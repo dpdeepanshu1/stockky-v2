@@ -50,7 +50,7 @@ import notifier
 from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
-from orders import overnight_stop
+from orders import entry_pause, overnight_stop
 from screening import intraday_eligibility
 from tz_utils import IST, as_aware, ist_today_str
 
@@ -105,6 +105,13 @@ def _learn_from_entry_rejection(db: Session, pos: ScalpPosition, entry_status: s
     never succeed on a retry today, so record the symbol exactly the way the synchronous BUY path in
     orders/entry.py does. Best effort: a failure here must never stop the position being closed out."""
     if entry_status != "REJECTED" or not reason:
+        return
+    if dhan_client.is_insufficient_funds_error(reason):
+        # group209 (item 15): a margin rejection is about the account — pause ALL new entries briefly
+        # (orders/entry_pause.py) instead of retrying the next candidate straight into the same RMS wall.
+        entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)
+        logger.warning("reconcile: %s (id=%d) entry REJECTED for margin — new entries paused %sm. Reason: %s",
+                       pos.symbol, pos.id, config.ENTRY_MARGIN_PAUSE_MINUTES, reason[:200])
         return
     if dhan_client.is_security_intraday_restricted_error(reason):
         kind = "INTRADAY_RESTRICTED"

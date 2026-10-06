@@ -107,6 +107,49 @@ SLOW_CYCLE_LOG_EVERY_S = 300.0
 _last_cycle_s: Optional[float] = None
 _last_slow_cycle_log = 0.0
 
+# group211: the poll no longer sends the whole universe every cycle. Symbols held in an open position and
+# symbols recently asked for through /quote (the "hot" set, see angelone_budget.py) are polled EVERY cycle in
+# their own priority lanes; the rest of the universe is refreshed at most every FEED_COLD_INTERVAL_S seconds
+# as BACKGROUND (which keeps a token reserve free for the lanes above it). 0 = the old behaviour: every
+# symbol every cycle, no lanes. ANGELONE_FEED_HOT_MAX caps the hot (non-held) set.
+FEED_COLD_INTERVAL_S = float(((os.getenv("ANGELONE_FEED_COLD_INTERVAL_S") or "").strip() or "30"))
+FEED_HOT_MAX = int(float(((os.getenv("ANGELONE_FEED_HOT_MAX") or "").strip() or "100")))
+_last_cold_poll = 0.0
+
+
+def _plan_batches(tokens: list, token_map: dict, now: Optional[float] = None) -> list:
+    """group211: this cycle's [(token_batch, lane), ...]. Held symbols first (POSITION), then recently asked-for
+    symbols (CANDIDATE), then - only when FEED_COLD_INTERVAL_S has passed since the last time - the rest of the
+    universe (BACKGROUND). Falls back to the old plan (all tokens, lane None) when the cold interval is 0, the
+    budget is off or anything goes wrong. Never raises."""
+    global _last_cold_poll
+    old_plan = [(tokens[i:i + BATCH_SIZE], None) for i in range(0, len(tokens), BATCH_SIZE)]
+    try:
+        import angelone_budget as _b
+        if FEED_COLD_INTERVAL_S <= 0 or not _b.enabled():
+            return old_plan
+        now = time.time() if now is None else now
+        held_syms = [c for c in sorted(_b.position_symbols()) if c in token_map]
+        held_set = set(held_syms)
+        hot_syms = [c for c in _b.hot_symbols(max(0, FEED_HOT_MAX)) if c in token_map and c not in held_set]
+        held_tok = [token_map[c] for c in held_syms]
+        hot_tok = [token_map[c] for c in hot_syms]
+        taken = set(held_tok) | set(hot_tok)
+        plan = []
+        for toks, lane in ((held_tok, _b.POSITION), (hot_tok, _b.CANDIDATE)):
+            for i in range(0, len(toks), BATCH_SIZE):
+                plan.append((toks[i:i + BATCH_SIZE], lane))
+        if _last_cold_poll <= 0 or (now - _last_cold_poll) >= FEED_COLD_INTERVAL_S:
+            cold = [t for t in tokens if t not in taken]
+            for i in range(0, len(cold), BATCH_SIZE):
+                plan.append((cold[i:i + BATCH_SIZE], _b.BACKGROUND))
+            _last_cold_poll = now
+        return plan
+    except Exception as e:  # noqa: BLE001
+        logger.debug("angelone feed: batch plan failed, polling everything: %s", e)
+        return old_plan
+
+
 # In-memory dict — same pattern as yahoo_ws_feed.py
 _LIVE: Dict[str, dict] = {}
 _LIVE_LOCK = threading.Lock()
@@ -463,12 +506,22 @@ def start_feed_background(symbols: list) -> None:
                         type(e).__name__, e,
                     )
                     return
-                for i in range(0, len(tokens), BATCH_SIZE):
+                try:   # group211: every AngelOne caller is skipping AngelOne - do not walk the batches for nothing
+                    import angelone_budget as _bud
+                    if _bud.in_global_cooldown():
+                        return
+                except Exception:  # noqa: BLE001
+                    pass
+                i = 0
+                for batch, lane in _plan_batches(tokens, token_map):
                     if not _current():
                         return
-                    batch = tokens[i:i + BATCH_SIZE]
+                    i += len(batch)
                     try:
-                        fetched = await session.get_quotes_batch("NSE", batch)
+                        if lane is None:
+                            fetched = await session.get_quotes_batch("NSE", batch)
+                        else:
+                            fetched = await session.get_quotes_batch("NSE", batch, lane=lane)
                         if not _current():
                             return   # superseded/stopped while the request was in flight: drop the stale ticks
                         db_rows = []
@@ -500,7 +553,7 @@ def start_feed_background(symbols: list) -> None:
                         # the exception's class name when str(e) is empty.
                         logger.warning(
                             "AngelOne quote batch (%d-%d) failed: %s",
-                            i, i + len(batch), str(e) or type(e).__name__,
+                            i - len(batch), i, str(e) or type(e).__name__,
                         )
                     await asyncio.sleep(BATCH_GAP_S)
 

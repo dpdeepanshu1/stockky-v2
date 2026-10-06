@@ -440,6 +440,25 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
     )
 
 
+# -- group 214b (A7): capital is claimed best-conviction-first, not first-come ------------------------------
+# The loop below reserves cash (`reserved_cash`) the moment a candidate is staged, and the next candidate is sized and
+# cash-checked against what is left. Gate 6 only ranks candidates that were ALREADY approved, so with the old
+# received_at order a weak early candidate could use up the cash / per-trade room and a stronger one queued a few
+# seconds later was rejected for cash before Gate 6 ever saw it. Now the batch is walked highest conviction first
+# (ties keep received_at order, the sort is stable). Only the ORDER changes: the 20-row fetch, every gate, the
+# cash maths and Gate 6 are untouched. A duplicate-symbol pair now keeps the higher-conviction row.
+# ENTRY_CAPITAL_ORDER_BY_CONVICTION=0 restores received_at order.
+def _order_candidates_for_capital(candidates: list) -> list:
+    raw = (os.getenv("ENTRY_CAPITAL_ORDER_BY_CONVICTION") or "").strip().lower()
+    if raw in ("0", "false", "no", "off") or len(candidates) < 2:
+        return candidates
+    try:
+        return sorted(candidates, key=lambda c: -(float(getattr(c, "conviction_score", None) or 0.0)))
+    except Exception as e:  # never let ordering break a cycle
+        logger.debug("capital ordering skipped (%s)", e)
+        return candidates
+
+
 # ── Main evaluation cycle ─────────────────────────────────────────────────────
 
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
@@ -452,6 +471,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     )
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
+    candidates = _order_candidates_for_capital(candidates)
 
     # Fetch adaptive regime once per cycle (not per candidate)
     regime_ok    = True

@@ -31,7 +31,7 @@ class FakeSession:
     def is_configured(self):
         return self.configured
 
-    async def get_quote(self, exchange, token, max_wait=20.0):
+    async def get_quote(self, exchange, token, max_wait=20.0, lane=None):
         self.calls.append((exchange, token, max_wait))
         if self.delay:
             await asyncio.sleep(self.delay)

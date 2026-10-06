@@ -439,10 +439,19 @@ class TestRefreshVolumeShockCandidates:
         assert inserted == 0
         assert any("missing quote/history data" in m for m in caplog.messages)
 
-    def test_quality_gate_scoring_pass_fails_entirely(self, db, monkeypatch, caplog):
-        """The whole quality-gate httpx.AsyncClient block raising should be
-        caught, logged, and fall back to quality_scores={} (gate skipped,
-        everything that passed price/volume gets inserted)."""
+    @pytest.mark.parametrize("fail_closed_env, expected_inserted", [(None, 0), ("0", 1)])
+    def test_quality_gate_scoring_pass_fails_entirely(
+        self, db, monkeypatch, caplog, fail_closed_env, expected_inserted
+    ):
+        """The whole quality-gate httpx.AsyncClient block raising is caught
+        and logged, quality_scores={}. group 214 (A6): a symbol that was sent
+        to the scorer and got nothing back is now SKIPPED this cycle (default);
+        VOLUME_SHOCK_QUALITY_FAIL_CLOSED=0 restores the old behaviour where
+        everything that passed price/volume is inserted."""
+        if fail_closed_env is None:
+            monkeypatch.delenv("VOLUME_SHOCK_QUALITY_FAIL_CLOSED", raising=False)
+        else:
+            monkeypatch.setenv("VOLUME_SHOCK_QUALITY_FAIL_CLOSED", fail_closed_env)
         _no_restricted(monkeypatch)
         monkeypatch.setattr(config, "VOLUME_SHOCK_QUALITY_GATE_ENABLED", True)
 
@@ -488,7 +497,7 @@ class TestRefreshVolumeShockCandidates:
 
         with caplog.at_level("WARNING"):
             inserted = run(cd._refresh_volume_shock_candidates(db, "REAL", set()))
-        assert inserted == 1
+        assert inserted == expected_inserted
         assert any("scoring pass failed entirely" in m for m in caplog.messages)
 
     def test_late_exclude_event_skips_standard_seen_symbol(self, db, monkeypatch):
@@ -570,14 +579,19 @@ class TestRefreshVolumeShockCandidates:
         assert all(name != cd.amp.LEGACY_UNIVERSE_ADX_METRIC for name, _ in recorded)
         assert purged == [True]
 
+    @pytest.mark.parametrize("fail_closed_env, expected_inserted", [(None, 1), ("0", 2)])
     def test_metric_recording_failures_and_per_symbol_scoring_exception(
-        self, db, monkeypatch, caplog
+        self, db, monkeypatch, caplog, fail_closed_env, expected_inserted
     ):
         """Covers: amp.record_metric raising for universe_atr_pct (1717-1718)
         and universe_adx (1757-1758) — both best-effort, non-fatal — and one
         gate_symbol's _fetch_fund_tech_score raising inside the gathered
         quality-gate tasks so isinstance(qr, Exception) is True for it
         specifically (1740-1741), while the client itself stays healthy."""
+        if fail_closed_env is None:
+            monkeypatch.delenv("VOLUME_SHOCK_QUALITY_FAIL_CLOSED", raising=False)
+        else:
+            monkeypatch.setenv("VOLUME_SHOCK_QUALITY_FAIL_CLOSED", fail_closed_env)
         _no_restricted(monkeypatch)
         monkeypatch.setattr(config, "VOLUME_SHOCK_QUALITY_GATE_ENABLED", True)
 
@@ -607,9 +621,10 @@ class TestRefreshVolumeShockCandidates:
         with caplog.at_level("DEBUG"):
             inserted = run(cd._refresh_volume_shock_candidates(db, "REAL", set()))
 
-        # STEADY should still insert (base tier); FLAKY's per-symbol scoring
-        # exception falls back to "no quality data" (lenient), doesn't block it.
-        assert inserted == 2
+        # STEADY always inserts (base tier). FLAKY's per-symbol scoring
+        # exception: group 214 skips it this cycle by default (nothing to
+        # judge); VOLUME_SHOCK_QUALITY_FAIL_CLOSED=0 keeps the old lenient pass.
+        assert inserted == expected_inserted
         assert any("universe_atr_pct recording failed" in m for m in caplog.messages)
         assert any("universe_adx recording failed" in m for m in caplog.messages)
         assert any("scoring failed for FLAKY" in m for m in caplog.messages)

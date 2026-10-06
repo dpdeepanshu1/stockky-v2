@@ -584,6 +584,17 @@ SYMBOL_REENTRY_MIN_PULLBACK_PCT = _get_float("SYMBOL_REENTRY_MIN_PULLBACK_PCT", 
 ENTRY_REJECT_COOLDOWN_MINUTES = _get_int("ENTRY_REJECT_COOLDOWN_MINUTES", 30)
 ENTRY_REJECT_MAX_PER_SYMBOL_DAY = _get_int("ENTRY_REJECT_MAX_PER_SYMBOL_DAY", 2)
 
+# 2026-10-06 (group209, item 15): a margin / insufficient-funds rejection is about the account, not the symbol,
+# so it pauses ALL new entries for this many minutes (the next candidate would be rejected the same way) and does
+# not count against the symbol's own ENTRY_REJECT_* limits. An unclassified BUY placement failure rests just that
+# symbol for the second knob. 0 disables the respective pause. See orders/entry_pause.py.
+ENTRY_MARGIN_PAUSE_MINUTES = _get_int("ENTRY_MARGIN_PAUSE_MINUTES", 5)
+# Group 210 (item 14): periodic sweep of symbol locks that no live position backs (0 = off). A claim younger
+# than the min age is never swept (its position row may not exist yet).
+SYMBOL_LOCK_SWEEP_INTERVAL_S = _get_float("SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0)
+SYMBOL_LOCK_SWEEP_MIN_AGE_S = _get_float("SYMBOL_LOCK_SWEEP_MIN_AGE_S", 600.0)
+ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINUTES", 5)
+
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────
 # Dhan's own account-wide cap is roughly 5,000-7,000 orders/day, shared with
 # real-trade-service (same Dhan account). This is a soft, fail-open governor

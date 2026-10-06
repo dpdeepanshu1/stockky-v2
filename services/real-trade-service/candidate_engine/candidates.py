@@ -558,10 +558,14 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
     handled leniently by _quality_gate_fund_tech below, not treated as an
     automatic reject."""
     fund_score = tech_score = sector = market_cap_cr = adx = None
+    # group 214 (A6): remember whether each call actually ANSWERED (HTTP 200 + parsed). A timeout / error / non-200
+    # leaves the score None exactly like "service answered but has no score", and the gate used to wave both through.
+    fund_fetched = tech_fetched = False
     try:
         r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
         if r.status_code == 200:
             fj = r.json()
+            fund_fetched = True
             fund_score = fj.get("fundamental_score")
             sector = fj.get("sector_normalized") or fj.get("sector")
             # 2026-09-11 addition: market_cap floor for the quality gate.
@@ -600,6 +604,7 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
         )
         if r.status_code == 200:
             tj = r.json()
+            tech_fetched = True
             tech_score = tj.get("technical_score")
             adx = tj.get("adx")
     except Exception as e:
@@ -611,6 +616,8 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
         "sector": sector,
         "market_cap_cr": market_cap_cr,
         "adx": adx,
+        "fund_fetched": fund_fetched,
+        "tech_fetched": tech_fetched,
     }
 
 
@@ -685,6 +692,33 @@ async def _fetch_market_cap_cr(client: httpx.AsyncClient, symbol: str) -> float 
         f" - using last known Rs {stale:.0f} cr" if stale is not None else "",
     )
     return stale
+
+
+# ── group 214 (A6): quality gate no longer passes a candidate it could not score at all ─────────────────────
+# Before: a timed-out / failed fundamental AND technical lookup left every score None and `_quality_gate_fund_tech`
+# answered "no fundamental/technical data available - floor check skipped" (pass), the same as a service that answered
+# with no score. A per-symbol scoring exception, or the whole scoring pass failing, also let the symbol straight
+# through. So an analysis-intelligence slowdown turned the gate off exactly when it could not see anything.
+# Now: a symbol INSIDE the scored batch whose two lookups both failed is "unscored" and is skipped THIS cycle (not
+# inserted; the next volume-shock cycle tries again). Unchanged on purpose: a service that ANSWERED with no score is
+# still lenient, one working lookup is enough to apply its floor, and candidates beyond
+# VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS stay ungated (documented cost cap in config.py).
+# VOLUME_SHOCK_QUALITY_FAIL_CLOSED=0 restores the old behaviour.
+def _quality_fail_closed() -> bool:
+    raw = (os.getenv("VOLUME_SHOCK_QUALITY_FAIL_CLOSED") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _quality_unscored(qr: Optional[dict]) -> bool:
+    """True when the gate had nothing to judge: no result at all (scoring raised / pass failed), or both lookups failed.
+    A result without the fetch flags (older callers, fakes) is treated as scored, i.e. the old lenient behaviour."""
+    if qr is None:
+        return True
+    if "fund_fetched" not in qr and "tech_fetched" not in qr:
+        return False
+    if qr.get("fund_fetched") or qr.get("tech_fetched"):
+        return False
+    return qr.get("fundamental_score") is None and qr.get("technical_score") is None
 
 
 def _quality_gate_fund_tech(scored: dict, sector_peers: list, cross_cycle_peer_scores: Optional[list] = None) -> tuple:
@@ -1996,6 +2030,7 @@ async def _refresh_volume_shock_candidates(
     history_known_none = 0
     history_reasons: dict = {}
     quality_rejected = 0
+    quality_unscored = 0
 
     # ── First pass: keep only symbols that cleared the price/volume
     # breakout check, same as before. ─────────────────────────────────────
@@ -2062,8 +2097,10 @@ async def _refresh_volume_shock_candidates(
     # at VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS to bound extra outbound
     # calls on a big volume-shock day.
     quality_scores: dict = {}
+    gate_symbol_set: set = set()   # group 214: symbols that were sent to the scorer (the rest are ungated by the cost cap)
     if config.VOLUME_SHOCK_QUALITY_GATE_ENABLED and passed:
         gate_symbols = [sym for sym, _ in passed][:config.VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS]
+        gate_symbol_set = set(gate_symbols)
         try:
             async with httpx.AsyncClient() as qclient:
                 qsem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
@@ -2124,6 +2161,14 @@ async def _refresh_volume_shock_candidates(
             skipped += 1
             continue
         qr = quality_scores.get(sym)
+        if sym in gate_symbol_set and _quality_unscored(qr) and _quality_fail_closed():
+            logger.info(
+                "VOLUME_SHOCK CANDIDATE SKIPPED %s (mode=%s) | quality gate could not score it (fundamental and "
+                "technical lookups both failed) - retried next cycle", sym, mode,
+            )
+            skipped += 1
+            quality_unscored += 1
+            continue
         if qr is not None:
             sector_name = qr.get("sector") or "UNKNOWN"
             sector_peers = [p for p in by_sector.get(sector_name, []) if p.get("symbol") != sym]
@@ -2204,8 +2249,8 @@ async def _refresh_volume_shock_candidates(
         db.commit()
 
     logger.info(
-        "candidate_engine: volume_shock inserted=%d skipped=%d (quality_gate_rejected=%d) mode=%s",
-        inserted, skipped, quality_rejected, mode,
+        "candidate_engine: volume_shock inserted=%d skipped=%d (quality_gate_rejected=%d, quality_unscored=%d) mode=%s",
+        inserted, skipped, quality_rejected, quality_unscored, mode,
     )
     # Same systemic-failure diagnostic as the standard track above — see that
     # note for why this is checked explicitly instead of left to blend into

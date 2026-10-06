@@ -28,6 +28,8 @@ every other duplicated module shared between these two services)."""
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -159,42 +161,101 @@ def force_release(db: Session, symbol: str) -> bool:
         return False
 
 
-def cleanup_stale(db: Session) -> list[str]:
-    """BUG FIX (Issue #4): on startup (and optionally on demand), sweep
-    SharedSymbolLock rows held by THIS service and release any whose symbol
-    has no corresponding OPEN or EXIT_LEGS_REJECTED ScalpPosition — meaning
-    the position was closed/errored but release() was never called (exactly
-    the dead-entry bug fixed in reconcile.py). Safe to run at startup
-    because a genuinely open position will always have its status row; a
-    stale lock by definition has none. Returns list of released symbols."""
-    released = []
+def _as_utc(dt):
+    """claimed_at comes back naive from SQLite and aware from Postgres; compare both as UTC."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _sweep(db: Session, min_age_s: float, keep_dead_sell: bool) -> list[str]:
+    """Release locks held by THIS service that have no live position behind them.
+
+    min_age_s: leave a claim younger than this alone. try_claim() runs BEFORE the ScalpPosition row
+        exists, so a sweep with no grace period could delete the claim of an entry that is being placed
+        right now. Startup passes 0 (nothing is in flight yet).
+    keep_dead_sell: keep the lock of an ERROR row whose exit SELL died with zero fill (`*_SELL_DEAD`):
+        the position may still be open at the broker and reconcile re-claimed the lock on purpose.
+    """
+    released: list[str] = []
     try:
         from models import ScalpPosition  # local to avoid circular import
-        our_locks = db.query(SharedSymbolLock).filter_by(
-            held_by_service=_SERVICE_NAME
-        ).all()
+        now = datetime.now(timezone.utc)
+        our_locks = db.query(SharedSymbolLock).filter_by(held_by_service=_SERVICE_NAME).all()
         for lock in our_locks:
+            if min_age_s > 0:
+                claimed = _as_utc(lock.claimed_at)
+                if claimed is not None and (now - claimed).total_seconds() < min_age_s:
+                    continue
             has_open = db.query(ScalpPosition).filter(
                 ScalpPosition.symbol == lock.symbol,
                 ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")),
             ).first()
-            if has_open is None:
-                db.delete(lock)
-                released.append(lock.symbol)
-                logger.warning(
-                    "position-stocks: shared_symbol_lock.cleanup_stale: "
-                    "released stale lock for %s (no open position found)",
-                    lock.symbol,
-                )
+            if has_open is not None:
+                continue
+            if keep_dead_sell:
+                dead = db.query(ScalpPosition).filter(
+                    ScalpPosition.symbol == lock.symbol,
+                    ScalpPosition.status == "ERROR",
+                    ScalpPosition.error_message.like("%_SELL_DEAD%"),
+                ).first()
+                if dead is not None:
+                    continue
+            db.delete(lock)
+            released.append(lock.symbol)
+            logger.warning(
+                "position-stocks: shared_symbol_lock sweep: released stale lock for %s (no open position found)",
+                lock.symbol,
+            )
         if released:
             db.commit()
     except Exception as e:
-        logger.error(
-            "position-stocks: shared_symbol_lock.cleanup_stale failed: %s",
-            e, exc_info=True,
-        )
+        logger.error("position-stocks: shared_symbol_lock.cleanup_stale failed (sweep): %s", e, exc_info=True)
         try:
             db.rollback()
         except Exception:
             pass
+        return []
     return released
+
+
+def cleanup_stale(db: Session) -> list[str]:
+    """BUG FIX (Issue #4): on startup, sweep SharedSymbolLock rows held by THIS service and release any
+    whose symbol has no corresponding OPEN or EXIT_LEGS_REJECTED ScalpPosition — meaning the position was
+    closed/errored but release() was never called. Safe at startup because nothing is in flight yet.
+    Returns the list of released symbols."""
+    return _sweep(db, 0.0, False)
+
+
+_last_sweep = [0.0]
+
+
+def sweep_stale(db: Session, *, force: bool = False) -> list[str]:
+    """Group 210 (item 14): the same sweep, safe to run while the service is trading.
+
+    Before this the sweep ran only at startup, so a lock left behind by an ERROR row (AVALON) blocked
+    that symbol until the next restart. Differences from cleanup_stale: claims younger than
+    SYMBOL_LOCK_SWEEP_MIN_AGE_S (default 600) are left alone because their position row may not exist
+    yet, and a lock behind a dead exit SELL is kept because that position may still be open. Throttled to
+    one pass per SYMBOL_LOCK_SWEEP_INTERVAL_S (default 60; 0 turns the periodic sweep off).
+    Never raises."""
+    try:
+        import config
+        interval = float(getattr(config, "SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0))
+        min_age = float(getattr(config, "SYMBOL_LOCK_SWEEP_MIN_AGE_S", 600.0))
+    except Exception:
+        interval, min_age = 60.0, 600.0
+    if interval <= 0 and not force:
+        return []
+    now = time.monotonic()
+    if not force and (now - _last_sweep[0]) < interval:
+        return []
+    _last_sweep[0] = now
+    return _sweep(db, min_age, True)
+
+
+def reset_sweep_throttle() -> None:
+    """Tests: forget the last sweep time."""
+    _last_sweep[0] = 0.0

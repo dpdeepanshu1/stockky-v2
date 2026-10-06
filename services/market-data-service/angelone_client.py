@@ -30,7 +30,39 @@ except Exception:  # pragma: no cover — keep working even if rate_limiter.py i
     def _rl_set_cooldown(provider, seconds):
         pass
 
+try:  # group211: shared lanes + global 403 cooldown (see angelone_budget.py)
+    import angelone_budget as _budget
+except Exception:  # pragma: no cover - keep working even if the module is ever absent
+    _budget = None
+
 logger = logging.getLogger("angelone-client")
+
+
+def _budget_skip(lane) -> bool:
+    """True while the global AngelOne cooldown runs: the caller must send nothing. Never raises."""
+    try:
+        return bool(_budget is not None and _budget.skip(lane))
+    except Exception:  # pragma: no cover
+        return False
+
+
+async def _budget_admit(lane, provider: str, weight: float, max_wait: float) -> bool:
+    """False = this lane may not take a token right now (shed). lane=None is always admitted. Never raises."""
+    try:
+        if _budget is None:
+            return True
+        return bool(await _budget.admit(lane, provider, weight, max_wait))
+    except Exception:  # pragma: no cover
+        return True
+
+
+def _budget_trip(endpoint: str) -> None:
+    """Start the global cooldown after a rate-limit answer from `endpoint`. Never raises."""
+    try:
+        if _budget is not None:
+            _budget.trip(endpoint)
+    except Exception:  # pragma: no cover
+        pass
 
 _BASE = "https://apiconnect.angelone.in"
 
@@ -158,6 +190,8 @@ def _log_denied(endpoint: str, r: httpx.Response) -> None:
 # SKIPPED (caller falls back to yfinance) instead of being let through anyway —
 # see rate_limiter.try_acquire.
 _CANDLE_MAX_WAIT_S = float(((os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S") or "").strip() or "15"))
+# group211: how long a CANDIDATE/BACKGROUND batch call waits for its lane's reserve before it is shed.
+_LANE_MAX_WAIT_S = float(((os.environ.get("ANGELONE_LANE_MAX_WAIT_S") or "").strip() or "20"))
 
 
 class AngelOneSession:
@@ -299,13 +333,20 @@ class AngelOneSession:
             "X-MACAddress":      "00:00:00:00:00:00",
         }
 
-    async def get_quote(self, exchange: str, symbol_token: str, max_wait: float = 20.0) -> dict:
+    async def get_quote(self, exchange: str, symbol_token: str, max_wait: float = 20.0, lane: Optional[str] = None) -> dict:
         """Fetch live quote for one symbol token. A `max_wait` below the 20 s default makes this fail CLOSED
         (group199): if the angelone_quote bucket has no token within `max_wait` the call returns {} without
-        sending anything, so GET /quote can fall back to Yahoo instead of adding load to a busy bucket."""
+        sending anything, so GET /quote can fall back to Yahoo instead of adding load to a busy bucket.
+        group211: `lane` (angelone_budget.POSITION / CANDIDATE / BACKGROUND; None = unclassified, old behaviour)
+        decides how much of the bucket must stay free for higher lanes; any call is skipped during the global
+        cooldown."""
         if _rl_in_cooldown("angelone_quote"):
             return {}
+        if _budget_skip(lane):
+            return {}
         await self.ensure_session()
+        if not await _budget_admit(lane, "angelone_quote", 1, max_wait):
+            return {}
         if max_wait < 20.0:
             if not _rl_try_acquire("angelone_quote", weight=1, max_wait=max_wait):
                 return {}
@@ -323,6 +364,7 @@ class AngelOneSession:
             _log_denied("quote", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
+                _budget_trip("quote")
                 return {}
             r.raise_for_status()
             body = r.json()
@@ -338,11 +380,16 @@ class AngelOneSession:
         interval: str,
         from_date: str,
         to_date: str,
+        lane: Optional[str] = None,
     ) -> list:
-        """Fetch OHLCV candles. interval: ONE_MINUTE/FIVE_MINUTE/ONE_DAY etc."""
+        """Fetch OHLCV candles. interval: ONE_MINUTE/FIVE_MINUTE/ONE_DAY etc. `lane`: see get_quote (group211)."""
         if _rl_in_cooldown("angelone_candle"):
             return []
+        if _budget_skip(lane):
+            return []
         await self.ensure_session()
+        if not await _budget_admit(lane, "angelone_candle", 1, _CANDLE_MAX_WAIT_S):
+            return []
         # Fail-CLOSED limiter (2026-09-21): get_candles is reached from 100+
         # concurrent /history worker threads (asyncio.run per thread, so this
         # blocking wait only ever parks that one thread). The old fail-open
@@ -368,6 +415,7 @@ class AngelOneSession:
             _log_denied("getCandleData", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_candle", _ANGELONE_COOLDOWN_SEC)
+                _budget_trip("getCandleData")
                 return []
             r.raise_for_status()
             body = r.json()
@@ -399,6 +447,8 @@ class AngelOneSession:
         """
         if _rl_in_cooldown("angelone_gainers"):
             return []
+        if _budget_skip(None):   # group211: honours the global cooldown but never starts one (a flat 403 here can be an F&O access restriction)
+            return []
         await self.ensure_session()
         _rl_acquire("angelone_gainers", weight=1)
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -417,7 +467,7 @@ class AngelOneSession:
                 return []
             return body.get("data") or []
 
-    async def get_quotes_batch(self, exchange: str, symbol_tokens: list) -> list:
+    async def get_quotes_batch(self, exchange: str, symbol_tokens: list, lane: Optional[str] = None) -> list:
         """Fetch live quotes for multiple tokens in one call. AngelOne's
         quote endpoint documents a cap of 50 tokens per exchange per
         request — callers must chunk larger lists themselves (see
@@ -426,7 +476,11 @@ class AngelOneSession:
             return []
         if _rl_in_cooldown("angelone_quote"):
             return []
+        if _budget_skip(lane):
+            return []
         await self.ensure_session()
+        if not await _budget_admit(lane, "angelone_quote", 1, _LANE_MAX_WAIT_S):
+            return []
         # One HTTP call regardless of how many tokens are in this batch (up
         # to the 50-token cap), so this costs the same ONE unit against the
         # angelone_quote bucket as a single-symbol get_quote() call — same
@@ -441,6 +495,7 @@ class AngelOneSession:
             _log_denied("quote(batch)", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
+                _budget_trip("quote(batch)")
                 return []
             r.raise_for_status()
             body = r.json()

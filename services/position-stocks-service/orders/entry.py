@@ -38,6 +38,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
+from orders import entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility
 from screening.engine import Candidate
@@ -177,7 +178,10 @@ def _rejected_entry_reject(db: Session, symbol: str) -> Optional[str]:
         )
         now = datetime.now(timezone.utc)
         today = ist_today_str(now)
-        today_rows = [r for r in rows if (c := as_aware(r.closed_at)) is not None and ist_today_str(c) == today]
+        today_rows = [r for r in rows if (c := as_aware(r.closed_at)) is not None and ist_today_str(c) == today
+                      # group209: a margin rejection is the account's problem, handled by the global pause in
+                      # orders/entry_pause.py — it must not lock this symbol out for 30 min / the day.
+                      and not dhan_client.is_insufficient_funds_error(r.error_message or "")]
         if not today_rows:
             return None
         if max_day > 0 and len(today_rows) >= max_day:
@@ -347,6 +351,13 @@ def attempt_entry(
     today = ist_today_str()
     if gate.orders_placed_today_date == today and gate.orders_placed_today >= config.DAILY_ORDER_BUDGET:
         _log_candidate(db, candidate, "SKIPPED", f"ORDER_BUDGET_EXHAUSTED:{gate.orders_placed_today}", quality=quality)
+        return None
+
+    # group209 (item 15): a recent margin rejection pauses every new entry; a recent placement failure
+    # rests that one symbol. Checked before the symbol lock so nothing is claimed and released needlessly.
+    _pause = entry_pause.all_paused() or entry_pause.symbol_blocked(candidate.symbol)
+    if _pause:
+        _log_candidate(db, candidate, "SKIPPED", _pause, quality=quality)
         return None
 
     # Max concurrent positions
@@ -584,6 +595,7 @@ def attempt_entry(
                 "Error: %s", error_msg,
             )
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)   # group209
             _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
         elif dhan_client.is_circuit_limit_error(error_msg):
             # 2026-09-15 fix (session41b): "Rate Not Within Ckt Limit X To Y"
@@ -614,6 +626,7 @@ def attempt_entry(
         else:
             logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            entry_pause.cooldown_symbol(candidate.symbol, config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES, error_msg)   # group209
             _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
         # AUDIT FIX (session60): every branch above releases capital on a
         # failed BUY — the symbol claim taken above (before adaptive

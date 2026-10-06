@@ -211,6 +211,17 @@ def try_acquire(provider: str, weight: float = 1.0, max_wait: float = 5.0) -> bo
         return True
 
 
+def bucket_level(provider: str) -> tuple:
+    """group211: non-consuming peek at (tokens_available_now, capacity) for `provider`'s bucket, refilled
+    from elapsed time exactly like acquire() would. angelone_budget uses it to keep a reserve of tokens for
+    higher-priority lanes. Raises only if the bucket cannot be built (callers treat that as "no information")."""
+    b = _get_bucket(provider)
+    with b.lock:
+        now = time.time()
+        tokens = min(b.capacity, b.tokens + (now - b.updated) * b.rps)
+    return tokens, b.capacity
+
+
 def would_block(provider: str, weight: float = 1.0) -> bool:
     """Non-blocking peek: True if acquire(provider, weight) would have to
     wait right now (not enough tokens available this instant). Does not

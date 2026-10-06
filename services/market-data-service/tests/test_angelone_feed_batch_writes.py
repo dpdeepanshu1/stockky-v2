@@ -132,7 +132,7 @@ class _Session:
     async def ensure_session(self):
         return None
 
-    async def get_quotes_batch(self, exchange, tokens):
+    async def get_quotes_batch(self, exchange, tokens, lane=None):
         self.batches.append(list(tokens))
         return [{"symbolToken": t, "ltp": 10.0 + int(t), "open": 1, "high": 2, "low": 1, "close": 1,
                  "tradeVolume": 5} for t in tokens]

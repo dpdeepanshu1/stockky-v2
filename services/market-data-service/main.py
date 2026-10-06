@@ -1778,6 +1778,20 @@ def _waterfall_nse_direct_price(symbol: str) -> Optional[float]:
     return None
 
 
+def _ao_lane(symbols, demand: bool = False):
+    """group211: AngelOne budget lane for a request-driven lookup (POSITION for a held symbol, else CANDIDATE;
+    None when the budget is off or anything goes wrong, which keeps the old unclassified behaviour). `symbols`
+    is one symbol or an iterable of them; demand=True (single /quote lookups only) also marks the symbol "hot"
+    for the feed poll. Never raises."""
+    try:
+        import angelone_budget as _b
+        if isinstance(symbols, str):
+            return _b.lane_for(symbols, demand=demand)
+        return _b.lane_for_symbols(symbols)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _waterfall_angelone_price(symbol: str) -> Optional[float]:
     """AngelOne SmartAPI REST quote, on-demand for ANY symbol — not just
     the fixed universe angelone_ws_feed.py subscribes to at startup.
@@ -1836,7 +1850,7 @@ def _waterfall_angelone_price(symbol: str) -> Optional[float]:
         # — see angelone_client.py); this endpoint is sync, so bridge with
         # asyncio.run(). Safe here: FastAPI runs sync path functions in a
         # worker thread with no already-running event loop to conflict with.
-        quote = asyncio.run(session.get_quote("NSE", token))
+        quote = asyncio.run(session.get_quote("NSE", token, lane=_ao_lane(base, demand=True)))
         px = _safe((quote or {}).get("ltp"))
         if px is not None and px > 0:
             logger.info("AngelOne waterfall hit %s → ₹%.2f", base, px)
@@ -2141,8 +2155,10 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         except RuntimeError:
             pass
 
+        _lane = _ao_lane(base, demand=True)   # group211: POSITION for a held symbol, else CANDIDATE
+
         async def _go():
-            return await asyncio.wait_for(session.get_quote("NSE", token, max_wait=min(2.0, tmo)), timeout=tmo)
+            return await asyncio.wait_for(session.get_quote("NSE", token, max_wait=min(2.0, tmo), lane=_lane), timeout=tmo)
 
         q = asyncio.run(_go())
         if not isinstance(q, dict) or not q:
@@ -2534,6 +2550,17 @@ def _movers_sweep_coverage(fetched: int, universe: int):
     return (fetched / universe) < _MOVERS_MIN_COVERAGE, missing
 
 
+@app.get("/angelone/budget")
+def angelone_budget_status():
+    """group211: shared AngelOne budget - global cooldown, per-lane admitted/shed/skipped counts, held-symbol
+    cache, hot-symbol count and the AngelOne rate buckets."""
+    try:
+        import angelone_budget as _b
+        return _b.stats()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 @app.get("/angelone/movers")
 def angelone_movers():
     """
@@ -2580,7 +2607,9 @@ def angelone_movers():
             for i in range(0, len(tokens), 50):
                 batch = tokens[i:i + 50]
                 try:
-                    fetched = await session.get_quotes_batch("NSE", batch)
+                    # group211: the sweep is BACKGROUND, so it never takes the tokens held back for open
+                    # positions / candidates, and it is skipped while the global AngelOne cooldown runs.
+                    fetched = await session.get_quotes_batch("NSE", batch, lane="background")
                 except Exception as e:
                     logger.debug("angelone/movers batch %d-%d failed: %s", i, i + len(batch), e)
                     continue
@@ -2852,7 +2881,10 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 _tok_chunk = _all_tokens[_chunk_start: _chunk_start + _ao_chunk_size]
                 try:
                     _fetched = _aio.run(
-                        _ao_client.get_session().get_quotes_batch("NSE", _tok_chunk)
+                        _ao_client.get_session().get_quotes_batch(
+                            "NSE", _tok_chunk,
+                            lane=_ao_lane([_full_tok_map.get(_t, "") for _t in _tok_chunk]),   # group211
+                        )
                     )
                 except RuntimeError:
                     _fetched = []
@@ -3147,7 +3179,7 @@ def _angelone_history_candles(
         from_str = _from.strftime("%Y-%m-%d %H:%M")
         to_str = _to.strftime("%Y-%m-%d %H:%M")
 
-        raw = asyncio.run(session.get_candles("NSE", token, angel_interval, from_str, to_str))
+        raw = asyncio.run(session.get_candles("NSE", token, angel_interval, from_str, to_str, lane=_ao_lane(angel_sym)))
         if not raw:
             return None
 

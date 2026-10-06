@@ -358,6 +358,12 @@ async def _fast_reconcile_loop() -> None:
             # ledger.publish_exposure. Throttled + change-detected inside; fail-open.
             with factory() as db:
                 await asyncio.to_thread(ledger.publish_exposure, db)
+            # GROUP 210 (item 14): free symbol locks that no live position backs (AVALON's lock stayed until
+            # restart). Throttled inside; never raises; keeps young claims and dead-exit-SELL locks.
+            with factory() as db:
+                _swept = await asyncio.to_thread(shared_symbol_lock.sweep_stale, db)
+                if _swept:
+                    logger.warning("position-stocks: released %d stale symbol lock(s): %s", len(_swept), _swept)
             if not is_market_open_ist():
                 continue
             with factory() as db:

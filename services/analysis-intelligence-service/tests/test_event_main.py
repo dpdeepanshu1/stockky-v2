@@ -638,12 +638,13 @@ class TestKeywords:
         keys = set(em._get_keywords("PWL.NS"))
         assert {"Physics Wallah Ltd", "PWL", "pwl", "physics wallah ltd"} <= keys
         assert {"Physics Wallah", "physics wallah", "PW Edtech", "pw edtech"} <= keys
-        assert {"physics", "wallah", "ltd"} <= keys
+        assert {"physics", "wallah"} <= keys
+        assert "ltd" not in keys          # group213: generic name words are no longer keywords on their own
 
     def test_short_parts_dropped_and_ampersand_split(self, monkeypatch):
-        monkeypatch.setattr(em, "_get_company_name", lambda s: "A&B Co Industries")
+        monkeypatch.setattr(em, "_get_company_name", lambda s: "A&B Co Widgets")
         keys = set(em._get_keywords("ABC.BO"))
-        assert "industries" in keys
+        assert "widgets" in keys
         assert "co" not in keys and "a" not in keys and "b" not in keys
 
     def test_symbol_without_alias(self, monkeypatch):

@@ -16,3 +16,19 @@ def _g188_clear_bo_miss_memory():
     _m = sys.modules.get("main")
     if _m is not None and hasattr(_m, "_YF_BO_MISS"):
         _m._YF_BO_MISS.clear()
+
+
+@_pytest_g188.fixture(autouse=True)
+def _g211_reset_angelone_budget():
+    """group211: the AngelOne budget (global cooldown, lane counts, held/hot symbol caches) and the feed's cold-poll
+    clock are per process; one test tripping a cooldown must not make the next test's AngelOne call skip."""
+    def _reset():
+        _b = sys.modules.get("angelone_budget")
+        if _b is not None:
+            _b._reset()
+        _f = sys.modules.get("angelone_ws_feed")
+        if _f is not None and hasattr(_f, "_last_cold_poll"):
+            _f._last_cold_poll = 0.0
+    _reset()
+    yield
+    _reset()

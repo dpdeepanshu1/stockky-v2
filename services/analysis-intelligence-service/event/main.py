@@ -418,6 +418,22 @@ _EVENT_TYPE_KEYWORDS = {
 }
 
 
+# group213: words that appear in hundreds of Indian company names. Used as a single-word keyword each of them
+# matched almost every headline on the site-wide feeds ("limited", "india", "bank", "industries"...), so the
+# stock got other companies' news (and their event scores). The full company name, the ticker and the aliases
+# are still searched; only these bare words are no longer used on their own.
+_GENERIC_NAME_WORDS = frozenset({
+    "limited", "ltd", "private", "pvt", "public", "company", "co", "corp", "corporation", "inc",
+    "india", "indian", "bharat", "national", "global", "international", "general", "united",
+    "industries", "industry", "enterprises", "enterprise", "holdings", "holding", "group", "ventures",
+    "services", "service", "solutions", "systems", "technologies", "technology", "tech", "trading",
+    "bank", "finance", "financial", "financials", "capital", "investments", "investment", "insurance",
+    "power", "energy", "infra", "infrastructure", "projects", "construction", "realty", "properties",
+    "pharma", "pharmaceuticals", "healthcare", "chemicals", "steel", "textiles", "motors", "foods",
+    "new", "first", "the", "and", "of",
+})
+
+
 def _get_keywords(symbol: str) -> List[str]:
     """Return keywords to search in news feeds (company + aliases + base)."""
     company = _get_company_name(symbol)
@@ -426,11 +442,32 @@ def _get_keywords(symbol: str) -> List[str]:
     for a in _EVENT_ALIASES.get(base, []):
         keys.add(a)
         keys.add(a.lower())
-    # Split multi-word company names
+    # Split multi-word company names (group213: generic words such as "Limited" / "India" / "Bank" are skipped)
     for part in company.replace("&", " ").split():
-        if len(part) > 2:
-            keys.add(part.lower())
+        part = part.strip(".,()-").lower()
+        if len(part) > 2 and part not in _GENERIC_NAME_WORDS:
+            keys.add(part)
     return list(keys)
+
+
+_KW_PATTERN_CACHE: Dict[tuple, Any] = {}
+
+
+def _text_matches_keywords(text: str, keywords: List[str]) -> bool:
+    """group213: True when any keyword occurs in `text` (already lower-cased) as a WHOLE word / phrase.
+    The site-feed matchers used a plain substring test, so the ticker "BEL" matched "label", "ITC" matched
+    "pitch" and "LT" matched "built" (news/news_quality.py fixed the same thing for short tickers on 2026-10-04;
+    this is the event service's copy of the rule, applied to every keyword)."""
+    key = tuple(sorted({(k or "").lower().strip() for k in keywords if k and len((k or "").strip()) >= 2}))
+    if not key:
+        return False
+    pat = _KW_PATTERN_CACHE.get(key)
+    if pat is None:
+        if len(_KW_PATTERN_CACHE) > 2000:
+            _KW_PATTERN_CACHE.clear()
+        pat = re.compile(r"(?<![a-z0-9])(?:" + "|".join(re.escape(k) for k in key) + r")(?![a-z0-9])")
+        _KW_PATTERN_CACHE[key] = pat
+    return pat.search(text or "") is not None
 
 
 def _classify_event_title(title: str) -> Optional[str]:
@@ -641,7 +678,7 @@ def _fetch_moneycontrol_news(symbol: str, max_items: int = 5) -> List[Dict[str, 
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
             text = title + " " + desc
-            if any(kw.lower() in text for kw in keywords):
+            if _text_matches_keywords(text, keywords):
                 published = None
                 if hasattr(entry, 'published_parsed') and entry.published_parsed:
                     published = datetime(*entry.published_parsed[:6])
@@ -673,7 +710,7 @@ def _fetch_economic_times(symbol: str, max_items: int = 5) -> List[Dict[str, Any
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
             text = title + " " + desc
-            if any(kw.lower() in text for kw in keywords):
+            if _text_matches_keywords(text, keywords):
                 published = None
                 if hasattr(entry, 'published_parsed') and entry.published_parsed:
                     published = datetime(*entry.published_parsed[:6])
@@ -705,7 +742,7 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
             title = entry.title.lower()
             desc = entry.description.lower() if hasattr(entry, "description") else ""
             text = title + " " + desc
-            if any(kw.lower() in text for kw in keywords):
+            if _text_matches_keywords(text, keywords):
                 published = None
                 if hasattr(entry, 'published_parsed') and entry.published_parsed:
                     published = datetime(*entry.published_parsed[:6])

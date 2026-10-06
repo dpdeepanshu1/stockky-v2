@@ -663,6 +663,9 @@ VOLUME_SHOCK_SECTOR_HISTORY_MAX_SAMPLES     = int(((os.getenv("VOLUME_SHOCK_SECT
 # subject to the underlying price/volume checks, just not the quality gate
 # — same "don't silently guess" spirit as the rest of this module, applied
 # to cost control rather than a trading decision.
+# group 214 (A6): VOLUME_SHOCK_QUALITY_FAIL_CLOSED (read in candidate_engine/candidates.py, default on; 0/false/no/off = old
+# behaviour). A candidate inside the scored batch whose fundamental AND technical lookups both failed is skipped this
+# cycle instead of passing unchecked. Candidates beyond the cap above stay ungated, as documented.
 VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS = int(((os.getenv("VOLUME_SHOCK_QUALITY_GATE_MAX_SYMBOLS") or "").strip() or "40"))
 
 # ── Market-cap filter (2026-09-11 addition) ────────────────────────────────

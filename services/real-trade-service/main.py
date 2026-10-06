@@ -27,6 +27,7 @@ from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
 from tz_utils import as_aware, iso_utc, is_market_open_ist, ist_today_str
+from portfolio import broker_view
 from portfolio.portfolio import (
     close_position as _pf_close_position,
     held_exposure_positions as _pf_held_exposure_positions,
@@ -2453,12 +2454,25 @@ async def dhan_live_positions(admin: str = Depends(require_admin), db: Session =
     open at the broker level, independent of reconciliation state."""
     try:
         positions = dhan_client.get_positions(db)
-        return {"ok": True, "positions": positions}
     except dhan_client.DhanNotConnectedError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.warning("dhan get_positions failed: %s", e)
         raise HTTPException(status_code=502, detail=f"Dhan API error: {e}")
+    # Group 208 (item 13): Dhan's positions carry no LTP and keep closed rows (netQty 0). `positions`
+    # stays the raw list for compatibility; `rows` is the normalised view the dashboard should render.
+    ltps: dict[str, float] = {}
+    open_syms = broker_view.open_symbols(positions)
+    if open_syms:
+        try:
+            from market_feed.feed import get_quotes
+            ticks = await get_quotes(open_syms, priority=True)    # open holdings: reserved lane
+            ltps = {sym: t.price for sym, t in ticks.items() if t is not None and t.price}
+        except Exception as e:  # a quote failure must not hide the positions themselves
+            logger.warning("dhan positions: LTP lookup failed (%s) — showing positions without LTP", e)
+    rows = broker_view.normalize(positions, ltps)
+    return {"ok": True, "positions": positions, "rows": rows,
+            "open_count": sum(1 for r in rows if r["is_open"])}
 
 
 @app.get("/dhan/holdings")

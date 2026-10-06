@@ -167,6 +167,58 @@ def _run_edis_precheck(db: Session, positions: list, *, _edis_override: dict | N
         )
 
 
+_FILLED_ORDER_STATUSES = ("TRADED", "FILLED", "EXECUTED", "COMPLETE")
+_DEAD_ORDER_STATUSES = ("REJECTED", "CANCELLED", "EXPIRED")
+
+
+def _filled_bracket_exit_leg(db: Session, pos: ScalpPosition) -> Optional[str]:
+    """Group 205 (item 11, AVALON). Name of this position's super-order TARGET_LEG / STOP_LOSS_LEG
+    if Dhan already FILLED it, else None. Used right before a flat SELL: when the bracket exit
+    filled between our decision to exit and the SELL (cancelling the legs does not undo a fill),
+    the position is already flat at the broker and a second SELL is a duplicate that gets
+    rejected (stored as ERROR) or, worse, goes through as an unintended short. Fails open: any
+    lookup problem returns None and the SELL proceeds exactly as before."""
+    if not pos.dhan_super_order_id or pos.overnight_converted_to_cnc:
+        return None
+    try:
+        rows = dhan_client.get_super_order_list(db)
+    except Exception as e:  # noqa: BLE001 — never block an exit on a lookup failure
+        logger.warning("flat SELL guard: %s (id=%s) super order lookup failed (%s) — proceeding.", pos.symbol, pos.id, e)
+        return None
+    row = next((r for r in rows or [] if str(r.get("orderId") or "") == str(pos.dhan_super_order_id)), None)
+    if row is None:
+        return None
+    for leg in row.get("legDetails") or []:
+        name = str(leg.get("legName") or "")
+        if name in ("TARGET_LEG", "STOP_LOSS_LEG") and str(leg.get("orderStatus") or "").upper() in _FILLED_ORDER_STATUSES:
+            return name
+    return None
+
+
+def _existing_flat_sell(db: Session, pos: ScalpPosition) -> Optional[dict]:
+    """Group 205 (item 11). Today's live-or-filled plain SELL for this security and quantity
+    (rejected/cancelled ones ignored), or None. Checked before a RETRY of a flat SELL: an earlier
+    attempt that errored on our side (timeout) may still have been accepted by Dhan, and sending
+    again would be a duplicate. Fails open."""
+    try:
+        orders = dhan_client.get_order_list(db)
+    except Exception:  # noqa: BLE001
+        return None
+    for r in orders or []:
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
+            continue
+        if int(r.get("quantity") or 0) != int(pos.quantity):
+            continue
+        if str(r.get("orderStatus") or r.get("order_status") or "").upper() in _DEAD_ORDER_STATUSES:
+            continue
+        if str(r.get("tag") or r.get("correlationId") or "") not in ("", "EOD_SQUAREOFF"):
+            continue
+        return r
+    return None
+
+
 def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     """2026-09-15 fix (session40): places the flat-SELL for one position,
     retrying up to config.EOD_SELL_RETRY_ATTEMPTS times ONLY when the
@@ -218,6 +270,14 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     """
     exit_retry.check_cooldown(pos)
 
+    # Group 205 (item 11): never SELL a position whose bracket exit already filled.
+    _leg = _filled_bracket_exit_leg(db, pos)
+    if _leg:
+        raise PositionAlreadyFlat(
+            f"{pos.symbol} (id={pos.id}) already exited via its {_leg} at Dhan — flat SELL skipped, "
+            f"reconcile books the bracket fill"
+        )
+
     if pos.overnight_converted_to_cnc and pos.overnight_stop_order_id:
         # session72 (open-issue #1): book any fill of the resting stop BEFORE
         # sizing the SELL — otherwise a partially-filled stop plus a full-size
@@ -249,6 +309,18 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     last_exc: Exception | None = None
     attempts = max(1, config.EOD_SELL_RETRY_ATTEMPTS)
     for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            # Group 205 (item 11): the failed attempt may have been accepted anyway — adopt it
+            # instead of sending a duplicate SELL.
+            _dup = _existing_flat_sell(db, pos)
+            if _dup is not None:
+                _oid = str(_dup.get("orderId") or _dup.get("order_id") or "")
+                logger.warning(
+                    "flat SELL retry: %s (id=%d) already has Dhan SELL order %s (%s) — adopting it, not resending.",
+                    pos.symbol, pos.id, _oid, _dup.get("orderStatus") or _dup.get("order_status"),
+                )
+                exit_retry.reset(pos)
+                return {"orderId": _oid}
         try:
             result = dhan_client.place_order(
                 db,

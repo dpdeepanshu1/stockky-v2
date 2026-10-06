@@ -938,21 +938,207 @@ class TestRunExitReconciliation:
         reconcile.run_exit_reconciliation(db)
         assert p.exit_price == 98.0 and p.realized_pnl == pytest.approx(-20.0)
 
-    def test_flat_sell_without_order_id_keeps_the_placeholder_and_clears_the_sentinel(self, env):
+    def test_flat_sell_without_order_id_keeps_the_placeholder_and_the_sentinel(self, env):
+        # group 205: the sentinel used to be cleared here, which froze the placeholder forever
         db, b, _ = env
         p = pending(db, entry=100.0, qty=10, super_id="SO1")
         b.super_orders = [super_row("SO1", avg=100.0)]
         reconcile.run_exit_reconciliation(db)
-        assert p.error_message is None and p.exit_price == 100.0 and p.status == "EOD_SQUAREOFF"
+        assert p.error_message and "_PENDING_RECONCILE" in p.error_message
+        assert p.exit_price == 100.0 and p.status == "EOD_SQUAREOFF"
+
+    def test_flat_sell_not_visible_in_the_order_book_yet_stays_pending_then_resolves(self, env):
+        db, b, _ = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, exit_order_id="X1", super_id="SO1")
+        b.plain_orders = []                                         # SELL not in the book yet
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert "_PENDING_RECONCILE" in (p.error_message or "") and p.realized_pnl == 0.0
+        b.plain_orders = [plain_row("X1", avg=98.65)]               # next tick it shows up
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 98.65 and p.realized_pnl == pytest.approx(-13.5) and p.error_message is None
+
+    def test_flat_sell_still_in_transit_stays_pending(self, env):
+        db, b, _ = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X1", super_id="SO1")
+        b.plain_orders = [plain_row("X1", status="TRANSIT")]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert "_PENDING_RECONCILE" in (p.error_message or "")
+
+    def test_order_list_fetch_failure_does_not_freeze_the_placeholder(self, env):
+        db, b, _ = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X1", super_id="SO1")
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        b.plain_error = RuntimeError("403 exceeding access rate")
+        reconcile.run_exit_reconciliation(db)
+        assert "_PENDING_RECONCILE" in (p.error_message or "")
 
     def test_dead_flat_sell_goes_to_error_and_is_not_reprocessed(self, env):
         db, b, sent = env
         p = pending(db, exit_order_id="X1", super_id="SO1")
         b.plain_orders = [plain_row("X1", status="REJECTED")]
-        b.super_orders = [super_row("SO1", avg=100.0, target=("TRADED", 102.0))]
+        b.super_orders = [super_row("SO1", avg=100.0, target=("PENDING", 102.0))]   # nothing exited
         reconcile.run_exit_reconciliation(db)
         assert p.status == "ERROR" and len(sent["critical"]) == 1
-        assert p.exit_price == 100.0                                # the stray TARGET_LEG did not re-close it
+        assert p.exit_price == 100.0
+
+    # ── group 205 (item 11): a rejected duplicate SELL must not hide an exit that already filled ──
+    def test_dead_flat_sell_after_the_target_leg_filled_books_the_target_not_error(self, env):
+        db, b, sent = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X1", super_id="SO1")
+        b.plain_orders = [plain_row("X1", status="REJECTED")]
+        b.super_orders = [super_row("SO1", avg=100.0, target=("TRADED", 102.0, 102.5))]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "TARGET_HIT" and p.exit_price == 102.5
+        assert p.realized_pnl == pytest.approx(25.0) and p.error_message is None
+        assert sent["critical"] == []
+
+    def test_dead_flat_sell_after_another_sell_filled_books_that_fill(self, env):
+        db, b, sent = env
+        p = pending(db, status="STAGNATION_EXIT", entry=100.0, qty=10, exit_order_id="X2", super_id="SO1")
+        b.plain_orders = [plain_row("X2", status="REJECTED"),
+                          sell("X1", p.dhan_security_id, 10, averageTradedPrice=105.35)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "STAGNATION_EXIT" and p.dhan_exit_order_id == "X1"
+        assert p.exit_price == 105.35 and p.realized_pnl == pytest.approx(53.5) and p.error_message is None
+        assert sent["critical"] == []
+
+    def test_dead_flat_sell_with_two_candidate_fills_stays_error(self, env):
+        db, b, sent = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X3", super_id="SO1")
+        b.plain_orders = [plain_row("X3", status="REJECTED"),
+                          sell("X1", p.dhan_security_id, 10, averageTradedPrice=101.0),
+                          sell("X2", p.dhan_security_id, 10, averageTradedPrice=102.0)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "ERROR" and len(sent["critical"]) == 1
+
+    def test_dead_flat_sell_ignores_a_fill_already_claimed_by_another_position(self, env):
+        db, b, sent = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X3", super_id="SO1")
+        pending(db, entry=100.0, qty=10, exit_order_id="X1", error_message=None)    # owns X1
+        b.plain_orders = [plain_row("X3", status="REJECTED"),
+                          sell("X1", p.dhan_security_id, 10, averageTradedPrice=101.0)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "ERROR"
+
+    def test_dead_flat_sell_ignores_fills_of_other_securities_or_sizes(self, env):
+        db, b, _ = env
+        p = pending(db, entry=100.0, qty=10, exit_order_id="X3", super_id="SO1")
+        b.plain_orders = [plain_row("X3", status="REJECTED"),
+                          sell("X1", "99999", 10, averageTradedPrice=101.0),
+                          sell("X2", p.dhan_security_id, 4, averageTradedPrice=101.0)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.status == "ERROR"
+
+
+class TestRepairDeadSellErrors:
+    def err(self, db, **kw):
+        kw.setdefault("error_message", "STAGNATION_EXIT_SELL_DEAD: order X2 came back REJECTED with zero fill")
+        kw.setdefault("exit_price", 100.0)
+        kw.setdefault("realized_pnl", 0.0)
+        kw.setdefault("closed_at", days_ago(0))
+        return mkpos(db, status="ERROR", entry=100.0, qty=10, super_id="SO1", exit_order_id="X2", **kw)
+
+    def test_dry_run_reports_and_changes_nothing(self, env):
+        db, b, _ = env
+        p = self.err(db)
+        b.plain_orders = [sell("X1", p.dhan_security_id, 10, averageTradedPrice=105.35)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        out = reconcile.repair_dead_sell_errors(db)
+        assert out["recovered"][0]["pnl"] == 53.5 and out["recovered"][0]["new_status"] == "STAGNATION_EXIT"
+        assert p.status == "ERROR" and p.realized_pnl == 0.0
+
+    def test_apply_books_the_real_exit_and_restores_ledger_and_lock(self, env):
+        db, b, _ = env
+        p = self.err(db)
+        b.plain_orders = [sell("X1", p.dhan_security_id, 10, averageTradedPrice=105.35)]
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        before = available(db)
+        reconcile.repair_dead_sell_errors(db, apply=True)
+        assert p.status == "STAGNATION_EXIT" and p.exit_price == 105.35 and p.dhan_exit_order_id == "X1"
+        assert p.realized_pnl == pytest.approx(53.5) and p.error_message is None
+        assert available(db) == pytest.approx(before + 1000.0 + 53.5)
+        assert not lock_held(db, p.symbol)
+
+    def test_leg_exit_becomes_target_hit(self, env):
+        db, b, _ = env
+        p = self.err(db)
+        b.plain_orders = []
+        b.super_orders = [super_row("SO1", avg=100.0, target=("TRADED", 102.0, 102.5))]
+        reconcile.repair_dead_sell_errors(db, apply=True)
+        assert p.status == "TARGET_HIT" and p.exit_price == 102.5 and p.realized_pnl == pytest.approx(25.0)
+
+    def test_no_proof_of_an_exit_is_skipped(self, env):
+        db, b, _ = env
+        p = self.err(db)
+        b.plain_orders = []
+        b.super_orders = [super_row("SO1", avg=100.0)]
+        out = reconcile.repair_dead_sell_errors(db, apply=True)
+        assert out["recovered"] == [] and "may really be open" in out["skipped"][0]["reason"]
+        assert p.status == "ERROR"
+
+    def test_prior_day_and_partial_rows_are_skipped(self, env):
+        db, b, _ = env
+        self.err(db, closed_at=days_ago(1))
+        self.err(db, overnight_stop_prior_qty=2)
+        b.plain_orders = []
+        b.super_orders = []
+        out = reconcile.repair_dead_sell_errors(db, apply=True)
+        assert out["recovered"] == [] and len(out["skipped"]) == 2
+
+    def test_order_fetch_failure_is_reported_not_raised(self, env):
+        db, b, _ = env
+        self.err(db)
+        b.plain_error = RuntimeError("403")
+        assert "error" in reconcile.repair_dead_sell_errors(db, apply=True)
+
+
+# ── group 205: re-arm placeholder exits whose marker was cleared ─────────────
+class TestRearmClearedPlaceholders:
+    def cleared(self, db, status="STAGNATION_EXIT", **kw):
+        kw.setdefault("error_message", None)
+        return pending(db, status=status, **kw)
+
+    def test_dry_run_lists_but_changes_nothing(self, env):
+        db, _, _ = env
+        p = self.cleared(db, exit_order_id="X1")
+        out = reconcile.rearm_cleared_placeholder_exits(db)
+        assert [r["id"] for r in out["rearmed"]] == [p.id] and out["applied"] is False
+        assert p.error_message is None
+
+    def test_apply_rearms_and_the_next_pass_books_the_real_fill(self, env):
+        db, b, _ = env
+        p = self.cleared(db, entry=100.0, qty=10, exit_order_id="X1")
+        reconcile.rearm_cleared_placeholder_exits(db, apply=True)
+        assert "_PENDING_RECONCILE" in p.error_message
+        b.plain_orders = [plain_row("X1", avg=98.65)]
+        reconcile.run_exit_reconciliation(db)
+        assert p.exit_price == 98.65 and p.realized_pnl == pytest.approx(-13.5) and p.error_message is None
+
+    def test_prior_day_row_resolves_from_trade_history(self, env):
+        db, b, _ = env
+        p = self.cleared(db, entry=100.0, qty=10, exit_order_id="X1", closed_at=days_ago(1))
+        p.dhan_security_id = "555"
+        db.commit()
+        reconcile.rearm_cleared_placeholder_exits(db, apply=True)
+        b.trades = [trade("X1", 555, 10, 102.0, day="2026-09-20")]
+        s = reconcile.resolve_stuck_pending(db, force=True)
+        assert s["resolved"] == 1 and p.exit_price == 102.0 and p.realized_pnl == pytest.approx(20.0)
+
+    def test_rows_with_real_numbers_pending_old_or_partial_are_left_alone(self, env):
+        db, _, _ = env
+        real = self.cleared(db, exit_price=101.0, realized_pnl=10.0)
+        still_pending = pending(db, status="STAGNATION_EXIT")
+        old = self.cleared(db, closed_at=days_ago(10))
+        partial = self.cleared(db, overnight_stop_prior_qty=2)
+        out = reconcile.rearm_cleared_placeholder_exits(db, apply=True)
+        assert out["rearmed"] == [] and [r["id"] for r in out["skipped"]] == [partial.id]
+        assert real.error_message is None and old.error_message is None and partial.error_message is None
 
 
 # ── retention ────────────────────────────────────────────────────────────────

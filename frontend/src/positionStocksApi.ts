@@ -308,6 +308,11 @@ export interface ScalpTradeHistorySummary {
   rejected_entries?: number;
   wins: number;
   losses: number;
+  // group207: resolved trades with exactly 0 P&L (no longer counted as losses)
+  breakeven?: number;
+  // group207: exits still waiting for their real fill price, and ERROR rows — shown apart, not in totals
+  pending_reconcile?: number;
+  error_trades?: number;
   win_rate_pct: number | null;
   total_pnl: number;
   // AUDIT FIX (this session): backend's GET /trades/history has included

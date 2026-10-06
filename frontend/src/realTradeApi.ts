@@ -597,7 +597,7 @@ export const realTradeApi = {
     rtRequest<ManualOrderResult>(`/manual-order/${mode}/confirm`, { method: "POST", body: JSON.stringify(body) }, mode === "REAL"),
   // Live Dhan broker data — require admin auth, REAL mode only
   dhanLivePositions: () =>
-    rtRequest<{ ok: boolean; positions: any[] }>("/dhan/positions"),
+    rtRequest<{ ok: boolean; positions: any[]; rows?: any[]; open_count?: number }>("/dhan/positions"),
 
   dhanLiveHoldings: () =>
     rtRequest<{ ok: boolean; holdings: any[] }>("/dhan/holdings"),

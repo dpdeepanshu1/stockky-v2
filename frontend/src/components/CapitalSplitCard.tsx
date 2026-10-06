@@ -74,11 +74,21 @@ export default function CapitalSplitCard({
   // flat split of the live total when position-stocks-service isn't
   // reachable from this dashboard (e.g. its URL isn't configured here).
   const psAllocated = positionStocksAllocated ?? (totalBalance != null ? totalBalance * (pct / 100) : null);
-  const rtAllocatedComputed =
+  // group208 (item 13): this used to clamp to 0 when the Dhan balance was below Position Stocks' allocation,
+  // which showed "Allocated ₹0" and hid why. A negative remainder now shows as unknown plus a note.
+  const rtRemainder =
     totalBalance != null && psAllocated != null
-      ? Math.max(0, totalBalance - psAllocated)
+      ? totalBalance - psAllocated
       : totalBalance != null
       ? totalBalance * ((100 - pct) / 100)
+      : null;
+  const rtAllocatedComputed = rtRemainder != null && rtRemainder >= 0 ? rtRemainder : null;
+  const rtBelowPs = rtRemainder != null && rtRemainder < 0;
+  // The ledger's Available is cash + booked P&L, so it can exceed Allocated by what was earned, but a large
+  // gap usually means it drifted from the broker. Flag any excess so it gets compared with Dhan.
+  const psExcess =
+    positionStocksAllocated != null && positionStocksAvailable != null
+      ? positionStocksAvailable - positionStocksAllocated
       : null;
 
   return (
@@ -110,6 +120,11 @@ export default function CapitalSplitCard({
               <p className="font-display tabular-nums text-[11px] text-mist">
                 Available <span className="text-signal-buy font-bold">{fmtInr(positionStocksAvailable)}</span>
               </p>
+              {psExcess != null && psExcess > 1 && (
+                <p className="font-display tabular-nums text-[9px] text-signal-hold mt-1">
+                  Available is {fmtInr(psExcess)} above Allocated (booked P&L, or the ledger has drifted) — compare with the Dhan balance.
+                </p>
+              )}
             </>
           )}
         </div>
@@ -122,6 +137,11 @@ export default function CapitalSplitCard({
           <p className="font-display tabular-nums text-sm font-bold text-paper mt-1">
             Allocated (computed) {fmtInr(rtAllocatedComputed)}
           </p>
+          {rtBelowPs && (
+            <p className="font-display tabular-nums text-[9px] text-signal-hold">
+              Dhan balance is {fmtInr(Math.abs(rtRemainder as number))} below Position Stocks' allocation.
+            </p>
+          )}
           {realTradeError ? (
             <p className="font-display tabular-nums text-[10px] text-signal-sell mt-1">{realTradeError}</p>
           ) : (

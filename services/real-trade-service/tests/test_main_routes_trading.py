@@ -1071,7 +1071,39 @@ class TestDhanLiveDataRoutes:
         db = _fresh_db()
         with mock.patch("execution.dhan_client.get_positions", return_value=[{"sym": "AAA"}]):
             result = _run(main.dhan_live_positions(admin="admin", db=db))
-        assert result == {"ok": True, "positions": [{"sym": "AAA"}]}
+        # group 208: raw list kept for compatibility, plus the normalised rows (no netQty -> not open)
+        assert result["ok"] is True and result["positions"] == [{"sym": "AAA"}]
+        assert result["open_count"] == 0 and result["rows"][0]["is_open"] is False
+
+    def test_positions_rows_carry_ltp_for_open_positions_only(self):
+        db = _fresh_db()
+        raw = [{"tradingSymbol": "OPENCO", "netQty": 10, "buyAvg": 100.0, "productType": "INTRADAY"},
+               {"tradingSymbol": "DONECO", "netQty": 0, "buyAvg": 50.0, "realizedProfit": 71.0}]
+        seen = {}
+
+        async def fake_quotes(symbols, priority=False):
+            seen["symbols"], seen["priority"] = list(symbols), priority
+            return {"OPENCO": mock.Mock(price=103.0)}
+        with mock.patch("execution.dhan_client.get_positions", return_value=raw), \
+                mock.patch("market_feed.feed.get_quotes", fake_quotes):
+            result = _run(main.dhan_live_positions(admin="admin", db=db))
+        assert seen == {"symbols": ["OPENCO"], "priority": True}      # closed rows are never quoted
+        assert result["open_count"] == 1
+        open_row, done_row = result["rows"]
+        assert open_row["ltp"] == 103.0 and open_row["unrealized_pnl"] == 30.0
+        assert done_row["is_open"] is False and done_row["ltp"] is None and done_row["realized_pnl"] == 71.0
+
+    def test_positions_survive_a_quote_failure(self):
+        db = _fresh_db()
+        raw = [{"tradingSymbol": "OPENCO", "netQty": 10, "buyAvg": 100.0}]
+
+        async def boom(symbols, priority=False):
+            raise RuntimeError("403 exceeding access rate")
+        with mock.patch("execution.dhan_client.get_positions", return_value=raw), \
+                mock.patch("market_feed.feed.get_quotes", boom):
+            result = _run(main.dhan_live_positions(admin="admin", db=db))
+        assert result["open_count"] == 1 and result["rows"][0]["ltp"] is None
+        assert result["rows"][0]["unrealized_pnl"] is None
 
     def test_holdings_not_connected_409(self):
         db = _fresh_db()

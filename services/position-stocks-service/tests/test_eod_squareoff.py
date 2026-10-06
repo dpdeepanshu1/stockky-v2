@@ -483,6 +483,68 @@ class TestFireFlatSell:
 
 
 # ── run_eod_squareoff — plain sweep ──────────────────────────────────────────
+class TestDuplicateSellGuards:
+    """Group 205 (item 11): no second SELL for a position that already exited."""
+
+    def super_with(self, leg_status, leg="TARGET_LEG"):
+        return [{"orderId": "SO1", "orderStatus": "TRADED",
+                 "legDetails": [{"legName": leg, "orderStatus": leg_status}]}]
+
+    def test_filled_target_leg_blocks_the_flat_sell(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(dhan_client, "get_super_order_list", lambda db_: self.super_with("TRADED"))
+        p = mkpos(db, super_id="SO1")
+        with pytest.raises(eod.PositionAlreadyFlat, match="TARGET_LEG"):
+            eod._fire_flat_sell(db, p)
+        assert b.of("place_order") == []
+
+    def test_filled_stop_leg_blocks_the_flat_sell(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(dhan_client, "get_super_order_list", lambda db_: self.super_with("TRADED", "STOP_LOSS_LEG"))
+        with pytest.raises(eod.PositionAlreadyFlat, match="STOP_LOSS_LEG"):
+            eod._fire_flat_sell(db, mkpos(db, super_id="SO1"))
+
+    def test_unfilled_legs_do_not_block(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(dhan_client, "get_super_order_list", lambda db_: self.super_with("PENDING"))
+        assert eod._fire_flat_sell(db, mkpos(db, super_id="SO1")) == {"orderId": "F1"}
+
+    def test_lookup_failure_fails_open(self, env, monkeypatch):
+        db, b, _ = env
+        def boom(db_):
+            raise RuntimeError("403 exceeding access rate")
+        monkeypatch.setattr(dhan_client, "get_super_order_list", boom)
+        assert eod._fire_flat_sell(db, mkpos(db, super_id="SO1")) == {"orderId": "F1"}
+
+    def test_close_now_reports_already_closed_without_changing_the_row(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(dhan_client, "get_super_order_list", lambda db_: self.super_with("TRADED"))
+        p = mkpos(db, super_id="SO1")
+        with pytest.raises(eod.ManualCloseRejected, match="Already closed"):
+            eod.close_position_now(db, p, exit_reason="STAGNATION_EXIT")
+        assert p.status == "OPEN" and p.error_message is None and b.of("place_order") == []
+
+    def test_retry_adopts_an_order_the_failed_attempt_actually_placed(self, env, monkeypatch):
+        db, b, _ = env
+        p = mkpos(db)
+        b.place_script = [RuntimeError("read timeout")]
+        b.orders = [{"orderId": "LATE1", "transactionType": "SELL", "securityId": p.dhan_security_id,
+                     "quantity": p.quantity, "orderStatus": "TRADED", "tag": "EOD_SQUAREOFF"}]
+        assert eod._fire_flat_sell(db, p) == {"orderId": "LATE1"}
+        assert len(b.of("place_order")) == 1
+
+    def test_retry_ignores_rejected_or_foreign_orders_and_resends(self, env):
+        db, b, _ = env
+        p = mkpos(db)
+        b.place_script = [RuntimeError("read timeout")]
+        b.orders = [{"orderId": "R1", "transactionType": "SELL", "securityId": p.dhan_security_id,
+                     "quantity": p.quantity, "orderStatus": "REJECTED"},
+                    {"orderId": "O2", "transactionType": "SELL", "securityId": p.dhan_security_id,
+                     "quantity": p.quantity + 1, "orderStatus": "TRADED"}]
+        assert eod._fire_flat_sell(db, p) == {"orderId": "F2"}      # first attempt raised, second sent
+        assert len(b.of("place_order")) == 2
+
+
 class TestRunEodSquareoffPlain:
     def test_already_fired_today_is_a_noop(self, env):
         db, b, _ = env

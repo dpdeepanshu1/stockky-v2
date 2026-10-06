@@ -1617,7 +1617,7 @@ export default function PositionStocksTab() {
                 <p className="text-[9px] text-mist uppercase tracking-widest">Win Rate</p>
                 <p className="font-display tabular-nums font-bold text-sm text-paper">
                   {tradeHistory.summary.win_rate_pct != null ? `${tradeHistory.summary.win_rate_pct}%` : "—"}
-                  <span className="text-[10px] text-mist ml-1">({tradeHistory.summary.wins}W / {tradeHistory.summary.losses}L)</span>
+                  <span className="text-[10px] text-mist ml-1">({tradeHistory.summary.wins}W / {tradeHistory.summary.losses}L{(tradeHistory.summary.breakeven ?? 0) > 0 ? ` / ${tradeHistory.summary.breakeven}BE` : ""})</span>
                 </p>
               </div>
               <div>
@@ -1646,13 +1646,24 @@ export default function PositionStocksTab() {
                 <div className="h-1.5 rounded-full overflow-hidden flex">
                   <div className="bg-signal-buy h-full transition-all"
                     style={{ width: `${((tradeHistory.summary.wins / tradeHistory.summary.total_trades) * 100).toFixed(1)}%` }} />
+                  <div className="bg-mist/40 h-full"
+                    style={{ width: `${(((tradeHistory.summary.breakeven ?? 0) / tradeHistory.summary.total_trades) * 100).toFixed(1)}%` }} />
                   <div className="bg-signal-sell h-full flex-1" />
                 </div>
                 <div className="flex justify-between font-display tabular-nums text-[9px] text-mist mt-1">
                   <span>Wins: {tradeHistory.summary.wins}</span>
+                  {(tradeHistory.summary.breakeven ?? 0) > 0 && <span>Breakeven: {tradeHistory.summary.breakeven}</span>}
                   <span>Losses: {tradeHistory.summary.losses}</span>
                 </div>
               </div>
+            )}
+            {((tradeHistory.summary.pending_reconcile ?? 0) > 0 || (tradeHistory.summary.error_trades ?? 0) > 0) && (
+              <p className="font-display tabular-nums text-[10px] text-mist mb-3">
+                Not in the totals above:
+                {(tradeHistory.summary.pending_reconcile ?? 0) > 0 && ` ${tradeHistory.summary.pending_reconcile} exit(s) waiting for the real fill price`}
+                {(tradeHistory.summary.pending_reconcile ?? 0) > 0 && (tradeHistory.summary.error_trades ?? 0) > 0 && ","}
+                {(tradeHistory.summary.error_trades ?? 0) > 0 && ` ${tradeHistory.summary.error_trades} ERROR row(s)`}
+              </p>
             )}
 
             {tradeHistory.trades.length === 0 ? (

@@ -1056,6 +1056,21 @@ class TestTradesHistory:
         r = client.get("/trades/history", params={"range": "3d"})
         assert "RECENT" in [t["symbol"] for t in r.json()["trades"]]
 
+    def test_summary_keeps_breakeven_pending_and_error_rows_out_of_losses(self, client, db):
+        now = datetime.now(timezone.utc)
+        kw = dict(opened_at=now, closed_at=now)
+        _position(db, symbol="W1", status="TARGET_HIT", realized_pnl=100.0, **kw)
+        _position(db, symbol="L1", status="STOP_HIT", realized_pnl=-40.0, **kw)
+        _position(db, symbol="B1", status="STAGNATION_EXIT", realized_pnl=0.0, **kw)
+        _position(db, symbol="P1", status="STAGNATION_EXIT", realized_pnl=0.0,
+                  error_message="STAGNATION_EXIT_PENDING_RECONCILE: exit price unknown", **kw)
+        _position(db, symbol="E1", status="ERROR", realized_pnl=0.0,
+                  error_message="MANUAL_EXIT_SELL_DEAD: order X came back REJECTED", **kw)
+        s = client.get("/trades/history").json()["summary"]
+        assert (s["total_trades"], s["wins"], s["losses"], s["breakeven"]) == (3, 1, 1, 1)
+        assert s["pending_reconcile"] == 1 and s["error_trades"] == 1
+        assert s["win_rate_pct"] == 33.3 and s["total_pnl"] == 60.0
+
     def test_empty_history_no_crash(self, client, db):
         r = client.get("/trades/history")
         body = r.json()

@@ -674,7 +674,29 @@ function OrderFlowDiagram({ mode }: { mode: Mode }) {
 }
 
 // ── Balance allocation bar ───────────────────────────────────────────────────
-function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] }) {
+// group208 (item 13): Dhan's positions payload has no LTP and keeps closed rows (netQty 0). The backend
+// now sends `rows` (normalised, `is_open`, ltp/unrealized_pnl null when unknown). This keeps only OPEN
+// rows, and falls back to the raw list for an older backend (no LTP, no P&L, never the day buy value).
+export interface LivePositionRow {
+  symbol: string; product: string; net_qty: number;
+  avg_price: number | null; ltp: number | null; unrealized_pnl: number | null; cost_value: number | null;
+}
+export function openLivePositions(res: any): LivePositionRow[] {
+  if (Array.isArray(res?.rows)) return res.rows.filter((r: any) => r.is_open);
+  return (res?.positions || [])
+    .filter((p: any) => Number(p.netQty ?? 0) !== 0)
+    .map((p: any) => {
+      const qty = Number(p.netQty);
+      const avg = Number(p.buyAvg || p.costPrice || p.averageBuyPrice || 0) || null;
+      return {
+        symbol: p.tradingSymbol || p.symbol || "—", product: p.productType || p.positionType || "",
+        net_qty: qty, avg_price: avg, ltp: null, unrealized_pnl: null,
+        cost_value: avg ? Math.abs(qty) * avg : null,
+      };
+    });
+}
+
+function BalanceAllocation({ funds, positions }: { funds: any; positions: LivePositionRow[] }) {
   const available = pickNum(funds, "availabelBalance", "availableBalance", "availableCash") ?? 0;
   const utilized = pickNum(funds, "utilizedAmount", "utilisedAmount") ?? 0;
   const collateral = pickNum(funds, "collateralAmount") ?? 0;
@@ -682,11 +704,7 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
   const pct = (v: number) => total > 0 ? Math.round((v / total) * 100) : 0;
 
   // Per-position allocation from broker positions array
-  const positionsValue = positions.reduce((sum, p) => {
-    const qty = Number(p.buyQty || p.netQty || 0);
-    const avg = Number(p.averageBuyPrice || p.costPrice || 0);
-    return sum + qty * avg;
-  }, 0);
+  const positionsValue = positions.reduce((sum, p) => sum + (p.cost_value ?? 0), 0);
 
   return (
     <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
@@ -708,11 +726,9 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
             <p className="text-[9px] font-display tabular-nums text-mist mb-1">OPEN BROKER POSITIONS</p>
             <div className="space-y-1">
               {positions.slice(0, 6).map((p, i) => {
-                const sym = p.tradingSymbol || p.symbol || "—";
-                const qty = Number(p.buyQty || p.netQty || 0);
-                const avg = Number(p.averageBuyPrice || p.costPrice || 0);
-                const val = qty * avg;
-                const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
+                const sym = p.symbol || "—";
+                const val = p.cost_value ?? 0;
+                const pnl = p.unrealized_pnl;
                 const valPct = total > 0 ? Math.round((val / total) * 100) : 0;
                 return (
                   <div key={i} className="flex items-center gap-2">
@@ -721,7 +737,7 @@ function BalanceAllocation({ funds, positions }: { funds: any; positions: any[] 
                       <div className="h-full bg-signal-hold/60 rounded-full" style={{ width: `${valPct}%` }} />
                     </div>
                     <div className="w-16 text-right font-display tabular-nums text-[10px] text-mist">{fmtInr(val, 0)}</div>
-                    <div className={`w-14 text-right font-display tabular-nums text-[10px] ${pnlColor(pnl)}`}>{pnl >= 0 ? "+" : ""}{fmtInr(pnl, 0)}</div>
+                    <div className={`w-14 text-right font-display tabular-nums text-[10px] ${pnl == null ? "text-mist" : pnlColor(pnl)}`}>{pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${fmtInr(pnl, 0)}`}</div>
                   </div>
                 );
               })}
@@ -882,7 +898,7 @@ export default function RealAutoTrade() {
   const [nowTick, setNowTick] = useState(() => Date.now());
 
   // Live Dhan data
-  const [livePositions, setLivePositions] = useState<any[]>([]);
+  const [livePositions, setLivePositions] = useState<LivePositionRow[]>([]);
   const [liveHoldings, setLiveHoldings] = useState<any[]>([]);
   const [liveDhanOrders, setLiveDhanOrders] = useState<any[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -1068,7 +1084,7 @@ export default function RealAutoTrade() {
         fetch(`${base}/dhan/holdings`, { headers: h }).then(r => r.json()),
         fetch(`${base}/dhan/orders`, { headers: h }).then(r => r.json()),
       ]);
-      setLivePositions(posRes.positions || []);
+      setLivePositions(openLivePositions(posRes));
       setLiveHoldings(holdRes.holdings || []);
       setLiveDhanOrders(ordRes.orders || []);
     } catch (e: any) {
@@ -2000,16 +2016,12 @@ export default function RealAutoTrade() {
                     ) : (
                       <div className="space-y-2">
                         {livePositions.map((p, i) => {
-                          const sym = p.tradingSymbol || p.symbol || "—";
-                          const qty = Number(p.netQty || p.buyQty || 0);
-                          const avg = Number(p.averageBuyPrice || p.costPrice || 0);
-                          const ltp = Number(p.lastTradedPrice || p.ltp || 0);
-                          const pnl = Number(p.unrealizedProfit || p.dayBuyValue || 0);
-                          // 2026-09-17 fix: was p.positionType || p.productType — positionType
-                          // ("LONG"/"SHORT") is present on every row and always won, so this
-                          // label showed "LONG" instead of the actual product type (CNC/INTRADAY)
-                          // for every position, delivery included. productType now checked first.
-                          const product = p.productType || p.positionType || "";
+                          const sym = p.symbol || "—";
+                          const qty = p.net_qty;
+                          const avg = p.avg_price;
+                          const ltp = p.ltp;
+                          const pnl = p.unrealized_pnl;   // null = unknown (never the day buy value)
+                          const product = p.product;
                           return (
                             <div key={i} className="bg-ink rounded-xl px-3 py-2 border border-slate">
                               <div className="flex items-center justify-between">
@@ -2017,15 +2029,15 @@ export default function RealAutoTrade() {
                                   <span className="font-display tabular-nums text-sm font-bold text-paper">{sym}</span>
                                   <span className="font-display tabular-nums text-[10px] text-mist ml-2">{product}</span>
                                 </div>
-                                <span className={`font-display tabular-nums text-sm font-bold ${pnlColor(pnl)}`}>
-                                  {pnl >= 0 ? "+" : ""}{fmtInr(pnl, 2)}
+                                <span className={`font-display tabular-nums text-sm font-bold ${pnl == null ? "text-mist" : pnlColor(pnl)}`}>
+                                  {pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${fmtInr(pnl, 2)}`}
                                 </span>
                               </div>
                               <div className="flex gap-4 mt-1 font-display tabular-nums text-[10px] text-mist">
                                 <span>Qty <span className="text-paper">{qty}</span></span>
-                                <span>Avg <span className="text-paper">₹{avg.toFixed(2)}</span></span>
-                                <span>LTP <span className="text-paper">₹{ltp.toFixed(2)}</span></span>
-                                <span>Val <span className="text-paper">{fmtInr(qty * avg, 0)}</span></span>
+                                <span>Avg <span className="text-paper">{avg != null ? `₹${avg.toFixed(2)}` : "—"}</span></span>
+                                <span>LTP <span className="text-paper">{ltp != null ? `₹${ltp.toFixed(2)}` : "—"}</span></span>
+                                <span>Val <span className="text-paper">{p.cost_value != null ? fmtInr(p.cost_value, 0) : "—"}</span></span>
                               </div>
                             </div>
                           );

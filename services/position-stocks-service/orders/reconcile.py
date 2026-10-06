@@ -331,6 +331,55 @@ def _backfill_legacy_eod_exit_order_ids(db: Session, eod_pending: list[ScalpPosi
     return backfilled
 
 
+def _alt_exit_for_dead_sell(db: Session, pos: ScalpPosition, dead_oid: str, plain_orders: list,
+                            super_rows: Optional[list] = None) -> Optional[dict]:
+    """Group 205 (item 11, AVALON: bought 2359.20, sold 2412.70 = +₹53.50 at Dhan, stored ERROR ₹0).
+    The flat SELL we tracked came back REJECTED/CANCELLED, but that does not mean the position is
+    still open: a duplicate SELL is rejected exactly BECAUSE the first exit already filled. Looks for
+    that other exit and returns one of
+      {"kind": "leg", "leg": <filled TARGET_LEG/STOP_LOSS_LEG dict>, "row": <super row>, "status": ...}
+      {"kind": "order", "order_id": ..., "price": ...}   (the one other filled plain SELL)
+    or None when nothing proves the position is flat (then the caller keeps ERROR).
+    The plain-order match must be unique, same security, exact quantity, and not already claimed
+    as another position's exit order."""
+    if super_rows is None and pos.dhan_super_order_id:
+        try:
+            super_rows = dhan_client.get_super_order_list(db)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reconcile: dead-SELL check — super order list failed for %s (id=%s): %s", pos.symbol, pos.id, e)
+            super_rows = None
+    if super_rows and pos.dhan_super_order_id:
+        row = next((r for r in super_rows if str(r.get("orderId") or "") == str(pos.dhan_super_order_id)), None)
+        if row is not None:
+            legs = row.get("legDetails") or []
+            for name, status in (("TARGET_LEG", "TARGET_HIT"), ("STOP_LOSS_LEG", "STOP_HIT")):
+                leg = next((l for l in legs if l.get("legName") == name), None)
+                if leg and str(leg.get("orderStatus", "")).upper() in _FILLED_STATUSES:
+                    return {"kind": "leg", "leg": leg, "row": row, "status": status}
+    claimed = {str(r[0]) for r in db.query(ScalpPosition.dhan_exit_order_id)
+               .filter(ScalpPosition.dhan_exit_order_id.isnot(None), ScalpPosition.id != pos.id).all() if r[0]}
+    cands = []
+    for r in plain_orders or []:
+        oid = str(r.get("orderId") or r.get("order_id") or "")
+        if not oid or oid == str(dead_oid) or oid in claimed:
+            continue
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
+            continue
+        if int(r.get("quantity") or 0) != int(pos.quantity):
+            continue
+        if str(r.get("orderStatus") or r.get("order_status") or "").upper() not in _FILLED_STATUSES:
+            continue
+        try:
+            price = float(r.get("averageTradedPrice") or r.get("average_traded_price") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if price > 0:
+            cands.append({"kind": "order", "order_id": oid, "price": price})
+    return cands[0] if len(cands) == 1 else None
+
+
 def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int:
     """2026-09-15 fix (session40 — the "future improvement" flagged in
     run_exit_reconciliation's dead-code comment below, now implemented):
@@ -416,6 +465,29 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
             _resolve_pending_with_price(db, pos, real_exit_price, late=False)
             resolved += 1
         elif status in _DEAD_EXIT_STATUSES:
+            # Group 205 (item 11): before calling this an ERROR, check the position really is
+            # still open. A rejected SELL that duplicated an exit which already filled (bracket
+            # leg, or an earlier SELL order) must not turn a closed, profitable trade into ERROR/₹0.
+            _alt = _alt_exit_for_dead_sell(db, pos, str(pos.dhan_exit_order_id), plain_orders)
+            if _alt is not None and _alt["kind"] == "order":
+                logger.warning(
+                    "reconcile: %s (id=%d) flat SELL %s came back %s, but SELL order %s already filled @ ₹%.2f "
+                    "— position is flat; booking that fill instead of ERROR.",
+                    pos.symbol, pos.id, pos.dhan_exit_order_id, status, _alt["order_id"], _alt["price"],
+                )
+                pos.dhan_exit_order_id = _alt["order_id"]
+                _resolve_pending_with_price(db, pos, _alt["price"], late=False)
+                resolved += 1
+                continue
+            if _alt is not None and _alt["kind"] == "leg":
+                # Leave the row pending: the super-order pass of this same reconciliation books the
+                # filled TARGET/STOP leg (capital already released, so no double release).
+                logger.warning(
+                    "reconcile: %s (id=%d) flat SELL %s came back %s, but its %s already filled — "
+                    "leaving the row pending for the bracket-fill booking instead of ERROR.",
+                    pos.symbol, pos.id, pos.dhan_exit_order_id, status, _alt["status"],
+                )
+                continue
             # The flat SELL itself died with zero fill, even after
             # _fire_flat_sell's bounded retry — this position is still
             # genuinely open at the broker past hard-flat time and cannot
@@ -506,6 +578,8 @@ def _resolve_pending_with_price(db: Session, pos: ScalpPosition, real_exit_price
 
 _last_stuck_sweep_ts = 0.0
 _stuck_alerted: set[int] = set()
+# Group 205: log "keeping the marker" once per position, not every ~10 s tick.
+_pending_kept_logged: set[int] = set()
 
 
 def _ist_date_str(dt) -> str:
@@ -984,6 +1058,114 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
     return out
 
 
+def rearm_cleared_placeholder_exits(db: Session, *, apply: bool = False, days: int = 3) -> dict:
+    """Group 205 (item 10). Finds flat-SELL rows (EOD_SQUAREOFF / MANUAL_EXIT /
+    STAGNATION_EXIT) closed in the last `days` days that sit on the entry-price placeholder
+    (exit_price == entry_price, P&L 0) with the *_PENDING_RECONCILE marker already gone, which
+    is what the old fallback in run_exit_reconciliation() left behind. With apply=True the marker
+    is written back, so the normal machinery then books the real fill: today's rows via the order
+    list (dhan_exit_order_id), earlier rows via Dhan's trade history, with the usual ledger
+    booking. Dry run by default. A row whose real fill really equals its entry simply resolves to
+    the same numbers. Rows with overnight partials are skipped (their P&L is not a placeholder)."""
+    today = ist_today_str()
+    cutoff = (date.fromisoformat(today) - timedelta(days=max(0, days))).isoformat()
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.status.in_(_FLAT_SELL_PENDING_STATUSES),
+                    ScalpPosition.closed_at.isnot(None),
+                    ScalpPosition.exit_price.isnot(None))
+            .order_by(ScalpPosition.id).all())
+    out: dict = {"date_ist": today, "applied": bool(apply), "rearmed": [], "skipped": []}
+    for p in rows:
+        label = {"id": p.id, "symbol": p.symbol, "status": p.status}
+        if "_PENDING_RECONCILE" in (p.error_message or ""):
+            continue                                    # still pending, nothing to re-arm
+        if _ist_date_str(p.closed_at) < cutoff:
+            continue
+        if abs((p.exit_price or 0.0) - (p.entry_price or 0.0)) > 1e-9 or abs(p.realized_pnl or 0.0) > 1e-9:
+            continue                                    # a real exit price / P&L is already booked
+        if int(p.overnight_stop_prior_qty or 0) + int(p.overnight_stop_filled_qty_so_far or 0) > 0:
+            out["skipped"].append({**label, "reason": "has overnight partial fills"})
+            continue
+        out["rearmed"].append({**label, "closed_day_ist": _ist_date_str(p.closed_at),
+                               "dhan_exit_order_id": p.dhan_exit_order_id,
+                               "entry_price": p.entry_price, "quantity": p.quantity})
+        if apply:
+            p.error_message = (f"{p.status}_PENDING_RECONCILE: re-armed by repair (group 205); "
+                               f"exit_price=entry_price placeholder until the real fill is read from Dhan.")
+    if apply and out["rearmed"]:
+        db.commit()
+        global _last_stuck_sweep_ts
+        _last_stuck_sweep_ts = 0.0                      # let the next sweep pick them up immediately
+        logger.info("reconcile: re-armed %d cleared placeholder exit(s) for real-fill resolution",
+                    len(out["rearmed"]))
+    return out
+
+
+def repair_dead_sell_errors(db: Session, *, apply: bool = False) -> dict:
+    """Group 205 (item 11). TODAY's rows the old dead-SELL branch marked ERROR
+    (`*_SELL_DEAD`) although the position had in fact exited (AVALON-type: first exit filled, a
+    duplicate SELL was rejected). For each, look for the real exit with the same rule live
+    reconciliation now uses (filled TARGET/STOP leg, else the one other filled SELL for this
+    security and quantity). Dry run by default. With apply=True the row becomes TARGET_HIT /
+    STOP_HIT (leg) or its original flat-SELL status (order) with the real price and P&L, capital
+    is released again and the symbol lock freed (the dead branch had re-claimed both), and the
+    P&L is booked to the ledger. Rows with overnight partials, and rows with no proof of an exit,
+    are skipped and listed."""
+    today = ist_today_str()
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.status == "ERROR", ScalpPosition.error_message.like("%_SELL_DEAD%"))
+            .order_by(ScalpPosition.id).all())
+    out: dict = {"date_ist": today, "applied": bool(apply), "recovered": [], "skipped": []}
+    if not rows:
+        return out
+    try:
+        plain = dhan_client.get_order_list(db) or []
+        supers = dhan_client.get_super_order_list(db) or []
+    except Exception as e:
+        out["error"] = f"Dhan order fetch failed: {e}"
+        return out
+    for pos in rows:
+        label = {"id": pos.id, "symbol": pos.symbol}
+        day = _ist_date_str(pos.closed_at) if pos.closed_at else None
+        if day != today:
+            out["skipped"].append({**label, "reason": "not closed today (Dhan's order book only holds today)"})
+            continue
+        if int(pos.overnight_stop_prior_qty or 0) + int(pos.overnight_stop_filled_qty_so_far or 0) > 0:
+            out["skipped"].append({**label, "reason": "has overnight partial fills"})
+            continue
+        prefix = (pos.error_message or "").split("_SELL_DEAD")[0]
+        alt = _alt_exit_for_dead_sell(db, pos, str(pos.dhan_exit_order_id or ""), plain, supers)
+        if alt is None:
+            out["skipped"].append({**label, "reason": "no filled exit found at Dhan (position may really be open)"})
+            continue
+        if alt["kind"] == "leg":
+            trigger = pos.target_price if alt["status"] == "TARGET_HIT" else pos.stop_price
+            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger)
+            new_status = alt["status"]
+            exit_oid = str(alt["leg"].get("orderId") or pos.dhan_super_order_id)
+        else:
+            price = alt["price"]
+            new_status = prefix if prefix in _FLAT_SELL_PENDING_STATUSES else "EOD_SQUAREOFF"
+            exit_oid = alt["order_id"]
+        pnl = (price - pos.entry_price) * pos.quantity
+        pct = (price - pos.entry_price) / pos.entry_price * 100.0 if pos.entry_price else 0.0
+        out["recovered"].append({**label, "new_status": new_status, "exit_price": price,
+                                 "quantity": pos.quantity, "pnl": round(pnl, 2)})
+        if apply:
+            pos.status = new_status
+            pos.exit_price = price
+            pos.realized_pnl = pnl
+            pos.realized_pnl_pct = pct
+            pos.dhan_exit_order_id = exit_oid
+            pos.error_message = None
+            db.commit()
+            ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=pnl)
+            shared_symbol_lock.release(db, pos.symbol)
+            logger.info("reconcile: repaired dead-SELL ERROR row %s (id=%d) -> %s @ ₹%.2f, P&L ₹%.2f",
+                        pos.symbol, pos.id, new_status, price, pnl)
+    return out
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
@@ -1279,20 +1461,26 @@ def run_exit_reconciliation(db: Session) -> int:
             # the real fill, leave error_message as-is (still marked
             # PENDING_RECONCILE) for the next pass.
             if pos.status in _FLAT_SELL_PENDING_STATUSES:
-                entry_status = str(row.get("orderStatus", "")).upper()
-                if entry_status in _FILLED_STATUSES:
-                    # Original entry traded — exit was a plain MARKET SELL
-                    # whose fill we can't directly read from super_orders.
-                    # Use entry_price as exit_price placeholder (already set
-                    # by eod_squareoff.py / close_position_now()); clear the
-                    # pending-reconcile flag.
-                    pos.error_message = None
-                    db.commit()
+                # 2026-10-06 (group205, item 10 — exit price = entry price, P&L ₹0 on
+                # STAGNATION_EXIT/EOD/MANUAL rows). This branch used to CLEAR the
+                # *_PENDING_RECONCILE sentinel whenever the original entry leg was traded,
+                # on the theory that nothing more could be resolved here. But it is reached
+                # on EVERY tick where _reconcile_eod_pending() above could not resolve the
+                # row yet: the SELL not visible in the order book yet, still TRANSIT/PENDING,
+                # filled with no price field, or the order-list fetch itself failed (rate
+                # limit). Clearing the sentinel then made the entry-price placeholder
+                # permanent: no later pass (same-day order list, prior-day trade history,
+                # age-out alert) looks at a row without the sentinel. Keep the sentinel;
+                # the same-day order-list pass retries every tick, resolve_stuck_pending()
+                # recovers it from trade history the next day, and the age-out turns a
+                # genuinely unrecoverable row into a loud *_UNRESOLVED instead of a quiet 0.
+                if pos.id not in _pending_kept_logged:
+                    _pending_kept_logged.add(pos.id)
                     logger.info(
-                        "reconcile: %s (id=%d) %s — entry leg confirmed traded; "
-                        "exit price remains entry_price placeholder (no dhan_exit_order_id "
-                        "to resolve the real flat-SELL fill via get_order_list())",
-                        pos.symbol, pos.id, pos.status,
+                        "reconcile: %s (id=%d) %s — exit fill not resolvable yet "
+                        "(dhan_exit_order_id=%s); keeping the PENDING_RECONCILE marker so a "
+                        "later pass can book the real fill.",
+                        pos.symbol, pos.id, pos.status, pos.dhan_exit_order_id,
                     )
                 continue
 

@@ -158,7 +158,7 @@ from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile
 from orders import adaptive
-from orders import excursion, review_stats
+from orders import excursion, review_stats, trade_stats
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
@@ -1704,26 +1704,24 @@ def trades_history(
             if (ts := as_aware(r.closed_at or r.opened_at)) is not None and ts >= cutoff
         ]
 
-    closed = [r for r in rows if r.status != "OPEN" and r.realized_pnl is not None]
-    # 2026-10-06 (group192): entry orders Dhan rejected/cancelled never held shares. They carry no P&L so they
-    # were already outside every stat below; counted separately so the dashboard can show them apart from trades.
-    rejected_entries = [
-        r for r in rows if r.status == "ERROR" and (r.error_message or "").startswith("Entry leg")
-    ]
-    wins = [r for r in closed if r.realized_pnl > 0]
-    losses = [r for r in closed if r.realized_pnl <= 0]
-    total_pnl = sum(r.realized_pnl for r in closed) if closed else 0.0
-    best = max(closed, key=lambda r: r.realized_pnl) if closed else None
-    worst = min(closed, key=lambda r: r.realized_pnl) if closed else None
+    # 2026-10-06 (group207, item 12): classification lives in orders/trade_stats.py. Only SETTLED trades
+    # (real exit price) count towards trades / win rate / P&L; breakevens are no longer losses, and rows
+    # still waiting for their fill price (pending_reconcile) or in ERROR are counted apart, not as 0-rupee
+    # losses. Entry orders Dhan rejected (group192) stay separate as rejected_entries.
+    stats = trade_stats.summarize(rows)
+    best, worst = stats["best"], stats["worst"]
 
     return {
         "summary": {
-            "total_trades": len(closed),
-            "rejected_entries": len(rejected_entries),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate_pct": round(100.0 * len(wins) / len(closed), 1) if closed else None,
-            "total_pnl": round(total_pnl, 2),
+            "total_trades": stats["total_trades"],
+            "rejected_entries": stats["rejected_entries"],
+            "wins": stats["wins"],
+            "losses": stats["losses"],
+            "breakeven": stats["breakeven"],
+            "pending_reconcile": stats["pending_reconcile"],
+            "error_trades": stats["error_trades"],
+            "win_rate_pct": stats["win_rate_pct"],
+            "total_pnl": stats["total_pnl"],
             # AUDIT FIX: best/worst trade dict was missing opened_at, making
             # it impossible to correlate the dashboard's "best trade" entry
             # with an entry in the trades list without a manual search.
@@ -1820,6 +1818,23 @@ def reconcile_pending(db: Session = Depends(get_db)):
 def reconcile_pending_resolve(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Force the prior-day stuck-sentinel sweep now (bypasses its throttle)."""
     return reconcile.resolve_stuck_pending(db, force=True)
+
+
+@app.post("/reconcile/rearm-placeholder-exits")
+def reconcile_rearm_placeholder_exits(apply: bool = False, days: int = 3, admin: str = Depends(require_admin),
+                                      db: Session = Depends(get_db)):
+    """Group 205 (item 10): flat-SELL rows (stagnation/EOD/manual) that were left on the
+    entry-price placeholder with their pending marker cleared. Dry run unless `?apply=true`;
+    applying re-arms the marker so the normal reconcile passes read the real fill from Dhan."""
+    return reconcile.rearm_cleared_placeholder_exits(db, apply=apply, days=days)
+
+
+@app.post("/reconcile/repair-dead-sell-errors")
+def reconcile_repair_dead_sell_errors(apply: bool = False, admin: str = Depends(require_admin),
+                                      db: Session = Depends(get_db)):
+    """Group 205 (item 11): today's rows marked ERROR (`*_SELL_DEAD`) although the position had
+    exited (duplicate SELL rejected after the first exit filled). Dry run unless `?apply=true`."""
+    return reconcile.repair_dead_sell_errors(db, apply=apply)
 
 
 @app.post("/reconcile/repair-closed")

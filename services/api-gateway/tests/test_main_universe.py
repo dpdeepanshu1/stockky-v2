@@ -1352,9 +1352,15 @@ def ub(monkeypatch, log):
         cache={}, sets=[], set_raises={}, kv=FakeKv(),
         securities=[], indices=[], movers=[], bulk=[], w52=[], news=[], ipos=[], events=[],
         watchlist=[], searched=[], pruned=set(), raises={}, calls=[],
-        price_filter_calls=[],
+        price_filter_calls=[], refresh_scheduled=0,
     )
     monkeypatch.setattr(gw, "_redis_get", lambda k: env.cache.get(k))
+
+    def _schedule_refresh():        # group196: a stale serve schedules a real background rebuild; never start a thread here
+        env.refresh_scheduled += 1
+        return True
+
+    monkeypatch.setattr(gw, "_schedule_scan_universe_refresh", _schedule_refresh)
 
     def rset(k, v, ttl=None):
         if k in env.set_raises:
@@ -1420,6 +1426,7 @@ def test_build_serves_a_stale_copy_of_50_or_more_and_rewarms_the_live_key(ub, lo
     assert ub.kv.keys == [gw.SCAN_UNIVERSE_STALE_KEY]
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY) == [(S(60), 300)]
     assert ub.calls == []                                        # no rebuild on the request path
+    assert ub.refresh_scheduled == 1                             # group196: the background rebuild is scheduled
     assert log.any("info", "serving 60-symbol stale copy")
 
 

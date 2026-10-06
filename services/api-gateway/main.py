@@ -2018,6 +2018,66 @@ def _filter_symbols_under_max_price(symbols: List[str]) -> List[str]:
     return kept
 
 
+# ── group196: the "background rebuild" after a stale-served universe never rebuilt anything ─────────────
+# _build_scan_universe() serves the durable stale copy (SCAN_UNIVERSE_STALE_KEY) whenever the live key is cold, and
+# its comment promised "background rebuild will follow". Nothing ever did: the startup warm, the cached=true route's
+# fire-and-forget rebuild and every later caller all went through the SAME function, which found the stale copy
+# (kv get_stale ignores the TTL, and only a real build rewrites that key) and returned it again. So once one stale copy
+# existed the universe was only re-served, never rebuilt, and the first /scan/universe after a restart ran on the
+# previous session's names. Now a stale serve schedules ONE real rebuild (single-flight, daemon thread); the rebuild
+# skips the live/stale shortcuts. SCAN_UNIVERSE_STALE_REFRESH=0 restores the old serve-only behaviour.
+_UNIVERSE_REFRESH_LOCK = threading.Lock()
+_universe_refresh_ctx = threading.local()
+SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS = 50     # a rebuild thinner than this never overwrites the stored universe
+
+
+def _stale_universe_refresh_enabled() -> bool:
+    return (os.getenv("SCAN_UNIVERSE_STALE_REFRESH") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _build_scan_universe_fresh():
+    """A REAL rebuild: skips the live-cache and stale-copy shortcuts of _build_scan_universe().
+
+    Single-flight: returns None at once when another real rebuild is already running."""
+    if not _UNIVERSE_REFRESH_LOCK.acquire(blocking=False):
+        return None
+    _universe_refresh_ctx.on = True
+    try:
+        return _build_scan_universe()
+    finally:
+        _universe_refresh_ctx.on = False
+        _UNIVERSE_REFRESH_LOCK.release()
+
+
+def _schedule_scan_universe_refresh() -> bool:
+    """Start a background real rebuild unless one is running or the switch is off. Never raises."""
+    try:
+        if not _stale_universe_refresh_enabled() or _UNIVERSE_REFRESH_LOCK.locked():
+            return False
+
+        def _run() -> None:
+            try:
+                _build_scan_universe_fresh()
+            except Exception as e:
+                logger.warning("scan_universe: background rebuild failed (non-fatal): %s", e)
+
+        threading.Thread(target=_run, name="scan-universe-refresh", daemon=True).start()
+        return True
+    except Exception as e:
+        logger.debug("scan_universe: background rebuild not scheduled: %s", e)
+        return False
+
+
+def _build_scan_universe_forced() -> List[str]:
+    """force_refresh=true: a REAL rebuild for this caller (group196b).
+
+    The force_refresh paths drop the live key and call _build_scan_universe(), which then found the durable stale copy and
+    re-served it, so "force refresh" never refreshed the universe. A real rebuild that is already running (single
+    flight, `None`) or that returns nothing falls back to the plain call, which waits on / serves the normal way."""
+    out = _build_scan_universe_fresh()
+    return out if out else _build_scan_universe()
+
+
 # ── Build scan universe ──────────────────────────────────────────────────────
 def _build_scan_universe() -> List[str]:
     # ── 2026-09-18 fix: stale-serve on cold-start ─────────────────────────
@@ -2040,7 +2100,8 @@ def _build_scan_universe() -> List[str]:
     # function) under SCAN_UNIVERSE_STALE_KEY, kept separate from the short-TTL
     # live key so a hard cache-clear never wipes the safety net.
 
-    cached = _redis_get(SCAN_UNIVERSE_KEY)
+    refresh = bool(getattr(_universe_refresh_ctx, "on", False))      # group196: real rebuild, no shortcuts
+    cached = None if refresh else _redis_get(SCAN_UNIVERSE_KEY)
     if cached and isinstance(cached, list) and len(cached) > 0:
         # Always re-apply the delisted/index gate too, not just price — a symbol
         # can get added to KNOWN_DELISTED (symbol_aliases.py) *after* this cache
@@ -2051,7 +2112,7 @@ def _build_scan_universe() -> List[str]:
         return _filter_symbols_under_max_price(cached)
 
     # Live cache miss — try stale Neon read before paying full rebuild cost
-    if _kv_cache is not None:
+    if _kv_cache is not None and not refresh:
         try:
             stale = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
             if stale and isinstance(stale, list) and len(stale) > 0:
@@ -2067,6 +2128,7 @@ def _build_scan_universe() -> List[str]:
                     # next caller inside the same cycle doesn't also hit Neon,
                     # AND so the background rebuild naturally overwrites it soon.
                     _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
+                    _schedule_scan_universe_refresh()      # group196: the promised background rebuild
                     return stale
         except Exception as _stale_e:
             logger.debug("scan_universe stale-read failed (non-fatal): %s", _stale_e)
@@ -2260,6 +2322,11 @@ def _build_scan_universe() -> List[str]:
     except Exception:
         ttl = 3600
     result = _filter_symbols_under_max_price(result)
+    if refresh and len(result) < SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS:
+        # group196: a thin rebuild (NSE blocked, sources empty) must not replace the stored universe
+        logger.warning("scan_universe: background rebuild produced only %d symbol(s) - kept the stored universe",
+                       len(result))
+        return result
     _redis_set(SCAN_UNIVERSE_KEY, result, ttl=ttl)
     # 2026-09-18 fix: also write a long-lived stale-fallback copy so a restart
     # that finds the 30-min live key expired can still serve something fast
@@ -6105,7 +6172,7 @@ async def run_scan(force_refresh: bool = False, lite: bool = False):
             if not is_partial and total > 0 and processed >= int(total * 0.9):
                 return res
 
-    universe = (await asyncio.to_thread(_build_scan_universe))
+    universe = (await asyncio.to_thread(_build_scan_universe_forced if force_refresh else _build_scan_universe))
     if not universe:
         return {
             "scanned_at": datetime.now(IST).isoformat(),
@@ -6294,7 +6361,7 @@ def start_scan(
         if force_refresh:
             _drop_cache_keys(SCAN_UNIVERSE_KEY)
 
-        universe = _build_scan_universe()
+        universe = _build_scan_universe_forced() if force_refresh else _build_scan_universe()
         task_id = str(uuid.uuid4())
         if background_tasks is not None:
             background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
@@ -6449,7 +6516,7 @@ async def stream_market_scan(
             _redis_set(SCAN_UNIVERSE_KEY, None, ttl=1)
         except Exception:
             pass
-        universe = (await asyncio.to_thread(_build_scan_universe))
+        universe = (await asyncio.to_thread(_build_scan_universe_forced))
     universe = _prioritize_universe(universe)
     total = len(universe)
 
@@ -7532,7 +7599,7 @@ async def get_scan_universe(cached: bool = False):
                         _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
                         # Kick off background rebuild so data freshens soon
                         try:
-                            asyncio.create_task(asyncio.to_thread(_build_scan_universe))
+                            asyncio.create_task(asyncio.to_thread(_build_scan_universe_fresh))
                         except Exception:
                             pass
                         searched = await _load_searched_safe()
@@ -10679,7 +10746,12 @@ async def _warm_momentum_movers_cache():
         # news-mentioned symbols. Warm it right after so /scan/universe's
         # OTHER dependency is ready too, not just the movers half.
         try:
-            await asyncio.to_thread(_build_scan_universe)
+            # group196: a cold live key + a stored stale copy used to make this warm just re-serve the stale copy
+            _live = _redis_get(SCAN_UNIVERSE_KEY)
+            if isinstance(_live, list) and _live:
+                await asyncio.to_thread(_build_scan_universe)
+            else:
+                await asyncio.to_thread(_build_scan_universe_fresh)
             logger.info("Startup: scan-universe cache pre-warmed (first /scan/universe call will be fast)")
         except Exception as e:
             logger.warning("Startup warning (scan-universe warm, non-fatal): %s", e)

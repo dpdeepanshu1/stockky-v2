@@ -41,12 +41,12 @@ import main as em  # noqa: E402  (event/main.py)
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     """Isolate every module-level cache / flag for each test."""
-    for d in (em._yf_cache, em._company_name_cache, em._yf_ticker_cache, em._mem, em._mem_exp):
+    for d in (em._yf_cache, em._company_name_cache, em._company_name_fallback_until, em._yf_ticker_cache, em._mem, em._mem_exp):
         d.clear()
     monkeypatch.setattr(em, "_redis", None)
     monkeypatch.setattr(em, "_yf_rate_limited_until", 0.0)
     yield
-    for d in (em._yf_cache, em._company_name_cache, em._yf_ticker_cache, em._mem, em._mem_exp):
+    for d in (em._yf_cache, em._company_name_cache, em._company_name_fallback_until, em._yf_ticker_cache, em._mem, em._mem_exp):
         d.clear()
 
 
@@ -525,15 +525,18 @@ class TestGetCompanyName:
         monkeypatch.setattr(em, "_get_ticker", lambda s: pytest.fail("should not be called"))
         assert em._get_company_name("ABC.NS") == "ABC"
 
-    def test_QUIRK_rate_limit_fallback_is_cached_for_the_process_lifetime(self, monkeypatch):
-        """A transient cool-down caches the bare ticker as the 'company name' with no
-        expiry (COMPANY_NAME_CACHE_TTL is defined but never used), so Google News keeps
-        being queried by ticker even after yfinance recovers."""
+    def test_rate_limit_fallback_expires_so_the_real_name_is_fetched_later(self, monkeypatch):
+        """group201 (was test_QUIRK_rate_limit_fallback_is_cached_for_the_process_lifetime): the bare ticker is
+        remembered only for EVENT_COMPANY_NAME_FALLBACK_TTL_S, so Google News is not searched by ticker for the
+        rest of the process life after one transient cool-down."""
         em._yf_rate_limited_until = time.time() + 1000
         assert em._get_company_name("ABC.NS") == "ABC"
         em._yf_rate_limited_until = 0.0
         monkeypatch.setattr(em, "_get_ticker", lambda s: _T(info={"longName": "Real Name Ltd"}))
-        assert em._get_company_name("ABC.NS") == "ABC"
+        assert em._get_company_name("ABC.NS") == "ABC"            # still inside the fallback window
+        em._company_name_fallback_until["ABC.NS"] = time.time() - 1  # window over
+        assert em._get_company_name("ABC.NS") == "Real Name Ltd"
+        assert "ABC.NS" not in em._company_name_fallback_until      # a real name is kept for good
 
 
 class TestYfWrappers:

@@ -1933,3 +1933,45 @@ def test_movers_angelone_ok_status_does_not_warn(mm, log):
     mm.http.responses["/angelone/movers"] = Resp(200, {"status": "ok", "data": [{"symbol": "AAA"}]})
     gw._get_momentum_movers()
     assert not log.any("warning", "AngelOne movers unavailable")
+
+
+# ── group 202: the NSE movers yield line says how many rows each board returned ──────────────────
+
+def test_group202_movers_log_counts_rows_and_quiet_rows(mm, log):
+    """'+0 symbols' used to look the same for an empty board and for a full board of quiet stocks."""
+    mm.nse.responses[LOSERS] = {"data": [
+        {"symbol": "QUIET1", "pChange": -0.5}, {"symbol": "QUIET2", "pChange": 1.9},
+        {"symbol": "DROP", "pChange": -6}]}
+    gw._get_momentum_movers()
+    assert log.any("info", f"NSE movers {LOSERS}: +1 symbols (rows=3, under 2% move=2)")
+
+
+def test_group202_movers_log_empty_board_shows_zero_rows(mm, log):
+    mm.nse.responses[VOLG] = {"data": []}
+    gw._get_momentum_movers()
+    assert log.any("info", f"NSE movers {VOLG}: +0 symbols (rows=0, under 2% move=0)")
+
+
+def test_group202_movers_log_no_data_board_shows_zero_rows(mm, log):
+    mm.nse.responses[GAINERS] = None
+    gw._get_momentum_movers()
+    assert log.any("warning", f"NSE movers {GAINERS}: no data")
+    assert log.any("info", f"NSE movers {GAINERS}: +0 symbols (rows=0, under 2% move=0)")
+
+
+def test_group202_movers_log_non_dict_rows_are_not_counted(mm, log):
+    mm.nse.responses[GAINERS] = {"data": ["junk", {"symbol": "OK", "pChange": 9}]}
+    gw._get_momentum_movers()
+    assert log.any("info", f"NSE movers {GAINERS}: +1 symbols (rows=1, under 2% move=0)")
+
+
+def test_group202_movers_log_unusable_symbol_rows_count_as_rows_not_quiet(mm, log):
+    mm.nse.responses[GAINERS] = {"data": [{"symbol": "NIFTY 50", "pChange": 0.1}, {"symbol": "", "pChange": 0.1}]}
+    gw._get_momentum_movers()
+    assert log.any("info", f"NSE movers {GAINERS}: +0 symbols (rows=2, under 2% move=0)")
+
+
+def test_group202_movers_result_unchanged_by_counting(mm):
+    mm.nse.responses[GAINERS] = {"data": [{"symbol": "UP", "pChange": 5}, {"symbol": "FLAT", "pChange": 0.2}]}
+    out = set(gw._get_momentum_movers())
+    assert "UP" in out and "FLAT" not in out

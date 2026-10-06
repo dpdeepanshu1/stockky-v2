@@ -15,6 +15,7 @@ except Exception:
     enrich_events = None  # type: ignore
 import json
 import math
+import re
 import time
 import random
 import time
@@ -59,6 +60,10 @@ EVENTS_LIST_CACHE_TTL = 3600
 # ── In‑memory cache for yfinance calls and company names ──
 _yf_cache: Dict[str, Dict[str, Any]] = {}
 _company_name_cache: Dict[str, str] = {}
+# group201: a bare-ticker fallback (yfinance rate-limited or failed) is remembered only this long, so the real
+# company name is fetched again once yfinance recovers (it used to be cached for the whole process life, and
+# Google News then kept being searched by ticker). EVENT_COMPANY_NAME_FALLBACK_TTL_S, default 600; 0 = old behaviour.
+_company_name_fallback_until: Dict[str, float] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 COMPANY_NAME_CACHE_TTL = 3600  # 1 hour (company name rarely changes)
 
@@ -224,25 +229,50 @@ def _get_ticker(symbol: str) -> yf.Ticker:
             pass
     return _yf_ticker_cache[symbol]
 
+def _company_name_fallback_ttl() -> float:
+    raw = (os.getenv("EVENT_COMPANY_NAME_FALLBACK_TTL_S") or "").strip()
+    try:
+        v = float(raw) if raw else 600.0
+    except ValueError:
+        return 600.0
+    return v if v >= 0 else 600.0
+
+
+def _remember_fallback_name(symbol: str, fallback: str) -> str:
+    _company_name_cache[symbol] = fallback
+    ttl = _company_name_fallback_ttl()
+    if ttl > 0:
+        _company_name_fallback_until[symbol] = time.time() + ttl
+    else:
+        _company_name_fallback_until.pop(symbol, None)
+    return fallback
+
+
 def _get_company_name(symbol: str) -> str:
     """Get the long company name from yfinance, with fallback to the symbol."""
     if symbol in _company_name_cache:
-        return _company_name_cache[symbol]
+        until = _company_name_fallback_until.get(symbol)
+        if until is None or time.time() < until:
+            return _company_name_cache[symbol]
+        # a bare-ticker fallback has expired: forget it and ask again
+        _company_name_cache.pop(symbol, None)
+        _company_name_fallback_until.pop(symbol, None)
     fallback = symbol.replace(".NS", "").replace(".BO", "")
     if _yf_is_rate_limited():
-        _company_name_cache[symbol] = fallback
-        return fallback
+        return _remember_fallback_name(symbol, fallback)
     ticker = _get_ticker(symbol)
     try:
         info = ticker.info or {}
-        name = info.get("longName") or info.get("shortName") or fallback
-        _company_name_cache[symbol] = name
-        return name
+        name = info.get("longName") or info.get("shortName")
+        if name:
+            _company_name_cache[symbol] = name
+            _company_name_fallback_until.pop(symbol, None)
+            return name
+        return _remember_fallback_name(symbol, fallback)
     except Exception as e:
         _yf_mark_rate_limited(e)
         logger.debug("Could not fetch company name for %s: %s", symbol, e)
-        _company_name_cache[symbol] = fallback
-        return fallback
+        return _remember_fallback_name(symbol, fallback)
 
 @cached_yf("get_earnings_dates")
 def _get_earnings_dates(symbol: str, limit: int = 1):
@@ -472,17 +502,16 @@ def _summarize_events(events: dict) -> str:
 
 # ── News sources ──
 
-def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
-    """Fetch from Google News RSS using the company name."""
-    company = _get_company_name(symbol)
-    query = quote(company)
+def _google_news_parse(symbol: str, query_text: str, max_items: int):
+    """One Google News RSS search. Returns (items, ok); ok is False when the feed could not be read at all."""
+    query = quote(query_text)
     feed_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
     try:
         parsed = feedparser.parse(feed_url)
         logger.info(f"Google News feed entries for {symbol}: {len(parsed.entries)}")
         if getattr(parsed, "bozo", False) and not parsed.entries:
             logger.warning("Google News RSS feed returned empty for %s", symbol)
-            return []
+            return [], False
         items = []
         cutoff = _utcnow() - timedelta(days=30)
         for entry in parsed.entries[:max_items]:
@@ -497,10 +526,55 @@ def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
                 "published": published.isoformat() if published else None,
                 "url": entry.link,
             })
-        return items
+        return items, True
     except Exception as e:
         logger.warning("Failed to fetch Google News for %s: %s", symbol, e)
-        return []
+        return [], False
+
+
+# group201: Google News is the only source that returns items for most symbols (see group 195), and it was asked
+# ONE question: the company name. When that gave fewer than EVENT_GN_THIN_BELOW items (default 3; 0 = never widen)
+# a second, differently worded search is added ("<short name> share price NSE", or "<TICKER> NSE share price" when
+# only the ticker is known) and the two are merged. Only widened when the first search itself worked, so a down
+# network is not asked twice.
+_LEGAL_SUFFIX_RE = re.compile(r"[\s,]+(limited|ltd\.?|private|pvt\.?|inc\.?|corporation|corp\.?)\s*$", re.IGNORECASE)
+
+
+def _gn_thin_below() -> int:
+    raw = (os.getenv("EVENT_GN_THIN_BELOW") or "").strip()
+    try:
+        v = int(float(raw)) if raw else 3
+    except ValueError:
+        return 3
+    return v if v >= 0 else 3
+
+
+def _google_news_extra_query(symbol: str, company: str) -> str:
+    base = symbol.replace(".NS", "").replace(".BO", "").upper()
+    short = company or ""
+    for _ in range(2):  # "Foo Private Limited" -> "Foo"
+        short = _LEGAL_SUFFIX_RE.sub("", short).strip()
+    if not short or short.lower() == base.lower():
+        return f"{base} NSE share price"
+    return f"{short} share price NSE"
+
+
+def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]:
+    """Fetch from Google News RSS using the company name (plus a second query when that returns very little)."""
+    company = _get_company_name(symbol)
+    items, ok = _google_news_parse(symbol, company, max_items)
+    thin_below = _gn_thin_below()
+    if ok and thin_below > 0 and len(items) < thin_below:
+        extra_query = _google_news_extra_query(symbol, company)
+        extra, _ok = _google_news_parse(symbol, extra_query, max_items)
+        seen = {i["title"].strip().lower() for i in items if i.get("title")}
+        for it in extra:
+            key = (it.get("title") or "").strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                items.append(it)
+        logger.info("Google News widened for %s with %r: %d item(s) after the second search", symbol, extra_query, len(items))
+    return items
 
 
 # ── Shared site-wide feed cache (group 144) ───────────────────────────────────

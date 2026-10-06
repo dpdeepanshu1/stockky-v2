@@ -41,6 +41,12 @@ logger = logging.getLogger("yahoo-ws-feed")
 # while parked.
 IDLE_RECHECK_S = 60.0
 
+# Group 204: minimum pause before reconnecting after listen() RETURNS (as opposed to
+# raising). Before this, a clean return fell straight back to the top of the loop, which
+# built a second AsyncWebSocket and re-subscribed the whole universe with no delay and
+# no log line explaining why, and the first socket was never closed.
+MIN_RECONNECT_GAP_S = 5.0
+
 _LIVE: Dict[str, dict] = {}
 _LOCK = threading.Lock()
 _STATE: Dict[str, Any] = {
@@ -50,7 +56,15 @@ _STATE: Dict[str, Any] = {
     "last_message_at": 0.0,
     "error": None,
     "reconnects": 0,
+    "connects": 0,   # group 204: sockets opened since boot (1 = the single normal connection)
 }
+# Group 204: the symbols the feed SHOULD be subscribed to, as Yahoo ids (RELIANCE.NS). The
+# connection loop used to subscribe the list start_feed_background() was first called with
+# and nothing else, so a later universe (the 20 s refresh) was lost whenever the feed was
+# idle or reconnected, and every reconnect shrank back to the boot list. Every connect now
+# subscribes this set, and start_feed_background()/ensure_subscribed() only ever add to it.
+_DESIRED: set = set()
+_START_LOCK = threading.Lock()   # group 204: makes "is a feed thread alive? if not start one" atomic
 _THREAD: Optional[threading.Thread] = None
 _LOOP: Optional[asyncio.AbstractEventLoop] = None
 _WS_CLIENT = None  # yfinance.live.AsyncWebSocket instance, set once the feed thread starts
@@ -101,11 +115,30 @@ def _on_message(msg: dict) -> None:
         logger.debug("yahoo_ws on_message error: %s", e)
 
 
+async def _close_client() -> None:
+    """Close and forget the current AsyncWebSocket, if any. Never raises."""
+    global _WS_CLIENT
+    ws, _WS_CLIENT = _WS_CLIENT, None
+    if ws is None:
+        return
+    try:
+        close_fn = getattr(ws, "close", None) or getattr(ws, "disconnect", None)
+        if close_fn:
+            maybe_coro = close_fn()
+            if asyncio.iscoroutine(maybe_coro):
+                await maybe_coro
+    except Exception as e:
+        logger.debug("yahoo_ws_feed: close failed (non-fatal): %s", e)
+
+
 async def _async_feed_main(universe: List[str]) -> None:
     global _WS_CLIENT
     import yfinance as yf
 
+    with _LOCK:
+        _DESIRED.update(w for w in (_to_ws_symbol(s) for s in universe if s) if w)
     was_idle = False
+    why = "initial connect"
     while True:
         # 2026-09-01 fix: this streaming connection used to stay open and
         # subscribed 24/7 with no market-hours awareness — the
@@ -115,17 +148,10 @@ async def _async_feed_main(universe: List[str]) -> None:
         # holding a live socket to Yahoo's streamer all night.
         if not is_feed_window_ist():
             if _WS_CLIENT is not None:
-                try:
-                    close_fn = getattr(_WS_CLIENT, "close", None) or getattr(_WS_CLIENT, "disconnect", None)
-                    if close_fn:
-                        maybe_coro = close_fn()
-                        if asyncio.iscoroutine(maybe_coro):
-                            await maybe_coro
-                except Exception as e:
-                    logger.debug("yahoo_ws_feed: close on market-close failed (non-fatal): %s", e)
-                _WS_CLIENT = None
+                await _close_client()
                 with _LOCK:
                     _STATE["connected"] = False
+                    _STATE["subscribed"] = []
             if not was_idle:
                 logger.info(
                     "yahoo_ws_feed: outside market hours (IST) — idling, "
@@ -137,34 +163,67 @@ async def _async_feed_main(universe: List[str]) -> None:
         if was_idle:
             logger.info("yahoo_ws_feed: market window open — resuming connection")
             was_idle = False
+            why = "market window opened"
+        ws = None
         try:
+            # Group 204: never hold two sockets. A previous client that was not closed (listen()
+            # returned, or a failure part-way through connecting) is closed before a new one opens.
+            await _close_client()
+            with _LOCK:
+                ws_symbols = sorted(_DESIRED)
+            if not ws_symbols:
+                await asyncio.sleep(IDLE_RECHECK_S)
+                continue
             ws = yf.AsyncWebSocket(verbose=False)
-            _WS_CLIENT = ws
-            ws_symbols = sorted({_to_ws_symbol(s) for s in universe if s})
             await ws.subscribe(ws_symbols)
+            # Publish the client only once the initial subscribe has finished, so ensure_subscribed()
+            # cannot send the whole universe a second time onto a socket that is still being set up
+            # (its "already subscribed" list is empty until this point).
+            _WS_CLIENT = ws
             with _LOCK:
                 _STATE["subscribed"] = ws_symbols
                 _STATE["started"] = True
                 _STATE["connected"] = True
                 _STATE["error"] = None
-            logger.info("yahoo_ws_feed: subscribed to %s symbols", len(ws_symbols))
+                _STATE["connects"] += 1
+                n_connect = _STATE["connects"]
+                extra = sorted(_DESIRED - set(ws_symbols))
+            logger.info("yahoo_ws_feed: subscribed to %s symbols (connection #%d, %s)",
+                        len(ws_symbols), n_connect, why)
+            if extra:
+                # symbols added (refresh / ensure_subscribed) while the initial subscribe was in flight
+                await ws.subscribe(extra)
+                with _LOCK:
+                    _STATE["subscribed"] = sorted(set(ws_symbols) | set(extra))
             # listen() runs forever; internally reconnects on transient errors,
             # but a hard failure (auth/network down) still raises out of it —
             # that's what the outer try/except + backoff below is for.
             await ws.listen(_on_message)
+            # listen() returned without raising: the connection ended. Say so (the next
+            # "subscribed to" line is then explained) and pace the reconnect.
+            with _LOCK:
+                _STATE["connected"] = False
+            logger.warning("yahoo_ws_feed: listen() returned (connection closed) — reconnecting in %.0fs",
+                           MIN_RECONNECT_GAP_S)
+            why = "after listen() returned"
+            await asyncio.sleep(MIN_RECONNECT_GAP_S)
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if ws is not None and _WS_CLIENT is None:
+                _WS_CLIENT = ws          # so _close_client() below closes a half-set-up socket too
+            await _close_client()
             with _LOCK:
                 _STATE["connected"] = False
                 _STATE["error"] = str(e)[:200]
                 _STATE["reconnects"] += 1
             logger.warning("yahoo_ws_feed crashed, restarting in 5s: %s", e)
+            why = "after a crash"
             await asyncio.sleep(5)
 
 
 def _run_feed_thread(universe: List[str]) -> None:
-    global _LOOP
+    global _LOOP, _WS_CLIENT
     loop = asyncio.new_event_loop()
     _LOOP = loop
     asyncio.set_event_loop(loop)
@@ -172,38 +231,62 @@ def _run_feed_thread(universe: List[str]) -> None:
         loop.run_until_complete(_async_feed_main(universe))
     except Exception as e:
         logger.error("yahoo_ws_feed thread died: %s", e)
+    finally:
+        # a dead thread must not leave a stale client for ensure_subscribed() to send on
+        _WS_CLIENT = None
+        with _LOCK:
+            _STATE["connected"] = False
 
 
 def start_feed_background(universe: List[str]) -> None:
-    """Call once at service startup. Safe to call again — no-ops if already running."""
+    """Call once at service startup. Safe to call again — no-ops if already running.
+
+    Group 204: a repeat call still ADDS its symbols to the set the feed subscribes (a running
+    but idle or reconnecting feed would otherwise keep only the first call's list), and the
+    "is it already running" check and the thread start are now one atomic step, so two callers
+    (the boot fallback in a worker thread and the universe refresh on the event loop) can no
+    longer each start a thread and open two Yahoo sockets."""
     global _THREAD
-    if _THREAD and _THREAD.is_alive():
-        return
-    if not universe:
-        logger.warning("yahoo_ws_feed: empty universe, not starting")
-        return
-    _THREAD = threading.Thread(
-        target=_run_feed_thread, args=(universe,), daemon=True, name="yahoo-ws-feed"
-    )
-    _THREAD.start()
+    ws_syms = {w for w in (_to_ws_symbol(s) for s in (universe or []) if s) if w}
+    with _START_LOCK:
+        if ws_syms:
+            with _LOCK:
+                _DESIRED.update(ws_syms)
+        if _THREAD and _THREAD.is_alive():
+            return
+        if not universe:
+            logger.warning("yahoo_ws_feed: empty universe, not starting")
+            return
+        _THREAD = threading.Thread(
+            target=_run_feed_thread, args=(universe,), daemon=True, name="yahoo-ws-feed"
+        )
+        _THREAD.start()
     logger.info("yahoo_ws_feed: background thread started for %s symbols", len(universe))
 
 
 def ensure_subscribed(symbols: List[str]) -> None:
     """Add symbols to the live subscription without restarting the connection —
-    e.g. a newly-listed IPO or a symbol the scan universe picked up mid-day."""
-    if _WS_CLIENT is None or _LOOP is None:
+    e.g. a newly-listed IPO or a symbol the scan universe picked up mid-day.
+
+    Group 204: the symbols are always recorded in the desired set, so when no connection is
+    up (idle outside market hours, mid-reconnect) the next connection subscribes them."""
+    wanted = {w for w in (_to_ws_symbol(s) for s in (symbols or []) if s) if w}
+    if wanted:
+        with _LOCK:
+            _DESIRED.update(wanted)
+    ws, loop = _WS_CLIENT, _LOOP
+    if ws is None or loop is None:
         return
     with _LOCK:
         already = set(_STATE.get("subscribed", []))
-    new = sorted({_to_ws_symbol(s) for s in symbols if _to_ws_symbol(s) and _to_ws_symbol(s) not in already})
+    new = sorted(wanted - already)
     if not new:
         return
     try:
-        fut = asyncio.run_coroutine_threadsafe(_WS_CLIENT.subscribe(new), _LOOP)
+        fut = asyncio.run_coroutine_threadsafe(ws.subscribe(new), loop)
         fut.result(timeout=10)
         with _LOCK:
-            _STATE["subscribed"] = sorted(already | set(new))
+            _STATE["subscribed"] = sorted(set(_STATE.get("subscribed", [])) | set(new))
     except Exception as e:
         logger.debug("yahoo_ws ensure_subscribed failed: %s", e)
 
@@ -243,6 +326,8 @@ def feed_status() -> dict:
             "live_symbols_count": len(_LIVE),
             "last_message_age_sec": round(time.time() - last, 1) if last else None,
             "reconnects": _STATE["reconnects"],
+            "connects": _STATE["connects"],
+            "desired_count": len(_DESIRED),
             "error": _STATE.get("error"),
             "in_market_window": is_feed_window_ist(),
         }

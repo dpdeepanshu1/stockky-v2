@@ -1283,15 +1283,29 @@ def _momentum_single_flight_cfg() -> tuple:
     return on, wait
 
 
+# group203: set once a movers pass has produced a non-empty list in this process. Until then (cold start) a
+# /scan/universe caller waits SCAN_UNIVERSE_COLD_MOVERS_DEADLINE_S instead of the full movers deadline.
+_MOVERS_EVER_READY = False
+
+
+def _note_movers_ready(out) -> None:
+    global _MOVERS_EVER_READY
+    if isinstance(out, list) and out:
+        _MOVERS_EVER_READY = True
+
+
 def _get_momentum_movers() -> List[str]:
     """Real-time movers (see _compute_momentum_movers). Concurrent callers share one computation."""
     global _mm_flight
     cached = _redis_get(MOMENTUM_MOVERS_CACHE_KEY)
     if isinstance(cached, list) and cached:
+        _note_movers_ready(cached)
         return cached
     on, wait = _momentum_single_flight_cfg()
     if not on:
-        return _compute_momentum_movers()
+        out = _compute_momentum_movers()
+        _note_movers_ready(out)
+        return out
     with _MM_FLIGHT_LOCK:
         flight = _mm_flight
         leader = flight is None
@@ -1308,6 +1322,7 @@ def _get_momentum_movers() -> List[str]:
         out = _compute_momentum_movers()
         flight.result = list(out) if isinstance(out, list) else None
         flight.ok = isinstance(out, list)
+        _note_movers_ready(out)
         return out
     finally:
         with _MM_FLIGHT_LOCK:
@@ -1364,6 +1379,8 @@ def _compute_momentum_movers() -> List[str]:
         ("equity-stock-indices?index=NIFTY%20500", "nse:nifty500_idx"),
     ):
         pre = len(movers)
+        n_rows = 0          # group202: rows the board returned
+        n_small = 0         # ... of which a real move under 2% (valid, just not a mover)
         try:
             data = _fetch_from_nse_api(endpoint, key, ttl=900)
             if data is None:
@@ -1377,6 +1394,7 @@ def _compute_momentum_movers() -> List[str]:
                 for item in rows:
                     if not isinstance(item, dict):
                         continue
+                    n_rows += 1
                     sym = (item.get("symbol") or item.get("symbolName") or "").upper()
                     sym = _clean_equity_symbol(sym)
                     if not sym:
@@ -1396,9 +1414,14 @@ def _compute_momentum_movers() -> List[str]:
                         chg_f = None
                     if chg_f is None or abs(chg_f) >= 2.0:
                         movers.add(sym.replace("&", "").replace("-", "") if False else sym)
+                    else:
+                        n_small += 1
         except Exception as e:
             logger.debug("NSE movers %s: %s", endpoint, e)
-        logger.info("NSE movers %s: +%d symbols", endpoint, len(movers) - pre)
+        # group202: "+0 symbols" used to look the same whether NSE returned nothing or a full board of
+        # quiet stocks; the row counts tell the two apart.
+        logger.info("NSE movers %s: +%d symbols (rows=%d, under 2%% move=%d)",
+                    endpoint, len(movers) - pre, n_rows, n_small)
     logger.info(
         "momentum_movers step1 (NSE live boards, full-market): %d symbols",
         len(movers) - nse_live_before,
@@ -7543,15 +7566,36 @@ SCAN_UNIVERSE_MOVERS_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_MOVERS_DEADLI
 SCAN_UNIVERSE_BUILD_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_BUILD_DEADLINE_S") or "").strip() or "20"))
 
 
-async def _movers_with_deadline() -> tuple[List[str], bool]:
-    """(movers, partial). partial=True when the deadline hit before movers were ready."""
-    task = asyncio.ensure_future(asyncio.to_thread(_get_momentum_movers))
+def _scan_universe_cold_movers_deadline() -> float:
+    """group203: SCAN_UNIVERSE_COLD_MOVERS_DEADLINE_S (default 5; 0 = off = always the full deadline)."""
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=SCAN_UNIVERSE_MOVERS_DEADLINE_S), False
+        v = float(((os.getenv("SCAN_UNIVERSE_COLD_MOVERS_DEADLINE_S") or "").strip() or "5"))
+    except ValueError:
+        return 5.0
+    return v if v == v and v >= 0 else 5.0
+
+
+def _movers_deadline_now() -> float:
+    full = SCAN_UNIVERSE_MOVERS_DEADLINE_S
+    cold = _scan_universe_cold_movers_deadline()
+    if _MOVERS_EVER_READY or cold <= 0:
+        return full
+    return min(full, cold)
+
+
+async def _movers_with_deadline() -> tuple[List[str], bool]:
+    """(movers, partial). partial=True when the deadline hit before movers were ready.
+
+    group203: before any movers pass has finished in this process (cold start) the wait is shortened, so a
+    cached=true caller is not held for the full deadline while the startup warm-up is still running."""
+    task = asyncio.ensure_future(asyncio.to_thread(_get_momentum_movers))
+    deadline = _movers_deadline_now()
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=deadline), False
     except asyncio.TimeoutError:
         logger.warning("scan/universe: momentum movers not ready within %.0fs — returning without them "
                        "(computation continues in the background and will warm the cache)",
-                       SCAN_UNIVERSE_MOVERS_DEADLINE_S)
+                       deadline)
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         return [], True
     except Exception as _me:

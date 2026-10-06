@@ -62,3 +62,11 @@ def _reset_md_guard():
     mod = sys.modules.get("md_guard")
     if mod is not None:
         mod.reset_state()
+
+
+@pytest.fixture(autouse=True)
+def _no_google_news_widening(monkeypatch):
+    """group201: event/main.py makes a second Google News search when the first returns < 3 items. Existing tests
+    mock feedparser.parse / the news sources for ONE call; they run with widening off. The widening itself is
+    tested in test_group201_news_coverage.py, which sets EVENT_GN_THIN_BELOW itself."""
+    monkeypatch.setenv("EVENT_GN_THIN_BELOW", "0")

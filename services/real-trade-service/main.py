@@ -160,6 +160,21 @@ async def startup() -> None:
             _db2.close()
     except Exception as _e:
         logger.debug("startup ATR cache warm failed (non-fatal): %s", _e)
+    # 2026-10-06 (group 183b): restore the dead-symbol (group 160) and no-daily-history (group 172) pauses that were
+    # still running when the service stopped, so a restart does not ask about each of those symbols again.
+    # Non-fatal; PAUSE_STATE_PERSIST=0 keeps them per-process.
+    try:
+        from db import get_session_factory as _get_session_factory_pause
+        from market_feed.feed import load_dead_symbols_from_db
+        from candidate_engine.candidates import load_nohist_from_db
+        _db3 = _get_session_factory_pause()()
+        try:
+            load_dead_symbols_from_db(_db3)
+            load_nohist_from_db(_db3)
+        finally:
+            _db3.close()
+    except Exception as _e:
+        logger.debug("startup pause-state restore failed (non-fatal): %s", _e)
     # 2026-10-06 (group 179): load the Dhan security list in the background so the first order after a restart
     # does not wait for the download. Non-fatal; DHAN_SECURITY_WARM_ENABLED=0 turns it off.
     try:

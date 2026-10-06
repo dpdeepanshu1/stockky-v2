@@ -404,6 +404,47 @@ VOLUME_SHOCK_NOHIST_TTL_S = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_NOHIST_TTL
 _HIST_REASON: dict = {}        # symbol -> last failure reason (absent / None = last call returned candles)
 _HIST_NONE_UNTIL: dict = {}    # symbol -> monotonic time until which "no history" is taken as known
 _HIST_DEFINITE = ("empty answer", "HTTP 404", "HTTP 400", "short history")
+# group183b: the known-no-history pauses are saved to the resilience DB and restored at startup
+# (resilience/pause_state.py; PAUSE_STATE_PERSIST=0 = per-process only, as before).
+_HIST_PERSIST_KEY = "candidates:nohist"
+_HIST_PERSIST_READY = False       # set by load_nohist_from_db(); nothing is written before that
+
+
+def _hist_snapshot() -> dict:
+    from resilience.pause_state import mono_to_wall
+    now = time.monotonic()
+    return {sym: {"u": round(mono_to_wall(u), 1)} for sym, u in list(_HIST_NONE_UNTIL.items()) if u > now}
+
+
+def _persist_hist_state() -> None:
+    if not _HIST_PERSIST_READY:
+        return
+    try:
+        from resilience.pause_state import schedule_flush
+        schedule_flush(_HIST_PERSIST_KEY, _hist_snapshot)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_nohist_from_db(db) -> None:
+    """Call once at startup (main.py): restore known-no-history pauses that are still running. Non-fatal."""
+    global _HIST_PERSIST_READY
+    try:
+        from resilience.pause_state import enabled, load_items, wall_to_mono
+        if not enabled() or VOLUME_SHOCK_NOHIST_TTL_S <= 0:
+            return
+        items = load_items(db, _HIST_PERSIST_KEY)
+        for sym, ent in items.items():
+            try:
+                _HIST_NONE_UNTIL[sym] = wall_to_mono(ent["u"])
+            except (TypeError, ValueError, KeyError):
+                continue
+        _HIST_PERSIST_READY = True
+        if items:
+            logger.info("volume_shock: restored %d no-daily-history pause(s) from the DB (e.g. %s)",
+                        len(items), ", ".join(sorted(items)[:5]))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_nohist_from_db failed (non-fatal): %s", e)
 
 
 def _note_history_reason(symbol: str, reason: Optional[str]) -> None:
@@ -1287,8 +1328,10 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
             _note_history_reason(symbol, "short history")
         if VOLUME_SHOCK_NOHIST_TTL_S > 0 and _HIST_REASON.get(symbol) in _HIST_DEFINITE:
             _HIST_NONE_UNTIL[symbol] = time.monotonic() + VOLUME_SHOCK_NOHIST_TTL_S
+            _persist_hist_state()
         return {"reject_reason": "Insufficient daily history for volume-shock check.", "atr_pct": None}
-    _HIST_NONE_UNTIL.pop(symbol, None)
+    if _HIST_NONE_UNTIL.pop(symbol, None) is not None:
+        _persist_hist_state()
 
     current_price = float(quote.get("price") or quote.get("cmp") or 0)
 

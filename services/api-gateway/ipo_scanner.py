@@ -198,6 +198,41 @@ IPOALERTS_DAILY_LIMIT = int(os.getenv("IPOALERTS_DAILY_LIMIT", "20") or 20)
 IPOALERTS_RECENT_WINDOW_DAYS = int(os.getenv("IPOALERTS_RECENT_WINDOW_DAYS", "7") or 7)
 IPOALERTS_CACHE_HOURS = float(os.getenv("IPOALERTS_CACHE_HOURS", "6") or 6)
 IPOALERTS_STATUSES = ("open", "listed")  # NOT "upcoming"/"closed" — see above
+# 2026-10-06 (group 183): the free plan answers HTTP 400 "This parameter is not supported for free plan users." for
+# status=listed, on every cache miss, and each of those calls still costs one of the ~25 daily requests. When the body
+# says the plan rejects a status, remember it in the durable kv layer (survives a restart) for this long and stop asking.
+# 0 = old behaviour (ask every time).
+IPOALERTS_UNSUPPORTED_TTL_S = int(os.getenv("IPOALERTS_UNSUPPORTED_TTL_S", "604800") or 0)
+
+
+def _ipoalerts_unsupported_key(status: str) -> str:
+    return f"stockky:ipoalerts:unsupported:{status}"
+
+
+def _ipoalerts_plan_rejects(status_code: int, body: str) -> bool:
+    """True for the 'this plan does not accept that parameter' 400, not for any other failure."""
+    if status_code != 400:
+        return False
+    low = (body or "").lower()
+    return "not supported" in low and "plan" in low
+
+
+def _ipoalerts_status_unsupported(status: str) -> bool:
+    if IPOALERTS_UNSUPPORTED_TTL_S <= 0:
+        return False
+    try:
+        return bool(_kv().kv_get(_ipoalerts_unsupported_key(status)))
+    except Exception:
+        return False
+
+
+def _ipoalerts_mark_unsupported(status: str) -> None:
+    if IPOALERTS_UNSUPPORTED_TTL_S <= 0:
+        return
+    try:
+        _kv().kv_set(_ipoalerts_unsupported_key(status), True, ttl=IPOALERTS_UNSUPPORTED_TTL_S)
+    except Exception:
+        pass
 IPOALERTS_CACHE_KEY = "stockky:ipoalerts:cache"
 
 
@@ -479,8 +514,17 @@ def fetch_ipoalerts_calendar(_bypass_cache: bool = False) -> List[Dict[str, Any]
         except Exception:
             pass
 
+    statuses = [st for st in IPOALERTS_STATUSES if not _ipoalerts_status_unsupported(st)]
+    if not statuses:
+        logger.debug("ipoalerts: every status is marked unsupported for this plan — no request made")
+        try:
+            cached = _kv().kv_get(IPOALERTS_CACHE_KEY)
+            return cached if isinstance(cached, list) else []
+        except Exception:
+            return []
+
     used = _ipoalerts_quota_used()
-    if used + len(IPOALERTS_STATUSES) > IPOALERTS_DAILY_LIMIT:
+    if used + len(statuses) > IPOALERTS_DAILY_LIMIT:
         logger.warning(
             "ipoalerts: daily quota reached (%s/%s used) — skipping fetch, "
             "reusing whatever's cached (or NSE-only for this scan)",
@@ -501,7 +545,7 @@ def fetch_ipoalerts_calendar(_bypass_cache: bool = False) -> List[Dict[str, Any]
     out: List[Dict[str, Any]] = []
     headers = {"X-API-KEY": IPOALERTS_API_KEY, "Accept": "application/json"}
     spent = 0
-    for status in IPOALERTS_STATUSES:
+    for status in statuses:
         try:
             r = httpx.get(IPOALERTS_BASE, params={"status": status}, headers=headers, timeout=15)
             spent += 1
@@ -518,6 +562,12 @@ def fetch_ipoalerts_calendar(_bypass_cache: bool = False) -> List[Dict[str, Any]
                     "ipoalerts status=%s -> HTTP %s: %s",
                     status, r.status_code, r.text[:300],
                 )
+                if IPOALERTS_UNSUPPORTED_TTL_S > 0 and _ipoalerts_plan_rejects(r.status_code, r.text):
+                    _ipoalerts_mark_unsupported(status)
+                    logger.info(
+                        "ipoalerts: status=%s is not available on this plan — not asking again for %s h "
+                        "(IPOALERTS_UNSUPPORTED_TTL_S)", status, round(IPOALERTS_UNSUPPORTED_TTL_S / 3600, 1),
+                    )
                 continue
             data = r.json()
             for row in data.get("ipos") or []:

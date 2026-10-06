@@ -1,6 +1,7 @@
 // frontend/src/App.tsx
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { setVisibleInterval } from "./visibleInterval";
 import { api, getApiUrl, setApiUrl, apiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
 import Pipeline from "./components/Pipeline";
 import DecisionCard from "./components/DecisionCard";
@@ -1820,8 +1821,7 @@ function OvernightAutomationPanel() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 20000);
-    return () => clearInterval(id);
+    return setVisibleInterval(refresh, 20000);   // group 184: paused while the browser tab is hidden
   }, []);
 
   async function toggleEnabled() {

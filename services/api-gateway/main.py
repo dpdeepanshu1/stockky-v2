@@ -254,6 +254,14 @@ async def _start_shared_http():
         logger.info("Startup: reset %d circuit breaker(s): %s", len(names), names)
     except Exception as e:
         logger.warning("Startup warning (circuit-breaker reset, non-fatal): %s", e)
+    # group 185: say so at boot when the hand-kept NSE holiday set has run out (this year, or next year from 15 Nov).
+    try:
+        from nse_holidays import holiday_coverage_warning
+        _hol_msg = holiday_coverage_warning()
+        if _hol_msg:
+            logger.warning(_hol_msg)
+    except Exception as e:
+        logger.debug("holiday coverage check skipped (non-fatal): %s", e)
 
 
 @app.on_event("shutdown")

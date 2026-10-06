@@ -568,6 +568,91 @@ class TestFetchIpoalerts:
         assert [r["symbol"] for r in ipo.fetch_ipoalerts_calendar()] == ["A"]
 
 
+class TestIpoalertsPlanRejectsStatus:
+    """group 183: a 400 'not supported for free plan' is remembered, so the status is not asked again."""
+
+    BODY = '{"status":"400","title":"Bad Request","detail":"This parameter is not supported for free plan users."}'
+
+    @pytest.fixture(autouse=True)
+    def _key(self, monkeypatch):
+        monkeypatch.setattr(ipo, "IPOALERTS_API_KEY", "k")
+        monkeypatch.setattr(ipo, "IPOALERTS_UNSUPPORTED_TTL_S", 604800)
+
+    def _free_plan(self, hx):
+        def handler(url, params, kw):
+            if params["status"] == "listed":
+                return FakeResp(400, text=self.BODY)
+            return FakeResp(200, {"ipos": [{"symbol": "OPEN1", "priceRange": "95-99"}]})
+        hx.route("ipoalerts", handler)
+
+    def test_plan_rejects_helper(self):
+        assert ipo._ipoalerts_plan_rejects(400, self.BODY) is True
+        assert ipo._ipoalerts_plan_rejects(400, "bad status") is False
+        assert ipo._ipoalerts_plan_rejects(429, self.BODY) is False
+        assert ipo._ipoalerts_plan_rejects(400, None) is False
+
+    def test_rejected_status_is_marked_with_ttl(self, kv, hx):
+        self._free_plan(hx)
+        out = ipo.fetch_ipoalerts_calendar()
+        assert [r["symbol"] for r in out] == ["OPEN1"]
+        assert kv.store[ipo._ipoalerts_unsupported_key("listed")] is True
+        assert ipo._ipoalerts_unsupported_key("open") not in kv.store
+        assert (ipo._ipoalerts_unsupported_key("listed"), True, 604800) in kv.sets
+
+    def test_next_fetch_skips_the_marked_status_and_spends_less_quota(self, kv, hx):
+        self._free_plan(hx)
+        ipo.fetch_ipoalerts_calendar()
+        assert len(hx.calls) == 2
+        del kv.store[ipo.IPOALERTS_CACHE_KEY]          # cache miss again (e.g. 6 h later or after a restart)
+        hx.calls.clear()
+        before = kv.store[ipo._ipoalerts_quota_key()]
+        out = ipo.fetch_ipoalerts_calendar()
+        assert [r["symbol"] for r in out] == ["OPEN1"]
+        assert [c[1]["status"] for c in hx.calls] == ["open"]
+        assert kv.store[ipo._ipoalerts_quota_key()] == before + 1
+
+    def test_quota_check_counts_only_statuses_still_asked(self, kv, hx, monkeypatch):
+        kv.store[ipo._ipoalerts_unsupported_key("listed")] = True
+        kv.store[ipo._ipoalerts_quota_key()] = 19
+        monkeypatch.setattr(ipo, "IPOALERTS_DAILY_LIMIT", 20)
+        hx.route("ipoalerts", FakeResp(200, {"ipos": []}))
+        ipo.fetch_ipoalerts_calendar()
+        assert [c[1]["status"] for c in hx.calls] == ["open"]   # 19 + 1 <= 20, would have been skipped with 2
+
+    def test_all_statuses_marked_makes_no_request_and_returns_cache(self, kv, hx):
+        kv.store[ipo._ipoalerts_unsupported_key("open")] = True
+        kv.store[ipo._ipoalerts_unsupported_key("listed")] = True
+        assert ipo.fetch_ipoalerts_calendar() == []
+        assert hx.calls == []
+        kv.store[ipo.IPOALERTS_CACHE_KEY] = [{"symbol": "C"}]
+        assert ipo.fetch_ipoalerts_calendar(_bypass_cache=True) == [{"symbol": "C"}]
+        assert hx.calls == []
+
+    def test_other_400_is_not_marked(self, kv, hx):
+        hx.route("ipoalerts", FakeResp(400, text="bad status"))
+        ipo.fetch_ipoalerts_calendar()
+        assert ipo._ipoalerts_unsupported_key("open") not in kv.store
+        assert ipo._ipoalerts_unsupported_key("listed") not in kv.store
+
+    def test_ttl_zero_restores_old_behaviour(self, kv, hx, monkeypatch):
+        monkeypatch.setattr(ipo, "IPOALERTS_UNSUPPORTED_TTL_S", 0)
+        self._free_plan(hx)
+        ipo.fetch_ipoalerts_calendar()
+        assert ipo._ipoalerts_unsupported_key("listed") not in kv.store
+        del kv.store[ipo.IPOALERTS_CACHE_KEY]
+        hx.calls.clear()
+        ipo.fetch_ipoalerts_calendar()
+        assert len(hx.calls) == 2
+
+    def test_kv_errors_never_raise(self, kv, hx):
+        kv.get_raises_for[ipo._ipoalerts_unsupported_key("listed")] = RuntimeError("down")
+        kv.set_raises_for[ipo._ipoalerts_unsupported_key("listed")] = RuntimeError("down")
+        self._free_plan(hx)
+        out = ipo.fetch_ipoalerts_calendar()
+        assert [r["symbol"] for r in out] == ["OPEN1"]
+        assert ipo._ipoalerts_status_unsupported("listed") is False
+
+
 # ── NSE session / calendar ────────────────────────────────────────────────────
 
 class TestNseSession:

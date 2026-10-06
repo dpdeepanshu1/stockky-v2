@@ -88,3 +88,30 @@ def holiday_name(d: Union[date, datetime]) -> str | None:
     if _as_calendar_date(d) not in _NSE_HOLIDAYS:
         return None
     return "NSE holiday"
+
+
+# group 185: the exchange calendar is a hand-kept set (seven copies in the repo, see scripts/check_holiday_lists_sync.py).
+# NSE publishes the next year's list in December (the 2026 circulars are dated 12 and 23 Dec 2025), so for most of December
+# there is nothing official to enter, and on 1 Jan every holiday of the new year would silently count as a trading day.
+# holiday_coverage_warning() is what the gateway logs at startup so that is noticed in time: from 15 Nov (default) it
+# warns when next year has no dates, and in any year with no dates at all.
+HOLIDAY_WARN_FROM = (11, 15)   # (month, day)
+
+
+def holiday_coverage_warning(today: Union[date, datetime, None] = None) -> str | None:
+    """A warning text when the set has no dates for this year (or, from HOLIDAY_WARN_FROM, for next year); else None."""
+    now = _as_calendar_date(today) if today is not None else datetime.now(_IST).date()
+    years = {d.year for d in _NSE_HOLIDAYS}
+    missing = []
+    if now.year not in years:
+        missing.append(now.year)
+    if (now.month, now.day) >= HOLIDAY_WARN_FROM and now.year + 1 not in years:
+        missing.append(now.year + 1)
+    if not missing:
+        return None
+    return (
+        "NSE holiday list has NO dates for %s - every holiday of that year would be treated as a trading day. "
+        "Add the official NSE trading-holiday circular (published each December) to all seven copies listed in "
+        "scripts/check_holiday_lists_sync.py, then run it." % " and ".join(str(y) for y in missing)
+    )
+

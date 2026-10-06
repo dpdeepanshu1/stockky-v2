@@ -5,6 +5,7 @@
 // history chart labels. All data comes from position-stocks-service only.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
@@ -534,13 +535,16 @@ export default function PositionStocksTab() {
     void loadCandidateLog();
     void loadRestrictedSymbols();
     void loadRealTradeAccount();
-    const t = setInterval(() => void loadAll(), 15_000);
-    const td = setInterval(() => void loadDhanLive(), 30_000);
-    const ta = setInterval(() => void loadDhanAccount(), 30_000);
-    const tc = setInterval(() => void loadCandidateLog(), 15_000);
-    const tir = setInterval(() => void loadRestrictedSymbols(), 30_000);
-    const tr = setInterval(() => void loadRealTradeAccount(), 30_000);
-    return () => { clearInterval(t); clearInterval(td); clearInterval(ta); clearInterval(tc); clearInterval(tir); clearInterval(tr); };
+    // group 184: the six data polls pause while the browser tab is hidden and run once when it is shown again.
+    const stops = [
+      setVisibleInterval(() => void loadAll(), 15_000),
+      setVisibleInterval(() => void loadDhanLive(), 30_000),
+      setVisibleInterval(() => void loadDhanAccount(), 30_000),
+      setVisibleInterval(() => void loadCandidateLog(), 15_000),
+      setVisibleInterval(() => void loadRestrictedSymbols(), 30_000),
+      setVisibleInterval(() => void loadRealTradeAccount(), 30_000),
+    ];
+    return () => { stops.forEach((stop) => stop()); };
   }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
 
   // ADDED (session48 — "no live process shows and no stock name shows"):
@@ -560,8 +564,8 @@ export default function PositionStocksTab() {
       }
     };
     void poll();
-    const id = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(id); };
+    const stop = setVisibleInterval(poll, 2000);
+    return () => { cancelled = true; stop(); };
   }, [subTab]);
 
   const saveApiUrl = () => { setPositionStocksApiUrl(apiUrlInput); void loadAll(); };

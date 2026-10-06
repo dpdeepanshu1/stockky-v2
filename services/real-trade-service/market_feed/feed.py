@@ -495,8 +495,12 @@ def _safe_prev_close(value) -> Optional[float]:
 # non-priority batches for FEED_DEAD_BACKOFF_S (default 30 min), doubling after each further miss up to
 # FEED_DEAD_BACKOFF_MAX_S (default 6 h). Timeouts and 5xx are NOT misses (upstream trouble says nothing
 # about the symbol). One real price clears the count. The priority lane (open positions) never skips.
-# FEED_DEAD_SKIP=0 turns the whole thing off. The state is per process and resets on restart.
+# FEED_DEAD_SKIP=0 turns the whole thing off. group183b: paused symbols are also saved to the resilience DB (see
+# resilience/pause_state.py) and restored at startup, so a restart no longer asks about each of them again
+# (PAUSE_STATE_PERSIST=0 = per-process only, as before).
 _DEAD_LOCK = _threading.Lock()
+_DEAD_PERSIST_KEY = "market_feed:dead_symbols"
+_DEAD_PERSIST_READY = False       # set by load_dead_symbols_from_db(); nothing is written before that
 _DEAD: dict[str, list] = {}        # clean symbol -> [consecutive_misses, skip_until_monotonic]
 
 
@@ -529,6 +533,7 @@ def _note_no_data(symbol: str) -> None:
                 if ent[0] == after or ent[0] - after < 6:
                     logger.info("get_quotes: %s has had no price %d time(s) in a row — paused for %.0f min "
                                 "(open positions are never paused)", sym, ent[0], wait / 60.0)
+                _persist_dead_state()
     except Exception as e:  # noqa: BLE001
         logger.debug("_note_no_data(%s) failed: %s", symbol, e)
 
@@ -538,7 +543,9 @@ def _note_priced(symbol: str) -> None:
     try:
         if _DEAD:
             with _DEAD_LOCK:
-                _DEAD.pop(_clean_sym(symbol), None)
+                gone = _DEAD.pop(_clean_sym(symbol), None)
+            if gone is not None and gone[1] > _time.monotonic():
+                _persist_dead_state()          # a saved pause just ended: save the removal too
     except Exception:  # noqa: BLE001
         pass
 
@@ -553,6 +560,47 @@ def _paused_symbols(symbols: list) -> list:
             return [x for x in symbols if x in _DEAD and _DEAD[x][1] > now]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _dead_snapshot() -> dict:
+    """{symbol: {"m": misses, "u": wall-clock deadline}} for symbols paused right now."""
+    from resilience.pause_state import mono_to_wall
+    now = _time.monotonic()
+    with _DEAD_LOCK:
+        return {sym: {"m": int(ent[0]), "u": round(mono_to_wall(ent[1]), 1)}
+                for sym, ent in _DEAD.items() if ent[1] > now}
+
+
+def _persist_dead_state() -> None:
+    if not _DEAD_PERSIST_READY:
+        return
+    try:
+        from resilience.pause_state import schedule_flush
+        schedule_flush(_DEAD_PERSIST_KEY, _dead_snapshot)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_dead_symbols_from_db(db) -> None:
+    """Call once at startup (main.py): restore pauses that are still running. Non-fatal."""
+    global _DEAD_PERSIST_READY
+    try:
+        from resilience.pause_state import enabled, load_items, wall_to_mono
+        if not enabled() or not _dead_cfg()[0]:
+            return
+        items = load_items(db, _DEAD_PERSIST_KEY)
+        with _DEAD_LOCK:
+            for sym, ent in items.items():
+                try:
+                    _DEAD[sym] = [max(1, int(ent.get("m", 1))), wall_to_mono(ent["u"])]
+                except (TypeError, ValueError, KeyError):
+                    continue
+        _DEAD_PERSIST_READY = True
+        if items:
+            logger.info("feed: restored %d paused no-price symbol(s) from the DB (e.g. %s)",
+                        len(items), ", ".join(sorted(items)[:5]))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_dead_symbols_from_db failed (non-fatal): %s", e)
 
 
 def clear_dead_symbols() -> None:

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import { api, MarketIndicesResponse } from "../api";
 
 export default function MarketSentimentHeader() {
@@ -28,8 +29,7 @@ export default function MarketSentimentHeader() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(() => fetchData(false), 60000);
-    return () => clearInterval(interval);
+    return setVisibleInterval(() => fetchData(false), 60000);   // group 184: paused while the browser tab is hidden
   }, []);
 
   if (loading && !data) {

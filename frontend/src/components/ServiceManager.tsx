@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import { api, wakeService, SystemServiceStatus, apiUrl } from "../api";
 import { getRealTradeApiUrl } from "../realTradeApi";
 import BottomSheet from "./BottomSheet";
@@ -68,8 +69,7 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
 
   useEffect(() => {
     fetchServices();
-    const id = setInterval(fetchServices, 45000);
-    return () => clearInterval(id);
+    return setVisibleInterval(fetchServices, 45000);   // group 184: paused while the browser tab is hidden
   }, []);
 
   const entries = Object.entries(services);

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
@@ -203,8 +204,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
       } catch { /* optional */ }
     };
     tick();
-    const id = window.setInterval(tick, 45000);
-    return () => { cancelled = true; window.clearInterval(id); };
+    const stop = setVisibleInterval(tick, 45000);   // group 184: paused while the browser tab is hidden
+    return () => { cancelled = true; stop(); };
   }, [data.symbol, quoteWs]);
 
 

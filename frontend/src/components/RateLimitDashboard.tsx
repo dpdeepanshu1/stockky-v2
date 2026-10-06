@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import { api } from "../api";
 
 type Upstream = {
@@ -79,8 +80,7 @@ export default function RateLimitDashboard() {
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 30000);
-    return () => clearInterval(id);
+    return setVisibleInterval(load, 30000);        // group 184: paused while the browser tab is hidden
   }, [load]);
 
   return (

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { setVisibleInterval } from "../visibleInterval";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
@@ -516,8 +517,8 @@ function CatalystWatchlistPanel({ mode, loggedIn }: { mode: Mode; loggedIn: bool
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 30_000);
-    return () => clearInterval(t);
+    const stop = setVisibleInterval(() => void load(), 30_000);   // group 184: paused while the browser tab is hidden
+    return () => stop();
   }, [load]);
 
   return (
@@ -1158,8 +1159,8 @@ export default function RealAutoTrade() {
       }
     };
     void poll();
-    const id = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(id); };
+    const stop = setVisibleInterval(poll, 2000);
+    return () => { cancelled = true; stop(); };
   }, [activeTab, mode, loggedIn]);
 
   useEffect(() => {
@@ -1172,8 +1173,8 @@ export default function RealAutoTrade() {
       } catch { /* best-effort */ }
     };
     void poll();
-    const id = setInterval(poll, 5000);
-    return () => { cancelled = true; clearInterval(id); };
+    const stop = setVisibleInterval(poll, 5000);
+    return () => { cancelled = true; stop(); };
   }, [activeTab, mode, loggedIn]);
 
   // BUG FIX (this session — "refresh button not working"/positions tab
@@ -1193,8 +1194,8 @@ export default function RealAutoTrade() {
         if (!cancelled) { setPositions(p); setOrders(o); }
       } catch { /* best-effort */ }
     };
-    const id = setInterval(poll, 10_000);
-    return () => { cancelled = true; clearInterval(id); };
+    const stop = setVisibleInterval(poll, 10_000);
+    return () => { cancelled = true; stop(); };
   }, [activeTab, mode, loggedIn]);
 
   const saveApiUrl = () => { setRealTradeApiUrl(apiUrlInput); void loadStatus(mode); };

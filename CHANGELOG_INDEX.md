@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-06 (group 198)  diagnostic for symbols that never price (scripts only, no service change).
+  Item 3 of the open list. The pause (group 160/183b) and the "no price" cache (group 161) already exist; what the repo cannot say is why STEAMHOUSE / SGRL / KENNAMET have no price (SME series, wrong ticker, or failing sources; the bhavcopy keeps only EQ/BE/BZ). New `scripts/diagnose_never_priced.sh` + `.py` print each name's AngelOne series rows, timed `/quote` and `/last-close` answers, the log lines in three services, and whether it is in the scan universe / movers. Details in `docs/GROUP198_NEVER_PRICED_DIAGNOSTIC.md`. Nothing to rebuild.
 - 2026-10-06 (group 197)  force_refresh=true now really rebuilds the scan universe (api-gateway).
   Closes the "not changed" gap of group 196. `run_scan`, `start_scan` and the scan stream dropped the live universe key on `force_refresh` but then called `_build_scan_universe()`, which re-served the stored stale copy. New `_build_scan_universe_forced()` runs the real rebuild (falls back to the plain call if one is already running or it returns nothing). New tests (4); details in `docs/GROUP197_FORCE_REFRESH_REAL_UNIVERSE_REBUILD.md`. Rebuild api-gateway.
 - 2026-10-06 (group 196)  a stale-served scan universe now gets a real background rebuild (api-gateway).

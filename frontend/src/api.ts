@@ -21,8 +21,30 @@ export function apiUrl(path: string): string {
   return `${base}${p}`;
 }
 
+/**
+ * 2026-10-06 (group 182): a gateway URL typed without a scheme ("my-vm.duckdns.org") was stored as is, so apiUrl()
+ * built a RELATIVE path and every request went to the page's own origin — the check then failed again with no hint
+ * why. Adds a scheme when missing (http for localhost / loopback / private-range hosts, https for everything else),
+ * trims whitespace and trailing slashes. An empty input stays empty (clears the override).
+ */
+export function normalizeGatewayUrl(raw: string): string {
+  let v = (raw || "").trim().replace(/\/+$/, "");
+  if (!v) return "";
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return v;
+  v = v.replace(/^\/+/, "");
+  const host = v.split("/")[0].split(":")[0].toLowerCase();
+  const isLocal =
+    host === "localhost" ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host.endsWith(".local");
+  return `${isLocal ? "http" : "https"}://${v}`;
+}
+
 export function setApiUrl(url: string) {
-  const clean = url.trim().replace(/\/$/, "");
+  const clean = normalizeGatewayUrl(url);
   if (clean) localStorage.setItem(STORAGE_KEY, clean);
   else localStorage.removeItem(STORAGE_KEY);
 }

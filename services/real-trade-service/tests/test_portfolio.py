@@ -214,6 +214,80 @@ class TestImportBrokerHoldings:
         n = run(pf.import_broker_holdings(db))
         assert n == 0
 
+    def _import_with_positions(self, db, monkeypatch, rows):
+        monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: [])
+        monkeypatch.setattr(dhan_client, "get_positions", lambda db_: rows)
+        monkeypatch.setattr(shared_symbol_lock, "try_claim", lambda db_, sym, mode="REAL": True)
+
+        async def _no_quotes(symbols):
+            return {}
+        monkeypatch.setattr("market_feed.feed.get_quotes", _no_quotes)
+        return run(pf.import_broker_holdings(db))
+
+    def test_group180_part_sold_same_day_cnc_row_imports_the_net_quantity(self, db, monkeypatch):
+        monkeypatch.delenv("IMPORT_CNC_CAP_TO_NET_QTY", raising=False)
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "PARTSOLD", "productType": "CNC", "buyQty": 10, "sellQty": 4,
+             "netQty": 6, "averageBuyPrice": 50.0},
+        ])
+        assert n == 1
+        assert db.query(models.TradePosition).filter_by(symbol="PARTSOLD").first().qty_open == 6
+
+    @pytest.mark.parametrize("net", [0, -3, "0"])
+    def test_group180_fully_sold_same_day_cnc_row_is_not_imported(self, db, monkeypatch, net):
+        monkeypatch.delenv("IMPORT_CNC_CAP_TO_NET_QTY", raising=False)
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "SOLDOUT", "productType": "CNC", "positionType": "CLOSED", "buyQty": 10,
+             "sellQty": 10, "netQty": net, "averageBuyPrice": 50.0},
+        ])
+        assert n == 0
+        assert db.query(models.TradePosition).filter_by(symbol="SOLDOUT").count() == 0
+
+    def test_group180_net_equal_to_buy_is_unchanged(self, db, monkeypatch):
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "FULL", "productType": "CNC", "buyQty": 10, "netQty": 10, "averageBuyPrice": 50.0},
+        ])
+        assert n == 1
+        assert db.query(models.TradePosition).filter_by(symbol="FULL").first().qty_open == 10
+
+    def test_group180_row_without_net_qty_is_unchanged(self, db, monkeypatch):
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "NONET", "productType": "CNC", "buyQty": 10, "averageBuyPrice": 50.0},
+        ])
+        assert n == 1
+        assert db.query(models.TradePosition).filter_by(symbol="NONET").first().qty_open == 10
+
+    def test_group180_unparseable_net_qty_is_ignored(self, db, monkeypatch):
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "ODDNET", "productType": "CNC", "buyQty": 10, "netQty": "n/a",
+             "averageBuyPrice": 50.0},
+        ])
+        assert n == 1
+        assert db.query(models.TradePosition).filter_by(symbol="ODDNET").first().qty_open == 10
+
+    def test_group180_switch_off_restores_buy_side_quantity(self, db, monkeypatch):
+        monkeypatch.setenv("IMPORT_CNC_CAP_TO_NET_QTY", "0")
+        n = self._import_with_positions(db, monkeypatch, [
+            {"tradingSymbol": "OLDWAY", "productType": "CNC", "buyQty": 10, "sellQty": 4,
+             "netQty": 6, "averageBuyPrice": 50.0},
+        ])
+        assert n == 1
+        assert db.query(models.TradePosition).filter_by(symbol="OLDWAY").first().qty_open == 10
+
+    def test_group180_settled_holding_still_takes_priority(self, db, monkeypatch):
+        monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: [
+            {"tradingSymbol": "BOTH", "totalQty": 20, "avgCostPrice": 48.0}])
+        monkeypatch.setattr(dhan_client, "get_positions", lambda db_: [
+            {"tradingSymbol": "BOTH", "productType": "CNC", "buyQty": 10, "netQty": 6, "averageBuyPrice": 50.0}])
+        monkeypatch.setattr(shared_symbol_lock, "try_claim", lambda db_, sym, mode="REAL": True)
+
+        async def _no_quotes(symbols):
+            return {}
+        monkeypatch.setattr("market_feed.feed.get_quotes", _no_quotes)
+        assert run(pf.import_broker_holdings(db)) == 1
+        pos = db.query(models.TradePosition).filter_by(symbol="BOTH").first()
+        assert pos.qty_open == 20 and pos.avg_entry_price == 48.0
+
     def test_one_bad_candidate_does_not_block_the_rest_of_the_batch(self, db, monkeypatch):
         """session65 regression guard: the RIR/ANUHPHR incident -- one
         candidate's import failing must not abandon every OTHER candidate

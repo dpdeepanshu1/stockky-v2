@@ -841,10 +841,34 @@ def _get_nse_client(force_new: bool = False) -> httpx.Client:
             pass
     return _nse_client
 
+# 2026-10-06 (group 178): while NSE blocks this VM's IP (403 on every board, see the group 96 note for
+# quote-equity) each caller of _fetch_from_nse_api still paid for a request, a fresh cookie bootstrap and a retry,
+# for each of the four movers boards, on every movers recompute -- more traffic into the block, nothing gained.
+# After a 401/403/429 that survives the one session-refresh retry, ALL NSE api fetches pause for
+# NSE_API_BLOCK_SECONDS (default 600; 0 = never pause; blank/invalid = default). During the pause a stale cached
+# value is still served and otherwise None (the callers already fall through to the other sources); one warning
+# marks the start. A 200 ends the pause. 404/5xx/exceptions never start one.
+_nse_api_block_until = 0.0
+_nse_api_block_skipped = 0
+
+
+def _nse_api_block_seconds() -> float:
+    raw = (os.getenv("NSE_API_BLOCK_SECONDS") or "").strip()
+    try:
+        v = float(raw) if raw else 600.0
+    except ValueError:
+        return 600.0
+    return v if v >= 0 else 600.0
+
+
 def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
+    global _nse_api_block_until, _nse_api_block_skipped
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, dict):
         return cached
+    if _nse_api_block_until and time.time() < _nse_api_block_until:
+        _nse_api_block_skipped += 1
+        return cached if cached else None
     try:
         client = _get_nse_client()
         url = f"https://www.nseindia.com/api/{endpoint}"
@@ -857,12 +881,23 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
             client = _get_nse_client(force_new=True)
             resp = client.get(url)
         if resp.status_code == 200:
+            _nse_api_block_until = 0.0
             data = resp.json()
             if isinstance(data, dict):
                 _redis_set(cache_key, data, ttl)
                 return data
         else:
-            logger.warning(f"NSE API {endpoint} returned {resp.status_code}")
+            _pause = _nse_api_block_seconds()
+            if resp.status_code in (401, 403, 429) and _pause > 0:
+                _nse_api_block_until = time.time() + _pause
+                logger.warning(
+                    "NSE API %s returned %s after a session refresh — pausing all NSE api fetches for %ds "
+                    "(skipped %d calls during the previous pause)",
+                    endpoint, resp.status_code, int(_pause), _nse_api_block_skipped,
+                )
+                _nse_api_block_skipped = 0
+            else:
+                logger.warning(f"NSE API {endpoint} returned {resp.status_code}")
     except Exception as e:
         logger.warning(f"Failed to fetch {endpoint}: {e}")
     if cached:
@@ -1199,6 +1234,9 @@ def _next_general_pool_slice(general_pool: List[str], sample_size: int) -> List[
         return out
 
 
+_angelone_movers_warned_at = [0.0]
+
+
 def _get_momentum_movers() -> List[str]:
     """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves.
 
@@ -1307,6 +1345,7 @@ def _get_momentum_movers() -> List[str]:
     # whole-market, not F&O-scoped, not NSE-block-exposed, not
     # Yahoo-rate-limit-exposed. Runs ALWAYS (unconditionally, like step 1),
     # not gated behind step 1 failing, so it's a genuine co-primary source.
+    payload = None
     try:
         resp = httpx.get(f"{MARKET_DATA_URL}/angelone/movers", timeout=25.0)
         if resp.status_code == 200:
@@ -1325,6 +1364,18 @@ def _get_momentum_movers() -> List[str]:
             )
         else:
             logger.debug("AngelOne movers: HTTP %d", resp.status_code)
+        # 2026-10-06 (group 178): a status=error / not_configured answer (e.g. AngelOne login 403) came back as
+        # HTTP 200 and was ignored here with no log line at all. One warning per 10 minutes now says what
+        # market-data-service reported.
+        if resp.status_code == 200 and isinstance(payload, dict) and payload.get("status") not in (None, "ok"):
+            _now_m = time.time()
+            if _now_m - _angelone_movers_warned_at[0] >= 600:
+                _angelone_movers_warned_at[0] = _now_m
+                logger.warning(
+                    "AngelOne movers unavailable (status=%s): %s — whole-market movers fall back to the "
+                    "other sources",
+                    payload.get("status"), str(payload.get("error") or payload.get("reason") or "no detail")[:200],
+                )
     except Exception as e:
         logger.debug("AngelOne movers fetch failed: %s", e)
 

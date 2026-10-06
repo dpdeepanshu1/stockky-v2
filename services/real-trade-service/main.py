@@ -160,6 +160,13 @@ async def startup() -> None:
             _db2.close()
     except Exception as _e:
         logger.debug("startup ATR cache warm failed (non-fatal): %s", _e)
+    # 2026-10-06 (group 179): load the Dhan security list in the background so the first order after a restart
+    # does not wait for the download. Non-fatal; DHAN_SECURITY_WARM_ENABLED=0 turns it off.
+    try:
+        from execution import dhan_client as _dhan_client_warm
+        _dhan_client_warm.start_security_warm_task()
+    except Exception as _e:
+        logger.debug("startup Dhan security warm-up not started (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any

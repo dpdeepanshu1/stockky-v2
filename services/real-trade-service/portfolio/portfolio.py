@@ -437,6 +437,31 @@ async def import_broker_holdings(db: Session) -> int:
             continue
         if _qty_int <= 0 or _avg_float <= 0:
             continue
+        # 2026-10-06 (group 180): the quantity above is the BUY side of today's activity. A delivery row that was
+        # partly or fully sold today (buyQty 10, sellQty 4, netQty 6, or netQty 0 / positionType CLOSED) was still
+        # imported at the full buy quantity, giving a tracked position larger than what the account holds (a sold-out
+        # row became a ghost position whose exits could only be rejected). When Dhan reports a net quantity, the
+        # import is capped to it and a row with nothing left is skipped. Rows with no netQty are unchanged.
+        # WATCH: IMPORT_CNC_CAP_TO_NET_QTY=0 restores the old buy-side quantity.
+        if (os.getenv("IMPORT_CNC_CAP_TO_NET_QTY") or "").strip().lower() not in ("0", "false", "no", "off"):
+            _net_raw = _get(_prow, "netQty", "net_qty")
+            try:
+                _net_int = int(float(_net_raw)) if _net_raw is not None else None
+            except (TypeError, ValueError):
+                _net_int = None
+            if _net_int is not None:
+                if _net_int <= 0:
+                    logger.debug(
+                        "import_broker_holdings: same-day CNC row %s has net qty %d (bought %d, sold today) — "
+                        "nothing left to import.", _sym, _net_int, _qty_int,
+                    )
+                    continue
+                if _net_int < _qty_int:
+                    logger.info(
+                        "import_broker_holdings: same-day CNC row %s — bought %d but net qty is %d (part sold "
+                        "today); importing the net quantity.", _sym, _qty_int, _net_int,
+                    )
+                    _qty_int = _net_int
         # Re-shape to match the holdings row schema so the common candidate
         # loop below needs no branching.
         _extra_rows.append({

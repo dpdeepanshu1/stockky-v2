@@ -1909,3 +1909,20 @@ def test_news_exchange_names_and_etf_index_tickers_are_never_news_symbols(news):
         Entry("BSE Sensex, NSE Nifty: COMMOIETF NV20IETF NIFTYBEES NIFTY1 TCS rally")
     ]
     assert gw._get_news_mentioned_symbols() == ["TCS"]
+
+
+def test_movers_angelone_error_status_is_warned_once(mm, log):
+    """group 178: status=error / not_configured came back as HTTP 200 and was ignored with no log line."""
+    _fill_boards(mm)
+    mm.http.responses["/angelone/movers"] = Resp(200, {"status": "error", "data": [], "error": "RuntimeError: HTTP 403"})
+    gw._get_momentum_movers()
+    gw._get_momentum_movers()
+    warned = [m for m in log.msgs["warning"] if "AngelOne movers unavailable" in m]
+    assert len(warned) == 1
+
+
+def test_movers_angelone_ok_status_does_not_warn(mm, log):
+    _fill_boards(mm)
+    mm.http.responses["/angelone/movers"] = Resp(200, {"status": "ok", "data": [{"symbol": "AAA"}]})
+    gw._get_momentum_movers()
+    assert not log.any("warning", "AngelOne movers unavailable")

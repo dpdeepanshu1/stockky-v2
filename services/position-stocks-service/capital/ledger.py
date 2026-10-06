@@ -252,7 +252,29 @@ def sync_from_broker(db: Session) -> float:
     own_committed_capital = db.query(
         func.coalesce(func.sum(_SP.capital_risked), 0.0)
     ).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).scalar()
-    row.total_allocated_capital = scalp_alloc + own_committed_capital
+    # 2026-10-06 (group 181): the pool is 50% of Dhan's FREE cash plus its own committed capital. Free cash also falls
+    # when real-trade-service BUYS, so a real-trade buy shrank this pool's risk-sizing baseline by half of what it
+    # spent, even though the account's total value did not change and real-trade-service is itself capped at its own
+    # half (the carried-over "scalp pool shrinking when real-trade buys"). real-trade-service publishes its open
+    # position market value to the shared exposure table every equity sync; this credits this pool's share of it
+    # back. Capped so the pool is never sized above what the account actually holds in free cash plus its own
+    # committed capital, and fail-open (an unreadable/zero exposure changes nothing).
+    # SCALP_POOL_CREDIT_PEER_EXPOSURE=0 restores the old figure.
+    peer_credit = 0.0
+    if (os.getenv("SCALP_POOL_CREDIT_PEER_EXPOSURE") or "").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            _peer_mv = float(shared_exposure.get_other_service_exposure(db) or 0.0)
+        except Exception:  # noqa: BLE001
+            _peer_mv = 0.0
+        if _peer_mv > 0:
+            peer_credit = _peer_mv * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
+    new_total = scalp_alloc + own_committed_capital + peer_credit
+    if peer_credit > 0:
+        _ceiling = available_balance + own_committed_capital
+        if new_total > _ceiling:
+            new_total = _ceiling
+            peer_credit = max(0.0, _ceiling - scalp_alloc - own_committed_capital)
+    row.total_allocated_capital = new_total
     # AUDIT FIX: the original condition `if row.available_capital <= 0`
     # only set available_capital on the very first sync (when the ledger
     # row was brand-new or drained to zero). A second sync call with a
@@ -299,6 +321,11 @@ def sync_from_broker(db: Session) -> float:
         logger.info(
             "ledger: synced from broker — total Dhan balance ₹%.2f, scalp pool ₹%.2f",
             available_balance, scalp_alloc,
+        )
+    if peer_credit > 0 and _should_log_sync("peer_credit", round(peer_credit, 2)):
+        logger.info(
+            "ledger: credited ₹%.2f for the pool's share of real-trade-service's open positions "
+            "(pool baseline ₹%.2f)", peer_credit, row.total_allocated_capital,
         )
     # BUG FIX (Issue #2): sync peer PnL at the same cadence as broker sync
     # so reserve_capital()'s combined kill-switch check stays current.

@@ -21,7 +21,9 @@ sequence already enforced in main.py's route dependencies:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -380,6 +382,86 @@ def get_security_id(db: Session, symbol: str) -> str:
     # malformed id immediately, without waiting for the 24h TTL or a
     # service restart to pick up the _load_security_cache fix above.
     return _clean_security_id(sec_id)
+
+
+# 2026-10-06 (group 179): the Dhan instrument list (~100k rows, pandas parse, up to two downloads) was first loaded
+# INSIDE get_security_id(), i.e. in the order path: the first order after a restart, and the first one after the
+# 24 h TTL expired, waited for the whole download (and a failed load was retried by the next order too). A background
+# task now loads it shortly after boot and refreshes it before the TTL runs out, so the order path finds a warm
+# cache. get_security_id() is unchanged and still loads synchronously if the cache is somehow empty.
+# DHAN_SECURITY_WARM_ENABLED=0 turns the task off.
+_SECURITY_WARM_INITIAL_DELAY_S = 10.0
+_SECURITY_WARM_REFRESH_AFTER_S = 18 * 60 * 60     # refresh when the cache is older than this (TTL is 24 h)
+_SECURITY_WARM_CHECK_EVERY_S = 6 * 60 * 60
+_SECURITY_WARM_RETRY_AFTER_FAILURE_S = 300.0
+_SECURITY_WARM_RECHECK_NO_CREDENTIALS_S = 30 * 60
+_security_warm_task = None
+
+
+def _security_warm_enabled() -> bool:
+    return (os.getenv("DHAN_SECURITY_WARM_ENABLED") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def warm_security_cache(db: Session, max_age_s: float = _SECURITY_WARM_REFRESH_AFTER_S) -> str:
+    """Loads the security list if the cache is empty or older than `max_age_s`.
+    Returns "no_credentials", "fresh", "loaded" or "failed". Never raises."""
+    try:
+        if dhan_credentials.get_decrypted_credentials(db) is None:
+            return "no_credentials"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("warm_security_cache: credentials check failed: %s", e)
+        return "no_credentials"
+    if _security_cache and (time.time() - _security_cache_loaded_at) <= max_age_s:
+        return "fresh"
+    try:
+        _load_security_cache(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Dhan security list warm-up failed: %s: %s", type(e).__name__, e)
+        return "failed"
+    if _security_cache and (time.time() - _security_cache_loaded_at) <= max_age_s:
+        return "loaded"
+    return "failed"
+
+
+def _warm_security_cache_own_session() -> str:
+    from db import get_session_factory  # noqa: PLC0415
+    db = get_session_factory()()
+    try:
+        return warm_security_cache(db)
+    finally:
+        db.close()
+
+
+async def keepwarm_security_cache() -> None:
+    """Background loop: load shortly after boot, then keep the cache from reaching its TTL."""
+    await asyncio.sleep(_SECURITY_WARM_INITIAL_DELAY_S)
+    while True:
+        try:
+            result = await asyncio.to_thread(_warm_security_cache_own_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Dhan security list keep-warm cycle crashed: %s: %s", type(e).__name__, e)
+            result = "failed"
+        if result == "loaded":
+            logger.info("Dhan security list warmed in the background (%d symbols) — first order skips the download",
+                        len(_security_cache))
+        wait = {
+            "failed": _SECURITY_WARM_RETRY_AFTER_FAILURE_S,
+            "no_credentials": _SECURITY_WARM_RECHECK_NO_CREDENTIALS_S,
+        }.get(result, _SECURITY_WARM_CHECK_EVERY_S)
+        await asyncio.sleep(wait)
+
+
+def start_security_warm_task():
+    """Starts the keep-warm loop once (call from a running event loop). Returns the task or None."""
+    global _security_warm_task
+    if not _security_warm_enabled():
+        return None
+    if _security_warm_task is not None and not _security_warm_task.done():
+        return _security_warm_task
+    _security_warm_task = asyncio.get_running_loop().create_task(keepwarm_security_cache())
+    return _security_warm_task
 
 
 # Substrings Dhan's own error remarks use for an actually-invalid/expired

@@ -2317,6 +2317,15 @@ _MOVERS_MIN_COVERAGE = 0.98
 _MOVERS_PARTIAL_TTL_S = 120
 
 
+def _movers_error_ttl_s() -> float:
+    raw = (os.getenv("ANGELONE_MOVERS_ERROR_TTL_S") or "").strip()
+    try:
+        v = float(raw) if raw else 120.0
+    except ValueError:
+        return 120.0
+    return v if v >= 0 else 120.0
+
+
 def _movers_sweep_coverage(fetched: int, universe: int):
     """Group 127: (is_partial, missing_count) for an AngelOne movers sweep. Partial means fewer
     than _MOVERS_MIN_COVERAGE of the universe came back. An empty universe is never partial."""
@@ -2420,8 +2429,18 @@ def angelone_movers():
             _cache_set(cache_key, result)
         return result
     except Exception as e:
-        logger.warning("angelone/movers failed: %s", e)
-        return {"status": "error", "data": [], "error": str(e)[:300]}
+        # 2026-10-06 (group 178): a failed sweep (typically the AngelOne login answering 403) was never cached,
+        # so every caller made a fresh login attempt plus a scrip-master check -- repeated logins into a
+        # refusal. The error answer is now cached for ANGELONE_MOVERS_ERROR_TTL_S (default 120 s; 0 = off;
+        # blank/invalid = default) and the warning names the exception type (some have an empty message).
+        _msg = str(e).strip()
+        _desc = f"{type(e).__name__}: {_msg}" if _msg else type(e).__name__
+        logger.warning("angelone/movers failed: %s", _desc)
+        result = {"status": "error", "data": [], "error": _desc[:300]}
+        _err_ttl = _movers_error_ttl_s()
+        if _err_ttl > 0:
+            _cache_set(cache_key, result, ttl=int(_err_ttl))
+        return result
 
 
 @app.post("/quotes/bulk")

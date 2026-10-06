@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, getApiUrl, setApiUrl, SystemHealth, wakeService } from "../api";
+import { api, getApiUrl, normalizeGatewayUrl, setApiUrl, SystemHealth, wakeService } from "../api";
 
 type Stage =
   | { phase: "checking-gateway" }
@@ -71,6 +71,11 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
   const [stage, setStage] = useState<Stage>({ phase: "checking-gateway" });
   const [apiUrlInput, setApiUrlInput] = useState(getApiUrl());
   const cancelled = useRef(false);
+  // 2026-10-06 (group 182): every Connect/Reconnect starts a new check chain; results of an older chain (e.g. the
+  // hung ping to the previous URL finally failing) are ignored instead of overwriting the new attempt's screen.
+  const runSeq = useRef(0);
+  // Bumped on Reconnect so the "connecting" timer restarts even though the phase stays "checking-gateway".
+  const [checkKey, setCheckKey] = useState(0);
   const currentAttempt = stage.phase === "waking" ? stage.attempt : 0;
   const [checkingElapsedMs, setCheckingElapsedMs] = useState(0);
 
@@ -97,24 +102,27 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
       setCheckingElapsedMs(0);
       return;
     }
+    setCheckingElapsedMs(0);
     const start = Date.now();
     const id = setInterval(() => {
       if (!cancelled.current) setCheckingElapsedMs(Date.now() - start);
     }, 1000);
     return () => clearInterval(id);
-  }, [stage.phase]);
+  }, [stage.phase, checkKey]);
 
-  async function runCheck(attempt: number) {
+  async function runCheck(attempt: number, seq: number = runSeq.current) {
+    const superseded = () => cancelled.current || seq !== runSeq.current;
     try {
       await api.ping();
     } catch {
-      if (!cancelled.current) setStage({ phase: "gateway-down" });
+      if (!superseded()) setStage({ phase: "gateway-down" });
       return;
     }
+    if (superseded()) return;
 
     try {
       const health = await api.systemHealth();
-      if (cancelled.current) return;
+      if (superseded()) return;
 
       if (health.required_ok) {
         setStage({ phase: "ready" });
@@ -127,17 +135,17 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
 
       setStage({ phase: "waking", health, attempt });
       if (attempt < MAX_AUTO_ATTEMPTS) {
-        setTimeout(() => runCheck(attempt + 1), 5000);
+        setTimeout(() => runCheck(attempt + 1, seq), 5000);
       }
     } catch (e) {
-      if (!cancelled.current) {
+      if (!superseded()) {
         setStage({
           phase: "waking",
           health: null,
           attempt,
         });
         if (attempt < MAX_AUTO_ATTEMPTS) {
-          setTimeout(() => runCheck(attempt + 1), 5000);
+          setTimeout(() => runCheck(attempt + 1, seq), 5000);
         }
       }
     }
@@ -215,9 +223,13 @@ export default function SystemCheck({ onReady }: { onReady: () => void }) {
   }
 
   function saveGatewayUrl() {
-    setApiUrl(apiUrlInput);
+    const applied = normalizeGatewayUrl(apiUrlInput);
+    setApiUrl(applied);
+    setApiUrlInput(applied);            // show what was actually applied (scheme added, slash trimmed)
+    runSeq.current += 1;                // older in-flight checks no longer count
+    setCheckKey((k) => k + 1);          // restart the "connecting" timer, hide the stuck panel until it is stuck again
     setStage({ phase: "checking-gateway" });
-    runCheck(0);
+    runCheck(0, runSeq.current);
   }
 
   if (stage.phase === "gateway-down") {

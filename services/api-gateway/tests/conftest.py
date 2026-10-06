@@ -28,3 +28,18 @@ def _isolate_env(monkeypatch):
 
 import os as _os_logcfg
 _os_logcfg.environ.setdefault("HTTPX_LOG_LEVEL", "INFO")  # 2026-10-04: tests assert on httpx INFO lines; production default is WARNING
+
+
+@pytest.fixture(autouse=True)
+def _reset_nse_api_block_and_movers_warning():
+    """group178: the NSE api pause and the AngelOne-movers warning throttle are per process; never let one test's
+    state leak into the next. Only touches the gateway module if some test already imported it."""
+    def _clear():
+        mod = sys.modules.get("main")
+        if mod is not None and hasattr(mod, "_nse_api_block_until"):
+            mod._nse_api_block_until = 0.0
+            mod._nse_api_block_skipped = 0
+            mod._angelone_movers_warned_at[0] = 0.0
+    _clear()
+    yield
+    _clear()

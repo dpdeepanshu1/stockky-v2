@@ -1907,3 +1907,72 @@ def test_fetch_from_nse_api_client_construction_failure_is_swallowed(monkeypatch
 
     monkeypatch.setattr(gw, "_get_nse_client", boom)
     assert gw._fetch_from_nse_api("e", "ck") is None
+
+
+# ── group 178: NSE api block pause ───────────────────────────────────────────
+
+class TestNseApiBlockPause:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.delenv("NSE_API_BLOCK_SECONDS", raising=False)
+
+    def test_blocked_after_retry_pauses_all_endpoints(self, api):
+        api.clients = [ScriptedClient(Resp(403)), ScriptedClient(Resp(403))]
+        assert gw._fetch_from_nse_api("a", "ck1") is None
+        calls_after_first = list(api.client_calls)
+        assert gw._fetch_from_nse_api("b", "ck2") is None        # no network, no client at all
+        assert gw._fetch_from_nse_api("c", "ck3") is None
+        assert api.client_calls == calls_after_first
+        assert gw._nse_api_block_until > 0 and gw._nse_api_block_skipped == 2
+
+    @pytest.mark.parametrize("status", [401, 429])
+    def test_401_and_429_also_pause(self, api, status):
+        api.clients = [ScriptedClient(Resp(status), ) , ScriptedClient(Resp(status))]
+        gw._fetch_from_nse_api("a", "ck1")
+        assert gw._nse_api_block_until > 0
+
+    @pytest.mark.parametrize("resp", [Resp(404), Resp(500), Resp(503)])
+    def test_other_statuses_never_pause(self, api, resp):
+        api.clients = [ScriptedClient(resp)]
+        gw._fetch_from_nse_api("a", "ck1")
+        assert gw._nse_api_block_until == 0.0
+
+    def test_exception_never_pauses(self, api):
+        api.clients = [ScriptedClient(RuntimeError("net"))]
+        gw._fetch_from_nse_api("a", "ck1")
+        assert gw._nse_api_block_until == 0.0
+
+    def test_stale_cache_is_still_served_during_the_pause(self, api, monkeypatch):
+        monkeypatch.setattr(gw, "_nse_api_block_until", gw.time.time() + 100)
+        api.cache["ck"] = ["legacy list"]
+        assert gw._fetch_from_nse_api("a", "ck") == ["legacy list"]
+        assert api.client_calls == []
+
+    def test_pause_expires_and_a_200_clears_it(self, api, monkeypatch):
+        monkeypatch.setattr(gw, "_nse_api_block_until", gw.time.time() - 1)
+        api.clients = [ScriptedClient(Resp(200, {"ok": 1}))]
+        assert gw._fetch_from_nse_api("a", "ck") == {"ok": 1}
+        assert gw._nse_api_block_until == 0.0
+
+    def test_zero_disables_the_pause(self, api, monkeypatch):
+        monkeypatch.setenv("NSE_API_BLOCK_SECONDS", "0")
+        api.clients = [ScriptedClient(Resp(403)), ScriptedClient(Resp(403)),
+                       ScriptedClient(Resp(403)), ScriptedClient(Resp(403))]
+        gw._fetch_from_nse_api("a", "ck1")
+        gw._fetch_from_nse_api("b", "ck2")
+        assert gw._nse_api_block_until == 0.0 and len(api.client_calls) == 4
+
+    @pytest.mark.parametrize("raw", ["", "  ", "abc", "-4"])
+    def test_blank_or_invalid_uses_default(self, monkeypatch, raw):
+        monkeypatch.setenv("NSE_API_BLOCK_SECONDS", raw)
+        assert gw._nse_api_block_seconds() == 600.0
+
+    def test_one_warning_when_the_pause_starts(self, api, caplog):
+        import logging as _l
+        api.clients = [ScriptedClient(Resp(403)), ScriptedClient(Resp(403))]
+        with caplog.at_level(_l.WARNING):
+            gw._fetch_from_nse_api("a", "ck1")
+            gw._fetch_from_nse_api("b", "ck2")
+            gw._fetch_from_nse_api("c", "ck3")
+        msgs = [r.getMessage() for r in caplog.records if "pausing all NSE api fetches" in r.getMessage()]
+        assert len(msgs) == 1 and "600s" in msgs[0]

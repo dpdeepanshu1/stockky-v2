@@ -2075,6 +2075,30 @@ def _failed_quote_payload(sym: str, source: str = "failed") -> dict:
 # wait and on the call itself. Any miss (not configured, cooldown, no scrip-master token, empty answer, error,
 # timeout, called from inside an event loop) returns None and the old path runs unchanged. QUOTE_ANGELONE_FIRST=0
 # turns it off. The AngelOne quote has no ATR, so `atr` stays None (merges keep the prior real value).
+# A cached row is "soft stale" (refetched on the next call) once its remaining TTL is <= _QUOTE_SOFT_WINDOW_S (see
+# `_should_soft_refresh(..., soft_window=45)` in _get_quote_inner). An AngelOne row must therefore be stored with
+# FRESH + SOFT-WINDOW seconds, or it would be refetched on every call (seen on the VM: repeat /quote took 0.5-2.2 s).
+_QUOTE_SOFT_WINDOW_S = 45
+_AO_FIRST_FRESH_S = 12
+_AO_MISS_LOG: dict = {}
+_AO_MISS_LOG_EVERY_S = 300.0
+
+
+def _ao_first_miss(sym: str, reason: str):
+    """Log why AngelOne-first did not price `sym` (once per symbol per 5 min); always returns None."""
+    try:
+        now = time.monotonic()
+        last = _AO_MISS_LOG.get(sym)
+        if last is None or now - last >= _AO_MISS_LOG_EVERY_S:
+            if len(_AO_MISS_LOG) >= 2000:
+                _AO_MISS_LOG.clear()
+            _AO_MISS_LOG[sym] = now
+            logger.info("quote: AngelOne-first did not price %s (%s) - using the Yahoo path", sym, reason)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _quote_angelone_first_cfg() -> tuple:
     on = ((os.getenv("QUOTE_ANGELONE_FIRST") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
     try:
@@ -2101,7 +2125,7 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         try:
             from rate_limiter import in_cooldown as _rl_cd
             if _rl_cd("angelone_quote"):
-                return None
+                return _ao_first_miss(sym, "angelone_quote cooldown")
         except Exception:  # noqa: BLE001
             pass
         base = _waterfall_equity_base(sym)
@@ -2110,10 +2134,10 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         import angelone_scrip_master as scrip_master
         token = scrip_master.get_token(base)
         if not token:
-            return None
+            return _ao_first_miss(sym, "no scrip-master token")
         try:
             asyncio.get_running_loop()
-            return None   # called from inside an event loop: asyncio.run() would fail, use the old path
+            return _ao_first_miss(sym, "called inside an event loop")
         except RuntimeError:
             pass
 
@@ -2122,10 +2146,10 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
 
         q = asyncio.run(_go())
         if not isinstance(q, dict) or not q:
-            return None
+            return _ao_first_miss(sym, "empty answer: rate bucket busy, rate-limit cooldown or no quote for the token")
         price = _safe(q.get("ltp"))
         if price is None or price <= 0:
-            return None
+            return _ao_first_miss(sym, "answer had no positive ltp")
         prev = _safe(q.get("close"))
         change_pct = None
         if prev and prev > 0:
@@ -2153,7 +2177,7 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         }
     except Exception as e:  # noqa: BLE001
         logger.debug("angelone-first quote %s: %s", sym, e)
-        return None
+        return _ao_first_miss(sym, "error %s" % type(e).__name__)
 
 
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
@@ -2247,7 +2271,7 @@ def _get_quote_inner(symbol: str):
     cached = _cache_get(cache_key)
 
     # Soft refresh window: serve stale while refreshing only if Yahoo is healthy
-    if cached and _should_soft_refresh(cache_key, soft_window=45):
+    if cached and _should_soft_refresh(cache_key, soft_window=_QUOTE_SOFT_WINDOW_S):
         soft_cached = cached
         cached = None
     else:
@@ -2271,7 +2295,7 @@ def _get_quote_inner(symbol: str):
     if ao_first:
         result = _sanitize_for_json(_pad_quote_response(sym, ao_first))
         result["source"] = "angelone_rest"
-        _cache_set(cache_key, result, ttl=12)
+        _cache_set(cache_key, result, ttl=_AO_FIRST_FRESH_S + _QUOTE_SOFT_WINDOW_S)
         _fallback_set(cache_key, result)
         return result
 

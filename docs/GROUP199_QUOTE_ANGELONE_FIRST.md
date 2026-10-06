@@ -46,3 +46,6 @@ Sandbox: market-data 935 passed (908 on the uploaded zip). Not live-tested.
 `bash scripts/diagnose_never_priced.sh 2>&1 | tee never_priced_report.txt` - the first `/quote` for STEAMHOUSE / SGRL / KENNAMET / ROSSTECH
 should now say `source='angelone_rest'` and take well under a second, and real-trade-service should stop logging ReadTimeout for non-feed names.
 If `source` is still `yahoo`, look for `angelone_quote` cooldown lines in market-data (the fallback is working as designed).
+
+## Correction (group 200)
+The 12 s cache described above did not work: rows were stored with ttl=12, which is inside the 45 s soft-refresh window, so every repeat `/quote` refetched from AngelOne. Fixed in group 200 (ttl 57 s = 12 s fresh + 45 s window).

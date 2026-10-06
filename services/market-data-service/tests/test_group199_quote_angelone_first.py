@@ -53,6 +53,7 @@ def ao(monkeypatch):
     monkeypatch.setattr(main, "_waterfall_equity_base", lambda s: str(s).upper().replace(".NS", ""))
     monkeypatch.delenv("QUOTE_ANGELONE_FIRST", raising=False)
     monkeypatch.delenv("QUOTE_ANGELONE_FIRST_TIMEOUT_S", raising=False)
+    main._AO_MISS_LOG.clear()
     return sess
 
 
@@ -133,8 +134,9 @@ class TestHelper:
 @pytest.fixture()
 def route(monkeypatch, ao):
     cache = {}
+    main._TEST_TTLS = {}
     monkeypatch.setattr(main, "_cache_get", lambda k: cache.get(k))
-    monkeypatch.setattr(main, "_cache_set", lambda k, v, ttl=None: cache.__setitem__(k, v))
+    monkeypatch.setattr(main, "_cache_set", lambda k, v, ttl=None: (cache.__setitem__(k, v), main._TEST_TTLS.__setitem__(k, ttl)))
     monkeypatch.setattr(main, "_fallback_get", lambda k: None)
     monkeypatch.setattr(main, "_fallback_set", lambda k, v: None)
     monkeypatch.setattr(main, "normalize_symbol", lambda s: str(s).upper().replace(".NS", ""))
@@ -213,3 +215,74 @@ class TestClientFailClosed:
         with pytest.raises(RuntimeError):
             asyncio.run(sess.get_quote("NSE", "1"))
         assert used == {"acquire": 1, "try": 0}
+
+
+class TestCacheAndMissLog:
+    def test_row_ttl_outlives_the_soft_refresh_window(self, route):
+        main.get_quote("SGRL")
+        ttl = main._TEST_TTLS["quote:SGRL"]
+        assert ttl == main._AO_FIRST_FRESH_S + main._QUOTE_SOFT_WINDOW_S
+        assert ttl > main._QUOTE_SOFT_WINDOW_S      # a ttl <= the window is refetched on every call
+
+    def test_repeat_call_is_served_from_the_real_cache(self, monkeypatch, ao):
+        """Regression: with the real cache a 12 s ttl made every repeat /quote refetch from AngelOne."""
+        import time
+        monkeypatch.setattr(main, "_fallback_get", lambda k: None)
+        monkeypatch.setattr(main, "_fallback_set", lambda k, v: None)
+        monkeypatch.setattr(main, "normalize_symbol", lambda s: str(s).upper().replace(".NS", ""))
+        monkeypatch.setattr(main, "is_known_delisted", lambda s: False)
+        for name in ("angelone_ws_feed", "yahoo_ws_feed"):
+            m = types.ModuleType(name)
+            m.get_live_quote = lambda s: None
+            monkeypatch.setitem(sys.modules, name, m)
+        monkeypatch.setattr(main, "_yahoo_ohlcv_quote", lambda s: (_ for _ in ()).throw(AssertionError("no Yahoo")))
+        main._neg_reset()
+        main._mem._d.pop("quote:SGRL", None)
+        r1 = main.get_quote("SGRL")
+        r2 = main.get_quote("SGRL")
+        assert r1["source"] == r2["source"] == "angelone_rest"
+        assert r2["fetched_at"] == r1["fetched_at"]
+        assert len(ao.calls) == 1
+        # about 12 s later (remaining ttl <= 45): refreshed once
+        val, _exp = main._mem._d["quote:SGRL"]
+        main._mem._d["quote:SGRL"] = (val, time.time() + 40)
+        main.get_quote("SGRL")
+        assert len(ao.calls) == 2
+        main._mem._d.pop("quote:SGRL", None)
+
+    def test_empty_answer_logs_reason_once_per_window(self, ao, caplog):
+        import logging
+        ao.answer = {}
+        with caplog.at_level(logging.INFO, logger="market-data-service"):
+            main._angelone_rest_quote_first("STEAMHOUSE")
+            main._angelone_rest_quote_first("STEAMHOUSE")
+        lines = [r.getMessage() for r in caplog.records if "AngelOne-first did not price STEAMHOUSE" in r.getMessage()]
+        assert len(lines) == 1 and "empty answer" in lines[0]
+
+    def test_other_reasons_are_named(self, ao, monkeypatch, caplog):
+        import logging, rate_limiter
+        with caplog.at_level(logging.INFO, logger="market-data-service"):
+            monkeypatch.setattr(rate_limiter, "in_cooldown", lambda p: True)
+            main._angelone_rest_quote_first("A1")
+            monkeypatch.setattr(rate_limiter, "in_cooldown", lambda p: False)
+            monkeypatch.setattr(angelone_scrip_master, "get_token", lambda b: None)
+            main._angelone_rest_quote_first("A2")
+            monkeypatch.setattr(angelone_scrip_master, "get_token", lambda b: "1")
+            ao.exc = RuntimeError("x")
+            main._angelone_rest_quote_first("A3")
+            ao.exc = None
+            ao.answer = {"ltp": 0}
+            main._angelone_rest_quote_first("A4")
+        text = " | ".join(r.getMessage() for r in caplog.records)
+        for want in ("A1", "cooldown", "A2", "no scrip-master token", "A3", "error RuntimeError", "A4", "no positive ltp"):
+            assert want in text
+
+    def test_quiet_for_off_and_not_configured(self, ao, monkeypatch, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="market-data-service"):
+            monkeypatch.setenv("QUOTE_ANGELONE_FIRST", "0")
+            main._angelone_rest_quote_first("Q1")
+            monkeypatch.delenv("QUOTE_ANGELONE_FIRST")
+            ao.configured = False
+            main._angelone_rest_quote_first("Q2")
+        assert not [r for r in caplog.records if "AngelOne-first" in r.getMessage()]

@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import random
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, List
 
@@ -2520,8 +2520,59 @@ def angelone_movers():
         return result
 
 
+def _bulk_cache_max_age_s() -> float:
+    """group193: freshest age (seconds) at which /quotes/bulk may still serve a cached quote row as-is.
+    BULK_CACHE_MAX_AGE_SEC: blank/invalid = 15 (the same bound the live-feed hits use); 0 or negative = off
+    (old behaviour: any cached row, however old)."""
+    raw = (os.getenv("BULK_CACHE_MAX_AGE_SEC") or "").strip()
+    try:
+        v = float(raw) if raw else 15.0
+    except ValueError:
+        return 15.0
+    return v if v > 0 else 0.0
+
+
+def _quote_row_age_s(row) -> Optional[float]:
+    """Seconds since a cached quote row's fetched_at (naive UTC isoformat, as every writer here stamps it).
+    None when the row has no parsable timestamp."""
+    try:
+        raw = row.get("fetched_at") if isinstance(row, dict) else None
+        if not raw:
+            return None
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.post("/quotes/bulk")
 def get_quotes_bulk(req: BulkQuoteRequest):
+    """group193 wrapper. /quotes/bulk used to hand back any cached row as-is, with its ORIGINAL fetched_at, for
+    as long as the quote cache kept it (tens of seconds to minutes). real-trade-service rejects bulk rows older
+    than 20 s, so on the 2026-10-06 boot 183 of 725 symbols came back 'older than limit' and were then priced one
+    by one through GET /quote (yfinance, a worker thread each) — that burst is what starved market-data-service
+    and produced the ReadTimeouts. Rows older than BULK_CACHE_MAX_AGE_SEC are now re-read through the live feed /
+    AngelOne REST batch like any miss; only if every source then fails is the old row returned (same fetched_at,
+    so the caller's own freshness check still applies and nothing is hidden)."""
+    stale_rows: dict = {}
+    out = _get_quotes_bulk_core(req, stale_rows)
+    try:
+        if stale_rows and isinstance(out, dict):
+            have = {str(q.get("symbol") or "").upper() for q in (out.get("quotes") or []) if isinstance(q, dict)}
+            missing = [row for base, row in stale_rows.items() if base.upper() not in have]
+            if missing:
+                out = dict(out)
+                out["quotes"] = list(out.get("quotes") or []) + _sanitize_for_json(missing)
+                out["ok"] = True
+                out["stale_served"] = len(missing)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("quotes/bulk stale fallback skipped: %s", e)
+    return out
+
+
+def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
     """
     Single-call bulk quotes via yf.download for the entire requested universe.
     Replaces ticker-by-ticker loops that trigger free-tier 429 cascades.
@@ -2569,9 +2620,17 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     # Yahoo streaming tick) for free, and only ask yfinance for the rest.
     results: list = []
     still_needed: list = []
+    _max_age = _bulk_cache_max_age_s()
     for mapped in yf_tickers:
         cached = _cache_get(f"quote:{mapped}")
         if cached:
+            if _max_age > 0:
+                _age = _quote_row_age_s(cached)
+                if _age is not None and _age > _max_age:
+                    # group193: too old to hand back as 'fresh' — refresh it; keep it only as a last resort.
+                    _stale_out[symbol_map.get(mapped, mapped).replace(".NS", "").replace(".BO", "")] = cached
+                    still_needed.append(mapped)
+                    continue
             results.append(cached)
             continue
         still_needed.append(mapped)

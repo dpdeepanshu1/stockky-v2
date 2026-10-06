@@ -125,6 +125,7 @@ file's best-effort checks.
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -578,6 +579,61 @@ def _parse_feed_items(root: ET.Element) -> list[dict]:
     return items
 
 
+# group195: BusinessStandard's RSS answered HTTP 200 with a real <?xml ...?><rss> document, yet strict
+# ElementTree refused it ("not well-formed (invalid token): line 269, column 51") — the usual cause is an unescaped
+# '&' or a stray control character inside one headline/URL — and the whole feed was thrown away as "non-XML". Parsing
+# now tries, in order: strict XML; XML after removing characters XML forbids and escaping bare '&'; and finally a
+# plain <item>/<entry> extraction. Only a body that yields no items at all (HTML interstitial, empty page) is still
+# reported as non-XML.
+_XML_BAD_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+_ITEM_BLOCK = re.compile(r"<(item|entry)\b[^>]*>(.*?)</\1>", re.S | re.I)
+
+
+def _tag_text(block: str, tag: str) -> str:
+    m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", block, re.S | re.I)
+    if not m:
+        return ""
+    raw = re.sub(r"^\s*<!\[CDATA\[(.*?)\]\]>\s*$", r"\1", m.group(1), flags=re.S)
+    return _html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
+
+
+def _regex_feed_items(text: str) -> list[dict]:
+    out: list[dict] = []
+    for m in _ITEM_BLOCK.finditer(text or ""):
+        block = m.group(2)
+        title = _tag_text(block, "title")
+        link = _tag_text(block, "link")
+        if not link:
+            lm = re.search(r"<link\b[^>]*href=[\"']([^\"']+)[\"']", block, re.I)
+            link = _html.unescape(lm.group(1)).strip() if lm else ""
+        pub = _tag_text(block, "pubDate") or _tag_text(block, "published") or _tag_text(block, "updated")
+        if title:
+            out.append({"title": title, "link": link, "pubDate": pub})
+    return out
+
+
+def _parse_feed_text(text: str) -> tuple[list[dict], str]:
+    """(items, how) — how is 'strict', 'repaired' or 'regex'. Raises ET.ParseError only when nothing at all
+    could be read from the body."""
+    body = (text or "").lstrip("\ufeff \t\r\n")
+    try:
+        return _parse_feed_items(ET.fromstring(body)), "strict"
+    except ET.ParseError as first:
+        err = first
+    try:
+        fixed = _BARE_AMP.sub("&amp;", _XML_BAD_CHARS.sub("", body))
+        items = _parse_feed_items(ET.fromstring(fixed))
+        if items:
+            return items, "repaired"
+    except ET.ParseError:
+        pass
+    items = _regex_feed_items(body)
+    if items:
+        return items, "regex"
+    raise err
+
+
 # RSS/Atom fetch headers (2026-09-17, session58): every other scraping
 # module in this repo (market-data-service/main.py, market-data-service/
 # bhavcopy.py, api-gateway/main.py's _NSE_CLIENT_HEADERS, api-gateway/
@@ -612,7 +668,10 @@ async def _fetch_rss_items(feed: dict) -> list[dict]:
             resp = await client.get(feed["url"])
             resp.raise_for_status()
             try:
-                root = ET.fromstring(resp.text)
+                items, how = _parse_feed_text(resp.text)
+                if how != "strict":
+                    logger.info("afterhours-scan: %s was not strictly well-formed; read %d item(s) by %s parsing",
+                                feed["source"], len(items), how)
             except ET.ParseError as pe:
                 # 2026-09-17 fix (session58): a 200 response that fails to
                 # parse as XML is a bot-detection interstitial, not a
@@ -626,7 +685,6 @@ async def _fetch_rss_items(feed: dict) -> list[dict]:
                     feed["source"], resp.status_code, pe, snippet,
                 )
                 return []
-        items = _parse_feed_items(root)
         logger.debug("afterhours-scan: %s → %d items", feed["source"], len(items))
         return items
     except Exception as e:

@@ -651,8 +651,51 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
         return []
 
 
+# group195: on 2026-10-06 the "Yahoo Finance" news source returned 0 items for every one of 40+ symbols in a row
+# (ABB, BSE, CGPOWER, ANGELONE ... - names that always have headlines), yet each lookup still made a Yahoo request.
+# After EVENT_YF_NEWS_EMPTY_PAUSE_AFTER (default 30; 0 = never pause) empty answers in a row the source is skipped
+# for EVENT_YF_NEWS_PAUSE_SECONDS (default 1800); the next lookup after that is a probe - one more empty answer
+# pauses it again, any item resumes normal use. Google News and the shared RSS feeds are not affected.
+_YF_NEWS_LOCK = _threading.Lock()
+_YF_NEWS_STATE = {"empty": 0, "pause_until": 0.0}
+
+
+def _yf_news_cfg(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    try:
+        v = float(raw) if raw else default
+    except ValueError:
+        return default
+    return v if v >= 0 else default
+
+
+def _yf_news_paused() -> bool:
+    with _YF_NEWS_LOCK:
+        return time.time() < _YF_NEWS_STATE["pause_until"]
+
+
+def _yf_news_note(found: bool) -> None:
+    limit = int(_yf_news_cfg("EVENT_YF_NEWS_EMPTY_PAUSE_AFTER", 30))
+    if limit <= 0:
+        return
+    with _YF_NEWS_LOCK:
+        if found:
+            _YF_NEWS_STATE["empty"] = 0
+            return
+        _YF_NEWS_STATE["empty"] += 1
+        if _YF_NEWS_STATE["empty"] >= limit:
+            secs = _yf_news_cfg("EVENT_YF_NEWS_PAUSE_SECONDS", 1800.0)
+            _YF_NEWS_STATE["pause_until"] = time.time() + secs
+            _YF_NEWS_STATE["empty"] = limit - 1      # the probe after the pause re-pauses on one more empty answer
+            logger.warning("Yahoo Finance news returned nothing for %d lookups in a row - skipping it for %.0fs "
+                           "(EVENT_YF_NEWS_EMPTY_PAUSE_AFTER=0 turns this off)", limit, secs)
+
+
 def _fetch_yf_news(symbol: str) -> List[Dict[str, Any]]:
+    if _yf_news_paused():
+        return []
     news_data = _get_news(symbol)
+    _yf_news_note(bool(news_data))
     if not news_data:
         return []
     items = []

@@ -68,6 +68,8 @@ def clean(monkeypatch):
     m._history_flights.clear()
     monkeypatch.setattr(m, "cache", None)
     monkeypatch.setattr(m, "_HISTORY_FORCE_REUSE_S", 60.0)
+    monkeypatch.setenv("HISTORY_WIDEN_DAILY", "0")   # group231: these tests pin the per-period fetch path
+    monkeypatch.setattr(m, "_history_last_good_get", lambda k: None)   # group230 durable store must not answer "all failed"
     yield
     m._mem._d.clear()
     m._history_flights.clear()

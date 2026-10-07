@@ -57,4 +57,6 @@ def test_non_string_input_does_not_raise():
 def test_both_log_sites_use_the_helper():
     src = inspect.getsource(c)
     assert "reject[:150]" not in src.replace("`reject[:150]`", "")
-    assert src.count("| %s\", sym, mode, _reject_log_text(reject)") == 2
+    # group231: group 230 moved the second site to `_txt = _reject_log_text(reject)` (it appends the history note);
+    # the def plus 3 call sites remain, none of them cut the text
+    assert src.count("_reject_log_text(reject)") == 4

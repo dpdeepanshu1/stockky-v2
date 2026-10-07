@@ -205,11 +205,12 @@ class TestBandCheck:
         # A SMALL drop is not "chasing" the catalyst — only an upward run past the
         # band marks it missed. A slightly-cheaper-than-catalyst entry still queues.
         # (group155: a drop beyond WATCHLIST_MAX_DROP_PCT, default 3%, is no longer queued -
-        # see tests/test_group155_watchlist_adverse_guard.py. This used to assert a -10% drop queued.)
+        # see tests/test_group155_watchlist_adverse_guard.py. This used to assert a -10% drop queued.
+        # group231: Tier 1 rows use a 1.5% limit, so the drop here is -1%.)
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
         async def _quote(symbols):
-            return {row.symbol: tick(98.0, row.symbol)}
+            return {row.symbol: tick(99.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))

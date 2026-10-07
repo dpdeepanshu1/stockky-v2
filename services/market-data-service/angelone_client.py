@@ -47,6 +47,23 @@ def _budget_skip(lane, family: str = "quote") -> bool:
         return False
 
 
+def _position_probe(lane) -> bool:
+    """group231: True when a held-position (POSITION lane) quote call may go out during a quote cooldown (one per
+    second at most, see angelone_budget.position_probe_allowed). Never raises."""
+    try:
+        return bool(_budget is not None and _budget.position_probe_allowed(lane))
+    except Exception:  # pragma: no cover
+        return False
+
+
+def _position_probe_denied() -> None:
+    try:
+        if _budget is not None:
+            _budget.position_probe_denied()
+    except Exception:  # pragma: no cover
+        pass
+
+
 async def _budget_admit(lane, provider: str, weight: float, max_wait: float) -> bool:
     """False = this lane may not take a token right now (shed). lane=None is always admitted. Never raises."""
     try:
@@ -367,12 +384,19 @@ class AngelOneSession:
         decides how much of the bucket must stay free for higher lanes; any call is skipped during the global
         cooldown."""
         _note_quote_miss(None)
+        _probing = False   # group231: a held-position call sent during a quote cooldown
         if _rl_in_cooldown("angelone_quote"):
-            _note_quote_miss("angelone_quote rate-limit cooldown is running")
-            return {}
-        if _budget_skip(lane):
-            _note_quote_miss("global AngelOne cooldown (403) is running")  # group227: the quote-family cooldown
-            return {}
+            if _position_probe(lane):
+                _probing = True
+            else:
+                _note_quote_miss("angelone_quote rate-limit cooldown is running")
+                return {}
+        if not _probing and _budget_skip(lane):
+            if _position_probe(lane):
+                _probing = True
+            else:
+                _note_quote_miss("global AngelOne cooldown (403) is running")  # group227: the quote-family cooldown
+                return {}
         await self.ensure_session()
         if not await _budget_admit(lane, "angelone_quote", 1, max_wait):
             _note_quote_miss("lane budget shed this call (higher-priority lanes need the bucket)")
@@ -394,6 +418,10 @@ class AngelOneSession:
             )
             _log_denied("quote", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
+                if _probing:   # group231: a probe must not extend the cooldown it is probing
+                    _position_probe_denied()
+                    _note_quote_miss("held-position probe answered rate-limited (probing paused)")
+                    return {}
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("quote")
                 _note_quote_miss("AngelOne answered rate-limited (cooldown started)")
@@ -507,10 +535,15 @@ class AngelOneSession:
         angelone_ws_feed.py's polling loop, which chunks in batches of 50)."""
         if not symbol_tokens:
             return []
+        _probing = False   # group231: see get_quote
         if _rl_in_cooldown("angelone_quote"):
-            return []
-        if _budget_skip(lane):
-            return []
+            if not _position_probe(lane):
+                return []
+            _probing = True
+        if not _probing and _budget_skip(lane):
+            if not _position_probe(lane):
+                return []
+            _probing = True
         await self.ensure_session()
         if not await _budget_admit(lane, "angelone_quote", 1, _LANE_MAX_WAIT_S):
             return []
@@ -527,6 +560,9 @@ class AngelOneSession:
             )
             _log_denied("quote(batch)", r)
             if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
+                if _probing:
+                    _position_probe_denied()
+                    return []
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("quote(batch)")
                 return []

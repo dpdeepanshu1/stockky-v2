@@ -110,6 +110,8 @@ def _new_cool() -> dict:
 _cool = {QUOTE: _new_cool(), CANDLE: _new_cool()}
 _suppressed = 0
 _last_trip_endpoint: Optional[str] = None
+_probe_next = 0.0                       # group231: earliest time of the next held-position probe
+_probes = {"allowed": 0, "denied": 0}
 _counts = {lane: {"admitted": 0, "shed": 0, "skipped_cooldown": 0} for lane in LANES}
 _counts["unclassified"] = {"admitted": 0, "shed": 0, "skipped_cooldown": 0}
 
@@ -195,6 +197,40 @@ def skip(lane: Optional[str] = None, family: Optional[str] = None) -> bool:
     with _lock:
         _counts[_bucket_name(lane)]["skipped_cooldown"] += 1
     return True
+
+
+# ── group231: held-position probe during a QUOTE cooldown ───────────────────
+# A quote 403 made EVERY quote caller skip AngelOne for 30-60 s, including the priced-every-8-s held positions,
+# which then went to the saturated Yahoo path (ReadTimeouts) with real money at stake. During a quote-family
+# cooldown a POSITION-lane call may send ONE request per ANGELONE_POSITION_PROBE_INTERVAL_S (default 1; 0 = off),
+# starting ANGELONE_POSITION_PROBE_MIN_AGE_S (default 2) after the trip. A probe that is itself answered 403 does
+# not extend any cooldown and pauses probing for ANGELONE_POSITION_PROBE_BACKOFF_S (default 10).
+# Candle cooldowns and every other lane are unchanged.
+def position_probe_allowed(lane: Optional[str], family: str = QUOTE) -> bool:
+    """True when this POSITION-lane quote call may be sent although the quote cooldown runs. Takes the probe slot."""
+    global _probe_next
+    if lane != POSITION or family != QUOTE or not enabled():
+        return False
+    interval = _env_float("ANGELONE_POSITION_PROBE_INTERVAL_S", 1.0, 0.0, 600.0)
+    if interval <= 0.0:
+        return False
+    min_age = _env_float("ANGELONE_POSITION_PROBE_MIN_AGE_S", 2.0, 0.0, 600.0)
+    now = time.time()
+    with _lock:
+        if now - _cool[QUOTE]["last_trip"] < min_age or now < _probe_next:
+            return False
+        _probe_next = now + interval
+        _probes["allowed"] += 1
+    return True
+
+
+def position_probe_denied() -> None:
+    """A probe was answered with a rate-limit response: stop probing for a while."""
+    global _probe_next
+    backoff = _env_float("ANGELONE_POSITION_PROBE_BACKOFF_S", 10.0, 0.0, 3600.0)
+    with _lock:
+        _probe_next = time.time() + backoff
+        _probes["denied"] += 1
 
 
 # ── lane admission ──────────────────────────────────────────────────────────
@@ -390,6 +426,7 @@ def stats() -> dict:
             "suppressed_late_403s": _suppressed,
             "last_trip_endpoint": _last_trip_endpoint,
             "lanes": counts,
+            "position_probes": dict(_probes),
         }
     with _pos_lock:
         out["position_symbols"] = len(_pos_symbols)
@@ -406,12 +443,15 @@ def stats() -> dict:
 
 def _reset() -> None:
     """Test helper: forget every cooldown, count, cached position and demand."""
-    global _suppressed, _last_trip_endpoint
+    global _suppressed, _last_trip_endpoint, _probe_next
     global _pos_symbols, _pos_loaded_at, _pos_refreshing
     with _lock:
         for _f in FAMILIES:
             _cool[_f] = _new_cool()
         _suppressed = 0
+        _probe_next = 0.0
+        _probes["allowed"] = 0
+        _probes["denied"] = 0
         _last_trip_endpoint = None
         for v in _counts.values():
             for k in v:

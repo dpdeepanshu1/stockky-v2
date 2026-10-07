@@ -34,7 +34,8 @@ def db():
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for k in ("WATCHLIST_ADVERSE_GUARD", "WATCHLIST_MAX_DROP_PCT", "WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT"):
+    for k in ("WATCHLIST_ADVERSE_GUARD", "WATCHLIST_MAX_DROP_PCT", "WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT",
+              "WATCHLIST_TIER1_MAX_DROP_PCT", "WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT"):
         monkeypatch.delenv(k, raising=False)
     entry._adverse_last_log.clear()
 
@@ -77,7 +78,15 @@ def test_big_drop_not_queued_but_row_stays_active(db, monkeypatch):
 
 
 def test_small_drop_inside_limit_still_queued(db, monkeypatch):
+    # group231: Tier 1's limit is 1.5%, so -1% is inside it; a Tier 2 row keeps the 3% limit (-2% queues)
     make_row(db, catalyst_price=100.0)
+    patch_quotes(monkeypatch, tick(99.0))  # -1%
+    tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
+    assert tally["queued"] == 1 and tally["adverse"] == 0
+
+
+def test_tier2_drop_of_two_percent_still_queued(db, monkeypatch):
+    make_row(db, source_tier=2, catalyst_price=100.0)
     patch_quotes(monkeypatch, tick(98.0))  # -2%
     tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
     assert tally["queued"] == 1 and tally["adverse"] == 0
@@ -85,7 +94,7 @@ def test_small_drop_inside_limit_still_queued(db, monkeypatch):
 
 def test_drop_limit_env_override(db, monkeypatch):
     monkeypatch.setenv("WATCHLIST_MAX_DROP_PCT", "0.10")
-    make_row(db, catalyst_price=100.0)
+    make_row(db, source_tier=2, catalyst_price=100.0)   # group231: Tier 1 has its own limit
     patch_quotes(monkeypatch, tick(92.0))  # -8% < 10% limit
     assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
 
@@ -168,9 +177,17 @@ def test_tier1_first_touch_without_prev_close_still_queues(db, monkeypatch):
     assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
 
 
-def test_tier1_ignores_day_change_rule(db, monkeypatch):
+def test_tier1_down_on_the_day_is_held_since_group231(db, monkeypatch):
     make_row(db, source_tier=1, catalyst_price=100.0)
-    patch_quotes(monkeypatch, tick(100.5, prev_close=105.0))  # down on day but flat vs catalyst
+    patch_quotes(monkeypatch, tick(100.5, prev_close=105.0))  # down 4.3% on the day, flat vs catalyst
+    tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
+    assert tally["queued"] == 0 and tally["adverse"] == 1
+
+
+def test_tier1_day_change_rule_can_be_switched_off(db, monkeypatch):
+    monkeypatch.setenv("WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT", "off")
+    make_row(db, source_tier=1, catalyst_price=100.0)
+    patch_quotes(monkeypatch, tick(100.5, prev_close=105.0))
     assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
 
 

@@ -57,11 +57,12 @@ def make_row(db, *, symbol="PACEDIGITK", catalyst_price=100.0, tier=1, ctype="re
     return row
 
 
-def patch_quotes(monkeypatch, prices, seen=None):
+def patch_quotes(monkeypatch, prices, seen=None, prev_close=None):
     async def fake(symbols, **kw):
         if seen is not None:
             seen.append(sorted(symbols))
-        return {s: Tick(symbol=s, price=p, as_of=datetime.now(timezone.utc), atr=1.5, source="test")
+        return {s: Tick(symbol=s, price=p, as_of=datetime.now(timezone.utc), atr=1.5, source="test",
+                        prev_close=prev_close)
                 for s, p in prices.items() if s in symbols}
     monkeypatch.setattr(entry, "get_quotes", fake)
 
@@ -231,7 +232,8 @@ class TestTriggerPass:
     def test_next_row_takes_over_when_the_primary_is_missed(self, db, monkeypatch):
         primary = make_row(db, catalyst_price=100.0, tier=1, ctype="results")
         backup = make_row(db, catalyst_price=118.0, tier=3, ctype="volume_shock")
-        patch_quotes(monkeypatch, {"PACEDIGITK": 120.0})
+        # group231: the Tier 3 backup needs a known day change (group 230), so the tick carries a previous close
+        patch_quotes(monkeypatch, {"PACEDIGITK": 120.0}, prev_close=110.0)
         run(entry.evaluate_watchlist_entries(db, "DEMO"))      # primary ran away from its catalyst
         db.refresh(primary)
         assert primary.status == "missed"

@@ -2139,7 +2139,15 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         try:
             from rate_limiter import in_cooldown as _rl_cd
             if _rl_cd("angelone_quote"):
-                return _ao_first_miss(sym, "angelone_quote cooldown")
+                # group231: a HELD symbol still goes to get_quote(), which sends one probe per second at most
+                _held = False
+                try:
+                    import angelone_budget as _bud231
+                    _held = _bud231.lane_for(_waterfall_equity_base(sym) or sym, demand=False) == _bud231.POSITION
+                except Exception:  # noqa: BLE001
+                    _held = False
+                if not _held:
+                    return _ao_first_miss(sym, "angelone_quote cooldown")
         except Exception:  # noqa: BLE001
             pass
         base = _waterfall_equity_base(sym)
@@ -3294,8 +3302,9 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
 #      do not change inside a minute. 0 restores the old always-upstream force.
 _HISTORY_FORCE_REUSE_S = float(((os.getenv("HISTORY_FORCE_REUSE_S") or "").strip() or "60"))
 _HISTORY_DERIVE_MIN_BARS = 5
-_HISTORY_PERIOD_ORDER = ["1mo", "3mo", "6mo", "1y", "2y", "5y"]
-_HISTORY_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+_HISTORY_DERIVE_MIN_BARS_BY_PERIOD = {"5d": 3}   # group231: a 7-calendar-day window holds 3-5 sessions
+_HISTORY_PERIOD_ORDER = ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
+_HISTORY_PERIOD_DAYS = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
 
 
 # group230 (log review items 1 and 2): daily candles of COMPLETED sessions never change, yet the 1d/1mo series was
@@ -3400,6 +3409,28 @@ def _history_store(cache_key: str, result: dict, ttl: int) -> None:
             pass
 
 
+def _history_slice(src, period: str, longer: str):
+    """Result for `period` cut out of a longer-period result `src` (a copy, flagged derived_from), or None when
+    `src` has no usable candles or fewer than the minimum bars fall inside the window. Never raises."""
+    try:
+        candles = src.get("candles") if isinstance(src, dict) else None
+        if not candles or not isinstance(candles, list) or period not in _HISTORY_PERIOD_DAYS:
+            return None
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")).date()
+                  - timedelta(days=_HISTORY_PERIOD_DAYS[period])).isoformat()
+        sliced = [c for c in candles if isinstance(c, dict) and str(c.get("date", ""))[:10] >= cutoff]
+        if len(sliced) < _HISTORY_DERIVE_MIN_BARS_BY_PERIOD.get(period, _HISTORY_DERIVE_MIN_BARS):
+            return None
+        out = dict(src)
+        out["period"] = period
+        out["candles"] = sliced
+        out["derived_from"] = longer
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history slice failed for %s from %s: %s", period, longer, e)
+        return None
+
+
 def _history_from_longer_cache(sym: str, period: str, interval: str, days, require_fresh: bool = False):
     """Serve `period` by slicing an already-cached LONGER period for the same
     symbol/interval. Returns a result dict (not cached, so it can never shadow
@@ -3407,28 +3438,102 @@ def _history_from_longer_cache(sym: str, period: str, interval: str, days, requi
     try:
         if days is not None or period not in _HISTORY_PERIOD_DAYS:
             return None
-        want_days = _HISTORY_PERIOD_DAYS[period]
-        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=want_days)).isoformat()
         idx = _HISTORY_PERIOD_ORDER.index(period)
         for longer in _HISTORY_PERIOD_ORDER[idx + 1:]:
             key = f"history:{sym}:{longer}:{interval}:"
             if require_fresh and not _mem.get(f"{key}:fresh"):
                 continue
-            src = _cache_get(key)
-            candles = src.get("candles") if isinstance(src, dict) else None
-            if not candles or not isinstance(candles, list):
-                continue
-            sliced = [c for c in candles if isinstance(c, dict) and str(c.get("date", ""))[:10] >= cutoff]
-            if len(sliced) < _HISTORY_DERIVE_MIN_BARS:
-                continue
-            out = dict(src)
-            out["period"] = period
-            out["candles"] = sliced
-            out["derived_from"] = longer
-            return out
+            out = _history_slice(_cache_get(key), period, longer)
+            if out:
+                return out
     except Exception as e:  # noqa: BLE001
         logger.debug("history derive-from-longer failed for %s %s: %s", sym, period, e)
     return None
+
+
+# group231 (log review item 1): a standard candidate asks /history for 5d/1d, 1mo/1d and 3mo/1d (plus 6mo/1d from
+# other callers) - up to four AngelOne getCandleData calls for the same symbol, each its own cache key, while the
+# 1.5/s candle bucket is what 403s at the open. When AngelOne is the source, a short DAILY period is now answered by
+# ONE 1y/1d fetch (cached under the 1y key, so every later short period is sliced from it, see
+# _history_from_longer_cache). HISTORY_WIDEN_DAILY=0 turns it off. AngelOne failing / cooling / not configured
+# returns None here and the request goes the old way (yfinance for the requested period), so this can never make
+# history less available. The 1y key is also what the durable last-good store holds, so a cooldown or an all-failed
+# answer for a short period can be served from it (_history_last_good_for).
+_HISTORY_WIDEN_PERIODS = ("5d", "1mo", "3mo", "6mo")
+
+
+def _history_widen_on() -> bool:
+    return ((os.getenv("HISTORY_WIDEN_DAILY") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+
+
+def _history_widen_from_angelone(symbol: str, sym: str, period: str, interval: str, days, force: bool):
+    """Answer a short daily `period` from one AngelOne 1y/1d fetch (stored under the 1y key).
+    Returns (result_or_None, attempted): attempted=True means the 1y call itself failed, so the caller must not
+    repeat the same AngelOne call for the short period."""
+    try:
+        if (not _history_widen_on() or days is not None or (interval or "").lower() != "1d"
+                or period not in _HISTORY_WIDEN_PERIODS):
+            return None, False
+        if MAX_HISTORY_PERIOD not in ("1y", "2y", "5y"):
+            return None, False
+        if _history_candle_cooling():
+            return None, False
+        key1y = f"history:{sym}:1y:{interval}:"
+        entry = _history_flight_enter(f"widen|{sym}|{interval}")
+        held = entry[0].acquire(timeout=_HISTORY_FLIGHT_WAIT_S)
+        try:
+            # a concurrent request for another short period may have filled the 1y key while we waited
+            _d = _history_from_longer_cache(sym, period, interval, None, require_fresh=bool(force))
+            if _d:
+                return _d, True
+            candles = _angelone_history_candles(sym, "1y", interval, None, None, None)
+            if not candles:
+                return None, _history_angel_available(sym)
+            if len(candles) > MAX_HISTORY_ROWS:
+                candles = candles[-MAX_HISTORY_ROWS:]
+            full = {
+                "symbol": sym,
+                "requested": (symbol or "").strip(),
+                "period": "1y",
+                "interval": interval,
+                "candles": candles,
+                "source": "angelone",
+            }
+            _history_store(key1y, full, _history_ttl(interval))
+            return _history_slice(full, period, "1y"), True
+        finally:
+            _history_flight_exit(f"widen|{sym}|{interval}", entry, held)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history widen failed for %s %s: %s", sym, period, e)
+        return None, False
+
+
+def _history_angel_available(sym: str) -> bool:
+    """True when an AngelOne candle call for `sym` could really have been sent (configured, plain symbol, token)."""
+    try:
+        base = (sym or "").replace(".NS", "").replace(".BO", "").strip()
+        if not base or base.startswith("^") or " " in base:
+            return False
+        from angelone_client import get_session
+        if not get_session().is_configured():
+            return False
+        import angelone_scrip_master
+        return bool(angelone_scrip_master.get_token(base))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _history_last_good_for(cache_key: str, sym: str, period: str, interval: str, days):
+    """Last good daily result for this exact key, else (short daily periods only) a slice of the 1y last-good."""
+    _lg = _history_last_good_get(cache_key)
+    if _lg or days is not None or period not in _HISTORY_WIDEN_PERIODS or not _history_widen_on():
+        return _lg
+    _full = _history_last_good_get(f"history:{sym}:1y:{interval}:")
+    _out = _history_slice(_full, period, "1y") if _full else None
+    if _out:
+        _out["stale"] = True
+        _out["source"] = "last_good"
+    return _out
 
 
 # ── /history single-flight (2026-09-21) ─────────────────────────────────────
@@ -3584,12 +3689,18 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
     # group230: while the AngelOne candle cooldown runs, a symbol with a recent last-good daily series is answered
     # from it (flagged stale) instead of going to yfinance, which is what saturates and times out at the open.
     if not force and _history_candle_cooling():
-        _lg = _history_last_good_get(cache_key)
+        _lg = _history_last_good_for(cache_key, sym, period, interval, days)
         if _lg:
             _cache_set(cache_key, _lg, ttl=120)     # short, so a real fetch replaces it once the cooldown ends
             return _lg
 
-    angel_candles = _angelone_history_candles(sym, period, interval, days, start_date, end_date)
+    # group231: a short daily period is cut from ONE cached 1y/1d AngelOne fetch (one candle call per symbol)
+    _widened, _widen_tried = _history_widen_from_angelone(symbol, sym, period, interval, days, force)
+    if _widened:
+        return _widened
+
+    # a failed 1y call is not repeated for the short period (the yfinance loop below still runs)
+    angel_candles = None if _widen_tried else _angelone_history_candles(sym, period, interval, days, start_date, end_date)
     if angel_candles:
         if len(angel_candles) > MAX_HISTORY_ROWS:
             angel_candles = angel_candles[-MAX_HISTORY_ROWS:]
@@ -3698,7 +3809,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
         return result
 
     # group230: every source failed - a recent last-good daily series beats an empty answer (see above).
-    _lg = _history_last_good_get(cache_key)
+    _lg = _history_last_good_for(cache_key, sym, period, interval, days)
     if _lg:
         logger.info("history %s %s/%s: every source failed (%s) - served last good candles (%ss old)",
                     symbol, period, interval, (last_err or "no data")[:80], _lg.get("stale_age_s"))

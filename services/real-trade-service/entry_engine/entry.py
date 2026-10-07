@@ -1602,6 +1602,10 @@ def _watchlist_deep_drop_reason(pct_move: float) -> Optional[str]:
     return None
 
 
+def _wl_tier1_day_check_on() -> bool:
+    return ((os.getenv("WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT") or "").strip() or "0").lower() not in ("off", "none", "no", "false")
+
+
 def _wl_require_prev_close_on() -> bool:
     return ((os.getenv("WATCHLIST_REQUIRE_PREV_CLOSE") or "").strip() or "1") not in ("0", "false", "False")
 
@@ -1625,9 +1629,23 @@ def _watchlist_adverse_reason(row, pct_move: float, tick, baseline_just_set: boo
         _inst = _watchlist_instrument_reason(getattr(row, "symbol", ""), getattr(tick, "price", 0))
         if _inst:
             return _inst
+        # group231 (log review item 5): Tier 1 (a real catalyst) queued ABCAPITAL 2.33% below its catalyst price
+        # while 47 rows were skipped for the 3% drop. Tier 1 now uses a tighter drop limit
+        # (WATCHLIST_TIER1_MAX_DROP_PCT, default 1.5%, 0 = fall back to WATCHLIST_MAX_DROP_PCT) and must not be down
+        # on the day (WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT, default 0.0; "off" = no day check). An UNKNOWN day change
+        # still passes for Tier 1 (the catalyst price is the baseline there). Tier 2/3 keep the old 3% limit.
         max_drop = abs(_wl_env_float("WATCHLIST_MAX_DROP_PCT", 0.03))
+        if getattr(row, "source_tier", None) == 1:
+            _t1_drop = abs(_wl_env_float("WATCHLIST_TIER1_MAX_DROP_PCT", 0.015))
+            if _t1_drop > 0:
+                max_drop = _t1_drop
         if max_drop > 0 and pct_move < -max_drop:
             return f"price is {pct_move:.1%} below catalyst (limit -{max_drop:.1%})"
+        if getattr(row, "source_tier", None) == 1 and _wl_tier1_day_check_on():
+            _t1_min = _wl_env_float("WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT", 0.0)
+            _t1_chg = _tick_day_change_pct(tick)
+            if _t1_chg is not None and _t1_chg < _t1_min:
+                return f"tier 1 stock is {_t1_chg:+.2f}% on the day (need >= {_t1_min:+.2f}%)"
         if getattr(row, "source_tier", None) == 3:
             min_chg = _wl_env_float("WATCHLIST_TIER3_MIN_DAY_CHANGE_PCT", 1.0)
             day_chg = _tick_day_change_pct(tick)

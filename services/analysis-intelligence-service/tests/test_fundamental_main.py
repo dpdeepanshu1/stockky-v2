@@ -505,6 +505,43 @@ class TestIndianApiFallback:
         assert out["fallback_used"] is True
         assert "IndianAPI fallback failed" in caplog.text
 
+    # group234: IndianAPI is for a real "no data" answer only, never for a market-data failure.
+    @pytest.mark.parametrize("exc", [
+        httpx.TimeoutException("slow"),
+        httpx.ConnectError("refused"),
+        RuntimeError("reset"),
+    ])
+    def test_not_called_when_market_data_times_out_or_errors(self, env, exc, caplog):
+        called = []
+        env.mp.setattr(fm, "get_fundamentals_with_fallback", lambda *a: called.append(a))
+        env.http_exc = exc
+        with caplog.at_level(logging.INFO):
+            out = env.analyze()
+        assert called == [] and out["fallback_used"] is True
+        assert "IndianAPI fallback skipped" in caplog.text
+
+    @pytest.mark.parametrize("code", [429, 500, 502, 503])
+    def test_not_called_when_market_data_answers_429_or_5xx(self, env, code):
+        called = []
+        env.mp.setattr(fm, "get_fundamentals_with_fallback", lambda *a: called.append(a))
+        env.http_exc = _status_error(code)
+        assert env.analyze()["fallback_used"] is True
+        assert called == []
+
+    def test_called_when_market_data_answers_with_no_data(self, env):
+        called = []
+        env.mp.setattr(fm, "get_fundamentals_with_fallback", lambda s, y: called.append(s) or {"pe_ratio": 9})
+        env.analyze({}, symbol="INFY")
+        assert called == ["INFY"]
+
+    def test_env_flag_restores_fallback_on_market_data_failure(self, env):
+        called = []
+        env.mp.setenv("INDIANAPI_ON_MD_FAILURE", "1")
+        env.mp.setattr(fm, "get_fundamentals_with_fallback", lambda s, y: called.append(s) or {"pe_ratio": 9})
+        env.http_exc = httpx.TimeoutException("slow")
+        env.analyze(symbol="INFY")
+        assert called == ["INFY"]
+
 
 # ── analyze: scoring table (each case is a delta from the neutral 50) ─────────
 

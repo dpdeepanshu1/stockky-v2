@@ -62,7 +62,13 @@ async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true
     const token = getSessionToken();
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
-  const resp = await fetch(`${base}${path}`, { ...init, headers });
+  // group234: a bare browser "Failed to fetch" says nothing about WHICH call failed (timeout, CORS, service down).
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}${path}`, { ...init, headers });
+  } catch (e: any) {
+    throw new Error(`Could not reach ${path} (${e?.message || "network error"})`);
+  }
   const raw = await resp.text();
   let data: any = null;
   if (raw && raw.trim()) {
@@ -274,6 +280,9 @@ export interface CandidateRow {
 export interface CycleResult {
   mode: string;
   new_candidates: number;
+  // group234: set when a manual cycle's watchlist/candidates stage hit its deadline (partial results)
+  timed_out?: boolean;
+  stage_timeouts?: string[];
   entry: { evaluated: number; entered: number; waited: number; rejected: number };
   fills: number;
   expired_orders: number;
@@ -527,8 +536,9 @@ export const realTradeApi = {
       mode === "REAL"
     ),
 
-  runCycle: (mode: "DEMO" | "REAL") =>
-    rtRequest<CycleResult>(`/cycle/run/${mode}`, { method: "POST" }, mode === "REAL"),
+  // group234: REAL is refused outside market hours unless force=true (server returns 409 "Outside market hours ...")
+  runCycle: (mode: "DEMO" | "REAL", force = false) =>
+    rtRequest<CycleResult>(`/cycle/run/${mode}${force ? "?force=true" : ""}`, { method: "POST" }, mode === "REAL"),
 
   // 2026-09-17 (session58, user request): manual "run now" for the
   // after-hours news scan — bypasses the enabled toggle and the 15:45–08:45

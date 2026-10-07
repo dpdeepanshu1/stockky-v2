@@ -997,3 +997,77 @@ class TestRealPipelineStatusIntegration:
         status = pstat.get_status("DEMO")
         assert status["running"] is False
         assert status["last_cycle"]["error"] == "RuntimeError: candidates 500"
+
+
+# ===========================================================================
+# group234: a MANUAL cycle gives each data stage a deadline and reports the timeout
+# ===========================================================================
+class TestManualStageDeadline:
+    @pytest.fixture(autouse=True)
+    def _clean_pstat(self):
+        pstat._STATE.pop("DEMO", None)
+        pstat._HISTORY["DEMO"].clear()
+        yield
+        pstat._STATE.pop("DEMO", None)
+        pstat._HISTORY["DEMO"].clear()
+
+    def test_slow_candidates_stage_times_out_and_cycle_continues(self, monkeypatch):
+        monkeypatch.setenv("CYCLE_MANUAL_STAGE_TIMEOUT_S", "0.1")
+        ran = []
+
+        async def slow_candidates(db, mode):
+            await asyncio.sleep(5)
+            return 9
+
+        async def entry(db, mode, armed):
+            ran.append("entry")
+
+        _stub_stages(monkeypatch, refresh_candidates=slow_candidates, entry_evaluate=entry)
+        out = run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))
+        assert out["timed_out"] is True and out["stage_timeouts"] == ["candidates"]
+        assert out["new_candidates"] == 0
+        assert ran == ["entry"]                       # later stages still ran
+        assert pstat.get_status("DEMO")["running"] is False   # no stuck "Cycle running"
+
+    def test_slow_watchlist_stage_times_out(self, monkeypatch):
+        monkeypatch.setenv("CYCLE_MANUAL_STAGE_TIMEOUT_S", "0.1")
+
+        async def slow_watchlist(db, mode):
+            await asyncio.sleep(5)
+
+        _stub_stages(monkeypatch)
+        monkeypatch.setattr(wl_mod, "refresh_watchlist", slow_watchlist)
+        out = run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))
+        assert out["stage_timeouts"] == ["watchlist"]
+        assert out["watchlist"] == {"error": "timed out"}
+
+    def test_fast_manual_cycle_has_no_timeout_keys(self, monkeypatch):
+        _stub_stages(monkeypatch)
+        out = run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))
+        assert "stage_timeouts" not in out and "timed_out" not in out
+
+    def test_autopilot_cycle_is_never_cut(self, monkeypatch):
+        monkeypatch.setenv("CYCLE_MANUAL_STAGE_TIMEOUT_S", "0.05")
+
+        async def slowish(db, mode):
+            await asyncio.sleep(0.3)
+            return 4
+
+        _stub_stages(monkeypatch, refresh_candidates=slowish)
+        out = run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="autopilot"))
+        assert out["new_candidates"] == 4 and "stage_timeouts" not in out
+
+    def test_zero_disables_the_deadline(self, monkeypatch):
+        monkeypatch.setenv("CYCLE_MANUAL_STAGE_TIMEOUT_S", "0")
+
+        async def slowish(db, mode):
+            await asyncio.sleep(0.2)
+            return 2
+
+        _stub_stages(monkeypatch, refresh_candidates=slowish)
+        out = run(cycle_runner.run_cycle_core(_DB, "DEMO", True, trigger="manual"))
+        assert out["new_candidates"] == 2 and "timed_out" not in out
+
+    def test_bad_env_value_falls_back_to_60(self, monkeypatch):
+        monkeypatch.setenv("CYCLE_MANUAL_STAGE_TIMEOUT_S", "abc")
+        assert cycle_runner._manual_stage_timeout_s() == 60.0

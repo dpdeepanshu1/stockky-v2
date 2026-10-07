@@ -1418,8 +1418,22 @@ export default function RealAutoTrade() {
   const doRunCycle = async () => {
     setCycleBusy(true); setError(null);
     try {
-      const res = await realTradeApi.runCycle(mode);
+      let res;
+      try {
+        res = await realTradeApi.runCycle(mode);
+      } catch (e: any) {
+        // group234: the server refuses a REAL cycle outside market hours; let the admin override it explicitly.
+        if (mode === "REAL" && /outside market hours/i.test(e?.message || "")
+            && window.confirm("The market is closed, so a REAL cycle would run on last-close prices and no order can fill. Run it anyway?")) {
+          res = await realTradeApi.runCycle(mode, true);
+        } else {
+          throw e;
+        }
+      }
       setCycleResult(res);
+      if (res?.timed_out) {
+        setError(`Cycle finished with partial results - timed out: ${(res.stage_timeouts || []).join(", ")}`);
+      }
       await Promise.all([loadStatus(mode), loadPositionsAndOrders(mode)]);
     } catch (e: any) { setError(e?.message || "Cycle failed"); }
     finally { setCycleBusy(false); }

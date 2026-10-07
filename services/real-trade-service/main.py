@@ -1223,10 +1223,21 @@ async def add_manual_candidate(
     return {"ok": True, "mode": mode, "symbol": symbol, "queued": True}
 
 
+def _manual_real_cycle_offhours_blocked() -> bool:
+    """group234: True when a manual REAL cycle should be refused because the market is closed."""
+    import os as _os
+    if ((_os.getenv("MANUAL_REAL_CYCLE_OFFHOURS_BLOCK") or "").strip() or "1").lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        return not is_market_open_ist()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ── Routes: audit log read ───────────────────────────────────────────────────
 # ── Routes: Phase 2 — DEMO cycle (candidates -> entry -> fills -> exits) ───
 @app.post("/cycle/run/{mode}")
-async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+async def run_cycle(mode: str, force: bool = False, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     """Runs one full evaluation cycle: refresh candidates from api-gateway,
     evaluate entries (risk-checked), check pending order fills, expire
     stale unfilled orders, then evaluate exits on every open position.
@@ -1257,6 +1268,16 @@ async def run_cycle(mode: str, admin: Optional[str] = Depends(require_admin_if_r
     gate = _check_and_expire_gates(db, mode)
     if not gate.armed:
         raise HTTPException(status_code=409, detail=f"{mode} is not armed — arm it before running a cycle.")
+
+    # group234: a manual REAL cycle outside market hours used to run the full screening on last-close data (one ran
+    # 553 s and the page sat on "Cycle running"). Refused unless ?force=true; DEMO and
+    # MANUAL_REAL_CYCLE_OFFHOURS_BLOCK=0 are unchanged.
+    if mode == "REAL" and not force and _manual_real_cycle_offhours_blocked():
+        raise HTTPException(
+            status_code=409,
+            detail=("Outside market hours — a REAL cycle would run on last-close prices and no order can fill. "
+                    "Run it during 09:15-15:30 IST on a trading day, or pass force=true to run it anyway."),
+        )
 
     from execution.auto_pilot import _get_lock
     from cycle_runner import run_cycle_core

@@ -311,6 +311,10 @@ def _exc_detail(e) -> str:
 def analyze(symbol: str, force: bool = False):
     f = {}
     fallback_used = False
+    # group234: True only when market-data ANSWERED and had nothing (200 with no data). A timeout, transport error,
+    # 429 or 5xx means "unknown", not "no data" - those must not spend IndianAPI quota (it answered 429 after
+    # market-data timeouts). INDIANAPI_ON_MD_FAILURE=1 restores the old behaviour.
+    md_answered_empty = False
     try:
         # Propagate force so market-data does not serve a 24h-old fundamentals cache
         force_param = str(force).lower()
@@ -320,6 +324,7 @@ def analyze(symbol: str, force: bool = False):
         f = resp.json()
         if not f or not isinstance(f, dict):
             f = {}
+        md_answered_empty = True
     except httpx.TimeoutException as e:
         logger.warning("Market data service timed out for %s (%s)", symbol, _exc_detail(e))
         fallback_used = True
@@ -354,7 +359,10 @@ def analyze(symbol: str, force: bool = False):
     # IndianAPI fallback when market-data/Yahoo path returned nothing useful
     _core_keys = ("pe_ratio", "roe", "debt_to_equity", "revenue_growth", "market_cap", "sector")
     _has_core = any(f.get(k) is not None for k in _core_keys)
-    if (not _has_core) and get_fundamentals_with_fallback is not None:
+    _ia_on_failure = ((os.environ.get("INDIANAPI_ON_MD_FAILURE") or "").strip() or "0").lower() in ("1", "true", "yes", "on")
+    if (not _has_core) and (not md_answered_empty) and (not _ia_on_failure):
+        logger.info("IndianAPI fallback skipped for %s: market-data did not answer (timeout/error), not a 'no data' reply", symbol)
+    if (not _has_core) and get_fundamentals_with_fallback is not None and (md_answered_empty or _ia_on_failure):
         try:
             def _empty_yahoo(_sym: str):
                 return None  # market-data already failed/empty — skip straight to IndianAPI

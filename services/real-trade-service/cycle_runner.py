@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from sqlalchemy.orm import Session
 
@@ -63,7 +64,7 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str 
         pass
 
     try:
-        result = await _run_cycle_core(db, mode, gate_armed)
+        result = await _run_cycle_core(db, mode, gate_armed, trigger=trigger)
         if warning:
             result["pre_market_warning"] = warning
         return result
@@ -75,7 +76,36 @@ async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str 
         raise
 
 
-async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
+def _manual_stage_timeout_s() -> float:
+    """group234: deadline (seconds) for each data stage (watchlist / candidates) of a MANUAL cycle.
+    CYCLE_MANUAL_STAGE_TIMEOUT_S, default 60, 0 = no deadline. Auto-pilot cycles are never cut."""
+    try:
+        return float((os.getenv("CYCLE_MANUAL_STAGE_TIMEOUT_S") or "").strip() or "60")
+    except ValueError:
+        return 60.0
+
+
+async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str = "autopilot") -> dict:
+    stage_timeouts: list = []
+    _deadline = _manual_stage_timeout_s() if trigger == "manual" else 0.0
+
+    async def _bounded(name: str, coro, default):
+        """Data stages only (nothing here places or cancels an order). On the deadline the stage is cancelled, the
+        session rolled back, the stage is named in result['stage_timeouts'] and the cycle goes on with what exists."""
+        if _deadline <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=_deadline)
+        except asyncio.TimeoutError:
+            stage_timeouts.append(name)
+            logger.warning("run_cycle_core: %s stage hit the %.0fs manual-cycle deadline - continuing with partial results",
+                           name, _deadline)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return default
+
     if mode == "REAL":
         # §2 — TOTP refresh: attempt before the liveness check so a freshly-
         # expired token is renewed before we even call enforce_live_token.
@@ -226,7 +256,8 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
             _timer_stop("candidates")
 
     watchlist_result, new_candidates = await asyncio.gather(
-        _dynamic_universe_and_watchlist(), _candidates()
+        _bounded("watchlist", _dynamic_universe_and_watchlist(), {"error": "timed out"}),
+        _bounded("candidates", _candidates(), 0),
     )
 
     _stage("entry")
@@ -291,6 +322,9 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool) -> dict:
         "exit": exit_result,
         "reconcile": reconcile_result,
     }
+    if stage_timeouts:
+        result["stage_timeouts"] = list(stage_timeouts)
+        result["timed_out"] = True
     try:
         pstat.end_cycle(mode, result)
     except Exception:

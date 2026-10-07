@@ -713,6 +713,20 @@ async def _preload_angelone_scrip_master():
     except Exception as e:
         logger.warning("angelone_scrip_master preload skipped: %s", e)
 
+@app.on_event("startup")
+async def _preload_bhavcopy_latest_day():
+    """group234: warm the latest NSE bhavcopy session off the event loop. group233 answers closed-market quotes from
+    the bhavcopy close; on a fresh container the first calls otherwise each waited for the CSV download.
+    BHAVCOPY_PREWARM=0 turns it off. A failure only logs - the lazy path still works."""
+    if ((os.getenv("BHAVCOPY_PREWARM") or "").strip() or "1").lower() in ("0", "false", "no", "off"):
+        return
+    try:
+        from bhavcopy import prewarm_latest_day
+        asyncio.get_event_loop().run_in_executor(None, prewarm_latest_day)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bhavcopy prewarm skipped: %s", e)
+
+
 # ── Root & Health endpoints (fix 404) ────────────────────────────────────────
 @app.get("/")
 async def root():

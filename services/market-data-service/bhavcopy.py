@@ -462,6 +462,34 @@ def process_bhavcopy_dataframe(df):  # type: ignore[no-untyped-def]
     return out
 
 
+# group234: the close-price column names the CSV parsers accept. NSE's sec_bhavdata_full (the first-choice source,
+# see _bhav_urls_for_date) names it CLOSE_PRICE (and LAST_PRICE); the old list had only "ClosePrice", which does not
+# match "close_price" after the header clean-up, so EVERY row came out with close=None. Thousands of rows loaded per
+# day (kept for their delivery %) yet eod_close_from_bhavcopy() found no symbol at all, and group233's closed-market
+# last-close path fell through to AngelOne/Yahoo. CLOSE stays first so the UDiFF/legacy files behave as before.
+_CLOSE_COL_NAMES = (
+    "CLOSE", "close", "CLOSE_PRICE", "ClosePrice", "ClsPric",
+    "LAST", "last", "LAST_PRICE", "LastPric",
+)
+_NO_CLOSE_WARNED: set = set()
+
+
+def _warn_no_close_col(fieldnames) -> None:
+    """One WARNING per distinct header when a bhavcopy file has no recognisable close column, so the next
+    NSE format change is visible in the log instead of showing up as thousands of silent 'not found' lookups."""
+    try:
+        key = tuple(str(f).strip() for f in (fieldnames or ()))
+        if key in _NO_CLOSE_WARNED:
+            return
+        if len(_NO_CLOSE_WARNED) > 20:
+            _NO_CLOSE_WARNED.clear()
+        _NO_CLOSE_WARNED.add(key)
+        logger.warning("bhavcopy: no close-price column recognised in header %s - EOD closes unavailable from this "
+                       "file (add the column name to _CLOSE_COL_NAMES)", list(key)[:30])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
     """
     Same column-detection logic as _parse_bhav_csv, but parses every EQ/BE/BZ
@@ -486,7 +514,7 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
 
     sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
     series_col = col("SERIES", "series", "SctySrs")
-    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "ClosePrice")
+    close_col = col(*_CLOSE_COL_NAMES)
     deliv_pct_col = col(
         "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
         "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
@@ -500,6 +528,8 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
     )
     if not sym_col:
         return out
+    if not close_col:
+        _warn_no_close_col(reader.fieldnames)
 
     for row in reader:
         row_sym = (row.get(sym_col) or "").strip().upper()
@@ -550,7 +580,39 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+# group234: single-flight per session date. With the cache empty (fresh container) every caller that needed the
+# same day downloaded + parsed the same ~10 MB CSV at once. The first caller now fetches; the others wait for it
+# (up to BHAVCOPY_DAY_WAIT_S) and read the cache. A failed fetch is NOT remembered: the next caller after the
+# leader finished tries again exactly as before.
+_BHAV_INFLIGHT: Dict[str, threading.Event] = {}
+_BHAV_INFLIGHT_LOCK = threading.Lock()
+_BHAV_DAY_WAIT_S = float((_os.getenv("BHAVCOPY_DAY_WAIT_S") or "").strip() or "45")
+
+
 def _fetch_bhav_day_parsed(client: httpx.Client, d) -> Optional[Dict[str, Dict[str, Any]]]:
+    key = d.isoformat()
+    if key in _BHAV_DAY_CACHE:
+        return _BHAV_DAY_CACHE[key]
+    with _BHAV_INFLIGHT_LOCK:
+        if key in _BHAV_DAY_CACHE:
+            return _BHAV_DAY_CACHE[key]
+        ev = _BHAV_INFLIGHT.get(key)
+        leader = ev is None
+        if leader:
+            ev = threading.Event()
+            _BHAV_INFLIGHT[key] = ev
+    if not leader:
+        ev.wait(timeout=_BHAV_DAY_WAIT_S if _BHAV_DAY_WAIT_S > 0 else None)
+        return _BHAV_DAY_CACHE.get(key)
+    try:
+        return _fetch_bhav_day_parsed_uncached(client, d)
+    finally:
+        with _BHAV_INFLIGHT_LOCK:
+            _BHAV_INFLIGHT.pop(key, None)
+        ev.set()
+
+
+def _fetch_bhav_day_parsed_uncached(client: httpx.Client, d) -> Optional[Dict[str, Dict[str, Any]]]:
     """
     Download + parse one session date's bhavcopy once, cached for the rest
     of this process's lifetime under _BHAV_DAY_CACHE. Every symbol lookup
@@ -634,7 +696,7 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
 
     sym_col = col("SYMBOL", "symbol", "TckrSymb", "SECURITY")
     series_col = col("SERIES", "series", "SctySrs")
-    close_col = col("CLOSE", "close", "LAST", "last", "ClsPric", "LastPric", "ClosePrice")
+    close_col = col(*_CLOSE_COL_NAMES)
     deliv_pct_col = col(
         "DELIV_PER", "DELIVERY_PER", "DELIV_PERCENTAGE", "DELIV_PERC",
         "DELIVERY_%", "DELIVERY_PERCENT", "DelivPer",
@@ -700,6 +762,23 @@ def _parse_bhav_csv(text: str, symbol: str) -> Optional[Dict[str, Any]]:
             "source": "nse_bhavcopy",
             "raw_row": {k: row.get(k) for k in (sym_col, deliv_pct_col, deliv_qty_col, tq_col, close_col) if k},
         }
+    return None
+
+
+def prewarm_latest_day() -> Optional[str]:
+    """group234: load the most recent bhavcopy session into the per-date cache (called once from a boot thread) so
+    the first closed-market /quote and /quotes/bulk calls are dict lookups, not a CSV download. Returns the ISO
+    date that was cached, or None. Never raises."""
+    try:
+        client = _nse_client()
+        for d in _candidate_session_dates(6):
+            day = _fetch_bhav_day_parsed(client, d)
+            if day:
+                with_close = sum(1 for r in day.values() if r.get("close"))
+                logger.info("bhavcopy prewarm: %s cached (%d rows, %d with a close price)", d.isoformat(), len(day), with_close)
+                return d.isoformat()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bhavcopy prewarm failed: %s", e)
     return None
 
 

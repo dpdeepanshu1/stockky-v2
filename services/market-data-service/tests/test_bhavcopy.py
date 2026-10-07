@@ -22,6 +22,8 @@ import bhavcopy as bh
 def _clean():
     bh._BHAV_DAY_CACHE.clear()
     bh._EOD_MISS.clear()
+    bh._BHAV_INFLIGHT.clear()
+    bh._NO_CLOSE_WARNED.clear()
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0
     bh._denied_last_logged = {} if hasattr(bh, "_denied_last_logged") else {}

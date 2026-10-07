@@ -333,6 +333,80 @@ class TestRunCycle:
         assert _get_lock("DEMO").acquire(blocking=False) is True
         _get_lock("DEMO").release()
 
+    # group234: a manual REAL cycle outside market hours is refused unless forced
+    def _real_armed(self):
+        db = _fresh_db()
+        _seed(db)
+        gate = db.query(models.TradeGateState).filter_by(mode="REAL").first()
+        if gate is None:
+            pytest.skip("no REAL gate row in the seed")
+        gate.armed = True
+        db.commit()
+        return db
+
+    def test_real_cycle_refused_outside_market_hours(self):
+        db = self._real_armed()
+        ran = []
+
+        async def _fake_run(db_, mode, armed, trigger="manual"):
+            ran.append(mode)
+            return {"ok": True}
+
+        with mock.patch.object(main, "is_market_open_ist", return_value=False), \
+             mock.patch("cycle_runner.run_cycle_core", side_effect=_fake_run):
+            with pytest.raises(HTTPException) as ei:
+                _run(main.run_cycle("real", admin="a", db=db))
+        _expect_http_error(ei, 409)
+        assert "Outside market hours" in str(ei.value.detail)
+        assert ran == []
+
+    def test_real_cycle_force_runs_outside_market_hours(self):
+        db = self._real_armed()
+
+        async def _fake_run(db_, mode, armed, trigger="manual"):
+            return {"ok": True, "mode": mode}
+
+        with mock.patch.object(main, "is_market_open_ist", return_value=False), \
+             mock.patch("cycle_runner.run_cycle_core", side_effect=_fake_run):
+            out = _run(main.run_cycle("real", force=True, admin="a", db=db))
+        assert out == {"ok": True, "mode": "REAL"}
+
+    def test_real_cycle_runs_inside_market_hours(self):
+        db = self._real_armed()
+
+        async def _fake_run(db_, mode, armed, trigger="manual"):
+            return {"ok": True}
+
+        with mock.patch.object(main, "is_market_open_ist", return_value=True), \
+             mock.patch("cycle_runner.run_cycle_core", side_effect=_fake_run):
+            assert _run(main.run_cycle("real", admin="a", db=db)) == {"ok": True}
+
+    def test_env_off_switch_restores_old_behaviour(self, monkeypatch):
+        db = self._real_armed()
+        monkeypatch.setenv("MANUAL_REAL_CYCLE_OFFHOURS_BLOCK", "0")
+
+        async def _fake_run(db_, mode, armed, trigger="manual"):
+            return {"ok": True}
+
+        with mock.patch.object(main, "is_market_open_ist", return_value=False), \
+             mock.patch("cycle_runner.run_cycle_core", side_effect=_fake_run):
+            assert _run(main.run_cycle("real", admin="a", db=db)) == {"ok": True}
+
+    def test_demo_cycle_never_blocked_by_market_hours(self):
+        db = _fresh_db()
+        _seed(db)
+
+        async def _fake_run(db_, mode, armed, trigger="manual"):
+            return {"ok": True}
+
+        with mock.patch.object(main, "is_market_open_ist", return_value=False), \
+             mock.patch("cycle_runner.run_cycle_core", side_effect=_fake_run):
+            assert _run(main.run_cycle("demo", admin=None, db=db)) == {"ok": True}
+
+    def test_helper_fails_open_when_clock_check_raises(self):
+        with mock.patch.object(main, "is_market_open_ist", side_effect=RuntimeError("x")):
+            assert main._manual_real_cycle_offhours_blocked() is False
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # /afterhours/run-manual/{mode}

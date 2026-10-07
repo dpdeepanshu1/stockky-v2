@@ -3182,7 +3182,9 @@ def _angelone_history_candles(
             _from = datetime.combine(start_date, dtime(9, 15))
             _to = datetime.combine(end_date, dtime(15, 30))
         else:
-            _period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            # group227: "5d" was missing here, so period=5d silently became the 180-day default and the
+            # candidate engine's "1w" return was really a 6-month return whenever AngelOne served the candles.
+            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
             span = _period_days.get(period, 180)
             _to = datetime.now(ist).replace(tzinfo=None)
             _from = _to - timedelta(days=span)
@@ -3239,7 +3241,7 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
         if start_date is not None:
             _from, _to = start_date, end_date
         else:
-            _period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
             span = _period_days.get(period, 180)
             _to = datetime.now(ZoneInfo("Asia/Kolkata")).date()
             _from = _to - timedelta(days=span)
@@ -3421,7 +3423,8 @@ def get_history(
 
 def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days: Optional[int]):
     # Cap long periods on free-tier 512MB dynos
-    _period_rank = {"1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
+    # group227: "5d" (real-trade-service's 1-week horizon) ranks below every cap so it is never widened to MAX_HISTORY_PERIOD
+    _period_rank = {"5d": 0, "1mo": 1, "3mo": 2, "6mo": 3, "1y": 4, "2y": 5, "5y": 6}
     if _period_rank.get(period, 4) > _period_rank.get(MAX_HISTORY_PERIOD, 4):
         period = MAX_HISTORY_PERIOD
     """OHLCV for equities and indices.

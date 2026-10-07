@@ -465,6 +465,7 @@ def clear_history_state() -> None:
     _HIST_NONE_UNTIL.clear()
     _HISTORY_LAST_GOOD.clear()
     _HISTORY_STALE_USED[0] = 0
+    clear_reject_cache()
 
 
 # group224 (item A3 of the 2026-10-07 open-market log review): at 09:15-09:25 market-data is saturated by the
@@ -500,6 +501,86 @@ def _history_stale_fallback(symbol: str, period: str, interval: str) -> list:
 def clear_history_stale_state() -> None:
     _HISTORY_LAST_GOOD.clear()
     _HISTORY_STALE_USED[0] = 0
+
+
+# group227 (item 2 of the 2026-10-07 10:33 IST log review): the same symbols were rejected for STABLE reasons every
+# 3-minute cycle (AXISCADES, RAYMOND, TRANSRAIL, JAYKAY, INDHOTEL ... "top 12% of 52w range", "6m return < -10%") and
+# each re-evaluation cost 7 /history calls plus a quote and a market-cap call - the biggest single driver of the
+# AngelOne getCandleData rate limit. A rejection that cannot change within minutes is now remembered per symbol:
+#   * STABLE kinds (price floor, 6m downtrend, ATR cap, volume health) use REJECT_CACHE_STABLE_S (default 3600);
+#   * PRICE-SENSITIVE kinds (weighted bullish score, 52w range, near resistance move with the intraday price) use the
+#     shorter REJECT_CACHE_PRICE_S (default 900);
+#   * never cached: data-starved / incomplete-history / no-quote results (those are "cannot judge", not a verdict) and
+#     anything that passed; an entry is also dropped at the IST date change and when the adaptive ATR cap rises above
+#     the cached ATR. REJECT_CACHE_STABLE_S=0 and REJECT_CACHE_PRICE_S=0 together restore the old re-evaluate-every-cycle.
+def _reject_ttl_env(name: str, default: str) -> float:
+    try:
+        return float(((os.getenv(name) or "").strip() or default))
+    except ValueError:
+        return float(default)
+
+
+REJECT_CACHE_STABLE_S = _reject_ttl_env("REJECT_CACHE_STABLE_S", "3600")
+REJECT_CACHE_PRICE_S = _reject_ttl_env("REJECT_CACHE_PRICE_S", "900")
+_REJECT_STABLE_KINDS = ("price_floor", "downtrend_6m", "atr", "volume")
+_REJECT_PRICE_KINDS = ("bullish_score", "range_52w", "resistance")
+_REJECT_CACHE: dict = {}   # symbol -> (monotonic ts, ist date str, result dict)
+_REJECT_CACHE_MAX = 3000
+
+
+def clear_reject_cache() -> None:
+    _REJECT_CACHE.clear()
+
+
+def _reject_ttl_for(kind) -> float:
+    if kind in _REJECT_STABLE_KINDS:
+        return REJECT_CACHE_STABLE_S
+    if kind in _REJECT_PRICE_KINDS:
+        return REJECT_CACHE_PRICE_S
+    return 0.0
+
+
+def _reject_cache_put(symbol: str, result) -> None:
+    """Remember a definite rejection. Anything else (a pass, a data gap, no kind) is ignored. Never raises."""
+    try:
+        if not isinstance(result, dict) or not result.get("reject_reason"):
+            return
+        if result.get("data_starved") or result.get("data_incomplete") or result.get("from_reject_cache"):
+            return
+        if _reject_ttl_for(result.get("reject_kind")) <= 0:
+            return
+        if len(_REJECT_CACHE) >= _REJECT_CACHE_MAX:
+            _REJECT_CACHE.clear()
+        from tz_utils import ist_today_str
+        _REJECT_CACHE[symbol] = (time.monotonic(), ist_today_str(), dict(result))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reject_cache_get(symbol: str):
+    """The cached rejection for this symbol (a copy tagged from_reject_cache) while it is still valid, else None."""
+    try:
+        ent = _REJECT_CACHE.get(symbol)
+        if not ent:
+            return None
+        ts, day, result = ent
+        age = time.monotonic() - ts
+        ttl = _reject_ttl_for(result.get("reject_kind"))
+        from tz_utils import ist_today_str
+        if ttl <= 0 or age > ttl or day != ist_today_str():
+            _REJECT_CACHE.pop(symbol, None)
+            return None
+        if result.get("reject_kind") == "atr":
+            cached_atr = result.get("atr_pct")
+            if cached_atr is None or cached_atr <= _adaptive_max_atr_pct:
+                _REJECT_CACHE.pop(symbol, None)     # the adaptive cap rose past it: judge again
+                return None
+        out = dict(result)
+        out["from_reject_cache"] = True
+        out["reject_cache_age_s"] = round(age)
+        return out
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _fetch_history(
@@ -1180,6 +1261,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                 "very wide bid-ask spreads, and illiquid exits. Skip."
             ),
             "tf_returns": tf_returns, "bullish_count": 0, "atr_pct": None,
+            "reject_kind": "price_floor",
         }
 
     # ── Check 2: 6-month downtrend block ─────────────────────────────────────
@@ -1196,6 +1278,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                 f"{ret_6m:.1f}% has no relative strength to trade off."
             ),
             "tf_returns": tf_returns, "bullish_count": 0, "atr_pct": None,
+            "reject_kind": "downtrend_6m",
         }
 
     # ── Check 3: Weighted multi-timeframe alignment (§10) ───────────────────────
@@ -1222,6 +1305,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                 "1-day down-weighted (0.5x) — single-day pop is mean-reversion risk."
             ),
             "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
+            "reject_kind": "bullish_score",
         }
 
     # ── Check 4: 52-week range position (overextension) ──────────────────────
@@ -1243,6 +1327,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                             "invites profit-booking from existing holders. Poor R:R."
                         ),
                         "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
+                        "reject_kind": "range_52w",
                     }
 
     # ── Check 5: ATR volatility cap ───────────────────────────────────────────
@@ -1271,6 +1356,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                         "means the stock has broken structure — not worth the risk."
                     ),
                     "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": atr_pct,
+                    "reject_kind": "atr",
                 }
 
     # ── Check 6: Volume confirmation ──────────────────────────────────────────
@@ -1284,6 +1370,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                     "there is no institutional participation confirming this signal."
                 ),
                 "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": atr_pct,
+                "reject_kind": "volume",
             }
 
         # ── Check 7: Not near recent resistance ───────────────────────────────
@@ -1295,6 +1382,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
                     "resistance gives poor R:R. Wait for a breakout or pullback."
                 ),
                 "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": atr_pct,
+                "reject_kind": "resistance",
             }
 
     # All checks passed
@@ -1856,7 +1944,23 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
         # it shares the same per-symbol _fetch_quote() call inside
         # _multi_tf_analysis(), so the same rate-limiter contention applies
         # whenever those sources return a larger batch.
-        await _prefetch_quotes_bulk(client, [r["symbol"] for r in rows])
+        # group227: symbols rejected for a stable reason in a recent cycle are answered from the rejection cache -
+        # no quote prefetch, no 7 /history calls, no market-cap call for them (see _reject_cache_get).
+        cached_rejects: dict[str, dict] = {}
+        for r in rows:
+            _cr = _reject_cache_get(r["symbol"])
+            if _cr is not None:
+                cached_rejects[r["symbol"]] = _cr
+        live_rows = [r for r in rows if r["symbol"] not in cached_rejects]
+        if cached_rejects:
+            logger.info(
+                "candidate_engine: %d of %d symbol(s) answered from the rejection cache, no history/quote calls "
+                "(mode=%s): %s%s",
+                len(cached_rejects), len(rows), mode, ", ".join(list(cached_rejects)[:10]),
+                ", ..." if len(cached_rejects) > 10 else "",
+            )
+
+        await _prefetch_quotes_bulk(client, [r["symbol"] for r in live_rows])
 
         sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
 
@@ -1866,7 +1970,7 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
 
         tf_tasks = {
             r["symbol"]: asyncio.create_task(_limited_mtf(r["symbol"]))
-            for r in rows
+            for r in live_rows
         }
         # 2026-09-11 gap-closure addition: run the market-cap fetch
         # concurrently alongside the MTF tasks above (same semaphore, same
@@ -1878,14 +1982,14 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
 
         mcap_tasks = {
             r["symbol"]: asyncio.create_task(_limited_mcap(r["symbol"]))
-            for r in rows
+            for r in live_rows
         }
         tf_results = await asyncio.gather(*tf_tasks.values(), return_exceptions=True)
         mcap_results = await asyncio.gather(*mcap_tasks.values(), return_exceptions=True)
         mcap_map: dict[str, float | None] = {}
         for sym, result in zip(mcap_tasks.keys(), mcap_results):
             mcap_map[sym] = None if isinstance(result, Exception) else result
-        tf_map: dict[str, dict] = {}
+        tf_map: dict[str, dict] = dict(cached_rejects)
         data_starved_count = 0
         for sym, result in zip(tf_tasks.keys(), tf_results):
             if isinstance(result, Exception):
@@ -1894,6 +1998,7 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
                 data_starved_count += 1
             else:
                 tf_map[sym] = result
+                _reject_cache_put(sym, result)
                 if result.get("data_starved"):
                     data_starved_count += 1
         # Diagnostic: if almost every symbol came back with zero data (quote AND
@@ -1955,9 +2060,16 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
         reject = tf.get("reject_reason")
 
         if reject:
-            logger.info(
-                "CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _reject_log_text(reject)
-            )
+            if tf.get("from_reject_cache"):
+                # group227: a repeat of a rejection already logged in full - keep it out of the INFO stream
+                logger.debug(
+                    "CANDIDATE REJECTED %s (mode=%s) | cached %ss ago: %s",
+                    sym, mode, tf.get("reject_cache_age_s"), _reject_log_text(reject),
+                )
+            else:
+                logger.info(
+                    "CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _reject_log_text(reject)
+                )
             skipped += 1
             continue
 

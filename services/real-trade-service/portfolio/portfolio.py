@@ -816,6 +816,16 @@ def holdings_sync_reconcile(db: Session) -> dict:
     # failed SELL attempt) — this makes it proactive, on every reconcile,
     # so a stale qty is fixed before it ever causes an oversell rejection.
     broker_qty_by_symbol: dict[str, int] = {}
+    # GROUP 232 (COHANCE phantom OPEN): settled-holdings qty kept separately,
+    # plus the SIGNED net qty and sell average from Dhan's live positions
+    # rows. A holding sold today (outside this app, or a sell this service
+    # never booked) stays listed in get_holdings() until settlement while
+    # get_positions() already shows it as netQty<0 ("Dhan shows -2"). The
+    # presence/qty check alone saw "holdings still has it" and left the
+    # position OPEN forever; the net is used below to subtract those sells.
+    holdings_qty_by_symbol: dict[str, int] = {}
+    pos_net_by_symbol: dict[str, int] = {}
+    pos_sell_avg_by_symbol: dict[str, float] = {}
     for row in holdings or []:
         if not isinstance(row, dict):
             continue
@@ -824,6 +834,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
         if sym and qty > 0:
             key = str(sym).upper().strip()
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
+            holdings_qty_by_symbol[key] = max(holdings_qty_by_symbol.get(key, 0), qty)
     for row in live_positions or []:
         if not isinstance(row, dict):
             continue
@@ -840,6 +851,17 @@ def holdings_sync_reconcile(db: Session) -> dict:
         if sym and qty > 0:
             key = str(sym).upper().strip()
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
+        if sym:
+            _net_raw = _get(row, "netQty", "net_qty")
+            if _net_raw is not None:
+                try:
+                    _k = str(sym).upper().strip()
+                    pos_net_by_symbol[_k] = pos_net_by_symbol.get(_k, 0) + int(_net_raw)
+                    _sa = _get(row, "sellAvg", "sell_avg")
+                    if _sa is not None and float(_sa) > 0:
+                        pos_sell_avg_by_symbol[_k] = float(_sa)
+                except (TypeError, ValueError):
+                    pass
     broker_symbols: set[str] = set(broker_qty_by_symbol.keys())
 
     now = datetime.now(timezone.utc)
@@ -905,7 +927,27 @@ def holdings_sync_reconcile(db: Session) -> dict:
             opened_at = opened_at.replace(tzinfo=timezone.utc)
         too_recent = opened_at is not None and opened_at > guard_cutoff
 
-        if symbol in broker_symbols:
+        # GROUP 232: subtract today's sells from a still-listed holding.
+        # Only applied when the holdings feed has NOT already dropped below
+        # our own qty (holdings >= qty_open): that is exactly the settlement-
+        # lag case. If holdings already shows fewer shares than we hold, the
+        # existing cap-down below handles it and netting again would count
+        # the same sale twice.
+        broker_have = broker_qty_by_symbol.get(symbol, 0)
+        externally_sold = 0
+        _net = pos_net_by_symbol.get(symbol)
+        _h_qty = holdings_qty_by_symbol.get(symbol, 0)
+        _our_qty = position.qty_open or 0
+        if (
+            _net is not None and _net < 0 and _our_qty > 0
+            and _h_qty >= _our_qty and broker_have >= _our_qty
+        ):
+            _still_held = max(0, _h_qty + _net)
+            if _still_held < broker_have:
+                externally_sold = broker_have - _still_held
+                broker_have = _still_held
+
+        if broker_have > 0:
             # Broker still holds SOME of this symbol — not a ghost — but
             # it may hold LESS than qty_open (partial external sell).
             # Cap qty_open down to match; never raise it (a broker qty
@@ -913,7 +955,6 @@ def holdings_sync_reconcile(db: Session) -> dict:
             # settled into the feed yet, nothing to fix here).
             if too_recent:
                 continue  # too recent — broker feed may just not have caught up yet
-            broker_have = broker_qty_by_symbol.get(symbol, 0)
             qty_open = position.qty_open or 0
             if broker_have >= qty_open or qty_open <= 0:
                 continue
@@ -951,19 +992,31 @@ def holdings_sync_reconcile(db: Session) -> dict:
         position.qty_open = 0
         position.status = "CLOSED"
         position.closed_at = now
+        if externally_sold:
+            _sa = pos_sell_avg_by_symbol.get(symbol)
+            _why = (
+                f"still listed in Dhan holdings but live positions show net "
+                f"{pos_net_by_symbol.get(symbol)} (sold at the broker"
+                + (f", sell avg ₹{_sa:,.2f}" if _sa else "")
+                + ", no exit fill booked here)"
+            )
+        else:
+            _why = (
+                f"not found in Dhan holdings or live positions (checked "
+                f"{len(broker_symbols)} broker symbols)"
+            )
         db.add(models.TradePositionEvent(
             position_id=position.id, event_type="GHOST_CLOSED",
             detail=(
-                f"holdings_sync_reconcile: {symbol} not found in Dhan holdings or live "
-                f"positions (checked {len(broker_symbols)} broker symbols) — force-closed "
+                f"holdings_sync_reconcile: {symbol} {_why} — force-closed "
                 f"{qty_open} shares as a ghost/never-actually-held position, cash refunded "
                 f"₹{refund:,.2f} at avg entry ₹{position.avg_entry_price}"
             ),
         ))
         logger.warning(
             "holdings_sync_reconcile: force-closed ghost position %s (id=%d) — "
-            "%d shares not found at broker, refunding ₹%.2f",
-            symbol, position.id, qty_open, refund,
+            "%d shares: %s, refunding ₹%.2f",
+            symbol, position.id, qty_open, _why, refund,
         )
         if account is None:
             account = get_account(db, "REAL", for_update=True)

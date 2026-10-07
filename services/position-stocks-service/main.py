@@ -364,6 +364,10 @@ async def _fast_reconcile_loop() -> None:
                 _swept = await asyncio.to_thread(shared_symbol_lock.sweep_stale, db)
                 if _swept:
                     logger.warning("position-stocks: released %d stale symbol lock(s): %s", len(_swept), _swept)
+            # GROUP 232: keep today's closed cards on the real fills (entry from the order book when the
+            # super-order row has none). Throttled inside, idempotent, never raises, runs after the close too.
+            with factory() as db:
+                await asyncio.to_thread(reconcile.auto_repair_closed_entry_prices, db)
             if not is_market_open_ist():
                 continue
             with factory() as db:

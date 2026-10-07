@@ -824,6 +824,100 @@ def _entry_fill_from_row(row: dict) -> Optional[float]:
     return None
 
 
+_ORDER_LIST_TTL_S = 20.0
+_order_list_cache: tuple[float, list] = (0.0, [])
+
+
+def _cached_order_list(db: Session) -> list:
+    """Today's plain order book, shared for ~20 s so a pass that needs it for several positions
+    makes one Dhan call. A failed fetch returns [] and is not cached."""
+    global _order_list_cache
+    ts, rows = _order_list_cache
+    now = time.monotonic()
+    if rows and now - ts < _ORDER_LIST_TTL_S:
+        return rows
+    try:
+        rows = dhan_client.get_order_list(db) or []
+    except Exception as e:
+        logger.warning("reconcile: entry-fill lookup — failed to fetch order list: %s", e)
+        return []
+    _order_list_cache = (now, rows)
+    return rows
+
+
+def _entry_dead_on_row(row: dict) -> bool:
+    """True when the super-order row says the ENTRY never filled (parent or ENTRY_LEG rejected /
+    cancelled): there is no BUY fill to look for, so no order-book lookup is made."""
+    if str((row or {}).get("orderStatus", "")).upper() in _DEAD_ENTRY_STATUSES:
+        return True
+    for leg in (row or {}).get("legDetails") or []:
+        if str(leg.get("legName", "")).upper() == "ENTRY_LEG" and \
+                str(leg.get("orderStatus", "")).upper() in _DEAD_ENTRY_STATUSES:
+            return True
+    return False
+
+
+def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
+                               orders: Optional[list] = None) -> Optional[float]:
+    """GROUP 232. Real ENTRY fill from today's plain order book, used when the super-order row carries
+    no usable entry price (`_entry_fill_from_row` returned None). Card P&L for THELEELA / MASTERTR /
+    RPTECH / RPEL stayed on the signal price although the BUY fills (593.30, 87.22, ...) were in
+    Dhan's order book.
+
+    Same conservative rule as `_exit_fill_from_orderbook`: a BUY on this position's own security id,
+    TRADED, for exactly this position's quantity, with a real averageTradedPrice within 5% of the
+    stored entry. One match is taken. With several (a re-entry of the same symbol and size the same
+    day) the one whose createTime is closest to pos.opened_at is taken, only when that is within
+    10 minutes and clearly closer than the next one; otherwise None and the stored price stays.
+    Every use is logged. Today only (Dhan's order book is today-only)."""
+    if not pos.dhan_security_id or not pos.entry_price:
+        return None
+    if orders is None:
+        orders = _cached_order_list(db)
+    if not orders:
+        return None
+    found: list[tuple[float, Optional[float]]] = []   # (avg price, seconds from opened_at)
+    opened = as_aware(pos.opened_at) if pos.opened_at else None
+    for r in orders:
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "BUY":
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
+            continue
+        if str(r.get("orderStatus") or r.get("order_status") or "").upper() not in _FILLED_STATUSES:
+            continue
+        try:
+            qty = int(float(r.get("filledQty") or r.get("tradedQuantity") or r.get("quantity") or 0))
+        except (TypeError, ValueError):
+            continue
+        if qty != int(pos.quantity):
+            continue
+        avg = _num(r.get("averageTradedPrice") or r.get("average_traded_price"))
+        if not avg or abs(avg - pos.entry_price) / pos.entry_price > 0.05:
+            continue
+        gap = None
+        raw_t = r.get("createTime") or r.get("create_time") or r.get("exchangeTime")
+        if raw_t and opened is not None:
+            try:
+                t = datetime.fromisoformat(str(raw_t).replace("Z", "+00:00").replace(" ", "T")[:19])
+                t = t.replace(tzinfo=IST) if t.tzinfo is None else t
+                gap = abs((t - opened).total_seconds())
+            except (TypeError, ValueError):
+                gap = None
+        found.append((avg, gap))
+    chosen: Optional[float] = None
+    if len(found) == 1:
+        chosen = found[0][0]
+    elif len(found) > 1:
+        timed = sorted((f for f in found if f[1] is not None), key=lambda f: f[1])
+        if timed and timed[0][1] <= 600 and (len(timed) == 1 or timed[1][1] - timed[0][1] > 60):
+            chosen = timed[0][0]
+    if chosen is not None:
+        logger.info("reconcile: %s (id=%d) entry fill ₹%.2f taken from today's order book "
+                    "(super-order row had no entry price; stored ₹%.2f)",
+                    pos.symbol, pos.id, chosen, pos.entry_price)
+    return chosen
+
+
 def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
     """Replace the scan-time LTP in pos.entry_price (and capital_risked, the
     ledger, the live target/stop legs) with Dhan's real entry fill. Idempotent.
@@ -832,6 +926,9 @@ def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
     if pos.status not in ("OPEN",) + _FLAT_SELL_PENDING_STATUSES:
         return False
     real_entry_price = _entry_fill_from_row(row)
+    if not real_entry_price and pos.entry_price and not _entry_dead_on_row(row):
+        # GROUP 232: the super-order row had no entry price; take the BUY fill from the order book.
+        real_entry_price = _entry_fill_from_orderbook(db, pos)
     if not real_entry_price or not pos.entry_price or abs(real_entry_price - pos.entry_price) <= 1e-6:
         return False
 
@@ -1006,12 +1103,20 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
             out["skipped"].append({**label, "reason": "has overnight partial fills"})
             continue
         row = by_id.get(str(pos.dhan_super_order_id))
-        if row is None:
-            out["skipped"].append({**label, "reason": "super order not in today's list"})
-            continue
-        real = _entry_fill_from_row(row)
+        real = _entry_fill_from_row(row) if row is not None else None
+        if not real and not (row is not None and _entry_dead_on_row(row)):
+            # GROUP 232: no usable entry price on the super-order row (or no row): take the BUY fill
+            # from today's order book (exact-quantity, within 5%, one clear match).
+            if order_book is None:
+                try:
+                    order_book = dhan_client.get_order_list(db) or []
+                except Exception as e:
+                    order_book = []
+                    out["exit_error"] = f"order list fetch failed: {e}"
+            real = _entry_fill_from_orderbook(db, pos, orders=order_book) if order_book else None
         if not real:
-            out["skipped"].append({**label, "reason": "no real entry fill on the row"})
+            out["skipped"].append({**label, "reason": ("super order not in today's list"
+                                                       if row is None else "no real entry fill on the row")})
             continue
         drift = abs(real - pos.entry_price) / pos.entry_price * 100.0 if pos.entry_price else 0.0
         if pos.entry_price and drift > _REPAIR_MAX_DRIFT_PCT and abs(real - pos.entry_price) > 1e-6:
@@ -1067,6 +1172,41 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
     except Exception as e:  # reporting only
         logger.warning("reconcile: repair loss-limit report failed: %s", e)
     return out
+
+
+_last_auto_repair_ts = 0.0
+
+
+def auto_repair_closed_entry_prices(db: Session) -> int:
+    """GROUP 232. Runs `repair_closed_entry_prices(apply=True)` on a throttle so today's closed cards
+    move from the signal price to the real fill without anyone calling POST /reconcile/repair-closed.
+    The repair is idempotent (a corrected row matches its fill and is skipped), skips overnight
+    partials and any fill more than 25% from the stored entry, and moves the ledger by exactly the P&L
+    difference. `ENTRY_REPAIR_AUTO_INTERVAL_S` (default 300, 0 = off). Returns the number of rows
+    changed. Never raises."""
+    global _last_auto_repair_ts
+    try:
+        interval = float(getattr(config, "ENTRY_REPAIR_AUTO_INTERVAL_S", 300.0) or 0.0)
+        if interval <= 0:
+            return 0
+        now = time.monotonic()
+        if _last_auto_repair_ts and now - _last_auto_repair_ts < interval:
+            return 0
+        _last_auto_repair_ts = now
+        res = repair_closed_entry_prices(db, apply=True)
+        n = len(res.get("changes") or [])
+        if n:
+            logger.warning("reconcile: auto-repaired %d closed row(s) to real fills (P&L delta ₹%.2f): %s",
+                           n, res.get("total_pnl_delta", 0.0),
+                           ", ".join(str(c.get("symbol")) for c in res["changes"]))
+        return n
+    except Exception as e:  # never break the reconcile loop
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning("reconcile: auto-repair of closed entry prices failed: %s", e)
+        return 0
 
 
 def rearm_cleared_placeholder_exits(db: Session, *, apply: bool = False, days: int = 3) -> dict:

@@ -661,6 +661,9 @@ ENTRY_MARGIN_PAUSE_MINUTES = _get_int("ENTRY_MARGIN_PAUSE_MINUTES", 5)
 # Group 210 (item 14): periodic sweep of symbol locks that no live position backs (0 = off). A claim younger
 # than the min age is never swept (its position row may not exist yet).
 SYMBOL_LOCK_SWEEP_INTERVAL_S = _get_float("SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0)
+# GROUP 232: how often (seconds) today's closed rows are re-checked against Dhan's real entry/exit
+# fills and corrected (orders/reconcile.py::auto_repair_closed_entry_prices). 0 = off.
+ENTRY_REPAIR_AUTO_INTERVAL_S = _get_float("ENTRY_REPAIR_AUTO_INTERVAL_S", 300.0)
 SYMBOL_LOCK_SWEEP_MIN_AGE_S = _get_float("SYMBOL_LOCK_SWEEP_MIN_AGE_S", 600.0)
 ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINUTES", 5)
 

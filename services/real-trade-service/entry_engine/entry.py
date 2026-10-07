@@ -41,6 +41,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
+from entry_engine import opening_guard
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -472,6 +473,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
     candidates = _order_candidates_for_capital(candidates)
+
+    # group 220 (review item 6): no automatic entries in the first minutes after the open. Returns BEFORE the loop
+    # below, so no candidate is consumed or rejected: they stay queued and are evaluated normally once the guard lifts.
+    # See entry_engine/opening_guard.py (off with OPENING_ENTRY_GUARD_ENABLED=false).
+    _opening_reason = opening_guard.reason(mode)
+    if _opening_reason:
+        if opening_guard.should_log(mode):
+            logger.info("entry_engine: %s %s (%d candidate(s) left queued)", mode, _opening_reason, len(candidates))
+        return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
+                "entry_details": [], "opening_guard": _opening_reason}
 
     # Fetch adaptive regime once per cycle (not per candidate)
     regime_ok    = True

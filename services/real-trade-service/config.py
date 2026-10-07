@@ -358,6 +358,26 @@ AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").
 # time-of-day vars remain here.
 PREPICK_TIME_IST = os.getenv("PREPICK_TIME_IST", "09:00")
 ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
+
+# ── Opening entry guard (2026-10-07, group 220) ───────────────────────────────
+# Review item 6. In the September trade file the five entries opened between 09:19 and 09:24 IST (3 trading days) all
+# lost (-Rs 274 together) while the other 17 made +Rs 301, nearly all of it one trade. Tiny and old, so a hypothesis, but
+# the first minutes after the 09:15 open are conventionally the most volatile (auction-driven prices, wide spreads) and
+# nothing in this service stopped an automatic entry then: two of those five fired at 09:19, BEFORE ENTER_AT_OPEN's
+# 09:20, so the regular auto-pilot cycle enters at the open too. entry_engine/opening_guard.py makes evaluate_mode()
+# leave candidates queued (not consumed, not rejected) until OPENING_ENTRY_NOT_BEFORE_IST while the market is open; they
+# are evaluated normally, with live ticks, once the guard lifts. The ENTER_AT_OPEN schedule moves to the guard time when
+# the guard is later than ENTER_AT_OPEN_TIME_IST (otherwise its once-a-day run would fire into the guard and be wasted).
+#   OPENING_ENTRY_GUARD_ENABLED   false turns the guard off
+#   OPENING_ENTRY_NOT_BEFORE_IST  'HH:MM' IST, default 09:30 (blank/bad value falls back to 09:30)
+#   OPENING_ENTRY_GUARD_MODES     comma list of modes it applies to, default REAL,DEMO (set REAL to keep DEMO as a control)
+OPENING_ENTRY_GUARD_ENABLED = ((os.getenv("OPENING_ENTRY_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
+OPENING_ENTRY_NOT_BEFORE_IST = (os.getenv("OPENING_ENTRY_NOT_BEFORE_IST") or "").strip() or "09:30"
+OPENING_ENTRY_GUARD_MODES = tuple(
+    m.strip().upper()
+    for m in ((os.getenv("OPENING_ENTRY_GUARD_MODES") or "").strip() or "REAL,DEMO").split(",")
+    if m.strip()
+)
 # 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
 # reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
 # found that SELLs placed close to Dhan's intraday cutoff generated a large

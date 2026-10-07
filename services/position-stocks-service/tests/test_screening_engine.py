@@ -54,8 +54,11 @@ def feed(monkeypatch):
     monkeypatch.setattr(engine, "_WINDOW_THRESHOLDS", {1: 0.7, 5: 1.0, 15: 1.5, 60: 2.5})
     monkeypatch.setattr(engine, "_volume_accum", defaultdict(int))
     monkeypatch.setattr(engine, "_tick_timestamps", defaultdict(list))
+    monkeypatch.setattr(engine, "_vol_hist", defaultdict(lambda: engine.deque(maxlen=engine._VOL_HIST_MAX)))
+    # group 219: this file pins the LEGACY score formula (the SCAN_RANKING_V2_ENABLED=0 rollback path);
+    # the v2 formula is covered in tests/test_group219_ranking_v2.py.
     for k, v in dict(MIN_AVG_VOLUME=50_000, MAX_SPREAD_PCT=0.5, MIN_PREFERRED_THRESHOLD_RELAX_PCT=15.0,
-                     DISABLED_SCAN_WINDOWS=frozenset()).items():
+                     DISABLED_SCAN_WINDOWS=frozenset(), SCAN_RANKING_V2_ENABLED=False).items():
         monkeypatch.setattr(config, k, v)
     return f
 

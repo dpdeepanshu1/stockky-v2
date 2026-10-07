@@ -23,6 +23,12 @@ Gates applied per candidate:
   6. Range-position multiplier on composite_score: demotes candidates
      already near their day-high (less upside room).
 
+GROUP 219 (2026-10-07): the formula below is the LEGACY one (SCAN_RANKING_V2_ENABLED=0). v2 scores
+  pct_eff * liquidity * volume_pace * range_mult * vwap_mult * consistency_mult * window_mult
+  pct_eff = min(pct_change, SCAN_PCT_CAP_MULT x the window threshold); liquidity = min(day_volume / (3 x floor), 1);
+  volume_pace = this window's volume per minute vs the symbol's pace earlier today, clamped 0.5-2.0, 1.0 if unknown.
+  See config.py's "Scalp ranking v2" block and docs/GROUP219_SCALP_RANKING_V2.md.
+
 Composite score formula:
   score = pct_change * volume_weight * range_mult * consistency_mult
   volume_weight   = min(real_day_volume / MIN_AVG_VOLUME, 3.0)  — cap at 3×
@@ -61,12 +67,15 @@ PROBLEMS FOUND IN DEEP AUDIT:
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+import threading
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 import config
 from feed import ws_client
+from tz_utils import IST
 
 logger = logging.getLogger("position-stocks-screener")
 
@@ -124,6 +133,70 @@ def _update_volume(symbol: str, ts: float) -> None:
     while tl and tl[0] < cutoff:
         tl.pop(0)
     _volume_accum[symbol] = len(tl)
+
+
+# group 219: cumulative day volume snapshots, one per SCAN_RVOL_SAMPLE_S per symbol, ~65 minutes deep. Fed from
+# on_tick_hook, read by _relative_volume() for the v2 volume-pace weight.
+_VOL_HIST_MAX = 800
+_vol_hist: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_VOL_HIST_MAX))
+_vol_lock = threading.Lock()
+
+
+def _record_volume(symbol: str, volume, ts: float) -> None:
+    """Keep a (ts, cumulative day volume) snapshot at most every SCAN_RVOL_SAMPLE_S. Never raises."""
+    try:
+        if not volume or volume <= 0:
+            return
+        with _vol_lock:
+            dq = _vol_hist[symbol]
+            if dq and ts - dq[-1][0] < config.SCAN_RVOL_SAMPLE_S:
+                return
+            dq.append((float(ts), float(volume)))
+    except Exception as e:  # a bookkeeping problem must never reach the tick path
+        logger.debug("record_volume %s: %s", symbol, e)
+
+
+def _session_open_ts(ts: float) -> float:
+    """09:15 IST on the IST date of `ts`, as an epoch timestamp."""
+    d = datetime.fromtimestamp(ts, IST)
+    return d.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
+
+
+def _relative_volume(symbol: str, win_minutes: int) -> Optional[float]:
+    """Volume PACE: this window's volume per minute divided by the symbol's own per-minute pace earlier in the session
+    (volume before the window / minutes from 09:15 to the window start). >1 = trading faster than it did so far today.
+    None when it cannot be judged: no snapshot old enough to start the window, a volume reset, or fewer than
+    SCAN_RVOL_MIN_BASELINE_MIN minutes of session before the window (the opening burst makes the baseline useless).
+    It is a within-day pace, not a comparison with previous days' average volume (this service has no such history)."""
+    try:
+        with _vol_lock:
+            snaps = list(_vol_hist.get(symbol, ()))
+        if len(snaps) < 2:
+            return None
+        now_ts, cum_now = snaps[-1]
+        start_ts = now_ts - win_minutes * 60.0
+        ref = None
+        for ts, vol in reversed(snaps):
+            if ts <= start_ts:
+                ref = (ts, vol)
+                break
+        if ref is None:
+            return None
+        ref_ts, cum_ref = ref
+        recent = cum_now - cum_ref
+        if recent < 0 or cum_ref <= 0:
+            return None
+        span_min = (now_ts - ref_ts) / 60.0
+        base_min = (ref_ts - _session_open_ts(ref_ts)) / 60.0
+        if span_min <= 0 or base_min < config.SCAN_RVOL_MIN_BASELINE_MIN:
+            return None
+        baseline_rate = cum_ref / base_min
+        if baseline_rate <= 0:
+            return None
+        return (recent / span_min) / baseline_rate
+    except Exception as e:
+        logger.debug("relative_volume %s: %s", symbol, e)
+        return None
 
 
 def _spread_pct(symbol: str, ltp: float) -> Optional[float]:
@@ -202,6 +275,7 @@ class Candidate:
     current_ltp: float
     tick_activity: int           # tick count in last 5m (volume proxy)
     composite_score: float = 0.0
+    rvol: Optional[float] = None  # group 219: volume pace in this window (None = unknown), for display only
     window_label: str = field(init=False)
 
     def __post_init__(self):
@@ -340,14 +414,36 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
             # ── Window conviction bonus ────────────────────────────────────
             win_mult = _WINDOW_CONVICTION_MULT.get(win_minutes, 1.0)
 
-            score = (
-                pct
-                * volume_weight
-                * _range_mult
-                * _vwap_mult
-                * _cons_mult
-                * win_mult
-            )
+            rvol = None
+            if config.SCAN_RANKING_V2_ENABLED:
+                # group 219: cap how much the size of the move counts, replace the saturated volume weight with
+                # liquidity x volume pace. See the "Scalp ranking v2" block in config.py.
+                _base_thr = _WINDOW_THRESHOLDS.get(win_minutes, threshold)
+                pct_eff = pct
+                if config.SCAN_PCT_CAP_MULT > 0 and _base_thr > 0:
+                    pct_eff = min(pct, _base_thr * config.SCAN_PCT_CAP_MULT)
+                liquidity = volume_weight / vol_cap if vol_cap > 0 else 1.0
+                rvol = _relative_volume(symbol, win_minutes)
+                pace_w = 1.0 if rvol is None else max(
+                    config.SCAN_RVOL_MIN_WEIGHT, min(rvol, config.SCAN_RVOL_MAX_WEIGHT))
+                score = (
+                    pct_eff
+                    * liquidity
+                    * pace_w
+                    * _range_mult
+                    * _vwap_mult
+                    * _cons_mult
+                    * win_mult
+                )
+            else:
+                score = (
+                    pct
+                    * volume_weight
+                    * _range_mult
+                    * _vwap_mult
+                    * _cons_mult
+                    * win_mult
+                )
 
             if score <= 0:
                 continue
@@ -359,6 +455,7 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
                 current_ltp=current_ltp,
                 tick_activity=tick_count,
                 composite_score=round(score, 4),
+                rvol=(round(rvol, 2) if rvol is not None else None),
             ))
 
     candidates.sort(key=lambda c: c.composite_score, reverse=True)
@@ -368,3 +465,4 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
 def on_tick_hook(symbol: str, ltp: float, volume: int, ts: float) -> None:
     """Called by ws_client on every incoming tick. Updates volume proxy."""
     _update_volume(symbol, ts)
+    _record_volume(symbol, volume, ts)

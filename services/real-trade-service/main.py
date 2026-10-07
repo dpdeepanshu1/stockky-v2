@@ -27,6 +27,7 @@ from auth import dhan_credentials
 from audit.logger import log_action
 from db import get_db, init_schema
 from tz_utils import as_aware, iso_utc, is_market_open_ist, ist_today_str
+from entry_engine import opening_guard as _opening_guard
 from portfolio import broker_view
 from portfolio.portfolio import (
     close_position as _pf_close_position,
@@ -467,6 +468,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "enter_at_open": {
                 "enabled": bool(getattr(gate, "enter_at_open_enabled", False)),
                 "time_ist": config.ENTER_AT_OPEN_TIME_IST,
+                "effective_time_ist": _opening_guard.enter_at_open_time(mode).strftime("%H:%M"),   # group 220
                 "last_run": getattr(gate, "enter_at_open_last_run", None),
             },
             "eod_squareoff": {

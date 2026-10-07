@@ -501,6 +501,27 @@ BREAKEVEN_STOP_BUFFER_TICKS = int(_get_float("BREAKEVEN_STOP_BUFFER_TICKS", 2))
 # ScalpGateState.breakeven_stop_enabled toggle, OFF by default.)
 BREAKEVEN_TRIGGER_MAX_PCT = _get_float("BREAKEVEN_TRIGGER_MAX_PCT", 1.0)
 
+# ── Scalp ranking v2 (2026-10-07, group 219) ─────────────────────────────────
+# The composite score was pct_change x volume_weight x ... . volume_weight = min(day_volume / MIN_AVG_VOLUME, 3), so
+# once a stock passed 3x the floor (150k shares at the 50k default, true for almost every symbol soon after the open)
+# every candidate got the same weight, and the score was just "biggest mover first", which is the move most likely to
+# be over. v2 (screening/engine.py): (1) the move's contribution is capped at SCAN_PCT_CAP_MULT x the window's own
+# threshold, so size alone stops winning and the quality terms (range position, VWAP extension, consistency, volume
+# pace) decide among the strong movers; (2) the saturated volume weight is replaced by a mild liquidity factor
+# (day volume vs 3x the floor, max 1.0) times a volume-PACE weight: this window's volume per minute against the
+# symbol's own pace earlier in the session. Unknown pace (early session, no history after a restart) is neutral 1.0.
+# Candidate.pct_change is still the real move; only the score changes. SCAN_RANKING_V2_ENABLED=0 restores the old formula.
+#   SCAN_PCT_CAP_MULT              0 disables the cap
+#   SCAN_RVOL_MIN_WEIGHT / MAX     clamp for the volume-pace weight
+#   SCAN_RVOL_MIN_BASELINE_MIN     minutes of session needed before a window starts for its baseline to be trusted
+#   SCAN_RVOL_SAMPLE_S             spacing of the cumulative-volume snapshots kept per symbol
+SCAN_RANKING_V2_ENABLED = _get_bool("SCAN_RANKING_V2_ENABLED", True)
+SCAN_PCT_CAP_MULT = _get_float("SCAN_PCT_CAP_MULT", 3.0)
+SCAN_RVOL_MIN_WEIGHT = _get_float("SCAN_RVOL_MIN_WEIGHT", 0.5)
+SCAN_RVOL_MAX_WEIGHT = _get_float("SCAN_RVOL_MAX_WEIGHT", 2.0)
+SCAN_RVOL_MIN_BASELINE_MIN = _get_float("SCAN_RVOL_MIN_BASELINE_MIN", 10.0)
+SCAN_RVOL_SAMPLE_S = _get_float("SCAN_RVOL_SAMPLE_S", 5.0)
+
 # ── Entry cost gate (2026-10-07, group 218) ──────────────────────────────────
 # real-trade-service has had an edge-vs-transaction-cost gate since 2026-09-18 (its cost_model.py, Gate 5.6); this
 # service had none, so a scalp whose target barely covered its own costs was bought anyway. orders/cost_gate.py is a

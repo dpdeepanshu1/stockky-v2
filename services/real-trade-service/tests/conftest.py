@@ -19,3 +19,13 @@ def _reset_volume_shock_history_state():
     _clear()
     yield
     _clear()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _opening_entry_guard_off_by_default(monkeypatch):
+    """group 220: the opening entry guard depends on the wall clock (09:15-09:30 IST). Every pre-existing test predates
+    it and must not flake when the suite happens to run in that window, so it is off unless a test turns it on
+    (tests/test_group220_opening_guard.py does)."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPENING_ENTRY_GUARD_ENABLED", False)
+

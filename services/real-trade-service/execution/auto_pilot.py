@@ -830,6 +830,13 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
         return 0
 
 
+def _enter_at_open_time(mode: str):
+    """ENTER_AT_OPEN trigger time for `mode` (group 220): config.ENTER_AT_OPEN_TIME_IST, or the opening-guard time when
+    the guard is later, so the once-a-day run is not spent while entries are blocked."""
+    from entry_engine import opening_guard
+    return opening_guard.enter_at_open_time(mode)
+
+
 async def _enter_at_open(db, mode: str, gate_armed: bool) -> None:
     """~09:20 just after open: run one full entry cycle so the pre-picked names
     get entered at the early price instead of waiting for the next auto-pilot
@@ -1503,7 +1510,7 @@ async def _schedule_tick_body(mode: str) -> None:
             getattr(gate, "enter_at_open_enabled", False)
             and getattr(gate, "enter_at_open_last_run", None) != today
             and is_market_open_ist()
-            and ist_time_at_or_after(parse_hhmm(config.ENTER_AT_OPEN_TIME_IST, 9, 20))
+            and ist_time_at_or_after(_enter_at_open_time(mode))   # group 220: moves to the opening-guard time when that is later
         ):
             gate.enter_at_open_last_run = today
             db.commit()

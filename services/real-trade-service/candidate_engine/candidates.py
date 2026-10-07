@@ -463,9 +463,62 @@ def clear_history_state() -> None:
     """Forget failure reasons and known-no-history pauses (tests, or an operator hook)."""
     _HIST_REASON.clear()
     _HIST_NONE_UNTIL.clear()
+    _HISTORY_LAST_GOOD.clear()
+    _HISTORY_STALE_USED[0] = 0
+
+
+# group224 (item A3 of the 2026-10-07 open-market log review): at 09:15-09:25 market-data is saturated by the
+# opening sweeps, and /history calls timed out for 25 of 157 volume-shock symbols (DIVISLAB, NESTLEIND, DRREDDY,
+# ETERNAL ...) and 15 main-track symbols, each skipped as "cannot judge" for that cycle. Daily and longer candles
+# barely change within minutes, so when a call fails for a TRANSIENT reason (timeout, 403/429/5xx - never an
+# empty answer or 404/400, which stay "definite") the last good answer for that symbol/period/interval is reused
+# if it is younger than CANDIDATE_HISTORY_STALE_FALLBACK_S (default 1800; 0 = off). Only 1d/1wk/1mo candles are
+# eligible (intraday bars go stale too fast). The failure reason is still recorded as before.
+HISTORY_STALE_FALLBACK_S = float(((os.getenv("CANDIDATE_HISTORY_STALE_FALLBACK_S") or "").strip() or "1800"))
+_HISTORY_STALE_INTERVALS = ("1d", "1wk", "1mo")
+_HISTORY_LAST_GOOD: dict = {}   # (symbol, period, interval) -> (monotonic ts, candles)
+_HISTORY_LAST_GOOD_MAX = 4000
+_HISTORY_STALE_USED = [0]
+
+
+def _history_stale_fallback(symbol: str, period: str, interval: str) -> list:
+    """Last good candles for this key when the last failure was transient and the copy is young enough, else []."""
+    try:
+        if HISTORY_STALE_FALLBACK_S <= 0 or interval not in _HISTORY_STALE_INTERVALS:
+            return []
+        if _HIST_REASON.get(symbol) in _HIST_DEFINITE:
+            return []
+        ent = _HISTORY_LAST_GOOD.get((symbol, period, interval))
+        if not ent or (time.monotonic() - ent[0]) > HISTORY_STALE_FALLBACK_S:
+            return []
+        _HISTORY_STALE_USED[0] += 1
+        return list(ent[1])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def clear_history_stale_state() -> None:
+    _HISTORY_LAST_GOOD.clear()
+    _HISTORY_STALE_USED[0] = 0
 
 
 async def _fetch_history(
+    client: httpx.AsyncClient, symbol: str, period: str, interval: str = "1d"
+) -> list[dict]:
+    got = await _fetch_history_raw(client, symbol, period, interval)
+    try:
+        if got:
+            if interval in _HISTORY_STALE_INTERVALS and HISTORY_STALE_FALLBACK_S > 0:
+                if len(_HISTORY_LAST_GOOD) > _HISTORY_LAST_GOOD_MAX:
+                    _HISTORY_LAST_GOOD.clear()
+                _HISTORY_LAST_GOOD[(symbol, period, interval)] = (time.monotonic(), got)
+            return got
+    except Exception:  # noqa: BLE001
+        return got
+    return _history_stale_fallback(symbol, period, interval)
+
+
+async def _fetch_history_raw(
     client: httpx.AsyncClient, symbol: str, period: str, interval: str = "1d"
 ) -> list[dict]:
     try:
@@ -2070,6 +2123,10 @@ async def _refresh_volume_shock_candidates(
             history_missing, len(vs_tasks), mode,
             ", ".join(f"{k} x{v}" for k, v in sorted(history_reasons.items(), key=lambda kv: -kv[1])),
         )
+    if _HISTORY_STALE_USED[0]:
+        logger.info("history: %d call(s) answered from the last good daily candles after a transient market-data "
+                    "failure (CANDIDATE_HISTORY_STALE_FALLBACK_S=%.0f)", _HISTORY_STALE_USED[0], HISTORY_STALE_FALLBACK_S)
+        _HISTORY_STALE_USED[0] = 0
     if history_known_none:
         logger.info("volume_shock: %d of %d symbol(s) skipped without a request - no daily history on record "
                     "(retried after %.0f h; CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S)",

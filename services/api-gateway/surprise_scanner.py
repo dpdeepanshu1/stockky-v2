@@ -372,6 +372,45 @@ def _session_progress_ist() -> float:
         return 0.4
 
 
+# group223: the 08:30-09:15 pre-open window was left out of the group138 shortcut ("that window wants live data"), so
+# the first cached=true caller after a pre-open boot (real-trade-service's candidate fetch, 2026-10-07 08:58 IST) found a
+# result 17.6 h old, started the full ~1,000-quote live scan, and waited 20 s for it ("exceeded 20s - served last computed
+# result (age 63566s)"): the caller got the same old rows anyway, while the scan kept /quote busy and drained the AngelOne
+# bucket (hundreds of "AngelOne-first did not price ... lane budget shed" lines). Until SURPRISE_PREOPEN_STALE_LEAD_SEC
+# (default 300) before 09:15 the saved result is now served at once, flagged `preopen_stale_cache`; inside the last five
+# minutes, and after the open, the live scan runs as before. SURPRISE_PREOPEN_STALE_SERVE=0 turns it off; a lead of 0 too.
+SURPRISE_PREOPEN_STALE_LEAD_DEFAULT_SEC = 300.0
+_PREOPEN_LOG_EVERY_SEC = 600.0
+_preopen_logged_at = [0.0]
+
+
+def _preopen_stale_serve_enabled() -> bool:
+    return ((os.getenv("SURPRISE_PREOPEN_STALE_SERVE") or "").strip() or "1").lower() in ("1", "true", "yes", "on", "y")
+
+
+def _preopen_stale_lead_sec() -> float:
+    raw = (os.getenv("SURPRISE_PREOPEN_STALE_LEAD_SEC") or "").strip()
+    try:
+        v = float(raw) if raw else SURPRISE_PREOPEN_STALE_LEAD_DEFAULT_SEC
+    except ValueError:
+        return SURPRISE_PREOPEN_STALE_LEAD_DEFAULT_SEC
+    if v != v:
+        return SURPRISE_PREOPEN_STALE_LEAD_DEFAULT_SEC
+    return max(0.0, v)
+
+
+def _seconds_to_open_in_preopen(now_ts: float) -> Optional[float]:
+    """Seconds until 09:15 IST when now_ts is inside a trading day's 08:30-09:15 pre-open window, else None."""
+    from datetime import datetime, time as dtime
+    from zoneinfo import ZoneInfo
+    now = datetime.fromtimestamp(now_ts, ZoneInfo("Asia/Kolkata"))
+    if not _is_trading_day(now.date()):
+        return None
+    if not (dtime(8, 30) <= now.time() < dtime(9, 15)):
+        return None
+    return (now.replace(hour=9, minute=15, second=0, microsecond=0) - now).total_seconds()
+
+
 class SurpriseStockEngine:
     def __init__(self):
         self.static_cache: Dict[str, Dict[str, Any]] = {}
@@ -958,6 +997,24 @@ class SurpriseStockEngine:
                             return result
                 except Exception as e:  # never let this shortcut break a scan: fall through to the live path
                     logger.debug("closed-market cache check failed (non-fatal): %s", e)
+                # group223: early pre-open: serve the saved result instead of a live sweep nobody can use yet.
+                try:
+                    if _preopen_stale_serve_enabled():
+                        _lead = _preopen_stale_lead_sec()
+                        _to_open = _seconds_to_open_in_preopen(_now_ts) if _lead > 0 else None
+                        if _to_open is not None and _to_open > _lead:
+                            result = dict(self._last_result)
+                            result["from_cache"] = True
+                            result["cache_age_sec"] = round(age, 1)
+                            result["preopen_stale_cache"] = True
+                            if _now_ts - _preopen_logged_at[0] >= _PREOPEN_LOG_EVERY_SEC:
+                                _preopen_logged_at[0] = _now_ts
+                                logger.info(
+                                    "surprise/scan: pre-open, %.0f s before the open - serving the saved result "
+                                    "(age %.0f s) instead of a live sweep", _to_open, age)
+                            return result
+                except Exception as e:  # never let this shortcut break a scan: fall through to the live path
+                    logger.debug("pre-open stale-serve check failed (non-fatal): %s", e)
 
         # AUDIT FIX (2026-09-19): load_static_cache() does a blocking SQL
         # query against the surprise-static-feed table (see its own body,

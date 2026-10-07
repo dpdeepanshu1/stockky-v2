@@ -40,7 +40,7 @@ _ENV_KEYS = (
     "SURPRISE_SHOCKER_MIN_CHANGE_PCT", "SURPRISE_SHOCKER_MIN_RVOL", "SURPRISE_ORB_ATR_FRACTION",
     "SURPRISE_ORB_FALLBACK_PCT", "SURPRISE_FEED_OPEN_TTL_SEC", "SURPRISE_FEED_COOLDOWN_SEC",
     "SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC", "CACHE_DATABASE_URL", "DATABASE_URL", "TRAINING_DATABASE_URL",
-    "ORACLE_DSN", "MARKET_DATA_URL",
+    "ORACLE_DSN", "MARKET_DATA_URL", "SURPRISE_PREOPEN_STALE_SERVE", "SURPRISE_PREOPEN_STALE_LEAD_SEC",
 )
 
 
@@ -2620,9 +2620,10 @@ class TestClosedMarketCache:
         r = self._rig(rig, _ist(2026, 10, 1, 11, 0), _ist(2026, 9, 30, 15, 50))
         assert "from_cache" not in r.scan(cached=True)
 
-    def test_preopen_window_still_wants_live_data(self, rig, monkeypatch):
+    def test_last_minutes_of_preopen_still_want_live_data(self, rig, monkeypatch):
+        # group223: the pre-open window is served from the saved result until 5 minutes before the open
         monkeypatch.delenv("SURPRISE_CLOSED_MARKET_CACHE", raising=False)
-        r = self._rig(rig, _ist(2026, 10, 5, 8, 45), _ist(2026, 10, 1, 15, 50))
+        r = self._rig(rig, _ist(2026, 10, 5, 9, 12), _ist(2026, 10, 1, 15, 50))
         assert "from_cache" not in r.scan(cached=True)
 
     def test_early_morning_before_preopen_serves_the_last_close_result(self, rig, monkeypatch):
@@ -2668,3 +2669,82 @@ class TestClosedMarketCache:
         monkeypatch.setattr(nse_holidays, "is_nse_holiday", lambda d: True)
         assert sc._last_session_close_ts(_ist(2026, 10, 4, 12, 0)) is None
         assert sc._session_over_ist(_ist(2026, 10, 1, 11, 0)) is True      # holiday -> over all day
+
+
+# ── group 223: early pre-open serves the saved result instead of a live sweep ────────────────────────────────
+class TestPreopenStaleServe:
+    # 2026-10-05 Mon is a trading day; the saved result is from Thursday's session (17+ h old)
+    def _rig(self, rig, now_ts, scan_ts=None):
+        r = rig(static={"A": static_row()})
+        r.clock.now = now_ts
+        r.e._last_result = {"count": 7, "stocks": []}
+        r.e._last_scan_ts = scan_ts if scan_ts is not None else _ist(2026, 10, 1, 15, 19)
+        return r
+
+    def test_early_preopen_serves_the_saved_result_without_a_sweep(self, rig, monkeypatch):
+        r = self._rig(rig, _ist(2026, 10, 5, 8, 58))              # 17 min before the open
+        out = r.scan(cached=True)
+        assert out["from_cache"] is True and out["preopen_stale_cache"] is True and out["count"] == 7
+        assert out["cache_age_sec"] > 3600
+        assert r.loads == [] and r.fetched == []
+
+    def test_a_result_older_than_the_closed_rule_allows_is_still_served_early_in_preopen(self, rig):
+        # scanned at 15:19, before close + grace: the group138 rule rejects it, the pre-open rule does not care
+        r = self._rig(rig, _ist(2026, 10, 5, 8, 31), _ist(2026, 10, 1, 15, 19))
+        assert r.scan(cached=True)["preopen_stale_cache"] is True
+
+    @pytest.mark.parametrize("hh,mm,served", [(8, 29, False), (8, 30, True), (9, 9, True), (9, 10, False),
+                                              (9, 14, False), (9, 15, False), (11, 0, False)])
+    def test_window_edges(self, rig, hh, mm, served):
+        # lead 300 s: 09:10:00 is exactly the lead (not strictly earlier) -> live; 08:29 is the closed rule's domain
+        r = self._rig(rig, _ist(2026, 10, 5, hh, mm))
+        assert ("preopen_stale_cache" in r.scan(cached=True)) is served
+
+    def test_without_a_saved_result_the_live_scan_runs(self, rig):
+        r = rig(static={"A": static_row()})
+        r.clock.now = _ist(2026, 10, 5, 8, 58)
+        r.e._last_result = None
+        assert "from_cache" not in r.scan(cached=True)
+
+    def test_a_fresh_result_is_served_by_the_age_rule_not_flagged_stale(self, rig):
+        r = self._rig(rig, _ist(2026, 10, 5, 8, 58), _ist(2026, 10, 5, 8, 57))
+        out = r.scan(cached=True)
+        assert out["from_cache"] is True and "preopen_stale_cache" not in out
+
+    def test_weekend_and_holiday_preopen_hours_are_not_a_preopen(self, rig, sc):
+        assert sc._seconds_to_open_in_preopen(_ist(2026, 10, 4, 8, 58)) is None      # Sunday
+        assert sc._seconds_to_open_in_preopen(_ist(2026, 10, 2, 8, 58)) is None      # NSE holiday
+        assert sc._seconds_to_open_in_preopen(_ist(2026, 10, 5, 8, 45)) == 30 * 60
+
+    def test_env_off_switches(self, rig, monkeypatch):
+        monkeypatch.setenv("SURPRISE_PREOPEN_STALE_SERVE", "0")
+        assert "from_cache" not in self._rig(rig, _ist(2026, 10, 5, 8, 58)).scan(cached=True)
+        monkeypatch.setenv("SURPRISE_PREOPEN_STALE_SERVE", "  ")        # blank -> default ON
+        assert self._rig(rig, _ist(2026, 10, 5, 8, 58)).scan(cached=True)["preopen_stale_cache"] is True
+        monkeypatch.setenv("SURPRISE_PREOPEN_STALE_LEAD_SEC", "0")      # lead 0 = off
+        assert "from_cache" not in self._rig(rig, _ist(2026, 10, 5, 8, 58)).scan(cached=True)
+
+    @pytest.mark.parametrize("raw,lead", [("", 300.0), ("abc", 300.0), ("nan", 300.0), ("-5", 0.0), ("120", 120.0)])
+    def test_lead_parsing(self, sc, monkeypatch, raw, lead):
+        monkeypatch.setenv("SURPRISE_PREOPEN_STALE_LEAD_SEC", raw)
+        assert sc._preopen_stale_lead_sec() == lead
+
+    def test_a_shorter_lead_serves_stale_for_longer_only_when_larger(self, rig, monkeypatch):
+        monkeypatch.setenv("SURPRISE_PREOPEN_STALE_LEAD_SEC", "900")      # 15 min: 09:00 is inside the live part
+        assert "from_cache" not in self._rig(rig, _ist(2026, 10, 5, 9, 5)).scan(cached=True)
+        assert self._rig(rig, _ist(2026, 10, 5, 8, 59)).scan(cached=True)["preopen_stale_cache"] is True
+
+    def test_per_symbol_requests_always_scan_live(self, rig):
+        assert "from_cache" not in self._rig(rig, _ist(2026, 10, 5, 8, 58)).scan(cached=True, symbols=["A"])
+
+    def test_a_helper_failure_falls_through_to_the_live_scan(self, rig, sc, monkeypatch):
+        monkeypatch.setattr(sc, "_seconds_to_open_in_preopen", lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert "from_cache" not in self._rig(rig, _ist(2026, 10, 5, 8, 58)).scan(cached=True)
+
+    def test_the_log_line_is_throttled(self, rig, sc, caplog):
+        sc._preopen_logged_at[0] = 0.0
+        r = self._rig(rig, _ist(2026, 10, 5, 8, 58))
+        with caplog.at_level(logging.INFO):
+            r.scan(cached=True)
+            r.scan(cached=True)
+        assert len([x for x in caplog.records if "pre-open" in x.getMessage()]) == 1

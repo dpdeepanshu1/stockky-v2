@@ -53,6 +53,67 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ── group 226 (item 5 of the 2026-10-07 list): do not read "Hot Picks still warming" as "no catalysts" ───────
+# Right after a boot api-gateway's Hot Picks cache is cold: /stockky-hot answers at once with empty buckets and
+# "warming": true while a background job builds the list (api-gateway stockky_hot_cached). The first watchlist refresh
+# took that for an empty Tier 1, fell to Tier 2/3 and went a whole cycle without the Hot Picks catalysts. Now, when the
+# answer is empty AND flagged warming, Tier 1 re-polls /stockky-hot a few times (bounded) before giving up.
+#   WATCHLIST_TIER1_WARMUP_RETRIES   re-polls (default 3, 0 = off)      WATCHLIST_TIER1_WARMUP_WAIT_S   seconds between (default 8)
+#   WATCHLIST_TIER1_WARMUP_MIN_GAP_S at most one waiting spell per this many seconds (default 120), so a Hot Picks
+#   job that stays slow cannot add the wait to every cycle.
+_HOT_BUCKET_KEYS = ("bulk_insider_driven", "results_driven", "news_driven")
+_warm_wait_last = [-1e9]
+
+
+def _env_num(name: str, default: float) -> float:
+    try:
+        v = float((os.getenv(name) or "").strip() or default)
+    except ValueError:
+        return default
+    return v if v == v and v >= 0 else default
+
+
+def _hot_is_warming_empty(payload: Any) -> bool:
+    """True for a Tier 1 payload whose Hot Picks part is flagged warming and lists nothing in any bucket."""
+    try:
+        hot = payload.get("hot_picks")
+        return bool(isinstance(hot, dict) and hot.get("warming") and not any(hot.get(k) for k in _HOT_BUCKET_KEYS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _wait_for_hot_picks(payload: dict) -> dict:
+    """Re-poll /stockky-hot while it still says "warming" with empty buckets. Returns the payload with the newest Hot
+    Picks answer (the original one when nothing better came). Never raises."""
+    retries = int(_env_num("WATCHLIST_TIER1_WARMUP_RETRIES", 3))
+    wait_s = _env_num("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0)
+    gap_s = _env_num("WATCHLIST_TIER1_WARMUP_MIN_GAP_S", 120.0)
+    if retries <= 0 or not _hot_is_warming_empty(payload):
+        return payload
+    import time as _t
+    if _t.monotonic() - _warm_wait_last[0] < gap_s:
+        return payload
+    _warm_wait_last[0] = _t.monotonic()
+    logger.info("watchlist/sources: Hot Picks is still warming (empty buckets) - re-polling up to %d x %.0fs before "
+                "falling back to Tier 2", retries, wait_s)
+    for attempt in range(1, retries + 1):
+        await asyncio.sleep(wait_s)
+        try:
+            async with httpx.AsyncClient(timeout=_TIER1_HTTP_TIMEOUT) as client:
+                r = await client.get(f"{config.API_GATEWAY_URL}/stockky-hot")
+                r.raise_for_status()
+                hot = r.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("watchlist/sources: Hot Picks re-poll %d/%d failed (%s: %s) - giving up the wait",
+                           attempt, retries, type(exc).__name__, exc)
+            return payload
+        if isinstance(hot, dict) and (any(hot.get(k) for k in _HOT_BUCKET_KEYS) or not hot.get("warming")):
+            logger.info("watchlist/sources: Hot Picks ready after re-poll %d/%d", attempt, retries)
+            return {**payload, "hot_picks": hot}
+    logger.info("watchlist/sources: Hot Picks still warming after %d re-poll(s) - continuing without it this cycle", retries)
+    return payload
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
@@ -122,6 +183,8 @@ async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
         return cached  # None signals caller to try Tier 2
 
     payload = await api_gateway_breaker.call(_tier1_call, fallback=_tier1_fallback)
+    if payload and isinstance(payload, dict) and _hot_is_warming_empty(payload):
+        payload = await _wait_for_hot_picks(payload)       # group 226
     if payload:
         save_snapshot(db, "tier1_hot_picks", payload)
         candidates = _normalize_tier1(payload)

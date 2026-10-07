@@ -194,3 +194,40 @@ def test_leftover_cap_zero_means_no_cap(env, monkeypatch):
     env["bulk_empty"] = True
     out = _run(f.get_quotes([f"S{i}" for i in range(100)]))
     assert len(out) == 100
+
+
+def test_small_entry_batches_are_never_starved_by_the_distress_window(env):
+    env["down"] = True
+    _run(f.get_quotes(["A"], priority=True))
+    assert f._prio_in_distress()
+    env["down"] = False
+    env["single"].clear()
+    out = _run(f.get_quotes([f"S{i}" for i in range(20)]))     # a cycle's <=20 entry candidates
+    assert len(out) == 20 and len(env["single"]) == 20
+
+
+def test_distress_is_not_marked_when_the_bulk_fallback_recovers_every_held_symbol(env):
+    env["bulk_empty"] = False
+    calls = {"n": 0}
+    orig = f._bulk_ticks
+
+    async def flaky_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+        calls["n"] += 1
+        if calls["n"] == 1:                                    # bulk-first misses, per-symbol also fails, last resort works
+            if stats is not None:
+                stats.setdefault("failed", 0); stats.setdefault("reasons", {})
+            return {}
+        return await orig(client, symbols, timeout=timeout, max_age_s=max_age_s, stats=stats)
+
+    async def no_single(client, symbol, **kw):
+        return None
+
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    mp.setattr(f, "_bulk_ticks", flaky_bulk)
+    mp.setattr(f, "get_quote", no_single)
+    try:
+        out = _run(f.get_quotes(["A"], priority=True))
+    finally:
+        mp.undo()
+    assert out["A"].price == 77.0 and not f._prio_in_distress()

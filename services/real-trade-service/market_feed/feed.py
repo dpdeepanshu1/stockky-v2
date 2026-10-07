@@ -174,8 +174,9 @@ _PRIO_LOCK = _threading.Lock()
 #   * last-good fallback: when the whole priority lane could not price a held symbol, return the last tick the lane
 #     did price for it if that tick is at most FEED_PRIORITY_STALE_FALLBACK_S old (default 90 s, 0 = off). The Tick
 #     keeps its REAL as_of and its source is tagged "stale_last_good(<orig>)", so nothing mistakes it for a fresh quote.
-#   * back-pressure: a priority-lane failure switches the non-priority per-symbol leftovers off for FEED_BACKPRESSURE_S
-#     (default 20 s) and a single non-priority batch sends at most FEED_LEFTOVER_MAX (default 120) per-symbol lookups
+#   * back-pressure: a priority-lane failure (a held symbol still unpriced after every attempt) switches the per-symbol
+#     leftovers of LARGE non-priority batches (> FEED_BULK_MIN_SYMBOLS) off for FEED_BACKPRESSURE_S
+#     (default 20 s; small entry batches are never affected) and a single non-priority batch sends at most FEED_LEFTOVER_MAX (default 120) per-symbol lookups
 #     (0 = no cap), so the watchlist poll can no longer starve the positions.
 FEED_PRIORITY_STALE_FALLBACK_S = _env_float("FEED_PRIORITY_STALE_FALLBACK_S", 90.0)
 FEED_BACKPRESSURE_S = _env_float("FEED_BACKPRESSURE_S", 20.0)
@@ -1124,8 +1125,8 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
                 len(missing), len(uniq), missing[:8], len(missing) - len(still),
                 f", still missing {still[:8]}" if still else "",
             )
-            _prio_mark_distress()
             if still:
+                _prio_mark_distress()     # only when a held symbol is STILL unpriced after every attempt
                 stale = _prio_last_good_fallback(still)
                 if stale:
                     out.update(stale)
@@ -1208,7 +1209,9 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
             out, todo = {}, list(symbols)
             bulk_answered = False
 
-    if todo and _prio_in_distress():
+    if todo and len(set(symbols)) > FEED_BULK_MIN_SYMBOLS and _prio_in_distress():
+        # Large (watchlist-poll sized) batches only. A small batch - the <=20 entry candidates of a cycle - is never
+        # starved: if a held symbol cannot be priced for its own reasons, entries must not stop with it.
         logger.info("get_quotes: %d per-symbol lookup(s) skipped for %.0fs — the priority lane (open positions) is "
                     "struggling and market-data is being left free for it", len(todo), FEED_BACKPRESSURE_S)
         todo = []

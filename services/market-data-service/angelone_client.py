@@ -38,10 +38,11 @@ except Exception:  # pragma: no cover - keep working even if the module is ever 
 logger = logging.getLogger("angelone-client")
 
 
-def _budget_skip(lane) -> bool:
-    """True while the global AngelOne cooldown runs: the caller must send nothing. Never raises."""
+def _budget_skip(lane, family: str = "quote") -> bool:
+    """True while the AngelOne cooldown of `family` ("quote" or "candle", group227) runs: the caller must send
+    nothing. Never raises."""
     try:
-        return bool(_budget is not None and _budget.skip(lane))
+        return bool(_budget is not None and _budget.skip(lane, family))
     except Exception:  # pragma: no cover
         return False
 
@@ -370,7 +371,7 @@ class AngelOneSession:
             _note_quote_miss("angelone_quote rate-limit cooldown is running")
             return {}
         if _budget_skip(lane):
-            _note_quote_miss("global AngelOne cooldown (403) is running")
+            _note_quote_miss("global AngelOne cooldown (403) is running")  # group227: the quote-family cooldown
             return {}
         await self.ensure_session()
         if not await _budget_admit(lane, "angelone_quote", 1, max_wait):
@@ -417,7 +418,7 @@ class AngelOneSession:
         """Fetch OHLCV candles. interval: ONE_MINUTE/FIVE_MINUTE/ONE_DAY etc. `lane`: see get_quote (group211)."""
         if _rl_in_cooldown("angelone_candle"):
             return []
-        if _budget_skip(lane):
+        if _budget_skip(lane, "candle"):   # group227: a candle 403 pauses candle callers only, never quotes
             return []
         await self.ensure_session()
         if not await _budget_admit(lane, "angelone_candle", 1, _CANDLE_MAX_WAIT_S):

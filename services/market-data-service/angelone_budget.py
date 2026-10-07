@@ -25,6 +25,13 @@ What this module adds (nothing here talks to AngelOne itself; angelone_client.py
     waits on the DB. Symbols recently looked up through single-symbol /quote form the "hot" set the feed poll
     keeps fresh every cycle.
 
+group227 (item 1 of the 2026-10-07 10:33 IST log review): the cooldown is now kept PER FAMILY, "quote" (ltpData / quote
+batches / the feed poll / gainers) and "candle" (getCandleData). AngelOne limits each endpoint on its own, and the log
+showed quotes answering normally right up to a candle 403; yet that 403 paused every quote caller for 30-60 s, which
+sent the whole feed to a saturated yfinance (18 s timeouts, 347 unpriced symbols, ReadTimeouts in real-trade). A candle
+403 now pauses only candle callers, a quote 403 only quote callers. ANGELONE_SPLIT_COOLDOWN=0 restores the single
+shared cooldown.
+
 Callers that pass no lane (lane=None) keep the old behaviour exactly, except that they too honour the global
 cooldown. ANGELONE_BUDGET=0 turns the whole module off (no lanes, no global cooldown).
 All env reads are blank-safe: ((os.getenv(X) or "").strip() or default).
@@ -91,10 +98,16 @@ def reserve_fraction(lane: Optional[str]) -> float:
 
 # ── global cooldown ─────────────────────────────────────────────────────────
 _lock = threading.Lock()
-_cool_until = 0.0
-_cool_dur = 0.0
-_last_trip_at = 0.0
-_trips = 0
+QUOTE = "quote"
+CANDLE = "candle"
+FAMILIES = (QUOTE, CANDLE)
+
+
+def _new_cool() -> dict:
+    return {"until": 0.0, "dur": 0.0, "last_trip": 0.0, "trips": 0}
+
+
+_cool = {QUOTE: _new_cool(), CANDLE: _new_cool()}
 _suppressed = 0
 _last_trip_endpoint: Optional[str] = None
 _counts = {lane: {"admitted": 0, "shed": 0, "skipped_cooldown": 0} for lane in LANES}
@@ -105,48 +118,79 @@ def _bucket_name(lane: Optional[str]) -> str:
     return lane if lane in LANES else "unclassified"
 
 
-def in_global_cooldown() -> bool:
-    return enabled() and time.time() < _cool_until
+def split_enabled() -> bool:
+    """Per-family cooldowns (default). ANGELONE_SPLIT_COOLDOWN=0: one shared cooldown for every endpoint (group 211)."""
+    return _env_str("ANGELONE_SPLIT_COOLDOWN", "1").lower() not in ("0", "false", "off", "no")
 
 
-def cooldown_remaining() -> float:
-    return max(0.0, _cool_until - time.time()) if enabled() else 0.0
+def family_for(endpoint: Optional[str]) -> str:
+    """Cooldown family of an endpoint / rate-limiter provider name: anything with "candle" in it is CANDLE, the rest
+    (quote, quote(batch), gainers, angelone_quote ...) is QUOTE. With the split off everything is QUOTE (one state)."""
+    if split_enabled() and "candle" in (endpoint or "").lower():
+        return CANDLE
+    return QUOTE
 
 
-def trip(endpoint: str) -> float:
-    """Record a rate-limit answer from `endpoint`. Returns the cooldown seconds just started, or 0.0 when
-    nothing new started (budget off, or a cooldown is already running -- late answers to calls that were
-    already in flight must not escalate it)."""
-    global _cool_until, _cool_dur, _last_trip_at, _trips, _suppressed, _last_trip_endpoint
+def _families(family: Optional[str]) -> tuple:
+    """The family states a check covers: one named family, or every family when none is named (status, old callers)."""
+    if family is None:
+        return FAMILIES
+    return (family if family in FAMILIES else QUOTE,)
+
+
+def in_global_cooldown(family: Optional[str] = None) -> bool:
+    """True while the cooldown of `family` runs (family None: while ANY family's cooldown runs)."""
+    if not enabled():
+        return False
+    now = time.time()
+    return any(now < _cool[f]["until"] for f in _families(family))
+
+
+def cooldown_remaining(family: Optional[str] = None) -> float:
     if not enabled():
         return 0.0
     now = time.time()
+    return max(0.0, max(_cool[f]["until"] for f in _families(family)) - now)
+
+
+def trip(endpoint: str) -> float:
+    """Record a rate-limit answer from `endpoint`. Starts the cooldown of that endpoint's family only. Returns the
+    cooldown seconds just started, or 0.0 when nothing new started (budget off, or that family's cooldown is already
+    running -- late answers to calls that were already in flight must not escalate it)."""
+    global _suppressed, _last_trip_endpoint
+    if not enabled():
+        return 0.0
+    fam = family_for(endpoint)
+    now = time.time()
     with _lock:
-        if now < _cool_until:
+        st = _cool[fam]
+        if now < st["until"]:
             _suppressed += 1
             return 0.0
         base, cap = _cooldown_base_s(), _cooldown_max_s()
-        if _last_trip_at and (now - _last_trip_at) <= _ESCALATE_WINDOW_S and _cool_dur > 0:
-            dur = min(cap, max(base, _cool_dur * 2.0))
+        if st["last_trip"] and (now - st["last_trip"]) <= _ESCALATE_WINDOW_S and st["dur"] > 0:
+            dur = min(cap, max(base, st["dur"] * 2.0))
         else:
             dur = base
-        _cool_dur = dur
-        _cool_until = now + dur
-        _last_trip_at = now
-        _trips += 1
+        st["dur"] = dur
+        st["until"] = now + dur
+        st["last_trip"] = now
+        st["trips"] += 1
         _last_trip_endpoint = endpoint
-        trips_now = _trips
+        trips_now = sum(v["trips"] for v in _cool.values())
+    who = "ALL AngelOne callers" if not split_enabled() else ("AngelOne %s callers" % fam)
     logger.warning(
-        "AngelOne budget: rate-limit answer from %s - ALL AngelOne callers skip AngelOne for %.0fs "
+        "AngelOne budget: rate-limit answer from %s - %s skip AngelOne for %.0fs "
         "(trip #%d; escalates to at most %.0fs if it trips again within %.0fs)",
-        endpoint, dur, trips_now, cap, _ESCALATE_WINDOW_S,
+        endpoint, who, dur, trips_now, cap, _ESCALATE_WINDOW_S,
     )
     return dur
 
 
-def skip(lane: Optional[str] = None) -> bool:
-    """True when the global cooldown is running (the caller must not send anything). Counts the skip."""
-    if not in_global_cooldown():
+def skip(lane: Optional[str] = None, family: Optional[str] = None) -> bool:
+    """True when the cooldown of `family` is running (the caller must not send anything). Counts the skip.
+    family None: any running cooldown counts (the old shared behaviour)."""
+    if not in_global_cooldown(family):
         return False
     with _lock:
         _counts[_bucket_name(lane)]["skipped_cooldown"] += 1
@@ -176,7 +220,7 @@ async def admit(lane: Optional[str], provider: str, weight: float = 1.0, max_wai
         return True
     deadline = time.time() + max(0.0, max_wait)
     while True:
-        if in_global_cooldown():
+        if in_global_cooldown(family_for(provider)):
             _count(lane, "skipped_cooldown")
             return False
         try:
@@ -333,9 +377,16 @@ def stats() -> dict:
         counts = {k: dict(v) for k, v in _counts.items()}
         out = {
             "enabled": enabled(),
-            "global_cooldown_active": time.time() < _cool_until,
-            "global_cooldown_remaining_s": round(max(0.0, _cool_until - time.time()), 1),
-            "trips": _trips,
+            "global_cooldown_active": any(time.time() < v["until"] for v in _cool.values()),
+            "global_cooldown_remaining_s": round(max(0.0, max(v["until"] for v in _cool.values()) - time.time()), 1),
+            "split_cooldown": split_enabled(),
+            "cooldowns": {
+                f: {"active": time.time() < v["until"],
+                    "remaining_s": round(max(0.0, v["until"] - time.time()), 1),
+                    "trips": v["trips"]}
+                for f, v in _cool.items()
+            },
+            "trips": sum(v["trips"] for v in _cool.values()),
             "suppressed_late_403s": _suppressed,
             "last_trip_endpoint": _last_trip_endpoint,
             "lanes": counts,
@@ -355,13 +406,11 @@ def stats() -> dict:
 
 def _reset() -> None:
     """Test helper: forget every cooldown, count, cached position and demand."""
-    global _cool_until, _cool_dur, _last_trip_at, _trips, _suppressed, _last_trip_endpoint
+    global _suppressed, _last_trip_endpoint
     global _pos_symbols, _pos_loaded_at, _pos_refreshing
     with _lock:
-        _cool_until = 0.0
-        _cool_dur = 0.0
-        _last_trip_at = 0.0
-        _trips = 0
+        for _f in FAMILIES:
+            _cool[_f] = _new_cool()
         _suppressed = 0
         _last_trip_endpoint = None
         for v in _counts.values():

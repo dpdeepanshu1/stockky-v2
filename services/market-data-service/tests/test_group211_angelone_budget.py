@@ -38,7 +38,7 @@ def run(coro):
 def _clean(monkeypatch):
     for k in ("ANGELONE_BUDGET", "ANGELONE_GLOBAL_COOLDOWN_S", "ANGELONE_GLOBAL_COOLDOWN_MAX_S",
               "ANGELONE_LANE_RESERVE_CANDIDATE", "ANGELONE_LANE_RESERVE_BACKGROUND",
-              "ANGELONE_POSITION_LANE_REFRESH_S", "ANGELONE_HOT_DEMAND_WINDOW_S"):
+              "ANGELONE_POSITION_LANE_REFRESH_S", "ANGELONE_HOT_DEMAND_WINDOW_S", "ANGELONE_SPLIT_COOLDOWN"):
         monkeypatch.delenv(k, raising=False)
     b._reset()
     rl._buckets.clear()
@@ -103,29 +103,29 @@ def test_trip_starts_one_cooldown_every_caller_sees(caplog):
 def test_late_403s_during_a_running_cooldown_do_not_escalate_it():
     assert b.trip("quote") == 30.0
     assert b.trip("quote(batch)") == 0.0
-    assert b.trip("getCandleData") == 0.0
+    assert b.trip("gainers") == 0.0                      # group227: late answers are per family (candles have their own)
     s = b.stats()
     assert s["trips"] == 1 and s["suppressed_late_403s"] == 2 and s["last_trip_endpoint"] == "quote"
 
 
 def test_second_trip_within_window_doubles_up_to_the_cap(monkeypatch):
     assert b.trip("a") == 30.0
-    b._cool_until = time.time() - 1          # first cooldown over
+    b._cool["quote"]["until"] = time.time() - 1          # first cooldown over
     assert b.trip("b") == 60.0               # doubled
-    b._cool_until = time.time() - 1
+    b._cool["quote"]["until"] = time.time() - 1
     assert b.trip("c") == 60.0               # capped at ANGELONE_GLOBAL_COOLDOWN_MAX_S
 
 
 def test_trip_after_the_escalation_window_starts_from_base_again():
     assert b.trip("a") == 30.0
-    b._cool_until = time.time() - 1
-    b._last_trip_at = time.time() - (b._ESCALATE_WINDOW_S + 5)
+    b._cool["quote"]["until"] = time.time() - 1
+    b._cool["quote"]["last_trip"] = time.time() - (b._ESCALATE_WINDOW_S + 5)
     assert b.trip("b") == 30.0
 
 
 def test_cooldown_expires():
     b.trip("a")
-    b._cool_until = time.time() - 0.01
+    b._cool["quote"]["until"] = time.time() - 0.01
     assert not b.in_global_cooldown() and b.skip(b.CANDIDATE) is False
 
 
@@ -450,7 +450,7 @@ RATE_LIMITED = {"message": "Access denied because of exceeding access rate"}
 @pytest.mark.parametrize("call", ["quote", "batch", "candles", "gainers"])
 def test_every_endpoint_sends_nothing_while_the_global_cooldown_runs(monkeypatch, call):
     s = _session(monkeypatch)
-    b.trip("elsewhere")
+    b.trip("getCandleData" if call == "candles" else "elsewhere")   # group227: each family's own cooldown
     if call == "quote":
         assert run(s.get_quote("NSE", "1", lane=b.POSITION)) == {}
     elif call == "batch":
@@ -462,14 +462,17 @@ def test_every_endpoint_sends_nothing_while_the_global_cooldown_runs(monkeypatch
     assert _Client.sent == []
 
 
-def test_a_403_on_candles_stops_quote_callers_too(monkeypatch):
+def test_a_403_on_candles_no_longer_stops_quote_callers(monkeypatch):
+    """group227: was test_a_403_on_candles_stops_quote_callers_too - the candle cooldown is now its own family."""
     s = _session(monkeypatch, _Resp(403, RATE_LIMITED))
     assert run(s.get_candles("NSE", "1", "ONE_DAY", "a", "b")) == []
-    assert b.in_global_cooldown() and b.stats()["last_trip_endpoint"] == "getCandleData"
+    assert b.in_global_cooldown("candle") and not b.in_global_cooldown("quote")
+    assert b.stats()["last_trip_endpoint"] == "getCandleData"
     sent_before = len(_Client.sent)
-    assert run(s.get_quote("NSE", "1")) == {}
-    assert run(s.get_quotes_batch("NSE", ["1"])) == []
-    assert len(_Client.sent) == sent_before                  # nothing more went out
+    assert run(s.get_candles("NSE", "1", "ONE_DAY", "a", "b")) == []
+    assert len(_Client.sent) == sent_before                  # candle callers send nothing more
+    run(s.get_quote("NSE", "1"))
+    assert len(_Client.sent) == sent_before + 1              # quotes still go out
 
 
 def test_a_403_on_quote_and_on_batch_trip_the_global_cooldown(monkeypatch):

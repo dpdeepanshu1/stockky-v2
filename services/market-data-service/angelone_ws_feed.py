@@ -159,7 +159,7 @@ def _cooldown_running() -> bool:
     """True while the shared AngelOne rate-limit cooldown (angelone_budget) is running; never raises."""
     try:
         import angelone_budget as _b
-        return bool(_b.in_global_cooldown())
+        return bool(_b.in_global_cooldown("quote"))   # group227: a candle 403 must not stop the feed
     except Exception:  # noqa: BLE001
         return False
 
@@ -173,7 +173,7 @@ def _trip_on_http_denied(exc: BaseException) -> bool:
         if code not in (403, 429):
             return False
         import angelone_budget as _b
-        if _b.in_global_cooldown():
+        if _b.in_global_cooldown("quote"):
             return False
         return bool(_b.trip("quote(batch)"))
     except Exception:  # noqa: BLE001
@@ -533,7 +533,7 @@ def start_feed_background(symbols: list) -> None:
                     return
                 try:   # group211: every AngelOne caller is skipping AngelOne - do not walk the batches for nothing
                     import angelone_budget as _bud
-                    if _bud.in_global_cooldown():
+                    if _bud.in_global_cooldown("quote"):
                         return
                 except Exception:  # noqa: BLE001
                     pass

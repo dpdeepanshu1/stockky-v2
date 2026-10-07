@@ -66,7 +66,10 @@ def test_a_plain_text_403_starts_the_cooldown_and_returns_empty(monkeypatch, cal
         assert run(s.get_candles("NSE", "1", "ONE_DAY", "a", "b")) == []
     assert b.in_global_cooldown()
     sent = len(_Client.sent)
-    assert run(s.get_quotes_batch("NSE", ["1"])) == []                       # nothing more goes out
+    if call == "candles":      # group227: the candle cooldown stops candle callers only
+        assert run(s.get_candles("NSE", "1", "ONE_DAY", "a", "b")) == []
+    else:
+        assert run(s.get_quotes_batch("NSE", ["1"])) == []                   # nothing more goes out
     assert len(_Client.sent) == sent
 
 

@@ -2215,6 +2215,83 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         return _ao_first_miss(sym, "error %s" % type(e).__name__)
 
 
+
+# ── group233: closed-market quotes come from the last close, not from AngelOne / Yahoo ──────────────────
+# Outside the feed window (before ~09:05, after ~15:35 IST, weekends, NSE holidays) a price cannot change, yet
+# every quote that missed the cache walked the whole waterfall (AngelOne-first, then Yahoo) and the evening
+# boot log showed hundreds of per-symbol calls doing exactly that. When closed, /quote/{symbol} and
+# /quotes/bulk now answer from (1) the cached quote row of any age, (2) the 30-day last-good fallback row,
+# (3) the local NSE bhavcopy close, and only then continue into the normal waterfall.
+# QUOTE_CLOSED_SERVE_LAST_CLOSE=0 turns it off. QUOTE_CLOSED_LAST_CLOSE_MAX_AGE_H (default 96) is how old a
+# fallback row may be before the bhavcopy close is tried first.
+def _closed_serve_enabled() -> bool:
+    return ((os.getenv("QUOTE_CLOSED_SERVE_LAST_CLOSE") or "").strip() or "1").lower() not in ("0", "false", "no", "off")
+
+
+def _quote_market_closed() -> bool:
+    """True when no live price can exist: outside the feed window (same window the live feeds use, so the
+    pre-open 09:05-09:15 and the 15:30-15:35 close slack still count as open here)."""
+    if not _closed_serve_enabled():
+        return False
+    try:
+        from market_hours import is_feed_window_ist
+        return not is_feed_window_ist()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _last_close_max_age_s() -> float:
+    raw = (os.getenv("QUOTE_CLOSED_LAST_CLOSE_MAX_AGE_H") or "").strip()
+    try:
+        v = float(raw) if raw else 96.0
+    except ValueError:
+        v = 96.0
+    return max(v, 1.0) * 3600.0
+
+
+def _row_price(row) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    try:
+        px = float(row.get("price") or row.get("cmp") or 0)
+        return px if px > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _closed_last_close_row(sym: str) -> Optional[dict]:
+    """A quote-shaped last-close row for `sym` (already normalised), or None. Never touches AngelOne or Yahoo.
+    Rows keep their ORIGINAL fetched_at so a caller's own freshness check still sees their real age; a
+    bhavcopy row is stamped now and tagged source=bhavcopy_eod."""
+    key = f"quote:{sym}"
+    stale_fb = None
+    for src_name, getter in (("cache", _cache_get), ("fallback", _fallback_get)):
+        try:
+            hit = getter(key)
+        except Exception:  # noqa: BLE001
+            hit = None
+        if _row_price(hit) is None:
+            continue
+        age = _quote_row_age_s(hit)
+        if src_name == "fallback" and (age is None or age > _last_close_max_age_s()):
+            stale_fb = stale_fb or hit        # too old to trust first; the bhavcopy close is tried before it
+            continue
+        row = _pad_quote_response(sym, dict(hit))
+        row["source"] = f"last_close_{src_name}"
+        return _sanitize_for_json(row)
+    px = _waterfall_bhavcopy_price(sym)
+    if px and px > 0:
+        return _sanitize_for_json(_pad_quote_response(sym, {
+            "symbol": sym, "price": float(px), "cmp": float(px), "previous_close": float(px),
+            "source": "bhavcopy_eod", "fetched_at": datetime.utcnow().isoformat(),
+        }))
+    if stale_fb is not None:
+        row = _pad_quote_response(sym, dict(stale_fb))
+        row["source"] = "last_close_fallback"
+        return _sanitize_for_json(row)
+    return None
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161
@@ -2316,6 +2393,12 @@ def _get_quote_inner(symbol: str):
         return cached
     if soft_cached and _in_cooldown("yfinance"):
         return soft_cached
+
+    # group233: market closed -> answer from the last close, skip AngelOne-first and Yahoo entirely.
+    if not str(sym).startswith("^") and not str(sym).upper().startswith("NIFTY") and _quote_market_closed():
+        _lc = _closed_last_close_row(sym)
+        if _lc:
+            return _lc
 
     # group161: a symbol that has just failed every source answers "no price" at once, unless a
     # last-good price exists (then the normal path serves that).
@@ -2793,6 +2876,9 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
     results: list = []
     still_needed: list = []
     _max_age = _bulk_cache_max_age_s()
+    _closed = _quote_market_closed()      # group233: closed market -> a cached row of any age is the last close
+    if _closed:
+        _max_age = 0
     for mapped in yf_tickers:
         cached = _cache_get(f"quote:{mapped}")
         if cached:
@@ -2806,6 +2892,22 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
             results.append(cached)
             continue
         still_needed.append(mapped)
+
+    if still_needed and _closed:
+        # group233: no live price can exist; serve fallback / bhavcopy closes. Only symbols with no close known
+        # anywhere (e.g. a brand-new listing) continue into the normal live path below.
+        _left = []
+        for mapped in still_needed:
+            if mapped.startswith("^"):
+                _left.append(mapped)
+                continue
+            _lc = _closed_last_close_row(mapped)
+            if _lc:
+                _lc["symbol"] = symbol_map.get(mapped, mapped).replace(".NS", "").replace(".BO", "")   # bulk rows carry the clean base
+                results.append(_lc)
+            else:
+                _left.append(mapped)
+        still_needed = _left
 
     if still_needed:
         live_hits: dict = {}

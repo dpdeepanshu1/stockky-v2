@@ -2741,6 +2741,17 @@ def _gw_bulk_row_fresh(row: dict, max_age_s: float) -> bool:
     return 0 <= (datetime.now(_dt_timezone.utc) - ts).total_seconds() <= max_age_s
 
 
+def _gw_quotes_closed() -> bool:
+    """group233: True on weekends, NSE holidays and outside 09:15-16:00 IST, when no live price can change.
+    GATEWAY_BULK_QUOTE_CLOSED_AWARE=0 turns the closed-market handling off."""
+    if ((os.getenv("GATEWAY_BULK_QUOTE_CLOSED_AWARE") or "").strip() or "1").lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        return _market_session_phase_ist() in ("closed", "holiday")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _fetch_prices_bulk_first(bases: list, client: httpx.AsyncClient) -> dict:
     """Price `bases` through chunked POST /quotes/bulk. Returns {BASE: float} for the ones it could
     price; a failing chunk just leaves its symbols for the per-symbol path (never raises)."""
@@ -2748,6 +2759,11 @@ async def _fetch_prices_bulk_first(bases: list, client: httpx.AsyncClient) -> di
     now = time.monotonic()
     cache_s = _gw_env_num("GATEWAY_BULK_QUOTE_CACHE_S", 8.0)
     max_age = _gw_env_num("GATEWAY_BULK_QUOTE_MAX_AGE_S", 20.0)
+    if _gw_quotes_closed():
+        # group233: market-data answers a closed market from the last close, whose fetched_at is hours old.
+        # Accept it (and reuse it for a while) instead of throwing it away and asking per symbol.
+        max_age = max(max_age, _gw_env_num("GATEWAY_BULK_QUOTE_CLOSED_MAX_AGE_S", 7 * 86400.0))
+        cache_s = max(cache_s, _gw_env_num("GATEWAY_BULK_QUOTE_CLOSED_CACHE_S", 600.0))
     chunk = max(1, int(_gw_env_num("GATEWAY_BULK_QUOTE_CHUNK", 50)))
     timeout_s = _gw_env_num("GATEWAY_BULK_QUOTE_TIMEOUT_S", 12.0)
     need = []
@@ -2794,8 +2810,15 @@ async def _fetch_prices_bulk_first(bases: list, client: httpx.AsyncClient) -> di
     return out
 
 
-async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> dict:
-    """Concurrent short quotes for a scan chunk → {BASE: float}."""
+async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient, *,
+                                   bulk_min: Optional[int] = None, per_symbol_fallback: bool = True) -> dict:
+    """Concurrent short quotes for a scan chunk → {BASE: float}.
+
+    group233: bulk_min overrides GATEWAY_BULK_QUOTE_MIN for this call (the hot-picks price pass has fewer than
+    15 missing symbols, so it always took the per-symbol path); per_symbol_fallback=False leaves a symbol that
+    bulk could not price unpriced instead of sending one GET /quote for it. With the market closed the
+    per-symbol leftover is skipped anyway: market-data already tried the cached close, the last-good row and
+    the bhavcopy close for every symbol in the bulk call."""
     out = {}
     sem = asyncio.Semaphore(8)  # aligned with MAX_PARALLEL_WORKERS (free-tier safe)
 
@@ -2828,15 +2851,22 @@ async def _fetch_prices_bulk_async(symbols: list, client: httpx.AsyncClient) -> 
         seen.add(base)
         todo.append(s_)
 
-    bulk_min = int(_gw_env_num("GATEWAY_BULK_QUOTE_MIN", 15))
+    if bulk_min is None:
+        bulk_min = int(_gw_env_num("GATEWAY_BULK_QUOTE_MIN", 15))
+    bulk_ran = False
     if bulk_min > 0 and len(todo) >= bulk_min:
         bases = [t.upper().replace(".NS", "").replace(".BO", "").strip() for t in todo]
         try:
             out.update(await _fetch_prices_bulk_first(bases, client))
+            bulk_ran = True
         except Exception as e:
             logger.debug("gateway bulk-first pricing failed, using per-symbol path: %s", e)
         todo = [t for t, b in zip(todo, bases) if b not in out]
 
+    if not per_symbol_fallback or (bulk_ran and _gw_quotes_closed()):
+        if todo:
+            logger.info("gateway prices: %d symbol(s) left unpriced after bulk (no per-symbol /quote)", len(todo))
+        return out
     await asyncio.gather(*(one(s_) for s_ in todo), return_exceptions=True)
     return out
 
@@ -7358,13 +7388,26 @@ async def market_trending():
         news = _get_news_mentioned_symbols()
         trending = list(set(movers + news))
         trending_data = []
+        # group233: price the (at most 10) names with ONE POST /quotes/bulk instead of one GET /quote each.
+        _bulk_rows: dict = {}
+        try:
+            _tsyms = [str(x).upper().replace(".NS", "").replace(".BO", "").strip() for x in trending[:10] if x]
+            if _tsyms:
+                _br = httpx.post(f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk", json={"symbols": _tsyms}, timeout=8)
+                if _br.status_code == 200:
+                    for _q in ((_br.json() or {}).get("quotes") or []):
+                        if isinstance(_q, dict):
+                            _k = str(_q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                            if _k:
+                                _bulk_rows[_k] = _q
+        except Exception as e:
+            logger.debug("trending bulk quotes: %s", e)
         for sym in trending[:10]:
             try:
                 price = change = change_pct = None
                 try:
-                    resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=3)
-                    if resp.status_code == 200:
-                        data = resp.json() or {}
+                    data = _bulk_rows.get(str(sym).upper().replace(".NS", "").replace(".BO", "").strip())
+                    if data:
                         p = data.get("price") or data.get("cmp")
                         prev = data.get("previous_close")
                         if p is not None and float(p) > 0:
@@ -8826,7 +8869,9 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     if _still_missing:
         _miss_syms = list({_item.get("symbol") or "" for _item in _still_missing if _item.get("symbol")})
         try:
-            _live_prices: dict = await _fetch_prices_bulk_async(_miss_syms, client)
+            # group233: always bulk (even for < 15 symbols) and never one GET /quote per symbol.
+            _live_prices: dict = await _fetch_prices_bulk_async(
+                _miss_syms, client, bulk_min=1, per_symbol_fallback=False)
             if _live_prices:
                 for _item in _still_missing:
                     _sym = _item.get("symbol") or ""

@@ -256,6 +256,9 @@ class FakeHttp:
     def __init__(self):
         self.routes = {}
         self.gets = []
+        self.posts = []             # group233: (url, [symbols]) per POST /quotes/bulk
+        self.post_raises = None     # an Exception makes every bulk POST raise
+        self.post_status = 200
         self.client_kwargs = []
 
     def module(self):
@@ -278,6 +281,29 @@ class FakeHttp:
                 if isinstance(r, Exception):
                     raise r
                 return r if r is not None else FakeResp(404, {})
+
+            def post(self, url, json=None, **kw):
+                """group233: POST {base}/quotes/bulk is answered from the same per-symbol `routes`
+                ({base}/quote/{SYM}): a 200 dict body becomes a quote row, anything else leaves the symbol out."""
+                syms = list((json or {}).get("symbols") or [])
+                http.posts.append((url, syms))
+                if http.post_raises is not None:
+                    raise http.post_raises
+                if http.post_status != 200:
+                    return FakeResp(http.post_status, {})
+                base = url[: -len("/quotes/bulk")]
+                rows = []
+                for sym in syms:
+                    r = http.routes.get(f"{base}/quote/{sym}")
+                    if r is None or isinstance(r, Exception) or r.status_code != 200:
+                        continue
+                    try:
+                        body = r.json()
+                    except Exception:
+                        continue
+                    if isinstance(body, dict):
+                        rows.append(dict(body, symbol=sym))
+                return FakeResp(200, {"quotes": rows})
 
         m.Client = Client
         return m
@@ -1369,7 +1395,7 @@ class TestRepairBatchSelection:
         env.http.routes[f"{MD}/quote/RELIANCE"] = FakeResp(200, {"price": 2500})
         out = m.hotpicks_repair_batch(symbol=" reliance.ns ", market_data_url=MD)
         assert out["attempted"] == 1 and out["repaired"] == ["RELIANCE"]
-        assert env.http.gets == [f"{MD}/quote/RELIANCE"]
+        assert env.http.posts == [(f"{MD}/quotes/bulk", ["RELIANCE"])] and env.http.gets == []
         out = m.hotpicks_repair_batch(symbol="reliance.bo", market_data_url=MD)
         assert out["repaired"] == ["RELIANCE"]
 
@@ -1394,12 +1420,13 @@ class TestRepairBatchSelection:
     def test_limit_clamp(self, m, env, limit, expected):
         _targets(env, *[(f"S{i}", "news_driven", "{}") for i in range(120)])
         out = m.hotpicks_repair_batch(limit=limit, market_data_url=MD)
-        assert out["attempted"] == expected == len(env.http.gets)
+        assert out["attempted"] == expected == sum(len(p[1]) for p in env.http.posts)
+        assert env.http.gets == []                                  # group233: never one GET /quote per symbol
 
     def test_limit_keeps_first_rows_in_order(self, m, env):
         _targets(env, *[(f"S{i}", "news_driven", "{}") for i in range(5)])
         m.hotpicks_repair_batch(limit=2, market_data_url=MD)
-        assert env.http.gets == [f"{MD}/quote/S0", f"{MD}/quote/S1"]
+        assert env.http.posts == [(f"{MD}/quotes/bulk", ["S0", "S1"])] and env.http.gets == []
 
 
 class TestRepairBatchFetch:
@@ -1409,21 +1436,21 @@ class TestRepairBatchFetch:
     def test_client_settings(self, m, env):
         self._one(env)
         m.hotpicks_repair_batch(market_data_url=MD)
-        assert env.http.client_kwargs == [{"timeout": 8.0, "follow_redirects": True}]
+        assert env.http.client_kwargs == [{"timeout": 15.0, "follow_redirects": True}]
 
     def test_url_precedence_and_trailing_slash(self, env):
         mod = env.load(MARKET_DATA_URL="http://envmd/")
         self._one(env)
         mod.hotpicks_repair_batch()
-        assert env.http.gets == ["http://envmd/quote/AAA"]
-        env.http.gets.clear()
+        assert [p[0] for p in env.http.posts] == ["http://envmd/quotes/bulk"]
+        env.http.posts.clear()
         mod.hotpicks_repair_batch(market_data_url="http://arg///")
-        assert env.http.gets == ["http://arg/quote/AAA"]
+        assert [p[0] for p in env.http.posts] == ["http://arg/quotes/bulk"]
 
     def test_no_url_at_all_uses_empty_base(self, m, env):
         self._one(env)
         m.hotpicks_repair_batch()
-        assert env.http.gets == ["/quote/AAA"]
+        assert [p[0] for p in env.http.posts] == ["/quotes/bulk"]
 
     def test_successful_update(self, m, env):
         _targets(env, ("AAA", "results_driven", _json(decision="BUY", keep="me")))
@@ -1498,11 +1525,10 @@ class TestRepairBatchFetch:
         _targets(env, ("BAD", "news_driven", "{}"), ("GOOD", "news_driven", "{}"))
         env.http.routes[f"{MD}/quote/BAD"] = RuntimeError("net boom")
         env.http.routes[f"{MD}/quote/GOOD"] = FakeResp(200, {"price": 9})
-        with caplog.at_level(logging.DEBUG, logger="hotpicks-store"):
-            out = m.hotpicks_repair_batch(market_data_url=MD)
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        # group233: one bulk call; a symbol the bulk answer leaves out is skipped without touching the others
         assert out["repaired"] == ["GOOD"] and out["attempted"] == 2
-        assert any("hotpicks repair BAD failed" in r.getMessage() for r in caplog.records)
-        assert env.clock.slept == [0.5, 0.5]
+        assert env.clock.slept == [0.5]
 
     def test_json_decode_error_is_isolated(self, m, env):
         self._one(env)
@@ -1544,6 +1570,32 @@ class TestRepairBatchFetch:
         out = m.hotpicks_repair_batch(market_data_url=MD)
         assert out["repaired"] == ["AAA", "AAA"]
         assert [c[1]["section"] for c in env.hp.shared.find("UPDATE")] == ["news_driven", "results_driven"]
+
+
+class TestRepairBatchBulk:
+    """group233: the price repair prices every target with chunked POST /quotes/bulk, never GET /quote/{sym}."""
+
+    def test_chunks_of_50_and_no_single_quotes(self, m, env):
+        _targets(env, *[(f"S{i}", "news_driven", "{}") for i in range(120)])
+        m.hotpicks_repair_batch(limit=100, market_data_url=MD)
+        assert [len(p[1]) for p in env.http.posts] == [50, 50] and env.http.gets == []
+
+    def test_duplicate_symbols_across_sections_are_requested_once(self, m, env):
+        _targets(env, ("AAA", "news_driven", "{}"), ("AAA", "results_driven", "{}"))
+        m.hotpicks_repair_batch(market_data_url=MD)
+        assert env.http.posts == [(f"{MD}/quotes/bulk", ["AAA"])]
+
+    def test_failed_bulk_call_repairs_nothing_and_never_falls_back_to_quote(self, m, env):
+        _targets(env, ("AAA", "news_driven", "{}"))
+        env.http.post_raises = RuntimeError("down")
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        assert out["status"] == "completed" and out["repaired"] == [] and env.http.gets == []
+
+    def test_non_200_bulk_answer_repairs_nothing(self, m, env):
+        _targets(env, ("AAA", "news_driven", "{}"))
+        env.http.post_status = 503
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        assert out["repaired"] == [] and env.http.gets == []
 
 
 # ── hotpicks_repair_scores (decision fill) ────────────────────────────────────

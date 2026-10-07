@@ -1299,14 +1299,67 @@ async def _get_preview(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]
     return None
 
 
+# group233: preview prices (after-hours news-scan validation, the dashboard's "waiting at" preview) used to send
+# GET /quote/{sym} then GET /last-close/{sym} for EVERY symbol - hundreds of per-symbol calls, each one a
+# potential AngelOne-lane shed and Yahoo fallback. Now: chunked POST /quotes/bulk first (any age is fine for a
+# non-tradeable preview; market-data answers a closed market from the last close), then GET /last-close/{sym}
+# (cache / bhavcopy only, never AngelOne or Yahoo) for the symbols bulk did not price, and GET /quote/{sym} only
+# for at most FEED_PREVIEW_QUOTE_FALLBACK_MAX of the rest (0 = never; a brand-new listing no cache knows yet).
+FEED_PREVIEW_BULK_MAX_AGE_S = float(((os.getenv("FEED_PREVIEW_BULK_MAX_AGE_S") or "").strip() or str(7 * 86400)))
+FEED_PREVIEW_QUOTE_FALLBACK_MAX = max(0, int(((os.getenv("FEED_PREVIEW_QUOTE_FALLBACK_MAX") or "").strip() or "5")))
+
+
+async def _get_preview_last_close(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:
+    """Preview price from GET /last-close/{sym} only (no AngelOne / Yahoo behind it)."""
+    try:
+        r = await client.get(f"{MARKET_DATA_URL}/last-close/{_path_sym(symbol)}", timeout=8.0)
+        if r.status_code != 200:
+            return None
+        q = r.json()
+        px = q.get("price") or q.get("close") or q.get("previous_close")
+        if px and float(px) > 0:
+            return Tick(symbol=symbol, price=float(px), as_of=datetime.now(timezone.utc),
+                        atr=_cached_atr(symbol), source="preview:last_close")
+    except Exception as e:
+        logger.debug("get_preview(%s) via /last-close failed: %s", symbol, e)
+    return None
+
+
 async def get_preview_quotes(symbols: list[str]) -> dict[str, Tick]:
     """Bulk best-effort preview (last-close) prices — see _get_preview. Only
     call this for symbols that came back empty from get_quotes()."""
     out: dict[str, Tick] = {}
     if not symbols:
         return out
-    results = await _bounded_gather(symbols, _get_preview, "get_preview_quotes")
-    for sym, tick in zip(symbols, results):
-        if tick is not None:
-            out[sym] = tick
+    uniq = list(dict.fromkeys(s for s in symbols if s))
+
+    # 1) one chunked POST /quotes/bulk (age does not matter for a preview)
+    got: dict[str, Tick] = {}
+    try:
+        limits = httpx.Limits(max_connections=FEED_BULK_CONCURRENCY * 2)
+        async with httpx.AsyncClient(limits=limits) as bulk_client:
+            got = await _bulk_ticks(bulk_client, uniq, max_age_s=FEED_PREVIEW_BULK_MAX_AGE_S)
+    except Exception as e:
+        logger.warning("get_preview_quotes: bulk pass failed (%s: %s) - /last-close path for all", type(e).__name__, e)
+    for sym in uniq:
+        t = got.get(_clean_sym(sym))
+        if t is not None and t.price and t.price > 0:
+            out[sym] = Tick(symbol=sym, price=float(t.price), as_of=datetime.now(timezone.utc),
+                            atr=_cached_atr(sym), source="preview:last_close")
+
+    # 2) /last-close for what bulk could not price (cheap: cache / bhavcopy only)
+    left = [s for s in uniq if s not in out]
+    if left:
+        results = await _bounded_gather(left, _get_preview_last_close, "get_preview_quotes(last-close)")
+        for sym, tick in zip(left, results):
+            if tick is not None:
+                out[sym] = tick
+
+    # 3) a few per-symbol /quote calls at most, for names no cache or bhavcopy knows
+    left = [s for s in uniq if s not in out][:FEED_PREVIEW_QUOTE_FALLBACK_MAX]
+    if left:
+        results = await _bounded_gather(left, _get_preview, "get_preview_quotes(quote)")
+        for sym, tick in zip(left, results):
+            if tick is not None:
+                out[sym] = tick
     return out

@@ -257,6 +257,7 @@ class TrendEnv:
         self.resolve = lambda sym: sym + ".NS"
         self.resolved = []
         self.history_calls = []
+        self.bulk_posts = []
 
 
 @pytest.fixture
@@ -291,7 +292,26 @@ def tenv(monkeypatch):
                 raise out
             return out
 
+    def http_post(url, json=None, timeout=None, **kw):
+        """group233: /market/trending prices its (<=10) symbols with ONE POST /quotes/bulk. The per-symbol
+        `env.quotes` entries are turned into bulk rows: a 200 dict body is a row, anything else leaves it out."""
+        env.quote_timeouts.append(timeout)
+        env.bulk_posts.append((url, list(json["symbols"])))
+        rows = []
+        for sym in json["symbols"]:
+            out = env.quotes.get(sym)
+            if out is None or isinstance(out, Exception) or out.status_code != 200:
+                continue
+            try:
+                body = out.json()
+            except Exception:
+                continue
+            if isinstance(body, dict):
+                rows.append(dict(body, symbol=sym))
+        return FakeGetResp(200, {"quotes": rows})
+
     monkeypatch.setattr(gw.httpx, "get", http_get)
+    monkeypatch.setattr(gw.httpx, "post", http_post)
     monkeypatch.setattr(gw, "resolve_ns_ticker", resolve)
     monkeypatch.setattr(gw.yf, "Ticker", FakeTicker)
     return env
@@ -308,7 +328,8 @@ class TestMarketTrendingQuotes:
         out = _run(gw.market_trending())
         assert out == {"data": [{"symbol": "AAA", "price": 110.0, "change": 10.0, "change_pct": 10.0}],
                        "count": 1}
-        assert tenv.quote_timeouts == [3]
+        assert tenv.quote_timeouts == [8]                       # group233: one bulk POST, not one GET per symbol
+        assert tenv.bulk_posts == [(f"{gw.MARKET_DATA_URL.rstrip('/')}/quotes/bulk", ["AAA"])]
         assert tenv.resolved == [] and tenv.history_calls == []
 
     def test_cmp_is_accepted_when_price_is_missing(self, tenv):

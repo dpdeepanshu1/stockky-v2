@@ -43,3 +43,14 @@ def _reset_nse_api_block_and_movers_warning():
     _clear()
     yield
     _clear()
+
+
+@pytest.fixture(autouse=True)
+def _g233_market_open_by_default(monkeypatch):
+    """group233: with the market closed the gateway's bulk price helpers accept hours-old rows and skip the
+    per-symbol /quote leftover. Existing tests were written for an open market and must not depend on the wall
+    clock they run at, so the closed check is pinned to False; the group233 tests set it explicitly."""
+    gw = sys.modules.get("main")
+    if gw is not None and hasattr(gw, "_gw_quotes_closed"):
+        monkeypatch.setattr(gw, "_gw_quotes_closed", lambda: False)
+    yield

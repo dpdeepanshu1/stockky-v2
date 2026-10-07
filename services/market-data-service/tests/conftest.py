@@ -32,3 +32,14 @@ def _g211_reset_angelone_budget():
     _reset()
     yield
     _reset()
+
+
+@_pytest_g188.fixture(autouse=True)
+def _g233_market_open_by_default(monkeypatch):
+    """group233: /quote and /quotes/bulk answer a CLOSED market from the last close. Existing tests were written for
+    an open market and must not depend on the wall clock they run at, so the closed check is pinned to False;
+    the group233 tests set it to True explicitly."""
+    _m = sys.modules.get("main")
+    if _m is not None and hasattr(_m, "_quote_market_closed"):
+        monkeypatch.setattr(_m, "_quote_market_closed", lambda: False)
+    yield

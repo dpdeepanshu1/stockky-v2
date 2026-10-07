@@ -174,6 +174,7 @@ def test_batch_deadline_returns_partial_results_on_slow_upstream(feed, monkeypat
 def test_preview_quotes_use_same_bounded_path(feed, monkeypatch):
     f, srv = feed
     monkeypatch.setattr(f, "FEED_QUOTE_CONCURRENCY", 6)
+    monkeypatch.setattr(f, "FEED_PREVIEW_QUOTE_FALLBACK_MAX", 1000)   # group233: this fake serves GET /quote only
     out = _run(f.get_preview_quotes([f"P{i}" for i in range(50)]))
     assert len(out) == 50
     assert srv.max_inflight <= 6

@@ -341,6 +341,7 @@ class HEnv:
         self.store_raises = False
         self.resolver_raises = set()
         self.bulk_prices = {}
+        self.bulk_kwargs = []
         self.bulk_raises = None
         self.bulk_calls = []
         self.stop_after = None      # int: the check right after this many symbols returns True
@@ -419,7 +420,8 @@ def henv(monkeypatch, kv):
             raise RuntimeError("resolver down")
         return float(row.get("px", 0.0))
 
-    async def bulk(symbols, client):
+    async def bulk(symbols, client, **kw):
+        env.bulk_kwargs.append(kw)           # group233: the hot-picks pass must ask for bulk-only pricing
         env.bulk_calls.append(sorted(symbols))
         if env.bulk_raises:
             raise env.bulk_raises
@@ -1108,6 +1110,8 @@ class TestHotPrices:
         by = {r["symbol"]: r for r in out["results_driven"]}
         assert by["AAA"]["price"] == 120.5 and by["BBB"]["price"] == 77.0 and by["BBB"]["close"] == 77.0
         assert henv.bulk_calls == [["BBB"]]
+        # group233: always bulk (even for 1 symbol) and never one GET /quote per symbol
+        assert henv.bulk_kwargs == [{"bulk_min": 1, "per_symbol_fallback": False}]
 
     @pytest.mark.parametrize("row", [None, {"px": 0.0}, {"px": -3.0}])
     def test_missing_or_non_positive_feed_prices_fall_through_to_the_waterfall(self, henv, row):

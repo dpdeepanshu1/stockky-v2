@@ -654,13 +654,33 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
 
         md = ((market_data_url or "").strip() or (os.getenv("MARKET_DATA_URL") or "").strip()).rstrip("/")
         repaired = []
-        with httpx.Client(timeout=8.0, follow_redirects=True) as client, eng.begin() as conn:
+        # group233: price every target with chunked POST /quotes/bulk (market-data answers a closed market
+        # from the last close) instead of one GET /quote per symbol; a symbol bulk cannot price is skipped
+        # this run (it stays "missing price" and the next repair retries it).
+        def _base(x) -> str:
+            return str(x or "").upper().replace(".NS", "").replace(".BO", "").strip()
+
+        bulk_bodies: dict = {}
+        with httpx.Client(timeout=15.0, follow_redirects=True) as _bc:
+            _bases = list(dict.fromkeys(_base(t[0]) for t in targets if _base(t[0])))
+            for _i in range(0, len(_bases), 50):
+                try:
+                    _r = _bc.post(f"{md}/quotes/bulk", json={"symbols": _bases[_i:_i + 50]})
+                    if _r.status_code != 200:
+                        continue
+                    _j = _r.json()
+                    for _q in ((_j.get("quotes") if isinstance(_j, dict) else None) or []):
+                        if isinstance(_q, dict) and _base(_q.get("symbol")):
+                            bulk_bodies[_base(_q.get("symbol"))] = _q
+                except Exception as e:
+                    logger.debug("hotpicks repair bulk chunk failed: %s", e)
+
+        with eng.begin() as conn:
             for sym, section, blob in targets:
                 try:
-                    r = client.get(f"{md}/quote/{sym}")
-                    if r.status_code != 200:
+                    body = bulk_bodies.get(_base(sym))
+                    if not body:
                         continue
-                    body = r.json() if isinstance(r.json(), dict) else {}
                     px = None
                     for k in ("price", "cmp", "ltp", "close", "last_price"):
                         try:

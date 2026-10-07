@@ -1400,6 +1400,11 @@ class ScanRig:
         self.scored = []
         self.loads = []
         self.n_static = n_static
+        self.prefetched = []          # group229: symbol lists scan() asked the bulk prefetch to price
+
+        async def prefetch(client, url, symbols):
+            self.prefetched.append(list(symbols))
+            return 0
 
         def load_static_cache(force=False):
             self.loads.append(force)
@@ -1420,6 +1425,7 @@ class ScanRig:
 
         monkeypatch.setattr(self.e, "load_static_cache", load_static_cache)
         monkeypatch.setattr(self.e, "_fetch_quote", fetch)
+        monkeypatch.setattr(self.e, "_prefetch_bulk", prefetch)
         monkeypatch.setattr(self.e, "score_stock", score)
 
     def scan(self, **kw):

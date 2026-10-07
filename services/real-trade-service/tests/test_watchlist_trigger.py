@@ -148,7 +148,9 @@ class TestCatalystPriceBackfill:
         row = make_row(db, catalyst_price=0.0, source_tier=3, entry_band_pct=0.05)
 
         async def _quote(symbols):
-            return {row.symbol: tick(50.0, row.symbol)}
+            # group230: a Tier-3 row needs a previous close (day change known); +4% on the day here
+            return {row.symbol: Tick(symbol=row.symbol, price=50.0, as_of=datetime.now(timezone.utc), atr=1.5,
+                                     source="test", prev_close=48.0)}
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
         tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))

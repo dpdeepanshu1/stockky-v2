@@ -385,6 +385,43 @@ def _summarize(mode: str, result: dict) -> tuple[str, bool]:
     return "\n".join(lines), activity
 
 
+def _exit_tick_warn_s() -> float:
+    try:
+        raw = (os.getenv("EXIT_TICK_WARN_S") or "").strip()
+        return float(raw) if raw else 15.0
+    except (TypeError, ValueError):
+        return 15.0
+
+
+_exit_tick_last_warn: dict = {}
+
+
+def _note_exit_tick_timing(mode: str, exit_s: float, reconcile_s: float, now_m: Optional[float] = None) -> bool:
+    """group230 (log review item 4): the exit-cycle deadline was "unproven under load" because nothing recorded how
+    long a tick took. Logs ONE WARNING (at most every 60 s per mode) when exit evaluation + reconcile took longer
+    than EXIT_TICK_WARN_S (default 15 s; 0 = off), with the split so a slow price lookup can be told from a slow
+    reconcile. Observation only: the tick is never cancelled (cancelling in the middle of an order call is unsafe).
+    Returns True when it warned. Never raises."""
+    try:
+        import time as _t
+        limit = _exit_tick_warn_s()
+        total = float(exit_s) + float(reconcile_s)
+        if limit <= 0 or total <= limit:
+            return False
+        now_m = _t.monotonic() if now_m is None else now_m
+        if now_m - _exit_tick_last_warn.get(mode, -1e12) < 60.0:
+            return False
+        _exit_tick_last_warn[mode] = now_m
+        logger.warning(
+            "exit tick %s took %.1fs (> %.0fs): exit evaluation %.1fs, reconcile %.1fs - a held position's "
+            "stop/target check is only as fresh as the end of this tick (EXIT_TICK_WARN_S)",
+            mode, total, limit, exit_s, reconcile_s,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _exit_only_tick(mode: str) -> None:
     """Fast exit-only tick: exit_engine + reconcile, no candidates/entry.
 
@@ -459,14 +496,21 @@ async def _exit_only_tick_body(mode: str) -> None:
         # Stop-hit and emergency gap-down checks are purely price-based and
         # must never be held hostage to the arming/auto-pilot state.
         from exit_engine.exit import evaluate_mode as exit_evaluate
+        import time as _time_mod
+        _t_exit0 = _time_mod.monotonic()
         exit_result = await exit_evaluate(db, mode)
+        _exit_s = _time_mod.monotonic() - _t_exit0
 
         # Reconcile: only needed for REAL; also unconditional (same pre-fix
         # pattern — reconcile already ran regardless of armed state).
+        _reconcile_s = 0.0
         if mode == "REAL" and _reconcile_due(mode):
             from execution.reconcile import reconcile_real_orders
+            _t_rec0 = _time_mod.monotonic()
             await reconcile_real_orders(db)
             _mark_reconciled(mode)
+            _reconcile_s = _time_mod.monotonic() - _t_rec0
+        _note_exit_tick_timing(mode, _exit_s, _reconcile_s)
 
         # Alert if gate is off while positions are open — keeps the operator
         # informed without blocking the protective exit above.

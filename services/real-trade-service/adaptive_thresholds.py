@@ -272,18 +272,25 @@ def startup_staleness_warning() -> None:
 
 # ── Threshold age annotation for reasoning strings ───────────────────────────
 
-def threshold_age_note(constant_name: str) -> str:
+def threshold_age_note(constant_name: str, effective=None) -> str:
     """
     Returns a short string like "(gate=38, set 2026-08-28, 12d ago)" to
     embed in WAIT/BLOCK reasoning so the dashboard shows exactly how old
     the judgment is every time a threshold fires.
     Called by entry_engine.py when logging regime-gate WAIT decisions.
+
+    group230: `effective` is the gate the caller actually applied. The constants table holds the STATIC value
+    (25), while the live gate is usually the adaptive one (36), so the log read "gate=36 (adaptive) (gate=25,
+    set ...)" and looked like two gates. When `effective` is given and differs from the table value, the note
+    names the table value as the static default instead of printing a second "gate=".
     """
     entry = _REGIME_CONSTANTS.get(constant_name)
     if entry is None:
         return ""
     value, reviewed_date = entry
     age_days = _days_since(reviewed_date)
+    if effective is not None and effective != value:
+        return f"(static default {value}, set {reviewed_date}, {age_days}d ago)"
     return f"(gate={value}, set {reviewed_date}, {age_days}d ago)"
 
 

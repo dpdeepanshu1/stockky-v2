@@ -91,6 +91,15 @@ POLL_INTERVAL_S = float(((os.getenv("ANGELONE_POLL_INTERVAL_S") or "").strip() o
 # universe doesn't fire every batch back-to-back with zero spacing.
 BATCH_GAP_S = float(((os.getenv("ANGELONE_BATCH_GAP_S") or "").strip() or "0.35"))
 BATCH_SIZE = 50  # AngelOne's documented per-request token cap for this endpoint
+# group230 (log review item 3): a poll cycle walked its 14 batches strictly one after another (request latency + the
+# 0.35 s gap + the DB write each), so a cycle took 15-25 s against the 15 s target (70 s at boot) and rows polled
+# first were stale before the next pass. After the FIRST batch (held positions, alone, so a rate-limit answer on it
+# still ends the cycle at once) the rest now go FEED_BATCH_CONCURRENCY at a time (default 2); the quote limiter
+# (5/s) and the lane budget still pace them. ANGELONE_FEED_BATCH_CONCURRENCY=1 restores the old one-by-one walk.
+try:
+    FEED_BATCH_CONCURRENCY = max(1, int(float(((os.getenv("ANGELONE_FEED_BATCH_CONCURRENCY") or "").strip() or "2"))))
+except ValueError:
+    FEED_BATCH_CONCURRENCY = 2
 
 # group153: live_quotes used to be written ONE ROW PER TRANSACTION (491 sequential
 # MERGE/INSERT round trips per poll cycle on a 491-symbol universe, on the polling
@@ -537,23 +546,23 @@ def start_feed_background(symbols: list) -> None:
                         return
                 except Exception:  # noqa: BLE001
                     pass
-                i = 0
-                for batch, lane in _plan_batches(tokens, token_map):
-                    if not _current():
-                        return
-                    if i and _cooldown_running():
-                        # group225: a batch earlier in this cycle just hit the rate limit (the 403 started the shared
-                        # cooldown) - the remaining batches would only be shed or rejected, so end the cycle now
-                        # instead of walking (and logging) every one of them.
-                        logger.info("AngelOne feed: rate-limit cooldown started mid-cycle - %d of %d tokens polled, "
-                                    "rest skipped until it ends", i, len(tokens))
-                        return
-                    i += len(batch)
+                async def _run_batch(batch, lane, start_i, end_i):
                     try:
-                        if lane is None:
-                            fetched = await session.get_quotes_batch("NSE", batch)
-                        else:
-                            fetched = await session.get_quotes_batch("NSE", batch, lane=lane)
+                        # group230: ONE quick retry when the connection itself could not be made (a single
+                        # "quote batch (1-11) failed: ConnectError" left that batch stale for a whole cycle)
+                        for _attempt in (1, 2):
+                            try:
+                                if lane is None:
+                                    fetched = await session.get_quotes_batch("NSE", batch)
+                                else:
+                                    fetched = await session.get_quotes_batch("NSE", batch, lane=lane)
+                                break
+                            except Exception as _ce:  # noqa: BLE001
+                                if (_attempt == 1 and type(_ce).__name__ in ("ConnectError", "ConnectTimeout")
+                                        and _current() and not _cooldown_running()):
+                                    await asyncio.sleep(0.5)
+                                    continue
+                                raise
                         if not _current():
                             return   # superseded/stopped while the request was in flight: drop the stale ticks
                         db_rows = []
@@ -578,16 +587,37 @@ def start_feed_background(symbols: list) -> None:
                             # so the DB round trip does not block the event loop.
                             await asyncio.to_thread(_upsert_ticks_batch_sync, db_rows)
                     except Exception as e:
-                        # BUG FIX (2026-09-17): httpx timeout exceptions
-                        # stringify to "" — bare `e` produced "quote batch
-                        # (X-Y) failed:" with no indication of timeout vs.
-                        # connection error vs. anything else. Fall back to
-                        # the exception's class name when str(e) is empty.
+                        # BUG FIX (2026-09-17): httpx timeout exceptions stringify to "" - fall back to the
+                        # exception's class name when str(e) is empty.
                         logger.warning(
                             "AngelOne quote batch (%d-%d) failed: %s",
-                            i - len(batch), i, str(e) or type(e).__name__,
+                            start_i, end_i, str(e) or type(e).__name__,
                         )
                         _trip_on_http_denied(e)   # group225: a 403/429 that no body check recognised still backs the feed off
+
+                plan = list(_plan_batches(tokens, token_map))
+                i = 0
+                pos = 0
+                while pos < len(plan):
+                    if not _current():
+                        return
+                    if i and _cooldown_running():
+                        # group225: a batch earlier in this cycle just hit the rate limit (the 403 started the shared
+                        # cooldown) - the remaining batches would only be shed or rejected, so end the cycle now
+                        # instead of walking (and logging) every one of them.
+                        logger.info("AngelOne feed: rate-limit cooldown started mid-cycle - %d of %d tokens polled, "
+                                    "rest skipped until it ends", i, len(tokens))
+                        return
+                    # group230: the first batch alone, then FEED_BATCH_CONCURRENCY at a time
+                    width = 1 if pos == 0 else FEED_BATCH_CONCURRENCY
+                    group = plan[pos:pos + width]
+                    pos += len(group)
+                    jobs = []
+                    for batch, lane in group:
+                        start_i = i
+                        i += len(batch)
+                        jobs.append(_run_batch(batch, lane, start_i, i))
+                    await asyncio.gather(*jobs)
                     await asyncio.sleep(BATCH_GAP_S)
 
             async def _sleep_while_current(total_s: float) -> None:

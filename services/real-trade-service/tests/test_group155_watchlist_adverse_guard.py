@@ -126,9 +126,45 @@ def test_tier3_up_on_the_day_queued(db, monkeypatch):
     assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
 
 
-def test_tier3_without_prev_close_fails_open(db, monkeypatch):
+def test_tier3_without_prev_close_is_held_back(db, monkeypatch):
+    # group230 (was "fails open"): no previous close means the day change is unknown, so it is not queued blind
     make_row(db, source_tier=3, catalyst_price=0.0)
     patch_quotes(monkeypatch, tick(98.0, prev_close=None))
+    tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
+    assert tally["queued"] == 0 and tally["adverse"] == 1
+
+
+def test_tier3_without_prev_close_queues_when_the_rule_is_off(db, monkeypatch):
+    monkeypatch.setenv("WATCHLIST_REQUIRE_PREV_CLOSE", "0")
+    make_row(db, source_tier=3, catalyst_price=0.0)
+    patch_quotes(monkeypatch, tick(98.0, prev_close=None))
+    assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
+
+
+def test_tier3_held_row_is_queued_once_the_prev_close_is_known(db, monkeypatch):
+    make_row(db, source_tier=3, catalyst_price=0.0)
+    patch_quotes(monkeypatch, tick(103.0, prev_close=None))
+    assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 0     # baseline set, held
+    patch_quotes(monkeypatch, tick(103.0, prev_close=100.0))                    # +3% on the day
+    assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
+
+
+def test_tier2_first_touch_without_prev_close_is_held_back(db, monkeypatch):
+    make_row(db, source_tier=2, catalyst_price=0.0)
+    patch_quotes(monkeypatch, tick(100.0, prev_close=None))
+    tally = run(entry.evaluate_watchlist_entries(db, "DEMO"))
+    assert tally["queued"] == 0 and tally["adverse"] == 1
+
+
+def test_tier2_with_a_known_catalyst_price_does_not_need_prev_close(db, monkeypatch):
+    make_row(db, source_tier=2, catalyst_price=100.0)
+    patch_quotes(monkeypatch, tick(101.0, prev_close=None))
+    assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
+
+
+def test_tier1_first_touch_without_prev_close_still_queues(db, monkeypatch):
+    make_row(db, source_tier=1, catalyst_price=0.0)
+    patch_quotes(monkeypatch, tick(100.0, prev_close=None))
     assert run(entry.evaluate_watchlist_entries(db, "DEMO"))["queued"] == 1
 
 

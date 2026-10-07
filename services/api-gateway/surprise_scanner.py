@@ -53,6 +53,16 @@ HARD_FLOOR_LIQUIDITY = float(((os.getenv("HARD_FLOOR_LIQUIDITY") or "").strip() 
 MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_MIN_CHANGE_PCT") or "").strip() or "1.5"))
 CONCURRENCY = int(((os.getenv("SURPRISE_SCAN_CONCURRENCY") or "").strip() or "20"))
 QUOTE_TIMEOUT = float(((os.getenv("SURPRISE_QUOTE_TIMEOUT") or "").strip() or "3"))
+# group229: scan() used to send one GET /quote/{sym} per liquid-universe symbol (~1,000, 25 at a time)
+# whenever the shared bulk cache was cold. During the open session that was the main source of the
+# per-symbol /quote storm on market-data-service (each call shed from the AngelOne lane and sent to
+# Yahoo). scan() now prices the whole key list with chunked POST /quotes/bulk first and only the
+# symbols bulk could not price use the old per-symbol path. SURPRISE_BULK_PREFETCH=0 turns it off.
+BULK_PREFETCH = ((os.getenv("SURPRISE_BULK_PREFETCH") or "").strip() or "1") not in ("0", "false", "False")
+BULK_CHUNK = max(1, int(float(((os.getenv("SURPRISE_BULK_CHUNK") or "").strip() or "100"))))
+BULK_TIMEOUT = float(((os.getenv("SURPRISE_BULK_TIMEOUT") or "").strip() or "15"))
+BULK_CONCURRENCY = max(1, int(float(((os.getenv("SURPRISE_BULK_CONCURRENCY") or "").strip() or "2"))))
+BULK_MAX_AGE_SEC = float(((os.getenv("SURPRISE_BULK_MAX_AGE_SEC") or "").strip() or "30"))
 # 2026-09-03 fix: default cached_max_age_sec (below, in SurpriseStockEngine.scan)
 # was 90s while real-trade-service's pipeline cycle (AUTO_PILOT_INTERVAL_SECONDS,
 # config.py) defaults to 180s. That mismatch meant candidate_engine's
@@ -419,6 +429,8 @@ class SurpriseStockEngine:
         self._last_rvol: Dict[str, float] = {}
         self._last_scan_ts: float = 0.0
         self._last_result: Optional[Dict[str, Any]] = None
+        # group229: per-scan bulk prefetch {SYMBOL: tick}; reset at the start of every scan()
+        self._bulk_ticks: Dict[str, dict] = {}
 
     def _load_last_result_from_durable_cache(self) -> None:
         """Repopulate self._last_result/_last_scan_ts from the durable
@@ -874,12 +886,9 @@ class SurpriseStockEngine:
 
         return hit
 
-    def _tick_from_bulk_cache(self, symbol: str) -> Optional[dict]:
-        try:
-            from data_feed import get_cached_quote
-            row = get_cached_quote(symbol)
-        except Exception:
-            row = None
+    @staticmethod
+    def _row_to_tick(row) -> Optional[dict]:
+        """Map a bulk-quote / cache row to the tick dict score_stock() reads (None when it has no price)."""
         if not isinstance(row, dict):
             return None
         price = row.get("price") or row.get("close") or row.get("cmp") or row.get("ltp")
@@ -901,10 +910,89 @@ class SurpriseStockEngine:
             "_from_cache":   True,
         }
 
+    def _tick_from_bulk_cache(self, symbol: str) -> Optional[dict]:
+        try:
+            from data_feed import get_cached_quote
+            row = get_cached_quote(symbol)
+        except Exception:
+            row = None
+        return self._row_to_tick(row)
+
+    @staticmethod
+    def _bulk_row_fresh(row: dict, max_age_s: float) -> bool:
+        """True when the row's fetched_at parses and is at most max_age_s old (UTC, naive or aware)."""
+        raw = row.get("fetched_at")
+        if not raw or not isinstance(raw, str):
+            return False
+        try:
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return 0 <= (datetime.now(timezone.utc) - ts).total_seconds() <= max_age_s
+        except Exception:
+            return False
+
+    async def _prefetch_bulk(self, client: httpx.AsyncClient, market_data_url: str, symbols: List[str]) -> int:
+        """group229: price `symbols` with chunked POST /quotes/bulk into self._bulk_ticks.
+
+        Never raises: a failing chunk just leaves its symbols for the per-symbol path in _fetch_quote.
+        Rows older than BULK_MAX_AGE_SEC are ignored (same idea as the gateway's bulk-first helper).
+        Returns the number of symbols priced."""
+        md = (market_data_url or "").rstrip("/")
+        if not BULK_PREFETCH or not md or not symbols:
+            return 0
+        seen, todo = set(), []
+        for sym in symbols:
+            base = str(sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            if base and base not in seen and base not in self._bulk_ticks:
+                seen.add(base)
+                todo.append(base)
+        if not todo:
+            return 0
+        sem = asyncio.Semaphore(BULK_CONCURRENCY)
+        priced = 0
+
+        async def one_chunk(part: List[str]) -> int:
+            n = 0
+            async with sem:
+                try:
+                    r = await client.post(f"{md}/quotes/bulk", json={"symbols": part}, timeout=BULK_TIMEOUT)
+                    if r.status_code != 200:
+                        return 0
+                    body = r.json()
+                    rows = body.get("quotes") if isinstance(body, dict) else None
+                    wanted = set(part)
+                    for q in rows or []:
+                        if not isinstance(q, dict):
+                            continue
+                        base = str(q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                        if base not in wanted or not self._bulk_row_fresh(q, BULK_MAX_AGE_SEC):
+                            continue
+                        tick = self._row_to_tick(q)
+                        if tick:
+                            tick["_from_cache"] = False   # a live market-data answer, not the gateway's own cache
+                            self._bulk_ticks[base] = tick
+                            n += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("surprise bulk prefetch chunk failed (%d symbols): %s", len(part), e)
+            return n
+
+        results = await asyncio.gather(*(one_chunk(todo[i:i + BULK_CHUNK]) for i in range(0, len(todo), BULK_CHUNK)),
+                                       return_exceptions=True)
+        for res in results:
+            if isinstance(res, int):
+                priced += res
+        logger.info("surprise scan: bulk prefetch priced %d of %d symbol(s)", priced, len(todo))
+        return priced
+
     async def _fetch_quote(self, client: httpx.AsyncClient, market_data_url: str, symbol: str) -> Optional[dict]:
         cached = self._tick_from_bulk_cache(symbol)
         if cached:
             return cached
+        prefetched = self._bulk_ticks.get(str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip())
+        if prefetched:
+            return dict(prefetched)
         async with self.semaphore:
             try:
                 r = await client.get(f"{market_data_url.rstrip('/')}/quote/{symbol}", timeout=QUOTE_TIMEOUT)
@@ -1045,6 +1133,8 @@ class SurpriseStockEngine:
         results: List[dict] = []
         quote_ok = cache_hits = upstream_calls = 0
         chunk = 25
+        self._bulk_ticks = {}
+        await self._prefetch_bulk(client, market_data_url, keys)
         for i in range(0, len(keys), chunk):
             batch = keys[i: i + chunk]
             ticks = await asyncio.gather(
@@ -1076,6 +1166,7 @@ class SurpriseStockEngine:
                 k for k, v in self.static_cache.items()
                 if v.get("sector") in breakout_sectors and k not in already_hit
             ]
+            await self._prefetch_bulk(client, market_data_url, peer_keys)
             for i in range(0, len(peer_keys), chunk):
                 batch = peer_keys[i: i + chunk]
                 ticks = await asyncio.gather(

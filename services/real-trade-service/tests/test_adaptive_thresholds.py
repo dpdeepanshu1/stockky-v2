@@ -345,3 +345,22 @@ class TestAdaptiveStatus:
         assert status["history_readings_available"] == 0
         assert status["history_days_available"] == 0
         assert status["latest_market_score"] is None
+
+
+class TestThresholdAgeNoteEffectiveGate:
+    """group230: the note must not print a second 'gate=' when the applied gate differs from the table value."""
+
+    def test_effective_equal_keeps_old_format(self, monkeypatch):
+        monkeypatch.setattr(at, "_REGIME_CONSTANTS", {"FOO": (38, "2026-01-01")})
+        age = at._days_since("2026-01-01")
+        assert at.threshold_age_note("FOO", effective=38) == f"(gate=38, set 2026-01-01, {age}d ago)"
+
+    def test_effective_different_names_the_table_value_as_static_default(self, monkeypatch):
+        monkeypatch.setattr(at, "_REGIME_CONSTANTS", {"FOO": (25, "2026-01-01")})
+        age = at._days_since("2026-01-01")
+        note = at.threshold_age_note("FOO", effective=36)
+        assert note == f"(static default 25, set 2026-01-01, {age}d ago)"
+        assert "gate=" not in note
+
+    def test_unknown_constant_still_empty_with_effective(self):
+        assert at.threshold_age_note("NOT_A_REAL_CONSTANT", effective=36) == ""

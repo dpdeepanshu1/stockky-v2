@@ -495,7 +495,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # Get age annotation for the threshold
             try:
                 from adaptive_thresholds import threshold_age_note
-                age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE")
+                age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE", effective=threshold)
             except Exception:
                 age_note = ""
             logger.info(
@@ -718,7 +718,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         if mode == "REAL" and not regime_ok and not is_regime_override:
             try:
                 from adaptive_thresholds import threshold_age_note
-                age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE")
+                age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE", effective=threshold)
             except Exception:
                 age_note = ""
             _wait_with_preview(
@@ -1602,11 +1602,26 @@ def _watchlist_deep_drop_reason(pct_move: float) -> Optional[str]:
     return None
 
 
-def _watchlist_adverse_reason(row, pct_move: float, tick) -> Optional[str]:
-    """Return a short reason when this row must NOT be queued this cycle, else None. Never raises."""
+def _wl_require_prev_close_on() -> bool:
+    return ((os.getenv("WATCHLIST_REQUIRE_PREV_CLOSE") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _watchlist_adverse_reason(row, pct_move: float, tick, baseline_just_set: bool = False) -> Optional[str]:
+    """Return a short reason when this row must NOT be queued this cycle, else None. Never raises.
+
+    group230 (log review item 5): a Tier 2/3 row whose tick carries no previous close was queued blind - its
+    "move" was 0.00% because the baseline had just been set from that same tick, and the day change that the
+    Tier-3 check needs was None, which let it through. Tier 3 with an unknown day change, and a Tier 2 row whose
+    baseline was set from this very tick (`baseline_just_set`) with an unknown day change, now stay active and
+    are re-checked next cycle, when the previous close is usually known. WATCHLIST_REQUIRE_PREV_CLOSE=0 restores
+    the old behaviour."""
     try:
         if not _wl_adverse_guard_on():
             return None
+        if (_wl_require_prev_close_on() and getattr(row, "source_tier", None) in (2, 3)
+                and (getattr(row, "source_tier", None) == 3 or baseline_just_set)
+                and _tick_day_change_pct(tick) is None):
+            return "no previous close on the tick (day change unknown) - re-checked next cycle"
         _inst = _watchlist_instrument_reason(getattr(row, "symbol", ""), getattr(tick, "price", 0))
         if _inst:
             return _inst
@@ -1812,7 +1827,9 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         #     Fall through to the band-check immediately so these rows don't sit
         #     NEVER TOUCHED until the next cycle (which may not come until the
         #     next market session for intraday-created entries).
+        _baseline_just_set = False
         if row.catalyst_price == 0.0:
+            _baseline_just_set = True
             row.catalyst_price = price
             row.catalyst_price_source = "live"  # AUDIT FIX (this session): this branch always sets it from a real tick fetched this cycle — see models.py's docstring
             row.updated_at = now
@@ -1861,7 +1878,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
         # group155: do not queue a stock that has fallen away from its catalyst, or a Tier-3
         # volume-shock stock that is not up on the day. The row stays active (re-checked next cycle).
-        _adv = _watchlist_adverse_reason(row, pct_move, tick)
+        _adv = _watchlist_adverse_reason(row, pct_move, tick, _baseline_just_set)
         if _adv:
             adverse += 1
             if _adverse_should_log(mode, row):

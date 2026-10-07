@@ -3298,10 +3298,101 @@ _HISTORY_PERIOD_ORDER = ["1mo", "3mo", "6mo", "1y", "2y", "5y"]
 _HISTORY_PERIOD_DAYS = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
 
 
+# group230 (log review items 1 and 2): daily candles of COMPLETED sessions never change, yet the 1d/1mo series was
+# cached for only 900 s while the market was open, so the volume-shock list (128 symbols) plus the candidate checks
+# re-asked AngelOne getCandleData for the same series every 15 minutes (8 candle 403 trips in 15 minutes). Daily
+# (1d/1wk/1mo) results now stay cached HISTORY_DAILY_OPEN_TTL_S (default 3600) while open; intraday stays 900.
+# The last good daily result is also kept in the durable KV store (survives a restart) and served, flagged
+# stale=true, when every source fails or while the AngelOne candle cooldown runs - instead of an empty answer
+# that the candidate engine read as "Insufficient daily history" (large caps ASIANPAINT, INFY, HCLTECH ...).
+_HISTORY_DAILY_INTERVALS = ("1d", "1wk", "1mo")
+
+
+def _hist_env_num(name: str, default: float) -> float:
+    try:
+        raw = (os.getenv(name) or "").strip()
+        return float(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _history_ttl(interval: str) -> int:
+    """Cache seconds for a freshly fetched history result."""
+    if not is_market_open():
+        return 21600
+    if (interval or "").lower() in _HISTORY_DAILY_INTERVALS:
+        return int(max(60.0, _hist_env_num("HISTORY_DAILY_OPEN_TTL_S", 3600.0)))
+    return 900
+
+
+def _history_last_good_on() -> bool:
+    return ((os.getenv("HISTORY_LAST_GOOD") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _history_lg_key(cache_key: str) -> str:
+    return f"history_lg:{cache_key}"
+
+
+def _history_last_good_save(cache_key: str, result: dict) -> None:
+    """Keep the last good DAILY result durably (at most once per HISTORY_LAST_GOOD_SAVE_EVERY_S per key). Never raises."""
+    try:
+        parts = cache_key.split(":")
+        if not _history_last_good_on() or len(parts) < 4 or parts[3].lower() not in _HISTORY_DAILY_INTERVALS:
+            return
+        if not isinstance(result, dict) or not result.get("candles") or result.get("stale"):
+            return
+        gate = f"{_history_lg_key(cache_key)}:saved"
+        if _mem.get(gate):
+            return
+        from kv_cache import set as _kv_set
+        max_age = _hist_env_num("HISTORY_LAST_GOOD_MAX_AGE_S", 345600.0)
+        _kv_set(_history_lg_key(cache_key),
+                {"saved_at": time.time(), "result": _sanitize_for_json(result)}, ttl=int(max_age * 1.5))
+        _mem.set(gate, True, ttl=int(max(60.0, _hist_env_num("HISTORY_LAST_GOOD_SAVE_EVERY_S", 21600.0))))
+    except Exception as e:  # noqa: BLE001 - an optimisation only
+        logger.debug("history last-good save failed for %s: %s", cache_key, e)
+
+
+def _history_last_good_get(cache_key: str):
+    """The last good daily result for this key (a copy flagged stale=true), or None. Never raises."""
+    try:
+        parts = cache_key.split(":")
+        if not _history_last_good_on() or len(parts) < 4 or parts[3].lower() not in _HISTORY_DAILY_INTERVALS:
+            return None
+        from kv_cache import get as _kv_get
+        ent = _kv_get(_history_lg_key(cache_key))
+        if not isinstance(ent, dict):
+            return None
+        age = time.time() - float(ent.get("saved_at") or 0)
+        res = ent.get("result")
+        if age < 0 or age > _hist_env_num("HISTORY_LAST_GOOD_MAX_AGE_S", 345600.0):
+            return None
+        if not isinstance(res, dict) or not res.get("candles"):
+            return None
+        out = dict(res)
+        out["stale"] = True
+        out["stale_age_s"] = int(age)
+        out["source"] = "last_good"
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history last-good read failed for %s: %s", cache_key, e)
+        return None
+
+
+def _history_candle_cooling() -> bool:
+    """True while the AngelOne candle-family cooldown runs (candles are then served by the saturated yfinance path)."""
+    try:
+        import angelone_budget as _b
+        return bool(_b.in_global_cooldown("candle"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _history_store(cache_key: str, result: dict, ttl: int) -> None:
     """Cache an upstream-fetched history result and stamp it "fresh" so a
     force=true request arriving within HISTORY_FORCE_REUSE_S can reuse it."""
     _cache_set(cache_key, result, ttl=ttl)
+    _history_last_good_save(cache_key, result)
     if _HISTORY_FORCE_REUSE_S > 0:
         try:
             _mem.set(f"{cache_key}:fresh", True, ttl=int(max(1, _HISTORY_FORCE_REUSE_S)))
@@ -3490,6 +3581,14 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
                 detail=f"No history found for {symbol} (cached no-data result, retries in <=1h)",
             )
 
+    # group230: while the AngelOne candle cooldown runs, a symbol with a recent last-good daily series is answered
+    # from it (flagged stale) instead of going to yfinance, which is what saturates and times out at the open.
+    if not force and _history_candle_cooling():
+        _lg = _history_last_good_get(cache_key)
+        if _lg:
+            _cache_set(cache_key, _lg, ttl=120)     # short, so a real fetch replaces it once the cooldown ends
+            return _lg
+
     angel_candles = _angelone_history_candles(sym, period, interval, days, start_date, end_date)
     if angel_candles:
         if len(angel_candles) > MAX_HISTORY_ROWS:
@@ -3502,7 +3601,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
             "candles": angel_candles,
             "source": "angelone",
         }
-        hist_ttl = 900 if is_market_open() else 21600
+        hist_ttl = _history_ttl(interval)
         _history_store(cache_key, result, hist_ttl)
         return result
 
@@ -3568,7 +3667,7 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
                 "interval": interval,
                 "candles": candles,
             }
-            hist_ttl = 900 if is_market_open() else 21600
+            hist_ttl = _history_ttl(interval)
             _history_store(cache_key, result, hist_ttl)
             if cand != sym:
                 logger.info("History for %s served via fallback ticker %s", symbol, cand)
@@ -3594,9 +3693,17 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
             "candles": nse_candles,
             "source": "nse_direct",
         }
-        hist_ttl = 900 if is_market_open() else 21600
+        hist_ttl = _history_ttl(interval)
         _history_store(cache_key, result, hist_ttl)
         return result
+
+    # group230: every source failed - a recent last-good daily series beats an empty answer (see above).
+    _lg = _history_last_good_get(cache_key)
+    if _lg:
+        logger.info("history %s %s/%s: every source failed (%s) - served last good candles (%ss old)",
+                    symbol, period, interval, (last_err or "no data")[:80], _lg.get("stale_age_s"))
+        _cache_set(cache_key, _lg, ttl=120)
+        return _lg
 
     # All candidates failed
     detail = last_err or f"No history for {symbol}"

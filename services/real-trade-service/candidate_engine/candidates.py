@@ -2209,8 +2209,14 @@ async def _refresh_volume_shock_candidates(
 
         reject = result.get("reject_reason")
         if reject:
+            _txt = _reject_log_text(reject)
+            if "insufficient daily history" in str(reject).lower():
+                # group230: say WHY the history is missing, so a market-data timeout is not read as a verdict on the stock
+                _why_now = _HIST_REASON.get(sym) or "unknown"
+                _txt += (f" [history {'missing' if _why_now in _HIST_DEFINITE else 'unavailable'}: {_why_now}"
+                         f" - {'no data on record' if _why_now in _HIST_DEFINITE else 'not judged'}]")
             logger.info(
-                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _reject_log_text(reject)
+                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _txt
             )
             skipped += 1
             if "no quote" in reject.lower() or "insufficient" in reject.lower():

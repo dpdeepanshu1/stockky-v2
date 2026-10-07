@@ -155,6 +155,31 @@ _LIVE: Dict[str, dict] = {}
 _LIVE_LOCK = threading.Lock()
 
 
+def _cooldown_running() -> bool:
+    """True while the shared AngelOne rate-limit cooldown (angelone_budget) is running; never raises."""
+    try:
+        import angelone_budget as _b
+        return bool(_b.in_global_cooldown())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _trip_on_http_denied(exc: BaseException) -> bool:
+    """group225: if a batch failed with an HTTP 403/429 (raise_for_status) start the shared AngelOne cooldown, whatever
+    the response body said. The client already trips it for the known rate-limit wording; this is the safety net for
+    any other 403/429 text, so the feed never retries a denied endpoint every ~3 s. Never raises. True if tripped."""
+    try:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if code not in (403, 429):
+            return False
+        import angelone_budget as _b
+        if _b.in_global_cooldown():
+            return False
+        return bool(_b.trip("quote(batch)"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _clean(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
@@ -516,6 +541,13 @@ def start_feed_background(symbols: list) -> None:
                 for batch, lane in _plan_batches(tokens, token_map):
                     if not _current():
                         return
+                    if i and _cooldown_running():
+                        # group225: a batch earlier in this cycle just hit the rate limit (the 403 started the shared
+                        # cooldown) - the remaining batches would only be shed or rejected, so end the cycle now
+                        # instead of walking (and logging) every one of them.
+                        logger.info("AngelOne feed: rate-limit cooldown started mid-cycle - %d of %d tokens polled, "
+                                    "rest skipped until it ends", i, len(tokens))
+                        return
                     i += len(batch)
                     try:
                         if lane is None:
@@ -555,6 +587,7 @@ def start_feed_background(symbols: list) -> None:
                             "AngelOne quote batch (%d-%d) failed: %s",
                             i - len(batch), i, str(e) or type(e).__name__,
                         )
+                        _trip_on_http_denied(e)   # group225: a 403/429 that no body check recognised still backs the feed off
                     await asyncio.sleep(BATCH_GAP_S)
 
             async def _sleep_while_current(total_s: float) -> None:

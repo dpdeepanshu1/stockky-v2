@@ -25,7 +25,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import market_feed.feed as f  # noqa: E402
-from market_feed.feed import Tick  # noqa: E402
 
 
 def _run(coro):
@@ -33,7 +32,7 @@ def _run(coro):
 
 
 def _tick(sym, price=50.0, source="t"):
-    return Tick(symbol=sym, price=price, as_of=datetime.now(timezone.utc), atr=None, source=source)
+    return f.Tick(symbol=sym, price=price, as_of=datetime.now(timezone.utc), atr=None, source=source)
 
 
 class _Dummy:

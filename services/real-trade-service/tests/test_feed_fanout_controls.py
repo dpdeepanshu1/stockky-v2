@@ -80,6 +80,7 @@ def feed(monkeypatch):
     srv = _Upstream()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     monkeypatch.setenv("MARKET_DATA_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+    monkeypatch.setenv("FEED_LEFTOVER_MAX", "0")       # group225: these tests pin the fan-out cap, not the per-batch leftover cap
     import importlib
     import market_feed.feed as f
     f = importlib.reload(f)

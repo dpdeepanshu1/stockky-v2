@@ -165,6 +165,23 @@ FEED_PRIORITY_BULK_COOLDOWN_S = _env_float("FEED_PRIORITY_BULK_COOLDOWN_S", 30.0
 FEED_PRIORITY_SHARE_S = _env_float("FEED_PRIORITY_SHARE_S", 3.0)
 FEED_LEFTOVER_SKIP_LIVE = _env_on("FEED_LEFTOVER_SKIP_LIVE")
 _PRIO_LOCK = _threading.Lock()
+
+# ── group225 (items 1/2 of the 2026-10-07 list): open positions keep a price while market-data is saturated ──
+# At 09:43 the six REAL positions (ADANIGREEN, GODREJCP, SCI, IOC, CIEINDIA, COHANCE) hit ReadTimeout on bulk, on
+# /live-quote and on /quote every 8 s exit cycle although market-data answered 200 (late). Cause: the same process
+# also sent ~579 per-symbol lookups for the watchlist, so market-data's workers were busy when the position calls
+# arrived. Two changes:
+#   * last-good fallback: when the whole priority lane could not price a held symbol, return the last tick the lane
+#     did price for it if that tick is at most FEED_PRIORITY_STALE_FALLBACK_S old (default 90 s, 0 = off). The Tick
+#     keeps its REAL as_of and its source is tagged "stale_last_good(<orig>)", so nothing mistakes it for a fresh quote.
+#   * back-pressure: a priority-lane failure switches the non-priority per-symbol leftovers off for FEED_BACKPRESSURE_S
+#     (default 20 s) and a single non-priority batch sends at most FEED_LEFTOVER_MAX (default 120) per-symbol lookups
+#     (0 = no cap), so the watchlist poll can no longer starve the positions.
+FEED_PRIORITY_STALE_FALLBACK_S = _env_float("FEED_PRIORITY_STALE_FALLBACK_S", 90.0)
+FEED_BACKPRESSURE_S = _env_float("FEED_BACKPRESSURE_S", 20.0)
+FEED_LEFTOVER_MAX = int(_env_float("FEED_LEFTOVER_MAX", 120.0))
+_PRIO_LAST_GOOD: dict = {}         # clean symbol -> Tick (last tick the priority lane priced)
+_PRIO_DISTRESS_UNTIL = [0.0]       # monotonic time until which non-priority per-symbol leftovers are skipped
 _PRIO_SHARED: dict = {}            # clean symbol -> (monotonic ts, Tick)
 _PRIO_BULK_OFF_UNTIL = [0.0]       # monotonic time until which bulk-first is skipped after a failure
 
@@ -173,7 +190,9 @@ def clear_priority_share() -> None:
     """Forget the shared priority ticks and the bulk-first cool-down (tests, or an operator hook)."""
     with _PRIO_LOCK:
         _PRIO_SHARED.clear()
+        _PRIO_LAST_GOOD.clear()
         _PRIO_BULK_OFF_UNTIL[0] = 0.0
+        _PRIO_DISTRESS_UNTIL[0] = 0.0
 
 # ATR background refresh policy. Before: Source 2 fired a /history fetch on
 # EVERY call for EVERY symbol (even with a warm ATR — the ATR cache has no
@@ -998,7 +1017,49 @@ def _prio_shared_lookup(uniq: list[str]) -> dict[str, Tick]:
     return out
 
 
+def _prio_remember_last_good(ticks: dict[str, Tick]) -> None:
+    """Keep the freshest priced tick per held symbol for the group225 fallback (bounded, memory-only)."""
+    if FEED_PRIORITY_STALE_FALLBACK_S <= 0 or not ticks:
+        return
+    with _PRIO_LOCK:
+        if len(_PRIO_LAST_GOOD) > 500:
+            _PRIO_LAST_GOOD.clear()
+        for sym, tick in ticks.items():
+            if not str(tick.source).startswith("stale_last_good"):
+                _PRIO_LAST_GOOD[_clean_sym(sym)] = tick
+
+
+def _prio_last_good_fallback(wanted: list[str]) -> dict[str, Tick]:
+    """Last good ticks (<= FEED_PRIORITY_STALE_FALLBACK_S old by their own as_of) for symbols the lane could not price."""
+    if FEED_PRIORITY_STALE_FALLBACK_S <= 0 or not wanted:
+        return {}
+    now = datetime.now(timezone.utc)
+    out: dict[str, Tick] = {}
+    with _PRIO_LOCK:
+        for sym in wanted:
+            t = _PRIO_LAST_GOOD.get(_clean_sym(sym))
+            if t is None:
+                continue
+            as_of = t.as_of if t.as_of.tzinfo else t.as_of.replace(tzinfo=timezone.utc)
+            if (now - as_of).total_seconds() <= FEED_PRIORITY_STALE_FALLBACK_S:
+                out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
+                                source=f"stale_last_good({t.source})", volume=t.volume,
+                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close)
+    return out
+
+
+def _prio_mark_distress() -> None:
+    if FEED_BACKPRESSURE_S > 0:
+        with _PRIO_LOCK:
+            _PRIO_DISTRESS_UNTIL[0] = _time.monotonic() + FEED_BACKPRESSURE_S
+
+
+def _prio_in_distress() -> bool:
+    return _time.monotonic() < _PRIO_DISTRESS_UNTIL[0]
+
+
 def _prio_shared_store(ticks: dict[str, Tick]) -> None:
+    _prio_remember_last_good(ticks)
     if FEED_PRIORITY_SHARE_S <= 0 or not ticks:
         return
     now = _time.monotonic()
@@ -1063,7 +1124,14 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
                 len(missing), len(uniq), missing[:8], len(missing) - len(still),
                 f", still missing {still[:8]}" if still else "",
             )
-    _prio_shared_store(out)
+            _prio_mark_distress()
+            if still:
+                stale = _prio_last_good_fallback(still)
+                if stale:
+                    out.update(stale)
+                    logger.warning("priority quotes: %d held symbol(s) served from their last good tick (<= %.0fs old): %s",
+                                   len(stale), FEED_PRIORITY_STALE_FALLBACK_S, sorted(stale)[:8])
+    _prio_shared_store({s: t for s, t in out.items() if not str(t.source).startswith("stale_last_good")})
     return out
 
 
@@ -1140,6 +1208,14 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
             out, todo = {}, list(symbols)
             bulk_answered = False
 
+    if todo and _prio_in_distress():
+        logger.info("get_quotes: %d per-symbol lookup(s) skipped for %.0fs — the priority lane (open positions) is "
+                    "struggling and market-data is being left free for it", len(todo), FEED_BACKPRESSURE_S)
+        todo = []
+    elif todo and FEED_LEFTOVER_MAX > 0 and len(todo) > FEED_LEFTOVER_MAX:
+        logger.info("get_quotes: per-symbol lookups capped at %d of %d (FEED_LEFTOVER_MAX); the rest wait for the next cycle",
+                    FEED_LEFTOVER_MAX, len(todo))
+        todo = todo[:FEED_LEFTOVER_MAX]
     if todo:
         if bulk_answered and FEED_LEFTOVER_SKIP_LIVE:
             async def _no_live(client, sym):

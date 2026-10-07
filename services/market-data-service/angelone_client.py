@@ -167,10 +167,17 @@ def _resolve_client_public_ip() -> str:
 _ANGELONE_COOLDOWN_SEC = float(((os.environ.get("ANGELONE_COOLDOWN_SEC") or "").strip() or "30"))
 
 
-def _is_rate_limit_response(status_code: int, body: Optional[dict]) -> bool:
+def _is_rate_limit_response(status_code: int, body: Optional[dict], text: Optional[str] = None) -> bool:
+    """group225: AngelOne's gateway answers the rate limit with a PLAIN-TEXT 403 body ("Access denied because of
+    exceeding access rate"), not JSON, so `body` is None for it. The old JSON-only test therefore missed the real
+    thing: no cooldown started, no global trip, and every caller (feed batches, /quote, candles) kept sending into the
+    limit. `text` (the raw response body) is now checked with the same wording."""
     if status_code == 403:
         msg = ((body or {}).get("message") or "").lower()
         if "exceeding access rate" in msg or "access denied" in msg:
+            return True
+        raw = (text or "").lower()
+        if "exceeding access rate" in raw or "access denied" in raw:
             return True
     return status_code == 429
 
@@ -385,7 +392,7 @@ class AngelOneSession:
                 },
             )
             _log_denied("quote", r)
-            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+            if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("quote")
                 _note_quote_miss("AngelOne answered rate-limited (cooldown started)")
@@ -438,7 +445,7 @@ class AngelOneSession:
                 },
             )
             _log_denied("getCandleData", r)
-            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+            if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
                 _rl_set_cooldown("angelone_candle", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("getCandleData")
                 return []
@@ -482,7 +489,7 @@ class AngelOneSession:
                 headers=self._headers(),
                 json={"datatype": datatype, "expirytype": expirytype},
             )
-            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+            if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
                 _rl_set_cooldown("angelone_gainers", _ANGELONE_COOLDOWN_SEC)
                 return []
             r.raise_for_status()
@@ -518,7 +525,7 @@ class AngelOneSession:
                 json={"mode": "FULL", "exchangeTokens": {exchange: symbol_tokens}},
             )
             _log_denied("quote(batch)", r)
-            if _is_rate_limit_response(r.status_code, _safe_json(r)):
+            if _is_rate_limit_response(r.status_code, _safe_json(r), r.text):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("quote(batch)")
                 return []

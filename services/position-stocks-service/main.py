@@ -1353,6 +1353,8 @@ def status(db: Session = Depends(get_db)):
             # 2026-10-02 loss-day fix gates (see screening/trade_gates.py)
             "market_gate_enabled": config.MARKET_GATE_ENABLED,
             "market_gate_min_nifty_change_pct": config.MARKET_GATE_MIN_NIFTY_CHANGE_PCT,
+            "market_gate_prev_close_enabled": config.MARKET_GATE_PREV_CLOSE_ENABLED,
+            "market_gate_min_nifty_prev_close_pct": config.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT,
             "loss_brake_enabled": config.LOSS_BRAKE_ENABLED,
             "loss_brake_max_consecutive_losses": config.LOSS_BRAKE_MAX_CONSECUTIVE_LOSSES,
             "loss_brake_cooldown_minutes": config.LOSS_BRAKE_COOLDOWN_MINUTES,

@@ -987,6 +987,9 @@ class TestWarmSurpriseScanCache:
         monkeypatch.setattr(gw, "MARKET_DATA_URL", "http://md.local")
         monkeypatch.setattr(gw, "_surprise_boot_warm_delay_sec", lambda: 0)
         monkeypatch.setattr(gw, "_market_session_phase_ist", lambda: e.phase)
+        # group222: pre-open skip depends on the clock; pin "60 s before the open" (inside the 300 s lead) so
+        # the older tests keep their meaning whatever time the suite runs.
+        monkeypatch.setattr(gw, "_seconds_to_market_open_ist", lambda: 60.0)
         return e
 
     def test_the_first_scan_runs_in_the_background(self, env, caplog):

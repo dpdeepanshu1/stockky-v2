@@ -64,6 +64,24 @@ def _budget_trip(endpoint: str) -> None:
     except Exception:  # pragma: no cover
         pass
 
+# group222: why the last get_quote() on THIS thread returned {} (so GET /quote can say which of the
+# several different causes it was instead of listing all of them). Thread-local because /quote runs each
+# call in its own thread with asyncio.run(); never read across threads. Purely diagnostic.
+_miss_local = _threading.local()
+
+
+def _note_quote_miss(reason: Optional[str]) -> None:
+    try:
+        _miss_local.reason = reason
+    except Exception:  # pragma: no cover
+        pass
+
+
+def last_quote_miss_reason() -> Optional[str]:
+    """Reason the most recent get_quote() on this thread returned {}, or None (answered / unknown)."""
+    return getattr(_miss_local, "reason", None)
+
+
 _BASE = "https://apiconnect.angelone.in"
 
 # 2026-09-07 fix — ROOT CAUSE of the recurring 403 on the secure quote/
@@ -340,15 +358,20 @@ class AngelOneSession:
         group211: `lane` (angelone_budget.POSITION / CANDIDATE / BACKGROUND; None = unclassified, old behaviour)
         decides how much of the bucket must stay free for higher lanes; any call is skipped during the global
         cooldown."""
+        _note_quote_miss(None)
         if _rl_in_cooldown("angelone_quote"):
+            _note_quote_miss("angelone_quote rate-limit cooldown is running")
             return {}
         if _budget_skip(lane):
+            _note_quote_miss("global AngelOne cooldown (403) is running")
             return {}
         await self.ensure_session()
         if not await _budget_admit(lane, "angelone_quote", 1, max_wait):
+            _note_quote_miss("lane budget shed this call (higher-priority lanes need the bucket)")
             return {}
         if max_wait < 20.0:
             if not _rl_try_acquire("angelone_quote", weight=1, max_wait=max_wait):
+                _note_quote_miss("angelone_quote rate bucket had no token within %.1fs" % max_wait)
                 return {}
         else:
             _rl_acquire("angelone_quote", weight=1)
@@ -365,12 +388,14 @@ class AngelOneSession:
             if _is_rate_limit_response(r.status_code, _safe_json(r)):
                 _rl_set_cooldown("angelone_quote", _ANGELONE_COOLDOWN_SEC)
                 _budget_trip("quote")
+                _note_quote_miss("AngelOne answered rate-limited (cooldown started)")
                 return {}
             r.raise_for_status()
             body = r.json()
             fetched = (body.get("data") or {}).get("fetched") or []
             if fetched:
                 return fetched[0]
+            _note_quote_miss("AngelOne returned no quote for this token")
             return {}
 
     async def get_candles(

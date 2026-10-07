@@ -2160,9 +2160,20 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         async def _go():
             return await asyncio.wait_for(session.get_quote("NSE", token, max_wait=min(2.0, tmo), lane=_lane), timeout=tmo)
 
+        try:   # group222: a reason left by an earlier call on this thread must not label this one
+            from angelone_client import _note_quote_miss as _nqm
+            _nqm(None)
+        except Exception:  # noqa: BLE001
+            pass
         q = asyncio.run(_go())
         if not isinstance(q, dict) or not q:
-            return _ao_first_miss(sym, "empty answer: rate bucket busy, rate-limit cooldown or no quote for the token")
+            _why = None
+            try:   # group222: the specific cause when angelone_client recorded one on this thread
+                from angelone_client import last_quote_miss_reason as _lqmr
+                _why = _lqmr()
+            except Exception:  # noqa: BLE001
+                _why = None
+            return _ao_first_miss(sym, "empty answer: " + (_why or "rate bucket busy, rate-limit cooldown or no quote for the token"))
         price = _safe(q.get("ltp"))
         if price is None or price <= 0:
             return _ao_first_miss(sym, "answer had no positive ltp")

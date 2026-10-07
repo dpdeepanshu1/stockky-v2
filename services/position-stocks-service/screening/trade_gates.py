@@ -3,7 +3,9 @@
 Two pre-entry gates for AUTO scalp entries, both fail-open:
 
   market_gate_reject()  async  — blocks entries while Nifty is below its day
-                                 open by more than the configured threshold.
+                                 open by more than the configured threshold, or
+                                 (group 221) is down by more than a wider
+                                 threshold against the previous session's close.
   loss_brake_reject()   sync   — blocks entries after N consecutive losing
                                  closes today (timed pause) or once today's
                                  realized loss reaches a % of the pool.
@@ -30,13 +32,30 @@ logger = logging.getLogger(__name__)
 _NOT_CLOSED = ("OPEN", "EXIT_LEGS_REJECTED", "ERROR")
 
 # {"pct": float|None, "ts": float}
-_market_cache: dict = {"pct": None, "ts": 0.0}
+_market_cache: dict = {"pct": None, "ts": 0.0, "prev_pct": None}
 
 
 def last_nifty_change_pct() -> Optional[float]:
     """Most recently fetched Nifty % change vs day open (None if unknown) —
     exposed so entry logging can record market context for later analysis."""
     return _market_cache["pct"]
+
+
+def last_nifty_prev_close_pct() -> Optional[float]:
+    """Most recently fetched Nifty % change vs the previous session's close (None if unknown)."""
+    return _market_cache.get("prev_pct")
+
+
+def _prev_close_pct(body) -> Optional[float]:
+    """nifty_vs_prev_close.change_pct from a /market/indices body, or None when it is absent,
+    unusable, or the payload is a stale / zero-fallback copy (yesterday's number must not gate today)."""
+    try:
+        if not isinstance(body, dict) or body.get("stale") or body.get("fallback"):
+            return None
+        val = float((body.get("nifty_vs_prev_close") or {}).get("change_pct"))
+        return val if val == val and abs(val) != float("inf") else None
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 async def _fetch_nifty_change_pct() -> Optional[float]:
@@ -49,7 +68,9 @@ async def _fetch_nifty_change_pct() -> Optional[float]:
             )
         if r.status_code != 200:
             return None
-        pct = (r.json().get("nifty") or {}).get("change_pct")
+        body = r.json()
+        _market_cache["prev_pct"] = _prev_close_pct(body)
+        pct = (body.get("nifty") or {}).get("change_pct")
         return float(pct) if pct is not None else None
     except Exception as e:
         logger.debug("market gate: indices fetch failed (fail-open): %s", e)
@@ -61,16 +82,20 @@ async def market_gate_reject() -> Optional[str]:
         return None
     now = time.time()
     if now - _market_cache["ts"] >= config.MARKET_GATE_CACHE_TTL_S:
+        _market_cache["prev_pct"] = None      # the fetch sets it again only on a good payload
         pct = await _fetch_nifty_change_pct()
         # Cache failures too (as None) so a dead gateway is retried every TTL,
         # not on every 10s cycle.
         _market_cache.update({"pct": pct, "ts": now})
     pct = _market_cache["pct"]
-    if pct is None:
-        return None
-    if pct <= config.MARKET_GATE_MIN_NIFTY_CHANGE_PCT:
+    if pct is not None and pct <= config.MARKET_GATE_MIN_NIFTY_CHANGE_PCT:
         return (f"MARKET_WEAK:nifty {pct:+.2f}% vs day open "
                 f"<= {config.MARKET_GATE_MIN_NIFTY_CHANGE_PCT:+.2f}%")
+    prev = _market_cache.get("prev_pct")
+    if (config.MARKET_GATE_PREV_CLOSE_ENABLED and prev is not None
+            and prev <= config.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT):
+        return (f"MARKET_WEAK:nifty {prev:+.2f}% vs prev close "
+                f"<= {config.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT:+.2f}%")
     return None
 
 

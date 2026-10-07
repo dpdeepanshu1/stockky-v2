@@ -246,6 +246,13 @@ MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
 MARKET_GATE_ENABLED = _get_bool("MARKET_GATE_ENABLED", True)
 MARKET_GATE_MIN_NIFTY_CHANGE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_CHANGE_PCT", -0.10)
 MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
+# Group 221 (2026-10-07): the gate above measures Nifty against TODAY'S OPEN, so a market that gapped
+# down 1.2% and has been flat since the open reads 0.0% and is let through. This second check blocks
+# on the change against the PREVIOUS SESSION's close (gateway key nifty_vs_prev_close). The -0.75 default
+# is my assumption (roughly a bottom-fifth Nifty day); there is no outcome data behind it. Ignored for a
+# stale / fallback gateway payload and when the key is missing (older gateway), so it fails open.
+MARKET_GATE_PREV_CLOSE_ENABLED = _get_bool("MARKET_GATE_PREV_CLOSE_ENABLED", True)
+MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT", -0.75)
 MARKET_GATE_TIMEOUT_S = _get_float("MARKET_GATE_TIMEOUT_S", 3.0)
 _API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
 def _env_url(name: str, default: str, rstrip: bool = True) -> str:

@@ -7419,6 +7419,37 @@ async def market_trending():
         logger.warning("market/trending failed: %s — returning empty", e)
         return {"data": [], "count": 0}
 
+def _prev_session_change(ticker, last_price) -> Optional[dict]:
+    """Change of ``last_price`` against the PREVIOUS SESSION's close, or None.
+
+    Group 221 (2026-10-07). /market/indices fetches ``history(period="1d")``, which is a single
+    row, so its ``len(hist) > 1`` previous-close branch never runs and ``nifty.change_pct`` is really
+    "vs today's open". That is left as it is (the regime score and the dashboard were tuned on it);
+    this reads the real previous close separately so a gate can see a gap-down day that has been
+    flat since the open. Fail-soft: any problem -> None, never an exception.
+    """
+    try:
+        closes = ticker.history(period="5d")["Close"].dropna()
+        if len(closes) < 2:
+            return None
+        row = -2
+        try:   # last row dated before today (IST) = a finished session, so it IS the previous close
+            last_day = closes.index[-1].date()
+            if last_day < datetime.now(IST).date():
+                row = -1
+        except Exception:
+            row = -2   # no usable index dates (tests, odd frames): the second-last row
+        prev = float(closes.iloc[row])
+        last = float(last_price)
+        if not (math.isfinite(prev) and math.isfinite(last)) or prev <= 0 or last <= 0:
+            return None
+        return {"prev_close": round(prev, 2),
+                "change_pct": round(_safe_pct(last - prev, prev), 2)}
+    except Exception as e:
+        logger.debug("prev-session change unavailable: %s", e)
+        return None
+
+
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
 @app.get("/market/indices")
 def get_market_indices(force_refresh: bool = False):
@@ -7468,6 +7499,9 @@ def get_market_indices(force_refresh: bool = False):
         sensex_change_pct = _safe_pct(sensex_change, sensex_prev_close)
 
         avg_change = (nifty_change_pct + sensex_change_pct) / 2
+        # Group 221: real previous-session change, reported beside (not instead of) the open-based one.
+        nifty_vs_prev = _prev_session_change(nifty, nifty_close)
+        sensex_vs_prev = _prev_session_change(sensex, sensex_close)
         # 2026-09-03 fix: sensitivity raised 0.3 → 1.5.
         # Old formula mapped ±0.3% Nifty move to full 0-100 range, so a
         # routine -0.26% flat/slightly-down day scored 7 — "disaster" level.
@@ -7502,6 +7536,10 @@ def get_market_indices(force_refresh: bool = False):
             "market_score": round(market_score),
             "fetched_at": fetched_at_str,
         }
+        if nifty_vs_prev:
+            result["nifty_vs_prev_close"] = nifty_vs_prev
+        if sensex_vs_prev:
+            result["sensex_vs_prev_close"] = sensex_vs_prev
         if not _json_finite(result):
             raise ValueError("non-finite index values")
         _redis_set(INDICES_CACHE_KEY, result, ttl=300)
@@ -10730,6 +10768,41 @@ def _surprise_boot_warm_delay_sec() -> float:
         return 20.0
 
 
+# group222: the skip above only covered "closed"/"holiday". A boot at 08:37 IST is "preopen", so the full
+# ~1,000-symbol /quote sweep still ran (2026-10-07 boot log: several hundred /quote calls within a minute,
+# half of them falling through AngelOne-first to Yahoo). The sweep result is only honoured for
+# SURPRISE_CACHE_MAX_AGE_SEC (220 s), so one that finishes more than ~5 minutes before 09:15 cannot serve the
+# first cycle anyway. Pre-open boots earlier than SURPRISE_BOOT_WARM_PREOPEN_LEAD_SEC (default 300) before the
+# open now take the same restore-and-skip path; later ones still warm. 0 restores the old behaviour.
+def _surprise_boot_warm_preopen_lead_sec() -> float:
+    try:
+        return max(0.0, float(((os.getenv("SURPRISE_BOOT_WARM_PREOPEN_LEAD_SEC") or "").strip() or "300")))
+    except ValueError:
+        return 300.0
+
+
+def _seconds_to_market_open_ist() -> float:
+    """Seconds from now until today's 09:15 IST (<= 0 once it has passed)."""
+    now = datetime.now(IST)
+    return (now.replace(hour=9, minute=15, second=0, microsecond=0) - now).total_seconds()
+
+
+def _surprise_boot_warm_skip_reason() -> Optional[str]:
+    """'closed' / 'not open yet' when the boot quote sweep should be skipped (a saved result is restored
+    instead), else None. Never raises."""
+    try:
+        phase = _market_session_phase_ist()
+        if phase in ("closed", "holiday"):
+            return "closed"
+        if phase == "preopen":
+            lead = _surprise_boot_warm_preopen_lead_sec()
+            if lead > 0 and _seconds_to_market_open_ist() > lead:
+                return "not open yet"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 @app.on_event("startup")
 async def _warm_surprise_scan_cache():
     async def _warm():
@@ -10738,7 +10811,8 @@ async def _warm_surprise_scan_cache():
             if delay > 0:
                 await asyncio.sleep(delay)
             from surprise_scanner import surprise_engine
-            if _market_session_phase_ist() in ("closed", "holiday"):
+            _skip_why = _surprise_boot_warm_skip_reason()
+            if _skip_why:
                 # group132: ONE stale read, tried first. group131 ran the plain read first, but kv_cache's
                 # plain read DELETES an expired row, so the stale read that followed never found it. The
                 # stale read accepts expired rows and removes nothing (freshness is age-checked in scan()).
@@ -10748,7 +10822,7 @@ async def _warm_surprise_scan_cache():
                 if callable(loader):
                     await asyncio.to_thread(loader)
                 if getattr(surprise_engine, "_last_result", None) is not None:
-                    logger.info("Startup: market closed — restored the last surprise/scan result, skipped the boot quote sweep")
+                    logger.info("Startup: market %s — restored the last surprise/scan result, skipped the boot quote sweep", _skip_why)
                     return
             client = _get_http_client()
             await surprise_engine.scan(client=client, market_data_url=MARKET_DATA_URL, cached=True)

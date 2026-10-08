@@ -1955,6 +1955,18 @@ async def regime_override_stats(
     }
 
 
+@app.get("/charges/{mode}/cumulative")
+async def charges_cumulative(
+    mode: str, days: int = 14,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """2026-10-08 (group 258): brokerage over every filled order since the first one (trade_orders/trade_fills are
+    never purged), with per-product, per-day and top-symbol splits. Estimate from the Charges-tab rate card."""
+    import asyncio
+    import charges_ledger
+    return await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days)
+
+
 @app.get("/orders/{mode}")
 async def list_orders(mode: str, days: int = 2, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
     # AUDIT FIX (this session): this used to take `limit: int = 50` and

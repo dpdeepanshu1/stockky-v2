@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
-  realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl,
+  realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl, type CumulativeBrokerage,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus, type DhanEdisSummary,
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
@@ -902,6 +902,8 @@ export default function RealAutoTrade() {
   const [liveHoldings, setLiveHoldings] = useState<any[]>([]);
   const [liveDhanOrders, setLiveDhanOrders] = useState<any[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [cumBrokerage, setCumBrokerage] = useState<CumulativeBrokerage | null>(null);
+  const [cumBrokerageError, setCumBrokerageError] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
 
   // 2026-09-11 fix — user ask: "if we sell something why it shows here"
@@ -1094,6 +1096,17 @@ export default function RealAutoTrade() {
     }
   };
 
+  // group 258: brokerage since the first filled order (trade_orders/trade_fills are never purged).
+  const loadCumBrokerage = async () => {
+    if (!getSessionToken() || mode !== "REAL") return;
+    try {
+      setCumBrokerage(await realTradeApi.cumulativeBrokerage("REAL", 14));
+      setCumBrokerageError(null);
+    } catch (e: any) {
+      setCumBrokerageError(e?.message || "Failed to load cumulative brokerage");
+    }
+  };
+
   // Position Stocks Service's capital ledger + split pct, for the Capital
   // Split card below. Both GET /ledger and GET /status on that service are
   // public reads (no admin session needed there) — this only ever needs
@@ -1151,6 +1164,7 @@ export default function RealAutoTrade() {
       void loadLiveDhanData();
       void loadPositionStocksLedger();
     }
+    if (activeTab === "charges" && mode === "REAL" && loggedIn) void loadCumBrokerage();
     if (activeTab === "log") void loadAudit();
   }, [activeTab, mode, loggedIn]);
 
@@ -2996,6 +3010,51 @@ export default function RealAutoTrade() {
                           </div>
                         </div>
                       </div>
+                    </div>
+
+                    {/* group 258: brokerage since the first filled order */}
+                    <div className="bg-graphite border border-slate rounded-2xl p-4">
+                      <SectionHdr>Brokerage since start{cumBrokerage?.since ? ` (from ${cumBrokerage.since})` : ""}</SectionHdr>
+                      {cumBrokerageError && <p className="font-display tabular-nums text-[10px] text-signal-sell mb-2">{cumBrokerageError}</p>}
+                      {cumBrokerage ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            <StatCard label="Total brokerage till date" value={`-${fmtInr(cumBrokerage.brokerage_total, 2)}`} color="text-signal-sell"
+                              sub={`${fmtInr(cumBrokerage.brokerage_incl_gst, 2)} with GST`} />
+                            <StatCard label="Orders paying brokerage" value={`${cumBrokerage.orders_paying_brokerage} / ${cumBrokerage.orders}`} color="text-paper"
+                              sub={`${cumBrokerage.orders_at_cap} at the ₹${cumBrokerage.rate_card.cap_rs} cap · ${cumBrokerage.trading_days} days`} />
+                          </div>
+                          <div className="space-y-1.5 font-display tabular-nums text-[11px] mb-2">
+                            {Object.entries(cumBrokerage.by_product).map(([prod, v]) => (
+                              <div key={prod} className="flex items-center justify-between">
+                                <span className="text-paper">{prod} <span className="text-mist text-[9px]">{v.orders} orders · {fmtInr(v.value, 0)} traded</span></span>
+                                <span className={v.brokerage > 0 ? "text-signal-sell" : "text-mist"}>{v.brokerage > 0 ? `-${fmtInr(v.brokerage, 2)}` : "—"}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {cumBrokerage.top_symbols.length > 0 && (
+                            <p className="font-display tabular-nums text-[10px] text-mist mb-2">
+                              Most brokerage: {cumBrokerage.top_symbols.map(t => `${t.symbol} ${fmtInr(t.brokerage, 2)}`).join(" · ")}
+                            </p>
+                          )}
+                          {cumBrokerage.recent_days.length > 0 && (
+                            <div className="space-y-1 font-display tabular-nums text-[11px] border-t border-slate pt-2">
+                              <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
+                                <span>Day</span><span>Orders · Brokerage</span>
+                              </div>
+                              {cumBrokerage.recent_days.map(d => (
+                                <div key={d.day} className="flex items-center justify-between">
+                                  <span className="text-paper">{d.day}</span>
+                                  <span className="text-mist">{d.orders} · <span className={d.brokerage > 0 ? "text-signal-sell" : "text-mist"}>{d.brokerage > 0 ? `-${fmtInr(d.brokerage, 2)}` : "—"}</span></span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumBrokerage.note}</p>
+                        </>
+                      ) : !cumBrokerageError ? (
+                        <p className="font-display tabular-nums text-[10px] text-mist">Loading…</p>
+                      ) : null}
                     </div>
 
                     {/* Per-order breakdown */}

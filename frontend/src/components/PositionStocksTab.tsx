@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
+  type ScalpCumulativeCharges,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
@@ -365,6 +366,8 @@ export default function PositionStocksTab() {
   const [tradeHistoryRange, setTradeHistoryRange] = useState<"today" | "3d">("3d");
   const [dhanLive, setDhanLive] = useState<DhanLiveOrders | null>(null);
   const [dhanLiveError, setDhanLiveError] = useState<string | null>(null);
+  const [cumCharges, setCumCharges] = useState<ScalpCumulativeCharges | null>(null);
+  const [cumChargesError, setCumChargesError] = useState<string | null>(null);
   const [lastCycleResult, setLastCycleResult] = useState<ScalpCycleResult | null>(null);
   // ADDED (session48 — "no live process shows and no stock name shows"):
   // polled snapshot of the current/last cycle from the new GET
@@ -487,6 +490,16 @@ export default function PositionStocksTab() {
     }
   }, []);
 
+  // group 258: brokerage since the start (survives the 3-day trade-history retention).
+  const loadCumCharges = useCallback(async () => {
+    try {
+      setCumCharges(await positionStocksApi.cumulativeCharges(14));
+      setCumChargesError(null);
+    } catch (e: any) {
+      setCumChargesError(e?.message || "Failed to load cumulative charges");
+    }
+  }, []);
+
   // Dhan Account card (client ID, token countdown, live funds) — same shared
   // account real-trade-service's Real Automatic Trade tab already shows;
   // requires admin auth (it's a live Dhan API call, not just a DB read).
@@ -546,6 +559,13 @@ export default function PositionStocksTab() {
     ];
     return () => { stops.forEach((stop) => stop()); };
   }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
+
+  // group 258: cumulative brokerage is only needed on the Charges sub-tab; refresh it every 60 s while that tab is open.
+  useEffect(() => {
+    if (subTab !== "charges") return;
+    void loadCumCharges();
+    return setVisibleInterval(() => void loadCumCharges(), 60_000);
+  }, [subTab, loadCumCharges]);
 
   // ADDED (session48 — "no live process shows and no stock name shows"):
   // polls GET /pipeline/status every 2s while the Pipeline subtab is open,
@@ -1914,6 +1934,49 @@ export default function PositionStocksTab() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* group 258: brokerage since the start (scalp_charges_ledger, not purged by the 3-day retention) */}
+            <div className="bg-graphite border border-slate rounded-2xl p-4">
+              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">
+                Brokerage since start{cumCharges?.since ? ` (from ${cumCharges.since})` : ""}
+              </p>
+              {cumChargesError && <p className="font-display tabular-nums text-[10px] text-signal-sell mb-2">{cumChargesError}</p>}
+              {cumCharges ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <div className="bg-ink border border-slate rounded-xl p-3">
+                      <p className="text-[9px] text-mist uppercase tracking-widest">Total brokerage till date</p>
+                      <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(cumCharges.brokerage_total, 2)}</p>
+                      <p className="text-[9px] text-mist mt-0.5">{fmtInr(cumCharges.brokerage_incl_gst, 2)} with GST · {cumCharges.trades} trades · {cumCharges.trading_days} days</p>
+                    </div>
+                    <div className="bg-ink border border-slate rounded-xl p-3">
+                      <p className="text-[9px] text-mist uppercase tracking-widest">All charges till date</p>
+                      <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(cumCharges.all_charges_total, 2)}</p>
+                      <p className="text-[9px] text-mist mt-0.5">
+                        {cumCharges.avg_brokerage_per_trade != null ? `avg ${fmtInr(cumCharges.avg_brokerage_per_trade, 2)} brokerage/trade` : "no booked trades yet"}
+                        {cumCharges.brokerage_pct_of_gross_pnl != null ? ` · ${cumCharges.brokerage_pct_of_gross_pnl}% of gross profit` : ""}
+                      </p>
+                    </div>
+                  </div>
+                  {cumCharges.recent_days.length > 0 && (
+                    <div className="space-y-1 font-display tabular-nums text-[11px]">
+                      <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
+                        <span>Day</span><span>Trades · Brokerage · All charges</span>
+                      </div>
+                      {cumCharges.recent_days.map(d => (
+                        <div key={d.day} className="flex items-center justify-between">
+                          <span className="text-paper">{d.day}</span>
+                          <span className="text-mist">{d.trades} · <span className="text-signal-sell">-{fmtInr(d.brokerage, 2)}</span> · <span className="text-signal-sell">-{fmtInr(d.total_charges, 2)}</span></span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumCharges.note}</p>
+                </>
+              ) : !cumChargesError ? (
+                <p className="font-display tabular-nums text-[10px] text-mist">Loading…</p>
+              ) : null}
             </div>
 
             {legCharges.length > 0 ? (

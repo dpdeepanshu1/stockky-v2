@@ -24,6 +24,7 @@ positions.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -101,7 +102,7 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
             result["added"] = to_add
             logger.info("dynamic_universe: added %d symbols: %s", len(to_add), to_add)
         except Exception as e:
-            logger.warning("dynamic_universe: subscribe call failed (%s)", e)
+            logger.warning("dynamic_universe: subscribe call failed (%s)", _err_text(e))
 
     if to_remove:
         try:
@@ -114,7 +115,7 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
             result["removed"] = to_remove
             logger.info("dynamic_universe: dropped %d inactive symbols: %s", len(to_remove), to_remove)
         except Exception as e:
-            logger.warning("dynamic_universe: unsubscribe call failed (%s)", e)
+            logger.warning("dynamic_universe: unsubscribe call failed (%s)", _err_text(e))
 
     # 2026-09-03 — trigger the event tracker's own /check pass so the newly
     # (un)subscribed symbols' cache actually gets populated. Found via audit
@@ -132,9 +133,27 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
     except Exception as e:
         # group170: httpx timeouts stringify to "", which logged "failed ()" - name the type as well
         logger.warning("dynamic_universe: /check trigger failed (%s) — Tier 2 cache may be stale",
-                       f"{type(e).__name__}: {e}" if str(e).strip() else type(e).__name__)
+                       _err_text(e))
 
     return result
+
+
+# group250 (2026-10-08 log): "momentum-movers source failed ()" - an httpx timeout has an empty str(), so the cause was
+# invisible, and the 15 s client timeout was shorter than the gateway's cold computation (it lets a follower wait up to
+# MOMENTUM_MOVERS_JOIN_WAIT_S = 45 s). The timeout is now DYNAMIC_UNIVERSE_MOVERS_TIMEOUT_S (default 45, blank-safe).
+def _err_text(e: BaseException) -> str:
+    """'ReadTimeout' for an exception with no message, 'Type: message' otherwise."""
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
+def _movers_timeout_s() -> float:
+    raw = (os.getenv("DYNAMIC_UNIVERSE_MOVERS_TIMEOUT_S") or "").strip()
+    try:
+        v = float(raw) if raw else 45.0
+    except ValueError:
+        return 45.0
+    return v if v == v and v > 0 else 45.0
 
 
 async def _compute_desired_universe() -> list[str]:
@@ -159,16 +178,18 @@ async def _compute_desired_universe() -> list[str]:
             vol_shock = await _fetch_volume_shock_universe(client)
         symbols.extend(vol_shock)
     except Exception as e:
-        logger.warning("dynamic_universe: volume-shock source failed (%s), continuing with momentum-movers only", e)
+        logger.warning("dynamic_universe: volume-shock source failed (%s), continuing with momentum-movers only", _err_text(e))
 
+    _t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=_movers_timeout_s()) as client:
             r = await client.get(f"{config.API_GATEWAY_URL}/market/momentum-movers")
             r.raise_for_status()
             movers = r.json().get("symbols", [])
         symbols.extend(movers)
     except Exception as e:
-        logger.warning("dynamic_universe: momentum-movers source failed (%s), continuing with volume-shock only", e)
+        logger.warning("dynamic_universe: momentum-movers source failed after %.0fs (%s), continuing with volume-shock only",
+                       time.monotonic() - _t0, _err_text(e))
 
     return list(dict.fromkeys(s.upper() for s in symbols))  # de-dup, preserve order
 

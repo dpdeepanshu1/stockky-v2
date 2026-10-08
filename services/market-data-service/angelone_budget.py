@@ -180,6 +180,8 @@ def trip(endpoint: str) -> float:
         st["trips"] += 1
         _last_trip_endpoint = endpoint
         trips_now = sum(v["trips"] for v in _cool.values())
+    if fam == CANDLE:
+        _slow_candle_bucket(dur)
     who = "ALL AngelOne callers" if not split_enabled() else ("AngelOne %s callers" % fam)
     logger.warning(
         "AngelOne budget: rate-limit answer from %s - %s skip AngelOne for %.0fs "
@@ -187,6 +189,21 @@ def trip(endpoint: str) -> float:
         endpoint, who, dur, trips_now, cap, _ESCALATE_WINDOW_S,
     )
     return dur
+
+
+# group251: after a candle trip the candle bucket is emptied and held empty for the cooldown, then refilled at
+# ANGELONE_CANDLE_SLOWDOWN_FACTOR (default 0.5) of its normal rate for ANGELONE_CANDLE_SLOWDOWN_S (default 600) more
+# seconds. Quote buckets are untouched. ANGELONE_CANDLE_SLOWDOWN_S=0 or factor>=1 turns it off.
+def _slow_candle_bucket(cooldown_s: float) -> None:
+    try:
+        factor = _env_float("ANGELONE_CANDLE_SLOWDOWN_FACTOR", 0.5, 0.05, 1.0)
+        slow_s = _env_float("ANGELONE_CANDLE_SLOWDOWN_S", 600.0, 0.0, 86400.0)
+        if slow_s <= 0.0 or factor >= 1.0:
+            return
+        import rate_limiter as _rl
+        _rl.slow_down("angelone_candle", cooldown_s, factor, slow_s)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("angelone_budget: candle slowdown skipped: %s", e)
 
 
 def skip(lane: Optional[str] = None, family: Optional[str] = None) -> bool:

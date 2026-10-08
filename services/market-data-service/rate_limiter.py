@@ -59,7 +59,7 @@ _DEFAULTS = {
     # numbers rather than matching them exactly; matching the docs exactly
     # has repeatedly proven to still get real accounts rate-limited.
     "angelone_quote":  (5.0, 8),   # docs: ~9 combined; staying well under it
-    "angelone_candle": (1.5, 3),   # docs: 3/s; halved for the same reason
+    "angelone_candle": (1.0, 2),   # docs: 3/s; group251: 1.5/3 still tripped at the open (trip #1, #2 within 3 min)
     "angelone_order":  (0.7, 2),   # docs: 1/s (order book/trade book/orders)
     # gainersLosers has no documented per-second figure of its own (it's
     # not in the endpoint rate-limit table the others above are sourced
@@ -94,9 +94,19 @@ class _Bucket:
     lock: threading.Lock = field(default_factory=threading.Lock)
     throttle_events: int = 0
     last_wait_sec: float = 0.0
+    # group251: after an upstream rate-limit answer the bucket is held empty until `updated` (no refill accrues
+    # before it) and refills at rps * slow_factor until slow_until, so the burst that follows a cooldown is gradual.
+    slow_factor: float = 1.0
+    slow_until: float = 0.0
 
     def __post_init__(self):
         self.tokens = self.capacity
+
+    def _eff_rps(self, now: float) -> float:
+        """Refill rate right now (caller holds the lock). Reduced while a post-trip slowdown runs."""
+        if self.slow_until and now < self.slow_until and 0.0 < self.slow_factor < 1.0:
+            return self.rps * self.slow_factor
+        return self.rps
 
     def acquire(self, weight: float = 1.0, max_wait: float = 20.0, fail_open: bool = True) -> float:
         """Blocks until `weight` tokens are available (or max_wait elapses,
@@ -128,9 +138,10 @@ class _Bucket:
             while True:
                 with self.lock:
                     now = time.time()
-                    elapsed = now - self.updated
-                    self.tokens = min(self.capacity, self.tokens + elapsed * self.rps)
-                    self.updated = now
+                    rps_now = self._eff_rps(now)
+                    elapsed = max(0.0, now - self.updated)
+                    self.tokens = min(self.capacity, self.tokens + elapsed * rps_now)
+                    self.updated = max(self.updated, now)
                     if self.tokens >= weight:
                         self.tokens -= weight
                         waited = now - start
@@ -139,7 +150,9 @@ class _Bucket:
                             self.throttle_events += 1
                         return waited
                     deficit = weight - self.tokens
-                    sleep_for = min(deficit / self.rps if self.rps > 0 else 0.5, 2.0)
+                    sleep_for = min(deficit / rps_now if rps_now > 0 else 0.5, 2.0)
+                    if self.updated > now:   # group251: refill is held until then
+                        sleep_for = min(max(sleep_for, self.updated - now), 2.0)
                     if not fail_open:
                         # honour max_wait precisely instead of overshooting by up to one sleep slice
                         sleep_for = min(sleep_for, max(0.0, max_wait - (now - start)))
@@ -162,6 +175,7 @@ class _Bucket:
         with self.lock:
             return {
                 "rps": self.rps,
+                "effective_rps": self._eff_rps(time.time()),
                 "capacity": self.capacity,
                 "tokens_available": round(self.tokens, 2),
                 "waiters": self.waiters,
@@ -218,7 +232,7 @@ def bucket_level(provider: str) -> tuple:
     b = _get_bucket(provider)
     with b.lock:
         now = time.time()
-        tokens = min(b.capacity, b.tokens + (now - b.updated) * b.rps)
+        tokens = min(b.capacity, b.tokens + max(0.0, now - b.updated) * b._eff_rps(now))
     return tokens, b.capacity
 
 
@@ -240,13 +254,32 @@ def would_block(provider: str, weight: float = 1.0) -> bool:
         b = _get_bucket(provider)
         with b.lock:
             now = time.time()
-            elapsed = now - b.updated
-            tokens = min(b.capacity, b.tokens + elapsed * b.rps)
+            elapsed = max(0.0, now - b.updated)
+            tokens = min(b.capacity, b.tokens + elapsed * b._eff_rps(now))
             if weight > b.capacity > 0:
                 weight = b.capacity  # see _Bucket.acquire(): an oversized request means "the whole bucket"
             return tokens < weight
     except Exception:
         return False
+
+
+def slow_down(provider: str, hold_s: float, factor: float, slow_s: float) -> None:
+    """group251: after `provider` answered a rate-limit 403/429. Empties its bucket and holds the refill for `hold_s`
+    seconds (the cooldown), then refills at rps * `factor` for a further `slow_s` seconds. Without this the bucket
+    was full again when the cooldown ended and the callers shed during it all fired together: the 2026-10-08 log
+    shows candle trip #2 right after trip #1's cooldown. Never raises; every later trip only extends the slowdown."""
+    try:
+        b = _get_bucket(provider)
+        with b.lock:
+            now = time.time()
+            hold_until = now + max(0.0, hold_s)
+            b.tokens = 0.0
+            b.updated = max(b.updated, hold_until)
+            if 0.0 < factor < 1.0 and slow_s > 0.0:
+                b.slow_factor = factor
+                b.slow_until = max(b.slow_until, hold_until + slow_s)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("rate_limiter.slow_down(%s) ignored: %s", provider, e)
 
 
 # ── Shared cooldown facility ─────────────────────────────────────────────────

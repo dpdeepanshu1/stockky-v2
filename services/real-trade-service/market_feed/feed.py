@@ -177,6 +177,13 @@ FEED_PRIORITY_BULK_MAX_AGE_S = _env_float("FEED_PRIORITY_BULK_MAX_AGE_S", 10.0)
 FEED_PRIORITY_BULK_TIMEOUT_S = _env_float("FEED_PRIORITY_BULK_TIMEOUT_S", 4.0)
 FEED_PRIORITY_BULK_COOLDOWN_S = _env_float("FEED_PRIORITY_BULK_COOLDOWN_S", 30.0)
 FEED_PRIORITY_SHARE_S = _env_float("FEED_PRIORITY_SHARE_S", 3.0)
+# group252 (2026-10-08 log): the held-position bulk call (one chunk of 6) timed out after its full 4 s and ONLY THEN did the
+# per-symbol path start, so every held-position price (and the 8 s exit cycle) lost 4 s while market-data answered the
+# per-symbol calls at once. Retrying a 6-symbol chunk in smaller chunks cannot help; the wait is the cost. Now, when the bulk
+# call has not answered within FEED_PRIORITY_HEDGE_S (default 1.5; 0 = old behaviour) the per-symbol lookups start
+# alongside it and each symbol takes whichever answer arrives first. A bulk call that was still unanswered then counts as
+# a failed bulk-first (same FEED_PRIORITY_BULK_COOLDOWN_S pause as before).
+FEED_PRIORITY_HEDGE_S = _env_float("FEED_PRIORITY_HEDGE_S", 1.5)
 FEED_LEFTOVER_SKIP_LIVE = _env_on("FEED_LEFTOVER_SKIP_LIVE")
 _PRIO_LOCK = _threading.Lock()
 
@@ -1189,6 +1196,38 @@ def _prio_shared_store(ticks: dict[str, Tick]) -> None:
             _PRIO_SHARED[_clean_sym(sym)] = (now, tick)
 
 
+async def _priority_hedge(client: httpx.AsyncClient, todo: list[str], bulk_task: "asyncio.Future") -> tuple:
+    """group252: run the per-symbol cascade for `todo` while `bulk_task` (still pending) keeps going. Returns
+    (bulk_ticks_by_clean_symbol, per_symbol_ticks_by_requested_symbol). Stops as soon as every symbol has a tick from
+    one source or both sources have finished; unfinished per-symbol lookups are cancelled. Never raises."""
+    tasks = {s: asyncio.ensure_future(get_quote(client, s, timeout_scale=FEED_PRIORITY_TIMEOUT_SCALE)) for s in todo}
+    per: dict = {}
+    got: dict = {}
+    try:
+        while True:
+            for sym, t in tasks.items():
+                if t.done() and sym not in per and not t.cancelled() and t.exception() is None and isinstance(t.result(), Tick):
+                    per[sym] = t.result()
+            if bulk_task.done() and not got and not bulk_task.cancelled() and bulk_task.exception() is None:
+                got = bulk_task.result() or {}
+            covered = [s for s in todo if s in per or _clean_sym(s) in got]
+            if len(covered) == len(todo):
+                break
+            waiting = {t for t in tasks.values() if not t.done()}
+            if not bulk_task.done():
+                waiting.add(bulk_task)
+            if not waiting:
+                break
+            await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("priority hedge ended early: %s", e)
+    finally:
+        for t in tasks.values():
+            if not t.done():
+                t.cancel()
+    return got, per
+
+
 async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
     """Priority lane for open positions: shared ticks, then bulk-first, then the per-symbol cascade on a
     dedicated client (own pool, scaled timeouts), then a /quotes/bulk fallback. See the group171 note."""
@@ -1203,31 +1242,51 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
     limits = httpx.Limits(max_connections=max(8, len(todo) * 2), max_keepalive_connections=max(2, len(todo)))
     async with httpx.AsyncClient(limits=limits) as client:
         # 1) one bulk request for every held symbol that is not already shared
+        _per_done = False
         if FEED_PRIORITY_BULK_FIRST and _time.monotonic() >= _PRIO_BULK_OFF_UNTIL[0]:
             stats: dict = {}
-            got = await _bulk_ticks(client, todo, timeout=FEED_PRIORITY_BULK_TIMEOUT_S,
-                                    max_age_s=FEED_PRIORITY_BULK_MAX_AGE_S, stats=stats)
-            if stats.get("failed") and not got:
-                with _PRIO_LOCK:
-                    _PRIO_BULK_OFF_UNTIL[0] = _time.monotonic() + FEED_PRIORITY_BULK_COOLDOWN_S
-                logger.warning("priority quotes: bulk-first failed for %d symbol(s) — per-symbol path now, "
-                               "bulk-first paused for %.0fs", len(todo), FEED_PRIORITY_BULK_COOLDOWN_S)
+            bulk_task = asyncio.ensure_future(_bulk_ticks(client, todo, timeout=FEED_PRIORITY_BULK_TIMEOUT_S,
+                                                          max_age_s=FEED_PRIORITY_BULK_MAX_AGE_S, stats=stats))
+            got: dict = {}
+            if FEED_PRIORITY_HEDGE_S > 0:
+                await asyncio.wait({bulk_task}, timeout=FEED_PRIORITY_HEDGE_S)
+            if bulk_task.done() or FEED_PRIORITY_HEDGE_S <= 0:
+                got = await bulk_task
+                if stats.get("failed") and not got:
+                    with _PRIO_LOCK:
+                        _PRIO_BULK_OFF_UNTIL[0] = _time.monotonic() + FEED_PRIORITY_BULK_COOLDOWN_S
+                    logger.warning("priority quotes: bulk-first failed for %d symbol(s) — per-symbol path now, "
+                                   "bulk-first paused for %.0fs", len(todo), FEED_PRIORITY_BULK_COOLDOWN_S)
+            else:
+                got, per = await _priority_hedge(client, todo, bulk_task)
+                _per_done = True
+                for sym, tick in per.items():
+                    out[sym] = tick
+                if not bulk_task.done() or (stats.get("failed") and not got):
+                    with _PRIO_LOCK:
+                        _PRIO_BULK_OFF_UNTIL[0] = _time.monotonic() + FEED_PRIORITY_BULK_COOLDOWN_S
+                    logger.warning("priority quotes: bulk-first had not answered %d symbol(s) after %.1fs — per-symbol lookups "
+                                   "started alongside it (%d priced per-symbol, %d from bulk), bulk-first paused for %.0fs",
+                                   len(todo), FEED_PRIORITY_HEDGE_S, len(per), len(got), FEED_PRIORITY_BULK_COOLDOWN_S)
+                if not bulk_task.done():
+                    bulk_task.cancel()
             for want in todo:
                 t = got.get(_clean_sym(want))
-                if t is not None:
+                if t is not None and want not in out:
                     out[want] = t
             todo = [s for s in todo if s not in out]
             if not todo:
                 _prio_shared_store(out)
                 return out
-        # 2) per-symbol cascade for whatever is left
-        ticks = await asyncio.gather(
-            *[get_quote(client, s, timeout_scale=FEED_PRIORITY_TIMEOUT_SCALE) for s in todo],
-            return_exceptions=True,
-        )
-        for sym, tick in zip(todo, ticks):
-            if isinstance(tick, Tick):
-                out[sym] = tick
+        # 2) per-symbol cascade for whatever is left (skipped when the hedge already tried every symbol)
+        if not _per_done:
+            ticks = await asyncio.gather(
+                *[get_quote(client, s, timeout_scale=FEED_PRIORITY_TIMEOUT_SCALE) for s in todo],
+                return_exceptions=True,
+            )
+            for sym, tick in zip(todo, ticks):
+                if isinstance(tick, Tick):
+                    out[sym] = tick
         missing = [s for s in todo if s not in out]
         if missing:
             # 3) last resort: bulk again with the longer (scaled) timeout and the normal age limit

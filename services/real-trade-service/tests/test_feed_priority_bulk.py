@@ -126,12 +126,20 @@ def test_large_batch_is_priced_by_bulk_not_one_request_per_symbol(feed, monkeypa
     assert t.price == 77.0 and t.source == "bulk(angelone)" and t.day_high == 80.0 and t.volume == 1000
 
 
-def test_small_batch_keeps_the_per_symbol_path(feed):
+def test_tiny_batch_keeps_the_per_symbol_path(feed):
     f, srv = feed
+    out = _run(f.get_quotes([f"S{i}" for i in range(4)]))     # below FEED_SMALL_BATCH_BULK_MIN_SYMBOLS (group246)
+    assert len(out) == 4
+    assert srv.hits["bulk"] == 0
+    assert srv.hits["quote"] == 4
+
+
+def test_small_batch_goes_bulk_first_from_the_small_batch_limit(feed):
+    f, srv = feed                                              # group246: the <=20 entry candidates cost 1 call
     out = _run(f.get_quotes([f"S{i}" for i in range(5)]))
     assert len(out) == 5
-    assert srv.hits["bulk"] == 0
-    assert srv.hits["quote"] == 5
+    assert srv.hits["bulk"] == 1
+    assert srv.hits["quote"] == 0
 
 
 def test_symbols_bulk_cannot_price_fall_back_per_symbol(feed, monkeypatch):

@@ -203,6 +203,12 @@ def test_small_entry_batches_are_never_starved_by_the_distress_window(env):
     env["down"] = False
     env["single"].clear()
     out = _run(f.get_quotes([f"S{i}" for i in range(20)]))     # a cycle's <=20 entry candidates
+    # group246: a 20-symbol batch is priced by one bulk call now; it is still not skipped during the window
+    assert len(out) == 20 and len(env["single"]) == 0
+    # ... and when bulk answers nothing, its leftovers still go through the per-symbol path (never starved)
+    env["bulk_empty"] = True
+    env["single"].clear()
+    out = _run(f.get_quotes([f"S{i}" for i in range(20)]))
     assert len(out) == 20 and len(env["single"]) == 20
 
 

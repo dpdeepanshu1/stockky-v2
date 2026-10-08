@@ -125,6 +125,11 @@ FEED_HTTP_MAX_CONNECTIONS = max(8, int(((os.getenv("FEED_HTTP_MAX_CONNECTIONS") 
 #     ones bulk could not price (or priced with data older than FEED_BULK_MAX_AGE_S).
 FEED_PRIORITY_TIMEOUT_SCALE = max(1.0, float(((os.getenv("FEED_PRIORITY_TIMEOUT_SCALE") or "").strip() or "2.0")))
 FEED_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_BULK_MIN_SYMBOLS") or "").strip() or "25")))
+# group246: small non-priority batches (the <=20 entry candidates of a cycle) used to skip bulk and cost one
+# /live-quote plus one /quote per symbol (~40 calls) while the held positions were being priced. From this many
+# symbols up they use /quotes/bulk first too. The large-batch rules (distress back-off) still key on
+# FEED_BULK_MIN_SYMBOLS only, so a small batch is never starved. Set it >= FEED_BULK_MIN_SYMBOLS to switch off.
+FEED_SMALL_BATCH_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_SMALL_BATCH_BULK_MIN_SYMBOLS") or "").strip() or "5")))
 FEED_BULK_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_CHUNK_SIZE") or "").strip() or "100")))
 FEED_BULK_CONCURRENCY = max(1, int(((os.getenv("FEED_BULK_CONCURRENCY") or "").strip() or "3")))
 FEED_BULK_TIMEOUT_S = float(((os.getenv("FEED_BULK_TIMEOUT_S") or "").strip() or "12"))
@@ -1240,7 +1245,9 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
 
     todo = list(symbols)
     bulk_answered = False       # True once the bulk-first pass ran: its leftovers skip /live-quote (group171)
-    if len(set(symbols)) > FEED_BULK_MIN_SYMBOLS:
+    # group246: bulk-first from FEED_SMALL_BATCH_BULK_MIN_SYMBOLS symbols (never above the large-batch limit)
+    _bulk_first_min = min(FEED_BULK_MIN_SYMBOLS, FEED_SMALL_BATCH_BULK_MIN_SYMBOLS - 1)
+    if len(set(symbols)) > _bulk_first_min:
         try:
             limits = httpx.Limits(max_connections=FEED_BULK_CONCURRENCY * 2)
             bulk_stats: dict = {}

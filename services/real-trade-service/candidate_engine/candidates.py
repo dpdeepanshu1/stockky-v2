@@ -599,7 +599,43 @@ async def _fetch_history(
     return _history_stale_fallback(symbol, period, interval)
 
 
+# group246: pace the /history calls. One standard-track symbol sends 7 /history requests at once and
+# CANDIDATE_ANALYSIS_CONCURRENCY (15) symbols run together, so a candidate cycle could have ~100 history
+# requests in flight against market-data-service - the same process that prices the held positions. The gate
+# below caps how many of THIS service's candidate /history calls are in flight at once; callers simply wait
+# their turn (the 42 s request timeout starts only after the gate is passed). 0 = off (old behaviour).
+HISTORY_MAX_INFLIGHT = int(((os.getenv("CANDIDATE_HISTORY_MAX_INFLIGHT") or "").strip() or "6"))
+_HISTORY_GATES: dict[int, asyncio.Semaphore] = {}
+
+
+def _history_gate() -> Optional[asyncio.Semaphore]:
+    """The /history in-flight limiter for the running event loop (a semaphore is tied to one loop), or None
+    when pacing is off."""
+    if HISTORY_MAX_INFLIGHT <= 0:
+        return None
+    try:
+        key = id(asyncio.get_running_loop())
+    except RuntimeError:
+        return None
+    gate = _HISTORY_GATES.get(key)
+    if gate is None:
+        if len(_HISTORY_GATES) > 8:
+            _HISTORY_GATES.clear()
+        gate = _HISTORY_GATES[key] = asyncio.Semaphore(HISTORY_MAX_INFLIGHT)
+    return gate
+
+
 async def _fetch_history_raw(
+    client: httpx.AsyncClient, symbol: str, period: str, interval: str = "1d"
+) -> list[dict]:
+    gate = _history_gate()
+    if gate is None:
+        return await _fetch_history_raw_ungated(client, symbol, period, interval)
+    async with gate:
+        return await _fetch_history_raw_ungated(client, symbol, period, interval)
+
+
+async def _fetch_history_raw_ungated(
     client: httpx.AsyncClient, symbol: str, period: str, interval: str = "1d"
 ) -> list[dict]:
     try:
@@ -995,17 +1031,26 @@ BULK_QUOTE_TIMEOUT_SECONDS = float(((os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SEC
 # roughly one hard-timeout window, not one per chunk.
 BULK_QUOTE_CONCURRENCY = int(((os.getenv("CANDIDATE_BULK_QUOTE_CONCURRENCY") or "").strip() or "4"))
 
+# group246: use the quotes the bulk prefetch already returned instead of one GET /quote/{symbol} per symbol.
+# CANDIDATE_USE_BULK_QUOTES=0 restores the old per-symbol calls (the bulk call still warms the cache).
+USE_BULK_QUOTES = ((os.getenv("CANDIDATE_USE_BULK_QUOTES") or "").strip() or "1") not in ("0", "false", "False")
 
-async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -> None:
+
+async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -> dict[str, dict]:
     """Best-effort: warm market-data-service's quote cache for `symbols` via
     chunked POST /quotes/bulk calls, fired with bounded concurrency. Never
     raises — if a chunk fails (or /quotes/bulk itself has an issue), the
     per-symbol _fetch_quote() fallback that runs afterward still works
     exactly as it did before this fix, just slower for whichever symbols
-    didn't get warmed."""
+    didn't get warmed.
+
+    group246: also RETURNS the quotes the bulk answer carried ({SYMBOL: quote dict}, empty when nothing
+    came back), so the per-symbol analyses can use them directly instead of asking GET /quote/{symbol}
+    again for every symbol (about 80 extra market-data calls per volume-shock cycle)."""
+    got: dict[str, dict] = {}
     unique = list(dict.fromkeys(s for s in symbols if s))
     if not unique:
-        return
+        return got
 
     chunks = [
         unique[i:i + BULK_QUOTE_CHUNK_SIZE]
@@ -1034,6 +1079,8 @@ async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -
                         len(chunk), ", ".join(chunk[:5]), ", ..." if len(chunk) > 5 else "",
                         resp.status_code, resp.text[:200],
                     )
+                else:
+                    _collect_bulk_quotes(resp, got)
             except Exception as e:
                 logger.warning(
                     "bulk quote prefetch chunk of %d symbols (%s%s) failed: %s: %s",
@@ -1042,6 +1089,34 @@ async def _prefetch_quotes_bulk(client: httpx.AsyncClient, symbols: list[str]) -
                 )
 
     await asyncio.gather(*(_post_chunk(c) for c in chunks))
+    return got
+
+
+def _collect_bulk_quotes(resp: Any, into: dict) -> None:
+    """group246: add the usable rows of one /quotes/bulk answer to `into` ({SYMBOL: quote}). A row needs a
+    symbol and a price above zero; anything else is left out so the caller still asks GET /quote for it.
+    Never raises."""
+    try:
+        body = resp.json()
+        for item in (body.get("quotes") if isinstance(body, dict) else None) or []:
+            if not isinstance(item, dict):
+                continue
+            sym = str(item.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            try:
+                px = float(item.get("price") or item.get("cmp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sym and px > 0 and px == px:
+                into[sym] = item
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _bulk_quote_for(prefetched: Optional[dict], symbol: str) -> Optional[dict]:
+    """group246: the prefetched bulk quote for `symbol`, or None (switched off, not priced, no usable row)."""
+    if not USE_BULK_QUOTES or not prefetched or not isinstance(prefetched, dict):
+        return None
+    return prefetched.get(str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip())
 
 
 # ── Analysis helpers ──────────────────────────────────────────────────────────
@@ -1168,7 +1243,34 @@ def _near_resistance(candles: list[dict], current_price: float) -> bool:
 
 # ── Multi-timeframe quality analysis ─────────────────────────────────────────
 
-async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
+# group247: cut the 6-month and 1-year views from one daily 1y series (see _multi_tf_analysis).
+# CANDIDATE_WEEKLY_FROM_DAILY=0 restores the two weekly yfinance calls. A daily series shorter than
+# CANDIDATE_WEEKLY_FROM_DAILY_MIN_BARS (default 60, about 3 months) or without dates is not trusted for this.
+WEEKLY_FROM_DAILY = ((os.getenv("CANDIDATE_WEEKLY_FROM_DAILY") or "").strip() or "1") not in ("0", "false", "False")
+WEEKLY_FROM_DAILY_MIN_BARS = int(((os.getenv("CANDIDATE_WEEKLY_FROM_DAILY_MIN_BARS") or "").strip() or "60"))
+
+
+def _weekly_views_from_daily(daily: Any) -> Optional[tuple[list, list]]:
+    """(6-month candles, 1-year candles) cut from a daily 1y series, or None when it cannot be trusted (not a
+    list, too few bars, bad or missing dates). The 6-month view is every bar within 183 days of the last bar."""
+    if not isinstance(daily, list) or len(daily) < max(2, WEEKLY_FROM_DAILY_MIN_BARS):
+        return None
+    try:
+        from datetime import date as _date, timedelta as _td
+        last = _date.fromisoformat(str((daily[-1] or {}).get("date") or "")[:10])
+        first = _date.fromisoformat(str((daily[0] or {}).get("date") or "")[:10])
+        if first >= last:
+            return None
+        cutoff = (last - _td(days=183)).isoformat()
+        half = [c for c in daily if str((c or {}).get("date") or "")[:10] >= cutoff]
+    except Exception:  # noqa: BLE001
+        return None
+    if len(half) < 2:
+        return None
+    return half, daily
+
+
+async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Optional[dict] = None) -> dict:
     """
     Checks 7 timeframes + quote concurrently and returns either
     reject_reason=None (passes all checks) or reject_reason=<string>.
@@ -1187,14 +1289,44 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
         "2y": ("2y",  "1mo"),   # macro — 2-year base
     }
 
+    # group247: the 6-month and 1-year series are weekly bars, which market-data can only get from yfinance (the
+    # bucket that saturates). Their return (first open to last close) and the 52-week high/low are the same
+    # numbers whether read from weekly or daily bars, so they are cut from the 1y/1d series instead - the series
+    # market-data already serves from its single cached AngelOne 1y fetch (group231), shared with the 5d/1mo/3mo
+    # calls. If that daily series is missing or too short to trust, the two weekly calls run as before.
+    _weekly_pair = {"6m": periods["6m"], "1y": periods["1y"]}
+    fetch_periods = dict(periods)
+    if WEEKLY_FROM_DAILY:
+        del fetch_periods["6m"], fetch_periods["1y"]
+        fetch_periods["1y_daily"] = ("1y", "1d")
+
     tasks: dict[str, asyncio.Task] = {
         tf: asyncio.create_task(_fetch_history(client, symbol, period, interval))
-        for tf, (period, interval) in periods.items()
+        for tf, (period, interval) in fetch_periods.items()
     }
-    tasks["quote"] = asyncio.create_task(_fetch_quote(client, symbol))
+    if quote:
+        # group246: the quote came with the bulk prefetch - do not ask GET /quote/{symbol} again.
+        async def _have_quote(_q=quote):
+            return _q
+        tasks["quote"] = asyncio.create_task(_have_quote())
+    else:
+        tasks["quote"] = asyncio.create_task(_fetch_quote(client, symbol))
 
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     fetched  = dict(zip(tasks.keys(), results))
+
+    if WEEKLY_FROM_DAILY:
+        _daily = fetched.pop("1y_daily", None)
+        _derived = _weekly_views_from_daily(_daily)
+        if _derived is not None:
+            fetched["6m"], fetched["1y"] = _derived
+        else:
+            # no usable daily series: the old weekly calls (yfinance)
+            _wk = await asyncio.gather(
+                *(_fetch_history(client, symbol, per, itv) for per, itv in _weekly_pair.values()),
+                return_exceptions=True,
+            )
+            fetched.update(dict(zip(_weekly_pair.keys(), _wk)))
 
     # Compute timeframe returns
     tf_returns: dict[str, Optional[float]] = {}
@@ -1563,7 +1695,7 @@ def _quote_return_pct(quote: dict) -> Optional[float]:
     return (px / prev - 1) * 100
 
 
-async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict:
+async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: Optional[dict] = None) -> dict:
     """
     Option A (Issue 1 fix) — momentum-breakout quality gate.
 
@@ -1579,10 +1711,12 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str) -> dict
     track). Liquidity is enforced downstream by risk_engine's own hard
     liquidity floor at order time, so it is not duplicated here.
     """
-    try:
-        quote = await _fetch_quote(client, symbol)
-    except Exception as e:
-        quote = e
+    # group246: a quote the caller already holds (from the bulk prefetch) is used as is - no GET /quote.
+    if not quote:
+        try:
+            quote = await _fetch_quote(client, symbol)
+        except Exception as e:
+            quote = e
 
     if isinstance(quote, Exception) or not quote:
         return {"reject_reason": "No quote available for volume-shock check.", "atr_pct": None}
@@ -1960,12 +2094,15 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
                 ", ..." if len(cached_rejects) > 10 else "",
             )
 
-        await _prefetch_quotes_bulk(client, [r["symbol"] for r in live_rows])
+        _bulk_q = await _prefetch_quotes_bulk(client, [r["symbol"] for r in live_rows])
 
         sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
 
         async def _limited_mtf(symbol: str) -> dict:
             async with sem:
+                _bq = _bulk_quote_for(_bulk_q, symbol)
+                if _bq is not None:
+                    return await _multi_tf_analysis(client, symbol, _bq)
                 return await _multi_tf_analysis(client, symbol)
 
         tf_tasks = {
@@ -2174,12 +2311,19 @@ async def _refresh_volume_shock_candidates(
         # return 200+ symbols, most outside the live-feed subscription, so
         # warm the quote cache in bulk BEFORE the per-symbol semaphore loop
         # below fires 200+ individually rate-limited /quote/{symbol} calls.
-        await _prefetch_quotes_bulk(client, candidates)
+        _bulk_q = await _prefetch_quotes_bulk(client, candidates)
+        _bulk_n = sum(1 for _s in candidates if _bulk_quote_for(_bulk_q, _s))
+        if USE_BULK_QUOTES and candidates:
+            logger.info("candidate_engine: volume_shock priced %d of %d symbol(s) from the bulk answer; %d fall back to "
+                        "GET /quote (mode=%s)", _bulk_n, len(candidates), len(candidates) - _bulk_n, mode)
 
         sem = asyncio.Semaphore(CANDIDATE_ANALYSIS_CONCURRENCY)
 
         async def _limited_vs(symbol: str) -> dict:
             async with sem:
+                _bq = _bulk_quote_for(_bulk_q, symbol)
+                if _bq is not None:
+                    return await _volume_shock_analysis(client, symbol, _bq)
                 return await _volume_shock_analysis(client, symbol)
 
         vs_tasks = {

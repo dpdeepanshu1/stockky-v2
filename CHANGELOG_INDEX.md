@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 260)  Charges since start now includes SELLs (real-trade-service execution/reconcile.py, charges_ledger.py, frontend PositionStocksTab.tsx).
+  Exit fills never wrote `trade_fills`, so the cumulative report skipped every sell (STT / DP read Rs 0, total Rs 55.95 vs Rs 93.06 today). SELL fills are now recorded; pre-fix sells are priced from broker_fill_notional or filled qty x limit price. Position Stocks "Net" now subtracts today's ledger charges instead of the BUY-only live snapshot. 10 new tests; real-trade suite 3754 passed; tsc clean. See docs/GROUP260_SELL_FILLS_IN_CHARGES.md.
 - 2026-10-08 (group 258)  Both Charges tabs show brokerage since the start (position-stocks-service orders/charges_ledger.py + new scalp_charges_ledger table, real-trade-service charges_ledger.py, frontend PositionStocksTab / RealAutoTrade).
   Position-stocks deletes closed trades after 3 days, so each settled trade is booked once into a never-purged ledger table; real-trade sums its never-purged orders/fills. New `GET /charges/cumulative` and `GET /charges/{mode}/cumulative`; env `CHARGES_BROKERAGE_PCT` (0.03), `CHARGES_BROKERAGE_CAP_RS` (20), `CHARGES_DELIVERY_BROKERAGE_RS` (0). Measurement only, no gate changed. 15 new tests, real pytest; tsc clean. Not run against a live DB. See docs/GROUP258_CUMULATIVE_BROKERAGE.md.
 - 2026-10-08 (group 257)  Two misleading log lines fixed: the AngelOne quote-cooldown miss line no longer says "using the Yahoo path", and the regime-WEAK line names the top-N override (market-data-service main.py, real-trade-service entry_engine/entry.py).

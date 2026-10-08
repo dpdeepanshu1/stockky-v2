@@ -1886,7 +1886,7 @@ export default function PositionStocksTab() {
             </div>
 
             <div className="bg-graphite border border-slate rounded-2xl p-4">
-              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Live Dhan order book, right now</p>
+              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Live Dhan order book, right now (TRADED legs with a price only — see the totals below for the full day)</p>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 <div className="bg-ink border border-slate rounded-xl p-3">
                   <p className="text-[9px] text-mist uppercase tracking-widest">Total charges</p>
@@ -1899,7 +1899,13 @@ export default function PositionStocksTab() {
                   <p className="text-[9px] text-mist mt-0.5">₹20 cap per leg, 18% GST</p>
                 </div>
               </div>
-              {ledger && (
+              {ledger && (() => {
+                // group 260: the order-book snapshot above only sees legs Dhan still lists as TRADED with a price
+                // (a market/EOD exit often has none), so subtracting ITS total understated today's cost (BUY leg only).
+                // Today's charges come from the ledger (buy + sell of every closed trade) when it has loaded.
+                const chargesToday = cumCharges?.today ? cumCharges.today.all_charges : grandTotal;
+                const net = ledger.realized_pnl_today - chargesToday;
+                return (
                 <div className="bg-ink border border-slate rounded-xl p-3 mb-3">
                   <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
                     <span>Realized P&L today (price only)</span>
@@ -1908,17 +1914,18 @@ export default function PositionStocksTab() {
                     </span>
                   </div>
                   <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
-                    <span>− Charges (this order book snapshot)</span>
-                    <span className="text-signal-sell">-{fmtInr(grandTotal, 2)}</span>
+                    <span>− Charges today (all closed trades, buy + sell)</span>
+                    <span className="text-signal-sell">-{fmtInr(chargesToday, 2)}</span>
                   </div>
                   <div className="flex items-center justify-between font-display tabular-nums text-xs font-bold border-t border-slate pt-1.5 mt-1">
-                    <span className="text-paper">Net (approx, after these charges)</span>
-                    <span className={(ledger.realized_pnl_today - grandTotal) >= 0 ? "text-signal-buy" : "text-signal-sell"}>
-                      {(ledger.realized_pnl_today - grandTotal) >= 0 ? "+" : ""}{fmtInr(ledger.realized_pnl_today - grandTotal, 2)}
+                    <span className="text-paper">Net (approx, after charges)</span>
+                    <span className={net >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                      {net >= 0 ? "+" : ""}{fmtInr(net, 2)}
                     </span>
                   </div>
                 </div>
-              )}
+                );
+              })()}
               <div className="border-t border-slate pt-3">
                 <p className="font-display tabular-nums text-[10px] text-mist mb-2 uppercase tracking-widest">Full breakdown</p>
                 <div className="space-y-1.5 font-display tabular-nums text-[11px]">

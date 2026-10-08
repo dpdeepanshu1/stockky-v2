@@ -161,7 +161,13 @@ def summarize(rows: list, recent_days: int = 14, today: Optional[str] = None) ->
 
 
 def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
-    """Read every order of `mode` with at least one fill and summarise its brokerage."""
+    """Read every order of `mode` with at least one fill and summarise its charges.
+
+    2026-10-08 (group 260): orders that have NO trade_fills row but did execute (every SELL booked before
+    group 260 - reconcile never wrote fills for exits) are priced from what the order row itself kept:
+    broker_fill_notional (broker's cumulative filled value) first, else filled_qty_so_far x limit_price
+    (an estimate; market sells have no limit price and are skipped), and dated by updated_at.
+    """
     mode = (mode or "REAL").upper()
     fill_rows = (
         db.query(models.TradeFill.order_id, models.TradeFill.qty, models.TradeFill.price, models.TradeFill.filled_at)
@@ -176,6 +182,20 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
         fa = as_aware(filled_at)
         if fa is not None and (oid not in first_fill or fa < first_fill[oid]):
             first_fill[oid] = fa
+    legacy: dict = {}
+    for o in (
+        db.query(models.TradeOrder)
+        .filter(models.TradeOrder.mode == mode, models.TradeOrder.filled_qty_so_far > 0)
+        .all()
+    ):
+        if o.id in value_by_order:
+            continue
+        v = float(o.broker_fill_notional or 0)
+        if v <= 0 and o.limit_price:
+            v = float(o.filled_qty_so_far) * float(o.limit_price)
+        if v > 0:
+            legacy[o.id] = o
+            value_by_order[o.id] = v
     if not value_by_order:
         return summarize([], recent_days)
     orders = []
@@ -185,7 +205,7 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
             created = as_aware(o.created_at)
             if created is None or value_by_order[o.id] <= 0:
                 continue
-            filled = first_fill.get(o.id) or created
+            filled = first_fill.get(o.id) or (as_aware(o.updated_at) if o.id in legacy else None) or created
             orders.append({
                 "id": o.id, "symbol": o.symbol, "side": o.side, "product_type": o.product_type,
                 "value": value_by_order[o.id], "created_at": created, "day": ist_today_str(filled),

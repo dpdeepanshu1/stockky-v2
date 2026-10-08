@@ -174,6 +174,14 @@ async def _book_fill_delta(
         return
 
     # SELL
+    # 2026-10-08 (group 260): record the broker-confirmed SELL increment as a TradeFill, exactly like a BUY
+    # (record_real_fill does it for entries). Exits used to leave NO trade_fills row, so charges_ledger.report()
+    # (which prices orders from trade_fills) never saw a single sell: the cumulative card showed brokerage only
+    # for buys and STT / DP / sell-side charges as Rs 0. Done before the position lookup so a sell that has no
+    # matching position (booked as "not booked" below) still costs real charges and is still counted. Same
+    # transaction as the status/position update that follows (their db.commit()).
+    db.add(models.TradeFill(order_id=order.id, qty=delta_qty, price=fill_price,
+                            filled_at=datetime.now(timezone.utc)))
     position = db.query(models.TradePosition).filter_by(
         mode="REAL", symbol=order.symbol, status="PENDING_EXIT"
     ).first()

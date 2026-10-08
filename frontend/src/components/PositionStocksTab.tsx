@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
-  type ScalpCumulativeCharges,
+  type ScalpCumulativeCharges, type ScalpChargesPeriod,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
@@ -25,6 +25,13 @@ import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import CapitalSplitCard from "./CapitalSplitCard";
 
 type Window = "1m" | "5m" | "15m" | "60m";
+
+// group 259: "2026-09-01" -> "01 Sep" for the charges date ranges.
+const _CHG_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtChargeDay(d: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || "");
+  return m ? `${m[3]} ${_CHG_MONTHS[Number(m[2]) - 1] || m[2]}` : (d || "—");
+}
 
 function fmtInr(n: number | null | undefined, decimals = 0): string {
   if (n == null || Number.isNaN(n)) return "—";
@@ -1936,42 +1943,33 @@ export default function PositionStocksTab() {
               </div>
             </div>
 
-            {/* group 258: brokerage since the start (scalp_charges_ledger, not purged by the 3-day retention) */}
+            {/* group 259: charges since the first booked trade — date range, today, total (scalp_charges_ledger, survives 3-day retention) */}
             <div className="bg-graphite border border-slate rounded-2xl p-4">
               <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">
-                Brokerage since start{cumCharges?.since ? ` (from ${cumCharges.since})` : ""}
+                Charges since start{cumCharges?.since ? ` (from ${fmtChargeDay(cumCharges.since)})` : ""}
               </p>
-              {cumChargesError && <p className="font-display tabular-nums text-[10px] text-signal-sell mb-2">{cumChargesError}</p>}
+              {cumChargesError && <p className="text-[10px] text-signal-sell mb-2">{cumChargesError}</p>}
               {cumCharges ? (
                 <>
-                  <div className="grid grid-cols-2 gap-2 mb-3">
-                    <div className="bg-ink border border-slate rounded-xl p-3">
-                      <p className="text-[9px] text-mist uppercase tracking-widest">Total brokerage till date</p>
-                      <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(cumCharges.brokerage_total, 2)}</p>
-                      <p className="text-[9px] text-mist mt-0.5">{fmtInr(cumCharges.brokerage_incl_gst, 2)} with GST · {cumCharges.trades} trades · {cumCharges.trading_days} days</p>
+                  <div className="space-y-1.5 font-display tabular-nums text-[11px]">
+                    <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
+                      <span>Period</span><span>Brokerage · All charges · Net P&amp;L</span>
                     </div>
-                    <div className="bg-ink border border-slate rounded-xl p-3">
-                      <p className="text-[9px] text-mist uppercase tracking-widest">All charges till date</p>
-                      <p className="font-display tabular-nums font-bold text-sm text-signal-sell">-{fmtInr(cumCharges.all_charges_total, 2)}</p>
-                      <p className="text-[9px] text-mist mt-0.5">
-                        {cumCharges.avg_brokerage_per_trade != null ? `avg ${fmtInr(cumCharges.avg_brokerage_per_trade, 2)} brokerage/trade` : "no booked trades yet"}
-                        {cumCharges.brokerage_pct_of_gross_pnl != null ? ` · ${cumCharges.brokerage_pct_of_gross_pnl}% of gross profit` : ""}
-                      </p>
-                    </div>
-                  </div>
-                  {cumCharges.recent_days.length > 0 && (
-                    <div className="space-y-1 font-display tabular-nums text-[11px]">
-                      <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
-                        <span>Day</span><span>Trades · Brokerage · All charges</span>
+                    {([
+                      cumCharges.history && { label: `${fmtChargeDay(cumCharges.history.from)} – ${fmtChargeDay(cumCharges.history.to)}`, p: cumCharges.history, bold: false },
+                      { label: "Today", p: cumCharges.today, bold: false },
+                      { label: "Total", p: cumCharges.total, bold: true },
+                    ].filter(Boolean) as { label: string; p: ScalpChargesPeriod; bold: boolean }[]).map(r => (
+                      <div key={r.label} className={`flex items-center justify-between ${r.bold ? "border-t border-slate pt-2 mt-1 font-bold" : ""}`}>
+                        <span className="text-paper">{r.label} <span className="text-mist text-[9px] font-normal">{r.p.trades} trades</span></span>
+                        <span className="text-mist">
+                          <span className="text-signal-sell">-{fmtInr(r.p.brokerage, 2)}</span>
+                          {" · "}<span className="text-signal-sell">-{fmtInr(r.p.all_charges, 2)}</span>
+                          {" · "}<span className={r.p.net_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{r.p.net_pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(r.p.net_pnl), 2)}</span>
+                        </span>
                       </div>
-                      {cumCharges.recent_days.map(d => (
-                        <div key={d.day} className="flex items-center justify-between">
-                          <span className="text-paper">{d.day}</span>
-                          <span className="text-mist">{d.trades} · <span className="text-signal-sell">-{fmtInr(d.brokerage, 2)}</span> · <span className="text-signal-sell">-{fmtInr(d.total_charges, 2)}</span></span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                    ))}
+                  </div>
                   <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumCharges.note}</p>
                 </>
               ) : !cumChargesError ? (

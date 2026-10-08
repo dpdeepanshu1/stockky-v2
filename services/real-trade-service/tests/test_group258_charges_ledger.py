@@ -71,3 +71,50 @@ def test_recent_days_newest_first_and_limited():
         rows.append(r)
     s = cl.summarize(rows, recent_days=3)
     assert [x["day"] for x in s["recent_days"]] == ["2026-10-05", "2026-10-04", "2026-10-03"]
+
+
+# -- group 259: all charges + range / today / total layout --
+def _row(i, side, symbol, value, product, day, minutes=0):
+    o = _o(i, side, symbol, value, product, minutes)
+    o["day"] = day
+    return o
+
+
+def test_delivery_sell_pays_stt_and_dp_but_no_brokerage():
+    buy, sell = cl.build_rows([
+        _row(1, "BUY", "AAA", 10_000, "CNC", "2026-10-07", 0),
+        _row(2, "SELL", "AAA", 10_000, None, "2026-10-07", 30),
+    ])
+    assert buy["brokerage"] == 0 and buy["charges"]["stt"] == 0 and buy["charges"]["stamp"] > 0 and buy["charges"]["dp"] == 0
+    assert sell["brokerage"] == 0 and abs(sell["charges"]["stt"] - 10.0) < 1e-9 and sell["charges"]["dp"] == 13.5
+
+
+def test_dp_is_billed_once_per_scrip_per_day():
+    rows = cl.build_rows([
+        _row(1, "SELL", "AAA", 5_000, "CNC", "2026-10-07", 0),
+        _row(2, "SELL", "AAA", 5_000, "CNC", "2026-10-07", 5),
+        _row(3, "SELL", "AAA", 5_000, "CNC", "2026-10-08", 600),
+    ])
+    assert [r["charges"]["dp"] for r in rows] == [13.5, 0.0, 13.5]
+
+
+def test_summary_has_range_today_and_total_rows():
+    rows = cl.build_rows([
+        _row(1, "BUY", "AAA", 10_000, "CNC", "2026-10-01", 0),
+        _row(2, "SELL", "AAA", 10_000, None, "2026-10-05", 30),
+        _row(3, "SELL", "BBB", 20_000, "CNC", "2026-10-08", 60),
+    ])
+    s = cl.summarize(rows, today="2026-10-08")
+    h, t, tot = s["history"], s["today"], s["total"]
+    assert (h["from"], h["to"], h["orders"]) == ("2026-10-01", "2026-10-07", 2)
+    assert (t["from"], t["to"], t["orders"]) == ("2026-10-08", "2026-10-08", 1)
+    assert tot["orders"] == 3 and (tot["from"], tot["to"]) == ("2026-10-01", "2026-10-08")
+    assert abs(h["all_charges"] + t["all_charges"] - tot["all_charges"]) < 0.011
+    assert tot["components"]["dp"] == 27.0 and tot["all_charges"] == s["all_charges_total"] > 0
+
+
+def test_history_none_when_only_today_and_empty_ok():
+    s = cl.summarize(cl.build_rows([_row(1, "BUY", "AAA", 10_000, "CNC", "2026-10-08")]), today="2026-10-08")
+    assert s["history"] is None and s["today"]["orders"] == 1
+    e = cl.summarize([], today="2026-10-08")
+    assert e["history"] is None and e["total"]["all_charges"] == 0

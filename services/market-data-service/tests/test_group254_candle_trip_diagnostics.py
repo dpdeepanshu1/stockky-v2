@@ -58,7 +58,8 @@ def test_sends_are_counted_with_windows(clock):
     clock.t += 30
     b.note_candle_sent()
     s = b.stats()["candle_calls"]
-    assert s == {"sent_total": 4, "sent_last_10s": 1, "sent_last_60s": 4, "tripped_on_first_call_after_cooldown": 0}
+    assert s == {"sent_total": 4, "sent_last_10s": 1, "sent_last_60s": 4, "tripped_on_first_call_after_cooldown": 0,
+                 "last_block_lasted_s": None}
     clock.t += 40
     s = b.stats()["candle_calls"]
     assert s["sent_last_60s"] == 1 and s["sent_total"] == 4
@@ -150,7 +151,7 @@ def test_reset_clears_the_counters(clock):
     assert b.stats()["candle_calls"]["tripped_on_first_call_after_cooldown"] == 1
     b._reset()
     assert b.stats()["candle_calls"] == {"sent_total": 0, "sent_last_10s": 0, "sent_last_60s": 0,
-                                         "tripped_on_first_call_after_cooldown": 0}
+                                         "tripped_on_first_call_after_cooldown": 0, "last_block_lasted_s": None}
 
 
 def test_note_never_raises():

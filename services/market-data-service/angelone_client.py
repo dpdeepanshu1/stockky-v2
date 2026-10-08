@@ -83,6 +83,15 @@ def _budget_note_quote_sent() -> None:
         pass
 
 
+def _budget_note_candle_ok() -> None:
+    """group255: a candle call was answered normally (closes a run of 403s in the budget's log). Never raises."""
+    try:
+        if _budget is not None:
+            _budget.note_candle_ok()
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _budget_note_candle_sent() -> None:
     """group254: count one real getCandleData request for the trip diagnostics. Never raises."""
     try:
@@ -500,6 +509,7 @@ class AngelOneSession:
                 return []
             r.raise_for_status()
             body = r.json()
+            _budget_note_candle_ok()
             return body.get("data") or []
 
     async def get_gainers_losers(self, datatype: str = "PercPriceGainers", expirytype: str = "NEAR") -> list:

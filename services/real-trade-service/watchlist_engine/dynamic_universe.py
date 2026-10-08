@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -125,6 +126,19 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
     # subscription with a 1s stagger (rate-limit friendly by design), so
     # this can take a while with a full 60-symbol universe — generous
     # timeout, and a failure here is logged but never fails the cycle.
+    # group253: /check walks every subscription one by one (1 s stagger + a fresh news/event fetch per symbol), which for
+    # 60+ symbols takes minutes - the 90 s wait below timed out on every sync ("/check trigger failed (ReadTimeout)")
+    # and, worse, held the whole dynamic-universe -> watchlist stage of the cycle for those 90 s. It is a cache warm-up
+    # the cycle does not read an answer from (Tier 2 just sees the cache fill a little later), so it now runs on its own daemon thread (cycles run on throw-away event loops in
+    # worker threads, which would cancel a background asyncio task) and only one runs at a time.
+    # DYNAMIC_UNIVERSE_CHECK_BACKGROUND=0 restores the old wait-for-it behaviour.
+    if _check_background_enabled():
+        if _start_check_background(_check_background_timeout_s()):
+            logger.info("dynamic_universe: /check started in the background to warm the event cache")
+        else:
+            logger.info("dynamic_universe: /check from an earlier sync is still running - not starting another")
+        return result
+
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
             r = await client.get(f"{config.EVENT_URL}/check")
@@ -154,6 +168,71 @@ def _movers_timeout_s() -> float:
     except ValueError:
         return 45.0
     return v if v == v and v > 0 else 45.0
+
+
+# ── group253: /check runs in the background ─────────────────────────────────
+_CHECK_LOCK = threading.Lock()
+_CHECK_RUNNING = [False]
+_CHECK_LAST: dict = {"started": 0, "finished": 0, "ok": None, "elapsed_s": None, "skipped_busy": 0}
+
+
+def _check_background_enabled() -> bool:
+    raw = (os.getenv("DYNAMIC_UNIVERSE_CHECK_BACKGROUND") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _check_background_timeout_s() -> float:
+    raw = (os.getenv("DYNAMIC_UNIVERSE_CHECK_TIMEOUT_S") or "").strip()
+    try:
+        v = float(raw) if raw else 600.0
+    except ValueError:
+        return 600.0
+    return v if v == v and v > 0 else 600.0
+
+
+def _check_worker(timeout_s: float) -> None:
+    """Thread body: GET {EVENT_URL}/check and log the real outcome. Always clears the running flag."""
+    t0 = time.monotonic()
+    ok = False
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            r = client.get(f"{config.EVENT_URL}/check")
+            r.raise_for_status()
+        ok = True
+        logger.info("dynamic_universe: /check finished in %.0fs - event cache warmed", time.monotonic() - t0)
+    except Exception as e:  # noqa: BLE001 - a warm-up must never raise out of its thread
+        logger.warning("dynamic_universe: /check trigger failed (%s) after %.0fs — Tier 2 cache may be stale",
+                       _err_text(e), time.monotonic() - t0)
+    finally:
+        with _CHECK_LOCK:
+            _CHECK_RUNNING[0] = False
+            _CHECK_LAST["finished"] += 1
+            _CHECK_LAST["ok"] = ok
+            _CHECK_LAST["elapsed_s"] = round(time.monotonic() - t0, 1)
+
+
+def _start_check_background(timeout_s: float) -> bool:
+    """Start one /check thread. False when one is already running (nothing started) or the thread could not start."""
+    with _CHECK_LOCK:
+        if _CHECK_RUNNING[0]:
+            _CHECK_LAST["skipped_busy"] += 1
+            return False
+        _CHECK_RUNNING[0] = True
+        _CHECK_LAST["started"] += 1
+    try:
+        threading.Thread(target=_check_worker, args=(timeout_s,), name="dynamic-universe-check", daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        with _CHECK_LOCK:
+            _CHECK_RUNNING[0] = False
+        logger.warning("dynamic_universe: could not start the /check thread (%s)", _err_text(e))
+        return False
+    return True
+
+
+def check_status() -> dict:
+    """Snapshot of the background /check (for tests and any status endpoint)."""
+    with _CHECK_LOCK:
+        return {"running": _CHECK_RUNNING[0], **_CHECK_LAST}
 
 
 async def _compute_desired_universe() -> list[str]:

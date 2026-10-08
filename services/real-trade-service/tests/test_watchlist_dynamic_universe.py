@@ -30,6 +30,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import watchlist_engine.dynamic_universe as du
 
 
+@pytest.fixture(autouse=True)
+def _inline_check(monkeypatch):
+    """These tests cover the original wait-for-/check path; group253's background mode has its own test file."""
+    monkeypatch.setenv("DYNAMIC_UNIVERSE_CHECK_BACKGROUND", "0")
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def run(coro):

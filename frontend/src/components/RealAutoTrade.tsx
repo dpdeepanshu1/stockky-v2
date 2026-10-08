@@ -2885,29 +2885,35 @@ export default function RealAutoTrade() {
               isDelivery: boolean; charges: ChargeBreakdown; time: string;
             }
 
-            const orderCharges: OrderCharge[] = liveDhanOrders
-              .filter(o => {
-                const qty = Number(o.quantity || 0);
-                const price = Number(o.price || o.averageTradedPrice || 0);
-                const st = (o.orderStatus || o.status || "").toUpperCase();
-                return qty > 0 && price > 0 && (st === "TRADED" || st === "FILLED");
-              })
-              .map(o => {
-                const side = (o.transactionType || o.side || "").toUpperCase();
-                const qty = Number(o.quantity || 0);
-                const price = Number(o.price || o.averageTradedPrice || 0);
-                const val = qty * price;
-                const product = (o.productType || o.positionType || "").toUpperCase();
-                const isDelivery = product === "CNC" || product === "DELIVERY";
-                const buyVal = side === "BUY" ? val : 0;
-                const sellVal = side === "SELL" ? val : 0;
-                return {
-                  symbol: o.tradingSymbol || o.symbol || "—",
-                  side, qty, price, isDelivery,
-                  charges: calcCharges(buyVal, sellVal, isDelivery),
-                  time: o.createTime || o.updateTime || "",
-                };
-              });
+            // group 261: Dhan's order book is the WHOLE shared account, so it also lists position-stocks-service's
+            // MIS legs (e.g. TRIVENI). /dhan/orders now tags each order `ours` (its orderId is one of this
+            // service's trade_orders). Only `ours !== false` orders count here; an untagged list (older backend,
+            // failed lookup) keeps every order as before. The rest is shown as a separate note, not summed.
+            const filledDhanOrders = liveDhanOrders.filter(o => {
+              const qty = Number(o.quantity || 0);
+              const price = Number(o.price || o.averageTradedPrice || 0);
+              const st = (o.orderStatus || o.status || "").toUpperCase();
+              return qty > 0 && price > 0 && (st === "TRADED" || st === "FILLED");
+            });
+            const toOrderCharge = (o: any): OrderCharge => {
+              const side = (o.transactionType || o.side || "").toUpperCase();
+              const qty = Number(o.quantity || 0);
+              const price = Number(o.price || o.averageTradedPrice || 0);
+              const val = qty * price;
+              const product = (o.productType || o.positionType || "").toUpperCase();
+              const isDelivery = product === "CNC" || product === "DELIVERY";
+              const buyVal = side === "BUY" ? val : 0;
+              const sellVal = side === "SELL" ? val : 0;
+              return {
+                symbol: o.tradingSymbol || o.symbol || "—",
+                side, qty, price, isDelivery,
+                charges: calcCharges(buyVal, sellVal, isDelivery),
+                time: o.createTime || o.updateTime || "",
+              };
+            };
+            const orderCharges: OrderCharge[] = filledDhanOrders.filter(o => o.ours !== false).map(toOrderCharge);
+            const otherServiceCharges: OrderCharge[] = filledDhanOrders.filter(o => o.ours === false).map(toOrderCharge);
+            const otherServiceTotal = otherServiceCharges.reduce((s, o) => s + o.charges.total, 0);
 
             // Aggregate totals
             const totalBrokerage = orderCharges.reduce((s, o) => s + o.charges.brokerage, 0);
@@ -2959,7 +2965,7 @@ export default function RealAutoTrade() {
                           trade-history/ledger API (date-range), which isn't wired up yet. */}
                       <SectionHdr>Today's Dhan charges</SectionHdr>
                       <div className="grid grid-cols-2 gap-2 mb-3">
-                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled orders today`} />
+                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled Real Auto Trade orders today`} />
                         <StatCard label="Brokerage" value={`-${fmtInr(totalBrokerage, 2)}`} color="text-signal-sell" sub="₹20 cap per leg" />
                         <StatCard label="STT" value={`-${fmtInr(totalSTT, 2)}`} color="text-signal-sell" sub="Securities Transaction Tax" />
                         <StatCard label="GST + Exchange" value={`-${fmtInr(totalGST + totalExchange, 2)}`} color="text-signal-sell" sub="18% GST on brokerage" />
@@ -2988,6 +2994,13 @@ export default function RealAutoTrade() {
                             </span>
                           </div>
                         </div>
+                      )}
+                      {otherServiceCharges.length > 0 && (
+                        <p className="font-display tabular-nums text-[10px] text-mist mb-3">
+                          Not counted above: {otherServiceCharges.length} filled order{otherServiceCharges.length === 1 ? "" : "s"} on the same Dhan
+                          account that Real Auto Trade did not place (e.g. Position Stocks), -{fmtInr(otherServiceTotal, 2)} — see the
+                          Position Stocks Charges tab.
+                        </p>
                       )}
                       <div className="border-t border-slate pt-3">
                         <p className="font-display tabular-nums text-[10px] text-mist mb-2 uppercase tracking-widest">Full breakdown</p>

@@ -2539,6 +2539,9 @@ async def dhan_live_orders(admin: str = Depends(require_admin), db: Session = De
     """Live today's order list from Dhan broker."""
     try:
         orders = dhan_client.get_order_list(db)
+        # group 261: the Dhan account is shared with position-stocks-service, so tag which orders are ours.
+        import dhan_order_scope
+        orders = dhan_order_scope.tag_dhan_orders(db, orders)
         return {"ok": True, "orders": orders}
     except dhan_client.DhanNotConnectedError as e:
         raise HTTPException(status_code=409, detail=str(e))

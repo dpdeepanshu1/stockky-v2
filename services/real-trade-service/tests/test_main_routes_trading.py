@@ -1219,7 +1219,18 @@ class TestDhanLiveDataRoutes:
         db = _fresh_db()
         with mock.patch("execution.dhan_client.get_order_list", return_value=[{"id": "O1"}]):
             result = _run(main.dhan_live_orders(admin="admin", db=db))
-        assert result == {"ok": True, "orders": [{"id": "O1"}]}
+        # group 261: every order is tagged `ours`; a row with no orderId is never ours.
+        assert result == {"ok": True, "orders": [{"id": "O1", "ours": False}]}
+
+    def test_orders_tagged_ours_only_when_orderid_is_a_stored_trade_order(self):
+        db = _fresh_db()
+        db.add(main.models.TradeOrder(mode="REAL", symbol="ABC", side="BUY", qty=1, status="PLACED",
+                                      dhan_order_id="111"))
+        db.commit()
+        rows = [{"orderId": "111", "tradingSymbol": "ABC"}, {"orderId": "222", "tradingSymbol": "TRIVENI"}]
+        with mock.patch("execution.dhan_client.get_order_list", return_value=rows):
+            result = _run(main.dhan_live_orders(admin="admin", db=db))
+        assert [o["ours"] for o in result["orders"]] == [True, False]
 
 
 if __name__ == "__main__":

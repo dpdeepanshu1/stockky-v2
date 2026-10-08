@@ -498,9 +498,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 age_note = threshold_age_note("ENTRY_REGIME_MIN_SCORE", effective=threshold)
             except Exception:
                 age_note = ""
+            # group257: the line used to end "BUYs blocked." even though ENTRY_REGIME_OVERRIDE_TOP_N lets the single
+            # strongest candidate through at reduced size - a BUY right after it looked like a gate leak (2026-10-08 09:42).
+            _ovr_n = int(getattr(config, "ENTRY_REGIME_OVERRIDE_TOP_N", 0) or 0)
+            _ovr_note = (
+                " (except the top %d conviction candidate(s), let through at %.0f%% risk)"
+                % (_ovr_n, float(getattr(config, "ENTRY_REGIME_OVERRIDE_RISK_SCALE", 0.5)) * 100.0)
+            ) if _ovr_n > 0 else ""
             logger.info(
-                "entry_engine: REAL regime WEAK score=%d < gate=%d (%s) %s — BUYs blocked.",
-                market_score, threshold, threshold_src, age_note,
+                "entry_engine: REAL regime WEAK score=%d < gate=%d (%s) %s — BUYs blocked%s.",
+                market_score, threshold, threshold_src, age_note, _ovr_note,
             )
 
     symbols = list({c.symbol for c in candidates})

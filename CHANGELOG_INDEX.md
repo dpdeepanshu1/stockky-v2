@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 257)  Two misleading log lines fixed: the AngelOne quote-cooldown miss line no longer says "using the Yahoo path", and the regime-WEAK line names the top-N override (market-data-service main.py, real-trade-service entry_engine/entry.py).
+  The 09:42 IST BUY after "regime WEAK ... BUYs blocked" was the intended `ENTRY_REGIME_OVERRIDE_TOP_N` (1) override at 50% risk, not a leak. Log text only, no behaviour change. See docs/GROUP257_COOLDOWN_MISS_LOG_TEXT.md.
 - 2026-10-08 (group 256)  While AngelOne's quote cooldown runs, unheld symbols get a recent cached price (or a quick "no price") instead of the Yahoo path; candle recovery is measured by send time (market-data-service main.py / angelone_budget.py / angelone_client.py, real-trade-service market_feed/feed.py).
   14:15 IST log: a quote 403 sent hundreds of symbols to a saturated yfinance (18 s timeout, ~100 ReadTimeouts); the "answered again, 1s after the first 403" recovery line was a call already in flight. New env `QUOTE_COOLDOWN_SERVE_STALE` (1), `QUOTE_COOLDOWN_SKIP_YAHOO` (1), `QUOTE_COOLDOWN_STALE_MAX_AGE_S` (180). Held symbols unchanged. The AngelOne 403 warning line now also shows response headers (Retry-After, Server, Via ...) and session age. See docs/GROUP256_RECOVERY_INFLIGHT_AND_COOLDOWN_STALE.md.
 - 2026-10-08 (group 255)  Candle cooldowns climb 30, 60, 120, 240 ... up to 600 s, and the budget logs how long AngelOne's candle block lasted (market-data-service angelone_budget.py / angelone_client.py).

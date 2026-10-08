@@ -94,6 +94,19 @@ def is_feed_window_ist(now: datetime | None = None) -> bool:
     return open_dt <= ist_now <= close_dt
 
 
+def is_preopen_ist(now: datetime | None = None) -> bool:
+    """True on a trading day between the start of the feed window (09:05 with the default slack) and the
+    09:15 bell: the pre-open session, when feeds are polled but a symbol AngelOne cannot price has no
+    live price anywhere (group244). Never true with MARKET_HOURS_FEED_ALWAYS_ON, on weekends or holidays."""
+    if _ALWAYS_ON:
+        return False
+    ist_now = (now or datetime.now(timezone.utc)).astimezone(IST)
+    if ist_now.weekday() >= 5 or is_nse_holiday_ist(ist_now):
+        return False
+    open_dt = datetime.combine(ist_now.date(), _MARKET_OPEN, tzinfo=IST)
+    return open_dt - timedelta(minutes=_PRE_OPEN_SLACK_MIN) <= ist_now < open_dt
+
+
 def seconds_until_next_window(now: datetime | None = None) -> float:
     """How long an idling feed loop should sleep before checking again.
     Short poll (60s) — cheap, and means the feed reliably picks back up

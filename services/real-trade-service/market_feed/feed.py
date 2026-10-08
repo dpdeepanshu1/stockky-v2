@@ -206,6 +206,14 @@ _ATR_REFRESH_TTL_S = float(((os.getenv("FEED_ATR_REFRESH_TTL_S") or "").strip() 
 _ATR_RETRY_BACKOFF_S = float(((os.getenv("FEED_ATR_RETRY_BACKOFF_S") or "").strip() or "300"))
 _ATR_MAX_INFLIGHT = max(1, int(((os.getenv("FEED_ATR_MAX_INFLIGHT") or "").strip() or "8")))
 _ATR_INFLIGHT_MAX_AGE_S = 30.0   # a slot older than this is presumed leaked (e.g. its loop was torn down)
+# group245: after a restart _ATR_LAST_OK is empty while the ATR cache is warm from the DB, so EVERY symbol the first
+# bulk/quote passes priced looked "due" and got a /history refresh (8 in flight, hundreds queued over the open): each is
+# an AngelOne 1y/1d candle call in market-data (the 2026-10-08 log: 13 /history?period=1mo calls in one second, then
+# getCandleData 403 "exceeding access rate" and a 30-60 s candle cooldown). A symbol whose ATR came from the DB and has
+# not been refreshed by this process is now refreshed at most FEED_ATR_WARM_REFRESH_PER_MIN times a minute process-wide
+# (default 6); a symbol with NO ATR is not limited (trading needs it). 0 = no limit (the old behaviour).
+_ATR_WARM_REFRESH_PER_MIN = int(_env_float("FEED_ATR_WARM_REFRESH_PER_MIN", 6.0))
+_ATR_WARM_STAMPS: list = []                  # monotonic times of recent warm-ATR refreshes (guarded by _ATR_STATE_LOCK)
 _ATR_STATE_LOCK = _threading.Lock()          # plain threading lock: state is touched from >1 event loop/thread
 _ATR_INFLIGHT: dict[str, float] = {}         # clean symbol -> monotonic start
 _ATR_LAST_TRY: dict[str, float] = {}         # clean symbol -> monotonic time of last attempt
@@ -433,6 +441,12 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
         last_try = _ATR_LAST_TRY.get(clean)
         if last_try is not None and (now - last_try) < _ATR_RETRY_BACKOFF_S and (last_ok is None or last_try > last_ok):
             return False                           # recent failed attempt — back off
+        if have_atr and last_ok is None and _ATR_WARM_REFRESH_PER_MIN > 0:
+            # group245: ATR loaded from the DB, never refreshed by this process: spread these out
+            _ATR_WARM_STAMPS[:] = [t0 for t0 in _ATR_WARM_STAMPS if now - t0 < 60.0]
+            if len(_ATR_WARM_STAMPS) >= _ATR_WARM_REFRESH_PER_MIN:
+                return False
+            _ATR_WARM_STAMPS.append(now)
         _ATR_INFLIGHT[clean] = now
         _ATR_LAST_TRY[clean] = now
     coro = _bg_refresh_atr(client, symbol)
@@ -802,6 +816,12 @@ DISPLAY_PRICE_TTL_CLOSED_S = float(((os.getenv("DISPLAY_PRICE_TTL_CLOSED_S") or 
 # A symbol that returned nothing is remembered briefly so an unquotable symbol
 # is not re-requested on every poll.
 DISPLAY_PRICE_MISS_TTL_S = float(((os.getenv("DISPLAY_PRICE_MISS_TTL_S") or "").strip() or "30"))
+# group243: the Candidates tab (limit 40) used to price its symbols with GET /live-quote + GET /quote each, ~80
+# calls per poll right at the open, most of them shed by AngelOne's lane budget and sent on to Yahoo. Bulk first now.
+FEED_DISPLAY_BULK = _env_on("FEED_DISPLAY_BULK")
+FEED_DISPLAY_BULK_MIN_SYMBOLS = max(2, int(_env_float("FEED_DISPLAY_BULK_MIN_SYMBOLS", 8.0)))
+FEED_DISPLAY_BULK_MAX_AGE_S = _env_float("FEED_DISPLAY_BULK_MAX_AGE_S", 60.0)   # market open; closed = FEED_PREVIEW_BULK_MAX_AGE_S
+FEED_DISPLAY_LEFTOVER_MAX = int(_env_float("FEED_DISPLAY_LEFTOVER_MAX", 10.0))
 _DISPLAY_CACHE: dict = {}                 # clean symbol -> (monotonic ts, price | None)
 _DISPLAY_CACHE_LOCK = _threading.Lock()   # guards the dict only (never held across an await)
 _DISPLAY_FETCH_LOCKS: dict = {}           # running loop id -> asyncio.Lock (single-flight per loop)
@@ -861,15 +881,48 @@ async def get_display_prices(symbols: list[str]) -> dict[str, float]:
         hits2, misses2 = _display_lookup(misses, ttl)
         out.update(hits2)
         if misses2:
-            async def _one(client, sym):
-                return await get_quote(client, sym, for_display=True)
-            results = await _bounded_gather(misses2, _one, "get_display_prices")
+            # group243: one chunked POST /quotes/bulk for the whole miss list first; only what bulk could not
+            # price goes through the per-symbol cascade (and then without /live-quote, bulk read the same feeds),
+            # capped at FEED_DISPLAY_LEFTOVER_MAX so a bulk miss never turns back into ~40 calls per poll.
+            priced: dict[str, float] = {}
+            bulk_answered = False
+            if FEED_DISPLAY_BULK and len(misses2) >= FEED_DISPLAY_BULK_MIN_SYMBOLS:
+                try:
+                    _age = FEED_DISPLAY_BULK_MAX_AGE_S if _market_open_now() else FEED_PREVIEW_BULK_MAX_AGE_S
+                    bstats: dict = {}
+                    limits = httpx.Limits(max_connections=FEED_BULK_CONCURRENCY * 2)
+                    async with httpx.AsyncClient(limits=limits) as bulk_client:
+                        got = await _bulk_ticks(bulk_client, misses2, max_age_s=_age, stats=bstats, schedule_atr=False)
+                    for sym in misses2:
+                        t = got.get(_clean_sym(sym))
+                        if t is not None and t.price and t.price > 0:
+                            priced[sym] = float(t.price)
+                    bulk_answered = not (bstats.get("failed") and not got)
+                    logger.info("get_display_prices: bulk priced %d/%d symbol(s)", len(priced), len(misses2))
+                except Exception as e:
+                    logger.warning("get_display_prices: bulk pass failed (%s: %s) - per-symbol path", type(e).__name__, e)
+                    priced, bulk_answered = {}, False
+            left = [x for x in misses2 if x not in priced]
+            attempted = left
+            if bulk_answered and FEED_DISPLAY_LEFTOVER_MAX >= 0 and len(left) > FEED_DISPLAY_LEFTOVER_MAX:
+                attempted = left[:FEED_DISPLAY_LEFTOVER_MAX]
+                logger.info("get_display_prices: per-symbol lookups capped at %d of %d (FEED_DISPLAY_LEFTOVER_MAX)",
+                            len(attempted), len(left))
+            per_sym: dict[str, float | None] = {}
+            if attempted:
+                async def _one(client, sym):
+                    return await get_quote(client, sym, for_display=True, skip_live_quote=bulk_answered)
+                results = await _bounded_gather(attempted, _one, "get_display_prices")
+                for sym, tick in zip(attempted, results):
+                    per_sym[sym] = float(tick.price) if tick is not None and tick.price else None
             now = _time.monotonic()
             with _DISPLAY_CACHE_LOCK:
                 if len(_DISPLAY_CACHE) > 4000:
                     _DISPLAY_CACHE.clear()
-                for sym, tick in zip(misses2, results):
-                    price = float(tick.price) if tick is not None and tick.price else None
+                for sym, price in priced.items():
+                    _DISPLAY_CACHE[_clean_sym(sym)] = (now, price)
+                    out[sym] = price
+                for sym, price in per_sym.items():           # lookups that were not attempted stay uncached: retried next poll
                     _DISPLAY_CACHE[_clean_sym(sym)] = (now, price)
                     if price is not None:
                         out[sym] = price
@@ -952,11 +1005,13 @@ def _bulk_reject_reason(item, *, now: Optional[datetime] = None, max_age_s: Opti
 
 
 async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout: Optional[float] = None,
-                      max_age_s: Optional[float] = None, stats: Optional[dict] = None) -> dict[str, Tick]:
+                      max_age_s: Optional[float] = None, stats: Optional[dict] = None,
+                      schedule_atr: bool = True) -> dict[str, Tick]:
     """Best-effort chunked POST /quotes/bulk -> {symbol: Tick}. Never raises; a failed chunk just leaves
     its symbols out so the caller falls back to the per-symbol cascade for them.
 
     max_age_s: freshness limit for this call (default FEED_BULK_MAX_AGE_S).
+    schedule_atr: False for dashboard-only callers (group243), which must not start ATR /history refreshes.
     stats (optional, filled in place): "chunks", "failed" (chunks that errored or answered non-200) and
     "reasons" ({no_price|no_time|stale|other: n}) for rows that were returned but not usable."""
     out: dict[str, Tick] = {}
@@ -995,7 +1050,8 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
                     if tick is not None:
                         out[tick.symbol] = tick
                         _note_priced(tick.symbol)
-                        _schedule_atr_refresh(client, tick.symbol)   # cold ATR -> background refresh, as get_quote()
+                        if schedule_atr:
+                            _schedule_atr_refresh(client, tick.symbol)   # cold ATR -> background refresh, as get_quote()
             except Exception as e:
                 _failed()
                 logger.warning("get_quotes: /quotes/bulk chunk of %d failed: %s: %s", len(chunk), type(e).__name__, e)

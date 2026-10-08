@@ -2281,6 +2281,22 @@ def _quote_market_closed() -> bool:
         return False
 
 
+# group244: the 09:05-09:15 pre-open still counts as "open" above (feeds warm up, AngelOne can answer), but a symbol
+# that the live caches AND AngelOne REST could not price has no live price at all then. /quotes/bulk used to send
+# those on to yf.download, which hit its 18 s hard timeout (2026-10-08 log: 50 of 88 priced, 38 left, 502).
+# QUOTE_PREOPEN_SERVE_LAST_CLOSE=0 turns it off (it also needs QUOTE_CLOSED_SERVE_LAST_CLOSE on).
+def _quote_preopen() -> bool:
+    if not _closed_serve_enabled():
+        return False
+    if ((os.getenv("QUOTE_PREOPEN_SERVE_LAST_CLOSE") or "").strip() or "1").lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        from market_hours import is_preopen_ist
+        return is_preopen_ist()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _last_close_max_age_s() -> float:
     raw = (os.getenv("QUOTE_CLOSED_LAST_CLOSE_MAX_AGE_H") or "").strip()
     try:
@@ -3126,6 +3142,28 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 )
         except Exception as _ao_err:
             logger.debug("quotes/bulk: AngelOne REST block failed (non-fatal): %s", _ao_err)
+
+    if yf_tickers and _quote_preopen():
+        # group244: pre-open, what AngelOne could not price has no live price: answer with the last close and keep
+        # yfinance for names with no close known anywhere (new listings, indices). Rows keep their original
+        # fetched_at, so a caller's own freshness limit still sees their real age.
+        _left_po = []
+        _served_po = 0
+        for _m in yf_tickers:
+            if _m.startswith("^"):
+                _left_po.append(_m)
+                continue
+            _lc = _closed_last_close_row(_m)
+            if _lc:
+                _lc["symbol"] = symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", "")
+                results.append(_lc)
+                _served_po += 1
+            else:
+                _left_po.append(_m)
+        if _served_po:
+            logger.info("quotes/bulk: pre-open - %d symbol(s) AngelOne could not price served from the last close, "
+                        "%d left for yfinance", _served_po, len(_left_po))
+        yf_tickers = _left_po
 
     if not yf_tickers:
         # Everything was already fresh (cache, live feed, or AngelOne REST) —

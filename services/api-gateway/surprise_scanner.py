@@ -933,8 +933,11 @@ class SurpriseStockEngine:
         except Exception:
             return False
 
-    async def _prefetch_bulk(self, client: httpx.AsyncClient, market_data_url: str, symbols: List[str]) -> int:
+    async def _prefetch_bulk(self, client: httpx.AsyncClient, market_data_url: str, symbols: List[str],
+                             store: Optional[Dict[str, dict]] = None) -> int:
         """group229: price `symbols` with chunked POST /quotes/bulk into self._bulk_ticks.
+        group242: `store` (optional dict) receives the ticks instead, so a caller that must not touch the scan's
+        own dict (the /surprise/scan/stream route) can prefetch without racing a running scan().
 
         Never raises: a failing chunk just leaves its symbols for the per-symbol path in _fetch_quote.
         Rows older than BULK_MAX_AGE_SEC are ignored (same idea as the gateway's bulk-first helper).
@@ -942,10 +945,11 @@ class SurpriseStockEngine:
         md = (market_data_url or "").rstrip("/")
         if not BULK_PREFETCH or not md or not symbols:
             return 0
+        target = self._bulk_ticks if store is None else store
         seen, todo = set(), []
         for sym in symbols:
             base = str(sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
-            if base and base not in seen and base not in self._bulk_ticks:
+            if base and base not in seen and base not in target:
                 seen.add(base)
                 todo.append(base)
         if not todo:
@@ -972,7 +976,7 @@ class SurpriseStockEngine:
                         tick = self._row_to_tick(q)
                         if tick:
                             tick["_from_cache"] = False   # a live market-data answer, not the gateway's own cache
-                            self._bulk_ticks[base] = tick
+                            target[base] = tick
                             n += 1
                 except Exception as e:  # noqa: BLE001
                     logger.debug("surprise bulk prefetch chunk failed (%d symbols): %s", len(part), e)
@@ -984,6 +988,23 @@ class SurpriseStockEngine:
             if isinstance(res, int):
                 priced += res
         logger.info("surprise scan: bulk prefetch priced %d of %d symbol(s)", priced, len(todo))
+        return priced
+
+    async def prime_bulk_ticks(self, client: httpx.AsyncClient, market_data_url: str, symbols: List[str]) -> int:
+        """group242: bulk-price `symbols` for the /surprise/scan/stream route, so its per-symbol _fetch_quote calls
+        are answered from self._bulk_ticks instead of one GET /quote each (a Surprise page open used to send ~1000
+        of them). Fetches into a fresh dict first and only then swaps the entries in: ticks left from an older
+        prefetch for these symbols are dropped (they would otherwise be served as if fresh), and ticks other
+        symbols already have (a running scan()) are left alone. Never raises; returns the number priced."""
+        fresh: Dict[str, dict] = {}
+        try:
+            priced = await self._prefetch_bulk(client, market_data_url, symbols, store=fresh)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("surprise stream bulk prime failed (non-fatal): %s", e)
+            return 0
+        for sym in symbols:
+            self._bulk_ticks.pop(str(sym or "").upper().replace(".NS", "").replace(".BO", "").strip(), None)
+        self._bulk_ticks.update(fresh)
         return priced
 
     async def _fetch_quote(self, client: httpx.AsyncClient, market_data_url: str, symbol: str) -> Optional[dict]:

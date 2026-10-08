@@ -9273,6 +9273,15 @@ async def api_surprise_scan_stream(
             "static_loaded": n_static,
         }) + "\n"
 
+        # group242: price the whole key list with chunked POST /quotes/bulk first; the per-symbol _fetch_quote calls
+        # below then find their tick already in hand and only the symbols bulk missed still go out one by one.
+        _prime = getattr(surprise_engine, "prime_bulk_ticks", None)
+        if _prime is not None:
+            try:
+                await _prime(client, MARKET_DATA_URL, keys)
+            except Exception as e:  # never let the prefetch break the stream: fall back to per-symbol quotes
+                logger.warning("surprise stream: bulk prefetch failed (%s) - quoting symbol by symbol", e)
+
         for i in range(0, total, chunk):
             batch = keys[i : i + chunk]
             try:

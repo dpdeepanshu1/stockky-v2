@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 242)  Surprise page stream prices its universe with chunked POST /quotes/bulk instead of one GET /quote per symbol (api-gateway surprise_scanner.py, main.py).
+  The 2026-10-08 pre-open log showed hundreds of per-symbol /quote calls each time the Surprise page opened and only one bulk call: group 229's prefetch was in scan() but not in the /api/surprise/scan/stream loop. New `prime_bulk_ticks` (fresh dict, then swapped in; stale ticks for those symbols dropped), `_prefetch_bulk(store=)`; stream primes once before its chunks, falls back to per-symbol on failure; `SURPRISE_BULK_PREFETCH=0` turns it off. SMCG04, HF_MODEL, Yahoo news, NSE bootstrap 403 not changed. Engine tests run under a stand-in runner, route tests unrun (no fastapi). See docs/GROUP242_SURPRISE_STREAM_BULK_PRIME.md.
 - 2026-10-08 (group 241)  frozen RSS feeds treated as unavailable; CNBC TV18 (404) and NDTV Profit (frozen) fallbacks (real-trade-service afterhours_scan.py, analysis-intelligence-service news/feed_fetch.py).
   Boot log: Moneycontrol 15/15 and NDTVProfit 20/20 items stale, CNBC feed 404. All-stale 200s now try the fallback URLs (env `NEWS_FEED_STALE_DAYS`, default 3); Google News site-search fallbacks with publisher suffix stripped. HF_MODEL, SMCG04, Yahoo news, NSE bootstrap 403 not changed. See docs/GROUP241_STALE_FEEDS_AND_DEAD_CNBC.md.
 - 2026-10-08 (group 240)  event service site feeds (Moneycontrol/ET/CNBC TV18) use news/feed_fetch.py instead of bare feedparser.parse (analysis-intelligence-service).

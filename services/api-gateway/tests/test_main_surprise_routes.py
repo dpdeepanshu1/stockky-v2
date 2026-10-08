@@ -75,6 +75,8 @@ class Engine:
         self.quotes = {}                # sym -> tick | Exception | None (default: a live tick)
         self.quote_calls = []
         self.quote_sync_raises = False
+        self.prime_calls = []           # group242: key lists handed to prime_bulk_ticks
+        self.prime_raises = None
         self.score_calls = []
         self.scores = {}                # sym -> dict | None (default: a scored dict)
         self._last_result = None
@@ -95,6 +97,12 @@ class Engine:
         if self.load_raises:
             raise self.load_raises
         return len(self.static_cache) if self.static_n is None else self.static_n
+
+    async def prime_bulk_ticks(self, client, url, symbols):
+        self.prime_calls.append(list(symbols))
+        if self.prime_raises:
+            raise self.prime_raises
+        return len(symbols)
 
     def _fetch_quote(self, client, url, sym):
         self.quote_calls.append(sym)
@@ -676,6 +684,38 @@ class TestSurpriseScanStream:
         prog = _events(lines, "progress")
         assert prog[0]["eta_sec"] is not None and prog[0]["eta_sec"] > 0
         assert prog[-1]["eta_sec"] is None
+
+    def test_group242_universe_is_bulk_primed_once_before_any_quote(self, senv):
+        senv.engine.static_cache = {"A": {"is_liquid": False}, "B": {"is_liquid": True}, "C": {}}
+        _stream()
+        assert senv.engine.prime_calls == [["B", "C"]]
+
+    def test_group242_explicit_symbols_are_primed_in_requested_order(self, senv):
+        senv.engine.static_cache = {"AAA": {}, "BBB": {}, "CCC": {}}
+        _stream(symbols="bbb.bo, aaa.ns ,zzz")
+        assert senv.engine.prime_calls == [["BBB", "AAA"]]
+
+    def test_group242_empty_universe_is_not_primed(self, senv):
+        _stream(force_reload=True)
+        assert senv.engine.prime_calls == []
+
+    def test_group242_prime_failure_falls_back_to_per_symbol_quotes(self, senv):
+        senv.engine.static_cache = {"AAA": {}, "BBB": {}}
+        senv.engine.prime_raises = RuntimeError("md down")
+        _, lines = _stream()
+        assert senv.engine.quote_calls == ["AAA", "BBB"]
+        assert lines[-1]["event"] == "done" and lines[-1]["quotes_ok"] == 2
+
+    def test_group242_engine_without_prime_method_still_streams(self, senv):
+        senv.engine.static_cache = {"AAA": {}}
+        cls = type(senv.engine)
+        original = cls.prime_bulk_ticks
+        del cls.prime_bulk_ticks
+        try:
+            _, lines = _stream()
+        finally:
+            cls.prime_bulk_ticks = original
+        assert senv.engine.quote_calls == ["AAA"] and lines[-1]["event"] == "done"
 
     def test_done_line_summarises_the_run(self, senv):
         senv.engine.static_cache = {"AAA": {}, "BBB": {}}

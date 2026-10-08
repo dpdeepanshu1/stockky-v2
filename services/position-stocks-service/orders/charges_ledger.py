@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Iterable
+from datetime import date, timedelta
+from typing import Iterable, Optional
 
 import config
 from models import ScalpChargesLedger, ScalpPosition
@@ -112,7 +113,21 @@ def sync_all(db) -> int:
     return book_positions(db, rows)
 
 
-def cumulative(db, recent_days: int = 14) -> dict:
+def _period(rows: list, start, end) -> dict:
+    """Totals over ledger rows whose day is within [start, end] (inclusive YYYY-MM-DD; None = open ended)."""
+    sel = [r for r in rows if (start is None or r.day >= start) and (end is None or r.day <= end)]
+    brokerage = sum(r.brokerage or 0.0 for r in sel)
+    gst_b = sum(r.gst_on_brokerage or 0.0 for r in sel)
+    charges = sum(r.total_charges or 0.0 for r in sel)
+    gross = sum(r.gross_pnl or 0.0 for r in sel)
+    return {
+        "from": start, "to": end, "trades": len(sel),
+        "brokerage": round(brokerage, 2), "brokerage_incl_gst": round(brokerage + gst_b, 2),
+        "all_charges": round(charges, 2), "gross_pnl": round(gross, 2), "net_pnl": round(gross - charges, 2),
+    }
+
+
+def cumulative(db, recent_days: int = 14, today: Optional[str] = None) -> dict:
     """Totals since the first booked trade, plus a per-day list (newest first) of the last `recent_days` days."""
     sync_all(db)
     rows = db.query(ScalpChargesLedger).all()
@@ -129,8 +144,18 @@ def cumulative(db, recent_days: int = 14) -> dict:
     turnover = sum((r.buy_value or 0.0) + (r.sell_value or 0.0) for r in rows)
     gross = sum(r.gross_pnl or 0.0 for r in rows)
     days = sorted(by_day.keys(), reverse=True)
+    since = min(by_day) if by_day else None
+    today = today or ist_today_str()
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    total_p = _period(rows, None, None)
+    total_p["from"], total_p["to"] = since, today
     return {
-        "since": min(by_day) if by_day else None,
+        "since": since,
+        "today_date": today,
+        # Three rows: first booked trade -> yesterday (date range), today, grand total.
+        "history": _period(rows, since, yesterday) if since and since <= yesterday else None,
+        "today": _period(rows, today, today),
+        "total": total_p,
         "trading_days": len(by_day),
         "trades": trades,
         "brokerage_total": round(brokerage, 2),

@@ -362,7 +362,23 @@ export interface DhanLiveOrder {
 }
 
 // group 258: brokerage and charges since the first booked trade (GET /charges/cumulative).
+export interface ScalpChargesPeriod {
+  from: string | null;
+  to: string | null;
+  trades: number;
+  brokerage: number;
+  brokerage_incl_gst: number;
+  all_charges: number;
+  gross_pnl: number;
+  net_pnl: number;
+}
+
 export interface ScalpCumulativeCharges {
+  // group 259: first booked trade -> yesterday (null when nothing before today), today, grand total.
+  today_date: string;
+  history: ScalpChargesPeriod | null;
+  today: ScalpChargesPeriod;
+  total: ScalpChargesPeriod;
   since: string | null;
   trading_days: number;
   trades: number;

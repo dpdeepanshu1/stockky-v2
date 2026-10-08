@@ -459,7 +459,23 @@ export interface ManualOrderResult {
 }
 
 // group 258: brokerage since the first filled order (GET /charges/{mode}/cumulative).
+export interface ChargesPeriod {
+  from: string | null;
+  to: string | null;
+  orders: number;
+  brokerage: number;
+  brokerage_incl_gst: number;
+  all_charges: number;
+  components: { brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number; dp: number };
+}
+
 export interface CumulativeBrokerage {
+  // group 259: first order -> yesterday (null when nothing before today), today, grand total.
+  today_date: string;
+  history: ChargesPeriod | null;
+  today: ChargesPeriod;
+  total: ChargesPeriod;
+  all_charges_total: number;
   since: string | null;
   trading_days: number;
   orders: number;

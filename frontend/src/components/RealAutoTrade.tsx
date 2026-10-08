@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
-  realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl, type CumulativeBrokerage,
+  realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl, type CumulativeBrokerage, type ChargesPeriod,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus, type DhanEdisSummary,
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
@@ -13,6 +13,13 @@ import ManualTradeTicket from "./trading/ManualTradeTicket";
 // is a best-effort, non-blocking call).
 import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+
+// group 259: "2026-09-01" -> "01 Sep" for the charges date ranges.
+const _CHG_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtChargeDay(d: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || "");
+  return m ? `${m[3]} ${_CHG_MONTHS[Number(m[2]) - 1] || m[2]}` : (d || "—");
+}
 
 type Mode = "DEMO" | "REAL";
 type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "charges" | "log";
@@ -3012,45 +3019,36 @@ export default function RealAutoTrade() {
                       </div>
                     </div>
 
-                    {/* group 258: brokerage since the first filled order */}
+                    {/* group 259: charges since the first filled order — date range, today, total */}
                     <div className="bg-graphite border border-slate rounded-2xl p-4">
-                      <SectionHdr>Brokerage since start{cumBrokerage?.since ? ` (from ${cumBrokerage.since})` : ""}</SectionHdr>
+                      <SectionHdr>Charges since start{cumBrokerage?.since ? ` (from ${fmtChargeDay(cumBrokerage.since)})` : ""}</SectionHdr>
                       {cumBrokerageError && <p className="font-display tabular-nums text-[10px] text-signal-sell mb-2">{cumBrokerageError}</p>}
                       {cumBrokerage ? (
                         <>
-                          <div className="grid grid-cols-2 gap-2 mb-3">
-                            <StatCard label="Total brokerage till date" value={`-${fmtInr(cumBrokerage.brokerage_total, 2)}`} color="text-signal-sell"
-                              sub={`${fmtInr(cumBrokerage.brokerage_incl_gst, 2)} with GST`} />
-                            <StatCard label="Orders paying brokerage" value={`${cumBrokerage.orders_paying_brokerage} / ${cumBrokerage.orders}`} color="text-paper"
-                              sub={`${cumBrokerage.orders_at_cap} at the ₹${cumBrokerage.rate_card.cap_rs} cap · ${cumBrokerage.trading_days} days`} />
-                          </div>
-                          <div className="space-y-1.5 font-display tabular-nums text-[11px] mb-2">
-                            {Object.entries(cumBrokerage.by_product).map(([prod, v]) => (
-                              <div key={prod} className="flex items-center justify-between">
-                                <span className="text-paper">{prod} <span className="text-mist text-[9px]">{v.orders} orders · {fmtInr(v.value, 0)} traded</span></span>
-                                <span className={v.brokerage > 0 ? "text-signal-sell" : "text-mist"}>{v.brokerage > 0 ? `-${fmtInr(v.brokerage, 2)}` : "—"}</span>
+                          <div className="space-y-1.5 font-display tabular-nums text-[11px]">
+                            <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
+                              <span>Period</span><span>Brokerage · All charges</span>
+                            </div>
+                            {([
+                              cumBrokerage.history && { label: `${fmtChargeDay(cumBrokerage.history.from)} – ${fmtChargeDay(cumBrokerage.history.to)}`, p: cumBrokerage.history, bold: false },
+                              { label: "Today", p: cumBrokerage.today, bold: false },
+                              { label: "Total", p: cumBrokerage.total, bold: true },
+                            ].filter(Boolean) as { label: string; p: ChargesPeriod; bold: boolean }[]).map(r => (
+                              <div key={r.label} className={`flex items-center justify-between ${r.bold ? "border-t border-slate pt-2 mt-1 font-bold" : ""}`}>
+                                <span className="text-paper">{r.label}</span>
+                                <span className="text-mist">
+                                  <span className={r.p.brokerage > 0 ? "text-signal-sell" : "text-mist"}>{r.p.brokerage > 0 ? `-${fmtInr(r.p.brokerage, 2)}` : "—"}</span>
+                                  {" · "}<span className="text-signal-sell">-{fmtInr(r.p.all_charges, 2)}</span>
+                                </span>
                               </div>
                             ))}
                           </div>
-                          {cumBrokerage.top_symbols.length > 0 && (
-                            <p className="font-display tabular-nums text-[10px] text-mist mb-2">
-                              Most brokerage: {cumBrokerage.top_symbols.map(t => `${t.symbol} ${fmtInr(t.brokerage, 2)}`).join(" · ")}
-                            </p>
-                          )}
-                          {cumBrokerage.recent_days.length > 0 && (
-                            <div className="space-y-1 font-display tabular-nums text-[11px] border-t border-slate pt-2">
-                              <div className="flex items-center justify-between text-[9px] text-mist uppercase tracking-widest">
-                                <span>Day</span><span>Orders · Brokerage</span>
-                              </div>
-                              {cumBrokerage.recent_days.map(d => (
-                                <div key={d.day} className="flex items-center justify-between">
-                                  <span className="text-paper">{d.day}</span>
-                                  <span className="text-mist">{d.orders} · <span className={d.brokerage > 0 ? "text-signal-sell" : "text-mist"}>{d.brokerage > 0 ? `-${fmtInr(d.brokerage, 2)}` : "—"}</span></span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumBrokerage.note}</p>
+                          <p className="font-display tabular-nums text-[10px] text-mist mt-2">
+                            Total split: STT {fmtInr(cumBrokerage.total.components.stt, 2)} · DP {fmtInr(cumBrokerage.total.components.dp, 2)} · GST {fmtInr(cumBrokerage.total.components.gst, 2)} · Exch+SEBI {fmtInr(cumBrokerage.total.components.exchange + cumBrokerage.total.components.sebi, 2)} · Stamp {fmtInr(cumBrokerage.total.components.stamp, 2)}
+                          </p>
+                          <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+                            Real Auto Trade orders only. Delivery brokerage is ₹0, so the cost is mostly STT + DP. {cumBrokerage.note}
+                          </p>
                         </>
                       ) : !cumBrokerageError ? (
                         <p className="font-display tabular-nums text-[10px] text-mist">Loading…</p>

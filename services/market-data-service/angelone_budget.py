@@ -39,6 +39,7 @@ All env reads are blank-safe: ((os.getenv(X) or "").strip() or default).
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
 import threading
@@ -112,6 +113,21 @@ _suppressed = 0
 _last_trip_endpoint: Optional[str] = None
 _probe_next = 0.0                       # group231: earliest time of the next held-position probe
 _probes = {"allowed": 0, "denied": 0}
+
+# group254: candle-call diagnostics. The 2026-10-08 pre-market log + GET /angelone/budget showed candle 403 trips with the
+# group251 slowdown active (bucket 1.0/s, effective 0.5/s, throttle_events 0, waiters 0) at roughly 10-20 real candle
+# calls a minute, far below AngelOne's documented 3/s, 180/min, 5000/h. To tell "AngelOne keeps blocking for longer than
+# our cooldown" from "our calls are too many" from "something else uses the same key or IP", every real getCandleData
+# send is counted and each candle trip logs what was sent just before it.
+_candle_sent: "collections.deque[float]" = collections.deque(maxlen=2000)
+_candle_sent_total = 0
+# Quote sends are counted too: AngelOne's plain-text 403 ("Access denied because of exceeding access rate") looks like an edge
+# limit, which could be counted per IP/account across endpoints rather than per endpoint; the feed poll alone is ~3 quote
+# calls a second, so the trip log shows the quote rate next to the candle rate.
+_quote_sent: "collections.deque[float]" = collections.deque(maxlen=4000)
+_quote_sent_total = 0
+_post_cd = {"for_until": 0.0, "first_ts": 0.0, "sent": 0}   # first send after the latest candle cooldown ended
+_first_after_cd_trips = 0                                      # trips whose 403 followed a cooldown's first send
 _counts = {lane: {"admitted": 0, "shed": 0, "skipped_cooldown": 0} for lane in LANES}
 _counts["unclassified"] = {"admitted": 0, "shed": 0, "skipped_cooldown": 0}
 
@@ -159,7 +175,7 @@ def trip(endpoint: str) -> float:
     """Record a rate-limit answer from `endpoint`. Starts the cooldown of that endpoint's family only. Returns the
     cooldown seconds just started, or 0.0 when nothing new started (budget off, or that family's cooldown is already
     running -- late answers to calls that were already in flight must not escalate it)."""
-    global _suppressed, _last_trip_endpoint
+    global _suppressed, _last_trip_endpoint, _first_after_cd_trips
     if not enabled():
         return 0.0
     fam = family_for(endpoint)
@@ -169,6 +185,7 @@ def trip(endpoint: str) -> float:
         if now < st["until"]:
             _suppressed += 1
             return 0.0
+        prev_until = st["until"]
         base, cap = _cooldown_base_s(), _cooldown_max_s()
         if st["last_trip"] and (now - st["last_trip"]) <= _ESCALATE_WINDOW_S and st["dur"] > 0:
             dur = min(cap, max(base, st["dur"] * 2.0))
@@ -180,6 +197,17 @@ def trip(endpoint: str) -> float:
         st["trips"] += 1
         _last_trip_endpoint = endpoint
         trips_now = sum(v["trips"] for v in _cool.values())
+        ctx = None
+        if fam == CANDLE:
+            last10 = sum(1 for t in _candle_sent if now - t <= 10.0)
+            last60 = sum(1 for t in _candle_sent if now - t <= 60.0)
+            after_cd = None
+            if prev_until > 0.0 and _post_cd["for_until"] == prev_until and _post_cd["sent"] > 0:
+                after_cd = (now - _post_cd["first_ts"], _post_cd["sent"])
+                _first_after_cd_trips += 1
+            q10 = sum(1 for t in _quote_sent if now - t <= 10.0)
+            q60 = sum(1 for t in _quote_sent if now - t <= 60.0)
+            ctx = (last10, last60, _candle_sent_total, after_cd, q10, q60)
     if fam == CANDLE:
         _slow_candle_bucket(dur)
     who = "ALL AngelOne callers" if not split_enabled() else ("AngelOne %s callers" % fam)
@@ -188,7 +216,48 @@ def trip(endpoint: str) -> float:
         "(trip #%d; escalates to at most %.0fs if it trips again within %.0fs)",
         endpoint, who, dur, trips_now, cap, _ESCALATE_WINDOW_S,
     )
+    if ctx is not None:
+        last10, last60, total, after_cd, q10, q60 = ctx
+        if after_cd is not None:
+            tail = ("this 403 came %.1fs after the first candle call sent once the previous cooldown ended "
+                    "(%d call(s) sent since it ended)" % after_cd)
+        else:
+            tail = "no earlier candle cooldown to compare with"
+        logger.warning(
+            "AngelOne budget: candle 403 context - candle calls sent: %d in the last 10s, %d in the last 60s, "
+            "%d since start; quote calls sent: %d in the last 10s, %d in the last 60s; %s",
+            last10, last60, total, q10, q60, tail,
+        )
     return dur
+
+
+def note_quote_sent() -> None:
+    """Count one real quote request (single or batch), called right before it is sent. Diagnostics only; never raises."""
+    global _quote_sent_total
+    try:
+        now = time.time()
+        with _lock:
+            _quote_sent.append(now)
+            _quote_sent_total += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def note_candle_sent() -> None:
+    """Count one real getCandleData request (called right before it is sent). Diagnostics only; never raises."""
+    global _candle_sent_total
+    try:
+        now = time.time()
+        with _lock:
+            _candle_sent.append(now)
+            _candle_sent_total += 1
+            until = _cool[CANDLE]["until"]
+            if until > 0.0 and now >= until:
+                if _post_cd["for_until"] != until:
+                    _post_cd["for_until"], _post_cd["first_ts"], _post_cd["sent"] = until, now, 0
+                _post_cd["sent"] += 1
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # group251: after a candle trip the candle bucket is emptied and held empty for the cooldown, then refilled at
@@ -445,6 +514,18 @@ def stats() -> dict:
             "lanes": counts,
             "position_probes": dict(_probes),
         }
+        _now = time.time()
+        out["candle_calls"] = {
+            "sent_total": _candle_sent_total,
+            "sent_last_10s": sum(1 for t in _candle_sent if _now - t <= 10.0),
+            "sent_last_60s": sum(1 for t in _candle_sent if _now - t <= 60.0),
+            "tripped_on_first_call_after_cooldown": _first_after_cd_trips,
+        }
+        out["quote_calls"] = {
+            "sent_total": _quote_sent_total,
+            "sent_last_10s": sum(1 for t in _quote_sent if _now - t <= 10.0),
+            "sent_last_60s": sum(1 for t in _quote_sent if _now - t <= 60.0),
+        }
     with _pos_lock:
         out["position_symbols"] = len(_pos_symbols)
         out["position_symbols_age_s"] = round(time.time() - _pos_loaded_at, 1) if _pos_loaded_at else None
@@ -461,12 +542,19 @@ def stats() -> dict:
 def _reset() -> None:
     """Test helper: forget every cooldown, count, cached position and demand."""
     global _suppressed, _last_trip_endpoint, _probe_next
+    global _candle_sent_total, _first_after_cd_trips, _quote_sent_total
     global _pos_symbols, _pos_loaded_at, _pos_refreshing
     with _lock:
         for _f in FAMILIES:
             _cool[_f] = _new_cool()
         _suppressed = 0
         _probe_next = 0.0
+        _candle_sent.clear()
+        _candle_sent_total = 0
+        _quote_sent.clear()
+        _quote_sent_total = 0
+        _first_after_cd_trips = 0
+        _post_cd.update(for_until=0.0, first_ts=0.0, sent=0)
         _probes["allowed"] = 0
         _probes["denied"] = 0
         _last_trip_endpoint = None

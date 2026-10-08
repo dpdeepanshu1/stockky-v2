@@ -74,6 +74,24 @@ async def _budget_admit(lane, provider: str, weight: float, max_wait: float) -> 
         return True
 
 
+def _budget_note_quote_sent() -> None:
+    """group254: count one real quote request (single or batch) for the trip diagnostics. Never raises."""
+    try:
+        if _budget is not None:
+            _budget.note_quote_sent()
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _budget_note_candle_sent() -> None:
+    """group254: count one real getCandleData request for the trip diagnostics. Never raises."""
+    try:
+        if _budget is not None:
+            _budget.note_candle_sent()
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _budget_trip(endpoint: str) -> None:
     """Start the global cooldown after a rate-limit answer from `endpoint`. Never raises."""
     try:
@@ -407,6 +425,7 @@ class AngelOneSession:
                 return {}
         else:
             _rl_acquire("angelone_quote", weight=1)
+        _budget_note_quote_sent()
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",
@@ -461,6 +480,7 @@ class AngelOneSession:
         # cooldown is active) and only token-holders hit AngelOne.
         if not _rl_try_acquire("angelone_candle", weight=1, max_wait=_CANDLE_MAX_WAIT_S):
             return []
+        _budget_note_candle_sent()
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -552,6 +572,7 @@ class AngelOneSession:
         # angelone_quote bucket as a single-symbol get_quote() call — same
         # reasoning as yfinance's batch weight capping (see rate_limiter.py).
         _rl_acquire("angelone_quote", weight=1)
+        _budget_note_quote_sent()
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/market/v1/quote/",

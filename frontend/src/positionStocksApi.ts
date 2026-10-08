@@ -361,6 +361,23 @@ export interface DhanLiveOrder {
   [key: string]: unknown; // pass through whatever else Dhan returns, unfiltered
 }
 
+// group 258: brokerage and charges since the first booked trade (GET /charges/cumulative).
+export interface ScalpCumulativeCharges {
+  since: string | null;
+  trading_days: number;
+  trades: number;
+  brokerage_total: number;
+  brokerage_incl_gst: number;
+  all_charges_total: number;
+  turnover: number;
+  gross_pnl_total: number;
+  avg_brokerage_per_trade: number | null;
+  brokerage_pct_of_gross_pnl: number | null;
+  rate_card: { pct: number; cap_rs: number };
+  recent_days: { day: string; trades: number; brokerage: number; total_charges: number }[];
+  note: string;
+}
+
 export interface DhanLiveOrders {
   count: number;
   orders: DhanLiveOrder[];
@@ -467,6 +484,7 @@ export const positionStocksApi = {
 
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
   dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),
+  cumulativeCharges: (days = 14) => psRequest<ScalpCumulativeCharges>(`/charges/cumulative?days=${days}`),
   dhanAccount: () => psRequest<DhanAccountStatus>("/dhan/account", {}, true),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),

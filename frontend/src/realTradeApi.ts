@@ -458,6 +458,23 @@ export interface ManualOrderResult {
   pnl?: number;
 }
 
+// group 258: brokerage since the first filled order (GET /charges/{mode}/cumulative).
+export interface CumulativeBrokerage {
+  since: string | null;
+  trading_days: number;
+  orders: number;
+  orders_paying_brokerage: number;
+  orders_at_cap: number;
+  brokerage_total: number;
+  brokerage_incl_gst: number;
+  avg_brokerage_per_paying_order: number | null;
+  by_product: Record<string, { orders: number; brokerage: number; value: number }>;
+  top_symbols: { symbol: string; brokerage: number }[];
+  recent_days: { day: string; orders: number; brokerage: number }[];
+  rate_card: { intraday_pct: number; cap_rs: number; delivery_rs: number };
+  note: string;
+}
+
 export const realTradeApi = {
   health: () => rtRequest<{ ok: boolean; service: string; phase: string }>("/health", {}, false),
 
@@ -598,6 +615,9 @@ export const realTradeApi = {
 
   resilienceStatus: () =>
     rtRequest<ResilienceStatus>(`/resilience/status`, {}, true),
+
+  cumulativeBrokerage: (mode: "DEMO" | "REAL", days = 14) =>
+    rtRequest<CumulativeBrokerage>(`/charges/${mode}/cumulative?days=${days}`),
 
   positions: (mode: "DEMO" | "REAL") =>
     rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),

@@ -225,6 +225,28 @@ class ScalpPosition(Base):
     __table_args__ = (Index("ix_scalp_positions_opened_at", "opened_at"),)
 
 
+class ScalpChargesLedger(Base):
+    """2026-10-08 (group 258): one row per SETTLED closed position, written once by
+    orders/charges_ledger.py. Exists because run_retention_cleanup() deletes closed
+    scalp_positions after TRADE_HISTORY_RETENTION_DAYS (3 by default), so a SUM over
+    scalp_positions can never give "brokerage since the start". Rows here are never
+    deleted by the retention job. position_id is the PK (idempotent booking) and has
+    no foreign key on purpose: the position row it came from is allowed to disappear."""
+    __tablename__ = "scalp_charges_ledger"
+
+    position_id = Column(Integer, primary_key=True, autoincrement=False)
+    symbol = Column(String(32), nullable=False)
+    day = Column(String(10), nullable=False, index=True)   # IST calendar date of the close, YYYY-MM-DD
+    quantity = Column(Integer, nullable=False, default=0)
+    buy_value = Column(Float, nullable=False, default=0.0)
+    sell_value = Column(Float, nullable=False, default=0.0)
+    brokerage = Column(Float, nullable=False, default=0.0)        # brokerage only (both legs, before GST)
+    gst_on_brokerage = Column(Float, nullable=False, default=0.0)
+    total_charges = Column(Float, nullable=False, default=0.0)    # every levy, same rate card as the Charges tab
+    gross_pnl = Column(Float, nullable=True)
+    booked_at = Column(DateTime, nullable=False, default=_now)
+
+
 class ScalpCandidateLog(Base):
     """Audit trail of every scanned candidate and why it was taken or
     skipped — mirrors the diagnostic value of real-trade-service's own

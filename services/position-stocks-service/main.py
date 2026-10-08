@@ -71,6 +71,7 @@ API endpoints:
                                           (seeded from live Dhan SELL rejections,
                                           filtered out of candidates every cycle)
   GET  /ledger                       — capital ledger state
+  GET  /charges/cumulative           — brokerage + charges since the first booked trade (survives 3-day retention)
   POST /ledger/sync                  — force sync from Dhan
   POST /ledger/reset-daily            — manual/emergency reset of today's P&L
                                           + kill switch (normal case is handled
@@ -158,7 +159,7 @@ from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile, trailing
 from orders import adaptive
-from orders import excursion, review_stats, trade_stats
+from orders import charges_ledger, excursion, review_stats, trade_stats
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
@@ -1778,6 +1779,13 @@ def trades_history(
             for r in rows
         ],
     }
+
+
+@app.get("/charges/cumulative")
+def charges_cumulative(days: int = 14, db: Session = Depends(get_db)):
+    """2026-10-08 (group 258): brokerage and total charges since the first booked trade (scalp_charges_ledger,
+    which the 3-day trade-history retention never purges), plus the last `days` days one by one."""
+    return charges_ledger.cumulative(db, recent_days=days)
 
 
 @app.post("/trades/cleanup")

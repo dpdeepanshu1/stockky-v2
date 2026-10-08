@@ -577,6 +577,15 @@ TRAIL_RETRY_BACKOFF_S = _get_float("TRAIL_RETRY_BACKOFF_S", 60.0)
 # POST /trades/cleanup is also available for an on-demand run.
 TRADE_HISTORY_RETENTION_DAYS = _get_float("TRADE_HISTORY_RETENTION_DAYS", 3.0)
 
+# ── Cumulative brokerage ledger (2026-10-08, group 258) ──────────────────────
+# orders/charges_ledger.py books every settled closed position into scalp_charges_ledger (never purged by the
+# retention job above) so the Charges tab can show brokerage since the start. Rate card = the one the Charges
+# tab uses (Rs 20 or 0.03% per executed leg, whichever is lower). NOTE: BROKERAGE_PER_ORDER (default 0, used by
+# the entry cost gate) assumes Dhan's Rs 0 plan; these two feed no gate, they only measure.
+# Set both to 0 if your Dhan contract note shows no brokerage on intraday.
+CHARGES_BROKERAGE_PCT = _get_float("CHARGES_BROKERAGE_PCT", 0.03)       # % of leg value
+CHARGES_BROKERAGE_CAP_RS = _get_float("CHARGES_BROKERAGE_CAP_RS", 20.0)  # flat cap per leg
+
 # ── Entry range-position hard gate (this session — "buy/sell timing ... not
 # high low aware or price aware") ───────────────────────────────────────────
 # screening/engine.py already applies a SOFT range-position penalty to

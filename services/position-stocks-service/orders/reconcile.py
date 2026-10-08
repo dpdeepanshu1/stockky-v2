@@ -1776,6 +1776,13 @@ def run_retention_cleanup(db: Session) -> int:
     )
     n = len(rows)
     if n:
+        # 2026-10-08 (group 258): book each settled row into the cumulative charges ledger BEFORE it is
+        # deleted, so "brokerage since the start" survives the retention window. Never raises.
+        try:
+            from orders import charges_ledger
+            charges_ledger.book_positions(db, rows)
+        except Exception:
+            logger.exception("retention-cleanup: charges ledger booking failed (rows still deleted as before)")
         for r in rows:
             db.delete(r)
         db.commit()

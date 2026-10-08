@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 258)  Both Charges tabs show brokerage since the start (position-stocks-service orders/charges_ledger.py + new scalp_charges_ledger table, real-trade-service charges_ledger.py, frontend PositionStocksTab / RealAutoTrade).
+  Position-stocks deletes closed trades after 3 days, so each settled trade is booked once into a never-purged ledger table; real-trade sums its never-purged orders/fills. New `GET /charges/cumulative` and `GET /charges/{mode}/cumulative`; env `CHARGES_BROKERAGE_PCT` (0.03), `CHARGES_BROKERAGE_CAP_RS` (20), `CHARGES_DELIVERY_BROKERAGE_RS` (0). Measurement only, no gate changed. 15 new tests, real pytest; tsc clean. Not run against a live DB. See docs/GROUP258_CUMULATIVE_BROKERAGE.md.
 - 2026-10-08 (group 257)  Two misleading log lines fixed: the AngelOne quote-cooldown miss line no longer says "using the Yahoo path", and the regime-WEAK line names the top-N override (market-data-service main.py, real-trade-service entry_engine/entry.py).
   The 09:42 IST BUY after "regime WEAK ... BUYs blocked" was the intended `ENTRY_REGIME_OVERRIDE_TOP_N` (1) override at 50% risk, not a leak. Log text only, no behaviour change. See docs/GROUP257_COOLDOWN_MISS_LOG_TEXT.md.
 - 2026-10-08 (group 256)  While AngelOne's quote cooldown runs, unheld symbols get a recent cached price (or a quick "no price") instead of the Yahoo path; candle recovery is measured by send time (market-data-service main.py / angelone_budget.py / angelone_client.py, real-trade-service market_feed/feed.py).

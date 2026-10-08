@@ -829,6 +829,15 @@ STAMP_DUTY_BUY_PCT_INTRADAY = float(((os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY") o
 # delivery sell of a previously-settled holding.
 DP_CHARGE_FLAT = float(((os.getenv("DP_CHARGE_FLAT") or "").strip() or "15.0"))
 
+# ── Cumulative brokerage report (2026-10-08, group 258) ─────────────────────
+# charges_ledger.py sums brokerage over every filled order in trade_orders/trade_fills (never purged) using the
+# same rate card as the dashboard Charges tab: INTRADAY/MIS = lower of Rs 20 and 0.03% per executed order,
+# CNC delivery = Rs 0. MEASUREMENT ONLY: it does not feed any gate (BROKERAGE_PER_ORDER above, default 0, still
+# drives cost_model.py). Set both CHARGES_* to 0 if your Dhan contract note shows no intraday brokerage.
+CHARGES_BROKERAGE_PCT = float(((os.getenv("CHARGES_BROKERAGE_PCT") or "").strip() or "0.03"))
+CHARGES_BROKERAGE_CAP_RS = float(((os.getenv("CHARGES_BROKERAGE_CAP_RS") or "").strip() or "20.0"))
+CHARGES_DELIVERY_BROKERAGE_RS = float(((os.getenv("CHARGES_DELIVERY_BROKERAGE_RS") or "").strip() or "0.0"))
+
 # Entry-time cost gate (see entry_engine/entry.py's Gate 5.6):
 #   1. Position value must clear MIN_TRADE_VALUE — below this, fixed/
 #      percentage costs dominate any realistic edge.

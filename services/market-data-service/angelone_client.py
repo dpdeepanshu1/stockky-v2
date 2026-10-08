@@ -83,11 +83,12 @@ def _budget_note_quote_sent() -> None:
         pass
 
 
-def _budget_note_candle_ok() -> None:
-    """group255: a candle call was answered normally (closes a run of 403s in the budget's log). Never raises."""
+def _budget_note_candle_ok(sent_at: Optional[float] = None) -> None:
+    """group255: a candle call was answered normally (closes a run of 403s in the budget's log). group256: `sent_at` is when
+    that call was sent, so a call already in flight when a 403 arrived is not mistaken for the recovery. Never raises."""
     try:
         if _budget is not None:
-            _budget.note_candle_ok()
+            _budget.note_candle_ok(sent_at)
     except Exception:  # pragma: no cover
         pass
 
@@ -490,6 +491,7 @@ class AngelOneSession:
         if not _rl_try_acquire("angelone_candle", weight=1, max_wait=_CANDLE_MAX_WAIT_S):
             return []
         _budget_note_candle_sent()
+        _sent_at = time.time()   # group256: for the recovery measurement
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -509,7 +511,7 @@ class AngelOneSession:
                 return []
             r.raise_for_status()
             body = r.json()
-            _budget_note_candle_ok()
+            _budget_note_candle_ok(_sent_at)
             return body.get("data") or []
 
     async def get_gainers_losers(self, datatype: str = "PercPriceGainers", expirytype: str = "NEAR") -> list:

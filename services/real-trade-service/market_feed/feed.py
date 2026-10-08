@@ -219,6 +219,10 @@ _WL_LAST_GOOD: dict = {}           # clean symbol -> Tick (last tick the non-pri
 _WL_LAST_GOOD_MAX = 3000
 
 
+# group256: ticks that are served stale (their real as_of is old) are never remembered as the "last good" tick of a symbol
+_STALE_TAGS = ("stale_last_good", "stale_cooldown")
+
+
 def _wl_remember_last_good(ticks: dict) -> None:
     """Remember the freshest priced tick per watchlist symbol for the group249 fallback (bounded, memory-only)."""
     if FEED_LEFTOVER_STALE_S <= 0 or not ticks:
@@ -227,7 +231,7 @@ def _wl_remember_last_good(ticks: dict) -> None:
         if len(_WL_LAST_GOOD) > _WL_LAST_GOOD_MAX:
             _WL_LAST_GOOD.clear()
         for sym, tick in ticks.items():
-            if tick is not None and not str(tick.source).startswith("stale_last_good"):
+            if tick is not None and not str(tick.source).startswith(_STALE_TAGS):
                 _WL_LAST_GOOD[_clean_sym(sym)] = tick
 
 
@@ -815,7 +819,10 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         q = r.json()
         price = q.get("price") or q.get("cmp")
         if not price or float(price) <= 0:
-            _note_no_data(symbol)   # group160: answered, but with nothing usable
+            # group256: market-data answers source="cooldown_unpriced" while AngelOne's quote cooldown runs and it has no
+            # recent cached price - that says nothing about the symbol, so it must not count towards the dead-symbol pause.
+            if str(q.get("source") or "") != "cooldown_unpriced":
+                _note_no_data(symbol)   # group160: answered, but with nothing usable
             return None
         _note_priced(symbol)
         vol = q.get("volume")
@@ -840,7 +847,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             # is what risk_engine's staleness check (#7) is actually trying to
             # measure (age since WE last saw a price), not the upstream
             # provider's internal timestamp.
-            as_of=datetime.now(timezone.utc),
+            as_of=_stale_cooldown_as_of(q) or datetime.now(timezone.utc),
             atr=atr,
             source=q.get("source") or "market-data-service",
             volume=int(vol) if vol not in (None, "") else None,
@@ -850,6 +857,25 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         )
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
+        return None
+
+
+def _stale_cooldown_as_of(q: dict):
+    """group256: a /quote row tagged source="stale_cooldown(...)" is a cached price served while AngelOne's quote cooldown
+    runs. Every other row is stamped with the time WE received it, but this one keeps the REAL age of its price (market-data's
+    fetched_at, naive UTC), so risk / entry staleness checks still see how old it is. None for any other row or on any
+    parse problem (the caller then stamps receipt time as before)."""
+    try:
+        if not str(q.get("source") or "").startswith("stale_cooldown"):
+            return None
+        raw = q.get("fetched_at")
+        if not raw:
+            return None
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -1151,7 +1177,7 @@ def _prio_remember_last_good(ticks: dict[str, Tick]) -> None:
         if len(_PRIO_LAST_GOOD) > 500:
             _PRIO_LAST_GOOD.clear()
         for sym, tick in ticks.items():
-            if not str(tick.source).startswith("stale_last_good"):
+            if not str(tick.source).startswith(_STALE_TAGS):
                 _PRIO_LAST_GOOD[_clean_sym(sym)] = tick
 
 
@@ -1309,7 +1335,7 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
                     out.update(stale)
                     logger.warning("priority quotes: %d held symbol(s) served from their last good tick (<= %.0fs old): %s",
                                    len(stale), FEED_PRIORITY_STALE_FALLBACK_S, sorted(stale)[:8])
-    _prio_shared_store({s: t for s, t in out.items() if not str(t.source).startswith("stale_last_good")})
+    _prio_shared_store({s: t for s, t in out.items() if not str(t.source).startswith(_STALE_TAGS)})
     return out
 
 

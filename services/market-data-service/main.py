@@ -2154,6 +2154,86 @@ def _ao_first_miss(sym: str, reason: str):
     return None
 
 
+
+# ── group256: while AngelOne's QUOTE cooldown runs, unheld symbols are served a recent cached price, not sent to Yahoo ──
+# 2026-10-08 ~14:15 IST log: a quote 403 (30 s cooldown) made every symbol AngelOne-first could not price fall to the Yahoo
+# path - hundreds of "AngelOne-first did not price X (angelone_quote cooldown) - using the Yahoo path" lines, a saturated
+# yfinance bucket, one 18 s yf.download timeout (502) and ~100 ReadTimeouts in real-trade-service. Those symbols are
+# watchlist / scan names nobody holds, and a price a minute old is enough for them. While the quote cooldown runs:
+#   * /quote/{symbol} and the leftovers of /quotes/bulk first reuse the cached / last-good row, if it is at most
+#     QUOTE_COOLDOWN_STALE_MAX_AGE_S old (default 180 s). The row keeps its REAL fetched_at and is tagged
+#     source="stale_cooldown(<orig>)", so no caller can mistake it for a fresh quote.
+#   * a symbol with no such row is NOT sent to Yahoo (QUOTE_COOLDOWN_SKIP_YAHOO=1, default): /quote answers
+#     source="cooldown_unpriced" with price None (not negative-cached), /quotes/bulk leaves it out.
+# Held symbols (POSITION lane) are untouched: they keep the one-probe-per-second path and the full waterfall.
+# QUOTE_COOLDOWN_SERVE_STALE=0 turns the whole thing off. Market-closed answers (group233) come first and are unchanged.
+def _quote_cooldown_cfg() -> tuple:
+    on = ((os.getenv("QUOTE_COOLDOWN_SERVE_STALE") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+    skip = ((os.getenv("QUOTE_COOLDOWN_SKIP_YAHOO") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+    try:
+        age = float((os.getenv("QUOTE_COOLDOWN_STALE_MAX_AGE_S") or "").strip() or 180.0)
+    except ValueError:
+        age = 180.0
+    if not (age == age and 1.0 <= age <= 3600.0):
+        age = 180.0
+    return on, skip, age
+
+
+def _angelone_quote_cooling() -> bool:
+    """True while AngelOne's quote-family cooldown runs (rate-limiter bucket cooldown or the shared budget cooldown)."""
+    try:
+        from rate_limiter import in_cooldown as _rl_cd
+        if _rl_cd("angelone_quote"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import angelone_budget as _bud
+        return bool(_bud.in_global_cooldown("quote"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _cooldown_symbol_held(sym: str) -> bool:
+    """True when `sym` is a held position (so it must keep the normal path). Unknown -> treated as held (fail safe)."""
+    try:
+        import angelone_budget as _bud
+        if not _bud.enabled():
+            return False
+        return _bud.lane_for(_waterfall_equity_base(sym) or sym, demand=False) == _bud.POSITION
+    except Exception:  # noqa: BLE001
+        return True
+
+
+_COOLDOWN_STALE_STATS = {"served": 0, "unpriced": 0}
+
+
+def _cooldown_stale_row(key_sym: str, out_sym: Optional[str] = None) -> Optional[dict]:
+    """Cached / last-good quote row of `key_sym` (the symbol as `quote:<key_sym>` is stored), at most
+    QUOTE_COOLDOWN_STALE_MAX_AGE_S old, tagged stale_cooldown. None when there is none. Never raises."""
+    try:
+        _on, _skip, max_age = _quote_cooldown_cfg()
+        key = f"quote:{key_sym}"
+        for getter in (_cache_get, _fallback_get):
+            try:
+                hit = getter(key)
+            except Exception:  # noqa: BLE001
+                hit = None
+            if _row_price(hit) is None:
+                continue
+            age = _quote_row_age_s(hit)
+            if age is None or age > max_age:
+                continue
+            row = _pad_quote_response(out_sym or key_sym, dict(hit))
+            _orig = str(row.get("source") or "cache")
+            if not _orig.startswith("stale_cooldown"):
+                row["source"] = f"stale_cooldown({_orig})"
+            return _sanitize_for_json(row)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("cooldown stale row %s: %s", key_sym, e)
+    return None
+
+
 def _quote_angelone_first_cfg() -> tuple:
     on = ((os.getenv("QUOTE_ANGELONE_FIRST") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
     try:
@@ -2490,6 +2570,22 @@ def _get_quote_inner(symbol: str):
         _cache_set(cache_key, result, ttl=_AO_FIRST_FRESH_S + _QUOTE_SOFT_WINDOW_S)
         _fallback_set(cache_key, result)
         return result
+
+    # group256: AngelOne's quote cooldown is running and nobody holds this symbol -> a recent cached price, else a quick
+    # "no price" (never negative-cached), instead of the Yahoo path that saturates under the burst.
+    try:
+        _cd_on, _cd_skip, _cd_age = _quote_cooldown_cfg()
+        if (_cd_on and not str(sym).startswith("^") and not str(sym).upper().startswith("NIFTY")
+                and _angelone_quote_cooling() and not _cooldown_symbol_held(sym)):
+            _stale = _cooldown_stale_row(sym)
+            if _stale:
+                _COOLDOWN_STALE_STATS["served"] += 1
+                return _stale
+            if _cd_skip:
+                _COOLDOWN_STALE_STATS["unpriced"] += 1
+                return _failed_quote_payload(sym, "cooldown_unpriced")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("cooldown stale gate %s: %s", sym, e)
 
     # ── Primary: Yahoo clean OHLCV ──────────────────────────────────────────
     yahoo_full = None
@@ -3164,6 +3260,35 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
             logger.info("quotes/bulk: pre-open - %d symbol(s) AngelOne could not price served from the last close, "
                         "%d left for yfinance", _served_po, len(_left_po))
         yf_tickers = _left_po
+
+    if yf_tickers:
+        # group256: AngelOne's quote cooldown is running -> unheld leftovers get a recent cached price (<= 180 s old by
+        # default) and, with none, are left out instead of going to yf.download (18 s timeout / 502 under the burst).
+        try:
+            _cd_on, _cd_skip, _cd_age = _quote_cooldown_cfg()
+            if _cd_on and _angelone_quote_cooling():
+                _left_cd, _served_cd, _dropped_cd = [], 0, 0
+                for _m in yf_tickers:
+                    if _m.startswith("^") or _cooldown_symbol_held(symbol_map.get(_m, _m)):
+                        _left_cd.append(_m)
+                        continue
+                    _row = _cooldown_stale_row(_m, symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", ""))
+                    if _row:
+                        results.append(_row)
+                        _served_cd += 1
+                    elif _cd_skip:
+                        _dropped_cd += 1
+                    else:
+                        _left_cd.append(_m)
+                if _served_cd or _dropped_cd:
+                    _COOLDOWN_STALE_STATS["served"] += _served_cd
+                    _COOLDOWN_STALE_STATS["unpriced"] += _dropped_cd
+                    logger.info("quotes/bulk: AngelOne quote cooldown running - %d leftover symbol(s) served from a cached "
+                                "price (<= %.0fs old), %d left unpriced instead of going to yfinance, %d still for yfinance",
+                                _served_cd, _cd_age, _dropped_cd, len(_left_cd))
+                yf_tickers = _left_cd
+        except Exception as _cde:  # noqa: BLE001
+            logger.debug("quotes/bulk: cooldown stale gate failed (non-fatal): %s", _cde)
 
     if not yf_tickers:
         # Everything was already fresh (cache, live feed, or AngelOne REST) —

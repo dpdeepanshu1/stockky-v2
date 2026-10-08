@@ -1776,7 +1776,9 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0, **extra_tally}
 
     symbols = list({row.symbol for row in active})
-    ticks = await get_quotes(symbols)
+    # group249: this trigger only QUEUES a candidate (the entry engine re-prices before any order), so a symbol bulk could
+    # not price may reuse its last tick for up to FEED_LEFTOVER_STALE_S instead of costing a per-symbol lookup.
+    ticks = await get_quotes(symbols, allow_stale=True)
 
     already_queued_symbols = {
         c.symbol

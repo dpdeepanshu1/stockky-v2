@@ -75,7 +75,7 @@ class TestEmptyAndNoTick:
     def test_row_with_no_tick_this_cycle_is_skipped_not_crashed(self, db, monkeypatch):
         make_row(db)
 
-        async def _no_quotes(symbols):
+        async def _no_quotes(symbols, **_kw):
             return {}
         monkeypatch.setattr(entry, "get_quotes", _no_quotes)
 
@@ -89,7 +89,7 @@ class TestZeroPriceGuard:
     def test_zero_price_tick_does_not_crash_and_is_skipped(self, db, monkeypatch):
         row = make_row(db, catalyst_price=0.0)  # Tier-3-style unknown baseline
 
-        async def _zero_quote(symbols):
+        async def _zero_quote(symbols, **_kw):
             return {row.symbol: tick(0.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _zero_quote)
 
@@ -104,7 +104,7 @@ class TestZeroPriceGuard:
     def test_negative_price_tick_is_also_skipped_not_crashed(self, db, monkeypatch):
         row = make_row(db, catalyst_price=0.0)
 
-        async def _neg_quote(symbols):
+        async def _neg_quote(symbols, **_kw):
             return {row.symbol: tick(-1.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _neg_quote)
 
@@ -119,7 +119,7 @@ class TestZeroPriceGuard:
         make_row(db, symbol="BADCO", catalyst_price=0.0)
         make_row(db, symbol="GOODCO", catalyst_price=100.0)
 
-        async def _mixed_quotes(symbols):
+        async def _mixed_quotes(symbols, **_kw):
             return {"BADCO": tick(0.0, "BADCO"), "GOODCO": tick(101.0, "GOODCO")}
         monkeypatch.setattr(entry, "get_quotes", _mixed_quotes)
 
@@ -134,7 +134,7 @@ class TestCatalystPriceBackfill:
     def test_tier1_zero_catalyst_price_is_set_and_falls_through_same_cycle(self, db, monkeypatch):
         row = make_row(db, catalyst_price=0.0, source_tier=1, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             return {row.symbol: tick(100.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
@@ -147,7 +147,7 @@ class TestCatalystPriceBackfill:
     def test_tier3_zero_catalyst_price_also_queues_same_cycle(self, db, monkeypatch):
         row = make_row(db, catalyst_price=0.0, source_tier=3, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             # group230: a Tier-3 row needs a previous close (day change known); +4% on the day here
             return {row.symbol: Tick(symbol=row.symbol, price=50.0, as_of=datetime.now(timezone.utc), atr=1.5,
                                      source="test", prev_close=48.0)}
@@ -163,7 +163,7 @@ class TestBandCheck:
     def test_within_band_queues_a_buy_now_candidate(self, db, monkeypatch):
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             return {row.symbol: tick(103.0, row.symbol)}  # +3%, within 5% band
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
@@ -179,7 +179,7 @@ class TestBandCheck:
     def test_price_beyond_band_marks_missed_and_does_not_queue(self, db, monkeypatch):
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             return {row.symbol: tick(110.0, row.symbol)}  # +10%, beyond 5% band
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
@@ -193,7 +193,7 @@ class TestBandCheck:
     def test_price_at_exact_band_edge_is_not_missed(self, db, monkeypatch):
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             return {row.symbol: tick(105.0, row.symbol)}  # exactly +5%
         monkeypatch.setattr(entry, "get_quotes", _quote)
 
@@ -209,7 +209,7 @@ class TestBandCheck:
         # group231: Tier 1 rows use a 1.5% limit, so the drop here is -1%.)
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
-        async def _quote(symbols):
+        async def _quote(symbols, **_kw):
             return {row.symbol: tick(99.0, row.symbol)}
         monkeypatch.setattr(entry, "get_quotes", _quote)
 

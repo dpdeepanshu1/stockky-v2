@@ -200,6 +200,48 @@ _PRIO_DISTRESS_UNTIL = [0.0]       # monotonic time until which non-priority per
 _PRIO_SHARED: dict = {}            # clean symbol -> (monotonic ts, Tick)
 _PRIO_BULK_OFF_UNTIL = [0.0]       # monotonic time until which bulk-first is skipped after a failure
 
+# group249 (2026-10-08 11:03 IST log, after group 248): the retry priced 168 of 300 lost symbols, but the 138 still unpriced
+# went to per-symbol GET /quote (capped at 120) and ~100 of those ended in ReadTimeout - market-data was saturated and
+# AngelOne's quote lane was in cooldown. Those are watchlist symbols nobody holds. For a caller that opts in
+# (allow_stale=True, today only the watchlist trigger, which merely QUEUES a candidate and never places an order) a symbol
+# the bulk pass could not price now reuses the last tick the non-priority path priced for it, if that tick is at most
+# FEED_LEFTOVER_STALE_S old (default 120 s, 0 = off). The Tick keeps its REAL as_of and its source is tagged
+# "stale_last_good(<orig>)". Only symbols with no recent tick still go to the per-symbol path.
+FEED_LEFTOVER_STALE_S = _env_float("FEED_LEFTOVER_STALE_S", 120.0)
+_WL_LAST_GOOD: dict = {}           # clean symbol -> Tick (last tick the non-priority batch path priced)
+_WL_LAST_GOOD_MAX = 3000
+
+
+def _wl_remember_last_good(ticks: dict) -> None:
+    """Remember the freshest priced tick per watchlist symbol for the group249 fallback (bounded, memory-only)."""
+    if FEED_LEFTOVER_STALE_S <= 0 or not ticks:
+        return
+    with _PRIO_LOCK:
+        if len(_WL_LAST_GOOD) > _WL_LAST_GOOD_MAX:
+            _WL_LAST_GOOD.clear()
+        for sym, tick in ticks.items():
+            if tick is not None and not str(tick.source).startswith("stale_last_good"):
+                _WL_LAST_GOOD[_clean_sym(sym)] = tick
+
+
+def _wl_last_good_fallback(wanted: list) -> dict:
+    """Last good ticks (<= FEED_LEFTOVER_STALE_S old by their own as_of) for watchlist symbols bulk could not price."""
+    if FEED_LEFTOVER_STALE_S <= 0 or not wanted or not _WL_LAST_GOOD:
+        return {}
+    now = datetime.now(timezone.utc)
+    out: dict = {}
+    with _PRIO_LOCK:
+        for sym in wanted:
+            t = _WL_LAST_GOOD.get(_clean_sym(sym))
+            if t is None:
+                continue
+            as_of = t.as_of if t.as_of.tzinfo else t.as_of.replace(tzinfo=timezone.utc)
+            if 0 <= (now - as_of).total_seconds() <= FEED_LEFTOVER_STALE_S:
+                out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
+                                source=f"stale_last_good({t.source})", volume=t.volume,
+                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close)
+    return out
+
 
 def clear_priority_share() -> None:
     """Forget the shared priority ticks and the bulk-first cool-down (tests, or an operator hook)."""
@@ -208,6 +250,7 @@ def clear_priority_share() -> None:
         _PRIO_LAST_GOOD.clear()
         _PRIO_BULK_OFF_UNTIL[0] = 0.0
         _PRIO_DISTRESS_UNTIL[0] = 0.0
+        _WL_LAST_GOOD.clear()
 
 # ATR background refresh policy. Before: Source 2 fired a /history fetch on
 # EVERY call for EVERY symbol (even with a warm ATR — the ATR cache has no
@@ -1211,7 +1254,7 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
     return out
 
 
-async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str, Tick]:
+async def get_quotes(symbols: list[str], *, priority: bool = False, allow_stale: bool = False) -> dict[str, Tick]:
     """Bulk fetch over a shared client. Each distinct stock is fetched once however it is spelled
     (KOTAKBANK / kotakbank.ns / KOTAKBANK.NS, M&M / M%26M) and the tick is returned under every spelling that
     was asked for (group159).
@@ -1226,7 +1269,8 @@ async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str,
     if len(uniq) < len(set(symbols)):
         logger.debug("get_quotes: %d requested spellings collapse to %d distinct symbols",
                      len(set(symbols)), len(uniq))
-    got = await _get_quotes_unique(uniq, priority=priority) if uniq else {}
+    _kw = {"allow_stale": True} if allow_stale else {}      # only passed when asked for (older fakes take priority only)
+    got = await _get_quotes_unique(uniq, priority=priority, **_kw) if uniq else {}
     for s, c in canon_of.items():
         t = got.get(c)
         if t is not None:
@@ -1234,7 +1278,7 @@ async def get_quotes(symbols: list[str], *, priority: bool = False) -> dict[str,
     return out
 
 
-async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> dict[str, Tick]:
+async def _get_quotes_unique(symbols: list[str], *, priority: bool = False, allow_stale: bool = False) -> dict[str, Tick]:
     """Bulk fetch over a shared client (symbols are already canonical and distinct).
 
     priority=True (open-position exit evaluation): dedicated pool, longer timeouts, /quotes/bulk fallback
@@ -1242,7 +1286,10 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
 
     Default: above FEED_BULK_MIN_SYMBOLS symbols, chunked /quotes/bulk first (a few requests instead of one
     or two per symbol), then the per-symbol cascade only for symbols bulk could not price fresh. At or below
-    that size it is the original concurrent per-symbol path."""
+    that size it is the original concurrent per-symbol path.
+
+    allow_stale=True (group249; watchlist trigger only): symbols still unpriced after the bulk pass reuse their last
+    non-priority tick if it is at most FEED_LEFTOVER_STALE_S old, before any per-symbol lookup."""
     out: dict[str, Tick] = {}
     if not symbols:
         return out
@@ -1297,6 +1344,16 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
             out, todo = {}, list(symbols)
             bulk_answered = False
 
+    if out:
+        _wl_remember_last_good(out)
+    if todo and allow_stale and FEED_LEFTOVER_STALE_S > 0:
+        _stale = _wl_last_good_fallback(todo)
+        if _stale:
+            out.update(_stale)
+            todo = [x for x in todo if x not in _stale]
+            logger.info("get_quotes: %d unpriced symbol(s) served from their last good tick (<= %.0fs old, watchlist "
+                        "trigger only); %d left for per-symbol lookups", len(_stale), FEED_LEFTOVER_STALE_S, len(todo))
+
     if todo and len(set(symbols)) > FEED_BULK_MIN_SYMBOLS and _prio_in_distress():
         # Large (watchlist-poll sized) batches only. A small batch - the <=20 entry candidates of a cycle - is never
         # starved: if a held symbol cannot be priced for its own reasons, entries must not stop with it.
@@ -1314,9 +1371,12 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
             results = await _bounded_gather(todo, _no_live, "get_quotes")
         else:
             results = await _bounded_gather(todo, get_quote, "get_quotes")
+        _fresh: dict = {}
         for sym, tick in zip(todo, results):
             if tick is not None:
                 out[sym] = tick
+                _fresh[sym] = tick
+        _wl_remember_last_good(_fresh)
     return out
 
 

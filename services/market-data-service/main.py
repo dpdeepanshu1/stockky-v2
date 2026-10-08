@@ -1874,6 +1874,23 @@ def _waterfall_angelone_price(symbol: str) -> Optional[float]:
     return None
 
 
+# group235: the 2026-10-07 evening log had ~1,500 "Bhavcopy EOD waterfall hit X" INFO lines in a few minutes (one per
+# symbol per request, the same symbol and price over and over). One INFO per symbol and price per process; repeats
+# go to DEBUG.
+_BHAV_HIT_LOGGED: dict = {}
+_BHAV_HIT_LOGGED_MAX = 6000
+
+
+def _log_bhavcopy_hit_once(base: str, px: float) -> None:
+    if _BHAV_HIT_LOGGED.get(base) == px:
+        logger.debug("Bhavcopy EOD waterfall hit %s → ₹%.2f (repeat)", base, px)
+        return
+    if len(_BHAV_HIT_LOGGED) >= _BHAV_HIT_LOGGED_MAX:
+        _BHAV_HIT_LOGGED.clear()
+    _BHAV_HIT_LOGGED[base] = px
+    logger.info("Bhavcopy EOD waterfall hit %s → ₹%.2f", base, px)
+
+
 def _waterfall_bhavcopy_price(symbol: str) -> Optional[float]:
     """Absolute last resort: official NSE bhavcopy EOD close.
 
@@ -1889,7 +1906,7 @@ def _waterfall_bhavcopy_price(symbol: str) -> Optional[float]:
         from bhavcopy import eod_close_from_bhavcopy
         px = eod_close_from_bhavcopy(base)
         if px and px > 0:
-            logger.info("Bhavcopy EOD waterfall hit %s → ₹%.2f", base, px)
+            _log_bhavcopy_hit_once(base, float(px))
             return float(px)
     except Exception as e:
         logger.debug("Bhavcopy price %s: %s", base, e)
@@ -2080,6 +2097,16 @@ def _neg_reset() -> None:
     """Forget every entry (tests / operator hook)."""
     with _NEG_LOCK:
         _NEG_QUOTE.clear()
+
+
+def _quote_closed_skip_quota_sources() -> bool:
+    """group235: True when the quote waterfall should leave out the quota-limited sources (market closed)."""
+    if ((os.getenv("QUOTE_CLOSED_SKIP_QUOTA_SOURCES") or "").strip() or "1").lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        return bool(_quote_market_closed())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _failed_quote_payload(sym: str, source: str = "failed") -> dict:
@@ -2295,10 +2322,27 @@ def _closed_last_close_row(sym: str) -> Optional[dict]:
         return _sanitize_for_json(row)
     px = _waterfall_bhavcopy_price(sym)
     if px and px > 0:
-        return _sanitize_for_json(_pad_quote_response(sym, {
+        row = {
             "symbol": sym, "price": float(px), "cmp": float(px), "previous_close": float(px),
             "source": "bhavcopy_eod", "fetched_at": datetime.utcnow().isoformat(),
-        }))
+        }
+        # group235: the row used to carry previous_close == close, so every closed-market bhavcopy quote read
+        # "0.0% today" (the 2026-10-07 log: 229 volume-shock candidates rejected on "Today's return 0.0%").
+        # The same bhavcopy line has the real previous close, day high/low and traded quantity.
+        try:
+            from bhavcopy import eod_row_from_bhavcopy
+            br = eod_row_from_bhavcopy(sym)
+            if br and br.get("close") and abs(float(br["close"]) - float(px)) < 1e-6:
+                pc = br.get("prev_close")
+                if pc and pc > 0:
+                    row["previous_close"] = float(pc)
+                    row["day_change_pct"] = round((float(px) - float(pc)) / float(pc) * 100.0, 2)
+                for k in ("day_high", "day_low", "volume"):
+                    if br.get(k):
+                        row[k] = br[k]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("bhavcopy extras %s: %s", sym, e)
+        return _sanitize_for_json(_pad_quote_response(sym, row))
     if stale_fb is not None:
         row = _pad_quote_response(sym, dict(stale_fb))
         row["source"] = "last_close_fallback"
@@ -2493,6 +2537,12 @@ def _get_quote_inner(symbol: str):
         # Prefer stale-good over burning TwelveData/AV on bulk feed storms
         if _in_cooldown("yfinance") or _in_cooldown("twelvedata"):
             return _pad_quote_response(sym, soft_cached)
+    # group235: with the market closed every quota-limited source (IndianAPI, TwelveData, AlphaVantage, Polygon) can
+    # only return the same last close. The 2026-10-07 log had two symbols that are in no bhavcopy (QUALIANCE, BMISL)
+    # walk all of them and trip the IndianAPI (429, +120 s) and AlphaVantage (429, +300 s) cooldowns at 00:55 IST,
+    # leaving less of that quota for market hours. Skipped while closed; NSE-direct, AngelOne and Yahoo still run.
+    # QUOTE_CLOSED_SKIP_QUOTA_SOURCES=0 restores the old behaviour.
+    _skip_quota_src = (not is_index) and _quote_closed_skip_quota_sources()
     if not is_index:
         # NSE-direct doesn't depend on yfinance/Yahoo cookies at all, so try
         # it even while yfinance is in cooldown (e.g. "Invalid Crumb" outage)
@@ -2524,7 +2574,7 @@ def _get_quote_inner(symbol: str):
     # IndianAPI, so this sits right after NSE-direct, ahead of the older
     # TwelveData/AlphaVantage/Polygon paid tiers (kept in place below as
     # extra safety nets, not removed).
-    if not is_index and not waterfall_price:
+    if not is_index and not waterfall_price and not _skip_quota_src:
         try:
             waterfall_price = _waterfall_indianapi_price(sym)
             if waterfall_price and waterfall_price > 0:
@@ -2532,7 +2582,7 @@ def _get_quote_inner(symbol: str):
         except Exception as e:
             logger.debug("indianapi waterfall %s: %s", sym, e)
 
-    if not is_index and not waterfall_price and not _in_cooldown("yfinance"):
+    if not is_index and not waterfall_price and not _in_cooldown("yfinance") and not _skip_quota_src:
         try:
             waterfall_price = _waterfall_twelvedata_price(sym)
             if waterfall_price and waterfall_price > 0:

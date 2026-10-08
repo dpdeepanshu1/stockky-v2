@@ -70,3 +70,11 @@ def _no_google_news_widening(monkeypatch):
     mock feedparser.parse / the news sources for ONE call; they run with widening off. The widening itself is
     tested in test_group201_news_coverage.py, which sets EVENT_GN_THIN_BELOW itself."""
     monkeypatch.setenv("EVENT_GN_THIN_BELOW", "0")
+
+
+@pytest.fixture(autouse=True)
+def _event_feeds_use_feedparser(monkeypatch):
+    """group240: event/main.py downloads site feeds through news/feed_fetch.py (httpx). The existing event tests mock
+    feedparser.parse for ONE call, so they run with the shared downloader off; tests/test_group240_event_shared_feed_fetch.py
+    turns it on itself and fakes the downloader."""
+    monkeypatch.setenv("EVENT_FEED_SHARED_FETCH", "0")

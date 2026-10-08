@@ -599,6 +599,17 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     return {"token": token, "expires_at": expires_at.isoformat()}
 
 
+@app.get("/auth/session")
+async def auth_session(authorization: str = Header(default="")):
+    """group237: is the Bearer token still a usable admin session? Always 200 (no 401), booleans only. The dashboard
+    calls this once before its first protected REAL request so a stale token left in localStorage no longer turns
+    the page load into a burst of 401s (pipeline / watchlist / resilience each hit twice in the 2026-10-07 log)."""
+    from auth.admin_auth import decode_session_token
+    if not authorization.startswith("Bearer "):
+        return {"valid": False}
+    return {"valid": bool(decode_session_token(authorization[len("Bearer "):].strip()))}
+
+
 @app.post("/auth/logout")
 async def logout(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     # REAL only — see the matching note in login(). DEMO has no session to

@@ -526,10 +526,26 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
         "TTL_TRD_QNTY", "TOTAL_TRADES", "TOTTRDQTY", "NO_OF_SHRS", "VOLUME",
         "TtlTradgVol", "TOT_TRADED_QTY", "TRADED_QTY",
     )
+    # group235: the same file carries the previous close, day high/low and traded quantity.
+    prev_col = col("PREV_CLOSE", "PREVCLOSE", "PrvsClsgPric", "PREV_CLOSE_PRICE")
+    high_col = col("HIGH_PRICE", "HIGH", "HghPric")
+    low_col = col("LOW_PRICE", "LOW", "LwPric")
     if not sym_col:
         return out
     if not close_col:
         _warn_no_close_col(reader.fieldnames)
+
+    def _num(row, c):
+        if not c:
+            return None
+        try:
+            raw = str(row.get(c) or "").replace(",", "").strip()
+            if not raw or raw.upper() in ("-", "NA", "N/A"):
+                return None
+            v = float(raw)
+            return v if v == v and v > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     for row in reader:
         row_sym = (row.get(sym_col) or "").strip().upper()
@@ -575,6 +591,10 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
             "close": close_px,
             "traded_qty": row.get(tq_col) if tq_col else None,
             "delivery_qty": row.get(deliv_qty_col) if deliv_qty_col else None,
+            "prev_close": _num(row, prev_col),
+            "day_high": _num(row, high_col),
+            "day_low": _num(row, low_col),
+            "volume": _num(row, tq_col),
             "source": "nse_bhavcopy",
         }
     return out
@@ -815,22 +835,9 @@ _EOD_MISS_TTL_S = float((_os.getenv("BHAVCOPY_EOD_MISS_TTL_S") or "").strip() or
 _EOD_MISS: Dict[str, float] = {}
 
 
-def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
-    """Last-resort EOD close price straight from the official NSE bhavcopy.
-
-    Used as the final rung of the live-price waterfall (see
-    ``_waterfall_bhavcopy_price`` in main.py) when Yahoo/TwelveData/
-    AlphaVantage/Polygon all fail — e.g. during a yfinance "Invalid Crumb"
-    outage. It's end-of-day, not live, but a real EOD close is far better
-    for the Data Feed Health repair flow than leaving a record at price=0
-    forever.
-
-    Routed through _fetch_bhav_day_parsed's per-date cache (same as
-    delivery_from_bhavcopy) — this was previously a second, independent
-    per-symbol full-file download+parse, so any repair run needing both
-    delivery% and EOD close for the same symbol (or EOD close for several
-    symbols) downloaded the identical CSV redundantly, once per call.
-    """
+def eod_row_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
+    """group235: the newest bhavcopy row for `symbol` that has a close, with the session date added as
+    row["date"] (ISO). Same lookup, cache and miss memory as eod_close_from_bhavcopy (which now delegates here)."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     if _EOD_MISS_TTL_S > 0:
         _until = _EOD_MISS.get(sym)
@@ -848,20 +855,9 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
                 continue
             row = day.get(sym)
             if row and row.get("close"):
-                return float(row["close"])
-        # 2026-08-25: added after TATAMOTORS/LTIM were seen going through
-        # every waterfall stage (including 10 successful bhavcopy CSV
-        # downloads) and still ending in "price still missing". Both are
-        # large, extremely liquid stocks that are on every single trading
-        # day's official bhavcopy without exception — if this log line
-        # ever shows a day with a nonzero row count where the symbol still
-        # wasn't found, the bug is in symbol-key formatting (e.g. a hidden
-        # whitespace/case mismatch, or the file's SYMBOL column using a
-        # different identifier for these specific names than mapped
-        # columns expect); if it shows 0 rows parsed for every date, the
-        # bug is upstream in _fetch_bhav_day_parsed's CSV/zip parsing, not
-        # in this lookup. Either way, this makes the next occurrence
-        # diagnosable from logs alone instead of requiring another guess.
+                out = dict(row)
+                out["date"] = d.isoformat()
+                return out
         logger.info("eod_close_from_bhavcopy(%s): not found in any of %s", sym, dates_tried)
         if _EOD_MISS_TTL_S > 0 and any(n for _d, n in dates_tried):
             _EOD_MISS[sym] = time.time() + _EOD_MISS_TTL_S
@@ -874,6 +870,26 @@ def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
     except Exception as e:
         logger.warning("eod_close_from_bhavcopy failed for %s: %s", sym, e)
     return None
+
+
+def eod_close_from_bhavcopy(symbol: str) -> Optional[float]:
+    """Last-resort EOD close price straight from the official NSE bhavcopy.
+
+    Used as the final rung of the live-price waterfall (see
+    ``_waterfall_bhavcopy_price`` in main.py) when Yahoo/TwelveData/
+    AlphaVantage/Polygon all fail — e.g. during a yfinance "Invalid Crumb"
+    outage. It's end-of-day, not live, but a real EOD close is far better
+    for the Data Feed Health repair flow than leaving a record at price=0
+    forever.
+
+    Routed through _fetch_bhav_day_parsed's per-date cache (same as
+    delivery_from_bhavcopy) — this was previously a second, independent
+    per-symbol full-file download+parse, so any repair run needing both
+    delivery% and EOD close for the same symbol (or EOD close for several
+    symbols) downloaded the identical CSV redundantly, once per call.
+    """
+    row = eod_row_from_bhavcopy(symbol)
+    return float(row["close"]) if row and row.get("close") else None
 
 
 def delivery_from_nse_cm_series(symbol: str) -> Optional[Dict[str, Any]]:

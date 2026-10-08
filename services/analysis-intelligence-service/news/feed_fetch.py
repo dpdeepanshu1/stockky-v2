@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -38,6 +39,29 @@ FEED_HEADERS = {
 }
 
 
+# 2026-10-08 (group 239, Moneycontrol HTTP 403): second header profile tried on the same URL when the first gets a
+# bot-gate status, plus per-feed fallback URLs (see _FALLBACKS). Same approach as real-trade-service's after-hours
+# scan (group 238).
+FEED_HEADERS_ALT = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+}
+_BLOCK_STATUSES = frozenset({401, 403, 406, 429, 451})
+
+# primary feed URL -> (publisher name, [fallback URLs tried in order, only when the primary download fails]).
+# Not live-verified from the sandbox (no network); the Google News search is not bot-gated and its titles end with
+# " - <publisher>", which is stripped from fallback entries.
+_FALLBACKS: Dict[str, Tuple[str, list]] = {
+    "https://www.moneycontrol.com/rss/latestnews.xml": ("Moneycontrol", [
+        "https://www.moneycontrol.com/rss/business.xml",
+        "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
+    ]),
+}
+
+
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     """Blank / garbage / out-of-range env values fall back to the default (never crash on import)."""
     try:
@@ -51,6 +75,8 @@ FEED_TIMEOUT_SEC = float(_env_int("NEWS_FEED_TIMEOUT_SEC", 10, 2, 30))
 CACHE_TTL_SEC = _env_int("NEWS_FEED_CACHE_TTL_SEC", 300, 0, 3600)    # 0 disables caching
 _SEARCH_TTL_CAP_SEC = 120
 _FAIL_TTL_SEC = 60
+_BLOCKED_TTL_SEC = _env_int("NEWS_FEED_BLOCKED_TTL_SEC", 1800, 60, 86400)   # all URLs bot-gated: do not retry per request
+_FALLBACKS_ENABLED = (os.getenv("NEWS_FEED_FALLBACKS") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
 _lock = threading.Lock()
@@ -72,29 +98,73 @@ def _empty_parsed() -> Any:
 
 
 def _download(url: str) -> Tuple[Optional[bytes], Dict[str, Any]]:
-    """GET `url`. -> (body, info). body is None when the download failed or the body is clearly not a feed."""
+    """GET `url`. -> (body, info). body is None when the download failed or the body is clearly not a feed.
+    A bot-gate status (403/429/...) retries once with the alternate header profile."""
     info: Dict[str, Any] = {"status": None, "error": None}
-    try:
-        with httpx.Client(timeout=FEED_TIMEOUT_SEC, follow_redirects=True, headers=FEED_HEADERS) as client:
-            resp = client.get(url)
-        info["status"] = resp.status_code
-        if resp.status_code != 200:
-            info["error"] = f"http_{resp.status_code}"
-            logger.warning("news feed %s -> HTTP %s (blocked or retired?)", _short(url), resp.status_code)
+    for headers in (FEED_HEADERS, FEED_HEADERS_ALT):
+        try:
+            with httpx.Client(timeout=FEED_TIMEOUT_SEC, follow_redirects=True, headers=headers) as client:
+                resp = client.get(url)
+            info["status"] = resp.status_code
+            if resp.status_code != 200:
+                info["error"] = f"http_{resp.status_code}"
+                if resp.status_code in _BLOCK_STATUSES and headers is FEED_HEADERS:
+                    continue                      # try the other header profile
+                logger.warning("news feed %s -> HTTP %s (blocked or retired?)", _short(url), resp.status_code)
+                return None, info
+            body = resp.content or b""
+            ctype = (resp.headers.get("content-type") or "").lower()
+            head = body[:200].lstrip().lower()
+            if "text/html" in ctype or head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+                info["error"] = "html_instead_of_feed"
+                logger.warning("news feed %s -> HTTP 200 but HTML, not a feed (bot page or retired URL): %r",
+                               _short(url), body[:80])
+                return None, info
+            info["error"] = None
+            return body, info
+        except Exception as exc:   # transport error / timeout: never crash a request over one source
+            info["error"] = type(exc).__name__
+            logger.warning("news feed %s download failed: %s", _short(url), type(exc).__name__)
             return None, info
-        body = resp.content or b""
-        ctype = (resp.headers.get("content-type") or "").lower()
-        head = body[:200].lstrip().lower()
-        if "text/html" in ctype or head.startswith(b"<!doctype html") or head.startswith(b"<html"):
-            info["error"] = "html_instead_of_feed"
-            logger.warning("news feed %s -> HTTP 200 but HTML, not a feed (bot page or retired URL): %r",
-                           _short(url), body[:80])
-            return None, info
-        return body, info
-    except Exception as exc:   # transport error / timeout: never crash a request over one source
-        info["error"] = type(exc).__name__
-        logger.warning("news feed %s download failed: %s", _short(url), type(exc).__name__)
-        return None, info
+    return None, info
+
+
+def _strip_publisher(parsed: Any, publisher: str) -> None:
+    """Fallback entries from a Google News search read 'Headline - Moneycontrol'; drop the trailing publisher."""
+    rx = re.compile(r"\s+[-\u2013|]\s+" + re.escape(publisher) + r"\s*$", re.I)
+    for entry in (getattr(parsed, "entries", None) or []):
+        try:
+            title = entry["title"]
+            fixed = rx.sub("", title).strip()
+            if fixed and fixed != title:
+                entry["title"] = fixed
+        except Exception:
+            continue
+
+
+def _try_fallbacks(url: str, info: Dict[str, Any]) -> Optional[Any]:
+    """Primary download failed: try this feed's fallback URLs. -> parsed (non-empty) or None."""
+    fb = _FALLBACKS.get(url) if _FALLBACKS_ENABLED else None
+    if not fb:
+        return None
+    publisher, urls = fb
+    tried = []
+    for u in urls:
+        raw, finfo = _download(u)
+        if raw is None:
+            tried.append(f"{_short(u)}: {finfo.get('error')}")
+            continue
+        parsed = feedparser.parse(raw)
+        if getattr(parsed, "entries", None):
+            _strip_publisher(parsed, publisher)
+            info["via"] = u
+            info["error"] = None
+            logger.info("news feed %s unavailable (%s) - served by fallback %s: %d entries",
+                        _short(url), info.get("status") or "failed", _short(u), len(parsed.entries))
+            return parsed
+        tried.append(f"{_short(u)}: zero_entries")
+    logger.warning("news feed %s and all fallbacks failed: %s", _short(url), " | ".join(tried))
+    return None
 
 
 def _short(url: str) -> str:
@@ -113,8 +183,15 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
 
     raw, info = _download(url)
     if raw is None:
-        parsed, keep = _empty_parsed(), min(ttl, _FAIL_TTL_SEC)
-        info["entries"] = 0
+        parsed = _try_fallbacks(url, info)
+        if parsed is not None:
+            info["entries"] = len(parsed.entries)
+            keep = ttl
+        else:
+            parsed = _empty_parsed()
+            info["entries"] = 0
+            blocked = info.get("status") in _BLOCK_STATUSES
+            keep = (_BLOCKED_TTL_SEC if blocked else min(ttl, _FAIL_TTL_SEC)) if ttl > 0 else 0
     else:
         parsed = feedparser.parse(raw)          # exceptions propagate, as with the old direct call
         info["entries"] = len(getattr(parsed, "entries", None) or [])

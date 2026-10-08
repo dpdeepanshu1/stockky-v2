@@ -638,13 +638,49 @@ def _feed_cache_seconds(name: str, default: int) -> int:
         return default
 
 
+_SHARED_FETCH: Dict[str, Any] = {}
+
+
+def _load_shared_fetch():
+    """2026-10-08 (group 240): news/feed_fetch.py's fetch_feed_ex, loaded by file path (each sub-app hides the
+    others' folders from sys.path while importing). It downloads with httpx - browser User-Agent, a second header
+    profile on a bot-gate status, 10 s timeout, fallback URLs for Moneycontrol - where feedparser.parse(url) used
+    feedparser's own User-Agent and no timeout and just returned zero entries when a site answered 403.
+    None when disabled (EVENT_FEED_SHARED_FETCH=0) or the module cannot be loaded; callers then use feedparser."""
+    if (os.getenv("EVENT_FEED_SHARED_FETCH") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if "fn" in _SHARED_FETCH:
+        return _SHARED_FETCH["fn"]
+    fn = None
+    try:
+        import importlib.util as _ilu
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "news", "feed_fetch.py")
+        spec = _ilu.spec_from_file_location("event_shared_feed_fetch", path)
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = mod.fetch_feed_ex
+    except Exception as e:  # missing file / import error: degrade to the old direct call
+        logger.warning("event feeds: shared downloader unavailable (%s) - using feedparser directly", e)
+    _SHARED_FETCH["fn"] = fn
+    return fn
+
+
+def _site_feed_parse(feed_url: str):
+    """Download + parse one site feed. Shared httpx downloader when available (never raises for a failed download;
+    returns an object with empty .entries), else the old feedparser.parse(feed_url)."""
+    fetch = _load_shared_fetch()
+    if fetch is not None:
+        return fetch(feed_url, "event")[0]
+    return feedparser.parse(feed_url)
+
+
 def _parse_site_feed(feed_url: str):
     """feedparser.parse(feed_url) behind a small shared TTL cache. Exceptions propagate to the
     caller exactly as before (the caller's own except clause logs them); a failure is cached as a
     miss for the empty-TTL so the next symbol does not retry at once."""
     ttl = _feed_cache_seconds("EVENT_FEED_CACHE_SECONDS", 300)
     if ttl <= 0:
-        return feedparser.parse(feed_url)
+        return _site_feed_parse(feed_url)
     empty_ttl = _feed_cache_seconds("EVENT_FEED_EMPTY_CACHE_SECONDS", 600)
     with _FEED_LOCKS_GUARD:
         lock = _FEED_LOCKS.setdefault(feed_url, _threading.Lock())
@@ -656,7 +692,7 @@ def _parse_site_feed(feed_url: str):
                 raise hit[2]
             return hit[1]
         try:
-            parsed = feedparser.parse(feed_url)
+            parsed = _site_feed_parse(feed_url)
         except Exception as e:
             _FEED_CACHE[feed_url] = (now + empty_ttl, None, e)
             raise

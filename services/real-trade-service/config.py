@@ -461,6 +461,11 @@ AFTERHOURS_SCAN_RAMP_END_IST   = os.getenv("AFTERHOURS_SCAN_RAMP_END_IST", "09:0
 AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS = max(
     300, int(((os.getenv("AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS") or "").strip() or "1800"))
 )
+# 2026-10-08 (group 238): an RSS feed whose every URL answered with a bot-gate status (HTTP 403/429/...)
+# is skipped for this long (floor 60 s) instead of being retried on every scan / 15-min intraday tick.
+AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS = max(
+    60, int(((os.getenv("AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS") or "").strip() or "1800"))
+)
 AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS = max(
     300, int(((os.getenv("AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS") or "").strip() or "21600"))
 )

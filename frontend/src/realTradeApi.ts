@@ -30,6 +30,29 @@ export function getSessionToken(): string | null {
 export function setSessionToken(token: string | null) {
   if (token) localStorage.setItem(STORAGE_TOKEN_KEY, token);
   else localStorage.removeItem(STORAGE_TOKEN_KEY);
+  // group237: a token that was just issued is known good; clearing it resets the check for the next login.
+  sessionCheck = token ? Promise.resolve(true) : null;
+}
+
+// group237: the first protected REAL request after a page load used to go out with whatever token was left in
+// localStorage. When it had expired, the pollers that start together (pipeline, watchlist, resilience, ...) each got
+// a 401 (6 in the 2026-10-07 log). Now ONE GET /auth/session decides first (always 200, no 401); the others wait for
+// it. Fails open: an old server without the route, a network error or a non-200 never blocks a request.
+let sessionCheck: Promise<boolean> | null = null;
+async function sessionUsable(base: string, token: string): Promise<boolean> {
+  if (!sessionCheck) {
+    sessionCheck = (async () => {
+      try {
+        const r = await fetch(`${base}/auth/session`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!r.ok) return true;
+        const j = await r.json();
+        return j?.valid !== false;
+      } catch {
+        return true;
+      }
+    })();
+  }
+  return sessionCheck;
 }
 
 // The dashboard mirrors "is there a session" into its own React `loggedIn`
@@ -60,7 +83,17 @@ async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true
   };
   if (requireAuth) {
     const token = getSessionToken();
-    if (token) headers["Authorization"] = `Bearer ${token}`;
+    if (token) {
+      if (!(await sessionUsable(base, token))) {
+        // known-expired: no network call for the protected request, and the expiry is announced once
+        if (getSessionToken() === token) {
+          setSessionToken(null);
+          sessionExpiredHandler?.();
+        }
+        throw new Error("Session expired - log in again");
+      }
+      headers["Authorization"] = `Bearer ${token}`;
+    }
   }
   // group234: a bare browser "Failed to fetch" says nothing about WHICH call failed (timeout, CORS, service down).
   let resp: Response;

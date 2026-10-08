@@ -128,6 +128,7 @@ from __future__ import annotations
 import html as _html
 import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -156,6 +157,17 @@ _RSS_FEEDS: list[dict] = [
         "source": "Moneycontrol",
         "url": "https://www.moneycontrol.com/rss/latestnews.xml",
         "source_bonus": 10,
+        # 2026-10-08 (group 238): moneycontrol.com answers this VM's IP with HTTP 403
+        # (Akamai bot gate), so the scan got 0 items from the highest-weighted feed.
+        # Tried in order ONLY when the primary URL fails: another Moneycontrol feed path,
+        # then a Google News RSS search restricted to moneycontrol.com (Google does not
+        # bot-gate RSS; its titles end with " - Moneycontrol", stripped on read).
+        # NOT live-verified from this sandbox (no network) - check the next scan log line
+        # "Moneycontrol primary feed unavailable ... served by fallback".
+        "fallback_urls": [
+            "https://www.moneycontrol.com/rss/business.xml",
+            "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
+        ],
     },
     {
         "source": "LiveMint",
@@ -658,38 +670,125 @@ def _parse_feed_text(text: str) -> tuple[list[dict], str]:
 _RSS_FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
 }
 
+# 2026-10-08 (group 238): second header profile, tried on the same URL when the first answers with a
+# bot-gate status. A different browser family + fuller browser-like headers is what Akamai-style gates
+# look at first. Costs nothing when the first profile works.
+_RSS_ALT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+}
 
-async def _fetch_rss_items(feed: dict) -> list[dict]:
-    """Fetch one RSS/Atom feed. Returns [] on any error — never crashes the scan."""
+# HTTP statuses that mean "we are being gated", not "the feed is broken".
+_BLOCK_STATUSES = frozenset({401, 403, 406, 429, 451})
+
+# source -> time.monotonic() until which a fully-blocked feed is skipped (no point hammering a gate every
+# intraday tick; the next try after the cool-down is cheap).
+_FEED_BLOCKED_UNTIL: dict[str, float] = {}
+
+
+def _blocked_cooldown_seconds() -> int:
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True, headers=_RSS_FETCH_HEADERS) as client:
-            resp = await client.get(feed["url"])
-            resp.raise_for_status()
-            try:
-                items, how = _parse_feed_text(resp.text)
+        return max(60, int(getattr(config, "AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS", 1800)))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _reset_feed_block_state() -> None:
+    _FEED_BLOCKED_UNTIL.clear()
+
+
+def _strip_publisher_suffix(title: str, source: str) -> str:
+    """Google News titles read 'Headline - Moneycontrol'; drop the trailing publisher so symbol
+    extraction and scoring see the same text the native feed would give."""
+    if not title or not source:
+        return title
+    return re.sub(r"\s+[-\u2013|]\s+" + re.escape(source) + r"\s*$", "", title, flags=re.I).strip() or title
+
+
+def _short_url(url: str) -> str:
+    return url if len(url) <= 80 else url[:77] + "..."
+
+
+async def _fetch_one_url(feed: dict, url: str) -> tuple[Optional[list[dict]], str]:
+    """Fetch+parse ONE url. -> (items, reason). items is None when this URL failed; reason then says why
+    ('HTTP 403', 'non-XML content', exception name...). A bot-gate status retries once with the alternate
+    header profile before giving up on the URL."""
+    reason = "unknown"
+    for headers in (_RSS_FETCH_HEADERS, _RSS_ALT_HEADERS):
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
+                resp = await client.get(url)
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as he:
+                    code = he.response.status_code
+                    reason = f"HTTP {code}"
+                    if code in _BLOCK_STATUSES:
+                        continue            # try the other header profile
+                    return None, reason
+                try:
+                    items, how = _parse_feed_text(resp.text)
+                except ET.ParseError as pe:
+                    # 2026-09-17 (session58): a 200 that is not XML is a bot interstitial / retired URL,
+                    # not a transient glitch - log enough of the body to tell at a glance.
+                    snippet = resp.text[:120].replace("\n", " ")
+                    logger.warning(
+                        "afterhours-scan: %s returned non-XML content (HTTP %d): %s - body starts: %r",
+                        feed["source"], resp.status_code, pe, snippet,
+                    )
+                    return None, "non-XML content"
                 if how != "strict":
                     logger.info("afterhours-scan: %s was not strictly well-formed; read %d item(s) by %s parsing",
                                 feed["source"], len(items), how)
-            except ET.ParseError as pe:
-                # 2026-09-17 fix (session58): a 200 response that fails to
-                # parse as XML is a bot-detection interstitial, not a
-                # transient glitch — log enough of the body to confirm
-                # that diagnosis at a glance next time, instead of just the
-                # bare ParseError (which by itself gives no way to tell
-                # "wrong content" apart from "malformed feed").
-                snippet = resp.text[:120].replace("\n", " ")
-                logger.warning(
-                    "afterhours-scan: %s returned non-XML content (HTTP %d): %s — body starts: %r",
-                    feed["source"], resp.status_code, pe, snippet,
-                )
-                return []
-        logger.debug("afterhours-scan: %s → %d items", feed["source"], len(items))
-        return items
-    except Exception as e:
-        logger.warning("afterhours-scan: RSS fetch failed for %s: %s", feed["source"], e)
+                return items, "ok"
+        except Exception as e:
+            logger.warning("afterhours-scan: RSS fetch failed for %s: %s", feed["source"], e)
+            return None, type(e).__name__
+    return None, reason
+
+
+async def _fetch_rss_items(feed: dict) -> list[dict]:
+    """Fetch one RSS/Atom feed. Returns [] on any error - never crashes the scan.
+
+    2026-10-08 (group 238, Moneycontrol HTTP 403): tries feed['url'], then each feed.get('fallback_urls')
+    in order, stopping at the first that yields a readable feed. If every URL fails with a bot-gate status
+    the feed is skipped for AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS (default 1800) so the 15-minute
+    intraday poll does not hammer a gate; any other failure is retried on the next tick as before."""
+    source = feed["source"]
+    now = time.monotonic()
+    until = _FEED_BLOCKED_UNTIL.get(source, 0.0)
+    if until > now:
+        logger.info("afterhours-scan: %s skipped - blocked, retry in %d s", source, int(until - now))
         return []
+
+    urls = [feed["url"], *[u for u in (feed.get("fallback_urls") or []) if u]]
+    reasons: list[str] = []
+    for idx, url in enumerate(urls):
+        items, reason = await _fetch_one_url(feed, url)
+        if items is not None:
+            if idx > 0:
+                items = [dict(it, title=_strip_publisher_suffix(it.get("title", ""), source)) for it in items]
+                logger.info("afterhours-scan: %s primary feed unavailable (%s) - served by fallback %s: %d item(s)",
+                            source, "; ".join(reasons) or "failed", _short_url(url), len(items))
+            _FEED_BLOCKED_UNTIL.pop(source, None)
+            logger.debug("afterhours-scan: %s -> %d items", source, len(items))
+            return items
+        reasons.append(f"{_short_url(url)}: {reason}")
+
+    if any(r.endswith(f"HTTP {c}") for r in reasons for c in _BLOCK_STATUSES):
+        cool = _blocked_cooldown_seconds()
+        _FEED_BLOCKED_UNTIL[source] = time.monotonic() + cool
+        logger.warning("afterhours-scan: %s blocked on all %d URL(s) (%s) - skipping this feed for %d s",
+                       source, len(urls), " | ".join(reasons), cool)
+    elif len(urls) > 1:
+        logger.warning("afterhours-scan: %s failed on all %d URL(s): %s", source, len(urls), " | ".join(reasons))
+    return []
 
 
 # ── Bulk/block-deal hits via api-gateway's existing /stockky-hot ───────────

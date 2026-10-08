@@ -20,6 +20,7 @@ propagate to the caller exactly as before.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import os
 import re
@@ -54,12 +55,47 @@ _BLOCK_STATUSES = frozenset({401, 403, 406, 429, 451})
 # primary feed URL -> (publisher name, [fallback URLs tried in order, only when the primary download fails]).
 # Not live-verified from the sandbox (no network); the Google News search is not bot-gated and its titles end with
 # " - <publisher>", which is stripped from fallback entries.
+_GN = "https://news.google.com/rss/search?q=site:{site}+when:2d&hl=en-IN&gl=IN&ceid=IN:en"
 _FALLBACKS: Dict[str, Tuple[str, list]] = {
+    # 2026-10-08 (group 241): the boot log showed https://www.cnbctv18.com/feed/ answering HTTP 404 (retired) and
+    # the NDTV Profit Atom feed on prod-qt-images.s3.amazonaws.com returning only old items (frozen). Both now
+    # fall back to a Google News site search. Not live-verified (no network in the sandbox).
+    "https://www.cnbctv18.com/feed/": ("CNBC TV18", [_GN.format(site="cnbctv18.com")]),
+    "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml":
+        ("NDTV Profit", [_GN.format(site="ndtvprofit.com")]),
     "https://www.moneycontrol.com/rss/latestnews.xml": ("Moneycontrol", [
         "https://www.moneycontrol.com/rss/business.xml",
         "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
     ]),
 }
+
+
+def _entry_epoch(entry: Any) -> Optional[float]:
+    for key in ("published_parsed", "updated_parsed"):
+        try:
+            v = entry.get(key) if hasattr(entry, "get") else getattr(entry, key, None)
+        except Exception:
+            v = None
+        if v:
+            try:
+                return float(calendar.timegm(v))
+            except Exception:
+                continue
+    return None
+
+
+def _all_entries_stale(parsed: Any, days: float) -> bool:
+    """True when the feed has entries and EVERY one carries a date older than `days` (a frozen / cached-old feed).
+    An entry without a readable date counts as unknown, so such a feed is never called stale."""
+    entries = getattr(parsed, "entries", None) or []
+    if not entries or days <= 0:
+        return False
+    cutoff = time.time() - days * 86400
+    for e in entries:
+        ts = _entry_epoch(e)
+        if ts is None or ts >= cutoff:
+            return False
+    return True
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -76,6 +112,7 @@ CACHE_TTL_SEC = _env_int("NEWS_FEED_CACHE_TTL_SEC", 300, 0, 3600)    # 0 disable
 _SEARCH_TTL_CAP_SEC = 120
 _FAIL_TTL_SEC = 60
 _BLOCKED_TTL_SEC = _env_int("NEWS_FEED_BLOCKED_TTL_SEC", 1800, 60, 86400)   # all URLs bot-gated: do not retry per request
+STALE_DAYS = _env_int("NEWS_FEED_STALE_DAYS", 3, 0, 60)   # 0 disables the all-stale check
 _FALLBACKS_ENABLED = (os.getenv("NEWS_FEED_FALLBACKS") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
@@ -195,6 +232,15 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
     else:
         parsed = feedparser.parse(raw)          # exceptions propagate, as with the old direct call
         info["entries"] = len(getattr(parsed, "entries", None) or [])
+        if info["entries"] and url in _FALLBACKS and _FALLBACKS_ENABLED and _all_entries_stale(parsed, STALE_DAYS):
+            # 200 with entries, but every one is older than STALE_DAYS: a frozen feed. Same as unavailable.
+            logger.warning("news feed %s -> HTTP 200 but all %d entries are older than %d days (frozen feed)",
+                           _short(url), info["entries"], STALE_DAYS)
+            info["error"] = "all_stale"
+            fb_parsed = _try_fallbacks(url, info)
+            if fb_parsed is not None:
+                parsed = fb_parsed
+                info["entries"] = len(parsed.entries)
         if info["entries"] == 0:
             info["error"] = "zero_entries"
             # A Google News search with no hits (small / obscure ticker) is normal, not a dead feed.

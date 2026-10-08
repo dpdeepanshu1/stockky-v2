@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 241)  frozen RSS feeds treated as unavailable; CNBC TV18 (404) and NDTV Profit (frozen) fallbacks (real-trade-service afterhours_scan.py, analysis-intelligence-service news/feed_fetch.py).
+  Boot log: Moneycontrol 15/15 and NDTVProfit 20/20 items stale, CNBC feed 404. All-stale 200s now try the fallback URLs (env `NEWS_FEED_STALE_DAYS`, default 3); Google News site-search fallbacks with publisher suffix stripped. HF_MODEL, SMCG04, Yahoo news, NSE bootstrap 403 not changed. See docs/GROUP241_STALE_FEEDS_AND_DEAD_CNBC.md.
 - 2026-10-08 (group 240)  event service site feeds (Moneycontrol/ET/CNBC TV18) use news/feed_fetch.py instead of bare feedparser.parse (analysis-intelligence-service).
   `_site_feed_parse` loads the shared httpx downloader by file path (browser headers, 403 retry, Moneycontrol fallbacks, timeout); `EVENT_FEED_SHARED_FETCH=0` restores the old call; tests/conftest.py keeps existing event tests on feedparser. See docs/GROUP240_EVENT_SERVICE_SHARED_FEED_FETCH.md.
 - 2026-10-08 (group 239)  Moneycontrol HTTP 403 in the news pillar (analysis-intelligence-service news/feed_fetch.py).

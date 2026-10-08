@@ -33,9 +33,14 @@ FB2 = "https://news.google.com/rss/search?q=site:moneycontrol.com"
 _RSS = (
     "<rss version=\"2.0\"><channel>"
     "<item><title>{title}</title><link>https://example.com/1</link>"
-    "<pubDate>Wed, 16 Sep 2026 21:32:36 +0530</pubDate></item></channel></rss>"
+    "<pubDate>{date}</pubDate></item></channel></rss>"
 )
 _FEED = {"source": "Moneycontrol", "url": PRIMARY, "source_bonus": 10, "fallback_urls": [FB1, FB2]}
+
+
+def _now_rfc822():
+    import email.utils
+    return email.utils.formatdate(usegmt=True)
 
 
 def run(coro):
@@ -53,7 +58,7 @@ def _ok(title="Reliance wins big order"):
     r = MagicMock()
     r.raise_for_status = MagicMock()
     r.status_code = 200
-    r.text = _RSS.format(title=title)
+    r.text = _RSS.format(title=title, date=_now_rfc822())
     return r
 
 
@@ -198,3 +203,86 @@ class TestConfigAndFeedList:
             assert ahs._blocked_cooldown_seconds() == 60
         with patch.object(ahs.config, "AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS", "junk"):
             assert ahs._blocked_cooldown_seconds() == 1800
+
+
+# ── group 241: a feed that answers 200 but is all-stale counts as unavailable ───────────────────────────────
+
+_OLD_RSS = (
+    "<rss version=\"2.0\"><channel>"
+    "<item><title>{title}</title><link>https://example.com/1</link>"
+    "<pubDate>Wed, 01 Jan 2020 10:00:00 +0530</pubDate></item></channel></rss>"
+)
+_NO_DATE_RSS = "<rss version=\"2.0\"><channel><item><title>{title}</title><link>https://e.com/1</link></item></channel></rss>"
+_FRESH_RSS = (
+    "<rss version=\"2.0\"><channel><item><title>{title}</title><link>https://e.com/1</link>"
+    "<pubDate>{date}</pubDate></item></channel></rss>"
+)
+
+
+def _body(xml):
+    r = MagicMock()
+    r.raise_for_status = MagicMock()
+    r.status_code = 200
+    r.text = xml
+    return r
+
+
+class TestStaleFeedFallback:
+    def test_all_stale_primary_falls_to_fresh_fallback(self):
+        r = _Router({PRIMARY: _body(_OLD_RSS.format(title="Old news")),
+                     FB1: _body(_OLD_RSS.format(title="Also old")),
+                     FB2: _body(_FRESH_RSS.format(title="Fresh deal - Moneycontrol",
+                                                  date=__import__("email.utils").utils.formatdate(usegmt=True)))})
+        items = _fetch(r)
+        assert [i["title"] for i in items] == ["Fresh deal"]
+        assert [c[0] for c in r.calls] == [PRIMARY, FB1, FB2]
+        assert ahs._FEED_BLOCKED_UNTIL == {}
+
+    def test_all_stale_everywhere_returns_the_stale_primary_items(self):
+        r = _Router({PRIMARY: _body(_OLD_RSS.format(title="Old news")),
+                     FB1: _body(_OLD_RSS.format(title="Also old")),
+                     FB2: _body(_OLD_RSS.format(title="Old again"))})
+        items = _fetch(r)
+        assert [i["title"] for i in items] == ["Old news"]          # funnel still sees 'N items, N stale'
+        assert ahs._FEED_BLOCKED_UNTIL == {}
+
+    def test_stale_primary_and_failing_fallbacks_returns_stale_primary(self):
+        r = _Router({PRIMARY: _body(_OLD_RSS.format(title="Old news")),
+                     FB1: _status(500, FB1), FB2: _status(503, FB2)})
+        assert [i["title"] for i in _fetch(r)] == ["Old news"]
+
+    def test_undated_items_are_never_called_stale(self):
+        r = _Router({PRIMARY: _body(_NO_DATE_RSS.format(title="No date"))})
+        items = _fetch(r)
+        assert [i["title"] for i in items] == ["No date"]
+        assert [c[0] for c in r.calls] == [PRIMARY]
+
+    def test_fresh_primary_makes_no_fallback_request(self):
+        r = _Router({PRIMARY: _body(_FRESH_RSS.format(
+            title="Today", date=__import__("email.utils").utils.formatdate(usegmt=True)))})
+        assert len(_fetch(r)) == 1
+        assert [c[0] for c in r.calls] == [PRIMARY]
+
+    def test_stale_feed_without_fallbacks_is_returned_as_before(self):
+        feed = {"source": "LiveMint", "url": "https://example.com/rss", "source_bonus": 8}
+        r = _Router({"https://example.com/rss": _body(_OLD_RSS.format(title="Old"))})
+        assert [i["title"] for i in _fetch(r, feed)] == ["Old"]
+
+    def test_all_items_stale_helper(self):
+        assert ahs._all_items_stale([]) is False
+        assert ahs._all_items_stale([{"title": "x", "pubDate": "Wed, 01 Jan 2020 10:00:00 +0530"}]) is True
+        assert ahs._all_items_stale([{"title": "x", "pubDate": "Wed, 01 Jan 2020 10:00:00 +0530"},
+                                     {"title": "y", "pubDate": ""}]) is False
+
+    def test_publisher_key_drives_the_suffix_strip(self):
+        feed = {"source": "NDTVProfit", "url": PRIMARY, "source_bonus": 9, "publisher": "NDTV Profit",
+                "fallback_urls": [FB2]}
+        r = _Router({PRIMARY: _body(_OLD_RSS.format(title="Frozen")),
+                     FB2: _body(_FRESH_RSS.format(title="Sensex jumps - NDTV Profit",
+                                                  date=__import__("email.utils").utils.formatdate(usegmt=True)))})
+        assert [i["title"] for i in _fetch(r, feed)] == ["Sensex jumps"]
+
+    def test_ndtv_entry_has_a_google_fallback_and_publisher(self):
+        nd = next(f for f in ahs._RSS_FEEDS if f["source"] == "NDTVProfit")
+        assert nd["publisher"] == "NDTV Profit"
+        assert any("news.google.com" in u and "ndtvprofit.com" in u for u in nd["fallback_urls"])

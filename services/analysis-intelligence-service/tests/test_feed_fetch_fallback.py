@@ -55,9 +55,18 @@ def _client_factory(table, calls):
 
 
 def _parsed_from(raw):
-    # the "body" doubles as a comma-separated list of titles for the fake parser
-    titles = [t for t in raw.decode().split("|") if t]
-    return types.SimpleNamespace(entries=[{"title": t} for t in titles])
+    # the "body" doubles as a '|'-separated list of titles for the fake parser; a title starting "OLD:" gets a
+    # 2020 published_parsed, "NEW:" gets now (the prefix is stripped), anything else has no date at all.
+    import time as _t
+    entries = []
+    for t in [t for t in raw.decode().split("|") if t]:
+        e = {"title": t}
+        if t.startswith("OLD:"):
+            e["title"], e["published_parsed"] = t[4:], _t.gmtime(1577836800)
+        elif t.startswith("NEW:"):
+            e["title"], e["published_parsed"] = t[4:], _t.gmtime()
+        entries.append(e)
+    return types.SimpleNamespace(entries=entries)
 
 
 @pytest.fixture(autouse=True)
@@ -162,3 +171,59 @@ class TestFallbacks:
     def test_registry_lists_moneycontrol_with_https_fallbacks(self):
         pub, urls = ff._FALLBACKS[MC]
         assert pub == "Moneycontrol" and urls and all(u.startswith("https://") for u in urls)
+
+
+NDTV = "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml"
+CNBC = "https://www.cnbctv18.com/feed/"
+GN_NDTV = ff._FALLBACKS[NDTV][1][0]
+GN_CNBC = ff._FALLBACKS[CNBC][1][0]
+
+
+class TestStaleAndNewFallbacks:
+    def test_frozen_primary_uses_fallback_and_strips_publisher(self, monkeypatch):
+        calls = _use(monkeypatch, {NDTV: _Resp(200, b"OLD:Ancient story|OLD:Another old one"),
+                                   GN_NDTV: _Resp(200, b"NEW:Sensex jumps - NDTV Profit")})
+        p, info = ff.fetch_feed_ex(NDTV, "news")
+        assert [e["title"] for e in p.entries] == ["Sensex jumps"] and info["via"] == GN_NDTV
+        assert [c[0] for c in calls] == [NDTV, GN_NDTV]
+
+    def test_frozen_primary_with_no_better_fallback_keeps_primary_entries(self, monkeypatch):
+        _use(monkeypatch, {NDTV: _Resp(200, b"OLD:Ancient story"), GN_NDTV: _Resp(403, b"no")})
+        p, info = ff.fetch_feed_ex(NDTV, "news")
+        assert [e["title"] for e in p.entries] == ["Ancient story"] and info["error"] == "all_stale"
+
+    def test_one_fresh_entry_is_not_frozen(self, monkeypatch):
+        calls = _use(monkeypatch, {NDTV: _Resp(200, b"OLD:Ancient story|NEW:Today")})
+        p, _ = ff.fetch_feed_ex(NDTV, "news")
+        assert len(p.entries) == 2 and [c[0] for c in calls] == [NDTV]
+
+    def test_undated_entries_are_never_frozen(self, monkeypatch):
+        calls = _use(monkeypatch, {NDTV: _Resp(200, b"No date here")})
+        ff.fetch_feed_ex(NDTV, "news")
+        assert [c[0] for c in calls] == [NDTV]
+
+    def test_stale_check_only_applies_to_feeds_with_fallbacks(self, monkeypatch):
+        calls = _use(monkeypatch, {"https://x.test/old": _Resp(200, b"OLD:Ancient story")})
+        p, _ = ff.fetch_feed_ex("https://x.test/old", "news")
+        assert len(p.entries) == 1 and len(calls) == 1
+
+    def test_stale_days_zero_disables_the_check(self, monkeypatch):
+        monkeypatch.setattr(ff, "STALE_DAYS", 0)
+        calls = _use(monkeypatch, {NDTV: _Resp(200, b"OLD:Ancient story")})
+        ff.fetch_feed_ex(NDTV, "news")
+        assert [c[0] for c in calls] == [NDTV]
+
+    def test_cnbc_404_falls_back_to_google_news_site_search(self, monkeypatch):
+        calls = _use(monkeypatch, {CNBC: _Resp(404, b"gone"), GN_CNBC: _Resp(200, b"NEW:Nifty ends higher - CNBC TV18")})
+        p, info = ff.fetch_feed_ex(CNBC, "event")
+        assert [e["title"] for e in p.entries] == ["Nifty ends higher"] and info["via"] == GN_CNBC
+        n = len(calls)
+        ff.fetch_feed_ex(CNBC, "event")
+        assert len(calls) == n                              # result cached under the primary: the 404 is not re-hit
+
+    def test_helpers(self):
+        import time as _t
+        old = types.SimpleNamespace(entries=[{"published_parsed": _t.gmtime(1577836800)}])
+        assert ff._all_entries_stale(old, 3) is True and ff._all_entries_stale(old, 0) is False
+        assert ff._all_entries_stale(types.SimpleNamespace(entries=[]), 3) is False
+        assert ff._all_entries_stale(types.SimpleNamespace(entries=[object()]), 3) is False

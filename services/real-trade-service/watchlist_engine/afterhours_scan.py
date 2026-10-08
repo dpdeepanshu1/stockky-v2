@@ -164,6 +164,8 @@ _RSS_FEEDS: list[dict] = [
         # bot-gate RSS; its titles end with " - Moneycontrol", stripped on read).
         # NOT live-verified from this sandbox (no network) - check the next scan log line
         # "Moneycontrol primary feed unavailable ... served by fallback".
+        # 2026-10-08 (group 241): the primary ALSO counts as unavailable when it answers 200 but every
+        # item is older than AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS (the 2026-10-08 boot log: 15 items, 15 stale).
         "fallback_urls": [
             "https://www.moneycontrol.com/rss/business.xml",
             "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
@@ -197,6 +199,14 @@ _RSS_FEEDS: list[dict] = [
         "source": "NDTVProfit",
         "url": "https://prod-qt-images.s3.amazonaws.com/production/bloombergquint/feed.xml",
         "source_bonus": 9,
+        # 2026-10-08 (group 241): the 2026-10-08 boot log showed this feed returning 20 items, ALL older than
+        # AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS (a frozen feed), so it never contributed a headline. When every
+        # item is stale the next URL is tried; Google News does not bot-gate RSS and its titles end
+        # with " - NDTV Profit" (stripped on read). Not live-verified (no network in the sandbox).
+        "publisher": "NDTV Profit",
+        "fallback_urls": [
+            "https://news.google.com/rss/search?q=site:ndtvprofit.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
+        ],
     },
     {
         # 2026-09-17 fix (session57): same gap as NDTVProfit above.
@@ -753,6 +763,16 @@ async def _fetch_one_url(feed: dict, url: str) -> tuple[Optional[list[dict]], st
     return None, reason
 
 
+def _all_items_stale(items: list[dict]) -> bool:
+    """True when the feed returned items and EVERY one has a parseable date older than
+    AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS (a frozen / cached-old feed). An item with a missing or unparseable date
+    counts as unknown, so a feed whose dates this parser can't read is never called stale."""
+    if not items:
+        return False
+    now = datetime.now(timezone.utc)
+    return all(not _is_within_max_age(_parse_item_datetime(it.get("pubDate")), now) for it in items)
+
+
 async def _fetch_rss_items(feed: dict) -> list[dict]:
     """Fetch one RSS/Atom feed. Returns [] on any error - never crashes the scan.
 
@@ -768,12 +788,20 @@ async def _fetch_rss_items(feed: dict) -> list[dict]:
         return []
 
     urls = [feed["url"], *[u for u in (feed.get("fallback_urls") or []) if u]]
+    publisher = feed.get("publisher") or source
     reasons: list[str] = []
+    stale_result: Optional[list[dict]] = None
     for idx, url in enumerate(urls):
         items, reason = await _fetch_one_url(feed, url)
         if items is not None:
+            if len(urls) > 1 and _all_items_stale(items):
+                # 200 + parsed, but nothing inside the freshness window: same as unavailable, try the next URL.
+                reasons.append(f"{_short_url(url)}: all {len(items)} item(s) stale")
+                if stale_result is None:
+                    stale_result = items
+                continue
             if idx > 0:
-                items = [dict(it, title=_strip_publisher_suffix(it.get("title", ""), source)) for it in items]
+                items = [dict(it, title=_strip_publisher_suffix(it.get("title", ""), publisher)) for it in items]
                 logger.info("afterhours-scan: %s primary feed unavailable (%s) - served by fallback %s: %d item(s)",
                             source, "; ".join(reasons) or "failed", _short_url(url), len(items))
             _FEED_BLOCKED_UNTIL.pop(source, None)
@@ -781,6 +809,12 @@ async def _fetch_rss_items(feed: dict) -> list[dict]:
             return items
         reasons.append(f"{_short_url(url)}: {reason}")
 
+    if stale_result is not None:
+        # The primary parsed but was all-stale and no fallback produced anything better: hand the stale items
+        # back so the scan's funnel still counts them ("15 items, 15 stale") instead of reporting an empty feed.
+        logger.warning("afterhours-scan: %s feed is stale and its fallbacks gave nothing better: %s",
+                       source, " | ".join(reasons))
+        return stale_result
     if any(r.endswith(f"HTTP {c}") for r in reasons for c in _BLOCK_STATUSES):
         cool = _blocked_cooldown_seconds()
         _FEED_BLOCKED_UNTIL[source] = time.monotonic() + cool

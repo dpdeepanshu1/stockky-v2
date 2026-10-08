@@ -1886,7 +1886,7 @@ export default function PositionStocksTab() {
             </div>
 
             <div className="bg-graphite border border-slate rounded-2xl p-4">
-              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Live Dhan order book, right now (TRADED legs with a price only — see the totals below for the full day)</p>
+              <p className="font-display tabular-nums text-[10px] text-mist uppercase tracking-widest mb-2">Live Dhan order book, right now (TRADED legs with a price only — a market/EOD exit with no price is missing here; the Charges today line below is the full-day figure)</p>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 <div className="bg-ink border border-slate rounded-xl p-3">
                   <p className="text-[9px] text-mist uppercase tracking-widest">Total charges</p>

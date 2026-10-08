@@ -128,16 +128,17 @@ def test_a_new_run_starts_after_recovery(clock):
     clock.t += 40
     b.note_candle_ok()
     clock.t += 10
-    b.trip("getCandleData")                            # trips again; the run restarts
-    clock.t += 20
+    b.trip("getCandleData")                            # trips again (60 s this time); the run restarts
+    clock.t += 65                                      # group256: the answer must come after the cooldown ended
     b.note_candle_ok()
-    assert b.stats()["candle_calls"]["last_block_lasted_s"] == 20.0
+    assert b.stats()["candle_calls"]["last_block_lasted_s"] == 65.0
 
 
 def test_reset_clears_recovery_state(clock):
     b.trip("getCandleData")
-    clock.t += 10
+    clock.t += 40
     b.note_candle_ok()
+    assert b.stats()["candle_calls"]["last_block_lasted_s"] == 40.0
     b._reset()
     assert b.stats()["candle_calls"]["last_block_lasted_s"] is None
 
@@ -160,10 +161,11 @@ def test_note_ok_never_raises():
 
 def test_client_wrapper_forwards_and_never_raises(monkeypatch):
     calls = []
-    monkeypatch.setattr(ac._budget, "note_candle_ok", lambda: calls.append(1))
+    monkeypatch.setattr(ac._budget, "note_candle_ok", lambda *a: calls.append(a))
     ac._budget_note_candle_ok()
-    assert calls == [1]
-    monkeypatch.setattr(ac._budget, "note_candle_ok", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    ac._budget_note_candle_ok(123.5)                   # group256: the send time is forwarded
+    assert calls == [(None,), (123.5,)]
+    monkeypatch.setattr(ac._budget, "note_candle_ok", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
     ac._budget_note_candle_ok()
 
 

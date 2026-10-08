@@ -246,9 +246,14 @@ def trip(endpoint: str) -> float:
     return dur
 
 
-def note_candle_ok() -> None:
+def note_candle_ok(sent_at: Optional[float] = None) -> None:
     """A getCandleData call was answered normally. If a run of 403s was open, log how long AngelOne blocked us (first 403 to
-    this answer; an upper bound at cooldown granularity) and close the run. Diagnostics only; never raises."""
+    this answer; an upper bound at cooldown granularity) and close the run. Diagnostics only; never raises.
+
+    group256: `sent_at` is the time the answered call was SENT. The 2026-10-08 log printed "answered again, 1s after the first
+    403" under a 30 s cooldown: a call that was already in flight when the 403 arrived came back normally a second later and
+    was taken for the recovery. A call counts as recovery only when it was sent after the candle cooldown ended; without
+    `sent_at` the answer must at least arrive after the cooldown ended."""
     global _candle_series_start, _last_recovery_s
     try:
         now = time.time()
@@ -256,6 +261,9 @@ def note_candle_ok() -> None:
             start = _candle_series_start
             if start <= 0.0:
                 return
+            until = _cool[CANDLE]["until"]
+            if (sent_at if sent_at is not None else now) < until:
+                return      # in flight before / during the cooldown: says nothing about the block ending
             _candle_series_start = 0.0
             _last_recovery_s = round(now - start, 1)
             rec, trips = _last_recovery_s, _cool[CANDLE]["trips"]

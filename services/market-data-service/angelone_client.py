@@ -83,11 +83,12 @@ def _budget_note_quote_sent() -> None:
         pass
 
 
-def _budget_note_candle_ok() -> None:
-    """group255: a candle call was answered normally (closes a run of 403s in the budget's log). Never raises."""
+def _budget_note_candle_ok(sent_at: Optional[float] = None) -> None:
+    """group255: a candle call was answered normally (closes a run of 403s in the budget's log). group256: `sent_at` is when
+    that call was sent, so a call already in flight when a 403 arrived is not mistaken for the recovery. Never raises."""
     try:
         if _budget is not None:
-            _budget.note_candle_ok()
+            _budget.note_candle_ok(sent_at)
     except Exception:  # pragma: no cover
         pass
 
@@ -243,6 +244,31 @@ _DENIED_LOG_EVERY_S = 60.0
 _denied_last_logged: dict[str, float] = {}
 
 
+# group257: when this process last logged in to AngelOne (epoch s, 0 = never). Shown on every 403 line: the 2026-10-08 boot log had
+# candle 403s within minutes of a fresh login, and nothing said how old the session was.
+_login_at = 0.0
+_DENIED_HEADER_KEYS = ("retry-after", "server", "content-type", "via", "x-request-id", "x-amzn-requestid", "x-cache",
+                       "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "cf-ray")
+
+
+def _denied_context(r) -> str:
+    """group257: the response headers that tell an edge / WAF limit (Retry-After, Server, Via ...) from an application one, and the
+    session age. Diagnostics only: never raises, never returns more than ~300 characters."""
+    try:
+        parts = []
+        hdrs = getattr(r, "headers", None)
+        if hdrs is not None:
+            for k in _DENIED_HEADER_KEYS:
+                v = hdrs.get(k)
+                if v:
+                    parts.append("%s=%s" % (k, str(v)[:60]))
+        age = (time.time() - _login_at) if _login_at > 0 else None
+        parts.append("session_age=%s" % ("%.0fs" % age if age is not None else "unknown"))
+        return ", ".join(parts)[:300]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _log_denied(endpoint: str, r: httpx.Response) -> None:
     if r.status_code not in (403, 429):
         return
@@ -251,8 +277,8 @@ def _log_denied(endpoint: str, r: httpx.Response) -> None:
         return
     _denied_last_logged[endpoint] = now
     logger.warning(
-        "AngelOne %s returned HTTP %d — body: %s (logged at most once per %.0fs per endpoint)",
-        endpoint, r.status_code, (r.text or "")[:300].replace("\n", " "), _DENIED_LOG_EVERY_S,
+        "AngelOne %s returned HTTP %d — body: %s (logged at most once per %.0fs per endpoint) | %s",
+        endpoint, r.status_code, (r.text or "")[:300].replace("\n", " "), _DENIED_LOG_EVERY_S, _denied_context(r),
     )
 
 
@@ -371,6 +397,8 @@ class AngelOneSession:
             self.token       = data["jwtToken"]
             self.feed_token  = data.get("feedToken")
             self.token_expiry = datetime.utcnow() + timedelta(hours=20)
+            global _login_at
+            _login_at = time.time()   # group257: shown on 403 lines
             logger.info("AngelOne session refreshed (expires in 20h)")
 
     def _headers(self) -> dict:
@@ -490,6 +518,7 @@ class AngelOneSession:
         if not _rl_try_acquire("angelone_candle", weight=1, max_wait=_CANDLE_MAX_WAIT_S):
             return []
         _budget_note_candle_sent()
+        _sent_at = time.time()   # group256: for the recovery measurement
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
@@ -509,7 +538,7 @@ class AngelOneSession:
                 return []
             r.raise_for_status()
             body = r.json()
-            _budget_note_candle_ok()
+            _budget_note_candle_ok(_sent_at)
             return body.get("data") or []
 
     async def get_gainers_losers(self, datatype: str = "PercPriceGainers", expirytype: str = "NEAR") -> list:

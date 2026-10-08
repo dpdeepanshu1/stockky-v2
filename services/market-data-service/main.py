@@ -2148,10 +2148,27 @@ def _ao_first_miss(sym: str, reason: str):
             if len(_AO_MISS_LOG) >= 2000:
                 _AO_MISS_LOG.clear()
             _AO_MISS_LOG[sym] = now
-            logger.info("quote: AngelOne-first did not price %s (%s) - using the Yahoo path", sym, reason)
+            logger.info("quote: AngelOne-first did not price %s (%s) - %s", sym, reason, _ao_first_miss_tail(reason))
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def _ao_first_miss_tail(reason: str) -> str:
+    """Where a symbol goes after AngelOne-first missed it. group257: during an AngelOne quote cooldown the group256 rules
+    apply (cached price <= QUOTE_COOLDOWN_STALE_MAX_AGE_S, else no price, Yahoo skipped), so "using the Yahoo path" would be
+    wrong there. Other miss reasons, and QUOTE_COOLDOWN_SERVE_STALE=0, keep the old text. Never raises."""
+    default = "using the Yahoo path"
+    try:
+        if reason != "angelone_quote cooldown":
+            return default
+        on, skip, age = _quote_cooldown_cfg()
+        if not on:
+            return default
+        return "serving a cached price <= %ds old, else %s" % (
+            int(age), "no price (Yahoo skipped)" if skip else "the Yahoo path")
+    except Exception:  # noqa: BLE001
+        return default
 
 
 

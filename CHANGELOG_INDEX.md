@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 248)  A /quotes/bulk chunk that times out is asked again in smaller bulk calls before the per-symbol path (real-trade-service market_feed/feed.py).
+  Log (10:16 IST): 1 of 8 bulk chunks of a 709-symbol poll timed out, its 100 symbols fell to 120 per-symbol `GET /quote` calls, AngelOne's lane budget shed them to the saturated Yahoo path and ~15 ReadTimeouts followed. Failed-chunk symbols are now retried as 25-symbol bulk calls (`FEED_BULK_RETRY_CHUNK_SIZE`, 20s `FEED_BULK_RETRY_TIMEOUT_S`); only when at least one chunk answered; `FEED_BULK_RETRY_FAILED=0` = old. 6 new tests, real pytest. Not confirmed live. See docs/GROUP248_FAILED_BULK_CHUNK_RETRY.md.
 - 2026-10-08 (group 247)  Candidate 6-month and 1-year views are cut from the daily 1y series instead of two weekly yfinance calls (real-trade-service candidate_engine/candidates.py).
   Log: 8 real candidates skipped as "cannot judge" and 2 history ReadTimeouts because the yfinance bucket was saturated (4 of the 7 /history calls per candidate go there). Return and 52-week high/low are the same from daily as from weekly bars, so yfinance calls per candidate drop 4 -> 2; falls back to the weekly calls if the daily series is missing/short (`CANDIDATE_WEEKLY_FROM_DAILY=0` = old). 8 new tests, real pytest. Not confirmed live. See docs/GROUP247_WEEKLY_VIEWS_FROM_DAILY.md.
 - 2026-10-08 (group 246)  Candidate/entry cycle no longer floods market-data while held positions are priced (real-trade-service candidate_engine/candidates.py, market_feed/feed.py).

@@ -130,6 +130,15 @@ FEED_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_BULK_MIN_SYMBOLS") or "").s
 # symbols up they use /quotes/bulk first too. The large-batch rules (distress back-off) still key on
 # FEED_BULK_MIN_SYMBOLS only, so a small batch is never starved. Set it >= FEED_BULK_MIN_SYMBOLS to switch off.
 FEED_SMALL_BATCH_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_SMALL_BATCH_BULK_MIN_SYMBOLS") or "").strip() or "5")))
+
+# group248: when one /quotes/bulk chunk of a bulk-first batch times out (while other chunks were answered), the symbols
+# of that chunk used to fall straight to the per-symbol /live-quote + /quote path - on 2026-10-08 that was 120 GET /quote
+# calls, each shed by AngelOne's lane budget and sent to the saturated Yahoo path, ~15 ReadTimeouts. They are now asked
+# once more as smaller bulk calls (FEED_BULK_RETRY_CHUNK_SIZE per call, FEED_BULK_RETRY_TIMEOUT_S each) before the
+# per-symbol path. FEED_BULK_RETRY_FAILED=0 turns it off. Only done when at least one chunk answered (market-data is up).
+FEED_BULK_RETRY_FAILED = ((os.getenv("FEED_BULK_RETRY_FAILED") or "").strip() or "1") not in ("0", "false", "False")
+FEED_BULK_RETRY_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_RETRY_CHUNK_SIZE") or "").strip() or "25")))
+FEED_BULK_RETRY_TIMEOUT_S = float(((os.getenv("FEED_BULK_RETRY_TIMEOUT_S") or "").strip() or "20"))
 FEED_BULK_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_CHUNK_SIZE") or "").strip() or "100")))
 FEED_BULK_CONCURRENCY = max(1, int(((os.getenv("FEED_BULK_CONCURRENCY") or "").strip() or "3")))
 FEED_BULK_TIMEOUT_S = float(((os.getenv("FEED_BULK_TIMEOUT_S") or "").strip() or "12"))
@@ -1011,19 +1020,22 @@ def _bulk_reject_reason(item, *, now: Optional[datetime] = None, max_age_s: Opti
 
 async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout: Optional[float] = None,
                       max_age_s: Optional[float] = None, stats: Optional[dict] = None,
-                      schedule_atr: bool = True) -> dict[str, Tick]:
+                      schedule_atr: bool = True, chunk_size: Optional[int] = None) -> dict[str, Tick]:
     """Best-effort chunked POST /quotes/bulk -> {symbol: Tick}. Never raises; a failed chunk just leaves
     its symbols out so the caller falls back to the per-symbol cascade for them.
 
     max_age_s: freshness limit for this call (default FEED_BULK_MAX_AGE_S).
     schedule_atr: False for dashboard-only callers (group243), which must not start ATR /history refreshes.
-    stats (optional, filled in place): "chunks", "failed" (chunks that errored or answered non-200) and
+    chunk_size: symbols per request (default FEED_BULK_CHUNK_SIZE).
+    stats (optional, filled in place): "chunks", "failed" (chunks that errored or answered non-200),
+    "failed_symbols" (the symbols of those chunks, group248) and
     "reasons" ({no_price|no_time|stale|other: n}) for rows that were returned but not usable."""
     out: dict[str, Tick] = {}
     uniq = list(dict.fromkeys(s for s in symbols if s))
     if not uniq:
         return out
-    chunks = [uniq[i:i + FEED_BULK_CHUNK_SIZE] for i in range(0, len(uniq), FEED_BULK_CHUNK_SIZE)]
+    _size = FEED_BULK_CHUNK_SIZE if not chunk_size else max(1, int(chunk_size))
+    chunks = [uniq[i:i + _size] for i in range(0, len(uniq), _size)]
     sem = asyncio.Semaphore(FEED_BULK_CONCURRENCY)
     to = FEED_BULK_TIMEOUT_S if timeout is None else timeout
 
@@ -1032,9 +1044,11 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
         stats.setdefault("failed", 0)
         stats.setdefault("reasons", {})
 
-    def _failed() -> None:
+    def _failed(chunk: Optional[list] = None) -> None:
         if stats is not None:
             stats["failed"] = stats.get("failed", 0) + 1
+            if chunk:
+                stats.setdefault("failed_symbols", []).extend(chunk)
 
     async def _post(chunk: list[str]) -> None:
         async with sem:
@@ -1043,7 +1057,7 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
                 if r.status_code != 200:
                     logger.warning("get_quotes: /quotes/bulk returned %d for %d symbol(s) — %s",
                                    r.status_code, len(chunk), r.text[:160])
-                    _failed()
+                    _failed(chunk)
                     return
                 body = r.json()
                 now = datetime.now(timezone.utc)
@@ -1058,7 +1072,7 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
                         if schedule_atr:
                             _schedule_atr_refresh(client, tick.symbol)   # cold ATR -> background refresh, as get_quote()
             except Exception as e:
-                _failed()
+                _failed(chunk)
                 logger.warning("get_quotes: /quotes/bulk chunk of %d failed: %s: %s", len(chunk), type(e).__name__, e)
 
     await asyncio.gather(*[_post(c) for c in chunks])
@@ -1253,6 +1267,17 @@ async def _get_quotes_unique(symbols: list[str], *, priority: bool = False) -> d
             bulk_stats: dict = {}
             async with httpx.AsyncClient(limits=limits) as bulk_client:
                 got = await _bulk_ticks(bulk_client, symbols, stats=bulk_stats)
+                # group248: a chunk that timed out while others answered is asked again, in smaller pieces
+                _lost = list(dict.fromkeys(bulk_stats.get("failed_symbols") or []))
+                if FEED_BULK_RETRY_FAILED and _lost and got:
+                    _rstats: dict = {}
+                    _got2 = await _bulk_ticks(bulk_client, _lost, timeout=FEED_BULK_RETRY_TIMEOUT_S, stats=_rstats,
+                                              chunk_size=FEED_BULK_RETRY_CHUNK_SIZE)
+                    got.update(_got2)
+                    logger.info("get_quotes: %d symbol(s) of failed bulk chunk(s) asked again in smaller bulk calls: "
+                                "priced %d%s", len(_lost), len(_got2),
+                                f", {_rstats['failed']} call(s) failed again" if _rstats.get("failed") else "")
+                    bulk_stats["failed"] = _rstats.get("failed", 0)
             for sym in symbols:
                 t = got.get(_clean_sym(sym))
                 if t is not None:

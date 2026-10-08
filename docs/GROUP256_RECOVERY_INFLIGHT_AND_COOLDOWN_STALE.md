@@ -30,3 +30,11 @@ No Dhan integration; no limits, ladder values or lane budgets changed.
 ## Tests
 `market-data-service/tests/test_group256_recovery_inflight_and_cooldown_stale.py` (29), `real-trade-service/tests/test_group256_cooldown_unpriced_and_stale_as_of.py` (6),
 group255 tests adjusted for `sent_at`. Run `bash run_tests.sh` on the VM.
+
+## 3. 403 diagnostics (added after the first boot log with group 256)
+Boot log 09:21 IST: candle trips #1 (6 candle calls since boot) and #2 (0.1 s after the first call following the 30 s cooldown) with the
+quote family untouched. Code audit: only market-data-service sends `getCandleData`; position-stocks-service only logs in and uses the
+websocket (no REST quote/candle calls), real-trade and api-gateway reach AngelOne only through market-data. So the block is not
+another service's REST traffic. `angelone_client._log_denied` now appends the response headers that separate an edge/WAF limit from an
+application one (Retry-After, Server, Via, Content-Type, x-ratelimit-*, cf-ray ...) and the session age (seconds since this process's last
+AngelOne login). Diagnostics only; the existing once-per-60s-per-endpoint throttle is unchanged. Next 403 line will show them.

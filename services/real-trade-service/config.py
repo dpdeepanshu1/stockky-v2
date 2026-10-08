@@ -810,11 +810,14 @@ BROKERAGE_PER_ORDER = float(((os.getenv("BROKERAGE_PER_ORDER") or "").strip() or
 STT_DELIVERY_PCT_PER_LEG   = float(((os.getenv("STT_DELIVERY_PCT_PER_LEG") or "").strip() or "0.10"))
 STT_INTRADAY_SELL_PCT      = float(((os.getenv("STT_INTRADAY_SELL_PCT") or "").strip() or "0.025"))
 
-# Exchange transaction charges + SEBI turnover fee — both legs, both product types.
-EXCHANGE_TXN_PCT   = float(((os.getenv("EXCHANGE_TXN_PCT") or "").strip() or "0.00325"))
+# Exchange transaction charges + IPFT levy + SEBI turnover fee — both legs, both product types.
+# 2026-10-08 (group 262): Dhan's published rate card (dhan.co/pricing) bills NSE equity at 0.0030699 % = the 0.00297 %
+# exchange transaction charge (since 1 Oct 2024) + 0.0001 % IPFT. This file used 0.00325 and the dashboards 0.00345.
+EXCHANGE_TXN_PCT   = float(((os.getenv("EXCHANGE_TXN_PCT") or "").strip() or "0.00297"))
+IPFT_PCT           = float(((os.getenv("IPFT_PCT") or "").strip() or "0.0001"))
 SEBI_TURNOVER_PCT  = float(((os.getenv("SEBI_TURNOVER_PCT") or "").strip() or "0.0001"))
 
-# GST — applied on (brokerage + exchange txn charges + SEBI fee), both legs.
+# GST — 18 % on (brokerage + exchange txn + IPFT + SEBI fee), both legs. NOT on STT, stamp duty or the DP charge's base.
 GST_PCT = float(((os.getenv("GST_PCT") or "").strip() or "18.0"))
 
 # Stamp duty — BUY leg only. Delivery rate is higher than intraday.
@@ -827,7 +830,9 @@ STAMP_DUTY_BUY_PCT_INTRADAY = float(((os.getenv("STAMP_DUTY_BUY_PCT_INTRADAY") o
 # product-type logic, which never touches real holdings). Applied by
 # cost_model.py only when the caller explicitly says the sell is a real
 # delivery sell of a previously-settled holding.
-DP_CHARGE_FLAT = float(((os.getenv("DP_CHARGE_FLAT") or "").strip() or "15.0"))
+# group 262: Dhan's published DP charge is Rs 12.50 per instruction per ISIN + GST (= Rs 14.75). cost_model used 15.0 and
+# the dashboards a hard-coded 13.5 with no GST; this is now the single source for the cost gate AND the charges report.
+DP_CHARGE_FLAT = float(((os.getenv("DP_CHARGE_FLAT") or "").strip() or "12.5"))
 
 # ── Cumulative brokerage report (2026-10-08, group 258) ─────────────────────
 # charges_ledger.py sums brokerage over every filled order in trade_orders/trade_fills (never purged) using the

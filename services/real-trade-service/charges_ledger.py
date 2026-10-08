@@ -14,6 +14,12 @@ note figures. Pure helpers + one DB reader; never writes.
 same rate card as the Charges tab), not just brokerage - delivery brokerage is Rs 0 so a brokerage-only total read
 "Rs 0" while today's figure showed ~Rs 93 (mostly the Rs 13.5 DP per delivery sell). Result is laid out as three
 rows: first order -> yesterday (a date range), today, grand total. An order's day is its FIRST FILL day (IST).
+
+2026-10-08 (group 262): the rate card is now ONE env-overridable set in config.py (Dhan's published NSE equity card) and
+was corrected: delivery STT is 0.1 % on BUY *and* SELL (every CNC buy used to show STT 0), intraday STT is 0.025 % on
+the SELL leg only, exchange = 0.00297 % + 0.0001 % IPFT, GST also covers the SEBI fee, DP is Rs 12.50 + GST. DP is not
+charged on a sell that only closes shares bought the same day (nothing was debited from demat). A legacy SELL with no
+price at all is priced off the last buy of the symbol and flagged `estimated` instead of vanishing (its DP was lost).
 """
 from __future__ import annotations
 
@@ -28,15 +34,16 @@ from tz_utils import as_aware, ist_today_str
 
 _DELIVERY = ("CNC", "DELIVERY")
 
-# Same rate card as the dashboard Charges tab (RealAutoTrade.tsx calcCharges).
-_STT_INTRA_PCT = 0.025 / 100
-_STT_DELIVERY_SELL_PCT = 0.1 / 100
-_EXCHANGE_PCT = 0.00345 / 100
-_SEBI_PCT = 0.0001 / 100
-_GST = 0.18
-_STAMP_DELIVERY_PCT = 0.015 / 100
-_STAMP_INTRA_PCT = 0.003 / 100
-_DP_CHARGE_RS = 13.5                  # per delivery scrip sold per day
+_GST = config.GST_PCT / 100.0
+
+
+def _pct(x: float) -> float:
+    return x / 100.0
+
+
+def dp_charge_rs() -> float:
+    """DP charge for one delivery scrip sold on a day, GST included (Rs 12.50 + 18 % = Rs 14.75)."""
+    return config.DP_CHARGE_FLAT * (1.0 + _GST)
 
 
 def order_brokerage(value: float, product: Optional[str]) -> float:
@@ -56,40 +63,69 @@ def order_charges(value: float, side: str, product: Optional[str]) -> dict:
     is_buy = (side or "").upper() == "BUY"
     brokerage = order_brokerage(value, product)
     if delivery:
-        stt = 0.0 if is_buy else value * _STT_DELIVERY_SELL_PCT
-        stamp = value * _STAMP_DELIVERY_PCT if is_buy else 0.0
+        stt = value * _pct(config.STT_DELIVERY_PCT_PER_LEG)                  # both legs
+        stamp = value * _pct(config.STAMP_DUTY_BUY_PCT_DELIVERY) if is_buy else 0.0
     else:
-        stt = value * _STT_INTRA_PCT
-        stamp = value * _STAMP_INTRA_PCT if is_buy else 0.0
-    exchange = value * _EXCHANGE_PCT
-    sebi = value * _SEBI_PCT
-    gst = (brokerage + exchange) * _GST
+        stt = 0.0 if is_buy else value * _pct(config.STT_INTRADAY_SELL_PCT)  # sell leg only
+        stamp = value * _pct(config.STAMP_DUTY_BUY_PCT_INTRADAY) if is_buy else 0.0
+    exchange = value * _pct(config.EXCHANGE_TXN_PCT + config.IPFT_PCT)
+    sebi = value * _pct(config.SEBI_TURNOVER_PCT)
+    gst = (brokerage + exchange + sebi) * _GST                               # not on STT / stamp duty
     return {"brokerage": brokerage, "stt": stt, "exchange": exchange, "sebi": sebi, "gst": gst, "stamp": stamp}
 
 
 def build_rows(orders: Iterable[dict]) -> list:
-    """orders: dicts with id, symbol, side, product_type, value, created_at(aware), day. Returns one row per order
-    with its product resolved and brokerage computed. Input order does not matter (sorted by created_at here)."""
+    """orders: dicts with id, symbol, side, product_type, value, created_at(aware), day (+ optional qty).
+    Returns one row per order with its product resolved and charges computed. Input order does not matter (sorted
+    by created_at here).
+
+    DP (delivery SELL only, once per scrip per day): skipped when the sell only closes shares BOUGHT THE SAME DAY (they
+    never reached demat, so nothing is debited). With no qty known the DP is charged, as before.
+    An executed SELL whose value is unknown (value 0 but qty known - a legacy market sell with neither a fill row nor
+    a broker notional) is priced at the last earlier BUY's unit price of that symbol and flagged ``estimated``."""
     last_buy_product: dict = {}
+    last_buy_unit: dict = {}
+    bought_today: dict = {}      # (symbol, day) -> delivery qty bought that day and not yet sold
     dp_charged: set = set()
     out = []
     for o in sorted(orders, key=lambda x: (x["created_at"], x["id"])):
         side = (o.get("side") or "").upper()
+        qty = float(o.get("qty") or 0)
+        value = float(o.get("value") or 0)
+        estimated = False
+        key = (o["symbol"], o["day"])
         if side == "BUY":
             product = (o.get("product_type") or "CNC").upper()
             last_buy_product[o["symbol"]] = product
+            if value > 0 and qty > 0:
+                last_buy_unit[o["symbol"]] = value / qty
+            if product in _DELIVERY:
+                bought_today[key] = bought_today.get(key, 0.0) + qty
         else:
             product = (o.get("product_type") or last_buy_product.get(o["symbol"]) or "CNC").upper()
-        value = float(o["value"])
+            if value <= 0 and qty > 0 and last_buy_unit.get(o["symbol"]):
+                value = qty * last_buy_unit[o["symbol"]]
+                estimated = True
+        if value <= 0:
+            continue
         c = order_charges(value, side, product)
         dp = 0.0
-        if side == "SELL" and product in _DELIVERY and value > 0 and (o["symbol"], o["day"]) not in dp_charged:
-            dp_charged.add((o["symbol"], o["day"]))   # DP billed once per scrip per day
-            dp = _DP_CHARGE_RS
+        if side == "SELL" and product in _DELIVERY:
+            from_demat = qty
+            if qty > 0:
+                same_day = min(qty, bought_today.get(key, 0.0))
+                bought_today[key] = bought_today.get(key, 0.0) - same_day
+                from_demat = qty - same_day
+            else:
+                from_demat = 1.0                       # qty unknown: assume it left demat
+            if from_demat > 0 and key not in dp_charged:
+                dp_charged.add(key)                    # DP billed once per scrip per day
+                dp = dp_charge_rs()
         c["dp"] = dp
         out.append({
             "id": o["id"], "symbol": o["symbol"], "side": side, "product": product, "day": o["day"],
-            "value": value, "brokerage": c["brokerage"], "charges": c, "all_charges": sum(c.values()),
+            "value": value, "qty": qty, "brokerage": c["brokerage"], "charges": c,
+            "all_charges": sum(c.values()), "estimated": estimated,
         })
     return out
 
@@ -125,7 +161,7 @@ def summarize(rows: list, recent_days: int = 14, today: Optional[str] = None) ->
         p["brokerage"] += r["brokerage"]
         p["value"] += r["value"]
     total = sum(r["brokerage"] for r in rows)
-    gst = total * 0.18
+    gst = total * _GST
     # Orders big enough that the flat cap (not the percentage) applies: value * pct >= cap.
     capped = [r for r in paying if pct > 0 and r["value"] * pct >= cap]
     days = sorted(by_day, reverse=True)
@@ -145,6 +181,7 @@ def summarize(rows: list, recent_days: int = 14, today: Optional[str] = None) ->
         "trading_days": len(by_day),
         "orders": len(rows),
         "orders_paying_brokerage": len(paying),
+        "orders_estimated": sum(1 for r in rows if r.get("estimated")),
         "orders_at_cap": len(capped),
         "brokerage_total": round(total, 2),
         "brokerage_incl_gst": round(total + gst, 2),
@@ -155,8 +192,15 @@ def summarize(rows: list, recent_days: int = 14, today: Optional[str] = None) ->
         "recent_days": [{"day": d, "orders": by_day[d]["orders"], "brokerage": round(by_day[d]["brokerage"], 2)}
                         for d in days[: max(1, min(int(recent_days), 90))]],
         "rate_card": {"intraday_pct": config.CHARGES_BROKERAGE_PCT, "cap_rs": cap,
-                      "delivery_rs": config.CHARGES_DELIVERY_BROKERAGE_RS},
-        "note": "Estimated from filled orders with the Charges-tab rate card; check against a Dhan contract note.",
+                      "delivery_rs": config.CHARGES_DELIVERY_BROKERAGE_RS,
+                      "stt_delivery_pct_per_leg": config.STT_DELIVERY_PCT_PER_LEG,
+                      "stt_intraday_sell_pct": config.STT_INTRADAY_SELL_PCT,
+                      "exchange_pct": round(config.EXCHANGE_TXN_PCT + config.IPFT_PCT, 6),
+                      "sebi_pct": config.SEBI_TURNOVER_PCT, "gst_pct": config.GST_PCT,
+                      "stamp_delivery_pct": config.STAMP_DUTY_BUY_PCT_DELIVERY,
+                      "stamp_intraday_pct": config.STAMP_DUTY_BUY_PCT_INTRADAY,
+                      "dp_rs_incl_gst": round(dp_charge_rs(), 2)},
+        "note": "Estimated from filled orders with Dhan's published NSE rate card (a contract note rounds STT and stamp duty to the rupee); check against a Dhan contract note.",
     }
 
 
@@ -176,9 +220,11 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
         .all()
     )
     value_by_order: dict = defaultdict(float)
+    qty_by_order: dict = defaultdict(float)
     first_fill: dict = {}
     for oid, qty, price, filled_at in fill_rows:
         value_by_order[oid] += float(qty or 0) * float(price or 0)
+        qty_by_order[oid] += float(qty or 0)
         fa = as_aware(filled_at)
         if fa is not None and (oid not in first_fill or fa < first_fill[oid]):
             first_fill[oid] = fa
@@ -193,9 +239,9 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
         v = float(o.broker_fill_notional or 0)
         if v <= 0 and o.limit_price:
             v = float(o.filled_qty_so_far) * float(o.limit_price)
-        if v > 0:
-            legacy[o.id] = o
-            value_by_order[o.id] = v
+        legacy[o.id] = o                       # value may still be 0: build_rows prices a SELL off the last BUY
+        value_by_order[o.id] = max(v, 0.0)
+        qty_by_order[o.id] = float(o.filled_qty_so_far)
     if not value_by_order:
         return summarize([], recent_days)
     orders = []
@@ -203,11 +249,12 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
     for i in range(0, len(ids), 500):
         for o in db.query(models.TradeOrder).filter(models.TradeOrder.id.in_(ids[i:i + 500])).all():
             created = as_aware(o.created_at)
-            if created is None or value_by_order[o.id] <= 0:
+            if created is None or (value_by_order[o.id] <= 0 and o.id not in legacy):
                 continue
             filled = first_fill.get(o.id) or (as_aware(o.updated_at) if o.id in legacy else None) or created
             orders.append({
                 "id": o.id, "symbol": o.symbol, "side": o.side, "product_type": o.product_type,
-                "value": value_by_order[o.id], "created_at": created, "day": ist_today_str(filled),
+                "value": value_by_order[o.id], "qty": qty_by_order.get(o.id, 0.0),
+                "created_at": created, "day": ist_today_str(filled),
             })
     return summarize(build_rows(orders), recent_days)

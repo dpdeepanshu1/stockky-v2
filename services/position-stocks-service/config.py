@@ -543,9 +543,12 @@ SCALP_MIN_EDGE_TO_COST_RATIO = _get_float("SCALP_MIN_EDGE_TO_COST_RATIO", 3.0)
 SCALP_COST_SLIPPAGE_ALLOWANCE_PCT = _get_float("SCALP_COST_SLIPPAGE_ALLOWANCE_PCT", 0.10)
 BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
 STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
-EXCHANGE_TXN_PCT = _get_float("EXCHANGE_TXN_PCT", 0.00325)                 # both legs
+# group 262: Dhan's published NSE equity card = 0.00297 % exchange transaction charge (since 1 Oct 2024; was 0.00325 here,
+# 0.00345 on the dashboards) + 0.0001 % IPFT levy, GST on both. Same env names/semantics as real-trade-service.
+EXCHANGE_TXN_PCT = _get_float("EXCHANGE_TXN_PCT", 0.00297)                 # both legs, NSE transaction charge
+IPFT_PCT = _get_float("IPFT_PCT", 0.0001)                                  # both legs, IPFT levy
 SEBI_TURNOVER_PCT = _get_float("SEBI_TURNOVER_PCT", 0.0001)                # both legs
-GST_PCT = _get_float("GST_PCT", 18.0)                                      # on brokerage + exchange + SEBI
+GST_PCT = _get_float("GST_PCT", 18.0)                                      # on brokerage + exchange + IPFT + SEBI
 STAMP_DUTY_BUY_PCT_INTRADAY = _get_float("STAMP_DUTY_BUY_PCT_INTRADAY", 0.003)  # BUY leg only
 
 # ── Trailing stop (2026-10-07, group 217) ────────────────────────────────────

@@ -88,14 +88,14 @@ def test_report_counts_the_sell_side_charges(db):
     rep = cl.report(db, "REAL")
     comp = rep["total"]["components"]
     assert rep["orders"] == 2
-    assert comp["stt"] == pytest.approx(1100 * 0.001, abs=0.01)   # delivery STT, sell side
-    assert comp["dp"] == 13.5                                      # DP charge for the delivery sell
+    assert comp["stt"] == pytest.approx((1000 + 1100) * 0.001, abs=0.01)   # delivery STT, BUY and SELL (group 262)
+    assert comp["dp"] == 0.0                                       # bought and sold the same day: nothing left demat
 
 
 def test_report_prices_a_legacy_sell_from_the_broker_notional(db):
     s = _order(db, "SELL", filled=10, notional=1100.0)
     rep = cl.report(db, "REAL")
-    assert rep["orders"] == 1 and rep["total"]["components"]["dp"] == 13.5
+    assert rep["orders"] == 1 and rep["total"]["components"]["dp"] == pytest.approx(cl.dp_charge_rs())
     assert s.id  # legacy order, no fill rows
 
 
@@ -126,3 +126,12 @@ def test_report_ignores_an_order_whose_fills_are_worth_nothing(db):
     db.add(models.TradeFill(order_id=o.id, qty=0, price=100.0, filled_at=NOW))
     db.commit()
     assert cl.report(db, "REAL")["orders"] == 0
+
+
+def test_report_estimates_a_legacy_market_sell_from_the_earlier_buy(db):
+    buy = _order(db, "BUY", product="CNC", qty=10)
+    db.add(models.TradeFill(order_id=buy.id, qty=10, price=100.0, filled_at=NOW))
+    db.commit()
+    _order(db, "SELL", filled=10)                      # market sell: no fill row, no notional, no limit
+    rep = cl.report(db, "REAL")
+    assert rep["orders"] == 2 and rep["orders_estimated"] == 1

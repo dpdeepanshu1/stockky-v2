@@ -459,3 +459,45 @@ def test_bulk_logs_one_summary_line(bulk, caplog):
         main._get_quotes_bulk_core(_breq("TCS", "NEWNAME"), {})
     lines = [r.getMessage() for r in caplog.records if "AngelOne quote cooldown running" in r.getMessage()]
     assert len(lines) == 1 and "1 leftover symbol(s) served" in lines[0] and "1 left unpriced" in lines[0]
+
+
+# ───────────────────────── group257: 403 diagnostics (headers + session age) ─────────────────────────
+class _H(dict):
+    def get(self, k, d=None):
+        return super().get(k.lower(), d)
+
+
+class _R403:
+    status_code = 403
+    text = "Access denied because of exceeding access rate"
+
+    def __init__(self, headers=None):
+        self.headers = _H({k.lower(): v for k, v in (headers or {}).items()})
+
+
+def test_denied_context_lists_known_headers_and_session_age(monkeypatch):
+    monkeypatch.setattr(ac, "_login_at", ac.time.time() - 125)
+    s = ac._denied_context(_R403({"Retry-After": "60", "Server": "AkamaiGHost", "X-Other": "ignored"}))
+    assert "retry-after=60" in s and "server=AkamaiGHost" in s and "x-other" not in s
+    assert "session_age=125s" in s or "session_age=126s" in s
+
+
+def test_denied_context_without_login_or_headers_and_never_raises(monkeypatch):
+    monkeypatch.setattr(ac, "_login_at", 0.0)
+    assert ac._denied_context(_R403()) == "session_age=unknown"
+
+    class _Boom:
+        @property
+        def headers(self):
+            raise RuntimeError("x")
+
+    assert isinstance(ac._denied_context(_Boom()), str)
+
+
+def test_log_denied_line_carries_the_context(monkeypatch, caplog):
+    monkeypatch.setattr(ac, "_denied_last_logged", {})
+    monkeypatch.setattr(ac, "_login_at", ac.time.time() - 10)
+    with caplog.at_level(logging.WARNING, logger="angelone-client"):
+        ac._log_denied("getCandleData", _R403({"Retry-After": "30"}))
+    lines = [r.getMessage() for r in caplog.records if "getCandleData returned HTTP 403" in r.getMessage()]
+    assert len(lines) == 1 and "retry-after=30" in lines[0] and "session_age=" in lines[0]

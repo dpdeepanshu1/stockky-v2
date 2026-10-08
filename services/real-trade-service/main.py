@@ -1964,7 +1964,26 @@ async def charges_cumulative(
     never purged), with per-product, per-day and top-symbol splits. Estimate from the Charges-tab rate card."""
     import asyncio
     import charges_ledger
-    return await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days)
+    rep = await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days)
+    # group 262: net P&L = booked realized P&L minus the charges above, taken from the same account row the Overview
+    # shows, so the dashboard never has to subtract two differently-scoped numbers itself. Best-effort only.
+    try:
+        account = db.query(models.TradeAccount).filter_by(mode=mode.upper()).first()
+        if account is not None:
+            _pf_maybe_reset_daily_pnl(db, account)
+            g_total = float(account.realized_pnl_total or 0.0)
+            g_today = float(account.realized_pnl_today or 0.0)
+            c_total = float(rep.get("all_charges_total") or 0.0)
+            c_today = float((rep.get("today") or {}).get("all_charges") or 0.0)
+            rep["pnl"] = {
+                "realized_gross_total": round(g_total, 2), "charges_total": round(c_total, 2),
+                "net_realized_total": round(g_total - c_total, 2),
+                "realized_gross_today": round(g_today, 2), "charges_today": round(c_today, 2),
+                "net_realized_today": round(g_today - c_today, 2),
+            }
+    except Exception:
+        logger.warning("charges cumulative: net P&L block unavailable", exc_info=True)
+    return rep
 
 
 @app.get("/orders/{mode}")

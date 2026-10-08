@@ -371,6 +371,8 @@ export interface ScalpChargesPeriod {
   all_charges: number;
   gross_pnl: number;
   net_pnl: number;
+  // group 262: per-component split (same rate card as the Real tab); absent on an older backend.
+  components?: { brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number };
 }
 
 export interface ScalpCumulativeCharges {

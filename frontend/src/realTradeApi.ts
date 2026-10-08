@@ -487,7 +487,18 @@ export interface CumulativeBrokerage {
   by_product: Record<string, { orders: number; brokerage: number; value: number }>;
   top_symbols: { symbol: string; brokerage: number }[];
   recent_days: { day: string; orders: number; brokerage: number }[];
-  rate_card: { intraday_pct: number; cap_rs: number; delivery_rs: number };
+  rate_card: {
+    intraday_pct: number; cap_rs: number; delivery_rs: number;
+    stt_delivery_pct_per_leg?: number; stt_intraday_sell_pct?: number; exchange_pct?: number; sebi_pct?: number;
+    gst_pct?: number; stamp_delivery_pct?: number; stamp_intraday_pct?: number; dp_rs_incl_gst?: number;
+  };
+  // group 262: orders priced off the last buy because no price was ever recorded (legacy market sells)
+  orders_estimated?: number;
+  // group 262: booked realized P&L (account row) minus the charges above; absent if the account row is unavailable.
+  pnl?: {
+    realized_gross_total: number; charges_total: number; net_realized_total: number;
+    realized_gross_today: number; charges_today: number; net_realized_today: number;
+  };
   note: string;
 }
 

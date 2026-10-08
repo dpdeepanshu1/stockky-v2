@@ -13,6 +13,7 @@ import ManualTradeTicket from "./trading/ManualTradeTicket";
 // is a best-effort, non-blocking call).
 import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+import { chargesForLegs, sumCharges, DP_CHARGE_INCL_GST, type ChargeBreakdown, type ChargeLeg } from "../chargesRates";
 
 // group 259: "2026-09-01" -> "01 Sep" for the charges date ranges.
 const _CHG_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -778,11 +779,14 @@ function PortfolioSummary({
   realizedPnlTotal,
   startingCapital,
   currentEquity,
+  chargesTotal,
 }: {
   positions: Position[];
   realizedPnlTotal: number | null;
   startingCapital: number | null;
   currentEquity: number | null;
+  /** group 262: all Dhan charges since the first filled order (backend ledger); null until loaded / in DEMO. */
+  chargesTotal?: number | null;
 }) {
   if (positions.length === 0 && realizedPnlTotal == null) return null;
 
@@ -811,6 +815,9 @@ function PortfolioSummary({
   // currently-open capital — only totalPnlPct (which mixes in all-time
   // realized P&L) needed to move to startingCapital as its denominator.
   const totalPnlPct = startingCapital && startingCapital > 0 ? (totalPnl / startingCapital) * 100 : 0;
+  // group 262: the same total after every brokerage / STT / GST / DP charge actually paid since the start.
+  const netOfCharges = chargesTotal != null ? totalPnl - chargesTotal : null;
+  const netOfChargesPct = netOfCharges != null && startingCapital && startingCapital > 0 ? (netOfCharges / startingCapital) * 100 : 0;
 
   // Deposits made outside this engine = equity growth not from trading
   const depositsOutside =
@@ -836,14 +843,23 @@ function PortfolioSummary({
           color={pnlColor(totalPnl)}
           sub={`Realized all-time (this engine): ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
         />
+        {netOfCharges != null && (
+          <StatCard
+            label="Total P&L after charges"
+            value={`${netOfCharges >= 0 ? "+" : ""}${fmtInr(netOfCharges, 0)} (${netOfChargesPct >= 0 ? "+" : ""}${netOfChargesPct.toFixed(1)}%)`}
+            color={pnlColor(netOfCharges)}
+            sub={`− charges paid since start: ${fmtInr(chargesTotal ?? 0, 0)}`}
+          />
+        )}
       </div>
       {/* NEW (2026-09-07): this P&L is pure (exit_price - entry_price) * qty — it does
           NOT subtract brokerage/STT/GST/DP. Without this line the number above reads
           as the full picture when it isn't; the Charges tab has the real after-costs
           number for today. */}
       <p className="font-display tabular-nums text-[10px] text-mist mt-2 pt-2 border-t border-slate">
-        ℹ️ P&L above is price movement only — brokerage, STT, GST and other charges are
-        not subtracted. See the Charges tab for today's actual costs and net P&L after charges.
+        ℹ️ {chargesTotal != null
+          ? "Total P&L above is price movement only; “after charges” subtracts every brokerage, STT, GST and DP charge paid since the start (estimated from Dhan's rate card)."
+          : "P&L above is price movement only — brokerage, STT, GST and other charges are not subtracted. See the Charges tab for the net after charges."}
       </p>
       {depositsOutside != null && depositsOutside > 500 && (
         <p className="font-display tabular-nums text-[10px] text-mist mt-2 pt-2 border-t border-slate">
@@ -1171,7 +1187,7 @@ export default function RealAutoTrade() {
       void loadLiveDhanData();
       void loadPositionStocksLedger();
     }
-    if (activeTab === "charges" && mode === "REAL" && loggedIn) void loadCumBrokerage();
+    if ((activeTab === "charges" || activeTab === "overview") && mode === "REAL" && loggedIn) void loadCumBrokerage();
     if (activeTab === "log") void loadAudit();
   }, [activeTab, mode, loggedIn]);
 
@@ -1939,6 +1955,7 @@ export default function RealAutoTrade() {
                 realizedPnlTotal={status?.account?.realized_pnl_total ?? null}
                 startingCapital={status?.account?.starting_capital ?? null}
                 currentEquity={status?.account?.current_equity ?? null}
+                chargesTotal={mode === "REAL" && cumBrokerage ? cumBrokerage.all_charges_total : null}
               />
 
               {/* Stockky account snapshot */}
@@ -1958,6 +1975,9 @@ export default function RealAutoTrade() {
                         label="P&L today"
                         value={fmtInr(status.account.realized_pnl_today, 0)}
                         color={pnlColor(status.account.realized_pnl_today)}
+                        sub={mode === "REAL" && cumBrokerage?.pnl
+                          ? `after charges ${cumBrokerage.pnl.net_realized_today >= 0 ? "+" : ""}${fmtInr(cumBrokerage.pnl.net_realized_today, 0)}`
+                          : undefined}
                       />
                     </div>
                     {/* Net P&L summary — big clear card */}
@@ -1972,6 +1992,9 @@ export default function RealAutoTrade() {
                         </p>
                         <p className="font-display tabular-nums text-[10px] text-mist">
                           Realized: {fmtInr(realized, 0)} · Unrealized: {unrealizedNow >= 0 ? "+" : ""}{fmtInr(unrealizedNow, 0)}
+                          {mode === "REAL" && cumBrokerage && (
+                            <> · After charges: {netPnl - cumBrokerage.all_charges_total >= 0 ? "+" : ""}{fmtInr(netPnl - cumBrokerage.all_charges_total, 0)}</>
+                          )}
                         </p>
                       </div>
                       <p className={`font-display tabular-nums text-2xl font-bold ${
@@ -2832,51 +2855,10 @@ export default function RealAutoTrade() {
               TAB: DHAN CHARGES
           ═══════════════════════════════════════════════════════════════ */}
           {activeTab === "charges" && (() => {
-            // Dhan charges for equity intraday delivery (NSE):
-            // Brokerage: ₹20 or 0.03% per order leg (whichever lower), free for delivery
-            // STT: 0.025% on buy+sell for intraday, 0.1% on sell for delivery
-            // Exchange txn: 0.00345% NSE
-            // SEBI: 0.0001% on turnover
-            // GST: 18% on (brokerage + exchange txn charges)
-            // Stamp duty: 0.015% on buy value (delivery), 0.003% on buy value (intraday)
-            // DP charge: ₹13.5 per sell (delivery CNC only, per scrip per day)
-
-            const BROKERAGE_CAP = 20;
-            const BROKERAGE_PCT = 0.03 / 100;
-            const STT_INTRA_PCT = 0.025 / 100;      // both sides
-            const STT_DELIVERY_SELL_PCT = 0.1 / 100; // sell side only
-            const EXCHANGE_PCT = 0.00345 / 100;
-            const SEBI_PCT = 0.0001 / 100;
-            const GST_PCT = 0.18;
-            const STAMP_DELIVERY_PCT = 0.015 / 100;
-            const STAMP_INTRA_PCT = 0.003 / 100;
-            const DP_CHARGE = 13.5;
-
-            interface ChargeBreakdown {
-              brokerage: number; stt: number; exchange: number;
-              sebi: number; gst: number; stamp: number; dp: number; total: number;
-            }
-
-            function calcCharges(buyVal: number, sellVal: number, isDelivery: boolean): ChargeBreakdown {
-              const turnover = buyVal + sellVal;
-              const buyBrok = isDelivery ? 0 : Math.min(buyVal * BROKERAGE_PCT, BROKERAGE_CAP);
-              const sellBrok = isDelivery ? 0 : Math.min(sellVal * BROKERAGE_PCT, BROKERAGE_CAP);
-              const brokerage = buyBrok + sellBrok;
-              const stt = isDelivery
-                ? sellVal * STT_DELIVERY_SELL_PCT
-                : turnover * STT_INTRA_PCT;
-              const exchange = turnover * EXCHANGE_PCT;
-              const sebi = turnover * SEBI_PCT;
-              const gst = (brokerage + exchange) * GST_PCT;
-              const stamp = isDelivery ? buyVal * STAMP_DELIVERY_PCT : buyVal * STAMP_INTRA_PCT;
-              // BUG FIX (2026-09-07): was `isDelivery ? DP_CHARGE : 0` — charged DP on
-              // every CNC leg, including BUYs. DP (Depository Participant) charges only
-              // apply when shares leave your demat, i.e. a delivery SELL — never a BUY.
-              // That was adding a phantom ~₹13.5 to every CNC buy order's charges.
-              const dp = (isDelivery && sellVal > 0) ? DP_CHARGE : 0;
-              const total = brokerage + stt + exchange + sebi + gst + stamp + dp;
-              return { brokerage, stt, exchange, sebi, gst, stamp, dp, total };
-            }
+            // group 262: rates and the DP rule live in ../chargesRates.ts (one card shared with Position Stocks and
+            // matching the backend ledger): delivery STT 0.1% on BUY and SELL, intraday STT on the SELL only,
+            // exchange 0.00297% + 0.0001% IPFT, GST also on SEBI, DP Rs 12.50 + GST once per scrip per day and not
+            // for shares bought the same day.
 
             // Compute charges from all orders in Dhan + our own orders
             // Build from liveDhanOrders (real broker data) when in REAL mode
@@ -2895,35 +2877,44 @@ export default function RealAutoTrade() {
               const st = (o.orderStatus || o.status || "").toUpperCase();
               return qty > 0 && price > 0 && (st === "TRADED" || st === "FILLED");
             });
-            const toOrderCharge = (o: any): OrderCharge => {
-              const side = (o.transactionType || o.side || "").toUpperCase();
-              const qty = Number(o.quantity || 0);
-              const price = Number(o.price || o.averageTradedPrice || 0);
-              const val = qty * price;
+            const toLeg = (o: any): ChargeLeg & { time: string } => {
               const product = (o.productType || o.positionType || "").toUpperCase();
-              const isDelivery = product === "CNC" || product === "DELIVERY";
-              const buyVal = side === "BUY" ? val : 0;
-              const sellVal = side === "SELL" ? val : 0;
               return {
                 symbol: o.tradingSymbol || o.symbol || "—",
-                side, qty, price, isDelivery,
-                charges: calcCharges(buyVal, sellVal, isDelivery),
+                side: (o.transactionType || o.side || "").toUpperCase(),
+                qty: Number(o.quantity || 0),
+                price: Number(o.price || o.averageTradedPrice || 0),
+                isDelivery: product === "CNC" || product === "DELIVERY",
                 time: o.createTime || o.updateTime || "",
               };
             };
-            const orderCharges: OrderCharge[] = filledDhanOrders.filter(o => o.ours !== false).map(toOrderCharge);
-            const otherServiceCharges: OrderCharge[] = filledDhanOrders.filter(o => o.ours === false).map(toOrderCharge);
+            const priceLegs = (orders: any[]): OrderCharge[] => {
+              const legs = orders.map(toLeg);
+              const priced = chargesForLegs(legs);       // DP needs the whole day's legs, so price them together
+              return legs.map((l, i) => ({ ...l, charges: priced[i] }));
+            };
+            const orderCharges: OrderCharge[] = priceLegs(filledDhanOrders.filter(o => o.ours !== false));
+            const otherServiceCharges: OrderCharge[] = priceLegs(filledDhanOrders.filter(o => o.ours === false));
             const otherServiceTotal = otherServiceCharges.reduce((s, o) => s + o.charges.total, 0);
 
-            // Aggregate totals
-            const totalBrokerage = orderCharges.reduce((s, o) => s + o.charges.brokerage, 0);
-            const totalSTT = orderCharges.reduce((s, o) => s + o.charges.stt, 0);
-            const totalExchange = orderCharges.reduce((s, o) => s + o.charges.exchange, 0);
-            const totalSEBI = orderCharges.reduce((s, o) => s + o.charges.sebi, 0);
-            const totalGST = orderCharges.reduce((s, o) => s + o.charges.gst, 0);
-            const totalStamp = orderCharges.reduce((s, o) => s + o.charges.stamp, 0);
-            const totalDP = orderCharges.reduce((s, o) => s + o.charges.dp, 0);
-            const grandTotal = orderCharges.reduce((s, o) => s + o.charges.total, 0);
+            // Today's totals. The backend ledger prices EVERY filled order of this service (including market sells the
+            // live order book lists without a price), so it is the headline whenever it has at least as many orders as
+            // the live list; the live list is the fallback (ledger not loaded yet / lagging a fresh fill).
+            const liveTotals = sumCharges(orderCharges.map(o => o.charges));
+            const ledgerToday = cumBrokerage?.today;
+            const useLedgerToday = !!ledgerToday && ledgerToday.orders >= orderCharges.length;
+            const todayCount = useLedgerToday && ledgerToday ? ledgerToday.orders : orderCharges.length;
+            const T: ChargeBreakdown = useLedgerToday && ledgerToday
+              ? { ...ledgerToday.components, total: ledgerToday.all_charges }
+              : liveTotals;
+            const totalBrokerage = T.brokerage;
+            const totalSTT = T.stt;
+            const totalExchange = T.exchange;
+            const totalSEBI = T.sebi;
+            const totalGST = T.gst;
+            const totalStamp = T.stamp;
+            const totalDP = T.dp;
+            const grandTotal = T.total;
 
             // Pair BUY+SELL for same symbol to get round-trip charges
             const roundTripMap: Record<string, { buy?: OrderCharge; sell?: OrderCharge }> = {};
@@ -2965,10 +2956,10 @@ export default function RealAutoTrade() {
                           trade-history/ledger API (date-range), which isn't wired up yet. */}
                       <SectionHdr>Today's Dhan charges</SectionHdr>
                       <div className="grid grid-cols-2 gap-2 mb-3">
-                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${orderCharges.length} filled Real Auto Trade orders today`} />
+                        <StatCard label="Total charges paid" value={`-${fmtInr(grandTotal, 2)}`} color="text-signal-sell" sub={`${todayCount} filled Real Auto Trade orders today`} />
                         <StatCard label="Brokerage" value={`-${fmtInr(totalBrokerage, 2)}`} color="text-signal-sell" sub="₹20 cap per leg" />
                         <StatCard label="STT" value={`-${fmtInr(totalSTT, 2)}`} color="text-signal-sell" sub="Securities Transaction Tax" />
-                        <StatCard label="GST + Exchange" value={`-${fmtInr(totalGST + totalExchange, 2)}`} color="text-signal-sell" sub="18% GST on brokerage" />
+                        <StatCard label="GST + Exchange" value={`-${fmtInr(totalGST + totalExchange, 2)}`} color="text-signal-sell" sub="18% GST on brokerage + exchange + SEBI" />
                       </div>
                       {/* NEW (2026-09-07): the Overview/Positions P&L is raw (exit_price -
                           entry_price) * qty — it never subtracts brokerage/STT/GST/DP. This is
@@ -3007,12 +2998,12 @@ export default function RealAutoTrade() {
                         <div className="space-y-1.5 font-display tabular-nums text-[11px]">
                           {[
                             { label: "Brokerage", val: totalBrokerage, note: "₹0 delivery, ₹20 or 0.03%/leg intraday" },
-                            { label: "STT", val: totalSTT, note: "0.025% intraday (both sides), 0.1% delivery (sell only)" },
-                            { label: "Exchange Txn", val: totalExchange, note: "0.00345% NSE" },
+                            { label: "STT", val: totalSTT, note: "0.025% intraday (sell only), 0.1% delivery (buy + sell)" },
+                            { label: "Exchange Txn", val: totalExchange, note: "0.00297% NSE + 0.0001% IPFT" },
                             { label: "SEBI charges", val: totalSEBI, note: "0.0001% on turnover" },
-                            { label: "GST", val: totalGST, note: "18% on brokerage + exchange fees" },
+                            { label: "GST", val: totalGST, note: "18% on brokerage + exchange + SEBI" },
                             { label: "Stamp duty", val: totalStamp, note: "0.015% delivery, 0.003% intraday (buy side)" },
-                            { label: "DP charges", val: totalDP, note: "₹13.5/sell for CNC delivery" },
+                            { label: "DP charges", val: totalDP, note: `₹12.50 + GST (₹${DP_CHARGE_INCL_GST.toFixed(2)}) per scrip sold from demat per day` },
                           ].map(row => (
                             <div key={row.label} className="flex items-center justify-between">
                               <div>
@@ -3059,6 +3050,31 @@ export default function RealAutoTrade() {
                           <p className="font-display tabular-nums text-[10px] text-mist mt-2">
                             Total split: STT {fmtInr(cumBrokerage.total.components.stt, 2)} · DP {fmtInr(cumBrokerage.total.components.dp, 2)} · GST {fmtInr(cumBrokerage.total.components.gst, 2)} · Exch+SEBI {fmtInr(cumBrokerage.total.components.exchange + cumBrokerage.total.components.sebi, 2)} · Stamp {fmtInr(cumBrokerage.total.components.stamp, 2)}
                           </p>
+                          {cumBrokerage.pnl && (
+                            <div className="bg-ink border border-slate rounded-xl p-3 mt-3">
+                              <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                                <span>Realized P&L all-time (price only)</span>
+                                <span className={pnlColor(cumBrokerage.pnl.realized_gross_total)}>
+                                  {cumBrokerage.pnl.realized_gross_total >= 0 ? "+" : ""}{fmtInr(cumBrokerage.pnl.realized_gross_total, 2)}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between font-display tabular-nums text-[11px] text-mist mb-1">
+                                <span>− Charges since start</span>
+                                <span className="text-signal-sell">-{fmtInr(cumBrokerage.pnl.charges_total, 2)}</span>
+                              </div>
+                              <div className="flex items-center justify-between font-display tabular-nums text-xs font-bold border-t border-slate pt-1.5 mt-1">
+                                <span className="text-paper">Net realized P&L all-time (after charges)</span>
+                                <span className={pnlColor(cumBrokerage.pnl.net_realized_total)}>
+                                  {cumBrokerage.pnl.net_realized_total >= 0 ? "+" : ""}{fmtInr(cumBrokerage.pnl.net_realized_total, 2)}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                          {(cumBrokerage.orders_estimated ?? 0) > 0 && (
+                            <p className="font-display tabular-nums text-[9px] text-mist mt-2">
+                              {cumBrokerage.orders_estimated} older sell order{cumBrokerage.orders_estimated === 1 ? "" : "s"} had no recorded price and {cumBrokerage.orders_estimated === 1 ? "is" : "are"} priced at the last buy of that stock (estimate).
+                            </p>
+                          )}
                           <p className="font-display tabular-nums text-[9px] text-mist mt-2">
                             Real Auto Trade orders only. Delivery brokerage is ₹0, so the cost is mostly STT + DP. {cumBrokerage.note}
                           </p>
@@ -3112,16 +3128,16 @@ export default function RealAutoTrade() {
                       <SectionHdr>Dhan charge rates reference (NSE equity)</SectionHdr>
                       <div className="space-y-1.5 font-display tabular-nums text-[11px]">
                         {[
-                          { type: "Intraday (MIS)", brok: "₹20 or 0.03%/leg", stt: "0.025% both sides", stamp: "0.003% buy", dp: "—" },
-                          { type: "Delivery (CNC)", brok: "FREE", stt: "0.1% on sell", stamp: "0.015% buy", dp: "₹13.5/sell" },
+                          { type: "Intraday (MIS)", brok: "₹20 or 0.03%/leg", stt: "0.025% on sell", stamp: "0.003% buy", dp: "—" },
+                          { type: "Delivery (CNC)", brok: "FREE", stt: "0.1% on buy + sell", stamp: "0.015% buy", dp: `₹${DP_CHARGE_INCL_GST.toFixed(2)}/scrip sold (₹12.50 + GST)` },
                         ].map(r => (
                           <div key={r.type} className="bg-ink border border-slate rounded-xl p-3">
                             <p className="font-bold text-paper mb-1.5">{r.type}</p>
                             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-mist">
                               <span>Brokerage: <span className="text-paper">{r.brok}</span></span>
                               <span>STT: <span className="text-paper">{r.stt}</span></span>
-                              <span>Exchange: <span className="text-paper">0.00345% + SEBI 0.0001%</span></span>
-                              <span>GST: <span className="text-paper">18% on brokerage+exch</span></span>
+                              <span>Exchange: <span className="text-paper">0.00297% + IPFT 0.0001% + SEBI 0.0001%</span></span>
+                              <span>GST: <span className="text-paper">18% on brokerage+exch+SEBI</span></span>
                               <span>Stamp: <span className="text-paper">{r.stamp}</span></span>
                               <span>DP: <span className="text-paper">{r.dp}</span></span>
                             </div>

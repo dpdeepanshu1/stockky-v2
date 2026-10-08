@@ -23,6 +23,7 @@ import {
 // trade-service's URL isn't configured in this browser).
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
 
@@ -1828,27 +1829,8 @@ export default function PositionStocksTab() {
         // super-order-leg book, broker-side truth) — an ENTRY_LEG that
         // TRADED is the BUY, whichever of TARGET_LEG/STOP_LOSS_LEG actually
         // TRADED is the SELL.
-        const BROKERAGE_CAP = 20;
-        const BROKERAGE_PCT = 0.03 / 100;
-        const STT_INTRA_PCT = 0.025 / 100; // both sides, intraday
-        const EXCHANGE_PCT = 0.00345 / 100;
-        const SEBI_PCT = 0.0001 / 100;
-        const GST_PCT = 0.18;
-        const STAMP_INTRA_PCT = 0.003 / 100; // buy side only
-
-        interface ChargeBreakdown {
-          brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number; total: number;
-        }
-        function calcCharges(buyVal: number, sellVal: number): ChargeBreakdown {
-          const turnover = buyVal + sellVal;
-          const brokerage = Math.min(buyVal * BROKERAGE_PCT, BROKERAGE_CAP) + Math.min(sellVal * BROKERAGE_PCT, BROKERAGE_CAP);
-          const stt = turnover * STT_INTRA_PCT;
-          const exchange = turnover * EXCHANGE_PCT;
-          const sebi = turnover * SEBI_PCT;
-          const gst = (brokerage + exchange) * GST_PCT;
-          const stamp = buyVal * STAMP_INTRA_PCT;
-          return { brokerage, stt, exchange, sebi, gst, stamp, total: brokerage + stt + exchange + sebi + gst + stamp };
-        }
+        // group 262: rates live in ../chargesRates.ts (one card shared with Real Auto Trade and the backend ledger):
+        // intraday STT is 0.025% on the SELL leg only, exchange 0.00297% + 0.0001% IPFT, GST also on SEBI.
 
         interface LegCharge { symbol: string; leg: string; side: string; qty: number; price: number; charges: ChargeBreakdown; }
         const filledLegs = (dhanLive?.orders ?? []).filter(o => {
@@ -1861,10 +1843,9 @@ export default function PositionStocksTab() {
           const side = String(o.transactionType ?? "").toUpperCase();
           const qty = Number(o.quantity || 0);
           const price = Number(o.price || 0);
-          const val = qty * price;
           return {
             symbol: String(o.tradingSymbol ?? "—"), leg: String(o.legName ?? "—"), side, qty, price,
-            charges: calcCharges(side === "BUY" ? val : 0, side === "SELL" ? val : 0),
+            charges: calcLegCharges(qty * price, side, false),      // every order here is INTRADAY (no DP)
           };
         });
         const totalBrokerage = legCharges.reduce((s, o) => s + o.charges.brokerage, 0);
@@ -1931,10 +1912,10 @@ export default function PositionStocksTab() {
                 <div className="space-y-1.5 font-display tabular-nums text-[11px]">
                   {[
                     { label: "Brokerage", val: totalBrokerage, note: "₹20 or 0.03%/leg, whichever lower" },
-                    { label: "STT", val: totalSTT, note: "0.025% intraday, both sides" },
-                    { label: "Exchange Txn", val: totalExchange, note: "0.00345% NSE" },
+                    { label: "STT", val: totalSTT, note: "0.025% intraday, sell leg only" },
+                    { label: "Exchange Txn", val: totalExchange, note: "0.00297% NSE + 0.0001% IPFT" },
                     { label: "SEBI charges", val: totalSEBI, note: "0.0001% on turnover" },
-                    { label: "GST", val: totalGST, note: "18% on brokerage + exchange fees" },
+                    { label: "GST", val: totalGST, note: "18% on brokerage + exchange + SEBI" },
                     { label: "Stamp duty", val: totalStamp, note: "0.003% intraday (buy side)" },
                   ].map(row => (
                     <div key={row.label} className="flex items-center justify-between">
@@ -1977,6 +1958,11 @@ export default function PositionStocksTab() {
                       </div>
                     ))}
                   </div>
+                  {cumCharges.total.components && (
+                    <p className="font-display tabular-nums text-[10px] text-mist mt-2">
+                      Total split: STT {fmtInr(cumCharges.total.components.stt, 2)} · GST {fmtInr(cumCharges.total.components.gst, 2)} · Exch+SEBI {fmtInr(cumCharges.total.components.exchange + cumCharges.total.components.sebi, 2)} · Stamp {fmtInr(cumCharges.total.components.stamp, 2)} · Brokerage {fmtInr(cumCharges.total.components.brokerage, 2)}
+                    </p>
+                  )}
                   <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumCharges.note}</p>
                 </>
               ) : !cumChargesError ? (

@@ -371,6 +371,8 @@ export interface ScalpChargesPeriod {
   all_charges: number;
   gross_pnl: number;
   net_pnl: number;
+  // group 262: per-component split (same rate card as the Real tab); absent on an older backend.
+  components?: { brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number };
 }
 
 export interface ScalpCumulativeCharges {
@@ -390,9 +392,23 @@ export interface ScalpCumulativeCharges {
   avg_brokerage_per_trade: number | null;
   brokerage_pct_of_gross_pnl: number | null;
   rate_card: { pct: number; cap_rs: number };
-  recent_days: { day: string; trades: number; brokerage: number; total_charges: number }[];
+  // group 263: gross - charges = net, all-time and today (same shape as Real Auto Trade's `pnl`); absent on an older backend.
+  pnl?: {
+    realized_gross_total: number; charges_total: number; net_realized_total: number;
+    realized_gross_today: number; charges_today: number; net_realized_today: number;
+  };
+  recent_days: { day: string; trades: number; brokerage: number; total_charges: number; gross_pnl?: number; net_pnl?: number }[];
   note: string;
 }
+
+// group 263: one stored ledger row per closed trade (GET /charges/trades) - full split + gross / net P&L.
+export interface ScalpChargeTrade {
+  position_id: number; symbol: string; day: string; qty: number;
+  buy_price: number | null; sell_price: number | null; buy_value: number; sell_value: number;
+  brokerage: number; stt: number; exchange: number; sebi: number; gst: number; stamp: number;
+  total_charges: number; gross_pnl: number | null; net_pnl: number | null;
+}
+export interface ScalpChargeTrades { day: string; count: number; trades: ScalpChargeTrade[] }
 
 export interface DhanLiveOrders {
   count: number;
@@ -501,6 +517,7 @@ export const positionStocksApi = {
   wsStatus: () => psRequest<{ connected: boolean; subscribed_symbols?: number; last_tick_at?: string | null; reconnect_attempts?: number }>("/ws-status"),
   dhanLiveOrders: () => psRequest<DhanLiveOrders>("/dhan/live-orders"),
   cumulativeCharges: (days = 14) => psRequest<ScalpCumulativeCharges>(`/charges/cumulative?days=${days}`),
+  chargesTrades: (day?: string) => psRequest<ScalpChargeTrades>(`/charges/trades${day ? `?day=${day}` : ""}`),
   dhanAccount: () => psRequest<DhanAccountStatus>("/dhan/account", {}, true),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),

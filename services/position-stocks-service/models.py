@@ -244,6 +244,16 @@ class ScalpChargesLedger(Base):
     gst_on_brokerage = Column(Float, nullable=False, default=0.0)
     total_charges = Column(Float, nullable=False, default=0.0)    # every levy, same rate card as the Charges tab
     gross_pnl = Column(Float, nullable=True)
+    # 2026-10-09 (group 263): the full per-trade split is STORED too (previously only brokerage / GST-on-brokerage / total
+    # were), plus the net P&L, so every figure the Charges tab shows survives the 3-day retention and any later
+    # rate-card change (orders/charges_ledger.py restates these in place). Nullable: rows booked before this group are
+    # backfilled on the next ledger read.
+    stt = Column(Float, nullable=True)
+    exchange = Column(Float, nullable=True)       # NSE transaction charge + IPFT, both legs
+    sebi = Column(Float, nullable=True)
+    gst = Column(Float, nullable=True)            # 18 % on brokerage + exchange + SEBI
+    stamp = Column(Float, nullable=True)
+    net_pnl = Column(Float, nullable=True)        # gross_pnl - total_charges
     booked_at = Column(DateTime, nullable=False, default=_now)
 
 

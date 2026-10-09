@@ -21,7 +21,7 @@ from orders import cost_gate
 def rates(monkeypatch):
     for k, v in dict(
         SCALP_COST_GATE_ENABLED=True, SCALP_MIN_EDGE_TO_COST_RATIO=3.0, SCALP_COST_SLIPPAGE_ALLOWANCE_PCT=0.10,
-        BROKERAGE_PER_ORDER=0.0, STT_INTRADAY_SELL_PCT=0.025, EXCHANGE_TXN_PCT=0.00325, SEBI_TURNOVER_PCT=0.0001,
+        BROKERAGE_PER_ORDER=0.0, STT_INTRADAY_SELL_PCT=0.025, EXCHANGE_TXN_PCT=0.00325, IPFT_PCT=0.0, SEBI_TURNOVER_PCT=0.0001,
         GST_PCT=18.0, STAMP_DUTY_BUY_PCT_INTRADAY=0.003,
     ).items():
         monkeypatch.setattr(config, k, v)
@@ -63,7 +63,7 @@ class TestEvaluate:
         assert r.cost_pct == pytest.approx(0.13619553, abs=1e-6)
 
     def test_zero_cost_means_ratio_none_and_passes(self):
-        for k in ("STT_INTRADAY_SELL_PCT", "EXCHANGE_TXN_PCT", "SEBI_TURNOVER_PCT", "STAMP_DUTY_BUY_PCT_INTRADAY",
+        for k in ("STT_INTRADAY_SELL_PCT", "EXCHANGE_TXN_PCT", "IPFT_PCT", "SEBI_TURNOVER_PCT", "STAMP_DUTY_BUY_PCT_INTRADAY",
                   "SCALP_COST_SLIPPAGE_ALLOWANCE_PCT"):
             setattr(config, k, 0.0)
         r = cost_gate.evaluate(100.0, 10, 1.0)

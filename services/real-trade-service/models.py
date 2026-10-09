@@ -660,6 +660,56 @@ class TradePnl(Base):
     __table_args__ = (UniqueConstraint("mode", "trade_date", name="uq_trade_pnl_mode_date"),)
 
 
+# ── Stored charges (2026-10-09, group 263) ───────────────────────────────────
+class TradeChargesLedger(Base):
+    """One row per EXECUTED order, written by charges_ledger.persist(). The charges themselves were only ever
+    recomputed on read from trade_orders / trade_fills; this stores the result (full Dhan split, DP included) so the
+    figures survive any later purge of orders / fills and any rate-card change (persist() restates rows in place on
+    every sync). order_id is the PK and has no foreign key on purpose, mirroring position-stocks-service's
+    scalp_charges_ledger: the order row it came from is allowed to disappear."""
+    __tablename__ = "trade_charges_ledger"
+
+    order_id = Column(Integer, primary_key=True, autoincrement=False)
+    mode = Column(String(8), nullable=False, index=True)
+    symbol = Column(String(32), nullable=False)
+    side = Column(String(4), nullable=False)
+    product = Column(String(12), nullable=True)
+    day = Column(String(10), nullable=False, index=True)   # IST calendar date of the FIRST FILL, YYYY-MM-DD
+    qty = Column(Float, nullable=False, default=0.0)
+    order_value = Column(Float, nullable=False, default=0.0)   # filled value, Rs (not named `value`: Oracle keyword-adjacent)
+    brokerage = Column(Float, nullable=False, default=0.0)
+    stt = Column(Float, nullable=False, default=0.0)
+    exchange = Column(Float, nullable=False, default=0.0)
+    sebi = Column(Float, nullable=False, default=0.0)
+    gst = Column(Float, nullable=False, default=0.0)
+    stamp = Column(Float, nullable=False, default=0.0)
+    dp = Column(Float, nullable=False, default=0.0)
+    total_charges = Column(Float, nullable=False, default=0.0)
+    estimated = Column(Boolean, nullable=False, default=False)
+    booked_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now)
+
+
+class TradePnlDaily(Base):
+    """One row per (mode, IST day): booked gross realized P&L, charges and net. Charges / order count are refreshed on
+    every charges sync; the gross figure is taken from TradeAccount.realized_pnl_today while the day is live and
+    frozen by portfolio._maybe_reset_daily_pnl() just before that counter is zeroed at the day rollover, so a day's
+    net P&L stays recoverable after the account row has moved on. (The older trade_pnl table is not written by
+    anything and needs a starting_equity, so it is left alone.)"""
+    __tablename__ = "trade_pnl_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String(8), nullable=False)
+    day = Column(String(10), nullable=False)
+    realized_gross = Column(Float, nullable=True)      # NULL = never captured for that day
+    charges = Column(Float, nullable=False, default=0.0)
+    net_realized = Column(Float, nullable=True)        # realized_gross - charges (NULL when gross unknown)
+    orders = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (UniqueConstraint("mode", "day", name="uq_trade_pnl_daily_mode_day"),)
+
+
 # ── Reconciliation (Stockky DB state vs actual Dhan account state) ─────────
 class TradeReconciliation(Base):
     __tablename__ = "trade_reconciliation"

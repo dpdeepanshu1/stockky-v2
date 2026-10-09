@@ -1081,9 +1081,9 @@ class TestCostGate:
     def test_flat_brokerage_makes_the_gate_skip_cleanly(self, env, monkeypatch):
         db, b, _ = env
         monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 20.0)
-        # cost = 40 brokerage + 7.44 gst + 7.00 other levies + 20 allowance = 74.44; edge 200 -> ratio 2.69 < 3
+        # cost = 40 brokerage + 7.44 gst + 6.91 other levies + 20 allowance = 74.35; edge 200 -> ratio 2.69 < 3
         assert entry.attempt_entry(db, cand(ltp=500.0)) is None
-        assert_clean_skip(env, "ABC", "COST_GATE:edge_to_cost=2.69<3.00 edge=Rs200.00 cost=Rs74.44")
+        assert_clean_skip(env, "ABC", "COST_GATE:edge_to_cost=2.69<3.00 edge=Rs200.00 cost=Rs74.35")
         assert "qty=40" in last_log(db).reason and "value=Rs20000.00" in last_log(db).reason
         assert b.of("get_security_id") != []          # rejected after sizing, before any order / budget use
         assert db.query(models.SharedOrderBudget).count() == 0 or db.query(models.SharedOrderBudget).one().orders_placed_today == 0

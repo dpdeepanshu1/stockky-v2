@@ -510,6 +510,12 @@ async def _exit_only_tick_body(mode: str) -> None:
             await reconcile_real_orders(db)
             _mark_reconciled(mode)
             _reconcile_s = _time_mod.monotonic() - _t_rec0
+            # group 263: store every executed order's charges + the day's net P&L (throttled to 1/min, never raises).
+            try:
+                import charges_ledger as _charges_ledger
+                _charges_ledger.sync_throttled(db, mode)
+            except Exception:
+                logger.warning("auto_pilot: charges ledger sync failed", exc_info=True)
         _note_exit_tick_timing(mode, _exit_s, _reconcile_s)
 
         # Alert if gate is off while positions are open — keeps the operator

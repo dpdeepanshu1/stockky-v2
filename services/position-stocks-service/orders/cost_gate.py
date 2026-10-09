@@ -49,7 +49,7 @@ def estimate_levies(entry_price: float, qty: int, exit_price: Optional[float] = 
     brokerage = config.BROKERAGE_PER_ORDER * 2
     stt = sell_value * (config.STT_INTRADAY_SELL_PCT / 100.0)
     stamp = buy_value * (config.STAMP_DUTY_BUY_PCT_INTRADAY / 100.0)
-    exchange = (buy_value + sell_value) * (config.EXCHANGE_TXN_PCT / 100.0)
+    exchange = (buy_value + sell_value) * ((config.EXCHANGE_TXN_PCT + config.IPFT_PCT) / 100.0)   # NSE + IPFT
     sebi = (buy_value + sell_value) * (config.SEBI_TURNOVER_PCT / 100.0)
     gst = (brokerage + exchange + sebi) * (config.GST_PCT / 100.0)
     return brokerage + stt + stamp + exchange + sebi + gst

@@ -6,6 +6,8 @@ without 50+ files cluttering the repo root.
 
 Most recent first — see each file for full detail:
 
+- 2026-10-08 (group 262)  Charges and total P&L corrected everywhere (real-trade-service config/cost_model/charges_ledger/main, position-stocks-service config/cost_gate/charges_ledger, frontend chargesRates.ts + both tabs).
+  One Dhan rate card (delivery STT on buy+sell, intraday STT sell only, exchange 0.00297%+IPFT 0.0001%, GST incl. SEBI, DP Rs 12.50+GST, none for same-day-bought shares), env-overridable and shared by gates, ledgers and dashboards. Position Stocks ledger restates old rows and refreshes repaired ones. New `pnl` block on `GET /charges/{mode}/cumulative`; Overview shows Total P&L after charges. real-trade 3774 passed, position-stocks 2910 passed (2 unrelated pre-existing failures noted), npm build clean. See docs/GROUP262_CHARGES_RATE_CARD_AND_NET_PNL.md.
 - 2026-10-08 (group 260)  Charges since start now includes SELLs (real-trade-service execution/reconcile.py, charges_ledger.py, frontend PositionStocksTab.tsx).
   Exit fills never wrote `trade_fills`, so the cumulative report skipped every sell (STT / DP read Rs 0, total Rs 55.95 vs Rs 93.06 today). SELL fills are now recorded; pre-fix sells are priced from broker_fill_notional or filled qty x limit price. Position Stocks "Net" now subtracts today's ledger charges instead of the BUY-only live snapshot. 10 new tests; real-trade suite 3754 passed; tsc clean. See docs/GROUP260_SELL_FILLS_IN_CHARGES.md.
 - 2026-10-08 (group 258)  Both Charges tabs show brokerage since the start (position-stocks-service orders/charges_ledger.py + new scalp_charges_ledger table, real-trade-service charges_ledger.py, frontend PositionStocksTab / RealAutoTrade).

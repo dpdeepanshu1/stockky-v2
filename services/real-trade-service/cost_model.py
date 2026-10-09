@@ -68,7 +68,7 @@ def estimate_round_trip_cost(
         stt = sell_value * (config.STT_INTRADAY_SELL_PCT / 100.0)
         stamp_duty = buy_value * (config.STAMP_DUTY_BUY_PCT_INTRADAY / 100.0)
 
-    exchange_txn = (buy_value + sell_value) * (config.EXCHANGE_TXN_PCT / 100.0)
+    exchange_txn = (buy_value + sell_value) * ((config.EXCHANGE_TXN_PCT + config.IPFT_PCT) / 100.0)   # NSE + IPFT
     sebi_turnover = (buy_value + sell_value) * (config.SEBI_TURNOVER_PCT / 100.0)
     gst = (brokerage + exchange_txn + sebi_turnover) * (config.GST_PCT / 100.0)
     dp_charge = config.DP_CHARGE_FLAT * (1 + config.GST_PCT / 100.0) if is_delivery_sell else 0.0

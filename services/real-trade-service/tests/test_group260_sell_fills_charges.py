@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,7 +20,10 @@ import charges_ledger as cl
 import models
 from execution import reconcile as R
 
-NOW = datetime(2026, 10, 8, 5, 0, tzinfo=timezone.utc)
+# group 263: was a fixed 2026-10-08 05:00 UTC, but _book_fill_delta stamps the SELL fill with the real clock, so once the
+# real IST day moved on the buy (fixed date) and the sell (today) fell on different days and the same-day-no-DP
+# assertion failed. Anchored to the real clock now (a minute ago keeps buy-before-sell ordering).
+NOW = datetime.now(timezone.utc) - timedelta(minutes=1)
 
 
 @pytest.fixture()
@@ -88,14 +91,14 @@ def test_report_counts_the_sell_side_charges(db):
     rep = cl.report(db, "REAL")
     comp = rep["total"]["components"]
     assert rep["orders"] == 2
-    assert comp["stt"] == pytest.approx(1100 * 0.001, abs=0.01)   # delivery STT, sell side
-    assert comp["dp"] == 13.5                                      # DP charge for the delivery sell
+    assert comp["stt"] == pytest.approx((1000 + 1100) * 0.001, abs=0.01)   # delivery STT, BUY and SELL (group 262)
+    assert comp["dp"] == 0.0                                       # bought and sold the same day: nothing left demat
 
 
 def test_report_prices_a_legacy_sell_from_the_broker_notional(db):
     s = _order(db, "SELL", filled=10, notional=1100.0)
     rep = cl.report(db, "REAL")
-    assert rep["orders"] == 1 and rep["total"]["components"]["dp"] == 13.5
+    assert rep["orders"] == 1 and rep["total"]["components"]["dp"] == pytest.approx(cl.dp_charge_rs())
     assert s.id  # legacy order, no fill rows
 
 
@@ -126,3 +129,12 @@ def test_report_ignores_an_order_whose_fills_are_worth_nothing(db):
     db.add(models.TradeFill(order_id=o.id, qty=0, price=100.0, filled_at=NOW))
     db.commit()
     assert cl.report(db, "REAL")["orders"] == 0
+
+
+def test_report_estimates_a_legacy_market_sell_from_the_earlier_buy(db):
+    buy = _order(db, "BUY", product="CNC", qty=10)
+    db.add(models.TradeFill(order_id=buy.id, qty=10, price=100.0, filled_at=NOW))
+    db.commit()
+    _order(db, "SELL", filled=10)                      # market sell: no fill row, no notional, no limit
+    rep = cl.report(db, "REAL")
+    assert rep["orders"] == 2 and rep["orders_estimated"] == 1

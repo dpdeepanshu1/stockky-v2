@@ -99,6 +99,13 @@ def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
         return
     prev_reset_date = account.pnl_last_reset_date
     prev_pnl = account.realized_pnl_today
+    # group 263: freeze the finished day's gross P&L into trade_pnl_daily BEFORE the counter is zeroed, so that day's
+    # net P&L (gross - stored charges) stays recoverable. Best-effort: never blocks or fails the reset.
+    try:
+        import charges_ledger
+        charges_ledger.freeze_day_gross(db, account.mode, prev_reset_date, float(prev_pnl or 0.0))
+    except Exception:
+        logger.warning("portfolio: could not store %s gross P&L before the daily reset", prev_reset_date, exc_info=True)
     account.realized_pnl_today = 0.0
     account.pnl_last_reset_date = today
     db.commit()

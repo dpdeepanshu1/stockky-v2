@@ -1286,3 +1286,50 @@ class TestBookSizeDownWiring:
         monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: None)
         assert entry.attempt_entry(db, cand()) is not None
         assert b.of("place_super_order")[0]["quantity"] == 40
+
+
+# ── group286: size-down from the 20-level book wiring ───────────────────────────
+class TestDepth20SizeDownWiring:
+    def test_cap_shrinks_quantity_and_returns_the_unused_reservation(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: 10)
+        assert entry.attempt_entry(db, cand()) is not None          # default sizing is 40 sh @ 500
+        assert b.of("place_super_order")[0]["quantity"] == 10
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - 10 * 500.0)
+
+    def test_second_cap_sees_the_quantity_left_by_the_first(self, env, monkeypatch):
+        db, b, _ = env
+        seen = []
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: 25)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: seen.append(q) or 30)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert seen == [25] and b.of("place_super_order")[0]["quantity"] == 25
+
+    def test_the_tighter_cap_wins(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: 30)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: 12)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 12
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - 12 * 500.0)
+
+    def test_cap_above_the_sized_quantity_changes_nothing(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: 400)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 40
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - POSITION_VALUE)
+
+    def test_no_cap_changes_nothing(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: None)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 40

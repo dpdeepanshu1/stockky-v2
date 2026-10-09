@@ -1317,6 +1317,30 @@ def repair_dead_sell_errors(db: Session, *, apply: bool = False) -> dict:
     return out
 
 
+_ws_xcheck_logged: set = set()
+
+
+def _entry_fill_from_order_events(pos: ScalpPosition) -> Optional[float]:
+    """group287: average BUY fill price when the Dhan order-update WebSocket (execution/order_ws.py) saw this
+    position's entry fully TRADED for its exact quantity since it was opened; else None. Memory only, no network.
+    Never raises. Empty unless DHAN_ORDER_WS_ENABLED=1."""
+    try:
+        from execution import order_ws
+        opened = pos.opened_at
+        if opened is None:
+            return None
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        ev = order_ws.store.find_entry_fill(pos.symbol, pos.quantity, opened.timestamp() - 120.0)
+        if not ev:
+            return None
+        px = ev.get("avg_traded_price") or ev.get("traded_price")
+        return float(px) if px and px > 0 else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("reconcile: order-event cross-check failed for %s: %s", getattr(pos, "symbol", "?"), e)
+        return None
+
+
 def _filled_entry_behind_dead_parent(db: Session, pos: ScalpPosition, row: dict,
                                      plain: Optional[list] = None) -> Optional[dict]:
     """Group 276 (AAATECH 2026-10-09: Dhan filled BUY 107.17 and SELL 107.99 = +Rs17.22, stored ERROR Rs0
@@ -1768,6 +1792,22 @@ def run_exit_reconciliation(db: Session) -> int:
                     logger.info("reconcile: %s (id=%d) parent row %s but BUY+SELL traded - booked %s %.2f->%.2f P&L Rs%.2f",
                                 pos.symbol, pos.id, entry_status, _ex["kind"], _alive["entry"], _ex["price"], _pnl)
                     continue
+                # group287: the order book proved nothing. Ask the order-update WebSocket (in-memory). It always LOGS a
+                # disagreement; it only changes the outcome with RECONCILE_USE_ORDER_EVENTS=1 (default 0 until the
+                # event shapes have been checked against Dhan's order book in a live session): the row then stays OPEN
+                # (not ERROR) so EOD squareoff covers it, exactly like the "BUY filled, no exit proven" case above.
+                _ws_px = _entry_fill_from_order_events(pos)
+                if _ws_px is not None:
+                    if pos.id not in _ws_xcheck_logged:
+                        _ws_xcheck_logged.add(pos.id)
+                        logger.warning(
+                            "reconcile: WS_CROSSCHECK %s (id=%d) parent row %s and no BUY in the order book, but the "
+                            "order-update WebSocket saw the BUY TRADED at Rs%.2f (qty %d)%s",
+                            pos.symbol, pos.id, entry_status, _ws_px, pos.quantity,
+                            " - keeping the position OPEN" if config.RECONCILE_USE_ORDER_EVENTS else
+                            " - RECONCILE_USE_ORDER_EVENTS=0, booking as before")
+                    if config.RECONCILE_USE_ORDER_EVENTS:
+                        continue
                 # 2026-10-06 (group192): read WHY Dhan killed the entry and learn from it. Before this the
                 # reason was dropped, so an RMS "not allowed to be traded in Intraday" rejection (HEGAM, 13
                 # times in 4 minutes) never reached the restricted-symbol list the screener filters on.

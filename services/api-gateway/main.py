@@ -4632,6 +4632,56 @@ _MOVERS_EMPTY_LOG_WINDOW_SEC = 600.0
 _MOVERS_EMPTY_LOG_AT: Dict[str, float] = {}
 
 
+def _movers_rows_from_market_data(symbols: List[str]) -> List[dict]:
+    """group275: movers rows for `symbols` from market-data-service POST /quotes/bulk (Dhan -> AngelOne -> yfinance
+    is decided there), instead of one yfinance 1m-history call per symbol. Returns the rows it could build; a symbol
+    with no fresh price or no previous close is simply left out so the caller can try yfinance for it. Never raises.
+    GATEWAY_MOVERS_VIA_MARKET_DATA=0 turns it off."""
+    if _gw_env_num("GATEWAY_MOVERS_VIA_MARKET_DATA", 1.0) <= 0 or not symbols:
+        return []
+    out: List[dict] = []
+    chunk = max(1, int(_gw_env_num("GATEWAY_BULK_QUOTE_CHUNK", 50)))
+    max_age = _gw_env_num("GATEWAY_MOVERS_QUOTE_MAX_AGE_S", 90.0)
+    timeout_s = _gw_env_num("GATEWAY_BULK_QUOTE_TIMEOUT_S", 12.0)
+    wanted_all = {str(x).upper().replace(".NS", "").replace(".BO", "").strip() for x in symbols if x}
+    for i in range(0, len(symbols), chunk):
+        part = [str(x).upper().replace(".NS", "").replace(".BO", "").strip() for x in symbols[i:i + chunk] if x]
+        if not part:
+            continue
+        try:
+            r = httpx.post(f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk", json={"symbols": part}, timeout=timeout_s)
+            if r.status_code != 200:
+                continue
+            for q in ((r.json() or {}).get("quotes") or []):
+                if not isinstance(q, dict):
+                    continue
+                base = str(q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                if base not in wanted_all or not _gw_bulk_row_fresh(q, max_age):
+                    continue
+                px = _gw_quote_px(q)
+                prev = _hot_float(q.get("previous_close"))
+                if not px or not prev or prev <= 0:
+                    continue
+                hi = _hot_float(q.get("day_high")) or px
+                lo = _hot_float(q.get("day_low")) or px
+                try:
+                    vol = int(float(q.get("volume") or 0))
+                except (TypeError, ValueError):
+                    vol = 0
+                out.append({
+                    "symbol": base,
+                    "price": round(px, 2),
+                    "change": round(px - prev, 2),
+                    "change_pct": round((px - prev) / prev * 100, 2),
+                    "volume": vol,
+                    "high": round(hi, 2),
+                    "low": round(lo, 2),
+                })
+        except Exception as e:  # noqa: BLE001
+            logger.debug("movers bulk quotes chunk failed (%d symbols): %s", len(part), e)
+    return out
+
+
 def _get_nifty50_data() -> List[dict]:
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"{MARKET_MOVERS_CACHE_PREFIX}{today}"
@@ -4707,7 +4757,7 @@ def _get_nifty50_data() -> List[dict]:
             logger.info("Serving cached market movers data for %s (post-lock)", today)
             return cached
 
-        logger.info("Fetching fresh market movers data from yfinance for %s", today)
+        logger.info("Fetching fresh market movers data (market-data bulk first, yfinance for the rest) for %s", today)
         # BUG (31-Aug-2026): `_get_nifty_indices()[:50]` — despite this
         # function's name/callers implying general "market movers" — was
         # *always* exactly the NIFTY 50 constituents, because
@@ -4769,9 +4819,15 @@ def _get_nifty50_data() -> List[dict]:
                 logger.warning(f"Could not fetch {sym}: {e}")
                 return None
 
-        data = []
+        # group275: market-data first (a few bulk calls); yfinance only for what it could not price.
+        data = _movers_rows_from_market_data(nifty_symbols)
+        _have = {d["symbol"] for d in data}
+        _left = [sy for sy in nifty_symbols if str(sy).upper().replace(".NS", "").replace(".BO", "").strip() not in _have]
+        if data:
+            logger.info("Movers: market-data priced %d/%d symbols, %d left for yfinance",
+                        len(data), len(nifty_symbols), len(_left))
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as ex:
-            for res in ex.map(_fetch_one, nifty_symbols):
+            for res in ex.map(_fetch_one, _left):
                 if res:
                     data.append(res)
         _redis_set(cache_key, data, ttl=86400)

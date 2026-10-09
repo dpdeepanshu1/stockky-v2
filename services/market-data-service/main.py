@@ -465,6 +465,10 @@ def _feed_boot_wait_s() -> float:
     return v if v == v and v >= 0 else 60.0
 
 
+class _FeedDisabled(Exception):
+    """Internal: a live feed is switched off by env; skip its refresh step quietly."""
+
+
 def _boot_defers_feeds() -> bool:
     """True when the feeds should wait for the first scan universe instead of starting on the default one."""
     return bool(FEED_BOOT_WAIT_FOR_UNIVERSE
@@ -472,8 +476,19 @@ def _boot_defers_feeds() -> bool:
                 and _feed_boot_wait_s() > 0)
 
 
+def _live_feed_enabled(name: str) -> bool:
+    """group275: ANGELONE_WS_FEED_ENABLED / YAHOO_WS_FEED_ENABLED (default ON, blank-safe). Once Dhan is the first
+    quote provider and has proven itself, switching these off frees the AngelOne request budget (the AngelOne feed
+    polls ~500 symbols every 3 s) and stops the two feeds writing `live_quotes` rows over Dhan's."""
+    raw = (os.getenv(name) or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _boot_start_angelone_feed() -> None:
     """Start the AngelOne feed on the default universe (only when AngelOne creds are present). Never raises."""
+    if not _live_feed_enabled("ANGELONE_WS_FEED_ENABLED"):
+        logger.info("angelone_ws_feed: disabled by ANGELONE_WS_FEED_ENABLED, not starting")
+        return
     try:
         from angelone_client import get_session
         if not get_session().is_configured():
@@ -492,6 +507,9 @@ def _boot_start_angelone_feed() -> None:
 
 def _boot_start_yahoo_feed() -> None:
     """Start the Yahoo feed on the default universe. Never raises."""
+    if not _live_feed_enabled("YAHOO_WS_FEED_ENABLED"):
+        logger.info("yahoo_ws_feed: disabled by YAHOO_WS_FEED_ENABLED, not starting")
+        return
     try:
         from surprise_premarket import default_universe_from_env
         import yahoo_ws_feed
@@ -662,6 +680,8 @@ async def _refresh_feed_universe_loop():
             _current_feed_universe = symbols
 
             try:
+                if not _live_feed_enabled("YAHOO_WS_FEED_ENABLED"):
+                    raise _FeedDisabled()
                 import yahoo_ws_feed
                 # group173: with the boot start deferred the Yahoo feed may not be running yet; starting is
                 # idempotent (no-op when it already is) and ensure_subscribed adds the rest.
@@ -669,12 +689,14 @@ async def _refresh_feed_universe_loop():
                 if _start_y is not None:
                     _start_y(symbols)
                 yahoo_ws_feed.ensure_subscribed(symbols)
+            except _FeedDisabled:
+                pass
             except Exception as e:
                 logger.warning("feed universe refresh: yahoo ensure_subscribed failed: %s", e)
 
             try:
                 from angelone_client import get_session
-                if get_session().is_configured():
+                if _live_feed_enabled("ANGELONE_WS_FEED_ENABLED") and get_session().is_configured():
                     import angelone_ws_feed
                     # stop_feed_background() joins the thread for up to 10s — run it
                     # off the event loop so the service stays responsive meanwhile.
@@ -2626,7 +2648,8 @@ def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, day
             if start_date is not None:
                 frm, to = start_date, end_date
             else:
-                nd = _HISTORY_PERIOD_DAYS.get(period, 180)
+                nd = (_HISTORY_LATEST_SESSION_LOOKBACK_DAYS if _history_is_latest_session(period)
+                      else _HISTORY_PERIOD_DAYS.get(period, 180))
                 if iv not in ("1d", "1wk"):
                     nd = min(nd, dhan_data.config.hourly_max_days())
                 frm, to = today - timedelta(days=nd), end
@@ -2640,6 +2663,8 @@ def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, day
         dhan_data.client.note_success()
         if not candles:
             return None
+        if start_date is None:
+            candles = _history_trim_latest_session(candles, period, iv)
         if len(candles) > MAX_HISTORY_ROWS:
             candles = candles[-MAX_HISTORY_ROWS:]
         result = {"symbol": sym, "requested": (symbol or "").strip(), "period": period, "interval": interval,
@@ -3067,6 +3092,44 @@ def angelone_budget_status():
         return {"enabled": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
+def _dhan_movers_enabled() -> bool:
+    """group275: the whole-market movers sweep asks Dhan first (3 calls of up to 1000 symbols instead of ~52 AngelOne
+    calls) when Dhan is the FIRST quote provider. DHAN_MOVERS_VIA_DHAN=0 turns it off. Never raises."""
+    try:
+        from dhan_data import config as _dc
+        return bool(_dc.enabled() and _dc.quote_position() == "first" and _dc.env_flag("DHAN_MOVERS_VIA_DHAN", True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _dhan_movers_sweep(symbols: list, min_abs_pct: float = 5.0):
+    """Price `symbols` through the shared Dhan batcher. Returns (movers_rows, priced_count, unpriced_symbols).
+    A symbol is "priced" when Dhan answered with a price AND a previous close (movers need both). Never raises: on
+    any error nothing is priced and every symbol is returned so the caller falls back to AngelOne."""
+    try:
+        from dhan_data import quotes as _dq
+        got = _dq.get_quotes(symbols, max_age_s=20.0)
+        rows, priced, unpriced = [], 0, []
+        for sym in symbols:
+            r = got.get(_dq.key_for(sym))
+            try:
+                ltp = float(r.get("price")) if r else None
+                prev = float(r.get("previous_close")) if r and r.get("previous_close") is not None else None
+            except (TypeError, ValueError):
+                ltp = prev = None
+            if not ltp or ltp <= 0 or not prev or prev <= 0:
+                unpriced.append(sym)
+                continue
+            priced += 1
+            pct = (ltp - prev) / prev * 100.0
+            if abs(pct) >= min_abs_pct:
+                rows.append({"symbol": sym, "pct_change": round(pct, 2), "ltp": ltp})
+        return rows, priced, unpriced
+    except Exception as e:  # noqa: BLE001
+        logger.debug("angelone/movers: Dhan sweep failed (non-fatal): %s", e)
+        return [], 0, list(symbols)
+
+
 @app.get("/angelone/movers")
 def angelone_movers():
     """
@@ -3096,7 +3159,8 @@ def angelone_movers():
         import angelone_scrip_master as scrip_master
 
         session = get_session()
-        if not session.is_configured():
+        _dhan_first = _dhan_movers_enabled()
+        if not session.is_configured() and not _dhan_first:
             return {"status": "not_configured", "data": [], "reason": "ANGELONE_* env vars not set"}
 
         token_map = scrip_master.get_all_symbols()  # {clean_symbol: token}
@@ -3106,6 +3170,17 @@ def angelone_movers():
             return {"status": "error", "data": [], "error": "scrip master returned 0 symbols"}
         reverse_map = {v: k for k, v in token_map.items()}
         tokens = list(token_map.values())
+        universe_size = len(tokens)
+
+        # group275: Dhan first. Only what Dhan could not price (about 9% - no scrip id, or no quote) goes on to the
+        # AngelOne sweep below, so a healthy Dhan turns ~52 AngelOne calls into ~5 (or none).
+        dhan_rows, dhan_priced = [], 0
+        if _dhan_first:
+            dhan_rows, dhan_priced, _unpriced = _dhan_movers_sweep(list(token_map.keys()))
+            if dhan_priced:
+                tokens = [token_map[sy] for sy in _unpriced if sy in token_map]
+                logger.info("angelone/movers: Dhan priced %d/%d symbols, %d left for AngelOne",
+                            dhan_priced, universe_size, len(tokens))
 
         async def _sweep():
             await session.ensure_session()
@@ -3122,8 +3197,10 @@ def angelone_movers():
                 out.extend(fetched or [])
             return out
 
-        rows_raw = asyncio.run(_sweep())
-        rows = []
+        rows_raw = []
+        if tokens and session.is_configured():
+            rows_raw = asyncio.run(_sweep())
+        rows = list(dhan_rows)
         for row in rows_raw:
             if not isinstance(row, dict):
                 continue
@@ -3144,21 +3221,24 @@ def angelone_movers():
         result = {
             "status": "ok",
             "data": rows,
-            "universe_size": len(tokens),
-            "quotes_fetched": len(rows_raw),
+            "universe_size": universe_size,
+            "quotes_fetched": len(rows_raw) + dhan_priced,
             "fetched_at": datetime.utcnow().isoformat(),
         }
+        if dhan_priced:
+            result["dhan_priced"] = dhan_priced
+            result["angelone_fetched"] = len(rows_raw)
         # Group 127: a rate-limited sweep (AngelOne 403 "exceeding access rate" cooldown mid-sweep)
         # silently skipped whole batches yet came back as a plain status=ok result that was then
         # cached for the full TTL (boot log: quotes_fetched=2610 of 2710). Flag it and retry sooner.
-        _partial, _missing = _movers_sweep_coverage(len(rows_raw), len(tokens))
+        _partial, _missing = _movers_sweep_coverage(len(rows_raw) + dhan_priced, universe_size)
         if _partial:
             result["partial"] = True
             result["missing_quotes"] = _missing
             logger.warning(
                 "angelone/movers: partial sweep - %d of %d quotes fetched (%d missing, likely an "
                 "AngelOne rate-limit cooldown); caching for %ds instead of the full TTL",
-                len(rows_raw), len(tokens), _missing, _MOVERS_PARTIAL_TTL_S,
+                len(rows_raw) + dhan_priced, universe_size, _missing, _MOVERS_PARTIAL_TTL_S,
             )
             _cache_set(cache_key, result, ttl=_MOVERS_PARTIAL_TTL_S)
         else:
@@ -3757,7 +3837,8 @@ def _angelone_history_candles(
         else:
             # group227: "5d" was missing here, so period=5d silently became the 180-day default and the
             # candidate engine's "1w" return was really a 6-month return whenever AngelOne served the candles.
-            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825,
+                            _HISTORY_LATEST_SESSION_PERIOD: _HISTORY_LATEST_SESSION_LOOKBACK_DAYS}
             span = _period_days.get(period, 180)
             _to = datetime.now(ist).replace(tzinfo=None)
             _from = _to - timedelta(days=span)
@@ -3783,6 +3864,8 @@ def _angelone_history_candles(
                 })
             except Exception:
                 continue
+        if start_date is None:
+            candles = _history_trim_latest_session(candles, period, interval)
         return candles or None
     except Exception as e:
         logger.debug("AngelOne history attempt for %s failed, falling back to yfinance: %s", angel_sym, e)
@@ -3814,7 +3897,8 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
         if start_date is not None:
             _from, _to = start_date, end_date
         else:
-            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+            _period_days = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825,
+                            _HISTORY_LATEST_SESSION_PERIOD: _HISTORY_LATEST_SESSION_LOOKBACK_DAYS}
             span = _period_days.get(period, 180)
             _to = datetime.now(ZoneInfo("Asia/Kolkata")).date()
             _from = _to - timedelta(days=span)
@@ -3848,6 +3932,8 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
                 "volume": int(_safe(row.get("CH_TOT_TRADED_QTY")) or 0),
             })
         candles.sort(key=lambda x: x["date"])
+        if start_date is None:
+            candles = _history_trim_latest_session(candles, period, interval)
         return candles or None
     except Exception as e:
         logger.debug("NSE-history fallback for %s: %s", base, e)
@@ -3870,6 +3956,36 @@ _HISTORY_DERIVE_MIN_BARS = 5
 _HISTORY_DERIVE_MIN_BARS_BY_PERIOD = {"5d": 3}   # group231: a 7-calendar-day window holds 3-5 sessions
 _HISTORY_PERIOD_ORDER = ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
 _HISTORY_PERIOD_DAYS = {"5d": 7, "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+
+
+# group275: period="1d" had no entry in any provider's period->days table, so every provider fell back to the
+# 180-day default (Dhan then capped it to 60 days): real-trade's "1d" intraday view (period=1d, interval=60m) came
+# back as ~7 weeks of hourly bars and its return was dropped as implausible. "1d" now means the latest trading
+# session: fetch a short window (covers a long weekend / holiday run) and keep only the last session's bars.
+# Deliberately NOT added to _HISTORY_PERIOD_DAYS (that table also drives slicing from longer cached series).
+_HISTORY_LATEST_SESSION_PERIOD = "1d"
+_HISTORY_LATEST_SESSION_LOOKBACK_DAYS = 5
+
+
+def _history_is_latest_session(period) -> bool:
+    return (period or "") == _HISTORY_LATEST_SESSION_PERIOD
+
+
+def _history_trim_latest_session(candles, period, interval=None):
+    """period=1d: keep only the bars of the last trading session present in `candles`. Any other period, or an empty
+    / unreadable list, is returned unchanged. Daily and weekly intervals keep just the last bar."""
+    if not _history_is_latest_session(period) or not candles or not isinstance(candles, list):
+        return candles
+    try:
+        if (interval or "").lower() in ("1d", "1wk", "1mo"):
+            return candles[-1:]
+        last_day = str((candles[-1] or {}).get("date") or "")[:10]
+        if not last_day:
+            return candles
+        kept = [c for c in candles if str((c or {}).get("date") or "")[:10] == last_day]
+        return kept or candles
+    except Exception:  # noqa: BLE001
+        return candles
 
 
 # group230 (log review items 1 and 2): daily candles of COMPLETED sessions never change, yet the 1d/1mo series was

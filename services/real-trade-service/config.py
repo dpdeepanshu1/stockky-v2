@@ -872,7 +872,10 @@ MIN_EDGE_TO_COST_RATIO   = float(((os.getenv("MIN_EDGE_TO_COST_RATIO") or "").st
 # rejecting outright.
 # group 264 (2026-10-09): entry product routing + same-day re-entry guard (see entry_product.py). ENTRY_PRODUCT_MODE=cnc
 # restores the old always-CNC behaviour without a code change.
-ENTRY_PRODUCT_MODE       = ((os.getenv("ENTRY_PRODUCT_MODE") or "").strip() or "auto").lower()
+# DEFAULT IS "cnc" (group 266): the Dhan contract note of 07-Oct-2026 showed a same-day CNC round trip is charged at
+# intraday rates anyway, so routing to MIS saves nothing on STT / brokerage / stamp; it only helps when a CNC exit would
+# otherwise be carried overnight (DP + delivery STT). Set "auto" to route same-day-exit entries to MIS.
+ENTRY_PRODUCT_MODE       = ((os.getenv("ENTRY_PRODUCT_MODE") or "").strip() or "cnc").lower()
 ENTRY_MIS_LAST_TIME_IST  = ((os.getenv("ENTRY_MIS_LAST_TIME_IST") or "").strip() or "14:45")
 # After a position in a symbol was fully closed today, a fresh BUY of the same symbol the same day is blocked
 # (churn pays a second round of STT/stamp + exchange charges). Stop-loss exits are unaffected. false = old behaviour.

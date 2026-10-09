@@ -91,7 +91,10 @@ def test_report_counts_the_sell_side_charges(db):
     rep = cl.report(db, "REAL")
     comp = rep["total"]["components"]
     assert rep["orders"] == 2
-    assert comp["stt"] == pytest.approx((1000 + 1100) * 0.001, abs=0.01)   # delivery STT, BUY and SELL (group 262)
+    # group 266: a CNC buy sold the SAME day is charged by Dhan as an intraday round trip (verified on the 07-Oct-2026
+    # contract note): STT 0.025 % on the sell only, 0.03 % brokerage on both legs. Was delivery STT on both legs.
+    assert comp["stt"] == pytest.approx(1100 * 0.00025, abs=0.01)
+    assert comp["brokerage"] == pytest.approx((1000 + 1100) * 0.0003, abs=0.01)
     assert comp["dp"] == 0.0                                       # bought and sold the same day: nothing left demat
 
 

@@ -26,6 +26,10 @@ full split incl. DP, trade_pnl_daily = per day gross / charges / net). persist()
 computed (restating a stored row in place when the rate card or a repaired fill changes it), persist_daily() refreshes
 the day's charges and, for today, the gross from the account row. Both are best-effort and never raise;
 sync_throttled() runs them from the fast reconcile tick so storage never waits for a dashboard read.
+
+2026-10-09 (group 266): a CNC buy sold the same day is priced at INTRADAY rates (see build_rows) - verified against the Dhan
+contract note of 07-Oct-2026. Before this every same-day CNC round trip was priced as delivery (brokerage 0, STT 0.1 %
+on both legs), which overstated STT and missed the 0.03 % brokerage Dhan really charges.
 """
 from __future__ import annotations
 
@@ -84,20 +88,41 @@ def order_charges(value: float, side: str, product: Optional[str]) -> dict:
     return {"brokerage": brokerage, "stt": stt, "exchange": exchange, "sebi": sebi, "gst": gst, "stamp": stamp}
 
 
+def _blend(value: float, side: str, intraday_frac: float) -> dict:
+    """Charges of one CNC order of which `intraday_frac` (0..1) of the quantity was squared off the same day (Dhan charges
+    that part at INTRADAY rates: 0.03 % brokerage, STT 0.025 % on the sell, intraday stamp) and the rest as delivery."""
+    f = max(0.0, min(1.0, intraday_frac))
+    if f <= 0.0:
+        return order_charges(value, side, "CNC")
+    if f >= 1.0:
+        return order_charges(value, side, "INTRADAY")
+    a = order_charges(value, side, "INTRADAY")
+    b = order_charges(value, side, "CNC")
+    return {k: f * a[k] + (1.0 - f) * b[k] for k in a}
+
+
 def build_rows(orders: Iterable[dict]) -> list:
     """orders: dicts with id, symbol, side, product_type, value, created_at(aware), day (+ optional qty).
     Returns one row per order with its product resolved and charges computed. Input order does not matter (sorted
     by created_at here).
 
+    group 266 (2026-10-09, verified on Dhan contract note 07-Oct-2026): a CNC BUY that is SOLD THE SAME DAY is charged by
+    Dhan as an INTRADAY round trip - brokerage 0.03 % on both legs, STT 0.025 % on the sell only, intraday stamp duty -
+    not as delivery (the note's brokerage of Rs 19.93 and STT of Rs 17.00 only reconcile that way). So the shares of a
+    delivery BUY that a later SELL of the same symbol closes the same day (FIFO) are priced at intraday rates on BOTH
+    orders; any remainder is priced as delivery. A SELL of shares bought on an earlier day stays a delivery sale.
+
     DP (delivery SELL only, once per scrip per day): skipped when the sell only closes shares BOUGHT THE SAME DAY (they
     never reached demat, so nothing is debited). With no qty known the DP is charged, as before.
     An executed SELL whose value is unknown (value 0 but qty known - a legacy market sell with neither a fill row nor
-    a broker notional) is priced at the last earlier BUY's unit price of that symbol and flagged ``estimated``."""
+    a broker notional) is priced at the last earlier BUY's unit price of that symbol and flagged ``estimated``.
+    With no qty known the order is priced as a plain delivery order (the old behaviour)."""
     last_buy_product: dict = {}
     last_buy_unit: dict = {}
-    bought_today: dict = {}      # (symbol, day) -> delivery qty bought that day and not yet sold
+    # (symbol, day) -> FIFO list of [row_index, unmatched delivery qty] of BUY orders not yet closed by a same-day sell
+    open_buys: dict = defaultdict(list)
     dp_charged: set = set()
-    out = []
+    pend: list = []                 # one dict per priced order, charges filled in the second pass
     for o in sorted(orders, key=lambda x: (x["created_at"], x["id"])):
         side = (o.get("side") or "").upper()
         qty = float(o.get("qty") or 0)
@@ -109,8 +134,6 @@ def build_rows(orders: Iterable[dict]) -> list:
             last_buy_product[o["symbol"]] = product
             if value > 0 and qty > 0:
                 last_buy_unit[o["symbol"]] = value / qty
-            if product in _DELIVERY:
-                bought_today[key] = bought_today.get(key, 0.0) + qty
         else:
             product = (o.get("product_type") or last_buy_product.get(o["symbol"]) or "CNC").upper()
             if value <= 0 and qty > 0 and last_buy_unit.get(o["symbol"]):
@@ -118,24 +141,46 @@ def build_rows(orders: Iterable[dict]) -> list:
                 estimated = True
         if value <= 0:
             continue
-        c = order_charges(value, side, product)
-        dp = 0.0
+        row = {"o": o, "side": side, "product": product, "value": value, "qty": qty, "key": key,
+               "estimated": estimated, "matched": 0.0, "dp": 0.0}
+        idx = len(pend)
+        pend.append(row)
+        if side == "BUY" and product in _DELIVERY and qty > 0:
+            open_buys[key].append([idx, qty])
         if side == "SELL" and product in _DELIVERY:
             from_demat = qty
             if qty > 0:
-                same_day = min(qty, bought_today.get(key, 0.0))
-                bought_today[key] = bought_today.get(key, 0.0) - same_day
-                from_demat = qty - same_day
+                need = qty
+                for slot in open_buys[key]:                      # FIFO: match against same-day delivery buys
+                    if need <= 0:
+                        break
+                    take = min(need, slot[1])
+                    if take > 0:
+                        slot[1] -= take
+                        pend[slot[0]]["matched"] += take
+                        row["matched"] += take
+                        need -= take
+                from_demat = qty - row["matched"]
             else:
-                from_demat = 1.0                       # qty unknown: assume it left demat
+                from_demat = 1.0                                   # qty unknown: assume it left demat
             if from_demat > 0 and key not in dp_charged:
-                dp_charged.add(key)                    # DP billed once per scrip per day
-                dp = dp_charge_rs()
-        c["dp"] = dp
+                dp_charged.add(key)                                # DP billed once per scrip per day
+                row["dp"] = dp_charge_rs()
+    out = []
+    for r in pend:
+        o = r["o"]
+        if r["product"] in _DELIVERY:
+            frac = (r["matched"] / r["qty"]) if r["qty"] > 0 else 0.0
+            c = _blend(r["value"], r["side"], frac)
+        else:
+            frac = 1.0
+            c = order_charges(r["value"], r["side"], r["product"])
+        c["dp"] = r["dp"]
         out.append({
-            "id": o["id"], "symbol": o["symbol"], "side": side, "product": product, "day": o["day"],
-            "value": value, "qty": qty, "brokerage": c["brokerage"], "charges": c,
-            "all_charges": sum(c.values()), "estimated": estimated,
+            "id": o["id"], "symbol": o["symbol"], "side": r["side"], "product": r["product"], "day": o["day"],
+            "value": r["value"], "qty": r["qty"], "brokerage": c["brokerage"], "charges": c,
+            "all_charges": sum(c.values()), "estimated": r["estimated"],
+            "same_day_frac": round(frac, 4),
         })
     return out
 

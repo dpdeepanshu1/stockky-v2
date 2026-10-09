@@ -20,6 +20,11 @@ MORNING = datetime(2026, 10, 9, 5, 0, tzinfo=timezone.utc)      # 10:30 IST
 LATE = datetime(2026, 10, 9, 9, 40, tzinfo=timezone.utc)        # 15:10 IST
 
 
+@pytest.fixture(autouse=True)
+def _auto_mode(monkeypatch):
+    monkeypatch.setattr(config, "ENTRY_PRODUCT_MODE", "auto")           # the shipped default is "cnc" since group 266
+
+
 @pytest.fixture()
 def db():
     eng = create_engine("sqlite:///:memory:")
@@ -50,25 +55,37 @@ def test_mode_cnc_restores_old_behaviour(db, monkeypatch):
     assert ep.choose_entry_product(db, "REAL", "ABC", "VOLUME_SHOCK", MORNING)[0] == "CNC"
 
 
+def test_shipped_default_is_cnc():
+    import importlib
+    os.environ.pop("ENTRY_PRODUCT_MODE", None)
+    assert importlib.reload(config).ENTRY_PRODUCT_MODE == "cnc"
+
+
 def test_choose_never_raises(db, monkeypatch):
     monkeypatch.setattr(config, "ENTRY_MIS_LAST_TIME_IST", "garbage")
     assert ep.choose_entry_product(db, "REAL", "ABC", "VOLUME_SHOCK", MORNING)[0] in ("CNC", "INTRADAY")
     assert ep.choose_entry_product(None, "REAL", "ABC", "VOLUME_SHOCK", MORNING)[0] in ("CNC", "INTRADAY")
 
 
-def test_mis_round_trip_is_much_cheaper_than_cnc():
+def test_same_day_cnc_round_trip_costs_the_same_as_mis():
+    # group 266: Dhan charges a CNC buy sold the same day as intraday, so the estimate must not treat it as delivery
     mis = cost_model.estimate_round_trip_cost(100.0, 30, 101.0, product_type="INTRADAY")
-    cnc = cost_model.estimate_round_trip_cost(100.0, 30, 101.0, product_type="CNC")
-    assert mis.total < cnc.total and mis.dp_charge == 0.0
-    assert mis.brokerage > 0 and cnc.brokerage == config.BROKERAGE_PER_ORDER * 2      # MIS brokerage now visible to the gate
+    cnc_same_day = cost_model.estimate_round_trip_cost(100.0, 30, 101.0, product_type="CNC")
+    assert cnc_same_day.total == mis.total and mis.dp_charge == 0.0 and mis.brokerage > 0
+
+
+def test_carried_cnc_sale_is_much_dearer_than_a_same_day_round_trip():
+    same_day = cost_model.estimate_round_trip_cost(100.0, 30, 101.0, product_type="CNC", is_delivery_sell=False)
+    carried = cost_model.estimate_round_trip_cost(100.0, 30, 101.0, product_type="CNC", is_delivery_sell=True)
+    assert carried.total > same_day.total + 10 and carried.dp_charge > 0 and carried.brokerage == 0.0
 
 
 def test_gate_includes_dp_only_when_asked():
     base = cost_model.evaluate_entry_cost_gate(100.0, 30, 1.0, product_type="CNC")
     dp = cost_model.evaluate_entry_cost_gate(100.0, 30, 1.0, product_type="CNC", include_dp=True)
-    assert dp.estimated_cost == pytest.approx(base.estimated_cost + config.DP_CHARGE_FLAT * (1 + config.GST_PCT / 100), abs=0.02)
+    assert dp.estimated_cost > base.estimated_cost + config.DP_CHARGE_FLAT * (1 + config.GST_PCT / 100) - 0.02
     mis = cost_model.evaluate_entry_cost_gate(100.0, 30, 1.0, product_type="INTRADAY", include_dp=True)
-    assert mis.estimated_cost < base.estimated_cost                        # MIS never carries DP
+    assert mis.estimated_cost == base.estimated_cost                       # MIS never carries DP
 
 
 def _closed(db, symbol, when):

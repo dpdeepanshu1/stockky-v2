@@ -55,22 +55,26 @@ def test_report_is_read_only_by_default(db):
 def test_persist_stores_one_row_per_order_with_full_split(db):
     buy = _filled(db, "BUY", 10, 100.0)
     sell = _filled(db, "SELL", 10, 110.0, minutes=5)
+    held = _filled(db, "BUY", 10, 100.0, symbol="HELD", minutes=6)      # never sold: stays a delivery buy
     rep = cl.report(db, "REAL", 14, True, -50.0)
     rows = {r.order_id: r for r in db.query(models.TradeChargesLedger).all()}
-    assert set(rows) == {buy.id, sell.id}
+    assert set(rows) == {buy.id, sell.id, held.id}
     b = rows[buy.id]
     assert b.mode == "REAL" and b.side == "BUY" and b.product == "CNC" and b.order_value == pytest.approx(1000.0)
-    assert b.stt == pytest.approx(1000 * config.STT_DELIVERY_PCT_PER_LEG / 100, abs=1e-3)   # delivery STT on the buy
+    # bought AND sold the same day -> Dhan charges it as intraday (group 266): no STT on the buy, 0.03 % brokerage
+    assert b.stt == 0.0 and b.brokerage == pytest.approx(1000 * config.CHARGES_BROKERAGE_PCT / 100, abs=1e-3)
     assert b.stamp > 0 and b.dp == 0.0
     assert b.total_charges == pytest.approx(b.brokerage + b.stt + b.exchange + b.sebi + b.gst + b.stamp + b.dp, abs=1e-3)
-    s = rows[sell.id]
-    assert s.stamp == 0.0 and s.stt > 0
+    sl = rows[sell.id]
+    assert sl.stamp == 0.0 and sl.stt == pytest.approx(1100 * config.STT_INTRADAY_SELL_PCT / 100, abs=1e-3)
+    h = rows[held.id]                                                    # unmatched buy keeps delivery STT
+    assert h.stt == pytest.approx(1000 * config.STT_DELIVERY_PCT_PER_LEG / 100, abs=1e-3) and h.brokerage == 0.0
     # what is stored adds up to what the report shows
     assert sum(r.total_charges for r in rows.values()) == pytest.approx(rep["all_charges_total"], abs=0.01)
 
 
 def test_persist_is_idempotent_and_restates_when_the_rate_card_changes(db, monkeypatch):
-    _filled(db, "BUY", 10, 100.0)
+    _filled(db, "BUY", 10, 100.0)                                     # never sold -> delivery buy
     cl.report(db, "REAL", 14, True)
     first = db.query(models.TradeChargesLedger).one().total_charges
     assert cl.persist_rows(db, "REAL", []) == 0

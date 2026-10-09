@@ -1752,6 +1752,21 @@ def order_events(order_id: str):
     return {"latest": ev, "history": order_ws.store.history(order_id)}
 
 
+@app.get("/orders/ws-compare")
+def order_ws_compare(db: Session = Depends(get_db)):
+    """group288: read-only. Compares the pushed order events with today's Dhan order book (status, side, filled qty,
+    average price, symbol) and says whether RECONCILE_USE_ORDER_EVENTS=1 is reasonable. Changes nothing."""
+    from execution import order_ws
+    if not config.DHAN_ORDER_WS_ENABLED or _order_ws_listener is None:
+        return {"available": False, "reason": "DHAN_ORDER_WS_ENABLED is not 1 (listener not running)"}
+    try:
+        book = dhan_client.get_order_list(db) or []
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "reason": f"order book fetch failed: {type(e).__name__}: {str(e)[:120]}"}
+    return {"available": True, "connected": bool(_order_ws_listener.state.get("connected")), "book_orders": len(book),
+            **order_ws.compare_with_order_book(book)}
+
+
 @app.get("/trades/report")
 def trades_report(days: int = 1, db: Session = Depends(get_db)):
     """Read-only (group 280, plan Phase B): expectancy and win rate by exit reason, exit hour, entry hour and scan

@@ -531,16 +531,22 @@ def attempt_entry(
     raw_qty = int(position_value / candidate.current_ltp)
     quantity = max(1, raw_qty)
     # group283 (plan C3 size-down): do not let the order eat its own touch (off unless ENTRY_BOOK_MAX_SHARE_PCT > 0).
-    _cap_qty = depth_gate.max_qty_from_book(candidate.symbol, candidate.current_ltp)
-    if _cap_qty is not None and quantity > _cap_qty:
-        _new_value = _cap_qty * candidate.current_ltp
-        logger.info("position-stocks entry: %s sized down %d -> %d shares (best-5 book cap)",
-                    candidate.symbol, quantity, _cap_qty)
-        if _new_value < position_value:
-            # hand the unused part of the reservation back so the pool does not sit on idle capital
-            ledger.release_capital(db, position_value=position_value - _new_value, realized_pnl=0.0)
-            position_value = _new_value
-        quantity = _cap_qty
+    # group286: then the same against Dhan's 20-level ask book within ENTRY_DEPTH20_SLIP_PCT of the touch (off unless
+    # ENTRY_DEPTH20_SLIP_PCT > 0). The second cap sees the quantity left after the first. Both fail open.
+    for _cap_fn, _cap_why in (
+        (lambda: depth_gate.max_qty_from_book(candidate.symbol, candidate.current_ltp), "best-5 book cap"),
+        (lambda: depth_gate.max_qty_from_depth20(candidate.symbol, quantity), "20-level book cap"),
+    ):
+        _cap_qty = _cap_fn()
+        if _cap_qty is not None and quantity > _cap_qty:
+            _new_value = _cap_qty * candidate.current_ltp
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (%s)",
+                        candidate.symbol, quantity, _cap_qty, _cap_why)
+            if _new_value < position_value:
+                # hand the unused part of the reservation back so the pool does not sit on idle capital
+                ledger.release_capital(db, position_value=position_value - _new_value, realized_pnl=0.0)
+                position_value = _new_value
+            quantity = _cap_qty
 
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:

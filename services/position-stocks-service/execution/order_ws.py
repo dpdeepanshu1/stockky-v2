@@ -113,6 +113,24 @@ class OrderEventStore:
             cur = self._orders.get(str(order_id))
             return list(cur["history"]) if cur else []
 
+    def find_entry_fill(self, symbol: str, qty: int, since_ts: float) -> Optional[dict]:
+        """group287: the most recent BUY event for `symbol` that is fully TRADED for exactly `qty` shares and was
+        received at or after `since_ts` (epoch seconds). Used only as a cross-check by reconcile. None when absent."""
+        want = (symbol or "").strip().upper().replace("-EQ", "")
+        best = None
+        with self._lock:
+            for v in self._orders.values():
+                ev = v["event"]
+                if (ev.get("symbol") or "").replace("-EQ", "") != want or ev.get("txn") != "B":
+                    continue
+                if ev.get("status") != "TRADED" or (ev.get("traded_qty") or 0) != int(qty):
+                    continue
+                if (ev.get("received_at") or 0) < since_ts:
+                    continue
+                if best is None or ev["received_at"] > best["received_at"]:
+                    best = ev
+        return dict(best) if best else None
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._orders)
@@ -123,6 +141,65 @@ class OrderEventStore:
 
 
 store = OrderEventStore()
+
+
+def _book_num(v) -> Optional[float]:
+    return _f(v)
+
+
+def compare_with_order_book(book_rows: list, event_store: Optional[OrderEventStore] = None,
+                            min_orders: int = 3, price_tol: float = 0.011) -> dict:
+    """group288: read-only check of the pushed order events against Dhan's order book (GET /orders), by order id.
+    Compares status, side, filled quantity, average price and (when the book row has one) the symbol.
+    `safe_to_enable` is True only when at least `min_orders` book orders had a WebSocket event and every one matched.
+    Orders the WebSocket never saw are counted (`missing_in_ws`) but are not mismatches (the listener may have
+    connected after they were placed). Never raises."""
+    st = event_store if event_store is not None else store
+    compared, matched, mismatched, missing = 0, 0, [], 0
+    try:
+        for row in book_rows or []:
+            oid = str(row.get("orderId") or row.get("order_id") or "").strip()
+            if not oid:
+                continue
+            ev = st.latest(oid)
+            if ev is None:
+                missing += 1
+                continue
+            compared += 1
+            diffs = {}
+            b_status = str(row.get("orderStatus") or "").strip().upper().replace(" ", "_")
+            if b_status and ev.get("status") != b_status:
+                diffs["status"] = {"book": b_status, "ws": ev.get("status")}
+            b_side = str(row.get("transactionType") or "").strip().upper()[:1]
+            if b_side and ev.get("txn") != b_side:
+                diffs["side"] = {"book": b_side, "ws": ev.get("txn")}
+            b_qty = _book_num(row.get("filledQty") if row.get("filledQty") is not None else row.get("tradedQuantity"))
+            if b_qty is not None and (ev.get("traded_qty") or 0) != int(b_qty):
+                diffs["traded_qty"] = {"book": int(b_qty), "ws": ev.get("traded_qty")}
+            b_px = _book_num(row.get("averageTradedPrice"))
+            if b_px and b_qty:
+                w_px = ev.get("avg_traded_price") or ev.get("traded_price")
+                if w_px is None or abs(w_px - b_px) > price_tol:
+                    diffs["avg_price"] = {"book": b_px, "ws": w_px}
+            b_sym = str(row.get("tradingSymbol") or "").strip().upper().replace("-EQ", "")
+            if b_sym and (ev.get("symbol") or "").replace("-EQ", "") != b_sym:
+                diffs["symbol"] = {"book": b_sym, "ws": ev.get("symbol")}
+            if diffs:
+                mismatched.append({"order_id": oid, "diffs": diffs})
+            else:
+                matched += 1
+    except Exception as e:  # noqa: BLE001
+        return {"compared": compared, "matched": matched, "mismatched": mismatched, "missing_in_ws": missing,
+                "safe_to_enable": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+    ok = compared >= min_orders and not mismatched
+    if ok:
+        verdict = "events match the order book: RECONCILE_USE_ORDER_EVENTS=1 is reasonable"
+    elif mismatched:
+        verdict = "events DISAGREE with the order book: keep RECONCILE_USE_ORDER_EVENTS=0 and send the mismatches"
+    else:
+        verdict = f"not enough overlap yet ({compared} compared, need {min_orders}): trade or wait, then call again"
+    return {"compared": compared, "matched": matched, "mismatched": mismatched, "missing_in_ws": missing,
+            "min_orders": min_orders, "safe_to_enable": ok, "verdict": verdict}
 
 
 def login_message(client_id: str, token: str) -> str:

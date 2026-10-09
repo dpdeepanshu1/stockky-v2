@@ -629,9 +629,20 @@ ENTRY_DEPTH_TIMEOUT_S = _get_float("ENTRY_DEPTH_TIMEOUT_S", 2.0)
 # (book_value_5 / 2), so a small cap's order does not eat its own touch. 0 = off (default). Unknown depth never shrinks.
 # Needs ENTRY_DEPTH_GATE on (it reuses the same market-data /quote read).
 ENTRY_BOOK_MAX_SHARE_PCT = _get_float("ENTRY_BOOK_MAX_SHARE_PCT", 0.0)
+# group286 (plan C3 size-down, 20 levels): cap an entry at ENTRY_DEPTH20_MAX_SHARE_PCT % of the ask-side shares Dhan's 20-level
+# book shows within ENTRY_DEPTH20_SLIP_PCT % of the best ask. 0 = off (default). Needs market-data DHAN_DEPTH20_ENABLED=1 and
+# ENTRY_DEPTH_GATE on; when market-data has no 20-level book yet (warming, stale, off) the order is not shrunk.
+# ENTRY_DEPTH20_WAIT_S = how long the first ask for a symbol waits for its book (adds up to that to the entry).
+ENTRY_DEPTH20_SLIP_PCT = _get_float("ENTRY_DEPTH20_SLIP_PCT", 0.0)
+ENTRY_DEPTH20_MAX_SHARE_PCT = _get_float("ENTRY_DEPTH20_MAX_SHARE_PCT", 50.0)
+ENTRY_DEPTH20_WAIT_S = _get_float("ENTRY_DEPTH20_WAIT_S", 1.0)
 # group280 (plan Phase C1): read-only Dhan order-update WebSocket (execution/order_ws.py). Off by default; nothing in the
 # trading path depends on it. See GET /orders/ws-status.
 DHAN_ORDER_WS_ENABLED = _get_bool("DHAN_ORDER_WS_ENABLED", False)
+# group287: when the order-book dead-parent check proves nothing but the order-update WebSocket saw the entry BUY fully
+# TRADED, keep the row OPEN instead of booking ERROR. Default 0 (the disagreement is only logged as WS_CROSSCHECK) until the
+# event shapes are confirmed live. Needs DHAN_ORDER_WS_ENABLED=1.
+RECONCILE_USE_ORDER_EVENTS = _get_bool("RECONCILE_USE_ORDER_EVENTS", False)
 # Reject stocks already up more than this % on the day vs the exchange's
 # previous close (mode-3 feed). 0 disables. Fails open when no previous close.
 MAX_DAY_GAIN_PCT = _get_float("MAX_DAY_GAIN_PCT", 7.0)

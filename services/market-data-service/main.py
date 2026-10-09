@@ -868,6 +868,21 @@ def dhan_status():
         return {"enabled": False, "error": f"{type(e).__name__}"}
 
 
+@app.get("/depth/{symbol}")
+def depth20_book(symbol: str, qty: Optional[float] = None, slip_pct: Optional[float] = None,
+                 wait_s: Optional[float] = None):
+    """group286: Dhan 20-level book of one NSE equity symbol (off unless DHAN_DEPTH20_ENABLED=1). The first ask for a
+    symbol subscribes to it (waits up to DHAN_DEPTH20_WAIT_S for the book); it is dropped again after
+    DHAN_DEPTH20_TTL_S without being asked for. `qty` adds what buying / selling that many shares would cost (average
+    price and impact vs the touch), `slip_pct` adds how many shares sit within that % of the touch. Always HTTP 200
+    with `available`; when false, `reason` says why (callers carry on without it)."""
+    try:
+        import dhan_data
+        return _sanitize_for_json(dhan_data.depth20.get(symbol, qty=qty, slip_pct=slip_pct, wait_s=wait_s))
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": (symbol or "").upper(), "available": False, "reason": f"error:{type(e).__name__}"}
+
+
 @app.get("/internal/data-sources")
 def data_sources_status():
     """group278: provider order, health of Dhan / AngelOne / yfinance and which one is serving right now, for

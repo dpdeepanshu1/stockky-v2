@@ -194,6 +194,42 @@ def ws_max_instruments() -> int:
     return env_int("DHAN_WS_MAX_INSTRUMENTS", 4000, 1)
 
 
+# ---- 20-level depth websocket (group 286, opt-in) ------------------------------------------------------------------
+def depth20_enabled() -> bool:
+    """DHAN_DEPTH20_ENABLED (default OFF). On = GET /depth/{symbol} subscribes to Dhan's 20-level book on demand."""
+    return env_flag("DHAN_DEPTH20_ENABLED", False)
+
+
+def depth20_url() -> str:
+    return env_str("DHAN_DEPTH20_URL", "wss://depth-api-feed.dhan.co/twentydepth")
+
+
+def depth20_max_instruments() -> int:
+    """Symbols held at once (blank or non-numeric -> 50; floor 1; Dhan's own limit of 50 is applied on top)."""
+    return env_int("DHAN_DEPTH20_MAX_INSTRUMENTS", 50, 1)
+
+
+def depth20_ttl_s() -> float:
+    """A symbol nobody asked about for this long is unsubscribed (blank -> 120 s; floor 5)."""
+    return env_float("DHAN_DEPTH20_TTL_S", 120.0, 5.0)
+
+
+def depth20_wait_s() -> float:
+    """How long GET /depth waits for the first book of a newly watched symbol (blank -> 1.5 s; 0 = do not wait)."""
+    return env_float("DHAN_DEPTH20_WAIT_S", 1.5, 0.0)
+
+
+def depth20_stale_s() -> float:
+    """A book whose older side was last updated longer ago than this is reported stale, not available
+    (blank -> 30 s). A quiet small cap can legitimately sit unchanged for a while, so this is generous."""
+    return env_float("DHAN_DEPTH20_STALE_S", 30.0, 1.0)
+
+
+def depth20_idle_close_s() -> float:
+    """The websocket is closed after this long with nothing watched (blank -> 60 s; floor 5)."""
+    return env_float("DHAN_DEPTH20_IDLE_CLOSE_S", 60.0, 5.0)
+
+
 # ---- credentials ------------------------------------------------------------------------------------------------
 def creds_cache_s() -> float:
     return env_float("DHAN_CREDS_CACHE_S", 60.0, 1.0)

@@ -13,7 +13,8 @@ from __future__ import annotations
 import threading
 from typing import Callable, List
 
-from . import client, config, creds, history, live_poller, live_store, quotes, scrip_master, ws_feed  # noqa: F401
+from . import (client, config, creds, depth20, history, live_poller, live_store, quotes, scrip_master,  # noqa: F401
+               ws_feed)
 from .errors import (DhanApiError, DhanAuthError, DhanError, DhanNoDataError, DhanNotConfigured,  # noqa: F401
                      DhanRateLimitError, DhanSubscriptionError)
 
@@ -38,6 +39,7 @@ def start_background(get_universe: Callable[[], List[str]]) -> None:
     if config.live_poller_enabled():
         live_poller.start(get_universe)
     ws_feed.start(get_universe)
+    depth20.start()
 
 
 def status() -> dict:
@@ -54,4 +56,5 @@ def status() -> dict:
         "live_poller": live_poller.status(),
         "live_store": live_store.status(),
         "websocket": ws_feed.status(),
+        "depth20": depth20.status(),
     }

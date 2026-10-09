@@ -83,3 +83,39 @@ def max_qty_from_book(symbol: str, ltp: float) -> Optional[int]:
     except Exception as e:  # noqa: BLE001
         logger.debug("book size cap %s failed (no cap): %s", symbol, e)
         return None
+
+
+def max_qty_from_depth20(symbol: str, quantity: int) -> Optional[int]:
+    """group286 (plan C3 size-down, 20 levels): the most shares to buy so the order uses at most
+    ENTRY_DEPTH20_MAX_SHARE_PCT % of the ask-side shares Dhan's 20-level book shows within ENTRY_DEPTH20_SLIP_PCT %
+    of the best ask (market-data GET /depth/{symbol}). None = no cap: feature off (ENTRY_DEPTH20_SLIP_PCT = 0),
+    market-data answers `available: false` (depth20 off, warming, stale, unsupported symbol), a timeout, a bad body
+    or any error. Minimum answer 1. Never raises. The first ask for a symbol subscribes it and may wait up to
+    ENTRY_DEPTH20_WAIT_S for the first book."""
+    try:
+        slip = float(config.ENTRY_DEPTH20_SLIP_PCT or 0)
+        if not config.ENTRY_DEPTH_GATE or slip <= 0 or not quantity or quantity <= 0:
+            return None
+        share = float(config.ENTRY_DEPTH20_MAX_SHARE_PCT or 0)
+        if share <= 0:
+            return None
+        wait = max(0.0, float(config.ENTRY_DEPTH20_WAIT_S or 0))
+        import httpx
+        with httpx.Client(timeout=config.ENTRY_DEPTH_TIMEOUT_S + wait) as client:
+            r = client.get(f"{config.MARKET_DATA_URL}/depth/{symbol}",
+                           params={"qty": quantity, "slip_pct": slip, "wait_s": wait})
+        body = r.json() if r.status_code == 200 else None
+        if not isinstance(body, dict) or body.get("available") is not True:
+            return None
+        within = _num(body.get("buy_qty_within_slip"))
+        if within is None:
+            return None
+        cap = max(1, int(within * share / 100.0))
+        if cap < quantity:
+            logger.info("depth20 %s: %d ask shares within %.2f%% of the touch, buying %d would use %.0f%% of them "
+                        "(impact %s%%)", symbol, int(within), slip, quantity, quantity / within * 100.0 if within else 0,
+                        body.get("buy_impact_pct"))
+        return cap
+    except Exception as e:  # noqa: BLE001
+        logger.debug("depth20 size cap %s failed (no cap): %s", symbol, e)
+        return None

@@ -59,6 +59,8 @@ services:
       ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
       ORACLE_WALLET_DIR: /oracle_wallet
       TNS_ADMIN: /oracle_wallet
+      # group270: must equal real-trade-service's key, or the stored Dhan token cannot be decrypted for market data
+      DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
     restart: unless-stopped
@@ -416,6 +418,8 @@ services:
       # otherwise falls back to the dead api-gateway-puwd.onrender.com host.
       - API_GATEWAY_URL=http://api-gateway:8000
       - PORT=8006
+      # group 270: previous-day daily candles for the opening gate (screening/prev_day.py)
+      - MARKET_DATA_URL=http://market-data-service:8001
       # Inherits DATABASE_URL, ORACLE_DSN/USER/PASSWORD, DHAN_CREDENTIAL_ENC_KEY,
       # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env (same
       # mechanism market-data-service already relies on for its own ANGELONE_*

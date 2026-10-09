@@ -813,6 +813,39 @@ def bhavcopy_universe(min_price: float = 0, limit: int = 3000):
     return {"symbols": [], "session_date": None, "count": 0}
 
 
+def _dhan_live_universe() -> list:
+    """Symbols the Dhan live poller keeps warm: the same scan universe the AngelOne/Yahoo feeds follow."""
+    try:
+        u = list(_current_feed_universe or [])
+        if not u:
+            from surprise_premarket import default_universe_from_env
+            u = list(default_universe_from_env() or [])
+        return u
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@app.on_event("startup")
+async def _start_dhan_data():
+    """group270: load Dhan's scrip master (own thread), start the live poller and, if DHAN_WS_ENABLED=1, the websocket."""
+    try:
+        import dhan_data
+        dhan_data.start_background(_dhan_live_universe)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("dhan_data startup skipped: %s", e)
+
+
+@app.get("/internal/dhan-status")
+def dhan_status():
+    """Dhan data health: credentials (no secrets), scrip-master size, call counters, batcher, poller, shadow comparison,
+    websocket. First place to look when quotes or candles fall back to AngelOne/yfinance."""
+    try:
+        import dhan_data
+        return _sanitize_for_json(dhan_data.status())
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": f"{type(e).__name__}"}
+
+
 @app.get("/live-quote/{symbol}")
 def live_quote(symbol: str):
     """
@@ -2463,6 +2496,163 @@ def _closed_last_close_row(sym: str) -> Optional[dict]:
     return None
 
 
+# ══ group270: Dhan Data API stages ════════════════════════════════════════════════════════════════════════════
+# Provider order is env config (QUOTE_PROVIDER_ORDER / HISTORY_PROVIDER_ORDER, default "dhan,angelone,yfinance").
+# The Dhan stage sits FIRST, AFTER AngelOne, or AFTER yfinance in each waterfall; every failure inside it returns
+# None so the unchanged AngelOne / yfinance / NSE code below runs exactly as before. See dhan_data/ and
+# docs/GROUP270_DHAN_DATA_API.md. DHAN_DATA_ENABLED=0 removes the stage completely.
+def _dhan_quote_position() -> str:
+    try:
+        from dhan_data import config as _dc
+        return _dc.quote_position()
+    except Exception:  # noqa: BLE001
+        return "off"
+
+
+def _dhan_history_position() -> str:
+    try:
+        from dhan_data import config as _dc
+        return _dc.history_position()
+    except Exception:  # noqa: BLE001
+        return "off"
+
+
+def _dhan_base(sym: str) -> str:
+    s_ = (sym or "").strip().upper()
+    return s_ if s_.startswith("^") else s_.replace(".NS", "").replace(".BO", "").strip()
+
+
+def _dhan_quote_payload(base: str, row: dict) -> dict:
+    return {
+        "symbol": base, "name": base,
+        "price": row.get("price"), "cmp": row.get("price"),
+        "previous_close": row.get("previous_close"), "day_change_pct": row.get("day_change_pct"),
+        "day_high": row.get("day_high"), "day_low": row.get("day_low"),
+        "volume": row.get("volume"), "source": "dhan",
+        "fetched_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _dhan_quote_stage(sym: str, cache_key: str):
+    """Single-symbol Dhan quote through the shared one-call-per-second batcher. Returns a finished, cached quote dict
+    or None (not configured, paused, unknown symbol, timeout, any error). Never raises."""
+    try:
+        from dhan_data import quotes as _dq
+        row = _dq.get_quote(sym)
+        if not row or not row.get("price"):
+            return None
+        result = _sanitize_for_json(_pad_quote_response(sym, _dhan_quote_payload(_dhan_base(sym), row)))
+        result["source"] = "dhan"
+        _cache_set(cache_key, result, ttl=15)
+        _fallback_set(cache_key, result)
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.debug("dhan quote stage %s: %s", sym, e)
+        return None
+
+
+def _dhan_bulk_stage(tickers: list, symbol_map: dict, results: list) -> list:
+    """Bulk Dhan stage for /quotes/bulk: prices what it can in ONE shared Dhan call, appends the rows to `results`,
+    returns the tickers it could not price. Never raises (on any error every ticker is returned untouched)."""
+    if not tickers:
+        return tickers
+    try:
+        from dhan_data import quotes as _dq
+        bases = {t: _dhan_base(symbol_map.get(t, t)) for t in tickers}
+        got = _dq.get_quotes(list(bases.values()))
+        remaining = []
+        for t in tickers:
+            row = got.get(_dq.key_for(bases[t]))
+            if not row or not row.get("price"):
+                remaining.append(t)
+                continue
+            quote = _pad_quote_response(bases[t], _dhan_quote_payload(bases[t], row))
+            quote["source"] = "dhan"
+            try:
+                _cache_set(f"quote:{t}", quote, ttl=15)
+            except Exception:  # noqa: BLE001
+                pass
+            results.append(quote)
+        if len(remaining) < len(tickers):
+            logger.info("quotes/bulk: Dhan priced %d/%d symbols, %d left for the next provider",
+                        len(tickers) - len(remaining), len(tickers), len(remaining))
+        return remaining
+    except Exception as e:  # noqa: BLE001
+        logger.debug("quotes/bulk: Dhan stage failed (non-fatal): %s", e)
+        return tickers
+
+
+def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, days, force: bool,
+                          cache_key: str, start_date, end_date):
+    """Dhan candles for /history. Returns a finished (and cached) result dict or None. A short daily period is cut from
+    ONE cached 1y/1d Dhan fetch (same idea as the group231 AngelOne widening). Never raises."""
+    try:
+        import dhan_data
+        from dhan_data import history as _dh, scrip_master as _sm
+        iv = (interval or "").lower()
+        if not _dh.supports(iv) or not dhan_data.history_available():
+            return None
+        base = _dhan_base(sym)
+        if not base or " " in base or not _sm.ensure_loaded(block=False) or not _sm.security_id(base):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    flight = f"dhan|{sym}|{iv}"
+    entry = _history_flight_enter(flight)
+    held = entry[0].acquire(timeout=_HISTORY_FLIGHT_WAIT_S)
+    try:
+        from dhan_data.errors import DhanError, DhanNoDataError
+        if not force:       # a concurrent request may have filled the cache while this one waited
+            _c = _cache_get(cache_key)
+            if _c:
+                return _c
+            _d = _history_from_longer_cache(sym, period, interval, days)
+            if _d:
+                return _d
+        today = _dh.today_ist()
+        end = today + timedelta(days=1)
+        try:
+            if (iv == "1d" and days is None and period in _HISTORY_WIDEN_PERIODS and _history_widen_on()
+                    and MAX_HISTORY_PERIOD in ("1y", "2y", "5y")):
+                candles = _dh.fetch_candles(base, "1d", today - timedelta(days=372), end)
+                if candles:
+                    full = {"symbol": sym, "requested": (symbol or "").strip(), "period": "1y", "interval": interval,
+                            "candles": candles[-MAX_HISTORY_ROWS:], "source": "dhan"}
+                    _history_store(f"history:{sym}:1y:{interval}:", full, _history_ttl(interval))
+                    dhan_data.client.note_success()
+                    _sl = _history_slice(full, period, "1y")
+                    if _sl:
+                        return _sl
+            if start_date is not None:
+                frm, to = start_date, end_date
+            else:
+                nd = _HISTORY_PERIOD_DAYS.get(period, 180)
+                if iv not in ("1d", "1wk"):
+                    nd = min(nd, dhan_data.config.hourly_max_days())
+                frm, to = today - timedelta(days=nd), end
+            candles = _dh.fetch_candles(base, iv, frm, to)
+        except DhanNoDataError:
+            return None
+        except DhanError as e:
+            dhan_data.client.note_failure(e)
+            logger.debug("dhan history %s %s/%s: %s", symbol, period, interval, e)
+            return None
+        dhan_data.client.note_success()
+        if not candles:
+            return None
+        if len(candles) > MAX_HISTORY_ROWS:
+            candles = candles[-MAX_HISTORY_ROWS:]
+        result = {"symbol": sym, "requested": (symbol or "").strip(), "period": period, "interval": interval,
+                  "candles": candles, "source": "dhan"}
+        _history_store(cache_key, result, _history_ttl(interval))
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.debug("dhan history stage failed for %s: %s", symbol, e)
+        return None
+    finally:
+        _history_flight_exit(flight, entry, held)
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161
@@ -2513,6 +2703,15 @@ def _get_quote_inner(symbol: str):
         )
 
     sym = normalize_symbol(symbol)
+
+    # group270: Dhan first (QUOTE_PROVIDER_ORDER). Indices are answered even when the market is closed; equities fall to
+    # the closed-market last-close handling below when it is closed, as before.
+    _dpos = _dhan_quote_position()
+    _dh_is_index = str(sym).startswith("^") or str(sym).upper().startswith("NIFTY")
+    if _dpos == "first" and (_dh_is_index or not _quote_market_closed()):
+        _dq_first = _dhan_quote_stage(sym, f"quote:{sym}")
+        if _dq_first:
+            return _dq_first
 
     try:
         import angelone_ws_feed
@@ -2588,6 +2787,12 @@ def _get_quote_inner(symbol: str):
         _fallback_set(cache_key, result)
         return result
 
+    # group270: Dhan as the second provider (angelone,dhan,...): asked when AngelOne had nothing / is cooling.
+    if _dpos == "after_angelone":
+        _dq_mid = _dhan_quote_stage(sym, cache_key)
+        if _dq_mid:
+            return _dq_mid
+
     # group256: AngelOne's quote cooldown is running and nobody holds this symbol -> a recent cached price, else a quick
     # "no price" (never negative-cached), instead of the Yahoo path that saturates under the burst.
     try:
@@ -2656,6 +2861,12 @@ def _get_quote_inner(symbol: str):
             return result
     except Exception as e:
         logger.debug("yahoo info fallback %s: %s", sym, e)
+
+    # group270: Dhan listed after yfinance (angelone,yfinance,dhan): only reached when both Yahoo stages found nothing.
+    if _dpos == "after_yfinance":
+        _dq_last = _dhan_quote_stage(sym, cache_key)
+        if _dq_last:
+            return _dq_last
 
     # ── Short-circuit waterfall (only when Yahoo failed AND not cooling) ──
     # Skip paid APIs for pure index symbols; skip all when soft cache can serve.
@@ -3102,6 +3313,10 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 _left.append(mapped)
         still_needed = _left
 
+    if still_needed and _dhan_quote_position() == "first":
+        # group270: ONE shared Dhan call prices what it can; the rest continues through the unchanged live-feed/AngelOne/yfinance code.
+        still_needed = _dhan_bulk_stage(still_needed, symbol_map, results)
+
     if still_needed:
         live_hits: dict = {}
         try:
@@ -3255,6 +3470,10 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 )
         except Exception as _ao_err:
             logger.debug("quotes/bulk: AngelOne REST block failed (non-fatal): %s", _ao_err)
+
+    if yf_tickers and _dhan_quote_position() in ("after_angelone", "after_yfinance"):
+        # group270: Dhan after AngelOne (also used for "after_yfinance": in /quotes/bulk it sits before the final yf.download).
+        yf_tickers = _dhan_bulk_stage(yf_tickers, symbol_map, results)
 
     if yf_tickers and _quote_preopen():
         # group244: pre-open, what AngelOne could not price has no live price: answer with the last close and keep
@@ -4032,6 +4251,13 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
                 detail=f"No history found for {symbol} (cached no-data result, retries in <=1h)",
             )
 
+    # group270: Dhan first (HISTORY_PROVIDER_ORDER). Any failure returns None and the unchanged path below runs.
+    _dh_hpos = _dhan_history_position()
+    if _dh_hpos == "first":
+        _dh_res = _dhan_history_attempt(symbol, sym, period, interval, days, force, cache_key, start_date, end_date)
+        if _dh_res:
+            return _dh_res
+
     # group230: while the AngelOne candle cooldown runs, a symbol with a recent last-good daily series is answered
     # from it (flagged stale) instead of going to yfinance, which is what saturates and times out at the open.
     if not force and _history_candle_cooling():
@@ -4061,6 +4287,11 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
         hist_ttl = _history_ttl(interval)
         _history_store(cache_key, result, hist_ttl)
         return result
+
+    if _dh_hpos == "after_angelone":
+        _dh_res = _dhan_history_attempt(symbol, sym, period, interval, days, force, cache_key, start_date, end_date)
+        if _dh_res:
+            return _dh_res
 
     last_err = None
     for cand in candidates:
@@ -4135,6 +4366,11 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
             last_err = str(e)
             logger.warning("History candidate %s failed for %s: %s", cand, symbol, e)
             continue
+
+    if _dh_hpos == "after_yfinance":
+        _dh_res = _dhan_history_attempt(symbol, sym, period, interval, days, force, cache_key, start_date, end_date)
+        if _dh_res:
+            return _dh_res
 
     # All yfinance candidates failed — try NSE historical before giving up
     # (round 2 of "AngelOne everywhere": Angel -> yfinance -> NSE tier).

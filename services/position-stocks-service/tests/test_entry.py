@@ -1111,3 +1111,76 @@ class TestCostGate:
         monkeypatch.setattr(config, "BROKERAGE_PER_ORDER", 0.0)
         assert entry.attempt_entry(db, cand("ABC", ltp=500.0)) is not None
 
+
+
+# ── group 268: opening gate wiring in attempt_entry ──────────────────────────
+class TestOpeningGateWiring:
+    def test_opening_gate_reject_skips_cleanly_and_releases_the_lock(self, env, monkeypatch):
+        from screening import opening_gate
+        db, b, _ = env
+        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: "OPENING_GATE:GAP_UP:+4.00% > +3.00%")
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "OPENING_GATE:GAP_UP")
+
+    def test_entered_log_row_carries_the_entry_features(self, env, monkeypatch):
+        from screening import opening_gate
+        db, b, _ = env
+        b.stop_pct = 2.0
+        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
+        monkeypatch.setattr(opening_gate, "entry_features", lambda sym, ltp, now=None: " gap=+0.50% range_pos=0.82")
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is not None
+        log = last_log(db)
+        assert log.decision == "ENTERED" and "gap=+0.50% range_pos=0.82" in log.reason
+
+
+class TestOpeningShadowWiring:
+    def _shadow(self, monkeypatch, active=True):
+        from screening import opening_gate
+        opening_gate.reset_shadow()
+        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
+        monkeypatch.setattr(opening_gate, "shadow_active", lambda now=None: active)
+        monkeypatch.setattr(opening_gate, "entry_features", lambda sym, ltp, now=None: " gap=+0.50%")
+
+    def test_shadow_logs_would_enter_once_and_places_no_order(self, env, monkeypatch):
+        db, b, _ = env
+        self._shadow(monkeypatch)
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "OPENING_SHADOW:WOULD_ENTER ltp=500.00 gap=+0.50%")
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None           # second scan: no second row
+        assert db.query(models.ScalpCandidateLog).filter(models.ScalpCandidateLog.reason.like("OPENING_SHADOW%")).count() == 1
+
+    def test_shadow_row_carries_the_stop_and_target_levels(self, env, monkeypatch):
+        db, b, _ = env
+        b.stop_pct = 2.0
+        self._shadow(monkeypatch)
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        log = last_log(db)
+        assert log.reason.startswith("OPENING_SHADOW:WOULD_ENTER ltp=500.00 gap=+0.50%")
+        assert " stop=" in log.reason and "(2.00%)" in log.reason and " target=" in log.reason and "(1.00%)" in log.reason
+
+    def test_shadow_off_enters_normally(self, env, monkeypatch):
+        db, b, _ = env
+        b.stop_pct = 2.0
+        self._shadow(monkeypatch, active=False)
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is not None
+
+
+class TestOpeningStopAtrWiring:
+    def test_tight_stop_is_skipped_cleanly_and_releases_the_lock(self, env, monkeypatch):
+        from screening import opening_gate
+        db, b, _ = env
+        b.stop_pct = 0.5
+        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
+        monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: "OPENING_GATE:STOP_TOO_TIGHT:test")
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "OPENING_GATE:STOP_TOO_TIGHT")
+
+    def test_shadow_applies_the_stop_check_too(self, env, monkeypatch):
+        from screening import opening_gate
+        db, b, _ = env
+        opening_gate.reset_shadow()
+        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
+        monkeypatch.setattr(opening_gate, "shadow_active", lambda now=None: True)
+        monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: "OPENING_GATE:STOP_TOO_TIGHT:test")
+        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "OPENING_GATE:STOP_TOO_TIGHT")

@@ -86,9 +86,9 @@ class TestReason:
         assert opening_guard.reason("REAL") is None
 
     @pytest.mark.parametrize("bad", ["", "xx", "9", "25:99"])
-    def test_blank_or_bad_cutoff_falls_back_to_0930(self, monkeypatch, bad):
+    def test_blank_or_bad_cutoff_falls_back_to_0915(self, monkeypatch, bad):
         monkeypatch.setattr(config, "OPENING_ENTRY_NOT_BEFORE_IST", bad)
-        assert opening_guard.not_before() == _time(9, 30)
+        assert opening_guard.not_before() == _time(9, 15)
 
     def test_a_cutoff_before_the_open_never_blocks(self, monkeypatch):
         monkeypatch.setattr(config, "OPENING_ENTRY_NOT_BEFORE_IST", "09:00")

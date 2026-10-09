@@ -42,7 +42,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import opening_guard
+from entry_engine import opening_gate, opening_guard, prev_day
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -577,11 +577,56 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     staged_symbols: set[str] = set()
     _gate_cache: dict = {}   # group 264: per-cycle memo (symbols closed today)
 
+    _og_held = 0
+    if opening_gate.is_active(mode):
+        prev_day.prefetch(symbols)          # group 270: previous-day candles, background threads, never blocks
     for idx, cand in enumerate(candidates):
         try:
             pstat.set_symbol_progress(mode, cand.symbol, idx, len(candidates))
         except Exception:
             pass
+
+        # group 268: opening-quality gate (09:15 until OPENING_GATE_SETTLE_IST). A held-back candidate stays queued
+        # (consumed stays False, nothing logged as a decision) and is checked again next cycle. Fails closed while active.
+        _og_tick = ticks.get(cand.symbol)
+        _og_stop = None
+        try:
+            if _og_tick is not None and _og_tick.atr and _og_tick.price:
+                _og_stop = _atr_stop_target_pct(_clamp_for_atr(_og_tick.atr / _og_tick.price * 100.0))[0]
+        except Exception:
+            _og_stop = None
+        _og_reason = opening_gate.reject_reason(mode, _og_tick, stop_pct=_og_stop)
+        if _og_reason:
+            _og_held += 1
+            waited += 1
+            if _og_held == 1 and opening_guard.should_log(mode + ":gate"):
+                logger.info("entry_engine: %s %s %s (candidate left queued)", mode, cand.symbol, _og_reason)
+            continue
+        # group 269: shadow mode - passed the gate, but nothing is entered inside the window; logged once a day, stays queued.
+        if opening_gate.shadow_active(mode):
+            waited += 1
+            _t = ticks.get(cand.symbol)
+            if opening_gate.shadow_first_time(mode, cand.symbol):
+                # group 271: stop/target % the entry would have used (same ATR rule as a real entry), so the line can be judged later
+                _sh_levels = ""
+                try:
+                    if _t is not None and _t.atr and _t.price:
+                        _s, _tg = _atr_stop_target_pct(_clamp_for_atr(_t.atr / _t.price * 100.0))
+                        _sh_levels = f" stop_pct={_s:.2f} target_pct={_tg:.2f}"
+                except Exception:
+                    _sh_levels = ""
+                try:                           # group 273: previous-day numbers, as the scalper's shadow row has
+                    _pdv = prev_day.peek(cand.symbol)
+                    if _pdv is not None and _pdv.close_pos is not None:
+                        _sh_levels += f" pd_close_pos={_pdv.close_pos:.2f}"
+                    if _pdv is not None and _pdv.atr_pct is not None:
+                        _sh_levels += f" atr_pct={_pdv.atr_pct:.2f}"
+                except Exception:
+                    pass
+                logger.info("entry_engine: %s OPENING_SHADOW would enter %s price=%.2f prev_close=%s day_range=%s-%s%s",
+                            mode, cand.symbol, getattr(_t, "price", 0.0) or 0.0, getattr(_t, "prev_close", None),
+                            getattr(_t, "day_low", None), getattr(_t, "day_high", None), _sh_levels)
+            continue
 
         cand.consumed = True
         tick     = ticks.get(cand.symbol)

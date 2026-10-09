@@ -51,6 +51,7 @@ _DURABLE_PREFIXES = (
     "stockky:searched",
     "stockky:scan_universe",
     "stockky:known_symbols",
+    "stockky:dhan_scrip",  # group270: Dhan symbol -> securityId snapshot (survives a restart during a Dhan outage)
     "stockky:data_feed",
     "feed:",  # alias key for data-feed payloads (Sticky Fix Step 2)
     "data_feed:",  # legacy mistaken prefix

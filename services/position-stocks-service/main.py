@@ -307,12 +307,12 @@ _EOD_SQUAREOFF_TIME = parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0)
 _EDIS_MORNING_CHECK_TIME = parse_hhmm(config.EDIS_MORNING_CHECK_TIME_IST, 9, 0)
 
 # session42 audit: two new time gates for entry quality.
-# Before 09:30: first 15 min of NSE session have extreme volatility, wide
+# Before 09:15 (group 268; was 09:30, now guarded by screening/opening_gate.py): first 15 min of NSE session have extreme volatility, wide
 #   spreads, and many false breakouts — tick-buffer data is also too thin
 #   for meaningful range-position or momentum-consistency calculations.
 # After 14:30: less than 30 min to EOD squareoff, not enough time for a
 #   position to reach target before being force-flattened at a loss.
-_NO_ENTRY_BEFORE = parse_hhmm(os.getenv("ENTRY_NO_BEFORE_IST", "09:30"), 9, 30)
+_NO_ENTRY_BEFORE = parse_hhmm(os.getenv("ENTRY_NO_BEFORE_IST", "09:15"), 9, 15)   # group 268: was 09:30; screening/opening_gate.py now guards the opening window
 _NO_ENTRY_AFTER  = parse_hhmm(os.getenv("ENTRY_NO_AFTER_IST",  "14:30"), 14, 30)
 _SCAN_INTERVAL_S = 10.0   # run screener every 10 seconds
 _cycle_lock = asyncio.Lock()  # prevents the background loop and a manual

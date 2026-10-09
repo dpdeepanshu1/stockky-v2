@@ -143,3 +143,15 @@ def test_open_position_without_sentinel_is_never_touched(db):
     assert summary["examined"] == 0
     assert pos.status == "OPEN"
     assert pos.error_message is None
+
+
+def test_first_sweep_is_not_throttled_on_a_freshly_booted_host(db, monkeypatch):
+    """group 272: time.monotonic() is host uptime. The module's initial "never swept" value must let the first sweep run
+    even when the host has been up for less than PENDING_RECONCILE_SWEEP_INTERVAL_S (the old 0.0 looked like a sweep
+    that had just happened)."""
+    import config
+    monkeypatch.setattr(config, "PENDING_RECONCILE_SWEEP_INTERVAL_S", 600.0)
+    monkeypatch.setattr(reconcile.time, "monotonic", lambda: 5.0)               # host up for 5 seconds
+    monkeypatch.setattr(reconcile, "_last_stuck_sweep_ts", float("-inf"))      # the module's initial value
+    assert "skipped" not in reconcile.resolve_stuck_pending(db)
+    assert reconcile.resolve_stuck_pending(db).get("skipped") == "throttled"   # and the next call is throttled again

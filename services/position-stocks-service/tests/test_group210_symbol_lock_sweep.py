@@ -127,3 +127,13 @@ def test_db_error_is_swallowed(monkeypatch):
 
     sl.reset_sweep_throttle()
     assert sl.sweep_stale(Boom()) == []
+
+
+def test_first_sweep_is_not_throttled_on_a_freshly_booted_host(db, monkeypatch):
+    """group 272: time.monotonic() is host uptime; a first sweep must run even when uptime is below the interval."""
+    monkeypatch.setattr(config, "SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0, raising=False)
+    monkeypatch.setattr(sl.time, "monotonic", lambda: 5.0)          # host up for 5 seconds
+    _lock(db, "A")
+    assert sl.sweep_stale(db) == ["A"]
+    _lock(db, "B")
+    assert sl.sweep_stale(db) == []                                 # still throttled right after

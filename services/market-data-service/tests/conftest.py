@@ -44,3 +44,12 @@ def _g233_market_open_by_default(monkeypatch):
     if _m is not None and hasattr(_m, "_quote_market_closed"):
         monkeypatch.setattr(_m, "_quote_market_closed", lambda: False)
     yield
+
+
+@_pytest_g188.fixture(autouse=True)
+def _g270_dhan_off_by_default(monkeypatch):
+    """group270: the Dhan Data API stage is ON by default in production. Existing tests were written for the
+    AngelOne/yfinance paths and must not start Dhan threads or touch the network, so it is switched off for every
+    test; the group270 tests turn it on explicitly with their own monkeypatch."""
+    monkeypatch.setenv("DHAN_DATA_ENABLED", "0")
+    yield

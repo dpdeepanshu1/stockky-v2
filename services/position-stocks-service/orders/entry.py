@@ -41,7 +41,7 @@ from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders import cost_gate, entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
-from screening import intraday_eligibility
+from screening import intraday_eligibility, opening_gate
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
 from screening import trade_gates
@@ -407,6 +407,30 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", f"RANGE_GATE:{range_reject}", quality=quality)
         return None
 
+    # group 268: opening-quality gate (09:15 until OPENING_GATE_SETTLE_IST). Fails CLOSED while active.
+    opening_reject = opening_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if opening_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", opening_reject, quality=quality)
+        return None
+    # group 269: shadow mode - the symbol passed the gate but no order is placed inside the window; log it once a day.
+    if opening_gate.shadow_active():
+        shared_symbol_lock.release(db, candidate.symbol)
+        _sh_levels = compute_levels(candidate.pct_change, candidate.current_ltp, symbol=candidate.symbol)
+        _sh_stop = opening_gate.stop_reject(candidate.symbol, _sh_levels.stop_pct)
+        if _sh_stop:                      # shadow mode applies the stop check too, so WOULD_ENTER means every check passed
+            _log_candidate(db, candidate, "SKIPPED", _sh_stop, quality=quality)
+            return None
+        if opening_gate.shadow_first_time(candidate.symbol):
+            _log_candidate(db, candidate, "SKIPPED",
+                           f"OPENING_SHADOW:WOULD_ENTER ltp={candidate.current_ltp:.2f}"
+                           f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}"
+                           # group 271: the levels a real entry would have used, so the row can be judged against later prices
+                           f" stop={_sh_levels.stop_price:.2f}({_sh_levels.stop_pct:.2f}%)"
+                           f" target={_sh_levels.target_price:.2f}({_sh_levels.target_pct:.2f}%)",
+                           quality=quality)
+        return None
+
     # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
     price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp)
     if price_reject:
@@ -430,6 +454,13 @@ def attempt_entry(
     levels: AdaptiveLevels = compute_levels(
         candidate.pct_change, candidate.current_ltp, symbol=candidate.symbol
     )
+
+    # group 270: inside the opening-gate window a stop tighter than a share of the daily ATR is noise-sized - skip.
+    _stop_reject = opening_gate.stop_reject(candidate.symbol, levels.stop_pct)
+    if _stop_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _stop_reject, quality=quality)
+        return None
 
     # Reserve capital (also checks kill switch again in the ledger)
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
@@ -699,7 +730,8 @@ def attempt_entry(
     _log_candidate(db, candidate, "ENTERED",
                    f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
                    f" nifty_pct={'n/a' if _nifty is None else f'{_nifty:+.2f}'}"
-                   f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}",
+                   f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}"
+                   f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}",
                    composite_score=candidate.composite_score,
                    quality=quality)
     logger.info(

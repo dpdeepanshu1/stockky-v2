@@ -5,7 +5,8 @@ There is no shared package, so each service carries its own copy of the Neon/Ora
 * four byte-identical "plain" copies - analysis-intelligence `fundamental/`, decision-prediction
   `decision/` and `training/`, notification-scheduler `notification/`;
 * `market-data-service/kv_cache.py` = plain + the `fundamentals:` durable prefix (its own
-  `/fundamentals/{symbol}` cache);
+  `/fundamentals/{symbol}` cache) + the `stockky:dhan_scrip` prefix (group 270: the Dhan symbol -> securityId
+  snapshot, so a restart during a Dhan outage still has the map);
 * `api-gateway/kv_cache.py` = plain + the gateway's durable feed/IPO/surprise prefixes, and the
   `kv_get_stale()` / `get_stale()` stale-read helpers.
 
@@ -38,7 +39,7 @@ MARKET_DATA = "market-data-service/kv_cache.py"
 GATEWAY = "api-gateway/kv_cache.py"
 ALL_COPIES = PLAIN_COPIES + (MARKET_DATA, GATEWAY)
 
-MARKET_DATA_ONLY = {"fundamentals:"}
+MARKET_DATA_ONLY = {"fundamentals:", "stockky:dhan_scrip"}
 GATEWAY_ONLY = {
     "stockky:hot_premarket_job",
     "stockky:ipo:",
@@ -183,6 +184,15 @@ def test_no_other_service_uses_a_gateway_only_durable_prefix(prefix):
     assert not offenders, (
         f"{offenders} use {prefix!r}, which is durable only in api-gateway/kv_cache.py - in that service "
         "the key would silently be memory-only. Add the prefix to its kv_cache.py copy."
+    )
+
+
+def test_no_other_service_uses_the_market_data_only_dhan_scrip_prefix():
+    # group 270 (merged in 274): only market-data-service's copy makes this prefix durable.
+    offenders = [rel for rel, src in _outside("market-data-service") if "stockky:dhan_scrip" in src]
+    assert not offenders, (
+        f"{offenders} use 'stockky:dhan_scrip', which is durable only in market-data-service/kv_cache.py - in that "
+        "service the key would silently be memory-only. Add the prefix to its kv_cache.py copy."
     )
 
 

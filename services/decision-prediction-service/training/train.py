@@ -261,6 +261,16 @@ class AbortCallback(xgb.callback.TrainingCallback):
 # ---------- Helpers ----------
 def fetch_symbol_data(symbol, period="2y", max_retries=5):
     """Fetch OHLCV data with exponential backoff for rate limits."""
+    # group270: optional market-data-service source (TRAINING_DATA_VIA_MARKET_DATA=1, off by default - see md_history.py
+    # for the adjusted-price caveat). Empty answer -> the unchanged yfinance loop below.
+    try:
+        import md_history
+        if md_history.enabled():
+            _md_df = md_history.fetch_daily_df(symbol, period)
+            if not _md_df.empty:
+                return _md_df
+    except Exception:  # noqa: BLE001
+        pass
     tickers = [f"{symbol}.NS", f"{symbol}.BO", symbol]
     for ticker in tickers:
         for attempt in range(max_retries):

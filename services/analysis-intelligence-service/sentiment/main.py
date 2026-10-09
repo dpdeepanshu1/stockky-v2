@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Any, List
 import asyncio
 
+import urllib.parse
+
+import httpx
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -39,6 +42,38 @@ except AttributeError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-sentiment-service")
+
+# --- group270: market-data-service first, yfinance as the fallback -------------------------------------
+# NIFTY 50 / SENSEX used to come from yfinance directly. market-data-service now serves index quotes and daily bars
+# from Dhan (then AngelOne, then yfinance), so this service asks it first and only goes to yfinance for what it could
+# not give. SENTIMENT_USE_MARKET_DATA=0 restores the direct yfinance path.
+def _env_url(name: str, default: str) -> str:
+    return (os.getenv(name) or "").strip().rstrip("/") or default.rstrip("/")
+
+
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+
+
+def _use_market_data() -> bool:
+    return ((os.getenv("SENTIMENT_USE_MARKET_DATA") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+
+
+def _md_get_json(path: str, timeout: float = 10.0):
+    """GET market-data-service `path` and return the parsed JSON body of a 200, else None. Never raises."""
+    try:
+        try:
+            import md_guard
+            getter = md_guard.md_get
+        except Exception:  # noqa: BLE001
+            getter = httpx.get
+        r = getter(f"{MARKET_DATA_URL}{path}", timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+        logger.debug("market-data %s answered %s", path, r.status_code)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("market-data %s failed: %s", path, e)
+    return None
+
 
 # --- Configuration ---
 INDEX_SYMBOLS: Dict[str, str] = {
@@ -109,6 +144,46 @@ def _safe_int(val):
     except (TypeError, ValueError):
         return None
 
+def _index_from_market_data(symbol: str, name: str) -> Optional[IndexData]:
+    """One index from market-data-service: /quote first (live price, previous close, day range), else the last two
+    daily bars of /history. None when neither gives a usable pair of closes (caller falls back to yfinance)."""
+    safe = urllib.parse.quote(symbol, safe="^")
+    q = _md_get_json(f"/quote/{safe}")
+    current = prev_close = high = low = volume = None
+    if isinstance(q, dict):
+        current = _safe_float(q.get("price") if q.get("price") is not None else q.get("cmp"))
+        prev_close = _safe_float(q.get("previous_close"))
+        high, low = _safe_float(q.get("day_high")), _safe_float(q.get("day_low"))
+        volume = _safe_int(q.get("volume"))
+    if not (current and prev_close):
+        h = _md_get_json(f"/history/{safe}?period=1mo&interval=1d", timeout=20.0)
+        candles = [c for c in ((h or {}).get("candles") or []) if isinstance(c, dict) and c.get("close")]
+        if len(candles) < 2:
+            return None
+        current = _safe_float(candles[-1].get("close"))
+        prev_close = _safe_float(candles[-2].get("close"))
+        high, low = _safe_float(candles[-1].get("high")), _safe_float(candles[-1].get("low"))
+        volume = _safe_int(candles[-1].get("volume"))
+        if not (current and prev_close):
+            return None
+    change = _safe_float(current - prev_close)
+    change_pct = _safe_float((change / prev_close) * 100) if change and prev_close else None
+    return IndexData(symbol=symbol, name=name, current=current, previous_close=prev_close, change=change,
+                     change_percent=change_pct, high=high, low=low, volume=volume, timestamp=datetime.now())
+
+
+def _nifty_hist(yf_period: str, rows: int):
+    """Daily NIFTY 50 bars (High/Low/Close columns, oldest first, last `rows`) for the momentum and volatility terms.
+    market-data-service first; yfinance only when it cannot supply at least `rows` bars. None on total failure."""
+    if _use_market_data():
+        h = _md_get_json("/history/%5ENSEI?period=3mo&interval=1d", timeout=20.0)
+        candles = [c for c in ((h or {}).get("candles") or []) if isinstance(c, dict) and c.get("close")]
+        if len(candles) >= rows:
+            df = pd.DataFrame(candles).tail(rows)
+            return df.rename(columns={"high": "High", "low": "Low", "close": "Close"})[["High", "Low", "Close"]].reset_index(drop=True)
+    return yf.Ticker("^NSEI").history(period=yf_period)
+
+
 def fetch_individual_ticker(symbol: str, name: str, max_retries=3) -> Optional[IndexData]:
     """Fetch a single ticker using Ticker.history as a fallback."""
     for attempt in range(max_retries):
@@ -154,6 +229,18 @@ def fetch_indices_batch(symbols: Dict[str, str]) -> Dict[str, IndexData]:
     result = {}
     if not symbols:
         return result
+
+    if _use_market_data():
+        for name, sym in symbols.items():
+            ind = _index_from_market_data(sym, name)
+            if ind is not None:
+                result[name] = ind
+        if len(result) == len(symbols):
+            logger.info("Index data served by market-data-service for %d indices", len(result))
+            return result
+        if result:
+            logger.info("market-data-service gave %d/%d indices, yfinance for the rest", len(result), len(symbols))
+        symbols = {n: s_ for n, s_ in symbols.items() if n not in result}
 
     yf_symbols = list(symbols.values())
     max_retries = 2
@@ -271,9 +358,8 @@ def compute_market_score(indices_data: Dict[str, IndexData]) -> int:
 
     # 3. Momentum adjustment (5-day change)
     try:
-        nifty = yf.Ticker("^NSEI")
-        hist = nifty.history(period="6d")
-        if len(hist) >= 6:
+        hist = _nifty_hist("6d", 6)
+        if hist is not None and len(hist) >= 6:
             close_5d_ago = hist['Close'].iloc[-6]
             close_today = hist['Close'].iloc[-1]
             change_5d = (close_today - close_5d_ago) / close_5d_ago * 100
@@ -284,9 +370,8 @@ def compute_market_score(indices_data: Dict[str, IndexData]) -> int:
 
     # 4. Volatility normalisation
     try:
-        nifty = yf.Ticker("^NSEI")
-        hist = nifty.history(period="1mo")
-        if len(hist) > 14:
+        hist = _nifty_hist("1mo", 22)
+        if hist is not None and len(hist) > 14:
             atr = (hist['High'] - hist['Low']).rolling(14).mean().iloc[-1]
             price = hist['Close'].iloc[-1]
             if price and atr:

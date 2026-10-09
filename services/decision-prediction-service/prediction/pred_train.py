@@ -267,6 +267,15 @@ def fetch_with_retry(symbol: str, max_retries: int = 3) -> pd.DataFrame:
     Download data with exponential backoff.
     Returns empty DataFrame if all retries fail.
     """
+    # group270: optional market-data-service source (TRAINING_DATA_VIA_MARKET_DATA=1, off by default - see md_history.py).
+    try:
+        import md_history
+        if md_history.enabled():
+            _md_df = md_history.fetch_daily_df(symbol, "5y")
+            if not _md_df.empty and len(_md_df) > 50:
+                return _md_df
+    except Exception:  # noqa: BLE001
+        pass
     tickers = [f"{symbol}.NS", f"{symbol}.BO", symbol]
     for ticker in tickers:
         for attempt in range(max_retries):

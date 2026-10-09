@@ -753,3 +753,39 @@ CAPITAL_STARVED_RETRY_ON_GROWTH_PCT = _get_float("CAPITAL_STARVED_RETRY_ON_GROWT
 ENTRY_PRECHECK = _get_bool("ENTRY_PRECHECK", True)
 PENDING_RECONCILE_MAX_AGE_DAYS = _get_int("PENDING_RECONCILE_MAX_AGE_DAYS", 3)
 PENDING_RECONCILE_SWEEP_INTERVAL_S = _get_float("PENDING_RECONCILE_SWEEP_INTERVAL_S", 600.0)
+
+# ── Opening-quality gate (group 268, 2026-10-09) ─────────────────────────────
+# The entry window now opens at 09:15 (ENTRY_NO_BEFORE_IST default, see main.py) instead of 09:30. The 14-day trade
+# breakdown showed entries before 10:30 won 1 of 10 (-Rs 154 gross), so instead of a fixed clock block every entry between
+# the open and OPENING_GATE_SETTLE_IST must pass screening/opening_gate.py (gap vs previous close, holding above the day's
+# open and the previous close, opening-range position, day-range position, Nifty direction). After the settle time the
+# normal rules apply unchanged. Missing data before the settle time FAILS CLOSED (the entry is skipped), unlike the other
+# gates. OPENING_GATE_ENABLED=0 turns the whole gate off (the 09:15 start then lets every normal rule through at the open).
+OPENING_GATE_ENABLED = _get_bool("OPENING_GATE_ENABLED", True)
+OPENING_GATE_SETTLE_IST = _get_str("OPENING_GATE_SETTLE_IST", "10:00")
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _get_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 5.0)   # no entry in the first minutes
+OPENING_GATE_MAX_GAP_UP_PCT = _get_float("OPENING_GATE_MAX_GAP_UP_PCT", 3.0)       # open vs previous close; 0 disables
+OPENING_GATE_MAX_GAP_DOWN_PCT = _get_float("OPENING_GATE_MAX_GAP_DOWN_PCT", 1.0)   # gap DOWN larger than this is skipped; 0 disables
+OPENING_GATE_MAX_RANGE_POS = _get_float("OPENING_GATE_MAX_RANGE_POS", 0.88)        # stricter than MAX_ENTRY_RANGE_POSITION; 0 disables
+OPENING_GATE_OR_MINUTES = _get_int("OPENING_GATE_OR_MINUTES", 15)                  # opening range = first N minutes from 09:15
+OPENING_GATE_MIN_OR_POS = _get_float("OPENING_GATE_MIN_OR_POS", 0.5)               # after the OR is built: price in its upper half or above it
+OPENING_GATE_MAX_ABOVE_OR_HIGH_PCT = _get_float("OPENING_GATE_MAX_ABOVE_OR_HIGH_PCT", 1.0)  # ...but not extended more than this above OR high
+OPENING_GATE_MIN_OR_TICKS = _get_int("OPENING_GATE_MIN_OR_TICKS", 10)             # fewer opening-range ticks (e.g. after a restart) = skip
+OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT = _get_float("OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT", 0.0)
+OPENING_GATE_NIFTY_MIN_VS_PREV_PCT = _get_float("OPENING_GATE_NIFTY_MIN_VS_PREV_PCT", 0.0)
+
+# group 269: shadow mode. OPENING_GATE_SHADOW=1 -> while the gate is active (09:15 until the settle time) NO entry is placed;
+# a symbol that passes every gate check is logged once per day as SKIPPED "OPENING_SHADOW:WOULD_ENTER ltp=..." (with the same
+# gap/range/OR/Nifty numbers as an ENTERED row) so the 09:15 entries can be judged against later prices before real money is
+# used. Rejected symbols are logged as before. Default 0 = the gate is live (group 268 behaviour).
+OPENING_GATE_SHADOW = _get_bool("OPENING_GATE_SHADOW", False)
+
+# ── Opening gate: previous-day candle checks (group 270, 2026-10-09) ─────────
+# Read from market-data-service /history (daily candles) by a background thread (screening/prev_day.py), never on the entry
+# path. Inside the gate window (09:15 - OPENING_GATE_SETTLE_IST) the entry is skipped when the data is not cached yet (fails
+# closed; the next 10 s scan finds it).
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+OPENING_GATE_PREVDAY_TIMEOUT_S = _get_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0)
+OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _get_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)   # previous day closed in the upper half of its range; 0 disables
+OPENING_GATE_MIN_STOP_ATR_FRAC = _get_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)           # stop % must be >= this x daily ATR %; 0 disables
+OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_get_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday

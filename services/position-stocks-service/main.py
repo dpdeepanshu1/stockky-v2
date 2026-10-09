@@ -258,10 +258,29 @@ async def lifespan(app: FastAPI):
     # BUG FIX (session47): independent fast reconcile/EOD loop — see the
     # BUG FIX comment above _FAST_RECONCILE_INTERVAL_S.
     _reconcile_task = asyncio.create_task(_fast_reconcile_loop(), name="position-stocks-fast-reconcile-loop")
+    # group280 (plan C1): read-only Dhan order-update WebSocket; only when DHAN_ORDER_WS_ENABLED=1.
+    global _order_ws_listener
+    _order_ws_task = None
+    if config.DHAN_ORDER_WS_ENABLED:
+        from execution import order_ws
+
+        def _order_ws_creds():
+            with _db.get_session_factory()() as _s:
+                return dhan_credentials_ro.get_decrypted_credentials(_s)
+        _order_ws_listener = order_ws.OrderUpdateListener(_order_ws_creds)
+        _order_ws_task = asyncio.create_task(_order_ws_listener.run(), name="position-stocks-order-ws")
+        logger.info("position-stocks-service: Dhan order-update WebSocket listener started (read-only)")
 
     yield
 
     # Graceful shutdown
+    if _order_ws_task is not None:
+        _order_ws_listener.stop()
+        _order_ws_task.cancel()
+        try:
+            await _order_ws_task
+        except asyncio.CancelledError:
+            pass
     _bg_task.cancel()
     _reconcile_task.cancel()
     try:
@@ -1711,6 +1730,40 @@ def trades_breakdown(days: int = 3, db: Session = Depends(get_db)):
     return {"days": days, **review_stats.breakdown(rows)}
 
 
+_order_ws_listener = None
+
+
+@app.get("/orders/ws-status")
+def order_ws_status():
+    """group280 (plan C1): state of the read-only Dhan order-update WebSocket (off unless DHAN_ORDER_WS_ENABLED=1)."""
+    from execution import order_ws
+    if _order_ws_listener is None:
+        return {"enabled": bool(config.DHAN_ORDER_WS_ENABLED), "running": False, "orders_tracked": len(order_ws.store)}
+    return {"enabled": True, "running": True, **_order_ws_listener.status(), "recent": order_ws.store.recent(10)}
+
+
+@app.get("/orders/events/{order_id}")
+def order_events(order_id: str):
+    """group280: the latest pushed state and the last transitions of one Dhan order id, or 404 when none was seen."""
+    from execution import order_ws
+    ev = order_ws.store.latest(order_id)
+    if ev is None:
+        raise HTTPException(status_code=404, detail="no order-update event seen for this order id")
+    return {"latest": ev, "history": order_ws.store.history(order_id)}
+
+
+@app.get("/trades/report")
+def trades_report(days: int = 1, db: Session = Depends(get_db)):
+    """Read-only (group 280, plan Phase B): expectancy and win rate by exit reason, exit hour, entry hour and scan
+    window, NET of estimated charges, with average entry slippage vs the signal price. days=1 is the daily report
+    (rows are only retained for TRADE_HISTORY_RETENTION_DAYS; 1-30)."""
+    from orders import trade_report
+    days = max(1, min(int(days), 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.query(ScalpPosition).filter(ScalpPosition.opened_at >= cutoff.replace(tzinfo=None)).all()
+    return {"days": days, **trade_report.report(rows)}
+
+
 @app.get("/trades/history")
 def trades_history(
     db: Session = Depends(get_db),
@@ -1882,6 +1935,14 @@ def reconcile_rearm_placeholder_exits(apply: bool = False, days: int = 3, admin:
     entry-price placeholder with their pending marker cleared. Dry run unless `?apply=true`;
     applying re-arms the marker so the normal reconcile passes read the real fill from Dhan."""
     return reconcile.rearm_cleared_placeholder_exits(db, apply=apply, days=days)
+
+
+@app.post("/reconcile/repair-dead-entry-errors")
+def reconcile_repair_dead_entry_errors(apply: bool = False, admin: str = Depends(require_admin),
+                                       db: Session = Depends(get_db)):
+    """Group 276 (AAATECH): today's rows marked ERROR "Entry leg REJECTED on Dhan" although the BUY and a
+    SELL both traded. Dry run unless `?apply=true`."""
+    return reconcile.repair_dead_entry_errors(db, apply=apply)
 
 
 @app.post("/reconcile/repair-dead-sell-errors")

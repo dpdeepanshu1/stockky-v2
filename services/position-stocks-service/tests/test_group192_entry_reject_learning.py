@@ -102,7 +102,12 @@ class TestReconcileLearnsFromRejection:
         assert p.error_message.startswith("Entry leg REJECTED on Dhan (reconciled): ")
         assert "not allowed to be traded in Intraday" in p.error_message
         assert "HEGAM" in intraday_eligibility.get_restricted_symbols(db)
-        assert broker.plain_calls == 0          # the super row already had the reason
+        # group284: the whole reconcile pass also reads the plain order book in _filled_entry_behind_dead_parent
+        # (a different guard), so count calls only around the reason lookup itself: the super row already
+        # carries the reason, so that lookup must not touch the order book.
+        broker.plain_calls = 0
+        assert reconcile._entry_reject_reason(db, p, _super_row(omsErrorDescription=RMS_TEXT)) != ""
+        assert broker.plain_calls == 0
 
     def test_reason_found_in_the_plain_order_book_when_the_super_row_has_none(self, db, broker):
         p = _pos(db)
@@ -185,8 +190,10 @@ class TestRejectedEntryGuard:
         assert entry._rejected_entry_reject(db, "HEGAM") is None
 
     def test_two_dead_entries_today_block_for_the_rest_of_the_day(self, db):
-        _dead(db, minutes_ago=100)
-        _dead(db, minutes_ago=90)
+        # group284: minutes_ago=100/90 fell on YESTERDAY's IST date when the suite ran between 00:00 and 01:40 IST,
+        # so the guard (which counts IST-today rows only) saw no dead entries. Keep both inside the first minutes.
+        _dead(db, minutes_ago=2)
+        _dead(db, minutes_ago=1)
         msg = entry._rejected_entry_reject(db, "HEGAM")
         assert msg and msg.startswith("ENTRY_REJECTED_TODAY:") and "limit 2" in msg
 
@@ -217,8 +224,9 @@ class TestRejectedEntryGuard:
 
     def test_day_limit_disabled_leaves_only_the_cooldown(self, db, monkeypatch):
         monkeypatch.setattr(config, "ENTRY_REJECT_MAX_PER_SYMBOL_DAY", 0)
-        _dead(db, minutes_ago=100)
-        _dead(db, minutes_ago=90)
+        monkeypatch.setattr(config, "ENTRY_REJECT_COOLDOWN_MINUTES", 1)   # group284: see the note above (IST midnight)
+        _dead(db, minutes_ago=6)
+        _dead(db, minutes_ago=5)
         assert entry._rejected_entry_reject(db, "HEGAM") is None
 
     def test_db_error_fails_open(self):

@@ -1317,6 +1317,93 @@ def repair_dead_sell_errors(db: Session, *, apply: bool = False) -> dict:
     return out
 
 
+def _filled_entry_behind_dead_parent(db: Session, pos: ScalpPosition, row: dict,
+                                     plain: Optional[list] = None) -> Optional[dict]:
+    """Group 276 (AAATECH 2026-10-09: Dhan filled BUY 107.17 and SELL 107.99 = +Rs17.22, stored ERROR Rs0
+    "entry rejected/never filled"). The super-order PARENT row can read REJECTED because ONE leg (the
+    stop leg, 106.95) was rejected, while the ENTRY actually traded. Before booking a dead entry as ERROR,
+    look in today's order book for a TRADED BUY for this security and exact quantity.
+    Returns None when nothing proves the entry filled (caller keeps the old ERROR path), else
+      {"entry": <avg buy price>, "exit": None}                        entry filled, no exit proven (keep OPEN)
+      {"entry": ..., "exit": {"price": p, "order_id": oid, "kind": "TARGET_HIT"|"STOP_HIT"}}
+    Disable with env DEAD_PARENT_FILL_CHECK=0. Never raises."""
+    try:
+        import os
+        if os.getenv("DEAD_PARENT_FILL_CHECK", "1").strip() == "0":
+            return None
+        if plain is None:
+            plain = _cached_order_list(db) or []
+        entry = _entry_fill_from_orderbook(db, pos, plain)
+        if entry is None:
+            return None
+        alt = _alt_exit_for_dead_sell(db, pos, "", plain, [row] if row else None)
+        if alt is None:
+            return {"entry": entry, "exit": None}
+        if alt["kind"] == "leg":
+            kind = alt["status"]
+            trigger = pos.target_price if kind == "TARGET_HIT" else pos.stop_price
+            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger)
+            oid = str(alt["leg"].get("orderId") or pos.dhan_super_order_id)
+        else:
+            price = alt["price"]
+            oid = alt["order_id"]
+            kind = "TARGET_HIT" if (pos.target_price and price >= pos.target_price * 0.998) else "STOP_HIT"
+        return {"entry": entry, "exit": {"price": price, "order_id": oid, "kind": kind}}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("reconcile: dead-parent fill check failed for %s (id=%s): %s",
+                       getattr(pos, "symbol", "?"), getattr(pos, "id", "?"), e)
+        return None
+
+
+def repair_dead_entry_errors(db: Session, *, apply: bool = False) -> dict:
+    """Group 276. TODAY's rows booked ERROR "Entry leg REJECTED/CANCELLED on Dhan (reconciled)" although
+    the BUY and a SELL actually traded (AAATECH). Dry run by default. apply=True books the real entry,
+    exit and P&L; the old dead-entry path already released the capital and the symbol lock, so only the
+    P&L goes to the ledger now."""
+    today = ist_today_str()
+    rows = (db.query(ScalpPosition)
+            .filter(ScalpPosition.status == "ERROR", ScalpPosition.error_message.like("Entry leg %on Dhan (reconciled)%"))
+            .order_by(ScalpPosition.id).all())
+    out: dict = {"date_ist": today, "applied": bool(apply), "recovered": [], "skipped": []}
+    if not rows:
+        return out
+    try:
+        plain = dhan_client.get_order_list(db) or []
+        supers = dhan_client.get_super_order_list(db) or []
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"Dhan order fetch failed: {e}"
+        return out
+    by_id = {str(r.get("orderId") or ""): r for r in supers}
+    for pos in rows:
+        label = {"id": pos.id, "symbol": pos.symbol}
+        day = _ist_date_str(pos.closed_at) if pos.closed_at else None
+        if day != today:
+            out["skipped"].append({**label, "reason": "not closed today (Dhan's order book only holds today)"})
+            continue
+        found = _filled_entry_behind_dead_parent(db, pos, by_id.get(str(pos.dhan_super_order_id or "")), plain)
+        if not found or not found.get("exit"):
+            out["skipped"].append({**label, "reason": "no filled BUY+SELL pair found at Dhan"})
+            continue
+        ex = found["exit"]
+        pnl = (ex["price"] - found["entry"]) * pos.quantity
+        pct = (ex["price"] - found["entry"]) / found["entry"] * 100.0 if found["entry"] else 0.0
+        out["recovered"].append({**label, "new_status": ex["kind"], "entry_price": found["entry"],
+                                 "exit_price": ex["price"], "quantity": pos.quantity, "pnl": round(pnl, 2)})
+        if apply:
+            pos.status = ex["kind"]
+            pos.entry_price = found["entry"]
+            pos.exit_price = ex["price"]
+            pos.realized_pnl = pnl
+            pos.realized_pnl_pct = pct
+            pos.dhan_exit_order_id = ex["order_id"]
+            pos.error_message = None
+            db.commit()
+            ledger.release_capital(db, position_value=0.0, realized_pnl=pnl)
+            logger.info("reconcile: repaired dead-entry ERROR row %s (id=%d) -> %s %.2f->%.2f, P&L Rs%.2f",
+                        pos.symbol, pos.id, ex["kind"], found["entry"], ex["price"], pnl)
+    return out
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
@@ -1651,6 +1738,36 @@ def run_exit_reconciliation(db: Session) -> int:
             # leaving the position stuck as OPEN and capital locked.
             leg_name = row.get("legName", "ENTRY_LEG")
             if leg_name in ("ENTRY_LEG", "") and entry_status in _DEAD_ENTRY_STATUSES:
+                # Group 276 (AAATECH): a REJECTED parent row does not prove the entry never traded.
+                _alive = _filled_entry_behind_dead_parent(db, pos, row)
+                if _alive is not None:
+                    _ex = _alive.get("exit")
+                    if _ex is None:
+                        if pos.id in _pending_kept_logged:
+                            continue
+                        _pending_kept_logged.add(pos.id)
+                        logger.warning(
+                            "reconcile: %s (id=%d) parent row %s but the BUY filled at Rs%.2f and no exit is "
+                            "proven yet - keeping the position OPEN (not ERROR) so EOD squareoff still covers it.",
+                            pos.symbol, pos.id, entry_status, _alive["entry"])
+                        continue
+                    _pnl = (_ex["price"] - _alive["entry"]) * pos.quantity
+                    _pct = (_ex["price"] - _alive["entry"]) / _alive["entry"] * 100.0 if _alive["entry"] else 0.0
+                    pos.status = _ex["kind"]
+                    pos.entry_price = _alive["entry"]
+                    pos.exit_price = _ex["price"]
+                    pos.realized_pnl = _pnl
+                    pos.realized_pnl_pct = _pct
+                    pos.dhan_exit_order_id = _ex["order_id"]
+                    pos.error_message = None
+                    pos.closed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=_pnl)
+                    shared_symbol_lock.release(db, pos.symbol)
+                    closed += 1
+                    logger.info("reconcile: %s (id=%d) parent row %s but BUY+SELL traded - booked %s %.2f->%.2f P&L Rs%.2f",
+                                pos.symbol, pos.id, entry_status, _ex["kind"], _alive["entry"], _ex["price"], _pnl)
+                    continue
                 # 2026-10-06 (group192): read WHY Dhan killed the entry and learn from it. Before this the
                 # reason was dropped, so an RMS "not allowed to be traded in Intraday" rejection (HEGAM, 13
                 # times in 4 minutes) never reached the restricted-symbol list the screener filters on.

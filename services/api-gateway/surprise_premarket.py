@@ -25,6 +25,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
+import yf_policy as _yf_policy  # group279
+
 logger = logging.getLogger("surprise-premarket")
 
 LOOKBACK_DAYS = int(((os.getenv("SURPRISE_LOOKBACK_DAYS") or "").strip() or "30"))
@@ -308,6 +310,122 @@ def _yahoo_session():
         return None
 
 
+def _clean_baseline_symbols(symbols: List[str]) -> Tuple[List[str], List[str]]:
+    """(clean, skipped): drop index pseudo-symbols, confirmed-delisted names and known non-NSE tickers, and map renamed
+    symbols through symbol_aliases. Shared by the market-data and yfinance bulk baseline paths.
+
+    2026-08-24 fix (kept from the inline version): this used to build "<bare_symbol>.NS" with no rename/delisting
+    resolution - the cause of the repeated "$JUBILANT.NS / $TATAMTRDVR.NS: possibly delisted" spam (JUBILANT is
+    JUBLFOOD now, TATAMTRDVR merged in 2024 and must never be queried)."""
+    try:
+        from symbol_aliases import resolve_base_symbol, is_known_delisted
+    except Exception:
+        resolve_base_symbol = None
+        is_known_delisted = lambda _s: False  # noqa: E731
+
+    clean: List[str] = []
+    skipped: List[str] = []
+    for s in symbols:
+        base = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not base:
+            continue
+        if base in _INDEX_SKIP or base.startswith("^"):
+            skipped.append(base)
+            continue
+        if is_known_delisted(base):
+            skipped.append(base)
+            continue
+        if resolve_base_symbol is not None:
+            resolved = resolve_base_symbol(base)
+            if resolved is None:
+                # Known non-NSE ticker (e.g. a US symbol that slipped into the universe) - never worth a .NS query.
+                skipped.append(base)
+                continue
+            base = resolved
+        clean.append(base)
+    return clean, skipped
+
+
+def _baseline_row_from_frame(base: str, frame) -> Optional[Dict[str, Any]]:
+    """One baseline row from a daily OHLCV frame (Open/High/Low/Close/Volume, oldest first), or None when there is not
+    enough usable data. Same maths and fields as the yfinance bulk path."""
+    try:
+        import numpy as np
+        sub = frame.dropna(how="all") if frame is not None else None
+        if sub is None or len(sub) < 5:
+            return None
+        tail = sub.tail(max(LOOKBACK_DAYS, 20))
+        highs = tail["High"].astype("float64").values
+        lows = tail["Low"].astype("float64").values
+        closes = tail["Close"].astype("float64").values
+        volumes = tail["Volume"].astype("float64").values
+        prev_close = float(closes[-1])
+        high_52w = float(np.nanmax(sub["High"].astype("float64").values))
+        if not (high_52w > 0 and prev_close > 0):
+            return None
+        dist_52w_pct = float(((high_52w - prev_close) / high_52w) * 100.0)
+        avg_daily_vol = float(np.nanmean(volumes)) if len(volumes) else 0.0
+        avg_15m_vol = int(max(1, avg_daily_vol / 25.0))
+        daily_atr = float(np.nanmean(highs - lows)) if len(highs) else 0.0
+        return {
+            "symbol": base,
+            "prev_close": round(prev_close, 2),
+            "avg_15m_volume": avg_15m_vol,
+            "daily_atr": round(daily_atr, 2),
+            "high_52w": round(high_52w, 2),
+            "dist_52w_pct": round(dist_52w_pct, 2),
+            "sector": None,
+            "is_liquid": bool((avg_daily_vol * prev_close) >= LIQUID_MIN_DAILY_TURNOVER),
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("baseline row %s failed: %s", base, e)
+        return None
+
+
+def _market_data_url() -> str:
+    return ((os.getenv("MARKET_DATA_URL") or "").strip() or "https://market-data-service-r6d7.onrender.com").rstrip("/")
+
+
+def bulk_baselines_from_market_data(
+    symbols: List[str], max_workers: Optional[int] = None, budget_s: Optional[float] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """group279: baselines from market-data-service GET /history (1y daily; Dhan -> AngelOne -> yfinance is decided
+    there) instead of the gateway's own yf.download. Returns (rows, remaining): `remaining` holds every symbol that got
+    no row (no data, over the time budget, stop requested), for the next source. Index / delisted / non-NSE names are
+    dropped like the yfinance path does. PREMARKET_BASELINES_VIA_MARKET_DATA=0 turns it off (everything remains).
+    PREMARKET_MD_WORKERS (4) and PREMARKET_MD_BUDGET_S (300) bound it. Never raises."""
+    syms = [str(x) for x in (symbols or []) if x]
+    if not syms or not _yf_policy.env_on("PREMARKET_BASELINES_VIA_MARKET_DATA", True):
+        return [], syms
+    try:
+        clean, _skipped = _clean_baseline_symbols(syms)
+        workers = max(1, int(max_workers if max_workers is not None
+                             else float((os.getenv("PREMARKET_MD_WORKERS") or "").strip() or 4)))
+        budget = float(budget_s if budget_s is not None
+                       else float((os.getenv("PREMARKET_MD_BUDGET_S") or "").strip() or 300))
+        base_url = _market_data_url()
+        t0 = time.time()
+        rows: List[Dict[str, Any]] = []
+        found = set()
+
+        def one(sym: str):
+            if premarket_stop_requested() or time.time() - t0 > budget:
+                return sym, None
+            return sym, _baseline_row_from_frame(sym, _yf_policy.md_daily_frame(base_url, sym, period="1y", timeout=20.0))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for sym, row in pool.map(one, clean):
+                if row:
+                    rows.append(row)
+                    found.add(sym)
+        remaining = [b for b in clean if b not in found]
+        logger.info("surprise bulk market-data: %s ok, %s remaining (%.1fs)", len(rows), len(remaining), time.time() - t0)
+        return rows, remaining
+    except Exception as e:  # noqa: BLE001
+        logger.warning("surprise bulk market-data failed (%s) - all symbols left for the next source", e)
+        return [], syms
+
+
 def bulk_baselines_from_yfinance(
     symbols: List[str], batch_size: int = YF_BULK_BATCH_SIZE
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -332,45 +450,16 @@ def bulk_baselines_from_yfinance(
     except Exception:
         rl_acquire = None
 
-    # 2026-08-24 fix: this loop used to build "<bare_symbol>.NS" directly
-    # with zero rename/delisting resolution — exactly the "~9 bare-symbol
-    # call sites that never went through the alias map" gap documented in
-    # symbol_aliases.py's own module docstring. That's the direct cause of
-    # the repeated "$JUBILANT.NS / $TATAMTRDVR.NS: possibly delisted"
-    # spam during premarket runs: JUBILANT should have resolved to
-    # JUBLFOOD, and TATAMTRDVR is a genuine 2024 merger that should never
-    # be queried at all. Both now get handled below instead of silently
-    # eating an error (and a slot in `remaining`, which then gets retried
-    # again via compute_baseline_for_symbol) every single run.
-    try:
-        from symbol_aliases import resolve_base_symbol, is_known_delisted
-    except Exception:
-        resolve_base_symbol = None
-        is_known_delisted = lambda _s: False  # noqa: E731
-
     _yahoo_session()
 
-    clean: List[str] = []
-    skipped: List[str] = []
-    for s in symbols:
-        base = (s or "").upper().replace(".NS", "").replace(".BO", "").strip()
-        if not base:
-            continue
-        if base in _INDEX_SKIP or base.startswith("^"):
-            skipped.append(base)
-            continue
-        if is_known_delisted(base):
-            skipped.append(base)
-            continue
-        if resolve_base_symbol is not None:
-            resolved = resolve_base_symbol(base)
-            if resolved is None:
-                # Known non-NSE ticker (e.g. a US symbol that slipped into
-                # the universe) — skip outright, never worth a .NS query.
-                skipped.append(base)
-                continue
-            base = resolved
-        clean.append(base)
+    clean, skipped = _clean_baseline_symbols(symbols)
+
+    # group279: GATEWAY_DIRECT_YFINANCE_FALLBACK=0 - the gateway does not call yfinance itself; the symbols stay
+    # in `remaining` for the caller (the per-symbol step then also declines, so they count as not computed).
+    if not _yf_policy.direct_yf_ok():
+        logger.info("surprise bulk yfinance: direct yfinance is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0), "
+                    "%s symbols not fetched", len(clean))
+        return [], clean
 
     rows: List[Dict[str, Any]] = []
     found = set()
@@ -468,6 +557,8 @@ def compute_baseline_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
 
     base = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
     if base in _INDEX_SKIP or base.startswith("^"):
+        return None
+    if not _yf_policy.direct_yf_ok():      # group279: GATEWAY_DIRECT_YFINANCE_FALLBACK=0
         return None
     ysym = _yahoo_sym(base)
     if not ysym:
@@ -1018,6 +1109,7 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
         current_sym: Optional[str] = None
         source_bhav = 0
         source_yf = 0
+        source_md = 0
 
         def _flush() -> None:
             nonlocal ok_rows, total_upserted
@@ -1062,6 +1154,32 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
             })
         else:
             remaining = list(uniq)
+
+        # group279: market-data /history first for what bhavcopy did not cover (Dhan -> AngelOne -> yfinance is
+        # decided there). yfinance below only gets what market-data could not give.
+        if remaining and _yf_policy.env_on("PREMARKET_BASELINES_VIA_MARKET_DATA", True):
+            _write_progress({
+                "stage": "computing",
+                "percent": max(8, int(100 * processed / total)) if total else 8,
+                "processed": processed,
+                "total": total,
+                "computed": computed,
+                "errors": errors,
+                "elapsed_sec": round(time.time() - t0, 1),
+                "eta_sec": None,
+                "is_running": True,
+                "current_symbol": None,
+                "message": f"market-data history for {len(remaining)} symbols…",
+            })
+            md_rows, remaining = bulk_baselines_from_market_data(remaining)
+            if md_rows:
+                ok_rows.extend(md_rows)
+                computed += len(md_rows)
+                processed += len(md_rows)
+                source_md += len(md_rows)
+                _flush()
+            if premarket_stop_requested():
+                return _stopped_result(processed, computed, errors)
 
         # Bulk yfinance for symbols not covered by bhavcopy — replaces the
         # old per-symbol ThreadPoolExecutor fan-out (was the source of the
@@ -1158,6 +1276,7 @@ def precalculate_surprise_baselines(symbols: List[str], force: bool = False) -> 
             "workers": workers,
             "source_bhavcopy": source_bhav,
             "source_yfinance": source_yf,
+            "source_market_data": source_md,
         }
         _write_progress({
             "stage": "done",

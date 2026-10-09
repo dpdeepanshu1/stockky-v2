@@ -618,6 +618,20 @@ MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
 # give away up to ~60% of the tightest stop before the trade started. Set ENTRY_MAX_SLIPPAGE_PCT=0.5 to restore.
 ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.25)
 ENTRY_MAX_TICK_AGE_S = _get_float("ENTRY_MAX_TICK_AGE_S", 45.0)
+# group280 (plan Phase C3): Dhan 5-level depth read from market-data /quote just before an entry. Reject a name whose
+# bid-ask spread is above ENTRY_DEPTH_MAX_SPREAD_PCT (0 = off) or whose best-5 book (both sides, Rs) is below
+# ENTRY_MIN_BOOK_VALUE (0 = off). Unknown depth (no answer, timeout, no Dhan depth) never blocks. ENTRY_DEPTH_GATE=0 = off.
+ENTRY_DEPTH_GATE = _get_bool("ENTRY_DEPTH_GATE", True)
+ENTRY_DEPTH_MAX_SPREAD_PCT = _get_float("ENTRY_DEPTH_MAX_SPREAD_PCT", 0.5)
+ENTRY_MIN_BOOK_VALUE = _get_float("ENTRY_MIN_BOOK_VALUE", 0.0)
+ENTRY_DEPTH_TIMEOUT_S = _get_float("ENTRY_DEPTH_TIMEOUT_S", 2.0)
+# group283 (plan C3, size down): cap an entry's order value at ENTRY_BOOK_MAX_SHARE_PCT % of ONE side of the best-5 book
+# (book_value_5 / 2), so a small cap's order does not eat its own touch. 0 = off (default). Unknown depth never shrinks.
+# Needs ENTRY_DEPTH_GATE on (it reuses the same market-data /quote read).
+ENTRY_BOOK_MAX_SHARE_PCT = _get_float("ENTRY_BOOK_MAX_SHARE_PCT", 0.0)
+# group280 (plan Phase C1): read-only Dhan order-update WebSocket (execution/order_ws.py). Off by default; nothing in the
+# trading path depends on it. See GET /orders/ws-status.
+DHAN_ORDER_WS_ENABLED = _get_bool("DHAN_ORDER_WS_ENABLED", False)
 # Reject stocks already up more than this % on the day vs the exchange's
 # previous close (mode-3 feed). 0 disables. Fails open when no previous close.
 MAX_DAY_GAIN_PCT = _get_float("MAX_DAY_GAIN_PCT", 7.0)

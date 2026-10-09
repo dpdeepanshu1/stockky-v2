@@ -1,0 +1,25 @@
+# group276 baseline: files that may still import yfinance directly. Migrate one, then delete its line.
+# Legitimate for good: market-data-service (the fallback itself), real-trade market_context/sector_signal.py (US sector ETFs, Dhan has no US data),
+# analysis-intelligence event/news/sentiment (company names and news), rate_limiter.py copies (they patch yfinance). To migrate: api-gateway main.py,
+# surprise_*.py, ipo_scanner.py, analysis technical/main.py, decision-prediction training/* (after the split/bonus adjustment check).
+services/analysis-intelligence-service/event/main.py
+services/analysis-intelligence-service/fundamental/rate_limiter.py
+services/analysis-intelligence-service/news/main.py
+services/analysis-intelligence-service/sentiment/main.py
+services/analysis-intelligence-service/technical/main.py
+services/api-gateway/ipo_scanner.py
+services/api-gateway/main.py
+services/api-gateway/rate_limiter.py
+services/api-gateway/surprise_premarket.py
+services/api-gateway/surprise_scanner.py
+services/decision-prediction-service/prediction/pred_train.py
+services/decision-prediction-service/training/app.py
+services/decision-prediction-service/training/evaluate.py
+services/decision-prediction-service/training/trades.py
+services/decision-prediction-service/training/train.py
+services/market-data-service/main.py
+services/market-data-service/rate_limiter.py
+services/market-data-service/surprise_premarket.py
+services/market-data-service/yahoo_ws_feed.py
+services/notification-scheduler-service/scheduler/rate_limiter.py
+services/real-trade-service/market_context/sector_signal.py

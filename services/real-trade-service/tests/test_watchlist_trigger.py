@@ -161,6 +161,7 @@ class TestCatalystPriceBackfill:
 
 class TestBandCheck:
     def test_within_band_queues_a_buy_now_candidate(self, db, monkeypatch):
+        monkeypatch.setenv("WATCHLIST_MAX_CHASE_PCT", "0")  # group276: chase limit tested in test_group276_chase_cap.py
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
         async def _quote(symbols, **_kw):
@@ -191,6 +192,7 @@ class TestBandCheck:
         assert db.query(models.TradeCandidate).count() == 0
 
     def test_price_at_exact_band_edge_is_not_missed(self, db, monkeypatch):
+        monkeypatch.setenv("WATCHLIST_MAX_CHASE_PCT", "0")  # group276: chase limit tested in test_group276_chase_cap.py
         row = make_row(db, catalyst_price=100.0, entry_band_pct=0.05)
 
         async def _quote(symbols, **_kw):

@@ -868,6 +868,38 @@ def dhan_status():
         return {"enabled": False, "error": f"{type(e).__name__}"}
 
 
+@app.get("/internal/data-sources")
+def data_sources_status():
+    """group278: provider order, health of Dhan / AngelOne / yfinance and which one is serving right now, for
+    quotes and for history. Read-only, no upstream call."""
+    import data_sources
+
+    def _left(name: str) -> float:
+        if name == "yfinance":
+            return max(0.0, _UPSTREAM_COOLDOWN.get("yfinance", 0.0) - time.time())
+        try:
+            from rate_limiter import _cooldowns, _cooldowns_lock
+            with _cooldowns_lock:
+                return max(0.0, _cooldowns.get(name, 0.0) - time.time())
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _dhan():
+        import dhan_data
+        return dhan_data.status()
+
+    def _angel_cfg() -> bool:
+        return all((os.environ.get(k) or "").strip() for k in
+                   ("ANGELONE_CLIENT_ID", "ANGELONE_API_KEY", "ANGELONE_MPIN", "ANGELONE_TOTP_SECRET"))
+
+    def _orders(kind: str):
+        from dhan_data import config as _dc
+        return _dc.quote_order() if kind == "quote" else _dc.history_order()
+
+    return _sanitize_for_json(data_sources.collect(
+        _dhan, _left, _angel_cfg, lambda: _orders("quote"), lambda: _orders("history")))
+
+
 @app.get("/live-quote/{symbol}")
 def live_quote(symbol: str):
     """

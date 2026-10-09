@@ -142,6 +142,7 @@ def env(monkeypatch):
         RISK_PER_TRADE_PCT=2.0, MAX_DAILY_LOSS_PCT_OF_POOL=4.0,
         # 2026-10-05 price guards off by default here (the fake tick buffer uses index timestamps)
         ENTRY_MAX_SLIPPAGE_PCT=0.0, ENTRY_MAX_TICK_AGE_S=0.0, MAX_DAY_GAIN_PCT=0.0,
+        ENTRY_DEPTH_GATE=False,      # group280: no network call from these tests; tests/test_group280_depth_gate.py covers it
     )
     for k, v in pins.items():
         monkeypatch.setattr(config, k, v)
@@ -1184,3 +1185,104 @@ class TestOpeningStopAtrWiring:
         monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: "OPENING_GATE:STOP_TOO_TIGHT:test")
         assert entry.attempt_entry(db, cand(ltp=500.0)) is None
         assert_clean_skip(env, "ABC", "OPENING_GATE:STOP_TOO_TIGHT")
+
+
+# ── group279: manual BUY refuses a price from a feed that has gone quiet ──────
+class TestManualBuyStaleTick:
+    @pytest.fixture(autouse=True)
+    def _age_limit_on(self, env, monkeypatch):    # after env, whose pins switch the age check off
+        import time as _t
+        self.now = _t.time()
+        self.mp = monkeypatch
+        monkeypatch.setattr(config, "ENTRY_MAX_TICK_AGE_S", 45.0)
+
+    def live(self, age_s, px=500.0):
+        now = self.now
+        self.mp.setattr(ws_client, "get_tick_buffer", lambda s: [(now - age_s, px)])
+
+    def test_stale_tick_is_rejected_before_anything_is_claimed(self, env):
+        db, b, _ = env
+        self.live(300)
+        with pytest.raises(entry.ManualEntryRejected, match=r"ABC: STALE_TICK:last tick 3\d\d?s old > 45s"):
+            entry.attempt_manual_entry(db, "ABC", 500.0)
+        assert b.of("place_super_order") == [] and not lock_held(db, "ABC")
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE)
+
+    def test_fresh_tick_goes_through(self, env):
+        db, b, _ = env
+        self.live(5)
+        assert entry.attempt_manual_entry(db, "ABC", 500.0).status == "OPEN"
+
+    def test_age_check_can_be_switched_off(self, env):
+        db, _, _ = env
+        self.mp.setattr(config, "ENTRY_MAX_TICK_AGE_S", 0.0)
+        self.live(5000)
+        assert entry.attempt_manual_entry(db, "ABC", 500.0).status == "OPEN"
+
+    def test_missing_buffer_or_error_fails_open_like_the_other_gates(self, env):
+        db, _, _ = env
+        self.mp.setattr(ws_client, "get_tick_buffer", lambda s: [])
+        assert entry._stale_tick_reject("ABC") is None
+        def boom(s):
+            raise RuntimeError("ws down")
+        self.mp.setattr(ws_client, "get_tick_buffer", boom)
+        assert entry._stale_tick_reject("ABC") is None
+
+    def test_automatic_guard_message_is_unchanged(self, env):
+        self.live(120, 100.0)
+        r = entry._price_guard_reject("ABC", 100.0)
+        assert r.startswith("STALE_TICK:last tick 12") and r.endswith("> 45s — current price unknown")
+
+
+# ── group280: the signal price is recorded for the slippage measure ─────────────
+class TestSignalPriceRecorded:
+    def test_auto_entry_records_the_scanner_price(self, env):
+        db, _, _ = env
+        entry.attempt_entry(db, cand(ltp=500.0))
+        assert db.query(models.ScalpPosition).one().signal_price == 500.0
+
+    def test_manual_entry_records_the_caller_price(self, env):
+        db, _, _ = env
+        assert entry.attempt_manual_entry(db, "ABC", 500.0).signal_price == 500.0
+
+
+# ── group280: depth gate wiring in attempt_entry ────────────────────────────────
+class TestDepthGateWiring:
+    def test_depth_reject_skips_before_capital_is_reserved_and_frees_the_lock(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: "DEPTH_SPREAD:0.90% > 0.50% (src=dhan)")
+        assert entry.attempt_entry(db, cand()) is None
+        assert last_log(db).reason.startswith("DEPTH_SPREAD:")
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE) and not lock_held(db, "ABC")
+        assert b.of("place_super_order") == []
+
+    def test_no_depth_reject_lets_the_entry_through(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        assert entry.attempt_entry(db, cand()) is not None
+
+
+# ── group283: size-down from the best-5 book wiring ─────────────────────────────
+class TestBookSizeDownWiring:
+    def test_cap_shrinks_quantity_and_returns_the_unused_reservation(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: 10)
+        assert entry.attempt_entry(db, cand()) is not None          # default sizing is 40 sh @ 500
+        assert b.of("place_super_order")[0]["quantity"] == 10
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - 10 * 500.0)
+
+    def test_cap_above_the_sized_quantity_changes_nothing(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: 400)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 40
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - POSITION_VALUE)
+
+    def test_no_cap_changes_nothing(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: None)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 40

@@ -1143,6 +1143,24 @@ def test_trades_breakdown_route(client, monkeypatch):
     assert client.get("/trades/breakdown?days=0").json()["days"] == 1
 
 
+def test_trades_report_route(client, monkeypatch):
+    from orders import trade_report
+    monkeypatch.setattr(trade_report, "report", lambda rows: {"trades": len(list(rows))})
+    assert client.get("/trades/report").json() == {"days": 1, "trades": 0}
+    assert client.get("/trades/report?days=999").json()["days"] == 30
+    assert client.get("/trades/report?days=0").json()["days"] == 1
+
+
+def test_order_ws_routes_when_the_listener_is_off(client):
+    from execution import order_ws
+    r = client.get("/orders/ws-status").json()
+    assert r["running"] is False and r["enabled"] is False
+    assert client.get("/orders/events/123").status_code == 404
+    order_ws.store.add(order_ws.parse_message({"Data": {"OrderNo": "123", "Status": "TRADED", "TradedQty": 5}}))
+    body = client.get("/orders/events/123").json()
+    assert body["latest"]["status"] == "TRADED" and body["history"][0]["traded_qty"] == 5
+
+
 class TestCandidatesRoute:
     def test_market_open_runs_scan(self, client, monkeypatch):
         monkeypatch.setattr(m, "is_market_open_ist", lambda: True)

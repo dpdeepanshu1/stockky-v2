@@ -201,6 +201,8 @@ _COLUMN_MIGRATIONS = [
     ("scalp_positions", "stop_moved_to_breakeven", "NUMBER(1)", "BOOLEAN", "0", "FALSE"),
     # 2026-10-02: see models.py (max/min tick price seen while OPEN).
     ("scalp_positions", "max_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    # group280: price at signal time, for the entry-slippage measure (see models.py).
+    ("scalp_positions", "signal_price", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "min_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     # 2026-09-18 (user audit finding): marks a carried-overnight position
     # that was successfully converted INTRADAY -> CNC via

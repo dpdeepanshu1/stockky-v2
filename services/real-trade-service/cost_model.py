@@ -59,7 +59,15 @@ def estimate_round_trip_cost(
     sell_value = exit_price * qty
     is_delivery = (product_type or "CNC").upper() == "CNC"
 
-    brokerage = config.BROKERAGE_PER_ORDER * 2  # one per leg
+    if is_delivery:
+        brokerage = config.BROKERAGE_PER_ORDER * 2  # one per leg
+    else:
+        # group 264: an INTRADAY (MIS) leg costs min(Rs cap, pct of value) at Dhan, not the delivery Rs 0 - the gate
+        # must see it now that entries are routed to MIS. Never below the configured flat per-order figure.
+        brokerage = sum(
+            max(config.BROKERAGE_PER_ORDER, min(config.CHARGES_BROKERAGE_CAP_RS, v * config.CHARGES_BROKERAGE_PCT / 100.0))
+            for v in (buy_value, sell_value)
+        )
 
     if is_delivery:
         stt = (buy_value + sell_value) * (config.STT_DELIVERY_PCT_PER_LEG / 100.0)
@@ -103,6 +111,7 @@ def evaluate_entry_cost_gate(
     product_type: str = "CNC",
     min_trade_value: Optional[float] = None,
     min_edge_to_cost_ratio: Optional[float] = None,
+    include_dp: bool = False,
 ) -> EdgeVsCostResult:
     """Gate 5.6 helper (entry_engine/entry.py): compares a candidate's own
     expected ₹ edge (position value * target_pct) against its estimated
@@ -112,7 +121,8 @@ def evaluate_entry_cost_gate(
 
     min_trade_value/min_edge_to_cost_ratio: 2026-09-18 fix (follow-on item
     #5) — optional per-mode overrides (entry_engine._resolve_cost_gate_knobs
-    reads them from TradeRiskConfig). Defaulting to None here (which falls
+    reads them from TradeRiskConfig). group 264: include_dp=True adds the flat DP charge (Rs 12.50 + GST) to the cost - used for CNC
+    entries that may be carried overnight and then sold from demat. Defaulting to None here (which falls
     back to config.py's env-var values) keeps this function's own behavior
     and every existing caller/test unchanged."""
     trade_value = entry_price * qty
@@ -120,7 +130,7 @@ def evaluate_entry_cost_gate(
     expected_edge = (target_price - entry_price) * qty
     cost = estimate_round_trip_cost(
         entry_price, qty, exit_price=target_price,
-        product_type=product_type, is_delivery_sell=False,
+        product_type=product_type, is_delivery_sell=bool(include_dp) and (product_type or "CNC").upper() == "CNC",
     )
     ratio = (expected_edge / cost.total) if cost.total > 0 else None
     effective_min_trade_value = min_trade_value if min_trade_value is not None else config.MIN_TRADE_VALUE
@@ -133,3 +143,16 @@ def evaluate_entry_cost_gate(
         passes_min_value=trade_value >= effective_min_trade_value,
         passes_min_ratio=(ratio is None) or (ratio >= effective_min_ratio),
     )
+
+
+def estimate_delivery_sell_cost(price: float, qty: int, carried: bool = True) -> float:
+    """group 264: Rs cost of ONE delivery (CNC) SELL leg of `qty` shares at `price`: STT + exchange + SEBI + GST on those,
+    plus the flat DP charge (Rs 12.50 + GST) when `carried` (shares settled in demat from an earlier day - a same-day
+    sale never pays DP)."""
+    value = float(price) * int(qty)
+    stt = value * (config.STT_DELIVERY_PCT_PER_LEG / 100.0)
+    exchange = value * ((config.EXCHANGE_TXN_PCT + config.IPFT_PCT) / 100.0)
+    sebi = value * (config.SEBI_TURNOVER_PCT / 100.0)
+    gst = (exchange + sebi) * (config.GST_PCT / 100.0)
+    dp = config.DP_CHARGE_FLAT * (1 + config.GST_PCT / 100.0) if carried else 0.0
+    return round(stt + exchange + sebi + gst + dp, 2)

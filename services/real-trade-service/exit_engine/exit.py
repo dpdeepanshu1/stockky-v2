@@ -49,6 +49,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
+import cost_model
 
 import models
 from audit.logger import log_action
@@ -191,6 +192,27 @@ def _load_profile(db: Session, position) -> dict:
         horizon_class = None
     profile = exit_profile_for(horizon_class)
     return {**profile, "horizon_class": horizon_class}
+
+
+def _dp_guard_blocks_target_sale(position, ltp: float, qty_to_close: int) -> Optional[str]:
+    """group 264: reason string when selling `qty_to_close` at `ltp` as a profit-target partial should be SKIPPED because the
+    sale would pay the flat DP fee (carried CNC holding) and the gross gain is under EXIT_DP_MIN_GAIN_RATIO x the
+    sell-leg cost; None when the sale may go ahead. Never raises (any failure = no block)."""
+    try:
+        if not config.EXIT_DP_GUARD_ENABLED:
+            return None
+        if getattr(position, "entry_product_type", None) in ("INTRADAY", "MIS"):
+            return None                                       # MIS never pays DP
+        if ist_today_str(as_aware(position.opened_at)) == ist_today_str():
+            return None                                       # same-day sale of a same-day buy: no DP
+        gain = (float(ltp) - float(position.avg_entry_price)) * int(qty_to_close)
+        cost = cost_model.estimate_delivery_sell_cost(ltp, qty_to_close, carried=True)
+        if gain >= config.EXIT_DP_MIN_GAIN_RATIO * cost:
+            return None
+        return (f"target sale would gain ₹{gain:,.0f} but costs ₹{cost:,.0f} to sell (DP + STT + charges); "
+                f"needs ≥ {config.EXIT_DP_MIN_GAIN_RATIO:.1f}x - holding, stop moved to breakeven")
+    except Exception:
+        return None
 
 
 def _write_exit_decision(
@@ -1339,6 +1361,21 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             ):
                 qty_to_close = max(1, int(position.qty_open * _partial_frac))
                 pct_locked   = qty_to_close / position.qty_open * 100
+                # group 264: don't pay the DP fee to book a tiny target gain on a carried CNC holding - hold it and
+                # protect the winner with a breakeven stop instead (stops / emergency / time exits are unaffected).
+                if mode == "REAL":
+                    _dp_skip = _dp_guard_blocks_target_sale(position, ltp, qty_to_close)
+                    if _dp_skip:
+                        if (position.current_stop or 0) < position.avg_entry_price:
+                            position.current_stop = position.avg_entry_price
+                            db.add(models.TradePositionEvent(
+                                position_id=position.id, event_type="STOP_TRAILED",
+                                detail=f"DP guard: {_dp_skip}",
+                            ))
+                            db.commit()
+                        logger.info("exit DP guard: %s %s", position.symbol, _dp_skip)
+                        held += 1
+                        continue
                 reasoning = (
                     f"Target ₹{position.current_target:.2f} hit at LTP ₹{ltp:.2f}. "
                     f"Locking in {qty_to_close} shares ({pct_locked:.0f}% of position). "

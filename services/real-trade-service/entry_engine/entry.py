@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 import config
 import cost_model
+import entry_product
 import models
 from audit.logger import log_action
 from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
@@ -574,6 +575,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     # the other is WAIT'd and re-evaluated fresh next cycle like any
     # other WAIT.
     staged_symbols: set[str] = set()
+    _gate_cache: dict = {}   # group 264: per-cycle memo (symbols closed today)
 
     for idx, cand in enumerate(candidates):
         try:
@@ -851,6 +853,29 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": result.reason, "risk_verdict": result.verdict.value})
             continue
 
+        # ── Gate 5.55: same-day re-entry guard (group 264) ───────────────────────
+        # A symbol whose position was already closed today pays a second full set of STT / stamp / exchange charges
+        # (plus DP on carried holdings) for what is mostly churn. Blocked until tomorrow; stops are never affected.
+        if config.REENTRY_SAME_DAY_BLOCK and mode == "REAL":
+            if "closed_today" not in _gate_cache:
+                _gate_cache["closed_today"] = entry_product.closed_today_symbols(db, mode)
+            if cand.symbol in _gate_cache["closed_today"]:
+                _re_reason = (f"{cand.symbol} was already traded and closed today - a same-day re-entry would pay a second "
+                              "round of charges. Re-evaluated tomorrow.")
+                decision.action = "WAIT"
+                decision.reasoning = _re_reason
+                decision.gate_tag = "reentry_same_day"
+                waited += 1
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _re_reason,
+                                       "risk_verdict": decision.risk_verdict, "gate_tag": "reentry_same_day"})
+                continue
+
+        # group 264: CNC vs INTRADAY for this entry (see entry_product.py) - decided once, used by the cost gate below and
+        # by the order placement further down (carried on the staged dict).
+        entry_prod, entry_prod_reason = entry_product.choose_entry_product(db, mode, cand.symbol, cand.decision_label)
+        _carry_overnight = entry_prod == "CNC" and entry_product.may_hold_overnight(db, mode, cand.decision_label)
+
         # ── Gate 5.6: transaction-cost / minimum-edge floor (2026-09-18) ────────
         # Audit finding: nothing anywhere compared a candidate's expected ₹
         # edge against what it actually costs to round-trip the position.
@@ -862,8 +887,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             final_qty_for_cost = result.approved_qty or proposed_qty
             min_trade_value, min_edge_to_cost_ratio = _resolve_cost_gate_knobs(db, mode)
             cost_check = cost_model.evaluate_entry_cost_gate(
-                entry_price, final_qty_for_cost, target_pct, product_type="CNC",
+                entry_price, final_qty_for_cost, target_pct, product_type=entry_prod,
                 min_trade_value=min_trade_value, min_edge_to_cost_ratio=min_edge_to_cost_ratio,
+                include_dp=_carry_overnight,
             )
             if not cost_check.passes:
                 if not cost_check.passes_min_value:
@@ -979,6 +1005,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "is_overnight_priority": is_overnight_priority,
             "us_sector_bonus": us_sector_bonus,
             "intraday_news_bonus": news_bonus,
+            "entry_product": entry_prod,
         })
 
         # BUG FIX (2026-09-10, session21c audit): reserved_cash exists to make
@@ -1135,7 +1162,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # persisted anywhere, so exit_engine couldn't later tell CNC and
             # INTRADAY-bought positions apart. Now explicit and stored — see
             # models.py TradeOrder.product_type's docstring.
-            product_type="CNC",
+            product_type=e.get("entry_product", "CNC"),   # group 264: INTRADAY for same-day exits
         )
         db.add(order)
         db.flush()
@@ -1218,7 +1245,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     # relying on place_order's CNC default — matches
                     # order.product_type set above, so the two never drift
                     # apart if place_order's default ever changes.
-                    product_type="CNC",
+                    product_type=e.get("entry_product", "CNC"),
                 )
                 dhan_order_id = str(
                     broker_result.get("orderId") or broker_result.get("order_id") or ""

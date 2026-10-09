@@ -7,7 +7,10 @@ bought CNC even when the position would be squared off the same day (EOD square-
 selected overnight hold), so each same-day round trip paid double STT + stamp at the delivery rate - and every exit of a
 carried CNC holding paid DP.
 
-Rule (config.ENTRY_PRODUCT_MODE = "auto", the default; "cnc" restores the old always-CNC behaviour with no code change):
+group 266: the shipped default is now "cnc" - Dhan prices a CNC buy sold the same day at intraday rates anyway (contract note
+07-Oct-2026), so MIS routing saves nothing on STT / brokerage / stamp. Set ENTRY_PRODUCT_MODE=auto to route.
+
+Rule (config.ENTRY_PRODUCT_MODE = "auto"; "cnc", the default since group 266, keeps the always-CNC behaviour):
   * label may be held overnight (config.OVERNIGHT_HOLD_ELIGIBLE_LABELS and the overnight-hold switch is on) -> CNC
   * at/after config.ENTRY_MIS_LAST_TIME_IST (too close to Dhan's intraday cut-off / our EOD square-off)     -> CNC
   * symbol is on the learned intraday-restricted list (T2T / ASM / GSM)                                       -> CNC

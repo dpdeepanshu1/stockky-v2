@@ -57,7 +57,10 @@ def estimate_round_trip_cost(
     exit_price = exit_price if exit_price is not None else entry_price
     buy_value = entry_price * qty
     sell_value = exit_price * qty
-    is_delivery = (product_type or "CNC").upper() == "CNC"
+    # group 266 (verified on the Dhan contract note of 07-Oct-2026): a CNC buy that is sold the SAME day is charged by Dhan
+    # as an intraday round trip. Delivery rates therefore apply only when the exit is a sale of settled holdings
+    # (is_delivery_sell=True, i.e. a carried position) - same-day CNC round trips are priced like MIS.
+    is_delivery = (product_type or "CNC").upper() == "CNC" and bool(is_delivery_sell)
 
     if is_delivery:
         brokerage = config.BROKERAGE_PER_ORDER * 2  # one per leg

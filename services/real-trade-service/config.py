@@ -369,15 +369,48 @@ ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
 # are evaluated normally, with live ticks, once the guard lifts. The ENTER_AT_OPEN schedule moves to the guard time when
 # the guard is later than ENTER_AT_OPEN_TIME_IST (otherwise its once-a-day run would fire into the guard and be wasted).
 #   OPENING_ENTRY_GUARD_ENABLED   false turns the guard off
-#   OPENING_ENTRY_NOT_BEFORE_IST  'HH:MM' IST, default 09:30 (blank/bad value falls back to 09:30)
+#   OPENING_ENTRY_NOT_BEFORE_IST  'HH:MM' IST, default 09:15 since group 268 (was 09:30; blank/bad value falls back to 09:15)
 #   OPENING_ENTRY_GUARD_MODES     comma list of modes it applies to, default REAL,DEMO (set REAL to keep DEMO as a control)
 OPENING_ENTRY_GUARD_ENABLED = ((os.getenv("OPENING_ENTRY_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
-OPENING_ENTRY_NOT_BEFORE_IST = (os.getenv("OPENING_ENTRY_NOT_BEFORE_IST") or "").strip() or "09:30"
+OPENING_ENTRY_NOT_BEFORE_IST = (os.getenv("OPENING_ENTRY_NOT_BEFORE_IST") or "").strip() or "09:15"
 OPENING_ENTRY_GUARD_MODES = tuple(
     m.strip().upper()
     for m in ((os.getenv("OPENING_ENTRY_GUARD_MODES") or "").strip() or "REAL,DEMO").split(",")
     if m.strip()
 )
+
+# ── Opening-quality gate (group 268, 2026-10-09) ─────────────────────────────
+# The entry window now opens at 09:15 (OPENING_ENTRY_NOT_BEFORE_IST above). The scalp service's 14-day breakdown showed
+# entries before 10:30 won 1 of 10, so from the open until OPENING_GATE_SETTLE_IST every automatic entry must pass
+# entry_engine/opening_gate.py: at least OPENING_GATE_MIN_MINUTES_AFTER_OPEN minutes after the open, price vs the previous
+# close inside [OPENING_GATE_MIN_CHANGE_PCT, OPENING_GATE_MAX_CHANGE_PCT], and not in the top of the exchange day range
+# (OPENING_GATE_MAX_RANGE_POS). The tick carries no day-open price, so "change vs previous close" is the gap proxy here.
+# Candidates that fail stay QUEUED (not consumed, not rejected) and are re-checked next cycle; after the settle time the
+# normal rules apply unchanged. Missing previous close / day range before the settle time FAILS CLOSED (stays queued).
+# Applies to the modes in OPENING_ENTRY_GUARD_MODES. OPENING_GATE_ENABLED=false turns it off.
+def _og_float(name, default):
+    try:
+        return float(((os.getenv(name) or "").strip() or str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+OPENING_GATE_ENABLED = ((os.getenv("OPENING_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+OPENING_GATE_SETTLE_IST = (os.getenv("OPENING_GATE_SETTLE_IST") or "").strip() or "10:00"
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 5.0)
+OPENING_GATE_MIN_CHANGE_PCT = _og_float("OPENING_GATE_MIN_CHANGE_PCT", -0.5)   # price vs previous close, lower bound
+OPENING_GATE_MAX_CHANGE_PCT = _og_float("OPENING_GATE_MAX_CHANGE_PCT", 3.0)    # upper bound; chasing a bigger move at the open is skipped
+OPENING_GATE_MAX_RANGE_POS = _og_float("OPENING_GATE_MAX_RANGE_POS", 0.88)     # 0 disables
+# group 269: shadow mode. true -> inside the gate window no candidate is entered; one that passes the gate is logged once per
+# symbol per day as "OPENING_SHADOW would enter" and stays queued. Default false = the gate is live (group 268).
+OPENING_GATE_SHADOW = ((os.getenv("OPENING_GATE_SHADOW") or "").strip() or "false").lower() == "true"
+# group 270: previous-day candle checks (entry_engine/prev_day.py: background fetch of market-data /history, never on the
+# entry path; a cache miss holds the candidate back for that cycle). Previous day must have closed in the upper half of its
+# range; the stop must be at least FRAC x the daily ATR % (0 disables either check).
+OPENING_GATE_PREVDAY_TIMEOUT_S = _og_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0)
+OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)
+OPENING_GATE_MIN_STOP_ATR_FRAC = _og_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)
+OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_og_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday
 # 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
 # reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
 # found that SELLs placed close to Dhan's intraday cutoff generated a large

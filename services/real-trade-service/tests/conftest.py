@@ -29,3 +29,17 @@ def _opening_entry_guard_off_by_default(monkeypatch):
     import config as _cfg
     monkeypatch.setattr(_cfg, "OPENING_ENTRY_GUARD_ENABLED", False)
 
+
+
+@_pytest_g172.fixture(autouse=True)
+def _opening_gate_off_by_default(monkeypatch):
+    """group 268: entry_engine/opening_gate.py depends on the wall clock (09:15-10:00 IST). Pre-existing tests predate it;
+    tests/test_group268_opening_gate.py turns it back on and pins the clock."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPENING_GATE_ENABLED", False, raising=False)
+    monkeypatch.setattr(_cfg, "OPENING_GATE_SHADOW", False, raising=False)
+    from entry_engine import opening_gate as _og
+    _og.reset_shadow()
+    from entry_engine import prev_day as _pd
+    _pd.reset()
+    yield

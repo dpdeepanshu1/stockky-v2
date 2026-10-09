@@ -583,7 +583,7 @@ def _resolve_pending_with_price(db: Session, pos: ScalpPosition, real_exit_price
     )
 
 
-_last_stuck_sweep_ts = 0.0
+_last_stuck_sweep_ts = float("-inf")     # group 272: monotonic() is host uptime; 0.0 throttled the first sweep on a young host
 _stuck_alerted: set[int] = set()
 # Group 205: log "keeping the marker" once per position, not every ~10 s tick.
 _pending_kept_logged: set[int] = set()

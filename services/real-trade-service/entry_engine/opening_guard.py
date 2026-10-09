@@ -4,7 +4,7 @@ WHY: review item 6. Nothing stopped an automatic entry at 09:15-09:30, and the S
 opened 09:19-09:24 IST all lost (3 trading days, -Rs 274 together). Small and old, so a precaution rather than a proven
 fix; see docs/GROUP220_OPENING_ENTRY_GUARD.md for what the data does and does not show.
 
-WHAT: while the market is open and the IST clock is before OPENING_ENTRY_NOT_BEFORE_IST (default 09:30),
+WHAT: while the market is open and the IST clock is before OPENING_ENTRY_NOT_BEFORE_IST (default 09:15 since group 268, was 09:30),
 reason(mode) returns a message and entry_engine.evaluate_mode() returns early WITHOUT touching any candidate: they stay
 queued (consumed=False), nothing is rejected or logged as a decision, and they are evaluated normally once the guard lifts.
 enter_at_open_time(mode) moves the ENTER_AT_OPEN schedule to the guard time when that is later, so the feature's single
@@ -42,7 +42,7 @@ def covers(mode: str) -> bool:
 
 
 def not_before() -> _time:
-    return parse_hhmm(config.OPENING_ENTRY_NOT_BEFORE_IST, 9, 30)
+    return parse_hhmm(config.OPENING_ENTRY_NOT_BEFORE_IST, 9, 15)
 
 
 def reason(mode: str, now: Optional[datetime] = None) -> Optional[str]:

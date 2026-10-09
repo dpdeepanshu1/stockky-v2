@@ -229,7 +229,9 @@ def cleanup_stale(db: Session) -> list[str]:
     return _sweep(db, 0.0, False)
 
 
-_last_sweep = [0.0]
+# group 272: "never swept" must be -inf, not 0.0: time.monotonic() is host uptime, so with 0.0 the first sweep was throttled
+# whenever the host had been up for less than the interval (and a 3600 s interval made the test fail on a fresh VM).
+_last_sweep = [float("-inf")]
 
 
 def sweep_stale(db: Session, *, force: bool = False) -> list[str]:
@@ -258,4 +260,4 @@ def sweep_stale(db: Session, *, force: bool = False) -> list[str]:
 
 def reset_sweep_throttle() -> None:
     """Tests: forget the last sweep time."""
-    _last_sweep[0] = 0.0
+    _last_sweep[0] = float("-inf")

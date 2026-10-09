@@ -78,3 +78,11 @@ def _event_feeds_use_feedparser(monkeypatch):
     feedparser.parse for ONE call, so they run with the shared downloader off; tests/test_group240_event_shared_feed_fetch.py
     turns it on itself and fakes the downloader."""
     monkeypatch.setenv("EVENT_FEED_SHARED_FETCH", "0")
+
+
+@pytest.fixture(autouse=True)
+def _g270_sentiment_direct_yfinance_by_default(monkeypatch):
+    """group270: sentiment asks market-data-service first in production. The older sentiment tests stub yfinance and
+    must never reach a real market-data URL, so that path is off for every test; the group270 tests switch it on."""
+    monkeypatch.setenv("SENTIMENT_USE_MARKET_DATA", "0")
+    yield

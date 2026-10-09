@@ -158,8 +158,11 @@ def test_note_history_reason_never_raises_and_is_bounded(monkeypatch):
     for i in range(5002):
         cd._note_history_reason(f"S{i}", "HTTP 500")
     assert len(cd._HIST_REASON) <= 5001
-    monkeypatch.setattr(cd, "_HIST_REASON", None)
-    cd._note_history_reason("X", "boom")          # swallowed
+    # group 272: undo the None inside the test. The autouse `_on` fixture's teardown calls clear_history_state() BEFORE a
+    # function-level monkeypatch is undone (monkeypatch is set up first, so torn down last) and crashed on None.
+    with monkeypatch.context() as m:
+        m.setattr(cd, "_HIST_REASON", None)
+        cd._note_history_reason("X", "boom")      # swallowed
 
 
 # ── cycle summary ────────────────────────────────────────────────────────────

@@ -1449,3 +1449,4 @@ class TestEntryCorrectionEdges:
         b.plain_orders = [plain_row("X1", avg=102.0)]
         reconcile.run_exit_reconciliation(db)
         assert p.entry_price == 100.0 and p.realized_pnl == pytest.approx(20.0)
+

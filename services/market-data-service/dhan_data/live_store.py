@@ -14,6 +14,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import List
 
 from . import config
@@ -23,7 +24,10 @@ logger = logging.getLogger("dhan-data.live-store")
 _q: "queue.Queue[List[dict]]" = queue.Queue(maxsize=3)
 _thread = None
 _lock = threading.Lock()
-_stats = {"batches_written": 0, "rows_written": 0, "dropped_batches": 0, "last_error": None}
+_stats = {"batches_written": 0, "rows_written": 0, "dropped_batches": 0, "last_error": None,
+          "coalesced_batches": 0, "failed_chunks": 0, "timeouts": 0}
+_last_warn = 0.0
+_WARN_EVERY_S = 60.0
 
 
 def write_mode() -> str:
@@ -58,7 +62,43 @@ def build_params(rows: List[dict]) -> List[dict]:
     return params
 
 
+def _chunks(items: list, size: int):
+    size = max(1, int(size))
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def coalesce(batches: List[List[dict]]) -> List[dict]:
+    """Merge several queued batches into one row list. The newest row per symbol wins, so a writer that fell behind
+    writes each symbol once with its latest price instead of replaying every stale batch."""
+    latest: dict = {}
+    for rows in batches:
+        for r in rows or []:
+            sym = r.get("symbol")
+            if sym:
+                latest[str(sym)] = r
+    return list(latest.values())
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    txt = f"{type(exc).__name__} {exc}"
+    return "DPY-4024" in txt or "timed out" in txt.lower() or "timeout" in txt.lower()
+
+
+def _warn_throttled(msg: str, *args) -> None:
+    global _last_warn
+    now = time.monotonic()
+    with _lock:
+        if now - _last_warn < _WARN_EVERY_S:
+            return
+        _last_warn = now
+    logger.warning(msg, *args)
+
+
 def _write_sync(rows: List[dict]) -> int:
+    """Upsert `rows` in chunks of DHAN_LIVE_WRITE_CHUNK, each in its own transaction. A chunk that fails (for
+    example an Oracle call timeout) is counted and skipped; the remaining chunks are still written. Returns the
+    number of rows written."""
     params = build_params(rows)
     if not params:
         return 0
@@ -82,15 +122,43 @@ def _write_sync(rows: List[dict]) -> int:
                "ON CONFLICT (symbol) DO UPDATE "
                "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
                "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()")
-    with engine.begin() as conn:
-        conn.execute(text(sql), params)
-    return len(params)
+    written = 0
+    last_exc = None
+    stmt = text(sql)
+    for chunk in _chunks(params, config.live_write_chunk()):
+        try:
+            with engine.begin() as conn:
+                conn.execute(stmt, chunk)
+            written += len(chunk)
+        except Exception as e:  # noqa: BLE001 - keep writing the other chunks
+            last_exc = e
+            with _lock:
+                _stats["failed_chunks"] += 1
+                if _is_timeout(e):
+                    _stats["timeouts"] += 1
+                _stats["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+    if last_exc is not None:
+        _warn_throttled("dhan live_quotes write: %d of %d rows written (last error %s: %s)",
+                        written, len(params), type(last_exc).__name__, str(last_exc)[:100])
+    return written
 
 
 def _loop() -> None:
     while True:
         rows = _q.get()
         try:
+            # Anything that queued up while the previous write ran is merged into this one (newest price per
+            # symbol), so a slow database is never fed stale batches one after another.
+            pending = [rows]
+            while True:
+                try:
+                    pending.append(_q.get_nowait())
+                except queue.Empty:
+                    break
+            if len(pending) > 1:
+                rows = coalesce(pending)
+                with _lock:
+                    _stats["coalesced_batches"] += len(pending) - 1
             n = _write_sync(rows)
             with _lock:
                 _stats["batches_written"] += 1

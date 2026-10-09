@@ -35,6 +35,20 @@ _thread: Optional[threading.Thread] = None
 _stop = False
 _stats = {"batches": 0, "symbols_last_batch": 0, "last_batch_ms": None, "last_batch_at": None, "rows_cached": 0,
           "empty_symbols": 0, "prev_close_disagreements": 0, "rows_mapped": 0}
+# group275: WHICH symbols Dhan did not price (status used to give only the count). Kept apart from _stats so the
+# counters stay plain numbers. no_scrip = not in Dhan's scrip master; no_data = sent to Dhan, nothing usable came back.
+_EMPTY_TRACK_MAX = 2000
+_EMPTY_SAMPLE_SHOWN = 25
+_empty_no_scrip: "OrderedDict[str, float]" = OrderedDict()
+_empty_no_data: "OrderedDict[str, float]" = OrderedDict()
+
+
+def _note_empty(bucket: "OrderedDict[str, float]", key: str, when: float) -> None:
+    """Caller holds _cond. Most recent last; the oldest entry goes when the bound is reached."""
+    bucket.pop(key, None)
+    bucket[key] = when
+    while len(bucket) > _EMPTY_TRACK_MAX:
+        bucket.popitem(last=False)
 
 
 # ── keys ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -170,12 +184,14 @@ def run_one_batch(batch: List[str]) -> List[dict]:
     Separated from the thread loop so tests can drive it directly."""
     t0 = time.monotonic()
     rows: List[dict] = []
+    unmapped: List[str] = []
     try:
         by_seg: Dict[str, List[int]] = {}
         key_by_id: Dict[tuple, str] = {}
         for k in batch:
             ident = scrip_master.security_id(k)
             if not ident:
+                unmapped.append(k)
                 continue
             seg, sid = ident
             by_seg.setdefault(seg, []).append(sid)
@@ -216,9 +232,15 @@ def run_one_batch(batch: List[str]) -> List[dict]:
             for row in rows:
                 _rows[row["symbol"]] = row
                 got.add(row["symbol"])
+            _wall = time.time()
+            _unmapped = set(unmapped)
             for k in batch:
                 if k not in got:
                     _fail[k] = done
+                    _note_empty(_empty_no_scrip if k in _unmapped else _empty_no_data, k, _wall)
+                else:
+                    _empty_no_scrip.pop(k, None)
+                    _empty_no_data.pop(k, None)
             _stats["batches"] += 1
             _stats["symbols_last_batch"] = len(batch)
             _stats["last_batch_ms"] = round((done - t0) * 1000.0, 1)
@@ -370,6 +392,10 @@ def status() -> dict:
         s = dict(_stats)
         s["pending_demand"] = len(_demand)
         s["pending_background"] = len(_bg)
+        s["empty_no_scrip_distinct"] = len(_empty_no_scrip)
+        s["empty_no_data_distinct"] = len(_empty_no_data)
+        s["empty_no_scrip_sample"] = list(_empty_no_scrip)[-_EMPTY_SAMPLE_SHOWN:][::-1]
+        s["empty_no_data_sample"] = list(_empty_no_data)[-_EMPTY_SAMPLE_SHOWN:][::-1]
     s["worker_alive"] = bool(_thread is not None and _thread.is_alive())
     return s
 
@@ -382,6 +408,7 @@ def _reset_for_tests() -> None:
         t.join(timeout=2.0)
     with _cond:
         _demand.clear(); _bg.clear(); _rows.clear(); _fail.clear(); _listeners.clear()
+        _empty_no_scrip.clear(); _empty_no_data.clear()
         for k in _stats:
             _stats[k] = None if k in ("last_batch_ms", "last_batch_at") else 0
         _stop = False

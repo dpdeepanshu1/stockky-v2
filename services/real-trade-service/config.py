@@ -870,6 +870,18 @@ MIN_EDGE_TO_COST_RATIO   = float(((os.getenv("MIN_EDGE_TO_COST_RATIO") or "").st
 # Enforced in risk_engine/engine.py (§5c-ii), which downsizes qty to fit
 # under the cap the same way the concentration cap does, rather than
 # rejecting outright.
+# group 264 (2026-10-09): entry product routing + same-day re-entry guard (see entry_product.py). ENTRY_PRODUCT_MODE=cnc
+# restores the old always-CNC behaviour without a code change.
+ENTRY_PRODUCT_MODE       = ((os.getenv("ENTRY_PRODUCT_MODE") or "").strip() or "auto").lower()
+ENTRY_MIS_LAST_TIME_IST  = ((os.getenv("ENTRY_MIS_LAST_TIME_IST") or "").strip() or "14:45")
+# After a position in a symbol was fully closed today, a fresh BUY of the same symbol the same day is blocked
+# (churn pays a second round of STT/stamp + exchange charges). Stop-loss exits are unaffected. false = old behaviour.
+# Exit-side DP guard: a profit-TARGET partial sale of a CARRIED CNC holding (bought on an earlier day, so the sale pays the
+# flat DP fee) is skipped while its gross gain is under EXIT_DP_MIN_GAIN_RATIO x the sell-leg cost (STT + DP + ...).
+# The stop is raised to breakeven instead so the winner is still protected. Stops / emergency / time exits are never held back.
+EXIT_DP_GUARD_ENABLED    = ((os.getenv("EXIT_DP_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
+EXIT_DP_MIN_GAIN_RATIO   = float(((os.getenv("EXIT_DP_MIN_GAIN_RATIO") or "").strip() or "3.0"))
+REENTRY_SAME_DAY_BLOCK   = ((os.getenv("REENTRY_SAME_DAY_BLOCK") or "").strip() or "true").lower() == "true"
 MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() or "3000.0"))
 
 # ── Selective overnight hold (2026-09-18 — user audit finding) ───────────────

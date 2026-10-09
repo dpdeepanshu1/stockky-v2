@@ -250,7 +250,8 @@ def _wl_last_good_fallback(wanted: list) -> dict:
             if 0 <= (now - as_of).total_seconds() <= FEED_LEFTOVER_STALE_S:
                 out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
                                 source=f"stale_last_good({t.source})", volume=t.volume,
-                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close)
+                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
+                                spread_pct=t.spread_pct, book_value_5=t.book_value_5)
     return out
 
 
@@ -534,13 +535,16 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
 
 
 class Tick:
-    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close")
+    __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close",
+                 "spread_pct", "book_value_5")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
                  volume: Optional[int] = None,
                  day_high: Optional[float] = None,
                  day_low: Optional[float] = None,
-                 prev_close: Optional[float] = None):
+                 prev_close: Optional[float] = None,
+                 spread_pct: Optional[float] = None,
+                 book_value_5: Optional[float] = None):
         self.symbol   = symbol
         self.price    = price
         self.as_of    = as_of
@@ -558,6 +562,11 @@ class Tick:
         # entry_engine tell a stock that is UP today from one that is down, which a bare price
         # cannot. Never used for sizing or ordering.
         self.prev_close = prev_close
+        # group277: Dhan 5-level depth summary when market-data supplies it (None otherwise): bid-ask spread in
+        # percent of mid, and the rupee value resting on both sides of the best five levels. Used only by the
+        # entry guard (an unknown value never blocks); never for sizing or ordering.
+        self.spread_pct = spread_pct
+        self.book_value_5 = book_value_5
 
 
 def _lq_prev_close(lq, ltp) -> Optional[float]:
@@ -578,6 +587,15 @@ def _lq_prev_close(lq, ltp) -> Optional[float]:
         return pc
     except Exception:
         return None
+
+
+def _safe_depth_num(value) -> Optional[float]:
+    """group277: a depth number from market-data as a float, or None when absent / not a finite number >= 0."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v >= 0 and v != float("inf") else None
 
 
 def _safe_prev_close(value) -> Optional[float]:
@@ -854,6 +872,8 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             day_high=float(_day_high) if _day_high else None,
             day_low=float(_day_low)  if _day_low  else None,
             prev_close=_safe_prev_close(q.get("previous_close") or q.get("prev_close")),
+            spread_pct=_safe_depth_num(q.get("spread_pct")),
+            book_value_5=_safe_depth_num(q.get("book_value_5")),
         )
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
@@ -1067,6 +1087,8 @@ def _tick_from_bulk_item(item, *, now: Optional[datetime] = None, max_age_s: Opt
             day_high=float(dh) if dh else None,
             day_low=float(dl) if dl else None,
             prev_close=_safe_prev_close(item.get("previous_close") or item.get("prev_close")),
+            spread_pct=_safe_depth_num(item.get("spread_pct")),
+            book_value_5=_safe_depth_num(item.get("book_value_5")),
         )
     except (TypeError, ValueError):
         return None
@@ -1196,7 +1218,8 @@ def _prio_last_good_fallback(wanted: list[str]) -> dict[str, Tick]:
             if (now - as_of).total_seconds() <= FEED_PRIORITY_STALE_FALLBACK_S:
                 out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
                                 source=f"stale_last_good({t.source})", volume=t.volume,
-                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close)
+                                day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
+                                spread_pct=t.spread_pct, book_value_5=t.book_value_5)
     return out
 
 

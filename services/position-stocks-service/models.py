@@ -146,6 +146,9 @@ class ScalpPosition(Base):
     # far each trade ran before it reversed (max favourable / adverse excursion)
     # before tuning targets, breakeven trigger or trailing/partial exits.
     max_price_seen = Column(Float, nullable=True)
+    # group280 (plan Phase B): the price the scanner / caller saw when it decided to buy. entry_price is later corrected to
+    # the real fill, so (entry_price - signal_price) / signal_price is the entry slippage. Nullable: older rows have none.
+    signal_price = Column(Float, nullable=True)
     min_price_seen = Column(Float, nullable=True)
 
     # 2026-09-18 (user audit finding): see the migration entry in db.py and

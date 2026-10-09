@@ -1904,6 +1904,26 @@ async def list_closed_positions(
     }
 
 
+@app.get("/positions/{mode}/breakdown")
+async def closed_positions_breakdown(
+    mode: str, days: int = 7,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Read-only (group 277): CLOSED positions of the last `days` days (1-60) grouped by entry time (30-min IST
+    bucket), source tab and exit hour, with win rate, gross / net P&L and expectancy per trade. Changes nothing."""
+    import trade_breakdown
+    mode = mode.upper()
+    days = max(1, min(int(days), 60))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
+    rows = (
+        db.query(models.TradePosition)
+        .filter(models.TradePosition.mode == mode, models.TradePosition.status == "CLOSED",
+                models.TradePosition.closed_at >= cutoff)
+        .all()
+    )
+    return {"mode": mode, "days": days, **trade_breakdown.breakdown(rows)}
+
+
 @app.get("/stats/regime-override")
 async def regime_override_stats(
     mode: str = "REAL", admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),

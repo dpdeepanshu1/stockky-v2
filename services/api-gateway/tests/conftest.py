@@ -54,3 +54,17 @@ def _g233_market_open_by_default(monkeypatch):
     if gw is not None and hasattr(gw, "_gw_quotes_closed"):
         monkeypatch.setattr(gw, "_gw_quotes_closed", lambda: False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _g278_indices_stay_on_yfinance_stub(monkeypatch):
+    """group278: /market/indices now asks market-data first. Older tests stub yf.Ticker and must not make a network
+    call, so the market-data read is off by default; the group278 tests turn it on explicitly."""
+    monkeypatch.setenv("INDICES_VIA_MARKET_DATA", "0")
+    monkeypatch.delenv("GATEWAY_DIRECT_YFINANCE_FALLBACK", raising=False)
+    # group279: the surprise feed, premarket baselines and repair-RSI also ask market-data first now. Older tests stub
+    # yfinance / httpx for the old order, so those reads are off by default; the group279 tests turn them on.
+    monkeypatch.setenv("SURPRISE_FEED_VIA_MARKET_DATA", "0")
+    monkeypatch.setenv("PREMARKET_BASELINES_VIA_MARKET_DATA", "0")
+    monkeypatch.setenv("REPAIR_RSI_VIA_MARKET_DATA", "0")
+    yield

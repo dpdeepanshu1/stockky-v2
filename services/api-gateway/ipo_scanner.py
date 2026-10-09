@@ -1244,7 +1244,14 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     except Exception as e:
         logger.debug("ipo history via market-data-service %s: %s", symbol, e)
 
-    # Fallback: direct yfinance (only reached if market-data-service is down/unreachable)
+    # Fallback: direct yfinance (only reached if market-data-service is down/unreachable).
+    # group279: GATEWAY_DIRECT_YFINANCE_FALLBACK=0 switches this last resort off.
+    try:
+        from yf_policy import direct_yf_ok
+        if not direct_yf_ok():
+            return None
+    except Exception:  # noqa: BLE001
+        pass
     try:
         import yfinance as yf
         from symbol_aliases import resolve_ns_ticker

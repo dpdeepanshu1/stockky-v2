@@ -533,6 +533,45 @@ class TestRsiTier:
         go(env, "A", dict(NO_RSI))
         assert env.yf_calls == []
 
+    # group279: market-data /history first, yfinance only as the allowed last resort
+    def _md(self, env, frame):
+        import yf_policy
+        env.md_calls = []
+
+        def fake(url, sym, period=None, days=None, timeout=15.0):
+            env.md_calls.append((url, sym, period))
+            return frame
+        env.mp.setattr(yf_policy, "md_daily_frame", fake)
+        env.mp.setenv("REPAIR_RSI_VIA_MARKET_DATA", "1")        # conftest turns it off for the older tests
+        env.mp.delenv("GATEWAY_DIRECT_YFINANCE_FALLBACK", raising=False)
+
+    def test_group279_market_data_history_wins_and_yahoo_is_not_called(self, env):
+        self._md(env, FakeHist([4.0, 5.0, 6.0]))
+        out = go(env, "A", dict(NO_RSI))
+        assert env.md_calls == [(gw.MARKET_DATA_URL, "A", "1mo")] and env.yf_calls == []
+        assert env.rsi_calls == [([4.0, 5.0, 6.0], 14)] and out["patched_fields"] == ["rsi"]
+
+    def test_group279_no_market_data_history_falls_back_to_yahoo(self, env):
+        self._md(env, None)
+        env.hist = FakeHist([1.0, 2.0, 3.0])
+        go(env, "A", dict(NO_RSI))
+        assert env.yf_calls == ["TICK.NS"] and env.rsi_calls == [([1.0, 2.0, 3.0], 14)]
+
+    def test_group279_direct_yahoo_off_goes_on_to_the_technical_service(self, env):
+        self._md(env, None)
+        env.mp.setenv("GATEWAY_DIRECT_YFINANCE_FALLBACK", "0")
+        env.hist = FakeHist([1.0, 2.0, 3.0])
+        env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44})
+        go(env, "A", dict(NO_RSI))
+        assert env.yf_calls == [] and env.rsi_calls == [] and stored(env)["rsi"] == 44.0
+
+    def test_group279_switch_off_keeps_the_old_yahoo_only_path(self, env):
+        self._md(env, FakeHist([9.0, 9.0, 9.0]))
+        env.mp.setenv("REPAIR_RSI_VIA_MARKET_DATA", "0")
+        env.hist = FakeHist([1.0, 2.0, 3.0])
+        go(env, "A", dict(NO_RSI))
+        assert env.md_calls == [] and env.yf_calls == ["TICK.NS"]
+
     @pytest.mark.parametrize("hist", [None, FakeHist([1], empty=True), FakeHist([1], has_close=False)])
     def test_unusable_history_falls_through(self, env, hist):
         env.hist = hist

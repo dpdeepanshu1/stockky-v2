@@ -1381,7 +1381,7 @@ class TestPrecalcBhavcopyStage:
         assert pre.upserts == [["A", "B"], ["C"], ["D"]]
         assert out == {"ok": True, "symbols_requested": 4, "computed": 4, "errors": 0, "elapsed_sec": 0.0,
                        "table": "surprise_static_feed", "upserted": 4, "upserted_last_batch": 4, "workers": 4,
-                       "source_bhavcopy": 2, "source_yfinance": 2}
+                       "source_bhavcopy": 2, "source_yfinance": 2, "source_market_data": 0}
         hit = next(p for p in pre.progress if str(p.get("message", "")).startswith("DB bhavcopy"))
         assert hit["message"] == "DB bhavcopy: 2 · yfinance left: 2"
         assert hit["percent"] == 50 and hit["processed"] == 2 and hit["computed"] == 2

@@ -1257,6 +1257,96 @@ SURPRISE_FEED_CACHE_KEY = "system:surprise_feed"
 SURPRISE_FEED_OPEN_TTL_SEC = int(__import__("os").getenv("SURPRISE_FEED_OPEN_TTL_SEC", "7200"))
 SURPRISE_FEED_COOLDOWN_SEC = float(__import__("os").getenv("SURPRISE_FEED_COOLDOWN_SEC", "0.5"))
 SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC = float(__import__("os").getenv("SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC", "300"))
+# group279: while the market is open a market-data quote older than this is not a live price for the feed (closed
+# market: the last close is the right answer, so no age limit applies).
+SURPRISE_FEED_MAX_QUOTE_AGE_SEC = float(__import__("os").getenv("SURPRISE_FEED_MAX_QUOTE_AGE_SEC", "120"))
+
+import yf_policy as _yf_policy  # noqa: E402  (group279: the shared "may I call yfinance myself" switch)
+
+
+class _SkipYf(Exception):
+    """Internal: nothing is left for the direct yfinance step (or it is switched off)."""
+
+
+async def _feed_rows_from_market_data(client: "httpx.AsyncClient", md: str, syms: List[str]) -> List[dict]:
+    """group279: feed rows for `syms` from market-data POST /quotes/bulk, shaped like the yfinance rows built in
+    run_market_aware_surprise_feed (price, cmp, previous_close, day_change_pct, day_high, day_low, volume, source).
+    A symbol with no price, over MAX_STOCK_PRICE, or (market open) with a quote older than
+    SURPRISE_FEED_MAX_QUOTE_AGE_SEC is left out so the next source can try it. Never raises."""
+    out: List[dict] = []
+    if not md or not syms:
+        return out
+    open_now = is_market_open_ist()
+    sem = asyncio.Semaphore(BULK_CONCURRENCY)
+
+    async def one_chunk(part: List[str]) -> List[dict]:
+        rows: List[dict] = []
+        async with sem:
+            try:
+                r = await client.post(f"{md}/quotes/bulk", json={"symbols": part}, timeout=BULK_TIMEOUT)
+                if r.status_code != 200:
+                    return rows
+                body = r.json()
+                wanted = set(part)
+                for q in (body.get("quotes") if isinstance(body, dict) else None) or []:
+                    if not isinstance(q, dict):
+                        continue
+                    base = str(q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+                    if base not in wanted:
+                        continue
+                    if open_now and not SurpriseStockEngine._bulk_row_fresh(q, SURPRISE_FEED_MAX_QUOTE_AGE_SEC):
+                        continue
+                    px = None
+                    for k in ("price", "cmp", "ltp", "close", "last_price"):
+                        try:
+                            v = float(q.get(k) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if v > 0:
+                            px = v
+                            break
+                    if not px or (MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE):
+                        continue
+
+                    def _num(key):
+                        try:
+                            v = float(q.get(key))
+                        except (TypeError, ValueError):
+                            return None
+                        return v if v == v and v > 0 else None
+
+                    prev = _num("previous_close")
+                    chg = round((px - prev) / prev * 100, 2) if prev else None
+                    if chg is None:
+                        try:
+                            chg = round(float(q.get("day_change_pct")), 2)
+                        except (TypeError, ValueError):
+                            chg = None
+                    vol = None
+                    try:
+                        v = int(float(q.get("volume")))
+                        vol = v if v >= 0 else None
+                    except (TypeError, ValueError):
+                        vol = None
+                    row = {"symbol": base, "price": px, "cmp": px, "previous_close": prev, "day_change_pct": chg,
+                           "day_high": _num("day_high"), "day_low": _num("day_low"),
+                           "source": q.get("source") or "market_data_bulk"}
+                    if vol is not None:
+                        row["volume"] = vol
+                    rows.append({k: v for k, v in row.items() if v is not None})
+            except Exception as e:  # noqa: BLE001
+                logger.debug("surprise feed bulk chunk failed (%d symbols): %s", len(part), e)
+        return rows
+
+    parts = [list(syms[i:i + BULK_CHUNK]) for i in range(0, len(syms), BULK_CHUNK)]
+    seen: set = set()
+    for res in await asyncio.gather(*(one_chunk(p) for p in parts), return_exceptions=True):
+        if isinstance(res, list):
+            for row in res:
+                if row["symbol"] not in seen:
+                    seen.add(row["symbol"])
+                    out.append(row)
+    return out
 
 
 def is_market_open_ist() -> bool:
@@ -1388,7 +1478,6 @@ async def run_market_aware_surprise_feed(
         return u
 
     try:
-        import yfinance as yf
         clean_syms = []
         seen_c = set()
         for s in syms:
@@ -1397,16 +1486,45 @@ async def run_market_aware_surprise_feed(
                 seen_c.add(c)
                 clean_syms.append(c)
         syms = clean_syms or syms
+    except Exception as e:
+        logger.warning("surprise feed symbol clean-up failed: %s", e)
+
+    # group279: market-data POST /quotes/bulk first (Dhan -> AngelOne -> yfinance is decided there). The direct
+    # yfinance download below only runs for the symbols it could not price, and only while
+    # GATEWAY_DIRECT_YFINANCE_FALLBACK allows it. SURPRISE_FEED_VIA_MARKET_DATA=0 restores the old order.
+    md_first = (market_data_url or "").rstrip("/")
+    if md_first and syms and _yf_policy.env_on("SURPRISE_FEED_VIA_MARKET_DATA", True):
+        try:
+            async with httpx.AsyncClient(timeout=BULK_TIMEOUT, follow_redirects=True) as _md_client:
+                _md_rows = await _feed_rows_from_market_data(_md_client, md_first, syms)
+            for _row in _md_rows:
+                results.append(_row)
+                got.add(_row["symbol"])
+            logger.info("surprise feed: market-data priced %d of %d symbol(s), %d left for the next source",
+                        len(_md_rows), len(syms), len(syms) - len(got))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("surprise feed: market-data bulk failed (%s) - falling back", e)
+
+    yf_syms = [s for s in syms if s not in got]
+    if yf_syms and not _yf_policy.direct_yf_ok():
+        logger.info("surprise feed: direct yfinance is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0) - %d symbol(s) "
+                    "go to the per-symbol market-data quote only", len(yf_syms))
+        yf_syms = []
+
+    try:
+        if not yf_syms:
+            raise _SkipYf()
+        import yfinance as yf
 
         try:
             from surprise_premarket import premarket_stop_requested
         except Exception:
             premarket_stop_requested = lambda: False
 
-        for i in range(0, len(syms), chunk_size):
+        for i in range(0, len(yf_syms), chunk_size):
             if premarket_stop_requested():
                 break
-            chunk = syms[i: i + chunk_size]
+            chunk = yf_syms[i: i + chunk_size]
             ticker_string = " ".join(f"{s}.NS" for s in chunk)
             try:
                 # AUDIT FIX (2026-09-19, the significant find in this
@@ -1468,6 +1586,8 @@ async def run_market_aware_surprise_feed(
                 logger.warning("surprise yf chunk %s: %s", i, e)
                 errors += 1
             await asyncio.sleep(0.5)
+    except _SkipYf:
+        pass
     except Exception as e:
         logger.warning("surprise chunked yf unavailable: %s", e)
 

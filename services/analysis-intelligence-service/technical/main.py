@@ -254,6 +254,11 @@ def _candles_to_df(candles):
     return df if len(df) >= 5 else None
 
 
+def _direct_yf_ok() -> bool:
+    """group278: may this service call yfinance itself when market-data-service has no history? (env switch, default on)"""
+    return (os.getenv("ANALYSIS_DIRECT_YFINANCE_FALLBACK") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _fetch_history_yfinance(symbol: str):
     """Direct Yahoo fallback when market-data-service is cold/rate-limited."""
     try:
@@ -441,8 +446,10 @@ def _fetch_history(symbol: str, force: bool = False):
     except Exception as e:
         logger.warning("Market data history chain failed for %s: %s — trying yfinance", symbol, e)
 
-    # 2) direct yfinance (free-tier resilience — last resort)
-    df = _fetch_history_yfinance(symbol)
+    # 2) direct yfinance (free-tier resilience — last resort). group278: ANALYSIS_DIRECT_YFINANCE_FALLBACK=0 keeps
+    #    this service off yfinance completely (history then comes only through market-data-service, which walks
+    #    Dhan -> AngelOne -> yfinance itself). Default on, so nothing changes until it is turned off.
+    df = _fetch_history_yfinance(symbol) if _direct_yf_ok() else None
     if df is not None:
         logger.info("Using yfinance history for %s (%s bars)", symbol, len(df))
         if len(df) > 260:

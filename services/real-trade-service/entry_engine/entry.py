@@ -1689,6 +1689,46 @@ def _wl_require_prev_close_on() -> bool:
     return ((os.getenv("WATCHLIST_REQUIRE_PREV_CLOSE") or "").strip() or "1") not in ("0", "false", "False")
 
 
+def _watchlist_tick_age_reason(tick) -> Optional[str]:
+    """group278 (plan Phase A: every price carries source + as_of, and entries refuse an old one): reason string when
+    the tick is older than WATCHLIST_MAX_TICK_AGE_S (default 30 s, 0 = off), else None. A tick without a usable
+    as_of never blocks. A last-good copy served while the feed is down keeps its ORIGINAL as_of, so it is caught
+    here. Never raises."""
+    try:
+        limit = _wl_env_float("WATCHLIST_MAX_TICK_AGE_S", 30.0)
+        as_of = getattr(tick, "as_of", None)
+        if limit <= 0 or as_of is None:
+            return None
+        from datetime import datetime, timezone
+        if not isinstance(as_of, datetime):
+            return None
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - as_of).total_seconds()
+        if age > limit:
+            src = getattr(tick, "source", None) or "?"
+            return f"price from {src} is {age:.0f}s old (limit {limit:.0f}s) - re-checked next cycle"
+    except Exception:
+        return None
+    return None
+
+
+def _watchlist_depth_reason(tick) -> Optional[str]:
+    """group277: reason string when the tick's depth says the stock is too expensive to trade, else None. Never raises."""
+    try:
+        max_spread = _wl_env_float("WATCHLIST_MAX_SPREAD_PCT", 0.5)
+        spread = getattr(tick, "spread_pct", None)
+        if max_spread > 0 and spread is not None and float(spread) > max_spread:
+            return f"bid-ask spread {float(spread):.2f}% is above the limit {max_spread:.2f}%"
+        min_book = _wl_env_float("WATCHLIST_MIN_BOOK_VALUE", 0.0)
+        book = getattr(tick, "book_value_5", None)
+        if min_book > 0 and book is not None and float(book) < min_book:
+            return f"best-5 book holds Rs{float(book):,.0f} (need >= Rs{min_book:,.0f})"
+    except Exception:
+        return None
+    return None
+
+
 def _watchlist_adverse_reason(row, pct_move: float, tick, baseline_just_set: bool = False) -> Optional[str]:
     """Return a short reason when this row must NOT be queued this cycle, else None. Never raises.
 
@@ -1720,6 +1760,23 @@ def _watchlist_adverse_reason(row, pct_move: float, tick, baseline_just_set: boo
                 max_drop = _t1_drop
         if max_drop > 0 and pct_move < -max_drop:
             return f"price is {pct_move:.1%} below catalyst (limit -{max_drop:.1%})"
+        # group276 (2026-10-09 TARIL bought 292.05 against catalyst 280.80 = +4.0%, now 282.75; BLUESTONE
+        # +4.2% above its catalyst, flat): the trigger only guarded falls. A row already up more than
+        # WATCHLIST_MAX_CHASE_PCT (default 2%) above its catalyst price is not queued (the row stays active and
+        # is queued when the price comes back inside the limit). 0 / "off" = no chase limit (old behaviour).
+        _chase = _wl_env_float("WATCHLIST_MAX_CHASE_PCT", 0.02)
+        if _chase > 0 and pct_move > _chase:
+            return f"price is {pct_move:.1%} above catalyst (chase limit +{_chase:.1%}) - waits for a pullback"
+        # group277 (2026-10-09 plan, Phase C3/D): Dhan's 5-level depth now rides on the tick (spread_pct,
+        # book_value_5). A wide spread or a thin book means the round trip loses more to slippage than a 1.2-1.4%
+        # target pays. Unknown depth (no Dhan quote, or a source without depth) never blocks.
+        # WATCHLIST_MAX_SPREAD_PCT (default 0.5, 0 = off), WATCHLIST_MIN_BOOK_VALUE (Rs, default 0 = off).
+        _depth = _watchlist_depth_reason(tick)
+        if _depth:
+            return _depth
+        _age = _watchlist_tick_age_reason(tick)
+        if _age:
+            return _age
         if getattr(row, "source_tier", None) == 1 and _wl_tier1_day_check_on():
             _t1_min = _wl_env_float("WATCHLIST_TIER1_MIN_DAY_CHANGE_PCT", 0.0)
             _t1_chg = _tick_day_change_pct(tick)

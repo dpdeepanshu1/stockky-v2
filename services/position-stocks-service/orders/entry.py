@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import cost_gate, entry_pause
+from orders import cost_gate, depth_gate, entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate
 from screening.engine import Candidate
@@ -97,6 +97,37 @@ def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
         return None
 
 
+def _stale_tick_message(age_s: float, max_age_s: float) -> str:
+    return f"STALE_TICK:last tick {age_s:.0f}s old > {max_age_s:.0f}s — current price unknown"
+
+
+def _stale_tick_reject(symbol: str) -> Optional[str]:
+    """group279: the stale-tick half of _price_guard_reject(), on its own, for the manual BUY path.
+
+    The manual BUY route takes its price from ws_client.get_last_ltp(), which has no age, so a feed that went quiet
+    minutes ago still looked like a live price. Same limit as the automatic path (ENTRY_MAX_TICK_AGE_S, 0 = off).
+    Fails OPEN on a missing tick buffer or any error, like every other gate in this module (the route already
+    refuses when there is no price at all)."""
+    try:
+        max_age = float(config.ENTRY_MAX_TICK_AGE_S)
+        if max_age <= 0:
+            return None
+        from feed import ws_client
+        buf = ws_client.get_tick_buffer(symbol)
+        if not buf:
+            return None
+        last_ts, last_px = buf[-1]
+        if not last_px or last_px <= 0:
+            return None
+        age = time.time() - float(last_ts)
+        if age > max_age:
+            return _stale_tick_message(age, max_age)
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("entry: stale tick check failed for %s: %s", symbol, e)
+        return None
+
+
 def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
     """Pre-order price guards (2026-10-05, scalp review). Returns a skip reason
     or None.
@@ -123,10 +154,7 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
                 max_age = config.ENTRY_MAX_TICK_AGE_S
                 age = time.time() - float(last_ts)
                 if max_age > 0 and age > max_age:
-                    return (
-                        f"STALE_TICK:last tick {age:.0f}s old "
-                        f"> {max_age:.0f}s — current price unknown"
-                    )
+                    return _stale_tick_message(age, max_age)
         if live is not None and signal_ltp > 0 and config.ENTRY_MAX_SLIPPAGE_PCT > 0:
             slip = (live - signal_ltp) / signal_ltp * 100.0
             if slip > config.ENTRY_MAX_SLIPPAGE_PCT:
@@ -462,6 +490,13 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _stop_reject, quality=quality)
         return None
 
+    # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.
+    _depth_reject = depth_gate.reject_reason(candidate.symbol)
+    if _depth_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
+        return None
+
     # Reserve capital (also checks kill switch again in the ledger)
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
     if position_value is None:
@@ -495,6 +530,17 @@ def attempt_entry(
     # Quantity
     raw_qty = int(position_value / candidate.current_ltp)
     quantity = max(1, raw_qty)
+    # group283 (plan C3 size-down): do not let the order eat its own touch (off unless ENTRY_BOOK_MAX_SHARE_PCT > 0).
+    _cap_qty = depth_gate.max_qty_from_book(candidate.symbol, candidate.current_ltp)
+    if _cap_qty is not None and quantity > _cap_qty:
+        _new_value = _cap_qty * candidate.current_ltp
+        logger.info("position-stocks entry: %s sized down %d -> %d shares (best-5 book cap)",
+                    candidate.symbol, quantity, _cap_qty)
+        if _new_value < position_value:
+            # hand the unused part of the reservation back so the pool does not sit on idle capital
+            ledger.release_capital(db, position_value=position_value - _new_value, realized_pnl=0.0)
+            position_value = _new_value
+        quantity = _cap_qty
 
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:
@@ -697,6 +743,7 @@ def attempt_entry(
         window_source=candidate.window_label,
         status="OPEN",
         entry_price=candidate.current_ltp,
+        signal_price=candidate.current_ltp,                  # group280: slippage = fill vs this
         quantity=quantity,
         target_price=levels.target_price,
         stop_price=levels.stop_price,
@@ -841,6 +888,12 @@ def attempt_manual_entry(
         raise ManualEntryRejected(f"No valid live price for {symbol}.")
 
     symbol = symbol.strip().upper()
+
+    # group279: refuse a price from a feed that has gone quiet. Checked before the symbol claim so nothing has to be
+    # released. The automatic path has had this since 2026-10-05 (_price_guard_reject); the manual route did not.
+    _stale = _stale_tick_reject(symbol)
+    if _stale:
+        raise ManualEntryRejected(f"{symbol}: {_stale}. Wait for a fresh tick (is the market open?) and try again.")
 
     # AUDIT FIX (2026-09-18): shared_symbol_lock.try_claim() below returns
     # True whenever the lock is already held by THIS service (an
@@ -993,6 +1046,7 @@ def attempt_manual_entry(
         window_source="MANUAL",
         status="OPEN",
         entry_price=current_ltp,
+        signal_price=current_ltp,                            # group280
         quantity=quantity,
         target_price=levels.target_price,
         stop_price=levels.stop_price,

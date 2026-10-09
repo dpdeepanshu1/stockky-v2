@@ -94,6 +94,41 @@ def parse_ltt(raw) -> Optional[datetime]:
     return None
 
 
+def depth_fields(item: dict, price: float) -> dict:
+    """Group 276. Best bid/ask and 5-level book summary from the market-quote item's `depth` block
+    (Dhan sends depth.buy / depth.sell, each a list of {quantity, orders, price}). Used by entry filters
+    to skip wide-spread or thin names. Returns {} when the item has no usable depth (callers fail open).
+    Fields: best_bid, best_ask, spread_pct (of mid), bid_qty_5, ask_qty_5, book_value_5 (Rs, both sides)."""
+    try:
+        d = item.get("depth")
+        if not isinstance(d, dict):
+            return {}
+        def _levels(side):
+            out = []
+            for lv in (d.get(side) or [])[:5]:
+                px, q = _f(lv.get("price")), _f(lv.get("quantity"))
+                if px and px > 0 and q and q > 0:
+                    out.append((px, q))
+            return out
+        buys, sells = _levels("buy"), _levels("sell")
+        if not buys or not sells:
+            return {}
+        bid, ask = max(p for p, _ in buys), min(p for p, _ in sells)
+        if bid <= 0 or ask <= 0 or ask < bid:      # crossed / locked book: not usable
+            return {}
+        mid = (bid + ask) / 2.0
+        return {
+            "best_bid": bid,
+            "best_ask": ask,
+            "spread_pct": round((ask - bid) / mid * 100.0, 4),
+            "bid_qty_5": sum(q for _, q in buys),
+            "ask_qty_5": sum(q for _, q in sells),
+            "book_value_5": round(sum(p * q for p, q in buys) + sum(p * q for p, q in sells), 2),
+        }
+    except Exception:  # noqa: BLE001 - never break a quote over depth
+        return {}
+
+
 def map_item(symbol: str, item: dict, now_mono: Optional[float] = None) -> Optional[dict]:
     """One Dhan market-quote item -> the row this service uses. None when there is no usable price."""
     if not isinstance(item, dict):
@@ -120,6 +155,7 @@ def map_item(symbol: str, item: dict, now_mono: Optional[float] = None) -> Optio
         "symbol": symbol,
         "price": price,
         "previous_close": prev,
+        **depth_fields(item, price),
         "day_change_pct": chg,
         "open": _f(ohlc.get("open")),
         "day_high": _f(ohlc.get("high")),

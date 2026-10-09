@@ -4826,6 +4826,12 @@ def _get_nifty50_data() -> List[dict]:
         if data:
             logger.info("Movers: market-data priced %d/%d symbols, %d left for yfinance",
                         len(data), len(nifty_symbols), len(_left))
+        # group279: the per-symbol yfinance fetch is the last resort and can be switched off
+        # (GATEWAY_DIRECT_YFINANCE_FALLBACK=0); symbols market-data could not price are then left out.
+        if _left and not _direct_yf_ok():
+            logger.info("Movers: direct yfinance is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0) - %d symbols "
+                        "market-data could not price are left out", len(_left))
+            _left = []
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as ex:
             for res in ex.map(_fetch_one, _left):
                 if res:
@@ -4944,6 +4950,8 @@ def proxy_quote(symbol: str):
         logger.warning("quote proxy %s: %s", sym, e)
     # fallback yfinance light
     try:
+        if not _direct_yf_ok():
+            raise ValueError("direct yfinance fallback is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0)")
         yf_ticker = resolve_ns_ticker(sym)
         if not yf_ticker:
             raise ValueError(f"{sym} not resolvable on NSE")
@@ -7478,6 +7486,8 @@ async def market_trending():
                     logger.debug("trending market-data quote %s: %s", sym, e)
 
                 if price is None:
+                    if not _direct_yf_ok():
+                        continue
                     yf_ticker = resolve_ns_ticker(sym)
                     if not yf_ticker:
                         continue
@@ -7517,6 +7527,70 @@ async def market_trending():
         # to empty data instead, same shape as the timeout branch above.
         logger.warning("market/trending failed: %s — returning empty", e)
         return {"data": [], "count": 0}
+
+def _direct_yf_ok() -> bool:
+    """group278: may this service call yfinance itself as a LAST resort when market-data-service has nothing?
+    GATEWAY_DIRECT_YFINANCE_FALLBACK=0 enforces the contract that prices come only through market-data (which
+    already walks Dhan -> AngelOne -> yfinance). Default on, so nothing changes until it is turned off."""
+    from yf_policy import direct_yf_ok     # group279: the same switch is read by the scanners and premarket
+    return direct_yf_ok()
+
+
+def _indices_via_md_on() -> bool:
+    """group278: /market/indices reads ^NSEI / ^BSESN from market-data /history first (INDICES_VIA_MARKET_DATA, default on)."""
+    return (os.getenv("INDICES_VIA_MARKET_DATA") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _md_index_frame(symbol: str, period: str):
+    """group278: daily OHLC of an index from market-data-service /history as a DataFrame shaped like
+    yf.Ticker(...).history() (DatetimeIndex, Open/High/Low/Close/Volume), or None when market-data has nothing.
+    Never raises. market-data decides Dhan -> AngelOne -> yfinance."""
+    try:
+        import pandas as pd
+        from urllib.parse import quote as _urlquote
+        md_period = "5d" if period in ("1d", "5d") else period
+        resp = httpx.get(f"{MARKET_DATA_URL}/history/{_urlquote(symbol, safe='')}",
+                         params={"period": md_period, "interval": "1d"}, timeout=12)
+        if resp.status_code != 200:
+            return None
+        candles = (resp.json() or {}).get("candles") or []
+        if not candles:
+            return None
+        df = pd.DataFrame(candles)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        df.columns = [str(c).capitalize() for c in df.columns]
+        for col in ("Open", "High", "Low", "Close", "Volume"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"]).sort_index()
+        if df.empty:
+            return None
+        if period == "1d":
+            df = df.iloc[-1:]          # yfinance period="1d" is the latest session only
+        return df
+    except Exception as e:  # noqa: BLE001
+        logger.debug("index history via market-data %s: %s", symbol, e)
+        return None
+
+
+class _IndexTicker:
+    """group278: the part of yf.Ticker that /market/indices uses (.history(period=...)), served by market-data
+    first and, only when that has nothing and _direct_yf_ok(), by yfinance as before."""
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+
+    def history(self, period: str = "1d", **kw):
+        if _indices_via_md_on():
+            df = _md_index_frame(self.symbol, period)
+            if df is not None:
+                return df
+        if _direct_yf_ok():
+            return yf.Ticker(self.symbol).history(period=period, **kw)
+        import pandas as pd
+        return pd.DataFrame()
+
 
 def _prev_session_change(ticker, last_price) -> Optional[dict]:
     """Change of ``last_price`` against the PREVIOUS SESSION's close, or None.
@@ -7577,8 +7651,8 @@ def get_market_indices(force_refresh: bool = False):
             )
 
     try:
-        nifty = yf.Ticker("^NSEI")
-        sensex = yf.Ticker("^BSESN")
+        nifty = _IndexTicker("^NSEI")
+        sensex = _IndexTicker("^BSESN")
         nifty_hist = nifty.history(period="1d")
         sensex_hist = sensex.history(period="1d")
         if nifty_hist.empty or sensex_hist.empty:
@@ -10434,6 +10508,8 @@ def _resolve_quote_price(sym: str):
     except Exception as e:
         logger.debug("ws quote market-data %s: %s", sym, e)
     try:
+        if not _direct_yf_ok():
+            raise ValueError("direct yfinance fallback is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0)")
         yf_ticker = resolve_ns_ticker(sym)
         if not yf_ticker:
             raise ValueError(f"{sym} not resolvable on NSE")
@@ -12574,10 +12650,15 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             from data_feed import compute_rsi_from_closes
             import yfinance as yf
             yf_ticker = resolve_ns_ticker(base)
-            hist = (
-                await asyncio.to_thread(lambda: yf.Ticker(yf_ticker).history(period="1mo"))
-                if yf_ticker else None
-            )
+            hist = None
+            # group279: market-data /history first (Dhan -> AngelOne -> yfinance there); direct yfinance only when
+            # that has nothing and GATEWAY_DIRECT_YFINANCE_FALLBACK allows it. REPAIR_RSI_VIA_MARKET_DATA=0 = old path.
+            if yf_ticker:
+                from yf_policy import env_on, md_daily_frame
+                if env_on("REPAIR_RSI_VIA_MARKET_DATA", True):
+                    hist = await asyncio.to_thread(md_daily_frame, MARKET_DATA_URL, base, "1mo")
+                if (hist is None or hist.empty) and _direct_yf_ok():
+                    hist = await asyncio.to_thread(lambda: yf.Ticker(yf_ticker).history(period="1mo"))
             if hist is not None and not hist.empty and "Close" in hist.columns:
                 closes = hist["Close"].dropna().values
                 rsi_local = compute_rsi_from_closes(closes, period=14)

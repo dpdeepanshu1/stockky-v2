@@ -78,6 +78,7 @@ def test_switch_off_makes_no_call(post, monkeypatch):
 def test_get_nifty50_data_only_sends_the_unpriced_symbols_to_yfinance(post, monkeypatch):
     post.quotes = [_q("AAA", 110.0, 100.0)]
     monkeypatch.setattr(gw, "_get_nifty_indices", lambda: ["AAA", "BBB"])
+    monkeypatch.setattr(gw, "_market_session_phase_ist", lambda: "open")   # group279: was wall-clock dependent
     monkeypatch.setattr(gw, "_redis_get", lambda k: None)
     monkeypatch.setattr(gw, "_redis_set", lambda *a, **k: None)
     seen = []

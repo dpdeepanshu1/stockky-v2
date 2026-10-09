@@ -20,9 +20,17 @@ was corrected: delivery STT is 0.1 % on BUY *and* SELL (every CNC buy used to sh
 the SELL leg only, exchange = 0.00297 % + 0.0001 % IPFT, GST also covers the SEBI fee, DP is Rs 12.50 + GST. DP is not
 charged on a sell that only closes shares bought the same day (nothing was debited from demat). A legacy SELL with no
 price at all is priced off the last buy of the symbol and flagged `estimated` instead of vanishing (its DP was lost).
+
+2026-10-09 (group 263): every figure is now ALSO STORED (tables trade_charges_ledger = one row per executed order with the
+full split incl. DP, trade_pnl_daily = per day gross / charges / net). persist() upserts the rows build_rows() just
+computed (restating a stored row in place when the rate card or a repaired fill changes it), persist_daily() refreshes
+the day's charges and, for today, the gross from the account row. Both are best-effort and never raise;
+sync_throttled() runs them from the fast reconcile tick so storage never waits for a dashboard read.
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict
 from typing import Iterable, Optional
 
@@ -31,6 +39,8 @@ import models
 from datetime import date, timedelta
 
 from tz_utils import as_aware, ist_today_str
+
+logger = logging.getLogger("real-trade-charges-ledger")
 
 _DELIVERY = ("CNC", "DELIVERY")
 
@@ -204,13 +214,16 @@ def summarize(rows: list, recent_days: int = 14, today: Optional[str] = None) ->
     }
 
 
-def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
+def report(db, mode: str = "REAL", recent_days: int = 14, persist: bool = False, gross_today=None) -> dict:
     """Read every order of `mode` with at least one fill and summarise its charges.
 
     2026-10-08 (group 260): orders that have NO trade_fills row but did execute (every SELL booked before
     group 260 - reconcile never wrote fills for exits) are priced from what the order row itself kept:
     broker_fill_notional (broker's cumulative filled value) first, else filled_qty_so_far x limit_price
     (an estimate; market sells have no limit price and are skipped), and dated by updated_at.
+
+    group 263: with ``persist=True`` the computed rows are also written to trade_charges_ledger / trade_pnl_daily
+    (``gross_today`` = TradeAccount.realized_pnl_today for the day's gross); the default stays read-only.
     """
     mode = (mode or "REAL").upper()
     fill_rows = (
@@ -243,7 +256,17 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
         value_by_order[o.id] = max(v, 0.0)
         qty_by_order[o.id] = float(o.filled_qty_so_far)
     if not value_by_order:
+        if persist and gross_today is not None:
+            persist_daily(db, mode, [], gross_today)
         return summarize([], recent_days)
+    rows = _rows_for(db, mode, value_by_order, qty_by_order, first_fill, legacy)
+    if persist:
+        persist_rows(db, mode, rows)          # group 263: store what was just computed (never raises)
+        persist_daily(db, mode, rows, gross_today)
+    return summarize(rows, recent_days)
+
+
+def _rows_for(db, mode, value_by_order, qty_by_order, first_fill, legacy) -> list:
     orders = []
     ids = list(value_by_order)
     for i in range(0, len(ids), 500):
@@ -257,4 +280,156 @@ def report(db, mode: str = "REAL", recent_days: int = 14) -> dict:
                 "value": value_by_order[o.id], "qty": qty_by_order.get(o.id, 0.0),
                 "created_at": created, "day": ist_today_str(filled),
             })
-    return summarize(build_rows(orders), recent_days)
+    return build_rows(orders)
+
+
+# ── Storage (group 263) ──────────────────────────────────────────────────────────────────────────────────────────
+_SPLIT = ("brokerage", "stt", "exchange", "sebi", "gst", "stamp", "dp")
+
+
+def persist_rows(db, mode: str, rows: list) -> int:
+    """Upsert one trade_charges_ledger row per build_rows() row. A stored row whose figures differ from the freshly
+    computed ones (rate card changed, a fill was repaired, DP re-attributed) is rewritten; identical rows are left
+    alone. Returns the number of rows inserted or changed. Never raises."""
+    if not rows:
+        return 0
+    try:
+        mode = (mode or "REAL").upper()
+        ids = [r["id"] for r in rows]
+        existing: dict = {}
+        for i in range(0, len(ids), 500):
+            for row in db.query(models.TradeChargesLedger).filter(models.TradeChargesLedger.order_id.in_(ids[i:i + 500])).all():
+                existing[row.order_id] = row
+        n = 0
+        for r in rows:
+            c = r["charges"]
+            vals = {k: round(float(c.get(k, 0.0)), 4) for k in _SPLIT}
+            total = round(float(r["all_charges"]), 4)
+            row = existing.get(r["id"])
+            if row is None:
+                db.add(models.TradeChargesLedger(
+                    order_id=r["id"], mode=mode, symbol=r["symbol"], side=r["side"], product=r["product"], day=r["day"],
+                    qty=float(r.get("qty") or 0.0), order_value=round(float(r["value"]), 4), total_charges=total,
+                    estimated=bool(r.get("estimated")), **vals,
+                ))
+                n += 1
+                continue
+            stale = (
+                row.day != r["day"] or row.side != r["side"] or (row.product or "") != (r["product"] or "")
+                or bool(row.estimated) != bool(r.get("estimated"))
+                or abs((row.order_value or 0.0) - r["value"]) > 0.005
+                or abs((row.qty or 0.0) - float(r.get("qty") or 0.0)) > 1e-9
+                or abs((row.total_charges or 0.0) - total) > 0.0005
+                or any(abs((getattr(row, k) or 0.0) - vals[k]) > 0.0005 for k in _SPLIT)
+            )
+            if stale:
+                row.day, row.side, row.product = r["day"], r["side"], r["product"]
+                row.qty, row.order_value, row.total_charges = float(r.get("qty") or 0.0), round(float(r["value"]), 4), total
+                row.estimated = bool(r.get("estimated"))
+                for k in _SPLIT:
+                    setattr(row, k, vals[k])
+                row.updated_at = models._now()
+                n += 1
+        if n:
+            db.commit()
+        return n
+    except Exception:
+        logger.exception("charges ledger: storing rows failed; totals are still computed on read")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+
+
+def _upsert_daily(db, mode: str, day: str, *, gross=None, charges=None, orders=None) -> None:
+    row = db.query(models.TradePnlDaily).filter(
+        models.TradePnlDaily.mode == mode, models.TradePnlDaily.day == day).first()
+    if row is None:
+        row = models.TradePnlDaily(mode=mode, day=day, charges=0.0, orders=0)
+        db.add(row)
+    if charges is not None:
+        row.charges = round(float(charges), 2)
+    if orders is not None:
+        row.orders = int(orders)
+    if gross is not None:
+        row.realized_gross = round(float(gross), 2)
+    if row.realized_gross is not None:
+        row.net_realized = round(row.realized_gross - (row.charges or 0.0), 2)
+    row.updated_at = models._now()
+
+
+def persist_daily(db, mode: str, rows: list, gross_today=None, today: Optional[str] = None) -> int:
+    """Refresh trade_pnl_daily: charges + order count for EVERY day present in `rows`, and today's gross P&L (from
+    the account row, when given). Past days keep the gross frozen at their rollover. Never raises."""
+    try:
+        mode = (mode or "REAL").upper()
+        today = today or ist_today_str()
+        per_day: dict = defaultdict(lambda: [0.0, 0])
+        for r in rows or []:
+            per_day[r["day"]][0] += r["all_charges"]
+            per_day[r["day"]][1] += 1
+        for d, (ch, n) in per_day.items():
+            _upsert_daily(db, mode, d, charges=ch, orders=n, gross=(gross_today if d == today else None))
+        if gross_today is not None and today not in per_day:
+            _upsert_daily(db, mode, today, gross=gross_today)
+        db.commit()
+        return len(per_day)
+    except Exception:
+        logger.exception("charges ledger: storing daily P&L failed")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+
+
+def freeze_day_gross(db, mode: str, day: Optional[str], gross: float) -> None:
+    """Called by portfolio._maybe_reset_daily_pnl just BEFORE realized_pnl_today is zeroed: store that day's final
+    gross P&L. Never raises, never leaves the session in a failed state."""
+    if not day:
+        return
+    try:
+        _upsert_daily(db, (mode or "REAL").upper(), day, gross=gross)
+        db.commit()
+    except Exception:
+        logger.exception("charges ledger: could not freeze %s gross P&L for %s", mode, day)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+_last_sync_at: dict = {}
+
+
+def sync_throttled(db, mode: str = "REAL", min_interval: float = 60.0) -> int:
+    """Compute + store charges at most once per `min_interval` s per mode (called from the fast reconcile tick).
+    Returns the number of executed orders processed, 0 when throttled or on failure. Never raises."""
+    mode = (mode or "REAL").upper()
+    now = time.monotonic()
+    last = _last_sync_at.get(mode)
+    if last is not None and now - last < min_interval:
+        return 0
+    _last_sync_at[mode] = now
+    try:
+        gross_today = None
+        try:
+            acct = db.query(models.TradeAccount).filter_by(mode=mode).first()
+            if acct is not None and acct.pnl_last_reset_date == ist_today_str():
+                gross_today = float(acct.realized_pnl_today or 0.0)
+        except Exception:
+            gross_today = None
+        rep = report(db, mode, 14, persist=True, gross_today=gross_today)
+        return int(rep.get("orders") or 0)
+    except Exception:
+        logger.exception("charges ledger: sync failed")
+        return 0
+
+
+def daily_history(db, mode: str = "REAL", days: int = 30) -> list:
+    """Stored per-day gross / charges / net, newest first (read-only)."""
+    rows = (db.query(models.TradePnlDaily).filter(models.TradePnlDaily.mode == (mode or "REAL").upper())
+            .order_by(models.TradePnlDaily.day.desc()).limit(max(1, min(int(days), 365))).all())
+    return [{"day": r.day, "orders": r.orders, "realized_gross": r.realized_gross, "charges": round(r.charges or 0.0, 2),
+             "net_realized": r.net_realized} for r in rows]

@@ -250,6 +250,13 @@ _COLUMN_MIGRATIONS = [
     # accounts for losses booked by real-trade-service on the same Dhan account.
     ("scalp_capital_ledger", "peer_realized_pnl_today", "BINARY_DOUBLE", "DOUBLE PRECISION", "0", "0"),
     ("scalp_capital_ledger", "peer_pnl_last_synced_at", "TIMESTAMP", "TIMESTAMP", None, None),
+    # 2026-10-09 (group 263): full charge split + net P&L stored per ledger row (see models.ScalpChargesLedger).
+    ("scalp_charges_ledger", "stt", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_charges_ledger", "exchange", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_charges_ledger", "sebi", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_charges_ledger", "gst", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_charges_ledger", "stamp", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_charges_ledger", "net_pnl", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     # AUDIT FIX (2026-09-15): scalp_intraday_restricted is a brand-new table
     # (models.ScalpIntradayRestrictedSecurity). create_all() will CREATE it
     # on the next boot — no column migrations needed for a new table.

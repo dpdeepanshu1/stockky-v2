@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
-  type ScalpCumulativeCharges, type ScalpChargesPeriod,
+  type ScalpCumulativeCharges, type ScalpChargesPeriod, type ScalpChargeTrades,
   getSessionToken, setSessionToken, setSessionExpiredHandler,
   type ScalpStatus, type ScalpPositionRow, type ScalpCandidateRow, type ScalpLedgerState,
   type ScalpTradeHistory, type DhanLiveOrders, type ScalpCycleResult, type DhanAccountStatus,
@@ -376,6 +376,7 @@ export default function PositionStocksTab() {
   const [dhanLiveError, setDhanLiveError] = useState<string | null>(null);
   const [cumCharges, setCumCharges] = useState<ScalpCumulativeCharges | null>(null);
   const [cumChargesError, setCumChargesError] = useState<string | null>(null);
+  const [chargeTrades, setChargeTrades] = useState<ScalpChargeTrades | null>(null);   // group 263: today's stored per-trade rows
   const [lastCycleResult, setLastCycleResult] = useState<ScalpCycleResult | null>(null);
   // ADDED (session48 — "no live process shows and no stock name shows"):
   // polled snapshot of the current/last cycle from the new GET
@@ -503,6 +504,7 @@ export default function PositionStocksTab() {
     try {
       setCumCharges(await positionStocksApi.cumulativeCharges(14));
       setCumChargesError(null);
+      try { setChargeTrades(await positionStocksApi.chargesTrades()); } catch { /* per-trade list is optional */ }
     } catch (e: any) {
       setCumChargesError(e?.message || "Failed to load cumulative charges");
     }
@@ -569,8 +571,9 @@ export default function PositionStocksTab() {
   }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
 
   // group 258: cumulative brokerage is only needed on the Charges sub-tab; refresh it every 60 s while that tab is open.
+  // group 263: the Overview P&L tiles also show the figure after charges, so it loads there too.
   useEffect(() => {
-    if (subTab !== "charges") return;
+    if (subTab !== "charges" && subTab !== "overview") return;
     void loadCumCharges();
     return setVisibleInterval(() => void loadCumCharges(), 60_000);
   }, [subTab, loadCumCharges]);
@@ -1104,12 +1107,26 @@ export default function PositionStocksTab() {
             <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_today ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
               {fmtInr(ledger?.realized_pnl_today)}
             </p>
+            {cumCharges?.pnl && ledger && (() => {
+              const netToday = ledger.realized_pnl_today - cumCharges.pnl.charges_today;
+              return (
+                <p className={`font-display tabular-nums text-[9px] ${netToday >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                  after charges {netToday >= 0 ? "+" : ""}{fmtInr(netToday, 0)}
+                </p>
+              );
+            })()}
           </div>
           <div>
             <p className="text-[9px] text-mist uppercase tracking-widest">P&L Total</p>
             <p className={`font-display tabular-nums font-bold text-sm ${(ledger?.realized_pnl_total ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
               {fmtInr(ledger?.realized_pnl_total)}
             </p>
+            {cumCharges?.pnl && (
+              <p className={`font-display tabular-nums text-[9px] ${cumCharges.pnl.net_realized_total >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                after charges {cumCharges.pnl.net_realized_total >= 0 ? "+" : ""}{fmtInr(cumCharges.pnl.net_realized_total, 0)}
+                {cumCharges.since ? ` (since ${fmtChargeDay(cumCharges.since)})` : ""}
+              </p>
+            )}
           </div>
         </div>
         <CapitalBar allocated={ledger?.total_allocated_capital ?? 0} available={ledger?.available_capital ?? 0} />
@@ -1963,6 +1980,43 @@ export default function PositionStocksTab() {
                       Total split: STT {fmtInr(cumCharges.total.components.stt, 2)} · GST {fmtInr(cumCharges.total.components.gst, 2)} · Exch+SEBI {fmtInr(cumCharges.total.components.exchange + cumCharges.total.components.sebi, 2)} · Stamp {fmtInr(cumCharges.total.components.stamp, 2)} · Brokerage {fmtInr(cumCharges.total.components.brokerage, 2)}
                     </p>
                   )}
+                  {cumCharges.pnl && (
+                    <div className="mt-3 pt-3 border-t border-slate space-y-1.5 font-display tabular-nums text-[11px]">
+                      <div className="flex items-center justify-between text-mist">
+                        <span>Realized P&amp;L all-time (price only)</span>
+                        <span className={cumCharges.pnl.realized_gross_total >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                          {cumCharges.pnl.realized_gross_total >= 0 ? "+" : ""}{fmtInr(cumCharges.pnl.realized_gross_total, 2)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-mist">
+                        <span>− Charges since start</span>
+                        <span className="text-signal-sell">-{fmtInr(cumCharges.pnl.charges_total, 2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between font-bold border-t border-slate pt-1.5">
+                        <span className="text-paper">Net realized P&amp;L all-time (after charges)</span>
+                        <span className={cumCharges.pnl.net_realized_total >= 0 ? "text-signal-buy" : "text-signal-sell"}>
+                          {cumCharges.pnl.net_realized_total >= 0 ? "+" : ""}{fmtInr(cumCharges.pnl.net_realized_total, 2)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {cumCharges.recent_days.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-slate">
+                      <p className="text-[9px] text-mist uppercase tracking-widest mb-1.5">Recent days · Gross · Charges · Net</p>
+                      <div className="space-y-1 font-display tabular-nums text-[10px]">
+                        {cumCharges.recent_days.map(d => (
+                          <div key={d.day} className="flex items-center justify-between">
+                            <span className="text-paper">{fmtChargeDay(d.day)} <span className="text-mist text-[9px]">{d.trades} trades</span></span>
+                            <span className="text-mist">
+                              {d.gross_pnl != null && <span className={d.gross_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{d.gross_pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(d.gross_pnl), 2)}</span>}
+                              {" · "}<span className="text-signal-sell">-{fmtInr(d.total_charges, 2)}</span>
+                              {d.net_pnl != null && <>{" · "}<span className={d.net_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{d.net_pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(d.net_pnl), 2)}</span></>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <p className="font-display tabular-nums text-[9px] text-mist mt-2">{cumCharges.note}</p>
                 </>
               ) : !cumChargesError ? (
@@ -1970,9 +2024,47 @@ export default function PositionStocksTab() {
               ) : null}
             </div>
 
+            {/* group 263: per-trade charges from the STORED ledger rows (full split, gross -> net), same columns as Real Auto Trade's "Per trade charges" */}
+            {chargeTrades && chargeTrades.trades.length > 0 && (
+              <div className="bg-graphite border border-slate rounded-2xl p-4">
+                <p className="dash-section-title mb-3">Per trade charges ({fmtChargeDay(chargeTrades.day)})</p>
+                <div className="space-y-2">
+                  {chargeTrades.trades.map(t => (
+                    <div key={t.position_id} className="bg-ink border border-slate rounded-xl p-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-display tabular-nums text-sm font-bold text-paper">{t.symbol}</span>
+                          <span className="font-display tabular-nums text-[9px] text-mist">MIS · buy + sell</span>
+                        </div>
+                        <span className="font-display tabular-nums text-xs text-signal-sell font-bold">-{fmtInr(t.total_charges, 2)}</span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-3 font-display tabular-nums text-[10px] text-mist">
+                        <span>Qty <span className="text-paper">{t.qty}</span></span>
+                        <span>Buy <span className="text-paper">{t.buy_price != null ? `₹${t.buy_price.toFixed(2)}` : "—"}</span></span>
+                        <span>Sell <span className="text-paper">{t.sell_price != null ? `₹${t.sell_price.toFixed(2)}` : "—"}</span></span>
+                        <span>Value <span className="text-paper">{fmtInr(t.buy_value, 0)}</span></span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-3 font-display tabular-nums text-[10px] text-mist mt-0.5">
+                        <span>Brokerage <span className="text-paper">₹{t.brokerage.toFixed(2)}</span></span>
+                        <span>STT <span className="text-paper">₹{t.stt.toFixed(2)}</span></span>
+                        <span>Exch+SEBI <span className="text-paper">₹{(t.exchange + t.sebi).toFixed(2)}</span></span>
+                        <span>GST+Stamp <span className="text-paper">₹{(t.gst + t.stamp).toFixed(2)}</span></span>
+                      </div>
+                      {t.gross_pnl != null && t.net_pnl != null && (
+                        <div className="flex flex-wrap gap-x-3 font-display tabular-nums text-[10px] text-mist mt-0.5">
+                          <span>Gross <span className={t.gross_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{t.gross_pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(t.gross_pnl), 2)}</span></span>
+                          <span>Net <span className={t.net_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{t.net_pnl >= 0 ? "+" : "-"}{fmtInr(Math.abs(t.net_pnl), 2)}</span></span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {legCharges.length > 0 ? (
               <div className="bg-graphite border border-slate rounded-2xl p-4">
-                <p className="dash-section-title mb-3">Per-leg charges</p>
+                <p className="dash-section-title mb-3">Per-leg charges (live Dhan order book)</p>
                 <div className="space-y-2">
                   {legCharges.map((oc, i) => (
                     <div key={i} className="bg-ink border border-slate rounded-xl p-3">

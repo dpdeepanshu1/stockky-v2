@@ -499,6 +499,9 @@ export interface CumulativeBrokerage {
     realized_gross_total: number; charges_total: number; net_realized_total: number;
     realized_gross_today: number; charges_today: number; net_realized_today: number;
   };
+  // group 263: stored per-day gross / charges / net (trade_pnl_daily), newest first. realized_gross / net_realized are
+  // null for a day whose gross was never captured (days before the daily snapshot existed).
+  pnl_daily?: { day: string; orders: number; realized_gross: number | null; charges: number; net_realized: number | null }[];
   note: string;
 }
 

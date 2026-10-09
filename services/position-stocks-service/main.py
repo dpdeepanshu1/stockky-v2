@@ -72,6 +72,7 @@ API endpoints:
                                           filtered out of candidates every cycle)
   GET  /ledger                       — capital ledger state
   GET  /charges/cumulative           — brokerage + charges since the first booked trade (survives 3-day retention)
+  GET  /charges/trades               — per-trade charges split + gross/net P&L of one day (stored ledger rows)
   POST /ledger/sync                  — force sync from Dhan
   POST /ledger/reset-daily            — manual/emergency reset of today's P&L
                                           + kill switch (normal case is handled
@@ -369,6 +370,10 @@ async def _fast_reconcile_loop() -> None:
             # super-order row has none). Throttled inside, idempotent, never raises, runs after the close too.
             with factory() as db:
                 await asyncio.to_thread(reconcile.auto_repair_closed_entry_prices, db)
+            # group 263: book every newly settled trade into the charges ledger (throttled to 1/min, never raises),
+            # so the stored figures never wait for a dashboard read or the 3-day retention job.
+            with factory() as db:
+                await asyncio.to_thread(charges_ledger.sync_throttled, db)
             if not is_market_open_ist():
                 continue
             with factory() as db:
@@ -1786,6 +1791,13 @@ def charges_cumulative(days: int = 14, db: Session = Depends(get_db)):
     """2026-10-08 (group 258): brokerage and total charges since the first booked trade (scalp_charges_ledger,
     which the 3-day trade-history retention never purges), plus the last `days` days one by one."""
     return charges_ledger.cumulative(db, recent_days=days)
+
+
+@app.get("/charges/trades")
+def charges_trades(day: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)):
+    """2026-10-09 (group 263): per-trade charges (full split + gross / net P&L) of one IST day (default today) from the
+    stored ledger rows - the Charges tab's "Per trade charges" list; survives the 3-day trade-history retention."""
+    return charges_ledger.trades(db, day=day, limit=limit)
 
 
 @app.post("/trades/cleanup")

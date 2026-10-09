@@ -1964,13 +1964,25 @@ async def charges_cumulative(
     never purged), with per-product, per-day and top-symbol splits. Estimate from the Charges-tab rate card."""
     import asyncio
     import charges_ledger
-    rep = await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days)
-    # group 262: net P&L = booked realized P&L minus the charges above, taken from the same account row the Overview
-    # shows, so the dashboard never has to subtract two differently-scoped numbers itself. Best-effort only.
+    # group 263: the account row is read FIRST so today's gross P&L is stored together with the charges.
+    account = None
     try:
         account = db.query(models.TradeAccount).filter_by(mode=mode.upper()).first()
         if account is not None:
             _pf_maybe_reset_daily_pnl(db, account)
+    except Exception:
+        logger.warning("charges cumulative: account row unavailable", exc_info=True)
+        account = None
+    g_today_stored = float(account.realized_pnl_today or 0.0) if account is not None else None
+    rep = await asyncio.to_thread(charges_ledger.report, db, mode.upper(), days, True, g_today_stored)
+    # group 262: net P&L = booked realized P&L minus the charges above, taken from the same account row the Overview
+    # shows, so the dashboard never has to subtract two differently-scoped numbers itself. Best-effort only.
+    try:
+        rep["pnl_daily"] = charges_ledger.daily_history(db, mode.upper(), max(days, 14))   # group 263: stored per-day net
+    except Exception:
+        logger.warning("charges cumulative: stored daily P&L unavailable", exc_info=True)
+    try:
+        if account is not None:
             g_total = float(account.realized_pnl_total or 0.0)
             g_today = float(account.realized_pnl_today or 0.0)
             c_total = float(rep.get("all_charges_total") or 0.0)

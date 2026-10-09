@@ -3070,6 +3070,23 @@ export default function RealAutoTrade() {
                               </div>
                             </div>
                           )}
+                          {cumBrokerage.pnl_daily && cumBrokerage.pnl_daily.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-slate">
+                              <p className="text-[9px] text-mist uppercase tracking-widest mb-1.5">Recent days (stored) · Gross · Charges · Net</p>
+                              <div className="space-y-1 font-display tabular-nums text-[10px]">
+                                {cumBrokerage.pnl_daily.map(d => (
+                                  <div key={d.day} className="flex items-center justify-between">
+                                    <span className="text-paper">{fmtChargeDay(d.day)} <span className="text-mist text-[9px]">{d.orders} orders</span></span>
+                                    <span className="text-mist">
+                                      {d.realized_gross != null ? <span className={pnlColor(d.realized_gross)}>{d.realized_gross >= 0 ? "+" : "-"}{fmtInr(Math.abs(d.realized_gross), 2)}</span> : "—"}
+                                      {" · "}<span className="text-signal-sell">-{fmtInr(d.charges, 2)}</span>
+                                      {" · "}{d.net_realized != null ? <span className={pnlColor(d.net_realized)}>{d.net_realized >= 0 ? "+" : "-"}{fmtInr(Math.abs(d.net_realized), 2)}</span> : "—"}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           {(cumBrokerage.orders_estimated ?? 0) > 0 && (
                             <p className="font-display tabular-nums text-[9px] text-mist mt-2">
                               {cumBrokerage.orders_estimated} older sell order{cumBrokerage.orders_estimated === 1 ? "" : "s"} had no recorded price and {cumBrokerage.orders_estimated === 1 ? "is" : "are"} priced at the last buy of that stock (estimate).

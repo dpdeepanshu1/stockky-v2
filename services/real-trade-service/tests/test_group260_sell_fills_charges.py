@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,7 +20,10 @@ import charges_ledger as cl
 import models
 from execution import reconcile as R
 
-NOW = datetime(2026, 10, 8, 5, 0, tzinfo=timezone.utc)
+# group 263: was a fixed 2026-10-08 05:00 UTC, but _book_fill_delta stamps the SELL fill with the real clock, so once the
+# real IST day moved on the buy (fixed date) and the sell (today) fell on different days and the same-day-no-DP
+# assertion failed. Anchored to the real clock now (a minute ago keeps buy-before-sell ordering).
+NOW = datetime.now(timezone.utc) - timedelta(minutes=1)
 
 
 @pytest.fixture()

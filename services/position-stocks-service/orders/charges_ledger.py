@@ -15,10 +15,18 @@ was priced once at booking and never revisited. Now (a) the rates come from conf
 from their own buy/sell values with the current card (history self-corrects after a rate fix) and (c) a row whose
 position was later repaired (entry/exit price or P&L corrected from the order book) is refreshed while the position
 still exists. Components (stt/exchange/sebi/gst/stamp) are exposed per period.
+
+2026-10-09 (group 263): the split itself (stt / exchange / sebi / gst / stamp) and the net P&L are now STORED on every
+ledger row, not only recomputed on read, and the stored values are re-aligned with the current rate card whenever
+the ledger is read (restate_stored). cumulative() also returns a `pnl` block (gross - charges = net, all-time and
+today, same shape as real-trade-service) and per-day gross / charges / net; trades() lists the per-trade rows.
+sync_throttled() books newly settled trades from the fast reconcile loop, so nothing depends on someone opening the
+dashboard (or on the 3-day retention job) before a trade reaches the ledger.
 """
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Iterable, Optional
@@ -72,6 +80,17 @@ def _bookable(row) -> bool:
     return bool(trade_stats.is_settled(row) and qty and qty > 0 and entry and entry > 0 and exit_ and exit_ > 0)
 
 
+def _store_split(row, c) -> None:
+    """Write the per-component split + net P&L (group 263) of charges `c` onto ledger row `row`."""
+    row.stt = round(c["stt"], 2)
+    row.exchange = round(c["exchange"], 2)
+    row.sebi = round(c["sebi"], 2)
+    row.gst = round(c["gst"], 2)
+    row.stamp = round(c["stamp"], 2)
+    gross = getattr(row, "gross_pnl", None)
+    row.net_pnl = round(float(gross) - c["total"], 2) if gross is not None else None
+
+
 def _apply(row, r, c) -> None:
     """Write the computed figures of position `r` onto ledger row `row`."""
     row.quantity = int(r.quantity)
@@ -81,6 +100,7 @@ def _apply(row, r, c) -> None:
     row.gst_on_brokerage = round(c["gst_on_brokerage"], 2)
     row.total_charges = round(c["total"], 2)
     row.gross_pnl = r.realized_pnl
+    _store_split(row, c)
 
 
 def book_positions(db, rows: Iterable) -> int:
@@ -137,6 +157,55 @@ def sync_all(db) -> int:
     return book_positions(db, rows)
 
 
+_last_sync_at = 0.0
+
+
+def sync_throttled(db, min_interval: float = 60.0) -> int:
+    """sync_all() at most once per `min_interval` seconds (called from the fast reconcile loop every few seconds).
+    Returns the number of NEW ledger rows, 0 when throttled. Never raises."""
+    global _last_sync_at
+    now = time.monotonic()
+    if _last_sync_at and now - _last_sync_at < min_interval:
+        return 0
+    _last_sync_at = now
+    try:
+        return sync_all(db)
+    except Exception:
+        logger.exception("charges ledger: throttled sync failed")
+        return 0
+
+
+def restate_stored(db, rows: Iterable) -> int:
+    """Re-align the STORED split / totals / net P&L of ledger `rows` with the current rate card (they are derived
+    only from the row's own buy / sell value + gross P&L). Fills the columns of rows booked before group 263 too.
+    Returns the number of rows changed. Never raises."""
+    try:
+        changed = 0
+        for r in rows:
+            c = _restated(r)
+            before = tuple(getattr(r, k, None) for k in ("stt", "exchange", "sebi", "gst", "stamp", "net_pnl"))
+            was_total = getattr(r, "total_charges", None)
+            was_brokerage = getattr(r, "brokerage", None)
+            _store_split(r, c)
+            r.brokerage = round(c["brokerage"], 2)
+            r.gst_on_brokerage = round(c["gst_on_brokerage"], 2)
+            r.total_charges = round(c["total"], 2)
+            after = tuple(getattr(r, k, None) for k in ("stt", "exchange", "sebi", "gst", "stamp", "net_pnl"))
+            if (before != after or was_total is None or abs((was_total or 0.0) - r.total_charges) > 0.005
+                    or abs((was_brokerage or 0.0) - r.brokerage) > 0.005):
+                changed += 1
+        if changed:
+            db.commit()
+        return changed
+    except Exception:
+        logger.exception("charges ledger: restating stored rows failed")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+
+
 def _restated(r) -> dict:
     """A ledger row's charges recomputed from its own stored leg values with the CURRENT rate card, so rows booked
     before a rate fix are corrected on read (nothing else in the row depends on the card)."""
@@ -168,13 +237,15 @@ def cumulative(db, recent_days: int = 14, today: Optional[str] = None) -> dict:
     """Totals since the first booked trade, plus a per-day list (newest first) of the last `recent_days` days."""
     sync_all(db)
     rows = db.query(ScalpChargesLedger).all()
-    by_day: dict = defaultdict(lambda: {"trades": 0, "brokerage": 0.0, "total_charges": 0.0})
+    restate_stored(db, rows)          # group 263: keep the stored split / net aligned with the current rate card
+    by_day: dict = defaultdict(lambda: {"trades": 0, "brokerage": 0.0, "total_charges": 0.0, "gross_pnl": 0.0})
     restated = {r.position_id: _restated(r) for r in rows}
     for r in rows:
         d = by_day[r.day]
         d["trades"] += 1
         d["brokerage"] += restated[r.position_id]["brokerage"]
         d["total_charges"] += restated[r.position_id]["total"]
+        d["gross_pnl"] += r.gross_pnl or 0.0
     trades = len(rows)
     brokerage = sum(c["brokerage"] for c in restated.values())
     gst_b = sum(c["gst_on_brokerage"] for c in restated.values())
@@ -187,12 +258,21 @@ def cumulative(db, recent_days: int = 14, today: Optional[str] = None) -> dict:
     yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
     total_p = _period(rows, None, None)
     total_p["from"], total_p["to"] = since, today
+    today_p = _period(rows, today, today)
     return {
         "since": since,
         "today_date": today,
+        # group 263: same shape as real-trade-service's `pnl` block - booked gross P&L minus the charges above. Scope =
+        # the ledger (trades booked since it was first deployed), so gross and charges always cover the same trades.
+        "pnl": {
+            "realized_gross_total": total_p["gross_pnl"], "charges_total": total_p["all_charges"],
+            "net_realized_total": total_p["net_pnl"],
+            "realized_gross_today": today_p["gross_pnl"], "charges_today": today_p["all_charges"],
+            "net_realized_today": today_p["net_pnl"],
+        },
         # Three rows: first booked trade -> yesterday (date range), today, grand total.
         "history": _period(rows, since, yesterday) if since and since <= yesterday else None,
-        "today": _period(rows, today, today),
+        "today": today_p,
         "total": total_p,
         "trading_days": len(by_day),
         "trades": trades,
@@ -210,9 +290,39 @@ def cumulative(db, recent_days: int = 14, today: Optional[str] = None) -> dict:
                       "stamp_buy_pct": config.STAMP_DUTY_BUY_PCT_INTRADAY},
         "recent_days": [
             {"day": d, "trades": by_day[d]["trades"], "brokerage": round(by_day[d]["brokerage"], 2),
-             "total_charges": round(by_day[d]["total_charges"], 2)}
+             "total_charges": round(by_day[d]["total_charges"], 2),
+             "gross_pnl": round(by_day[d]["gross_pnl"], 2),
+             "net_pnl": round(by_day[d]["gross_pnl"] - by_day[d]["total_charges"], 2)}
             for d in days[: max(1, min(int(recent_days), 90))]
         ],
         "note": ("Counted from when this ledger was first deployed; trades deleted by the 3-day history "
                  "retention before that are not included. Estimates from Dhan's published NSE rate card."),
     }
+
+
+def trades(db, day: Optional[str] = None, limit: int = 200) -> dict:
+    """Per-trade charges straight from the stored ledger rows of one IST day (default today, newest first), with the
+    full split and net P&L. Reads only what is stored (after a sync), so it also works for trades whose
+    scalp_positions row the retention job has already deleted. Never writes except the usual sync/restate."""
+    sync_all(db)
+    day = day or ist_today_str()
+    rows = (db.query(ScalpChargesLedger).filter(ScalpChargesLedger.day == day)
+            .order_by(ScalpChargesLedger.position_id.desc()).limit(max(1, min(int(limit), 1000))).all())
+    restate_stored(db, rows)
+    out = []
+    for r in rows:
+        c = _restated(r)
+        qty = int(r.quantity or 0)
+        gross = r.gross_pnl
+        out.append({
+            "position_id": r.position_id, "symbol": r.symbol, "day": r.day, "qty": qty,
+            "buy_price": round(r.buy_value / qty, 2) if qty else None,
+            "sell_price": round(r.sell_value / qty, 2) if qty else None,
+            "buy_value": round(r.buy_value or 0.0, 2), "sell_value": round(r.sell_value or 0.0, 2),
+            "brokerage": round(c["brokerage"], 2), "stt": round(c["stt"], 2), "exchange": round(c["exchange"], 2),
+            "sebi": round(c["sebi"], 2), "gst": round(c["gst"], 2), "stamp": round(c["stamp"], 2),
+            "total_charges": round(c["total"], 2),
+            "gross_pnl": round(gross, 2) if gross is not None else None,
+            "net_pnl": round(gross - c["total"], 2) if gross is not None else None,
+        })
+    return {"day": day, "count": len(out), "trades": out}

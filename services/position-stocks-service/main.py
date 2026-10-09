@@ -144,6 +144,8 @@ def _quiet_noisy_loggers() -> None:
 _quiet_noisy_loggers()
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -286,6 +288,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# group 267 (2026-10-09): a request that cannot get a DB connection within DB_POOL_TIMEOUT used to surface as an unhandled
+# exception (HTTP 500 + a 100-line traceback, e.g. POST /cycle/run). It is a transient "busy" condition, not a bug in the
+# route: answer 503 + Retry-After with a one-line log so the dashboard can retry instead of showing a server error.
+@app.exception_handler(SATimeoutError)
+async def _db_pool_busy_handler(request, exc):  # noqa: ANN001
+    logger.warning("position-stocks: DB connection pool busy for %s %s - answering 503 (%s)",
+                   getattr(request, "method", "?"), getattr(getattr(request, "url", None), "path", "?"),
+                   str(exc).split(" (Background on this error")[0][:200])
+    return JSONResponse(status_code=503, headers={"Retry-After": "5"},
+                        content={"detail": "Database connection pool is busy - retry in a few seconds."})
+
 
 _EOD_SQUAREOFF_TIME = parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0)
 # 2026-09-19 (audit finding): pre-market CDSL eDIS check time.
@@ -1838,7 +1853,7 @@ def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db
     diagnostic `curl .../dhan/funds` 404'd). Admin-gated, read-only. Dhan-side failures map to 409/502 — never
     401, because the dashboard clears the admin session on ANY 401 and a broker error must not log the operator out."""
     try:
-        return dhan_client.get_funds(db)
+        return dhan_client.get_funds(db, release_db=True)   # group 267
     except dhan_client.DhanNotConnectedError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -2096,7 +2111,7 @@ def dhan_account(admin: str = Depends(require_admin), db: Session = Depends(get_
     funds_error = None
     if status["connected"]:
         try:
-            funds = dhan_client.get_funds(db)
+            funds = dhan_client.get_funds(db, release_db=True)   # group 267: no pooled connection held during the Dhan call
         except Exception as e:
             funds_error = str(e)[:300]
     return {**status, "funds": funds, "funds_error": funds_error}
@@ -2136,7 +2151,7 @@ def dhan_live_orders(db: Session = Depends(get_db)):
     "SCALP" is included even in the rare case our own DB row for it
     hasn't committed yet (e.g. a same-cycle race)."""
     try:
-        orders = dhan_client.get_super_order_list(db)
+        orders = dhan_client.get_super_order_list(db, release_db=True)   # group 267: connection back to the pool first
     except Exception as e:
         logger.error("position-stocks: /dhan/live-orders fetch failed: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Dhan fetch failed: {e}")

@@ -35,12 +35,12 @@ out["bad_login"] = c.post("/auth/login", json={"username": "admin", "password": 
 r = c.post("/auth/login", json={"username": "admin", "password": "s3cret-pw"}); out["login"] = r.status_code
 tok = r.json()["token"]; H = {"Authorization": f"Bearer {tok}"}
 out["funds_no_token"] = c.get("/dhan/funds").status_code
-dhan_client.get_funds = lambda db: {"availabelBalance": 1234.5}
+dhan_client.get_funds = lambda db, **kw: {"availabelBalance": 1234.5}
 out["funds_ok"] = c.get("/dhan/funds", headers=H).json()
-def boom(db): raise RuntimeError("Dhan API error: DH-901 Invalid_Authentication")
+def boom(db, **kw): raise RuntimeError("Dhan API error: DH-901 Invalid_Authentication")
 dhan_client.get_funds = boom
 out["funds_dhan_error"] = c.get("/dhan/funds", headers=H).status_code
-def nc(db): raise dhan_client.DhanNotConnectedError("not connected")
+def nc(db, **kw): raise dhan_client.DhanNotConnectedError("not connected")
 dhan_client.get_funds = nc
 out["funds_not_connected"] = c.get("/dhan/funds", headers=H).status_code
 out["diag"] = c.get("/auth/config-check").json()

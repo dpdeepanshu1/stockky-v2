@@ -164,6 +164,23 @@ def _get_sdk_client(db: Session):
         return dhanhq(client_id, access_token)
 
 
+def _release_connection(db: Session) -> None:
+    """group 267 (2026-10-09): hand this session's pooled DB connection back BEFORE a slow Dhan HTTP call.
+
+    A Session keeps its connection (an open transaction) from the first query until commit / rollback / close, so a
+    read-only route that read the credentials and then waited on Dhan held one of the pool's few connections for the
+    whole broker round trip. With the pool at 2 + 2 and a dashboard that fires ~10 requests at once, a slow Dhan answer
+    left POST /cycle/run waiting 30 s for a free connection and failing with "QueuePool limit of size 2 overflow 2
+    reached" (HTTP 500). Only used by read-only callers (``release_db=True``): it is a no-op when the session has any
+    pending change, so it can never discard work. Never raises."""
+    try:
+        if db.new or db.dirty or db.deleted:
+            return
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        logger.debug("position-stocks: releasing the DB connection before the Dhan call failed (ignored)", exc_info=True)
+
+
 def _extract_data(response: dict, key: str = "data"):
     if not isinstance(response, dict):
         return response
@@ -290,16 +307,19 @@ def get_security_id(db: Session, symbol: str) -> str:
     return _clean_security_id(sec_id)
 
 
-def get_funds(db: Session) -> dict:
+def get_funds(db: Session, release_db: bool = False) -> dict:
     """Read-only — no arm check. Used by capital/ledger.py to sync the
-    scalp pool's allocation against the account's real available balance."""
+    scalp pool's allocation against the account's real available balance.
+    release_db=True (read-only routes): give the pooled DB connection back before the Dhan call (group 267)."""
     client = _get_sdk_client(db)
+    if release_db:
+        _release_connection(db)
     resp = client.get_fund_limits()
     data = _extract_data(resp)
     return data if isinstance(data, dict) else {}
 
 
-def get_order_list(db: Session) -> list:
+def get_order_list(db: Session, release_db: bool = False) -> list:
     """Read-only — no arm check. Returns all PLAIN (non-super) orders for
     the day, i.e. the same order book place_order()'s own post-placement
     verification reads inline. Added session40 alongside real-trade-
@@ -307,8 +327,10 @@ def get_order_list(db: Session) -> list:
     up a plain EOD_SQUAREOFF MARKET SELL's real fill by dhan_exit_order_id
     — get_super_order_list() (used for the normal TARGET_LEG/STOP_LOSS_LEG
     exit path) never contains plain orders, so that lookup was previously
-    impossible from this module."""
+    impossible from this module. release_db: see get_funds (group 267)."""
     client = _get_sdk_client(db)
+    if release_db:
+        _release_connection(db)
     resp = client.get_order_list()
     data = _extract_data(resp)
     return data if isinstance(data, list) else []
@@ -727,9 +749,12 @@ def place_super_order(
     return _extract_data(resp) or {}
 
 
-def get_super_order_list(db: Session) -> list:
-    """Read-only — no arm check. Used by the exit monitor to poll leg status."""
+def get_super_order_list(db: Session, release_db: bool = False) -> list:
+    """Read-only — no arm check. Used by the exit monitor to poll leg status.
+    release_db=True (read-only routes): give the pooled DB connection back before the Dhan call (group 267)."""
     client = _get_sdk_client(db)
+    if release_db:
+        _release_connection(db)
     resp = client.get_super_order_list()
     data = _extract_data(resp)
     return data if isinstance(data, list) else []

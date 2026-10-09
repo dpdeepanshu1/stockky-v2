@@ -1097,19 +1097,19 @@ def test_auth_config_check(client, monkeypatch):
 
 class TestDhanFunds:
     def test_success(self, client, monkeypatch):
-        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db: {"availabelBalance": 1000.0})
+        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db, **_kw: {"availabelBalance": 1000.0})
         r = client.get("/dhan/funds")
         assert r.status_code == 200
 
     def test_not_connected_409(self, client, monkeypatch):
-        def _raise(db):
+        def _raise(db, **_kw):
             raise DhanNotConnectedError("no creds")
         monkeypatch.setattr(m.dhan_client, "get_funds", _raise)
         r = client.get("/dhan/funds")
         assert r.status_code == 409
 
     def test_other_error_502(self, client, monkeypatch):
-        def _raise(db):
+        def _raise(db, **_kw):
             raise RuntimeError("dhan 5xx")
         monkeypatch.setattr(m.dhan_client, "get_funds", _raise)
         r = client.get("/dhan/funds")
@@ -1234,7 +1234,7 @@ def test_ws_status_route(client, monkeypatch):
 class TestDhanAccount:
     def test_connected_with_funds(self, client, monkeypatch):
         monkeypatch.setattr(m.dhan_credentials_ro, "connection_status", lambda db: {"connected": True})
-        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db: {"availabelBalance": 500.0})
+        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db, **_kw: {"availabelBalance": 500.0})
         r = client.get("/dhan/account")
         body = r.json()
         assert body["connected"] is True
@@ -1244,7 +1244,7 @@ class TestDhanAccount:
     def test_connected_funds_call_fails(self, client, monkeypatch):
         monkeypatch.setattr(m.dhan_credentials_ro, "connection_status", lambda db: {"connected": True})
 
-        def _raise(db):
+        def _raise(db, **_kw):
             raise RuntimeError("timeout")
         monkeypatch.setattr(m.dhan_client, "get_funds", _raise)
         r = client.get("/dhan/account")
@@ -1255,7 +1255,7 @@ class TestDhanAccount:
     def test_not_connected_skips_funds_call(self, client, monkeypatch):
         monkeypatch.setattr(m.dhan_credentials_ro, "connection_status", lambda db: {"connected": False})
         called = {"n": 0}
-        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db: called.__setitem__("n", 1))
+        monkeypatch.setattr(m.dhan_client, "get_funds", lambda db, **_kw: called.__setitem__("n", 1))
         r = client.get("/dhan/account")
         assert r.json()["funds"] is None
         assert called["n"] == 0
@@ -1264,7 +1264,7 @@ class TestDhanAccount:
 class TestDhanLiveOrders:
     def test_filters_to_our_own_order_ids(self, client, db, monkeypatch):
         _position(db, symbol="OURS", dhan_super_order_id="SO1")
-        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db: [
+        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db, **_kw: [
             {"orderId": "SO1", "symbol": "OURS"},
             {"orderId": "SO2", "symbol": "NOT_OURS"},
         ])
@@ -1274,7 +1274,7 @@ class TestDhanLiveOrders:
         assert body["orders"][0]["orderId"] == "SO1"
 
     def test_tag_fallback_when_no_db_match(self, client, db, monkeypatch):
-        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db: [
+        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db, **_kw: [
             {"orderId": "SOX", "tag": "SCALP"},
             {"orderId": "SOY", "tag": "OTHER"},
         ])
@@ -1283,14 +1283,14 @@ class TestDhanLiveOrders:
         assert r.json()["orders"][0]["orderId"] == "SOX"
 
     def test_fetch_failure_502(self, client, monkeypatch):
-        def _raise(db):
+        def _raise(db, **_kw):
             raise RuntimeError("dhan down")
         monkeypatch.setattr(m.dhan_client, "get_super_order_list", _raise)
         r = client.get("/dhan/live-orders")
         assert r.status_code == 502
 
     def test_no_orders_at_all(self, client, db, monkeypatch):
-        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db: [])
+        monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db, **_kw: [])
         r = client.get("/dhan/live-orders")
         assert r.json() == {"count": 0, "orders": []}
 
@@ -1637,7 +1637,7 @@ def test_get_db_dependency_yields_the_underlying_session():
 # ─── /dhan/live-orders — non-dict entries (session112 round 20) ────────────
 
 def test_live_orders_skips_non_dict_entries(client, db, monkeypatch):
-    monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db: [
+    monkeypatch.setattr(m.dhan_client, "get_super_order_list", lambda db, **_kw: [
         "not-a-dict-entry",
         {"orderId": "SOZ", "tag": "SCALP"},
     ])

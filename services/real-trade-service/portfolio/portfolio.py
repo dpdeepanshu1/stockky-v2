@@ -30,6 +30,8 @@ import os
 import time
 from datetime import datetime, timezone
 
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
 import config
@@ -37,7 +39,7 @@ import models
 from audit.logger import log_action
 from execution import shared_symbol_lock
 from market_feed.feed import Tick
-from tz_utils import ist_today_str
+from tz_utils import IST, ist_today_str
 
 logger = logging.getLogger("real-trade-portfolio")
 
@@ -185,6 +187,45 @@ def open_positions(db: Session, mode: str) -> list[models.TradePosition]:
         .filter(models.TradePosition.mode == mode, models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")))
         .all()
     )
+
+
+
+def today_loss_streak(db: Session, mode: str, now: Optional[datetime] = None):
+    """(streak, last_loss_close_at): consecutive realized-loss closes today (IST), newest first.
+
+    Group 289, feeds risk_engine's loss_streak_pause. A close with realized_pnl >= 0 (or unknown) ends the streak.
+    Positions imported from the broker's holdings are skipped: this system did not enter them today, so selling one
+    at a loss says nothing about today's entries. Any error returns (0, None), i.e. no brake: the brake is an extra
+    safety on entries and must never be the reason an exit or the cycle fails.
+    """
+    try:
+        n = (now or datetime.now(timezone.utc)).astimezone(IST)
+        day_start = n.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        rows = (
+            db.query(models.TradePosition)
+            .filter(
+                models.TradePosition.mode == mode,
+                models.TradePosition.status == "CLOSED",
+                models.TradePosition.closed_at.isnot(None),
+                models.TradePosition.closed_at >= day_start,
+            )
+            .order_by(models.TradePosition.closed_at.desc())
+            .all()
+        )
+        streak, last = 0, None
+        for r in rows:
+            if getattr(r, "broker_imported", False):
+                continue
+            if r.realized_pnl is not None and r.realized_pnl < 0:
+                streak += 1
+                if last is None:
+                    last = r.closed_at
+            else:
+                break
+        return streak, last
+    except Exception:  # noqa: BLE001
+        logger.warning("today_loss_streak failed (no brake applied)", exc_info=True)
+        return 0, None
 
 
 def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition]:

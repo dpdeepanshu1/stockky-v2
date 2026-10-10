@@ -1354,6 +1354,8 @@ class QuoteResponse(BaseModel):
     pe_ratio: Optional[float] = None    # fundamental service owns this
     source: Optional[str] = "unknown"
     fetched_at: Optional[str] = None
+    as_of: Optional[str] = None         # group289: tz-aware UTC time the price is from (None = unknown)
+    age_s: Optional[float] = None       # group289: seconds since as_of when this response was built (None = unknown)
 
     class Config:
         extra = "ignore"
@@ -1367,6 +1369,38 @@ class BulkQuoteRequest(BaseModel):
 def _clean_quote_dict(d: dict) -> dict:
     """Drop keys whose value is None so callers never JSON-merge nulls over real data."""
     return {k: v for k, v in (d or {}).items() if v is not None}
+
+
+def _quote_as_of_age(fetched):
+    """(as_of, age_s) from a quote's `fetched_at` (group 289: every payload carries `source`, `as_of` and `age_s`).
+
+    `fetched_at` is a naive UTC ISO string in this service, so it is read as UTC. as_of is timezone-aware ISO
+    (+00:00); age_s is seconds since then, never negative (clock skew), rounded to 0.1 s. A value that cannot be
+    read gives (None, None): a caller must then treat the age as UNKNOWN, never as fresh.
+    """
+    if not fetched:
+        return None, None
+    try:
+        dt = datetime.fromisoformat(str(fetched).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        return dt.isoformat(), round(max((datetime.now(timezone.utc) - dt).total_seconds(), 0.0), 1)
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _restamp_quote(row):
+    """Recompute as_of / age_s on a quote row at RESPONSE time and return it.
+
+    Rows come back from the quote cache with the age they had when they were stored; serving that as-is would
+    call a minutes-old price fresh. fetched_at is never touched, only the two derived fields are rewritten.
+    Non-dict rows, and dict rows that carry no timestamp and no derived fields at all, are returned unchanged
+    (nothing to restamp; an absent key already reads as "unknown" to every caller).
+    """
+    if isinstance(row, dict) and ("fetched_at" in row or "as_of" in row or "age_s" in row):
+        row["as_of"], row["age_s"] = _quote_as_of_age(row.get("fetched_at"))
+    return row
 
 
 def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
@@ -1444,6 +1478,7 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
         "source": d.get("source") or "unknown",
         "fetched_at": fetched,
     }
+    _restamp_quote(out)
     return out
 
 
@@ -2730,6 +2765,8 @@ def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161
     "no price" bookkeeping in one place."""
     result = _get_quote_inner(symbol)
+    if isinstance(result, dict):
+        result = _restamp_quote(dict(result))     # group289: age as of NOW, never the age stored in the cache
     try:
         if isinstance(result, dict):
             sym = normalize_symbol(symbol)
@@ -3355,6 +3392,11 @@ def get_quotes_bulk(req: BulkQuoteRequest):
                 out["stale_served"] = len(missing)
     except Exception as e:  # noqa: BLE001
         logger.debug("quotes/bulk stale fallback skipped: %s", e)
+    try:
+        if isinstance(out, dict) and isinstance(out.get("quotes"), list):
+            out["quotes"] = [_restamp_quote(dict(q)) if isinstance(q, dict) else q for q in out["quotes"]]   # group289
+    except Exception as e:  # noqa: BLE001
+        logger.debug("quotes/bulk as_of stamp skipped: %s", e)
     return out
 
 

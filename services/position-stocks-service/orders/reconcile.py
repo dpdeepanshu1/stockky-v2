@@ -828,21 +828,72 @@ _ORDER_LIST_TTL_S = 20.0
 _order_list_cache: tuple[float, list] = (0.0, [])
 
 
-def _cached_order_list(db: Session) -> list:
-    """Today's plain order book, shared for ~20 s so a pass that needs it for several positions
-    makes one Dhan call. A failed fetch returns [] and is not cached."""
+def _order_book_read(db: Session, *, force: bool = False) -> tuple[list, bool]:
+    """Today's plain order book as (rows, readable). `readable` is False ONLY when the Dhan call itself failed
+    (rate limit, 5xx, timeout): an empty book that was read fine is ([], True). group291: callers about to book a
+    trade as "never happened" need that difference, because an unreadable book proves nothing.
+    Shared for ~20 s like before; force=True skips that share (a cached book can predate a fill)."""
     global _order_list_cache
     ts, rows = _order_list_cache
     now = time.monotonic()
-    if rows and now - ts < _ORDER_LIST_TTL_S:
-        return rows
+    if not force and rows and now - ts < _ORDER_LIST_TTL_S:
+        return rows, True
     try:
         rows = dhan_client.get_order_list(db) or []
     except Exception as e:
         logger.warning("reconcile: entry-fill lookup — failed to fetch order list: %s", e)
-        return []
+        return [], False
     _order_list_cache = (now, rows)
-    return rows
+    return rows, True
+
+
+def _cached_order_list(db: Session) -> list:
+    """Today's plain order book, shared for ~20 s so a pass that needs it for several positions
+    makes one Dhan call. A failed fetch returns [] and is not cached."""
+    return _order_book_read(db)[0]
+
+
+# group291 (AAATECH follow-up): a dead-looking PARENT row used to be booked ERROR (capital and symbol lock released,
+# P&L 0) even when the order book could not be READ at that moment, so a Dhan rate limit during the pass could turn a
+# real filled trade into "never happened". pos.id -> time.monotonic() of the first unreadable pass.
+_dead_parent_book_unreadable_since: dict = {}
+_dead_parent_defer_logged: set = set()
+
+
+def _dead_parent_book_wait_s() -> float:
+    """DEAD_PARENT_BOOK_WAIT_S (default 180, 0 = never wait: the old behaviour). Blank / bad / NaN -> 180; negative -> 0."""
+    import os
+    raw = (os.getenv("DEAD_PARENT_BOOK_WAIT_S") or "").strip()
+    if not raw:
+        return 180.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 180.0
+    if v != v:
+        return 180.0
+    return v if v > 0 else 0.0
+
+
+def _defer_dead_parent_for_unreadable_book(pos: ScalpPosition) -> bool:
+    """True while an unreadable order book should keep a dead-looking position OPEN for the next pass instead of
+    booking it ERROR. It waits at most DEAD_PARENT_BOOK_WAIT_S from the first unreadable pass, then returns False
+    (the old ERROR path runs, and POST /reconcile/repair-dead-entry-errors can still undo a wrong one)."""
+    wait = _dead_parent_book_wait_s()
+    if wait <= 0:
+        return False
+    now = time.monotonic()
+    first = _dead_parent_book_unreadable_since.setdefault(pos.id, now)
+    if now - first >= wait:
+        _dead_parent_book_unreadable_since.pop(pos.id, None)
+        logger.warning("reconcile: %s (id=%d) order book still unreadable after %.0fs - booking the dead entry as before",
+                       pos.symbol, pos.id, wait)
+        return False
+    if pos.id not in _dead_parent_defer_logged:
+        _dead_parent_defer_logged.add(pos.id)
+        logger.warning("reconcile: %s (id=%d) parent row looks dead but Dhan's order book could not be read - keeping the "
+                       "position OPEN and checking again next pass (up to %.0fs)", pos.symbol, pos.id, wait)
+    return True
 
 
 def _entry_dead_on_row(row: dict) -> bool:
@@ -1763,7 +1814,14 @@ def run_exit_reconciliation(db: Session) -> int:
             leg_name = row.get("legName", "ENTRY_LEG")
             if leg_name in ("ENTRY_LEG", "") and entry_status in _DEAD_ENTRY_STATUSES:
                 # Group 276 (AAATECH): a REJECTED parent row does not prove the entry never traded.
-                _alive = _filled_entry_behind_dead_parent(db, pos, row)
+                # group291: read the book FRESH (a cached copy can predate the fill) and, when it cannot be read at
+                # all, wait for a later pass instead of booking a possibly real trade as ERROR.
+                _book, _book_ok = _order_book_read(db, force=True)
+                if _book_ok:
+                    _dead_parent_book_unreadable_since.pop(pos.id, None)
+                elif _defer_dead_parent_for_unreadable_book(pos):
+                    continue
+                _alive = _filled_entry_behind_dead_parent(db, pos, row, _book)
                 if _alive is not None:
                     _ex = _alive.get("exit")
                     if _ex is None:

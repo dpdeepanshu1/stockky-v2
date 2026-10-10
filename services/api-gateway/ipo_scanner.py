@@ -159,6 +159,17 @@ IPOALERTS_API_KEY = os.getenv("IPOALERTS_API_KEY", "").strip()
 IPOALERTS_BASE = "https://api.ipoalerts.in/ipos"
 
 
+# group303: high-confidence, hyphen-less debt/unit tickers. NCD (EHFLNCD, STFNCD8, TCFNCD2, SNCD9T2), zero-coupon
+# bond (PFCZCB1), partly-paid series (ADANIENPP1) and InvIT units (CUBEINVIT) are matched by suffix.
+_IPO_DEBT_TICKER_RE = re.compile(r"(NCD(\d+[A-Z]?\d*)?|ZCB\d*|[A-Z]{3,}PP[1-9]|INVIT\d*)$")
+# Issuer-prefix + 1-2 digit series (UGROD1, SMCG01, SMC01, NMC01, IHFL13). A generic "letters+digits" rule would also hit
+# real SME tickers such as VALUE360, so only listed issuer prefixes match. Extend with IPO_NON_EQUITY_SERIES_PREFIXES=A,B.
+_IPO_DEBT_SERIES_PREFIXES = ["UGROD", "SMCG", "SMC", "NMC", "IHFL"] + [
+    p.strip().upper() for p in (os.getenv("IPO_NON_EQUITY_SERIES_PREFIXES") or "").split(",") if p.strip()
+]
+_IPO_DEBT_SERIES_RE = re.compile(r"^(?:" + "|".join(re.escape(p) for p in _IPO_DEBT_SERIES_PREFIXES) + r")\d{1,2}$")
+
+
 def _is_ipo_non_equity(symbol: str) -> bool:
     """True for anything that isn't a real, tradeable equity IPO — NCD/bond
     debt-series tickers (coded <coupon><issuer><maturity-year>, e.g.
@@ -177,6 +188,12 @@ def _is_ipo_non_equity(symbol: str) -> bool:
     if not sym:
         return False
     if sym[0].isdigit():
+        return True
+    # group303: NSE debt / unit tickers carry NO hyphen (STFNCD8, TCFNCD2, SNCD9T2, EHFLNCD, PFCZCB1, ADANIENPP1,
+    # CUBEINVIT, UGROD1..3, SMCG01..03, SMC01, NMC01, IHFL13), so the hyphenated regexes in symbol_aliases missed them
+    # and every IPO rescan sent ~16 junk tickers to Yahoo (404 + ERROR log, twice: market-data and the gateway).
+    # Kept here, not in symbol_aliases, so the main equity pipeline's definition is untouched.
+    if _IPO_DEBT_TICKER_RE.search(sym) or _IPO_DEBT_SERIES_RE.match(sym):
         return True
     try:
         from symbol_aliases import is_non_equity_instrument
@@ -1197,6 +1214,46 @@ def _parse_date(d: Any) -> Optional[datetime]:
         return None
 
 
+_HISTORY_MISS: Dict[str, float] = {}
+_HISTORY_MISS_LOCK = threading.Lock()
+_HISTORY_MISS_MAX = 5000
+
+
+def _history_miss_ttl_s() -> float:
+    """IPO_HISTORY_MISS_TTL_S (default 3 h). 0 turns the negative cache off."""
+    try:
+        return max(0.0, float(((os.getenv("IPO_HISTORY_MISS_TTL_S") or "").strip() or "10800")))
+    except (TypeError, ValueError):
+        return 10800.0
+
+
+def _history_recently_missing(symbol: str) -> bool:
+    ttl = _history_miss_ttl_s()
+    if ttl <= 0:
+        return False
+    key = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    with _HISTORY_MISS_LOCK:
+        at = _HISTORY_MISS.get(key)
+        if at is None:
+            return False
+        if time.time() - at >= ttl:
+            _HISTORY_MISS.pop(key, None)
+            return False
+        return True
+
+
+def _history_mark_missing(symbol: str) -> None:
+    if _history_miss_ttl_s() <= 0:
+        return
+    key = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    if not key:
+        return
+    with _HISTORY_MISS_LOCK:
+        if len(_HISTORY_MISS) >= _HISTORY_MISS_MAX:
+            _HISTORY_MISS.pop(next(iter(_HISTORY_MISS)), None)
+        _HISTORY_MISS[key] = time.time()
+
+
 def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     """Bulk-safe single-symbol history pull.
 
@@ -1218,12 +1275,21 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
     *something* than a request shaped for a month of data that doesn't
     exist yet.
     """
+    # group303: a symbol market-data already answered "no history" for is not asked again for a while. A forced IPO rescan
+    # used to re-query ~125 such symbols every time, each one a Yahoo 404 + ERROR in market-data AND again in the gateway.
+    if _history_recently_missing(symbol):
+        return None
     try:
         r = httpx.get(
             f"{MARKET_DATA_URL}/history/{symbol}",
             params={"days": max(1, int(days)), "interval": "1d"},
             timeout=15,
         )
+        if r.status_code == 404:
+            # Authoritative answer from market-data (it already tried its whole waterfall). The docstring says the direct
+            # yfinance fallback is only for an UNREACHABLE market-data-service; a 404 used to fall through to it anyway.
+            _history_mark_missing(symbol)
+            return None
         if r.status_code == 200:
             data = r.json() or {}
             candles = data.get("candles") or data.get("data") or []
@@ -1261,6 +1327,7 @@ def _fetch_history(symbol: str, days: int) -> Optional[Any]:
         t = yf.Ticker(yf_ticker)
         hist = t.history(period=f"{max(5, days)}d", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
+            _history_mark_missing(symbol)
             return None
         return hist
     except Exception as e:

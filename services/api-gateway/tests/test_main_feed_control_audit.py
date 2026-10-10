@@ -678,7 +678,8 @@ class TestFeedStatus:
         out = gw.data_feed_status()
         assert out["ok"] is True and out["status"] == "done" and out["stocks_in_feed"] == 11
         assert out["last_count"] == 11 and out["last_success"] == "M" and out["last_success_at"] == "M"
-        assert out["meta"] == {"last_success_at": "M"}
+        # group303: group302's status normalisation also mirrors the feed count into meta["last_count"] and meta["stock_count"] (the old pin was stale)
+        assert out["meta"] == {"last_success_at": "M", "last_count": 11, "stock_count": 11}
         assert store.set_jobs == [] and store.set_metas == []
 
     def test_last_success_falls_back_to_job_finished_at(self, store, clock):

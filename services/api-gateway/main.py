@@ -2874,7 +2874,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
     """Prefer Data Feed → short Redis cache → upstream. Write-through to Data Feed on upstream hit."""
     # 1) Data Feed (durable 12–24h) — any useful feed row skips upstream
     try:
-        fed = _feed_store().get_symbol(symbol)
+        fed = await asyncio.to_thread(_feed_store().get_symbol, symbol)  # group303: Oracle read off the event loop
         if fed and (
             fed.get("fundamental_score") is not None
             or fed.get("metrics")
@@ -2971,14 +2971,14 @@ async def _refresh_fundamental_upstream(symbol: str, client: httpx.AsyncClient, 
             try:
                 payload = extract_feed_payload(symbol, fundamental=data, events=None)
                 # merge with existing feed events if present
-                existing = _feed_store().get_symbol(symbol) or {}
+                existing = await asyncio.to_thread(_feed_store().get_symbol, symbol) or {}  # group303
                 if existing:
                     for k in ("bulk_deals", "recent_insider_transactions", "earnings_surprise",
                               "next_earnings_date", "event_summary", "has_positive_catalyst",
                               "recent_event_score"):
                         if existing.get(k) is not None and payload.get(k) in (None, [], ""):
                             payload[k] = existing.get(k)
-                _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
+                await asyncio.to_thread(_feed_store().put_symbol, symbol, payload, DATA_FEED_TTL)  # group303: 1 read + 3 writes + index = ~5 Oracle round trips
             except Exception as e:
                 logger.debug("data feed write-through fund: %s", e)
             if data.get("fundamental_score") is not None:
@@ -2996,7 +2996,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
 
     # 1) Data Feed first (even empty lists mean "was fed" — avoid upstream spam)
     try:
-        fed = _feed_store().get_symbol(symbol)
+        fed = await asyncio.to_thread(_feed_store().get_symbol, symbol)  # group303
         if fed and (
             "event_summary" in fed
             or "bulk_deals" in fed
@@ -3036,7 +3036,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
             if data and isinstance(data, dict):
                 _redis_set(cache_key, data, ttl=STATIC_PARAM_TTL)
                 try:
-                    existing = _feed_store().get_symbol(symbol)
+                    existing = await asyncio.to_thread(_feed_store().get_symbol, symbol)  # group303
                     payload = extract_feed_payload(
                         symbol,
                         fundamental=existing if existing else None,
@@ -3057,7 +3057,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
                             "recent_event_score": data.get("recent_event_score"),
                             "updated_at": payload.get("updated_at"),
                         })
-                    _feed_store().put_symbol(symbol, payload, ttl=DATA_FEED_TTL)
+                    await asyncio.to_thread(_feed_store().put_symbol, symbol, payload, DATA_FEED_TTL)  # group303
                 except Exception as e:
                     logger.debug("data feed write-through events: %s", e)
                 return data
@@ -3695,7 +3695,7 @@ async def _analyze_one_symbol_ultra(
                     feed_row = prefetched_feeds.get(base_sym)
                 if feed_row is None:
                     try:
-                        feed_row = _feed_store().get_symbol(base_sym)
+                        feed_row = await asyncio.to_thread(_feed_store().get_symbol, base_sym)  # group303
                     except Exception:
                         feed_row = None
                 if isinstance(feed_row, dict) and feed_row:
@@ -9005,7 +9005,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         for _bucket in (news_driven, results_driven, bulk_insider_driven):
             for _item in _bucket:
                 try:
-                    _row = _hot_store.get_symbol(_item.get("symbol") or "")
+                    _row = await asyncio.to_thread(_hot_store.get_symbol, _item.get("symbol") or "")  # group303
                     _px = _feed_resolved_price(_row) if _row else 0.0
                     if _px > 0:
                         _item["price"] = _px
@@ -12276,7 +12276,7 @@ async def purge_over_cap_feed_symbols():
     skipped = []
     for sym in symbols:
         try:
-            row = store.get_symbol(sym) or {}
+            row = await asyncio.to_thread(store.get_symbol, sym) or {}  # group303
         except Exception as e:
             # A failed read is not evidence the row is over cap (it used to be judged as an empty row,
             # so the by-name denylist could delete a row we never managed to read). Leave it alone.
@@ -12510,7 +12510,7 @@ async def data_feed_update_batch_refresh(request: Request):
                     # sleep, so a run of over-cap symbols hammered the upstream at full speed.
                     await asyncio.sleep(0.15)
                     continue
-                store.put_symbol(base, row, ttl=DATA_FEED_TTL)
+                await asyncio.to_thread(store.put_symbol, base, row, DATA_FEED_TTL)  # group303
                 ok_n += 1
                 results.append({"symbol": base, "ok": True})
             else:
@@ -12623,7 +12623,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     """
     store = _feed_store()
     base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    current = dict(store.get_symbol(base) or {})
+    current = dict(await asyncio.to_thread(store.get_symbol, base) or {})  # group303
 
     # Known chronically->₹5000 names (static list — MRF, MARUTI, PAGEIND,
     # ...): purge immediately, no live quote needed. Previously this symbol
@@ -13020,7 +13020,8 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     # de-dupe, so the stored copy kept duplicates the API response didn't).
     current["repair_patched"] = patched
 
-    store.put_symbol(base, current, ttl=DATA_FEED_TTL)
+    # group303: this commit used to run on the event loop (loop-watchdog saw a 4.0s stall in oracledb commit during repair-all)
+    await asyncio.to_thread(store.put_symbol, base, current, DATA_FEED_TTL)
     still_missing = _feed_missing_fields(current)
     return {
         "symbol": base,
@@ -13276,7 +13277,7 @@ async def data_feed_run(
         fresh = []
         for s in universe:
             try:
-                entry = store.get_symbol(s)
+                entry = await asyncio.to_thread(store.get_symbol, s)  # group303
                 if not entry:
                     fresh.append(s)
             except Exception:
@@ -13512,7 +13513,7 @@ async def data_feed_run(
                     base, fund, events = await _feed_one(base)
                     if fund or events:
                         payload = extract_feed_payload(base, fund, events)
-                        store.put_symbol(base, payload, ttl=DATA_FEED_TTL)
+                        await asyncio.to_thread(store.put_symbol, base, payload, DATA_FEED_TTL)  # group303
                         done_set.add(base)
                         ok_n += 1
                     else:

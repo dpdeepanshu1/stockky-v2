@@ -395,6 +395,21 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", f"MAX_POSITIONS:{open_count}", quality=quality)
         return None
 
+    # group298: this service has no averaging-in, and try_claim() below lets a symbol this service already holds through
+    # ("already ours"). The scan excludes open symbols, but only from a snapshot taken at the start of the cycle: a manual
+    # BUY (it runs outside the cycle lock) or anything else that opened the symbol since then slipped past it. The manual
+    # path has had this check since 2026-09-18; the automatic path now has it too, checked live.
+    _held_here = (
+        db.query(ScalpPosition)
+        .filter(ScalpPosition.symbol == candidate.symbol)
+        .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+        .first()
+    )
+    if _held_here is not None:
+        _log_candidate(db, candidate, "SKIPPED", f"ALREADY_OPEN_HERE:id={_held_here.id},status={_held_here.status}",
+                       quality=quality)
+        return None
+
     # AUDIT FIX (session60): cross-service symbol lock — this service and
     # real-trade-service share one Dhan account, which holds a single
     # consolidated position per symbol with no concept of which service's

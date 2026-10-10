@@ -52,7 +52,7 @@ from execution import dhan_client, shared_exposure, shared_order_budget, shared_
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
-from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry
+from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry, working_buy_symbols
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 
@@ -94,7 +94,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         allow_pyramiding=risk.allow_pyramiding,
         realized_pnl_today=account.realized_pnl_today,
         open_position_count=len(positions),
-        open_position_symbols={p.symbol for p in positions},
+        open_position_symbols={p.symbol for p in positions} | working_buy_symbols(db, mode),   # group297
         open_positions_total_risk=sum(
             # BUG FIX (2026-09-01) — same fix as entry_engine/entry.py's
             # _account_state: abs() turned a profitable ratcheted-up stop

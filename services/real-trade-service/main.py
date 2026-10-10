@@ -32,6 +32,7 @@ from portfolio import broker_view
 from portfolio.portfolio import (
     close_position as _pf_close_position,
     held_exposure_positions as _pf_held_exposure_positions,
+    working_buy_symbols as _pf_working_buy_symbols,
     today_loss_streak as _pf_today_loss_streak,
     _maybe_reset_daily_pnl as _pf_maybe_reset_daily_pnl,
 )
@@ -1005,7 +1006,7 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         allow_pyramiding=risk_row.allow_pyramiding,
         realized_pnl_today=account_row.realized_pnl_today,
         open_position_count=len(open_positions),
-        open_position_symbols={p.symbol for p in open_positions},
+        open_position_symbols={p.symbol for p in open_positions} | _pf_working_buy_symbols(db, mode),   # group297
         open_positions_total_risk=sum(
             # BUG FIX (2026-09-01) — same fix as entry_engine/entry.py's
             # _account_state: abs() turned a profitable ratcheted-up stop

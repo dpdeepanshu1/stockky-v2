@@ -386,7 +386,10 @@ def evaluate_t1(prediction_id: str, allow_backfill: bool = True):
         scored = _evaluate_t1_with_backfill(pred, bars, allow_backfill=allow_backfill)
         if not scored.get("ok"):
             age_days = _calendar_age_days(pred.timestamp)
-            logger.warning(
+            # group303: "waiting_next_session" is the normal state of a prediction made today, not a fault - INFO.
+            # Every other reason (no_bars, bad_prices, ...) stays a WARNING.
+            logger.log(
+                logging.INFO if scored.get("reason") == "waiting_next_session" else logging.WARNING,
                 "T+1 skip %s reason=%s age=%sd bars=%s",
                 pred.symbol, scored.get("reason"), age_days, len(bars) if bars else 0,
             )
@@ -442,7 +445,12 @@ def evaluate_t5(prediction_id: str):
         end_date = (pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()) + timedelta(days=25)
         bars = _fetch_bars(pred.symbol, start_date, end_date)
         if not bars or len(bars) < 6:
-            logger.warning("Not enough data for %s on T+5 (bars=%s)", pred.symbol, len(bars) if bars else 0)
+            # group303: a prediction younger than 5 sessions cannot have T+5 bars yet - INFO; an old one with too few bars is a real gap.
+            _t5_age = _calendar_age_days(pred.timestamp)
+            logger.log(
+                logging.INFO if (_t5_age is not None and _t5_age < 5) else logging.WARNING,
+                "Not enough data for %s on T+5 (bars=%s)", pred.symbol, len(bars) if bars else 0,
+            )
             return {"ok": False, "reason": "not_enough_bars"}
 
         # BUG FIX (2026-09-01): this used to be `pred_day = start_date`, but

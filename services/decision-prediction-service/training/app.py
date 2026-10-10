@@ -741,10 +741,15 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
         db.commit()
 
         # Point-in-time validation (non-fatal warnings; hard issues logged)
+        # group303: the request body never carries a timestamp (the row is stamped server-side with ist_now() below), so the
+        # old check read None and logged "missing_prediction_timestamp" on EVERY prediction while validating nothing. Validate
+        # the timestamp that is actually stored. ist_now() is naive IST, so `now` must be IST too - the validator's default
+        # (utcnow) would make every row look 5.5 h in the future.
+        _snap_ts = ist_now()
         try:
             _pit = validate_prediction_snapshot({
-                "timestamp": pred.timestamp if hasattr(pred, "timestamp") else None,
-                "as_of": getattr(pred, "timestamp", None),
+                "timestamp": getattr(pred, "timestamp", None) or _snap_ts,
+                "as_of": getattr(pred, "timestamp", None) or _snap_ts,
                 "combined_score": getattr(pred, "combined_score", None),
                 "technical_score": getattr(pred, "technical_score", None),
                 "fundamental_score": getattr(pred, "fundamental_score", None),
@@ -752,7 +757,7 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
                 "decision": getattr(pred, "decision", None),
                 "feature_snapshot": getattr(pred, "feature_snapshot", None),
                 "provisional": getattr(pred, "provisional", None) if hasattr(pred, "provisional") else None,
-            })
+            }, now=_snap_ts)
             if not _pit.get("ok"):
                 logger.warning("PIT validation issues for %s: %s", getattr(pred, "symbol", "?"), _pit.get("issues"))
         except Exception as _pit_e:
@@ -760,7 +765,7 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
         snapshot = PredictionSnapshot(
             prediction_id=pred_id,
             symbol=pred.symbol,
-            timestamp=ist_now(),
+            timestamp=_snap_ts,
             price=pred.price,
             decision=pred.decision,
             confidence=pred.confidence,

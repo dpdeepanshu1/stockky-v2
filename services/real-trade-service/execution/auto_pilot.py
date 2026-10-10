@@ -1633,6 +1633,37 @@ _daily_report_last_failure: dict = {}      # mode -> time.monotonic() of the las
 _DAILY_REPORT_RETRY_S = 600.0
 
 
+def _daily_report_refresh_due(existing: dict, db=None, mode: Optional[str] = None) -> bool:
+    """group293: True when the stored snapshot of today should be rebuilt: refresh on (DAILY_REPORT_REFRESH_MINUTES > 0),
+    before DAILY_REPORT_REFRESH_UNTIL_IST, at least that many minutes since it was built, and some trade of the day still
+    has estimated charges. group294: or (given `db` and `mode`) the number of positions closed today differs from the
+    count stored in the snapshot, i.e. a trade closed after the report was built (a count that cannot be read, or a
+    snapshot without one, never triggers). An unreadable build time counts as old. Never raises (False on any problem)."""
+    try:
+        minutes = float(config.DAILY_REPORT_REFRESH_MINUTES or 0)
+        if minutes <= 0:
+            return False
+        if ist_time_at_or_after(parse_hhmm(config.DAILY_REPORT_REFRESH_UNTIL_IST, 18, 0)):
+            return False
+        try:
+            built = datetime.fromisoformat(str(existing.get("generated_at")))
+            if built.tzinfo is None:
+                built = built.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - built).total_seconds() < minutes * 60.0:
+                return False
+        except (TypeError, ValueError):
+            pass
+        if trade_records.charges_pending(existing) > 0:
+            return True
+        if db is not None and mode and existing.get("closed_count") is not None:
+            now_count = trade_records.closed_count_for_day(db, mode, str(existing.get("day") or ""))
+            if now_count is not None and now_count != existing.get("closed_count"):
+                return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[dict]:
     """group292: once per IST trading day, from DAILY_REPORT_TIME_IST (default 15:45, after the 15:00 square-off and the
     15:30 close) on, store today's per-trade expectancy report as a snapshot and push a short summary. The stored
@@ -1648,13 +1679,19 @@ async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[
         if not force:
             if not (is_ist_weekday() and ist_time_at_or_after(parse_hhmm(config.DAILY_REPORT_TIME_IST, 15, 45))):
                 return None
-            if trade_records.load_daily_snapshot(db, mode, today) is not None:
+            existing = trade_records.load_daily_snapshot(db, mode, today)
+            if existing is not None and not _daily_report_refresh_due(existing, db, mode):
                 return None
             last_fail = _daily_report_last_failure.get(mode)
             if last_fail is not None and _t.monotonic() - last_fail < _DAILY_REPORT_RETRY_S:
                 return None
+        else:
+            existing = None
         try:
             snap = trade_records.build_daily_snapshot(db, mode, today)
+            if existing is not None:             # a refresh of today's stored snapshot (never on force)
+                snap["refreshed_at"] = snap["generated_at"]
+                snap["refresh_count"] = int(existing.get("refresh_count") or 0) + 1
             if not trade_records.save_daily_snapshot(db, snap):
                 raise RuntimeError("snapshot could not be stored")
         except Exception:
@@ -1667,9 +1704,14 @@ async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[
             return None
         _daily_report_last_failure.pop(mode, None)
         overall = (snap.get("today") or {}).get("overall")
+        refreshed = existing is not None
+        if refreshed and trade_records.snapshot_figures(existing) == trade_records.snapshot_figures(snap):
+            logger.info("[schedule] daily report %s %s refreshed, figures unchanged (%s trades still estimated)",
+                        mode, today, trade_records.charges_pending(snap))
+            return snap
         if overall or force:
             try:
-                if not await notify_async(trade_records.format_daily_message(snap)):
+                if not await notify_async(trade_records.format_daily_message(snap, updated=refreshed)):
                     logger.warning("[schedule] daily report for %s %s stored but the Telegram push was not delivered "
                                    "(GET /positions/%s/report/daily has it)", mode, today, mode)
             except Exception:

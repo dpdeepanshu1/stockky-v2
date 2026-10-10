@@ -84,6 +84,17 @@ def _sync_log_every_s() -> float:
     return v if v >= 0 else 300.0
 
 
+def _peer_exposure_max_age_s() -> float:
+    """group295: SCALP_POOL_PEER_EXPOSURE_MAX_AGE_S (default 900 = the same 'stale' mark real-trade-service uses for this
+    table, 0 = never treat it as stale). Blank, unreadable or negative falls back to 900."""
+    raw = (os.getenv("SCALP_POOL_PEER_EXPOSURE_MAX_AGE_S") or "").strip()
+    try:
+        v = float(raw) if raw else 900.0
+    except ValueError:
+        return 900.0
+    return v if v >= 0 else 900.0
+
+
 def _should_log_sync(key: str, figures) -> bool:
     """True when `figures` differ from the last logged ones for `key`, or the interval has passed."""
     every = _sync_log_every_s()
@@ -307,6 +318,18 @@ def sync_from_broker(db: Session) -> float:
             _peer_mv = float(shared_exposure.get_other_service_exposure(db) or 0.0)
         except Exception:  # noqa: BLE001
             _peer_mv = 0.0
+        # group295: a figure real-trade-service has not refreshed for SCALP_POOL_PEER_EXPOSURE_MAX_AGE_S (900 s) may no
+        # longer describe its book (service down, positions closed since), so it is not credited. An age that cannot be
+        # read keeps the credit as before.
+        _max_age = _peer_exposure_max_age_s()
+        if _peer_mv > 0 and _max_age > 0:
+            _age = shared_exposure.get_other_service_exposure_age(db)
+            if _age is not None and _age > _max_age:
+                if _should_log_sync("peer_stale", int(_age // 300)):
+                    logger.warning(
+                        "ledger: real-trade-service's published exposure is %.0fs old (limit %.0fs) — not credited "
+                        "to the scalp pool until it publishes again", _age, _max_age)
+                _peer_mv = 0.0
         if _peer_mv > 0:
             peer_credit = _peer_mv * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
     new_total = scalp_alloc + own_committed_capital + peer_credit

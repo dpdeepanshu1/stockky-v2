@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
@@ -287,3 +287,51 @@ def test_new_routes_do_not_shadow_the_existing_ones(client):
     for p in ("/positions/{mode}/report", "/positions/{mode}/report/daily", "/positions/{mode}/report/history"):
         assert (p, "GET") in paths
     assert ("/positions/{mode}/report/daily/run", "POST") in paths
+
+
+# ── group293: charges booked after the first report ─────────────────────────────────────────────────────────────────
+
+def test_charges_booked_after_the_report_correct_the_snapshot_and_send_one_update(tick, monkeypatch):
+    from resilience import local_cache
+    monkeypatch.setattr(ap.config, "DAILY_REPORT_REFRESH_MINUTES", 15.0)
+    monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t, *a, **k: t.hour < 18)     # report time passed, cutoff not
+    s = tick["factory"]()
+    try:
+        seed_trade(s, "AAA", mode="REAL", opened_min=30, closed_min=1, charges=None)     # ledger has not booked anything
+    finally:
+        s.close()
+    asyncio.run(ap._schedule_tick_body("REAL"))
+    s = tick["factory"]()
+    try:
+        first = tr.load_daily_snapshot(s, "REAL", ist_today_str())
+    finally:
+        s.close()
+    assert tr.charges_pending(first) == 1 and first["today"]["overall"]["charges"] is None
+    assert len(tick["pushed"]) == 1 and "charges still estimated" in tick["pushed"][0]
+
+    asyncio.run(ap._schedule_tick_body("REAL"))                                          # too soon: nothing happens
+    assert len(tick["pushed"]) == 1
+
+    s = tick["factory"]()                                                                # the ledger books both orders
+    try:
+        for o in s.query(models.TradeOrder).filter_by(mode="REAL").all():
+            s.add(models.TradeChargesLedger(order_id=o.id, mode="REAL", symbol="AAA", side=o.side,
+                                            day=ist_today_str(), total_charges=7.0))
+        s.commit()
+        aged = dict(first, generated_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat())
+        local_cache.save_snapshot(s, tr.snapshot_key("REAL", ist_today_str()), aged)
+    finally:
+        s.close()
+
+    asyncio.run(ap._schedule_tick_body("REAL"))
+    s = tick["factory"]()
+    try:
+        final = tr.load_daily_snapshot(s, "REAL", ist_today_str())
+    finally:
+        s.close()
+    assert tr.charges_pending(final) == 0 and final["today"]["overall"]["charges"] == 14.0
+    assert final["refresh_count"] == 1 and final["records_today"][0]["charges_source"] == "ledger"
+    assert len(tick["pushed"]) == 2 and "(updated)" in tick["pushed"][1] and "still estimated" not in tick["pushed"][1]
+
+    asyncio.run(ap._schedule_tick_body("REAL"))                                          # final: never rebuilt again
+    assert len(tick["pushed"]) == 2

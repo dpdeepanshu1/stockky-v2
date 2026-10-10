@@ -427,6 +427,19 @@ EOD_SIGNAL_SCAN_TIME_IST = os.getenv("EOD_SIGNAL_SCAN_TIME_IST", "15:05")
 # have their charges estimated until the ledger books them. DAILY_REPORT_ENABLED=0 turns the step off.
 DAILY_REPORT_ENABLED = (os.getenv("DAILY_REPORT_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
 DAILY_REPORT_TIME_IST = os.getenv("DAILY_REPORT_TIME_IST", "15:45")
+# group293: while a stored snapshot still has ESTIMATED charges (the ledger has not booked every order yet), rebuild it every
+# DAILY_REPORT_REFRESH_MINUTES (default 15, 0 = off) until DAILY_REPORT_REFRESH_UNTIL_IST (default 18:00). The stored
+# snapshot is overwritten; one "updated" Telegram message is sent only when trades, charges or net P&L changed.
+def _daily_report_refresh_minutes() -> float:
+    try:
+        v = float(((os.getenv("DAILY_REPORT_REFRESH_MINUTES") or "").strip() or "15"))
+    except ValueError:
+        return 15.0
+    return v if v == v and v >= 0 else 15.0
+
+
+DAILY_REPORT_REFRESH_MINUTES = _daily_report_refresh_minutes()
+DAILY_REPORT_REFRESH_UNTIL_IST = ((os.getenv("DAILY_REPORT_REFRESH_UNTIL_IST") or "").strip() or "18:00")
 
 # How often the time-trigger loop wakes to check the clock (seconds).
 SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(((os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS") or "").strip() or "60")))

@@ -1906,6 +1906,26 @@ def _wl_instrument_retire_on() -> bool:
         (os.getenv("WATCHLIST_INSTRUMENT_RETIRE") or "").strip() or "1") not in ("0", "false", "False")
 
 
+def _wl_skip_held_on() -> bool:
+    """group296: ENTRY_WATCHLIST_SKIP_HELD (default on; 0/false/no/off = old behaviour of queueing held symbols)."""
+    return ((os.getenv("ENTRY_WATCHLIST_SKIP_HELD") or "").strip().lower() or "1") not in ("0", "false", "no", "off")
+
+
+def _held_symbols_for_trigger(db, mode: str) -> set:
+    """group296: symbols the watchlist trigger must not queue again: held (incl. exit in flight, same set as the risk
+    engine's no-pyramiding check) while pyramiding is off for the mode. Empty when pyramiding is allowed, the switch is
+    off, or anything fails (the risk engine still rejects a second buy, so failing open only costs the old churn)."""
+    try:
+        if not _wl_skip_held_on():
+            return set()
+        risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+        if risk is not None and risk.allow_pyramiding:
+            return set()
+        return {p.symbol for p in held_exposure_positions(db, mode)}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _adverse_should_log(mode: str, row) -> bool:
     """Same 30-minute per-row throttle as _log_adverse_once, without logging."""
     import time as _t
@@ -2010,6 +2030,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
     band_ok = missed = queued = adverse = 0
     now = datetime.now(timezone.utc)
+    _held_syms = _held_symbols_for_trigger(db, mode)     # group296
     _held: list = []      # group169: rows held back this cycle (logged as one summary line)
     _retired: list = []   # group169: rows retired this cycle (logged as one summary line)
 
@@ -2129,6 +2150,14 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
 
         # Already has an unconsumed watchlist-sourced candidate waiting — skip.
         if row.symbol in already_queued_symbols:
+            continue
+
+        # group296: already held (pyramiding off): queueing it only makes the entry engine reject it as no_pyramiding
+        # every cycle. The row stays active; it can queue once the position is closed.
+        if row.symbol in _held_syms:
+            extra_tally["held_skipped"] = extra_tally.get("held_skipped", 0) + 1
+            if _adverse_should_log(mode, row):
+                _held.append((row.symbol, f"catalyst={row.catalyst_type} tier={row.source_tier} already held"))
             continue
 
         # Within band and not yet queued — insert a tagged TradeCandidate.

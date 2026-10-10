@@ -54,7 +54,8 @@ folder is a package (`tests/__init__.py`), so sibling tests must be imported as 
 - position-stocks: `tests/test_group292_depth_quote_age.py` (46). Full suite: **3180 passed**.
 - real-trade: `tests/test_group292_daily_report.py` (43, collaborators faked) and `tests/test_group292_daily_report_db.py`
   (26, real in-memory SQLite, the real schedule tick and the real HTTP routes). Full suite: **4099 passed, 1 skipped**.
-- Both run with real pytest and `--cov` exactly as `.github/workflows/service-tests.yml` does (Python 3.12 here; CI also runs 3.11).
+- Both run with real pytest and `--cov` exactly as `.github/workflows/service-tests.yml` does, on Python 3.12 and on Python 3.11.15
+  (a fresh venv per service from its own `requirements.txt`, the CI matrix): same counts on both, 3180 and 4099 + 1 skipped.
 - Mutation checks: each new piece was broken on purpose and the tests failed every time except one redundant `isfinite` check
   (the range test already rejects NaN / inf).
 

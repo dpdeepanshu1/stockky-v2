@@ -208,6 +208,8 @@ def step(monkeypatch, cache):
     st = {"pushed": [], "builds": 0, "notify_result": True, "now": 1000.0, "snaps": []}
     monkeypatch.setattr(ap.config, "DAILY_REPORT_ENABLED", True, raising=False)
     monkeypatch.setattr(ap.config, "DAILY_REPORT_TIME_IST", "15:45", raising=False)
+    monkeypatch.setattr(ap.config, "DAILY_REPORT_REFRESH_MINUTES", 0.0, raising=False)   # group293 tests turn it on
+    monkeypatch.setattr(ap.config, "DAILY_REPORT_REFRESH_UNTIL_IST", "18:00", raising=False)
     monkeypatch.setattr(ap, "ist_today_str", lambda *a, **k: "2026-10-09")
     monkeypatch.setattr(ap, "is_ist_weekday", lambda *a, **k: True)
     monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t, *a, **k: (t.hour, t.minute) <= (15, 50))
@@ -218,7 +220,7 @@ def step(monkeypatch, cache):
         if st.get("build_error"):
             raise st["build_error"]
         recs = st.get("records", [rec(day or "2026-10-09", pnl=40.0, net=30.0, charges=10.0)])
-        return {"mode": mode, "day": day, "week_days": 7, "generated_at": "t",
+        return {"mode": mode, "day": day, "week_days": 7, "generated_at": st.get("generated_at", "t"),
                 "today": tr.expectancy_report(recs), "week": tr.expectancy_report(recs), "records_today": recs}
     monkeypatch.setattr(tr, "build_daily_snapshot", build)
 

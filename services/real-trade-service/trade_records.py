@@ -338,6 +338,22 @@ def records_for_day(records: list, day: str) -> list:
     return [r for r in records if r.get("exit_day_ist") == day]
 
 
+def closed_count_for_day(db, mode: str, day: str) -> Optional[int]:
+    """group294: how many positions of `mode` are CLOSED with closed_at on IST calendar day `day`. One cheap COUNT, used to
+    notice a trade that closed after the report was built. None when it cannot be read (never raises)."""
+    try:
+        import models
+        from tz_utils import IST
+        start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=IST)
+        lo = start.astimezone(timezone.utc).replace(tzinfo=None)
+        hi = (start + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
+        return int(db.query(models.TradePosition).filter(
+            models.TradePosition.mode == mode, models.TradePosition.status == "CLOSED",
+            models.TradePosition.closed_at >= lo, models.TradePosition.closed_at < hi).count())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_daily_snapshot(db, mode: str, day: Optional[str] = None, *, week_days: int = 7) -> dict:
     """`day`'s (default: today IST) records and expectancy report plus the rolling `week_days`-day report for context.
     Read-only. Raises only if the database read itself fails (the caller decides whether to retry)."""
@@ -346,21 +362,35 @@ def build_daily_snapshot(db, mode: str, day: Optional[str] = None, *, week_days:
     week_days = max(2, min(int(week_days), 60))
     recs = load_records(db, mode, week_days)
     today = records_for_day(recs, day)
+    closed_count = closed_count_for_day(db, mode, day)
     return {
         "mode": mode, "day": day, "generated_at": datetime.now(timezone.utc).isoformat(),
         "today": expectancy_report(today), "week_days": week_days, "week": expectancy_report(recs),
-        "records_today": today,
+        "records_today": today, "closed_count": closed_count,
     }
+
+
+def charges_pending(snap: Optional[dict]) -> int:
+    """group293: how many of the snapshot's closed trades of the day still carry ESTIMATED (or no) charges, i.e. whose
+    orders the charges ledger has not fully booked ('ledger' is the only final source). 0 = the snapshot is final."""
+    recs = (snap or {}).get("records_today") or []
+    return sum(1 for r in recs if r.get("charges_source") != "ledger")
+
+
+def snapshot_figures(snap: Optional[dict]) -> tuple:
+    """(trades, charges, net_pnl) of a snapshot's day: what a reader of the message would see change."""
+    o = ((snap or {}).get("today") or {}).get("overall") or {}
+    return (o.get("trades", 0), o.get("charges"), o.get("net_pnl"))
 
 
 def _money(x) -> str:
     return "n/a" if x is None else f"{x:+,.2f}"
 
 
-def format_daily_message(snap: dict) -> str:
+def format_daily_message(snap: dict, *, updated: bool = False) -> str:
     """Telegram text for a snapshot (Markdown, same style as the other notifier messages). Short on purpose."""
     t = (snap.get("today") or {}).get("overall")
-    head = f"\U0001F4CA *Daily trade report \u2014 {snap.get('mode')} {snap.get('day')}*"
+    head = f"\U0001F4CA *Daily trade report{' (updated)' if updated else ''} \u2014 {snap.get('mode')} {snap.get('day')}*"
     if not t:
         return head + "\nNo closed trades today."
     charges = "n/a" if t.get("charges") is None else f"{t['charges']:,.2f}"
@@ -380,17 +410,22 @@ def format_daily_message(snap: dict) -> str:
     if w:
         lines.append(f"Last {snap.get('week_days')} days: {w['trades']} trades, expectancy \u20b9{_money(w['expectancy'])}"
                      f", win rate {w['win_rate_pct']:.0f}%")
+    pending = charges_pending(snap)
+    if pending:
+        lines.append(f"(charges still estimated for {pending} of {t['trades']} trades)")
     if t.get("low_sample"):
         lines.append("(few trades today - treat as noise)")
     return "\n".join(lines)
 
 
 def save_daily_snapshot(db, snap: dict) -> bool:
-    """Store `snap` under its key. True only when it can be read back (the cache helper swallows write errors)."""
+    """Store `snap` under its key. True only when THIS snapshot reads back, judged by its build time (the cache helper
+    swallows write errors, and when a write over an older snapshot is lost the old one would still read back)."""
     from resilience import local_cache
     key = snapshot_key(snap["mode"], snap["day"])
     local_cache.save_snapshot(db, key, snap)
-    return local_cache.load_snapshot(db, key) is not None
+    back = local_cache.load_snapshot(db, key)
+    return isinstance(back, dict) and back.get("generated_at") == snap.get("generated_at")
 
 
 def load_daily_snapshot(db, mode: str, day: str) -> Optional[dict]:

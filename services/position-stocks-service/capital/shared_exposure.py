@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -97,3 +98,19 @@ def get_other_service_exposure(db: Session) -> float:
     except Exception as e:
         logger.warning("shared-exposure: failed to read other service's exposure: %s", e)
         return 0.0
+
+
+def get_other_service_exposure_age(db: Session) -> Optional[float]:
+    """group295: seconds since real-trade-service last published its exposure, or None when there is no row, no timestamp,
+    or on any DB error (caller treats None as 'cannot tell'). Never raises."""
+    try:
+        row = db.query(SharedServiceExposure).filter_by(service_name=OTHER_SERVICE_NAME).first()
+        ts = row.updated_at if row is not None else None
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shared-exposure: failed to read other service's exposure age: %s", e)
+        return None

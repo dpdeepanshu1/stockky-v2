@@ -43,3 +43,13 @@ def _opening_gate_off_by_default(monkeypatch):
     from entry_engine import prev_day as _pd
     _pd.reset()
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _daily_report_off_by_default(monkeypatch):
+    """group292: the end-of-day report step runs inside every schedule tick once the clock passes DAILY_REPORT_TIME_IST on a
+    weekday. Older tests drive _schedule_tick_body with a patched clock and must not pick up an extra DB read / write (or a
+    Telegram push) depending on the hour the suite happens to run, so it is off unless a test turns it on
+    (tests/test_group292_daily_report*.py do)."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "DAILY_REPORT_ENABLED", False, raising=False)

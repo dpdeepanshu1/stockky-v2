@@ -323,3 +323,97 @@ def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None) -> 
     for part in _chunks(w_ids):
         watchlist += db.query(models.WatchlistEntry).filter(models.WatchlistEntry.id.in_(part)).all()
     return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger)
+
+
+# ── daily report: today's expectancy, stored as a snapshot and pushed once after the close (group 292) ─────────────────
+SNAPSHOT_PREFIX = "daily_report:"          # key = daily_report:<MODE>:<YYYY-MM-DD> in the existing trade_resilience_cache table
+
+
+def snapshot_key(mode: str, day: str) -> str:
+    return f"{SNAPSHOT_PREFIX}{mode}:{day}"
+
+
+def records_for_day(records: list, day: str) -> list:
+    """Records whose position closed on IST calendar day `day` (YYYY-MM-DD)."""
+    return [r for r in records if r.get("exit_day_ist") == day]
+
+
+def build_daily_snapshot(db, mode: str, day: Optional[str] = None, *, week_days: int = 7) -> dict:
+    """`day`'s (default: today IST) records and expectancy report plus the rolling `week_days`-day report for context.
+    Read-only. Raises only if the database read itself fails (the caller decides whether to retry)."""
+    from tz_utils import ist_today_str
+    day = day or ist_today_str()
+    week_days = max(2, min(int(week_days), 60))
+    recs = load_records(db, mode, week_days)
+    today = records_for_day(recs, day)
+    return {
+        "mode": mode, "day": day, "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": expectancy_report(today), "week_days": week_days, "week": expectancy_report(recs),
+        "records_today": today,
+    }
+
+
+def _money(x) -> str:
+    return "n/a" if x is None else f"{x:+,.2f}"
+
+
+def format_daily_message(snap: dict) -> str:
+    """Telegram text for a snapshot (Markdown, same style as the other notifier messages). Short on purpose."""
+    t = (snap.get("today") or {}).get("overall")
+    head = f"\U0001F4CA *Daily trade report \u2014 {snap.get('mode')} {snap.get('day')}*"
+    if not t:
+        return head + "\nNo closed trades today."
+    charges = "n/a" if t.get("charges") is None else f"{t['charges']:,.2f}"
+    lines = [head,
+             f"{t['trades']} trades, {t['wins']} wins / {t['losses']} losses ({t['win_rate_pct']:.0f}%)",
+             f"Gross \u20b9{_money(t['gross_pnl'])}, charges \u20b9{charges}, net \u20b9{_money(t['net_pnl'])}",
+             f"Expectancy \u20b9{_money(t['expectancy'])} per trade"
+             + (f", payoff {t['payoff_ratio']:.2f}" if t.get("payoff_ratio") is not None else "")]
+    if t.get("avg_entry_slippage_pct") is not None:
+        lines.append(f"Avg entry slippage vs signal {t['avg_entry_slippage_pct']:+.2f}%")
+    by = (snap.get("today") or {}).get("by_exit_reason") or {}
+    if by:
+        parts = [f"{k} {v['trades']}x \u20b9{_money(v['expectancy'])}" for k, v in
+                 sorted(by.items(), key=lambda kv: kv[1]["trades"] * kv[1]["expectancy"])]
+        lines.append("By exit (expectancy): " + ", ".join(parts[:6]))
+    w = (snap.get("week") or {}).get("overall")
+    if w:
+        lines.append(f"Last {snap.get('week_days')} days: {w['trades']} trades, expectancy \u20b9{_money(w['expectancy'])}"
+                     f", win rate {w['win_rate_pct']:.0f}%")
+    if t.get("low_sample"):
+        lines.append("(few trades today - treat as noise)")
+    return "\n".join(lines)
+
+
+def save_daily_snapshot(db, snap: dict) -> bool:
+    """Store `snap` under its key. True only when it can be read back (the cache helper swallows write errors)."""
+    from resilience import local_cache
+    key = snapshot_key(snap["mode"], snap["day"])
+    local_cache.save_snapshot(db, key, snap)
+    return local_cache.load_snapshot(db, key) is not None
+
+
+def load_daily_snapshot(db, mode: str, day: str) -> Optional[dict]:
+    from resilience import local_cache
+    return local_cache.load_snapshot(db, snapshot_key(mode, day))
+
+
+def list_daily_snapshots(db, mode: str, limit: int = 30) -> list:
+    """Stored days for `mode`, newest first: [{"day", "trades", "net_pnl", "expectancy", "generated_at"}]."""
+    import json
+    import models
+    prefix = f"{SNAPSHOT_PREFIX}{mode}:"
+    rows = (db.query(models.ResilienceCache).filter(models.ResilienceCache.key.like(prefix + "%"))
+            .order_by(models.ResilienceCache.key.desc()).limit(max(1, min(int(limit), 365))).all())
+    out = []
+    for r in rows:
+        if not str(r.key).startswith(prefix):        # LIKE treats "_" as a wildcard; keep exact prefixes only
+            continue
+        try:
+            snap = json.loads(r.payload_json)
+            o = (snap.get("today") or {}).get("overall") or {}
+            out.append({"day": snap.get("day"), "trades": o.get("trades", 0), "net_pnl": o.get("net_pnl"),
+                        "expectancy": o.get("expectancy"), "generated_at": snap.get("generated_at")})
+        except Exception:  # noqa: BLE001
+            continue
+    return out

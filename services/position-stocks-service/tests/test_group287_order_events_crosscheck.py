@@ -10,7 +10,7 @@ import pytest
 import config
 from execution import order_ws
 from orders import reconcile
-from test_reconcile import (env, mkpos, super_row, available, lock_held,  # noqa: F401
+from tests.test_reconcile import (env, mkpos, super_row, available, lock_held,  # noqa: F401
                             LEDGER_AVAILABLE)
 
 
@@ -108,7 +108,7 @@ class TestReconcile:
     def test_order_book_proof_still_wins_over_events(self, env, fresh, monkeypatch):
         db, b, _ = env
         monkeypatch.setattr(config, "RECONCILE_USE_ORDER_EVENTS", False)
-        from test_reconcile_dead_parent_fill import _buy
+        from tests.test_reconcile_dead_parent_fill import _buy
         p = mkpos(db, entry=100.0, qty=10, super_id="SO1")
         b.super_orders = [super_row("SO1", status="REJECTED")]
         b.plain_orders = [_buy(p, 100.0)]

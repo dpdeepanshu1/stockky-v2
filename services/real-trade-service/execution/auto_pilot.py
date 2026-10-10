@@ -101,6 +101,7 @@ from typing import Optional
 
 import config
 import models
+import trade_records
 from db import get_session_factory
 from notifier import notify_async
 from tz_utils import (
@@ -1517,6 +1518,7 @@ async def _schedule_tick_body(mode: str) -> None:
     Session = get_session_factory()
     db = Session()
     try:
+        await _daily_report_step(db, mode)   # group292: independent of arming (and of a gate row) - it only reads closed trades
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
         if gate is None or not gate.armed:
             return
@@ -1625,6 +1627,58 @@ async def _schedule_tick_body(mode: str) -> None:
         logger.exception("[schedule] tick failed for %s", mode)
     finally:
         db.close()
+
+
+_daily_report_last_failure: dict = {}      # mode -> time.monotonic() of the last failed attempt (retry throttle)
+_DAILY_REPORT_RETRY_S = 600.0
+
+
+async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[dict]:
+    """group292: once per IST trading day, from DAILY_REPORT_TIME_IST (default 15:45, after the 15:00 square-off and the
+    15:30 close) on, store today's per-trade expectancy report as a snapshot and push a short summary. The stored
+    snapshot is also the once-a-day guard, so a restart cannot send it twice. No closed trades: the snapshot is stored,
+    nothing is pushed. A failed attempt is retried at most every 10 minutes. DAILY_REPORT_ENABLED=0 turns it off.
+    force=True (manual run) rebuilds, overwrites and pushes regardless. Returns the snapshot, or None when nothing ran.
+    Never raises."""
+    import time as _t
+    try:
+        if not force and not config.DAILY_REPORT_ENABLED:
+            return None
+        today = ist_today_str()
+        if not force:
+            if not (is_ist_weekday() and ist_time_at_or_after(parse_hhmm(config.DAILY_REPORT_TIME_IST, 15, 45))):
+                return None
+            if trade_records.load_daily_snapshot(db, mode, today) is not None:
+                return None
+            last_fail = _daily_report_last_failure.get(mode)
+            if last_fail is not None and _t.monotonic() - last_fail < _DAILY_REPORT_RETRY_S:
+                return None
+        try:
+            snap = trade_records.build_daily_snapshot(db, mode, today)
+            if not trade_records.save_daily_snapshot(db, snap):
+                raise RuntimeError("snapshot could not be stored")
+        except Exception:
+            _daily_report_last_failure[mode] = _t.monotonic()
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            logger.exception("[schedule] daily report failed for %s (retry in %.0fs)", mode, _DAILY_REPORT_RETRY_S)
+            return None
+        _daily_report_last_failure.pop(mode, None)
+        overall = (snap.get("today") or {}).get("overall")
+        if overall or force:
+            try:
+                if not await notify_async(trade_records.format_daily_message(snap)):
+                    logger.warning("[schedule] daily report for %s %s stored but the Telegram push was not delivered "
+                                   "(GET /positions/%s/report/daily has it)", mode, today, mode)
+            except Exception:
+                logger.exception("[schedule] daily report push failed for %s", mode)
+        logger.info("[schedule] daily report %s %s stored (%s trades)", mode, today, (overall or {}).get("trades", 0))
+        return snap
+    except Exception:
+        logger.exception("[schedule] daily report step failed for %s", mode)
+        return None
 
 
 async def _schedule_loop() -> None:

@@ -1968,6 +1968,60 @@ async def closed_positions_expectancy_report(
     return {"mode": mode, "days": days, **trade_records.expectancy_report(recs)}
 
 
+@app.get("/positions/{mode}/report/daily")
+async def stored_daily_report(
+    mode: str, day: Optional[str] = None,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Read-only (group 292): the stored end-of-day report snapshot of IST day `day` (YYYY-MM-DD, default today) - the
+    same data the daily Telegram summary was built from, frozen when it was stored (today's records plus the rolling
+    7-day report). 404 when none is stored for that day (not yet 15:45 IST, a non-trading day, or DAILY_REPORT_ENABLED=0)."""
+    import asyncio
+    import re
+    import trade_records
+    from tz_utils import ist_today_str
+    mode = _records_mode(mode)
+    day = (day or "").strip() or ist_today_str()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
+    snap = await asyncio.to_thread(trade_records.load_daily_snapshot, db, mode, day)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"no daily report stored for {mode} {day}")
+    return snap
+
+
+@app.get("/positions/{mode}/report/history")
+async def stored_daily_report_history(
+    mode: str, limit: int = 30,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Read-only (group 292): one line per stored end-of-day report, newest first (day, trades, net P&L, expectancy).
+    `limit` 1-365 (default 30)."""
+    import asyncio
+    import trade_records
+    mode = _records_mode(mode)
+    limit = max(1, min(int(limit), 365))
+    rows = await asyncio.to_thread(trade_records.list_daily_snapshots, db, mode, limit)
+    return {"mode": mode, "days": rows}
+
+
+@app.post("/positions/{mode}/report/daily/run")
+async def run_daily_report_now(
+    mode: str,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Group 292: rebuild today's report now, overwrite the stored snapshot and push the Telegram summary (also when no
+    trade closed today). Does not touch positions or orders. Same admin rule as the other routes (REAL needs login).
+    `stored` is True once the snapshot is saved; the Telegram push is best effort and is logged when undelivered."""
+    from execution import auto_pilot
+    mode = _records_mode(mode)
+    snap = await auto_pilot._daily_report_step(db, mode, force=True)
+    if snap is None:
+        raise HTTPException(status_code=500, detail="daily report could not be built or stored - see server logs")
+    return {"mode": mode, "day": snap["day"], "trades_today": (snap["today"].get("overall") or {}).get("trades", 0),
+            "stored": True}
+
+
 @app.get("/stats/regime-override")
 async def regime_override_stats(
     mode: str = "REAL", admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),

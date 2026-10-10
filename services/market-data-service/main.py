@@ -2012,20 +2012,56 @@ def _waterfall_angelone_price(symbol: str) -> Optional[float]:
 
 
 # group235: the 2026-10-07 evening log had ~1,500 "Bhavcopy EOD waterfall hit X" INFO lines in a few minutes (one per
-# symbol per request, the same symbol and price over and over). One INFO per symbol and price per process; repeats
-# go to DEBUG.
+# symbol per request, the same symbol and price over and over). That was cut to one INFO per symbol and price per process.
+# group302: that is still one line per symbol after every restart (about 2,900 lines in a few minutes on 2026-10-10, 70% of
+# the log). Per-symbol lines are now DEBUG, and one INFO summary is written at most every BHAVCOPY_HIT_SUMMARY_EVERY_S
+# seconds (default 60): how many symbols were priced from the last close and how many of those prices were new.
+# BHAVCOPY_HIT_LOG_PER_SYMBOL=1 brings back the group235 one-INFO-per-symbol behaviour.
 _BHAV_HIT_LOGGED: dict = {}
 _BHAV_HIT_LOGGED_MAX = 6000
+_BHAV_HIT_WINDOW: dict = {"since": 0.0, "hits": 0, "new": 0}
+
+
+def _bhav_hit_per_symbol_enabled() -> bool:
+    return (os.getenv("BHAVCOPY_HIT_LOG_PER_SYMBOL") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _bhav_hit_summary_every_s() -> float:
+    try:
+        return max(5.0, float(((os.getenv("BHAVCOPY_HIT_SUMMARY_EVERY_S") or "").strip() or "60")))
+    except ValueError:
+        return 60.0
 
 
 def _log_bhavcopy_hit_once(base: str, px: float) -> None:
-    if _BHAV_HIT_LOGGED.get(base) == px:
-        logger.debug("Bhavcopy EOD waterfall hit %s → ₹%.2f (repeat)", base, px)
+    is_new = _BHAV_HIT_LOGGED.get(base) != px
+    if is_new:
+        if len(_BHAV_HIT_LOGGED) >= _BHAV_HIT_LOGGED_MAX:
+            _BHAV_HIT_LOGGED.clear()
+        _BHAV_HIT_LOGGED[base] = px
+    if _bhav_hit_per_symbol_enabled():
+        if is_new:
+            logger.info("Bhavcopy EOD waterfall hit %s → ₹%.2f", base, px)
+        else:
+            logger.debug("Bhavcopy EOD waterfall hit %s → ₹%.2f (repeat)", base, px)
         return
-    if len(_BHAV_HIT_LOGGED) >= _BHAV_HIT_LOGGED_MAX:
-        _BHAV_HIT_LOGGED.clear()
-    _BHAV_HIT_LOGGED[base] = px
-    logger.info("Bhavcopy EOD waterfall hit %s → ₹%.2f", base, px)
+    logger.debug("Bhavcopy EOD waterfall hit %s → ₹%.2f%s", base, px, "" if is_new else " (repeat)")
+    now = time.time()
+    w = _BHAV_HIT_WINDOW
+    if not w["since"]:
+        w["since"] = now
+    w["hits"] += 1
+    if is_new:
+        w["new"] += 1
+    if now - w["since"] >= _bhav_hit_summary_every_s():
+        logger.info(
+            "Bhavcopy EOD waterfall: %d lookups in the last %.0fs priced from the last close (%d new prices); "
+            "per-symbol lines are at DEBUG (BHAVCOPY_HIT_LOG_PER_SYMBOL=1 restores them)",
+            w["hits"], now - w["since"], w["new"],
+        )
+        w["since"] = now
+        w["hits"] = 0
+        w["new"] = 0
 
 
 def _waterfall_bhavcopy_price(symbol: str) -> Optional[float]:

@@ -21,6 +21,8 @@ interface Props {
   subtitle?: string;
   healthData: FeedHealthData | null;
   healthLoading: boolean;
+  /** group302: set when the last audit failed or timed out; shows the message and turns the button into Retry */
+  auditError?: string | null;
   onRefreshAudit: () => void | Promise<void>;
   onRepairBatch: () => void | Promise<void>;
   onRepairSingle: (symbol: string) => void | Promise<void>;
@@ -38,7 +40,7 @@ interface Props {
  * pure presentation + the two button callbacks.
  */
 export default function FeedHealthPanel({
-  title, subtitle, healthData, healthLoading,
+  title, subtitle, healthData, healthLoading, auditError,
   onRefreshAudit, onRepairBatch, onRepairSingle,
   batchRepairBusy, patchingSymbol, repairBatchLabel = "⚡ Auto-Repair Missing (15)",
 }: Props) {
@@ -65,9 +67,14 @@ export default function FeedHealthPanel({
           disabled={healthLoading}
           className="font-display tabular-nums text-xs px-3 py-1.5 bg-graphite text-mist rounded-xl border border-slate hover:bg-slate/40 transition disabled:opacity-50"
         >
-          {healthLoading ? "Auditing…" : "🔄 Refresh Audit"}
+          {healthLoading ? "Auditing…" : auditError ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
         </button>
       </div>
+      {auditError && !healthLoading && (
+        <p className="font-display tabular-nums text-[11px] text-signal-sell mb-3" role="alert">
+          {auditError}
+        </p>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">

@@ -313,6 +313,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
   const [healthData, setHealthData] = useState<FeedHealthData | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null); // group302
   const [batchRepairBusy, setBatchRepairBusy] = useState(false);
   const [patchingSymbol, setPatchingSymbol] = useState<string | null>(null);
   const [repairMsg, setRepairMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -322,10 +323,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const fetchHotPicksHealth = useCallback(async () => {
     setHealthLoading(true);
+    setAuditError(null);
     try {
       setHealthData(await api.hotPicksAudit());
-    } catch {
-      // Health panel is best-effort — don't block the rest of the tab.
+    } catch (e: any) {
+      // Health panel is best-effort — don't block the rest of the tab. group302: but say so, with a Retry.
+      setAuditError(e?.message || "Audit failed");
     } finally {
       setHealthLoading(false);
     }
@@ -821,6 +824,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         subtitle="Audit stored Hot Picks (price/decision/score) and repair what's missing."
         healthData={healthData}
         healthLoading={healthLoading}
+        auditError={auditError}
         onRefreshAudit={fetchHotPicksHealth}
         onRepairBatch={handleRepairBatchMissing}
         onRepairSingle={handleRepairSingle}

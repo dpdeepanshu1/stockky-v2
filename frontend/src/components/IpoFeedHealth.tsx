@@ -249,7 +249,7 @@ export default function IpoFeedHealth({ onRepairComplete }: { onRepairComplete?:
                 <BusySpinner className="border-white/60" /> Auditing…
               </span>
             ) : (
-              "🔄 Refresh Audit"
+              error ? "🔄 Retry Audit" : "🔄 Refresh Audit"
             )}
           </button>
         </div>

@@ -876,9 +876,12 @@ class DataFeedStore:
                     "last_message": j.get("message") or self.meta().get("last_message"),
                     "source": "job_progress",
                 }
+                # group302: "Last success" must only move on a real feed run. A boot heal (status "idle", ok_count
+                # carried over from the last run) used to land in the `elif ok_n > 0` branch and stamp the restart
+                # time as the last success.
                 if j.get("status") in ("done", "stopped"):
                     meta_kw["last_success_at"] = j.get("finished_at") or j.get("updated_at") or _now_iso()
-                elif ok_n > 0:
+                elif ok_n > 0 and j.get("status") == "running":
                     meta_kw["last_success_at"] = j.get("updated_at") or _now_iso()
                 self.set_meta(**meta_kw)
         except Exception:
@@ -1917,6 +1920,9 @@ def clear_stuck_feed_job_on_boot() -> dict:
             status="idle",
             message="Boot heal: cleared stuck job after container restart (stock data preserved)",
             stop_requested=False,
+            # group302: nothing is running, so there is no elapsed time or ETA to carry over from the dead job.
+            elapsed_sec=0,
+            estimated_remaining_sec=0,
         )
         clear_data_feed_stop()
         logger.info("Boot heal: stuck data-feed job %s → idle (stock rows preserved)", status)

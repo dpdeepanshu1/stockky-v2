@@ -874,6 +874,22 @@ export async function streamSurpriseScan(
 // API object
 // ───────────────────────────────────────────────
 
+// group302: audits must never spin forever. One attempt, a 20 s budget (30 s for the feed audit, which walks every
+// tracked symbol), and a plain message the panels show next to a Retry button. They used to retry twice with a growing
+// timeout, which kept "Auditing..." on screen for well over a minute when the gateway was busy.
+const AUDIT_TIMEOUT_MS = 20000;
+async function auditRequest<T>(path: string, timeoutMs = AUDIT_TIMEOUT_MS): Promise<T> {
+  try {
+    return await request<T>(path, undefined, 0, timeoutMs);
+  } catch (e: any) {
+    const msg = String(e?.message || e || "");
+    if (/timed out/i.test(msg)) {
+      throw new Error(`Audit timed out after ${Math.round(timeoutMs / 1000)} s - the backend is busy. Press Retry.`);
+    }
+    throw e;
+  }
+}
+
 export const api = {
   // 2026-09-18 fix: /health does no DB work (confirmed in api-gateway/main.py —
   // it's a static dict literal), so it has zero legitimate reason to need the
@@ -1114,13 +1130,20 @@ export const api = {
       15000
     ),
 
+  // group302: the gateway now retries each target once (up to ~42 s worst case), so the browser waits longer than
+  // before and reads `ok` as "the durable database answered"; `partial` / `all_ok` carry the per-target detail.
   wakeAllDatabases: () =>
-    request<{ ok: boolean; at?: string; targets?: Record<string, { ok?: boolean; error?: string; db_backend?: string }> }>(
-      "/ops/wake-db-all",
-      { method: "POST" },
-      1,
-      25000
-    ),
+    request<{
+      ok: boolean;
+      all_ok?: boolean;
+      partial?: boolean;
+      at?: string;
+      targets?: Record<string, { ok?: boolean; error?: string; db_backend?: string }>;
+    }>("/ops/wake-db-all", { method: "POST" }, 1, 50000),
+
+  // group302: lets tabs skip work that cannot produce anything new while the market is closed.
+  getMarketSession: () =>
+    request<{ phase: string; is_open: boolean; is_holiday?: boolean }>("/market/session", undefined, 0, 8000),
 
   getWatchlist: () => request<{ symbols: string[] }>("/watchlist", undefined, 2, 30000),
 
@@ -1268,6 +1291,11 @@ export const api = {
       elapsed_sec?: number;
       error?: string;
       min_score?: number;
+      // group302: set when the market is closed and the saved result was served instead of a new scan
+      market_closed?: boolean;
+      from_cache?: boolean;
+      cache_age_sec?: number;
+      message?: string;
     }>(
       `/api/surprise/scan?force_reload=${forceReload ? "true" : "false"}`,
       undefined,
@@ -1408,7 +1436,7 @@ export const api = {
       error?: string;
       notification_result?: { delivered?: boolean; note?: string };
     }>(`/stockky-hot/notify-top-picks?top_n=${topN}`, { method: "POST" }, 1, 30000),
-  hotPicksAudit: () => request<{
+  hotPicksAudit: () => auditRequest<{
     ok: boolean;
     total_tracked?: number;
     rows_24h?: number;
@@ -1418,7 +1446,7 @@ export const api = {
     health_score?: number;
     message?: string;
     error?: string;
-  }>("/stockky-hot/audit", undefined, 2, 30000),
+  }>("/stockky-hot/audit"),
   hotPicksRepairBatch: (limit = 20, symbol?: string) =>
     request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
       `/stockky-hot/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
@@ -1441,7 +1469,7 @@ export const api = {
   // IPO Tracker's OWN feed health — reads ipo_static_feed, NOT the general
   // stock-universe feed (see /api/feed/audit-missing, which is unrelated).
   ipoAudit: () =>
-    request<{
+    auditRequest<{
       ok: boolean;
       total_tracked?: number;
       fully_scored?: number;
@@ -1480,7 +1508,7 @@ export const api = {
       health_score?: number;
       message?: string;
       error?: string;
-    }>("/ipo/audit", undefined, 2, 20000),
+    }>("/ipo/audit"),
   // Targeted repair — re-runs analyze_ipo() only for symbols missing a
   // field, not a full universe re-scan. Backs the IPO health tab's
   // Auto-Repair button (mirrors hotPicksRepairBatch above).
@@ -1893,7 +1921,7 @@ export const api = {
   runSurprisePremarketFeed: (force = false) =>
     request<any>(`/api/surprise/run-premarket-feed?force=${force}`, { method: "POST" }, 1, 300000),
   surpriseAudit: () =>
-    request<{
+    auditRequest<{
       ok: boolean;
       total_tracked?: number;
       fully_populated?: number;
@@ -1902,7 +1930,7 @@ export const api = {
       health_score?: number;
       message?: string;
       error?: string;
-    }>("/api/surprise/audit", undefined, 2, 30000),
+    }>("/api/surprise/audit"),
   surpriseRepairBatch: (limit = 20, symbol?: string) =>
     request<{ status: string; repaired?: string[]; attempted?: number; message?: string; error?: string }>(
       `/api/surprise/repair-batch?limit=${limit}${symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""}`,
@@ -1943,7 +1971,7 @@ export const api = {
   getDataFeedSymbol: (symbol: string) =>
     request<any>(`/data-feed/${encodeURIComponent(symbol)}`, undefined, 1, 20000),
   auditMissingFeed: () =>
-    request<any>("/api/feed/audit-missing", undefined, 2, 60000),
+    auditRequest<any>("/api/feed/audit-missing", 30000),
   repairFeedSingle: (symbol: string) =>
     request<any>(`/api/feed/repair-single/${encodeURIComponent(symbol)}`, { method: "POST" }, 2, 90000),
   repairFeedBatch: (limit: number = 15) =>
@@ -1997,7 +2025,7 @@ export const api = {
     }>(`/stockky-hot/table?hours=${hours}`, undefined, 2, 20000),
   // Hot Picks feed health (row counts, staleness, missing prices per section).
   getStockkyHotAudit: () =>
-    request<any>("/stockky-hot/audit", undefined, 2, 20000),
+    auditRequest<any>("/stockky-hot/audit"),
 
   getStockkyHot: (force = false) =>
     request<{

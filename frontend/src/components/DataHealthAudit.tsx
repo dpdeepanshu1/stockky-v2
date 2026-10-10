@@ -168,7 +168,7 @@ export default function DataHealthAudit() {
             disabled={loading || batchBusy}
             className="scan-action-btn"
           >
-            {loading ? "Auditing…" : "🔄 Refresh Audit"}
+            {loading ? "Auditing…" : error ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
           </button>
           <button
             type="button"

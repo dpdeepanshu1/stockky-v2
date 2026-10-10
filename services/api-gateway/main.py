@@ -5351,37 +5351,62 @@ async def ops_wake_db_all():
     """
     out: dict = {"ok": True, "at": datetime.now(IST).isoformat(), "targets": {}}
 
-    # 1) Gateway's own Neon connection
+    # group302: the old body ran the gateway's blocking DB ping (a pool checkout + SELECT) directly on the event
+    # loop, so a busy pool froze every other request, and any slow target turned the whole pill red even though the
+    # Oracle database was fine. Now: the ping runs in a worker thread under a budget, a failed target is retried once,
+    # and `ok` means "the durable database answered" (any target), with per-target detail kept for the UI.
+    # DB_WAKE_TIMEOUT_S (default 20) is the per-target budget.
     try:
-        gw = _neon_keepalive_ping()
-        out["targets"]["gateway_neon"] = gw
-    except Exception as e:
-        out["targets"]["gateway_neon"] = {"ok": False, "error": str(e)[:200]}
+        _budget = max(3.0, float(((os.getenv("DB_WAKE_TIMEOUT_S") or "").strip() or "20")))
+    except ValueError:
+        _budget = 20.0
 
-    # 2) Training service DB (+ its cache DB, whichever env var it resolves to)
-    #    /training/health itself performs a DB check on the training side.
-    try:
-        client = _get_http_client()
-        url = (TRAINING_URL or "").rstrip("/")
-        if url:
-            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=15.0)
+    async def _gateway_target() -> dict:
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_neon_keepalive_ping), timeout=_budget)
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": f"no answer within {_budget:.0f}s (gateway busy, not necessarily down)"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)[:200]}
+
+    async def _training_target() -> dict:
+        try:
+            client = _get_http_client()
+            url = (TRAINING_URL or "").rstrip("/")
+            if not url:
+                return {"ok": False, "error": "TRAINING_URL not configured"}
+            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=_budget)
             training_ok = r.status_code == 200
             data = {}
             try:
                 data = r.json() if training_ok else {}
             except Exception:
                 data = {}
-            out["targets"]["training_db"] = {
+            return {
                 "ok": training_ok and data.get("db_connected") is not False,
                 "db_connected": data.get("db_connected"),
                 "db_backend": data.get("db_backend"),
             }
-        else:
-            out["targets"]["training_db"] = {"ok": False, "error": "TRAINING_URL not configured"}
-    except Exception as e:
-        out["targets"]["training_db"] = {"ok": False, "error": str(e)[:200]}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)[:200] or type(e).__name__}
 
-    out["ok"] = all(bool(t.get("ok")) for t in out["targets"].values())
+    async def _with_one_retry(fn) -> dict:
+        res = await fn()
+        if not res.get("ok"):
+            await asyncio.sleep(1.5)
+            res2 = await fn()
+            if res2.get("ok"):
+                res2["retried"] = True
+                return res2
+        return res
+
+    gw, tr = await asyncio.gather(_with_one_retry(_gateway_target), _with_one_retry(_training_target))
+    out["targets"]["gateway_neon"] = gw
+    out["targets"]["training_db"] = tr
+    flags = [bool(t.get("ok")) for t in out["targets"].values()]
+    out["all_ok"] = all(flags)
+    out["ok"] = any(flags)
+    out["partial"] = out["ok"] and not out["all_ok"]
     return out
 
 
@@ -9263,6 +9288,47 @@ def _start_surprise_scan(engine, *, client, sym_list, force_reload: bool, cached
     return task
 
 
+def _surprise_closed_serve_enabled() -> bool:
+    return (os.getenv("SURPRISE_CLOSED_SERVE_LAST") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+async def _surprise_closed_market_result(engine, limit):
+    """group302: when the market is closed (or a holiday) hand back the last saved Surprise result instead of
+    starting a 970-symbol sweep nobody can use (2026-10-10, a Saturday: opening the tab started a full scan over a
+    31-hour-old result: 0/0 on screen, a busy gateway, nothing new to learn). The engine only had this shortcut for
+    cached=true callers and only when its result was newer than the last close. Returns None when a live scan should
+    run (market not closed, nothing saved yet, or the caller forced it with refresh=true / force_reload=true /
+    explicit symbols). SURPRISE_CLOSED_SERVE_LAST=0 restores the old behaviour."""
+    try:
+        if not _surprise_closed_serve_enabled():
+            return None
+        phase = _market_session_phase_ist()
+        if phase not in ("closed", "holiday"):
+            return None
+        if getattr(engine, "_last_result", None) is None:
+            loader = (getattr(engine, "_load_last_result_stale_from_durable_cache", None)
+                      or getattr(engine, "_load_last_result_from_durable_cache", None))
+            if callable(loader):
+                await asyncio.to_thread(loader)
+        last = getattr(engine, "_last_result", None)
+        if last is None:
+            return None
+        age = max(0.0, time.time() - float(getattr(engine, "_last_scan_ts", 0.0) or 0.0))
+        result = dict(last)
+        result["from_cache"] = True
+        result["market_closed"] = True
+        result["market_closed_cache"] = True
+        result["market_phase"] = phase
+        result["cache_age_sec"] = round(age, 1)
+        result["message"] = "Market closed - showing the last saved scan. Use Refresh Scan to run a fresh one."
+        if limit is not None and isinstance(result.get("stocks"), list):
+            result["stocks"] = result["stocks"][: max(0, int(limit))]
+        return result
+    except Exception as e:  # noqa: BLE001 - never let this shortcut break a scan
+        logger.debug("surprise closed-market serve skipped: %s", e)
+        return None
+
+
 @app.get("/api/surprise/scan")
 @app.get("/surprise/scan")
 async def api_surprise_scan(
@@ -9270,6 +9336,7 @@ async def api_surprise_scan(
     symbols: str = None,
     cached: bool = False,
     limit: int = None,
+    refresh: bool = False,
 ):
     """
     Lightweight surprise scan:
@@ -9298,6 +9365,11 @@ async def api_surprise_scan(
     sym_list = None
     if symbols:
         sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
+
+    if not sym_list and not force_reload and not refresh:
+        _closed = await _surprise_closed_market_result(surprise_engine, limit)
+        if _closed is not None:
+            return _closed
 
     client = _get_http_client()
     # Session 72 (#3): never run past the callers' 25s client timeout. The scan
@@ -9363,7 +9435,7 @@ async def api_surprise_scan_stream(
     async def event_generator():
         t0 = time.time()
         client = _get_http_client()
-        n_static = surprise_engine.load_static_cache(force=bool(force_reload))
+        n_static = await asyncio.to_thread(surprise_engine.load_static_cache, bool(force_reload))  # group302: blocking SQL, off the loop
         yield json.dumps({
             "_meta": True,
             "event": "static_loaded",
@@ -10893,13 +10965,81 @@ def _ensure_jobs_loop():
         logger.debug("jobs loop start: %s", e)
 
 
+# group302: runtime tuning that runs first at boot.
+#  - a larger default worker pool: asyncio.to_thread() (the surprise scan, movers sweep, scan-universe build, DB
+#    reads) shares ONE default executor of min(32, cpu+4) threads (about 6 on this 2 vCPU box). The boot warms alone
+#    could keep all of them busy, so every other to_thread call (the health-adjacent DB reads, audits) queued behind
+#    them. GATEWAY_THREAD_POOL (default 32, 0 = leave the default) raises it; the threads are idle most of the time.
+#  - the event-loop stall watchdog (loop_watchdog.py): logs the exact blocking line when the loop stalls > 3 s.
+@app.on_event("startup")
+async def _gateway_runtime_tuning():
+    try:
+        _n = int(((os.getenv("GATEWAY_THREAD_POOL") or "").strip() or "32"))
+        if _n > 0:
+            import concurrent.futures as _cf
+            asyncio.get_running_loop().set_default_executor(
+                _cf.ThreadPoolExecutor(max_workers=_n, thread_name_prefix="gw-worker")
+            )
+            logger.info("Startup: default thread pool set to %d workers (GATEWAY_THREAD_POOL)", _n)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Startup warning (thread pool tuning, non-fatal): %s", e)
+    try:
+        import loop_watchdog
+        if loop_watchdog.start():
+            logger.info("Startup: event-loop stall watchdog running (GET /ops/loop-lag)")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("loop watchdog not started: %s", e)
+
+
+@app.get("/ops/loop-lag")
+async def ops_loop_lag():
+    """Event-loop health: current lag and the worst stall since boot, with the stack that caused the last one."""
+    try:
+        import loop_watchdog
+        return loop_watchdog.snapshot()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:160]}
+
+
+# group302: the boot warms (momentum movers -> scan universe, and the surprise scan) used to start together a few
+# seconds after boot, on top of the first page loads. They now go one after another: movers/universe first (after
+# GATEWAY_BOOT_WARM_DELAY_S, default 8 s open / GATEWAY_BOOT_WARM_CLOSED_DELAY_S, default 90 s when the market is
+# closed - nobody needs them then and the UI is usually loading), the surprise warm waits for them to finish
+# (at most GATEWAY_BOOT_WARM_SURPRISE_WAIT_S, default 120 s).
+_boot_warm_movers_done: Optional["asyncio.Event"] = None
+
+
+def _boot_warm_event() -> "asyncio.Event":
+    global _boot_warm_movers_done
+    if _boot_warm_movers_done is None:
+        _boot_warm_movers_done = asyncio.Event()
+    return _boot_warm_movers_done
+
+
+def _boot_warm_env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(((os.getenv(name) or "").strip() or default)))
+    except ValueError:
+        return float(default)
+
+
+def _boot_warm_movers_delay_sec() -> float:
+    try:
+        phase = _market_session_phase_ist()
+    except Exception:  # noqa: BLE001
+        phase = "open"
+    if phase in ("closed", "holiday"):
+        return _boot_warm_env_float("GATEWAY_BOOT_WARM_CLOSED_DELAY_S", 90.0)
+    return _boot_warm_env_float("GATEWAY_BOOT_WARM_DELAY_S", 8.0)
+
+
 # ── Startup cache pre-population ──────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     """Non-blocking indices warm — never delays app readiness."""
     try:
         try:
-            _redis.delete(INDICES_CACHE_KEY)
+            await asyncio.to_thread(_redis.delete, INDICES_CACHE_KEY)  # group302: may be a durable DB call, keep it off the loop
             logger.info("Cleared old indices cache on startup")
         except Exception:
             pass
@@ -10996,6 +11136,11 @@ async def _warm_surprise_scan_cache():
             delay = _surprise_boot_warm_delay_sec()
             if delay > 0:
                 await asyncio.sleep(delay)
+            # group302: let the movers/universe warm finish first (bounded wait) so the two never overlap.
+            try:
+                await asyncio.wait_for(_boot_warm_event().wait(), timeout=_boot_warm_env_float("GATEWAY_BOOT_WARM_SURPRISE_WAIT_S", 120.0))
+            except asyncio.TimeoutError:
+                logger.info("Startup: surprise warm no longer waiting for the movers warm")
             from surprise_scanner import surprise_engine
             _skip_why = _surprise_boot_warm_skip_reason()
             if _skip_why:
@@ -11038,6 +11183,15 @@ async def _warm_surprise_scan_cache():
 async def _warm_momentum_movers_cache():
     async def _warm():
         try:
+            await _warm_inner()
+        finally:
+            _boot_warm_event().set()
+
+    async def _warm_inner():
+        try:
+            _d = _boot_warm_movers_delay_sec()
+            if _d > 0:
+                await asyncio.sleep(_d)
             await asyncio.to_thread(_get_momentum_movers)
             logger.info("Startup: momentum-movers cache pre-warmed (first /scan/universe call will be fast)")
         except Exception as e:
@@ -11051,7 +11205,7 @@ async def _warm_momentum_movers_cache():
         # OTHER dependency is ready too, not just the movers half.
         try:
             # group196: a cold live key + a stored stale copy used to make this warm just re-serve the stale copy
-            _live = _redis_get(SCAN_UNIVERSE_KEY)
+            _live = await asyncio.to_thread(_redis_get, SCAN_UNIVERSE_KEY)  # group302: durable read, off the loop
             if isinstance(_live, list) and _live:
                 await asyncio.to_thread(_build_scan_universe)
             else:
@@ -11879,6 +12033,55 @@ def data_feed_status():
     if fed_count <= 0:
         fed_count = int((meta or {}).get("last_count") or (job or {}).get("ok_count") or 0)
     last_ok = (meta or {}).get("last_success_at") or (job or {}).get("finished_at")
+    return _normalize_data_feed_status(store, job, meta, fed_count, last_ok)
+
+
+def _data_feed_normalize_enabled() -> bool:
+    return (os.getenv("DATA_FEED_STATUS_NORMALIZE") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _normalize_data_feed_status(store, job: dict, meta: dict, fed_count: int, last_ok):
+    """group302: make /data-feed/status tell one consistent story.
+
+    - "Last success" is a real feed run, never a boot heal. Older boots stamped the restart time into the meta;
+      when the stored message is a boot heal and the job has a finish time, that finish time is the real one
+      (and the meta is repaired once).
+    - elapsed / ETA exist only while a job is running (a dead job's 8-day-old started_at used to print 675174 s).
+    - one count: the stocks held in the feed. meta.stock_count (only ever written as 0 by a hard reset) and
+      meta.last_count follow it; `partial` is only true when the last run really stopped short of its universe.
+    DATA_FEED_STATUS_NORMALIZE=0 returns the raw job/meta as before.
+    """
+    job = dict(job or {})
+    meta = dict(meta or {})
+    if _data_feed_normalize_enabled():
+        try:
+            status = str(job.get("status") or "idle").lower()
+            if status != "running":
+                job["elapsed_sec"] = 0
+                job["estimated_remaining_sec"] = 0
+            fin = job.get("finished_at")
+            if (
+                status != "running"
+                and fin
+                and last_ok
+                and str(meta.get("last_message") or "").startswith("Boot heal")
+                and str(last_ok) > str(fin)
+            ):
+                last_ok = fin
+                meta["last_success_at"] = fin
+                try:
+                    store.set_meta(last_success_at=fin)
+                except Exception:  # noqa: BLE001 - repair is best effort
+                    pass
+            meta["stock_count"] = fed_count
+            meta["last_count"] = fed_count
+            _proc = int(job.get("processed") or 0)
+            _tot = int(job.get("total") or 0)
+            if status != "running" and _tot > 0 and _proc >= _tot:
+                meta["partial"] = False
+            job["universe_size"] = int(meta.get("universe_size") or _tot or 0)
+        except Exception as e:  # noqa: BLE001 - never let tidying break the status call
+            logger.debug("data-feed status normalize skipped: %s", e)
     return {
         "ok": True,
         **job,

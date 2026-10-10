@@ -127,7 +127,8 @@ def _release(h, old):
     main.logger.setLevel(old)
 
 
-def test_hit_logged_once_per_symbol_and_price():
+def test_hit_logged_once_per_symbol_and_price(monkeypatch):
+    monkeypatch.setenv("BHAVCOPY_HIT_LOG_PER_SYMBOL", "1")  # group302: per-symbol INFO is now opt-in
     h, old = _capture()
     try:
         for _ in range(5):
@@ -139,7 +140,8 @@ def test_hit_logged_once_per_symbol_and_price():
     assert len(hits) == 2 and any("RELIANCE" in h for h in hits) and any("DROPPER" in h for h in hits)
 
 
-def test_hit_logged_again_when_price_changes():
+def test_hit_logged_again_when_price_changes(monkeypatch):
+    monkeypatch.setenv("BHAVCOPY_HIT_LOG_PER_SYMBOL", "1")  # group302: per-symbol INFO is now opt-in
     h, old = _capture()
     try:
         main._log_bhavcopy_hit_once("ABC", 10.0)

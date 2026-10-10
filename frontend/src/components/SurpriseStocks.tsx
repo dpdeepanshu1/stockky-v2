@@ -83,6 +83,8 @@ export default function SurpriseStocks({
   const [pmProgress, setPmProgress] = useState<PremarketProgress | null>(null);
   const [pmError, setPmError] = useState<string | null>(null);
 
+  const [auditError, setAuditError] = useState<string | null>(null); // group302
+  const [closedNote, setClosedNote] = useState<string | null>(null); // group302: market-closed banner
   const [healthData, setHealthData] = useState<{
     health_score?: number;
     total_tracked?: number;
@@ -257,9 +259,45 @@ export default function SurpriseStocks({
     scanAbort.current = ac;
     setLoading(true);
     setError(null);
-    setStocks([]);
+    setClosedNote(null);
     setScanProg({ processed: 0, total: 0, hits: 0, quotes_ok: 0, elapsed: 0, percent: 0 });
 
+    // group302: while the market is closed, opening the tab (or any non-forced refresh) shows the last saved scan
+    // instead of starting a ~970-symbol sweep that cannot find anything new (it used to sit at 0/0 on a Saturday
+    // next to a 31-hour-old result). "Refresh Scan" passes force=true and still runs a real scan.
+    if (!force) {
+      try {
+        const sess = await api.getMarketSession();
+        if (sess && (sess.phase === "closed" || sess.phase === "holiday")) {
+          const data = await api.surpriseScan(false);
+          if (ac.signal.aborted) return;
+          setStocks(Array.isArray(data?.stocks) ? data.stocks : []);
+          setMeta({
+            static_loaded: data?.static_loaded,
+            quotes_ok: data?.quotes_ok,
+            universe_scanned: data?.universe_scanned,
+            elapsed_sec: data?.elapsed_sec,
+          });
+          if (data?.error) setError(String(data.error));
+          if (data?.market_closed) {
+            const mins = Math.round(Number(data.cache_age_sec || 0) / 60);
+            const age = mins >= 120 ? `${Math.round(mins / 60)} h old` : `${mins} min old`;
+            setClosedNote(`Market closed - showing the last saved scan (${age}). Press Refresh Scan to run a fresh one.`);
+          }
+          setScanProg(null);
+          setLastAt(new Date().toLocaleTimeString("en-IN", { hour12: true }));
+          if (scanAbort.current === ac) {
+            setLoading(false);
+            scanAbort.current = null;
+          }
+          return;
+        }
+      } catch {
+        /* session check or saved-result read failed: fall through to the normal scan below */
+      }
+    }
+
+    setStocks([]);
     try {
       const live: SurpriseStock[] = [];
       let usedStream = false;
@@ -460,17 +498,13 @@ export default function SurpriseStocks({
 
   const fetchSurpriseHealth = useCallback(async () => {
     setHealthLoading(true);
+    setAuditError(null);
     try {
       const data = await api.surpriseAudit();
       setHealthData(data);
     } catch (e: any) {
-      setHealthData({
-        health_score: 0,
-        total_tracked: 0,
-        missing_data: 0,
-        incomplete_stocks: [],
-        message: e?.message || "Audit failed",
-      });
+      // group302: keep the last good numbers (a failed audit is not "health 0") and show the reason with a Retry.
+      setAuditError(e?.message || "Audit failed");
     } finally {
       setHealthLoading(false);
     }
@@ -562,6 +596,11 @@ export default function SurpriseStocks({
           <p className="font-display tabular-nums text-[11px] text-mist/60 mt-1 max-w-xl">
             High RVOL / ORB vs Neon baselines. Live quotes only for ticks; static from premarket.
           </p>
+          {closedNote && (
+            <p className="font-display tabular-nums text-[11px] text-signal-hold mt-2" role="status">
+              {closedNote}
+            </p>
+          )}
           {meta && (
             <p className="font-display tabular-nums text-[10px] text-mist/45 mt-2">
               baselines {meta.static_loaded ?? "—"} · quotes {meta.quotes_ok ?? "—"}/
@@ -716,9 +755,14 @@ export default function SurpriseStocks({
             disabled={healthLoading}
             className="font-display tabular-nums text-xs px-3 py-1.5 bg-graphite text-mist rounded-xl border border-slate hover:bg-slate/40 transition disabled:opacity-50"
           >
-            {healthLoading ? "Auditing…" : "🔄 Refresh Audit"}
+            {healthLoading ? "Auditing…" : auditError ? "🔄 Retry Audit" : "🔄 Refresh Audit"}
           </button>
         </div>
+        {auditError && !healthLoading && (
+          <p className="font-display tabular-nums text-[11px] text-signal-sell mb-3" role="alert">
+            {auditError}
+          </p>
+        )}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="p-3 rounded-xl bg-graphite/80 border border-slate/60">

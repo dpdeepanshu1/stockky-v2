@@ -117,12 +117,21 @@ export default function App() {
   const [dbWakeState, setDbWakeState] = useState<"idle" | "waking" | "ok" | "error">("idle");
   const wakeAllDbs = useCallback(async () => {
     setDbWakeState("waking");
-    try {
-      const res = await api.wakeAllDatabases();
-      setDbWakeState(res?.ok ? "ok" : "error");
-    } catch {
-      setDbWakeState("error");
+    // group302: one quiet retry before showing red. The pill used to turn red when the gateway was merely busy
+    // (for example right after a restart) even though the database was fine.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await api.wakeAllDatabases();
+        if (res?.ok) {
+          setDbWakeState("ok");
+          return;
+        }
+      } catch {
+        /* fall through to the retry */
+      }
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 6000));
     }
+    setDbWakeState("error");
   }, []);
   useEffect(() => {
     void wakeAllDbs();

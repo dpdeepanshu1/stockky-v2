@@ -1052,7 +1052,7 @@ class TestWakeDbAll:
         assert out["targets"]["training_db"] == {"ok": True, "db_connected": True, "db_backend": "neon"}
         assert out["targets"]["gateway_neon"]["ok"] is True
         (_, url, kw), = env.calls
-        assert url == f"{gw.TRAINING_URL.rstrip('/')}/health" and kw["params"] == {"warm": "true"} and kw["timeout"] == 15.0
+        assert url == f"{gw.TRAINING_URL.rstrip('/')}/health" and kw["params"] == {"warm": "true"} and kw["timeout"] == 20.0  # group302: DB_WAKE_TIMEOUT_S budget
 
     def test_gateway_ping_exception_is_contained(self, env, monkeypatch):
         def boom():
@@ -1060,7 +1060,9 @@ class TestWakeDbAll:
 
         monkeypatch.setattr(gw, "_neon_keepalive_ping", boom)
         out = _run(gw.ops_wake_db_all())
-        assert out["ok"] is False and len(out["targets"]["gateway_neon"]["error"]) == 200
+        # group302: `ok` means the durable database answered somewhere; one failing target is `partial`.
+        assert out["ok"] is True and out["partial"] is True and out["all_ok"] is False
+        assert len(out["targets"]["gateway_neon"]["error"]) == 200
         assert out["targets"]["training_db"]["ok"] is True
 
     def test_training_non_200(self, env):
@@ -1073,24 +1075,26 @@ class TestWakeDbAll:
         out = _run(gw.ops_wake_db_all())
         assert out["targets"]["training_db"] == {"ok": True, "db_connected": None, "db_backend": None}
 
-    def test_training_reporting_db_down_turns_the_summary_red(self, env):
-        # FIXED: HTTP 200 with db_connected=False is no longer "ok".
+    def test_training_reporting_db_down_is_partial_not_ok_target(self, env):
+        # HTTP 200 with db_connected=False is still not "ok" for that target; group302: the pill follows the
+        # durable database answering (the gateway's own check passed), the summary says `partial`.
         env.routes["/health"] = FakeResp(200, {"db_connected": False, "db_backend": "none"})
         out = _run(gw.ops_wake_db_all())
-        assert out["ok"] is False and out["targets"]["training_db"]["ok"] is False
+        assert out["targets"]["training_db"]["ok"] is False
         assert out["targets"]["training_db"]["db_connected"] is False
+        assert out["ok"] is True and out["partial"] is True and out["all_ok"] is False
 
     def test_training_url_not_configured(self, env, monkeypatch):
         monkeypatch.setattr(gw, "TRAINING_URL", "")
         out = _run(gw.ops_wake_db_all())
-        assert out["ok"] is False
+        assert out["all_ok"] is False
         assert out["targets"]["training_db"] == {"ok": False, "error": "TRAINING_URL not configured"}
         assert env.calls == []
 
     def test_training_request_exception(self, env):
         env.routes["/health"] = httpx.ConnectError("dead")
         out = _run(gw.ops_wake_db_all())
-        assert out["ok"] is False and "dead" in out["targets"]["training_db"]["error"]
+        assert out["all_ok"] is False and "dead" in out["targets"]["training_db"]["error"]
 
     def test_served_on_get_and_post(self, env, tc):
         assert tc.get("/ops/wake-db-all").json()["ok"] is True

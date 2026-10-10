@@ -258,6 +258,11 @@ services:
       WATCHLIST_SCAN_HTTP_CONCURRENCY: ${WATCHLIST_SCAN_HTTP_CONCURRENCY:-8}
       WATCHLIST_SCAN_TIMEOUT_SECONDS: ${WATCHLIST_SCAN_TIMEOUT_SECONDS:-18}
       WATCHLIST_SCAN_GRACE_SECONDS: ${WATCHLIST_SCAN_GRACE_SECONDS:-30}
+      # group302: boot staggering + worker pool + stall watchdog (all optional; defaults shown)
+      GATEWAY_THREAD_POOL: ${GATEWAY_THREAD_POOL:-32}
+      GATEWAY_BOOT_WARM_DELAY_S: ${GATEWAY_BOOT_WARM_DELAY_S:-8}
+      GATEWAY_BOOT_WARM_CLOSED_DELAY_S: ${GATEWAY_BOOT_WARM_CLOSED_DELAY_S:-90}
+      GATEWAY_LOOP_WATCHDOG: ${GATEWAY_LOOP_WATCHDOG:-1}
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}
       ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
@@ -296,7 +301,9 @@ services:
     logging: *default-logging
     # Pure async I/O fan-out/proxy — CPU-light, but every request passes
     # through it, so it still gets a solid share.
-    cpus: "0.45"
+    # group302: 0.45 -> 0.70. After a full `down`/`up` the boot warms, the first page loads and the scans all
+    # land in the same minute and a 0.45 CFS quota throttles the gateway hard enough to look like a hang.
+    cpus: "0.70"
     mem_limit: 900m  # session72 (#2): was 500m — see boot_forensics.py; a cgroup OOM-kill is a silent SIGKILL (the 'restart with no crash/SIGTERM in the logs' signature)
     mem_reservation: 200m
 
@@ -402,7 +409,7 @@ services:
     mem_limit: 96m
     mem_reservation: 32m
 
-# Total caps: cpus sum ≈ 2.55 (soft ceilings, not reservations — fine to
+# Total caps: cpus sum ≈ 2.80 (group302: api-gateway 0.45 -> 0.70) (soft ceilings, not reservations — fine to
 # slightly exceed 2 vCPU since these are mostly I/O-bound and never all
 # peak at once); mem_limit sum ≈ 5.1 GB, leaving ~7 GB free for the OS,
 # Docker, the Oracle wallet's TLS buffers, and a safety margin against OOM.

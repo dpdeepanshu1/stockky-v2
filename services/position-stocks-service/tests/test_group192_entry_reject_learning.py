@@ -118,7 +118,10 @@ class TestReconcileLearnsFromRejection:
         assert "not allowed to be traded in Intraday" in p.error_message
         assert intraday_eligibility.is_restricted(db, "HEGAM")
 
-    def test_order_book_failure_still_closes_the_position_without_a_reason(self, db, broker):
+    def test_order_book_failure_still_closes_the_position_without_a_reason(self, db, broker, monkeypatch):
+        # group291: an unreadable order book now keeps a dead-looking parent OPEN for DEAD_PARENT_BOOK_WAIT_S; with the
+        # wait switched off this is the old behaviour this test pins (the reason lookup failing must not block closing).
+        monkeypatch.setenv("DEAD_PARENT_BOOK_WAIT_S", "0")
         p = _pos(db)
         broker.super_orders = [_super_row()]
         broker.plain_error = RuntimeError("dhan down")

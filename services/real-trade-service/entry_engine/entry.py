@@ -36,7 +36,7 @@ from audit.logger import log_action
 from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
-from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent
+from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent, today_loss_streak
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
@@ -371,6 +371,8 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
     positions = held_exposure_positions(db, mode)
     # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
     _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
+    # GROUP 289: today's consecutive realized losses, for risk_engine's loss_streak_pause.
+    _streak, _streak_at = today_loss_streak(db, mode)
     return AccountState(
         equity=account.current_equity,
         risk_per_trade_pct=risk.risk_per_trade_pct,
@@ -432,6 +434,8 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         # and the age of the peer figure (shown in the reject message).
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
         other_service_exposure_age_s=_peer_age,
+        loss_streak=_streak,
+        loss_streak_last_close_at=_streak_at,
         # 2026-09-21 (session79): flat max-trade-value cap — DB override
         # first, config.py default second, same resolution order as every
         # other admin-editable cost-gate knob on this row.
@@ -703,6 +707,32 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning,
                                    "risk_verdict": None})
+            continue
+
+        # ── Gate 2b (group 290): the price an order is built on must be fresh ─────────────────────────────────
+        # Entry, stop and target are all computed from tick.price below and a LIMIT order is sent at it. A price older
+        # than ENTRY_MAX_QUOTE_AGE_S (default 10 s, 0 = off) is re-read ONCE through the priority lane; if the newest
+        # reading is still too old the candidate is held (or WAITs) and judged again later.
+        _age_reason = _entry_quote_age_reason(tick)
+        if _age_reason is not None:
+            _fresh = await _refetch_fresh_tick(cand.symbol)
+            if _fresh is not None:
+                tick = _fresh                      # the newest reading, so a WAIT names its real age
+                ticks[cand.symbol] = _fresh
+                _age_reason = _entry_quote_age_reason(_fresh)
+        if _age_reason is not None:
+            if _hold_candidate_for_fresh_price(cand):
+                # An old price is a data problem, not a verdict on the candidate: like the opening gate, leave it
+                # queued (consumed back to False, no decision row) and judge it again next cycle.
+                cand.consumed = False
+                waited += 1
+                if opening_guard.should_log(f"{mode}:stale_quote:{cand.symbol}"):
+                    logger.info("entry_engine: %s %s held back, %s (candidate left queued)", mode, cand.symbol, _age_reason)
+                continue
+            _wait(f"Price too old to enter on: {_age_reason}.")
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT",
+                                   "reasoning": decision.reasoning, "risk_verdict": None})
             continue
 
         # §6 — clamp ATR: exclude corporate-action day jumps > 30%
@@ -1687,6 +1717,60 @@ def _wl_tier1_day_check_on() -> bool:
 
 def _wl_require_prev_close_on() -> bool:
     return ((os.getenv("WATCHLIST_REQUIRE_PREV_CLOSE") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _entry_quote_age_reason(tick, *, now=None) -> Optional[str]:
+    """group290 (plan Phase A: entries refuse an old price): reason string when the tick an entry would be priced on is
+    older than ENTRY_MAX_QUOTE_AGE_S (default 10 s, 0 = off), else None.
+
+    tick.as_of is the price's real time (market_feed.feed honours market-data's age_s). A tick whose age could not be
+    read (age_known False, or no datetime as_of) follows ENTRY_QUOTE_AGE_UNKNOWN: "allow" (default, the behaviour
+    before this group) or "refuse". A tick stamped in the future counts as age 0. Never raises (None = no objection)."""
+    try:
+        limit = _wl_env_float("ENTRY_MAX_QUOTE_AGE_S", 10.0)
+        if limit <= 0:
+            return None
+        src = getattr(tick, "source", None) or "?"
+        as_of = getattr(tick, "as_of", None)
+        if not (bool(getattr(tick, "age_known", True)) and isinstance(as_of, datetime)):
+            if ((os.getenv("ENTRY_QUOTE_AGE_UNKNOWN") or "").strip().lower() or "allow") == "refuse":
+                return f"price age unknown (source {src}, ENTRY_QUOTE_AGE_UNKNOWN=refuse)"
+            return None
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        age = ((now or datetime.now(timezone.utc)) - as_of).total_seconds()
+        if age > limit:
+            return f"price from {src} is {age:.0f}s old (limit {limit:.0f}s)"
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _hold_candidate_for_fresh_price(cand, *, now=None) -> bool:
+    """group290: True while a candidate whose price is too old may stay queued instead of being consumed as a WAIT: for
+    ENTRY_QUOTE_AGE_HOLD_MIN minutes after it was received (default 10, 0 = never hold). After that it is consumed, so a
+    symbol that never gets a fresh price cannot sit in the queue all day. Never raises."""
+    try:
+        hold_min = _wl_env_float("ENTRY_QUOTE_AGE_HOLD_MIN", 10.0)
+        got = getattr(cand, "received_at", None)
+        if hold_min <= 0 or not isinstance(got, datetime):
+            return False
+        if got.tzinfo is None:
+            got = got.replace(tzinfo=timezone.utc)
+        return 0 <= ((now or datetime.now(timezone.utc)) - got).total_seconds() <= hold_min * 60.0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _refetch_fresh_tick(symbol: str):
+    """group290: one priority-lane re-read of a single symbol for the entry age check. None on any failure (the caller
+    keeps judging the tick it already has)."""
+    try:
+        got = await get_quotes([symbol], priority=True)
+        return (got or {}).get(symbol)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("entry: fresh re-read of %s failed: %s: %s", symbol, type(e).__name__, e)
+        return None
 
 
 def _watchlist_tick_age_reason(tick) -> Optional[str]:

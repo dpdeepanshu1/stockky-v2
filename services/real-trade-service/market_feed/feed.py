@@ -33,7 +33,7 @@ import logging
 import os
 import threading as _threading
 import time as _time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -251,7 +251,8 @@ def _wl_last_good_fallback(wanted: list) -> dict:
                 out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
                                 source=f"stale_last_good({t.source})", volume=t.volume,
                                 day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
-                                spread_pct=t.spread_pct, book_value_5=t.book_value_5)
+                                spread_pct=t.spread_pct, book_value_5=t.book_value_5,
+                                age_known=getattr(t, "age_known", True))
     return out
 
 
@@ -536,7 +537,7 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
 
 class Tick:
     __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close",
-                 "spread_pct", "book_value_5")
+                 "spread_pct", "book_value_5", "age_known")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
                  volume: Optional[int] = None,
@@ -544,7 +545,8 @@ class Tick:
                  day_low: Optional[float] = None,
                  prev_close: Optional[float] = None,
                  spread_pct: Optional[float] = None,
-                 book_value_5: Optional[float] = None):
+                 book_value_5: Optional[float] = None,
+                 age_known: bool = True):
         self.symbol   = symbol
         self.price    = price
         self.as_of    = as_of
@@ -567,6 +569,10 @@ class Tick:
         # entry guard (an unknown value never blocks); never for sizing or ordering.
         self.spread_pct = spread_pct
         self.book_value_5 = book_value_5
+        # group290: False only when the price's real age could not be read (market-data /quote row with no usable
+        # age_s / as_of, i.e. an older market-data build), so `as_of` is merely the time WE received it.
+        # The entry age check treats False as "unknown", never as "fresh".
+        self.age_known = age_known
 
 
 def _lq_prev_close(lq, ltp) -> Optional[float]:
@@ -856,16 +862,16 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
         _day_high = q.get("day_high")
         _day_low  = q.get("day_low")
 
+        # group290: market-data answers a cached price with its real age (`age_s`, built at response time; `as_of` is
+        # the same instant, tz-aware). Stamping receipt time made a minute-old cached price look brand new to every
+        # staleness check. Only when this build of market-data says nothing is receipt time a guess, and then the
+        # tick says so with age_known=False.
+        _real_as_of = _quote_row_as_of(q) or _stale_cooldown_as_of(q)
         return Tick(
             symbol=symbol,
             price=float(price),
-            # market-data-service's own fetched_at isn't guaranteed to be a
-            # cleanly-parseable tz-aware timestamp across every source branch
-            # it can take, so this module stamps its OWN receipt time — which
-            # is what risk_engine's staleness check (#7) is actually trying to
-            # measure (age since WE last saw a price), not the upstream
-            # provider's internal timestamp.
-            as_of=_stale_cooldown_as_of(q) or datetime.now(timezone.utc),
+            as_of=_real_as_of or datetime.now(timezone.utc),
+            age_known=bool(_real_as_of),
             atr=atr,
             source=q.get("source") or "market-data-service",
             volume=int(vol) if vol not in (None, "") else None,
@@ -878,6 +884,30 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
         return None
+
+
+def _quote_row_as_of(q, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """group290: the real time of a market-data /quote row's price, from the `age_s` / `as_of` fields market-data adds
+    to every quote (group 289). None when neither is usable (older market-data, garbage); never raises.
+
+    `age_s` is preferred: a duration measured on market-data's clock when it built the response, so `now - age_s` does
+    not depend on the two hosts' clocks agreeing. The tz-aware `as_of` instant is the fallback. A negative, NaN,
+    infinite or non-numeric age is not usable; a bool is not a number; a naive as_of is not guessed at."""
+    try:
+        now = now or datetime.now(timezone.utc)
+        age = q.get("age_s")
+        if isinstance(age, (int, float)) and not isinstance(age, bool) and age == age and 0 <= age < 86400 * 30:
+            return now - timedelta(seconds=float(age))
+        raw = q.get("as_of")
+        if isinstance(raw, str) and raw.strip():
+            ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                return None
+            ts = ts.astimezone(timezone.utc)
+            return min(ts, now)          # clock skew: never a price from the future
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _stale_cooldown_as_of(q: dict):
@@ -1219,7 +1249,8 @@ def _prio_last_good_fallback(wanted: list[str]) -> dict[str, Tick]:
                 out[sym] = Tick(symbol=t.symbol, price=t.price, as_of=t.as_of, atr=t.atr,
                                 source=f"stale_last_good({t.source})", volume=t.volume,
                                 day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
-                                spread_pct=t.spread_pct, book_value_5=t.book_value_5)
+                                spread_pct=t.spread_pct, book_value_5=t.book_value_5,
+                                age_known=getattr(t, "age_known", True))
     return out
 
 

@@ -32,6 +32,7 @@ from portfolio import broker_view
 from portfolio.portfolio import (
     close_position as _pf_close_position,
     held_exposure_positions as _pf_held_exposure_positions,
+    today_loss_streak as _pf_today_loss_streak,
     _maybe_reset_daily_pnl as _pf_maybe_reset_daily_pnl,
 )
 # BUG FIX (this session, found while verifying — pre-existing, unrelated to
@@ -991,6 +992,8 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     open_positions = _pf_held_exposure_positions(db, mode)
     # GROUP 193: age of position-stocks-service's published exposure (shown in the reject message).
     _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
+    # GROUP 289: same loss-streak input the live entry path uses, so this preview matches what a real BUY would get.
+    _streak, _streak_at = _pf_today_loss_streak(db, mode)
     account_state = AccountState(
         equity=account_row.current_equity,
         risk_per_trade_pct=risk_row.risk_per_trade_pct,
@@ -1040,6 +1043,8 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         # and the age of the peer figure (shown in the reject message).
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
         other_service_exposure_age_s=_peer_age,
+        loss_streak=_streak,
+        loss_streak_last_close_at=_streak_at,
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
         # as the live entry/manual paths, so this dry run doesn't disagree
         # with what a real order would actually do.
@@ -1922,6 +1927,45 @@ async def closed_positions_breakdown(
         .all()
     )
     return {"mode": mode, "days": days, **trade_breakdown.breakdown(rows)}
+
+
+def _records_mode(mode: str) -> str:
+    mode = (mode or "").upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    return mode
+
+
+@app.get("/positions/{mode}/records")
+async def closed_position_records(
+    mode: str, days: int = 7, symbol: Optional[str] = None, limit: int = 200,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Read-only (group 290): one record per CLOSED position of the last `days` days (1-60), newest first - tier, catalyst,
+    entry slippage vs the signal and the catalyst, entry / exit time of day, exit reason, charges (ledger actuals where
+    booked) and net P&L. Built on read from existing tables; changes nothing. `limit` 1-1000 (default 200)."""
+    import trade_records
+    mode = _records_mode(mode)
+    days = max(1, min(int(days), 60))
+    limit = max(1, min(int(limit), 1000))
+    recs = list(reversed(trade_records.load_records(db, mode, days, symbol)))
+    return {"mode": mode, "days": days, "symbol": (symbol or "").upper() or None, "total": len(recs),
+            "returned": min(len(recs), limit), "records": recs[:limit]}
+
+
+@app.get("/positions/{mode}/report")
+async def closed_positions_expectancy_report(
+    mode: str, days: int = 7,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """Read-only (group 290): expectancy per trade for the last `days` days (1-60), grouped by exit reason, entry hour (IST),
+    watchlist tier, catalyst type, source tab and day, with win rate, payoff ratio, charges, net P&L and average entry
+    slippage. Groups under 5 trades carry low_sample=true. Changes nothing."""
+    import trade_records
+    mode = _records_mode(mode)
+    days = max(1, min(int(days), 60))
+    recs = trade_records.load_records(db, mode, days)
+    return {"mode": mode, "days": days, **trade_records.expectancy_report(recs)}
 
 
 @app.get("/stats/regime-override")

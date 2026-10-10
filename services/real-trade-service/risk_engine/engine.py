@@ -39,7 +39,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 
@@ -98,6 +98,22 @@ MAX_STOCK_PRICE = _blank_safe_float("RISK_MAX_STOCK_PRICE", 3000.0)
 # ever shows a problem with the derived figure.
 MAX_STOCK_PRICE_EXPLICITLY_SET = bool((os.getenv("RISK_MAX_STOCK_PRICE") or "").strip())   # blank = not set
 RISK_MAX_STOCK_PRICE_ADAPTIVE = ((os.getenv("RISK_MAX_STOCK_PRICE_ADAPTIVE") or "").strip() or "true").lower() == "true"
+
+# ── Loss-streak brake (group 289) ───────────────────────────────────────────
+# position-stocks-service has paused entries after consecutive losses (LOSS_BRAKE_*); this service only had the daily
+# loss cap (3 % of equity), which lets a bad morning bleed almost that much before anything stops. After
+# RISK_LOSS_STREAK_MAX consecutive realized losses today, new BUYs wait RISK_LOSS_STREAK_PAUSE_MINUTES from the last
+# losing close. RISK_LOSS_STREAK_MAX=0 turns it off. Exits are never affected.
+def _blank_safe_int(name: str, default: int) -> int:
+    """int(env) where a missing, blank or unparseable value gives `default` (a bare int("") would crash the import)."""
+    try:
+        return int(float((os.getenv(name) or "").strip() or default))
+    except (TypeError, ValueError):
+        return default
+
+
+LOSS_STREAK_MAX = _blank_safe_int("RISK_LOSS_STREAK_MAX", 3)
+LOSS_STREAK_PAUSE_MINUTES = _blank_safe_int("RISK_LOSS_STREAK_PAUSE_MINUTES", 45)
 # Conservative representative stop distance for the "can at least 1 share
 # still be sized" math below — deliberately entry_engine's WIDEST possible
 # stop (entry_engine/entry.py's MAX_STOP_PCT, not its typical/flat one), so
@@ -212,6 +228,11 @@ class AccountState:
     # (entry_engine/entry.py, manual_engine.py, main.py's dry-run endpoint)
     # all resolve and populate this.
     max_trade_value: Optional[float] = None
+    # ADDED (group 289): consecutive realized losses among today's closed positions, newest first, and the time of
+    # the latest losing close (see portfolio.today_loss_streak). The defaults (0 / None) mean "no brake", so any
+    # construction site that does not populate them behaves exactly as before.
+    loss_streak: int = 0
+    loss_streak_last_close_at: Optional[datetime] = None
 
 
 @dataclass
@@ -310,6 +331,21 @@ def evaluate(
                 f"{account.max_daily_loss_pct:.2f}% cap. "
                 "No new trades for the rest of this trading day.",
             )
+
+    # ── 3b. Loss-streak pause (BUY only, group 289) ───────────────────────────
+    if intent.side == "BUY" and LOSS_STREAK_MAX > 0 and account.loss_streak >= LOSS_STREAK_MAX:
+        last = account.loss_streak_last_close_at
+        if last is not None:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            resume = last + timedelta(minutes=max(LOSS_STREAK_PAUSE_MINUTES, 0))
+            if now < resume:
+                mins = (resume - now).total_seconds() / 60.0
+                return RiskResult(
+                    RiskVerdict.REJECTED, "loss_streak_pause",
+                    f"{account.loss_streak} consecutive losing exits today "
+                    f"(limit {LOSS_STREAK_MAX}); new entries paused {mins:.0f} more min.",
+                )
 
     # ── 4. Max concurrent positions (BUY only) ────────────────────────────────
     if intent.side == "BUY" and account.open_position_count >= account.max_concurrent_positions:

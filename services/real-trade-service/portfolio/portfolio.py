@@ -257,6 +257,35 @@ def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition
     )
 
 
+def _working_buy_max_age_hours() -> float:
+    raw = (os.getenv("ENTRY_WORKING_BUY_MAX_AGE_HOURS") or "").strip()
+    try:
+        v = float(raw) if raw else 24.0
+    except ValueError:
+        return 24.0
+    return v if v == v and v > 0 else 24.0
+
+
+def working_buy_symbols(db: Session, mode: str) -> set:
+    """group297: symbols with a BUY order of `mode` that is still working at the broker (PLACED / PARTIAL) and was created
+    within ENTRY_WORKING_BUY_MAX_AGE_HOURS (default 24, so an order nobody ever expired cannot block a symbol for good).
+    held_exposure_positions() only sees a symbol once a fill is booked, so a second BUY for the same symbol (next cycle, a
+    manual Confirm BUY, another candidate source) passed the no-pyramiding check while the first was still unfilled.
+    ENTRY_BLOCK_WORKING_BUY_DUP=0 returns an empty set (old behaviour). Fails open: any error gives an empty set."""
+    try:
+        if ((os.getenv("ENTRY_BLOCK_WORKING_BUY_DUP") or "").strip().lower() or "1") in ("0", "false", "no", "off"):
+            return set()
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=_working_buy_max_age_hours())
+        rows = (db.query(models.TradeOrder.symbol)
+                .filter(models.TradeOrder.mode == mode, models.TradeOrder.side == "BUY",
+                        models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+                        models.TradeOrder.created_at >= cutoff).all())
+        return {r[0] for r in rows if r[0]}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 # 2026-10-06 (group 174, log noise): import_broker_holdings() runs every reconcile cycle, and a lagging
 # holdings feed (LATENTVIEW) made the "skipping re-import" INFO line repeat every cycle for up to 24 h.
 # It now logs once per (symbol, closed_at) and again at most every RECENT_CLOSE_SKIP_LOG_EVERY_S

@@ -629,8 +629,8 @@ def evaluate(
     ):
         return RiskResult(
             RiskVerdict.REJECTED, "no_pyramiding",
-            f"{intent.symbol} already has an open position and pyramiding is disabled. "
-            "The existing position must close before re-entering.",
+            f"{intent.symbol} already has an open position or a BUY order still working, and pyramiding is disabled. "
+            "The existing position must close (or the order fill / expire) before re-entering.",
         )
 
     # ── 8. Stale market data (BUY only — a stale price on a SELL still

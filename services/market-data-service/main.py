@@ -4660,7 +4660,59 @@ def get_fundamentals_raw(
             "roe": None,
         })
 
+# group299: one fresh fundamentals computation per symbol at a time. analysis-intelligence and decision-prediction both ask
+# for the same symbol within the same second (the 2026-10-10 log shows "Fundamentals for X" twice for ASTERDM, TRENT, MANIKA,
+# CLEANMAX ...), and each ran the full Yahoo pass (info + financials + balance sheet + cash flow, with retries), doubling the
+# Yahoo load exactly when peer batches were timing out at 15 s. A second caller now waits for the first and reads its result
+# from the cache; a caller that waits longer than FUNDAMENTALS_JOIN_WAIT_S, or finds the cache empty (the first one failed),
+# computes for itself exactly as before. FUNDAMENTALS_SINGLE_FLIGHT=0 restores one computation per call.
+_FUND_FLIGHT_LOCK = threading.Lock()
+_FUND_FLIGHTS: dict = {}
+_FUND_FLIGHTS_MAX = 5000
+
+
+def _fund_single_flight_on() -> bool:
+    return ((os.getenv("FUNDAMENTALS_SINGLE_FLIGHT") or "").strip().lower() or "1") not in ("0", "false", "no", "off")
+
+
+def _fund_join_wait_s() -> float:
+    raw = (os.getenv("FUNDAMENTALS_JOIN_WAIT_S") or "").strip()
+    try:
+        v = float(raw) if raw else 40.0
+    except ValueError:
+        return 40.0
+    return v if v == v and v > 0 else 40.0
+
+
+def _fund_flight_lock(sym: str):
+    with _FUND_FLIGHT_LOCK:
+        lock = _FUND_FLIGHTS.get(sym)
+        if lock is None:
+            if len(_FUND_FLIGHTS) >= _FUND_FLIGHTS_MAX:
+                for k in [k for k, v in _FUND_FLIGHTS.items() if not v.locked()]:
+                    _FUND_FLIGHTS.pop(k, None)
+            lock = _FUND_FLIGHTS[sym] = threading.Lock()
+        return lock
+
+
 def _get_fundamentals_inner(symbol: str, force: bool = False):
+    if not _fund_single_flight_on():
+        return _get_fundamentals_compute(symbol, force=force)
+    lock = _fund_flight_lock(normalize_symbol(symbol))
+    if lock.acquire(blocking=False):                  # first caller: does the work
+        try:
+            return _get_fundamentals_compute(symbol, force=force)
+        finally:
+            lock.release()
+    if lock.acquire(timeout=_fund_join_wait_s()):     # follower: the first caller's result is in the cache now
+        try:
+            return _get_fundamentals_compute(symbol, force=False)
+        finally:
+            lock.release()
+    return _get_fundamentals_compute(symbol, force=force)    # the first caller is too slow: compute for ourselves
+
+
+def _get_fundamentals_compute(symbol: str, force: bool = False):
     sym = normalize_symbol(symbol)
     cache_key = f"fundamentals:{sym}"
     if not force:

@@ -36,6 +36,20 @@ def _g211_reset_angelone_budget():
 
 
 @_pytest_g188.fixture(autouse=True)
+def _g299_reset_rate_limiter_cooldowns():
+    """group299: rate_limiter's provider cooldown map is per process. A test that simulates a 403/429 (for example
+    test_group211's candle 403) sets a cooldown that outlives the test, and the next test that walks the quote
+    waterfall then skips Yahoo/AngelOne for up to its length - the group233/group235 tests failed in a full run only."""
+    def _reset():
+        _r = sys.modules.get("rate_limiter")
+        if _r is not None and hasattr(_r, "_cooldowns"):
+            _r._cooldowns.clear()
+    _reset()
+    yield
+    _reset()
+
+
+@_pytest_g188.fixture(autouse=True)
 def _g233_market_open_by_default(monkeypatch):
     """group233: /quote and /quotes/bulk answer a CLOSED market from the last close. Existing tests were written for
     an open market and must not depend on the wall clock they run at, so the closed check is pinned to False;

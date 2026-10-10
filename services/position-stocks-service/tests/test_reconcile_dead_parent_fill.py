@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from test_reconcile import (env, mkpos, super_row, plain_row, available, state, lock_held,  # noqa: F401
+from tests.test_reconcile import (env, mkpos, super_row, plain_row, available, state, lock_held,  # noqa: F401
                             LEDGER_AVAILABLE)
 from orders import reconcile
 

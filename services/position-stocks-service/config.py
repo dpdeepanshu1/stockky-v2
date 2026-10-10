@@ -625,6 +625,12 @@ ENTRY_DEPTH_GATE = _get_bool("ENTRY_DEPTH_GATE", True)
 ENTRY_DEPTH_MAX_SPREAD_PCT = _get_float("ENTRY_DEPTH_MAX_SPREAD_PCT", 0.5)
 ENTRY_MIN_BOOK_VALUE = _get_float("ENTRY_MIN_BOOK_VALUE", 0.0)
 ENTRY_DEPTH_TIMEOUT_S = _get_float("ENTRY_DEPTH_TIMEOUT_S", 2.0)
+# group292: age limit for the market-data /quote (and /depth) book the depth gate judges on. A book older than this is
+# re-read once, then treated as unknown depth (never blocks, never sizes). 0 = off. Needs the group 289 market-data
+# build: an older market-data sends no `age_s`, which is "unknown" and follows ENTRY_DEPTH_QUOTE_AGE_UNKNOWN
+# (allow = use it as before, refuse = treat as unknown depth).
+ENTRY_DEPTH_MAX_QUOTE_AGE_S = _get_float("ENTRY_DEPTH_MAX_QUOTE_AGE_S", 20.0)
+ENTRY_DEPTH_QUOTE_AGE_UNKNOWN = (os.getenv("ENTRY_DEPTH_QUOTE_AGE_UNKNOWN") or "allow").strip().lower()
 # group283 (plan C3, size down): cap an entry's order value at ENTRY_BOOK_MAX_SHARE_PCT % of ONE side of the best-5 book
 # (book_value_5 / 2), so a small cap's order does not eat its own touch. 0 = off (default). Unknown depth never shrinks.
 # Needs ENTRY_DEPTH_GATE on (it reuses the same market-data /quote read).

@@ -422,6 +422,11 @@ OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_og_float("OPENING_GATE_PREVDAY_MAX_AGE_
 # without any risk of re-entering something square-off just flattened.
 EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 EOD_SIGNAL_SCAN_TIME_IST = os.getenv("EOD_SIGNAL_SCAN_TIME_IST", "15:05")
+# group292: once per IST trading day, from this time on, store today's per-trade expectancy report (trade_records.py) as a
+# snapshot and push a short summary to Telegram. After the EOD square-off and the 15:30 close; sells that fill later still
+# have their charges estimated until the ledger books them. DAILY_REPORT_ENABLED=0 turns the step off.
+DAILY_REPORT_ENABLED = (os.getenv("DAILY_REPORT_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
+DAILY_REPORT_TIME_IST = os.getenv("DAILY_REPORT_TIME_IST", "15:45")
 
 # How often the time-trigger loop wakes to check the clock (seconds).
 SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(((os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS") or "").strip() or "60")))

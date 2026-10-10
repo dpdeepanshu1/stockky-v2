@@ -4,6 +4,11 @@ The scalper's own AngelOne feed only carries the best bid / ask. market-data-ser
 (`spread_pct`, `book_value_5` = both sides, Rs). This asks it once, right before capital is reserved, and refuses a name
 whose spread is too wide or whose book is too thin. Fails OPEN on everything: no answer, a timeout, a bad body, a quote
 without depth. Never raises. Answers are cached for a few seconds so one cycle does not ask twice for the same symbol.
+
+group292: a /quote row carries its real age (`age_s`, built by market-data when it answered, group 289). A book older
+than ENTRY_DEPTH_MAX_QUOTE_AGE_S (default 20 s, 0 = off) is re-read once; if it is still that old it counts as UNKNOWN
+depth (never blocks, never sizes) instead of being judged on a picture that no longer exists. An answer with no readable
+age follows ENTRY_DEPTH_QUOTE_AGE_UNKNOWN: "allow" (default) uses it as before, "refuse" treats it as unknown depth.
 """
 from __future__ import annotations
 
@@ -42,6 +47,70 @@ def _fetch(symbol: str) -> Optional[dict]:
     return body
 
 
+def _quote_age_s(body: Optional[dict], symbol: str, *, now: Optional[float] = None) -> Optional[float]:
+    """group292: how old the price/book in a /quote body is RIGHT NOW, in seconds, or None when it cannot be told.
+
+    market-data's `age_s` is a duration measured on its own clock when it built the response, so it does not depend on
+    the two hosts' clocks agreeing; the seconds this answer then sat in our 5 s cache are added. Without `age_s` a
+    tz-aware `as_of` is the fallback. Negative, NaN, infinite, bool or non-numeric ages are not usable. Never raises."""
+    try:
+        if not isinstance(body, dict):
+            return None
+        now = time.time() if now is None else now
+        hit = _cache.get(symbol)
+        cached_for = max(0.0, now - hit[0]) if hit and hit[1] is body else 0.0
+        age = body.get("age_s")
+        if isinstance(age, (int, float)) and not isinstance(age, bool) and math.isfinite(age) and 0 <= age < 86400 * 30:
+            return float(age) + cached_for
+        raw = body.get("as_of")
+        if isinstance(raw, str) and raw.strip():
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                return None
+            return max(0.0, now - ts.astimezone(timezone.utc).timestamp())
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _max_quote_age_s() -> float:
+    try:
+        return float(getattr(config, "ENTRY_DEPTH_MAX_QUOTE_AGE_S", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fresh_quote(symbol: str) -> Optional[dict]:
+    """group292: the /quote body for `symbol` when its price is young enough to judge depth on, else None (depth
+    unknown). Old -> one fresh re-read (the cache entry is dropped first). Never raises."""
+    try:
+        q = _fetch(symbol)
+        limit = _max_quote_age_s()
+        if not q or limit <= 0:
+            return q
+        age = _quote_age_s(q, symbol)
+        if age is None:
+            if str(getattr(config, "ENTRY_DEPTH_QUOTE_AGE_UNKNOWN", "allow")).strip().lower() == "refuse":
+                logger.info("depth gate %s: /quote carries no age, depth treated as unknown "
+                            "(ENTRY_DEPTH_QUOTE_AGE_UNKNOWN=refuse)", symbol)
+                return None
+            return q
+        if age <= limit:
+            return q
+        _cache.pop(symbol, None)
+        q2 = _fetch(symbol)
+        age2 = _quote_age_s(q2, symbol) if q2 else None
+        if q2 and (age2 is None or age2 <= limit):
+            return q2
+        logger.info("depth gate %s: /quote price is %.0fs old (max %.0fs), depth treated as unknown",
+                    symbol, age2 if age2 is not None else age, limit)
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("depth gate %s: quote age check failed (no depth): %s", symbol, e)
+        return None
+
+
 def reject_reason(symbol: str) -> Optional[str]:
     """A skip reason ("DEPTH_SPREAD:..." / "DEPTH_THIN_BOOK:...") or None when the entry may go ahead."""
     try:
@@ -51,7 +120,7 @@ def reject_reason(symbol: str) -> Optional[str]:
         min_book = float(config.ENTRY_MIN_BOOK_VALUE or 0)
         if max_spread <= 0 and min_book <= 0:
             return None
-        q = _fetch(symbol)
+        q = _fresh_quote(symbol)
         if not q:
             return None
         spread = _num(q.get("spread_pct"))
@@ -75,7 +144,7 @@ def max_qty_from_book(symbol: str, ltp: float) -> Optional[int]:
         share = float(config.ENTRY_BOOK_MAX_SHARE_PCT or 0)
         if not config.ENTRY_DEPTH_GATE or share <= 0 or not ltp or ltp <= 0:
             return None
-        q = _fetch(symbol)
+        q = _fresh_quote(symbol)
         book = _num((q or {}).get("book_value_5"))
         if not book or book <= 0:
             return None
@@ -106,6 +175,11 @@ def max_qty_from_depth20(symbol: str, quantity: int) -> Optional[int]:
                            params={"qty": quantity, "slip_pct": slip, "wait_s": wait})
         body = r.json() if r.status_code == 200 else None
         if not isinstance(body, dict) or body.get("available") is not True:
+            return None
+        limit = _max_quote_age_s()
+        _a = body.get("age_s")
+        if limit > 0 and isinstance(_a, (int, float)) and not isinstance(_a, bool) and math.isfinite(_a) and _a > limit:
+            logger.info("depth20 %s: book is %.0fs old (max %.0fs), no cap", symbol, _a, limit)
             return None
         within = _num(body.get("buy_qty_within_slip"))
         if within is None:

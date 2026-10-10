@@ -7,7 +7,7 @@ import pytest
 
 import config
 from execution import dhan_client, order_ws
-from test_main import client, db, m  # noqa: F401
+from tests.test_main import client, db, m  # noqa: F401
 
 
 def _ev(oid, status="TRADED", txn="B", qty=10, avg=100.0, symbol="ABC"):

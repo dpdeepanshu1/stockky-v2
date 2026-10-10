@@ -493,6 +493,36 @@ _last_tick_at: Optional[float] = None  # unix seconds of the most recent parsed 
 _OFFHOURS_RECHECK_S = 60.0
 
 
+def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask, day_stats=None) -> None:
+    """Store one tick for `symbol` and call the on-tick callbacks. Shared by the AngelOne WS loop below and the
+    market-data bulk poller (feed/md_poller.py, group301), so both fill exactly the same buffers.
+
+    BUG FIX (2026-09-17): the buffer append+prune holds the same lock get_tick_buffer() reads under (see that
+    function's docstring) - it must not overlap with a reader's list(deque) snapshot on another thread. Held only
+    across those lines, no `await` inside, so it cannot stall the event loop or deadlock.
+    AUDIT FIX (prior session): the prune is time-bounded - see the module-level comment by _MAX_BUFFER_AGE_S.
+    2026-09-18: `volume` is the real cumulative day volume (mode-3 feed), not the old always-0 placeholder.
+    `day_stats` is (open, high, low, prev_close) or None; any field may be None.
+    """
+    with _buffer_locks[symbol]:
+        buf = _tick_buffers[symbol]
+        buf.append((ts, ltp))
+        cutoff = ts - _MAX_BUFFER_AGE_S
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
+    if volume:
+        _last_volume[symbol] = volume
+    if day_stats is not None:
+        _accept_day_stats(symbol, day_stats, ltp)
+    if best_bid is not None and best_ask is not None:
+        _last_quote[symbol] = (best_bid, best_ask, ts)
+    for cb in _on_tick_callbacks:
+        try:
+            cb(symbol, ltp, _last_volume.get(symbol, 0), ts)
+        except Exception as e:
+            logger.debug("on_tick callback error: %s", e)
+
+
 def _offhours_idle() -> bool:
     """True outside 08:55-15:45 IST on weekdays (and all weekend). AngelOne drops a feed with no live ticks every
     ~2 min, so connecting off-hours just churned reconnect + a 2710-token resubscribe forever. Open positions do
@@ -643,43 +673,7 @@ async def _ws_loop() -> None:
                             _last_tick_at = ts
                             symbol = _token_to_symbol.get(token_str)
                             if symbol:
-                                # BUG FIX (2026-09-17): hold the same lock
-                                # get_tick_buffer() reads under (see that
-                                # function's docstring) — append+prune here
-                                # must not overlap with a reader's
-                                # list(deque) snapshot on another thread.
-                                # Held only across these three lines, no
-                                # `await` inside, so this can't stall the
-                                # WS message loop or deadlock.
-                                with _buffer_locks[symbol]:
-                                    buf = _tick_buffers[symbol]
-                                    buf.append((ts, ltp))
-                                    # AUDIT FIX (prior session): time-bounded
-                                    # prune — see the module-level comment by
-                                    # _MAX_BUFFER_AGE_S for the full reasoning.
-                                    # O(k) where k is the number of stale
-                                    # entries evicted this call, not the whole
-                                    # buffer, since popleft() only removes from
-                                    # the front and every prior append already
-                                    # enforced this same cutoff.
-                                    cutoff = ts - _MAX_BUFFER_AGE_S
-                                    while buf and buf[0][0] < cutoff:
-                                        buf.popleft()
-                                # 2026-09-18: real cumulative day volume, not
-                                # the always-0 placeholder this used to be —
-                                # see the mode-upgrade docstring note.
-                                if volume:
-                                    _last_volume[symbol] = volume
-                                _ds = _parse_day_stats(message)
-                                if _ds is not None:
-                                    _accept_day_stats(symbol, _ds, ltp)
-                                if best_bid is not None and best_ask is not None:
-                                    _last_quote[symbol] = (best_bid, best_ask, ts)
-                                for cb in _on_tick_callbacks:
-                                    try:
-                                        cb(symbol, ltp, _last_volume.get(symbol, 0), ts)
-                                    except Exception as e:
-                                        logger.debug("on_tick callback error: %s", e)
+                                _ingest_tick(symbol, ltp, ts, volume, best_bid, best_ask, _parse_day_stats(message))
                     # Text frames (status/error messages from server, incl. "pong")
                     elif isinstance(message, str):
                         if message != "pong":
@@ -744,6 +738,12 @@ async def start() -> None:
     if _running:
         return
     _running = True
+    if config.POSITION_FEED_SOURCE == "market_data":
+        # group301: ticks come from market-data /quotes/bulk (feed/md_poller.py); no AngelOne WebSocket is opened.
+        from feed import md_poller
+        _ws_task = asyncio.create_task(md_poller._poll_loop(), name="position-stocks-md-poller")
+        logger.info("position-stocks feed: market-data bulk poller started (POSITION_FEED_SOURCE=market_data)")
+        return
     _ws_task = asyncio.create_task(_ws_loop(), name="position-stocks-ws")
     logger.info("position-stocks WS: task started")
 
@@ -770,10 +770,17 @@ def ws_status() -> dict:
     # cycle), so the dashboard's LIVE/DOWN badge was actually reading
     # `status?.ws?.connected` as always-undefined -> always "DOWN", and the
     # reconnect counter and last-tick timestamp never appeared at all.
+    _md = config.POSITION_FEED_SOURCE == "market_data"
+    _extra = {}
+    if _md:
+        from feed import md_poller
+        _extra = {"md_poller": md_poller.status()}
     return {
+        **_extra,
+        "source": "market_data" if _md else "angelone_ws",
         "running": _running,
         "connected": _connected,
-        "subscribed_symbols": len(_token_to_symbol),
+        "subscribed_symbols": _extra["md_poller"]["universe"] if _md else len(_token_to_symbol),
         "task_done": _ws_task.done() if _ws_task else True,
         "reconnect_attempts": _reconnect_attempts,
         "day_stats_symbols": len(_day_stats),

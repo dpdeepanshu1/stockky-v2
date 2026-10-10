@@ -103,6 +103,21 @@ ANGELONE_WS_RECONNECT_BACKOFF_MAX_S = _get_float(
     "ANGELONE_WS_RECONNECT_BACKOFF_MAX_S", 60.0
 )
 
+# ── Tick source (group301) ───────────────────────────────────────────────────
+# "angelone_ws" (default) = this service's own AngelOne SmartWebSocketV2 feed (feed/ws_client.py, unchanged).
+# "market_data"           = poll market-data-service POST /quotes/bulk instead (feed/md_poller.py), so the scalper
+#                           runs on whatever provider order market-data has (Dhan first when QUOTE_PROVIDER_ORDER says so)
+#                           and this service needs no AngelOne login or WS connection. Anything else = "angelone_ws".
+# The poller sends one request per POSITION_BULK_POLL_S: open positions first (every request), then the next
+# POSITION_BULK_CHUNK symbols of the universe, round robin. Dhan allows 1 bulk request per second.
+POSITION_FEED_SOURCE = _get_str("POSITION_FEED_SOURCE", "angelone_ws").lower()
+if POSITION_FEED_SOURCE not in ("angelone_ws", "market_data"):
+    POSITION_FEED_SOURCE = "angelone_ws"
+POSITION_BULK_POLL_S = max(0.2, _get_float("POSITION_BULK_POLL_S", 1.0))
+POSITION_BULK_CHUNK = min(1000, max(1, _get_int("POSITION_BULK_CHUNK", 500)))
+POSITION_BULK_TIMEOUT_S = max(1.0, _get_float("POSITION_BULK_TIMEOUT_S", 8.0))
+POSITION_BULK_MAX_AGE_S = max(1.0, _get_float("POSITION_BULK_MAX_AGE_S", 30.0))
+
 # ── Scan universe ────────────────────────────────────────────────────────────
 SCAN_UNIVERSE_SOURCE = _get_str("SCAN_UNIVERSE_SOURCE", "all_nse_eq")
 

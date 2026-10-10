@@ -1487,12 +1487,13 @@ class TestRouteOrdering:
         assert self._matching_endpoint("/subscriptions") is em.list_subscriptions
         assert self._matching_endpoint("/check") is em.check_for_changes
 
-    def test_QUIRK_raw_feed_is_shadowed_by_symbol_route(self):
-        """/events/{symbol} is registered BEFORE /events/raw-feed, so an HTTP GET to
-        /events/raw-feed is answered by get_events(symbol="raw-feed"), and raw_feed()
-        is unreachable. Fix = register raw-feed first. Pinned, not changed."""
-        assert self._matching_endpoint("/events/raw-feed") is em.get_events
-        assert self._matching_endpoint("/events/raw-feed") is not em.raw_feed
+    def test_raw_feed_is_registered_before_the_symbol_route(self):
+        """group152 registered /events/raw-feed BEFORE /events/{symbol}, so an HTTP GET to /events/raw-feed reaches
+        raw_feed() instead of get_events(symbol="raw-feed"). This test used to pin the old shadowing quirk
+        (test_QUIRK_raw_feed_is_shadowed_by_symbol_route) and had been failing since group152; group300 flipped it."""
+        assert self._matching_endpoint("/events/raw-feed") is em.raw_feed
+        assert self._matching_endpoint("/events/raw-feed") is not em.get_events
+        assert self._matching_endpoint("/events/TCS") is em.get_events      # an ordinary symbol still resolves to get_events
 
 
 def _current(**over):

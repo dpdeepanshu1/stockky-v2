@@ -56,6 +56,33 @@ _FUND_CACHE_LOCK = threading.Lock()
 _FUND_CACHE_TTL = float(((os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS") or "").strip() or "60"))
 _FUND_FETCH_MAX_WORKERS = int(((os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS") or "").strip() or "6"))
 
+
+# group300: the market-data /fundamentals pass for a COLD symbol (Yahoo info + financials + balance sheet + cash flow) can
+# take longer than the old fixed 15 s, so a peer group of five cold names (CIPLA/DRREDDY/SUNPHARMA/DIVISLAB/APOLLOHOSP in the
+# 2026-10-10 log) timed out and came back empty even though market-data finished and cached every one a moment later.
+# The timeout is now PEER_FUNDAMENTALS_TIMEOUT_S (default 30) and a TIMEOUT (not any other error) is retried
+# PEER_FUNDAMENTALS_TIMEOUT_RETRIES times (default 1): by then market-data has the answer cached, or the retry joins the
+# computation still running there (group299 single flight), so it costs no second Yahoo pass.
+_FUND_TIMEOUT_DEFAULT_S = 30.0
+
+
+def _fund_timeout_s() -> float:
+    raw = (os.getenv("PEER_FUNDAMENTALS_TIMEOUT_S") or "").strip()
+    try:
+        v = float(raw) if raw else _FUND_TIMEOUT_DEFAULT_S
+    except ValueError:
+        return _FUND_TIMEOUT_DEFAULT_S
+    return v if v == v and 0 < v <= 120 else _FUND_TIMEOUT_DEFAULT_S
+
+
+def _fund_timeout_retries() -> int:
+    raw = (os.getenv("PEER_FUNDAMENTALS_TIMEOUT_RETRIES") or "").strip()
+    try:
+        v = int(float(raw)) if raw else 1
+    except ValueError:
+        return 1
+    return v if 0 <= v <= 3 else 1
+
 # Single default for "how many peers to compare" - rank_against_peers() and
 # compute_peer_relative() used to default to 6 and 5, so the same call could
 # rank against one peer set and score against another.
@@ -257,11 +284,12 @@ def _fund_inflight_lock(symbol: str) -> threading.Lock:
         return lock
 
 
-def fetch_fundamentals(market_data_url: str, symbol: str, timeout: float = 15.0) -> Dict[str, Any]:
+def fetch_fundamentals(market_data_url: str, symbol: str, timeout: Optional[float] = None) -> Dict[str, Any]:
     """Fetch fundamentals from market-data-service (short-TTL cached — see
-    module docstring above for why)."""
+    module docstring above for why). `timeout` None = PEER_FUNDAMENTALS_TIMEOUT_S (group300)."""
     # Always ask market-data for the canonical form, whichever spelling the caller used.
     symbol = _norm_symbol(symbol)
+    timeout = _fund_timeout_s() if timeout is None else timeout
     cached = _fund_cache_get(symbol)
     if cached is not None:
         return cached
@@ -269,20 +297,27 @@ def fetch_fundamentals(market_data_url: str, symbol: str, timeout: float = 15.0)
         cached = _fund_cache_get(symbol)      # another thread may have just fetched it
         if cached is not None:
             return cached
-        try:
-            url = f"{market_data_url.rstrip('/')}/fundamentals/{symbol}"
-            resp = httpx.get(url, timeout=timeout)
-            if resp.status_code == 200:
-                data = resp.json() or {}
-                _fund_cache_set(symbol, data)
-                return data
-        except Exception as e:
-            logger.warning("Fundamentals fetch failed for %s: %s", symbol, e)
+        url = f"{market_data_url.rstrip('/')}/fundamentals/{symbol}"
+        attempts = 1 + _fund_timeout_retries()
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = httpx.get(url, timeout=timeout)
+                if resp.status_code == 200:
+                    data = resp.json() or {}
+                    _fund_cache_set(symbol, data)
+                    return data
+                break
+            except httpx.TimeoutException as e:
+                logger.warning("Fundamentals fetch failed for %s: %s (attempt %d/%d)", symbol, e or "timed out", attempt, attempts)
+                continue                       # market-data keeps computing: the retry reads its cache / joins its flight
+            except Exception as e:
+                logger.warning("Fundamentals fetch failed for %s: %s", symbol, e)
+                break
         return {}
 
 
 def fetch_fundamentals_batch(
-    market_data_url: str, symbols: List[str], timeout: float = 15.0
+    market_data_url: str, symbols: List[str], timeout: Optional[float] = None
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch fundamentals for several symbols concurrently (cache-aware).
     Returns {symbol: data}; a symbol whose fetch failed maps to {}.

@@ -30,6 +30,7 @@ def _clean(monkeypatch):
     wsc._last_volume.clear()
     wsc._last_quote.clear()
     wsc._day_stats.clear()
+    wsc._exchange_vwap.clear()
     wsc._token_to_symbol.clear()
     wsc._on_tick_callbacks.clear()
     wsc._running = False

@@ -21,6 +21,8 @@ from tz_utils import ist_today_str
 logger = logging.getLogger("position-stocks-prev-day")
 
 ATR_WINDOW = 14
+AVG_RANGE_WINDOW = 35        # group305: sessions averaged for the board's normal daily move
+AVG_RANGE_MIN_DAYS = 10      # fewer completed days than this = no usable average (None)
 PREVDAY_MAX_INFLIGHT = 6
 PREVDAY_RETRY_S = 60.0
 _INLINE = False          # tests: run the fetch on the calling thread
@@ -37,6 +39,7 @@ class PrevDay(NamedTuple):
     close: float
     atr: Optional[float]     # 14-day daily ATR in price terms, None when fewer than 15 candles
     date: str
+    avg_range_pct: Optional[float] = None   # group305: mean daily (high-low)/close in % over up to AVG_RANGE_WINDOW completed days (board strength)
 
     @property
     def close_pos(self) -> Optional[float]:
@@ -93,7 +96,13 @@ def parse_candles(candles: List[dict], today: str, max_age_days: Optional[int] =
                     trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
             if len(trs) >= ATR_WINDOW:
                 atr = sum(trs[-ATR_WINDOW:]) / ATR_WINDOW
-        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10])
+        rngs = []
+        for r in rows[-AVG_RANGE_WINDOW:]:
+            rh, rl, rc = _f(r.get("high")), _f(r.get("low")), _f(r.get("close"))
+            if rh > 0 and rl > 0 and rc > 0 and rh >= rl:
+                rngs.append((rh - rl) / rc * 100.0)
+        avg_range = (sum(rngs) / len(rngs)) if len(rngs) >= AVG_RANGE_MIN_DAYS else None
+        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10], avg_range_pct=avg_range)
     except Exception:
         return None
 

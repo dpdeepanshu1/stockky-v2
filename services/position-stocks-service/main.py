@@ -253,6 +253,18 @@ async def lifespan(app: FastAPI):
     ws_client.register_on_tick(_engine_tick_hook)
     logger.info("position-stocks-service: ready on port %d", config.PORT)
 
+    # group305: Market Board (display + shadow logging only). Never fatal: a failure here must not stop the scalper.
+    _board_task = None
+    if config.BOARD_ENABLED:
+        try:
+            from feed import bar_store as _bar_store, fno_list as _fno_list
+            from screening import board_runner as _board_runner
+            _bar_store.install()
+            _fno_list.refresh_in_background()
+            _board_task = asyncio.create_task(_board_runner.loop(), name="position-stocks-board-loop")
+        except Exception as _be:  # noqa: BLE001
+            logger.warning("position-stocks-service: Market Board not started (%s: %s)", type(_be).__name__, _be)
+
     # Start background trading loop
     _bg_task = asyncio.create_task(_trading_loop(), name="position-stocks-trading-loop")
     # BUG FIX (session47): independent fast reconcile/EOD loop — see the
@@ -279,6 +291,12 @@ async def lifespan(app: FastAPI):
         _order_ws_task.cancel()
         try:
             await _order_ws_task
+        except asyncio.CancelledError:
+            pass
+    if _board_task is not None:
+        _board_task.cancel()
+        try:
+            await _board_task
         except asyncio.CancelledError:
             pass
     _bg_task.cancel()
@@ -2170,6 +2188,99 @@ def force_release_symbol_lock(
 @app.get("/ws-status")
 def ws_status_route():
     return ws_client.ws_status()
+
+
+# ── Market Board (group305-309): read-only. Static paths first, /board/{symbol} last (it would swallow them otherwise). ──
+def _board_open_symbols() -> list:
+    try:
+        from feed import md_poller
+        return md_poller.open_position_symbols()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@app.get("/board/status")
+def board_status():
+    from feed import bar_store, fno_list, sector_map
+    from screening import board_log, board_runner
+    return {"enabled": config.BOARD_ENABLED, "gate_mode": config.BOARD_GATE_MODE, "params_version": config.BOARD_PARAMS_VERSION,
+            "universe_default": config.BOARD_UNIVERSE_DEFAULT, "zones_enabled": config.BOARD_ZONES_ENABLED,
+            "zone_tf_min": config.BOARD_ZONE_TF_MIN, "chase_atr": config.BOARD_CHASE_ATR,
+            "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
+            "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors())}
+
+
+@app.get("/board/shadow-report")
+def board_shadow_report(days: int = 30, db: Session = Depends(get_db)):
+    """Shadow study over scalp_board_log: forward returns of each Market Board rule against a control, and whether the written
+    promotion rule is met. Read-only; research output, not advice."""
+    from datetime import timedelta as _td
+    from models import ScalpBoardLog
+    from screening import board_report
+    days = max(1, min(int(days), 120))
+    since = (datetime.now(IST) - _td(days=days)).strftime("%Y-%m-%d")
+    rows = db.query(ScalpBoardLog).filter(ScalpBoardLog.day >= since).order_by(ScalpBoardLog.id.asc()).limit(60000).all()
+    dicts = [{"kind": r.kind, "day": r.day, "symbol": r.symbol, "side": r.side, "rank": r.rank, "conviction": r.conviction,
+              "note": r.note, "zone_status": r.zone_status, "ts": str(r.ts), "params_version": r.params_version,
+              "fwd15_pct": r.fwd15_pct, "fwd30_pct": r.fwd30_pct, "fwd60_pct": r.fwd60_pct, "fwd_close_pct": r.fwd_close_pct}
+             for r in rows]
+    out = board_report.report(dicts, config.BOARD_COST_PCT, config.BOARD_PROMOTE_MIN_OBS, config.BOARD_PROMOTE_MIN_SESSIONS,
+                              config.BOARD_PARAMS_VERSION)
+    out["days"] = days
+    out["gate_mode"] = config.BOARD_GATE_MODE
+    return out
+
+
+@app.get("/board")
+def board_route(universe: Optional[str] = None, limit: Optional[int] = None, db: Session = Depends(get_db)):
+    """Market Board: market summary, sectors, ranked bullish / bearish rows from ticks already in memory (no new broker calls),
+    cached BOARD_CACHE_S seconds. When nothing is tracked (market closed / restart) the last logged snapshot is returned, flagged stale."""
+    if not config.BOARD_ENABLED:
+        raise HTTPException(status_code=404, detail="market board disabled (BOARD_ENABLED=0)")
+    from screening import board
+    payload = board.build(universe=universe, limit=limit, open_symbols=_board_open_symbols())
+    payload = dict(payload, market_open=is_market_open_ist(), stale=False)
+    if not payload["bullish"] and not payload["bearish"]:
+        try:
+            from models import ScalpBoardLog
+            last = db.query(ScalpBoardLog).filter(ScalpBoardLog.kind == "snapshot").order_by(ScalpBoardLog.id.desc()).first()
+            if last is not None:
+                rows = (db.query(ScalpBoardLog).filter(ScalpBoardLog.kind == "snapshot", ScalpBoardLog.day == last.day)
+                        .order_by(ScalpBoardLog.id.desc()).limit(400).all())
+                latest_ts = max(r.ts for r in rows)
+                pick = [r for r in rows if r.ts == latest_ts]
+                mk = lambda r: {"symbol": r.symbol, "name": r.symbol, "side": r.side, "rank": r.rank, "strength": r.strength,
+                                "conviction": r.conviction, "ltp": r.ltp, "open": r.day_open, "vwap": r.vwap,
+                                "zone_status": r.zone_status, "sector": "Other", "is_fno": False, "change_pct": None,
+                                "turnover": 0, "profile": [], "spark": [], "in_position": False}
+                payload["bullish"] = sorted([mk(r) for r in pick if r.side == "bull"], key=lambda x: x["rank"] or 999)
+                payload["bearish"] = sorted([mk(r) for r in pick if r.side == "bear"], key=lambda x: x["rank"] or 999)
+                payload["stale"] = True
+                payload["stale_day"] = last.day
+        except Exception as e:  # noqa: BLE001
+            logger.debug("board: last-session fallback unavailable (%s)", e)
+    return payload
+
+
+@app.get("/board/{symbol}")
+def board_symbol(symbol: str, db: Session = Depends(get_db)):
+    """Popup payload for one symbol (5-minute candles, VWAP, zones, levels, R:R) with the held-position overlay."""
+    if not config.BOARD_ENABLED:
+        raise HTTPException(status_code=404, detail="market board disabled (BOARD_ENABLED=0)")
+    from screening import board
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+    held = None
+    try:
+        pos = (db.query(ScalpPosition).filter(ScalpPosition.symbol == sym)
+               .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).first())
+        if pos is not None:
+            held = {"entry": pos.entry_price, "stop": pos.stop_price, "target": pos.target_price, "quantity": pos.quantity}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("board: position overlay for %s unavailable (%s)", sym, e)
+    view = board.symbol_view(sym, held)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"no bars for {sym} today (untracked, illiquid or market closed)")
+    return view
 
 
 @app.get("/dhan/account")

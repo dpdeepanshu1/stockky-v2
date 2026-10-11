@@ -450,6 +450,13 @@ export interface ScalpIntradayRestrictedRow {
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
+  // group306-309: Market Board (read-only, no admin login needed).
+  board: (universe = "all", limit = 130) =>
+    psRequest<any>(`/board?universe=${encodeURIComponent(universe)}&limit=${limit}`),
+  boardSymbol: (symbol: string) => psRequest<any>(`/board/${encodeURIComponent(symbol)}`),
+  boardStatus: () => psRequest<any>("/board/status"),
+  boardShadowReport: (days = 30) => psRequest<any>(`/board/shadow-report?days=${days}`),
+
   // Same admin username/password as Real Automatic Trade — verified against
   // the SAME ADMIN_PASSWORD_HASH/ADMIN_USERNAME env this service now shares
   // with real-trade-service (see backend auth/admin_auth.py).

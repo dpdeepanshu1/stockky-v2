@@ -835,3 +835,39 @@ OPENING_GATE_PREVDAY_TIMEOUT_S = _get_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.
 OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _get_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)   # previous day closed in the upper half of its range; 0 disables
 OPENING_GATE_MIN_STOP_ATR_FRAC = _get_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)           # stop % must be >= this x daily ATR %; 0 disables
 OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_get_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday
+
+
+# ── Market Board (group305-310) ───────────────────────────────────────────────
+# Read-only board (heatmap + stock popup) built from the tick stream already in memory, plus shadow logging of the new signals.
+# NOTHING here can place an order unless BOARD_GATE_MODE=enforce. Every value is blank-safe (_get_*).
+BOARD_ENABLED = _get_bool("BOARD_ENABLED", True)
+BOARD_UNIVERSE_DEFAULT = _get_str("BOARD_UNIVERSE_DEFAULT", "all").lower()          # all | fno | liquid
+if BOARD_UNIVERSE_DEFAULT not in ("all", "fno", "liquid"):
+    BOARD_UNIVERSE_DEFAULT = "all"
+BOARD_ROW_LIMIT = min(300, max(10, _get_int("BOARD_ROW_LIMIT", 130)))               # max rows per side
+BOARD_TOP_SYMBOLS = max(50, _get_int("BOARD_TOP_SYMBOLS", 400))                     # bar store keeps this many by turnover
+BOARD_MIN_DAY_VOLUME = max(0, _get_int("BOARD_MIN_DAY_VOLUME", 200000))             # shares; below it a symbol is not tracked
+BOARD_LIQUID_TOP_N = max(10, _get_int("BOARD_LIQUID_TOP_N", 100))                   # the "liquid" universe = top N by turnover
+BOARD_ONESIDED_RATIO = max(1.0, _get_float("BOARD_ONESIDED_RATIO", 2.0))
+BOARD_CACHE_S = max(0.0, _get_float("BOARD_CACHE_S", 1.0))
+BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
+BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
+BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
+BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
+BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
+# off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)
+BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "shadow").lower()
+if BOARD_GATE_MODE not in ("off", "shadow", "enforce"):
+    BOARD_GATE_MODE = "shadow"
+BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours
+BOARD_LOG_TOP_N = max(1, _get_int("BOARD_LOG_TOP_N", 20))                           # rows per side per snapshot
+BOARD_CONVICTION_WEIGHTS = _get_str("BOARD_CONVICTION_WEIGHTS", "")                 # "strength=0.5,volume=0.2,..." (optional)
+FNO_SYMBOLS_EXTRA = _get_str("FNO_SYMBOLS_EXTRA", "")                               # comma separated, added to the F&O list
+FNO_SYMBOLS_EXCLUDE = _get_str("FNO_SYMBOLS_EXCLUDE", "")                           # comma separated, removed from it
+FNO_LIST_REFRESH = _get_bool("FNO_LIST_REFRESH", True)                              # daily background refresh from Dhan's list
+FNO_LIST_URL = _get_str("FNO_LIST_URL", "https://images.dhan.co/api-data/api-scrip-master.csv")
+# shadow report / promotion rule (group309)
+BOARD_PROMOTE_MIN_OBS = max(1, _get_int("BOARD_PROMOTE_MIN_OBS", 30))
+BOARD_PROMOTE_MIN_SESSIONS = max(1, _get_int("BOARD_PROMOTE_MIN_SESSIONS", 10))
+BOARD_COST_PCT = max(0.0, _get_float("BOARD_COST_PCT", 0.12))                       # flat round-trip cost estimate, % of price
+BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes

@@ -2203,6 +2203,49 @@ async def get_adaptive_market_params_status(db: Session = Depends(get_db)):
             "min_market_cap_cr": {"value": config.MIN_MARKET_CAP_CR_STATIC, "source": "static (error)"},
         }
 
+@app.get("/board-overlay/{mode}")
+async def board_overlay_route(
+    mode: str,
+    admin: Optional[str] = Depends(require_admin_if_real),
+    db: Session = Depends(get_db),
+):
+    """group308: read-only overlay for the Market Board in the Real Trade tab. The board itself (heatmap, zones) comes from
+    position-stocks-service; this only says which symbols THIS service holds / watches / has as candidates, with the held
+    position's entry, stop and target, plus the static per-share price ceiling so the board can hatch tiles the risk engine would
+    reject. Display only: nothing here is read by entry_engine, exit_engine or the risk engine, and nothing is written."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from risk_engine import engine as _risk_engine
+    pos_rows = (
+        db.query(models.TradePosition)
+        .filter(models.TradePosition.mode == mode,
+                models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")))
+        .all()
+    )
+    wl_rows = db.query(models.WatchlistEntry).filter_by(mode=mode, status="active").limit(300).all()
+    cand_rows = (
+        db.query(models.TradeCandidate).filter_by(mode=mode)
+        .order_by(models.TradeCandidate.received_at.desc()).limit(80).all()
+    )
+    return {
+        "mode": mode,
+        "positions": [
+            {"symbol": p.symbol, "status": p.status, "qty_open": p.qty_open, "entry": p.avg_entry_price,
+             "stop": p.current_stop, "target": p.current_target}
+            for p in pos_rows
+        ],
+        "watchlist": sorted({r.symbol for r in wl_rows}),
+        "candidates": sorted({c.symbol for c in cand_rows}),
+        "max_stock_price": _risk_engine.MAX_STOCK_PRICE,
+        "max_stock_price_explicit": bool(_risk_engine.MAX_STOCK_PRICE_EXPLICITLY_SET),
+        "max_stock_price_note": (
+            "static ceiling from RISK_MAX_STOCK_PRICE" if _risk_engine.MAX_STOCK_PRICE_EXPLICITLY_SET
+            else "default ceiling; the live ceiling can be derived from equity (adaptive), so treat 'over cap' as approximate"
+        ),
+    }
+
+
 @app.get("/candidates/{mode}")
 async def list_candidates(
     mode: str, limit: int = 40,

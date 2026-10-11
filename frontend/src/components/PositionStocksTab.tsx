@@ -23,6 +23,8 @@ import {
 // trade-service's URL isn't configured in this browser).
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+import MarketBoard from "./board/MarketBoard";
+import JournalPanel from "./board/JournalPanel";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -411,7 +413,7 @@ export default function PositionStocksTab() {
   // Sub-tabs — the page used to be one long scroll of every section at
   // once; grouped into tabs so each screen only shows what's relevant to
   // that task (arming/health/risk vs. screener vs. positions vs. history).
-  type SubTab = "overview" | "pipeline" | "screener" | "positions" | "history" | "dhanorders" | "charges" | "settings";
+  type SubTab = "overview" | "board" | "pipeline" | "screener" | "positions" | "history" | "dhanorders" | "charges" | "settings";
   const [subTab, setSubTab] = useState<SubTab>("overview");
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
@@ -821,6 +823,7 @@ export default function PositionStocksTab() {
       <div className="flex flex-wrap gap-1 border-b border-slate pb-2">
         {([
           { id: "overview", label: "Overview" },
+          { id: "board", label: "Board" },
           { id: "pipeline", label: "Pipeline" },
           { id: "screener", label: "Screener" },
           { id: "positions", label: `Positions (${openPositions.length})` },
@@ -842,6 +845,14 @@ export default function PositionStocksTab() {
           </button>
         ))}
       </div>
+
+      {/* group306: Market Board (display + shadow logging only; places no order) */}
+      {subTab === "board" && (
+        <div className="space-y-4">
+          <MarketBoard active={subTab === "board"} title="Position Stocks · Market Board" />
+          <JournalPanel active={subTab === "board"} />
+        </div>
+      )}
 
       {subTab === "overview" && (
       <>

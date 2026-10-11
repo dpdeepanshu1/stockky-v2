@@ -217,6 +217,7 @@ _MAX_TICKS = 50_000
 _MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
+_exchange_vwap: Dict[str, float] = {}   # group304: exchange day average price (VWAP) per symbol, market-data poller only
 # 2026-10-05: exchange-reported day stats (open, high, low, previous close) from the
 # mode-2/3 frame. The tick buffer only holds ~65 min, so a 'day high/low' computed
 # from it is really the last hour's range; these are the true session values.
@@ -371,6 +372,13 @@ def _accept_day_stats(symbol: str, ds: tuple, ltp: float) -> bool:
     return False
 
 
+def get_exchange_vwap(symbol: str) -> Optional[float]:
+    """Exchange day VWAP (Dhan average_price via market-data) or None. Only the market-data poller feeds it; the AngelOne
+    WS path leaves it unset, so callers fall back to their own tick-weighted estimate."""
+    v = _exchange_vwap.get(symbol)
+    return v if v and v > 0 else None
+
+
 def get_last_volume(symbol: str) -> int:
     """Real cumulative day volume (shares) from the mode-3 feed, 0 if no
     tick has arrived for this symbol yet. See the mode-upgrade docstring
@@ -493,7 +501,7 @@ _last_tick_at: Optional[float] = None  # unix seconds of the most recent parsed 
 _OFFHOURS_RECHECK_S = 60.0
 
 
-def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask, day_stats=None) -> None:
+def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask, day_stats=None, vwap=None) -> None:
     """Store one tick for `symbol` and call the on-tick callbacks. Shared by the AngelOne WS loop below and the
     market-data bulk poller (feed/md_poller.py, group301), so both fill exactly the same buffers.
 
@@ -514,6 +522,8 @@ def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask,
         _last_volume[symbol] = volume
     if day_stats is not None:
         _accept_day_stats(symbol, day_stats, ltp)
+    if vwap is not None and vwap > 0 and 0.5 * ltp <= vwap <= 2.0 * ltp:   # group304: same 0.5x-2x plausibility as day stats
+        _exchange_vwap[symbol] = vwap
     if best_bid is not None and best_ask is not None:
         _last_quote[symbol] = (best_bid, best_ask, ts)
     for cb in _on_tick_callbacks:

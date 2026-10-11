@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import cost_gate, depth_gate, entry_pause
+from orders import board_gate, cost_gate, depth_gate, entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate
 from screening.engine import Candidate
@@ -510,6 +510,14 @@ def attempt_entry(
     if _depth_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
+        return None
+
+    # group309: Market Board chase guard. shadow (default) only logs; enforce refuses an entry that is > BOARD_CHASE_ATR ATRs past
+    # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
+    _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
+    if _board_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _board_reject, quality=quality)
         return None
 
     # Reserve capital (also checks kill switch again in the ledger)

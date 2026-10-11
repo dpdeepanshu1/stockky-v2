@@ -13,6 +13,7 @@ import ManualTradeTicket from "./trading/ManualTradeTicket";
 // is a best-effort, non-blocking call).
 import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+import MarketBoard from "./board/MarketBoard";
 import { chargesForLegs, sumCharges, DP_CHARGE_INCL_GST, type ChargeBreakdown, type ChargeLeg } from "../chargesRates";
 
 // group 259: "2026-09-01" -> "01 Sep" for the charges date ranges.
@@ -23,7 +24,7 @@ function fmtChargeDay(d: string | null | undefined): string {
 }
 
 type Mode = "DEMO" | "REAL";
-type Tab = "overview" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "charges" | "log";
+type Tab = "overview" | "board" | "live" | "positions" | "orders" | "watchlist" | "pipeline" | "charges" | "log";
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
 function fmtInr(n: number | null | undefined, decimals = 0): string {
@@ -1544,6 +1545,7 @@ export default function RealAutoTrade() {
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "overview", label: "Overview" },
+    { id: "board", label: "Board" },
     { id: "live", label: "Live Dhan" },
     { id: "positions", label: `Positions (${positions.length})` },
     { id: "orders", label: `Orders (${orders.length})` },
@@ -1645,6 +1647,34 @@ export default function RealAutoTrade() {
           {/* ═══════════════════════════════════════════════════════════════
               TAB: OVERVIEW
           ═══════════════════════════════════════════════════════════════ */}
+          {/* group308: Market Board (display only). Heatmap data comes from position-stocks-service; the highlights below come from THIS
+              service's own candidates / positions, so they still show if the heatmap service is down. No order can be placed from here. */}
+          {activeTab === "board" && (() => {
+            const heldSyms = new Set(positions.map(p => p.symbol));
+            const candSyms = new Set(candidates.map(c => c.symbol));
+            const marks = new Set<string>([...heldSyms, ...candSyms]);
+            return (
+              <div className="space-y-3">
+                <MarketBoard active={activeTab === "board"} marks={marks} title={`Real Trade · Market Board (${mode})`}
+                  popupExtra={row => (
+                    <div className="rounded-lg border border-slate bg-ink p-2 text-[11px] text-mist">
+                      {heldSyms.has(row.symbol) ? <span className="text-signal-hold">Open {mode} position in this account.</span>
+                        : candSyms.has(row.symbol) ? <span className="text-signal-prepare">On the {mode} candidate list.</span>
+                        : <span>Not a candidate or position here. Display only: no order can be placed from the board.</span>}
+                    </div>
+                  )} />
+                <div className="rounded-xl border border-slate bg-ink p-3 text-[11px]">
+                  <div className="font-display font-bold text-paper mb-1">Your {mode} positions and candidates</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[...heldSyms].map(s => <span key={"p" + s} className="px-2 py-0.5 rounded-full border border-signal-hold/50 text-signal-hold">{s} · held</span>)}
+                    {[...candSyms].filter(s => !heldSyms.has(s)).map(s => <span key={"c" + s} className="px-2 py-0.5 rounded-full border border-signal-prepare/40 text-signal-prepare">{s}</span>)}
+                    {heldSyms.size + candSyms.size === 0 && <span className="text-mist">None right now.</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {activeTab === "overview" && (
             <div className="space-y-4">
               {/* Gate sequence */}

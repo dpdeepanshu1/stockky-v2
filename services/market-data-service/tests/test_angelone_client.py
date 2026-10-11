@@ -273,10 +273,10 @@ class TestLogin:
             run(s._login())
 
     def test_ensure_session_skips_login_when_token_valid(self, monkeypatch):
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         s = _configured_session(monkeypatch)
         s.token = "existing"
-        s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+        s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         call_count = [0]
         async def _fake_login(): call_count[0] += 1
         monkeypatch.setattr(s, "_login", _fake_login)
@@ -292,8 +292,8 @@ class TestGetQuote:
     def _session(self, monkeypatch):
         s = _configured_session(monkeypatch)
         monkeypatch.setattr(s, "_login", lambda: None)   # sync stub – patch ensure_session
-        from datetime import datetime, timedelta
-        s.token = "tok"; s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+        from datetime import datetime, timedelta, timezone
+        s.token = "tok"; s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")
         return s
 
@@ -338,8 +338,8 @@ class TestGetQuote:
 class TestGetCandles:
     def _session(self, monkeypatch):
         s = _configured_session(monkeypatch)
-        from datetime import datetime, timedelta
-        s.token = "tok"; s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+        from datetime import datetime, timedelta, timezone
+        s.token = "tok"; s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")
         return s
 
@@ -383,8 +383,8 @@ class TestGetCandles:
 class TestGetGainersLosers:
     def _session(self, monkeypatch):
         s = _configured_session(monkeypatch)
-        from datetime import datetime, timedelta
-        s.token = "tok"; s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+        from datetime import datetime, timedelta, timezone
+        s.token = "tok"; s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")
         monkeypatch.setattr(ac, "_rl_in_cooldown", lambda p: False)
         monkeypatch.setattr(ac, "_rl_acquire", lambda *a, **kw: 0.0)
@@ -428,8 +428,8 @@ class TestGetGainersLosers:
 class TestGetQuotesBatch:
     def _session(self, monkeypatch):
         s = _configured_session(monkeypatch)
-        from datetime import datetime, timedelta
-        s.token = "tok"; s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+        from datetime import datetime, timedelta, timezone
+        s.token = "tok"; s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
         monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")
         monkeypatch.setattr(ac, "_rl_in_cooldown", lambda p: False)
         monkeypatch.setattr(ac, "_rl_acquire", lambda *a, **kw: 0.0)

@@ -266,8 +266,8 @@ def startup_staleness_warning() -> None:
         )
         notify_sync("\n".join(lines))
         _stale_notice_record(stale)
-    except Exception:
-        pass  # Telegram failure never affects startup (and is not recorded, so the next boot retries)
+    except Exception as _tg_err:  # Telegram failure never affects startup (and is not recorded, so the next boot retries)
+        logger.warning("stale-threshold notice not sent (will retry next boot): %s", _tg_err)
 
 
 # ── Threshold age annotation for reasoning strings ───────────────────────────

@@ -57,14 +57,14 @@ def test_a_genuine_no_price_answer_still_counts(noted):
 
 
 def test_stale_cooldown_keeps_the_real_age(noted):
-    ts = (datetime.utcnow() - timedelta(seconds=100)).isoformat()
+    ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=100)).isoformat()
     t = _get({"symbol": "ABC", "price": 50.0, "source": "stale_cooldown(angelone_rest)", "fetched_at": ts})
     age = (datetime.now(timezone.utc) - t.as_of).total_seconds()
     assert 95 < age < 110 and t.source == "stale_cooldown(angelone_rest)" and t.price == 50.0
 
 
 def test_a_normal_row_is_still_stamped_with_receipt_time(noted):
-    ts = (datetime.utcnow() - timedelta(seconds=100)).isoformat()
+    ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=100)).isoformat()
     t = _get({"symbol": "ABC", "price": 50.0, "source": "yahoo_clean", "fetched_at": ts})
     assert (datetime.now(timezone.utc) - t.as_of).total_seconds() < 5
 

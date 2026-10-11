@@ -83,6 +83,6 @@ def enter_at_open_time(mode: str) -> _time:
             cutoff = not_before()
             if cutoff > base:
                 return cutoff
-    except Exception:
-        pass
+    except Exception as _guard_err:
+        logger.warning("opening guard: could not read the shared not-before time (%s) - using the configured %s", _guard_err, config.ENTER_AT_OPEN_TIME_IST)
     return base

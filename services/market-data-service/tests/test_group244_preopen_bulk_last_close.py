@@ -23,7 +23,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 def _row(sym, age_s, price=100.0, source="angelone_ws"):
     return {"symbol": sym, "price": price, "source": source,
-            "fetched_at": (datetime.utcnow() - timedelta(seconds=age_s)).isoformat()}
+            "fetched_at": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=age_s)).isoformat()}
 
 
 @pytest.fixture()

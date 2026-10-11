@@ -102,8 +102,8 @@ def _place_overnight_stop(
                 f"STOP_LOSS_MARKET could not be confirmed live — squaring off "
                 f"instead of leaving unprotected.\nError: {str(e)[:300]}"
             )
-        except Exception:
-            pass
+        except Exception as notify_e:  # noqa: BLE001
+            logger.warning("overnight stop for %s (id=%s): the critical alert itself could not be sent (%s)", pos.symbol, pos.id, notify_e)
         return None
 
 
@@ -202,7 +202,8 @@ def _existing_flat_sell(db: Session, pos: ScalpPosition) -> Optional[dict]:
     again would be a duplicate. Fails open."""
     try:
         orders = dhan_client.get_order_list(db)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("flat SELL guard: %s (id=%s) order-book lookup failed (%s) - duplicate check skipped, proceeding.", pos.symbol, pos.id, e)
         return None
     for r in orders or []:
         if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
@@ -548,8 +549,9 @@ def run_eod_squareoff(db: Session) -> int:
                             dhan_client.cancel_super_order(
                                 db, order_id=pos.dhan_super_order_id, order_leg=leg
                             )
-                        except Exception:
-                            pass  # leg may already be filled/cancelled — not fatal
+                        except Exception as _cancel_err:  # leg may already be filled/cancelled — not fatal, but say why it was not cancelled
+                            logger.info("EOD/manual close: cancel of %s on super order %s (%s) not done: %s",
+                                        leg, pos.dhan_super_order_id, pos.symbol, _cancel_err)
                     wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
                     if wait_s > 0:
                         time.sleep(wait_s)
@@ -683,8 +685,9 @@ def run_eod_squareoff(db: Session) -> int:
                         dhan_client.cancel_super_order(
                             db, order_id=pos.dhan_super_order_id, order_leg=leg
                         )
-                    except Exception:
-                        pass  # leg may already be filled/cancelled — not fatal
+                    except Exception as _cancel_err:  # leg may already be filled/cancelled — not fatal, but say why it was not cancelled
+                        logger.info("EOD/manual close: cancel of %s on super order %s (%s) not done: %s",
+                                    leg, pos.dhan_super_order_id, pos.symbol, _cancel_err)
 
                 # 2026-09-18 fix (this session): backport of session67's
                 # close_position_now() fix. Without this pause, the plain
@@ -979,8 +982,9 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
                 dhan_client.cancel_super_order(
                     db, order_id=pos.dhan_super_order_id, order_leg=leg
                 )
-            except Exception:
-                pass  # leg may already be filled/cancelled — not fatal
+            except Exception as _cancel_err:  # leg may already be filled/cancelled — not fatal, but say why it was not cancelled
+                logger.info("EOD/manual close: cancel of %s on super order %s (%s) not done: %s",
+                            leg, pos.dhan_super_order_id, pos.symbol, _cancel_err)
         # 2026-09-18 fix (session67): give Dhan a moment to acknowledge the
         # cancellations before firing the SELL. Without this pause, the plain
         # MARKET SELL can race against a still-live TARGET_LEG or
@@ -1017,8 +1021,8 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
                 intraday_eligibility.record_restriction(
                     db, pos.symbol, detail=f"Manual exit SELL rejection: {err_str[:200]}",
                 )
-            except Exception:
-                pass
+            except Exception as rec_e:  # noqa: BLE001
+                logger.warning("manual close: could not record intraday restriction for %s (%s)", pos.symbol, rec_e)
             raise ManualCloseRejected(
                 f"Dhan rejected — {pos.symbol} is not tradeable intraday (T2T/ASM/GSM "
                 f"surveillance): {err_str}"

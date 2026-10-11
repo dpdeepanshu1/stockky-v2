@@ -13,7 +13,7 @@ import os
 import sys
 import threading
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -56,7 +56,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             srv.bulk_posts.append(list(body.get("symbols") or []))
         if srv.bulk_status != 200:
             return self._send(srv.bulk_status, {})
-        ts = (datetime.utcnow() - timedelta(seconds=srv.bulk_age_s)).isoformat()
+        ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=srv.bulk_age_s)).isoformat()
         rows = [{"symbol": s, "price": srv.bulk_prices[s], "fetched_at": ts, "source": "last_close_cache"}
                 for s in body.get("symbols") or [] if s in srv.bulk_prices]
         return self._send(200, {"quotes": rows})

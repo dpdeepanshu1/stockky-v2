@@ -11,7 +11,7 @@ Run from services/market-data-service:
 """
 from __future__ import annotations
 import os, sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.pop("BULK_CACHE_MAX_AGE_SEC", None)
@@ -23,7 +23,7 @@ import main
 
 def _row(sym, age_s, price=100.0):
     return {"symbol": sym, "price": price, "source": "cache_row",
-            "fetched_at": (datetime.utcnow() - timedelta(seconds=age_s)).isoformat()}
+            "fetched_at": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=age_s)).isoformat()}
 
 
 @pytest.fixture()
@@ -64,9 +64,9 @@ class TestHelpers:
         assert main._quote_row_age_s({"fetched_at": "garbage"}) is None
         assert main._quote_row_age_s({}) is None
         assert main._quote_row_age_s(None) is None
-        z = (datetime.utcnow() - timedelta(seconds=40)).isoformat() + "Z"
+        z = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=40)).isoformat() + "Z"
         assert 39 <= main._quote_row_age_s({"fetched_at": z}) <= 42
-        future = (datetime.utcnow() + timedelta(seconds=90)).isoformat()
+        future = (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=90)).isoformat()
         assert main._quote_row_age_s({"fetched_at": future}) == 0.0
 
 

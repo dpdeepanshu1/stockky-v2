@@ -472,8 +472,8 @@ def refresh_if_totp_enabled(db: Session) -> bool:
         try:
             from notifier import notify_sync
             notify_sync("🔑 *Dhan TOTP token refreshed* — new token saved.")
-        except Exception:
-            pass
+        except Exception as _n_err:
+            logger.warning("Dhan TOTP refreshed, but the Telegram notice failed: %s", _n_err)
         return True
     except Exception as e:
         # Redact BEFORE truncating (a [:300] cut through "pin=98765" would
@@ -484,6 +484,6 @@ def refresh_if_totp_enabled(db: Session) -> bool:
         try:
             from notifier import notify_sync
             notify_sync(f"🚨 *Dhan TOTP refresh FAILED*\n{safe_err[:300]}")
-        except Exception:
-            pass
+        except Exception as _n_err:
+            logger.warning("Dhan TOTP refresh failed AND the Telegram alert could not be sent: %s", _redact_secrets(_n_err, totp_secret, client_id, dhan_pin))
         return False

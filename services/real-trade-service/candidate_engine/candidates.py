@@ -422,8 +422,8 @@ def _persist_hist_state() -> None:
     try:
         from resilience.pause_state import schedule_flush
         schedule_flush(_HIST_PERSIST_KEY, _hist_snapshot)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _flush_err:  # noqa: BLE001
+        logger.debug("candidate history persist skipped: %s", _flush_err)
 
 
 def load_nohist_from_db(db) -> None:

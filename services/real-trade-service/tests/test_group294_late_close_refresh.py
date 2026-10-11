@@ -138,10 +138,21 @@ def _age_stored(factory, minutes):
         s.close()
 
 
+def _ist_minutes_since_midnight() -> float:
+    ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return ist.hour * 60 + ist.minute + ist.second / 60.0
+
+
 def test_a_trade_closed_after_the_report_is_added_by_the_next_refresh(tick):
+    # The seeded trades must fall on TODAY's IST day, so the minute offsets are scaled down shortly after IST midnight
+    # (this test failed between 00:00 and 01:00 IST when "60 minutes ago" was still yesterday).
+    since_midnight = _ist_minutes_since_midnight()
+    if since_midnight < 3:
+        pytest.skip("less than 3 minutes into the IST day: no room to seed trades inside today")
+    k = min(1.0, (since_midnight - 2.0) / 60.0)
     s = tick["factory"]()
     try:
-        seed_trade(s, "AAA", mode="REAL", opened_min=60, closed_min=20)          # ledger booked: charges final
+        seed_trade(s, "AAA", mode="REAL", opened_min=60 * k, closed_min=20 * k)  # ledger booked: charges final
     finally:
         s.close()
     asyncio.run(ap._schedule_tick_body("REAL"))
@@ -155,7 +166,7 @@ def test_a_trade_closed_after_the_report_is_added_by_the_next_refresh(tick):
 
     s = tick["factory"]()
     try:
-        seed_trade(s, "BBB", mode="REAL", opened_min=30, closed_min=1)           # a manual exit after the report
+        seed_trade(s, "BBB", mode="REAL", opened_min=30 * k, closed_min=1 * k)   # a manual exit after the report
     finally:
         s.close()
     asyncio.run(ap._schedule_tick_body("REAL"))                                    # too soon: nothing

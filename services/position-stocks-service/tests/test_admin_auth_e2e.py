@@ -4,6 +4,8 @@ Proves: login works, /dhan/funds is admin-gated and maps Dhan errors to 409/502 
 and a token minted by one service is accepted by the other (same SESSION_SECRET)."""
 import json, os, subprocess, sys
 
+import pytest
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVICES = os.path.dirname(HERE)
 PS, RT = HERE, os.path.join(SERVICES, "real-trade-service")
@@ -67,6 +69,7 @@ def test_position_stocks_admin_auth_and_funds_route():
     assert d["admin_password_hash_looks_argon2"] and d["session_secret_fingerprint"] and "x" * 8 not in json.dumps(d)
 
 
+@pytest.mark.skipif(not os.path.isdir(RT), reason="real-trade-service not mounted (e.g. docker run -v position-stocks-service only); run from ~/stockky-v2/services")
 def test_token_from_position_stocks_is_accepted_by_real_trade_service():
     env = _env()
     tok = _run(PS, PS_CODE, env)["token"]

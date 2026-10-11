@@ -11,7 +11,7 @@ import os
 import threading as _threading
 import time
 import weakref as _weakref
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -354,7 +354,7 @@ class AngelOneSession:
             if (
                 self.token
                 and self.token_expiry
-                and datetime.utcnow() < self.token_expiry
+                and datetime.now(timezone.utc).replace(tzinfo=None) < self.token_expiry
             ):
                 return
             await self._login()
@@ -396,7 +396,7 @@ class AngelOneSession:
             data = body["data"]
             self.token       = data["jwtToken"]
             self.feed_token  = data.get("feedToken")
-            self.token_expiry = datetime.utcnow() + timedelta(hours=20)
+            self.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=20)
             global _login_at
             _login_at = time.time()   # group257: shown on 403 lines
             logger.info("AngelOne session refreshed (expires in 20h)")

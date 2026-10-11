@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from urllib.parse import quote
 from typing import Optional
 
 import config
@@ -40,7 +41,7 @@ def _fetch(symbol: str) -> Optional[dict]:
         return hit[1]
     import httpx
     with httpx.Client(timeout=config.ENTRY_DEPTH_TIMEOUT_S) as client:
-        r = client.get(f"{config.MARKET_DATA_URL}/quote/{symbol}")
+        r = client.get(f"{config.MARKET_DATA_URL}/quote/{quote(str(symbol), safe='&')}")
     body = r.json() if r.status_code == 200 else None
     body = body if isinstance(body, dict) else None
     _cache[symbol] = (now, body)
@@ -171,7 +172,7 @@ def max_qty_from_depth20(symbol: str, quantity: int) -> Optional[int]:
         wait = max(0.0, float(config.ENTRY_DEPTH20_WAIT_S or 0))
         import httpx
         with httpx.Client(timeout=config.ENTRY_DEPTH_TIMEOUT_S + wait) as client:
-            r = client.get(f"{config.MARKET_DATA_URL}/depth/{symbol}",
+            r = client.get(f"{config.MARKET_DATA_URL}/depth/{quote(str(symbol), safe='&')}",
                            params={"qty": quantity, "slip_pct": slip, "wait_s": wait})
         body = r.json() if r.status_code == 200 else None
         if not isinstance(body, dict) or body.get("available") is not True:

@@ -49,9 +49,9 @@ def test_ensure_session_lock_survives_two_separate_event_loops():
     # Make ensure_session() a no-op HTTP-wise: pretend we're always
     # "already logged in" so the lock's critical section is exercised
     # without needing real credentials or a network call.
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     session.token = "fake-token"
-    session.token_expiry = datetime.utcnow() + timedelta(hours=1)
+    session.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
 
     errors: list[BaseException] = []
 
@@ -103,9 +103,9 @@ def test_locks_dict_does_not_leak_one_shot_asyncio_run_loops():
     import gc
 
     session = angelone_client.AngelOneSession()
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     session.token = "fake-token"
-    session.token_expiry = datetime.utcnow() + timedelta(hours=1)
+    session.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
 
     # Simulate 10 separate one-shot asyncio.run() calls, exactly like
     # /angelone/movers or the per-request quote/candle routes in main.py.

@@ -13,8 +13,9 @@
 # Stage 1 — build the static bundle (same as before).
 FROM node:20-slim AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+# group313: install exactly what package-lock.json says (npm ci) - `npm install` without the lockfile re-resolved versions on every build
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=${VITE_API_URL}

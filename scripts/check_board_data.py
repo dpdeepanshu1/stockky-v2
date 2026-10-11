@@ -21,7 +21,8 @@ def main() -> int:
         return 2
     for key, title in (("A_fno_underlyings", "A  F&O underlyings (Dhan instrument file)"), ("B_open_and_avg_price", "B  open / avg_price (/quotes/bulk)")):
         c = out.get(key) or {}
-        print(f"[{'OK ' if c.get('ok') else 'FAIL'}] {title}\n      {c.get('verdict')}")
+        tag = "OK  " if c.get("ok") else ("SKIP" if c.get("skipped") else "FAIL")
+        print(f"[{tag}] {title}\n      {c.get('verdict')}")
         if c.get("sample"):
             print("      sample:", json.dumps(c["sample"][:3]))
     print(out.get("note", ""))

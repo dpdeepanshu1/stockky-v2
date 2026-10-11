@@ -123,17 +123,17 @@ class TestGetQuoteSourceTwoAge:
         assert 24 < _age(t) < 29 and t.age_known is True
 
     def test_row_without_age_is_stamped_with_receipt_time_and_flagged(self, feed_quiet):
-        ts = (datetime.utcnow() - timedelta(seconds=100)).isoformat()      # fetched_at alone is NOT trusted
+        ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=100)).isoformat()      # fetched_at alone is NOT trusted
         t = _get({"symbol": "ABC", "price": 50.0, "source": "yahoo_clean", "fetched_at": ts})
         assert _age(t) < 5 and t.age_known is False
 
     def test_stale_cooldown_row_still_uses_fetched_at(self, feed_quiet):
-        ts = (datetime.utcnow() - timedelta(seconds=100)).isoformat()
+        ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=100)).isoformat()
         t = _get({"symbol": "ABC", "price": 50.0, "source": "stale_cooldown(angelone_rest)", "fetched_at": ts})
         assert 95 < _age(t) < 110 and t.age_known is True
 
     def test_age_s_beats_stale_cooldown_fetched_at(self, feed_quiet):
-        ts = (datetime.utcnow() - timedelta(seconds=500)).isoformat()
+        ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=500)).isoformat()
         t = _get({"symbol": "ABC", "price": 50.0, "source": "stale_cooldown(x)", "fetched_at": ts, "age_s": 30})
         assert 29 < _age(t) < 34
 
@@ -213,7 +213,7 @@ class TestEntryQuoteAgeReason:
         assert entry._entry_quote_age_reason(_tick(-40)) is None
 
     def test_naive_as_of_is_read_as_utc(self):
-        t = Tick("A", 1.0, datetime.utcnow() - timedelta(seconds=50), None, "x")
+        t = Tick("A", 1.0, datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=50), None, "x")
         assert entry._entry_quote_age_reason(t) is not None
 
     def test_garbage_never_raises(self):
@@ -242,7 +242,7 @@ class TestHoldCandidate:
 
     def test_naive_received_at_is_utc(self):
         class C:
-            received_at = datetime.utcnow() - timedelta(minutes=1)
+            received_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
         assert entry._hold_candidate_for_fresh_price(C()) is True
 
     def test_missing_or_bad_received_at_is_not_held(self):

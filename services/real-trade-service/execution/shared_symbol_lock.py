@@ -89,8 +89,8 @@ def try_claim(db: Session, symbol: str, mode: str = "REAL") -> bool:
                     symbol, existing.held_by_service,
                 )
                 return False
-        except Exception:
-            pass
+        except Exception as chk_e:  # noqa: BLE001
+            logger.warning("symbol lock race re-check for %s failed (%s) - keeping the claim", symbol, chk_e)
         return True
     except Exception as e:
         logger.error("shared_symbol_lock.try_claim(%s) failed (failing open): %s", symbol, e, exc_info=True)

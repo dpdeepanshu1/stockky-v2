@@ -41,11 +41,22 @@ def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[
     from feed import bar_backfill, bar_store
     from screening import board, board_log
     did = {"snapshot": False, "fill": 0, "pruned": 0, "backfill": 0}
+
+    def _failed(step: str, e: Exception) -> None:
+        _state["errors"] += 1
+        _state["last_error"] = f"{step}: {type(e).__name__}: {e}"
+        logger.warning("board runner %s step failed (%s: %s)", step, type(e).__name__, e)
+
+    # group313: each step has its own guard, so a failing backfill can no longer stop snapshots and forward-return fills
+    # (before, all three shared one try block and an exception in the first skipped the other two on every pass).
     try:
         if config.BOARD_BACKFILL_ENABLED and bar_backfill.pending_count():       # group311: fill the morning after a mid-session restart
             r = (backfill_fn or bar_backfill.run_pending)() or {}
             did["backfill"] = int(r.get("merged_symbols", 0))
             _state["backfilled"] = _state.get("backfilled", 0) + did["backfill"]
+    except Exception as e:  # noqa: BLE001
+        _failed("backfill", e)
+    try:
         if market_open and now - _state["last_snapshot"] >= config.BOARD_LOG_EVERY_S:
             held = []
             try:
@@ -59,6 +70,9 @@ def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[
                 _state["snapshots"] += 1
             _state["last_snapshot"] = now
             did["pruned"] = bar_store.prune()
+    except Exception as e:  # noqa: BLE001
+        _failed("snapshot", e)
+    try:
         if in_fill_window(now, market_open) and now - _state["last_fill"] >= FILL_EVERY_S:
             _state["last_fill"] = now
             factory = session_factory or _session_factory()
@@ -68,9 +82,7 @@ def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[
                     did["fill"] = board_log.fill_forward(s, day, now)
                 _state["fills"] += did["fill"]
     except Exception as e:  # noqa: BLE001
-        _state["errors"] += 1
-        _state["last_error"] = f"{type(e).__name__}: {e}"
-        logger.warning("board runner pass failed (%s: %s)", type(e).__name__, e)
+        _failed("fill", e)
     return did
 
 

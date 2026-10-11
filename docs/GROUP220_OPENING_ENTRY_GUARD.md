@@ -5,7 +5,7 @@ Files changed: `entry_engine/opening_guard.py` (new), `entry_engine/entry.py` (o
 (ENTER_AT_OPEN trigger time), `config.py` (3 settings), `main.py` (one extra status key), `tests/conftest.py` (guard off for older tests),
 `tests/test_group220_opening_guard.py` (new, 35), `tests/test_group220_enter_at_open_schedule.py` (new, 6).
 
-## What the data shows (re-checked against `tier_breakdown.csv`) and what it does not
+## What the data shows (re-checked against `archive/data/tier_breakdown.csv`) and what it does not
 Entries opened 09:19-09:24 IST: ETERNAL -7.00, NUVOCO -176.80, WELSPLSOL -59.55, GICRE -28.80, ELGIRUBCO -2.09. That is 0 of 5 winning, -Rs 274.24,
 over three trading days (2, 7 and 10 Sept). The other 17 trades made +Rs 301.03, of which IONEXCHANG alone is +Rs 290.80.
 

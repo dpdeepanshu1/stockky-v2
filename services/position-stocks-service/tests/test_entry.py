@@ -116,6 +116,7 @@ def env(monkeypatch):
     monkeypatch.setattr(dhan_client, "get_security_id", _sec)
     monkeypatch.setattr(dhan_client, "place_super_order", _super)
     monkeypatch.setattr(dhan_client, "place_order", _plain)
+    monkeypatch.setattr(dhan_client, "find_recent_buy_order", lambda *a, **k: None)   # group313: hermetic - no broker lookup after an ambiguous error
 
     def _levels(pct_change, ltp, symbol=None):
         b.calls.append(("compute_levels", {"pct_change": pct_change, "ltp": ltp, "symbol": symbol}))
@@ -674,6 +675,21 @@ class TestAttemptEntryOrderFailures:
         assert n_restricted == (1 if records_restriction else 0)
         if records_restriction:
             assert db.query(models.ScalpIntradayRestrictedSecurity).one().symbol == "T2TCO"
+
+    def test_ambiguous_timeout_but_order_exists_at_dhan_is_tracked_not_released(self, env, monkeypatch):
+        """group313: a timeout after the request left may still have placed the BUY - it must become a tracked position."""
+        db, b, sent = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]                  # "gateway timeout ..." = ambiguous
+        monkeypatch.setattr(dhan_client, "find_recent_buy_order", lambda *a, **k: {"orderId": "SO-RECOVERED", "orderStatus": "PENDING"})
+        pos = entry.attempt_entry(db, cand("t2tco"))
+        assert pos is not None and pos.dhan_super_order_id == "SO-RECOVERED" and n_positions(db) == 1
+        assert lock_held(db, "t2tco")                                  # the symbol claim stays: a live position exists
+
+    def test_ambiguous_timeout_with_nothing_at_dhan_is_still_a_failure(self, env):
+        db, b, _ = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+        assert entry.attempt_entry(db, cand("t2tco")) is None
+        assert last_log(db).reason.startswith("ORDER_FAILED:") and n_positions(db) == 0
 
     @pytest.mark.parametrize("msg", [RESTRICTED_MSG, CIRCUIT_MSG])
     def test_restriction_recording_failure_is_swallowed(self, env, monkeypatch, msg):

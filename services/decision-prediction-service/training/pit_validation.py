@@ -12,7 +12,7 @@ Free-tier scope:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("pit-validation")
@@ -39,7 +39,7 @@ def validate_prediction_snapshot(snapshot: Dict[str, Any], now: Optional[datetim
     Validate a feature/decision snapshot for PIT safety before train or store.
     Returns {ok, issues[], warnings[]}.
     """
-    now = _as_naive(now) or datetime.utcnow()
+    now = _as_naive(now) or datetime.now(timezone.utc).replace(tzinfo=None)
     issues: List[str] = []
     warnings: List[str] = []
 

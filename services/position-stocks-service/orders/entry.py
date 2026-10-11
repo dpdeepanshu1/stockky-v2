@@ -320,6 +320,32 @@ def _count_open_positions(db: Session) -> int:
     )
 
 
+def _recover_ambiguous_buy(db: Session, exc: Exception, security_id: str, quantity: int, symbol: str):
+    """group313: a BUY placement that errored on our side (timeout / dropped connection / gateway 5xx) may still have been
+    accepted by Dhan. Look for it before calling the entry failed: releasing the capital and the symbol claim while a live
+    position exists at the broker leaves it with no tracked stop. Returns (super_order_id, plain_order_id) when a matching
+    young BUY is found, else None (caller keeps its normal failure handling). Never raises."""
+    try:
+        if not dhan_client.is_ambiguous_placement_error(exc):
+            return None
+        known = set()
+        for a, b in db.query(ScalpPosition.dhan_super_order_id, ScalpPosition.dhan_entry_order_id).filter(
+                ScalpPosition.dhan_security_id == str(security_id)).all():
+            known.update(x for x in (a, b) if x)
+        row = dhan_client.find_recent_buy_order(db, security_id, quantity, super_order=bool(config.USE_SUPER_ORDER), exclude_ids=known)
+    except Exception as lookup_e:  # noqa: BLE001
+        logger.warning("position-stocks entry: %s BUY errored (%s) and the Dhan lookup failed too (%s) - treating as failed",
+                       symbol, exc, lookup_e)
+        return None
+    if not row:
+        logger.warning("position-stocks entry: %s BUY errored (%s); no matching young BUY at Dhan - treating as failed", symbol, exc)
+        return None
+    oid = str(row.get("orderId") or row.get("order_id") or row.get("id") or "")
+    logger.error("position-stocks entry: %s BUY errored (%s) BUT Dhan has order %s (qty %s, status %s) - RECOVERED, tracking it "
+                 "instead of releasing capital", symbol, exc, oid, quantity, row.get("orderStatus"))
+    return (oid, None) if config.USE_SUPER_ORDER else (None, oid)
+
+
 def _log_candidate(
     db: Session,
     candidate: Candidate,
@@ -674,85 +700,90 @@ def attempt_entry(
             )
             plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
-        error_msg = str(e)
-        # AUDIT FIX (2026-09-15): classify the BUY-side rejection too — if
-        # Dhan rejects the entry itself as "not allowed to be traded in
-        # Intraday", record the restriction immediately so this symbol is
-        # filtered out of future cycles before capital is ever reserved for
-        # it. Previously, a BUY rejection just fell into the generic
-        # ORDER_FAILED path with no diagnosis and no learning.
-        if dhan_client.is_security_intraday_restricted_error(error_msg):
-            logger.error(
-                "position-stocks entry: BUY rejected — %s is INTRADAY_RESTRICTED "
-                "(T2T/ASM/GSM). Recording restriction to exclude from future cycles. "
-                "Error: %s", candidate.symbol, error_msg,
-            )
-            try:
-                intraday_eligibility.record_restriction(
-                    db, candidate.symbol,
-                    detail=f"BUY rejection: {error_msg[:200]}",
-                )
-            except Exception as rec_e:
-                logger.warning(
-                    "position-stocks entry: could not record restriction for %s: %s",
-                    candidate.symbol, rec_e,
-                )
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_RESTRICTED:{error_msg}", quality=quality)
-        elif dhan_client.is_intraday_cutoff_error(error_msg):
-            logger.warning(
-                "position-stocks entry: BUY rejected — INTRADAY_CUTOFF: exchange window "
-                "closed for today. Will retry tomorrow. Error: %s", error_msg,
-            )
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}", quality=quality)
-        elif dhan_client.is_insufficient_funds_error(error_msg):
-            logger.error(
-                "position-stocks entry: BUY rejected — INSUFFICIENT_FUNDS. "
-                "Error: %s", error_msg,
-            )
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)   # group209
-            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
-        elif dhan_client.is_circuit_limit_error(error_msg):
-            # 2026-09-15 fix (session41b): "Rate Not Within Ckt Limit X To Y"
-            # — the stock has already hit its upper circuit; our BUY price
-            # was outside the allowed band.  Retrying at the same price can
-            # NEVER succeed this session.  Record it as intraday-restricted
-            # (same mechanism as T2T/ASM stocks) so it's excluded from all
-            # future cycles today — a stock at upper circuit has no intraday
-            # exit room even if the BUY did fill.
-            logger.error(
-                "position-stocks entry: BUY rejected — CIRCUIT_LIMIT (stock at upper "
-                "circuit, no intraday exit room). Recording restriction for today. "
-                "Error: %s", error_msg,
-            )
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            try:
-                intraday_eligibility.record_restriction(db, candidate.symbol)
-                logger.info(
-                    "position-stocks entry: %s added to intraday-restricted set (circuit limit)",
-                    candidate.symbol,
-                )
-            except Exception as rec_e:
-                logger.warning(
-                    "position-stocks entry: failed to record circuit-limit restriction for %s: %s",
-                    candidate.symbol, rec_e,
-                )
-            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_CIRCUIT_LIMIT:{error_msg}", quality=quality)
+        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, candidate.symbol)
+        if _rec is not None:
+            dhan_super_order_id, plain_order_id = _rec
+            error_msg = None
         else:
-            logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            entry_pause.cooldown_symbol(candidate.symbol, config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES, error_msg)   # group209
-            _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
-        # AUDIT FIX (session60): every branch above releases capital on a
-        # failed BUY — the symbol claim taken above (before adaptive
-        # levels were even computed) must be released here too, or a
-        # failed order permanently locks this symbol out for this service
-        # (real-trade-service is unaffected either way, since it never
-        # held the lock).
-        shared_symbol_lock.release(db, candidate.symbol)
-        return None
+            error_msg = str(e)
+            # AUDIT FIX (2026-09-15): classify the BUY-side rejection too — if
+            # Dhan rejects the entry itself as "not allowed to be traded in
+            # Intraday", record the restriction immediately so this symbol is
+            # filtered out of future cycles before capital is ever reserved for
+            # it. Previously, a BUY rejection just fell into the generic
+            # ORDER_FAILED path with no diagnosis and no learning.
+            if dhan_client.is_security_intraday_restricted_error(error_msg):
+                logger.error(
+                    "position-stocks entry: BUY rejected — %s is INTRADAY_RESTRICTED "
+                    "(T2T/ASM/GSM). Recording restriction to exclude from future cycles. "
+                    "Error: %s", candidate.symbol, error_msg,
+                )
+                try:
+                    intraday_eligibility.record_restriction(
+                        db, candidate.symbol,
+                        detail=f"BUY rejection: {error_msg[:200]}",
+                    )
+                except Exception as rec_e:
+                    logger.warning(
+                        "position-stocks entry: could not record restriction for %s: %s",
+                        candidate.symbol, rec_e,
+                    )
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_RESTRICTED:{error_msg}", quality=quality)
+            elif dhan_client.is_intraday_cutoff_error(error_msg):
+                logger.warning(
+                    "position-stocks entry: BUY rejected — INTRADAY_CUTOFF: exchange window "
+                    "closed for today. Will retry tomorrow. Error: %s", error_msg,
+                )
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}", quality=quality)
+            elif dhan_client.is_insufficient_funds_error(error_msg):
+                logger.error(
+                    "position-stocks entry: BUY rejected — INSUFFICIENT_FUNDS. "
+                    "Error: %s", error_msg,
+                )
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)   # group209
+                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
+            elif dhan_client.is_circuit_limit_error(error_msg):
+                # 2026-09-15 fix (session41b): "Rate Not Within Ckt Limit X To Y"
+                # — the stock has already hit its upper circuit; our BUY price
+                # was outside the allowed band.  Retrying at the same price can
+                # NEVER succeed this session.  Record it as intraday-restricted
+                # (same mechanism as T2T/ASM stocks) so it's excluded from all
+                # future cycles today — a stock at upper circuit has no intraday
+                # exit room even if the BUY did fill.
+                logger.error(
+                    "position-stocks entry: BUY rejected — CIRCUIT_LIMIT (stock at upper "
+                    "circuit, no intraday exit room). Recording restriction for today. "
+                    "Error: %s", error_msg,
+                )
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                try:
+                    intraday_eligibility.record_restriction(db, candidate.symbol)
+                    logger.info(
+                        "position-stocks entry: %s added to intraday-restricted set (circuit limit)",
+                        candidate.symbol,
+                    )
+                except Exception as rec_e:
+                    logger.warning(
+                        "position-stocks entry: failed to record circuit-limit restriction for %s: %s",
+                        candidate.symbol, rec_e,
+                    )
+                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_CIRCUIT_LIMIT:{error_msg}", quality=quality)
+            else:
+                logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
+                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                entry_pause.cooldown_symbol(candidate.symbol, config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES, error_msg)   # group209
+                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
+            # AUDIT FIX (session60): every branch above releases capital on a
+            # failed BUY — the symbol claim taken above (before adaptive
+            # levels were even computed) must be released here too, or a
+            # failed order permanently locks this symbol out for this service
+            # (real-trade-service is unaffected either way, since it never
+            # held the lock).
+            shared_symbol_lock.release(db, candidate.symbol)
+            return None
 
     # Mark first-live-order done
     if is_first:
@@ -1051,15 +1082,19 @@ def attempt_manual_entry(
             )
             plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, symbol)
-        db.add(ScalpCandidateLog(
-            symbol=symbol, window_source="MANUAL", pct_change=0.0,
-            composite_score=None, decision="SKIPPED",
-            reason=f"MANUAL_ORDER_FAILED:{e}",
-        ))
-        db.commit()
-        raise ManualEntryRejected(f"Dhan rejected the manual BUY: {e}")
+        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, symbol)
+        if _rec is not None:
+            dhan_super_order_id, plain_order_id = _rec
+        else:
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, symbol)
+            db.add(ScalpCandidateLog(
+                symbol=symbol, window_source="MANUAL", pct_change=0.0,
+                composite_score=None, decision="SKIPPED",
+                reason=f"MANUAL_ORDER_FAILED:{e}",
+            ))
+            db.commit()
+            raise ManualEntryRejected(f"Dhan rejected the manual BUY: {e}")
 
     if is_first:
         gate.first_live_order_done = True

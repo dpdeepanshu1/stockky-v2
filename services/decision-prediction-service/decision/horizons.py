@@ -75,7 +75,7 @@ def _age_hours(ts) -> Optional[float]:
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if getattr(ts, "tzinfo", None) is not None:
             ts = ts.replace(tzinfo=None)
-        return max(0.0, (datetime.utcnow() - ts).total_seconds() / 3600.0)
+        return max(0.0, (datetime.now(timezone.utc).replace(tzinfo=None) - ts).total_seconds() / 3600.0)
     except Exception:
         return None
 

@@ -875,8 +875,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             vol = getattr(tick, 'volume', None) or 0
             if vol and tick.price:
                 avg_traded_value = float(vol) * float(tick.price)
-        except Exception:
-            pass
+        except Exception as _atv_err:
+            logger.debug("entry_engine: traded value unavailable for %s (fail-open): %s", getattr(cand, 'symbol', '?'), _atv_err)
 
         intent = OrderIntent(
             mode=mode, symbol=cand.symbol, side="BUY", qty=proposed_qty,

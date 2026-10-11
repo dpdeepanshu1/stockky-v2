@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -87,7 +87,7 @@ class AngelOneSession:
             if (
                 self.token
                 and self.token_expiry
-                and datetime.utcnow() < self.token_expiry
+                and datetime.now(timezone.utc).replace(tzinfo=None) < self.token_expiry
             ):
                 return
             await self._login()
@@ -134,7 +134,7 @@ class AngelOneSession:
             data = body["data"]
             self.token       = data["jwtToken"]
             self.feed_token  = data.get("feedToken")
-            self.token_expiry = datetime.utcnow() + timedelta(hours=20)
+            self.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=20)
             # Log only whether a feed token came back, never any part of it: the feed token is the
             # credential in the WebSocket URL, and an 8-character prefix is still part of a secret.
             logger.info(

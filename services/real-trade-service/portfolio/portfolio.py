@@ -937,8 +937,8 @@ def holdings_sync_reconcile(db: Session) -> dict:
                     _sa = _get(row, "sellAvg", "sell_avg")
                     if _sa is not None and float(_sa) > 0:
                         pos_sell_avg_by_symbol[_k] = float(_sa)
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as _row_err:
+                    logger.warning("portfolio: unreadable broker position row for %s (net=%r) skipped: %s", sym, _net_raw, _row_err)
     broker_symbols: set[str] = set(broker_qty_by_symbol.keys())
 
     now = datetime.now(timezone.utc)

@@ -17,7 +17,7 @@ import logging
 import threading
 import time
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from zoneinfo import ZoneInfo
 
@@ -935,7 +935,7 @@ def get_delivery(symbol: str) -> Dict[str, Any]:
         try:
             hit = fn(sym)
             if hit and hit.get("delivery_pct") is not None:
-                hit["fetched_at"] = datetime.utcnow().isoformat()
+                hit["fetched_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 return hit
         except Exception as e:
             logger.warning("%s failed: %s", fn.__name__, e)
@@ -944,6 +944,6 @@ def get_delivery(symbol: str) -> Dict[str, Any]:
         "delivery_pct": 50.0,
         "source": "fallback_neutral",
         "session_date": None,
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "note": "Official delivery unavailable; neutral placeholder used so scoring never crashes.",
     }

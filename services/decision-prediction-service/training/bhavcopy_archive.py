@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,7 +23,7 @@ ARCHIVE_DIR = Path(os.environ.get("BHAVCOPY_ARCHIVE_DIR", "./archive_parquet"))
 
 
 def cutoff_date() -> datetime:
-    return datetime.utcnow() - timedelta(days=RETENTION_DAYS)
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=RETENTION_DAYS)
 
 
 def archive_dataframe_to_parquet(df, symbol: str, year: int, month: int) -> Optional[Path]:

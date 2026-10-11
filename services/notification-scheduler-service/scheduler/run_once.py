@@ -506,7 +506,7 @@ def store_daily_picks(date_str: str, picks: List[Dict]):
     if existing:
         try:
             existing_picks = json.loads(existing)
-        except:
+        except (ValueError, TypeError):
             existing_picks = []
     else:
         existing_picks = []
@@ -526,7 +526,7 @@ def get_daily_picks(date_str: str) -> List[Dict]:
     if data:
         try:
             return json.loads(data)
-        except:
+        except (ValueError, TypeError):
             return []
     return []
 

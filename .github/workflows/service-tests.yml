@@ -1,30 +1,60 @@
-# Offline unit tests for the two trading services. No secrets, no network, no broker:
+# Offline unit tests for every service. No secrets, no network, no broker:
 # every test runs against in-memory SQLite and scripted fakes (see each service's tests/).
-# A failure here means real order-placement / reconciliation / risk logic changed behaviour.
+# A failure here means real order-placement / reconciliation / risk / scanning logic changed behaviour.
+# group315: was position-stocks + real-trade only; now all seven services, the pinned constraints.txt (when present),
+# and the shared-copy / env-reference checks.
 name: Service unit tests
 
 on:
   push:
     branches: [main, backup-production]
     paths:
-      - "services/position-stocks-service/**"
-      - "services/real-trade-service/**"
+      - "services/**"
+      - "scripts/check_shared_copies.py"
+      - "scripts/shared_copies_baseline.json"
+      - ".env.example"
+      - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
   pull_request:
     paths:
-      - "services/position-stocks-service/**"
-      - "services/real-trade-service/**"
+      - "services/**"
+      - "scripts/check_shared_copies.py"
+      - "scripts/shared_copies_baseline.json"
+      - ".env.example"
+      - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
   workflow_dispatch:
 
 jobs:
+  checks:
+    name: Repo checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: A fix must land in every copy of a duplicated module
+        run: python3 scripts/check_shared_copies.py
+      - name: NSE holiday lists agree
+        run: python3 scripts/check_holiday_lists_sync.py
+
   test:
+    name: ${{ matrix.service }} (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service: [position-stocks-service, real-trade-service]
-        python-version: ["3.11", "3.12"]   # 3.11 = the Dockerfiles, 3.12 = the Ubuntu VM
+        include:
+          - {service: position-stocks-service, python-version: "3.11", tests: "tests"}
+          - {service: position-stocks-service, python-version: "3.12", tests: "tests"}   # 3.11 = the Dockerfiles, 3.12 = the Ubuntu VM
+          - {service: real-trade-service, python-version: "3.11", tests: "tests"}
+          - {service: real-trade-service, python-version: "3.12", tests: "tests"}
+          - {service: market-data-service, python-version: "3.11", tests: "tests"}
+          - {service: analysis-intelligence-service, python-version: "3.11", tests: "tests"}
+          - {service: api-gateway, python-version: "3.11", tests: "tests"}
+          - {service: notification-scheduler-service, python-version: "3.11", tests: "tests"}
+          - {service: decision-prediction-service, python-version: "3.11", tests: "training/tests prediction/tests decision/tests"}
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -35,7 +65,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: services/${{ matrix.service }}/requirements.txt
-      - name: Install
-        run: pip install -r requirements.txt pytest pytest-cov
+      - name: Install (pinned when constraints.txt exists)
+        run: |
+          c=""; [ -f constraints.txt ] && c="-c constraints.txt"
+          pip install -r requirements.txt $c pytest pytest-cov pytest-asyncio pytest-timeout
       - name: Unit tests
-        run: python -m pytest tests -q --cov=. --cov-report=term
+        # decision-prediction keeps its tests in three sub-folders, each with its own conftest / rootdir
+        run: |
+          for d in ${{ matrix.tests }}; do
+            if [ "$d" = "tests" ]; then python -m pytest tests -q --timeout=120; else (cd "$(dirname "$d")" && python -m pytest tests -q --timeout=120); fi
+          done

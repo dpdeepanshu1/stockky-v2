@@ -20,6 +20,7 @@ _ENV_CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get"}
 # Reads whose default is truthy but whose handling is already blank-safe or that are not boolean flags.
 _ALLOWED = {
     "RL_RENAME_DISCOVERY",          # `not in ("0","false",...)`: a blank value is not in the off-list -> stays on
+    "DEAD_PARENT_FILL_CHECK",       # `os.getenv(..., "1").strip() == "0"` (position-stocks reconcile, group 276): only a literal 0 turns it off, blank stays on
 }
 _NUMERIC_HINTS = ("int(", "float(", "_OVERFLOW", "POOL_SIZE")
 

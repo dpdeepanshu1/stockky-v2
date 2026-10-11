@@ -1,6 +1,6 @@
 # Changelog index
 
-Per-session fix notes live in `archive/session-notes/` (one file per
+Per-session1 fix notes live in `archive/session-notes/` (one file per
 session, dated). This file is just an index so they're discoverable
 without 50+ files cluttering the repo root.
 

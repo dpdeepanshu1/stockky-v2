@@ -230,7 +230,7 @@ class TestTodayLossStreak:
 @pytest.fixture()
 def acct(db, monkeypatch):
     monkeypatch.setattr(equity_sync, "sync_real_equity", lambda d: None)
-    monkeypatch.setattr(entry, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(entry, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(entry.shared_exposure, "get_other_service_exposure", lambda d: 0.0)
     # pin the clock the real helper sees, so this can never flake around IST midnight
     real = pf.today_loss_streak

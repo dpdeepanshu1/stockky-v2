@@ -175,6 +175,9 @@ services:
       - .env
     environment:
       API_GATEWAY_URL: http://api-gateway:8000
+      # group320: scheduler asks market-data-service GET /market/session whether the exchange really traded today
+      # (price-based closed-market verdict, fail-open); blank = check off.
+      MARKET_DATA_URL: http://market-data-service:8001
       # 2026-09-17: overnight_orchestrator.py's premarket phase calls
       # decision-prediction-service directly for the one-shot T+1/T+5
       # evaluate-outcomes step (NOT via api-gateway, a different service).

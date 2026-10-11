@@ -73,7 +73,7 @@ def db(monkeypatch):
     s.add(models.TradeRiskConfig(mode="DEMO"))
     s.add(models.TradeRiskConfig(mode="REAL"))
     s.commit()
-    monkeypatch.setattr(me, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(me, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr("execution.equity_sync.sync_real_equity", lambda db_: None)
     yield s
     s.close()

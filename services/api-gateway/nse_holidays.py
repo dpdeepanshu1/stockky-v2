@@ -80,14 +80,39 @@ def _as_calendar_date(d: Union[date, datetime]) -> Union[date, datetime]:
     return d
 
 
+def _today_ist() -> date:
+    return datetime.now(_IST).date()
+
+
+def _closed_by_price(cal: Union[date, datetime]) -> bool:
+    """group320: True only when `cal` is TODAY (IST) and market-data-service saw no stock/Nifty move 09:15-10:00 IST.
+
+    Catches a closure no calendar lists. Never blocks, never raises, fail-open: no verdict / any error = False.
+    A past or future date is never judged by prices (the verdict is day-scoped).
+    """
+    try:
+        if not isinstance(cal, date) or isinstance(cal, datetime):
+            return False
+        if cal != _today_ist():
+            return False
+        from session_proof_client import closed_for_day
+        return bool(closed_for_day(cal.strftime("%Y-%m-%d")))
+    except Exception:
+        return False
+
+
 def is_nse_holiday(d: Union[date, datetime]) -> bool:
-    return _as_calendar_date(d) in _NSE_HOLIDAYS
+    cal = _as_calendar_date(d)
+    return cal in _NSE_HOLIDAYS or _closed_by_price(cal)
 
 
 def holiday_name(d: Union[date, datetime]) -> str | None:
-    if _as_calendar_date(d) not in _NSE_HOLIDAYS:
-        return None
-    return "NSE holiday"
+    cal = _as_calendar_date(d)
+    if cal in _NSE_HOLIDAYS:
+        return "NSE holiday"
+    if _closed_by_price(cal):
+        return "No price movement 09:15-10:00 IST (treated as closed)"
+    return None
 
 
 # group 185: the exchange calendar is a hand-kept set (seven copies in the repo, see scripts/check_holiday_lists_sync.py).

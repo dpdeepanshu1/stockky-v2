@@ -181,8 +181,40 @@ SYSTEM_SERVICES = {
     "training": {"url": TRAINING_URL, "required": False},
 }
 
-app = FastAPI(title="Stockky API Gateway", version="2.5.16")
+# group318: FastAPI deprecated @app.on_event. These two decorators keep what on_event did (handlers run in the order they
+# are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run
+# them from a lifespan. The decorated function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
 
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="Stockky API Gateway", version="2.5.16", lifespan=_lifespan)
 # ── Shared HTTP client (persistent TLS pool across downstream services) ──
 _HTTP_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
 _HTTP_TIMEOUT = httpx.Timeout(90.0, connect=15.0)  # free-tier cold starts; longer connect for Render spin-up
@@ -201,7 +233,7 @@ def _get_http_client() -> httpx.AsyncClient:
     return _shared_http_client
 
 
-@app.on_event("startup")
+@_on_startup
 async def _boot_forensics_startup():
     """Session 72 (#2): classify why the previous process ended (OOM SIGKILL vs clean restart vs recreate)."""
     try:
@@ -211,7 +243,7 @@ async def _boot_forensics_startup():
         logger.debug("boot_forensics unavailable: %s", _bf)
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 async def _boot_forensics_shutdown():
     try:
         import boot_forensics
@@ -220,7 +252,7 @@ async def _boot_forensics_shutdown():
         pass
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_shared_http():
     """Non-blocking startup — UI must never freeze on 'Connecting to Backend...'."""
     global _shared_http_client
@@ -264,7 +296,7 @@ async def _start_shared_http():
         logger.debug("holiday coverage check skipped (non-fatal): %s", e)
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 async def _graceful_shutdown():
     """FastAPI/uvicorn SIGTERM path: commit work, stop loops, close clients."""
     global _shared_http_client, _quote_loop_task
@@ -2548,53 +2580,11 @@ def _normalize_decision_response(raw, symbol: str) -> dict:
     return merged
 
 # ── Value-buying adjustment for top-pick ranking ────────────────────────────
-# A stock priced under Rs 2000 with already-decent fundamentals gets a score
-# bonus (bigger the further under Rs 2000), so a Rs 200 stock with solid
-# fundamentals is favored over a Rs 1900 stock, all else equal. Cheap alone
-# isn't rewarded — only cheap + fundamentally sound. Stocks over Rs 2000 are
-# excluded entirely from "recommendations" (top picks), though they still
-# appear normally in all_results — this only changes which ones get
-# surfaced as headline picks (and what Send Top 5 / notifications send).
-VALUE_PRICE_CAP = 2000.0
-VALUE_BONUS_MAX = 8.0
-VALUE_MIN_FUNDAMENTAL_FOR_BONUS = 50.0
-
-def _value_adjusted_score(r: dict):
-    """Returns (adjusted_score, eligible_for_top_pick).
-    Price > VALUE_PRICE_CAP no longer hard-excludes a name — only removes
-    the cheap-stock bonus. High-score large-caps must still surface as picks.
-    """
-    price = r.get("close")
-    combined = r.get("combined_score", 0) or 0
-    if price is None or price <= 0:
-        return combined, True
-    fundamental = r.get("fundamental_score", 0) or 0
-    bonus = 0.0
-    if price <= VALUE_PRICE_CAP and fundamental >= VALUE_MIN_FUNDAMENTAL_FOR_BONUS:
-        bonus = (1 - price / VALUE_PRICE_CAP) * VALUE_BONUS_MAX
-    return combined + bonus, True
-
-def _select_top_picks(actionable: list, limit: int = 5) -> list:
-    """Value-adjusted ranking for recommendations specifically — the raw
-    combined_score sort on results/all_results is left untouched."""
-    eligible = [r for r in actionable if _value_adjusted_score(r)[1]]
-    eligible.sort(key=lambda r: _value_adjusted_score(r)[0], reverse=True)
-    return eligible[:limit]
-
-def _board_rank_key(row: dict) -> float:
-    """Sort key for a horizon board: the horizon score plus the same cheap-stock
-    value bonus the verdict's `_select_top_picks` uses, so the list people see is
-    ranked the way the verdict counts it. `_hz_score` itself stays the raw score."""
-    try:
-        sc = float(row.get("_hz_score") or 0)
-    except (TypeError, ValueError):
-        sc = 0.0
-    try:
-        combined = float(row.get("combined_score") or 0)
-        bonus = float(_value_adjusted_score(row)[0]) - combined
-    except Exception:
-        bonus = 0.0
-    return sc + bonus
+# Moved to pick_ranking.py (group 320, first step of splitting this file); names re-exported here unchanged.
+from pick_ranking import (  # noqa: E402,F401
+    VALUE_PRICE_CAP, VALUE_BONUS_MAX, VALUE_MIN_FUNDAMENTAL_FOR_BONUS,
+    _value_adjusted_score, _select_top_picks, _board_rank_key,
+)
 
 # ── More precise holding period ─────────────────────────────────────────────
 # decision-engine's holding_period is often a static "2-6 weeks" string, or
@@ -10971,7 +10961,7 @@ def _ensure_jobs_loop():
 #    could keep all of them busy, so every other to_thread call (the health-adjacent DB reads, audits) queued behind
 #    them. GATEWAY_THREAD_POOL (default 32, 0 = leave the default) raises it; the threads are idle most of the time.
 #  - the event-loop stall watchdog (loop_watchdog.py): logs the exact blocking line when the loop stalls > 3 s.
-@app.on_event("startup")
+@_on_startup
 async def _gateway_runtime_tuning():
     try:
         _n = int(((os.getenv("GATEWAY_THREAD_POOL") or "").strip() or "32"))
@@ -11034,7 +11024,7 @@ def _boot_warm_movers_delay_sec() -> float:
 
 
 # ── Startup cache pre-population ──────────────────────────────────────────
-@app.on_event("startup")
+@_on_startup
 async def startup_event():
     """Non-blocking indices warm — never delays app readiness."""
     try:
@@ -11129,7 +11119,7 @@ def _surprise_boot_warm_skip_reason() -> Optional[str]:
     return None
 
 
-@app.on_event("startup")
+@_on_startup
 async def _warm_surprise_scan_cache():
     async def _warm():
         try:
@@ -11179,7 +11169,7 @@ async def _warm_surprise_scan_cache():
 # genuine background task (not awaited, never delays app readiness — same
 # reasoning as the surprise-scan warm above), means the cache is already
 # populated by the time the real pipeline's first cycle asks for it.
-@app.on_event("startup")
+@_on_startup
 async def _warm_momentum_movers_cache():
     async def _warm():
         try:

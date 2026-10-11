@@ -576,10 +576,30 @@ def test_boot_forensics_shutdown_marks_clean_and_swallows_errors(monkeypatch):
 
 
 def test_lifecycle_hooks_are_registered_on_the_app():
-    startup = {f.__name__ for f in gw.app.router.on_startup}
-    shutdown = {f.__name__ for f in gw.app.router.on_shutdown}
+    # group318: hooks are registered by @_on_startup / @_on_shutdown and run from the app's lifespan (FastAPI deprecated on_event)
+    startup = {f.__name__ for f in gw._STARTUP_HOOKS}
+    shutdown = {f.__name__ for f in gw._SHUTDOWN_HOOKS}
     assert {"_boot_forensics_startup", "_start_shared_http"} <= startup
     assert {"_boot_forensics_shutdown", "_graceful_shutdown"} <= shutdown
+    assert gw.app.router.lifespan_context is not None and not gw.app.router.on_startup
+
+
+def test_lifespan_runs_startup_hooks_in_declaration_order_then_shutdown_hooks(monkeypatch):
+    order = []
+    monkeypatch.setattr(gw, "_STARTUP_HOOKS", [lambda: order.append("sync-up"), _async_marker(order, "async-up")])
+    monkeypatch.setattr(gw, "_SHUTDOWN_HOOKS", [_async_marker(order, "async-down"), lambda: order.append("sync-down")])
+
+    async def go():
+        async with gw._lifespan(gw.app):
+            order.append("serving")
+    _run(go())
+    assert order == ["sync-up", "async-up", "serving", "async-down", "sync-down"]
+
+
+def _async_marker(order, name):
+    async def h():
+        order.append(name)
+    return h
 
 
 class _StartupFakes:

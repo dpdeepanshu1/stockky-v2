@@ -426,7 +426,7 @@ async def _fast_reconcile_loop() -> None:
             # so the stored figures never wait for a dashboard read or the 3-day retention job.
             with factory() as db:
                 await asyncio.to_thread(charges_ledger.sync_throttled, db)
-            if not is_market_open_ist():
+            if not is_market_open_ist(honor_session_proof=False):   # group321: exit reconcile / EOD never wait on the price verdict
                 continue
             with factory() as db:
                 try:
@@ -819,6 +819,19 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                detail=f"After {_NO_ENTRY_AFTER.hour:02d}:{_NO_ENTRY_AFTER.minute:02d} IST — "
                       "too close to EOD to enter new positions")
         return _finalize()
+    # group321: the loop above now runs on the calendar alone (so exit reconcile / EOD square-off never wait on the price-based
+    # closed verdict); NEW entries still honour it.
+    _proof_closed = False
+    if trigger == "AUTO":
+        try:
+            from session_proof_client import closed_for_day as _closed_for_day
+            _proof_closed = bool(_closed_for_day(ist_today_str()))
+        except Exception:
+            _proof_closed = False        # fail open, like every other use of the verdict
+    if _proof_closed:
+        summary["skipped_reason"] = "MARKET_CLOSED_PRICE_PROOF"
+        _stage("gate_checks", "Gate Checks", _t, detail="Price-based check says the exchange did not trade today — no new entries")
+        return _finalize()
     _stage("gate_checks", "Gate Checks", _t, detail="service_enabled + armed + before EOD — cleared to screen")
 
     # BUG FIX (session52 audit — "why is the scalp pool always starved of
@@ -1158,7 +1171,7 @@ async def _trading_loop() -> None:
             # tripped breaker can never silently skip the unconditional
             # exit-reconciliation / EOD-squareoff steps. See _run_cycle()'s
             # entry-attempt block for the full reasoning.
-            if not is_market_open_ist():
+            if not is_market_open_ist(honor_session_proof=False):   # group321: the cycle also reconciles exits + EOD; entries re-check below
                 continue
 
             factory = _db.get_session_factory()
@@ -2239,6 +2252,11 @@ def board_shadow_report(days: int = 30, db: Session = Depends(get_db)):
                               config.BOARD_PARAMS_VERSION)
     out["days"] = days
     out["gate_mode"] = config.BOARD_GATE_MODE
+    try:
+        from orders import board_gate as _bg
+        out["effective_gate_mode"] = _bg.effective_mode()
+    except Exception:  # noqa: BLE001
+        out["effective_gate_mode"] = None
     return out
 
 

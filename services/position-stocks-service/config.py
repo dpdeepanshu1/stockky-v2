@@ -646,6 +646,11 @@ ENTRY_DEPTH_TIMEOUT_S = _get_float("ENTRY_DEPTH_TIMEOUT_S", 2.0)
 # (allow = use it as before, refuse = treat as unknown depth).
 ENTRY_DEPTH_MAX_QUOTE_AGE_S = _get_float("ENTRY_DEPTH_MAX_QUOTE_AGE_S", 20.0)
 ENTRY_DEPTH_QUOTE_AGE_UNKNOWN = (os.getenv("ENTRY_DEPTH_QUOTE_AGE_UNKNOWN") or "allow").strip().lower()
+# group322: no depth reading for a symbol (no answer, timeout, quote without a book). "allow" = enter anyway (old behaviour);
+# "refuse" = never without a reading; "auto" (default) = allow until depth has been seen flowing, then refuse a name with none.
+# ENTRY_DEPTH_PROVEN_WINDOW_S = how long a seen reading counts as "flowing" (21600 = 6 h, 0 = whole process).
+ENTRY_DEPTH_MISSING = (os.getenv("ENTRY_DEPTH_MISSING") or "auto").strip().lower()
+ENTRY_DEPTH_PROVEN_WINDOW_S = _get_float("ENTRY_DEPTH_PROVEN_WINDOW_S", 21600.0)
 # group283 (plan C3, size down): cap an entry's order value at ENTRY_BOOK_MAX_SHARE_PCT % of ONE side of the best-5 book
 # (book_value_5 / 2), so a small cap's order does not eat its own touch. 0 = off (default). Unknown depth never shrinks.
 # Needs ENTRY_DEPTH_GATE on (it reuses the same market-data /quote read).
@@ -856,9 +861,14 @@ BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)
-BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "shadow").lower()
-if BOARD_GATE_MODE not in ("off", "shadow", "enforce"):
-    BOARD_GATE_MODE = "shadow"
+# group322: "auto" (default) = shadow until the shadow report's written promotion rule for the chase guard is met (BOARD_PROMOTE_MIN_OBS
+# observations over BOARD_PROMOTE_MIN_SESSIONS sessions, bootstrap CI says what it blocks does clearly worse), then enforce; re-checked
+# every BOARD_AUTO_REFRESH_S over the last BOARD_AUTO_DAYS days and drops back to shadow if the verdict stops holding.
+BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "auto").lower()
+if BOARD_GATE_MODE not in ("off", "shadow", "enforce", "auto"):
+    BOARD_GATE_MODE = "auto"
+BOARD_AUTO_REFRESH_S = max(60, _get_int("BOARD_AUTO_REFRESH_S", 3600))
+BOARD_AUTO_DAYS = max(1, min(120, _get_int("BOARD_AUTO_DAYS", 30)))
 BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours
 BOARD_LOG_TOP_N = max(1, _get_int("BOARD_LOG_TOP_N", 20))                           # rows per side per snapshot
 BOARD_CONVICTION_WEIGHTS = _get_str("BOARD_CONVICTION_WEIGHTS", "")                 # "strength=0.5,volume=0.2,..." (optional)

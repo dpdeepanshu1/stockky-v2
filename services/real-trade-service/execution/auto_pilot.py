@@ -489,7 +489,8 @@ async def _exit_only_tick_body(mode: str) -> None:
     db = Session()
     try:
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
-        if not is_market_open_ist():
+        # group321: protective exits use the calendar + clock only; the price-based "closed" verdict gates entries, never stops.
+        if not is_market_open_ist(honor_session_proof=False):
             return
 
         # ── Protective exits: always run during market hours ─────────────────
@@ -927,6 +928,22 @@ def _overnight_hold_enabled(db, mode: str) -> bool:
     return config.OVERNIGHT_HOLD_ENABLED
 
 
+def _carry_gain_ok(entry_price, ltp) -> bool:
+    """group322: True when the unrealised gain over entry reaches config.OVERNIGHT_HOLD_MIN_GAIN_PCT (0 = no bar).
+    Unreadable prices fail closed (not carried)."""
+    try:
+        bar = float(getattr(config, "OVERNIGHT_HOLD_MIN_GAIN_PCT", 0.0) or 0.0)
+        if bar <= 0:
+            return True
+        e = float(entry_price or 0)
+        if e <= 0:
+            return False
+        # round: 101.5/100 - 1 is 1.4999999999999..., which would miss an exact 1.5% bar by float noise
+        return round((float(ltp) / e - 1.0) * 100.0, 6) >= bar
+    except Exception:
+        return False
+
+
 async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, dict]:
     """2026-09-18 fix (user audit finding): _eod_squareoff used to flatten
     EVERY open position unconditionally, discarding candidate_engine's own
@@ -1006,6 +1023,8 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
                     continue
             elif ltp < (p.avg_entry_price or 0):
                 continue
+            if not _carry_gain_ok(p.avg_entry_price, ltp):
+                continue            # group322: gain too small to pay for the carry (delivery costs + gap risk)
 
         dh = getattr(tick, "day_high", None)
         dl = getattr(tick, "day_low", None)
@@ -1576,7 +1595,7 @@ async def _schedule_tick_body(mode: str) -> None:
         if (
             getattr(gate, "eod_squareoff_enabled", False)
             and getattr(gate, "eod_squareoff_last_run", None) != today
-            and is_market_open_ist()
+            and is_market_open_ist(honor_session_proof=False)   # group321: square-off must not depend on the price verdict
             and ist_time_at_or_after(parse_hhmm(config.EOD_SQUAREOFF_TIME_IST, 15, 0))
         ):
             gate.eod_squareoff_last_run = today

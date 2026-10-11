@@ -2,8 +2,8 @@
 
 The scalper's own AngelOne feed only carries the best bid / ask. market-data-service /quote carries Dhan's 5-level book
 (`spread_pct`, `book_value_5` = both sides, Rs). This asks it once, right before capital is reserved, and refuses a name
-whose spread is too wide or whose book is too thin. Fails OPEN on everything: no answer, a timeout, a bad body, a quote
-without depth. Never raises. Answers are cached for a few seconds so one cycle does not ask twice for the same symbol.
+whose spread is too wide or whose book is too thin. Fails OPEN on a bad body / error; with no depth reading it follows ENTRY_DEPTH_MISSING (group322: "auto" refuses a name
+without depth once depth has been seen flowing, see _missing_depth_reason). Never raises. Answers are cached for a few seconds so one cycle does not ask twice for the same symbol.
 
 group292: a /quote row carries its real age (`age_s`, built by market-data when it answered, group 289). A book older
 than ENTRY_DEPTH_MAX_QUOTE_AGE_S (default 20 s, 0 = off) is re-read once; if it is still that old it counts as UNKNOWN
@@ -24,6 +24,8 @@ logger = logging.getLogger("position-stocks-depth-gate")
 
 _CACHE_TTL_S = 5.0
 _cache: dict = {}
+# group322: when a real depth reading (spread or book) last arrived from market-data. 0 = never since this process started.
+_depth_proven_at: float = 0.0
 
 
 def _num(v) -> Optional[float]:
@@ -112,6 +114,32 @@ def _fresh_quote(symbol: str) -> Optional[dict]:
         return None
 
 
+def _mark_depth_proven() -> None:
+    global _depth_proven_at
+    _depth_proven_at = time.time()
+
+
+def _missing_depth_reason(symbol: str) -> Optional[str]:
+    """group322: what to do when no depth reading is available for `symbol` (no answer, timeout, quote without a book).
+
+    ENTRY_DEPTH_MISSING: "allow" = enter anyway (the old behaviour, protects nothing); "refuse" = never enter without a
+    reading; "auto" (default) = allow until depth data has been seen flowing, then refuse a name that has none, so the gate
+    protects as soon as it can and a depth feed that never worked (unverified layout) does not stop every entry. The
+    "flowing" proof lasts ENTRY_DEPTH_PROVEN_WINDOW_S (default 6 h, 0 = for the whole process). Never raises."""
+    try:
+        mode = str(getattr(config, "ENTRY_DEPTH_MISSING", "auto") or "auto").strip().lower()
+        if mode in ("allow", "0", "false", "off", "no"):
+            return None
+        if mode != "refuse":
+            window = float(getattr(config, "ENTRY_DEPTH_PROVEN_WINDOW_S", 21600.0) or 0.0)
+            seen = _depth_proven_at
+            if seen <= 0 or (window > 0 and time.time() - seen > window):
+                return None
+        return f"DEPTH_MISSING:no spread / book reading for {symbol} (ENTRY_DEPTH_MISSING={mode})"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def reject_reason(symbol: str) -> Optional[str]:
     """A skip reason ("DEPTH_SPREAD:..." / "DEPTH_THIN_BOOK:...") or None when the entry may go ahead."""
     try:
@@ -122,11 +150,12 @@ def reject_reason(symbol: str) -> Optional[str]:
         if max_spread <= 0 and min_book <= 0:
             return None
         q = _fresh_quote(symbol)
-        if not q:
-            return None
-        spread = _num(q.get("spread_pct"))
-        book = _num(q.get("book_value_5"))
-        src = q.get("source") or "?"
+        spread = _num(q.get("spread_pct")) if q else None
+        book = _num(q.get("book_value_5")) if q else None
+        src = (q.get("source") if q else None) or "?"
+        if spread is None and book is None:
+            return _missing_depth_reason(symbol)
+        _mark_depth_proven()
         if max_spread > 0 and spread is not None and spread > max_spread:
             return f"DEPTH_SPREAD:{spread:.2f}% > {max_spread:.2f}% (src={src})"
         if min_book > 0 and book is not None and book < min_book:

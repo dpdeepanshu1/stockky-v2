@@ -125,7 +125,16 @@ def is_market_open() -> bool:
         return False
     if now.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:  # group 140: weekday holiday = closed
         return False
-    return dtime(9, 15) <= now.time() <= dtime(15, 30)
+    if not (dtime(9, 15) <= now.time() <= dtime(15, 30)):
+        return False
+    # group320: no stock/Nifty move 09:15-10:00 IST = the exchange never traded today (unlisted closure). Fail-open.
+    try:
+        from session_proof_client import closed_for_day
+        if closed_for_day(now.strftime("%Y-%m-%d")):
+            return False
+    except Exception:
+        pass
+    return True
 
 def get_cache_ttl() -> int:
     return 300 if is_market_open() else 21600

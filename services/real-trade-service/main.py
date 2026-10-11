@@ -81,7 +81,49 @@ def _quiet_noisy_loggers() -> None:
 
 _quiet_noisy_loggers()
 
-app = FastAPI(title="Stockky Real Automatic Trade", version="0.1.0-phase1")
+# group318: FastAPI deprecated @app.on_event. These two decorators keep what on_event did (handlers run in the order they
+# are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run
+# them from a lifespan. The decorated function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+async def _commit_off_loop(db) -> None:
+    """group319: db.commit() from an `async def` route used to run ON the shared event loop, so one slow commit
+    (remote Oracle/Neon round trip) stalled /health and every other route. The trading engine ticks already run on their
+    own worker threads (auto_pilot.py note 4); these operator routes did not. A Session is used by one request at a time,
+    so handing it to a worker thread for the commit is safe (same pattern as the other to_thread routes here)."""
+    import asyncio as _aio
+    await _aio.to_thread(db.commit)
+
+
+app = FastAPI(title="Stockky Real Automatic Trade", version="0.1.0-phase1", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],   # tightened at the gateway/proxy layer, same as other Stockky services
@@ -90,7 +132,7 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
+@_on_startup
 async def _boot_forensics_startup():
     """Session 72 (#2): classify why the previous process ended (OOM SIGKILL vs clean restart vs recreate)."""
     try:
@@ -102,7 +144,7 @@ async def _boot_forensics_startup():
         logger.debug("boot_forensics unavailable: %s", _bf)
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 async def _boot_forensics_shutdown():
     try:
         import boot_forensics
@@ -111,7 +153,7 @@ async def _boot_forensics_shutdown():
         pass
 
 
-@app.on_event("startup")
+@_on_startup
 async def startup() -> None:
     # Auto-Pilot (2026-08-27): a single asyncio background task IS started
     # here — execution/auto_pilot.py — but it is inert by default. It only
@@ -198,7 +240,7 @@ async def startup() -> None:
     logger.info("real-trade-service ready (adaptive thresholds + all improvements active)")
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 async def shutdown() -> None:
     # Best-effort final ATR cache flush (2026-09-12) so a graceful stop/deploy
     # doesn't lose the up-to-_ATR_FLUSH_EVERY-1 most recent ATR updates that
@@ -596,7 +638,7 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     gate.admin_authenticated = True
     gate.admin_authenticated_at = datetime.now(timezone.utc)
     gate.admin_session_expires_at = expires_at
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=body.username, action="ADMIN_LOGIN")
     return {"token": token, "expires_at": expires_at.isoformat()}
 
@@ -624,7 +666,7 @@ async def logout(admin: str = Depends(require_admin), db: Session = Depends(get_
     # running through market hours with the dashboard closed.
     gate = _gate(db, "REAL")
     gate.admin_authenticated = False
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin, action="ADMIN_LOGOUT")
     return {"ok": True}
 
@@ -636,7 +678,7 @@ async def connect_dhan(body: ConnectDhanRequest, admin: str = Depends(require_ad
     gate = _gate(db, "REAL")
     gate.dhan_connected = True
     gate.dhan_connected_at = datetime.now(timezone.utc)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin, action="DHAN_CONNECTED", detail=row.dhan_client_id_masked, mode="REAL")
     return dhan_credentials.connection_status(db)
 
@@ -881,7 +923,7 @@ async def update_risk_config(body: RiskConfigUpdate, authorization: str = Header
             setattr(risk, field, val)
     risk.updated_by = admin or "demo-user"
     risk.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin or "demo-user", action="RISK_CONFIG_UPDATED", mode=mode, detail=str(body.model_dump(exclude_none=True)))
     return {"ok": True}
 
@@ -892,7 +934,7 @@ async def confirm_risk_config(mode: str, admin: Optional[str] = Depends(require_
     gate = _gate(db, mode)
     gate.risk_config_confirmed = True
     gate.risk_config_confirmed_at = datetime.now(timezone.utc)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin, action="RISK_CONFIG_CONFIRMED", mode=mode)
     return {"ok": True}
 
@@ -924,7 +966,7 @@ async def arm(mode: str, admin: Optional[str] = Depends(require_admin_if_real), 
     gate.armed = True
     gate.armed_at = datetime.now(timezone.utc)
     gate.disarmed_reason = None
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin or "demo-user", action="ARMED", mode=mode)
     return {"ok": True, "armed": True, "mode": mode}
 
@@ -1063,7 +1105,7 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         mode=mode, symbol=body.symbol.upper(), check_name=result.check_name,
         verdict=result.verdict.value, detail=result.reason,
     ))
-    db.commit()
+    await _commit_off_loop(db)
     return {
         "verdict": result.verdict.value,
         "check_name": result.check_name,
@@ -1234,7 +1276,7 @@ async def add_manual_candidate(
         signal_price=body.signal_price,
     )
     db.add(row)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin or "admin", action="MANUAL_CANDIDATE", mode=mode,
                detail=f"{symbol} queued from Scan Market page")
     return {"ok": True, "mode": mode, "symbol": symbol, "queued": True}
@@ -1524,7 +1566,7 @@ async def reset_starting_capital(
         raise HTTPException(status_code=404, detail=f"No account found for mode {mode}")
     old = account.starting_capital
     account.starting_capital = round(req.starting_capital, 2)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin, action="RESET_STARTING_CAPITAL", mode=mode,
                detail=f"old={old} new={account.starting_capital}")
     logger.info(
@@ -1554,7 +1596,7 @@ async def autopilot_enable(mode: str, admin: Optional[str] = Depends(require_adm
     gate = _gate(db, mode)
     gate.auto_pilot_enabled = True
     gate.auto_pilot_enabled_at = datetime.now(timezone.utc)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin or "demo-user", action="AUTOPILOT_ENABLED", mode=mode)
     return {"ok": True, "mode": mode, "auto_pilot_enabled": True}
 
@@ -1566,7 +1608,7 @@ async def autopilot_disable(mode: str, admin: Optional[str] = Depends(require_ad
         raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
     gate = _gate(db, mode)
     gate.auto_pilot_enabled = False
-    db.commit()
+    await _commit_off_loop(db)
     log_action(db, actor=admin or "demo-user", action="AUTOPILOT_DISABLED", mode=mode)
     return {"ok": True, "mode": mode, "auto_pilot_enabled": False}
 
@@ -1625,7 +1667,7 @@ async def set_feature(mode: str, body: FeatureToggleRequest,
     gate = _gate(db, mode)
     setattr(gate, enabled_col, bool(body.enabled))
     setattr(gate, enabled_at_col, datetime.now(timezone.utc) if body.enabled else None)
-    db.commit()
+    await _commit_off_loop(db)
     log_action(
         db, actor=admin or "demo-user",
         action=f"FEATURE_{feature.upper()}_{'ENABLED' if body.enabled else 'DISABLED'}",
@@ -2558,7 +2600,7 @@ async def manual_cancel_order(
         order.status = "CANCELLED"
         order.updated_at = datetime.now(timezone.utc)
         db.add(models.TradeOrderEvent(order_id=order.id, event_type="CANCELLED", detail="Manually cancelled by admin"))
-        db.commit()
+        await _commit_off_loop(db)
         log_action(db, actor=admin or "admin", action="MANUAL_CANCEL", mode=mode, detail=f"order {order.id} ({order.symbol})")
         return {"ok": True, "mode": mode, "order_id": order.id, "status": "CANCELLED"}
     finally:

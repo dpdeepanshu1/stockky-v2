@@ -95,7 +95,7 @@ def test_a_db_error_fails_open():
 @pytest.fixture()
 def acct(db, monkeypatch):
     monkeypatch.setattr(equity_sync, "sync_real_equity", lambda d: None)
-    monkeypatch.setattr(entry, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(entry, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(entry.shared_exposure, "get_other_service_exposure", lambda d: 0.0)
     for mode in ("REAL", "DEMO"):
         db.add(models.TradeAccount(mode=mode, starting_capital=100_000.0, current_equity=90_000.0,
@@ -116,7 +116,7 @@ def test_entry_account_state_includes_a_working_buy_and_a_held_position(db, acct
 
 
 def test_manual_account_state_includes_a_working_buy(db, acct, monkeypatch):
-    monkeypatch.setattr(manual_engine, "is_market_open_ist", lambda: True, raising=False)
+    monkeypatch.setattr(manual_engine, "is_market_open_ist", lambda *a, **k: True, raising=False)
     order(db, "AAA")
     assert "AAA" in manual_engine._account_state(db, "REAL", gate_armed=True).open_position_symbols
 

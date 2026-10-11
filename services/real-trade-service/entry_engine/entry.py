@@ -194,7 +194,8 @@ def _resolve_cost_gate_knobs(db: Session, mode: str) -> tuple[float, float]:
     admin explicitly overrides one via the dashboard."""
     try:
         risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
-    except Exception:
+    except Exception as e:
+        logger.warning("entry: could not read the %s risk config (%s) - using built-in minimum trade value", mode, e)
         risk = None
     min_trade_value = (
         risk.min_trade_value if risk is not None and risk.min_trade_value is not None
@@ -1922,7 +1923,8 @@ def _held_symbols_for_trigger(db, mode: str) -> set:
         if risk is not None and risk.allow_pyramiding:
             return set()
         return {p.symbol for p in held_exposure_positions(db, mode)}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("watchlist trigger[%s]: held-symbol lookup failed (%s) - not skipping held symbols this pass", mode, e)
         return set()
 
 

@@ -1153,6 +1153,7 @@ def place_order(
     product_type: str = "CNC",
     validity: str = "DAY",
     tag: Optional[str] = None,
+    trigger_price: Optional[float] = None,
 ) -> dict:
     """Places a REAL order. is_armed MUST be True — second lock per module docstring.
 
@@ -1255,6 +1256,23 @@ def place_order(
                 f"unreachable; report as a bug in the caller's price math."
             )
 
+    # group322: STOP_LOSS / STOP_LOSS_MARKET carry a trigger price (broker-side stop, execution/broker_stop.py). Only sent when
+    # given, so every existing MARKET / LIMIT call builds exactly the same SDK request as before.
+    _extra: dict = {}
+    if trigger_price is not None:
+        if order_type not in ("STOP_LOSS", "STOP_LOSS_MARKET"):
+            raise ValueError(f"trigger_price only applies to STOP_LOSS / STOP_LOSS_MARKET orders, not {order_type}")
+        trigger_price = round_to_tick(trigger_price)
+        if not trigger_price or trigger_price <= 0:
+            raise ValueError("a stop order needs a positive trigger price")
+        if order_type == "STOP_LOSS_MARKET":
+            price = 0.0
+        elif price:
+            price = round_to_tick(price)
+        _extra["trigger_price"] = trigger_price
+    elif order_type in ("STOP_LOSS", "STOP_LOSS_MARKET"):
+        raise ValueError(f"{order_type} needs a trigger_price")
+
     outbound = {
         "security_id": security_id,
         "exchange_segment": exchange_segment,
@@ -1265,6 +1283,7 @@ def place_order(
         "price": price,
         "validity": validity,
         "tag": tag,
+        **_extra,
     }
     # Full outbound payload, logged BEFORE the SDK call — this is the
     # exact set of fields this function is asking the SDK to place, so a
@@ -1282,6 +1301,7 @@ def place_order(
         price=price,
         validity=validity,
         tag=tag,
+        **_extra,
     )
     result = _extract_data(resp) or {}
 

@@ -63,6 +63,11 @@ _stats = {"connected": False, "connects": 0, "packets": 0, "bid_packets": 0, "as
           "last_disconnect_code": None}
 _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
+# group322: layout self-check. Raw frame heads (bytes only, no token) so one live capture can be read from
+# /internal/dhan-status without a debugger; books that are not sane (wrong side order, crossed) are counted and NOT used.
+_SAMPLE_KEEP = 5
+_frame_samples: List[dict] = []
+_stats.update({"suspect_packets": 0, "crossed_books": 0, "messages": 0})
 
 
 # ── packet parsing (pure, tested with struct.pack) ──────────────────────────────────────────────────────────────
@@ -196,12 +201,64 @@ def summarize(bids: List[tuple], asks: List[tuple], qty: Optional[float] = None,
 
 
 # ── state ────────────────────────────────────────────────────────────────────────────────────────────────────────
+def levels_sane(levels, kind: str) -> bool:
+    """group322: True when one side of a book looks like a book: prices positive and finite, best level first (bids
+    never rising, asks never falling). A wrong byte order or header offset produces garbage that fails this, so the
+    packet is dropped (depth stays "warming" and callers carry on without it) instead of sizing an order on nonsense.
+    An empty side is sane (nothing to judge)."""
+    try:
+        last = None
+        for lv in levels or []:
+            price = float(lv[0])
+            if not math.isfinite(price) or price <= 0:
+                return False
+            if last is not None and ((kind == "bid" and price > last) or (kind == "ask" and price < last)):
+                return False
+            last = price
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def note_frame(data, tag: str = "frame", force: bool = False) -> None:
+    """group322: remember the first few raw frames (and any that did not parse) as {len, head_hex, tag, at}. 24 bytes
+    covers the 12-byte header and the first price. Never raises."""
+    try:
+        with _lock:
+            if not force and len(_frame_samples) >= 3:
+                return
+            _frame_samples.append({"tag": tag, "len": len(data), "head_hex": bytes(data[:24]).hex(), "at": time.time()})
+            del _frame_samples[:-_SAMPLE_KEEP]
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def layout_verdict(st: Optional[dict] = None) -> str:
+    """group322: "unverified" (no depth packet seen yet), "ok" (books applied, nothing bad), "suspect" (bad / unknown /
+    insane / crossed packets and few or no good ones - the byte layout in the module docstring is probably wrong)."""
+    st = st if st is not None else _stats
+    good = int(st.get("bid_packets", 0)) + int(st.get("ask_packets", 0)) - int(st.get("suspect_packets", 0))
+    unknown = sum((st.get("unknown_codes") or {}).values())
+    bad = int(st.get("bad_packets", 0)) + int(st.get("suspect_packets", 0)) + unknown + int(st.get("crossed_books", 0))
+    if int(st.get("messages", 0)) == 0:
+        return "unverified"
+    if good > 0 and bad * 4 <= good:
+        return "ok"
+    return "suspect" if bad > 0 else "unverified"
+
+
 def apply_packet(pkt: dict, now_mono: Optional[float] = None) -> Optional[str]:
     """Store one parsed bid/ask packet. Returns the symbol key it updated, or None (unknown instrument / empty)."""
     kind = pkt.get("kind")
     if kind not in ("bid", "ask"):
         return None
     now = time.monotonic() if now_mono is None else now_mono
+    if not levels_sane(pkt.get("levels"), kind):
+        with _lock:
+            _stats["suspect_packets"] += 1
+        logger.warning("dhan depth20: dropped a %s packet whose levels are not a sane book (check the byte layout; "
+                       "see frame_samples in /internal/dhan-status)", kind)
+        return None
     with _lock:
         key = _rev.get((pkt.get("segment"), pkt.get("security_id")))
         if key is None or key not in _wanted:
@@ -303,6 +360,9 @@ def _snapshot(key: str, qty, slip_pct) -> Optional[dict]:
             return None
         bids, asks = list(b["bids"]), list(b["asks"])
         age = time.monotonic() - min(b["bid_at"], b["ask_at"])
+        if bids and asks and bids[0][0] >= asks[0][0]:        # group322: crossed / locked = two sides from different moments
+            _stats["crossed_books"] += 1
+            return None
     s = summarize(bids, asks, qty, slip_pct)
     if s is None:
         return None
@@ -356,6 +416,8 @@ async def _session() -> None:
                 continue
             with _lock:
                 _stats["last_packet_at"] = time.time()
+                _stats["messages"] += 1
+            note_frame(msg)
             for pkt in parse_message(msg):
                 kind = pkt["kind"]
                 with _lock:
@@ -373,10 +435,12 @@ async def _session() -> None:
                         raise DhanRateLimitError("depth feed sent disconnect code 805 (too many connections)")
                     raise RuntimeError(f"depth feed sent disconnect code {pkt.get('reason')}")
                 elif kind == "unknown":
+                    note_frame(msg, "unknown_code", force=True)
                     with _lock:
                         uc = _stats["unknown_codes"]
                         uc[str(pkt.get("code"))] = uc.get(str(pkt.get("code")), 0) + 1
                 else:
+                    note_frame(msg, "bad", force=True)
                     with _lock:
                         _stats["bad_packets"] += 1
 
@@ -444,6 +508,8 @@ def status() -> dict:
         out["unknown_codes"] = dict(_stats["unknown_codes"])
         out["watching"] = sorted(_wanted.keys())
         out["books"] = len(_books)
+        out["frame_samples"] = list(_frame_samples)
+    out["layout_verdict"] = layout_verdict(out)
     out["enabled"] = config.depth20_enabled()
     out["max_instruments"] = min(config.depth20_max_instruments(), MAX_INSTRUMENTS)
     return out
@@ -451,7 +517,7 @@ def status() -> dict:
 
 def _reset_for_tests() -> None:
     with _lock:
-        _wanted.clear(); _books.clear(); _rev.clear()
+        _wanted.clear(); _books.clear(); _rev.clear(); _frame_samples.clear()
         for k, v in list(_stats.items()):
             if isinstance(v, dict):
                 _stats[k] = {}

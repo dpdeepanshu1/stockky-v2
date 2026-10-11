@@ -37,3 +37,13 @@ def _board_gate_off_by_default(monkeypatch):
     import config as _config
     monkeypatch.setattr(_config, "BOARD_GATE_MODE", "off", raising=False)
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _reset_depth_proven():
+    """group322: orders/depth_gate remembers (process-wide) that depth data has been seen; never let one test's reading
+    switch on the 'refuse a name without depth' rule for the next test."""
+    from orders import depth_gate as _dg
+    _dg._depth_proven_at = 0.0
+    yield
+    _dg._depth_proven_at = 0.0

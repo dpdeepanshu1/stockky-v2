@@ -107,7 +107,40 @@ def _install_httpx_secret_filter() -> None:
 
 _install_httpx_secret_filter()
 
-app = FastAPI(title="Stockky Notification Service", version="0.5.0")
+# group318: FastAPI deprecated @app.on_event. These two decorators keep what on_event did (handlers run in the order they
+# are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run
+# them from a lifespan. The decorated function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="Stockky Notification Service", version="0.5.0", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 CONFIG_KEY = "stockky:notification_config"
@@ -978,7 +1011,7 @@ def neon_keepalive_endpoint():
     return _neon_select_1()
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_neon_keepalive_loop():
     """Background loop so Neon stays warm even without external cron."""
     import asyncio

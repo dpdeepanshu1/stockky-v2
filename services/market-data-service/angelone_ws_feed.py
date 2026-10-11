@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from market_hours import is_feed_window_ist
+import session_proof
 
 
 _UNRESOLVED_NAMES_MAX = 20
@@ -82,6 +83,7 @@ _generation = 0
 # How often an idling (outside market hours) loop rechecks whether the
 # window has opened. Cheap — just a datetime compare, no upstream call.
 IDLE_RECHECK_S = 60.0
+SESSION_CLOSED_PROBE_S = float(os.getenv("SESSION_CLOSED_PROBE_S", "300") or 300)  # group319
 
 # How often a full poll cycle restarts once it finishes the whole universe.
 # The file itself only updates once/day, but this governs freshness of
@@ -371,6 +373,7 @@ def _on_tick_sync(tick: dict, write_db: bool = True):
             "ts":         time.time(),   # cheap float for staleness math, mirrors yahoo_ws_feed.py
             "source":     "angelone_ws",
         }
+    session_proof.observe(sym, ltp)   # group319: price-based proof the exchange is really trading today
     if not write_db:
         return (sym, ltp, o, h, l, c, vol)
     _upsert_tick_sync(sym, ltp, o, h, l, c, vol)
@@ -633,6 +636,7 @@ def start_feed_background(symbols: list) -> None:
 
             async def _poll_forever():
                 was_idle = False
+                was_closed = False
                 while _current():
                     # 2026-09-01 fix: this loop used to poll AngelOne for the
                     # whole universe every ~3s, 24/7, with no market-hours
@@ -657,6 +661,25 @@ def start_feed_background(symbols: list) -> None:
                     await _poll_cycle()
                     elapsed = time.time() - cycle_start
                     _note_cycle(elapsed, len(tokens))
+                    # group320: feed the Nifty index into the closed-market proof (rate-limited inside probe_nifty).
+                    try:
+                        await asyncio.to_thread(session_proof.probe_nifty)
+                    except Exception:
+                        pass
+                    # group319: the 09:15-10:00 price check says the exchange never traded today (an unlisted
+                    # holiday / closure). Keep probing, slowly, so the first real move still overturns the verdict.
+                    if session_proof.is_closed_today():
+                        if not was_closed:
+                            logger.warning(
+                                "AngelOne feed: no price moved 09:15-10:00 IST - treating today as a non-trading "
+                                "day, probing every %.0fs", SESSION_CLOSED_PROBE_S,
+                            )
+                            was_closed = True
+                        await _sleep_while_current(SESSION_CLOSED_PROBE_S)
+                        continue
+                    if was_closed:
+                        logger.info("AngelOne feed: prices are moving again - resuming normal polling")
+                        was_closed = False
                     # Note: a full cycle's wall time scales with universe size
                     # (len(tokens)/BATCH_SIZE batches * BATCH_GAP_S, plus network
                     # latency per batch). For a large universe this can exceed

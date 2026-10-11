@@ -139,7 +139,16 @@ def _is_market_open() -> bool:
     if now.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:  # group 140: weekday holiday = closed
         return False
     t = now.time()
-    return (t.hour > 9 or (t.hour == 9 and t.minute >= 15)) and (t.hour < 15 or (t.hour == 15 and t.minute <= 30))
+    if not ((t.hour > 9 or (t.hour == 9 and t.minute >= 15)) and (t.hour < 15 or (t.hour == 15 and t.minute <= 30))):
+        return False
+    # group320: no stock/Nifty move 09:15-10:00 IST = the exchange never traded today (unlisted closure). Fail-open.
+    try:
+        from session_proof_client import closed_for_day
+        if closed_for_day(now.strftime("%Y-%m-%d")):
+            return False
+    except Exception:
+        pass
+    return True
 
 def _cache_ttl() -> int:
     return DECIDE_CACHE_TTL_OPEN if _is_market_open() else DECIDE_CACHE_TTL_CLOSED
@@ -209,8 +218,40 @@ def time_module_time():
     import time as _t
     return _t.time()
 
-app = FastAPI(title="Stockky Decision Engine", version="0.7.6")
+# group318: FastAPI deprecated @app.on_event. These two decorators keep what on_event did (handlers run in the order they
+# are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run
+# them from a lifespan. The decorated function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
 
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="Stockky Decision Engine", version="0.7.6", lifespan=_lifespan)
 # Shared downstream client — avoid per-request TLS to analysis/training/market-data
 # Expanded pool + longer timeouts for free-tier Render (prevents PoolTimeout / ReadTimeout
 # when scanning many symbols and fanning out to technical/fundamental/news/event/prediction)
@@ -227,14 +268,14 @@ def _get_http_client() -> httpx.AsyncClient:
     return _shared_http
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_http_pool():
     global _shared_http
     _shared_http = httpx.AsyncClient(limits=_HTTP_LIMITS, timeout=_HTTP_TIMEOUT, follow_redirects=True)
     logger.info("Decision shared httpx pool started (limits=150 keepalive / 400 max, timeout=45s)")
 
 
-@app.on_event("shutdown")
+@_on_shutdown
 async def _stop_http_pool():
     global _shared_http
     if _shared_http is not None and not _shared_http.is_closed:

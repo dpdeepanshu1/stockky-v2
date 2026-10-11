@@ -398,7 +398,40 @@ def _install_httpx_secret_filter() -> None:
 
 _install_httpx_secret_filter()
 
-app = FastAPI(title="Stockky Market Data Service", version="2.2.0")
+# group318: FastAPI deprecated @app.on_event. These two decorators keep what on_event did (handlers run in the order they
+# are declared; an async handler is awaited, a sync one is called inline; a failing startup handler aborts boot) but run
+# them from a lifespan. The decorated function is returned unchanged, so tests can still call it directly.
+import contextlib as _contextlib
+import inspect as _inspect
+
+_STARTUP_HOOKS: list = []
+_SHUTDOWN_HOOKS: list = []
+
+
+def _on_startup(fn):
+    _STARTUP_HOOKS.append(fn)
+    return fn
+
+
+def _on_shutdown(fn):
+    _SHUTDOWN_HOOKS.append(fn)
+    return fn
+
+
+@_contextlib.asynccontextmanager
+async def _lifespan(_app):
+    for _h in list(_STARTUP_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+    yield
+    for _h in list(_SHUTDOWN_HOOKS):
+        _r = _h()
+        if _inspect.isawaitable(_r):
+            await _r
+
+
+app = FastAPI(title="Stockky Market Data Service", version="2.2.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -407,7 +440,7 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
+@_on_startup
 async def _raise_sync_thread_pool_capacity():
     """
     2026-09-21 fix: 13 of this service's 17 routes (including /quote/{symbol}
@@ -522,7 +555,7 @@ def _boot_start_yahoo_feed() -> None:
         logger.warning("yahoo_ws_feed startup skipped: %s", e)
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_angelone_ws_feed():
     """
     §1 of the master prompt: AngelOne is meant to be the PRIMARY quote
@@ -539,7 +572,7 @@ async def _start_angelone_ws_feed():
     _boot_start_angelone_feed()
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_yahoo_ws_feed():
     """
     Point 1 continued: one persistent WebSocket connection to Yahoo's live
@@ -572,7 +605,7 @@ async def _boot_feed_fallback():
     await asyncio.to_thread(_boot_start_yahoo_feed)
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_boot_feed_fallback():
     if _boot_defers_feeds():
         asyncio.create_task(_boot_feed_fallback())
@@ -708,12 +741,12 @@ async def _refresh_feed_universe_loop():
             logger.info("feed universe refreshed: %d symbols", len(symbols))
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_feed_universe_refresh():
     asyncio.create_task(_refresh_feed_universe_loop())
 
 
-@app.on_event("startup")
+@_on_startup
 async def _preload_angelone_scrip_master():
     """
     Bug I fix: angelone_scrip_master.ensure_loaded() was never called until
@@ -735,7 +768,7 @@ async def _preload_angelone_scrip_master():
     except Exception as e:
         logger.warning("angelone_scrip_master preload skipped: %s", e)
 
-@app.on_event("startup")
+@_on_startup
 async def _preload_bhavcopy_latest_day():
     """group234: warm the latest NSE bhavcopy session off the event loop. group233 answers closed-market quotes from
     the bhavcopy close; on a fresh container the first calls otherwise each waited for the CSV download.
@@ -758,6 +791,45 @@ async def root():
 async def health():
     # Simple health check; optionally verify dependencies (Redis, etc.)
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
+
+
+def _session_nifty_price():
+    """group320: current Nifty 50 price for the closed-market proof, through this service's own /quote path."""
+    q = get_quote("^NSEI")
+    return q.get("price") if isinstance(q, dict) else getattr(q, "price", None)
+
+
+try:
+    import session_proof as _session_proof_mod
+    _session_proof_mod.register_nifty_fetcher(_session_nifty_price)
+except Exception:  # never let the proof feed stop the service booting
+    pass
+
+
+@_on_startup
+def _start_session_nifty_probe():
+    """group321: the Nifty half of the proof runs on its own thread (not only inside the AngelOne feed loop)."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    try:
+        import session_proof
+        session_proof.start_probe_thread()
+    except Exception:
+        pass
+
+
+@app.get("/market/session")
+async def market_session():
+    """group319: did the exchange actually trade today? Decided from prices (no stock moved 09:15-10:00 IST = closed),
+    independent of the static holiday calendars. Callers fail open: only status=="closed" (closed: true) blocks anything."""
+    import session_proof
+    out = session_proof.status()
+    try:
+        from market_hours import is_nse_holiday_ist
+        out["calendar_holiday"] = bool(is_nse_holiday_ist())
+    except Exception:
+        out["calendar_holiday"] = False
+    return out
 
 
 @app.get("/angelone/network-check")
@@ -847,7 +919,7 @@ def _dhan_live_universe() -> list:
         return []
 
 
-@app.on_event("startup")
+@_on_startup
 async def _start_dhan_data():
     """group270: load Dhan's scrip master (own thread), start the live poller and, if DHAN_WS_ENABLED=1, the websocket."""
     try:

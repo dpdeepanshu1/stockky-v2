@@ -243,6 +243,12 @@ class RiskResult:
     approved_qty: Optional[int] = None  # risk engine may downsize, never upsize
 
 
+def _cap_trade_risk_at_daily_loss() -> bool:
+    """group322: blank-safe switch, default on."""
+    raw = (os.getenv("RISK_CAP_TRADE_RISK_AT_DAILY_LOSS") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _qty_within_risk_cap(per_share_risk: float, max_trade_risk: float) -> int:
     """Largest whole-share qty whose stop-loss risk fits inside `max_trade_risk`.
 
@@ -450,6 +456,10 @@ def evaluate(
         intent.adj_risk_pct if intent.adj_risk_pct is not None
         else account.risk_per_trade_pct
     )
+    # group322: one trade may never risk more than the whole daily-loss budget (defaults were 5% per trade vs 3% per day, so a
+    # single full stop-out could breach the day's limit). RISK_CAP_TRADE_RISK_AT_DAILY_LOSS=false restores the old behaviour.
+    if _cap_trade_risk_at_daily_loss() and account.max_daily_loss_pct and account.max_daily_loss_pct > 0:
+        effective_risk_pct = min(effective_risk_pct, account.max_daily_loss_pct)
     order_risk     = abs(intent.entry_price - intent.stop_price) * intent.qty
     max_trade_risk = account.equity * (effective_risk_pct / 100.0)
     final_qty      = intent.qty

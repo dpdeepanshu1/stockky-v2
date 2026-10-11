@@ -405,7 +405,7 @@ class TestMarketRegime:
 def acct(db, monkeypatch):
     calls = []
     monkeypatch.setattr(equity_sync, "sync_real_equity", lambda d: calls.append("sync"))
-    monkeypatch.setattr(entry, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(entry, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(entry.shared_exposure, "get_other_service_exposure", lambda d: 12_345.0)
     for mode in ("REAL", "DEMO"):
         db.add(models.TradeAccount(mode=mode, starting_capital=100_000.0, current_equity=90_000.0,
@@ -447,7 +447,7 @@ class TestAccountState:
         assert entry._account_state(db, "REAL", gate_armed=True).trading_globally_paused is False
 
     def test_market_hours_flag_comes_from_the_ist_clock(self, db, acct, monkeypatch):
-        monkeypatch.setattr(entry, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(entry, "is_market_open_ist", lambda *a, **k: False)
         assert entry._account_state(db, "REAL", True).market_is_open is False
 
     def test_position_exposure_is_summed(self, db, acct):

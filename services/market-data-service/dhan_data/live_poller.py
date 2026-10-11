@@ -67,7 +67,19 @@ def _compare(rows: List[dict]) -> None:
             continue
 
 
+def _observe_for_session_proof(rows: List[dict]) -> None:
+    """group321: Dhan is the first price source, so its rows feed the closed-market proof too (it was only fed by the
+    AngelOne / Yahoo websockets, which are off or stale on some days). Never raises."""
+    try:
+        import session_proof
+        for r in rows or []:
+            session_proof.observe(r.get("symbol"), r.get("price"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _on_rows(rows: List[dict]) -> None:
+    _observe_for_session_proof(rows)
     live_store.submit(rows)
     if config.shadow_compare():
         _compare(rows)

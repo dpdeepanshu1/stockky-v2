@@ -21,6 +21,7 @@ Pure stdlib, thread-safe, never raises into the caller. Off with SESSION_PROOF_E
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from datetime import datetime, time as _time, timezone
@@ -28,6 +29,7 @@ from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger("session-proof")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -91,6 +93,7 @@ def _fresh(day: str) -> dict:
         "nifty_obs": 0,        # in-window Nifty readings (group320)
         "nifty_moved": False,
         "proven_open": False,  # sticky for the day once a real move is seen
+        "last_status": None,   # group321: for transition logging
     }
 
 
@@ -151,6 +154,26 @@ def observe(symbol: str, price, now: Optional[datetime] = None) -> None:
         return
 
 
+def _log_transition(st: dict, out: dict) -> None:
+    """group321: log every change of the verdict (called with the lock held). Before this nothing was logged, so a day
+    wrongly judged closed could only be found by calling /market/session. closed / overturned are WARNING."""
+    try:
+        new = out.get("status")
+        old = st.get("last_status")
+        if new == old:
+            return
+        st["last_status"] = new
+        msg = ("session proof: %s -> %s (day=%s, observed=%s, moved=%s, nifty_readings=%s, nifty_moved=%s)"
+               % (old or "start", new, out.get("day"), out.get("observed_symbols"), out.get("moved_symbols"),
+                  out.get("nifty_readings"), out.get("nifty_moved")))
+        if new == "closed" or old == "closed":
+            logger.warning(msg)
+        elif new in ("open", "unknown"):
+            logger.info(msg)
+    except Exception:
+        return
+
+
 def status(now: Optional[datetime] = None) -> dict:
     """{'status': 'open'|'closed'|'unknown'|'pending'|'disabled', ...counts}.
 
@@ -189,6 +212,7 @@ def status(now: Optional[datetime] = None) -> dict:
                 out.update(status="closed", closed=True)
             else:
                 out.update(status="unknown", closed=False)
+            _log_transition(st, out)
             return out
     except Exception:
         return {"status": "unknown", "closed": False}
@@ -246,3 +270,36 @@ def probe_nifty(now: Optional[datetime] = None, mono: Optional[float] = None) ->
         return True
     except Exception:
         return False
+
+
+# ---- Own Nifty probe thread (group 321) -----------------------------------------------------------------------
+# probe_nifty() was only called from the AngelOne feed loop, so with ANGELONE_WS_FEED_ENABLED=0 (or the feed down) the
+# Nifty half of the proof never ran. This daemon thread calls it independently (rate limited inside probe_nifty).
+_probe_thread = None
+NIFTY_THREAD_ENABLED = _env_bool("SESSION_NIFTY_THREAD", True)
+
+
+def _probe_loop(stop: threading.Event, every_s: float) -> None:
+    while not stop.is_set():
+        try:
+            probe_nifty()
+        except Exception:
+            pass
+        stop.wait(every_s)
+
+
+def start_probe_thread(every_s: float = 20.0):
+    """Idempotent. Returns the stop Event (or None when disabled / already running)."""
+    global _probe_thread
+    try:
+        if not ENABLED or not NIFTY_THREAD_ENABLED or _nifty_fetcher is None:
+            return None
+        if _probe_thread is not None and _probe_thread[0].is_alive():
+            return None
+        stop = threading.Event()
+        th = threading.Thread(target=_probe_loop, args=(stop, max(5.0, float(every_s))), daemon=True, name="session-nifty-probe")
+        _probe_thread = (th, stop)
+        th.start()
+        return stop
+    except Exception:
+        return None

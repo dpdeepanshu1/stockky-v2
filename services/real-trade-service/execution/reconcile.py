@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import config
@@ -358,6 +359,8 @@ def _repair_orphaned_pending_exits(db: Session, tally: dict) -> None:
             models.TradeOrder.symbol == pos.symbol,
             models.TradeOrder.side == "SELL",
             models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+            # group322: a resting broker-side stop is not a software exit in flight
+            or_(models.TradeOrder.exit_reason.is_(None), models.TradeOrder.exit_reason != "broker_stop"),
         ).first()
         if still_in_flight is not None:
             continue  # genuinely still awaiting the broker — leave it for the loop below
@@ -588,7 +591,9 @@ async def reconcile_real_orders(db: Session) -> dict:
                     await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True,
                                            cumulative_qty=int(fill_qty_cumulative))
                     tally["partial_fills"] += 1
-                elif order.side == "SELL":
+                elif order.side == "SELL" and order.exit_reason != "broker_stop":
+                    # group322: a dead broker-side stop (cancelled by us, rejected, expired) is not a failed exit - no
+                    # position restore, no failure streak / backoff, no alert; it only gets its status below.
                     # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'
                     # docstring for the full incident): a SELL that dies with
                     # ZERO fill must not leave its position stuck at

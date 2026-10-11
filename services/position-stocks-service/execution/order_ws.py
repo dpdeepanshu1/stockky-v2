@@ -219,13 +219,40 @@ class OrderUpdateListener:
         self._bmin, self._bmax = backoff_min, backoff_max
         self._stop = False
         self.state = {"enabled": True, "connected": False, "connects": 0, "messages": 0, "order_events": 0,
-                      "last_message_at": None, "last_error": None, "last_connect_at": None, "no_credentials": 0}
+                      "last_message_at": None, "last_error": None, "last_connect_at": None, "no_credentials": 0,
+                      "unparsed": 0}
+        self._samples: list = []           # group322: first raw messages + the last few that did not parse
 
     def stop(self) -> None:
         self._stop = True
 
+    def _note(self, raw, tag: str, force: bool = False) -> None:
+        """group322: keep the first 3 raw messages and the last few unparsed ones (text cut to 400 chars). Messages
+        received from Dhan carry order data only; the login message (which holds the token) is never sampled."""
+        try:
+            if not force and len(self._samples) >= 3:
+                return
+            text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            self._samples.append({"tag": tag, "text": text[:400], "at": time.time()})
+            del self._samples[:-6]
+        except Exception:  # noqa: BLE001
+            pass
+
+    def layout_verdict(self) -> str:
+        """group322: "unverified" (no message yet), "ok" (events parsed, at most 1 in 4 messages unparsed),
+        "suspect" (messages arrive but few or none parse: the documented JSON shape is probably wrong), "unverified"
+        while there is not enough to tell (nothing yet, or only a few non-order messages)."""
+        m, ev = int(self.state.get("messages", 0)), int(self.state.get("order_events", 0))
+        bad = int(self.state.get("unparsed", 0))
+        if m == 0:
+            return "unverified"
+        if ev == 0:                     # a login ack or a quiet day parses to nothing; only a pile of misses is a signal
+            return "suspect" if bad >= 5 else "unverified"
+        return "ok" if bad * 4 <= ev else "suspect"
+
     def status(self) -> dict:
-        return {**self.state, "orders_tracked": len(self._store), "url": self._url}
+        return {**self.state, "orders_tracked": len(self._store), "url": self._url,
+                "layout_verdict": self.layout_verdict(), "samples": list(self._samples)}
 
     async def _open(self):
         if self._connect is not None:
@@ -253,10 +280,14 @@ class OrderUpdateListener:
                     async for raw in ws:
                         self.state["messages"] += 1
                         self.state["last_message_at"] = time.time()
+                        self._note(raw, "message")
                         ev = parse_message(raw)
                         if ev:
                             self._store.add(ev)
                             self.state["order_events"] += 1
+                        else:
+                            self.state["unparsed"] += 1
+                            self._note(raw, "unparsed", force=True)
                         if self._stop:
                             break
                 finally:

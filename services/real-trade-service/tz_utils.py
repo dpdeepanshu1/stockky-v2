@@ -86,7 +86,7 @@ def is_nse_holiday(now: Optional[datetime] = None) -> bool:
     return ist_dt.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026
 
 
-def is_market_open_ist(now: Optional[datetime] = None) -> bool:
+def is_market_open_ist(now: Optional[datetime] = None, honor_session_proof: bool = True) -> bool:
     """NSE market-hours check: Mon–Fri, 09:15–15:30 IST, EXCLUDING NSE/BSE
     trading holidays (_NSE_HOLIDAYS_2026 above — fixed 2026-09-14; this
     used to be weekday+hours only, see the AUDIT FIX comment above for the
@@ -105,7 +105,9 @@ def is_market_open_ist(now: Optional[datetime] = None) -> bool:
         return False
     # group319: a date no calendar lists (unscheduled closure, next year before December) is caught from PRICES -
     # market-data-service sees no stock/Nifty move 09:15-10:00 IST and says so. Only for real-clock calls.
-    if now is None:
+    # group321: honor_session_proof=False is for EXITS (stop-loss, emergency, EOD square-off, exit reconcile): a wrong
+    # "closed" verdict (stale feed) must only ever stop NEW entries, never leave an open position unprotected.
+    if now is None and honor_session_proof:
         try:
             from session_proof_client import closed_for_day
             if closed_for_day(ist_dt.strftime("%Y-%m-%d")):

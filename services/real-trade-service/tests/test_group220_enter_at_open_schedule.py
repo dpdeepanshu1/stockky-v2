@@ -40,7 +40,7 @@ def _fire(db, monkeypatch, clock):
     db.commit()
     monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-10-07")
     monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: _time(h, m) >= t)
-    monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
     calls = []
     monkeypatch.setattr(ap, "_enter_at_open", _async_recorder(calls))
     run(ap._schedule_tick_body("REAL"))

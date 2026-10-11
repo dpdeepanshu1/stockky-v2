@@ -46,6 +46,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import config
@@ -249,6 +250,9 @@ def _has_pending_real_sell(db: Session, symbol: str) -> bool:
             models.TradeOrder.symbol == symbol,
             models.TradeOrder.side == "SELL",
             models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+            # group322: a resting broker-side stop is not "a SELL awaiting confirmation" - it must never switch the
+            # software exits off (NULL exit_reason rows are ordinary sells, hence the explicit IS NULL)
+            or_(models.TradeOrder.exit_reason.is_(None), models.TradeOrder.exit_reason != "broker_stop"),
         )
         .first()
         is not None
@@ -535,6 +539,11 @@ def _send_real_sell(
             position.symbol, reason, position.consecutive_exit_failures,
             cooldown_seconds - elapsed_seconds, cooldown_seconds,
         )
+        return False
+    # group322: a resting broker-side stop must be gone (or confirmed traded) before a software SELL goes out, otherwise
+    # both could sell. False = skip this cycle (stop may have traded - reconcile books it - or the cancel is being retried).
+    from execution import broker_stop as _broker_stop
+    if not _broker_stop.cancel_for_exit(db, position):
         return False
     # 2026-09-15 fix (session38 — DATAMATICS "insufficient funds" SELL
     # rejections, 20 consecutive over ~2h). Root cause: this used to decide
@@ -1193,6 +1202,48 @@ def _send_real_sell(
         return False
 
 
+# group321: a held position whose price cannot be read is not being checked against its stop at all (the loop writes a HOLD
+# note and moves on). One quiet cycle is normal; a streak is not. After EXIT_NO_PRICE_ALERT_CYCLES in a row (default 6,
+# about a minute at the 8 s exit interval) log a WARNING and send one Telegram alert per symbol per
+# EXIT_NO_PRICE_ALERT_COOLDOWN_S (default 900). Off with EXIT_NO_PRICE_ALERT_CYCLES=0. Never raises.
+_NO_PRICE_STREAK: dict = {}
+_NO_PRICE_LAST_ALERT: dict = {}
+
+
+def _env_int_blank_safe(name: str, default: int) -> int:
+    try:
+        return int(((os.getenv(name) or "").strip() or default))
+    except Exception:
+        return default
+
+
+def _note_no_price(symbol: str, mode: str) -> int:
+    """Count one more cycle without a price for `symbol`; alert on a streak. Returns the streak length."""
+    try:
+        key = (mode, symbol)
+        n = _NO_PRICE_STREAK.get(key, 0) + 1
+        _NO_PRICE_STREAK[key] = n
+        limit = _env_int_blank_safe("EXIT_NO_PRICE_ALERT_CYCLES", 6)
+        if limit <= 0 or n < limit:
+            return n
+        import time as _t
+        now = _t.monotonic()
+        cooldown = _env_int_blank_safe("EXIT_NO_PRICE_ALERT_COOLDOWN_S", 900)
+        last = _NO_PRICE_LAST_ALERT.get(key)
+        if last is not None and (now - last) < cooldown:
+            return n
+        _NO_PRICE_LAST_ALERT[key] = now
+        logger.warning("exit: no price for held %s (%s) for %d cycles in a row - its stop is NOT being checked", symbol, mode, n)
+        try:
+            notify_sync(f"\u26a0\ufe0f *No price for held {symbol} ({mode})* - {n} exit cycles in a row without a quote, "
+                        "so its stop-loss is not being checked. Check the market-data feed or sell it by hand.")
+        except Exception:
+            logger.warning("exit: could not send the no-price alert for %s", symbol, exc_info=True)
+        return n
+    except Exception:
+        return 0
+
+
 async def evaluate_mode(db: Session, mode: str) -> dict:
     """One evaluation cycle for every open position in `mode`.
     Checks in order: emergency_gap, stop_hit, target_hit, time_stop,
@@ -1221,6 +1272,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
     if mode == "DEMO":
         refresh_unrealized(db, mode, ticks)
 
+    # group322: keep the optional broker-side safety-net stop in step with the software stop (off unless
+    # BROKER_STOP_ENABLED; throttled; never raises; runs before the per-position checks so a software exit still wins).
+    if mode == "REAL":
+        from execution import broker_stop as _broker_stop
+        await _broker_stop.sync_stops(db, mode, positions, ticks)
+
     held = trailed = partial_exits = full_exits = time_stops = emergency_exits = 0
     now  = datetime.now(timezone.utc)
 
@@ -1233,6 +1290,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
 
         tick = ticks.get(position.symbol)
         if tick is None:
+            _note_no_price(position.symbol, mode)   # group321: a held position with no price has NO stop check - say so
             _write_exit_decision(
                 db, position, "HOLD",
                 "No current price available this cycle — skipping evaluation.", 0.0,
@@ -1241,6 +1299,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             continue
 
         ltp = tick.price
+        _NO_PRICE_STREAK.pop((mode, position.symbol), None)
 
         # REAL: if a SELL is already in-flight, don't re-evaluate until
         # reconcile confirms or rejects it. Prevents double-selling.

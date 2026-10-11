@@ -676,7 +676,7 @@ class _OneShotSleep:
 
 def test_trading_loop_market_closed_skips_cycle(monkeypatch):
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: False)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: False)
     ran = {"n": 0}
     monkeypatch.setattr(m, "_run_cycle", lambda db, trigger: ran.__setitem__("n", ran["n"] + 1))
     asyncio.run(m._trading_loop())
@@ -685,7 +685,7 @@ def test_trading_loop_market_closed_skips_cycle(monkeypatch):
 
 def test_trading_loop_runs_one_cycle_and_records_success(db, monkeypatch):
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     ran = {"n": 0}
 
@@ -702,7 +702,7 @@ def test_trading_loop_runs_one_cycle_and_records_success(db, monkeypatch):
 
 def test_trading_loop_no_session_factory_skips(monkeypatch):
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m._db, "get_session_factory", lambda: None)
     ran = {"n": 0}
     monkeypatch.setattr(m, "_run_cycle", lambda db, trigger: ran.__setitem__("n", ran["n"] + 1))
@@ -728,7 +728,7 @@ def test_trading_loop_exception_records_failure(monkeypatch):
 
     monkeypatch.setattr(m.asyncio, "sleep", _Sleep())
 
-    def _boom():
+    def _boom(*a, **k):
         seen_exc["n"] += 1
         raise RuntimeError("market check exploded")
     monkeypatch.setattr(m, "is_market_open_ist", _boom)
@@ -761,7 +761,7 @@ def test_fast_reconcile_loop_full_pass(db, monkeypatch):
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     closed = {"n": 0}
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: closed.__setitem__("n", 1) or 1)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
@@ -776,7 +776,7 @@ def test_fast_reconcile_loop_eod_and_retention(db, monkeypatch):
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
@@ -795,7 +795,7 @@ def test_fast_reconcile_loop_reconcile_exception_stops_rest_of_pass(db, monkeypa
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation",
                          lambda db: (_ for _ in ()).throw(RuntimeError("boom")))
     stagnation_called = {"n": 0}
@@ -808,7 +808,7 @@ def test_fast_reconcile_loop_stagnation_and_breakeven_exceptions_are_isolated(db
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit",
                          lambda db: (_ for _ in ()).throw(RuntimeError("stagnation boom")))
@@ -825,7 +825,7 @@ def test_fast_reconcile_loop_off_hours_still_runs_stuck_pending(db, monkeypatch)
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     resolved = {"n": 0}
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: resolved.__setitem__("n", 1))
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: False)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: False)
     reconcile_called = {"n": 0}
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: reconcile_called.__setitem__("n", 1))
     _run_one_fast_reconcile_pass()
@@ -838,7 +838,7 @@ def test_fast_reconcile_loop_stuck_pending_exception_is_caught(db, monkeypatch):
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending",
                          lambda db: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: False)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: False)
     _run_one_fast_reconcile_pass()  # must not raise
 
 
@@ -888,7 +888,7 @@ class TestStatusRoute:
         monkeypatch.setattr(m.ws_client, "ws_status", lambda: {"connected": True})
         monkeypatch.setattr(m.shared_order_budget, "status", lambda db: {"used": 0, "budget": 5000})
         monkeypatch.setattr(m.shared_symbol_lock, "status", lambda db: [])
-        monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
         r = client.get("/status")
         assert r.status_code == 200
         body = r.json()
@@ -899,7 +899,7 @@ class TestStatusRoute:
         monkeypatch.setattr(m.ws_client, "ws_status", lambda: {})
         monkeypatch.setattr(m.shared_order_budget, "status", lambda db: {})
         monkeypatch.setattr(m.shared_symbol_lock, "status", lambda db: [])
-        monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
         today = m.ist_today_str()
         monkeypatch.setattr(m, "ist_time_at_or_after", lambda t: True)
         _gate(db, eod_squareoff_fired_date=today)
@@ -1163,7 +1163,7 @@ def test_order_ws_routes_when_the_listener_is_off(client):
 
 class TestCandidatesRoute:
     def test_market_open_runs_scan(self, client, monkeypatch):
-        monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(m, "scan", lambda: [_candidate("SBIN")])
         r = client.get("/candidates")
         body = r.json()
@@ -1171,7 +1171,7 @@ class TestCandidatesRoute:
         assert body["count"] == 1
 
     def test_market_closed_returns_empty(self, client, monkeypatch):
-        monkeypatch.setattr(m, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: False)
         called = {"n": 0}
         monkeypatch.setattr(m, "scan", lambda: called.__setitem__("n", 1))
         r = client.get("/candidates")
@@ -1520,7 +1520,7 @@ def test_fast_reconcile_loop_stagnation_success_is_logged(db, monkeypatch, caplo
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 2)  # truthy
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
@@ -1535,7 +1535,7 @@ def test_fast_reconcile_loop_breakeven_success_is_logged(db, monkeypatch, caplog
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 3)  # truthy
@@ -1550,7 +1550,7 @@ def test_fast_reconcile_loop_breakeven_exception_is_caught(db, monkeypatch, capl
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop",
@@ -1566,7 +1566,7 @@ def test_fast_reconcile_loop_eod_squareoff_exception_is_caught(db, monkeypatch, 
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
@@ -1583,7 +1583,7 @@ def test_fast_reconcile_loop_retention_cleanup_exception_is_caught(db, monkeypat
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     monkeypatch.setattr(m.breakeven, "run_breakeven_stop", lambda db: 0)
@@ -1605,7 +1605,7 @@ def test_fast_reconcile_loop_outer_exception_is_caught(db, monkeypatch, caplog):
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
 
-    def _boom():
+    def _boom(*a, **k):
         raise RuntimeError("market-open check exploded")
     monkeypatch.setattr(m, "is_market_open_ist", _boom)
     with caplog.at_level(logging.ERROR):
@@ -1677,7 +1677,7 @@ def test_fast_reconcile_loop_runs_excursion_tracking_and_survives_its_failure(db
     monkeypatch.setattr(m.asyncio, "sleep", _OneShotSleep())
     monkeypatch.setattr(m._db, "get_session_factory", lambda: (lambda: db))
     monkeypatch.setattr(m.reconcile, "resolve_stuck_pending", lambda db: {"resolved": 0})
-    monkeypatch.setattr(m, "is_market_open_ist", lambda: True)
+    monkeypatch.setattr(m, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(m.reconcile, "run_exit_reconciliation", lambda db: 0)
     monkeypatch.setattr(m.eod_squareoff, "run_stagnation_exit", lambda db: 0)
     ran = {"exc": 0, "be": 0}

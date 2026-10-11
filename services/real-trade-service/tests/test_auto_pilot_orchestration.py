@@ -235,7 +235,7 @@ class TestExitOnlyTickBody:
     def test_noop_when_market_closed(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         calls = []
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_recorder(calls, {}))
         run(ap._exit_only_tick_body("REAL"))
@@ -244,7 +244,7 @@ class TestExitOnlyTickBody:
     def test_runs_exit_evaluate_and_notifies_on_activity(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(
             "exit_engine.exit.evaluate_mode",
             _async_return({"full_exits": 1, "partial_exits": 0, "time_stops": 0, "emergency_exits": 0}),
@@ -259,7 +259,7 @@ class TestExitOnlyTickBody:
     def test_no_notify_when_nothing_happened(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -269,7 +269,7 @@ class TestExitOnlyTickBody:
     def test_demo_mode_skips_reconcile(self, db, monkeypatch):
         db.add(_gate(mode="DEMO"))
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         calls = []
         monkeypatch.setattr("execution.reconcile.reconcile_real_orders", _async_recorder(calls))
@@ -279,7 +279,7 @@ class TestExitOnlyTickBody:
     def test_real_mode_reconciles_when_due(self, db, monkeypatch):
         db.add(_gate(mode="REAL"))
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         monkeypatch.setattr(ap, "_reconcile_due", lambda mode: True)
         marked = []
@@ -293,7 +293,7 @@ class TestExitOnlyTickBody:
     def test_real_mode_skips_reconcile_when_not_due(self, db, monkeypatch):
         db.add(_gate(mode="REAL"))
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         monkeypatch.setattr(ap, "_reconcile_due", lambda mode: False)
         calls = []
@@ -305,7 +305,7 @@ class TestExitOnlyTickBody:
         db.add(_gate(armed=False))
         db.add(_position())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         alert_calls = []
         monkeypatch.setattr(ap, "_alert_if_open_positions_while_gate_off", _async_recorder(alert_calls))
@@ -315,7 +315,7 @@ class TestExitOnlyTickBody:
     def test_no_alert_call_when_gate_armed(self, db, monkeypatch):
         db.add(_gate(armed=True, auto_pilot_enabled=True))
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
         alert_calls = []
         monkeypatch.setattr(ap, "_alert_if_open_positions_while_gate_off", _async_recorder(alert_calls))
@@ -325,7 +325,7 @@ class TestExitOnlyTickBody:
     def test_gate_note_appended_to_notify_when_disarmed_with_activity(self, db, monkeypatch):
         db.add(_gate(armed=False))
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(
             "exit_engine.exit.evaluate_mode", _async_return({"emergency_exits": 1}),
         )
@@ -338,7 +338,7 @@ class TestExitOnlyTickBody:
     def test_exception_logged_and_notified_never_raises(self, db, monkeypatch, caplog):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_raise(RuntimeError("boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -379,7 +379,7 @@ class TestFullTickBody:
     def test_noop_when_market_closed(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         cycle_calls = []
         monkeypatch.setattr("cycle_runner.run_cycle_core", _async_recorder(cycle_calls, {}))
         run(ap._full_tick_body("REAL"))
@@ -388,7 +388,7 @@ class TestFullTickBody:
     def test_auto_disarmed_notifies_and_returns(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(
             "cycle_runner.run_cycle_core",
             _async_return({"auto_disarmed": "Dhan token expired"}),
@@ -402,7 +402,7 @@ class TestFullTickBody:
     def test_notifies_summary_on_activity(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(
             "cycle_runner.run_cycle_core",
             _async_return({"entry": {"entered": 1, "rejected": 0}}),
@@ -415,7 +415,7 @@ class TestFullTickBody:
     def test_no_notify_on_no_activity_without_heartbeat(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("cycle_runner.run_cycle_core", _async_return({}))
         monkeypatch.setattr(config, "AUTO_PILOT_NOTIFY_HEARTBEAT", False)
         notes = []
@@ -426,7 +426,7 @@ class TestFullTickBody:
     def test_heartbeat_notify_even_with_no_activity(self, db, monkeypatch):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("cycle_runner.run_cycle_core", _async_return({}))
         monkeypatch.setattr(config, "AUTO_PILOT_NOTIFY_HEARTBEAT", True)
         notes = []
@@ -437,7 +437,7 @@ class TestFullTickBody:
     def test_exception_logged_and_notified_never_raises(self, db, monkeypatch, caplog):
         db.add(_gate())
         db.commit()
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr("cycle_runner.run_cycle_core", _async_raise(RuntimeError("cycle boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -1223,7 +1223,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         prepick_calls = []
         monkeypatch.setattr(ap, "_prepick", _async_recorder(prepick_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1236,7 +1236,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         prepick_calls = []
         monkeypatch.setattr(ap, "_prepick", _async_recorder(prepick_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1247,7 +1247,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         monkeypatch.setattr(ap, "_prepick", _async_raise(RuntimeError("prepick boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -1260,7 +1260,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         edis_calls = []
         monkeypatch.setattr(ap, "_edis_morning_check", _async_recorder(edis_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1271,7 +1271,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         monkeypatch.setattr(ap, "_edis_morning_check", _async_raise(RuntimeError("edis boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -1283,7 +1283,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: False)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: False)
         enter_calls = []
         monkeypatch.setattr(ap, "_enter_at_open", _async_recorder(enter_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1294,7 +1294,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         enter_calls = []
         monkeypatch.setattr(ap, "_enter_at_open", _async_recorder(enter_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1305,7 +1305,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(ap, "_enter_at_open", _async_raise(RuntimeError("boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -1317,7 +1317,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         squareoff_calls = []
         monkeypatch.setattr(ap, "_eod_squareoff", _async_recorder(squareoff_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1331,7 +1331,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(ap, "_eod_squareoff", _async_raise(RuntimeError("squareoff boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
@@ -1345,7 +1345,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         scan_calls = []
         monkeypatch.setattr(ap, "_eod_signal_scan", _async_recorder(scan_calls))
         run(ap._schedule_tick_body("REAL"))
@@ -1356,7 +1356,7 @@ class TestScheduleTickBody:
         db.commit()
         monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
         monkeypatch.setattr(ap, "ist_time_at_or_after", lambda t: True)
-        monkeypatch.setattr(ap, "is_market_open_ist", lambda: True)
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
         monkeypatch.setattr(ap, "_eod_signal_scan", _async_raise(RuntimeError("scan boom")))
         notes = []
         monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))

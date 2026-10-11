@@ -806,6 +806,18 @@ except Exception:  # never let the proof feed stop the service booting
     pass
 
 
+@_on_startup
+def _start_session_nifty_probe():
+    """group321: the Nifty half of the proof runs on its own thread (not only inside the AngelOne feed loop)."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    try:
+        import session_proof
+        session_proof.start_probe_thread()
+    except Exception:
+        pass
+
+
 @app.get("/market/session")
 async def market_session():
     """group319: did the exchange actually trade today? Decided from prices (no stock moved 09:15-10:00 IST = closed),

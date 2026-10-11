@@ -1023,6 +1023,48 @@ OVERNIGHT_HOLD_MAX_PER_SECTOR = int(((os.getenv("OVERNIGHT_HOLD_MAX_PER_SECTOR")
 # cost of exiting now, not just to be >= 0. Kept togglable in case the
 # stricter bar ever needs to be relaxed for testing.
 OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS = ((os.getenv("OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS") or "").strip() or "true").lower() == "true"
+# group322: a carried CNC position pays about 0.7% round trip (DP fee + delivery STT on a Rs 3,000 trade) against about 0.1% for a
+# same-day exit, and takes the overnight gap risk. Require at least this % gain over entry before it may be carried; 0 = off
+# (the net-of-costs check above still applies). Below the bar the position squares off at EOD as before.
+def _og_min_gain() -> float:
+    try:
+        return max(0.0, float(((os.getenv("OVERNIGHT_HOLD_MIN_GAIN_PCT") or "").strip() or "1.5")))
+    except Exception:
+        return 1.5
+OVERNIGHT_HOLD_MIN_GAIN_PCT = _og_min_gain()
+
+# group322: BROKER-SIDE STOP (execution/broker_stop.py). OFF by default: it has never been exercised against a live Dhan account.
+# When on, every REAL CNC position held since an earlier day (settled in demat) gets a resting Dhan stop-loss SELL at the
+# software stop minus BROKER_STOP_BUFFER_PCT %, so the software stop (8 s poll) normally fires first and the broker order is
+# only the safety net for when this service is down / blind. It is cancelled before any software SELL, never lowered, and
+# moved up when the stop ratchets up by at least BROKER_STOP_MIN_MOVE_PCT %.
+def _bs_bool(name: str, default: str) -> bool:
+    return ((os.getenv(name) or "").strip() or default).lower() in ("1", "true", "yes", "on")
+
+
+def _bs_float(name: str, default: float) -> float:
+    try:
+        return float(((os.getenv(name) or "").strip() or default))
+    except Exception:
+        return default
+
+
+def _bs_int(name: str, default: int) -> int:
+    try:
+        return int(float(((os.getenv(name) or "").strip() or default)))
+    except Exception:
+        return default
+
+
+BROKER_STOP_ENABLED = _bs_bool("BROKER_STOP_ENABLED", "false")
+BROKER_STOP_BUFFER_PCT = max(0.0, _bs_float("BROKER_STOP_BUFFER_PCT", 0.5))
+BROKER_STOP_MIN_MOVE_PCT = max(0.0, _bs_float("BROKER_STOP_MIN_MOVE_PCT", 0.25))
+BROKER_STOP_SYNC_SECONDS = max(5, _bs_int("BROKER_STOP_SYNC_SECONDS", 60))
+BROKER_STOP_CANCEL_MAX_FAILS = max(1, _bs_int("BROKER_STOP_CANCEL_MAX_FAILS", 3))
+BROKER_STOP_ALERT_COOLDOWN_S = max(0, _bs_int("BROKER_STOP_ALERT_COOLDOWN_S", 900))
+BROKER_STOP_ORDER_TYPE = ((os.getenv("BROKER_STOP_ORDER_TYPE") or "").strip() or "STOP_LOSS_MARKET").upper()
+if BROKER_STOP_ORDER_TYPE not in ("STOP_LOSS_MARKET", "STOP_LOSS"):
+    BROKER_STOP_ORDER_TYPE = "STOP_LOSS_MARKET"
 
 # ── Overnight-hold × CDSL eDIS morning check (2026-09-19, audit finding) ────
 # Every same-day exit in this service sells product_type=INTRADAY, which

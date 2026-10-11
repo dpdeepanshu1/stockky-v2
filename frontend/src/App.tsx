@@ -25,6 +25,8 @@ import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
 import MarketSentimentHeader from "./components/MarketSentimentHeader";
 import CommandPalette, { CommandAction } from "./components/CommandPalette";
+import StockPopup from "./components/board/StockPopup";
+import type { BoardRowLite } from "./components/board/boardTypes";
 import { useStockkyRealtime, RealtimeMessage } from "./useRealtime";
 
 type ViewState =
@@ -148,6 +150,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showServiceManager, setShowServiceManager] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [boardSym, setBoardSym] = useState<BoardRowLite | null>(null);   // group311: Market Board popup opened from the command palette
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
   // Watchlist overlay must not stick when navigating Dashboard / other tabs
@@ -992,7 +995,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-ink text-paper relative terminal-shell terminal-premium">
-      <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} actions={cmdActions} />
+      <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} actions={cmdActions}
+        symbolAction={(sym) => ({ id: `board-${sym}`, label: `${sym} — zones, levels, R:R`, group: "Market Board", hint: "popup", run: () => setBoardSym({ symbol: sym }) })} />
+      <StockPopup row={boardSym} onClose={() => setBoardSym(null)} reduced={false} />
       {statusMessage && (
         <div className="fixed top-4 right-4 z-50 bg-graphite border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
           <p className="font-mono text-sm text-paper">{statusMessage}</p>

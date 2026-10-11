@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { positionStocksApi } from "../../positionStocksApi";
 import { byDay, byTag, type JTrade } from "./journalStats";
+import { Card } from "./boardCard";
 
 export default function JournalPanel({ active }: { active: boolean }) {
   const [trades, setTrades] = useState<JTrade[]>([]);
@@ -22,8 +23,7 @@ export default function JournalPanel({ active }: { active: boolean }) {
   const maxAbs = Math.max(1, ...days.map(d => Math.abs(d.pnl)));
   return (
     <div className="space-y-3 text-[11px]">
-      <div className="rounded-xl border border-slate bg-ink p-3">
-        <div className="font-display font-bold text-paper mb-2">P&L by day (IST)</div>
+      <Card title="P&L by day (IST)">
         {err && <div className="text-signal-hold">{err}</div>}
         {!days.length ? <div className="text-mist">No closed trades with a final P&L yet.</div> : (
           <div className="flex flex-wrap gap-1">
@@ -33,24 +33,22 @@ export default function JournalPanel({ active }: { active: boolean }) {
             ))}
           </div>
         )}
-      </div>
-      <div className="rounded-xl border border-slate bg-ink p-3">
-        <div className="font-display font-bold text-paper mb-2">Win rate by scan window</div>
+      </Card>
+      <Card title="Win rate by scan window">
         {tags.map(t => (
           <div key={t.tag} className="flex justify-between tabular-nums text-mist py-0.5">
             <span>{t.tag}</span><span>{t.trades} trades · {t.win_rate == null ? "-" : `${Math.round(t.win_rate * 100)}%`} wins{t.trades < 30 ? " (small sample)" : ""} · ₹{t.pnl.toFixed(0)}</span>
           </div>
         ))}
         {!tags.length && <div className="text-mist">Nothing to show yet.</div>}
-      </div>
+      </Card>
       {rep && (
-        <div className="rounded-xl border border-slate bg-ink p-3">
-          <div className="font-display font-bold text-paper mb-1">Board shadow study ({rep.days}d, gate mode: {rep.gate_mode})</div>
+        <Card title={`Board shadow study (${rep.days}d, gate mode: ${rep.gate_mode})`}>
           {Object.entries(rep.rules as Record<string, any>).map(([k, r]) => (
             <div key={k} className="py-0.5 text-mist"><b className="text-paper">{k}</b>: {r.verdict} <span className="text-[9px]">({r.about})</span></div>
           ))}
           <div className="text-[9px] text-mist mt-1">Needs {rep.min_obs} observations over {rep.min_sessions} sessions before any rule can be promoted. Research output, not advice.</div>
-        </div>
+        </Card>
       )}
     </div>
   );

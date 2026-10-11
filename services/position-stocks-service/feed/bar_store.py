@@ -18,7 +18,8 @@ _last_cum_vol: Dict[str, float] = {}
 _turnover: Dict[str, float] = {}
 _day: Optional[int] = None
 _installed = False
-_stats = {"ticks": 0, "skipped_low_volume": 0, "pruned": 0, "errors": 0}
+_backfilled: Dict[str, int] = {}          # group311: symbol -> history bars merged in (mid-session restart backfill)
+_stats = {"ticks": 0, "skipped_low_volume": 0, "pruned": 0, "errors": 0, "backfilled_symbols": 0, "backfilled_bars": 0}
 
 
 def _cfg_int(name: str, default: int) -> int:
@@ -32,7 +33,7 @@ def _cfg_int(name: str, default: int) -> int:
 def reset() -> None:
     global _day
     with _lock:
-        _bars.clear(); _last_cum_vol.clear(); _turnover.clear()
+        _bars.clear(); _last_cum_vol.clear(); _turnover.clear(); _backfilled.clear()
         _day = None
         for k in _stats:
             _stats[k] = 0
@@ -53,7 +54,7 @@ def on_tick(symbol: str, ltp: float, cum_volume, ts: float) -> None:
             elif day != _day:
                 if day < _day:
                     return
-                _bars.clear(); _last_cum_vol.clear(); _turnover.clear()
+                _bars.clear(); _last_cum_vol.clear(); _turnover.clear(); _backfilled.clear()
                 _day = day
             dq = _bars.get(symbol)
             if dq is None:
@@ -121,7 +122,7 @@ def prune(keep: Optional[int] = None) -> int:
         order = sorted(_bars.keys(), key=lambda s: _turnover.get(s, 0.0), reverse=True)
         drop = order[keep:]
         for s in drop:
-            _bars.pop(s, None); _last_cum_vol.pop(s, None); _turnover.pop(s, None)
+            _bars.pop(s, None); _last_cum_vol.pop(s, None); _turnover.pop(s, None); _backfilled.pop(s, None)
         _stats["pruned"] += len(drop)
         return len(drop)
 
@@ -129,3 +130,50 @@ def prune(keep: Optional[int] = None) -> int:
 def stats() -> dict:
     with _lock:
         return {"symbols": len(_bars), "bars": sum(len(d) for d in _bars.values()), "day": _day, **_stats}
+
+
+def insert_history(symbol: str, hist: List[Bar]) -> int:
+    """group311: merge EARLIER 1-minute bars (history fetch after a mid-session restart) in front of the live ones. Only minutes strictly
+    before the first live bar are taken (a live bar is never overwritten); bad / duplicate rows are dropped. The symbol must already be
+    tracked - this never creates one. Returns bars added."""
+    try:
+        if not symbol or not hist:
+            return 0
+        with _lock:
+            dq = _bars.get(symbol)
+            if not dq:
+                return 0
+            first_live = dq[0][0]
+            seen = {}
+            for b in hist:
+                try:
+                    t, o, h, l, c, v = (float(x) for x in b)
+                except (TypeError, ValueError):
+                    continue
+                if not (t < first_live and o > 0 and h > 0 and l > 0 and c > 0 and h >= l) or v != v:
+                    continue
+                m = float(int(t // 60) * 60)
+                seen[m] = [m, o, h, l, c, max(0.0, v)]
+            if not seen:
+                return 0
+            _bars[symbol] = deque([seen[k] for k in sorted(seen)] + [list(b) for b in dq], maxlen=MAX_BARS)
+            if symbol not in _backfilled:
+                _stats["backfilled_symbols"] += 1
+            _backfilled[symbol] = _backfilled.get(symbol, 0) + len(seen)
+            _stats["backfilled_bars"] += len(seen)
+            return len(seen)
+    except Exception as e:  # noqa: BLE001
+        _stats["errors"] += 1
+        logger.debug("bar_store.insert_history(%s): %s", symbol, e)
+        return 0
+
+
+def is_backfilled(symbol: str) -> bool:
+    with _lock:
+        return symbol in _backfilled
+
+
+def first_bar_ts(symbol: str) -> Optional[float]:
+    with _lock:
+        dq = _bars.get(symbol)
+        return dq[0][0] if dq else None

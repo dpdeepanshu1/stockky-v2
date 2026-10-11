@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import main as m  # noqa: E402
 
@@ -18,6 +20,15 @@ class _Store:
         assert key == m.SEARCHED_KEY
         self.writes.append(list(val))
         self.value = list(val)
+
+
+@pytest.fixture(autouse=True)
+def _no_learned_symbol_state(monkeypatch):
+    """The learned rename / delisted lists live in the process-wide kv_cache memory store; another test file can
+    leave entries there (the 6 tests below failed in a full run at weekday market hours and passed alone)."""
+    import symbol_aliases
+    monkeypatch.setattr(symbol_aliases, "_load_learned_renames", lambda: {})
+    monkeypatch.setattr(symbol_aliases, "_load_learned_delisted", lambda: {})
 
 
 def _patch(monkeypatch, value):

@@ -42,6 +42,24 @@ def angel(monkeypatch):
     return calls
 
 
+@pytest.fixture()
+def offline_fallbacks(monkeypatch):
+    """The yfinance and NSE fallbacks must find nothing, whether or not the machine can reach Yahoo
+    (these tests used to pass only where the network was blocked)."""
+    import pandas as pd
+
+    class _NoData:
+        def __init__(self, *a, **k):
+            pass
+
+        def history(self, *a, **k):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(m.yf, "Ticker", _NoData)
+    monkeypatch.setattr(m, "_nse_history_candles", lambda *a, **k: None)
+    monkeypatch.setattr(m.time, "sleep", lambda *a, **k: None)
+
+
 def _get(period, force=False):
     return m._get_history_impl("TCS", period, "1d", force, None)
 
@@ -85,7 +103,7 @@ def test_small_max_history_period_disables_widening(angel, monkeypatch):
     assert angel == ["1mo"]
 
 
-def test_failed_1y_call_is_not_repeated_for_short_period(monkeypatch):
+def test_failed_1y_call_is_not_repeated_for_short_period(monkeypatch, offline_fallbacks):
     calls = []
     monkeypatch.setattr(m, "_angelone_history_candles", lambda *a: calls.append(a[1]))
     monkeypatch.setattr(m, "_history_angel_available", lambda s: True)
@@ -94,7 +112,7 @@ def test_failed_1y_call_is_not_repeated_for_short_period(monkeypatch):
     assert calls == ["1y"]
 
 
-def test_angelone_unavailable_keeps_old_path(monkeypatch):
+def test_angelone_unavailable_keeps_old_path(monkeypatch, offline_fallbacks):
     calls = []
     monkeypatch.setattr(m, "_angelone_history_candles", lambda *a: calls.append(a[1]))
     monkeypatch.setattr(m, "_history_angel_available", lambda s: False)

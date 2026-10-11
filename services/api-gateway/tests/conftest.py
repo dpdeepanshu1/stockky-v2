@@ -24,6 +24,16 @@ _ISOLATED_ENV = (
 def _isolate_env(monkeypatch):
     for name in _ISOLATED_ENV:
         monkeypatch.delenv(name, raising=False)
+    # group302 staggers the boot warms (8 s market open / 90 s closed); tests await the warm for fractions of a second.
+    monkeypatch.setenv("GATEWAY_BOOT_WARM_DELAY_S", "0")
+    monkeypatch.setenv("GATEWAY_BOOT_WARM_CLOSED_DELAY_S", "0")
+    monkeypatch.setenv("SURPRISE_BOOT_WARM_DELAY_SEC", "0")
+    monkeypatch.setenv("GATEWAY_BOOT_WARM_SURPRISE_WAIT_S", "0")   # the surprise warm waits up to 120 s for the movers warm; tests never run that one
+    # the boot-warm asyncio.Event is a process-wide singleton bound to the first event loop that used it; every test
+    # runs its own loop (asyncio.run), so drop it before each test
+    _mod = sys.modules.get("main")
+    if _mod is not None and hasattr(_mod, "_boot_warm_movers_done"):
+        monkeypatch.setattr(_mod, "_boot_warm_movers_done", None)
     yield
 
 import os as _os_logcfg

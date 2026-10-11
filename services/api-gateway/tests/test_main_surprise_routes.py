@@ -144,6 +144,9 @@ class SEnv:
 @pytest.fixture
 def senv(monkeypatch):
     env = SEnv()
+    # group302 serves the saved result while the market is closed; pin "open" so these tests do not depend on the
+    # day / time they run (they failed on every weekend and after 15:30 IST). Tests that need another phase override it.
+    monkeypatch.setattr(gw, "_market_session_phase_ist", lambda: "open")
     mod = types.ModuleType("surprise_scanner")
     mod.surprise_engine = env.engine
 

@@ -515,7 +515,7 @@ class TestIndicesCache:
         kv.store[gw.INDICES_CACHE_KEY] = {"nifty": {"price": 1}}
         _set_move(ienv, 0.0, 0.0)
         body = json.loads(gw.get_market_indices(force_refresh=True).body)
-        assert body["nifty"]["price"] == 20000.0 and ienv.calls == ["^NSEI", "^BSESN"]
+        assert body["nifty"]["price"] == 20000.0 and ienv.calls[:2] == ["^NSEI", "^BSESN"]
 
     @pytest.mark.parametrize("cached", ["", [], "text", {}, None])
     def test_unusable_cache_values_fall_through_to_a_live_fetch(self, ienv, kv, cached):
@@ -523,7 +523,7 @@ class TestIndicesCache:
             kv.store[gw.INDICES_CACHE_KEY] = cached
         _set_move(ienv, 0.0, 0.0)
         body = json.loads(gw.get_market_indices().body)
-        assert body["market_mood"] == "NEUTRAL" and ienv.calls == ["^NSEI", "^BSESN"]
+        assert body["market_mood"] == "NEUTRAL" and ienv.calls[:2] == ["^NSEI", "^BSESN"]   # group221 adds a previous-session history read per index after the live fetch
 
 
 class TestIndicesLive:

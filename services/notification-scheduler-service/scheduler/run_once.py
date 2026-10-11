@@ -216,7 +216,17 @@ def is_holiday(today: datetime) -> bool:
     date_str = today.strftime("%Y-%m-%d")
     if today.weekday() >= 5:
         return True
-    return date_str in HOLIDAYS_2026
+    if date_str in HOLIDAYS_2026:
+        return True
+    # group320: a weekday no calendar lists (unscheduled closure, next year before December) is caught from PRICES:
+    # market-data-service saw no stock/Nifty move 09:15-10:00 IST. Fail-open (any error / no verdict = not a holiday).
+    try:
+        from session_proof_client import closed_for_day
+        if closed_for_day(date_str):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _wake_up_services():

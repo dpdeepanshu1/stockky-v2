@@ -78,3 +78,47 @@ def _g278_indices_stay_on_yfinance_stub(monkeypatch):
     monkeypatch.setenv("PREMARKET_BASELINES_VIA_MARKET_DATA", "0")
     monkeypatch.setenv("REPAIR_RSI_VIA_MARKET_DATA", "0")
     yield
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# group317: no real network from a unit test. 19 tests used to resolve the production hostnames (market-data, analysis-
+# intelligence, Google News, NSE): on the VM that is a real request to a live service, in CI it is a flaky DNS lookup.
+# A blocked attempt is recorded and fails the test that made it, even when the code under test swallows the exception.
+# Escape hatch for a deliberate live run:  ALLOW_TEST_NETWORK=1 python -m pytest ...
+# ---------------------------------------------------------------------------------------------------------------------
+import socket as _socket
+
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "0.0.0.0", "", "testserver", "test"}
+
+
+def _host_of(addr):
+    if isinstance(addr, (tuple, list)) and addr:
+        return str(addr[0])
+    return str(addr)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    if os.environ.get("ALLOW_TEST_NETWORK") == "1":
+        yield
+        return
+    blocked = []
+    real_gai, real_connect = _socket.getaddrinfo, _socket.socket.connect
+
+    def _gai(host, *a, **k):
+        if host is not None and _host_of(host) not in _LOCAL_HOSTS:
+            blocked.append(f"dns {host}")
+            raise _socket.gaierror(_socket.EAI_NONAME, f"real network blocked in unit tests: {host}")
+        return real_gai(host, *a, **k)
+
+    def _connect(self, addr):
+        if self.family in (_socket.AF_INET, _socket.AF_INET6) and _host_of(addr) not in _LOCAL_HOSTS:
+            blocked.append(f"connect {_host_of(addr)}")
+            raise OSError(f"real network blocked in unit tests: {_host_of(addr)}")
+        return real_connect(self, addr)
+
+    monkeypatch.setattr(_socket, "getaddrinfo", _gai)
+    monkeypatch.setattr(_socket.socket, "connect", _connect)
+    yield
+    if blocked:
+        pytest.fail("test made a real network call (stub it): " + ", ".join(sorted(set(blocked))), pytrace=False)

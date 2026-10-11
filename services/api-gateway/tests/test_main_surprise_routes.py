@@ -248,7 +248,9 @@ class TestRunPremarketFeed:
         assert r.status_code == 500 and r.json()["detail"] == "x" * 240
 
     def test_missing_scanner_module_is_a_500(self, no_module, client):
-        assert client.get("/api/surprise/run-premarket-feed").status_code == 500
+        # group317: pass symbols so the route does not build the real scan universe first (that made live calls to
+        # analysis-intelligence, Google News and NSE before reaching the import that this test makes fail)
+        assert client.post("/api/surprise/run-premarket-feed", json={"symbols": ["AAA"]}).status_code == 500
 
 
 # ═════════════════════════════════════════════════════════════════════════════

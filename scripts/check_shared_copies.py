@@ -27,26 +27,49 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _repo_walk import walk_py  # noqa: E402  (never look inside .venv / site-packages)
+
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "shared_copies_baseline.json"
 
 # family name -> file name that is duplicated across services
-FAMILIES = ["oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier"]
-IDENTICAL = {"oracle_compat", "boot_forensics"}
-SKIP_DIRS = {"tests", "__pycache__", "node_modules", ".git", "scripts"}
+FAMILIES = ["oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier", "session_proof_client"]
+IDENTICAL = {"oracle_compat", "boot_forensics", "session_proof_client"}  # group320: six copies of the closed-market client
+SKIP_DIRS = frozenset({"tests", "scripts"})
 
 
 def find_copies(name: str) -> list[Path]:
-    out = []
-    for dirpath, dirnames, filenames in os.walk(ROOT / "services"):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        if f"{name}.py" in filenames:
-            out.append(Path(dirpath) / f"{name}.py")
-    return sorted(out)
+    return sorted(p for p in walk_py(ROOT / "services", SKIP_DIRS) if p.name == f"{name}.py")
 
 
 def rel(p: Path) -> str:
     return p.relative_to(ROOT).as_posix()
+
+
+_IGNORED_FIELDS = {"type_params", "type_comment", "kind"}  # fields that exist only in some Python versions
+
+
+def _canon(node) -> str:
+    """Version-independent text form of an AST node.
+
+    `ast.dump` is NOT stable across Python versions (3.12 adds `type_params=[]` to every def/class, 3.13 stops printing
+    empty fields), so a baseline written on one interpreter failed on another (the CI runs 3.11, the VM 3.12). This writer
+    skips None / empty fields and the version-only ones, so the same source hashes the same everywhere.
+    """
+    if isinstance(node, ast.AST):
+        parts = []
+        for f in node._fields:
+            if f in _IGNORED_FIELDS:
+                continue
+            v = getattr(node, f, None)
+            if v is None or v == []:
+                continue
+            parts.append(f"{f}={_canon(v)}")
+        return f"{type(node).__name__}({','.join(parts)})"
+    if isinstance(node, list):
+        return "[" + ",".join(_canon(x) for x in node) + "]"
+    return repr(node)
 
 
 def symbols(path: Path) -> dict[str, str]:
@@ -62,7 +85,7 @@ def symbols(path: Path) -> dict[str, str]:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names = [node.target.id]
         for n in names:
-            res[n] = hashlib.sha1(ast.dump(node).encode()).hexdigest()[:8]
+            res[n] = hashlib.sha1(_canon(node).encode()).hexdigest()[:8]
     return res
 
 

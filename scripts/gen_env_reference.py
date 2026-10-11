@@ -8,20 +8,25 @@ docs/ENV_REFERENCE.md: variable, services that read it, the default found in the
   python3 scripts/gen_env_reference.py            # (re)write docs/ENV_REFERENCE.md
   python3 scripts/gen_env_reference.py --check    # exit 1 when the file is out of date (for CI / before a deploy)
 
+Virtualenvs (`.venv`, `venv`, anything with a pyvenv.cfg) and `site-packages` are never scanned (see _repo_walk.py), so the
+output is the same on the VM, a laptop and CI.
+
 Defaults are read from `os.getenv("X", "d")` and from the `(os.getenv("X") or "").strip() or "d"` form; anything else is
 shown as `(dynamic)`. A variable listed here is READ by the code; whether it is SET is decided by your .env / compose file.
 """
 from __future__ import annotations
 
 import ast
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _repo_walk import walk_py  # noqa: E402  (skips .venv / site-packages / caches, same rule for every scanner)
+
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "ENV_REFERENCE.md"
-SKIP = {"tests", "__pycache__", "node_modules", "scripts", ".git"}
+SKIP = frozenset({"tests", "scripts"})  # our own test code and helper scripts are not production reads
 CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get", "environ.get", "getenv"}
 
 
@@ -33,48 +38,43 @@ def _const(node):
 
 def scan():
     found = defaultdict(lambda: {"svc": set(), "defaults": [], "where": []})
-    for dp, dn, fn in os.walk(ROOT / "services"):
-        dn[:] = sorted(d for d in dn if d not in SKIP)
-        for f in sorted(fn):
-            if not f.endswith(".py"):
+    for p in walk_py(ROOT / "services", SKIP):
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        parents = {}
+        for n in ast.walk(tree):
+            for c in ast.iter_child_nodes(n):
+                parents[c] = n
+        rel = p.relative_to(ROOT).as_posix()
+        svc = rel.split("/")[1]
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call) and ast.unparse(n.func) in CALLS and n.args):
                 continue
-            p = Path(dp) / f
-            try:
-                tree = ast.parse(p.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
+            name = _const(n.args[0])
+            if not isinstance(name, str) or not name.isupper():
                 continue
-            parents = {}
-            for n in ast.walk(tree):
-                for c in ast.iter_child_nodes(n):
-                    parents[c] = n
-            rel = p.relative_to(ROOT).as_posix()
-            svc = rel.split("/")[1]
-            for n in ast.walk(tree):
-                if not (isinstance(n, ast.Call) and ast.unparse(n.func) in CALLS and n.args):
-                    continue
-                name = _const(n.args[0])
-                if not isinstance(name, str) or not name.isupper():
-                    continue
-                default = None
-                if len(n.args) > 1:
-                    default = _const(n.args[1])
-                else:
-                    # (os.getenv("X") or "").strip() or "d"  -> default "d"
-                    cur = n
-                    for _ in range(4):
-                        cur = parents.get(cur)
-                        if cur is None:
-                            break
-                        if isinstance(cur, ast.BoolOp) and isinstance(cur.op, ast.Or):
-                            consts = [_const(v) for v in cur.values if isinstance(v, ast.Constant) and v.value not in ("", None)]
-                            if consts:
-                                default = consts[-1]
-                            break
-                e = found[name]
-                e["svc"].add(svc)
-                e["defaults"].append("(dynamic)" if default is None and len(n.args) > 1 else ("" if default is None else repr(default)))
-                if len(e["where"]) < 3:
-                    e["where"].append(f"{rel}:{n.lineno}")
+            default = None
+            if len(n.args) > 1:
+                default = _const(n.args[1])
+            else:
+                # (os.getenv("X") or "").strip() or "d"  -> default "d"
+                cur = n
+                for _ in range(4):
+                    cur = parents.get(cur)
+                    if cur is None:
+                        break
+                    if isinstance(cur, ast.BoolOp) and isinstance(cur.op, ast.Or):
+                        consts = [_const(v) for v in cur.values if isinstance(v, ast.Constant) and v.value not in ("", None)]
+                        if consts:
+                            default = consts[-1]
+                        break
+            e = found[name]
+            e["svc"].add(svc)
+            e["defaults"].append("(dynamic)" if default is None and len(n.args) > 1 else ("" if default is None else repr(default)))
+            if len(e["where"]) < 3:
+                e["where"].append(f"{rel}:{n.lineno}")
     return found
 
 
@@ -100,7 +100,8 @@ def render(found) -> str:
 
 
 def main() -> int:
-    text = render(scan())
+    found = scan()
+    text = render(found)
     if "--check" in sys.argv:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if current != text:
@@ -109,7 +110,7 @@ def main() -> int:
         print("docs/ENV_REFERENCE.md is up to date")
         return 0
     OUT.write_text(text, encoding="utf-8")
-    print(f"wrote {OUT.relative_to(ROOT)}: {text.count(chr(10)) - 8} variables")
+    print(f"wrote {OUT.relative_to(ROOT)}: {len(found)} variables")
     return 0
 
 

@@ -1082,6 +1082,14 @@ class Movers:
         self.angel = None               # dict payload for /angelone/movers, or an Exception (default: unreachable)
         self.http_calls = []
         mp.setattr(gw.httpx, "get", self._http_get)
+        # group317: the open-session fetch asks market-data POST /quotes/bulk first; without this stub the tests resolved the
+        # production hostname. "Unreachable" makes it fall through to the yfinance stub, which is what these tests describe.
+        self.http_posts = []
+        mp.setattr(gw.httpx, "post", self._http_post)
+
+    def _http_post(self, url, *a, **kw):
+        self.http_posts.append(url)
+        raise RuntimeError("market-data unreachable")
 
     def _http_get(self, url, timeout=None, **kw):
         self.http_calls.append(url)

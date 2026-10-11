@@ -10,6 +10,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _repo_walk import walk_py  # noqa: E402  (a local .venv's packages import yfinance too - not ours)
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PAT = re.compile(r"^\s*(import yfinance|from yfinance)", re.M)
 ALLOW_FILE = ROOT / "scripts" / "price_source_allowlist.txt"
@@ -17,7 +20,7 @@ ALLOW_FILE = ROOT / "scripts" / "price_source_allowlist.txt"
 
 def offenders() -> list[str]:
     out = []
-    for p in sorted((ROOT / "services").rglob("*.py")):
+    for p in walk_py(ROOT / "services"):
         rel = p.relative_to(ROOT).as_posix()
         if "/tests/" in rel or rel.endswith("_test.py") or "/test_" in rel:
             continue

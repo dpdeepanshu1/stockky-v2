@@ -12,6 +12,10 @@ on:
       - "services/**"
       - "scripts/check_shared_copies.py"
       - "scripts/shared_copies_baseline.json"
+      - "scripts/gen_env_reference.py"
+      - "scripts/_repo_walk.py"
+      - "scripts/test_repo_scripts.py"
+      - "docs/ENV_REFERENCE.md"
       - ".env.example"
       - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
@@ -20,6 +24,10 @@ on:
       - "services/**"
       - "scripts/check_shared_copies.py"
       - "scripts/shared_copies_baseline.json"
+      - "scripts/gen_env_reference.py"
+      - "scripts/_repo_walk.py"
+      - "scripts/test_repo_scripts.py"
+      - "docs/ENV_REFERENCE.md"
       - ".env.example"
       - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
@@ -38,6 +46,14 @@ jobs:
         run: python3 scripts/check_shared_copies.py
       - name: NSE holiday lists agree
         run: python3 scripts/check_holiday_lists_sync.py
+      - name: docs/ENV_REFERENCE.md is current (regenerate with scripts/gen_env_reference.py)
+        run: python3 scripts/gen_env_reference.py --check
+      - name: No new direct yfinance imports outside the allow-list
+        run: python3 scripts/check_price_source_imports.py
+      - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
+        run: |
+          pip install pytest
+          python -m pytest scripts/test_repo_scripts.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

@@ -101,7 +101,18 @@ def is_market_open_ist(now: Optional[datetime] = None) -> bool:
         return False
     if ist_dt.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:
         return False
-    return _MARKET_OPEN <= ist_dt.time() <= _MARKET_CLOSE
+    if not (_MARKET_OPEN <= ist_dt.time() <= _MARKET_CLOSE):
+        return False
+    # group319: a date no calendar lists (unscheduled closure, next year before December) is caught from PRICES -
+    # market-data-service sees no stock/Nifty move 09:15-10:00 IST and says so. Only for real-clock calls.
+    if now is None:
+        try:
+            from session_proof_client import closed_for_day
+            if closed_for_day(ist_dt.strftime("%Y-%m-%d")):
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def as_aware(dt: Optional[datetime]) -> Optional[datetime]:

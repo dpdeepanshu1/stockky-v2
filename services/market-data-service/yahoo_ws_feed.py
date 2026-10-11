@@ -33,6 +33,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from market_hours import is_feed_window_ist
+import session_proof
 
 logger = logging.getLogger("yahoo-ws-feed")
 
@@ -107,6 +108,7 @@ def _on_message(msg: dict) -> None:
             "source": "yahoo_ws",
             "ts": time.time(),
         }
+        session_proof.observe(sym, quote["price"])   # group319
         with _LOCK:
             _LIVE[sym] = quote
             _STATE["last_message_at"] = quote["ts"]

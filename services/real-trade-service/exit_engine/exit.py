@@ -188,7 +188,8 @@ def _load_profile(db: Session, position) -> dict:
     try:
         row = db.get(models.WatchlistEntry, position.watchlist_entry_id)   # Session.get (Query.get is legacy in SQLAlchemy 2.0)
         horizon_class = row.horizon_class if row else None
-    except Exception:
+    except Exception as e:
+        logger.warning("exit profile: watchlist row lookup failed for %s (%s) - using the default exit profile", getattr(position, "symbol", "?"), e)
         horizon_class = None
     profile = exit_profile_for(horizon_class)
     return {**profile, "horizon_class": horizon_class}
@@ -1639,7 +1640,8 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     0.0,
                 )
                 db.commit()
-            except Exception:
+            except Exception as _note_exc:
+                logger.warning("evaluate_mode: could not store the HOLD note for %s (%s): %s", position.symbol, mode, _note_exc)
                 db.rollback()
             held += 1
 

@@ -95,6 +95,15 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
+def _first(*vals):
+    """First argument that is not None. group319: `a or b or default` treated a real 0 (RS 0, event score 0 = a
+    strongly negative event, 0% delivery) as "missing" and silently replaced it with a neutral 50 / the fallback."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _n(v, default=50.0) -> float:
     try:
         if v is None:
@@ -220,15 +229,15 @@ def compute_pillar_scores(
     extras = extras or {}
     tech = _n(technical.get("technical_score"), 50)
     # Relative strength vs Nifty (0–100 style)
-    rs = _n(extras.get("rs_vs_nifty") or technical.get("rs_score"), 50)
+    rs = _n(_first(extras.get("rs_vs_nifty"), technical.get("rs_score")), 50)
     vol = 55.0
     if technical.get("volume_surge"):
         vol = 75.0
-    delivery = _n(extras.get("delivery_pct") or technical.get("delivery_pct"), 50)
+    delivery = _n(_first(extras.get("delivery_pct"), technical.get("delivery_pct")), 50)
     volume_rs = _clamp(0.45 * rs + 0.35 * vol + 0.20 * (50 + (delivery - 50) * 0.5))
 
     fund = _n(fundamental.get("fundamental_score"), 50)
-    quality = _n(extras.get("quality_score") or fundamental.get("quality_score"), fund)
+    quality = _n(_first(extras.get("quality_score"), fundamental.get("quality_score")), fund)
     peer = _n(extras.get("peer_relative_score"), 50)
     quality_peers = _clamp(0.55 * quality + 0.45 * peer)
 
@@ -241,7 +250,7 @@ def compute_pillar_scores(
     # event_depth.compute_event_score (analysis-intelligence-service),
     # passed through via extras["event_score"]. Falls back to a neutral 50
     # if the event pipeline hasn't scored this symbol yet.
-    event_pillar = _n(extras.get("event_score") or (events or {}).get("event_score"), 50)
+    event_pillar = _n(_first(extras.get("event_score"), (events or {}).get("event_score")), 50)
 
     pred = 50.0
     if prediction and prediction.get("model_loaded"):
@@ -278,6 +287,18 @@ def score_horizon(
     # and always applied to the original, undecayed pillar value.
     pillars = dict(pillars)
 
+    # Time-decay: stale news/sentiment (e.g. 4h old) contributes less vs fresh technicals.
+    # Only applied to the "news" pillar — "event" already carries its own
+    # per-item recency decay from event_depth.compute_event_score, so
+    # decaying it again here would double-penalize old events.
+    # group319: this used to run AFTER the weighted score below was computed, so it only changed the pillar value
+    # shown in the response and never the score/decision. It now runs first, so stale news really counts for less.
+    news_age = _age_hours(flags.get("news_as_of") or flags.get("sentiment_as_of") or flags.get("as_of"))
+    news_w = time_decay_weight(news_age, half_life_hours=4.0)
+    if "news" in pillars and news_w < 0.999:
+        # Pull news pillar toward neutral 50 as it ages
+        pillars["news"] = pillars["news"] * news_w + 50.0 * (1.0 - news_w)
+
     weights = HORIZON_WEIGHTS[horizon]
     mult = regime_multipliers(market_score, classification)
     total_w = 0.0
@@ -290,15 +311,6 @@ def score_horizon(
     score = _clamp(weighted / total_w if total_w else 50.0)
 
     # Closed-loop score nudge from live win-rate (±8 max)
-    # Time-decay: stale news/sentiment (e.g. 4h old) contributes less vs fresh technicals.
-    # Only applied to the "news" pillar — "event" already carries its own
-    # per-item recency decay from event_depth.compute_event_score, so
-    # decaying it again here would double-penalize old events.
-    news_age = _age_hours(flags.get("news_as_of") or flags.get("sentiment_as_of") or flags.get("as_of"))
-    news_w = time_decay_weight(news_age, half_life_hours=4.0)
-    if "news" in pillars and news_w < 0.999:
-        # Pull news pillar toward neutral 50 as it ages
-        pillars["news"] = pillars["news"] * news_w + 50.0 * (1.0 - news_w)
 
     live_wr = flags.get("live_win_rate")
     live_n = int(flags.get("live_win_rate_n") or 0)

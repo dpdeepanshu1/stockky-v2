@@ -170,10 +170,15 @@ def ingest_rows(rows, now: Optional[float] = None) -> int:
             vol = int(vol) if vol is not None and int(vol) > 0 else 0
         except (TypeError, ValueError):
             vol = 0
+        # group304: the quote row carries the session OPEN (Dhan ohlc.open) and the exchange day VWAP (average price); the
+        # first version of this poller dropped both, so screening/opening_gate.py (which fails closed without a day open)
+        # would have refused every 09:15-10:00 entry on this feed.
+        op = _num(row.get("open"))
         hi, lo, prev = _num(row.get("day_high")), _num(row.get("day_low")), _num(row.get("previous_close"))
-        day_stats = (None, hi, lo, prev) if any(v is not None for v in (hi, lo, prev)) else None
+        vwap = _num(row.get("avg_price"))
+        day_stats = (op, hi, lo, prev) if any(v is not None for v in (op, hi, lo, prev)) else None
         ws_client._last_tick_at = ts
-        ws_client._ingest_tick(sym, price, ts, vol, None, None, day_stats)
+        ws_client._ingest_tick(sym, price, ts, vol, None, None, day_stats, vwap)
         stored += 1
     _stats["ticks"] += stored
     return stored

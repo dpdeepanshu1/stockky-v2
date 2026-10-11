@@ -28,3 +28,12 @@ def _opening_gate_off_by_default(monkeypatch):
     from screening import prev_day as _pd
     _pd.reset()
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _board_gate_off_by_default(monkeypatch):
+    """group309: orders/board_gate.py queues a shadow row (background writer) for every entry it looks at. Switch it off for every
+    older test; test_group309_board_log_gate_report.py turns it back on explicitly."""
+    import config as _config
+    monkeypatch.setattr(_config, "BOARD_GATE_MODE", "off", raising=False)
+    yield

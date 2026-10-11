@@ -1410,6 +1410,11 @@ class TestLifespan:
         monkeypatch.setattr(m.ws_client, "start", _fake_start)
         monkeypatch.setattr(m.ws_client, "stop", _fake_stop)
         monkeypatch.setattr(m.ws_client, "register_on_tick", lambda cb: registered.append(cb))
+        # group305: lifespan also installs the Market Board bar store (a second tick callback) and starts a board loop; keep the
+        # lifespan tests offline (no daily F&O download thread) and independent of whether an earlier test already installed it.
+        from feed import bar_store as _bar_store
+        monkeypatch.setattr(_bar_store, "_installed", False)
+        monkeypatch.setattr(m.config, "FNO_LIST_REFRESH", False, raising=False)
 
         async def _never_ending():
             await asyncio.Event().wait()
@@ -1432,7 +1437,8 @@ class TestLifespan:
         asyncio.run(_run())
         assert started["n"] == 1
         assert stopped["n"] == 1
-        assert registered == [m._engine_tick_hook]
+        from feed import bar_store as _bar_store
+        assert registered == [m._engine_tick_hook, _bar_store.on_tick]      # engine hook first, then the board's bar store
 
     def test_boot_forensics_exception_is_swallowed(self, db, monkeypatch):
         started, stopped, _ = self._base_patches(monkeypatch, db)

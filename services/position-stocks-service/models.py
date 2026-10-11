@@ -533,3 +533,34 @@ class ScalpQualityCache(Base):
     technical_score = Column(Float, nullable=True)
     market_cap_cr = Column(Float, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class ScalpBoardLog(Base):
+    """group309: shadow log of the Market Board's signals (top movers per side every BOARD_LOG_EVERY_S, plus every entry the
+    chase guard looked at). Evidence for the shadow report - nothing here places or blocks an order unless BOARD_GATE_MODE=enforce.
+    New table (create_all, no column migration). fwd_* columns are filled later from the same day's bars: forward return in %,
+    signed so positive = the signal's side was right, before costs."""
+    __tablename__ = "scalp_board_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime, nullable=False, default=_now, index=True)
+    day = Column(String(10), nullable=False, index=True)          # IST date YYYY-MM-DD
+    kind = Column(String(12), nullable=False)                     # "snapshot" | "entry"
+    symbol = Column(String(32), nullable=False, index=True)
+    side = Column(String(4), nullable=True)                       # bull | bear
+    rank = Column(Integer, nullable=True)
+    strength = Column(Float, nullable=True)
+    conviction = Column(Integer, nullable=True)
+    ltp = Column(Float, nullable=True)
+    day_open = Column(Float, nullable=True)
+    vwap = Column(Float, nullable=True)
+    chase_atr = Column(Float, nullable=True)
+    rr = Column(Float, nullable=True)
+    zone_status = Column(String(8), nullable=True)
+    in_position = Column(Boolean, nullable=False, default=False)
+    note = Column(String(120), nullable=True)
+    params_version = Column(String(16), nullable=True)
+    fwd15_pct = Column(Float, nullable=True)
+    fwd30_pct = Column(Float, nullable=True)
+    fwd60_pct = Column(Float, nullable=True)
+    fwd_close_pct = Column(Float, nullable=True)

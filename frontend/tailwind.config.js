@@ -1,51 +1,52 @@
 /** @type {import('tailwindcss').Config} */
+// UI refresh (2026-10-11): every themed colour is now an RGB-channel CSS
+// variable (see :root / html.light in src/index.css) wrapped with
+// <alpha-value>. Before this, colours were plain `var(--x)` strings, which
+// Tailwind cannot apply an opacity modifier to — so ~600 classes such as
+// `text-mist/60`, `border-slate/40`, `bg-ink/40` were silently never
+// generated and those elements fell back to inherited/default styling.
+// Token NAMES (ink/graphite/slate/mist/paper, signal.*) are unchanged, so
+// no component className needed to change.
+const c = (name) => `rgb(var(--${name}-rgb) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
-      // 2026-09-03 Groww-style UI upgrade: token NAMES kept identical
-      // (ink/graphite/slate/mist/paper) so every existing className in the
-      // 27 components keeps working. Values now point at the CSS variables
-      // in index.css instead of fixed hex, so bg-ink/text-paper/etc. stay
-      // correctly theme-aware — the existing dark/light toggle (html.light)
-      // keeps working exactly as before, it just now switches into the new
-      // Groww-styled light palette instead of the old one. Semantic note:
-      // "ink"/"graphite" were originally near-black backgrounds, now
-      // resolve to whichever --bg/--panel is active per theme; "paper" was
-      // light text-on-dark, now resolves to --fg (dark text in light mode).
       colors: {
-        ink: "var(--bg)",
-        graphite: "var(--panel)",
-        slate: "var(--border)",
-        mist: "var(--muted)",
-        paper: "var(--fg)",
+        ink: c("bg"),          // app background
+        graphite: c("panel"),  // cards / panels
+        slate: c("border"),    // hairlines / borders
+        mist: c("muted"),      // secondary text
+        paper: c("fg"),        // primary text
         amber: {
-          terminal: "var(--buy)", // brand accent, repurposed from amber to brand green
-          dim: "var(--amber)",
+          terminal: c("accent"),
+          dim: c("warn"),
         },
         signal: {
-          buy: "#00b386",
-          prepare: "#3968ef",
-          hold: "#ed7a1a",
-          avoid: "#93a0a8",
-          sell: "#ff5b52",
+          buy: c("buy"),
+          prepare: c("accent"), // interactive / informational blue
+          hold: c("warn"),
+          avoid: c("muted-2"),
+          sell: c("sell"),
         },
       },
       fontFamily: {
-        display: ["'DM Sans'", "'Inter'", "system-ui", "sans-serif"],
-        mono: ["'Inter'", "ui-monospace", "monospace"],
-        body: ["'DM Sans'", "'Inter'", "system-ui", "sans-serif"],
+        display: ["'Inter'", "system-ui", "sans-serif"],
+        mono: ["'Inter'", "system-ui", "sans-serif"],
+        body: ["'Inter'", "system-ui", "sans-serif"],
+        code: ["'JetBrains Mono'", "ui-monospace", "monospace"],
       },
       boxShadow: {
-        "glow-sm": "0 1px 2px rgba(16,24,32,0.04)",
-        glow: "0 8px 24px rgba(16,24,32,0.08)",
-        panel: "0 1px 2px rgba(16,24,32,0.04), 0 8px 24px rgba(16,24,32,0.06)",
+        "glow-sm": "0 1px 2px rgb(var(--shadow-rgb) / 0.06)",
+        glow: "0 8px 24px rgb(var(--shadow-rgb) / 0.10)",
+        panel: "0 1px 2px rgb(var(--shadow-rgb) / 0.06), 0 6px 18px rgb(var(--shadow-rgb) / 0.06)",
       },
       borderRadius: {
-        card: "16px",
+        card: "14px",
       },
       letterSpacing: {
-        terminal: "0.08em",
+        terminal: "0.01em",
       },
     },
   },

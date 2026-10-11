@@ -1,3 +1,4 @@
+// group324: Card now renders the board's dark terminal island (.ob, see board.css) so the journal cards under the board match it.
 // group311: ONE card style for everything on the Market Board, matching the dashboards' own cards (StatCard / SectionHdr in
 // RealAutoTrade: graphite surface, slate border, rounded-2xl, small uppercase label). Pure presentation; no behaviour.
 import type { ReactNode } from "react";
@@ -9,10 +10,10 @@ export const LABEL_CLASS = "text-[10px] font-display tabular-nums uppercase trac
 export function Card({ children, title, right, className = "", pad = "p-3" }:
   { children: ReactNode; title?: ReactNode; right?: ReactNode; className?: string; pad?: string }) {
   return (
-    <div className={`${CARD_CLASS} ${pad} ${className}`}>
+    <div className={`ob ob-card ${pad === "p-3" ? "" : pad} ${className}`}>
       {(title || right) && (
         <div className="flex items-center justify-between gap-2 mb-2">
-          {title ? <p className={LABEL_CLASS}>{title}</p> : <span />}
+          {title ? <p className="ob-cap">{title}</p> : <span />}
           {right}
         </div>
       )}

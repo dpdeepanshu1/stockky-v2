@@ -22,6 +22,7 @@ import {
 // non-blocking call — this dashboard must keep working even if real-
 // trade-service's URL isn't configured in this browser).
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
+import { SubTabs } from "./ui/SubTabs";
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
@@ -820,31 +821,22 @@ export default function PositionStocksTab() {
       </div>
 
       {/* ── Sub-tab nav ── */}
-      <div className="flex flex-wrap gap-1 border-b border-slate pb-2">
-        {([
+      <SubTabs<SubTab>
+        label="Position Stocks sections"
+        value={subTab}
+        onChange={setSubTab}
+        items={[
           { id: "overview", label: "Overview" },
           { id: "board", label: "Board" },
           { id: "pipeline", label: "Pipeline" },
           { id: "screener", label: "Screener" },
-          { id: "positions", label: `Positions (${openPositions.length})` },
+          { id: "positions", label: "Positions", count: openPositions.length },
           { id: "history", label: "Trade History" },
           { id: "dhanorders", label: "Dhan Live Orders" },
           { id: "charges", label: "Charges" },
           { id: "settings", label: "Settings" },
-        ] as { id: SubTab; label: string }[]).map(t => (
-          <button
-            key={t.id}
-            onClick={() => setSubTab(t.id)}
-            className={`px-3 py-1.5 rounded-lg font-display tabular-nums text-[11px] uppercase tracking-wide border transition-colors ${
-              subTab === t.id
-                ? "bg-signal-prepare/20 border-signal-prepare/40 text-signal-prepare"
-                : "border-transparent text-mist hover:text-paper"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+        ]}
+      />
 
       {/* group306: Market Board (display + shadow logging only; places no order) */}
       {subTab === "board" && (

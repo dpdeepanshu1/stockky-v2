@@ -7,6 +7,7 @@ import {
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
+import { SubTabs } from "./ui/SubTabs";
 // Cross-service, read-only: position-stocks-service's own capital ledger
 // and split percentage, used only to populate the "Position Stocks" side
 // of CapitalSplitCard below (see that component's docstring for why this
@@ -1544,20 +1545,20 @@ export default function RealAutoTrade() {
 
   const nextGateNeeded = !gate1 ? 1 : !gate2 ? 2 : !gate3 ? 3 : armed ? null : 4;
 
-  const tabs: { id: Tab; label: string }[] = [
+  const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "overview", label: "Overview" },
     { id: "board", label: "Board" },
     { id: "live", label: "Live Dhan" },
-    { id: "positions", label: `Positions (${positions.length})` },
-    { id: "orders", label: `Orders (${orders.length})` },
-    { id: "watchlist", label: `Watchlist (${candidates.length})` },
+    { id: "positions", label: "Positions", count: positions.length },
+    { id: "orders", label: "Orders", count: orders.length },
+    { id: "watchlist", label: "Watchlist", count: candidates.length },
     { id: "pipeline", label: "Pipeline" },
     { id: "charges", label: "Charges" },
     { id: "log", label: "Activity" },
   ];
 
   return (
-    <div className="max-w-3xl mx-auto pb-8">
+    <div className="max-w-5xl mx-auto pb-8">
       {/* ── Header bar ───────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between mb-1 px-1">
         <div className="flex items-center gap-2">
@@ -1631,19 +1632,7 @@ export default function RealAutoTrade() {
             )
           )}
 
-          {/* ── Tab bar (Groww-style pill segmented control) ───────────── */}
-          <div className="flex gap-1 mb-4 overflow-x-auto pb-1 bg-ink border border-slate rounded-full p-1">
-            {tabs.map(t => (
-              <button key={t.id} onClick={() => setActiveTab(t.id)}
-                className={`px-3.5 py-1.5 rounded-full font-display text-[12px] font-semibold whitespace-nowrap transition-colors flex-shrink-0 ${
-                  activeTab === t.id
-                    ? "bg-signal-buy text-white"
-                    : "text-mist hover:text-paper"
-                }`}>
-                {t.label}
-              </button>
-            ))}
-          </div>
+          <SubTabs items={tabs} value={activeTab} onChange={setActiveTab} label="Auto Trade sections" />
 
           {/* ═══════════════════════════════════════════════════════════════
               TAB: OVERVIEW
@@ -1679,12 +1668,12 @@ export default function RealAutoTrade() {
                         : <span>Not a candidate or position here. Display only: no order can be placed from the board.</span>}
                     </div>
                   )} />
-                <div className="rounded-xl border border-slate bg-ink p-3 text-[11px]">
-                  <div className="font-display font-bold text-paper mb-1">Your {mode} positions and candidates</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {[...heldSyms].map(s => <span key={"p" + s} className="px-2 py-0.5 rounded-full border border-signal-hold/50 text-signal-hold">{s} · held</span>)}
-                    {[...candSyms].filter(s => !heldSyms.has(s)).map(s => <span key={"c" + s} className="px-2 py-0.5 rounded-full border border-signal-prepare/40 text-signal-prepare">{s}</span>)}
-                    {heldSyms.size + candSyms.size === 0 && <span className="text-mist">None right now.</span>}
+                <div className="ob ob-card" data-testid="real-board-marks">
+                  <p className="ob-cap">Your {mode} positions and candidates</p>
+                  <div className="ob-chips">
+                    {[...heldSyms].map(s => <span key={"p" + s} className="held">{s} · held</span>)}
+                    {[...candSyms].filter(s => !heldSyms.has(s)).map(s => <span key={"c" + s}>{s}</span>)}
+                    {heldSyms.size + candSyms.size === 0 && <span className="none">None right now.</span>}
                   </div>
                 </div>
               </div>

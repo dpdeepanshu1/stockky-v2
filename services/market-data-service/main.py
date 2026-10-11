@@ -757,7 +757,7 @@ async def root():
 @app.get("/health")
 async def health():
     # Simple health check; optionally verify dependencies (Redis, etc.)
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
 @app.get("/angelone/network-check")
@@ -781,7 +781,7 @@ async def angelone_network_check():
         "angelone_static_ip_env_value": explicit or None,
         "auto_detected_outbound_ip": detected,
         "ip_that_will_actually_be_sent": explicit or detected or "127.0.0.1 (fallback — see note)",
-        "checked_at": datetime.utcnow().isoformat(),
+        "checked_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         "note": (
             "AngelOne's secure endpoints validate X-ClientPublicIP. If this "
             "doesn't match an IP AngelOne will accept, either set "
@@ -1454,7 +1454,7 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
     if vol is not None and vol < 0:
         vol = None
 
-    fetched = d.get("fetched_at") or datetime.utcnow().isoformat()
+    fetched = d.get("fetched_at") or datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     if not isinstance(fetched, str):
         fetched = str(fetched)
 
@@ -1665,7 +1665,7 @@ def _yahoo_ohlcv_quote(symbol: str) -> Optional[dict]:
                 "atr": atr_val,
                 "source": "yahoo",
                 "yahoo_ticker": ticker,
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             }
         except Exception as e:
             if _is_rate_limit_error(e):
@@ -2289,7 +2289,7 @@ def _failed_quote_payload(sym: str, source: str = "failed") -> dict:
         "price": None,
         "cmp": None,
         "source": source,
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     })
     return _sanitize_for_json(result)
 
@@ -2519,7 +2519,7 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
             "day_low": day_low if day_low and day_low > 0 else None,
             "volume": vol,
             "source": "angelone_rest",
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
     except Exception as e:  # noqa: BLE001
         logger.debug("angelone-first quote %s: %s", sym, e)
@@ -2610,7 +2610,7 @@ def _closed_last_close_row(sym: str) -> Optional[dict]:
     if px and px > 0:
         row = {
             "symbol": sym, "price": float(px), "cmp": float(px), "previous_close": float(px),
-            "source": "bhavcopy_eod", "fetched_at": datetime.utcnow().isoformat(),
+            "source": "bhavcopy_eod", "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
         # group235: the row used to carry previous_close == close, so every closed-market bhavcopy quote read
         # "0.0% today" (the 2026-10-07 log: 229 volume-shock candidates rejected on "Today's return 0.0%").
@@ -2669,7 +2669,7 @@ def _dhan_quote_payload(base: str, row: dict) -> dict:
         "previous_close": row.get("previous_close"), "day_change_pct": row.get("day_change_pct"),
         "day_high": row.get("day_high"), "day_low": row.get("day_low"),
         "volume": row.get("volume"), "source": "dhan",
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -2865,7 +2865,7 @@ def _get_quote_inner(symbol: str):
             result = _pad_quote_response(sym, {
                 **live,
                 "name": sym,
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             })
             result = _sanitize_for_json(result)
             result["source"] = "angelone_ws"
@@ -2883,7 +2883,7 @@ def _get_quote_inner(symbol: str):
             result = _pad_quote_response(sym, {
                 **live,
                 "name": sym,
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             })
             result = _sanitize_for_json(result)
             result["source"] = "yahoo_ws"
@@ -2998,7 +2998,7 @@ def _get_quote_inner(symbol: str):
                 "market_cap": info.get("marketCap"),
                 "pe_ratio": info.get("trailingPE"),
                 "source": "yahoo_info",
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             })
             result = _sanitize_for_json(result)
             _cache_set(cache_key, result)
@@ -3098,7 +3098,7 @@ def _get_quote_inner(symbol: str):
             "price": float(waterfall_price),
             "cmp": float(waterfall_price),
             "source": waterfall_source or "waterfall",
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         })
         result = _sanitize_for_json(result)
         _cache_set(cache_key, result)
@@ -3127,7 +3127,7 @@ def _get_quote_inner(symbol: str):
                     "price": float(bhav_px),
                     "cmp": float(bhav_px),
                     "source": "bhavcopy_eod",
-                    "fetched_at": datetime.utcnow().isoformat(),
+                    "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 })
                 result = _sanitize_for_json(result)
                 # Short TTL — this is EOD, not live; let the next live attempt override it soon.
@@ -3143,7 +3143,7 @@ def _get_quote_inner(symbol: str):
         "price": None,
         "cmp": None,
         "source": "failed",
-        "fetched_at": datetime.utcnow().isoformat(),
+        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     })
     return _sanitize_for_json(result)
 
@@ -3343,7 +3343,7 @@ def angelone_movers():
             "data": rows,
             "universe_size": universe_size,
             "quotes_fetched": len(rows_raw) + dhan_priced,
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
         if dhan_priced:
             result["dhan_priced"] = dhan_priced
@@ -3550,7 +3550,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                     "day_low": live.get("low") or live.get("day_low"),
                     "volume": live.get("volume"),
                     "source": live.get("source") or "live_feed",
-                    "fetched_at": datetime.utcnow().isoformat(),
+                    "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 })
                 try:
                     _cache_set(f"quote:{mapped}", quote, ttl=15)
@@ -3653,7 +3653,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                         "day_low": float(_fq.get("low") or 0) or None,
                         "volume": _fq.get("tradeVolume"),
                         "source": "angelone_rest",
-                        "fetched_at": datetime.utcnow().isoformat(),
+                        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                     })
                     try:
                         _cache_set(f"quote:{_mapped_key}", quote, ttl=12)
@@ -3877,7 +3877,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                 "day_low": day_low,
                 "volume": volume,
                 "source": "yahoo_bulk",
-                "fetched_at": datetime.utcnow().isoformat(),
+                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             })
             # Cache under both the yf key and the base symbol
             try:

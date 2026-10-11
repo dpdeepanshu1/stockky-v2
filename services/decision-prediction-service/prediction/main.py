@@ -8,7 +8,7 @@ Walk-forward and calibration remain on the training side.
 import os
 import re
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -377,7 +377,7 @@ def _fetch_news_scores(symbol: str) -> Dict[str, Any]:
             if next_earn:
                 try:
                     dt = datetime.fromisoformat(str(next_earn).replace("Z", "+00:00"))
-                    days = (dt.replace(tzinfo=None) - datetime.utcnow()).days
+                    days = (dt.replace(tzinfo=None) - datetime.now(timezone.utc).replace(tzinfo=None)).days
                     scores["days_to_next_earnings"] = float(max(0, min(90, days)))
                 except Exception:
                     pass
@@ -547,7 +547,7 @@ def predict(symbol: str):
             history_df=df,
             fundamental_snapshot=fundamental,
             news_scores=news,
-            as_of_date=datetime.utcnow(),
+            as_of_date=datetime.now(timezone.utc).replace(tzinfo=None),
         )
 
         aligned = _align_features(features, model)

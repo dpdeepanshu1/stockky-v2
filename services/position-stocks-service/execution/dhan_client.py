@@ -1280,3 +1280,80 @@ def is_circuit_limit_error(message: str) -> bool:
         Log once and do NOT hammer Dhan with retries."""
     m = (message or "").lower()
     return any(marker in m for marker in _CIRCUIT_LIMIT_MARKERS)
+
+
+# ── group313: BUY placement that errored on OUR side may still have reached Dhan ──────────────────────────────────────
+# A read timeout / reset / 5xx after the request left means Dhan may have accepted the entry. Treating that as "failed"
+# released the capital and the symbol claim while a live position (and its stop) existed at the broker. Dhan does not echo
+# correlationId/tag on this account (see main.py /dhan/live-orders), so the lookup matches on security id + side + quantity +
+# a young createTime instead of an id. Fails open: any doubt -> None -> the caller keeps its old "failed" handling.
+_AMBIGUOUS_TYPE_NAMES = frozenset({
+    "ReadTimeout", "ReadError", "WriteError", "RemoteProtocolError", "ChunkedEncodingError", "ConnectionResetError",
+    "ConnectionAbortedError", "IncompleteRead", "ServerDisconnectedError",
+})
+_NOT_SENT_TYPE_NAMES = frozenset({"ConnectTimeout", "ConnectError", "PoolTimeout", "NameResolutionError", "ConnectionRefusedError"})
+_AMBIGUOUS_MARKERS = (
+    "read timed out", "timed out", "readtimeout", "connection reset", "connection aborted", "remote end closed",
+    "server disconnected", "incompleteread", "bad gateway", "gateway time-out", "gateway timeout", "service unavailable",
+)
+_AMBIGUOUS_HTTP_RE = re.compile(r"(?<![\d.:])50[234](?![\d.])")      # a bare HTTP 502/503/504, not digits inside an RMS id or price
+_NOT_SENT_MARKERS = ("connect timeout", "connecttimeout", "name resolution", "connection refused", "failed to establish a new connection")
+_DEAD_BUY_STATUSES = frozenset({"REJECTED", "CANCELLED", "EXPIRED"})
+
+
+def is_ambiguous_placement_error(exc) -> bool:
+    """True when an order-placement exception does NOT prove Dhan never received the order (timeout / dropped connection /
+    gateway 5xx after sending). A refused or never-established connection, and any ordinary Dhan rejection, are not ambiguous."""
+    names = {c.__name__ for c in type(exc).__mro__}
+    msg = str(exc or "").lower()
+    if names & _NOT_SENT_TYPE_NAMES or any(m in msg for m in _NOT_SENT_MARKERS):
+        return False
+    if names & _AMBIGUOUS_TYPE_NAMES:
+        return True
+    return any(m in msg for m in _AMBIGUOUS_MARKERS) or bool(_AMBIGUOUS_HTTP_RE.search(msg))
+
+
+def match_recent_buy_order(rows, security_id, quantity, now=None, within_s: float = 180.0, exclude_ids=()) -> Optional[dict]:
+    """Newest live BUY row for this security id and exact quantity created within `within_s` seconds, whose id is not already
+    ours. Needs a parseable createTime (IST when naive); without one nothing is matched. Pure."""
+    from datetime import datetime, timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_dt = now if isinstance(now, datetime) else datetime.now(ist)
+    skip = {str(x) for x in (exclude_ids or ()) if x}
+    best = None
+    best_age = None
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "BUY":
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(security_id):
+            continue
+        if str(r.get("orderStatus") or r.get("order_status") or "").upper() in _DEAD_BUY_STATUSES:
+            continue
+        try:
+            if int(float(r.get("quantity") or 0)) != int(quantity):
+                continue
+        except (TypeError, ValueError):
+            continue
+        oid = str(r.get("orderId") or r.get("order_id") or r.get("id") or "")
+        if not oid or oid in skip:
+            continue
+        raw_t = r.get("createTime") or r.get("create_time")
+        try:
+            t = datetime.fromisoformat(str(raw_t).replace("Z", "+00:00").replace(" ", "T")[:19])
+            t = t.replace(tzinfo=ist) if t.tzinfo is None else t
+            age = (now_dt - t).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if age < -30 or age > within_s:
+            continue
+        if best is None or age < best_age:
+            best, best_age = r, age
+    return best
+
+
+def find_recent_buy_order(db: Session, security_id, quantity, super_order: bool = True, exclude_ids=(), within_s: float = 180.0) -> Optional[dict]:
+    """Ask Dhan (super-order list or plain order book) for a BUY that an errored placement may have created. Read-only."""
+    rows = get_super_order_list(db) if super_order else get_order_list(db)
+    return match_recent_buy_order(rows, security_id, quantity, exclude_ids=exclude_ids, within_s=within_s)

@@ -4,7 +4,7 @@ Enhanced to support comprehensive metrics, batch evaluation, and summary statist
 """
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 import yfinance as yf
@@ -180,7 +180,7 @@ def _calendar_age_days(ts) -> int:
         try:
             if getattr(ts, "tzinfo", None) is not None:
                 ts = ts.replace(tzinfo=None)
-            return max(0, (datetime.utcnow() - ts).days)
+            return max(0, (datetime.now(timezone.utc).replace(tzinfo=None) - ts).days)
         except Exception:
             return 0
 
@@ -288,7 +288,7 @@ def _persist_t1_outcome(db, pred, scored: dict) -> dict:
         outcome = db_models.PredictionOutcome(
             prediction_id=pred.prediction_id,
             evaluation_period="T+1",
-            evaluation_date=datetime.utcnow(),
+            evaluation_date=datetime.now(timezone.utc).replace(tzinfo=None),
             close_price=float(t1_px) if t1_px is not None else None,
             return_pct=ret,
             direction_correct=1 if success else 0,
@@ -372,7 +372,7 @@ def evaluate_t1(prediction_id: str, allow_backfill: bool = True):
         if existing:
             return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        raw_day = pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()
+        raw_day = pred.timestamp.date() if pred.timestamp else datetime.now(timezone.utc).replace(tzinfo=None).date()
         # Wide window: prior + future sessions for realtime; history always available
         start_date = raw_day - timedelta(days=45)
         end_date = raw_day + timedelta(days=20)
@@ -441,8 +441,8 @@ def evaluate_t5(prediction_id: str):
         if existing:
             return {"ok": True, "reason": "already_evaluated", "success": bool(existing.success)}
 
-        start_date = (pred.timestamp.date() - timedelta(days=5)) if pred.timestamp else datetime.utcnow().date()
-        end_date = (pred.timestamp.date() if pred.timestamp else datetime.utcnow().date()) + timedelta(days=25)
+        start_date = (pred.timestamp.date() - timedelta(days=5)) if pred.timestamp else datetime.now(timezone.utc).replace(tzinfo=None).date()
+        end_date = (pred.timestamp.date() if pred.timestamp else datetime.now(timezone.utc).replace(tzinfo=None).date()) + timedelta(days=25)
         bars = _fetch_bars(pred.symbol, start_date, end_date)
         if not bars or len(bars) < 6:
             # group303: a prediction younger than 5 sessions cannot have T+5 bars yet - INFO; an old one with too few bars is a real gap.
@@ -498,7 +498,7 @@ def evaluate_t5(prediction_id: str):
         outcome = db_models.PredictionOutcome(
             prediction_id=prediction_id,
             evaluation_period="T+5",
-            evaluation_date=datetime.utcnow(),
+            evaluation_date=datetime.now(timezone.utc).replace(tzinfo=None),
             open_price=t5_bar.get("open"),
             high_price=t5_bar.get("high"),
             low_price=t5_bar.get("low"),
@@ -542,7 +542,7 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
     period: 'T+1' or 'T+5'
     """
     import time as _time
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td, timezone
 
     db = SessionLocal()
     try:

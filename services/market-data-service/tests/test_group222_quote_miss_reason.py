@@ -15,7 +15,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -74,7 +74,7 @@ def _session(monkeypatch, resp=None, cooldown=False, try_acquire=True):
     s = ac.AngelOneSession()
     s.client_id, s.mpin, s.api_key, s.totp_secret = "C1", "1234", "KEY", "JBSWY3DPEHPK3PXP"
     s.token = "tok"
-    s.token_expiry = datetime.utcnow() + timedelta(hours=1)
+    s.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
     monkeypatch.setattr(ac, "_resolve_client_public_ip", lambda: "1.2.3.4")
     monkeypatch.setattr(ac, "_rl_in_cooldown", lambda p: cooldown)
     monkeypatch.setattr(ac, "_rl_acquire", lambda *a, **k: 0.0)

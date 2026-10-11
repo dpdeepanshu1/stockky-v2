@@ -7,8 +7,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# group313: constraints.txt (made by scripts/freeze_constraints.sh) pins every dependency to the versions the tests ran on; optional until generated
+COPY requirements.txt constraints.tx[t] ./
+RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.txt -c constraints.txt; else pip install --no-cache-dir -r requirements.txt; fi
 
 COPY . .
 

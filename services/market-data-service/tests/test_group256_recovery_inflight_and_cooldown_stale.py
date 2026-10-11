@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -183,7 +183,7 @@ _ENV = ("QUOTE_COOLDOWN_SERVE_STALE", "QUOTE_COOLDOWN_SKIP_YAHOO", "QUOTE_COOLDO
 
 def _row(sym, price=100.0, age_s=30.0, source="angelone_rest"):
     return {"symbol": sym, "price": price, "cmp": price, "source": source,
-            "fetched_at": (datetime.utcnow() - timedelta(seconds=age_s)).isoformat()}
+            "fetched_at": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=age_s)).isoformat()}
 
 
 @pytest.fixture

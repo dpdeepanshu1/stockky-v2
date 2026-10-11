@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from urllib.parse import quote
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -79,7 +80,7 @@ def _fetch_candles(symbol: str) -> List[dict]:
     import httpx
     import config
     with httpx.Client(timeout=float(_cfg("BOARD_BACKFILL_TIMEOUT_S", 8.0))) as client:
-        r = client.get(f"{config.MARKET_DATA_URL}/history/{symbol}", params={"period": "1d", "interval": "1m"})
+        r = client.get(f"{config.MARKET_DATA_URL}/history/{quote(symbol, safe='&')}", params={"period": "1d", "interval": "1m"})
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}")
         body = r.json()

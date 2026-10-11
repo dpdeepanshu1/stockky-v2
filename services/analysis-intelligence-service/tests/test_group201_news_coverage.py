@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import unquote
 
@@ -39,7 +39,7 @@ def _fresh(monkeypatch):
 
 
 def _entry(title, days_ago=1):
-    t = (datetime.utcnow() - timedelta(days=days_ago)).timetuple()
+    t = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_ago)).timetuple()
     return SimpleNamespace(title=title, link=f"http://x/{title}", published_parsed=t)
 
 

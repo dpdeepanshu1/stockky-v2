@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -142,7 +143,7 @@ def upsert_cache_batch(db: Session, signals: list[QualitySignal]) -> None:
 async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float]]:
     fund_score = market_cap_cr = None
     try:
-        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{quote(symbol, safe='&')}", timeout=config.QUALITY_GATE_TIMEOUT_S)
         if r.status_code == 200:
             fj = r.json()
             fund_score = fj.get("fundamental_score")
@@ -165,7 +166,7 @@ async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Op
 async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[float]:
     tech_score = None
     try:
-        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{symbol}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{quote(symbol, safe='&')}", timeout=config.QUALITY_GATE_TIMEOUT_S)
         if r.status_code == 200:
             tech_score = r.json().get("technical_score")
     except Exception as e:
@@ -197,7 +198,7 @@ async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[O
     has_catalyst = event_score = None
     bulk_flag = False
     try:
-        r = await client.get(f"{config.EVENT_URL}/events/{symbol}/categorized", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/categorized", timeout=config.QUALITY_GATE_TIMEOUT_S)
         if r.status_code == 200:
             ej = r.json()
             has_catalyst = ej.get("has_positive_catalyst")

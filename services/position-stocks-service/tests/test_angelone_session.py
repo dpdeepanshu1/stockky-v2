@@ -26,7 +26,7 @@ import asyncio
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -189,7 +189,7 @@ class TestLogin:
         assert sess.token == "JWT_OK"
         assert sess.feed_token == "FEED_OK"
         assert sess.token_expiry is not None
-        assert sess.token_expiry > datetime.utcnow()
+        assert sess.token_expiry > datetime.now(timezone.utc).replace(tzinfo=None)
 
     @pytest.mark.parametrize("feed_token,expected", [("FEED_SECRET_123456", "received"), (None, "MISSING"), ("", "MISSING")])
     def test_login_log_never_contains_any_part_of_the_feed_token(self, caplog, feed_token, expected):
@@ -240,7 +240,7 @@ class TestLogin:
                 self._run(sess._login())
 
         # Expiry should be roughly 20 hours from now (±5 minutes tolerance)
-        expected = datetime.utcnow() + timedelta(hours=20)
+        expected = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=20)
         diff = abs((sess.token_expiry - expected).total_seconds())
         assert diff < 300
 
@@ -283,7 +283,7 @@ class TestEnsureSession:
             call_log.append(1)
             sess.token = "JWT_FAKE"
             sess.feed_token = "FEED_FAKE"
-            sess.token_expiry = datetime.utcnow() + timedelta(hours=20)
+            sess.token_expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=20)
 
         sess._login = fake_login
 
@@ -298,7 +298,7 @@ class TestEnsureSession:
     def test_fresh_token_skips_login(self):
         sess = _make_session(
             token="EXISTING",
-            token_expiry=datetime.utcnow() + timedelta(hours=10),
+            token_expiry=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=10),
         )
         calls = []
         self._patch_login(sess, calls)
@@ -308,7 +308,7 @@ class TestEnsureSession:
     def test_expired_token_triggers_relogin(self):
         sess = _make_session(
             token="OLD_TOKEN",
-            token_expiry=datetime.utcnow() - timedelta(minutes=1),  # expired
+            token_expiry=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1),  # expired
         )
         calls = []
         self._patch_login(sess, calls)

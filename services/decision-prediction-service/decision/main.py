@@ -411,7 +411,7 @@ def _extract_event_signals(events: dict | None) -> dict:
     reasons = []
     event_risk = False
     earnings_days_out = None
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     # Earnings proximity
     next_earnings = events.get("next_earnings_date")
@@ -1329,7 +1329,7 @@ async def _decide_impl(
             "live_win_rate_n": int((training or {}).get("live_win_rate_n") or 0),
             "news_as_of": (news or {}).get("as_of") or (news or {}).get("fetched_at") or (news or {}).get("updated_at"),
             "sentiment_as_of": ((sentiment or {}).get("as_of") or (sentiment or {}).get("fetched_at")) if isinstance(sentiment, dict) else None,
-            "as_of": datetime.utcnow().isoformat() + "Z",
+            "as_of": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         }
         mh = multi_horizon_decide(
             technical=technical if isinstance(technical, dict) else {},

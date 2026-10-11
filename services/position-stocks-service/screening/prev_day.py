@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from urllib.parse import quote
 from typing import List, NamedTuple, Optional
 
 import config
@@ -111,7 +112,7 @@ def _fetch_candles(symbol: str) -> list:
     import httpx
     sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     with httpx.Client(timeout=config.OPENING_GATE_PREVDAY_TIMEOUT_S) as client:
-        r = client.get(f"{config.MARKET_DATA_URL}/history/{sym}", params={"period": "1mo", "interval": "1d"})
+        r = client.get(f"{config.MARKET_DATA_URL}/history/{quote(str(sym), safe='&')}", params={"period": "1mo", "interval": "1d"})
     if r.status_code != 200:
         raise RuntimeError(f"history HTTP {r.status_code}")
     return (r.json() or {}).get("candles") or []

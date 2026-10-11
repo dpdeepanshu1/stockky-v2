@@ -57,6 +57,8 @@ def _split_env(name: str) -> Set[str]:
 _COMPACT_COLS = ("SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL")
 _DETAILED_COLS = ("EXCH_ID", "INSTRUMENT", "UNDERLYING_SYMBOL")
 _SANE_NAME = re.compile(r"^[A-Z0-9&][A-Z0-9&\-]{0,24}$")
+# Dhan's file carries exchange test contracts (011NSETEST-NOV2036-FUT ...); they are not tradable stocks.
+_TEST_UNDERLYING = re.compile(r"NSETEST")
 
 
 def parse_report(lines: Iterable[str]) -> dict:
@@ -96,6 +98,9 @@ def parse_report(lines: Iterable[str]) -> dict:
         if not sym:
             sym = _UNDERLYING_RE.sub("", raw)
         if not sym:
+            continue
+        if _TEST_UNDERLYING.search(sym):
+            out["test_rows"] = out.get("test_rows", 0) + 1
             continue
         if len(out["sample"]) < 5:
             out["sample"].append({"raw": raw[:40], "underlying": sym})

@@ -67,7 +67,7 @@ def test_young_claim_is_left_alone_even_with_no_position_row(db):
 
 def test_young_claim_naive_timestamp_is_also_protected(db):
     # SQLite hands back naive datetimes
-    _lock(db, "NEWBUY", claimed_at=datetime.utcnow() - timedelta(seconds=30))
+    _lock(db, "NEWBUY", claimed_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=30))
     assert sl.sweep_stale(db) == []
 
 

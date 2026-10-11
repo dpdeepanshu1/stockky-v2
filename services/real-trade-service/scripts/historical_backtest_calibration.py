@@ -36,7 +36,7 @@ import asyncio
 import os
 import statistics
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, ".")
 
@@ -51,7 +51,7 @@ async def _fetch_forward_candles(client: httpx.AsyncClient, symbol: str, catalys
     window_days after. Uses the live system's own /history endpoint so
     symbol-rename handling (ZOMATO->ETERNAL etc.) is identical to what
     entry_engine actually saw — no separate data path to disagree with."""
-    days_since_catalyst = (datetime.utcnow() - catalyst_ts).days
+    days_since_catalyst = (datetime.now(timezone.utc).replace(tzinfo=None) - catalyst_ts).days
     total_days = days_since_catalyst + 2  # +2 buffer either side
     try:
         r = await client.get(
@@ -160,7 +160,7 @@ async def main():
     from watchlist_engine.decay import CATALYST_PROFILES, EXIT_PROFILES
 
     session = db.get_session_factory()()
-    cutoff = datetime.utcnow() - timedelta(days=args.lookback_days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=args.lookback_days)
 
     print(f"{'='*78}\nHistorical backtest calibration — last {args.lookback_days} days, mode={args.mode}\n{'='*78}\n")
     print("NOTE: this backtests against real historical prices for every catalyst")
@@ -212,7 +212,7 @@ async def main():
             # directional signal these stats are meant to give.
             too_recent = [
                 e for e in entries
-                if (datetime.utcnow() - e.catalyst_ts).days < max_hold
+                if (datetime.now(timezone.utc).replace(tzinfo=None) - e.catalyst_ts).days < max_hold
             ]
             usable_entries = [e for e in entries if e not in too_recent]
 

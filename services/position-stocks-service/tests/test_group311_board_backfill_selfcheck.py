@@ -281,3 +281,19 @@ def test_sector_extra_env_overrides_and_coverage_report(monkeypatch):
     rep = sector_map.coverage_report(["TCS", "AAA", "BBB", "CCC"], lambda s: {"AAA": 1, "BBB": 9, "CCC": 5}.get(s, 0), top=2)
     assert rep["tracked"] == 4 and rep["classified"] == 1 and rep["pct"] == 25.0 and rep["top_other"] == ["BBB", "CCC"]
     assert sector_map.coverage_report([])["pct"] is None
+
+
+def test_check_b_market_closed_is_skipped_not_failed():
+    """Closed market: open / avg_price are legitimately absent -> SKIP, and the overall verdict is not dragged to FAIL."""
+    empty = lambda syms: [_row(s, open=None, avg_price=None) for s in syms]  # noqa: E731
+    b = board_selfcheck.check_b(False, empty)
+    assert b["ok"] is False and b["skipped"] is True and b["verdict"].startswith("skipped")
+    live = board_selfcheck.check_b(True, empty)
+    assert live["ok"] is False and "skipped" not in live
+
+
+def test_fno_parse_ignores_exchange_test_contracts():
+    lines = ["SEM_EXM_EXCH_ID,SEM_INSTRUMENT_NAME,SEM_TRADING_SYMBOL",
+             "NSE,FUTSTK,011NSETEST-NOV2036-FUT", "NSE,FUTSTK,RELIANCE-Nov2026-FUT", "NSE,FUTSTK,360ONE-Nov2026-FUT"]
+    rep = fl.parse_report(lines)
+    assert rep["underlyings"] == {"RELIANCE", "360ONE"} and rep["test_rows"] == 1

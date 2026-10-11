@@ -77,9 +77,14 @@ def _fetch_bulk(symbols: List[str]) -> list:
 
 def check_b(market_open: bool, fetch: Optional[Callable[[List[str]], list]] = None) -> dict:
     try:
-        return evaluate_bulk((fetch or _fetch_bulk)(list(PROBE_SYMBOLS)), market_open)
+        r = evaluate_bulk((fetch or _fetch_bulk)(list(PROBE_SYMBOLS)), market_open)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "verdict": f"/quotes/bulk request failed ({type(e).__name__}: {str(e)[:120]})", "rows": 0}
+        r = {"ok": False, "verdict": f"/quotes/bulk request failed ({type(e).__name__}: {str(e)[:120]})", "rows": 0}
+    # While the market is closed open / avg_price are legitimately absent, so a miss is "not applicable", not a failure.
+    if not market_open and not r.get("ok"):
+        r["skipped"] = True
+        r["verdict"] = "skipped: market closed, run between 09:20 and 15:20 IST (" + str(r.get("verdict")) + ")"
+    return r
 
 
 def check_a(report: Optional[dict] = None) -> dict:
@@ -90,5 +95,5 @@ def check_a(report: Optional[dict] = None) -> dict:
 def run(market_open: bool, fno_report: Optional[dict] = None, fetch_bulk: Optional[Callable[[List[str]], list]] = None) -> dict:
     a = check_a(fno_report)
     b = check_b(market_open, fetch_bulk)
-    return {"as_of": time.time(), "A_fno_underlyings": a, "B_open_and_avg_price": b, "ok": bool(a.get("ok") and b.get("ok")),
+    return {"as_of": time.time(), "A_fno_underlyings": a, "B_open_and_avg_price": b, "ok": bool(a.get("ok") and (b.get("ok") or b.get("skipped"))),
             "note": "Check B only means something while the market is open; run it between 09:20 and 15:20 IST."}

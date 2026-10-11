@@ -1,6 +1,6 @@
 // group306: the Market Board container - strip, sector rail, bullish block over bearish block (treemaps), flow lines, popup.
 // Display only: it places no order. `marks` lets a host tab highlight symbols (watchlist, candidates); open positions are ringed.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { squarify } from "./treemapLayout";
 import { useBoardData, usePrefersReducedMotion } from "./useBoardData";
 import MarketStrip from "./MarketStrip";
@@ -13,21 +13,26 @@ import type { BoardRow } from "./boardTypes";
 const UNIVERSES: { id: string; label: string }[] = [{ id: "all", label: "All" }, { id: "fno", label: "F&O only" }, { id: "liquid", label: "Liquid top-N" }];
 const weight = (r: BoardRow) => Math.max(0.1, r.strength) * Math.log10(Math.max(10, r.turnover || 0) + 10);
 
-function useWidth(): [React.RefObject<HTMLDivElement>, number] {
-  const ref = useRef<HTMLDivElement>(null);
+// group311 fix: the measured <div> only exists once data has loaded, so a mount-time effect never saw it and the width stayed 0 (empty
+// board). A callback ref attaches the ResizeObserver whenever the element appears.
+function useWidth(): [(el: HTMLDivElement | null) => void, number] {
   const [w, setW] = useState(0);
-  useEffect(() => {
-    const el = ref.current;
+  const roRef = useRef<ResizeObserver | null>(null);
+  const setRef = useCallback((el: HTMLDivElement | null) => {
+    roRef.current?.disconnect(); roRef.current = null;
     if (!el) return;
+    setW(Math.floor(el.clientWidth));
+    if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(es => setW(Math.floor(es[0].contentRect.width)));
-    ro.observe(el); setW(Math.floor(el.clientWidth));
-    return () => ro.disconnect();
+    ro.observe(el); roRef.current = ro;
   }, []);
-  return [ref, w];
+  useEffect(() => () => roRef.current?.disconnect(), []);
+  return [setRef, w];
 }
 
-export default function MarketBoard({ active = true, marks, popupExtra, title = "Market Board" }:
-  { active?: boolean; marks?: Set<string>; popupExtra?: (row: BoardRow) => React.ReactNode; title?: string }) {
+export default function MarketBoard({ active = true, marks, popupExtra, title = "Market Board", hatchFor, showZoneScore, legend }:
+  { active?: boolean; marks?: Set<string>; popupExtra?: (row: BoardRow) => React.ReactNode; title?: string;
+    hatchFor?: (row: BoardRow) => boolean; showZoneScore?: boolean; legend?: React.ReactNode }) {
   const [universe, setUniverse] = useState("all");
   const [sector, setSector] = useState<string | null>(null);
   const [sel, setSel] = useState<BoardRow | null>(null);
@@ -55,7 +60,7 @@ export default function MarketBoard({ active = true, marks, popupExtra, title = 
         {rows.length === 0 ? <div className="text-[11px] text-mist rounded-lg border border-slate p-4">Nothing ranked on this side{data?.coverage.warming ? ` (${data.coverage.warming} symbols still warming up)` : ""}.</div> : (
           <svg width={width} height={blockH} role="group" aria-label={label}>
             <defs><pattern id="board-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="var(--muted-2)" strokeWidth="2" strokeOpacity="0.5" /></pattern></defs>
-            {rects.map(t => { const r = m.get(t.id); return r ? <BoardTile key={r.symbol} row={r} x={t.x} y={t.y} w={t.w} h={t.h} reduced={reduced} marked={marks?.has(r.symbol)} onOpen={setSel} /> : null; })}
+            {rects.map(t => { const r = m.get(t.id); return r ? <BoardTile key={r.symbol} row={r} x={t.x} y={t.y} w={t.w} h={t.h} reduced={reduced} marked={marks?.has(r.symbol)} hatched={hatchFor ? hatchFor(r) : false} showScore={showZoneScore} onOpen={setSel} /> : null; })}
           </svg>
         )}
       </div>
@@ -71,6 +76,7 @@ export default function MarketBoard({ active = true, marks, popupExtra, title = 
         ))}
         <button onClick={() => void reload()} className="px-2.5 py-1 rounded-full text-[11px] border border-slate text-mist hover:text-paper">{loading ? "…" : "Refresh"}</button>
       </div>
+      {legend && <div className="text-[10px] text-mist">{legend}</div>}
       {error && <div className="rounded-lg border border-signal-hold/40 bg-signal-hold/10 text-signal-hold text-[11px] p-2">{error}{data ? " Showing the last good data." : ""}</div>}
       {!data && !error && <div className="text-[12px] text-mist p-6 text-center">Loading the board…</div>}
       {data && (

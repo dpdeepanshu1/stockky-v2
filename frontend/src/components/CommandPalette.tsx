@@ -13,9 +13,11 @@ type Props = {
   open: boolean;
   onClose: () => void;
   actions: CommandAction[];
+  /** group311: when the query looks like a stock symbol, offer one extra action built from it (e.g. open the Market Board popup). */
+  symbolAction?: (symbol: string) => CommandAction;
 };
 
-export default function CommandPalette({ open, onClose, actions }: Props) {
+export default function CommandPalette({ open, onClose, actions, symbolAction }: Props) {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -23,11 +25,14 @@ export default function CommandPalette({ open, onClose, actions }: Props) {
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return actions;
-    return actions.filter((a) => {
+    const base = actions.filter((a) => {
       const hay = `${a.label} ${a.hint || ""} ${a.group || ""} ${a.keywords || ""}`.toLowerCase();
       return hay.includes(needle);
     });
-  }, [actions, q]);
+    const sym = q.trim().toUpperCase().replace(/\.(NS|BO)$/, "");
+    if (symbolAction && /^[A-Z0-9][A-Z0-9&-]{1,19}$/.test(sym)) return [...base, symbolAction(sym)];
+    return base;
+  }, [actions, q, symbolAction]);
 
   useEffect(() => {
     if (!open) return;

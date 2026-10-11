@@ -13,8 +13,9 @@ import config
 logger = logging.getLogger("position-stocks-board-runner")
 
 LOOP_S = 30.0
+BACKFILL_LOOP_S = 6.0
 FILL_EVERY_S = 120.0
-_state = {"last_snapshot": 0.0, "last_fill": 0.0, "snapshots": 0, "fills": 0, "errors": 0, "last_error": None}
+_state = {"last_snapshot": 0.0, "last_fill": 0.0, "snapshots": 0, "fills": 0, "errors": 0, "last_error": None, "backfilled": 0}
 
 
 def state() -> dict:
@@ -22,7 +23,7 @@ def state() -> dict:
 
 
 def reset() -> None:
-    _state.update(last_snapshot=0.0, last_fill=0.0, snapshots=0, fills=0, errors=0, last_error=None)
+    _state.update(last_snapshot=0.0, last_fill=0.0, snapshots=0, fills=0, errors=0, last_error=None, backfilled=0)
 
 
 def in_fill_window(now: float, market_open: bool) -> bool:
@@ -35,11 +36,16 @@ def in_fill_window(now: float, market_open: bool) -> bool:
 
 
 def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[], list]] = None,
-             session_factory: Optional[Callable] = None, today_fn: Optional[Callable[[], str]] = None) -> dict:
-    from feed import bar_store
+             session_factory: Optional[Callable] = None, today_fn: Optional[Callable[[], str]] = None,
+             backfill_fn: Optional[Callable[[], dict]] = None) -> dict:
+    from feed import bar_backfill, bar_store
     from screening import board, board_log
-    did = {"snapshot": False, "fill": 0, "pruned": 0}
+    did = {"snapshot": False, "fill": 0, "pruned": 0, "backfill": 0}
     try:
+        if config.BOARD_BACKFILL_ENABLED and bar_backfill.pending_count():       # group311: fill the morning after a mid-session restart
+            r = (backfill_fn or bar_backfill.run_pending)() or {}
+            did["backfill"] = int(r.get("merged_symbols", 0))
+            _state["backfilled"] = _state.get("backfilled", 0) + did["backfill"]
         if market_open and now - _state["last_snapshot"] >= config.BOARD_LOG_EVERY_S:
             held = []
             try:
@@ -96,4 +102,9 @@ async def loop() -> None:
             raise
         except Exception as e:  # noqa: BLE001
             logger.debug("board runner loop: %s", e)
-        await asyncio.sleep(LOOP_S)
+        try:
+            from feed import bar_backfill
+            quick = bool(config.BOARD_BACKFILL_ENABLED and bar_backfill.pending_count())
+        except Exception:  # noqa: BLE001
+            quick = False
+        await asyncio.sleep(BACKFILL_LOOP_S if quick else LOOP_S)     # a queue of backfills is drained every few seconds

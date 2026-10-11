@@ -1,10 +1,11 @@
 // group306: sector list with average change; click a sector to filter the board to it.
 import type { BoardSector } from "./boardTypes";
+import { CARD_CLASS } from "./boardCard";
 
 export default function SectorRail({ sectors, selected, onSelect }:
   { sectors: BoardSector[]; selected: string | null; onSelect: (s: string | null) => void }) {
   return (
-    <div className="rounded-xl border border-slate bg-ink p-2 text-[11px] max-h-[640px] overflow-y-auto" role="listbox" aria-label="Sectors">
+    <div className={`${CARD_CLASS} p-2 text-[11px] max-h-[640px] overflow-y-auto`} role="listbox" aria-label="Sectors">
       <button onClick={() => onSelect(null)} className={`w-full text-left px-2 py-1 rounded ${selected == null ? "bg-slate text-paper" : "text-mist hover:text-paper"}`}>All sectors</button>
       {sectors.map(s => (
         <button key={s.name} role="option" aria-selected={selected === s.name} onClick={() => onSelect(selected === s.name ? null : s.name)}

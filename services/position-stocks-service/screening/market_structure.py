@@ -349,3 +349,33 @@ def risk_reward(side: str, ltp: float, zone: Optional[Dict], lv: Dict[str, List[
         return None
     return {"invalidation": inval, "target": tgt["price"], "target_label": tgt["label"], "risk": risk,
             "reward": reward, "rr": round(reward / risk, 2)}
+
+
+def zone_score(zone: Optional[Dict], rr: Optional[float], chase: Optional[float], chase_limit: float = 1.5) -> Optional[int]:
+    """group311: one 0-100 number for how clean a zone setup is (for the Real Trade board, which has no zone maths of its own).
+    Heuristic, not a measured edge: zone quality 40 (bos / fvg / fresh), zone still valid 15, reward:risk 25 (capped at 3R), room left
+    before the zone is chased 20 (unknown chase = half). None when there is no zone for the side."""
+    if not zone:
+        return None
+    q = zone_quality(zone) or 0.4
+    pts = 40.0 * max(0.0, min(1.0, (q - 0.4) / 0.6))
+    pts += 15.0 if zone.get("valid") else 0.0
+    if rr is not None and _finite(rr) and rr > 0:
+        pts += 25.0 * min(float(rr), 3.0) / 3.0
+    if chase is not None and _finite(chase) and chase_limit > 0:
+        pts += 20.0 * (1.0 - max(0.0, min(1.0, float(chase) / chase_limit)))
+    else:
+        pts += 10.0
+    return int(round(max(0.0, min(100.0, pts))))
+
+
+def zone_risk(side: str, ltp: float, zone: Optional[Dict]) -> Optional[Tuple[float, float]]:
+    """group311: (invalidation price, risk per share) from the zone's far edge, with or without a target level. None when there is no
+    zone or price is already beyond the far edge. Used for the Real Trade 'over risk cap' check."""
+    if not zone or not _finite(ltp) or ltp <= 0:
+        return None
+    inval = zone["bottom"] if side == "bull" else zone["top"]
+    risk = (ltp - inval) if side == "bull" else (inval - ltp)
+    if not _finite(inval) or not _finite(risk) or risk <= 0:
+        return None
+    return round(float(inval), 2), round(float(risk), 2)

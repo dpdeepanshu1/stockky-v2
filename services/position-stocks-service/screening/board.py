@@ -10,7 +10,7 @@ from collections import deque
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import config
-from feed import bar_store, fno_list, sector_map, ws_client
+from feed import bar_backfill, bar_store, fno_list, sector_map, ws_client
 from screening import market_structure as ms
 from screening import prev_day
 
@@ -29,6 +29,7 @@ _zone_cache: Dict[str, Tuple[str, dict]] = {}
 def reset() -> None:
     with _lock:
         _cache.clear(); _rank_hist.clear(); _zone_cache.clear()
+    bar_backfill.reset()
 
 
 def session_open_ts(day_number: Optional[int]) -> Optional[float]:
@@ -152,12 +153,15 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
     syms = _universe_symbols(universe)
     rows: List[dict] = []
     warming = no_open = 0
+    late: List[str] = []              # group311: first bar later than the cold-start tolerance -> backfill candidates
     up = down = flat = 0
     sector_stats: Dict[str, dict] = {}
     for s in sorted(syms, key=lambda x: bar_store.turnover(x), reverse=True)[: max(limit * 2, 60)]:
         prev_day.get(s)          # warm the previous-day cache (background fetch, never blocks)
     for s in syms:
         bars = bar_store.get_bars(s)
+        if bars and open_ts is not None and bars[0][0] - open_ts > COLD_START_TOLERANCE_S and not bar_store.is_backfilled(s):
+            late.append(s)
         d = _day_inputs(s, bars, open_ts)
         if d is None:
             no_open += 1
@@ -188,6 +192,12 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
             "turnover": bar_store.turnover(s), "in_position": s in held, "_bars": bars, "_pd": pd,
         })
 
+    if late and getattr(config, "BOARD_BACKFILL_ENABLED", True):
+        try:
+            late.sort(key=lambda x: bar_store.turnover(x), reverse=True)
+            bar_backfill.request(late[: int(getattr(config, "BOARD_BACKFILL_TOP_N", 120))], now)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("board: backfill request failed (%s)", e)
     bullish = ms.rank_rows(rows, "bull")
     bearish = ms.rank_rows(rows, "bear")
     sec_side: Dict[str, Dict[str, int]] = {}
@@ -220,6 +230,9 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
             r["chase_atr"] = chase
             r["extended"] = bool(chase is not None and chase > config.BOARD_CHASE_ATR)
             r["rr"] = zv["rr"]["rr"] if zv and zv["rr"] else None
+            zr = ms.zone_risk(side, r["ltp"], zone)
+            r["invalidation"], r["risk_per_share"] = (zr if zr else (None, None))
+            r["zone_score"] = ms.zone_score(zone, r["rr"], chase, config.BOARD_CHASE_ATR)
             r["rule"] = _rule_label(side, r["rank"], r["conviction"], chase)
             r["profile"] = ms.profile(bars, 16)
             r["spark"] = [round(x, 2) for x in ms.spark(bars, 40)]
@@ -247,7 +260,7 @@ def build(universe: Optional[str] = None, limit: Optional[int] = None, open_symb
                "feed": feed, "market": market, "sectors": sectors, "bullish": out_sides.get("bull", []),
                "bearish": out_sides.get("bear", []),
                "coverage": {"tracked": len(syms), "ranked": len(rows), "warming": warming, "no_day_open": no_open,
-                            "bar_store": bar_store.stats()}}
+                            "late_start": len(late), "bar_store": bar_store.stats(), "backfill": bar_backfill.state()}}
     with _lock:
         if not _rank_hist or now - _rank_hist[-1][0] >= 15.0:
             _rank_hist.append((now, snap))
@@ -290,4 +303,7 @@ def symbol_view(symbol: str, held: Optional[dict] = None, now: Optional[float] =
             "levels": zv["levels"] if zv else {"supports": [], "resistances": []},
             "rr": zv["rr"] if zv else None, "chase_atr": zv["chase_atr"] if zv else None,
             "extended": bool(zv and zv["chase_atr"] is not None and zv["chase_atr"] > config.BOARD_CHASE_ATR),
-            "or": list(zv["or"]) if zv and zv["or"] else None, "position": held}
+            "or": list(zv["or"]) if zv and zv["or"] else None, "position": held,
+            "zone_score": ms.zone_score(zv["zone"], zv["rr"]["rr"] if zv and zv["rr"] else None, zv["chase_atr"], config.BOARD_CHASE_ATR) if zv else None,
+            "invalidation_risk": (lambda zr: ({"invalidation": zr[0], "risk_per_share": zr[1]} if zr else None))(ms.zone_risk(side, ltp, zv["zone"])) if zv else None,
+            "backfilled": bar_store.is_backfilled(symbol)}

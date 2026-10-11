@@ -2201,13 +2201,24 @@ def _board_open_symbols() -> list:
 
 @app.get("/board/status")
 def board_status():
-    from feed import bar_store, fno_list, sector_map
+    from feed import bar_backfill, bar_store, fno_list, sector_map
     from screening import board_log, board_runner
     return {"enabled": config.BOARD_ENABLED, "gate_mode": config.BOARD_GATE_MODE, "params_version": config.BOARD_PARAMS_VERSION,
             "universe_default": config.BOARD_UNIVERSE_DEFAULT, "zones_enabled": config.BOARD_ZONES_ENABLED,
             "zone_tf_min": config.BOARD_ZONE_TF_MIN, "chase_atr": config.BOARD_CHASE_ATR,
             "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
-            "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors())}
+            "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors()),
+            "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover)}
+
+
+@app.get("/board/self-check")
+def board_self_check():
+    """group311: checks A (F&O underlyings in the Dhan instrument file) and B (open / avg_price in market-data /quotes/bulk), run live.
+    Read-only; slow (one file download + one bulk quote call), so not for polling. Script: scripts/check_board_data.py."""
+    if not config.BOARD_ENABLED:
+        raise HTTPException(status_code=404, detail="market board disabled (BOARD_ENABLED=0)")
+    from screening import board_selfcheck
+    return board_selfcheck.run(bool(is_market_open_ist()))
 
 
 @app.get("/board/shadow-report")

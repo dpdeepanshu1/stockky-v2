@@ -54,28 +54,59 @@ def _split_env(name: str) -> Set[str]:
     return {x.strip().upper() for x in (os.getenv(name) or "").split(",") if x.strip()}
 
 
-def parse_fut_underlyings(lines: Iterable[str]) -> Set[str]:
-    out: Set[str] = set()
+_COMPACT_COLS = ("SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL")
+_DETAILED_COLS = ("EXCH_ID", "INSTRUMENT", "UNDERLYING_SYMBOL")
+_SANE_NAME = re.compile(r"^[A-Z0-9&][A-Z0-9&\-]{0,24}$")
+
+
+def parse_report(lines: Iterable[str]) -> dict:
+    """group311: parse a Dhan instrument file and say what was found. Understands the compact layout (SEM_EXM_EXCH_ID /
+    SEM_INSTRUMENT_NAME / SEM_TRADING_SYMBOL, underlying = trading symbol minus the expiry tail) and the detailed layout (EXCH_ID /
+    INSTRUMENT / UNDERLYING_SYMBOL; column names from memory, UNVERIFIED). Returns {shape, rows, futstk_rows, underlyings, sample,
+    suspicious, header}; shape is "unknown" when neither column set is present. Pure; no network."""
+    out = {"shape": "unknown", "rows": 0, "futstk_rows": 0, "underlyings": set(), "sample": [], "suspicious": [], "header": []}
     reader = csv.reader(lines)
     try:
         header = next(reader)
     except StopIteration:
         return out
-    idx = {h.strip(): i for i, h in enumerate(header)}
-    need = ("SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_TRADING_SYMBOL")
-    if not all(k in idx for k in need):
+    header = [h.strip().lstrip("\ufeff") for h in header]
+    out["header"] = header[:40]
+    idx = {h: i for i, h in enumerate(header)}
+    if all(k in idx for k in _COMPACT_COLS):
+        out["shape"] = "compact"
+        i_ex, i_ins, i_sym = (idx[k] for k in _COMPACT_COLS)
+        i_und = None
+    elif all(k in idx for k in _DETAILED_COLS):
+        out["shape"] = "detailed"
+        i_ex, i_ins, i_und = (idx[k] for k in _DETAILED_COLS)
+        i_sym = idx.get("SYMBOL_NAME", idx.get("DISPLAY_NAME", i_und))
+    else:
         return out
-    i_ex, i_ins, i_sym = (idx[k] for k in need)
-    top = max(i_ex, i_ins, i_sym)
+    top = max(i_ex, i_ins, i_sym, i_und if i_und is not None else 0)
     for row in reader:
+        out["rows"] += 1
         if len(row) <= top:
             continue
         if row[i_ex].strip().upper() != "NSE" or row[i_ins].strip().upper() != "FUTSTK":
             continue
-        sym = _UNDERLYING_RE.sub("", row[i_sym].strip().upper())
-        if sym:
-            out.add(sym)
+        out["futstk_rows"] += 1
+        raw = row[i_sym].strip().upper()
+        sym = row[i_und].strip().upper() if i_und is not None else ""
+        if not sym:
+            sym = _UNDERLYING_RE.sub("", raw)
+        if not sym:
+            continue
+        if len(out["sample"]) < 5:
+            out["sample"].append({"raw": raw[:40], "underlying": sym})
+        if not _SANE_NAME.match(sym) and len(out["suspicious"]) < 10:
+            out["suspicious"].append(sym)
+        out["underlyings"].add(sym)
     return out
+
+
+def parse_fut_underlyings(lines: Iterable[str]) -> Set[str]:
+    return parse_report(lines)["underlyings"]
 
 
 def _save_snapshot(symbols: Set[str]) -> None:
@@ -138,7 +169,7 @@ def status() -> dict:
         return dict(_status, loaded_at=_loaded_at or None)
 
 
-def _download() -> Set[str]:
+def _download(report: bool = False):
     import config
     import httpx
     t0 = time.time()
@@ -152,7 +183,31 @@ def _download() -> Set[str]:
                     if time.time() - t0 > _MAX_DOWNLOAD_S:
                         raise RuntimeError("download too slow")
                     yield line
-            return parse_fut_underlyings(gen())
+            return parse_report(gen()) if report else parse_fut_underlyings(gen())
+
+
+def diagnose(report: Optional[dict] = None) -> dict:
+    """group311 (check A): what the Dhan instrument file really contains versus the built-in list. Downloads the file unless a parsed
+    `report` is passed (tests). Never changes the loaded set."""
+    try:
+        rep = report if report is not None else _download(report=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "verdict": f"could not download the Dhan instrument file ({type(e).__name__}: {str(e)[:120]}) - the F&O badge uses the built-in list",
+                "source_now": status().get("source")}
+    und = set(rep["underlyings"])
+    miss = sorted(_BUILTIN - und)
+    if rep["shape"] == "unknown":
+        verdict = f"file layout not recognised (columns: {', '.join(rep['header'][:8])}...) - parser needs a new mapping"
+    elif len(und) < MIN_PLAUSIBLE:
+        verdict = f"only {len(und)} FUTSTK underlyings found in {rep['futstk_rows']} FUTSTK rows - not plausible, built-in list stays in use"
+    elif rep["suspicious"]:
+        verdict = f"{len(und)} underlyings but some names look wrong ({', '.join(rep['suspicious'][:5])}) - check the tail-stripping pattern"
+    else:
+        verdict = f"ok: {len(und)} F&O underlyings parsed ({rep['shape']} layout)"
+    return {"ok": rep["shape"] != "unknown" and len(und) >= MIN_PLAUSIBLE and not rep["suspicious"], "verdict": verdict,
+            "shape": rep["shape"], "rows": rep["rows"], "futstk_rows": rep["futstk_rows"], "underlyings": len(und),
+            "sample": rep["sample"], "suspicious": rep["suspicious"], "in_builtin_not_in_file": miss[:40],
+            "in_file_not_in_builtin": len(und - _BUILTIN), "source_now": status().get("source")}
 
 
 def refresh(force: bool = False) -> bool:

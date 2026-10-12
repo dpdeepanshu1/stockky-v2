@@ -411,6 +411,67 @@ OPENING_GATE_PREVDAY_TIMEOUT_S = _og_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0
 OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)
 OPENING_GATE_MIN_STOP_ATR_FRAC = _og_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)
 OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_og_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday
+# group 329 (2026-10-12): two pre-buy checks a market professional makes before any entry. Both FAIL OPEN (missing data never blocks).
+#  * circuit band: no BUY within CIRCUIT_UPPER_BUFFER_PCT of the exchange upper circuit (a locked stock cannot be filled and
+#    has no room left) or within CIRCUIT_LOWER_BUFFER_PCT of the lower circuit (a falling stock that may lock and cannot be
+#    sold). Buffers are % of price; 0 disables that side. Needs upper_circuit / lower_circuit on the /quote row.
+#  * results day: no BUY on a stock whose results / earnings are dated today (EARNINGS_DAY_BLOCK); a stock that would be CARRIED
+#    overnight is also not carried when results fall on the next trading day (EARNINGS_CARRY_BLOCK). Date comes from
+#    analysis-intelligence-service GET /events/{symbol}/categorized -> upcoming[type=earnings_date].
+CIRCUIT_GATE_ENABLED = ((os.getenv("CIRCUIT_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+CIRCUIT_UPPER_BUFFER_PCT = _og_float("CIRCUIT_UPPER_BUFFER_PCT", 1.0)
+CIRCUIT_LOWER_BUFFER_PCT = _og_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
+EARNINGS_DAY_BLOCK = ((os.getenv("EARNINGS_DAY_BLOCK") or "").strip() or "true").lower() == "true"
+EARNINGS_CARRY_BLOCK = ((os.getenv("EARNINGS_CARRY_BLOCK") or "").strip() or "true").lower() == "true"
+EARNINGS_FETCH_TIMEOUT_S = _og_float("EARNINGS_FETCH_TIMEOUT_S", 6.0)
+# group 329: re-check the bid-ask spread / best-5 book on the FRESH tick at the moment of the BUY (the watchlist path only checked it when
+# the row was queued, which can be minutes earlier). Same limits as the queue-time check: WATCHLIST_MAX_SPREAD_PCT (0.5), WATCHLIST_MIN_BOOK_VALUE.
+ENTRY_DEPTH_RECHECK = ((os.getenv("ENTRY_DEPTH_RECHECK") or "").strip() or "true").lower() == "true"
+# group 329: carrying over a closed market (weekend / holiday) is exposed to more than one overnight gap, so the carry bar
+# (OVERNIGHT_HOLD_MIN_GAIN_PCT) is raised by this many % for EACH extra closed day before the next session (Fri->Mon = 2 extra days).
+# 0 turns it off. A normal overnight (next session is tomorrow) is unchanged.
+OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT", 0.5)
+
+# group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
+#  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
+#      VIX_GATE_ENABLED         master switch for the VIX checks
+#      VIX_BLOCK_ABOVE          no NEW entries while VIX is at / above this level (0 = off)
+#      VIX_CAUTION_ABOVE        at / above this level, or VIX up VIX_SPIKE_PCT % on the day: position risk x VIX_CAUTION_SIZE_MULT
+#      VIX_CARRY_BLOCK_ABOVE    no overnight carry at / above this level, or VIX up VIX_CARRY_SPIKE_PCT % on the day (0 = off)
+VIX_GATE_ENABLED = ((os.getenv("VIX_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+VIX_BLOCK_ABOVE = _og_float("VIX_BLOCK_ABOVE", 24.0)
+VIX_CAUTION_ABOVE = _og_float("VIX_CAUTION_ABOVE", 18.0)
+VIX_CAUTION_SIZE_MULT = _og_float("VIX_CAUTION_SIZE_MULT", 0.7)
+VIX_SPIKE_PCT = _og_float("VIX_SPIKE_PCT", 10.0)
+VIX_CARRY_BLOCK_ABOVE = _og_float("VIX_CARRY_BLOCK_ABOVE", 20.0)
+VIX_CARRY_SPIKE_PCT = _og_float("VIX_CARRY_SPIKE_PCT", 6.0)
+VIX_CACHE_TTL_S = _og_float("VIX_CACHE_TTL_S", 120.0)
+VIX_FETCH_TIMEOUT_S = _og_float("VIX_FETCH_TIMEOUT_S", 3.0)
+#  * VWAP confirmation: a long entry must not sit BELOW the day's volume-weighted average price (sellers in control). Tolerance in % of
+#    VWAP. Needs avg_price on the market-data row (Dhan average_price); unknown never blocks.
+ENTRY_VWAP_GATE_ENABLED = ((os.getenv("ENTRY_VWAP_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+ENTRY_VWAP_TOLERANCE_PCT = _og_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
+#  * Pre-open snapshot (entry_engine/preopen.py): at PREOPEN_SNAPSHOT_TIME_IST (default 09:08, before the 09:15 bell) the indicative gap of the
+#    queued candidates is recorded and the caches (previous-day candles, results dates / news, VIX) are warmed. A candidate that gapped up
+#    PREOPEN_GAP_UP_BLOCK_PCT or more (chasing) or down PREOPEN_GAP_DOWN_BLOCK_PCT or more (falling) is not bought until PREOPEN_GAP_GATE_UNTIL_IST.
+#    A price that is not fresh (older than PREOPEN_MAX_PRICE_AGE_S) is not a pre-open price and is ignored. 0 disables a side.
+PREOPEN_SNAPSHOT_ENABLED = ((os.getenv("PREOPEN_SNAPSHOT_ENABLED") or "").strip() or "true").lower() == "true"
+PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:08"
+PREOPEN_GAP_GATE_UNTIL_IST = (os.getenv("PREOPEN_GAP_GATE_UNTIL_IST") or "").strip() or "11:00"
+PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
+PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
+PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
+PREOPEN_WARM_MAX_SYMBOLS = int(_og_float("PREOPEN_WARM_MAX_SYMBOLS", 40.0))
+#  * Negative news / events: no BUY (and no carry) on a stock whose event score (0-100, 50 = neutral, analysis-intelligence-service) is at / below
+#    NEWS_NEGATIVE_BLOCK_SCORE, or that carries a regulatory action / delisting risk / a fresh earnings miss. 0 disables the score test.
+NEWS_NEGATIVE_BLOCK_ENABLED = ((os.getenv("NEWS_NEGATIVE_BLOCK_ENABLED") or "").strip() or "true").lower() == "true"
+NEWS_NEGATIVE_BLOCK_SCORE = _og_float("NEWS_NEGATIVE_BLOCK_SCORE", 35.0)
+#  * Carry context (hold-or-sell at the close): on top of the existing carry rules, a position is NOT carried overnight when the market is selling
+#    into the close (Nifty down CARRY_MIN_NIFTY_CHANGE_PCT or more vs the previous close), VIX is high / spiking (above), or the stock has negative news.
+CARRY_CONTEXT_GATE_ENABLED = ((os.getenv("CARRY_CONTEXT_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+CARRY_MIN_NIFTY_CHANGE_PCT = _og_float("CARRY_MIN_NIFTY_CHANGE_PCT", -0.8)
+CARRY_BLOCK_NEGATIVE_NEWS = ((os.getenv("CARRY_BLOCK_NEGATIVE_NEWS") or "").strip() or "true").lower() == "true"
+CARRY_INDICES_TIMEOUT_S = _og_float("CARRY_INDICES_TIMEOUT_S", 4.0)
 # 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
 # reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
 # found that SELLs placed close to Dhan's intraday cutoff generated a large

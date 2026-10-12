@@ -96,6 +96,14 @@ async def market_gate_reject() -> Optional[str]:
             and prev <= config.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT):
         return (f"MARKET_WEAK:nifty {prev:+.2f}% vs prev close "
                 f"<= {config.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT:+.2f}%")
+    # group330: India VIX (fear). Fail-open; own switch (VIX_GATE_ENABLED). Cached, so a dead market-data adds no per-cycle wait.
+    try:
+        from screening import vix_gate
+        _vix_reason = vix_gate.block_reason(await vix_gate.refresh())
+        if _vix_reason:
+            return _vix_reason
+    except Exception as e:  # noqa: BLE001
+        logger.debug("market gate: vix check failed (fail-open): %s", e)
     return None
 
 

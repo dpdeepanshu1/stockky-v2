@@ -1,6 +1,6 @@
 // frontend/src/App.tsx
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Fragment, useState, useEffect, useRef, useCallback } from "react";
 import { setVisibleInterval } from "./visibleInterval";
 import { api, getApiUrl, setApiUrl, apiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
 import Pipeline from "./components/Pipeline";
@@ -24,6 +24,8 @@ import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
 import MarketSentimentHeader from "./components/MarketSentimentHeader";
+import { NavIcon, type IconName } from "./components/ui/NavIcon";
+import { PageHeader } from "./components/ui/PageHeader";
 import CommandPalette, { CommandAction } from "./components/CommandPalette";
 import StockPopup from "./components/board/StockPopup";
 import type { BoardRowLite } from "./components/board/boardTypes";
@@ -40,7 +42,7 @@ type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surp
 
 // The five tabs the mobile bottom bar shows, in order. Explicit so that adding
 // a tab to navItems can never silently displace one of them.
-const MOBILE_BOTTOM_TABS: Tab[] = ["dashboard", "datafeed", "hot", "surprise", "training"];
+const MOBILE_BOTTOM_TABS: Tab[] = ["dashboard", "realtrade", "positionstocks", "hot"];
 
 
 async function powerOffAll() {
@@ -977,21 +979,30 @@ export default function App() {
     })),
   ];
 
-  const navItems: { id: Tab; label: string; short: string; icon: string }[] = [
-    { id: "dashboard", label: "Dashboard", short: "Home", icon: "▣" },
-    { id: "datafeed", label: "Data Feed", short: "Feed", icon: "🗄️" },
-    { id: "hot", label: "Hot Picks", short: "Picks", icon: "🔥" },
-    { id: "surprise", label: "Surprise", short: "Surp", icon: "⚡" },
-    { id: "ipo", label: "IPO Tracker", short: "IPO", icon: "🆕" },
-    { id: "realtrade", label: "Real Automatic Trade", short: "AutoTrade", icon: "🤖" },
-    { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "📈" },
-
-    { id: "training", label: "Training", short: "Train", icon: "◈" },
-    { id: "trades", label: "Trades", short: "Trade", icon: "⇄" },
-    { id: "notifications", label: "Alerts", short: "Alerts", icon: "◉" },
-    { id: "watchlist", label: "Watchlist", short: "List", icon: "☆" },
-    { id: "settings", label: "Settings", short: "Set", icon: "⚙" },
+  // Grouped by what the person is doing, not by which service backs the tab.
+  const navItems: { id: Tab; label: string; short: string; icon: IconName; group: string }[] = [
+    { id: "dashboard", label: "Dashboard", short: "Home", icon: "home", group: "" },
+    { id: "realtrade", label: "Auto Trade", short: "Auto Trade", icon: "bot", group: "Trading" },
+    { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "trend", group: "Trading" },
+    { id: "trades", label: "Paper Trades", short: "Paper", icon: "swap", group: "Trading" },
+    { id: "hot", label: "Hot Picks", short: "Picks", icon: "flame", group: "Discover" },
+    { id: "surprise", label: "Surprise Momentum", short: "Surprise", icon: "zap", group: "Discover" },
+    { id: "ipo", label: "IPO Tracker", short: "IPO", icon: "tag", group: "Discover" },
+    { id: "watchlist", label: "Watchlist", short: "Watchlist", icon: "star", group: "Discover" },
+    { id: "notifications", label: "Alerts", short: "Alerts", icon: "bell", group: "System" },
+    { id: "datafeed", label: "Data Feed", short: "Feed", icon: "database", group: "System" },
+    { id: "training", label: "Training Lab", short: "Train", icon: "flask", group: "System" },
+    { id: "settings", label: "Settings", short: "Settings", icon: "sliders", group: "System" },
   ];
+  const goTo = (id: Tab) => {
+    setTab(id);
+    if (id === "watchlist") setShowWatchlist(true);
+    else setShowWatchlist(false);
+    if (id !== "settings") setShowSettings(false);
+    setMobileMoreOpen(false);
+  };
+  const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
+
 
   return (
     <div className="min-h-screen bg-ink text-paper relative terminal-shell terminal-premium">
@@ -1005,57 +1016,41 @@ export default function App() {
       )}
 
       {/* Desktop sidebar */}
-      <aside className="terminal-sidebar hidden md:flex">
+      <aside className="terminal-sidebar hidden md:flex" aria-label="Main navigation">
         <div className="sidebar-brand">
-          <span className="font-display text-lg tracking-tight">Stockky</span>
-          <span className="mono text-[9px] text-mist tracking-widest uppercase">Terminal · NSE</span>
-          <span className={`mono text-[9px] ${wsLive ? "text-signal-buy" : "text-mist/50"}`}>
-            {wsLive ? "● LIVE FEED" : "○ POLLING"}
-          </span>
+          <span className="brand-mark" aria-hidden="true">S</span>
+          <div>
+            <div className="brand-name">Stockky</div>
+            <div className="brand-sub">NSE research &amp; trading</div>
+          </div>
         </div>
         <nav className="sidebar-nav">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`sidebar-link ${tab === item.id ? "active" : ""}`}
-              onClick={() => {
-                setTab(item.id as Tab);
-                if (item.id === "watchlist") setShowWatchlist(true);
-                else setShowWatchlist(false);
-                if (item.id !== "settings") setShowSettings(false);
-              }}
-            >
-              <span className="mono text-[11px] opacity-70 w-4">{item.icon}</span>
-              {item.label}
-            </button>
+          {navItems.map((item, i) => (
+            <Fragment key={item.id}>
+              {item.group && item.group !== navItems[i - 1]?.group && (
+                <div className="sidebar-group-label">{item.group}</div>
+              )}
+              <button
+                type="button"
+                className={`sidebar-link ${tab === item.id ? "active" : ""}`}
+                aria-current={tab === item.id ? "page" : undefined}
+                onClick={() => goTo(item.id)}
+              >
+                <NavIcon name={item.icon} />
+                {item.label}
+              </button>
+            </Fragment>
           ))}
         </nav>
         <div className="sidebar-footer">
-          <BackendStatusDot status={backendUp} onClick={() => setTab("settings")} />
-          <button
-            type="button"
-            className="sidebar-link"
-            onClick={() => setCmdOpen(true)}
-            title="Command palette"
-          >
-            <span className="kbd">⌘K</span> Command
-          </button>
-          <button
-            type="button"
-            className="sidebar-link"
-            onClick={() => setShowServiceManager(!showServiceManager)}
-          >
+          <button type="button" className="sidebar-link" onClick={() => setShowServiceManager(!showServiceManager)}>
+            <NavIcon name="layers" />
             Services
           </button>
-          <button
-            type="button"
-            className="sidebar-link theme-toggle"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            title="Toggle dark / light"
-            aria-label="Toggle color theme"
-          >
-            {theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}
+          <button type="button" className="sidebar-link" onClick={() => setCmdOpen(true)}>
+            <NavIcon name="search" />
+            Search &amp; commands
+            <span className="kbd" style={{ marginLeft: "auto" }}>Ctrl K</span>
           </button>
         </div>
       </aside>
@@ -1070,28 +1065,22 @@ export default function App() {
             aria-expanded={mobileMoreOpen}
             onClick={() => setMobileMoreOpen(true)}
           >
-            <span className="mobile-menu-icon" aria-hidden>☰</span>
+            <NavIcon name="menu" />
           </button>
-          <div className="min-w-0">
-            <span className="font-display text-base block leading-none">Stockky</span>
-            <span className={`mono text-[9px] ${wsLive ? "text-signal-buy" : "text-mist/50"}`}>
-              {wsLive ? "● LIVE" : "○ POLL"}
-            </span>
-          </div>
+          <span className="brand-name">Stockky</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <BackendStatusDot status={backendUp} onClick={() => setTab("settings")} />
           <button
             type="button"
-            className="btn-terminal text-[10px]"
-            onClick={() => void wakeAllDbs()}
-            disabled={dbWakeState === "waking"}
-            title="Wake Neon / training / cache databases"
+            className={`status-chip ${backendUp === "up" ? "ok" : backendUp === "down" ? "bad" : "warn"}`}
+            onClick={() => (backendUp === "down" ? handleWakeBackend() : setTab("settings"))}
+            title={backendUp === "up" ? "Backend connected" : backendUp === "down" ? "Backend unreachable — tap to wake" : "Connecting…"}
           >
-            {dbWakeState === "waking" ? "⏳DB" : dbWakeState === "ok" ? "✅DB" : dbWakeState === "error" ? "⚠️DB" : "🔌DB"}
+            <span className="dot" />
+            {backendUp === "up" ? (wsLive ? "Live" : "Polling") : backendUp === "down" ? "Offline" : "…"}
           </button>
-          <button type="button" className="btn-terminal text-[10px]" onClick={() => setCmdOpen(true)}>
-            ⌘K
+          <button type="button" className="icon-btn" aria-label="Search and commands" onClick={() => setCmdOpen(true)}>
+            <NavIcon name="search" />
           </button>
         </div>
       </header>
@@ -1108,104 +1097,105 @@ export default function App() {
           <aside className="mobile-drawer-panel">
             <div className="mobile-drawer-head">
               <div>
-                <div className="font-display text-lg">Stockky</div>
-                <div className="mono text-[9px] text-mist tracking-widest uppercase">Terminal · NSE</div>
+                <div className="brand-name">Stockky</div>
+                <div className="brand-sub">NSE research &amp; trading</div>
               </div>
-              <button type="button" className="btn-terminal text-[10px]" onClick={() => setMobileMoreOpen(false)}>
-                Close
+              <button type="button" className="icon-btn" aria-label="Close menu" onClick={() => setMobileMoreOpen(false)}>
+                <NavIcon name="x" />
               </button>
             </div>
             <nav className="mobile-drawer-nav">
-              {navItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`mobile-drawer-link ${tab === item.id ? "active" : ""}`}
-                  onClick={() => {
-                    setTab(item.id as Tab);
-                    if (item.id === "watchlist") setShowWatchlist(true);
-                    else setShowWatchlist(false);
-                    if (item.id !== "settings") setShowSettings(false);
-                    setMobileMoreOpen(false);
-                  }}
-                >
-                  <span className="opacity-70 w-5 text-center">{item.icon}</span>
-                  {item.label}
-                </button>
+              {navItems.map((item, i) => (
+                <Fragment key={item.id}>
+                  {item.group && item.group !== navItems[i - 1]?.group && (
+                    <div className="mobile-drawer-group">{item.group}</div>
+                  )}
+                  <button
+                    type="button"
+                    className={`mobile-drawer-link ${tab === item.id ? "active" : ""}`}
+                    aria-current={tab === item.id ? "page" : undefined}
+                    onClick={() => goTo(item.id)}
+                  >
+                    <NavIcon name={item.icon} />
+                    {item.label}
+                  </button>
+                </Fragment>
               ))}
             </nav>
             <div className="mobile-drawer-foot">
               <button
                 type="button"
                 className="mobile-drawer-link"
-                onClick={() => { setCmdOpen(true); setMobileMoreOpen(false); }}
+                onClick={() => { setShowServiceManager(true); setMobileMoreOpen(false); }}
               >
-                <span className="kbd">⌘K</span> Command
+                <NavIcon name="layers" />
+                Services
               </button>
               <button
                 type="button"
                 className="mobile-drawer-link"
-                onClick={() => { setShowServiceManager(true); setMobileMoreOpen(false); }}
+                onClick={() => void wakeAllDbs()}
+                disabled={dbWakeState === "waking"}
               >
-                Services
+                <NavIcon name="database" />
+                {dbWakeState === "waking" ? "Waking databases…" : dbWakeState === "ok" ? "Databases awake" : dbWakeState === "error" ? "Wake failed — try again" : "Wake databases"}
               </button>
               <button
                 type="button"
                 className="mobile-drawer-link"
                 onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
               >
-                {theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}
+                <NavIcon name={theme === "dark" ? "sun" : "moon"} />
+                {theme === "dark" ? "Light theme" : "Dark theme"}
               </button>
             </div>
           </aside>
         </div>
       )}
 
-      {/* Bloomberg-style status strip — clickable */}
-      <div className="terminal-status-strip hidden md:flex">
-        <button type="button" className="pill amber-txt" onClick={() => setTab("dashboard")} title="Go to Dashboard">
-          STOCKKY TERMINAL
+      {/* Desktop top bar: search + system status */}
+      <div className="app-topbar hidden md:flex">
+        <button type="button" className="topbar-search" onClick={() => setCmdOpen(true)} title="Search stocks or jump to a page">
+          <NavIcon name="search" />
+          <span className="grow">Search stocks or jump to a page</span>
+          <span className="kbd">Ctrl K</span>
         </button>
+        <div className="topbar-spacer" />
         <button
           type="button"
-          className={`pill ${wsLive ? "live" : ""}`}
+          className={`status-chip ${wsLive ? "ok" : ""}`}
           onClick={() => setCmdOpen(true)}
-          title="Command palette"
+          title={wsLive ? "Prices are streaming live" : "Live stream is off — prices refresh by polling"}
         >
-          {wsLive ? "LIVE" : "POLL"}
+          <span className="dot" />
+          {wsLive ? "Live prices" : "Polling prices"}
         </button>
         <button
           type="button"
-          className={`pill ${backendUp === "down" ? "pill-danger" : backendUp === "up" ? "live" : ""}`}
+          className={`status-chip ${backendUp === "up" ? "ok" : backendUp === "down" ? "bad" : "warn"}`}
           onClick={() => {
             if (backendUp === "down") handleWakeBackend();
             else setTab("settings");
           }}
-          title={backendUp === "down" ? "Wake backend" : "Settings"}
+          title={backendUp === "down" ? "Click to wake the backend" : "Open settings"}
         >
-          BACKEND {backendUp === "up" ? "UP" : backendUp === "down" ? "DOWN" : "…"}
-        </button>
-        <button type="button" className="pill" onClick={() => setCmdOpen(true)} title="Jump anywhere">
-          TAB {tab.toUpperCase()}
+          <span className="dot" />
+          {backendUp === "up" ? "Backend connected" : backendUp === "down" ? "Backend offline — wake" : "Connecting…"}
         </button>
         <button
           type="button"
-          className="pill"
-          onClick={() => setShowServiceManager(true)}
-          title="Service manager"
-        >
-          SERVICES
-        </button>
-        <button
-          type="button"
-          className={`pill ${dbWakeState === "ok" ? "live" : dbWakeState === "error" ? "pill-danger" : ""}`}
+          className={`status-chip ${dbWakeState === "ok" ? "ok" : dbWakeState === "error" ? "bad" : dbWakeState === "waking" ? "warn" : ""}`}
           onClick={() => void wakeAllDbs()}
           disabled={dbWakeState === "waking"}
-          title="Wake Neon / training / cache databases"
+          title="Wake the Neon, training and cache databases (free-tier databases sleep when idle)"
         >
-          {dbWakeState === "waking" ? "WAKING DB…" : dbWakeState === "ok" ? "DB AWAKE" : dbWakeState === "error" ? "DB WAKE FAILED" : "WAKE DB"}
+          <span className="dot" />
+          {dbWakeState === "waking" ? "Waking databases…" : dbWakeState === "ok" ? "Databases awake" : dbWakeState === "error" ? "Wake failed — retry" : "Wake databases"}
         </button>
         <StatusClock />
+        <button type="button" className="icon-btn" aria-label={themeLabel} title={themeLabel} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+          <NavIcon name={theme === "dark" ? "sun" : "moon"} />
+        </button>
       </div>
 
       {showServiceManager && (
@@ -1262,28 +1252,28 @@ export default function App() {
       <main className="terminal-main max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8">
         {tab === "notifications" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Alerts</p>
+            <PageHeader title="Alerts" desc="Notifications from the scanners and trading services, newest first." />
             <NotificationsPanel />
           </div>
         ) : tab === "training" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Training Lab</p>
+            <PageHeader title="Training Lab" desc="Train, evaluate and monitor the prediction models behind the signals." />
             <Training />
           </div>
         ) : tab === "trades" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Paper Trades</p>
+            <PageHeader title="Paper Trades" desc="Practice trades with a simulated wallet. No real money is used here." />
             <Trades />
           </div>
         ) : tab === "datafeed" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Data Feed</p>
+            <PageHeader title="Data Feed" desc="Market data coverage and freshness across the stocks Stockky tracks." />
             <DataFeed />
             <DataHealthAudit />
           </div>
         ) : tab === "hot" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Hot Picks</p>
+            <PageHeader title="Hot Picks" desc="Stocks currently ranked highest by the combined technical, fundamental and news score." />
             <HotStocks
               onAnalyze={(s) => {
                 setTab("dashboard");
@@ -1293,7 +1283,7 @@ export default function App() {
           </div>
         ) : tab === "surprise" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Surprise Momentum</p>
+            <PageHeader title="Surprise Momentum" desc="Stocks making unusual moves on volume, news or price right now." />
             <SurpriseStocks
               onSelect={(s) => {
                 setTab("dashboard");
@@ -1303,7 +1293,7 @@ export default function App() {
           </div>
         ) : tab === "ipo" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">IPO Tracker</p>
+            <PageHeader title="IPO Tracker" desc="Upcoming, open and recently listed IPOs." />
             <IpoTracker
               onSelect={(s) => {
                 setTab("dashboard");
@@ -1312,9 +1302,15 @@ export default function App() {
             />
           </div>
         ) : tab === "realtrade" ? (
-          <RealAutoTrade />
+          <div className="page-terminal">
+            <PageHeader title="Auto Trade" desc="Automated trading with your broker account. Switch between simulated (DEMO) and live (REAL) mode below." />
+            <RealAutoTrade />
+          </div>
         ) : tab === "positionstocks" ? (
-          <PositionStocksTab />
+          <div className="page-terminal">
+            <PageHeader title="Position Stocks" desc="Fast momentum trades that open and close within the day, using their own capital pool." />
+            <PositionStocksTab />
+          </div>
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}
@@ -1325,7 +1321,7 @@ export default function App() {
           />
         ) : tab === "watchlist" ? (
           <div className="page-terminal">
-            <p className="dash-section-title">Watchlist</p>
+            <PageHeader title="Watchlist" desc="The stocks you follow. Scan them together or open one for a full analysis." />
             <WatchlistManager
               symbols={watchlist}
               onChange={handleWatchlistUpdate}
@@ -1346,20 +1342,13 @@ export default function App() {
               <div className="dash-hero terminal-panel">
                 <div className="dash-hero-top">
                   <div>
-                    <p className="dash-section-title">Market terminal</p>
-                    <MarketClock />
+                    <h1 className="page-title">Analyse any stock</h1>
+                    <p className="page-desc">
+                      Technical, fundamental, news and AI signals combined into one clear decision.
+                    </p>
                   </div>
-                  <button type="button" className="btn-terminal" onClick={() => setCmdOpen(true)}>
-                    Ctrl+K
-                  </button>
+                  <MarketClock />
                 </div>
-                <h1 className="dash-hero-title">
-                  Know your next move. <span className="num-amber">In one call.</span>
-                </h1>
-                <p className="dash-hero-sub">
-                  Technical, fundamental, news and AI signals — one decision.
-                  Press <span className="kbd">Ctrl</span>+<span className="kbd">K</span> to jump.
-                </p>
 
                 <div className="dash-search-row">
                   <div className="dash-search">
@@ -1368,7 +1357,7 @@ export default function App() {
                       value={query}
                       onChange={(e) => setQuery(e.target.value.toUpperCase())}
                       onKeyDown={(e) => e.key === "Enter" && handleSearch(query)}
-                      placeholder="TCS, INFY, RELIANCE…"
+                      placeholder="Enter a symbol, e.g. TCS, INFY, RELIANCE"
                       autoComplete="off"
                       spellCheck={false}
                       aria-label="Symbol search"
@@ -1387,17 +1376,17 @@ export default function App() {
                       type="button"
                       onClick={() => handleScan(true)}
                       className="btn-scan-lite whitespace-nowrap"
-                      title="Lite Market Scan — Neon feed + instant scores, minimal downstream load (recommended on free tier)"
+                      title="Quick scan: uses the stored data feed and instant scores, with minimal load on the services (recommended on the free tier)"
                     >
-                      ⚡ Lite Market Scan
+                      Quick scan
                     </button>
                     <button
                       type="button"
                       onClick={() => handleScan(false)}
                       className="btn-scan-full whitespace-nowrap"
-                      title="Full Market Scan — all pillars (technical, fundamental, news, events, prediction)"
+                      title="Full scan: runs every check (technical, fundamental, news, events, prediction). Slower."
                     >
-                      ▶ Run Market Scan
+                      Full market scan
                     </button>
                   </div>
                 </div>
@@ -1655,30 +1644,31 @@ export default function App() {
             "ipo" to navItems would otherwise have silently pushed "training"
             out of a blind .slice(0, 5); IPO Tracker is reachable from the
             desktop rail, the ⋯ More drawer and the command palette. */}
-        {navItems.filter((i) => MOBILE_BOTTOM_TABS.includes(i.id)).map((item) => (
+        {MOBILE_BOTTOM_TABS.map((id) => navItems.find((i) => i.id === id)!).map((item) => (
           <button
             key={item.id}
             type="button"
             className={tab === item.id ? "active" : ""}
-            onClick={() => setTab(item.id)}
+            aria-current={tab === item.id ? "page" : undefined}
+            onClick={() => goTo(item.id)}
           >
-            <span className="block text-[12px] mb-0.5">{item.icon}</span>
+            <NavIcon name={item.icon} />
             <span>{item.short}</span>
           </button>
         ))}
         <button
           type="button"
-          className={mobileMoreOpen || tab === "settings" ? "active" : ""}
+          className={mobileMoreOpen || !MOBILE_BOTTOM_TABS.includes(tab) ? "active" : ""}
           onClick={() => setMobileMoreOpen(true)}
         >
-          <span className="block text-[12px] mb-0.5">☰</span>
+          <NavIcon name="menu" />
           <span>More</span>
         </button>
       </nav>
 
-      <footer className="md:ml-[200px] px-4 sm:px-6 py-5 border-t border-slate/40 mt-8 pb-20 md:pb-5">
-        <p className="text-[10px] text-mist/40 font-mono tracking-wide uppercase">
-          Stockky Terminal · Informational only — not investment advice · Verify before trading
+      <footer className="app-footer px-4 sm:px-6 py-5 border-t border-slate/40 mt-8 pb-20 md:pb-5">
+        <p className="text-[11px] text-mist/70">
+          Stockky is for information only and is not investment advice. Verify prices and signals before you trade.
         </p>
       </footer>
     </div>
@@ -1713,16 +1703,14 @@ function BackendStatusDot({
   status: "checking" | "up" | "down";
   onClick: () => void;
 }) {
-  const color =
-    status === "up" ? "bg-signal-buy" : status === "down" ? "bg-signal-sell" : "bg-signal-hold animate-pulse";
-  const label = status === "up" ? "Backend connected" : status === "down" ? "Backend unreachable" : "Checking...";
+  const label = status === "up" ? "Backend connected" : status === "down" ? "Backend unreachable" : "Checking…";
   return (
     <button
       onClick={onClick}
       title={label}
-      className="hidden sm:flex items-center gap-1.5 font-mono text-[10px] text-mist/60 hover:text-mist transition px-1"
+      className={`status-chip ${status === "up" ? "ok" : status === "down" ? "bad" : "warn"}`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${color}`} />
+      <span className="dot" />
       {label}
     </button>
   );
@@ -1742,8 +1730,8 @@ function StatusClock() {
     return () => window.clearInterval(id);
   }, []);
   return (
-    <span className="mono text-[10px] text-mist/60 ml-auto status-clock">
-      {now.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
+    <span className="topbar-clock" title="Indian Standard Time">
+      {now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST
     </span>
   );
 }
@@ -1962,7 +1950,7 @@ function SettingsPage({
 
   return (
     <div className="page-terminal settings-page space-y-4">
-      <p className="dash-section-title">Settings</p>
+      <PageHeader title="Settings" desc="Backend address, appearance and system tools." />
       <p className="text-xs text-mist/60 mb-2">API connection · theme · services · deploy checklist</p>
       <section className="terminal-panel">
         <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Backend connection</h3>

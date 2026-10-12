@@ -53,3 +53,26 @@ def _daily_report_off_by_default(monkeypatch):
     (tests/test_group292_daily_report*.py do)."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "DAILY_REPORT_ENABLED", False, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _group329_gates_off_by_default(monkeypatch):
+    """group329: the results-day gates would call the event service over the network, and the weekend carry bar depends on the weekday
+    the suite happens to run. Every older test predates them, so they are off unless a test turns them on
+    (tests/test_group329_circuit_earnings.py and test_group329_depth_weekend.py do)."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "EARNINGS_DAY_BLOCK", False, raising=False)
+    monkeypatch.setattr(_cfg, "EARNINGS_CARRY_BLOCK", False, raising=False)
+    monkeypatch.setattr(_cfg, "OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT", 0.0, raising=False)
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _group330_gates_off_by_default(monkeypatch):
+    """group330: the VIX / negative-news / carry-context checks call market-data, the event service and the gateway over the network, and the
+    pre-open snapshot depends on the clock. Older tests predate them, so they are off unless a test turns them on
+    (tests/test_group330_*.py do). The VWAP gate needs no switch: a tick without `vwap` never blocks."""
+    import config as _cfg
+    for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "CARRY_CONTEXT_GATE_ENABLED", "PREOPEN_SNAPSHOT_ENABLED"):
+        monkeypatch.setattr(_cfg, name, False, raising=False)
+    yield

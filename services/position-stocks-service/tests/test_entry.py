@@ -1349,3 +1349,22 @@ class TestDepth20SizeDownWiring:
         monkeypatch.setattr(entry.depth_gate, "max_qty_from_depth20", lambda s, q: None)
         assert entry.attempt_entry(db, cand()) is not None
         assert b.of("place_super_order")[0]["quantity"] == 40
+
+
+# ── group329: circuit-band gate wiring in attempt_entry ─────────────────────────
+class TestCircuitGateWiring:
+    def test_circuit_reject_skips_before_capital_is_reserved_and_frees_the_lock(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.circuit_gate, "reject_reason",
+                            lambda s, p: "CIRCUIT_UPPER:price 500.00 within 1.0% of the upper circuit 502.00 (locked or no room for the target)")
+        assert entry.attempt_entry(db, cand()) is None
+        assert last_log(db).reason.startswith("CIRCUIT_UPPER:")
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE) and not lock_held(db, "ABC")
+        assert b.of("place_super_order") == []
+
+    def test_no_circuit_reject_lets_the_entry_through(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
+        monkeypatch.setattr(entry.circuit_gate, "reject_reason", lambda s, p: None)
+        assert entry.attempt_entry(db, cand()) is not None

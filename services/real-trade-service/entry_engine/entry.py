@@ -19,6 +19,7 @@ All other entry logic (drift, R:R, conviction sizing, Dhan placement) unchanged.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -42,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import opening_gate, opening_guard, prev_day
+from entry_engine import circuit_gate, event_risk, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -832,6 +833,52 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": decision.reasoning, "risk_verdict": None})
             continue
 
+        # ── Gate 4b (group 329): exchange circuit band ────────────────────────────────────────────────────────────
+        # No BUY at / next to the upper circuit (cannot fill, no room) or close to the lower circuit (a stop or square-off may
+        # not execute). Unknown limits never block. See entry_engine/circuit_gate.py (off with CIRCUIT_GATE_ENABLED=false).
+        _circuit_reason = circuit_gate.reject_reason_tick(tick)
+        if _circuit_reason:
+            _wait_with_preview(_circuit_reason)
+            decision.gate_tag = "circuit_band"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _circuit_reason,
+                                   "risk_verdict": None, "gate_tag": "circuit_band"})
+            continue
+
+        # ── Gate 4c (group 329): spread / book re-check on the fresh tick ──────────────────────────────────────────
+        # The queue-time check can be minutes old. Unknown depth never blocks (same helper, same limits, as the queue-time check).
+        if config.ENTRY_DEPTH_RECHECK:
+            _depth_reason = _watchlist_depth_reason(tick)
+            if _depth_reason:
+                _depth_reason = f"DEPTH_AT_ENTRY: {_depth_reason}"
+                _wait_with_preview(_depth_reason)
+                decision.gate_tag = "depth_at_entry"
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _depth_reason,
+                                       "risk_verdict": None, "gate_tag": "depth_at_entry"})
+                continue
+
+        # -- Gate 4d (group 330): India VIX, VWAP, pre-open gap -------------------------------------------------------
+        # VIX: no new BUY while fear is high (and a smaller position while it is elevated, applied at sizing below). VWAP: no long under
+        # the day's volume-weighted average. Pre-open gap: no chasing a big gap-up / catching a big gap-down recorded at 09:08.
+        # Every one fails open on missing data. See entry_engine/vix_gate.py, vwap_gate.py, preopen.py.
+        _vix_snap = await asyncio.to_thread(vix_gate.snapshot)
+        _g4d_reason, _g4d_tag = None, None
+        for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
+                          (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
+                          (lambda: preopen.gap_reason(cand.symbol), "preopen_gap")):
+            _g4d_reason = _fn()
+            if _g4d_reason:
+                _g4d_tag = _tag
+                break
+        if _g4d_reason:
+            _wait_with_preview(_g4d_reason)
+            decision.gate_tag = _g4d_tag
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _g4d_reason,
+                                   "risk_verdict": None, "gate_tag": _g4d_tag})
+            continue
+
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)
         if rr < MIN_REWARD_RISK_RATIO:
@@ -855,6 +902,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # a smaller slice of equity than the same candidate would on a
             # healthy regime day.
             adj_risk_pct *= config.ENTRY_REGIME_OVERRIDE_RISK_SCALE
+        # group330: elevated / spiking India VIX -> smaller position (config.VIX_CAUTION_SIZE_MULT). 1.0 when VIX is unknown or calm.
+        _vix_mult = vix_gate.size_mult(_vix_snap)
+        if _vix_mult < 1.0:
+            adj_risk_pct *= _vix_mult
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
 
@@ -989,6 +1040,37 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                        "reasoning": cost_reason, "risk_verdict": decision.risk_verdict,
                                        "gate_tag": "cost_model"})
+                continue
+
+        # ── Gate 5.7 (group 329): results / earnings day ──────────────────────────────────────────────────────────
+        # A stock reporting today can gap 5-10 % straight through its stop. Checked last among the per-candidate gates so the
+        # (cached, at most one per symbol per day) event-service lookup only runs for a candidate everything else approved.
+        # Fail-open: unknown date / event service down never blocks. See entry_engine/event_risk.py.
+        if config.EARNINGS_DAY_BLOCK:
+            _earn_reason = await asyncio.to_thread(event_risk.reject_reason, cand.symbol)
+            if _earn_reason:
+                decision.action = "WAIT"
+                decision.reasoning = _earn_reason
+                decision.gate_tag = "earnings_day"
+                waited += 1
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _earn_reason,
+                                       "risk_verdict": decision.risk_verdict, "gate_tag": "earnings_day"})
+                continue
+
+        # -- Gate 5.8 (group 330): negative news / events --------------------------------------------------------------
+        # Same cached event-service answer as Gate 5.7 (no second call): event score at / below NEWS_NEGATIVE_BLOCK_SCORE, a regulatory
+        # action, delisting risk or a fresh earnings miss. Fail-open on unknown. See event_risk.negative_news_reason.
+        if config.NEWS_NEGATIVE_BLOCK_ENABLED:
+            _news_reason = await asyncio.to_thread(event_risk.news_reason, cand.symbol)
+            if _news_reason:
+                decision.action = "WAIT"
+                decision.reasoning = _news_reason
+                decision.gate_tag = "negative_news"
+                waited += 1
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _news_reason,
+                                       "risk_verdict": decision.risk_verdict, "gate_tag": "negative_news"})
                 continue
 
         # ── Gate 5.5: same-symbol duplicate guard (within this cycle) ──────────

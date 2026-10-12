@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 
 import config
 from models import ScalpQualityCache
+from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-quality-gate")
 
@@ -68,10 +69,19 @@ class QualitySignal:
     has_positive_catalyst: Optional[bool] = None
     recent_event_score: Optional[float] = None
     bulk_deal_flag: bool = False
+    # group329: ISO date (YYYY-MM-DD) of the stock's next / current results announcement when the event service reports one.
+    earnings_date: Optional[str] = None
+    # group330: a "NEWS_NEGATIVE:..." reason from the same event-service answer (low event score / regulatory action / delisting risk / fresh miss).
+    negative_news: Optional[str] = None
 
     def passes(self) -> tuple[bool, str]:
         """Lenient pass/fail: only reject on data that IS present and below
         floor. Missing data always passes through with a reason noting so."""
+        # group329: a stock reporting results TODAY can gap 5-10 % through a stop either way - not a scalp setup. Unknown date passes.
+        if config.EARNINGS_DAY_BLOCK and self.earnings_date and self.earnings_date == ist_today_str():
+            return False, f"EARNINGS_TODAY: results dated {self.earnings_date} (today) - gap risk a stop cannot cover"
+        if config.NEWS_NEGATIVE_BLOCK_ENABLED and self.negative_news:
+            return False, self.negative_news
         if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
             return False, f"fundamental_score {self.fundamental_score:.0f} < floor {config.MIN_FUNDAMENTAL_SCORE:.0f}"
         if self.technical_score is not None and self.technical_score < config.MIN_TECHNICAL_SCORE:
@@ -194,6 +204,57 @@ async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Opti
     return fund_score, tech_score, market_cap_cr
 
 
+# group329: symbol -> earnings date seen by the most recent _fetch_event_signal() call, consumed once by check().
+_earnings_seen: dict = {}
+
+
+# group330: symbol -> negative-news reason seen by the most recent _fetch_event_signal() call, consumed once by check().
+_news_seen: dict = {}
+
+# event types that are a hard negative on their own (decayed impact at / below the limit): a regulatory action, delisting risk, a FRESH earnings miss.
+_HARD_NEGATIVE_TYPES = {"regulatory_action": -8.0, "delisting_risk": -8.0, "earnings_miss": -15.0}
+
+
+def _negative_news_from(body) -> Optional[str]:
+    """A "NEWS_NEGATIVE:..." reason from an /events/{symbol}/categorized body, or None. Missing score / breakdown = None. Never raises."""
+    try:
+        if not config.NEWS_NEGATIVE_BLOCK_ENABLED or not isinstance(body, dict):
+            return None
+        for b in (body.get("event_score_breakdown") or []):
+            if not isinstance(b, dict):
+                continue
+            limit = _HARD_NEGATIVE_TYPES.get(b.get("type"))
+            if limit is not None and float(b.get("decayed_impact") or 0.0) <= limit:
+                return f"NEWS_NEGATIVE:{b.get('type')} on record (decayed impact {float(b['decayed_impact']):+.1f}) - not a long"
+        floor = float(config.NEWS_NEGATIVE_BLOCK_SCORE or 0.0)
+        raw = body.get("event_score")
+        if floor > 0 and raw is not None:
+            score = float(raw)
+            if score == score and score <= floor:
+                return f"NEWS_NEGATIVE:event score {score:.0f} <= {floor:.0f} (negative news / events) - not a long"
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _earnings_date_from(body) -> Optional[str]:
+    """The earnings date (YYYY-MM-DD) in an /events/{symbol}/categorized body, or None. Both `upcoming` and `recent` are read: the
+    endpoint files a bare date of TODAY under `recent` (it compares midnight against the current instant). Never raises."""
+    try:
+        if not isinstance(body, dict):
+            return None
+        dates = []
+        for key in ("upcoming", "recent"):
+            for item in (body.get(key) or []):
+                if isinstance(item, dict) and item.get("type") == "earnings_date":
+                    raw = str(item.get("date") or "")[:10]
+                    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+                        dates.append(raw)
+        return min(dates) if dates else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[bool], Optional[float], bool]:
     has_catalyst = event_score = None
     bulk_flag = False
@@ -204,6 +265,13 @@ async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[O
             has_catalyst = ej.get("has_positive_catalyst")
             event_score = ej.get("recent_event_score")
             bulk_flag = bool(ej.get("bulk_deals"))
+            # group329: remember the earnings date from this same answer (the return shape stays a 3-tuple); check() picks it up.
+            _ed = _earnings_date_from(ej)
+            if _ed:
+                _earnings_seen[symbol] = _ed
+            _nr = _negative_news_from(ej)
+            if _nr:
+                _news_seen[symbol] = _nr
     except Exception as e:
         # See the matching BUG FIX comment in _fetch_fundamental above.
         logger.info("quality_gate: event fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
@@ -237,6 +305,8 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
     if not config.QUALITY_GATE_ENABLED:
         return QualitySignal(symbol=symbol)
 
+    _news_seen.pop(symbol, None)          # group330: same rule for the negative-news reason
+    _earnings_seen.pop(symbol, None)      # group329: never reuse a date left by an earlier, failed check
     async with httpx.AsyncClient() as client:
         try:
             (fund_score, tech_score, market_cap_cr), (has_catalyst, event_score, bulk_flag) = await asyncio.gather(
@@ -258,4 +328,6 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
         has_positive_catalyst=has_catalyst,
         recent_event_score=event_score,
         bulk_deal_flag=bulk_flag,
+        earnings_date=_earnings_seen.pop(symbol, None),
+        negative_news=_news_seen.pop(symbol, None),
     ), cached)

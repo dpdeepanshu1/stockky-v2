@@ -252,6 +252,8 @@ def _wl_last_good_fallback(wanted: list) -> dict:
                                 source=f"stale_last_good({t.source})", volume=t.volume,
                                 day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
                                 spread_pct=t.spread_pct, book_value_5=t.book_value_5,
+                                upper_circuit=getattr(t, "upper_circuit", None), lower_circuit=getattr(t, "lower_circuit", None),
+                                vwap=getattr(t, "vwap", None),
                                 age_known=getattr(t, "age_known", True))
     return out
 
@@ -537,7 +539,7 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
 
 class Tick:
     __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close",
-                 "spread_pct", "book_value_5", "age_known")
+                 "spread_pct", "book_value_5", "age_known", "upper_circuit", "lower_circuit", "vwap")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
                  volume: Optional[int] = None,
@@ -546,7 +548,10 @@ class Tick:
                  prev_close: Optional[float] = None,
                  spread_pct: Optional[float] = None,
                  book_value_5: Optional[float] = None,
-                 age_known: bool = True):
+                 age_known: bool = True,
+                 upper_circuit: Optional[float] = None,
+                 lower_circuit: Optional[float] = None,
+                 vwap: Optional[float] = None):
         self.symbol   = symbol
         self.price    = price
         self.as_of    = as_of
@@ -573,6 +578,13 @@ class Tick:
         # age_s / as_of, i.e. an older market-data build), so `as_of` is merely the time WE received it.
         # The entry age check treats False as "unknown", never as "fresh".
         self.age_known = age_known
+        # group329: the exchange's circuit limits for today (rupees) when market-data's /quote row carries them, else None.
+        # Read only by entry_engine/circuit_gate.py; an unknown value never blocks and is never used for sizing or ordering.
+        self.upper_circuit = upper_circuit
+        self.lower_circuit = lower_circuit
+        # group330: the day's volume-weighted average price (Dhan `average_price`, market-data `avg_price`) when the row carries it, else None.
+        # Read only by entry_engine/vwap_gate.py; an unknown value never blocks.
+        self.vwap = vwap
 
 
 def _lq_prev_close(lq, ltp) -> Optional[float]:
@@ -602,6 +614,15 @@ def _safe_depth_num(value) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return v if v == v and v >= 0 and v != float("inf") else None
+
+
+def _safe_circuit(value) -> Optional[float]:
+    """group329: an exchange circuit limit as a positive finite float, or None (absent, 0, negative, NaN, not a number)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and 0 < v < float("inf") else None
 
 
 def _safe_prev_close(value) -> Optional[float]:
@@ -880,6 +901,9 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             prev_close=_safe_prev_close(q.get("previous_close") or q.get("prev_close")),
             spread_pct=_safe_depth_num(q.get("spread_pct")),
             book_value_5=_safe_depth_num(q.get("book_value_5")),
+            upper_circuit=_safe_circuit(q.get("upper_circuit")),
+            lower_circuit=_safe_circuit(q.get("lower_circuit")),
+            vwap=_safe_circuit(q.get("avg_price")),
         )
     except Exception as e:
         logger.warning("get_quote(%s): source-2 (market-data-service /quote) failed: %s: %s", symbol, type(e).__name__, e)
@@ -1119,6 +1143,9 @@ def _tick_from_bulk_item(item, *, now: Optional[datetime] = None, max_age_s: Opt
             prev_close=_safe_prev_close(item.get("previous_close") or item.get("prev_close")),
             spread_pct=_safe_depth_num(item.get("spread_pct")),
             book_value_5=_safe_depth_num(item.get("book_value_5")),
+            upper_circuit=_safe_circuit(item.get("upper_circuit")),
+            lower_circuit=_safe_circuit(item.get("lower_circuit")),
+            vwap=_safe_circuit(item.get("avg_price")),
         )
     except (TypeError, ValueError):
         return None
@@ -1250,6 +1277,8 @@ def _prio_last_good_fallback(wanted: list[str]) -> dict[str, Tick]:
                                 source=f"stale_last_good({t.source})", volume=t.volume,
                                 day_high=t.day_high, day_low=t.day_low, prev_close=t.prev_close,
                                 spread_pct=t.spread_pct, book_value_5=t.book_value_5,
+                                upper_circuit=getattr(t, "upper_circuit", None), lower_circuit=getattr(t, "lower_circuit", None),
+                                vwap=getattr(t, "vwap", None),
                                 age_known=getattr(t, "age_known", True))
     return out
 

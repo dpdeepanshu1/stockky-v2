@@ -556,6 +556,45 @@ SCAN_RVOL_SAMPLE_S = _get_float("SCAN_RVOL_SAMPLE_S", 5.0)
 SCALP_COST_GATE_ENABLED = _get_bool("SCALP_COST_GATE_ENABLED", True)
 SCALP_MIN_EDGE_TO_COST_RATIO = _get_float("SCALP_MIN_EDGE_TO_COST_RATIO", 3.0)
 SCALP_COST_SLIPPAGE_ALLOWANCE_PCT = _get_float("SCALP_COST_SLIPPAGE_ALLOWANCE_PCT", 0.10)
+
+# group 329 (2026-10-12): two pre-buy checks a market professional makes before any entry. Both FAIL OPEN (missing data never blocks).
+#   CIRCUIT_GATE_ENABLED        0 turns the circuit-band check off
+#   CIRCUIT_UPPER_BUFFER_PCT    no BUY within this % of the exchange UPPER circuit (locked / no room; a scalp target of
+#                               MIN_TARGET_PCT needs room above the price). 0 disables this side.
+#   CIRCUIT_LOWER_BUFFER_PCT    no BUY within this % of the LOWER circuit (may lock down; a stop or the EOD sell might not execute)
+#   EARNINGS_DAY_BLOCK          no BUY on a stock whose results / earnings are dated today (gap risk a stop cannot cover); the date
+#                               comes from the event service answer the quality gate already fetches (QUALITY_GATE_ENABLED must be on)
+# The limits come from market-data's /quote row (the same cached read the depth gate uses), not from the AngelOne frame.
+CIRCUIT_GATE_ENABLED = _get_bool("CIRCUIT_GATE_ENABLED", True)
+CIRCUIT_UPPER_BUFFER_PCT = _get_float("CIRCUIT_UPPER_BUFFER_PCT", 1.0)
+CIRCUIT_LOWER_BUFFER_PCT = _get_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
+EARNINGS_DAY_BLOCK = _get_bool("EARNINGS_DAY_BLOCK", True)
+
+# group 330 (2026-10-12): India VIX, negative news and a 09:08 pre-market plan for the scalper. All FAIL OPEN, each with its own switch.
+#   VIX_GATE_ENABLED     master switch (VIX read from market-data /quote/INDIAVIX, cached VIX_CACHE_TTL_S)
+#   VIX_BLOCK_ABOVE      no new entries at / above this VIX level (0 = off)
+#   VIX_CAUTION_ABOVE    at / above this level, or VIX up VIX_SPIKE_PCT % on the day: position size x VIX_CAUTION_SIZE_MULT
+#   NEWS_NEGATIVE_BLOCK_ENABLED / NEWS_NEGATIVE_BLOCK_SCORE   quality gate: skip a stock whose event score (0-100, 50 = neutral) is at / below the
+#                        score or that carries a regulatory action / delisting risk / fresh earnings miss (same event-service answer, no extra call)
+#   PREOPEN_*            09:08 snapshot: warms caches and records the indicative gap of the first PREOPEN_MAX_SYMBOLS F&O names; a gap-up of
+#                        PREOPEN_GAP_UP_BLOCK_PCT or a gap-down of PREOPEN_GAP_DOWN_BLOCK_PCT blocks the entry until PREOPEN_GAP_GATE_UNTIL_IST
+VIX_GATE_ENABLED = _get_bool("VIX_GATE_ENABLED", True)
+VIX_BLOCK_ABOVE = _get_float("VIX_BLOCK_ABOVE", 24.0)
+VIX_CAUTION_ABOVE = _get_float("VIX_CAUTION_ABOVE", 18.0)
+VIX_CAUTION_SIZE_MULT = _get_float("VIX_CAUTION_SIZE_MULT", 0.7)
+VIX_SPIKE_PCT = _get_float("VIX_SPIKE_PCT", 10.0)
+VIX_CACHE_TTL_S = _get_float("VIX_CACHE_TTL_S", 120.0)
+VIX_FETCH_TIMEOUT_S = _get_float("VIX_FETCH_TIMEOUT_S", 3.0)
+NEWS_NEGATIVE_BLOCK_ENABLED = _get_bool("NEWS_NEGATIVE_BLOCK_ENABLED", True)
+NEWS_NEGATIVE_BLOCK_SCORE = _get_float("NEWS_NEGATIVE_BLOCK_SCORE", 35.0)
+PREOPEN_SNAPSHOT_ENABLED = _get_bool("PREOPEN_SNAPSHOT_ENABLED", True)
+PREOPEN_SNAPSHOT_TIME_IST = _get_str("PREOPEN_SNAPSHOT_TIME_IST", "09:08")
+PREOPEN_GAP_GATE_UNTIL_IST = _get_str("PREOPEN_GAP_GATE_UNTIL_IST", "10:00")
+PREOPEN_GAP_UP_BLOCK_PCT = _get_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
+PREOPEN_GAP_DOWN_BLOCK_PCT = _get_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
+PREOPEN_MAX_PRICE_AGE_S = _get_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
+PREOPEN_MAX_SYMBOLS = _get_int("PREOPEN_MAX_SYMBOLS", 150)
+PREOPEN_FETCH_TIMEOUT_S = _get_float("PREOPEN_FETCH_TIMEOUT_S", 6.0)
 BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
 STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
 # group 262: Dhan's published NSE equity card = 0.00297 % exchange transaction charge (since 1 Oct 2024; was 0.00325 here,

@@ -1201,6 +1201,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "us_sector_bonus": us_sector_bonus,
             "intraday_news_bonus": news_bonus,
             "board_bonus": board_bonus,
+            "board_side": (_board_rows.get(cand.symbol) or {}).get("side"),     # group338: lets Gate 6 drop board-bearish picks (long-only)
             "entry_product": entry_prod,
         })
 

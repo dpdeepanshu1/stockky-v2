@@ -2347,6 +2347,27 @@ def shortlist_route():
                         "quality": config.SHORTLIST_W_QUALITY, "zone": config.SHORTLIST_W_ZONE}}
 
 
+@app.get("/top-picks")
+def top_picks_route():
+    """group338: the best 3-to-5 pick CARDS for the Board tab - the scalper's last shortlist (fresh) enriched with the live board row, topped up
+    with the strongest bullish board rows (flagged source=board, a preview the entry gates have not seen). Read-only; places no order."""
+    from screening import top_picks
+    payload = None
+    if config.BOARD_ENABLED:
+        try:
+            from screening import board as _board
+            payload = _board.build(None, None, _board_open_symbols())
+        except Exception as e:  # noqa: BLE001 - no board = engine picks without live prices
+            logger.debug("top-picks: board unavailable (%s)", e)
+    built = top_picks.build(_last_shortlist["rows"], _last_shortlist["at"], payload, time.time())
+    market_open = bool(is_market_open_ist())
+    note = None
+    if not built["picks"]:
+        note = ("Ranking the market..." if market_open else "Market closed - picks appear once the session is ranked (09:15 IST Mon-Fri).")
+    return {"enabled": True, "max": config.TOP_PICKS_N, "market_open": market_open, "as_of": _last_shortlist["at"],
+            "entered_symbol": _last_shortlist["entered_symbol"], "note": note, **built}
+
+
 @app.get("/board/status")
 def board_status():
     from feed import bar_backfill, bar_store, fno_list, sector_map

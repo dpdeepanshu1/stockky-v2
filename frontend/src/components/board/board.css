@@ -113,3 +113,39 @@
 .ob-rail.h { display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--ob-line); padding: 8px 10px; }
 .ob-rail.h button { width: auto; flex: none; display: flex; gap: 6px; height: auto; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--ob-line-2); white-space: nowrap; }
 .ob-rail.h button[aria-selected="true"] { border-color: rgba(74,163,255,.5); box-shadow: none; }
+
+/* group338: Top picks cards (TopPicks.tsx). Same dark terminal island and tokens as the board; own classes, scoped under .ob. */
+.ob .tp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 10px; }
+.ob .tp-msg { font-size: 11px; color: var(--ob-dim); padding: 6px 2px; } .ob .tp-msg.warn { color: var(--ob-amber); }
+.ob .tp-note { font-size: 9px; color: var(--ob-dim-2); padding-top: 8px; }
+.ob .tp-card { position: relative; border: 1px solid var(--ob-line-2); border-radius: 12px; padding: 10px 11px 9px; min-width: 0;
+  background: linear-gradient(160deg, rgba(31,224,143,.10), rgba(10,143,90,.03) 55%), var(--ob-panel); box-shadow: 0 0 0 1px rgba(31,224,143,.05) inset; }
+.ob .tp-card.bear { background: linear-gradient(160deg, rgba(255,61,90,.10), rgba(163,26,51,.03) 55%), var(--ob-panel); box-shadow: 0 0 0 1px rgba(255,61,90,.05) inset; }
+.ob .tp-card.held { border-color: rgba(245,166,35,.55); }
+.ob .tp-head { display: flex; align-items: center; gap: 8px; }
+.ob .tp-rank { font-size: 10px; font-weight: 800; color: var(--ob-dim); letter-spacing: .06em; font-variant-numeric: tabular-nums; }
+.ob .tp-id { min-width: 0; margin-right: auto; }
+.ob .tp-sym { display: block; font-size: 14px; font-weight: 800; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob .tp-sub { display: block; font-size: 10px; color: var(--ob-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob .tp-ring-bg { fill: none; stroke: rgba(255,255,255,.10); stroke-width: 3; }
+.ob .tp-ring-fg { fill: none; stroke: var(--ob-g); stroke-width: 3; stroke-linecap: round; transition: stroke-dasharray .5s ease; }
+.ob .tp-card.bear .tp-ring-fg { stroke: var(--ob-r); }
+.ob .tp-ring-t { font-size: 11px; font-weight: 800; fill: var(--ob-fg); font-variant-numeric: tabular-nums; }
+.ob .tp-badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0 4px; }
+.ob .tp-side, .ob .tp-badge { font-size: 9px; font-weight: 800; letter-spacing: .08em; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--ob-line-2); text-transform: uppercase; white-space: nowrap; }
+.ob .tp-side.g { color: #04140d; background: var(--ob-g); border-color: var(--ob-g); } .ob .tp-side.r { color: #1a0509; background: var(--ob-r); border-color: var(--ob-r); }
+.ob .tp-badge.good { color: var(--ob-g); border-color: rgba(31,224,143,.5); background: rgba(31,224,143,.10); }
+.ob .tp-badge.bad { color: var(--ob-r); border-color: rgba(255,61,90,.5); background: rgba(255,61,90,.10); }
+.ob .tp-badge.wait { color: var(--ob-amber); border-color: rgba(245,166,35,.45); background: rgba(245,166,35,.08); }
+.ob .tp-badge.preview { color: var(--ob-cyan); border-color: rgba(74,163,255,.45); background: rgba(74,163,255,.08); }
+.ob .tp-mid { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.ob .tp-chg { font-size: 24px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; } .ob .tp-chg.g, .ob dd.g { color: var(--ob-g); } .ob .tp-chg.r, .ob dd.r { color: var(--ob-r); }
+.ob .tp-px { font-size: 11px; color: var(--ob-dim); font-variant-numeric: tabular-nums; }
+.ob .tp-spark polyline.g { stroke: var(--ob-g); } .ob .tp-spark polyline.r { stroke: var(--ob-r); }
+.ob .tp-range { position: relative; height: 4px; border-radius: 999px; margin: 9px 0 3px; background: linear-gradient(90deg, rgba(255,61,90,.55), rgba(255,255,255,.10) 50%, rgba(31,224,143,.55)); }
+.ob .tp-range i { position: absolute; top: -3px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--ob-fg); box-shadow: 0 0 0 2px var(--ob-bg), 0 0 8px rgba(255,255,255,.5); }
+.ob .tp-lv { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; margin: 8px 0 0; }
+.ob .tp-lv dt { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ob-dim-2); }
+.ob .tp-lv dd { margin: 0; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ob .tp-why { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--ob-line); font-size: 10px; color: var(--ob-dim); line-height: 1.35; }
+@media (prefers-reduced-motion: reduce) { .ob .tp-ring-fg { transition: none; } }

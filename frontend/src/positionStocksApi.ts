@@ -457,6 +457,8 @@ export const positionStocksApi = {
   boardStatus: () => psRequest<any>("/board/status"),
   // group337: best-3-to-5 shortlist of the last entry cycle with what became of each pick (read-only, no admin login needed).
   shortlist: () => psRequest<any>("/shortlist"),
+  // group338: the best 3-to-5 pick CARDS (last entry cycle + board preview), read-only.
+  topPicks: () => psRequest<any>("/top-picks"),
   // group336: scan-window health (losing-window pause), stop/target advice and today's calendar session type (read-only).
   windowsHealth: (days = 0) => psRequest<any>(`/windows/health${days ? `?days=${days}` : ""}`),
   tuningStopTarget: (days = 14) => psRequest<any>(`/tuning/stop-target?days=${days}`),

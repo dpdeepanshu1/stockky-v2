@@ -98,6 +98,11 @@ def build(passers: Sequence[Tuple[object, object]], board_payload: Optional[dict
         floor = float(config.SHORTLIST_MIN_SCORE or 0.0)
         rows.sort(key=lambda r: (-r["score"], r["scan_rank"]))      # stable: equal scores keep scan order
         kept = [r for r in rows if r["score"] >= floor] or rows[:1]
+        if getattr(config, "SHORTLIST_DROP_BEARISH", True):
+            # group338: long-only scalper - never trade against the board when a non-bearish passer is available.
+            _longs = [r for r in kept if r["board_side"] != "bear"]
+            if _longs:
+                kept = _longs
         kept = kept[: max(1, int(config.SHORTLIST_MAX))]
         for n, r in enumerate(kept, 1):
             r["pick"] = n

@@ -356,6 +356,18 @@ SHORTLIST_BOARD_TIMEOUT_S = _get_float("SHORTLIST_BOARD_TIMEOUT_S", 3.0)
 # opening gate, price guard ...), try the next shortlisted pick instead of ending the cycle. Skips that end every attempt (not armed,
 # kill switch, order budget, max positions, margin pause) still end it. SHORTLIST_FALLTHROUGH=0 restores stop-at-first-skip.
 SHORTLIST_FALLTHROUGH = _get_bool("SHORTLIST_FALLTHROUGH", True)
+# group 338: the scalper is long-only, so a quality-gate passer the Market Board ranks BEARISH is dropped from the shortlist whenever at least
+# one non-bearish passer remains (it is never the only reason for an empty shortlist). SHORTLIST_DROP_BEARISH=0 = penalty only (group332).
+SHORTLIST_DROP_BEARISH = _get_bool("SHORTLIST_DROP_BEARISH", True)
+# group 338: Top picks cards (screening/top_picks.py, GET /top-picks). Display only.
+#   TOP_PICKS_N              cards shown (the best 3 to 5; default 5)
+#   TOP_PICKS_MIN_SHOWN      below this many fresh engine picks, strongest bullish board rows fill the list (flagged "board preview")
+#   TOP_PICKS_FRESH_S        an entry cycle's shortlist counts as fresh this long
+#   TOP_PICKS_MIN_CONVICTION board rows below this conviction never appear as preview picks
+TOP_PICKS_N = max(1, min(10, _get_int("TOP_PICKS_N", 5)))
+TOP_PICKS_MIN_SHOWN = max(0, min(10, _get_int("TOP_PICKS_MIN_SHOWN", 3)))
+TOP_PICKS_FRESH_S = max(30.0, _get_float("TOP_PICKS_FRESH_S", 900.0))
+TOP_PICKS_MIN_CONVICTION = _get_float("TOP_PICKS_MIN_CONVICTION", 60.0)
 # Deliberately much shorter than real-trade-service's 12-60s timeouts — this
 # loop ticks every 10s, so anything slower than a couple seconds isn't "quick".
 QUALITY_GATE_TIMEOUT_S = _get_float("QUALITY_GATE_TIMEOUT_S", 2.5)

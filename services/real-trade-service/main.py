@@ -2316,6 +2316,27 @@ async def shortlist_route(mode: str, admin: Optional[str] = Depends(require_admi
     return _sl.snapshot(mode)
 
 
+@app.get("/top-picks/{mode}")
+async def top_picks_route(mode: str, admin: Optional[str] = Depends(require_admin_if_real)):
+    """group338: the best 3-to-5 pick CARDS for the Board tab - the last Gate-6 shortlist (fresh) with entry / stop / target / R:R, enriched with
+    the live Market Board row, topped up with the strongest bullish board rows (source=board: a preview no risk check has seen). Read-only."""
+    import time as _time
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import board_client as _bc, shortlist as _sl, top_picks as _tp
+    rows = await _bc.get_rows()
+    snap = _sl.snapshot(mode)
+    built = _tp.build(snap, rows, _time.time())
+    market_open = bool(is_market_open_ist())
+    note = None
+    if not built["picks"]:
+        note = ("Waiting for the first entry cycle to rank candidates..." if market_open
+                else "Market closed - picks appear once the session is ranked (09:15 IST Mon-Fri).")
+    return {"mode": mode, "enabled": True, "max": config.TOP_PICKS_N, "market_open": market_open, "as_of": snap.get("as_of"),
+            "note": note, **built}
+
+
 @app.get("/candidates/{mode}")
 async def list_candidates(
     mode: str, limit: int = 40,

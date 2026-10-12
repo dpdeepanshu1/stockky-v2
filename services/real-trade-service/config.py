@@ -243,6 +243,16 @@ ENTRY_BOARD_CACHE_TTL_S = float(_g332("ENTRY_BOARD_CACHE_TTL_S", "30"))
 ENTRY_BOARD_TIMEOUT_S = float(_g332("ENTRY_BOARD_TIMEOUT_S", "2.5"))
 ENTRY_BOARD_URL = _g332("ENTRY_BOARD_URL", _g332("POSITION_STOCKS_SERVICE_URL", "http://position-stocks-service:8006").rstrip("/") + "/board")
 ENTRY_FETCH_BY_CONVICTION = _g332("ENTRY_FETCH_BY_CONVICTION", "true").lower() not in ("0", "false", "no", "off")
+# group 338: the entry engine is long-only, so a risk-approved candidate the Market Board ranks BEARISH is left out of the shortlist whenever
+# at least one non-bearish candidate remains (upper-circuit entries keep their bypass). ENTRY_SHORTLIST_DROP_BEARISH=false = nudge only (group332).
+ENTRY_SHORTLIST_DROP_BEARISH = _g332("ENTRY_SHORTLIST_DROP_BEARISH", "true").lower() not in ("0", "false", "no", "off")
+# group 338: Top picks cards (entry_engine/top_picks.py, GET /top-picks/{mode}). Display only.
+#   TOP_PICKS_N cards shown (best 3 to 5) | TOP_PICKS_MIN_SHOWN fewer fresh engine picks than this -> strongest bullish board rows fill the list
+#   (flagged "board preview") | TOP_PICKS_FRESH_S how long an entry cycle's shortlist counts as fresh | TOP_PICKS_MIN_CONVICTION preview floor
+TOP_PICKS_N = max(1, min(10, int(_g332("TOP_PICKS_N", "5"))))
+TOP_PICKS_MIN_SHOWN = max(0, min(10, int(_g332("TOP_PICKS_MIN_SHOWN", "3"))))
+TOP_PICKS_FRESH_S = max(30.0, float(_g332("TOP_PICKS_FRESH_S", "900")))
+TOP_PICKS_MIN_CONVICTION = float(_g332("TOP_PICKS_MIN_CONVICTION", "60"))
 ENTRY_MIN_COMPOSITE_SCORE = float(((os.getenv("ENTRY_MIN_COMPOSITE_SCORE") or "").strip() or "50.0"))
 # Weights must sum to 1.0 — conviction (the pipeline's own scoring across
 # analysis-intelligence/decision-prediction), reward:risk (how much upside

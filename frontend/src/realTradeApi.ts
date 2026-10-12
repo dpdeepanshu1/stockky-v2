@@ -512,6 +512,8 @@ export const realTradeApi = {
 
   // group337: best-3-to-5 shortlist of the last entry cycle for this mode, with what became of each pick (read-only).
   shortlist: (mode: "DEMO" | "REAL") => rtRequest<any>(`/shortlist/${mode}`),
+  // group338: the best 3-to-5 pick CARDS for this mode (last Gate-6 shortlist + board preview), read-only.
+  topPicks: (mode: "DEMO" | "REAL") => rtRequest<any>(`/top-picks/${mode}`),
   // group336: what kind of session today is (expiry / pre-holiday / Friday) and the rules that follow.
   calendarToday: () => rtRequest<any>("/calendar/today", {}, false),
 

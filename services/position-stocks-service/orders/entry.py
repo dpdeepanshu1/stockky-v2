@@ -39,9 +39,9 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import board_gate, cost_gate, depth_gate, entry_pause
+from orders import board_gate, circuit_gate, cost_gate, depth_gate, entry_pause
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
-from screening import intraday_eligibility, opening_gate
+from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
 from screening import trade_gates
@@ -538,6 +538,21 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
         return None
 
+    # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
+    # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.
+    _circuit_reject = circuit_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if _circuit_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _circuit_reject, quality=quality)
+        return None
+
+    # group330: pre-open gap (09:08 snapshot) - do not chase a big gap-up / catch a big gap-down until the gate window ends. Fails open.
+    _gap_reject = preopen.gap_reason(candidate.symbol)
+    if _gap_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _gap_reject, quality=quality)
+        return None
+
     # group309: Market Board chase guard. shadow (default) only logs; enforce refuses an entry that is > BOARD_CHASE_ATR ATRs past
     # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
     _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
@@ -596,6 +611,19 @@ def attempt_entry(
                 ledger.release_capital(db, position_value=position_value - _new_value, realized_pnl=0.0)
                 position_value = _new_value
             quantity = _cap_qty
+
+    # group330: elevated / spiking India VIX -> smaller position (config.VIX_CAUTION_SIZE_MULT). Cache-only read, 1.0 when VIX is unknown.
+    _vix_mult = vix_gate.size_mult()
+    if _vix_mult < 1.0 and quantity > 1:
+        _vq = max(1, int(quantity * _vix_mult))
+        if _vq < quantity:
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (India VIX x%.2f)",
+                        candidate.symbol, quantity, _vq, _vix_mult)
+            _vnew = _vq * candidate.current_ltp
+            if _vnew < position_value:
+                ledger.release_capital(db, position_value=position_value - _vnew, realized_pnl=0.0)
+                position_value = _vnew
+            quantity = _vq
 
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:

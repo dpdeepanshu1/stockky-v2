@@ -944,6 +944,36 @@ def _carry_gain_ok(entry_price, ltp) -> bool:
         return False
 
 
+def _closed_days_before_next_session(now=None) -> int:
+    """group329: how many calendar days between today and the next trading session, minus the normal one (Fri -> Mon = 2,
+    Thu -> Fri = 0, a holiday on the next weekday adds one more). 0 on any error."""
+    try:
+        from datetime import timedelta as _td
+        from entry_engine.event_risk import next_trading_day
+        from tz_utils import ist_now
+        today = ist_now(now).date()
+        return max(0, (next_trading_day(today) - today).days - 1)
+    except Exception:
+        return 0
+
+
+def _carry_gap_gain_ok(entry_price, ltp, now=None) -> bool:
+    """group329: the extra gain demanded for carrying over a weekend / holiday (config.OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT
+    per extra closed day, on top of _carry_gain_ok's bar). True when no extra bar applies. Unreadable prices fail closed."""
+    try:
+        per_day = float(getattr(config, "OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT", 0.0) or 0.0)
+        extra_days = _closed_days_before_next_session(now) if per_day > 0 else 0
+        if extra_days <= 0:
+            return True
+        e = float(entry_price or 0)
+        if e <= 0:
+            return False
+        bar = float(getattr(config, "OVERNIGHT_HOLD_MIN_GAIN_PCT", 0.0) or 0.0) + per_day * extra_days
+        return round((float(ltp) / e - 1.0) * 100.0, 6) >= bar
+    except Exception:
+        return False
+
+
 async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, dict]:
     """2026-09-18 fix (user audit finding): _eod_squareoff used to flatten
     EVERY open position unconditionally, discarding candidate_engine's own
@@ -999,6 +1029,7 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
 
     scored: list[tuple[float, object, float]] = []  # (conviction, position, position_value)
     reasons: dict = {}
+    _ctx_loaded, _ctx_nifty, _ctx_vix = False, None, None      # group330: carry context, fetched once for the batch
     for p in candidates:
         tick = ticks.get(p.symbol)
         if tick is None or not tick.price:
@@ -1025,6 +1056,8 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
                 continue
             if not _carry_gain_ok(p.avg_entry_price, ltp):
                 continue            # group322: gain too small to pay for the carry (delivery costs + gap risk)
+            if not _carry_gap_gain_ok(p.avg_entry_price, ltp):
+                continue            # group329: a weekend / holiday carry needs a bigger cushion (several overnight gaps)
 
         dh = getattr(tick, "day_high", None)
         dl = getattr(tick, "day_low", None)
@@ -1033,6 +1066,27 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
         range_pos = max(0.0, min(1.0, (ltp - dl) / (dh - dl)))
         if range_pos >= config.OVERNIGHT_HOLD_MAX_RANGE_POS:
             continue  # already extended near today's high — not the exhausted-breakout case
+
+        # group329: never carry into a results announcement (today after the close, or the next trading day) - the overnight
+        # gap on the announcement is the one risk the carry rules above do not price. Fail-open: unknown date does not block.
+        if config.EARNINGS_CARRY_BLOCK:
+            from entry_engine import event_risk
+            _earn_reason = await asyncio.to_thread(event_risk.reject_reason, p.symbol, carry=True)
+            if _earn_reason:
+                logger.info("overnight hold: %s not carried - %s", p.symbol, _earn_reason)
+                continue
+
+        # group330: context at the close - market selling into it, VIX high / spiking, negative news on the stock. Fail-open on unknown.
+        if config.CARRY_CONTEXT_GATE_ENABLED:
+            from entry_engine import carry_context as _cc, vix_gate as _vg
+            if not _ctx_loaded:
+                _ctx_nifty = await asyncio.to_thread(_cc.nifty_change_pct)
+                _ctx_vix = await asyncio.to_thread(_vg.snapshot)
+                _ctx_loaded = True
+            _ctx_reason = await asyncio.to_thread(_cc.reason, p.symbol, _ctx_nifty, _ctx_vix)
+            if _ctx_reason:
+                logger.info("overnight hold: %s not carried - %s", p.symbol, _ctx_reason)
+                continue
 
         conviction = float(getattr(p, "entry_conviction_score", None) or 0.0)
         position_value = ltp * p.qty_open
@@ -1556,6 +1610,18 @@ async def _schedule_tick_body(mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] pre-pick failed for %s", mode)
                 await notify_async(f"⚠️ *Pre-pick error — {mode}* — see server logs.")
+
+        # -- Pre-open snapshot (group 330): 09:08-09:15 indicative gap of the queued candidates + cache warm-up. Best-effort, in-memory,
+        # once per IST day; a failure never touches pre-pick or entries.
+        try:
+            from entry_engine import preopen as _preopen
+            if _preopen.due():
+                _po_syms = [r[0] for r in (
+                    db.query(models.TradeCandidate.symbol)
+                    .filter_by(mode=mode, consumed=False).limit(300).all())]
+                await _preopen.run(_po_syms)
+        except Exception:
+            logger.exception("[schedule] pre-open snapshot failed for %s (non-fatal)", mode)
 
         # ── eDIS morning check (pre-open; market need not be open) ────────
         # 2026-09-19 (audit finding): runs before pre-pick's default 09:00

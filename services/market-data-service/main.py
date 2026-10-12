@@ -1428,6 +1428,12 @@ class QuoteResponse(BaseModel):
     fetched_at: Optional[str] = None
     as_of: Optional[str] = None         # group289: tz-aware UTC time the price is from (None = unknown)
     age_s: Optional[float] = None       # group289: seconds since as_of when this response was built (None = unknown)
+    # group330: Dhan market-quote extras. Present only when the quote came from Dhan; None otherwise (callers treat None as unknown).
+    avg_price: Optional[float] = None       # Dhan average_price = the day's volume-weighted average price (VWAP)
+    upper_circuit: Optional[float] = None
+    lower_circuit: Optional[float] = None
+    spread_pct: Optional[float] = None
+    book_value_5: Optional[float] = None
 
     class Config:
         extra = "ignore"
@@ -1550,6 +1556,11 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
         "source": d.get("source") or "unknown",
         "fetched_at": fetched,
     }
+    # group330: Dhan extras pass through only when present and valid (never invented, never 0). Rows from other sources do not carry them.
+    for _k in ("avg_price", "upper_circuit", "lower_circuit", "spread_pct", "book_value_5"):
+        _v = _f(_k)
+        if _v is not None and _v > 0:
+            out[_k] = _v
     _restamp_quote(out)
     return out
 
@@ -2742,6 +2753,9 @@ def _dhan_quote_payload(base: str, row: dict) -> dict:
         "day_high": row.get("day_high"), "day_low": row.get("day_low"),
         "volume": row.get("volume"), "source": "dhan",
         "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        # group330: the Dhan fields real-trade's VWAP / circuit / depth checks read. _pad_quote_response keeps only the non-None ones.
+        "avg_price": row.get("avg_price"), "upper_circuit": row.get("upper_circuit"), "lower_circuit": row.get("lower_circuit"),
+        "spread_pct": row.get("spread_pct"), "book_value_5": row.get("book_value_5"),
     }
 
 

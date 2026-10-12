@@ -955,7 +955,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             return _finalize()
         _mkt = await trade_gates.market_gate_reject()
         if _mkt:
-            summary["skipped_reason"] = "MARKET_WEAK"
+            summary["skipped_reason"] = "VIX_HIGH" if _mkt.startswith("VIX_HIGH") else "MARKET_WEAK"   # group330
             _stage("trade_gates", "Market Filter", _t, detail=_mkt)
             return _finalize()
         _stage("trade_gates", "Market Filter + Loss Brake", _t, detail="passed")
@@ -1171,6 +1171,13 @@ async def _trading_loop() -> None:
             # tripped breaker can never silently skip the unconditional
             # exit-reconciliation / EOD-squareoff steps. See _run_cycle()'s
             # entry-attempt block for the full reasoning.
+            # group330: 09:08 pre-market plan (best-effort, once per IST day, never blocks the loop's own work).
+            try:
+                from screening import preopen as _preopen
+                if _preopen.due():
+                    await _preopen.run()
+            except Exception:
+                logger.exception("pre-open snapshot failed (non-fatal)")
             if not is_market_open_ist(honor_session_proof=False):   # group321: the cycle also reconciles exits + EOD; entries re-check below
                 continue
 

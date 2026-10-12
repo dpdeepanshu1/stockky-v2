@@ -47,3 +47,18 @@ def _reset_depth_proven():
     _dg._depth_proven_at = 0.0
     yield
     _dg._depth_proven_at = 0.0
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _group330_gates_off_by_default(monkeypatch):
+    """group330: the VIX / negative-news checks call market-data and the event service over the network and the pre-open snapshot depends on
+    the clock. Older tests predate them, so they are off unless a test turns them on (tests/test_group330_*.py do)."""
+    import config as _config
+    for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "PREOPEN_SNAPSHOT_ENABLED"):
+        monkeypatch.setattr(_config, name, False, raising=False)
+    from screening import preopen as _po, vix_gate as _vg
+    _po.reset()
+    _vg.reset()
+    yield
+    _po.reset()
+    _vg.reset()

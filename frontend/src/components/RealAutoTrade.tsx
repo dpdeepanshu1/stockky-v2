@@ -15,6 +15,7 @@ import { SubTabs } from "./ui/SubTabs";
 import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
+import ShortlistPanel from "./board/ShortlistPanel";
 import { riskCap, type RiskCapResult } from "./board/riskCap";
 import { chargesForLegs, sumCharges, DP_CHARGE_INCL_GST, type ChargeBreakdown, type ChargeLeg } from "../chargesRates";
 
@@ -1655,6 +1656,8 @@ export default function RealAutoTrade() {
             };
             return (
               <div className="space-y-3">
+                <ShortlistPanel active={activeTab === "board"} kind="real" resetKey={mode} fetcher={() => realTradeApi.shortlist(mode)}
+                  title={`Best picks · next entries (${mode})`} note="Display only. Every entry gate and the risk engine still decide; if a pick's order fails, the next reserve pick takes its slot." />
                 <MarketBoard active={activeTab === "board"} marks={marks} title={`Real Trade · Market Board (${mode})`}
                   showZoneScore hatchFor={row => capOf(row).status === "over"}
                   legend="Hatched tile = not even one share fits your per-trade risk cap (stop: your candidate's own stop when it has one, else the board zone's far edge). Z = zone score 0-100, a heuristic. Display only: the risk engine decides."

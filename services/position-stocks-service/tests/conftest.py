@@ -55,9 +55,13 @@ def _group330_gates_off_by_default(monkeypatch):
     the clock. Older tests predate them, so they are off unless a test turns them on (tests/test_group330_*.py do)."""
     import config as _config
     for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "PREOPEN_SNAPSHOT_ENABLED", "ENTRY_VWAP_GATE_ENABLED",
-                 "ENTRY_LIQUIDITY_GATE_ENABLED"):   # group333: VWAP reads the clock
+                 "ENTRY_LIQUIDITY_GATE_ENABLED",   # group333: VWAP reads the clock
+                 "CALENDAR_RULES_ENABLED", "WINDOW_AUTODISABLE_ENABLED"):   # group336: calendar reads the clock, window health reads trade history
         monkeypatch.setattr(_config, name, False, raising=False)
+    monkeypatch.setattr(_config, "CATALYST_NO_NEWS_ACTION", "off", raising=False)
     from screening import preopen as _po, vix_gate as _vg
+    from orders import window_health as _wh
+    _wh.reset()
     _po.reset()
     _vg.reset()
     yield

@@ -636,6 +636,28 @@ ENTRY_MIN_DAY_TURNOVER_CR = _get_float("ENTRY_MIN_DAY_TURNOVER_CR", 1.0)
 ENTRY_LIQ_MIN_TIME_IST = _get_str("ENTRY_LIQ_MIN_TIME_IST", "10:00")
 ENTRY_RVOL_MIN_TIME_IST = _get_str("ENTRY_RVOL_MIN_TIME_IST", "09:45")
 ENTRY_MIN_RVOL = _get_float("ENTRY_MIN_RVOL", 0.35)
+
+# group 336 (2026-10-12): expiry / Friday / pre-holiday rules (orders/calendar_gate.py), catalyst check (orders/catalyst_gate.py), losing-window
+# auto-disable + stop/target width advice (orders/window_health.py). All fail open; each has a switch.
+CALENDAR_RULES_ENABLED = _get_bool("CALENDAR_RULES_ENABLED", True)
+CALENDAR_EXPIRY_WEEKDAY = _get_int("CALENDAR_EXPIRY_WEEKDAY", 1)               # 0=Mon..4=Fri; 1 = Tuesday (NSE index weekly expiry since Sept 2025 - verify)
+CALENDAR_EXPIRY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_EXPIRY_ENTRY_CUTOFF_IST", "14:30")      # blank = no cut-off
+CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_FRIDAY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_FRIDAY_ENTRY_CUTOFF_IST", "")
+CALENDAR_EXPIRY_SIZE_MULT = _get_float("CALENDAR_EXPIRY_SIZE_MULT", 0.8)
+CALENDAR_PRE_HOLIDAY_SIZE_MULT = _get_float("CALENDAR_PRE_HOLIDAY_SIZE_MULT", 0.8)
+CALENDAR_FRIDAY_SIZE_MULT = _get_float("CALENDAR_FRIDAY_SIZE_MULT", 0.9)
+CALENDAR_EXPIRY_CARRY_MAX = _get_int("CALENDAR_EXPIRY_CARRY_MAX", 2)           # carry caps are used by real-trade only; kept so the knobs match
+CALENDAR_PRE_HOLIDAY_CARRY_MAX = _get_int("CALENDAR_PRE_HOLIDAY_CARRY_MAX", 1)
+CALENDAR_FRIDAY_CARRY_MAX = _get_int("CALENDAR_FRIDAY_CARRY_MAX", 2)
+CATALYST_NO_NEWS_ACTION = _get_str("CATALYST_NO_NEWS_ACTION", "size")           # size | block | off
+CATALYST_MOVE_PCT = _get_float("CATALYST_MOVE_PCT", 4.0)
+CATALYST_NO_NEWS_SIZE_MULT = _get_float("CATALYST_NO_NEWS_SIZE_MULT", 0.6)
+WINDOW_AUTODISABLE_ENABLED = _get_bool("WINDOW_AUTODISABLE_ENABLED", True)
+WINDOW_AUTODISABLE_DAYS = _get_int("WINDOW_AUTODISABLE_DAYS", 7)
+WINDOW_AUTODISABLE_MIN_TRADES = _get_int("WINDOW_AUTODISABLE_MIN_TRADES", 8)
+WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT = _get_float("WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT", 35.0)
+WINDOW_TUNING_MIN_TRADES = _get_int("WINDOW_TUNING_MIN_TRADES", 20)
 BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
 STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
 # group 262: Dhan's published NSE equity card = 0.00297 % exchange transaction charge (since 1 Oct 2024; was 0.00325 here,

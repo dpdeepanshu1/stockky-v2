@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -541,7 +541,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             )
 
     # group332: Market Board rows (position-stocks /board), cached + fail-open; feeds the per-candidate composite nudge below.
-    _board_rows = await _board_client.get_rows() if mode == "REAL" else {}
+    # group337: DEMO now ranks with the same board nudge as REAL (it used to be REAL-only, so the two modes ordered the same candidates differently).
+    _board_rows = await _board_client.get_rows()
 
     symbols = list({c.symbol for c in candidates})
     ticks   = await get_quotes(symbols)
@@ -893,6 +894,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
                           (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
                           (lambda: preopen.gap_reason(cand.symbol), "preopen_gap"),
+                          (lambda: calendar_gate.entry_block_reason(), "calendar"),                # group336: expiry / pre-holiday / Friday cut-off
                           (lambda: liquidity_gate.reject_reason_tick(tick), "liquidity")):      # group333: volume / turnover floor
             _g4d_reason = _fn()
             if _g4d_reason:
@@ -933,6 +935,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _vix_mult = vix_gate.size_mult(_vix_snap)
         if _vix_mult < 1.0:
             adj_risk_pct *= _vix_mult
+        # group336: expiry / pre-holiday / Friday session -> smaller position (config.CALENDAR_*_SIZE_MULT). 1.0 on an ordinary day.
+        _cal_mult = calendar_gate.size_mult()
+        if _cal_mult < 1.0:
+            adj_risk_pct *= _cal_mult
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
 
@@ -1194,6 +1200,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "is_overnight_priority": is_overnight_priority,
             "us_sector_bonus": us_sector_bonus,
             "intraday_news_bonus": news_bonus,
+            "board_bonus": board_bonus,
             "entry_product": entry_prod,
         })
 
@@ -1251,6 +1258,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             reserve = [x for x in _sl["shortlist"] if id(x) not in _sel_ids]
             _res_ids = {id(x) for x in reserve}
             skipped = [x for x in skipped if id(x) not in _res_ids]
+        _shortlist.record(mode, _sl, len(approved_entries), selected, reserve)           # group337: for GET /shortlist/{mode}
         logger.info(
             "entry_engine: %s shortlist %d of %d approved - %s | entering %d",
             mode, len(_sl["shortlist"]), len(approved_entries),
@@ -1549,6 +1557,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "symbol": cand.symbol, "action": decision.action,
             "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
         })
+        # group337: what became of this pick, for the Board tab's shortlist panel
+        _shortlist.mark(mode, cand.symbol, "ENTERED" if decision.action == "ENTER" else f"PLACEMENT_FAILED:{str(decision.reasoning or '')[:90]}")
         # group335: this pick's placement failed -> give its slot to the next shortlisted pick (best first) while slots remain this cycle.
         if _slot_failed and reserve and entered < config.ENTRY_MAX_NEW_PER_CYCLE:
             _nxt = reserve.pop(0)
@@ -1558,6 +1568,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
     # group335: shortlist picks that were never needed are marked WAIT exactly as before (same reasoning text).
     _mark_skipped_wait(reserve)
+    _shortlist.finalize(mode)                                  # group337: reserve picks never needed -> NOT_NEEDED
 
     db.commit()
     log_action(db, actor="system", action="ENTRY_CYCLE", mode=mode,

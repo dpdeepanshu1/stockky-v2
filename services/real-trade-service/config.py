@@ -493,6 +493,24 @@ ENTRY_MIN_DAY_TURNOVER_CR = _og_float("ENTRY_MIN_DAY_TURNOVER_CR", 1.0)
 ENTRY_LIQ_MIN_TIME_IST = (os.getenv("ENTRY_LIQ_MIN_TIME_IST") or "").strip() or "10:00"
 ENTRY_RVOL_MIN_TIME_IST = (os.getenv("ENTRY_RVOL_MIN_TIME_IST") or "").strip() or "09:45"
 ENTRY_MIN_RVOL = _og_float("ENTRY_MIN_RVOL", 0.35)
+
+# group 336 (2026-10-12): expiry / Friday / pre-holiday rules (entry_engine/calendar_gate.py): an entry cut-off, a smaller size and a lower overnight-carry
+# cap on those sessions. Fail open; CALENDAR_RULES_ENABLED=false turns all of it off, a blank cut-off turns that cut-off off.
+def _cal_str(name, default):
+    raw = os.getenv(name)
+    return default if raw is None else raw.strip()          # an explicitly blank variable means "no cut-off"
+
+CALENDAR_RULES_ENABLED = ((os.getenv("CALENDAR_RULES_ENABLED") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
+CALENDAR_EXPIRY_WEEKDAY = int(_og_float("CALENDAR_EXPIRY_WEEKDAY", 1))      # 0=Mon..4=Fri; 1 = Tuesday (NSE index weekly expiry since Sept 2025 - verify)
+CALENDAR_EXPIRY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_EXPIRY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_FRIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_FRIDAY_ENTRY_CUTOFF_IST", "")
+CALENDAR_EXPIRY_SIZE_MULT = _og_float("CALENDAR_EXPIRY_SIZE_MULT", 0.8)
+CALENDAR_PRE_HOLIDAY_SIZE_MULT = _og_float("CALENDAR_PRE_HOLIDAY_SIZE_MULT", 0.8)
+CALENDAR_FRIDAY_SIZE_MULT = _og_float("CALENDAR_FRIDAY_SIZE_MULT", 0.9)
+CALENDAR_EXPIRY_CARRY_MAX = int(_og_float("CALENDAR_EXPIRY_CARRY_MAX", 2))
+CALENDAR_PRE_HOLIDAY_CARRY_MAX = int(_og_float("CALENDAR_PRE_HOLIDAY_CARRY_MAX", 1))
+CALENDAR_FRIDAY_CARRY_MAX = int(_og_float("CALENDAR_FRIDAY_CARRY_MAX", 2))
 #  * Negative news / events: no BUY (and no carry) on a stock whose event score (0-100, 50 = neutral, analysis-intelligence-service) is at / below
 #    NEWS_NEGATIVE_BLOCK_SCORE, or that carries a regulatory action / delisting risk / a fresh earnings miss. 0 disables the score test.
 NEWS_NEGATIVE_BLOCK_ENABLED = ((os.getenv("NEWS_NEGATIVE_BLOCK_ENABLED") or "").strip() or "true").lower() == "true"

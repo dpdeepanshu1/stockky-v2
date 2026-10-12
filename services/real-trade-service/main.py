@@ -2295,6 +2295,27 @@ async def board_overlay_route(
     }
 
 
+@app.get("/calendar/today")
+async def calendar_today():
+    """group336: what kind of session today is (weekly / monthly expiry, pre-holiday, Friday) and the entry / carry rules that follow from it."""
+    from entry_engine import calendar_gate
+    ctx = calendar_gate.context()
+    return {**ctx, "enabled": config.CALENDAR_RULES_ENABLED, "entry_blocked_now": calendar_gate.entry_block_reason(),
+            "size_mult": calendar_gate.size_mult(),
+            "carry_cap": calendar_gate.carry_max_positions(config.OVERNIGHT_HOLD_MAX_POSITIONS)}
+
+
+@app.get("/shortlist/{mode}")
+async def shortlist_route(mode: str, admin: Optional[str] = Depends(require_admin_if_real)):
+    """group337: the best-3-to-5 shortlist of the last entry cycle for this mode and what became of every pick (ENTERED /
+    PLACEMENT_FAILED / NOT_NEEDED / NOT_PLACED). Read-only; nothing in the entry path reads it back."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import shortlist as _sl
+    return _sl.snapshot(mode)
+
+
 @app.get("/candidates/{mode}")
 async def list_candidates(
     mode: str, limit: int = 40,

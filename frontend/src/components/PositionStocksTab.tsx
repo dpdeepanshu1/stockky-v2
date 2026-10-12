@@ -26,6 +26,8 @@ import { SubTabs } from "./ui/SubTabs";
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
+import ShortlistPanel from "./board/ShortlistPanel";
+import SessionHealthPanel from "./board/SessionHealthPanel";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -841,6 +843,9 @@ export default function PositionStocksTab() {
       {/* group306: Market Board (display + shadow logging only; places no order) */}
       {subTab === "board" && (
         <div className="space-y-4">
+          <ShortlistPanel active={subTab === "board"} kind="scalp" fetcher={() => positionStocksApi.shortlist()}
+            title="Best picks · next entries (scalp pool)" note="Display only. The entry gates still decide; a pick that fails one is skipped and the next pick is tried." />
+          <SessionHealthPanel active={subTab === "board"} />
           <MarketBoard active={subTab === "board"} title="Position Stocks · Market Board" />
           <JournalPanel active={subTab === "board"} />
         </div>

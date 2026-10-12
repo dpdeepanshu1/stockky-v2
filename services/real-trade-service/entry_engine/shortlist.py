@@ -9,6 +9,8 @@ before: (1) the Market Board's verdict on the symbol (conviction, rank, zone, ch
 Pure functions, no I/O. ENTRY_SHORTLIST_ENABLED=false / ENTRY_BOARD_NUDGE_ENABLED=false restore the old behaviour."""
 from __future__ import annotations
 
+import threading
+import time
 from typing import Dict, List, Optional
 
 import config
@@ -61,3 +63,83 @@ def build(approved: List[dict]) -> Dict[str, List[dict]]:
     selected = shortlist[: config.ENTRY_MAX_NEW_PER_CYCLE]
     ids = {id(e) for e in selected}
     return {"shortlist": shortlist, "selected": selected, "skipped": [e for e in ranked if id(e) not in ids]}
+
+
+# -- group337: what the last cycle's shortlist looked like and what became of each pick (GET /shortlist/{mode}, Board tab panel) ----------
+# Display only: nothing in the entry path reads this back. In-memory, per mode, replaced by every cycle that ranked at least one approved entry.
+_state_lock = threading.Lock()
+_state: Dict[str, dict] = {}
+
+
+def reset() -> None:
+    with _state_lock:
+        _state.clear()
+
+
+def _pick_row(n: int, e: dict, status: str) -> dict:
+    c = e.get("cand")
+    return {
+        "pick": n, "symbol": getattr(c, "symbol", None), "status": status, "outcome": None,
+        "composite_score": round(float(e.get("composite_score") or 0.0), 1),
+        "raw_composite_score": round(float(e.get("raw_composite_score") or 0.0), 1),
+        "board_bonus": round(float(e.get("board_bonus") or 0.0), 1),
+        "news_bonus": round(float(e.get("intraday_news_bonus") or 0.0), 1),
+        "sector_bonus": round(float(e.get("us_sector_bonus") or 0.0), 1),
+        "conviction": getattr(c, "conviction_score", None),
+        "decision_label": getattr(c, "decision_label", None),
+        "rr": round(float(e.get("rr") or 0.0), 2),
+        "entry": e.get("entry_price"), "stop": e.get("stop_price"), "target": e.get("target_price"),
+        "is_upper_circuit": bool(e.get("is_upper_circuit")),
+    }
+
+
+def record(mode: str, built: Dict[str, List[dict]], approved_count: int, selected: List[dict], reserve: List[dict]) -> None:
+    """Remember this cycle's shortlist. status: SELECTED (placed first), RESERVE (placed only if a selected pick fails). Never raises."""
+    try:
+        sel_ids = {id(x) for x in selected}
+        res_ids = {id(x) for x in reserve}
+        rows, n = [], 0
+        for e in built.get("shortlist", []):
+            n += 1
+            rows.append(_pick_row(n, e, "SELECTED" if id(e) in sel_ids else ("RESERVE" if id(e) in res_ids else "SHORTLISTED")))
+        with _state_lock:
+            _state[mode] = {"at": time.time(), "approved": int(approved_count), "rows": rows}
+    except Exception:  # noqa: BLE001 - visibility must never break a cycle
+        pass
+
+
+def mark(mode: str, symbol: Optional[str], outcome: str) -> None:
+    """Set what became of one pick: ENTERED, PLACEMENT_FAILED:<why>, NOT_NEEDED. Never raises."""
+    try:
+        with _state_lock:
+            for r in (_state.get(mode) or {}).get("rows", []):
+                if r["symbol"] == symbol:
+                    r["outcome"] = outcome
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def finalize(mode: str) -> None:
+    """Picks still without an outcome when the cycle ends were never placed: reserve picks that were not needed, or selected picks the cycle never reached."""
+    try:
+        with _state_lock:
+            for r in (_state.get(mode) or {}).get("rows", []):
+                if r["outcome"] is None:
+                    r["outcome"] = "NOT_NEEDED" if r["status"] == "RESERVE" else "NOT_PLACED"
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def snapshot(mode: str) -> dict:
+    """JSON-safe copy for GET /shortlist/{mode}, with the settings that shaped it."""
+    with _state_lock:
+        st = _state.get(mode) or {}
+        rows = [dict(r) for r in st.get("rows", [])]
+        at, approved = st.get("at"), st.get("approved", 0)
+    return {
+        "mode": mode, "enabled": bool(getattr(config, "ENTRY_SHORTLIST_ENABLED", True)),
+        "max": int(config.ENTRY_SHORTLIST_MAX), "max_new_per_cycle": int(config.ENTRY_MAX_NEW_PER_CYCLE),
+        "min_composite": float(config.ENTRY_MIN_COMPOSITE_SCORE), "fallthrough": bool(getattr(config, "ENTRY_SHORTLIST_FALLTHROUGH", True)),
+        "board_nudge_enabled": bool(getattr(config, "ENTRY_BOARD_NUDGE_ENABLED", True)),
+        "as_of": at, "approved_count": approved, "picks": rows,
+    }

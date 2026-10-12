@@ -1149,12 +1149,15 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
     # from concentrating in one sector — added below. See config.py's
     # OVERNIGHT_HOLD_MAX_PER_SECTOR comment for the full reasoning.
     from market_context.sector_signal import NSE_SECTOR_MAP
+    # group336: on an expiry / pre-holiday / Friday session the number of positions carried overnight is capped lower (never above the normal cap).
+    from entry_engine import calendar_gate as _calg
+    _carry_cap = _calg.carry_max_positions(config.OVERNIGHT_HOLD_MAX_POSITIONS)
     keep_ids: set = set()
     running_value = 0.0
     kept_count = 0
     sector_counts: dict[str, int] = {}
     for conviction, p, position_value in scored:
-        if kept_count >= config.OVERNIGHT_HOLD_MAX_POSITIONS:
+        if kept_count >= _carry_cap:
             reasons.pop(p.id, None)
             continue
         if equity > 0 and position_value > max_single_value:

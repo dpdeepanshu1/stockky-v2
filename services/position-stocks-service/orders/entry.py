@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import board_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
+from orders import board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -357,7 +357,7 @@ _skip_state = _threading.local()
 _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "PENNY_STOCK", "RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "ENTRY_REJECTED_TODAY", "REENTRY_", "ALREADY_OPEN_HERE",
     "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
-    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN",
+    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE",
 )
 
 
@@ -604,6 +604,21 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _liq_reject, quality=quality)
         return None
 
+    # group336: expiry / pre-holiday / (optionally) Friday session - no NEW entry after the cut-off (orders/calendar_gate.py). Fails open.
+    _cal_reject = calendar_gate.entry_block_reason()
+    if _cal_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _cal_reject, quality=quality)
+        return None
+
+    # group336: a large move with no news / catalyst behind it. "block" mode refuses it here; the default "size" mode shrinks it at sizing below.
+    _cat_block, _cat_mult = catalyst_gate.decide(candidate.pct_change, getattr(quality, "has_positive_catalyst", None) if quality else None,
+                                                  bool(getattr(quality, "bulk_deal_flag", False)) if quality else False)
+    if _cat_block:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _cat_block, quality=quality)
+        return None
+
     # group309: Market Board chase guard. shadow (default) only logs; enforce refuses an entry that is > BOARD_CHASE_ATR ATRs past
     # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
     _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
@@ -675,6 +690,20 @@ def attempt_entry(
                 ledger.release_capital(db, position_value=position_value - _vnew, realized_pnl=0.0)
                 position_value = _vnew
             quantity = _vq
+
+    # group336: expiry / pre-holiday / Friday session and a no-news big move each shrink the position (separate risks, so they multiply).
+    _cal_m = calendar_gate.size_mult()
+    _cal_mult = _cal_m * _cat_mult
+    if _cal_mult < 1.0 and quantity > 1:
+        _cq = max(1, int(quantity * max(0.25, _cal_mult)))
+        if _cq < quantity:
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (calendar x%.2f, no-news move x%.2f)",
+                        candidate.symbol, quantity, _cq, _cal_m, _cat_mult)
+            _cnew = _cq * candidate.current_ltp
+            if _cnew < position_value:
+                ledger.release_capital(db, position_value=position_value - _cnew, realized_pnl=0.0)
+                position_value = _cnew
+            quantity = _cq
 
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:

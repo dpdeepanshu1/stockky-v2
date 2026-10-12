@@ -1020,6 +1020,16 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     )
     # Persist whatever WAS fetched live this cycle for next time's fallback.
     quality_gate.upsert_cache_batch(db, quality_results)
+    # LOG FIX: release the pooled connection before the next awaits — a slow
+    # Oracle round trip while the session sat checked-out starved the pool.
+    try:
+        db.commit()
+    except Exception:
+        logger.warning("position-stocks: commit after quality-cache upsert failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     checked = []
     entered_candidate = None
     for candidate, quality in zip(top_n, quality_results):
@@ -1032,7 +1042,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         })
         if not ok:
             logger.info("position-stocks: quality gate skipped %s — %s", candidate.symbol, reason)
-            log_quality_reject(db, candidate, quality, reason)
+            try:
+                log_quality_reject(db, candidate, quality, reason)
+            except Exception:   # audit-trail write is best-effort; never abort the cycle
+                logger.warning("position-stocks: could not log quality reject for %s", candidate.symbol, exc_info=True)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             continue
         entered_candidate = (candidate, quality)
         break  # only ever try one candidate per cycle, same as before
@@ -1212,7 +1229,12 @@ async def _trading_loop() -> None:
             break
         except Exception as e:
             logger.error("position-stocks trading loop error: %s", e, exc_info=True)
-            circuit_breaker.record_failure()
+            # DB pool/timeout trouble is infrastructure, not a broker failure — don't trip the
+            # trading circuit breaker on it, and back off briefly so the pool can drain.
+            if "QueuePool" in repr(e) or "DPY-4024" in str(e) or "TimeoutError" in type(e).__name__:
+                await asyncio.sleep(5)
+            else:
+                circuit_breaker.record_failure()
 
 
 # ── FastAPI dependency ───────────────────────────────────────────────────────

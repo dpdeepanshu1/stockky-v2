@@ -1,13 +1,13 @@
-"""entry_engine/carry_context.py - market / fear / news context for the hold-or-sell decision at the close (group 330, 2026-10-12).
+"""entry_engine/carry_context.py - market / fear / news context for the hold-or-sell decision at the close (group 330, 2026-10-12; global cues added group 331).
 
 WHY: _select_overnight_holds already asks "is this position profitable, not extended, results not tomorrow". It never asked what the
 MARKET is doing at 15:00: a stock can be green while Nifty is selling off into the close and VIX is jumping, and the next open then
-gaps down on that context. This adds three context checks, evaluated per position, all fail open:
+gaps down on that context. This adds four context checks, evaluated per position, all fail open:
   1. MARKET : Nifty down config.CARRY_MIN_NIFTY_CHANGE_PCT or more vs the previous close (api-gateway /market/indices, fresh payloads only)
   2. FEAR   : India VIX high or spiking (entry_engine/vix_gate.carry_reason)
   3. NEWS   : negative news / events on the stock (entry_engine/event_risk.news_reason; CARRY_BLOCK_NEGATIVE_NEWS)
-NOT covered (no verified live source at 15:00 IST): overseas / GIFT-Nifty cues. The overnight US-sector snapshot is last night's session, so
-it says nothing about tonight's US open and is deliberately not used here.
+  4. GLOBAL : live overseas cues (entry_engine/global_cues.py, group 331): Europe / Asia / US-futures day moves.
+NOT covered: GIFT Nifty (no verified source). The overnight US-sector snapshot is last night's session and is deliberately not used here.
 
 Every check is "no opinion" on missing data. Blocking calls: wrap with asyncio.to_thread. Off with CARRY_CONTEXT_GATE_ENABLED=false.
 """
@@ -86,7 +86,8 @@ def market_reason(nifty_pct: Optional[float]) -> Optional[str]:
         return None
 
 
-def reason(symbol: str, nifty_pct: Optional[float] = None, vix_snap: Optional[dict] = None, *, check_news: bool = True) -> Optional[str]:
+def reason(symbol: str, nifty_pct: Optional[float] = None, vix_snap: Optional[dict] = None, *, check_news: bool = True,
+           global_snap: Optional[dict] = None) -> Optional[str]:
     """First carry-context objection for this symbol, or None. Pass nifty_pct / vix_snap fetched once for the whole batch. Never raises."""
     try:
         if not config.CARRY_CONTEXT_GATE_ENABLED:
@@ -94,8 +95,11 @@ def reason(symbol: str, nifty_pct: Optional[float] = None, vix_snap: Optional[di
         r = market_reason(nifty_pct)
         if r:
             return r
-        from entry_engine import event_risk, vix_gate
+        from entry_engine import event_risk, global_cues, vix_gate
         r = vix_gate.carry_reason(vix_snap)
+        if r:
+            return r
+        r = global_cues.reason(global_snap)      # group331: live Europe / Asia / US-futures cues
         if r:
             return r
         if check_news and config.CARRY_BLOCK_NEGATIVE_NEWS:

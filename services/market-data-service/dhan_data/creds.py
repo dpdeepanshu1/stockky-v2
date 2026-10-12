@@ -141,7 +141,15 @@ def get_credentials(force: bool = False) -> Tuple[str, str]:
                 # cached token expired meanwhile: reload
             else:
                 raise DhanNotConfigured(_cache["reason"])
+        prev_value, prev_exp = _cache["value"], _cache["expires_at"]
         value, reason, expiry = _load()
+        # LOG FIX (2026-10-12): a transient DB timeout while reading trade_credentials used to blank a perfectly
+        # good cached token and pause all Dhan data for 5 minutes. Keep the last-known-good token while it has not
+        # expired and let the next cache window retry the read.
+        if (value is None and reason in ("db_read_failed", "db_unavailable") and prev_value
+                and (prev_exp is None or datetime.now(timezone.utc) < prev_exp)):
+            _cache.update(at=now, value=prev_value, reason="ok", expires_at=prev_exp)
+            return prev_value
         _cache.update(at=now, value=value, reason=reason, expires_at=expiry)
         if value is None:
             raise DhanNotConfigured(reason)

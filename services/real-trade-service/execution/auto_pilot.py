@@ -1029,7 +1029,7 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
 
     scored: list[tuple[float, object, float]] = []  # (conviction, position, position_value)
     reasons: dict = {}
-    _ctx_loaded, _ctx_nifty, _ctx_vix = False, None, None      # group330: carry context, fetched once for the batch
+    _ctx_loaded, _ctx_nifty, _ctx_vix, _ctx_glob = False, None, None, None      # group330: carry context, fetched once for the batch
     for p in candidates:
         tick = ticks.get(p.symbol)
         if tick is None or not tick.price:
@@ -1078,12 +1078,13 @@ async def _select_overnight_holds(db, mode: str, positions: list) -> tuple[set, 
 
         # group330: context at the close - market selling into it, VIX high / spiking, negative news on the stock. Fail-open on unknown.
         if config.CARRY_CONTEXT_GATE_ENABLED:
-            from entry_engine import carry_context as _cc, vix_gate as _vg
+            from entry_engine import carry_context as _cc, global_cues as _gc, vix_gate as _vg
             if not _ctx_loaded:
                 _ctx_nifty = await asyncio.to_thread(_cc.nifty_change_pct)
                 _ctx_vix = await asyncio.to_thread(_vg.snapshot)
+                _ctx_glob = await asyncio.to_thread(_gc.snapshot)
                 _ctx_loaded = True
-            _ctx_reason = await asyncio.to_thread(_cc.reason, p.symbol, _ctx_nifty, _ctx_vix)
+            _ctx_reason = await asyncio.to_thread(lambda: _cc.reason(p.symbol, _ctx_nifty, _ctx_vix, global_snap=_ctx_glob))
             if _ctx_reason:
                 logger.info("overnight hold: %s not carried - %s", p.symbol, _ctx_reason)
                 continue

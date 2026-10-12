@@ -68,8 +68,12 @@ if not ORACLE_WALLET_PASSWORD.strip():
     ORACLE_WALLET_PASSWORD = ""
 ORACLE_WALLET_DIR = (os.getenv("ORACLE_WALLET_DIR") or "").strip() or "/oracle_wallet"
 
-DB_POOL_SIZE = _get_int("DB_POOL_SIZE", 3)
-DB_MAX_OVERFLOW = _get_int("DB_MAX_OVERFLOW", 3)
+# LOG FIX (2026-10-12): "QueuePool limit of size 2 overflow 2 reached" killed a
+# trading-loop cycle because the shared .env pool tuning (2+1) is far too small
+# for this service (loop + pre-open + ledger + API threads all share it). Floor
+# it so a low shared setting can never starve the loop again.
+DB_POOL_SIZE = max(4, _get_int("DB_POOL_SIZE", 4))
+DB_MAX_OVERFLOW = max(4, _get_int("DB_MAX_OVERFLOW", 4))
 DB_POOL_RECYCLE = _get_int("DB_POOL_RECYCLE", 1800)
 DB_POOL_TIMEOUT = _get_int("DB_POOL_TIMEOUT", 30)
 

@@ -457,6 +457,7 @@ ENTRY_VWAP_TOLERANCE_PCT = _og_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
 #    A price that is not fresh (older than PREOPEN_MAX_PRICE_AGE_S) is not a pre-open price and is ignored. 0 disables a side.
 PREOPEN_SNAPSHOT_ENABLED = ((os.getenv("PREOPEN_SNAPSHOT_ENABLED") or "").strip() or "true").lower() == "true"
 PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:08"
+PREOPEN_SNAPSHOT_PASSES_IST = (os.getenv("PREOPEN_SNAPSHOT_PASSES_IST") or "").strip()    # "" = PREOPEN_SNAPSHOT_TIME_IST, 09:11, 09:14
 PREOPEN_GAP_GATE_UNTIL_IST = (os.getenv("PREOPEN_GAP_GATE_UNTIL_IST") or "").strip() or "11:00"
 PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
@@ -472,6 +473,18 @@ CARRY_CONTEXT_GATE_ENABLED = ((os.getenv("CARRY_CONTEXT_GATE_ENABLED") or "").st
 CARRY_MIN_NIFTY_CHANGE_PCT = _og_float("CARRY_MIN_NIFTY_CHANGE_PCT", -0.8)
 CARRY_BLOCK_NEGATIVE_NEWS = ((os.getenv("CARRY_BLOCK_NEGATIVE_NEWS") or "").strip() or "true").lower() == "true"
 CARRY_INDICES_TIMEOUT_S = _og_float("CARRY_INDICES_TIMEOUT_S", 4.0)
+#  * Global cues at the close (entry_engine/global_cues.py): live day moves of GLOBAL_CUE_SYMBOLS (Yahoo symbols read through market-data GET /global-cues:
+#    Europe is open at 15:00 IST, Asia has just closed, US index futures trade nearly 24 h). A position is NOT carried when at least GLOBAL_CUE_MIN_READINGS
+#    cues read and their average is at / below CARRY_GLOBAL_MIN_AVG_PCT, or any US-futures cue is at / below CARRY_GLOBAL_US_FUT_MIN_PCT. 0 disables a test.
+GLOBAL_CUES_ENABLED = ((os.getenv("GLOBAL_CUES_ENABLED") or "").strip() or "true").lower() == "true"
+GLOBAL_CUE_SYMBOLS = (os.getenv("GLOBAL_CUE_SYMBOLS") or "").strip() or "^GDAXI,^FTSE,^N225,^HSI,ES=F,NQ=F"
+GLOBAL_CUE_US_FUTURES = (os.getenv("GLOBAL_CUE_US_FUTURES") or "").strip() or "ES=F,NQ=F"
+GLOBAL_CUE_MIN_READINGS = int(_og_float("GLOBAL_CUE_MIN_READINGS", 2.0))
+GLOBAL_CUE_MAX_AGE_S = _og_float("GLOBAL_CUE_MAX_AGE_S", 21600.0)
+GLOBAL_CUE_CACHE_TTL_S = _og_float("GLOBAL_CUE_CACHE_TTL_S", 300.0)
+GLOBAL_CUE_TIMEOUT_S = _og_float("GLOBAL_CUE_TIMEOUT_S", 12.0)
+CARRY_GLOBAL_MIN_AVG_PCT = _og_float("CARRY_GLOBAL_MIN_AVG_PCT", -0.9)
+CARRY_GLOBAL_US_FUT_MIN_PCT = _og_float("CARRY_GLOBAL_US_FUT_MIN_PCT", -1.2)
 # 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
 # reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
 # found that SELLs placed close to Dhan's intraday cutoff generated a large

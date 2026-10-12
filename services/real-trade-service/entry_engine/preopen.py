@@ -27,12 +27,24 @@ from tz_utils import ist_now, ist_time_at_or_after, ist_today_str, is_nse_holida
 logger = logging.getLogger("real-trade-preopen")
 
 _lock = threading.Lock()
-_snap: dict = {"day": None, "gaps": {}, "captured_at": None, "warmed": 0}
+_snap: dict = {"day": None, "gaps": {}, "captured_at": None, "warmed": 0, "passes": [], "coverage": [], "warm_done": False}
 
 
 def reset() -> None:
     with _lock:
-        _snap.update({"day": None, "gaps": {}, "captured_at": None, "warmed": 0})
+        _snap.update({"day": None, "gaps": {}, "captured_at": None, "warmed": 0, "passes": [], "coverage": [], "warm_done": False})
+
+
+def _pass_times() -> list:
+    """The snapshot pass times (HH:MM, before the 09:15 bell). Default: PREOPEN_SNAPSHOT_TIME_IST, 09:11, 09:14 - a symbol with no fresh price
+    at the first pass gets two more chances as the pre-open auction settles. PREOPEN_SNAPSHOT_PASSES_IST (comma list) overrides."""
+    raw = (getattr(config, "PREOPEN_SNAPSHOT_PASSES_IST", "") or "").strip()
+    labels = [x.strip() for x in raw.split(",") if x.strip()] if raw else [config.PREOPEN_SNAPSHOT_TIME_IST, "09:11", "09:14"]
+    return labels or [config.PREOPEN_SNAPSHOT_TIME_IST]
+
+
+def _reached(now=None) -> list:
+    return [lab for lab in _pass_times() if ist_time_at_or_after(parse_hhmm(lab, 9, 8), now)]
 
 
 def gap_pct(price, prev_close) -> Optional[float]:
@@ -47,18 +59,18 @@ def gap_pct(price, prev_close) -> Optional[float]:
 
 
 def due(now: Optional[datetime] = None) -> bool:
-    """True from PREOPEN_SNAPSHOT_TIME_IST until the 09:15 bell on a trading day when today's snapshot has not been taken. Never raises."""
+    """True before the 09:15 bell on a trading day while a snapshot pass whose time has come has not been taken yet. Never raises."""
     try:
         if not config.PREOPEN_SNAPSHOT_ENABLED:
             return False
         n = ist_now(now)
         if n.weekday() >= 5 or is_nse_holiday(n):
             return False
+        if ist_time_at_or_after(parse_hhmm("09:15", 9, 15), now):
+            return False
         with _lock:
-            if _snap["day"] == ist_today_str(now):
-                return False
-        return (ist_time_at_or_after(parse_hhmm(config.PREOPEN_SNAPSHOT_TIME_IST, 9, 8), now)
-                and not ist_time_at_or_after(parse_hhmm("09:15", 9, 15), now))
+            done = set(_snap["passes"]) if _snap["day"] == ist_today_str(now) else set()
+        return any(lab not in done for lab in _reached(now))
     except Exception:  # noqa: BLE001
         return False
 
@@ -81,8 +93,17 @@ def record(ticks: dict, now: Optional[datetime] = None) -> int:
                     gaps[str(sym).upper()] = g
             except Exception:  # noqa: BLE001
                 continue
+        day = ist_today_str(now)
         with _lock:
-            _snap.update({"day": ist_today_str(now), "gaps": gaps, "captured_at": now_utc.isoformat()})
+            if _snap["day"] == day:
+                merged = dict(_snap["gaps"])
+                merged.update(gaps)                  # a later pass overrides an earlier reading, never drops one
+                gaps_all, passes = merged, set(_snap["passes"])
+            else:
+                gaps_all, passes = gaps, set()
+                _snap.update({"coverage": [], "warm_done": False, "warmed": 0})      # a new IST day starts clean
+            passes.update(_reached(now))
+            _snap.update({"day": day, "gaps": gaps_all, "captured_at": now_utc.isoformat(), "passes": sorted(passes)})
         n_ok = len(gaps)
     except Exception as e:  # noqa: BLE001
         logger.debug("preopen.record failed (ignored): %s", e)
@@ -92,7 +113,7 @@ def record(ticks: dict, now: Optional[datetime] = None) -> int:
 def status() -> dict:
     with _lock:
         return {"day": _snap["day"], "symbols_with_gap": len(_snap["gaps"]), "captured_at": _snap["captured_at"],
-                "warmed": _snap["warmed"], "gaps": dict(sorted(_snap["gaps"].items(), key=lambda kv: -abs(kv[1]))[:15])}
+                "warmed": _snap["warmed"], "passes_done": list(_snap["passes"]), "coverage": list(_snap["coverage"]), "gaps": dict(sorted(_snap["gaps"].items(), key=lambda kv: -abs(kv[1]))[:15])}
 
 
 def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
@@ -137,17 +158,32 @@ async def run(symbols: list) -> dict:
     try:
         from market_feed.feed import get_quotes
         syms = sorted({str(s).upper() for s in (symbols or []) if s})
+        with _lock:
+            first_pass = not (_snap["day"] == ist_today_str() and _snap["warm_done"])
         ticks = await get_quotes(syms) if syms else {}
         stored = record(ticks)
-        warmed = await asyncio.to_thread(_warm_blocking, syms)
+        warmed = await asyncio.to_thread(_warm_blocking, syms) if first_pass else 0
         with _lock:
             if _snap["day"] != ist_today_str():
-                _snap.update({"day": ist_today_str(), "gaps": {}, "captured_at": datetime.now(timezone.utc).isoformat()})
-            _snap["warmed"] = warmed
-        logger.info("[preopen] snapshot: %d queued symbols, %d with a fresh gap, %d warmed", len(syms), stored, warmed)
+                _snap.update({"day": ist_today_str(), "gaps": {}, "captured_at": datetime.now(timezone.utc).isoformat(),
+                              "passes": [], "coverage": [], "warm_done": False})
+            if first_pass:
+                _snap["warmed"] = warmed
+                _snap["warm_done"] = True
+            _snap["coverage"].append({"at": datetime.now(timezone.utc).isoformat(), "queued": len(syms), "priced": len(ticks or {}),
+                                      "fresh_gap": stored})
+            total = len(_snap["gaps"])
+        # Coverage is the one thing that cannot be verified offline: say loudly when the feed had (almost) nothing fresh at this pass.
+        if syms and stored * 5 < len(syms):
+            logger.warning("[preopen] LOW COVERAGE: %d of %d queued symbols had a fresh price (%d tick(s) returned) - the gap gate "
+                           "is mostly blind today", stored, len(syms), len(ticks or {}))
+        logger.info("[preopen] snapshot: %d queued symbols, %d fresh gap this pass (%d total), %d warmed", len(syms), stored, total, warmed)
         return status()
     except Exception as e:  # noqa: BLE001
         logger.warning("[preopen] snapshot failed (ignored): %s", e)
         with _lock:
-            _snap["day"] = ist_today_str()
+            day = ist_today_str()
+            if _snap["day"] != day:
+                _snap.update({"day": day, "gaps": {}, "passes": [], "coverage": [], "warm_done": False})
+            _snap["passes"] = sorted(set(_snap["passes"]) | set(_reached()))      # do not retry the same pass every tick
         return status()

@@ -2882,6 +2882,86 @@ def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, day
         _history_flight_exit(flight, entry, held)
 
 
+# group331: overseas cues for the real-trade carry decision. Deliberately NOT served by /quote: that waterfall is built for NSE equities
+# (it appends ".NS" to "ES=F", asks AngelOne / Dhan, applies closed-market last-close and equity cooldown rules). A foreign index or a future needs
+# exactly one thing - the day's % move - so this route asks Yahoo directly, only for an allow-listed symbol, cached, single-flight, never raises.
+_GLOBAL_CUE_DEFAULT = "^GDAXI,^FTSE,^N225,^HSI,^GSPC,^IXIC,ES=F,NQ=F"
+_GLOBAL_CUE_STATE: dict = {"lock": threading.Lock(), "rows": {}}
+
+
+def _global_cue_allowed() -> set:
+    raw = (os.getenv("GLOBAL_CUE_ALLOWED") or "").strip() or _GLOBAL_CUE_DEFAULT
+    return {x.strip().upper() for x in raw.split(",") if x.strip()}
+
+
+def _global_cue_cfg():
+    def _f(name, dflt):
+        try:
+            return float((os.getenv(name) or "").strip() or dflt)
+        except ValueError:
+            return float(dflt)
+    return _f("GLOBAL_CUE_TTL_S", 300.0), _f("GLOBAL_CUE_MAX_BAR_AGE_DAYS", 1.0)
+
+
+def _global_cue_fetch_one(symbol: str, max_bar_age_days: float) -> Optional[dict]:
+    """The day's move of one overseas symbol from Yahoo's daily bars (last bar = today's, in progress, when that market is trading).
+    None when nothing usable or the last bar is older than max_bar_age_days (a market on holiday has no 'today' move)."""
+    t = yf.Ticker(symbol)
+    hist = t.history(period="5d", interval="1d")
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None
+    closes = hist["Close"].dropna()
+    if len(closes) < 2:
+        return None
+    price, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
+    if not (math.isfinite(price) and math.isfinite(prev)) or price <= 0 or prev <= 0:
+        return None
+    bar_dt = closes.index[-1]
+    try:
+        bar_date = bar_dt.date()
+    except AttributeError:
+        bar_date = None
+    if bar_date is not None and max_bar_age_days >= 0:
+        if (datetime.now(timezone.utc).date() - bar_date).days > max_bar_age_days:
+            return None
+    return {"symbol": symbol, "price": price, "previous_close": prev,
+            "day_change_pct": round((price - prev) / prev * 100.0, 3),
+            "bar_date": bar_date.isoformat() if bar_date else None, "source": "yahoo_global"}
+
+
+@app.get("/global-cues")
+def get_global_cues(symbols: str = ""):
+    """Day % move of overseas index / futures symbols (comma list, allow-list GLOBAL_CUE_ALLOWED). Rows that cannot be read are listed
+    under "missing", never invented. Cached GLOBAL_CUE_TTL_S per symbol; honours the yfinance cooldown."""
+    allowed = _global_cue_allowed()
+    wanted = [x.strip().upper() for x in (symbols or "").split(",") if x.strip()] or sorted(allowed)
+    wanted = [x for x in dict.fromkeys(wanted)]
+    rejected = [x for x in wanted if x not in allowed]
+    wanted = [x for x in wanted if x in allowed]
+    ttl, max_bar_age = _global_cue_cfg()
+    rows: dict = {}
+    missing: list = list(rejected)
+    now = time.monotonic()
+    with _GLOBAL_CUE_STATE["lock"]:               # single flight: concurrent callers wait for one fetch round, then read the cache
+        for sym in wanted:
+            hit = _GLOBAL_CUE_STATE["rows"].get(sym)
+            if hit and now - hit[0] < ttl:
+                row = hit[1]
+            else:
+                row = None
+                if not _in_cooldown("yfinance"):
+                    try:
+                        row = _global_cue_fetch_one(sym, max_bar_age)
+                    except Exception as e:  # noqa: BLE001
+                        logger.info("global-cues %s failed (%s: %s)", sym, type(e).__name__, e)
+                _GLOBAL_CUE_STATE["rows"][sym] = (time.monotonic(), row)   # a miss is cached too, so a dead symbol is not retried every call
+            if row:
+                rows[sym] = {**row, "age_s": None}
+            else:
+                missing.append(sym)
+    return {"rows": rows, "missing": missing, "ttl_s": ttl}
+
+
 @app.get("/quote/{symbol}", response_model=QuoteResponse)
 def get_quote(symbol: str):
     """Quote route. The waterfall lives in _get_quote_inner; this wrapper keeps the group161

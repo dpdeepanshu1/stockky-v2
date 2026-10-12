@@ -366,8 +366,12 @@ def _log_candidate(
         market_cap_cr=quality.market_cap_cr if quality else None,
         has_positive_catalyst=quality.has_positive_catalyst if quality else None,
     )
-    db.add(log)
-    db.commit()
+    try:
+        db.add(log)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def log_quality_reject(db: Session, candidate: Candidate, quality: QualitySignal, reason: str) -> None:

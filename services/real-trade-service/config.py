@@ -224,6 +224,22 @@ HOLDINGS_SYNC_GUARD_MINUTES = int(((os.getenv("HOLDINGS_SYNC_GUARD_MINUTES") or 
 # still visible next cycle instead of being silently discarded.
 ENTRY_CYCLE_QUALITY_FILTER_ENABLED = ((os.getenv("ENTRY_CYCLE_QUALITY_FILTER_ENABLED") or "").strip() or "true").lower() == "true"
 ENTRY_MAX_NEW_PER_CYCLE = int(((os.getenv("ENTRY_MAX_NEW_PER_CYCLE") or "").strip() or "3"))
+
+# group 332: "best 3 to 5" shortlist inside Gate 6 + Market Board nudge (entry_engine/shortlist.py, board_client.py).
+#   ENTRY_SHORTLIST_ENABLED    best ENTRY_SHORTLIST_MAX risk-approved candidates are ranked; entries come from its first ENTRY_MAX_NEW_PER_CYCLE
+#   ENTRY_BOARD_NUDGE_ENABLED  position-stocks Market Board conviction/rank/zone/chase moves the composite by at most +/-ENTRY_BOARD_MAX_NUDGE
+#   ENTRY_FETCH_BY_CONVICTION  an entry pass looks at the 20 highest-conviction queued rows (+5 oldest), not just the 20 oldest
+# Ranking only: no gate is lowered, every one fails open (no board = no nudge).
+def _g332(name: str, default: str) -> str:
+    return (os.getenv(name) or "").strip() or default
+ENTRY_SHORTLIST_ENABLED = _g332("ENTRY_SHORTLIST_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+ENTRY_SHORTLIST_MAX = max(1, min(10, int(_g332("ENTRY_SHORTLIST_MAX", "5"))))
+ENTRY_BOARD_NUDGE_ENABLED = _g332("ENTRY_BOARD_NUDGE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+ENTRY_BOARD_MAX_NUDGE = float(_g332("ENTRY_BOARD_MAX_NUDGE", "6.0"))
+ENTRY_BOARD_CACHE_TTL_S = float(_g332("ENTRY_BOARD_CACHE_TTL_S", "30"))
+ENTRY_BOARD_TIMEOUT_S = float(_g332("ENTRY_BOARD_TIMEOUT_S", "2.5"))
+ENTRY_BOARD_URL = _g332("ENTRY_BOARD_URL", _g332("POSITION_STOCKS_SERVICE_URL", "http://position-stocks-service:8006").rstrip("/") + "/board")
+ENTRY_FETCH_BY_CONVICTION = _g332("ENTRY_FETCH_BY_CONVICTION", "true").lower() not in ("0", "false", "no", "off")
 ENTRY_MIN_COMPOSITE_SCORE = float(((os.getenv("ENTRY_MIN_COMPOSITE_SCORE") or "").strip() or "50.0"))
 # Weights must sum to 1.0 — conviction (the pipeline's own scoring across
 # analysis-intelligence/decision-prediction), reward:risk (how much upside
@@ -439,12 +455,14 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 #      VIX_CAUTION_ABOVE        at / above this level, or VIX up VIX_SPIKE_PCT % on the day: position risk x VIX_CAUTION_SIZE_MULT
 #      VIX_CARRY_BLOCK_ABOVE    no overnight carry at / above this level, or VIX up VIX_CARRY_SPIKE_PCT % on the day (0 = off)
 VIX_GATE_ENABLED = ((os.getenv("VIX_GATE_ENABLED") or "").strip() or "true").lower() == "true"
-VIX_BLOCK_ABOVE = _og_float("VIX_BLOCK_ABOVE", 24.0)
+# group 332: default 0 = off. A weak / fearful market no longer stops BUYs (some stocks do well on down days); VIX_CAUTION_* still
+# shrinks size. Set VIX_BLOCK_ABOVE=24 to bring the block back.
+VIX_BLOCK_ABOVE = _og_float("VIX_BLOCK_ABOVE", 0.0)
 VIX_CAUTION_ABOVE = _og_float("VIX_CAUTION_ABOVE", 18.0)
 VIX_CAUTION_SIZE_MULT = _og_float("VIX_CAUTION_SIZE_MULT", 0.7)
 VIX_SPIKE_PCT = _og_float("VIX_SPIKE_PCT", 10.0)
-VIX_CARRY_BLOCK_ABOVE = _og_float("VIX_CARRY_BLOCK_ABOVE", 20.0)
-VIX_CARRY_SPIKE_PCT = _og_float("VIX_CARRY_SPIKE_PCT", 6.0)
+VIX_CARRY_BLOCK_ABOVE = _og_float("VIX_CARRY_BLOCK_ABOVE", 0.0)   # group 332: 0 = off (was 20); a fearful market must not force a sale
+VIX_CARRY_SPIKE_PCT = _og_float("VIX_CARRY_SPIKE_PCT", 0.0)   # group 332: 0 = off (was 6)
 VIX_CACHE_TTL_S = _og_float("VIX_CACHE_TTL_S", 120.0)
 VIX_FETCH_TIMEOUT_S = _og_float("VIX_FETCH_TIMEOUT_S", 3.0)
 #  * VWAP confirmation: a long entry must not sit BELOW the day's volume-weighted average price (sellers in control). Tolerance in % of
@@ -457,6 +475,7 @@ ENTRY_VWAP_TOLERANCE_PCT = _og_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
 #    A price that is not fresh (older than PREOPEN_MAX_PRICE_AGE_S) is not a pre-open price and is ignored. 0 disables a side.
 PREOPEN_SNAPSHOT_ENABLED = ((os.getenv("PREOPEN_SNAPSHOT_ENABLED") or "").strip() or "true").lower() == "true"
 PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:08"
+PREOPEN_SNAPSHOT_PASSES_IST = (os.getenv("PREOPEN_SNAPSHOT_PASSES_IST") or "").strip()    # "" = PREOPEN_SNAPSHOT_TIME_IST, 09:11, 09:14
 PREOPEN_GAP_GATE_UNTIL_IST = (os.getenv("PREOPEN_GAP_GATE_UNTIL_IST") or "").strip() or "11:00"
 PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
@@ -469,9 +488,21 @@ NEWS_NEGATIVE_BLOCK_SCORE = _og_float("NEWS_NEGATIVE_BLOCK_SCORE", 35.0)
 #  * Carry context (hold-or-sell at the close): on top of the existing carry rules, a position is NOT carried overnight when the market is selling
 #    into the close (Nifty down CARRY_MIN_NIFTY_CHANGE_PCT or more vs the previous close), VIX is high / spiking (above), or the stock has negative news.
 CARRY_CONTEXT_GATE_ENABLED = ((os.getenv("CARRY_CONTEXT_GATE_ENABLED") or "").strip() or "true").lower() == "true"
-CARRY_MIN_NIFTY_CHANGE_PCT = _og_float("CARRY_MIN_NIFTY_CHANGE_PCT", -0.8)
+CARRY_MIN_NIFTY_CHANGE_PCT = _og_float("CARRY_MIN_NIFTY_CHANGE_PCT", 0.0)   # group 332: 0 = off (was -0.8); a weak Nifty no longer forces a sale. Negative value = old rule
 CARRY_BLOCK_NEGATIVE_NEWS = ((os.getenv("CARRY_BLOCK_NEGATIVE_NEWS") or "").strip() or "true").lower() == "true"
 CARRY_INDICES_TIMEOUT_S = _og_float("CARRY_INDICES_TIMEOUT_S", 4.0)
+#  * Global cues at the close (entry_engine/global_cues.py): live day moves of GLOBAL_CUE_SYMBOLS (Yahoo symbols read through market-data GET /global-cues:
+#    Europe is open at 15:00 IST, Asia has just closed, US index futures trade nearly 24 h). A position is NOT carried when at least GLOBAL_CUE_MIN_READINGS
+#    cues read and their average is at / below CARRY_GLOBAL_MIN_AVG_PCT, or any US-futures cue is at / below CARRY_GLOBAL_US_FUT_MIN_PCT. 0 disables a test.
+GLOBAL_CUES_ENABLED = ((os.getenv("GLOBAL_CUES_ENABLED") or "").strip() or "true").lower() == "true"
+GLOBAL_CUE_SYMBOLS = (os.getenv("GLOBAL_CUE_SYMBOLS") or "").strip() or "^GDAXI,^FTSE,^N225,^HSI,ES=F,NQ=F"
+GLOBAL_CUE_US_FUTURES = (os.getenv("GLOBAL_CUE_US_FUTURES") or "").strip() or "ES=F,NQ=F"
+GLOBAL_CUE_MIN_READINGS = int(_og_float("GLOBAL_CUE_MIN_READINGS", 2.0))
+GLOBAL_CUE_MAX_AGE_S = _og_float("GLOBAL_CUE_MAX_AGE_S", 21600.0)
+GLOBAL_CUE_CACHE_TTL_S = _og_float("GLOBAL_CUE_CACHE_TTL_S", 300.0)
+GLOBAL_CUE_TIMEOUT_S = _og_float("GLOBAL_CUE_TIMEOUT_S", 12.0)
+CARRY_GLOBAL_MIN_AVG_PCT = _og_float("CARRY_GLOBAL_MIN_AVG_PCT", -0.9)
+CARRY_GLOBAL_US_FUT_MIN_PCT = _og_float("CARRY_GLOBAL_US_FUT_MIN_PCT", -1.2)
 # 2026-09-10 (session22, user request): moved from 15:15 to 15:00. Two
 # reasons: (1) decision #33 (session21e, live Dhan order-book evidence)
 # found that SELLs placed close to Dhan's intraday cutoff generated a large
@@ -746,6 +777,10 @@ ENTRY_REGIME_MIN_SCORE              = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") 
 # engine) unchanged, and get sized at REGIME_OVERRIDE_RISK_SCALE of normal
 # risk as an extra margin for trading against a still-weak market read. Set
 # to 0 to fully restore the old "regime weak = nothing enters" behavior.
+# group 332: the market-regime gate (Gate 3: "regime WEAK -> no BUY") is REMOVED by default. A weak Nifty no longer blocks or
+# down-sizes any entry; stock-level checks (R:R, drift, VWAP, risk engine, cash) still apply. The regime score is still recorded
+# for the dashboard. ENTRY_REGIME_GATE_ENABLED=true restores the old gate (with the override below).
+ENTRY_REGIME_GATE_ENABLED           = ((os.getenv("ENTRY_REGIME_GATE_ENABLED") or "").strip() or "false").lower() == "true"
 ENTRY_REGIME_OVERRIDE_TOP_N         = int(((os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N") or "").strip() or "1"))
 ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(((os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE") or "").strip() or "0.5"))
 ENTRY_MIN_REWARD_RISK               = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))  # LAST_REVIEWED: 2026-10-04

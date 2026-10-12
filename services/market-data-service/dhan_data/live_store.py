@@ -125,18 +125,31 @@ def _write_sync(rows: List[dict]) -> int:
     written = 0
     last_exc = None
     stmt = text(sql)
-    for chunk in _chunks(params, config.live_write_chunk()):
+
+    def _write_chunk(chunk: list, may_split: bool) -> None:
+        nonlocal written, last_exc
         try:
             with engine.begin() as conn:
                 conn.execute(stmt, chunk)
             written += len(chunk)
         except Exception as e:  # noqa: BLE001 - keep writing the other chunks
-            last_exc = e
             with _lock:
                 _stats["failed_chunks"] += 1
                 if _is_timeout(e):
                     _stats["timeouts"] += 1
                 _stats["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+            # LOG FIX (2026-10-12): "333 of 483 rows written ... DPY-4024 call timeout of 8000 ms". A chunk that times out is
+            # retried ONCE as two halves (each its own transaction, each well inside the call timeout) instead of losing every
+            # row in it until the next poll cycle.
+            if may_split and _is_timeout(e) and len(chunk) >= 20:
+                mid = len(chunk) // 2
+                _write_chunk(chunk[:mid], False)
+                _write_chunk(chunk[mid:], False)
+            else:
+                last_exc = e
+
+    for chunk in _chunks(params, config.live_write_chunk()):
+        _write_chunk(chunk, True)
     if last_exc is not None:
         _warn_throttled("dhan live_quotes write: %d of %d rows written (last error %s: %s)",
                         written, len(params), type(last_exc).__name__, str(last_exc)[:100])

@@ -227,7 +227,8 @@ _day_stats: Dict[str, tuple] = {}   # symbol -> (open, high, low, prev_close)
 _day_stats_accepted = 0
 _day_stats_rejected = 0
 _day_stats_warned = False
-_DAY_STATS_TOL = 0.005      # tick vs. high/low timing slack (0.5%)
+_DAY_STATS_TOL = 0.02       # tick vs. high/low timing slack (2%). 2026-10-12: CPCAP ltp 158.99 vs frame high 157.36 (1.03% on a +8% mover) was rejected
+                            # as a bad layout though open/prev were fine; a real layout error is garbage far outside this (see _DAY_STATS_MAX_RATIO)
 _DAY_STATS_MAX_RATIO = 2.0  # no field may be >2x or <0.5x the last price (circuit limits are far tighter)
 
 # BUG FIX (2026-09-17): _tick_buffers' deques are written by _ws_loop below,
@@ -335,7 +336,7 @@ def _day_stats_plausible(ds: tuple, ltp: float) -> bool:
     A wrong byte offset yields garbage (huge, tiny or unordered numbers), which would
     otherwise feed the range gate, adaptive levels and the entry guard. Checks: every
     present field is within 0.5x-2x of the last price; high >= low when both exist;
-    the last price sits inside [low, high] allowing 0.5% slack for tick/frame timing.
+    the last price sits inside [low, high] allowing 2% slack for tick/frame timing.
     """
     if not ltp or ltp <= 0:
         return True   # nothing to compare against; do not reject on missing data

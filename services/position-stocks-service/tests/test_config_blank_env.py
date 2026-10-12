@@ -18,7 +18,7 @@ import pytest
 import config
 
 _TRUE_BY_DEFAULT = (
-    "RISK_PER_TRADE_PCT_CONFIRMED", "USE_SUPER_ORDER", "FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE", "MARKET_GATE_ENABLED",
+    "RISK_PER_TRADE_PCT_CONFIRMED", "USE_SUPER_ORDER", "FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE",
     "LOSS_BRAKE_ENABLED", "SYMBOL_BLOCK_AFTER_LOSS_TODAY", "QUALITY_GATE_ENABLED",
 )
 _STR_DEFAULTS = {
@@ -123,3 +123,9 @@ def test_angelone_session_ignores_a_whitespace_only_static_ip(monkeypatch):
     assert aosess._resolve_client_public_ip() == "198.51.100.9"
     monkeypatch.setattr(aosess.config, "ANGELONE_STATIC_IP", " 203.0.113.7 ")
     assert aosess._resolve_client_public_ip() == "203.0.113.7"
+
+
+def test_blank_market_gate_flags_stay_off(reloaded):
+    """group332: the Nifty-weak gate is removed by default; blank env must not switch it back on."""
+    cfg = reloaded(MARKET_GATE_ENABLED="")
+    assert cfg.MARKET_GATE_ENABLED is False and cfg.MARKET_GATE_PREV_CLOSE_ENABLED is False

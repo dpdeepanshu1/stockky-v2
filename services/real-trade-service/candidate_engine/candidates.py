@@ -720,6 +720,19 @@ async def _fetch_delivery(client: httpx.AsyncClient, symbol: str) -> Optional[di
 # the pure price/volume breakout check straight to the watchlist, with zero
 # fundamental or technical quality check. See config.py's VOLUME_SHOCK_*
 # comment block for the full rationale; this is the implementation.
+
+async def _get_retry_once(client, url, **kw):
+    """LOG FIX (2026-10-12): under load the analysis services answered after the 12 s read timeout and the
+    whole quality gate came back "could not score" for ~40 symbols. One short retry (the service usually has the
+    result cached by then) before giving up; any other exception, or a second timeout, propagates as before."""
+    try:
+        return await client.get(url, **kw)
+    except Exception as e:  # noqa: BLE001
+        if "Timeout" not in type(e).__name__:
+            raise
+        await asyncio.sleep(0.5)
+        return await client.get(url, **kw)
+
 async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict:
     """Best-effort fundamental_score/technical_score/sector fetch for the
     quality gate. Any failure or timeout on either call returns None for
@@ -732,7 +745,9 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
     # leaves the score None exactly like "service answered but has no score", and the gate used to wave both through.
     fund_fetched = tech_fetched = False
     try:
-        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
+        r = await _get_retry_once(client, f"{config.FUNDAMENTAL_URL}/analyze/{symbol}", timeout=12.0)
+        if r.status_code != 200:
+            logger.info("quality_gate: fundamental fetch for %s answered HTTP %s", symbol, r.status_code)
         if r.status_code == 200:
             fj = r.json()
             fund_fetched = True
@@ -753,14 +768,15 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
                 except (TypeError, ValueError):
                     market_cap_cr = None
     except Exception as e:
-        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, e)
+        logger.info("quality_gate: fundamental fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     try:
         # 2026-09-11 addition: pass this cycle's adaptive RSI bounds,
         # extension-threshold cutoffs, and trend/mean-reversion signal
         # weights through to the technical service — see technical/
         # main.py's analyze() for the corresponding params and its
         # fallback-to-static behavior when these aren't sent.
-        r = await client.get(
+        r = await _get_retry_once(
+            client,
             f"{config.TECHNICAL_URL}/analyze/{symbol}",
             params={
                 "rsi_oversold": _adaptive_rsi_oversold,
@@ -778,7 +794,7 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
             tech_score = tj.get("technical_score")
             adx = tj.get("adx")
     except Exception as e:
-        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, e)
+        logger.info("quality_gate: technical fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     return {
         "symbol": symbol,
         "fundamental_score": fund_score,

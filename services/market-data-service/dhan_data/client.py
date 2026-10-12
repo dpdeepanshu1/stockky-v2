@@ -138,7 +138,10 @@ def note_failure(exc: Exception) -> None:
     """Record a failure from a stage and apply the right back-off. Safe to call with any exception."""
     if isinstance(exc, DhanNotConfigured):
         # no usable token yet / expired: not a Dhan fault, do not open the breaker, just stop asking for a while
-        _pause(f"not configured ({exc})", seconds=max(config.auth_pause_s(), 300.0))
+        # a transient DB read failure is not "no token": retry soon instead of idling 5 minutes
+        _transient = str(exc) in ("db_read_failed", "db_unavailable")
+        _pause(f"not configured ({exc})",
+               seconds=(30.0 if _transient else max(config.auth_pause_s(), 300.0)))
         return
     if isinstance(exc, DhanAuthError):
         creds.invalidate()

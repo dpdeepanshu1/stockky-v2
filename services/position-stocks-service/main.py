@@ -169,7 +169,7 @@ from orders.entry import (
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
-from screening import intraday_eligibility, quality_gate, trade_gates
+from screening import intraday_eligibility, quality_gate, shortlist, trade_gates
 from screening.engine import scan, on_tick_hook as _engine_tick_hook
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
@@ -558,6 +558,7 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
 #     (reserve_capital + reserve_additional together need max(position_value, qty*ltp));
 #   - attempt_entry() refuses when open positions >= MAX_CONCURRENT_SCALP_POSITIONS
 #     (same OPEN + EXIT_LEGS_REJECTED count).
+_last_shortlist: dict = {"at": None, "rows": []}     # group332: latest best-picks shortlist, for GET /shortlist
 _unaffordable_logged_at: float = float("-inf")  # -inf: the first log is never suppressed, even right after boot
 
 
@@ -967,7 +968,9 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # get checked against quality_gate.py — never lowers quality_gate's own
     # bar (MIN_FUNDAMENTAL_SCORE/MIN_TECHNICAL_SCORE/MIN_MARKET_CAP_CR are
     # untouched). More looks at real candidates, not a lower bar for any one.
-    _effective_top_n = config.QUALITY_GATE_TOP_N + (
+    # group332: with the shortlist on, look at up to SHORTLIST_MAX ranked names so the best 3-5 passers can be compared.
+    _base_top_n = max(config.QUALITY_GATE_TOP_N, config.SHORTLIST_MAX) if config.SHORTLIST_ENABLED else config.QUALITY_GATE_TOP_N
+    _effective_top_n = _base_top_n + (
         config.MIN_PREFERRED_EXTRA_TOP_N if under_preferred else 0
     )
     # session72 (#8): cooled-down capital-starved symbols are dropped BEFORE
@@ -1020,6 +1023,16 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     )
     # Persist whatever WAS fetched live this cycle for next time's fallback.
     quality_gate.upsert_cache_batch(db, quality_results)
+    # LOG FIX: release the pooled connection before the next awaits — a slow
+    # Oracle round trip while the session sat checked-out starved the pool.
+    try:
+        db.commit()
+    except Exception:
+        logger.warning("position-stocks: commit after quality-cache upsert failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     checked = []
     entered_candidate = None
     for candidate, quality in zip(top_n, quality_results):
@@ -1032,7 +1045,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
         })
         if not ok:
             logger.info("position-stocks: quality gate skipped %s — %s", candidate.symbol, reason)
-            log_quality_reject(db, candidate, quality, reason)
+            try:
+                log_quality_reject(db, candidate, quality, reason)
+            except Exception:   # audit-trail write is best-effort; never abort the cycle
+                logger.warning("position-stocks: could not log quality reject for %s", candidate.symbol, exc_info=True)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             continue
         entered_candidate = (candidate, quality)
         break  # only ever try one candidate per cycle, same as before
@@ -1087,6 +1107,24 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             result = None
             capital_skipped: list[str] = []
             quality_passers = [(c, q) for c, q in zip(top_n, quality_results) if q.passes()[0]]
+            if config.SHORTLIST_ENABLED and quality_passers:
+                # group332: best 3-5 passers on scan score + Market Board conviction + quality + zone, tried best-first.
+                _ts = time.perf_counter()
+                _bp = None
+                try:
+                    if config.BOARD_ENABLED:
+                        from screening import board as _board
+                        _bp = await asyncio.wait_for(
+                            asyncio.to_thread(_board.build, None, None, _board_open_symbols()),
+                            timeout=config.SHORTLIST_BOARD_TIMEOUT_S)
+                except Exception as _e:  # noqa: BLE001 - no board = score on the remaining parts
+                    logger.debug("position-stocks: shortlist board read skipped (%s)", _e)
+                _sl = shortlist.build(quality_passers, _bp)
+                quality_passers = [(r["cand"], r["quality"]) for r in _sl]
+                _last_shortlist.update(at=time.time(), rows=shortlist.public(_sl))
+                _stage("shortlist", "Best Picks Shortlist", _ts,
+                       detail="; ".join(f"#{r['pick']} {r['symbol']} {r['score']}" for r in _sl),
+                       picks=shortlist.public(_sl))
             for _c, _q in quality_passers:
                 try:
                     result = await asyncio.to_thread(attempt_entry, db, _c, quality=_q)
@@ -1212,7 +1250,12 @@ async def _trading_loop() -> None:
             break
         except Exception as e:
             logger.error("position-stocks trading loop error: %s", e, exc_info=True)
-            circuit_breaker.record_failure()
+            # DB pool/timeout trouble is infrastructure, not a broker failure — don't trip the
+            # trading circuit breaker on it, and back off briefly so the pool can drain.
+            if "QueuePool" in repr(e) or "DPY-4024" in str(e) or "TimeoutError" in type(e).__name__:
+                await asyncio.sleep(5)
+            else:
+                circuit_breaker.record_failure()
 
 
 # ── FastAPI dependency ───────────────────────────────────────────────────────
@@ -2217,6 +2260,13 @@ def _board_open_symbols() -> list:
         return md_poller.open_position_symbols()
     except Exception:  # noqa: BLE001
         return []
+
+
+@app.get("/shortlist")
+def shortlist_route():
+    """group332: the best-3-to-5 picks the last entry cycle ranked (scan score + board conviction + quality + zone). Read-only."""
+    return {"enabled": config.SHORTLIST_ENABLED, "max": config.SHORTLIST_MAX,
+            "as_of": _last_shortlist["at"], "picks": _last_shortlist["rows"]}
 
 
 @app.get("/board/status")

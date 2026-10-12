@@ -51,7 +51,7 @@ def test_config_defaults_are_pinned(monkeypatch):
     import importlib
     cfg = importlib.reload(config)
     try:
-        assert cfg.MARKET_GATE_PREV_CLOSE_ENABLED is True
+        assert cfg.MARKET_GATE_PREV_CLOSE_ENABLED is False      # group332: market-weak gates removed by default
         assert cfg.MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT == -0.75
     finally:
         importlib.reload(config)

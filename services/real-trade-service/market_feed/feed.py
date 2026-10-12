@@ -856,7 +856,9 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             # non-200 (e.g. market-data-service 500/timeout-ish response)
             # never even hit the except block. This is the path directly
             # behind the dashboard's "No current price available" WAIT text.
-            logger.warning(
+            # LOG FIX: a 404 is a definite "delisted / unknown symbol" answer already handled by the
+            # dead-symbol pause above — not an upstream fault worth a WARNING every cycle.
+            (logger.info if r.status_code == 404 else logger.warning)(
                 "get_quote(%s): market-data-service /quote returned %d — %s",
                 symbol, r.status_code, r.text[:200],
             )

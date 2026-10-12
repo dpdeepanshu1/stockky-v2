@@ -455,6 +455,13 @@ async def health():
     return {"ok": True, "service": config.SERVICE_NAME, "phase": "1"}
 
 
+@app.get("/preopen/status")
+def preopen_status():
+    """group331: today's 09:08 pre-open snapshot - passes done, per-pass coverage (queued / priced / fresh gaps) and the biggest gaps."""
+    from entry_engine import preopen
+    return preopen.status()
+
+
 @app.get("/status/{mode}")
 async def gate_status(mode: str, db: Session = Depends(get_db)):
     """Public-ish (no admin auth) — the dashboard needs to render 🔴/🟢

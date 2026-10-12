@@ -35,7 +35,9 @@ class TestVix:
         for bad in (None, {}, {"price": 0}, {"price": 500}, {"price": "x"}, {"price": float("nan")}, "s"):
             assert vix_gate.parse_row(bad) is None
 
-    def test_block_reason(self):
+    def test_block_reason(self, monkeypatch):
+        assert config.VIX_BLOCK_ABOVE == 0.0 and vix_gate.block_reason({"level": 40.0, "change_pct": 0}) is None   # group332: off by default
+        monkeypatch.setattr(config, "VIX_BLOCK_ABOVE", 24.0)
         assert vix_gate.block_reason({"level": 24.0, "change_pct": 0}).startswith("VIX_HIGH")
         assert vix_gate.block_reason({"level": 23.9, "change_pct": 0}) is None
         assert vix_gate.block_reason(None) is None
@@ -82,6 +84,7 @@ class TestVix:
             return {"level": 26.0, "change_pct": 0.0}
         monkeypatch.setattr(vix_gate, "_fetch", f)
         monkeypatch.setattr(config, "MARKET_GATE_ENABLED", True)
+        monkeypatch.setattr(config, "VIX_BLOCK_ABOVE", 24.0)    # group332: block is opt-in now
 
         async def nifty():
             return 0.5

@@ -44,6 +44,7 @@ import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 from entry_engine import circuit_gate, event_risk, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
+from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -467,16 +468,35 @@ def _order_candidates_for_capital(candidates: list) -> list:
         return candidates
 
 
+def _fetch_candidates(db: Session, mode: str) -> list:
+    """The unconsumed candidates one entry pass looks at. group332: with ENTRY_FETCH_BY_CONVICTION (default on) these are the 20
+    HIGHEST-conviction rows plus the 5 oldest (so a manual / low-score row cannot starve), instead of only the 20 oldest - otherwise
+    a strong candidate queued late never reached the ranking while 20 weaker ones sat ahead of it. Off (or
+    ENTRY_CAPITAL_ORDER_BY_CONVICTION=0) = the old 20 oldest."""
+    base = db.query(models.TradeCandidate).filter_by(mode=mode, consumed=False)
+    _cap_raw = (os.getenv("ENTRY_CAPITAL_ORDER_BY_CONVICTION") or "").strip().lower()
+    if not getattr(config, "ENTRY_FETCH_BY_CONVICTION", True) or _cap_raw in ("0", "false", "no", "off"):
+        return base.order_by(models.TradeCandidate.received_at.asc()).limit(20).all()
+    try:
+        from sqlalchemy import func
+        best = (base.order_by(func.coalesce(models.TradeCandidate.conviction_score, 0.0).desc(),
+                              models.TradeCandidate.received_at.asc()).limit(20).all())
+        oldest = base.order_by(models.TradeCandidate.received_at.asc()).limit(5).all()
+        seen, out = set(), []
+        for c in sorted(best + oldest, key=lambda c: (c.received_at is None, c.received_at)):
+            if c.id not in seen:
+                seen.add(c.id)
+                out.append(c)
+        return out
+    except Exception as e:  # never let the fetch break a cycle
+        logger.debug("fetch by conviction failed (%s) - falling back to oldest 20", e)
+        return base.order_by(models.TradeCandidate.received_at.asc()).limit(20).all()
+
+
 # ── Main evaluation cycle ─────────────────────────────────────────────────────
 
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
-    candidates = (
-        db.query(models.TradeCandidate)
-        .filter_by(mode=mode, consumed=False)
-        .order_by(models.TradeCandidate.received_at.asc())
-        .limit(20)
-        .all()
-    )
+    candidates = _fetch_candidates(db, mode)
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
     candidates = _order_candidates_for_capital(candidates)
@@ -498,6 +518,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     threshold_src = "static"
     if mode == "REAL":
         regime_ok, market_score, threshold, threshold_src = await _get_market_regime(db)
+        if not config.ENTRY_REGIME_GATE_ENABLED:
+            # group 332: a weak market must not stop BUYs. Score is still fetched/recorded (dashboard + adaptive history).
+            regime_ok = True
         if not regime_ok:
             # Get age annotation for the threshold
             try:
@@ -516,6 +539,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 "entry_engine: REAL regime WEAK score=%d < gate=%d (%s) %s — BUYs blocked%s.",
                 market_score, threshold, threshold_src, age_note, _ovr_note,
             )
+
+    # group332: Market Board rows (position-stocks /board), cached + fail-open; feeds the per-candidate composite nudge below.
+    _board_rows = await _board_client.get_rows() if mode == "REAL" else {}
 
     symbols = list({c.symbol for c in candidates})
     ticks   = await get_quotes(symbols)
@@ -1133,6 +1159,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             news_bonus = 0.0
         if news_bonus:
             raw_composite_score = max(0.0, min(100.0, raw_composite_score + news_bonus))
+        # group332: Market Board verdict on this symbol (conviction/rank/zone/chase), capped +/- nudge, ranking only.
+        board_bonus = _shortlist.board_nudge(_board_rows.get(cand.symbol))
+        if board_bonus:
+            raw_composite_score = max(0.0, min(100.0, raw_composite_score + board_bonus))
         is_upper_circuit = (cand.decision_label or "").upper() == "VOLUME_SHOCK_UPPER_CIRCUIT"
         # BUG FIX (2026-09-10): comment at Gate 6 said "UC scores now 85
         # so they sort first" but _composite_quality_score() was never told
@@ -1208,16 +1238,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     # ENTRY_MAX_NEW_PER_CYCLE and must rank above non-UC entries when slots are
     # limited (sorted by composite_score desc, UC scores now 85 so they sort first).
     if approved_entries and config.ENTRY_CYCLE_QUALITY_FILTER_ENABLED:
-        approved_entries.sort(key=lambda e: e["composite_score"], reverse=True)
-        selected = [
-            e for i, e in enumerate(approved_entries)
-            if i < config.ENTRY_MAX_NEW_PER_CYCLE and (
-                e["composite_score"] >= config.ENTRY_MIN_COMPOSITE_SCORE
-                or e["is_upper_circuit"]  # UC bypasses floor — 69.7% win rate
-            )
-        ]
-        selected_ids = {id(e) for e in selected}
-        skipped = [e for e in approved_entries if id(e) not in selected_ids]
+        # group332: best-3-to-5 shortlist (entry_engine/shortlist.py) - same ordering/floor/UC-bypass/max-new rules as before, now
+        # visible: the shortlist (up to ENTRY_SHORTLIST_MAX) is logged and the entries are its first ENTRY_MAX_NEW_PER_CYCLE.
+        _sl = _shortlist.build(approved_entries)
+        selected, skipped = _sl["selected"], _sl["skipped"]
+        logger.info(
+            "entry_engine: %s shortlist %d of %d approved - %s | entering %d",
+            mode, len(_sl["shortlist"]), len(approved_entries),
+            ", ".join(f"{e['cand'].symbol}={e['composite_score']:.1f}" for e in _sl["shortlist"]) or "none", len(selected),
+        )
     else:
         selected, skipped = approved_entries, []
 

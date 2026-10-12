@@ -149,3 +149,21 @@
 .ob .tp-lv dd { margin: 0; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ob .tp-why { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--ob-line); font-size: 10px; color: var(--ob-dim); line-height: 1.35; }
 @media (prefers-reduced-motion: reduce) { .ob .tp-ring-fg { transition: none; } }
+
+/* group339: live momentum strip + chart-type toggle in the popup; clickable pick cards / shortlist rows */
+.ob .ob-mom { margin-top: 10px; padding: 9px 10px; border: 1px solid var(--ob-line-2); border-radius: 10px; background: rgba(0,0,0,.22); }
+.ob .ob-mom.g { border-color: rgba(31,224,143,.45); } .ob .ob-mom.r { border-color: rgba(255,61,90,.45); }
+.ob .ob-mom-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ob-dim); }
+.ob .ob-mom-head b { font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--ob-fg); } .ob .ob-mom.g .ob-mom-head b { color: var(--ob-g); } .ob .ob-mom.r .ob-mom-head b { color: var(--ob-r); }
+.ob .ob-mom-bar { position: relative; height: 4px; border-radius: 999px; margin: 8px 0 6px; background: linear-gradient(90deg, rgba(255,61,90,.6), rgba(255,255,255,.12) 50%, rgba(31,224,143,.6)); }
+.ob .ob-mom-bar i { position: absolute; top: -3px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--ob-fg); box-shadow: 0 0 0 2px rgba(0,0,0,.5); transition: left .4s ease; }
+.ob .ob-mom-kv { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 12px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.ob .ob-mom-kv > div { display: flex; flex-direction: column; } .ob .ob-mom-kv span { font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ob-dim-2); } .ob .ob-mom-kv b { font-size: 12px; }
+.ob .ob-modes { display: flex; gap: 6px; margin-top: 10px; }
+.ob .tp-card[role="button"] { cursor: pointer; transition: border-color .15s, transform .15s; }
+.ob .tp-card[role="button"]:hover { border-color: var(--ob-cyan); transform: translateY(-1px); }
+.ob .tp-card[role="button"]:focus-visible { outline: 2px solid var(--ob-cyan); outline-offset: 2px; }
+.ob .tp-open { margin-top: 6px; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--ob-cyan); }
+.sl-row[role="button"] { cursor: pointer; } .sl-row[role="button"]:hover { border-color: rgb(74,163,255); } .sl-row[role="button"]:focus-visible { outline: 2px solid rgb(74,163,255); outline-offset: 1px; }
+@media (max-width: 640px) { .ob .ob-mom-kv { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { .ob .ob-mom-bar i { transition: none; } }

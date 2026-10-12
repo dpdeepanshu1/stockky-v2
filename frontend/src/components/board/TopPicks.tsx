@@ -6,6 +6,9 @@
 import { useEffect, useState } from "react";
 import { setVisibleInterval } from "../../visibleInterval";
 import { Card } from "./boardCard";
+import StockPopup from "./StockPopup";
+import { usePrefersReducedMotion } from "./useBoardData";
+import type { BoardRowLite } from "./boardTypes";
 import { levelPosition, normalizePicks, pickBadge, sparkPath, type PickCard, type PicksView } from "./topPicks";
 
 const px = (v: number | null, d = 2) => (v == null ? "-" : v.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -21,12 +24,31 @@ function Ring({ value }: { value: number | null }) {
   );
 }
 
-function PickCardView({ p }: { p: PickCard }) {
+/** Popup footer for a pick: what the auto-buy engine did / will do with it. Plain text, no order is placed from here. */
+function PickStatus({ p }: { p: PickCard }) {
+  const badge = pickBadge(p);
+  const msg = p.source === "board"
+    ? "Board preview: ranked strong by the Market Board, but the entry engine has not shortlisted it. Entry, stop and target are approximations."
+    : p.outcome === "ENTERED" ? "The engine entered this pick."
+    : p.status === "SELECTED" ? "First in line: the next entry cycle tries this stock first, if every entry gate and risk check still pass."
+    : p.status === "RESERVE" ? "Reserve: it is tried only if a pick ahead of it is skipped or its order fails."
+    : "Shortlisted by the entry engine.";
+  return (
+    <div className="rounded-lg border border-slate bg-ink p-2 text-[11px] text-mist space-y-1" data-testid="pick-status">
+      <div><b className="text-paper">#{p.pick} · {badge.label}</b></div>
+      <div>{msg}</div>
+    </div>
+  );
+}
+
+function PickCardView({ p, onOpen }: { p: PickCard; onOpen: (p: PickCard) => void }) {
   const up = (p.changePct ?? 0) >= 0, badge = pickBadge(p);
   const pts = sparkPath(p.spark, 96, 28);
   const pos = levelPosition(p.stop, p.ltp ?? p.entry, p.target);
   return (
-    <article className={`tp-card ${p.side === "bear" ? "bear" : "bull"}${p.inPosition ? " held" : ""}`} data-testid={`top-pick-${p.symbol}`}>
+    <article className={`tp-card ${p.side === "bear" ? "bear" : "bull"}${p.inPosition ? " held" : ""}`} data-testid={`top-pick-${p.symbol}`}
+      role="button" tabIndex={0} aria-label={`${p.symbol}: open chart and live momentum`} onClick={() => onOpen(p)}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(p); } }}>
       <header className="tp-head">
         <span className="tp-rank">#{p.pick}</span>
         <div className="tp-id">
@@ -66,6 +88,7 @@ function PickCardView({ p }: { p: PickCard }) {
         <div><dt>Conv.</dt><dd>{p.conviction == null ? "-" : p.conviction.toFixed(0)}</dd></div>
       </dl>
       {p.reasons.length > 0 && <div className="tp-why">{p.reasons.slice(0, 4).join(" · ")}</div>}
+      <div className="tp-open">Tap for chart &amp; live momentum</div>
     </article>
   );
 }
@@ -74,6 +97,13 @@ export default function TopPicks({ active, fetcher, title, note, resetKey }:
   { active: boolean; fetcher: () => Promise<any>; title: string; note?: string; resetKey?: string }) {
   const [view, setView] = useState<PicksView | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [sel, setSel] = useState<BoardRowLite | null>(null);
+  const [selPick, setSelPick] = useState<PickCard | null>(null);
+  const reduced = usePrefersReducedMotion();
+  // a card opens the same stock popup the board tiles use (candle / line chart, zones, levels, live momentum); the card's own fields fill the header
+  const open = (p: PickCard) => (setSelPick(p), setSel({ symbol: p.symbol, name: p.name, sector: p.sector ?? undefined, side: p.side ?? undefined, ltp: p.ltp ?? undefined,
+    change_pct: p.changePct ?? undefined, conviction: p.conviction ?? undefined, rank: p.rank ?? undefined, zone_score: p.zoneScore ?? undefined,
+    rr: p.rr ?? undefined, extended: p.extended }));
 
   useEffect(() => {
     if (!active) return;
@@ -99,14 +129,18 @@ export default function TopPicks({ active, fetcher, title, note, resetKey }:
       </span>
     : undefined;
   return (
+    <>
     <Card title={title} right={right}>
       <div data-testid="top-picks">
         {err && <div className="tp-msg warn">{err}</div>}
         {view && !view.picks.length && !err && <div className="tp-msg">{view.note || "No picks yet."}</div>}
-        {view && view.picks.length > 0 && <div className="tp-grid">{view.picks.map(p => <PickCardView key={`${p.pick}-${p.symbol}`} p={p} />)}</div>}
+        {view && view.picks.length > 0 && <div className="tp-grid">{view.picks.map(p => <PickCardView key={`${p.pick}-${p.symbol}`} p={p} onOpen={open} />)}</div>}
         {!view && !err && <div className="tp-msg">Loading the best picks…</div>}
         {note && <div className="tp-note">{note}</div>}
       </div>
     </Card>
+    {/* outside the Card on purpose: the sheet is a fixed overlay and follows the app theme */}
+    <StockPopup row={sel} onClose={() => setSel(null)} reduced={reduced} extra={selPick ? <PickStatus p={selPick} /> : undefined} />
+    </>
   );
 }

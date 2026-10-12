@@ -73,7 +73,9 @@ def _group330_gates_off_by_default(monkeypatch):
     pre-open snapshot depends on the clock. Older tests predate them, so they are off unless a test turns them on
     (tests/test_group330_*.py do). The VWAP gate needs no switch: a tick without `vwap` never blocks."""
     import config as _cfg
-    for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "CARRY_CONTEXT_GATE_ENABLED", "PREOPEN_SNAPSHOT_ENABLED", "GLOBAL_CUES_ENABLED"):
+    for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "CARRY_CONTEXT_GATE_ENABLED", "PREOPEN_SNAPSHOT_ENABLED", "GLOBAL_CUES_ENABLED",
+                 "ENTRY_LIQUIDITY_GATE_ENABLED",   # group333: reads the clock + prev-day candles
+                 "CALENDAR_RULES_ENABLED"):   # group336: expiry / pre-holiday / Friday rules read the clock
         monkeypatch.setattr(_cfg, name, False, raising=False)
     yield
 

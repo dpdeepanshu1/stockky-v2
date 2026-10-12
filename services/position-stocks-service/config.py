@@ -352,6 +352,10 @@ SHORTLIST_W_ZONE = _get_float("SHORTLIST_W_ZONE", 0.10)
 SHORTLIST_BEAR_PENALTY = _get_float("SHORTLIST_BEAR_PENALTY", 20.0)
 SHORTLIST_EXTENDED_PENALTY = _get_float("SHORTLIST_EXTENDED_PENALTY", 10.0)
 SHORTLIST_BOARD_TIMEOUT_S = _get_float("SHORTLIST_BOARD_TIMEOUT_S", 3.0)
+# group 335: when the best pick is skipped for a reason that only concerns that symbol (VWAP, liquidity, depth, circuit, re-entry,
+# opening gate, price guard ...), try the next shortlisted pick instead of ending the cycle. Skips that end every attempt (not armed,
+# kill switch, order budget, max positions, margin pause) still end it. SHORTLIST_FALLTHROUGH=0 restores stop-at-first-skip.
+SHORTLIST_FALLTHROUGH = _get_bool("SHORTLIST_FALLTHROUGH", True)
 # Deliberately much shorter than real-trade-service's 12-60s timeouts — this
 # loop ticks every 10s, so anything slower than a couple seconds isn't "quick".
 QUALITY_GATE_TIMEOUT_S = _get_float("QUALITY_GATE_TIMEOUT_S", 2.5)
@@ -615,6 +619,45 @@ PREOPEN_GAP_DOWN_BLOCK_PCT = _get_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _get_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
 PREOPEN_MAX_SYMBOLS = _get_int("PREOPEN_MAX_SYMBOLS", 150)
 PREOPEN_FETCH_TIMEOUT_S = _get_float("PREOPEN_FETCH_TIMEOUT_S", 6.0)
+
+# group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
+# depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.
+# ENTRY_VWAP_MAX_EXTENSION_PCT > 0 also refuses a chase that far ABOVE the VWAP (0 = off). Fails open on missing data.
+ENTRY_VWAP_GATE_ENABLED = _get_bool("ENTRY_VWAP_GATE_ENABLED", True)
+ENTRY_VWAP_TOLERANCE_PCT = _get_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
+ENTRY_VWAP_MAX_EXTENSION_PCT = _get_float("ENTRY_VWAP_MAX_EXTENSION_PCT", 0.0)
+ENTRY_VWAP_MIN_TIME_IST = _get_str("ENTRY_VWAP_MIN_TIME_IST", "09:45")
+
+# group 333 (2026-10-12): liquidity floor (orders/liquidity_gate.py): normal daily turnover (20-session mean of volume x close, crore Rs), today's turnover
+# so far, and relative volume vs the normal pace of the session. A floor of 0 turns that test off; unknown inputs never block.
+ENTRY_LIQUIDITY_GATE_ENABLED = _get_bool("ENTRY_LIQUIDITY_GATE_ENABLED", True)
+ENTRY_MIN_AVG_TURNOVER_CR = _get_float("ENTRY_MIN_AVG_TURNOVER_CR", 3.0)
+ENTRY_MIN_DAY_TURNOVER_CR = _get_float("ENTRY_MIN_DAY_TURNOVER_CR", 1.0)
+ENTRY_LIQ_MIN_TIME_IST = _get_str("ENTRY_LIQ_MIN_TIME_IST", "10:00")
+ENTRY_RVOL_MIN_TIME_IST = _get_str("ENTRY_RVOL_MIN_TIME_IST", "09:45")
+ENTRY_MIN_RVOL = _get_float("ENTRY_MIN_RVOL", 0.35)
+
+# group 336 (2026-10-12): expiry / Friday / pre-holiday rules (orders/calendar_gate.py), catalyst check (orders/catalyst_gate.py), losing-window
+# auto-disable + stop/target width advice (orders/window_health.py). All fail open; each has a switch.
+CALENDAR_RULES_ENABLED = _get_bool("CALENDAR_RULES_ENABLED", True)
+CALENDAR_EXPIRY_WEEKDAY = _get_int("CALENDAR_EXPIRY_WEEKDAY", 1)               # 0=Mon..4=Fri; 1 = Tuesday (NSE index weekly expiry since Sept 2025 - verify)
+CALENDAR_EXPIRY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_EXPIRY_ENTRY_CUTOFF_IST", "14:30")      # blank = no cut-off
+CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_FRIDAY_ENTRY_CUTOFF_IST = _get_str("CALENDAR_FRIDAY_ENTRY_CUTOFF_IST", "")
+CALENDAR_EXPIRY_SIZE_MULT = _get_float("CALENDAR_EXPIRY_SIZE_MULT", 0.8)
+CALENDAR_PRE_HOLIDAY_SIZE_MULT = _get_float("CALENDAR_PRE_HOLIDAY_SIZE_MULT", 0.8)
+CALENDAR_FRIDAY_SIZE_MULT = _get_float("CALENDAR_FRIDAY_SIZE_MULT", 0.9)
+CALENDAR_EXPIRY_CARRY_MAX = _get_int("CALENDAR_EXPIRY_CARRY_MAX", 2)           # carry caps are used by real-trade only; kept so the knobs match
+CALENDAR_PRE_HOLIDAY_CARRY_MAX = _get_int("CALENDAR_PRE_HOLIDAY_CARRY_MAX", 1)
+CALENDAR_FRIDAY_CARRY_MAX = _get_int("CALENDAR_FRIDAY_CARRY_MAX", 2)
+CATALYST_NO_NEWS_ACTION = _get_str("CATALYST_NO_NEWS_ACTION", "size")           # size | block | off
+CATALYST_MOVE_PCT = _get_float("CATALYST_MOVE_PCT", 4.0)
+CATALYST_NO_NEWS_SIZE_MULT = _get_float("CATALYST_NO_NEWS_SIZE_MULT", 0.6)
+WINDOW_AUTODISABLE_ENABLED = _get_bool("WINDOW_AUTODISABLE_ENABLED", True)
+WINDOW_AUTODISABLE_DAYS = _get_int("WINDOW_AUTODISABLE_DAYS", 7)
+WINDOW_AUTODISABLE_MIN_TRADES = _get_int("WINDOW_AUTODISABLE_MIN_TRADES", 8)
+WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT = _get_float("WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT", 35.0)
+WINDOW_TUNING_MIN_TRADES = _get_int("WINDOW_TUNING_MIN_TRADES", 20)
 BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
 STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
 # group 262: Dhan's published NSE equity card = 0.00297 % exchange transaction charge (since 1 Oct 2024; was 0.00325 here,

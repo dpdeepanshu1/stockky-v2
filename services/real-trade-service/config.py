@@ -234,6 +234,9 @@ def _g332(name: str, default: str) -> str:
     return (os.getenv(name) or "").strip() or default
 ENTRY_SHORTLIST_ENABLED = _g332("ENTRY_SHORTLIST_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 ENTRY_SHORTLIST_MAX = max(1, min(10, int(_g332("ENTRY_SHORTLIST_MAX", "5"))))
+# group 335: when a selected pick's broker placement fails for a reason about that symbol, the next shortlisted pick is placed in the same cycle
+# (ENTRY_SHORTLIST_FALLTHROUGH=false = old behaviour: it waits for the next cycle).
+ENTRY_SHORTLIST_FALLTHROUGH = _g332("ENTRY_SHORTLIST_FALLTHROUGH", "true").lower() not in ("0", "false", "no", "off")
 ENTRY_BOARD_NUDGE_ENABLED = _g332("ENTRY_BOARD_NUDGE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 ENTRY_BOARD_MAX_NUDGE = float(_g332("ENTRY_BOARD_MAX_NUDGE", "6.0"))
 ENTRY_BOARD_CACHE_TTL_S = float(_g332("ENTRY_BOARD_CACHE_TTL_S", "30"))
@@ -481,6 +484,33 @@ PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
 PREOPEN_WARM_MAX_SYMBOLS = int(_og_float("PREOPEN_WARM_MAX_SYMBOLS", 40.0))
+
+# group 333 (2026-10-12): liquidity floor (entry_engine/liquidity_gate.py): normal daily turnover (20-session mean of volume x close, crore Rs), today's
+# turnover so far, and relative volume vs the normal pace of the session. A floor of 0 turns that test off; unknown inputs never block.
+ENTRY_LIQUIDITY_GATE_ENABLED = ((os.getenv("ENTRY_LIQUIDITY_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+ENTRY_MIN_AVG_TURNOVER_CR = _og_float("ENTRY_MIN_AVG_TURNOVER_CR", 3.0)
+ENTRY_MIN_DAY_TURNOVER_CR = _og_float("ENTRY_MIN_DAY_TURNOVER_CR", 1.0)
+ENTRY_LIQ_MIN_TIME_IST = (os.getenv("ENTRY_LIQ_MIN_TIME_IST") or "").strip() or "10:00"
+ENTRY_RVOL_MIN_TIME_IST = (os.getenv("ENTRY_RVOL_MIN_TIME_IST") or "").strip() or "09:45"
+ENTRY_MIN_RVOL = _og_float("ENTRY_MIN_RVOL", 0.35)
+
+# group 336 (2026-10-12): expiry / Friday / pre-holiday rules (entry_engine/calendar_gate.py): an entry cut-off, a smaller size and a lower overnight-carry
+# cap on those sessions. Fail open; CALENDAR_RULES_ENABLED=false turns all of it off, a blank cut-off turns that cut-off off.
+def _cal_str(name, default):
+    raw = os.getenv(name)
+    return default if raw is None else raw.strip()          # an explicitly blank variable means "no cut-off"
+
+CALENDAR_RULES_ENABLED = ((os.getenv("CALENDAR_RULES_ENABLED") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
+CALENDAR_EXPIRY_WEEKDAY = int(_og_float("CALENDAR_EXPIRY_WEEKDAY", 1))      # 0=Mon..4=Fri; 1 = Tuesday (NSE index weekly expiry since Sept 2025 - verify)
+CALENDAR_EXPIRY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_EXPIRY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "14:30")
+CALENDAR_FRIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_FRIDAY_ENTRY_CUTOFF_IST", "")
+CALENDAR_EXPIRY_SIZE_MULT = _og_float("CALENDAR_EXPIRY_SIZE_MULT", 0.8)
+CALENDAR_PRE_HOLIDAY_SIZE_MULT = _og_float("CALENDAR_PRE_HOLIDAY_SIZE_MULT", 0.8)
+CALENDAR_FRIDAY_SIZE_MULT = _og_float("CALENDAR_FRIDAY_SIZE_MULT", 0.9)
+CALENDAR_EXPIRY_CARRY_MAX = int(_og_float("CALENDAR_EXPIRY_CARRY_MAX", 2))
+CALENDAR_PRE_HOLIDAY_CARRY_MAX = int(_og_float("CALENDAR_PRE_HOLIDAY_CARRY_MAX", 1))
+CALENDAR_FRIDAY_CARRY_MAX = int(_og_float("CALENDAR_FRIDAY_CARRY_MAX", 2))
 #  * Negative news / events: no BUY (and no carry) on a stock whose event score (0-100, 50 = neutral, analysis-intelligence-service) is at / below
 #    NEWS_NEGATIVE_BLOCK_SCORE, or that carries a regulatory action / delisting risk / a fresh earnings miss. 0 disables the score test.
 NEWS_NEGATIVE_BLOCK_ENABLED = ((os.getenv("NEWS_NEGATIVE_BLOCK_ENABLED") or "").strip() or "true").lower() == "true"

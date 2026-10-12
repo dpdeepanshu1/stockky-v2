@@ -21,6 +21,8 @@ from tz_utils import ist_today_str
 logger = logging.getLogger("real-trade-prev-day")
 
 ATR_WINDOW = 14
+AVG_VOLUME_WINDOW = 20       # group333: completed sessions averaged for the normal daily volume / turnover
+AVG_VOLUME_MIN_DAYS = 5      # fewer sessions with a volume than this = no usable average (None)
 PREVDAY_MAX_INFLIGHT = 6
 PREVDAY_RETRY_S = 60.0
 _INLINE = False          # tests: run the fetch on the calling thread
@@ -37,6 +39,8 @@ class PrevDay(NamedTuple):
     close: float
     atr: Optional[float]     # 14-day daily ATR in price terms, None when fewer than 15 candles
     date: str
+    avg_volume: Optional[float] = None      # group333: mean daily share volume over up to AVG_VOLUME_WINDOW completed sessions (None = unknown)
+    avg_turnover: Optional[float] = None    # group333: mean daily volume x close in Rs over the same sessions (None = unknown)
 
     @property
     def close_pos(self) -> Optional[float]:
@@ -93,7 +97,15 @@ def parse_candles(candles: List[dict], today: str, max_age_days: Optional[int] =
                     trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
             if len(trs) >= ATR_WINDOW:
                 atr = sum(trs[-ATR_WINDOW:]) / ATR_WINDOW
-        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10])
+        vols, tovs = [], []
+        for r in rows[-AVG_VOLUME_WINDOW:]:
+            rv, rc = _f(r.get("volume")), _f(r.get("close"))
+            if rv > 0 and rc > 0:
+                vols.append(rv)
+                tovs.append(rv * rc)
+        avg_vol = (sum(vols) / len(vols)) if len(vols) >= AVG_VOLUME_MIN_DAYS else None
+        avg_tov = (sum(tovs) / len(tovs)) if len(tovs) >= AVG_VOLUME_MIN_DAYS else None
+        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10], avg_volume=avg_vol, avg_turnover=avg_tov)
     except Exception:
         return None
 

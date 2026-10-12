@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import board_gate, circuit_gate, cost_gate, depth_gate, entry_pause
+from orders import board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -346,6 +346,36 @@ def _recover_ambiguous_buy(db: Session, exc: Exception, security_id: str, quanti
     return (oid, None) if config.USE_SUPER_ORDER else (None, oid)
 
 
+# group335: remember the reason of the most recent SKIPPED row written on this thread, so the cycle's shortlist loop can tell a skip that
+# is specific to ONE symbol (VWAP, liquidity, depth, circuit, re-entry...) from one that ends every attempt this cycle (not armed, kill
+# switch, order budget, max positions, margin pause). Thread-local: attempt_entry runs in asyncio.to_thread, one call per thread at a time.
+import threading as _threading
+
+_skip_state = _threading.local()
+
+# Reason prefixes that only concern the symbol just tried (all raised before an order is sent). Anything else ends the cycle as before.
+_SYMBOL_SPECIFIC_SKIP_PREFIXES = (
+    "PENNY_STOCK", "RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "ENTRY_REJECTED_TODAY", "REENTRY_", "ALREADY_OPEN_HERE",
+    "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
+    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE",
+)
+
+
+def reset_last_skip() -> None:
+    _skip_state.reason = None
+
+
+def last_skip_reason() -> Optional[str]:
+    return getattr(_skip_state, "reason", None)
+
+
+def is_symbol_specific_skip(reason: Optional[str]) -> bool:
+    """True when the skip reason only concerns that one symbol, so the next shortlisted pick is still worth trying."""
+    if not reason:
+        return False
+    return str(reason).startswith(_SYMBOL_SPECIFIC_SKIP_PREFIXES)
+
+
 def _log_candidate(
     db: Session,
     candidate: Candidate,
@@ -354,6 +384,8 @@ def _log_candidate(
     composite_score: Optional[float] = None,
     quality: Optional[QualitySignal] = None,
 ) -> None:
+    if decision == "SKIPPED":
+        _skip_state.reason = str(reason)
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,
@@ -557,6 +589,36 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _gap_reject, quality=quality)
         return None
 
+    # group333: VWAP confirmation - no long below the day's VWAP (or, when ENTRY_VWAP_MAX_EXTENSION_PCT is set, a chase far above it). Same cached /quote
+    # row as the depth / circuit gates; fails open.
+    _vwap_reject = vwap_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if _vwap_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _vwap_reject, quality=quality)
+        return None
+
+    # group333: volume / turnover floor - normal daily turnover, today's turnover so far, relative volume (orders/liquidity_gate.py). Cached data only; fails open.
+    _liq_reject = liquidity_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if _liq_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _liq_reject, quality=quality)
+        return None
+
+    # group336: expiry / pre-holiday / (optionally) Friday session - no NEW entry after the cut-off (orders/calendar_gate.py). Fails open.
+    _cal_reject = calendar_gate.entry_block_reason()
+    if _cal_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _cal_reject, quality=quality)
+        return None
+
+    # group336: a large move with no news / catalyst behind it. "block" mode refuses it here; the default "size" mode shrinks it at sizing below.
+    _cat_block, _cat_mult = catalyst_gate.decide(candidate.pct_change, getattr(quality, "has_positive_catalyst", None) if quality else None,
+                                                  bool(getattr(quality, "bulk_deal_flag", False)) if quality else False)
+    if _cat_block:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _cat_block, quality=quality)
+        return None
+
     # group309: Market Board chase guard. shadow (default) only logs; enforce refuses an entry that is > BOARD_CHASE_ATR ATRs past
     # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
     _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
@@ -628,6 +690,20 @@ def attempt_entry(
                 ledger.release_capital(db, position_value=position_value - _vnew, realized_pnl=0.0)
                 position_value = _vnew
             quantity = _vq
+
+    # group336: expiry / pre-holiday / Friday session and a no-news big move each shrink the position (separate risks, so they multiply).
+    _cal_m = calendar_gate.size_mult()
+    _cal_mult = _cal_m * _cat_mult
+    if _cal_mult < 1.0 and quantity > 1:
+        _cq = max(1, int(quantity * max(0.25, _cal_mult)))
+        if _cq < quantity:
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (calendar x%.2f, no-news move x%.2f)",
+                        candidate.symbol, quantity, _cq, _cal_m, _cat_mult)
+            _cnew = _cq * candidate.current_ltp
+            if _cnew < position_value:
+                ledger.release_capital(db, position_value=position_value - _cnew, realized_pnl=0.0)
+                position_value = _cnew
+            quantity = _cq
 
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:

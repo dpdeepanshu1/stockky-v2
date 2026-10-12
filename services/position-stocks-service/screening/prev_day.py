@@ -22,6 +22,8 @@ from tz_utils import ist_today_str
 logger = logging.getLogger("position-stocks-prev-day")
 
 ATR_WINDOW = 14
+AVG_VOLUME_WINDOW = 20       # group333: completed sessions averaged for the normal daily volume / turnover
+AVG_VOLUME_MIN_DAYS = 5      # fewer sessions with a volume than this = no usable average (None)
 AVG_RANGE_WINDOW = 35        # group305: sessions averaged for the board's normal daily move
 AVG_RANGE_MIN_DAYS = 10      # fewer completed days than this = no usable average (None)
 PREVDAY_MAX_INFLIGHT = 6
@@ -41,6 +43,8 @@ class PrevDay(NamedTuple):
     atr: Optional[float]     # 14-day daily ATR in price terms, None when fewer than 15 candles
     date: str
     avg_range_pct: Optional[float] = None   # group305: mean daily (high-low)/close in % over up to AVG_RANGE_WINDOW completed days (board strength)
+    avg_volume: Optional[float] = None      # group333: mean daily share volume over up to AVG_VOLUME_WINDOW completed sessions (None = unknown)
+    avg_turnover: Optional[float] = None    # group333: mean daily volume x close in Rs over the same sessions (None = unknown)
 
     @property
     def close_pos(self) -> Optional[float]:
@@ -103,7 +107,16 @@ def parse_candles(candles: List[dict], today: str, max_age_days: Optional[int] =
             if rh > 0 and rl > 0 and rc > 0 and rh >= rl:
                 rngs.append((rh - rl) / rc * 100.0)
         avg_range = (sum(rngs) / len(rngs)) if len(rngs) >= AVG_RANGE_MIN_DAYS else None
-        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10], avg_range_pct=avg_range)
+        vols, tovs = [], []
+        for r in rows[-AVG_VOLUME_WINDOW:]:
+            rv, rc = _f(r.get("volume")), _f(r.get("close"))
+            if rv > 0 and rc > 0:
+                vols.append(rv)
+                tovs.append(rv * rc)
+        avg_vol = (sum(vols) / len(vols)) if len(vols) >= AVG_VOLUME_MIN_DAYS else None
+        avg_tov = (sum(tovs) / len(tovs)) if len(tovs) >= AVG_VOLUME_MIN_DAYS else None
+        return PrevDay(high=h, low=l, close=c, atr=atr, date=str(last.get("date"))[:10], avg_range_pct=avg_range,
+                       avg_volume=avg_vol, avg_turnover=avg_tov)
     except Exception:
         return None
 

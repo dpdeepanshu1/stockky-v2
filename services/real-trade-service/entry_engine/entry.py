@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import circuit_gate, event_risk, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -541,7 +541,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             )
 
     # group332: Market Board rows (position-stocks /board), cached + fail-open; feeds the per-candidate composite nudge below.
-    _board_rows = await _board_client.get_rows() if mode == "REAL" else {}
+    # group337: DEMO now ranks with the same board nudge as REAL (it used to be REAL-only, so the two modes ordered the same candidates differently).
+    _board_rows = await _board_client.get_rows()
 
     symbols = list({c.symbol for c in candidates})
     ticks   = await get_quotes(symbols)
@@ -884,7 +885,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                        "risk_verdict": None, "gate_tag": "depth_at_entry"})
                 continue
 
-        # -- Gate 4d (group 330): India VIX, VWAP, pre-open gap -------------------------------------------------------
+        # -- Gate 4d (group 330; liquidity floor group 333): India VIX, VWAP, pre-open gap, volume / turnover -------------------------------------------------------
         # VIX: no new BUY while fear is high (and a smaller position while it is elevated, applied at sizing below). VWAP: no long under
         # the day's volume-weighted average. Pre-open gap: no chasing a big gap-up / catching a big gap-down recorded at 09:08.
         # Every one fails open on missing data. See entry_engine/vix_gate.py, vwap_gate.py, preopen.py.
@@ -892,7 +893,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _g4d_reason, _g4d_tag = None, None
         for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
                           (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
-                          (lambda: preopen.gap_reason(cand.symbol), "preopen_gap")):
+                          (lambda: preopen.gap_reason(cand.symbol), "preopen_gap"),
+                          (lambda: calendar_gate.entry_block_reason(), "calendar"),                # group336: expiry / pre-holiday / Friday cut-off
+                          (lambda: liquidity_gate.reject_reason_tick(tick), "liquidity")):      # group333: volume / turnover floor
             _g4d_reason = _fn()
             if _g4d_reason:
                 _g4d_tag = _tag
@@ -932,6 +935,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _vix_mult = vix_gate.size_mult(_vix_snap)
         if _vix_mult < 1.0:
             adj_risk_pct *= _vix_mult
+        # group336: expiry / pre-holiday / Friday session -> smaller position (config.CALENDAR_*_SIZE_MULT). 1.0 on an ordinary day.
+        _cal_mult = calendar_gate.size_mult()
+        if _cal_mult < 1.0:
+            adj_risk_pct *= _cal_mult
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
 
@@ -1193,6 +1200,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "is_overnight_priority": is_overnight_priority,
             "us_sector_bonus": us_sector_bonus,
             "intraday_news_bonus": news_bonus,
+            "board_bonus": board_bonus,
             "entry_product": entry_prod,
         })
 
@@ -1237,11 +1245,20 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     # not by the R:R/drift blend that composite measures. They still count toward
     # ENTRY_MAX_NEW_PER_CYCLE and must rank above non-UC entries when slots are
     # limited (sorted by composite_score desc, UC scores now 85 so they sort first).
+    reserve: list = []
     if approved_entries and config.ENTRY_CYCLE_QUALITY_FILTER_ENABLED:
         # group332: best-3-to-5 shortlist (entry_engine/shortlist.py) - same ordering/floor/UC-bypass/max-new rules as before, now
         # visible: the shortlist (up to ENTRY_SHORTLIST_MAX) is logged and the entries are its first ENTRY_MAX_NEW_PER_CYCLE.
         _sl = _shortlist.build(approved_entries)
         selected, skipped = _sl["selected"], _sl["skipped"]
+        # group335: shortlist picks beyond ENTRY_MAX_NEW_PER_CYCLE are kept in reserve - if a selected pick's broker placement fails, the next
+        # reserve pick is placed in its slot this same cycle instead of waiting a whole cycle. Whatever is left unused is marked WAIT below.
+        if getattr(config, "ENTRY_SHORTLIST_FALLTHROUGH", True):
+            _sel_ids = {id(x) for x in selected}
+            reserve = [x for x in _sl["shortlist"] if id(x) not in _sel_ids]
+            _res_ids = {id(x) for x in reserve}
+            skipped = [x for x in skipped if id(x) not in _res_ids]
+        _shortlist.record(mode, _sl, len(approved_entries), selected, reserve)           # group337: for GET /shortlist/{mode}
         logger.info(
             "entry_engine: %s shortlist %d of %d approved - %s | entering %d",
             mode, len(_sl["shortlist"]), len(approved_entries),
@@ -1250,42 +1267,52 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     else:
         selected, skipped = approved_entries, []
 
-    for e in skipped:
-        decision = e["decision"]
-        decision.action = "WAIT"
-        # 2026-09-09 fix (session20): this used to say "not among top N, OR
-        # below floor" for every skipped candidate regardless of which one
-        # actually applied — leaving no way to tell, from the message alone,
-        # whether a candidate lost out to stronger competition this cycle or
-        # never had a chance to clear the floor at all. State the real reason.
-        below_floor = (
-            e["composite_score"] < config.ENTRY_MIN_COMPOSITE_SCORE
-            and not e["is_upper_circuit"]
-        )
-        if below_floor:
-            why = (
-                f"below the {config.ENTRY_MIN_COMPOSITE_SCORE:.0f} composite floor "
-                "(setup quality itself, not competition from other candidates)"
+    def _mark_skipped_wait(entries) -> None:
+        """Mark risk-approved entries that lose out this cycle as WAIT (unchanged text; group335 made it callable twice)."""
+        nonlocal waited
+        for e in entries:
+            decision = e["decision"]
+            decision.action = "WAIT"
+            # 2026-09-09 fix (session20): this used to say "not among top N, OR
+            # below floor" for every skipped candidate regardless of which one
+            # actually applied — leaving no way to tell, from the message alone,
+            # whether a candidate lost out to stronger competition this cycle or
+            # never had a chance to clear the floor at all. State the real reason.
+            below_floor = (
+                e["composite_score"] < config.ENTRY_MIN_COMPOSITE_SCORE
+                and not e["is_upper_circuit"]
             )
-        else:
-            why = (
-                f"not among this cycle's top {config.ENTRY_MAX_NEW_PER_CYCLE} candidates "
-                "(cleared the floor but ranked below stronger setups this cycle)"
+            if below_floor:
+                why = (
+                    f"below the {config.ENTRY_MIN_COMPOSITE_SCORE:.0f} composite floor "
+                    "(setup quality itself, not competition from other candidates)"
+                )
+            else:
+                why = (
+                    f"not among this cycle's top {config.ENTRY_MAX_NEW_PER_CYCLE} candidates "
+                    "(cleared the floor but ranked below stronger setups this cycle)"
+                )
+            decision.reasoning = (
+                f"Risk-approved (composite quality score {e['composite_score']:.1f}/100 — "
+                f"conviction/R:R/drift-safety blend) but {why}. Concentrating capital in "
+                "the strongest setups this cycle rather than every setup that merely cleared the "
+                "individual gates — re-evaluated fresh next cycle."
             )
-        decision.reasoning = (
-            f"Risk-approved (composite quality score {e['composite_score']:.1f}/100 — "
-            f"conviction/R:R/drift-safety blend) but {why}. Concentrating capital in "
-            "the strongest setups this cycle rather than every setup that merely cleared the "
-            "individual gates — re-evaluated fresh next cycle."
-        )
-        waited += 1
-        db.add(decision)
-        entry_details.append({
-            "symbol": e["cand"].symbol, "action": "WAIT",
-            "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
-        })
+            waited += 1
+            db.add(decision)
+            entry_details.append({
+                "symbol": e["cand"].symbol, "action": "WAIT",
+                "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
+            })
 
-    for e in selected:
+    _mark_skipped_wait(skipped)
+
+    _queue = list(selected)
+    _qi = 0
+    while _qi < len(_queue):
+        e = _queue[_qi]
+        _qi += 1
+        _slot_failed = False          # group335: set when this pick's broker placement failed for a reason specific to it
         cand, decision = e["cand"], e["decision"]
         entry_price, stop_price, target_price = e["entry_price"], e["stop_price"], e["target_price"]
         rr, adj_risk_pct, is_regime_override = e["rr"], e["adj_risk_pct"], e["is_regime_override"]
@@ -1450,6 +1477,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 )
             except Exception as ex:
                 logger.error("REAL order placement failed for %s: %s", cand.symbol, ex)
+                # group335: a failure about THIS symbol frees its slot for the next shortlisted pick; an account-wide one (shared order
+                # budget used up) does not - every other pick would hit the same wall.
+                _slot_failed = "order budget exhausted" not in str(ex).lower()
                 order.status = "REJECTED"
                 # AUDIT FIX (session60): release the symbol claim taken
                 # above on ANY placement failure (including our own
@@ -1527,6 +1557,18 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "symbol": cand.symbol, "action": decision.action,
             "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
         })
+        # group337: what became of this pick, for the Board tab's shortlist panel
+        _shortlist.mark(mode, cand.symbol, "ENTERED" if decision.action == "ENTER" else f"PLACEMENT_FAILED:{str(decision.reasoning or '')[:90]}")
+        # group335: this pick's placement failed -> give its slot to the next shortlisted pick (best first) while slots remain this cycle.
+        if _slot_failed and reserve and entered < config.ENTRY_MAX_NEW_PER_CYCLE:
+            _nxt = reserve.pop(0)
+            _queue.append(_nxt)
+            logger.info("entry_engine: %s placement failed for %s - promoting next shortlisted pick %s (composite %.1f)",
+                        mode, cand.symbol, _nxt["cand"].symbol, _nxt["composite_score"])
+
+    # group335: shortlist picks that were never needed are marked WAIT exactly as before (same reasoning text).
+    _mark_skipped_wait(reserve)
+    _shortlist.finalize(mode)                                  # group337: reserve picks never needed -> NOT_NEEDED
 
     db.commit()
     log_action(db, actor="system", action="ENTRY_CYCLE", mode=mode,

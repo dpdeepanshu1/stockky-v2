@@ -162,10 +162,11 @@ from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile, trailing
 from orders import adaptive
-from orders import charges_ledger, excursion, review_stats, trade_stats
+from orders import calendar_gate, charges_ledger, excursion, review_stats, trade_stats, window_health
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
+    reset_last_skip, last_skip_reason, is_symbol_specific_skip,
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
@@ -558,7 +559,27 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
 #     (reserve_capital + reserve_additional together need max(position_value, qty*ltp));
 #   - attempt_entry() refuses when open positions >= MAX_CONCURRENT_SCALP_POSITIONS
 #     (same OPEN + EXIT_LEGS_REJECTED count).
-_last_shortlist: dict = {"at": None, "rows": []}     # group332: latest best-picks shortlist, for GET /shortlist
+def _attempt_entry_with_skip_reason(db, candidate, quality=None):
+    """group335: attempt_entry plus the reason of its last SKIPPED row, read on the SAME thread (the reason is thread-local).
+    Looks attempt_entry up at call time, so a patched one still works. Returns (position_or_None, skip_reason_or_None)."""
+    reset_last_skip()
+    res = attempt_entry(db, candidate, quality=quality)
+    return res, (None if res else last_skip_reason())
+
+
+_last_shortlist: dict = {"at": None, "rows": [], "evaluated": 0, "passed": 0, "entered_symbol": None}   # group332/337: latest best-picks shortlist, for GET /shortlist
+
+
+def _mark_pick(symbol: str, outcome: str) -> None:
+    """group337: record what became of one shortlisted pick (ENTERED / SKIPPED:<reason> / NOT_TRIED). Display only; never raises."""
+    try:
+        for r in _last_shortlist["rows"]:
+            if r.get("symbol") == symbol:
+                r["outcome"] = outcome
+        if outcome == "ENTERED":
+            _last_shortlist["entered_symbol"] = symbol
+    except Exception:  # noqa: BLE001
+        pass
 _unaffordable_logged_at: float = float("-inf")  # -inf: the first log is never suppressed, even right after boot
 
 
@@ -976,6 +997,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # session72 (#8): cooled-down capital-starved symbols are dropped BEFORE
     # the top-N slice so other candidates take their place (and no quality-gate
     # HTTP calls / candidate-log rows are spent on a symbol we know we can't fund).
+    # group336: candidates from a scan window that keeps losing (>= N settled trades, low win rate, net negative over the last days) are left
+    # out of this cycle; the window returns by itself when those trades age out. AUTO entries only - a manual cycle looks at everything.
+    if trigger == "AUTO":
+        candidates, _paused = window_health.filter_candidates(db, candidates)
+        summary["windows_paused"] = _paused
+        if not candidates:
+            summary["skipped_reason"] = "ALL_CANDIDATES_WINDOW_PAUSED"
+            return _finalize()
     candidates, _cooled = _capital_cooldown_filter(db, candidates)
     summary["capital_cooldown_skipped"] = _cooled
     if not candidates:
@@ -1119,19 +1148,31 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                             timeout=config.SHORTLIST_BOARD_TIMEOUT_S)
                 except Exception as _e:  # noqa: BLE001 - no board = score on the remaining parts
                     logger.debug("position-stocks: shortlist board read skipped (%s)", _e)
+                _n_passed = len(quality_passers)
                 _sl = shortlist.build(quality_passers, _bp)
                 quality_passers = [(r["cand"], r["quality"]) for r in _sl]
-                _last_shortlist.update(at=time.time(), rows=shortlist.public(_sl))
+                # group337: every pick starts as NOT_TRIED; the entry loop below fills in what really happened to it.
+                _last_shortlist.update(at=time.time(), rows=[dict(r, outcome="NOT_TRIED") for r in shortlist.public(_sl)],
+                                       evaluated=len(top_n), passed=_n_passed, entered_symbol=None)
                 _stage("shortlist", "Best Picks Shortlist", _ts,
                        detail="; ".join(f"#{r['pick']} {r['symbol']} {r['score']}" for r in _sl),
                        picks=shortlist.public(_sl))
+            _pick_skips: list[str] = []
             for _c, _q in quality_passers:
                 try:
-                    result = await asyncio.to_thread(attempt_entry, db, _c, quality=_q)
+                    result, _skip = await asyncio.to_thread(_attempt_entry_with_skip_reason, db, _c, _q)
                     candidate = _c  # track which one actually attempted
                     quality = _q
+                    _mark_pick(_c.symbol, "ENTERED" if result else "SKIPPED:" + (str(_skip).split(":", 1)[0] if _skip else "NO_ENTRY"))
+                    if (not result and config.SHORTLIST_FALLTHROUGH and is_symbol_specific_skip(_skip)):
+                        # group335: this symbol failed a gate that only concerns it (VWAP / liquidity / depth / circuit / ...) -
+                        # the next shortlisted pick may still be fine; global skips (not armed, kill switch, budget, max positions) still stop.
+                        _pick_skips.append(f"{_c.symbol}:{str(_skip).split(':', 1)[0]}")
+                        logger.info("position-stocks: %s skipped (%s) - trying next shortlisted pick", _c.symbol, str(_skip)[:120])
+                        continue
                     break  # success or non-capital skip — stop here
                 except InsufficientCapitalSkip as _ics:
+                    _mark_pick(_c.symbol, "SKIPPED:INSUFFICIENT_CAPITAL")
                     capital_skipped.append(_c.symbol)
                     _note_capital_starved(db, _c.symbol)
                     logger.info(
@@ -1139,6 +1180,9 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                         _c.symbol, _ics,
                     )
                     continue  # try the next quality-passing candidate
+            if _pick_skips and not result:
+                summary["shortlist_skips"] = _pick_skips
+                logger.info("position-stocks: no shortlisted pick cleared its entry gates this cycle (%s)", ", ".join(_pick_skips))
             if capital_skipped and not result:
                 logger.info(
                     "position-stocks: all %d quality-passing candidate(s) hit INSUFFICIENT_CAPITAL "
@@ -1800,6 +1844,36 @@ def positions(db: Session = Depends(get_db)):
     return out
 
 
+@app.get("/windows/health")
+def windows_health(days: int = 0, db: Session = Depends(get_db)):
+    """group336: per scan window (1m/5m/15m/60m) settled trades, win rate, net P&L and whether the losing-window auto-disable has it paused
+    right now. `days` = look-back (default WINDOW_AUTODISABLE_DAYS). Read-only."""
+    days = max(1, min(int(days or config.WINDOW_AUTODISABLE_DAYS), 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.query(ScalpPosition).filter(ScalpPosition.opened_at >= cutoff.replace(tzinfo=None)).all()
+    return {"days": days, "enabled": config.WINDOW_AUTODISABLE_ENABLED,
+            "rule": {"min_trades": config.WINDOW_AUTODISABLE_MIN_TRADES, "max_win_rate_pct": config.WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT,
+                     "lookback_days_used_for_pausing": config.WINDOW_AUTODISABLE_DAYS},
+            "windows": window_health.evaluate(rows)}
+
+
+@app.get("/tuning/stop-target")
+def tuning_stop_target(days: int = 14, db: Session = Depends(get_db)):
+    """group336: ADVICE ONLY - stop / target width suggested by the real excursions of closed trades (nothing is applied). `days` 1-30."""
+    days = max(1, min(int(days), 30))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.query(ScalpPosition).filter(ScalpPosition.opened_at >= cutoff.replace(tzinfo=None)).all()
+    return {"days": days, **window_health.suggest(rows)}
+
+
+@app.get("/calendar/today")
+def calendar_today():
+    """group336: what kind of session today is (weekly / monthly expiry, pre-holiday, Friday) and the entry rules that follow from it."""
+    ctx = calendar_gate.context()
+    return {**ctx, "enabled": config.CALENDAR_RULES_ENABLED, "entry_blocked_now": calendar_gate.entry_block_reason(),
+            "size_mult": calendar_gate.size_mult()}
+
+
 @app.get("/trades/breakdown")
 def trades_breakdown(days: int = 3, db: Session = Depends(get_db)):
     """Read-only (group 167): closed trades grouped by entry time (30-min IST bucket), scan window
@@ -2266,7 +2340,11 @@ def _board_open_symbols() -> list:
 def shortlist_route():
     """group332: the best-3-to-5 picks the last entry cycle ranked (scan score + board conviction + quality + zone). Read-only."""
     return {"enabled": config.SHORTLIST_ENABLED, "max": config.SHORTLIST_MAX,
-            "as_of": _last_shortlist["at"], "picks": _last_shortlist["rows"]}
+            "as_of": _last_shortlist["at"], "picks": _last_shortlist["rows"],
+            "evaluated": _last_shortlist["evaluated"], "passed_quality_gate": _last_shortlist["passed"],
+            "entered_symbol": _last_shortlist["entered_symbol"],
+            "weights": {"scan": config.SHORTLIST_W_SCAN, "board": config.SHORTLIST_W_BOARD,
+                        "quality": config.SHORTLIST_W_QUALITY, "zone": config.SHORTLIST_W_ZONE}}
 
 
 @app.get("/board/status")

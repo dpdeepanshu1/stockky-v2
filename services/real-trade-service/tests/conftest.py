@@ -76,3 +76,31 @@ def _group330_gates_off_by_default(monkeypatch):
     for name in ("VIX_GATE_ENABLED", "NEWS_NEGATIVE_BLOCK_ENABLED", "CARRY_CONTEXT_GATE_ENABLED", "PREOPEN_SNAPSHOT_ENABLED", "GLOBAL_CUES_ENABLED"):
         monkeypatch.setattr(_cfg, name, False, raising=False)
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _board_nudge_off_by_default(monkeypatch):
+    """group332: the Market Board nudge makes an HTTP call to position-stocks-service; no pre-existing test wants (or can reach) it.
+    tests/test_group332_shortlist.py turns it back on with a stubbed client."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_BOARD_NUDGE_ENABLED", False, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _regime_gate_on_for_legacy_tests(monkeypatch):
+    """group332: the market-regime gate is OFF by default now (a weak market must not stop BUYs). The pre-existing regime-gate tests
+    exercise the gate's own logic, so they run with it switched back on; tests/test_group332_shortlist.py pins the new default."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_REGIME_GATE_ENABLED", True, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _legacy_weak_market_blocks_on(monkeypatch):
+    """group332: the VIX block, VIX carry block and Nifty-weak carry block default to OFF now (a weak / fearful market must not stop
+    a BUY or force a sale). The pre-existing group330/331 tests exercise those rules' own logic, so they run with the old values;
+    tests/test_group332_shortlist.py pins the new defaults from config.py's source."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "VIX_BLOCK_ABOVE", 24.0, raising=False)
+    monkeypatch.setattr(_cfg, "VIX_CARRY_BLOCK_ABOVE", 20.0, raising=False)
+    monkeypatch.setattr(_cfg, "VIX_CARRY_SPIKE_PCT", 6.0, raising=False)
+    monkeypatch.setattr(_cfg, "CARRY_MIN_NIFTY_CHANGE_PCT", -0.8, raising=False)

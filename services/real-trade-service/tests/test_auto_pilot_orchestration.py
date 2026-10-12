@@ -347,6 +347,33 @@ class TestExitOnlyTickBody:
         assert len(notes) == 1
         assert "Fast exit tick error" in notes[0][0][0]
 
+    def test_oracle_call_timeout_is_quiet_until_it_repeats(self, db, monkeypatch):
+        # group332: a lone DPY-4024 (DB briefly saturated) is rolled back + logged, not a Telegram; the 3rd in a row alerts.
+        db.add(_gate())
+        db.commit()
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
+        monkeypatch.setattr("exit_engine.exit.evaluate_mode",
+                            _async_raise(RuntimeError("(oracledb.exceptions.DatabaseError) DPY-4024: call timeout of 8000 ms exceeded")))
+        notes = []
+        monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
+        ap._fast_exit_db_timeouts.clear()
+        run(ap._exit_only_tick_body("REAL"))
+        run(ap._exit_only_tick_body("REAL"))
+        assert notes == []
+        run(ap._exit_only_tick_body("REAL"))
+        assert len(notes) == 1 and "3 ticks in a row" in notes[0][0][0]
+
+    def test_success_resets_the_timeout_streak(self, db, monkeypatch):
+        db.add(_gate())
+        db.commit()
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
+        monkeypatch.setattr("exit_engine.exit.evaluate_mode", _async_return({}))
+        monkeypatch.setattr(ap, "_alert_if_open_positions_while_gate_off", _async_return(None))
+        monkeypatch.setattr(ap, "notify_async", _async_recorder([]))
+        ap._fast_exit_db_timeouts["REAL"] = 2
+        run(ap._exit_only_tick_body("REAL"))
+        assert ap._fast_exit_db_timeouts["REAL"] == 0
+
 
 # ---------------------------------------------------------------------------
 # _full_tick_body

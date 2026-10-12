@@ -423,6 +423,16 @@ def _note_exit_tick_timing(mode: str, exit_s: float, reconcile_s: float, now_m: 
         return False
 
 
+_fast_exit_db_timeouts: dict = {}
+FAST_EXIT_TIMEOUT_ALERT_AFTER = 3     # consecutive Oracle call timeouts before Telegram is used (group332)
+
+
+def _is_db_call_timeout(exc: BaseException) -> bool:
+    """True for an Oracle call timeout (python-oracledb DPY-4024) - transient DB saturation, not a logic error."""
+    txt = f"{type(exc).__name__} {exc}"
+    return "DPY-4024" in txt or "call timeout" in txt.lower()
+
+
 async def _exit_only_tick(mode: str) -> None:
     """Fast exit-only tick: exit_engine + reconcile, no candidates/entry.
 
@@ -538,9 +548,24 @@ async def _exit_only_tick_body(mode: str) -> None:
                 f"Full: {exit_.get('full_exits',0)} | Partial: {exit_.get('partial_exits',0)} | "
                 f"Time-stop: {exit_.get('time_stops',0)} | Emergency: {exit_.get('emergency_exits',0)}"
             )
+        _fast_exit_db_timeouts[mode] = 0
     except Exception as e:
-        logger.exception("exit-only tick failed for %s", mode)
-        await notify_async(f"⚠️ *Fast exit tick error — {mode}*\n{str(e)[:200]}")
+        if _is_db_call_timeout(e):
+            # LOG FIX (2026-10-12): "Fast exit tick error - REAL: DPY-4024 call timeout of 8000 ms exceeded (INSERT INTO
+            # trade_exit_decisions ...)" fired while the Oracle DB was briefly saturated (live_quotes MERGE storm right after boot).
+            # The tick repeats every few seconds, so one timeout is rolled back and logged; Telegram only when it keeps happening.
+            try:
+                db.rollback()
+            except Exception:
+                logger.debug("exit-only tick: rollback after Oracle call timeout failed", exc_info=True)
+            _fast_exit_db_timeouts[mode] = _fast_exit_db_timeouts.get(mode, 0) + 1
+            n = _fast_exit_db_timeouts[mode]
+            logger.warning("exit-only tick for %s: Oracle call timeout (%d in a row), retrying next tick: %s", mode, n, str(e)[:160])
+            if n == FAST_EXIT_TIMEOUT_ALERT_AFTER or (n > FAST_EXIT_TIMEOUT_ALERT_AFTER and n % 20 == 0):
+                await notify_async(f"⚠️ *Fast exit tick — {mode}*\nOracle call timeout {n} ticks in a row; stops are still re-checked every tick.\n{str(e)[:160]}")
+        else:
+            logger.exception("exit-only tick failed for %s", mode)
+            await notify_async(f"⚠️ *Fast exit tick error — {mode}*\n{str(e)[:200]}")
     finally:
         db.close()
 

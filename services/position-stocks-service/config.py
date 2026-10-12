@@ -262,7 +262,9 @@ MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
 #    by more than MARKET_GATE_MIN_NIFTY_CHANGE_PCT. Source is the API
 #    gateway's /market/indices (same endpoint real-trade-service uses).
 #    Fetch failure => ALLOW (a broken data feed must never freeze trading).
-MARKET_GATE_ENABLED = _get_bool("MARKET_GATE_ENABLED", True)
+# group 332: the Nifty-weak gates are OFF by default (a weak market must not stop entries; some stocks do well on down days).
+# MARKET_GATE_ENABLED=1 / MARKET_GATE_PREV_CLOSE_ENABLED=1 bring them back.
+MARKET_GATE_ENABLED = _get_bool("MARKET_GATE_ENABLED", False)
 MARKET_GATE_MIN_NIFTY_CHANGE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_CHANGE_PCT", -0.10)
 MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
 # Group 221 (2026-10-07): the gate above measures Nifty against TODAY'S OPEN, so a market that gapped
@@ -270,7 +272,7 @@ MARKET_GATE_CACHE_TTL_S = _get_float("MARKET_GATE_CACHE_TTL_S", 120.0)
 # on the change against the PREVIOUS SESSION's close (gateway key nifty_vs_prev_close). The -0.75 default
 # is my assumption (roughly a bottom-fifth Nifty day); there is no outcome data behind it. Ignored for a
 # stale / fallback gateway payload and when the key is missing (older gateway), so it fails open.
-MARKET_GATE_PREV_CLOSE_ENABLED = _get_bool("MARKET_GATE_PREV_CLOSE_ENABLED", True)
+MARKET_GATE_PREV_CLOSE_ENABLED = _get_bool("MARKET_GATE_PREV_CLOSE_ENABLED", False)
 MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT = _get_float("MARKET_GATE_MIN_NIFTY_PREV_CLOSE_PCT", -0.75)
 MARKET_GATE_TIMEOUT_S = _get_float("MARKET_GATE_TIMEOUT_S", 3.0)
 _API_GATEWAY_URL = (os.getenv("API_GATEWAY_URL") or "").strip().rstrip("/") or "https://api-gateway-puwd.onrender.com"
@@ -336,6 +338,20 @@ ADAPTIVE_BAR_TARGET_MAX_PCT = _get_float("ADAPTIVE_BAR_TARGET_MAX_PCT", 3.5)
 # loop, matching this service's core isolation promise.
 QUALITY_GATE_ENABLED = _get_bool("QUALITY_GATE_ENABLED", True)
 QUALITY_GATE_TOP_N = _get_int("QUALITY_GATE_TOP_N", 3)
+
+# group 332: "best 3 to 5" shortlist (screening/shortlist.py). With it on, up to SHORTLIST_MAX ranked names are quality-checked, the
+# passers are re-ranked on scan score + Market Board conviction + quality + zone score, and the best SHORTLIST_MAX are tried
+# best-first. Never lowers a gate. SHORTLIST_ENABLED=0 restores the old scan-order behaviour.
+SHORTLIST_ENABLED = _get_bool("SHORTLIST_ENABLED", True)
+SHORTLIST_MAX = max(1, min(10, _get_int("SHORTLIST_MAX", 5)))
+SHORTLIST_MIN_SCORE = _get_float("SHORTLIST_MIN_SCORE", 0.0)
+SHORTLIST_W_SCAN = _get_float("SHORTLIST_W_SCAN", 0.40)
+SHORTLIST_W_BOARD = _get_float("SHORTLIST_W_BOARD", 0.30)
+SHORTLIST_W_QUALITY = _get_float("SHORTLIST_W_QUALITY", 0.20)
+SHORTLIST_W_ZONE = _get_float("SHORTLIST_W_ZONE", 0.10)
+SHORTLIST_BEAR_PENALTY = _get_float("SHORTLIST_BEAR_PENALTY", 20.0)
+SHORTLIST_EXTENDED_PENALTY = _get_float("SHORTLIST_EXTENDED_PENALTY", 10.0)
+SHORTLIST_BOARD_TIMEOUT_S = _get_float("SHORTLIST_BOARD_TIMEOUT_S", 3.0)
 # Deliberately much shorter than real-trade-service's 12-60s timeouts — this
 # loop ticks every 10s, so anything slower than a couple seconds isn't "quick".
 QUALITY_GATE_TIMEOUT_S = _get_float("QUALITY_GATE_TIMEOUT_S", 2.5)
@@ -583,7 +599,7 @@ EARNINGS_DAY_BLOCK = _get_bool("EARNINGS_DAY_BLOCK", True)
 #   PREOPEN_*            09:08 snapshot: warms caches and records the indicative gap of the first PREOPEN_MAX_SYMBOLS F&O names; a gap-up of
 #                        PREOPEN_GAP_UP_BLOCK_PCT or a gap-down of PREOPEN_GAP_DOWN_BLOCK_PCT blocks the entry until PREOPEN_GAP_GATE_UNTIL_IST
 VIX_GATE_ENABLED = _get_bool("VIX_GATE_ENABLED", True)
-VIX_BLOCK_ABOVE = _get_float("VIX_BLOCK_ABOVE", 24.0)
+VIX_BLOCK_ABOVE = _get_float("VIX_BLOCK_ABOVE", 0.0)   # group 332: 0 = no VIX block (fear must not stop entries); VIX_CAUTION_* still shrinks size. 24 = old block
 VIX_CAUTION_ABOVE = _get_float("VIX_CAUTION_ABOVE", 18.0)
 VIX_CAUTION_SIZE_MULT = _get_float("VIX_CAUTION_SIZE_MULT", 0.7)
 VIX_SPIKE_PCT = _get_float("VIX_SPIKE_PCT", 10.0)

@@ -173,11 +173,25 @@ class TestLiveStoreChunks:
         assert store.executed == [100, 100, 50]
 
     def test_a_failed_chunk_does_not_lose_the_rest(self, store):
-        store.fail_on = {2}
+        # group332: the chunk AND both retry halves fail -> only that chunk's rows are lost; the other chunks still land.
+        store.fail_on = {2, 3, 4}
         assert live_store._write_sync(_rows(250)) == 150
-        assert store.executed == [100, 100, 50]
+        assert store.executed == [100, 100, 50, 50, 50]
         st = live_store.status()
-        assert st["failed_chunks"] == 1 and st["timeouts"] == 1 and "DPY-4024" in st["last_error"]
+        assert st["failed_chunks"] == 3 and st["timeouts"] == 3 and "DPY-4024" in st["last_error"]
+
+    def test_a_timed_out_chunk_is_retried_as_two_halves(self, store):
+        # group332 (2026-10-12 log: "333 of 483 rows written ... DPY-4024"): one timeout no longer loses the chunk.
+        store.fail_on = {2}
+        assert live_store._write_sync(_rows(250)) == 250
+        assert store.executed == [100, 100, 50, 50, 50]
+        st = live_store.status()
+        assert st["failed_chunks"] == 1 and st["timeouts"] == 1
+
+    def test_tiny_chunk_is_not_split(self, store):
+        store.fail_on = {1}
+        assert live_store._write_sync(_rows(10)) == 0
+        assert store.executed == [10]
 
     def test_chunk_size_is_blank_safe(self, monkeypatch):
         for raw, want in (("", 150), ("abc", 150), ("0", 10), ("40", 40)):

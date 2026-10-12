@@ -249,11 +249,21 @@ class TestInTheCycle:
 
     def test_top_n_slot_goes_to_next_affordable_candidate(self, db, monkeypatch):
         monkeypatch.setattr(config, "QUALITY_GATE_TOP_N", 2)
+        monkeypatch.setattr(config, "SHORTLIST_ENABLED", False)           # group332: shortlist widens top-N to SHORTLIST_MAX; legacy width here
         monkeypatch.setattr(config, "MIN_PREFERRED_SCALP_POSITIONS", 0)   # not "under preferred": no extra top-N slots
         cands = [_cand("SATIN", 150.0), _cand("COMSYN", 900.0), _cand("A", 10.0), _cand("B", 20.0), _cand("C", 30.0)]
         calls = self._setup(db, monkeypatch, cands, avail=120.0)
         asyncio.run(m._run_cycle(db, trigger="AUTO"))
         assert calls["check"] == ["A", "B"]
+
+    def test_shortlist_widens_top_n_to_shortlist_max(self, db, monkeypatch):
+        monkeypatch.setattr(config, "QUALITY_GATE_TOP_N", 2)
+        monkeypatch.setattr(config, "SHORTLIST_ENABLED", True)
+        monkeypatch.setattr(config, "MIN_PREFERRED_SCALP_POSITIONS", 0)
+        cands = [_cand("SATIN", 150.0), _cand("COMSYN", 900.0), _cand("A", 10.0), _cand("B", 20.0), _cand("C", 30.0)]
+        calls = self._setup(db, monkeypatch, cands, avail=120.0)
+        asyncio.run(m._run_cycle(db, trigger="AUTO"))
+        assert calls["check"] == ["A", "B", "C"]
 
     def test_unaffordable_log_is_rate_limited(self, db, monkeypatch, caplog):
         calls = self._setup(db, monkeypatch, [_cand("SATIN", 150.0), _cand("OK", 10.0)], avail=120.0)

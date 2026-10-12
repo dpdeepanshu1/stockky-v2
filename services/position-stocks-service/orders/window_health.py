@@ -88,8 +88,8 @@ def disabled_windows(db) -> Dict[str, str]:
         logger.debug("window disabled_windows failed (nothing disabled): %s", e)
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e2:  # noqa: BLE001
+            logger.debug("window disabled_windows rollback failed: %s", e2)
         return {}
 
 

@@ -27,6 +27,7 @@ import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
 import ShortlistPanel from "./board/ShortlistPanel";
+import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
@@ -843,6 +844,8 @@ export default function PositionStocksTab() {
       {/* group306: Market Board (display + shadow logging only; places no order) */}
       {subTab === "board" && (
         <div className="space-y-4">
+          <TopPicks active={subTab === "board"} fetcher={() => positionStocksApi.topPicks()}
+            title="Top picks · best 3 to 5 for the scalp pool" note="Display only. The same ranking drives which stock the scalper tries first; every entry gate still decides. Board-preview cards have not been through those gates." />
           <ShortlistPanel active={subTab === "board"} kind="scalp" fetcher={() => positionStocksApi.shortlist()}
             title="Best picks · next entries (scalp pool)" note="Display only. The entry gates still decide; a pick that fails one is skipped and the next pick is tried." />
           <SessionHealthPanel active={subTab === "board"} />

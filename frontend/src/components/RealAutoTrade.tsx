@@ -16,6 +16,7 @@ import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import ShortlistPanel from "./board/ShortlistPanel";
+import TopPicks from "./board/TopPicks";
 import { riskCap, type RiskCapResult } from "./board/riskCap";
 import { chargesForLegs, sumCharges, DP_CHARGE_INCL_GST, type ChargeBreakdown, type ChargeLeg } from "../chargesRates";
 
@@ -1656,6 +1657,8 @@ export default function RealAutoTrade() {
             };
             return (
               <div className="space-y-3">
+                <TopPicks active={activeTab === "board"} resetKey={mode} fetcher={() => realTradeApi.topPicks(mode)}
+                  title={`Top picks · best 3 to 5 (${mode})`} note="Display only. Entries come from the same ranking; the risk engine and every entry gate still decide. Board-preview cards are not candidates that passed them." />
                 <ShortlistPanel active={activeTab === "board"} kind="real" resetKey={mode} fetcher={() => realTradeApi.shortlist(mode)}
                   title={`Best picks · next entries (${mode})`} note="Display only. Every entry gate and the risk engine still decide; if a pick's order fails, the next reserve pick takes its slot." />
                 <MarketBoard active={activeTab === "board"} marks={marks} title={`Real Trade · Market Board (${mode})`}

@@ -56,6 +56,11 @@ def build(approved: List[dict]) -> Dict[str, List[dict]]:
     ranked = sorted(approved, key=lambda e: e["composite_score"], reverse=True)   # stable: ties keep processing order
     eligible = [e for e in ranked
                 if e["composite_score"] >= config.ENTRY_MIN_COMPOSITE_SCORE or e.get("is_upper_circuit")]
+    if getattr(config, "ENTRY_SHORTLIST_DROP_BEARISH", True):
+        # group338: long-only engine - never enter against the board when a non-bearish candidate is available (UC keeps its bypass).
+        _longs = [e for e in eligible if e.get("board_side") != "bear" or e.get("is_upper_circuit")]
+        if _longs:
+            eligible = _longs
     if getattr(config, "ENTRY_SHORTLIST_ENABLED", True):
         shortlist = eligible[: max(1, int(config.ENTRY_SHORTLIST_MAX))]
     else:

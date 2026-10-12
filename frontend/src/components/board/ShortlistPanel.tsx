@@ -4,6 +4,9 @@
 import { useEffect, useState } from "react";
 import { setVisibleInterval } from "../../visibleInterval";
 import { Card } from "./boardCard";
+import StockPopup from "./StockPopup";
+import { usePrefersReducedMotion } from "./useBoardData";
+import type { BoardRowLite } from "./boardTypes";
 
 type Kind = "scalp" | "real";
 
@@ -78,6 +81,8 @@ export default function ShortlistPanel({ active, kind, fetcher, title, note, res
   { active: boolean; kind: Kind; fetcher: () => Promise<any>; title: string; note?: string; resetKey?: string }) {
   const [data, setData] = useState<Summary | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [sel, setSel] = useState<BoardRowLite | null>(null);   // a row opens the stock popup: candle / line chart, levels and live momentum
+  const reduced = usePrefersReducedMotion();
 
   useEffect(() => {
     if (!active) return;
@@ -98,6 +103,7 @@ export default function ShortlistPanel({ active, kind, fetcher, title, note, res
 
   const age = data?.asOf ? Math.max(0, Math.round((Date.now() - data.asOf) / 1000)) : null;
   return (
+    <>
     <Card title={title} right={age != null ? <span className="text-[9px] text-mist tabular-nums">last cycle {age < 90 ? `${age}s` : `${Math.round(age / 60)}m`} ago</span> : undefined}>
       <div className="space-y-1.5 text-[11px]" data-testid={`shortlist-${kind}`}>
         {err && <div className="text-signal-hold">{err}</div>}
@@ -109,11 +115,15 @@ export default function ShortlistPanel({ active, kind, fetcher, title, note, res
         {data?.rows.map((r: Row) => {
           const o = outcomeStyle(r.outcome);
           return (
-            <div key={`${r.pick}-${r.symbol}`} className="flex items-center justify-between gap-2 rounded-lg border border-slate bg-ink px-2 py-1.5">
+            <div key={`${r.pick}-${r.symbol}`} className="sl-row flex items-center justify-between gap-2 rounded-lg border border-slate bg-ink px-2 py-1.5"
+              role="button" tabIndex={0} aria-label={`${r.symbol}: open chart and live momentum`} data-testid={`shortlist-row-${r.symbol}`}
+              onClick={() => setSel({ symbol: r.symbol })}
+              onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSel({ symbol: r.symbol }); } }}>
               <div className="min-w-0">
                 <span className="font-display font-bold text-paper tabular-nums">#{r.pick} {r.symbol}</span>
                 {r.status && <span className="ml-1.5 text-[9px] uppercase tracking-widest text-mist">{r.status === "SELECTED" ? "first in line" : r.status === "RESERVE" ? "reserve" : r.status.toLowerCase()}</span>}
                 {r.detail && <div className="text-[10px] text-mist truncate">{r.detail}</div>}
+                <div className="text-[9px] text-signal-prepare">Tap for chart &amp; live momentum</div>
               </div>
               <div className="text-right shrink-0 tabular-nums">
                 <div className="text-paper font-bold">{r.score == null ? "-" : r.score.toFixed(1)}</div>
@@ -125,5 +135,7 @@ export default function ShortlistPanel({ active, kind, fetcher, title, note, res
         {note && <div className="text-[9px] text-mist pt-1">{note}</div>}
       </div>
     </Card>
+    <StockPopup row={sel} onClose={() => setSel(null)} reduced={reduced} />
+    </>
   );
 }

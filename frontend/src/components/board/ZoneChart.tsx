@@ -4,7 +4,8 @@
 import type { SymbolView } from "./boardTypes";
 import { istClock } from "./boardState";
 
-export default function ZoneChart({ v, width = 640, height = 300, reduced }: { v: SymbolView; width?: number; height?: number; reduced: boolean }) {
+// group339: `mode` "candle" (default) or "line" - the same zones, levels, VWAP and held-position lines over either candles or a close-price line.
+export default function ZoneChart({ v, width = 640, height = 300, reduced, mode = "candle" }: { v: SymbolView; width?: number; height?: number; reduced: boolean; mode?: "candle" | "line" }) {
   const c = v.candles;
   if (!c.length) return <div style={{ fontSize: 11, color: "var(--ob-dim)", padding: 12 }}>No bars yet.</div>;
   const padL = 6, padR = 58, padT = 8, padB = 18;
@@ -33,7 +34,7 @@ export default function ZoneChart({ v, width = 640, height = 300, reduced }: { v
     </g>
   );
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label={`${v.symbol} ${v.tf_min}-minute candles with zones and levels`} style={{ display: "block" }}>
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label={`${v.symbol} ${v.tf_min}-minute ${mode === "line" ? "price line" : "candles"} with zones and levels`} style={{ display: "block" }}>
       {grid.map((gy, i) => <line key={i} x1={padL} x2={xEnd} y1={gy} y2={gy} stroke="var(--ob-line)" strokeWidth={1} />)}
       {v.zones.map((z, i) => (
         <g key={i}>
@@ -53,7 +54,17 @@ export default function ZoneChart({ v, width = 640, height = 300, reduced }: { v
         <line key={i} x1={padL} x2={xEnd} y1={y(p)} y2={y(p)} stroke="var(--ob-cyan)" strokeOpacity={0.55} strokeWidth={0.8} strokeDasharray="1 3" />
       ))}
       {vw.length > 1 && <polyline points={vw.map(p => p.join(",")).join(" ")} fill="none" stroke="#8d86ff" strokeWidth={1.1} strokeDasharray="3 2" />}
-      {c.map((k, i) => {
+      {mode === "line" && c.length > 1 && (() => {
+        const pts = c.map((k, i) => [x(i), y(i === c.length - 1 ? v.ltp : k[4])] as [number, number]);
+        const col = v.ltp >= c[0][1] ? up : dn;
+        return (
+          <g data-testid="zone-chart-line">
+            <polygon points={`${pts[0][0]},${padT + H} ${pts.map(p => p.join(",")).join(" ")} ${pts[pts.length - 1][0]},${padT + H}`} fill={col} fillOpacity={0.10} />
+            <polyline points={pts.map(p => p.join(",")).join(" ")} fill="none" stroke={col} strokeWidth={1.7} strokeLinejoin="round" strokeLinecap="round" />
+          </g>
+        );
+      })()}
+      {mode === "candle" && c.map((k, i) => {
         const bull = k[4] >= k[1], col = bull ? up : dn;
         return (
           <g key={k[0]} className={reduced ? undefined : "ob-candle"} style={reduced ? undefined : { animationDelay: `${Math.min(700, i * 6)}ms` }}>

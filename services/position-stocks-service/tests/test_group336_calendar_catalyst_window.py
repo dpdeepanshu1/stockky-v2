@@ -123,7 +123,9 @@ class TestWindowHealth:
         assert sum(v["disabled"] for v in ev.values()) == 1 and ev["1m"]["disabled"] is False
 
     def test_filter_candidates(self, monkeypatch):
-        monkeypatch.setattr(wh, "_load_rows", lambda db: [R("5m", -10)] * 10)
+        wh.reset()          # the module caches the paused set for 5 minutes; start clean
+        # a profitable 15m window exists, so the losing 5m is not the "one window that always trades"
+        monkeypatch.setattr(wh, "_load_rows", lambda db: [R("5m", -10)] * 10 + [R("15m", 20)] * 5)
         c = [NS(symbol="A", window_label="5m"), NS(symbol="B", window_label="15m")]
         db = NS(rollback=lambda: None)
         kept, dropped = wh.filter_candidates(db, c)

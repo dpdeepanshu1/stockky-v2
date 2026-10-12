@@ -43,7 +43,8 @@ def test_max_five_and_never_padded():
     assert len(shortlist.build(passers[:2], None)) == 2
 
 
-def test_bearish_and_extended_are_penalised():
+def test_bearish_and_extended_are_penalised(monkeypatch):
+    monkeypatch.setattr(config, "SHORTLIST_DROP_BEARISH", False)      # group338 drops board-bearish passers by default; this is the penalty-only path
     passers = [(C("A", 10), Q(70, 70)), (C("B", 10), Q(70, 70)), (C("C", 10), Q(70, 70))]
     out = shortlist.build(passers, _payload(B("A", 80, 1, side="bear"), B("B", 80, 2, extended=True), B("C", 80, 3)))
     assert [r["symbol"] for r in out] == ["C", "B", "A"]

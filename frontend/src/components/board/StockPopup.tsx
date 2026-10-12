@@ -11,7 +11,12 @@ import { positionStocksApi } from "../../positionStocksApi";
 import ZoneChart from "./ZoneChart";
 import { zoneScoreLabel } from "./riskCap";
 import { convictionDots } from "./boardState";
+import { computeMomentum, fmtPct } from "./momentum";
 import type { BoardRowLite, SymbolView } from "./boardTypes";
+
+type ChartMode = "candle" | "line";
+const MODE_KEY = "stockky.board.chartMode";
+const readMode = (): ChartMode => { try { return localStorage.getItem(MODE_KEY) === "line" ? "line" : "candle"; } catch { return "candle"; } };
 
 const f2 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "-" : v.toFixed(2));
 const num = (v: number | null | undefined) => (v != null && Number.isFinite(v) ? v : null);
@@ -20,6 +25,8 @@ const initials = (s: string) => s.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpp
 export default function StockPopup({ row, onClose, reduced, extra }: { row: BoardRowLite | null; onClose: () => void; reduced: boolean; extra?: React.ReactNode }) {
   const [v, setV] = useState<SymbolView | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [mode, setModeState] = useState<ChartMode>(readMode);
+  const setMode = (m: ChartMode) => { setModeState(m); try { localStorage.setItem(MODE_KEY, m); } catch { /* storage blocked: the choice just is not remembered */ } };
   useEffect(() => {
     setV(null); setErr(null);
     if (!row) return;
@@ -56,7 +63,8 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
     const lo = Math.min(...spark), hi = Math.max(...spark), span = hi - lo || 1;
     sparkPts = spark.map((p, i) => `${((i / (spark.length - 1)) * 86).toFixed(1)},${(2 + (1 - (p - lo) / span) * 24).toFixed(1)}`).join(" ");
   }
-  const ob = v?.zone ? `${f2(v.zone.bottom)}-${f2(v.zone.top)}` : "-";
+  const mom = v ? computeMomentum(v.candles, ltp, num(v.vwap) ?? num(row?.vwap), v.tf_min) : null;
+  const ob = v?.zone ?`${f2(v.zone.bottom)}-${f2(v.zone.top)}` : "-";
   const sr = v ? `${f2(v.levels.supports[0]?.price)} / ${f2(v.levels.resistances[0]?.price)}` : "-";
   return (
     <BottomSheet isOpen={!!row} onClose={onClose} desktopMaxWidth="max-w-2xl"
@@ -88,7 +96,30 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
             </div>
             {row.rule ? <span className="ob-rule" style={{ color: sideCol, borderColor: sideCol, background: "rgba(255,255,255,.03)" }}>{row.rule}</span> : null}
             {err && !v && <div className="ob-note" style={{ color: "var(--ob-amber)" }}>{err}</div>}
-            {v ? <div className="ob-chart"><ZoneChart v={v} reduced={reduced} /></div> : !err && <div className="ob-note" style={{ padding: 12 }}>Loading chart…</div>}
+            {mom && (
+              <div className={`ob-mom ${mom.tone}`} data-testid="stock-momentum">
+                <div className="ob-mom-head"><span>Live momentum</span><b>{mom.label}{mom.score != null ? ` · ${mom.score > 0 ? "+" : ""}${mom.score}` : ""}</b></div>
+                {mom.score != null && (
+                  <div className="ob-mom-bar" aria-hidden="true"><i style={{ left: `${(50 + mom.score / 2).toFixed(1)}%` }} /></div>
+                )}
+                <div className="ob-mom-kv">
+                  <div><span>Last {mom.shortBars} bars</span><b>{fmtPct(mom.shortPct)}</b></div>
+                  <div><span>Last {mom.longBars} bars</span><b>{fmtPct(mom.longPct)}</b></div>
+                  <div><span>vs VWAP</span><b>{fmtPct(mom.vwapPct)}</b></div>
+                  <div><span>Green of 5</span><b>{mom.greenOf5 == null ? "-" : `${mom.greenOf5}/5`}</b></div>
+                  <div><span>Day range</span><b>{mom.dayPos == null ? "-" : `${Math.round(mom.dayPos * 100)}%`}</b></div>
+                  <div><span>Volume</span><b>{mom.volRatio == null ? "-" : `${mom.volRatio.toFixed(1)}x`}</b></div>
+                </div>
+                <div className="ob-note">{mom.tfMin}-minute bars, refreshed every 5 s{bull ? "" : " · this stock is on the bearish side of the board; the engines only buy long"}.</div>
+              </div>
+            )}
+            {v && (
+              <div className="ob-modes" role="group" aria-label="Chart type">
+                <button type="button" className="ob-chip" aria-pressed={mode === "candle"} onClick={() => setMode("candle")}>Candles</button>
+                <button type="button" className="ob-chip" aria-pressed={mode === "line"} onClick={() => setMode("line")}>Line</button>
+              </div>
+            )}
+            {v ? <div className="ob-chart"><ZoneChart v={v} reduced={reduced} mode={mode} /></div> : !err && <div className="ob-note" style={{ padding: 12 }}>Loading chart…</div>}
             {v && (
               <div className="ob-levels">
                 <div>{v.levels.resistances.map(l => <div key={l.label}>{l.label} <b>{l.price.toFixed(2)}</b> <span style={{ fontSize: 9 }}>{l.source}</span></div>)}</div>

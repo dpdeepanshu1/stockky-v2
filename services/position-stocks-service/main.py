@@ -166,6 +166,7 @@ from orders import charges_ledger, excursion, review_stats, trade_stats
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
+    reset_last_skip, last_skip_reason, is_symbol_specific_skip,
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
@@ -558,6 +559,14 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
 #     (reserve_capital + reserve_additional together need max(position_value, qty*ltp));
 #   - attempt_entry() refuses when open positions >= MAX_CONCURRENT_SCALP_POSITIONS
 #     (same OPEN + EXIT_LEGS_REJECTED count).
+def _attempt_entry_with_skip_reason(db, candidate, quality=None):
+    """group335: attempt_entry plus the reason of its last SKIPPED row, read on the SAME thread (the reason is thread-local).
+    Looks attempt_entry up at call time, so a patched one still works. Returns (position_or_None, skip_reason_or_None)."""
+    reset_last_skip()
+    res = attempt_entry(db, candidate, quality=quality)
+    return res, (None if res else last_skip_reason())
+
+
 _last_shortlist: dict = {"at": None, "rows": []}     # group332: latest best-picks shortlist, for GET /shortlist
 _unaffordable_logged_at: float = float("-inf")  # -inf: the first log is never suppressed, even right after boot
 
@@ -1125,11 +1134,18 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                 _stage("shortlist", "Best Picks Shortlist", _ts,
                        detail="; ".join(f"#{r['pick']} {r['symbol']} {r['score']}" for r in _sl),
                        picks=shortlist.public(_sl))
+            _pick_skips: list[str] = []
             for _c, _q in quality_passers:
                 try:
-                    result = await asyncio.to_thread(attempt_entry, db, _c, quality=_q)
+                    result, _skip = await asyncio.to_thread(_attempt_entry_with_skip_reason, db, _c, _q)
                     candidate = _c  # track which one actually attempted
                     quality = _q
+                    if (not result and config.SHORTLIST_FALLTHROUGH and is_symbol_specific_skip(_skip)):
+                        # group335: this symbol failed a gate that only concerns it (VWAP / liquidity / depth / circuit / ...) -
+                        # the next shortlisted pick may still be fine; global skips (not armed, kill switch, budget, max positions) still stop.
+                        _pick_skips.append(f"{_c.symbol}:{str(_skip).split(':', 1)[0]}")
+                        logger.info("position-stocks: %s skipped (%s) - trying next shortlisted pick", _c.symbol, str(_skip)[:120])
+                        continue
                     break  # success or non-capital skip — stop here
                 except InsufficientCapitalSkip as _ics:
                     capital_skipped.append(_c.symbol)
@@ -1139,6 +1155,9 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                         _c.symbol, _ics,
                     )
                     continue  # try the next quality-passing candidate
+            if _pick_skips and not result:
+                summary["shortlist_skips"] = _pick_skips
+                logger.info("position-stocks: no shortlisted pick cleared its entry gates this cycle (%s)", ", ".join(_pick_skips))
             if capital_skipped and not result:
                 logger.info(
                     "position-stocks: all %d quality-passing candidate(s) hit INSUFFICIENT_CAPITAL "

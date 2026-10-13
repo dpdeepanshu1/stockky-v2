@@ -88,3 +88,45 @@ def test_checked_in_generated_files_are_current():
     for cmd in (["gen_env_reference.py", "--check"], ["check_shared_copies.py"]):
         r = subprocess.run([sys.executable, str(SCRIPTS / cmd[0]), *cmd[1:]], capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ---- group341c: merge-conflict marker check ----------------------------------------------------------------------------
+def test_conflict_scan_finds_markers_even_when_indented():
+    import check_merge_conflicts as c
+    text = "def f():\n    if x:\n    <<<<<<< HEAD\n        a = 1\n    =======\n        a = 2\n    >>>>>>> origin/main\n"
+    assert c.scan_text(text) == [(3, "<<<<<<<"), (5, "======="), (7, ">>>>>>>")]
+
+
+def test_conflict_scan_ignores_underlines_and_headings():
+    import check_merge_conflicts as c
+    assert c.scan_text('"""Title\n=================\nbody\n"""\nx = "<<<<<<<<"  # 8 chars inside text\nSetext\n=======\n') == []
+    assert c.scan_text("a <<<<<<< b\n") == []        # not at the start of a line
+
+
+def test_conflict_check_cli(tmp_path):
+    ok = tmp_path / "ok.py"
+    ok.write_text("x = 1\n")
+    bad = tmp_path / "svc" / "reconcile.py"
+    bad.parent.mkdir()
+    bad.write_text("if True:\n<<<<<<< HEAD\n    pass\n=======\n    pass\n>>>>>>> branch\n")
+    venv = tmp_path / ".venv" / "lib"
+    venv.mkdir(parents=True)
+    (venv / "mod.py").write_text("<<<<<<< HEAD\n")             # vendored: ignored
+    r = subprocess.run([sys.executable, str(SCRIPTS / "check_merge_conflicts.py"), str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode == 1
+    assert "reconcile.py:2" in r.stdout and "mod.py" not in r.stdout
+    r2 = subprocess.run([sys.executable, str(SCRIPTS / "check_merge_conflicts.py"), str(ok)], capture_output=True, text=True)
+    assert r2.returncode == 0, r2.stdout
+
+
+def test_repo_has_no_conflict_markers():
+    r = subprocess.run([sys.executable, str(SCRIPTS / "check_merge_conflicts.py")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout
+
+
+def test_every_service_dockerfile_compiles_code_at_build_time():
+    """A syntax error must fail `docker compose build`, not crash-loop the container (the 2026-10-13 reconcile.py case)."""
+    for df in sorted((ROOT / "services").glob("*/Dockerfile")):
+        text = df.read_text()
+        assert "compileall" in text, f"{df.parent.name}: no compileall step"
+        assert text.index("COPY . .") < text.index("compileall"), f"{df.parent.name}: compileall must run after COPY . ."

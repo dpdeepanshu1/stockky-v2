@@ -583,6 +583,121 @@ def _support_resistance(df: pd.DataFrame, window: int = 20):
     return float(recent["Low"].min()), float(recent["High"].max())
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+# ── Market-structure engine (stockky_ms, vendored by scripts/sync_market_structure.py) ─────────────────────────────────
+# Additive and fail-open: when the package is missing (standalone technical image), STRUCTURE_ENABLED=0, or anything raises, the
+# response simply has no `market_structure` block and every existing field is unchanged.
+try:
+    from stockky_ms.engine import analyze as _ms_analyze
+    from stockky_ms.summary import flatten_summary as _ms_flatten
+except Exception:  # noqa: BLE001
+    _ms_analyze = None
+    _ms_flatten = None
+
+_STRUCTURE_STALE_DAYS = 7
+
+
+def _structure_enabled() -> bool:
+    return (os.getenv("STRUCTURE_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _df_to_bars(df):
+    """DataFrame (DatetimeIndex, Open/High/Low/Close/Volume) -> [(epoch_s, o, h, l, c, v)] for the engine."""
+    out = []
+    has_open = "Open" in df.columns
+    has_vol = "Volume" in df.columns
+    for ts, row in df.iterrows():
+        try:
+            c = float(row["Close"])
+            out.append((float(pd.Timestamp(ts).timestamp()), float(row["Open"]) if has_open else c, float(row["High"]), float(row["Low"]), c,
+                        float(row["Volume"]) if has_vol and not pd.isna(row["Volume"]) else 0.0))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _structure_for_df(df, ctx=None):
+    """Returns (block, summary) or (None, None). Never raises."""
+    if _ms_analyze is None or not _structure_enabled() or df is None or len(df) < 5:
+        return None, None
+    try:
+        last = pd.Timestamp(df.index[-1])
+        if last.tzinfo is None:
+            last = last.tz_localize("UTC")
+        stale = (pd.Timestamp.now(tz="UTC") - last) > pd.Timedelta(days=_STRUCTURE_STALE_DAYS)
+        block = _ms_analyze(_df_to_bars(df), ctx=ctx or {}, stale=bool(stale))
+        return block, _ms_flatten(block)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Technical: market-structure analyze failed (%s); continuing without it", e)
+        return None, None
+
+
+def _structure_max_bytes() -> int:
+    """Size guard for the market_structure block in a response (0 disables). Over the cap the block is dropped and only the flat summary is kept."""
+    try:
+        return max(0, int((os.getenv("STRUCTURE_MAX_BYTES") or "60000").strip()))
+    except Exception:  # noqa: BLE001
+        return 60000
+
+
+def _structure_cache_ttl() -> int:
+    """TTL for cached structure blocks. STRUCTURE_CACHE_TTL_S overrides; otherwise follows the analysis cache TTL (5 min open / 6 h closed)."""
+    try:
+        v = (os.getenv("STRUCTURE_CACHE_TTL_S") or "").strip()
+        if v:
+            return max(0, int(v))
+    except Exception:  # noqa: BLE001
+        pass
+    return get_cache_ttl()
+
+
+def _structure_cached(sym, df, ctx=None, force=False):
+    """Cached wrapper around _structure_for_df. Returns (block, summary); never raises.
+
+    The cache entry is validated against the frame (last bar timestamp + bar count) and the extension flags in ctx, so a new bar or a
+    different flag set recomputes instead of serving a stale block. One entry per (symbol, flags): no per-bar key growth."""
+    try:
+        if df is None or len(df) < 5:
+            return None, None
+        flags = f"{int(bool((ctx or {}).get('extended')))}{int(bool((ctx or {}).get('extended_short')))}"
+        key = f"tech_ms:{sym}:{flags}"
+        sig = [str(pd.Timestamp(df.index[-1])), int(len(df))]
+        if not force and _structure_cache_ttl() > 0:
+            hit = _cache_get(key)
+            if isinstance(hit, dict) and hit.get("sig") == sig and hit.get("block") is not None:
+                return hit["block"], hit.get("summary")
+        block, summary = _structure_for_df(df, ctx)
+        if block is not None and _structure_cache_ttl() > 0:
+            try:
+                _cache_set(key, {"sig": sig, "block": block, "summary": summary}, ttl=_structure_cache_ttl())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Technical: structure cache write failed for %s (%s)", sym, e)
+        return block, summary
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Technical: structure cache path failed for %s (%s); computing uncached", sym, e)
+        return _structure_for_df(df, ctx)
+
+
+def _attach_structure(result, block, summary):
+    """Adds market_structure + structure_summary to a result dict under the size cap. Returns True if the full block was attached."""
+    if block is None:
+        return False
+    cap = _structure_max_bytes()
+    size = 0
+    if cap:
+        try:
+            size = len(json.dumps(block, default=str, separators=(",", ":")))
+        except Exception:  # noqa: BLE001
+            size = cap + 1
+    if cap and size > cap:
+        logger.warning("Technical: market_structure block %d bytes > STRUCTURE_MAX_BYTES=%d; sending summary only", size, cap)
+        result["structure_summary"] = summary
+        result["structure_truncated"] = True
+        return False
+    result["market_structure"] = block
+    result["structure_summary"] = summary
+    return True
+
+
 @app.get("/sector-strength/{symbol}")
 async def sector_relative_strength(symbol: str, sector: str = ""):
     """
@@ -683,6 +798,9 @@ def analyze(
     # these (fully backward compatible).
     trend_weight: float = 1.0,
     meanrev_weight: float = 1.0,
+    # Group 349: lite=1 skips the market-structure computation (the gateway repair path only needs rsi / ema20 / macd). A warm cached
+    # structure summary is still returned (cheap, flat keys); the heavy `market_structure` block is never sent in lite mode.
+    lite: bool = False,
 ):
     sym = normalize_symbol(symbol)
     # force=True and/or non-default threshold overrides must bypass the
@@ -700,6 +818,8 @@ def analyze(
     if not force and not _using_overrides:
         cached = _cache_get(cache_key)
         if cached:
+            if lite and isinstance(cached, dict) and "market_structure" in cached:
+                cached = {k: v for k, v in cached.items() if k != "market_structure"}
             return cached
 
     df = _fetch_history(sym, force=force)
@@ -1003,6 +1123,9 @@ def analyze(
         "extended": bool(extended),
         "extended_short": bool(extended_short),
         "data_insufficient": data_length < 30,
+        "macd": round(macd_val, 4),
+        "macd_hist": round(macd_val - macd_s_val, 4),
+        "sma20": round(float(close.tail(min(20, data_length)).mean()), 2),
         # 2026-09-11 addition: surfaces what this specific call actually
         # used, for debugging/audit — 1.0/1.0 and 30.0/70.0/0.18/0.05 mean
         # "static defaults, no overrides sent."
@@ -1014,12 +1137,52 @@ def analyze(
         "reasons": reasons,
     }
 
+    # Group 349: structure block (additive, fail-open; cached together with the rest of the result).
+    # lite=1 never computes structure; a result built without it must not be cached under the shared key (a later full call would
+    # be served a structure-less result for the whole TTL), so lite results are returned uncached unless the summary came from cache.
+    _ms_ctx = {"ema20": ema20_val, "extended": bool(extended), "extended_short": bool(extended_short)}
+    if lite:
+        _ls = None
+        if _structure_enabled() and _ms_analyze is not None:
+            try:
+                _hit = _cache_get(f"tech_ms:{sym}:{int(bool(extended))}{int(bool(extended_short))}")
+                if isinstance(_hit, dict) and _hit.get("summary"):
+                    _ls = _hit["summary"]
+            except Exception:  # noqa: BLE001
+                _ls = None
+        if _ls:
+            result["structure_summary"] = _ls
+        return result
+    _ms_block, _ms_sum = _structure_cached(sym, df, _ms_ctx, force=force)
+    _attach_structure(result, _ms_block, _ms_sum)
+
     # 2026-09-11: don't poison the shared per-symbol cache with a result
     # computed under non-default (adaptive) thresholds — only cache the
     # plain static-default computation, same as before this change.
     if not _using_overrides:
         _cache_set(cache_key, result)
     return result
+
+@app.get("/structure/{symbol}")
+def structure_only(symbol: str, force: bool = False):
+    """Group 349: just the market-structure block (no scoring), for callers that only need structure. Cached like /analyze."""
+    sym = normalize_symbol(symbol)
+    if not _structure_enabled() or _ms_analyze is None:
+        raise HTTPException(status_code=503, detail="market-structure engine not available")
+    key = f"tech_structure:{sym}"
+    if not force:
+        cached = _cache_get(key)
+        if cached:
+            return cached
+    df = _fetch_history(sym, force=force)
+    block, summary = _structure_cached(sym, df, None, force=force)
+    if block is None:
+        raise HTTPException(status_code=503, detail="structure unavailable (history thin or engine error)")
+    result = {"symbol": sym}
+    _attach_structure(result, block, summary)
+    _cache_set(key, result)
+    return result
+
 
 if __name__ == "__main__":
     import uvicorn

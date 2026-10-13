@@ -1017,6 +1017,7 @@ BOARD_CACHE_S = max(0.0, _get_float("BOARD_CACHE_S", 1.0))
 BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
 BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
 BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
+BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", False)                         # Group 349: Market Board zones/swings from stockky_ms.compat_board (legacy code stays the fallback)
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)

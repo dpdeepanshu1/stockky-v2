@@ -25,6 +25,7 @@ from typing import List, Optional, Set, Dict, Union, Any
 import httpx
 import yfinance as yf
 from symbol_aliases import resolve_ns_ticker
+import ms_passthrough  # Group 349: market-structure block passthrough (never raises)
 
 # yfinance keeps a small timezone cache on disk. Left to its own defaults it
 # writes under $HOME/.cache, which on Render/containers is often read-only or
@@ -3866,6 +3867,8 @@ async def _analyze_one_symbol_ultra(
                             "metrics": feed_row.get("metrics"),
                             "events": feed_row.get("events"),
                             "event_risk": feed_row.get("event_risk"),
+                            # Group 349: flat structure summary for the decision service's shadow policy (None keys dropped below)
+                            "structure_summary": {k: v for k, v in feed_row.items() if isinstance(k, str) and k.startswith("ms_")} or None,
                         }
                         # Drop None values to keep payload clean
                         eval_payload = {k: v for k, v in eval_payload.items() if v is not None}
@@ -5853,6 +5856,29 @@ def _mark_thin_technical(result: dict) -> dict:
     return result
 
 
+@app.get("/stock/{symbol}/structure")
+async def stock_structure(symbol: str, force: bool = False):
+    """Group 349: market-structure block + flat summary for one symbol (proxy to the technical service). Always 200 with a safe
+    'unavailable' default when the engine/upstream is down, so the UI panel can render its empty state instead of an error."""
+    base = (symbol or "").strip().upper().replace(".NS", "").replace(".BO", "")
+    empty = {"symbol": base, "market_structure": None, "structure_summary": ms_passthrough.safe_summary(None)}
+    if not ms_passthrough.enabled() or not base:
+        return empty
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{base}" + ("?force=true" if force else ""), timeout=20)
+        if resp.status_code != 200:
+            return empty
+        data = resp.json()
+        blk = ms_passthrough.safe_block(data)
+        if blk is None:
+            return empty
+        return {"symbol": base, "market_structure": blk, "structure_summary": ms_passthrough.safe_summary(data)}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("structure proxy %s: %s", base, e)
+        return empty
+
+
 @app.get("/stock/{symbol}")
 async def get_stock_decision(symbol: str, already_owned: bool = False):
     """
@@ -6076,6 +6102,7 @@ async def get_stock_decision(symbol: str, already_owned: bool = False):
                         result[k] = td[k]
                 if td.get("reasons"):
                     reasons["technical"] = td["reasons"] if isinstance(td["reasons"], list) else [str(td["reasons"])]
+                ms_passthrough.merge_into(result, td)  # Group 349: additive market_structure + structure_summary
 
             fd = fetched.get("fund")
             if isinstance(fd, dict):
@@ -12930,6 +12957,13 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                     current["technical_score"] = t.get("technical_score")
                 if t.get("macd_hist") is not None or t.get("macd") is not None:
                     current["macd_hist"] = t.get("macd_hist", t.get("macd"))
+                try:  # Group 349: seed the flat ms_* summary keys into the feed row (only non-None values)
+                    _msk = ms_passthrough.feed_keys(t)
+                    if _msk:
+                        current.update(_msk)
+                        patched.append("market_structure")
+                except Exception:  # noqa: BLE001
+                    pass
             elif r.status_code in (401, 429):
                 logger.warning("repair rsi %s HTTP %s — backing off", base, r.status_code)
                 await asyncio.sleep(cooldown * 2)

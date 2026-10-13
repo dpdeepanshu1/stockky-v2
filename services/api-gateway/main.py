@@ -1505,10 +1505,12 @@ def _compute_momentum_movers() -> List[str]:
             _now_m = time.time()
             if _now_m - _angelone_movers_warned_at[0] >= 600:
                 _angelone_movers_warned_at[0] = _now_m
-                logger.warning(
+                _why = str(payload.get("error") or payload.get("reason") or "no detail")[:200]
+                # group341: a boot-time "still loading" answer is expected, not a fault
+                (logger.info if "still loading" in _why else logger.warning)(
                     "AngelOne movers unavailable (status=%s): %s — whole-market movers fall back to the "
                     "other sources",
-                    payload.get("status"), str(payload.get("error") or payload.get("reason") or "no detail")[:200],
+                    payload.get("status"), _why,
                 )
     except Exception as e:
         logger.debug("AngelOne movers fetch failed: %s", e)

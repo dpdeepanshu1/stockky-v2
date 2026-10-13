@@ -29,6 +29,11 @@ Bar = Tuple[float, float, float, float, float, float]
 _lock = threading.Lock()
 _pending: "OrderedDict[str, float]" = OrderedDict()
 _tried: Dict[str, float] = {}
+# group345 (13 Oct log: the backfill ran every ~9 s, 12 one-minute history calls each, and one run came back 11/12 empty - a large share of the
+# market-data load and its ReadTimeouts). A symbol whose history came back empty / failed is not asked again for BOARD_BACKFILL_EMPTY_RETRY_S
+# (default 1 h, not 15 min), and a batch that is mostly empty / failed pauses the whole backfill for BOARD_BACKFILL_PAUSE_S (default 5 min).
+_hold_until: Dict[str, float] = {}
+_pause_until = [0.0]
 _state = {"requested": 0, "fetched": 0, "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0, "last_error": None, "last_run": 0.0}
 
 
@@ -42,7 +47,7 @@ def _cfg(name: str, default):
 
 def reset() -> None:
     with _lock:
-        _pending.clear(); _tried.clear()
+        _pending.clear(); _tried.clear(); _hold_until.clear(); _pause_until[0] = 0.0
         _state.update(requested=0, fetched=0, merged_symbols=0, merged_bars=0, empty=0, errors=0, last_error=None, last_run=0.0)
 
 
@@ -69,6 +74,8 @@ def request(symbols: Iterable[str], now: Optional[float] = None) -> int:
                 continue
             last = _tried.get(s)
             if last is not None and now - last < retry:
+                continue
+            if _hold_until.get(s, 0.0) > now:
                 continue
             _pending[s] = now
             added += 1
@@ -129,8 +136,10 @@ def run_pending(max_n: Optional[int] = None, now: Optional[float] = None,
                 fetch: Optional[Callable[[str], List[dict]]] = None) -> dict:
     """Fetch and merge up to max_n queued symbols (blocking - call from a worker thread). Returns counts."""
     now = time.time() if now is None else now
-    max_n = int(_cfg("BOARD_BACKFILL_PER_CYCLE", 12)) if max_n is None else max_n
+    max_n = int(_cfg("BOARD_BACKFILL_PER_CYCLE", 6)) if max_n is None else max_n
     with _lock:
+        if _pause_until[0] > now:
+            return {"tried": 0, "merged_symbols": 0, "merged_bars": 0, "empty": 0, "errors": 0, "paused": True}
         batch = []
         while _pending and len(batch) < max_n:
             batch.append(_pending.popitem(last=False)[0])
@@ -141,8 +150,11 @@ def run_pending(max_n: Optional[int] = None, now: Optional[float] = None,
     with ThreadPoolExecutor(max_workers=min(4, len(batch)), thread_name_prefix="board-backfill") as ex:
         results = list(ex.map(lambda s: _one(s, f), batch))
     with _lock:
+        empty_retry = float(_cfg("BOARD_BACKFILL_EMPTY_RETRY_S", 3600))
         for sym, n, err in results:
             _tried[sym] = now
+            if err or n <= 0:
+                _hold_until[sym] = now + empty_retry
             _state["fetched"] += 1
             if err:
                 _state["errors"] += 1; _state["last_error"] = f"{sym}: {err}"; did["errors"] += 1
@@ -152,6 +164,11 @@ def run_pending(max_n: Optional[int] = None, now: Optional[float] = None,
             else:
                 _state["empty"] += 1; did["empty"] += 1
         _state["last_run"] = now
+        if did["tried"] >= 4 and (did["empty"] + did["errors"]) * 4 >= did["tried"] * 3:
+            _pause_until[0] = now + float(_cfg("BOARD_BACKFILL_PAUSE_S", 300))
+            did["paused_for_s"] = float(_cfg("BOARD_BACKFILL_PAUSE_S", 300))
+            logger.info("board backfill: %d of %d came back empty/failed - pausing the backfill for %.0fs",
+                        did["empty"] + did["errors"], did["tried"], did["paused_for_s"])
     if did["merged_symbols"] or did["errors"]:
         logger.info("board backfill: %d tried, %d filled (%d bars), %d empty, %d errors",
                     did["tried"], did["merged_symbols"], did["merged_bars"], did["empty"], did["errors"])

@@ -365,24 +365,35 @@ def inject_rows(rows: Iterable[dict]) -> None:
         _stats["rows_cached"] = len(_rows)
 
 
-_last_call: dict = {}
-
-
 _last_call: dict = {}      # group344: breakdown of the most recent get_quotes() call (see last_call_breakdown)
+# group345 (13 Oct log: "fresh 616" for a 100-symbol call, lines printed twice): concurrent get_quotes() calls overwrote one shared dict.
+# Each call now fills its OWN dict and publishes it per thread, so the caller reads back its own call; the shared dict stays as a
+# last-writer-wins fallback for threads that never called get_quotes.
+_tl = threading.local()
 
 
 def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
                wait_s: Optional[float] = None) -> Dict[str, dict]:
     """{key: row} for the symbols Dhan could price now. Fresh rows are served immediately; the rest wait for the next
     batch (bounded). Symbols Dhan does not know, a paused/disabled Dhan, and a timeout all just return fewer rows."""
+    info: dict = {}
+    try:
+        return _get_quotes(symbols, max_age_s, wait_s, info)
+    finally:
+        if info:
+            _tl.last = info
+            _last_call.clear()
+            _last_call.update(info)
+
+
+def _get_quotes(symbols, max_age_s, wait_s, info: dict) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
     if not config.enabled():
         return out
     keys = list(dict.fromkeys(key_for(s) for s in symbols if key_for(s)))
     if not keys:
         return out
-    _last_call.clear()
-    _last_call.update({"requested": len(keys), "fresh": 0, "unmapped": 0, "waited_out": 0, "paused_or_no_map": False})
+    info.update({"requested": len(keys), "fresh": 0, "unmapped": 0, "waited_out": 0, "paused_or_no_map": False})
     limit = config.quote_fresh_s() if max_age_s is None else max_age_s
     now = time.monotonic()
     need: List[str] = []
@@ -393,17 +404,17 @@ def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
                 out[k] = row
             else:
                 need.append(k)
-    _last_call["fresh"] = len(out)
+    info["fresh"] = len(out)
     if not need:
         return out
     if not scrip_master.ensure_loaded(block=False):
-        _last_call["paused_or_no_map"] = True
+        info["paused_or_no_map"] = True
         return out                                  # no map yet: fall through to the next provider at once
     _n_all = len(need)
     need = [k for k in need if scrip_master.security_id(k)]
-    _last_call["unmapped"] = _n_all - len(need)
+    info["unmapped"] = _n_all - len(need)
     if need and not client.available():
-        _last_call["paused_or_no_map"] = True
+        info["paused_or_no_map"] = True
     if not need or not client.available():
         return out
     start = time.monotonic()
@@ -430,14 +441,15 @@ def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
             row = _rows.get(k)
             if row is not None and row["_mono"] >= start:
                 out[k] = row
-        _last_call["waited_out"] = sum(1 for k in need if k not in out and not _fail.get(k, 0.0) >= start)
+        info["waited_out"] = sum(1 for k in need if k not in out and not _fail.get(k, 0.0) >= start)
     return out
 
 
 def last_call_breakdown() -> dict:
     """group344: why the most recent get_quotes() priced fewer symbols than asked (fresh / not in Dhan's scrip map /
-    still unanswered when the wait ended / Dhan paused). Diagnostic only; copy of a shared dict."""
-    return dict(_last_call)
+    still unanswered when the wait ended / Dhan paused). Diagnostic only. Returns the CALLING thread's own last call when it made one."""
+    mine = getattr(_tl, "last", None)
+    return dict(mine) if mine else dict(_last_call)
 
 
 def get_quote(symbol: str, **kw) -> Optional[dict]:
@@ -465,7 +477,8 @@ def _reset_for_tests() -> None:
         t.join(timeout=2.0)
     with _cond:
         _demand.clear(); _bg.clear(); _rows.clear(); _fail.clear(); _listeners.clear()
-        _empty_no_scrip.clear(); _empty_no_data.clear()
+        _empty_no_scrip.clear(); _empty_no_data.clear(); _last_call.clear()
+        _tl.last = None
         for k in _stats:
             _stats[k] = None if k in ("last_batch_ms", "last_batch_at") else 0
         _stop = False

@@ -478,6 +478,94 @@ def _get_redis():
     return _redis
 
 
+# ── group346: write-behind for durable writes issued from the asyncio event-loop thread ─────────────────────────
+# The api-gateway log showed the event loop blocked 3.6-3.9 s inside an Oracle commit. `kv_set` / `kv_delete` /
+# `kv_set_many` are plain sync functions that many `async def` handlers call directly, so every durable key write
+# (scan status, hot-pick job state, feed payloads...) did an Oracle round trip + commit ON the loop thread.
+# Memory is always written first and is what readers hit, so the durable copy can lag a moment: when the caller is
+# the event-loop thread the Oracle part is queued and a single daemon writer applies it (latest value per key wins).
+# Callers on worker threads (asyncio.to_thread, background threads) still write synchronously, as before.
+# KV_WRITE_BEHIND=0 turns this off. `flush_pending()` drains the queue (called on shutdown).
+KV_WRITE_BEHIND = (os.getenv("KV_WRITE_BEHIND") or "1").strip().lower() not in ("0", "false", "no", "off")
+_wb_lock = threading.Lock()
+_wb_pending: dict = {}  # key -> ("set", value, ttl) | ("del",)
+_wb_wake = threading.Event()
+_wb_idle = threading.Event()
+_wb_idle.set()
+_wb_thread: Optional[threading.Thread] = None
+_wb_stats = {"queued": 0, "written": 0, "failed": 0, "coalesced": 0}
+
+
+def _on_event_loop_thread() -> bool:
+    try:
+        import asyncio
+
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _wb_worker() -> None:
+    while True:
+        _wb_wake.wait(timeout=5.0)
+        _wb_wake.clear()
+        while True:
+            with _wb_lock:
+                if not _wb_pending:
+                    _wb_idle.set()
+                    break
+                key, op = next(iter(_wb_pending.items()))
+                del _wb_pending[key]
+            try:
+                if op[0] == "set":
+                    _neon_set(key, op[1], ttl=op[2])
+                else:
+                    _neon_delete_sync(key)
+                _wb_stats["written"] += 1
+            except Exception as e:  # noqa: BLE001 - durable copy is best effort, memory already has it
+                _wb_stats["failed"] += 1
+                logger.debug("write-behind %s: %s", key, e)
+
+
+def _wb_enqueue(key: str, op: tuple) -> None:
+    global _wb_thread
+    with _wb_lock:
+        if key in _wb_pending:
+            _wb_stats["coalesced"] += 1
+        _wb_pending[key] = op
+        _wb_stats["queued"] += 1
+        _wb_idle.clear()
+        if _wb_thread is None or not _wb_thread.is_alive():
+            _wb_thread = threading.Thread(target=_wb_worker, name="kv-write-behind", daemon=True)
+            _wb_thread.start()
+    _wb_wake.set()
+
+
+def flush_pending(timeout: float = 10.0) -> bool:
+    """Block until queued durable writes are applied (shutdown path). True when the queue drained."""
+    if not _wb_pending:
+        return True
+    _wb_wake.set()
+    return _wb_idle.wait(timeout=max(0.1, float(timeout)))
+
+
+def write_behind_status() -> dict:
+    with _wb_lock:
+        pending = len(_wb_pending)
+    return {"enabled": KV_WRITE_BEHIND, "pending": pending, **_wb_stats}
+
+
+def _neon_delete_sync(key: str) -> None:
+    eng = _get_neon()
+    if not eng:
+        return
+    from sqlalchemy import text
+
+    with eng.begin() as conn:
+        conn.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
+
+
 def kv_get(key: str) -> Any:
     """Memory → Redis (if USE_REDIS=1) → Neon durable."""
     val = _mem.get(key)
@@ -520,7 +608,10 @@ def kv_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
         except Exception as e:
             logger.debug("redis set %s: %s", key, e)
     if _is_durable(key):
-        _neon_set(key, value, ttl=ttl)
+        if KV_WRITE_BEHIND and _on_event_loop_thread():
+            _wb_enqueue(key, ("set", value, ttl))
+        else:
+            _neon_set(key, value, ttl=ttl)
 
 
 def kv_get_stale(key: str) -> Any:
@@ -585,15 +676,13 @@ def kv_delete(key: str) -> None:
         except Exception:
             pass
     if _is_durable(key):
-        eng = _get_neon()
-        if eng:
-            try:
-                from sqlalchemy import text
-
-                with eng.begin() as conn:
-                    conn.execute(text("DELETE FROM stockky_kv WHERE k = :k"), {"k": key})
-            except Exception:
-                pass
+        if KV_WRITE_BEHIND and _on_event_loop_thread():
+            _wb_enqueue(key, ("del",))
+            return
+        try:
+            _neon_delete_sync(key)
+        except Exception:
+            pass
 
 
 def kv_ttl(key: str) -> int:
@@ -629,6 +718,11 @@ def kv_set_many(items: dict, ttl: Optional[int] = None) -> None:
 
     durable_items = {k: v for k, v in items.items() if _is_durable(k)}
     if not durable_items:
+        return
+
+    if KV_WRITE_BEHIND and _on_event_loop_thread():
+        for _k, _v in durable_items.items():
+            _wb_enqueue(_k, ("set", _v, ttl))
         return
 
     eng = _get_neon()

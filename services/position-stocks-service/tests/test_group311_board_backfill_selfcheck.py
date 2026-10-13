@@ -297,3 +297,14 @@ def test_fno_parse_ignores_exchange_test_contracts():
              "NSE,FUTSTK,011NSETEST-NOV2036-FUT", "NSE,FUTSTK,RELIANCE-Nov2026-FUT", "NSE,FUTSTK,360ONE-Nov2026-FUT"]
     rep = fl.parse_report(lines)
     assert rep["underlyings"] == {"RELIANCE", "360ONE"} and rep["test_rows"] == 1
+
+
+def test_group345_empty_symbols_are_held_and_a_mostly_empty_batch_pauses():
+    bar_backfill.reset()
+    bar_backfill.request(list("ABCD"), now=1.0)
+    did = bar_backfill.run_pending(max_n=4, now=2.0, fetch=lambda s: [])
+    assert did["tried"] == 4 and did.get("paused_for_s")
+    # while paused nothing is fetched, and the empty symbols are not re-queued for an hour
+    assert bar_backfill.run_pending(max_n=4, now=3.0, fetch=lambda s: [])["tried"] == 0
+    assert bar_backfill.request(list("ABCD"), now=1000.0) == 0
+    assert bar_backfill.request(list("ABCD"), now=5000.0) == 4

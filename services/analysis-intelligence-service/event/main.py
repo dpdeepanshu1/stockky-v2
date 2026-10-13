@@ -913,7 +913,41 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
 
 
 # ── Core event fetch ──────────────────────────────────────────────────────────
+# group345 (13 Oct log: two "Fetching fresh events" for the same symbol - the quality gate's retry and the /check warm-up each started their own
+# slow Yahoo/RSS fetch). One fetch per symbol at a time: later callers wait for the one in flight and read its result.
+import threading as _threading
+
+_inflight_lock = _threading.Lock()
+_inflight: Dict[str, "_threading.Event"] = {}
+_INFLIGHT_WAIT_S = float(os.getenv("EVENT_INFLIGHT_WAIT_S", "40") or 40)
+_live_lock = _threading.Lock()
+_live_requests = [0]            # live /events/* requests being served right now; /check yields to them
+
+
 def _fetch_events(symbol: str, force: bool = False) -> dict:
+    sym = _normalize(symbol)
+    with _inflight_lock:
+        ev = _inflight.get(sym)
+        leader = ev is None
+        if leader:
+            ev = _inflight[sym] = _threading.Event()
+    if not leader:
+        ev.wait(_INFLIGHT_WAIT_S)
+        cached = _redis_get(f"{EVENT_CACHE_PREFIX}{sym}")
+        if cached:
+            logger.info("Event fetch for %s joined the one already running", sym)
+            return cached
+        # the leader failed or timed out and left nothing cached: fetch it ourselves
+        return _fetch_events_impl(symbol, force=force)
+    try:
+        return _fetch_events_impl(symbol, force=force)
+    finally:
+        with _inflight_lock:
+            _inflight.pop(sym, None)
+        ev.set()
+
+
+def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
     sym = _normalize(symbol)
     cache_key = f"{EVENT_CACHE_PREFIX}{sym}"
 
@@ -1254,7 +1288,13 @@ def raw_feed(hours: int = 24):
 
 @app.get("/events/{symbol}")
 def get_events(symbol: str, force: bool = False):
-    return _fetch_events(symbol, force=force)
+    with _live_lock:
+        _live_requests[0] += 1
+    try:
+        return _fetch_events(symbol, force=force)
+    finally:
+        with _live_lock:
+            _live_requests[0] -= 1
 
 
 @app.get("/events/{symbol}/categorized")
@@ -1267,7 +1307,13 @@ def get_events_categorized(symbol: str, force: bool = False):
     this symbol was checked, using the same diff logic /check uses.
     """
     symbol = _normalize(symbol)
-    current = _fetch_events(symbol, force=force)
+    with _live_lock:
+        _live_requests[0] += 1
+    try:
+        current = _fetch_events(symbol, force=force)
+    finally:
+        with _live_lock:
+            _live_requests[0] -= 1
 
     state = _load_state()
     previous = state["last_known"].get(symbol, {})
@@ -1415,9 +1461,21 @@ def check_for_changes():
     state = _load_state()
     changes = []
 
+    # group345: this warm-up is background work. It yields to live requests (the quality gate's per-entry news check) and stops after
+    # CHECK_MAX_SECONDS so one pass cannot hold the event service for 300 s (13 Oct: dynamic_universe /check ran 300 s, 7 gate calls timed out).
+    _t0 = time.monotonic()
+    _budget = float(os.getenv("CHECK_MAX_SECONDS", "240") or 0)
     for i, symbol in enumerate(state["subscriptions"]):
         if i > 0:
             time.sleep(1)
+        _y = 0
+        while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
+            time.sleep(0.5)
+            _y += 1
+        if _budget > 0 and time.monotonic() - _t0 > _budget:
+            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass",
+                           time.monotonic() - _t0, i, len(state["subscriptions"]), _budget)
+            break
 
         current = _fetch_events(symbol)
         previous = state["last_known"].get(symbol, {})

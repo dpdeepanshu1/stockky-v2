@@ -161,6 +161,56 @@ def _plan_batches(tokens: list, token_map: dict, now: Optional[float] = None) ->
         return old_plan
 
 
+# group346 (log review #12, cycle 30-40 s against a 15 s target): each batch used to AWAIT its live_quotes DB write
+# (an Oracle executemany MERGE of up to 50 rows) before the next batch could start, so on a slow link the DB, not
+# AngelOne, set the cycle time. The in-memory _LIVE cache (which /quote, /live-quote and /quotes/bulk read) is already
+# up to date at that point, so the durable copy is now handed to ONE background writer that keeps only the latest row
+# per symbol and drains in <=50-row transactions. ANGELONE_FEED_DB_ASYNC=0 restores the awaited write.
+DB_ASYNC_WRITES = ((os.getenv("ANGELONE_FEED_DB_ASYNC") or "").strip() or "1") not in ("0", "false", "False")
+_DB_PENDING: Dict[str, tuple] = {}
+_DB_PENDING_LOCK = threading.Lock()
+_db_writer_busy = False
+_db_async_stats = {"queued_rows": 0, "written_rows": 0, "coalesced_rows": 0, "passes": 0}
+
+
+def _db_writer_drain() -> None:
+    global _db_writer_busy
+    try:
+        while True:
+            with _DB_PENDING_LOCK:
+                if not _DB_PENDING:
+                    _db_writer_busy = False
+                    return
+                chunk_syms = list(_DB_PENDING.keys())[:BATCH_SIZE]
+                rows = [_DB_PENDING.pop(k) for k in chunk_syms]
+            _upsert_ticks_batch_sync(rows)   # never raises
+            _db_async_stats["written_rows"] += len(rows)
+            _db_async_stats["passes"] += 1
+    except Exception as e:  # noqa: BLE001 - the in-memory cache is the primary store
+        logger.debug("live_quotes async writer stopped: %s", e)
+        with _DB_PENDING_LOCK:
+            _db_writer_busy = False
+
+
+def _queue_db_rows(rows: list) -> None:
+    """Hand rows [(sym, ltp, o, h, l, c, vol), ...] to the background writer (latest row per symbol wins)."""
+    global _db_writer_busy
+    start = False
+    with _DB_PENDING_LOCK:
+        for r in rows:
+            if not r or not r[0]:
+                continue
+            if r[0] in _DB_PENDING:
+                _db_async_stats["coalesced_rows"] += 1
+            _DB_PENDING[r[0]] = r
+            _db_async_stats["queued_rows"] += 1
+        if _DB_PENDING and not _db_writer_busy:
+            _db_writer_busy = True
+            start = True
+    if start:
+        threading.Thread(target=_db_writer_drain, name="live-quotes-writer", daemon=True).start()
+
+
 # In-memory dict — same pattern as yahoo_ws_feed.py
 _LIVE: Dict[str, dict] = {}
 _LIVE_LOCK = threading.Lock()
@@ -415,6 +465,7 @@ def feed_status() -> dict:
         "newest_tick_age_s": (time.time() - newest) if newest else None,
         "in_market_window": is_feed_window_ist(),
         "last_cycle_s": _last_cycle_s,
+        "db_async": {"enabled": DB_ASYNC_WRITES, "pending_rows": len(_DB_PENDING), **_db_async_stats},
     }
 
 
@@ -588,7 +639,10 @@ def start_feed_background(symbols: list) -> None:
                         if db_rows:
                             # One transaction for the whole AngelOne batch, off the poll loop
                             # so the DB round trip does not block the event loop.
-                            await asyncio.to_thread(_upsert_ticks_batch_sync, db_rows)
+                            if DB_ASYNC_WRITES:
+                                _queue_db_rows(db_rows)   # group346: do not hold the next batch for the DB round trip
+                            else:
+                                await asyncio.to_thread(_upsert_ticks_batch_sync, db_rows)
                     except Exception as e:
                         # BUG FIX (2026-09-17): httpx timeout exceptions stringify to "" - fall back to the
                         # exception's class name when str(e) is empty.

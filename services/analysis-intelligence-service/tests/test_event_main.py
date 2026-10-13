@@ -1122,6 +1122,33 @@ class TestFetchEventsCache:
         assert em._fetch_events("ZWID.NS")["recent_news"]
 
 
+class TestFetchEventsSingleFlight:
+    def test_second_caller_joins_the_fetch_in_flight(self, monkeypatch):
+        import threading
+        calls = []
+        gate = threading.Event()
+
+        def impl(symbol, force=False):
+            calls.append(symbol)
+            gate.wait(5)
+            res = {"symbol": symbol, "recent_news": [{"title": "x"}]}
+            em._redis_set(f"{em.EVENT_CACHE_PREFIX}{em._normalize(symbol)}", res, ttl=100)
+            return res
+        monkeypatch.setattr(em, "_fetch_events_impl", impl)
+        out = []
+        t1 = threading.Thread(target=lambda: out.append(em._fetch_events("ZWID.NS")))
+        t1.start()
+        while not calls:
+            time.sleep(0.01)
+        t2 = threading.Thread(target=lambda: out.append(em._fetch_events("ZWID.NS")))
+        t2.start()
+        time.sleep(0.1)
+        gate.set()
+        t1.join(5)
+        t2.join(5)
+        assert len(calls) == 1 and len(out) == 2 and em._inflight == {}
+
+
 class TestFetchEventsData:
     def test_full_payload(self, monkeypatch):
         news = [

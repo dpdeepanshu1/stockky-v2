@@ -566,12 +566,45 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
 #     (reserve_capital + reserve_additional together need max(position_value, qty*ltp));
 #   - attempt_entry() refuses when open positions >= MAX_CONCURRENT_SCALP_POSITIONS
 #     (same OPEN + EXIT_LEGS_REJECTED count).
+# group345: symbol -> monotonic time until which it is left out after a price-only entry-gate reject (see config.GATE_REJECT_COOLDOWN_S).
+_gate_rejected: dict = {}
+_GATE_COOLDOWN_PREFIXES = ("PRICE_GUARD", "RANGE_GATE", "PENNY_STOCK")
+
+
+def _note_gate_reject(symbol: str, skip_reason) -> None:
+    if config.GATE_REJECT_COOLDOWN_S > 0 and skip_reason and str(skip_reason).startswith(_GATE_COOLDOWN_PREFIXES):
+        if len(_gate_rejected) > 2000:
+            _gate_rejected.clear()
+        _gate_rejected[symbol] = time.monotonic() + config.GATE_REJECT_COOLDOWN_S
+
+
+def _gate_cooldown_filter(candidates: list) -> tuple[list, list]:
+    """Drop candidates still cooling down after a deterministic entry-gate reject. Returns (kept, skipped_symbols)."""
+    if not _gate_rejected or config.GATE_REJECT_COOLDOWN_S <= 0:
+        return candidates, []
+    now = time.monotonic()
+    kept, skipped = [], []
+    for c in candidates:
+        until = _gate_rejected.get(c.symbol)
+        if until is None:
+            kept.append(c)
+        elif now >= until:
+            _gate_rejected.pop(c.symbol, None)
+            kept.append(c)
+        else:
+            skipped.append(c.symbol)
+    return kept, skipped
+
+
 def _attempt_entry_with_skip_reason(db, candidate, quality=None):
     """group335: attempt_entry plus the reason of its last SKIPPED row, read on the SAME thread (the reason is thread-local).
     Looks attempt_entry up at call time, so a patched one still works. Returns (position_or_None, skip_reason_or_None)."""
     reset_last_skip()
     res = attempt_entry(db, candidate, quality=quality)
-    return res, (None if res else last_skip_reason())
+    _reason = None if res else last_skip_reason()
+    if _reason:
+        _note_gate_reject(candidate.symbol, _reason)
+    return res, _reason
 
 
 _last_shortlist: dict = {"at": None, "rows": [], "evaluated": 0, "passed": 0, "entered_symbol": None}   # group332/337: latest best-picks shortlist, for GET /shortlist
@@ -1016,6 +1049,11 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     summary["capital_cooldown_skipped"] = _cooled
     if not candidates:
         summary["skipped_reason"] = "ALL_CANDIDATES_CAPITAL_COOLDOWN"
+        return _finalize()
+    candidates, _gate_cooled = _gate_cooldown_filter(candidates)
+    summary["gate_cooldown_skipped"] = _gate_cooled
+    if not candidates:
+        summary["skipped_reason"] = "ALL_CANDIDATES_GATE_COOLDOWN"
         return _finalize()
     candidates, _unaffordable = _unaffordable_filter(db, candidates)
     summary["unaffordable_skipped"] = _unaffordable

@@ -165,6 +165,7 @@ def store(monkeypatch):
         live_store._stats[k] = None if k == "last_error" else 0
     live_store._last_sent.clear(); live_store._latest.clear(); live_store._prio.clear()
     live_store._last_warn = 0.0
+    live_store._backoff_until = 0.0
     return eng
 
 
@@ -195,7 +196,7 @@ class TestLiveStoreChunks:
         assert store.executed == [10]
 
     def test_chunk_size_is_blank_safe(self, monkeypatch):
-        for raw, want in (("", 150), ("abc", 150), ("0", 10), ("40", 40)):
+        for raw, want in (("", 60), ("abc", 60), ("0", 10), ("40", 40)):
             monkeypatch.setenv("DHAN_LIVE_WRITE_CHUNK", raw)
             assert config.live_write_chunk() == want
 

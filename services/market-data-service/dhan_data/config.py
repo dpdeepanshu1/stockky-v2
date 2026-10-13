@@ -177,9 +177,9 @@ def transient_pause_s() -> float:
 
 
 def live_write_chunk() -> int:
-    """Rows per `live_quotes` transaction (blank or non-numeric -> 150; floor 10). One 900-row MERGE could outlast
+    """Rows per `live_quotes` transaction (blank or non-numeric -> 60; floor 10). One 900-row MERGE could outlast
     Oracle's 8 s call timeout (DPY-4024) and lose the whole batch; small chunks commit independently."""
-    return env_int("DHAN_LIVE_WRITE_CHUNK", 150, 10)
+    return env_int("DHAN_LIVE_WRITE_CHUNK", 60, 10)
 
 
 def hourly_max_days() -> int:

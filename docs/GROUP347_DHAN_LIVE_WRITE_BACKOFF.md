@@ -5,7 +5,7 @@ Verification: `py_compile` on changed files, repo checks, and a stand-alone stub
 
 | Issue | Change |
 |---|---|
-| `dhan live_quotes write: 83 of 158 rows written ... DPY-4024 call timeout of 8000 ms` right after boot | `dhan_data/live_store.py`: a timed-out chunk opens a back-off (`DHAN_LIVE_WRITE_BACKOFF_S`, default 20 s, 0 = off). While it lasts only priority (held-position) rows are written; other rows are not marked as sent and go out on the first write after it. `status()` shows `backoff_skipped_batches`. Default `DHAN_LIVE_WRITE_CHUNK` 150 -> 60 so one transaction is shorter. |
+| `dhan live_quotes write: 83 of 158 rows written ... DPY-4024 call timeout of 8000 ms` right after boot | `dhan_data/live_store.py`: a timed-out chunk opens a back-off (`DHAN_LIVE_WRITE_BACKOFF_S`, default 20 s, 0 = off). While it lasts only priority (held-position) rows are written; other rows are not marked as sent and go out on the first write after it. `status()` shows `backoff_skipped_batches`. Default `DHAN_LIVE_WRITE_CHUNK` 150 -> 60 (also updated in `.env.example` and `.env.oracle.recommended`) so one transaction is shorter. |
 
 Checked, no change:
 - **Reconcile "exit fill taken from today's order book" (TECHM, FSL, BRIGADE, ...)**: `_exit_fill_from_orderbook` reads a real

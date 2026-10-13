@@ -387,7 +387,7 @@ def is_listed(symbol: str) -> Optional[bool]:
     return c in _token_map or c in _be_map
 
 
-def get_all_symbols() -> Dict[str, str]:
+def get_all_symbols(wait_s: Optional[float] = None) -> Dict[str, str]:
     """Returns the FULL {clean_symbol: token} map for every NSE-EQ symbol
     in the scrip master (~2000 symbols) — not scoped to any pre-selected
     seed/watchlist. Added 2026-09-04 to support a whole-market AngelOne
@@ -397,9 +397,11 @@ def get_all_symbols() -> Dict[str, str]:
     yfinance seed.
 
     group 135: stays EQ-only on purpose. The -BE fallback (trade-to-trade
-    names) is for named lookups; adding ~hundreds of BE names to the
-    whole-market movers sweep would change what that list contains."""
-    ensure_loaded()
+    whole-market movers sweep would change what that list contains.
+
+    group341: `wait_s` = how long a cold-start caller waits for the scrip master download (default ANGELONE_SCRIP_MASTER_WAIT_S);
+    the movers route passes a longer wait so a request that arrives during boot does not see an empty map by a second."""
+    ensure_loaded(wait_s=wait_s)
     return dict(_token_map)
 
 

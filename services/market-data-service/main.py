@@ -308,6 +308,41 @@ def get_cache_ttl() -> int:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("market-data-service")
 
+
+class _YfDeadSymbolNoise(logging.Filter):
+    """group341: yfinance logs every empty download as 3-4 ERROR records ('$SYM: possibly delisted', a blank line, '1 Failed download:',
+    '[SYM]: ...'); 31 of them in 20 minutes for BMISL / BIRET / HEG / HDFIRE buried real errors. One WARNING per symbol per 6 h is kept,
+    the rest are dropped. The caller already handles the empty frame (negative caches, the .BO fallback)."""
+    _SYM = re.compile(r"([A-Z0-9&\-]{2,20}\.(?:NS|BO))")
+    _EVERY_S = 6 * 3600.0
+
+    def __init__(self):
+        super().__init__()
+        self._seen = {}
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001
+            return True
+        if record.levelno < logging.ERROR:
+            return True
+        if not msg.strip() or "Failed download" in msg:
+            return False
+        if "possibly delisted" in msg or "no price data found" in msg:
+            m = self._SYM.search(msg)
+            key = m.group(1) if m else msg[:40]
+            now = time.time()
+            if now - self._seen.get(key, 0.0) < self._EVERY_S:
+                return False
+            self._seen[key] = now
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
+logging.getLogger("yfinance").addFilter(_YfDeadSymbolNoise())
+
 # 2026-10-04 (log noise): httpx logs every outbound request at INFO and uvicorn logs every /health probe
 # (container healthchecks + the browser's api.ping()) -- together most of the log volume. httpx -> WARNING
 # (HTTPX_LOG_LEVEL=INFO restores it); successful /health access lines are dropped (ACCESS_LOG_HEALTH=1 restores
@@ -3449,11 +3484,17 @@ def angelone_movers():
         if not session.is_configured() and not _dhan_first:
             return {"status": "not_configured", "data": [], "reason": "ANGELONE_* env vars not set"}
 
-        token_map = scrip_master.get_all_symbols()  # {clean_symbol: token}
+        # group341: at boot this ran a second before the scrip master finished loading and answered "returned 0 symbols"; wait for the
+        # first load (bounded), and report a still-empty map as warming instead of an error.
+        try:
+            _wait = float(((os.getenv("ANGELONE_MOVERS_SCRIP_WAIT_S") or "").strip() or "8"))
+        except ValueError:
+            _wait = 8.0
+        token_map = scrip_master.get_all_symbols(wait_s=_wait)  # {clean_symbol: token}
         # group 188 (item 9): ETFs / funds are not stock picks; skipping them also trims the sweep's AngelOne calls
         token_map, _etf_skipped = drop_etfs(token_map)
         if not token_map:
-            return {"status": "error", "data": [], "error": "scrip master returned 0 symbols"}
+            return {"status": "error", "data": [], "error": "scrip master returned 0 symbols (still loading - retry shortly)"}
         reverse_map = {v: k for k, v in token_map.items()}
         tokens = list(token_map.values())
         universe_size = len(tokens)

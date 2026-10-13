@@ -44,7 +44,9 @@ fail-open pass the first time it's ever scored.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import time as _time
 from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -211,6 +213,22 @@ _earnings_seen: dict = {}
 # group330: symbol -> negative-news reason seen by the most recent _fetch_event_signal() call, consumed once by check().
 _news_seen: dict = {}
 
+# group341: symbols whose event call failed in the most recent check() (timeout / non-200), consumed once by check().
+_event_failed: set = set()
+# group341: symbol -> (monotonic ts, QualitySignal) for a FULLY fetched result, reused for QUALITY_GATE_RESULT_TTL_S seconds so the 10 s
+# cycle does not re-fetch 3 endpoints for the same shortlisted symbol every time (and cause its own timeouts).
+_result_cache: dict = {}
+# group341: symbol -> (wall ts, earnings_date, negative_news) from the last event call that worked, so a later timeout does not
+# silently switch the EARNINGS_TODAY / NEWS_NEGATIVE blocks off.
+_event_memory: dict = {}
+
+
+def reset_runtime_state() -> None:
+    """group341: forget the result cache, event memory and failure marks (tests / manual reset)."""
+    _event_failed.clear()
+    _result_cache.clear()
+    _event_memory.clear()
+
 # event types that are a hard negative on their own (decayed impact at / below the limit): a regulatory action, delisting risk, a FRESH earnings miss.
 _HARD_NEGATIVE_TYPES = {"regulatory_action": -8.0, "delisting_risk": -8.0, "earnings_miss": -15.0}
 
@@ -272,7 +290,10 @@ async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[O
             _nr = _negative_news_from(ej)
             if _nr:
                 _news_seen[symbol] = _nr
+        else:
+            _event_failed.add(symbol)   # group341: non-200 answer
     except Exception as e:
+        _event_failed.add(symbol)       # group341: timeout / transport error
         # See the matching BUG FIX comment in _fetch_fundamental above.
         logger.info("quality_gate: event fetch failed for %s (%s)", symbol, str(e) or type(e).__name__)
     return has_catalyst, event_score, bulk_flag
@@ -305,8 +326,15 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
     if not config.QUALITY_GATE_ENABLED:
         return QualitySignal(symbol=symbol)
 
+    # group341: a fully fetched result from the last QUALITY_GATE_RESULT_TTL_S seconds is reused (live fetch still runs for anything else).
+    _ttl = float(getattr(config, "QUALITY_GATE_RESULT_TTL_S", 0.0) or 0.0)
+    if _ttl > 0:
+        _hit = _result_cache.get(symbol)
+        if _hit is not None and _time.monotonic() - _hit[0] < _ttl:
+            return dataclasses.replace(_hit[1])
     _news_seen.pop(symbol, None)          # group330: same rule for the negative-news reason
     _earnings_seen.pop(symbol, None)      # group329: never reuse a date left by an earlier, failed check
+    _event_failed.discard(symbol)
     async with httpx.AsyncClient() as client:
         try:
             (fund_score, tech_score, market_cap_cr), (has_catalyst, event_score, bulk_flag) = await asyncio.gather(
@@ -320,7 +348,20 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
             logger.error("quality_gate: unexpected error for %s: %s", symbol, e, exc_info=True)
             return _apply_cache_fallback(QualitySignal(symbol=symbol), cached)
 
-    return _apply_cache_fallback(QualitySignal(
+    _ev_failed = symbol in _event_failed
+    _event_failed.discard(symbol)
+    _earn = _earnings_seen.pop(symbol, None)
+    _neg = _news_seen.pop(symbol, None)
+    _mem_h = float(getattr(config, "QUALITY_GATE_EVENT_MEMORY_H", 0.0) or 0.0)
+    if _mem_h > 0:
+        if _ev_failed:
+            _m = _event_memory.get(symbol)
+            if _m is not None and _time.time() - _m[0] < _mem_h * 3600.0:
+                _earn = _earn or _m[1]
+                _neg = _neg or _m[2]
+        else:
+            _event_memory[symbol] = (_time.time(), _earn, _neg)
+    _sig = _apply_cache_fallback(QualitySignal(
         symbol=symbol,
         fundamental_score=fund_score,
         technical_score=tech_score,
@@ -328,6 +369,12 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
         has_positive_catalyst=has_catalyst,
         recent_event_score=event_score,
         bulk_deal_flag=bulk_flag,
-        earnings_date=_earnings_seen.pop(symbol, None),
-        negative_news=_news_seen.pop(symbol, None),
+        earnings_date=_earn,
+        negative_news=_neg,
     ), cached)
+    # only a complete LIVE answer is reused; anything that fell back to the cache or lost the event call is fetched again next time
+    if _ttl > 0 and not _ev_failed and None not in (fund_score, tech_score, market_cap_cr):
+        if len(_result_cache) > 2000:
+            _result_cache.clear()
+        _result_cache[symbol] = (_time.monotonic(), dataclasses.replace(_sig))
+    return _sig

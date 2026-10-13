@@ -119,6 +119,21 @@ _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
 _lock = threading.Lock()
 
 
+# group341: the same dead-feed warnings (cnbctv18 404, Moneycontrol / NDTV Profit frozen) were repeated on every cache expiry, 11 lines in
+# 20 minutes for three feeds that are already served by a fallback. WARNING once per message key per hour, DEBUG after that.
+_WARN_EVERY_S = 3600.0
+_warned_at: Dict[str, float] = {}
+
+
+def _warn_throttled(key: str, msg: str, *args: Any) -> None:
+    now = time.time()
+    if now - _warned_at.get(key, 0.0) >= _WARN_EVERY_S:
+        _warned_at[key] = now
+        logger.warning(msg, *args)
+    else:
+        logger.debug(msg, *args)
+
+
 def clear_cache() -> None:
     with _lock:
         _cache.clear()
@@ -147,21 +162,21 @@ def _download(url: str) -> Tuple[Optional[bytes], Dict[str, Any]]:
                 info["error"] = f"http_{resp.status_code}"
                 if resp.status_code in _BLOCK_STATUSES and headers is FEED_HEADERS:
                     continue                      # try the other header profile
-                logger.warning("news feed %s -> HTTP %s (blocked or retired?)", _short(url), resp.status_code)
+                _warn_throttled("http:" + url, "news feed %s -> HTTP %s (blocked or retired?)", _short(url), resp.status_code)
                 return None, info
             body = resp.content or b""
             ctype = (resp.headers.get("content-type") or "").lower()
             head = body[:200].lstrip().lower()
             if "text/html" in ctype or head.startswith(b"<!doctype html") or head.startswith(b"<html"):
                 info["error"] = "html_instead_of_feed"
-                logger.warning("news feed %s -> HTTP 200 but HTML, not a feed (bot page or retired URL): %r",
-                               _short(url), body[:80])
+                _warn_throttled("html:" + url, "news feed %s -> HTTP 200 but HTML, not a feed (bot page or retired URL): %r",
+                                _short(url), body[:80])
                 return None, info
             info["error"] = None
             return body, info
         except Exception as exc:   # transport error / timeout: never crash a request over one source
             info["error"] = type(exc).__name__
-            logger.warning("news feed %s download failed: %s", _short(url), type(exc).__name__)
+            _warn_throttled("dl:" + url, "news feed %s download failed: %s", _short(url), type(exc).__name__)
             return None, info
     return None, info
 
@@ -200,7 +215,7 @@ def _try_fallbacks(url: str, info: Dict[str, Any]) -> Optional[Any]:
                         _short(url), info.get("status") or "failed", _short(u), len(parsed.entries))
             return parsed
         tried.append(f"{_short(u)}: zero_entries")
-    logger.warning("news feed %s and all fallbacks failed: %s", _short(url), " | ".join(tried))
+    _warn_throttled("allfail:" + url, "news feed %s and all fallbacks failed: %s", _short(url), " | ".join(tried))
     return None
 
 
@@ -234,8 +249,8 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
         info["entries"] = len(getattr(parsed, "entries", None) or [])
         if info["entries"] and url in _FALLBACKS and _FALLBACKS_ENABLED and _all_entries_stale(parsed, STALE_DAYS):
             # 200 with entries, but every one is older than STALE_DAYS: a frozen feed. Same as unavailable.
-            logger.warning("news feed %s -> HTTP 200 but all %d entries are older than %d days (frozen feed)",
-                           _short(url), info["entries"], STALE_DAYS)
+            _warn_throttled("stale:" + url, "news feed %s -> HTTP 200 but all %d entries are older than %d days (frozen feed)",
+                            _short(url), info["entries"], STALE_DAYS)
             info["error"] = "all_stale"
             fb_parsed = _try_fallbacks(url, info)
             if fb_parsed is not None:
@@ -244,8 +259,10 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
         if info["entries"] == 0:
             info["error"] = "zero_entries"
             # A Google News search with no hits (small / obscure ticker) is normal, not a dead feed.
-            (logger.info if "news.google.com" in url else logger.warning)(
-                "news feed %s (%s) -> HTTP 200 but 0 entries (dead URL or bot page)", source, _short(url))
+            if "news.google.com" in url:
+                logger.info("news feed %s (%s) -> HTTP 200 but 0 entries (dead URL or bot page)", source, _short(url))
+            else:
+                _warn_throttled("zero:" + url, "news feed %s (%s) -> HTTP 200 but 0 entries (dead URL or bot page)", source, _short(url))
         keep = ttl
     if keep > 0:
         with _lock:

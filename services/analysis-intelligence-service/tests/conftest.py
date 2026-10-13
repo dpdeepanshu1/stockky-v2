@@ -86,3 +86,14 @@ def _g270_sentiment_direct_yfinance_by_default(monkeypatch):
     must never reach a real market-data URL, so that path is off for every test; the group270 tests switch it on."""
     monkeypatch.setenv("SENTIMENT_USE_MARKET_DATA", "0")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _g341_feed_warning_throttle_reset():
+    """group341: news/feed_fetch.py logs a dead-feed WARNING once per hour per feed; every test starts with a clean throttle."""
+    try:
+        from news import feed_fetch as _ff
+        _ff._warned_at.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    yield

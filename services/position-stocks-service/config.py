@@ -1039,3 +1039,21 @@ BOARD_BACKFILL_PER_CYCLE = max(1, _get_int("BOARD_BACKFILL_PER_CYCLE", 12))     
 BOARD_BACKFILL_TIMEOUT_S = max(1.0, _get_float("BOARD_BACKFILL_TIMEOUT_S", 8.0))
 BOARD_BACKFILL_RETRY_S = max(60, _get_int("BOARD_BACKFILL_RETRY_S", 900))            # a symbol is retried no sooner than this (hit or miss)
 BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes
+
+# ---- group341 (log review 2026-10-13) -------------------------------------------------------------------------------------------
+# Pool baseline: sync_from_broker() adds back this pool's committed capital to Dhan's FREE cash. Free cash only falls by the MARGIN an
+# intraday order blocks (about 20% at 5x MIS - TECHM: cash -Rs596.61 for a Rs2,978.60 position), so adding back the full notional
+# inflated the baseline by ~28% per open position (Rs9,446 -> Rs12,126). Only this fraction of capital_risked is added back.
+# 1.0 = old behaviour (cash-funded / CNC positions).
+SCALP_POOL_COMMITTED_MARGIN_FRAC = _get_float("SCALP_POOL_COMMITTED_MARGIN_FRAC", 0.20)
+# Per-slot notional cap = (pool / MAX_CONCURRENT_SCALP_POSITIONS) x this. risk/stop alone gave a 0.8% stop a position of 50% of the
+# pool (the 5-slot split assumed stops >= 2%), so two positions used the whole pool. 0 = no cap (old behaviour).
+SCALP_SLOT_NOTIONAL_CAP_MULT = _get_float("SCALP_SLOT_NOTIONAL_CAP_MULT", 1.5)
+# Quality gate: a fully-fetched result is reused for this many seconds (the 10 s cycle re-fetched 3 calls per shortlisted symbol each
+# time, ~24 technical calls for one rejected symbol in 7 minutes, and the self-inflicted load caused the ReadTimeouts). 0 = off.
+QUALITY_GATE_RESULT_TTL_S = _get_float("QUALITY_GATE_RESULT_TTL_S", 90.0)
+# When the event call fails, the last earnings date / negative-news reason seen for the symbol within this many hours still applies
+# (the EARNINGS_TODAY and NEWS_NEGATIVE blocks were silently skipped on every timeout). 0 = off.
+QUALITY_GATE_EVENT_MEMORY_H = _get_float("QUALITY_GATE_EVENT_MEMORY_H", 24.0)
+# Tick buffer: per-symbol cap (was a fixed 50,000 ticks x 2,600 subscribed symbols; the service grew 63 -> 364 MB of 400 in 20 minutes).
+WS_MAX_TICKS_PER_SYMBOL = _get_int("WS_MAX_TICKS_PER_SYMBOL", 4000)

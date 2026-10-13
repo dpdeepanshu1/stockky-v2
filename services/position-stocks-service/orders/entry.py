@@ -701,7 +701,7 @@ def attempt_entry(
     # group330: elevated / spiking India VIX -> smaller position (config.VIX_CAUTION_SIZE_MULT). Cache-only read, 1.0 when VIX is unknown.
     _vix_mult = vix_gate.size_mult()
     if _vix_mult < 1.0 and quantity > 1:
-        _vq = max(1, int(quantity * _vix_mult))
+        _vq = max(1, int(quantity * _vix_mult + 0.5))   # group341: nearest share, not floor (x0.9 on 3 shares floored to 2 = a 33% cut)
         if _vq < quantity:
             logger.info("position-stocks entry: %s sized down %d -> %d shares (India VIX x%.2f)",
                         candidate.symbol, quantity, _vq, _vix_mult)
@@ -715,7 +715,7 @@ def attempt_entry(
     _cal_m = calendar_gate.size_mult()
     _cal_mult = _cal_m * _cat_mult
     if _cal_mult < 1.0 and quantity > 1:
-        _cq = max(1, int(quantity * max(0.25, _cal_mult)))
+        _cq = max(1, int(quantity * max(0.25, _cal_mult) + 0.5))   # group341: nearest share, not floor
         if _cq < quantity:
             logger.info("position-stocks entry: %s sized down %d -> %d shares (calendar x%.2f, no-news move x%.2f)",
                         candidate.symbol, quantity, _cq, _cal_m, _cat_mult)

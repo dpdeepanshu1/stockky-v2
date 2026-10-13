@@ -35,7 +35,7 @@ def _setup(monkeypatch):
     # the store keeps (value, ttl); the handler gets the value back
     monkeypatch.setattr(m, "_cache_get", lambda k: (store.get(k) or (None, None))[0])
     monkeypatch.setattr(m, "_test_store", store, raising=False)
-    sm = types.SimpleNamespace(get_all_symbols=lambda: {"AAA": "1", "BBB": "2"})
+    sm = types.SimpleNamespace(get_all_symbols=lambda **_k: {"AAA": "1", "BBB": "2"})
     monkeypatch.setitem(sys.modules, "angelone_scrip_master", sm)
     yield
 

@@ -332,6 +332,10 @@ def sync_from_broker(db: Session) -> float:
                 _peer_mv = 0.0
         if _peer_mv > 0:
             peer_credit = _peer_mv * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
+    # group341: only the MARGIN this pool's positions block is missing from Dhan's free cash, not their full cost (see
+    # config.SCALP_POOL_COMMITTED_MARGIN_FRAC); adding the whole notional back inflated the baseline ~28% per open position.
+    _margin_frac = min(1.0, max(0.0, float(getattr(config, "SCALP_POOL_COMMITTED_MARGIN_FRAC", 1.0))))
+    own_committed_capital = own_committed_capital * _margin_frac
     new_total = scalp_alloc + own_committed_capital + peer_credit
     if peer_credit > 0:
         _ceiling = available_balance + own_committed_capital
@@ -496,6 +500,15 @@ def reserve_capital(
         / config.MAX_CONCURRENT_SCALP_POSITIONS
     )
     position_value = risk_rupees / (adaptive_stop_pct / 100.0)
+    # group341: a tight stop (the target cap lets it fall to 0.8%) turns risk/stop into half the pool for ONE slot, so the "5 slots"
+    # split was not real. Cap one slot's notional at (pool / slots) x SCALP_SLOT_NOTIONAL_CAP_MULT (0 = off).
+    _cap_mult = float(getattr(config, "SCALP_SLOT_NOTIONAL_CAP_MULT", 0.0) or 0.0)
+    if _cap_mult > 0:
+        _slot_cap = row.total_allocated_capital / max(1, config.MAX_CONCURRENT_SCALP_POSITIONS) * _cap_mult
+        if position_value > _slot_cap:
+            logger.info("ledger.reserve_capital: slot notional capped Rs%.2f -> Rs%.2f (stop %.2f%% would size it above %.1fx a slot)",
+                        position_value, _slot_cap, adaptive_stop_pct, _cap_mult)
+            position_value = _slot_cap
 
     if position_value > row.available_capital:
         logger.info(

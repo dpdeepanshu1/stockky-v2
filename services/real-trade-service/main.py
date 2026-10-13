@@ -237,6 +237,15 @@ async def startup() -> None:
         startup_staleness_warning()
     except Exception as _e:
         logger.debug("adaptive staleness check failed (non-fatal): %s", _e)
+    # group341: with BROKER_STOP_ENABLED off, REAL positions are protected only by this process's own exit loop (8 s). If the container is
+    # killed (OOM, redeploy) or the network drops, nothing at the broker stops a loss. Say so loudly at boot instead of leaving it to a doc.
+    try:
+        import config as _cfg
+        if not getattr(_cfg, "BROKER_STOP_ENABLED", False):
+            logger.warning("SAFETY: BROKER_STOP_ENABLED is off - REAL positions have NO broker-side stop-loss, only this service's software exit loop. "
+                           "Set BROKER_STOP_ENABLED=true in .env once you have confirmed it on a small position.")
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("broker-stop startup check failed (non-fatal): %s", _e)
     logger.info("real-trade-service ready (adaptive thresholds + all improvements active)")
 
 

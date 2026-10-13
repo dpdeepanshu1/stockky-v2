@@ -537,5 +537,5 @@ services:
     # Separate from real-trade-service's CPU/mem budget — runs its own
     # event loop and WS connection independently.
     cpus: "0.30"
-    mem_limit: 400m
+    mem_limit: 700m  # group341: was 400m - tick buffers took it to 91% within 20 min of the open (log 2026-10-13); see WS_MAX_TICKS_PER_SYMBOL
     mem_reservation: 128m

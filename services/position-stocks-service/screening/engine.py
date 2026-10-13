@@ -282,6 +282,15 @@ class Candidate:
         self.window_label = f"{self.window_minutes}m"
 
 
+def _bare_symbol(sym) -> str:
+    """group341: upper-case symbol without a trailing .NS / .BO."""
+    t = str(sym or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if t.endswith(suf):
+            return t[: -len(suf)]
+    return t
+
+
 def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False) -> List[Candidate]:
     """Run a full scan across all subscribed symbols and all four windows.
     Returns a list of Candidate objects sorted by composite_score descending.
@@ -299,7 +308,8 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
 
     All multipliers documented at the top of this file.
     """
-    open_symbols = open_symbols or set()
+    # group341: a row spelled INFY.NS / INFY.BO must still match a held INFY (the held check compares bare names).
+    open_symbols = {_bare_symbol(x) for x in (open_symbols or set())}
     candidates: List[Candidate] = []
 
     if under_preferred:
@@ -321,7 +331,7 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
     )
 
     for symbol in subscribed:
-        if symbol in open_symbols:
+        if _bare_symbol(symbol) in open_symbols:
             continue
 
         buf = ws_client.get_tick_buffer(symbol)

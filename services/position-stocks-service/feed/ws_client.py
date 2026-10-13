@@ -213,7 +213,8 @@ _install_ws_secret_filter()
 # memory-safety backstop against unbounded growth in a pathological case
 # (e.g. corrupted/non-monotonic timestamps defeating the age prune) — in
 # normal operation the time prune keeps the buffer far below it.
-_MAX_TICKS = 50_000
+# group341: was a fixed 50_000 per symbol x ~2,600 subscribed symbols (position-stocks grew 63 -> 364 MB of 400 in 20 min after the open).
+_MAX_TICKS = max(500, int(getattr(config, "WS_MAX_TICKS_PER_SYMBOL", 4000) or 4000))
 _MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
@@ -289,8 +290,12 @@ def get_tick_buffer(symbol: str) -> list:
     for why that raced with the WS ingestion loop) — now returns a plain
     list copied under the symbol's lock, safe to iterate/index/reverse
     from any thread with no risk of a concurrent-mutation crash."""
+    # group341: do not create an empty deque (and lock) for every symbol that is merely asked about.
+    _buf = _tick_buffers.get(symbol)
+    if _buf is None:
+        return []
     with _buffer_locks[symbol]:
-        return list(_tick_buffers[symbol])
+        return list(_buf)
 
 
 def get_last_ltp(symbol: str) -> Optional[float]:

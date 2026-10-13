@@ -106,7 +106,7 @@ class ScalpPosition(Base):
     # OPEN, TARGET_HIT, STOP_HIT, EOD_SQUAREOFF, MANUAL_EXIT, ERROR,
     # EXIT_LEGS_REJECTED (super-order exit legs were rejected by Dhan —
     # circuit-limit / surveillance; awaiting EOD squareoff plain MARKET SELL),
-    # STAGNATION_EXIT (this session: promoted from a MANUAL_EXIT-labeled
+    # STOP_BREACH_EXIT (group 340: price sat under the stored stop, broker leg did not fire), STAGNATION_EXIT (this session: promoted from a MANUAL_EXIT-labeled
     # cosmetic reason to its own real terminal status — see
     # orders/eod_squareoff.py::close_position_now/run_stagnation_exit and
     # orders/reconcile.py's _FLAT_SELL_PENDING_STATUSES)

@@ -142,7 +142,7 @@ def _learn_from_entry_rejection(db: Session, pos: ScalpPosition, entry_status: s
 # to go through this exact same pending-fill resolution path or it would
 # be stuck at its entry_price/₹0.0 placeholder forever, same bug this
 # tuple already fixed once for MANUAL_EXIT.
-_FLAT_SELL_PENDING_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT")
+from orders.statuses import FLAT_SELL_STATUSES as _FLAT_SELL_PENDING_STATUSES, TERMINAL_STATUSES as _TERMINAL_STATUSES   # group340: single source
 
 
 def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
@@ -962,7 +962,9 @@ def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
         timed = sorted((f for f in found if f[1] is not None), key=lambda f: f[1])
         if timed and timed[0][1] <= 600 and (len(timed) == 1 or timed[1][1] - timed[0][1] > 60):
             chosen = timed[0][0]
-    if chosen is not None:
+    # group341: this ran (and logged) on EVERY reconcile pass even when the stored price already equalled the fill - 11 identical lines
+    # in 40 s after the TECHM entry. Log only when it is about to change something.
+    if chosen is not None and abs(chosen - pos.entry_price) > 1e-6:
         logger.info("reconcile: %s (id=%d) entry fill ₹%.2f taken from today's order book "
                     "(super-order row had no entry price; stored ₹%.2f)",
                     pos.symbol, pos.id, chosen, pos.entry_price)
@@ -1024,40 +1026,91 @@ def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
     # 2026-09-18: the legs sent to Dhan were computed off the pre-fill LTP.
     # Re-arm them off the real fill — only for a still-OPEN position (a flat-
     # sell-pending one has its legs cancelled / is on its way out).
+    # group341: each leg is persisted as soon as Dhan accepts it, the stop is read back, and a leg that fails is retried on later
+    # passes (the old code stored nothing if the second modify failed and never retried, because the entry price was already saved).
     if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
-        try:
-            new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
-            new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
-            # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down
-            # by a late fill-price correction.
-            if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
-                new_stop = pos.stop_price
-            dhan_client.modify_super_order(
-                db, order_id=pos.dhan_super_order_id,
-                order_leg="TARGET_LEG", target_price=new_target,
-            )
-            dhan_client.modify_super_order(
-                db, order_id=pos.dhan_super_order_id,
-                order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop,
-            )
-            old_target, old_stop = pos.target_price, pos.stop_price
-            pos.target_price = new_target
-            pos.stop_price = new_stop
-            db.commit()
-            logger.info(
-                "reconcile: %s (id=%d) re-armed target/stop legs for the "
-                "corrected fill price: target ₹%.2f -> ₹%.2f, stop ₹%.2f -> ₹%.2f",
-                pos.symbol, pos.id, old_target, new_target, old_stop, new_stop,
-            )
-        except Exception as e:
-            # Not fatal — legs stay at their original prices (pre-fix behaviour).
-            logger.warning(
-                "reconcile: %s (id=%d) failed to re-arm target/stop legs "
-                "after fill-price correction (%s) — legs remain at their "
-                "original prices",
-                pos.symbol, pos.id, e,
-            )
+        _rearm_state.pop(pos.id, None)
+        _rearm_legs(db, pos)
     return True
+
+
+# group341: position id -> {"target": bool, "stop": bool, "tries": int} for positions whose target/stop legs still have to be moved to the
+# levels implied by the real fill. Lives in this process only (a restart loses it; the entry price is already saved by then).
+_rearm_state: dict = {}
+_REARM_MAX_TRIES = 6
+
+
+def _rearm_legs(db: Session, pos: ScalpPosition) -> bool:
+    """Move the TARGET and STOP legs to the levels implied by pos.entry_price. Each leg is persisted the moment Dhan accepts it, the stop is
+    verified by read-back (dhan_client.verify_stop_leg), and the position stays queued in _rearm_state until both legs are in place.
+    Returns True when both are. Never raises."""
+    st = _rearm_state.setdefault(pos.id, {"target": False, "stop": False, "tries": 0})
+    st["tries"] += 1
+    try:
+        # group340: store the tick-rounded price modify_super_order() really sends (DWARKESH: card 47.13 vs trigger 47.21)
+        new_target = dhan_client.round_to_tick(round(pos.entry_price * (1 + pos.adaptive_target_pct / 100.0), 2))
+        new_stop = dhan_client.round_to_tick(round(pos.entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2))
+        # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down by a late fill-price correction.
+        if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
+            new_stop = pos.stop_price
+        if not st["target"]:
+            try:
+                dhan_client.modify_super_order(db, order_id=pos.dhan_super_order_id, order_leg="TARGET_LEG", target_price=new_target)
+                old_target = pos.target_price
+                pos.target_price = new_target
+                db.commit()
+                st["target"] = True
+                logger.info("reconcile: %s (id=%d) target leg re-armed for the corrected fill: ₹%.2f -> ₹%.2f",
+                            pos.symbol, pos.id, old_target or 0.0, new_target)
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                logger.warning("reconcile: %s (id=%d) target leg re-arm failed (try %d/%d): %s",
+                               pos.symbol, pos.id, st["tries"], _REARM_MAX_TRIES, e)
+        if not st["stop"]:
+            try:
+                dhan_client.modify_super_order(db, order_id=pos.dhan_super_order_id, order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop)
+                seen = dhan_client.verify_stop_leg(db, order_id=pos.dhan_super_order_id, expected_price=new_stop)
+                if seen is False:
+                    raise RuntimeError("Dhan's stop leg does not show the new price after the modify")
+                old_stop = pos.stop_price
+                pos.stop_price = new_stop
+                db.commit()
+                st["stop"] = True
+                logger.info("reconcile: %s (id=%d) stop leg re-armed for the corrected fill: ₹%.2f -> ₹%.2f%s",
+                            pos.symbol, pos.id, old_stop or 0.0, new_stop, " (read back OK)" if seen else "")
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                logger.warning("reconcile: %s (id=%d) stop leg re-arm failed (try %d/%d): %s",
+                               pos.symbol, pos.id, st["tries"], _REARM_MAX_TRIES, e)
+    except Exception as e:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("reconcile: %s (id=%d) re-arm error (try %d/%d): %s", pos.symbol, pos.id, st["tries"], _REARM_MAX_TRIES, e)
+    if st["target"] and st["stop"]:
+        _rearm_state.pop(pos.id, None)
+        return True
+    if st["tries"] >= _REARM_MAX_TRIES:
+        _rearm_state.pop(pos.id, None)
+        missing = " and ".join(n for n in ("target", "stop") if not st[n])
+        logger.error("reconcile: %s (id=%d) gave up re-arming the %s leg after %d tries - the broker leg is NOT at the level stored in the database",
+                     pos.symbol, pos.id, missing, st["tries"])
+        try:
+            notifier.notify_fire_and_forget(
+                f"⚠️ <b>Leg re-arm failed</b> — {pos.symbol} x{pos.quantity}\n"
+                f"The {missing} leg could not be moved to the corrected fill price after {st['tries']} tries; "
+                f"Dhan still holds the original level. Check the super order."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
+def _retry_rearm_pending(db: Session, pos: ScalpPosition) -> None:
+    """group341: called every reconcile pass for an OPEN position; re-tries a leg move that failed earlier."""
+    if pos.id in _rearm_state and pos.status == "OPEN" and pos.dhan_super_order_id and config.USE_SUPER_ORDER:
+        _rearm_legs(db, pos)
 
 
 def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
@@ -1226,6 +1279,7 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
 
 
 _last_auto_repair_ts = 0.0
+_auto_repair_logged: set = set()   # group340: (id, real entry, symbol) already announced by this process
 
 
 def auto_repair_closed_entry_prices(db: Session) -> int:
@@ -1247,9 +1301,19 @@ def auto_repair_closed_entry_prices(db: Session) -> int:
         res = repair_closed_entry_prices(db, apply=True)
         n = len(res.get("changes") or [])
         if n:
-            logger.warning("reconcile: auto-repaired %d closed row(s) to real fills (P&L delta ₹%.2f): %s",
-                           n, res.get("total_pnl_delta", 0.0),
-                           ", ".join(str(c.get("symbol")) for c in res["changes"]))
+            changes = res["changes"]
+            if getattr(config, "RECONCILE_LOG_ONCE", True):
+                fresh = []
+                for c in changes:
+                    key = (c.get("id"), c.get("real_entry"), c.get("symbol"))
+                    if key not in _auto_repair_logged:
+                        _auto_repair_logged.add(key)
+                        fresh.append(c)
+                changes = fresh
+            if changes:
+                logger.warning("reconcile: auto-repaired %d closed row(s) to real fills (P&L delta ₹%.2f): %s",
+                               len(changes), res.get("total_pnl_delta", 0.0),
+                               ", ".join(str(c.get("symbol")) for c in changes))
         return n
     except Exception as e:  # never break the reconcile loop
         try:
@@ -1680,6 +1744,7 @@ def run_exit_reconciliation(db: Session) -> int:
         # separate, already-reserved software allocation and out of this
         # fix's scope.
         _apply_entry_correction(db, pos, row)
+        _retry_rearm_pending(db, pos)   # group341: a leg move that failed on an earlier pass
 
         leg_details = row.get("legDetails") or []
         target_leg = next((l for l in leg_details if l.get("legName") == "TARGET_LEG"), None)
@@ -1975,9 +2040,7 @@ def run_retention_cleanup(db: Session) -> int:
     from sqlalchemy import or_, and_
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=config.TRADE_HISTORY_RETENTION_DAYS)
-    terminal_statuses = (
-        "TARGET_HIT", "STOP_HIT", "EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT", "ERROR",
-    )
+    terminal_statuses = _TERMINAL_STATUSES
     rows = (
         db.query(ScalpPosition)
         .filter(ScalpPosition.status.in_(terminal_statuses))

@@ -307,7 +307,7 @@ def movers_env(monkeypatch):
     monkeypatch.delenv("DHAN_MOVERS_VIA_DHAN", raising=False)
     m._mem._d.clear()
     monkeypatch.setattr(m, "cache", None)
-    monkeypatch.setattr(sm, "get_all_symbols", lambda: {"AAA": "1", "BBB": "2", "CCC": "3", "DDD": "4"})
+    monkeypatch.setattr(sm, "get_all_symbols", lambda **_k: {"AAA": "1", "BBB": "2", "CCC": "3", "DDD": "4"})
     monkeypatch.setattr(m, "drop_etfs", lambda tm: (tm, 0))
     sess = _FakeSession(True)
     monkeypatch.setattr(angelone_client, "get_session", lambda: sess)

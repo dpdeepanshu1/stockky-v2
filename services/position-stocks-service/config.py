@@ -699,6 +699,45 @@ TRAIL_MIN_STEP_PCT = _get_float("TRAIL_MIN_STEP_PCT", 0.15)
 TRAIL_MIN_INTERVAL_S = _get_float("TRAIL_MIN_INTERVAL_S", 20.0)
 TRAIL_RETRY_BACKOFF_S = _get_float("TRAIL_RETRY_BACKOFF_S", 60.0)
 
+# -- group 340 (2026-10-12): stop integrity, candle-history levels, sizing, scalp target cap -------------------------------------
+# Stop-breach watchdog (orders/stop_watchdog.py): FEDDERSHOL's stop was trailed to 58.85 yet the trade ended at 58.41 - nothing noticed the
+# price sitting under its own stop. Price under an OPEN position's stored stop for STOP_WATCHDOG_GRACE_S seconds = the broker stop did not
+# fire: close at market (status STOP_BREACH_EXIT) and alert. STOP_WATCHDOG_ENABLED=0 = off.
+STOP_WATCHDOG_ENABLED = _get_bool("STOP_WATCHDOG_ENABLED", True)
+STOP_WATCHDOG_GRACE_S = _get_float("STOP_WATCHDOG_GRACE_S", 20.0)
+STOP_WATCHDOG_MIN_BREACH_TICKS = _get_int("STOP_WATCHDOG_MIN_BREACH_TICKS", 1)   # price must be this many ticks UNDER the stop
+STOP_WATCHDOG_MAX_TICK_AGE_S = _get_float("STOP_WATCHDOG_MAX_TICK_AGE_S", 15.0)  # an older price does not count
+STOP_WATCHDOG_RETRY_S = _get_float("STOP_WATCHDOG_RETRY_S", 30.0)                # wait after a rejected watchdog exit
+# Read-back after every stop move (dhan_client.verify_stop_leg): the stop is saved as moved only when Dhan's own leg shows it. Unreadable =
+# fails open (as before). STOP_VERIFY_ENABLED=0 = off.
+STOP_VERIFY_ENABLED = _get_bool("STOP_VERIFY_ENABLED", True)
+STOP_VERIFY_RETRY_WAIT_S = _get_float("STOP_VERIFY_RETRY_WAIT_S", 0.4)           # one re-read after this pause before calling a move unconfirmed
+# Candle history for the volatility stop (orders/adaptive.py): a symbol with fewer than ADAPTIVE_BAR_MIN_BARS tick-buffer bars fell back to
+# the tick proxy, which lands on the 2% stop / ~4% target floor (COFFEEDAY, SYNCOMF, CLEANMAX on 2026-10-12). Now the bar store, then ONE
+# short cached market-data /history call, supplies the bars first.
+ADAPTIVE_HISTORY_ENABLED = _get_bool("ADAPTIVE_HISTORY_ENABLED", True)
+ADAPTIVE_HISTORY_TIMEOUT_S = _get_float("ADAPTIVE_HISTORY_TIMEOUT_S", 2.0)
+ADAPTIVE_HISTORY_CACHE_S = _get_float("ADAPTIVE_HISTORY_CACHE_S", 300.0)
+ADAPTIVE_HISTORY_MISS_CACHE_S = _get_float("ADAPTIVE_HISTORY_MISS_CACHE_S", 120.0)
+# Scalp target cap: no trade on 2026-10-12 got past +2.3% (targets 3.5-4.4%, clocks cut trades at 20-30 min). A target above the cap is cut to
+# it; if reward:risk then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to target/MIN_RR (never under SCALP_TARGET_CAP_MIN_STOP_PCT).
+# Risk-based sizing makes a tighter stop a larger position for the SAME rupee risk. 0 = no cap.
+SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 2.5)
+SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 1.5)
+SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 0.8)
+# Share rounding (orders/sizing.py): floor() lost up to a share (CLEANMAX: budget ~1.9 shares -> 1). Round up when the extra share costs at most
+# SIZING_MAX_OVERSHOOT_PCT over the budget; when ONE share costs more than SIZING_ONE_SHARE_MAX_MULT x the budget, skip instead of forcing 1
+# share. SIZING_ROUNDING_ENABLED=0 = old behaviour.
+SIZING_ROUNDING_ENABLED = _get_bool("SIZING_ROUNDING_ENABLED", True)
+SIZING_MAX_OVERSHOOT_PCT = _get_float("SIZING_MAX_OVERSHOOT_PCT", 10.0)
+SIZING_ONE_SHARE_MAX_MULT = _get_float("SIZING_ONE_SHARE_MAX_MULT", 1.5)
+# Cheap-stock floor (0 = off). Ships OFF: set e.g. 50 to skip sub-Rs50 names once the journal supports it.
+ENTRY_MIN_PRICE = _get_float("ENTRY_MIN_PRICE", 0.0)
+# Optional cut-off for ordinary days (blank = none). The two latest entries on 2026-10-12 (14:12, 14:29) lost; two trades prove nothing, so OFF.
+SCALP_ENTRY_CUTOFF_IST = _get_str("SCALP_ENTRY_CUTOFF_IST", "")
+# Reconcile announces the same closed-trade fill correction once per process per position (was every 5 minutes, all day).
+RECONCILE_LOG_ONCE = _get_bool("RECONCILE_LOG_ONCE", True)
+
 # this session: user asked for Trade History to only retain "today" /
 # "last 3 days" and for the ledger to actually only store that much —
 # orders/reconcile.py::run_retention_cleanup() deletes CLOSED positions
@@ -1000,3 +1039,21 @@ BOARD_BACKFILL_PER_CYCLE = max(1, _get_int("BOARD_BACKFILL_PER_CYCLE", 12))     
 BOARD_BACKFILL_TIMEOUT_S = max(1.0, _get_float("BOARD_BACKFILL_TIMEOUT_S", 8.0))
 BOARD_BACKFILL_RETRY_S = max(60, _get_int("BOARD_BACKFILL_RETRY_S", 900))            # a symbol is retried no sooner than this (hit or miss)
 BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes
+
+# ---- group341 (log review 2026-10-13) -------------------------------------------------------------------------------------------
+# Pool baseline: sync_from_broker() adds back this pool's committed capital to Dhan's FREE cash. Free cash only falls by the MARGIN an
+# intraday order blocks (about 20% at 5x MIS - TECHM: cash -Rs596.61 for a Rs2,978.60 position), so adding back the full notional
+# inflated the baseline by ~28% per open position (Rs9,446 -> Rs12,126). Only this fraction of capital_risked is added back.
+# 1.0 = old behaviour (cash-funded / CNC positions).
+SCALP_POOL_COMMITTED_MARGIN_FRAC = _get_float("SCALP_POOL_COMMITTED_MARGIN_FRAC", 0.20)
+# Per-slot notional cap = (pool / MAX_CONCURRENT_SCALP_POSITIONS) x this. risk/stop alone gave a 0.8% stop a position of 50% of the
+# pool (the 5-slot split assumed stops >= 2%), so two positions used the whole pool. 0 = no cap (old behaviour).
+SCALP_SLOT_NOTIONAL_CAP_MULT = _get_float("SCALP_SLOT_NOTIONAL_CAP_MULT", 1.5)
+# Quality gate: a fully-fetched result is reused for this many seconds (the 10 s cycle re-fetched 3 calls per shortlisted symbol each
+# time, ~24 technical calls for one rejected symbol in 7 minutes, and the self-inflicted load caused the ReadTimeouts). 0 = off.
+QUALITY_GATE_RESULT_TTL_S = _get_float("QUALITY_GATE_RESULT_TTL_S", 90.0)
+# When the event call fails, the last earnings date / negative-news reason seen for the symbol within this many hours still applies
+# (the EARNINGS_TODAY and NEWS_NEGATIVE blocks were silently skipped on every timeout). 0 = off.
+QUALITY_GATE_EVENT_MEMORY_H = _get_float("QUALITY_GATE_EVENT_MEMORY_H", 24.0)
+# Tick buffer: per-symbol cap (was a fixed 50,000 ticks x 2,600 subscribed symbols; the service grew 63 -> 364 MB of 400 in 20 minutes).
+WS_MAX_TICKS_PER_SYMBOL = _get_int("WS_MAX_TICKS_PER_SYMBOL", 4000)

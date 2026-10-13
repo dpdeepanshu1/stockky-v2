@@ -146,6 +146,20 @@ def entry_block_reason(now: Optional[datetime] = None) -> Optional[str]:
         return None
 
 
+def scalp_cutoff_reason(now: Optional[datetime] = None) -> Optional[str]:
+    """group 340: 'SCALP_ENTRY_CUTOFF:...' once config.SCALP_ENTRY_CUTOFF_IST has passed, else None. Blank = off (default). Fails open."""
+    try:
+        raw = (getattr(config, "SCALP_ENTRY_CUTOFF_IST", "") or "").strip()
+        if not raw:
+            return None
+        if ist_time_at_or_after(parse_hhmm(raw, 14, 15), now):
+            return f"SCALP_ENTRY_CUTOFF:no new scalp entry after {raw} IST"
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scalp cutoff check failed (allowing): %s", e)
+        return None
+
+
 def size_mult(now: Optional[datetime] = None) -> float:
     """1.0 on an ordinary day; the smallest applicable CALENDAR_*_SIZE_MULT (clamped 0.1..1.0) on an expiry / pre-holiday / Friday session."""
     try:

@@ -1223,6 +1223,10 @@ class SurpriseStockEngine:
             "building_min_score": BUILDING_MIN_SCORE,
             "market_note":     "thresholds raised for quality",
         }
+        # group341: the log showed scans start ("~1,005 quotes") but never finish, so nobody could tell whether they complete.
+        logger.info("surprise scan finished: %d rows from %d symbols in %.1fs (quotes_ok=%s, cache_hits=%s, upstream_calls=%s)%s",
+                    len(results), len(keys), result["elapsed_sec"], quote_ok, cache_hits, upstream_calls,
+                    "" if not symbols else " [filtered request]")
         # Only cache full-universe scans (symbols=None) — a filtered
         # request isn't representative of "the last scored result" that
         # the cached=true fast-path above is meant to serve.

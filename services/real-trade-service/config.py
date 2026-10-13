@@ -1192,6 +1192,9 @@ def _bs_int(name: str, default: int) -> int:
         return default
 
 
+# group 340 (2026-10-12): imported demat holdings (portfolio.py) got targets of +9.75% / +13.5% against ~1.8% stops, unreachable inside a
+# 10-day time stop. The imported target is capped at this multiple of the stop distance (0 = no cap).
+IMPORT_TARGET_MAX_STOP_MULT = max(0.0, _bs_float("IMPORT_TARGET_MAX_STOP_MULT", 2.5))
 BROKER_STOP_ENABLED = _bs_bool("BROKER_STOP_ENABLED", "false")
 BROKER_STOP_BUFFER_PCT = max(0.0, _bs_float("BROKER_STOP_BUFFER_PCT", 0.5))
 BROKER_STOP_MIN_MOVE_PCT = max(0.0, _bs_float("BROKER_STOP_MIN_MOVE_PCT", 0.25))

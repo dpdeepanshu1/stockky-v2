@@ -702,11 +702,15 @@ def _score_headline(title: str) -> float:
         else:
             if resp.status_code in HF_CONFIG_ERROR_STATUSES and _hf_error_backoff_sec() > 0:
                 _pause = _hf_error_backoff_sec()
-                _HF_BACKOFF_UNTIL = time.monotonic() + _pause
                 try:
                     _detail = " ".join(str(getattr(resp, "text", "") or "").split())[:200]
                 except Exception:  # noqa: BLE001
                     _detail = ""
+                # group341: "model not supported by any provider you have enabled" is a configuration error that only an env change fixes;
+                # retrying every 30 minutes just repeats the 400 and the warning. Back off 6 h for that one.
+                if resp.status_code == 400 and "not supported" in _detail.lower():
+                    _pause = max(_pause, 6 * 3600.0)
+                _HF_BACKOFF_UNTIL = time.monotonic() + _pause
                 logger.warning(
                     "HF API error: %s%s - check HF_MODEL (%s) is served to your token through Inference "
                     "Providers and the token may call them; skipping Hugging Face sentiment for %ds",

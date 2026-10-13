@@ -164,7 +164,7 @@ export interface DhanAccountStatus {
 export interface ScalpPositionRow {
   id: number;
   symbol: string;
-  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
+  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "STOP_BREACH_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   entry_price: number;
   exit_price: number | null;

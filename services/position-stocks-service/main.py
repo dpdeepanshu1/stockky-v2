@@ -160,7 +160,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
-from orders import breakeven, eod_squareoff, overnight_stop, reconcile, trailing
+from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, trailing
 from orders import adaptive
 from orders import calendar_gate, charges_ledger, excursion, review_stats, trade_stats, window_health
 from orders.entry import (
@@ -475,6 +475,13 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: trailing-stop raised %d stop(s)", n_trail)
                 except Exception as e:
                     logger.error("position-stocks: trailing-stop error: %s", e, exc_info=True)
+                try:
+                    # group 340: close a position whose own stop did not fire (orders/stop_watchdog.py)
+                    n_breach = await asyncio.to_thread(stop_watchdog.run_stop_watchdog, db)
+                    if n_breach:
+                        logger.warning("position-stocks: stop-watchdog closed %d position(s) whose stop did not fire", n_breach)
+                except Exception as e:
+                    logger.error("position-stocks: stop-watchdog error: %s", e, exc_info=True)
                 try:
                     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
                     today = ist_today_str()

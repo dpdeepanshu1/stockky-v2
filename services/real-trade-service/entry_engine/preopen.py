@@ -139,13 +139,27 @@ def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
         return None
 
 
-def _warm_blocking(symbols: list) -> int:
+def _warm_blocking(symbols: list, *, _clock=None) -> int:
+    """Warm the prev-day / VIX / event caches for the queued symbols. group344: bounded by PREOPEN_WARM_BUDGET_S and stopped at the
+    market open, so it cannot hold the event service while a live entry check needs it. `_clock` is for tests."""
+    import time as _t
+    clock = _clock or _t.monotonic
     n = 0
     try:
         from entry_engine import event_risk, prev_day, vix_gate
         prev_day.prefetch(symbols)                      # background threads, never blocks
         vix_gate.snapshot()
+        budget = float(getattr(config, "PREOPEN_WARM_BUDGET_S", 0.0) or 0.0)
+        stop_at_open = bool(getattr(config, "PREOPEN_WARM_STOP_AT_OPEN", True))
+        start = clock()
         for sym in symbols[: max(0, int(config.PREOPEN_WARM_MAX_SYMBOLS))]:
+            if budget > 0 and clock() - start >= budget:
+                logger.info("[preopen] warm-up stopped after %.0fs budget: %d of %d symbols warmed", budget, n,
+                            min(len(symbols), int(config.PREOPEN_WARM_MAX_SYMBOLS)))
+                break
+            if stop_at_open and ist_time_at_or_after(parse_hhmm("09:15", 9, 15)):
+                logger.info("[preopen] warm-up stopped at the market open: %d symbol(s) warmed", n)
+                break
             event_risk.lookup(sym)                      # one cached call per symbol per day (also fills the news verdict)
             n += 1
     except Exception as e:  # noqa: BLE001

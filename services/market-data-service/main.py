@@ -1022,6 +1022,52 @@ def data_sources_status():
         _dhan, _left, _angel_cfg, lambda: _orders("quote"), lambda: _orders("history")))
 
 
+class FeedCoverageRequest(BaseModel):
+    symbols: List[str]
+
+
+@app.post("/internal/feed-coverage")
+def feed_coverage(req: FeedCoverageRequest):
+    """group344 (item 4 of the 13 Oct review: held symbols priced only through Yahoo, a stale price behind a stop). For each symbol:
+    does AngelOne have a token, does Dhan have a security id, is it on the known-delisted list, and is it in the Dhan quote cache.
+    `primary_feed` is False when neither AngelOne nor Dhan can price it (it then depends on Yahoo, which calls such names
+    \"possibly delisted\" or 404s). Never raises; unknown answers are None."""
+    out = []
+    try:
+        import angelone_scrip_master as _asm
+    except Exception:  # noqa: BLE001
+        _asm = None
+    try:
+        from dhan_data import scrip_master as _dsm, quotes as _dq
+    except Exception:  # noqa: BLE001
+        _dsm = _dq = None
+    for raw in (req.symbols or [])[:200]:
+        base = (raw or "").upper().replace(".NS", "").replace(".BO", "").strip()
+        if not base:
+            continue
+        ao = dh = cached = None
+        try:
+            if _asm is not None:
+                ao = bool(_asm.get_token(base))
+        except Exception:  # noqa: BLE001
+            ao = None
+        try:
+            if _dsm is not None and _dsm.ensure_loaded(block=False):
+                dh = bool(_dsm.security_id(base))
+        except Exception:  # noqa: BLE001
+            dh = None
+        try:
+            if _dq is not None:
+                cached = _dq.peek(base, max_age_s=30.0) is not None
+        except Exception:  # noqa: BLE001
+            cached = None
+        delisted = is_known_delisted(base)
+        out.append({"symbol": base, "angelone_token": ao, "dhan_security_id": dh, "dhan_fresh_quote": cached,
+                    "known_delisted": delisted,
+                    "primary_feed": bool((ao or dh) and not delisted) if (ao is not None or dh is not None) else None})
+    return {"ok": True, "symbols": out}
+
+
 @app.get("/live-quote/{symbol}")
 def live_quote(symbol: str):
     """
@@ -1037,6 +1083,15 @@ def live_quote(symbol: str):
     angelone_ws_feed.py's write path.
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+    # group344: the Dhan poller's newest row for this symbol (a few seconds old at most) answers without touching Oracle,
+    # which was timing out under the live_quotes writes (DPY-4024 / "live_quotes read failed ... ReadTimeout").
+    try:
+        from dhan_data import live_store as _dls
+        _mem = _dls.latest(sym)
+        if _mem is not None:
+            return _mem
+    except Exception:  # noqa: BLE001 - fall through to the database read
+        pass
     try:
         from sqlalchemy import text as _text
         from kv_cache import _get_neon
@@ -1477,6 +1532,9 @@ class QuoteResponse(BaseModel):
 class BulkQuoteRequest(BaseModel):
     """Request body for single-call bulk quotes (eliminates sequential 429 cascade)."""
     symbols: List[str]
+    # group344: real-trade-service's held-position lane sets this so the symbols are written to live_quotes first and are
+    # never skipped as "price unchanged". Ignored (False) for every other caller.
+    priority: bool = False
 
 
 def _clean_quote_dict(d: dict) -> dict:
@@ -2835,8 +2893,16 @@ def _dhan_bulk_stage(tickers: list, symbol_map: dict, results: list) -> list:
                 pass
             results.append(quote)
         if len(remaining) < len(tickers):
-            logger.info("quotes/bulk: Dhan priced %d/%d symbols, %d left for the next provider",
-                        len(tickers) - len(remaining), len(tickers), len(remaining))
+            _bd = ""
+            try:
+                _b = _dq.last_call_breakdown()
+                _bd = (" (fresh %s, not in Dhan's scrip map %s, unanswered when the wait ended %s%s)"
+                       % (_b.get("fresh"), _b.get("unmapped"), _b.get("waited_out"),
+                          ", Dhan paused" if _b.get("paused_or_no_map") else ""))
+            except Exception:  # noqa: BLE001
+                pass
+            logger.info("quotes/bulk: Dhan priced %d/%d symbols, %d left for the next provider%s",
+                        len(tickers) - len(remaining), len(tickers), len(remaining), _bd)
         return remaining
     except Exception as e:  # noqa: BLE001
         logger.debug("quotes/bulk: Dhan stage failed (non-fatal): %s", e)
@@ -3623,6 +3689,12 @@ def get_quotes_bulk(req: BulkQuoteRequest):
     AngelOne REST batch like any miss; only if every source then fails is the old row returned (same fetched_at,
     so the caller's own freshness check still applies and nothing is hidden)."""
     stale_rows: dict = {}
+    if getattr(req, "priority", False):
+        try:
+            from dhan_data import live_store as _dls
+            _dls.mark_priority(req.symbols or [])
+        except Exception:  # noqa: BLE001
+            pass
     out = _get_quotes_bulk_core(req, stale_rows)
     try:
         if stale_rows and isinstance(out, dict):

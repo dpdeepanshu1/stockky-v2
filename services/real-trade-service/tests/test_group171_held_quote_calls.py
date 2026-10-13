@@ -61,7 +61,7 @@ def env(monkeypatch):
     monkeypatch.setattr(f, "FEED_LEFTOVER_SKIP_LIVE", True)
     calls = {"bulk": [], "single": []}
 
-    async def fake_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+    async def fake_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None, **kw):
         calls["bulk"].append({"symbols": list(symbols), "timeout": timeout, "max_age_s": max_age_s})
         if stats is not None:
             stats.setdefault("failed", 0)
@@ -272,7 +272,7 @@ def test_small_batches_keep_the_full_cascade(env):
 def test_failed_bulk_does_not_skip_live_quote(env):
     env["bulk_fail"] = True
 
-    async def failing_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+    async def failing_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None, **kw):
         stats["failed"] = 1
         stats["chunks"] = 1
         stats["reasons"] = {}
@@ -288,7 +288,7 @@ def test_failed_bulk_does_not_skip_live_quote(env):
 
 
 def test_log_line_explains_why_bulk_left_symbols(env, caplog):
-    async def reasoned_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+    async def reasoned_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None, **kw):
         stats["chunks"] = 1
         stats["failed"] = 0
         stats["reasons"] = {"stale": 3, "no_price": 2}

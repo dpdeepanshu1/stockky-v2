@@ -106,3 +106,20 @@ def _legacy_weak_market_blocks_on(monkeypatch):
     monkeypatch.setattr(_cfg, "VIX_CARRY_BLOCK_ABOVE", 20.0, raising=False)
     monkeypatch.setattr(_cfg, "VIX_CARRY_SPIKE_PCT", 6.0, raising=False)
     monkeypatch.setattr(_cfg, "CARRY_MIN_NIFTY_CHANGE_PCT", -0.8, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _g344_legacy_defaults(monkeypatch):
+    """group344: the watchlist park memory is per process (row ids repeat across the tests' fresh databases) and the pre-open warm-up now stops
+    at the 09:15 IST open (wall-clock dependent). Older tests assume neither; tests/test_group344_log_review.py sets what it needs."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "PREOPEN_WARM_STOP_AT_OPEN", False, raising=False)
+    monkeypatch.setenv("WATCHLIST_PARK_S", "0")
+    try:
+        from entry_engine import entry as _entry
+        _entry._wl_parked.clear()
+        from watchlist_engine import sources as _src
+        _src._warm_wait_fails[0] = 0
+    except Exception:
+        pass
+    yield

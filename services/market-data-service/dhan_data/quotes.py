@@ -365,6 +365,12 @@ def inject_rows(rows: Iterable[dict]) -> None:
         _stats["rows_cached"] = len(_rows)
 
 
+_last_call: dict = {}
+
+
+_last_call: dict = {}      # group344: breakdown of the most recent get_quotes() call (see last_call_breakdown)
+
+
 def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
                wait_s: Optional[float] = None) -> Dict[str, dict]:
     """{key: row} for the symbols Dhan could price now. Fresh rows are served immediately; the rest wait for the next
@@ -375,6 +381,8 @@ def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
     keys = list(dict.fromkeys(key_for(s) for s in symbols if key_for(s)))
     if not keys:
         return out
+    _last_call.clear()
+    _last_call.update({"requested": len(keys), "fresh": 0, "unmapped": 0, "waited_out": 0, "paused_or_no_map": False})
     limit = config.quote_fresh_s() if max_age_s is None else max_age_s
     now = time.monotonic()
     need: List[str] = []
@@ -385,11 +393,17 @@ def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
                 out[k] = row
             else:
                 need.append(k)
+    _last_call["fresh"] = len(out)
     if not need:
         return out
     if not scrip_master.ensure_loaded(block=False):
+        _last_call["paused_or_no_map"] = True
         return out                                  # no map yet: fall through to the next provider at once
+    _n_all = len(need)
     need = [k for k in need if scrip_master.security_id(k)]
+    _last_call["unmapped"] = _n_all - len(need)
+    if need and not client.available():
+        _last_call["paused_or_no_map"] = True
     if not need or not client.available():
         return out
     start = time.monotonic()
@@ -416,7 +430,14 @@ def get_quotes(symbols: Iterable[str], max_age_s: Optional[float] = None,
             row = _rows.get(k)
             if row is not None and row["_mono"] >= start:
                 out[k] = row
+        _last_call["waited_out"] = sum(1 for k in need if k not in out and not _fail.get(k, 0.0) >= start)
     return out
+
+
+def last_call_breakdown() -> dict:
+    """group344: why the most recent get_quotes() priced fewer symbols than asked (fresh / not in Dhan's scrip map /
+    still unanswered when the wait ended / Dhan paused). Diagnostic only; copy of a shared dict."""
+    return dict(_last_call)
 
 
 def get_quote(symbol: str, **kw) -> Optional[dict]:

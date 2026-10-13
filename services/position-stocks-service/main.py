@@ -1029,6 +1029,18 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     if not candidates:
         summary["skipped_reason"] = "ALL_CANDIDATES_UNAFFORDABLE"
         return _finalize()
+    # group344: the price floor runs BEFORE the quality gate (HATHWAY at Rs10.6 spent three gate calls and was only rejected later at entry).
+    if config.PRICE_FLOOR_BEFORE_GATE:
+        _floor = max(float(config.MIN_STOCK_PRICE or 0.0), float(getattr(config, "ENTRY_MIN_PRICE", 0.0) or 0.0))
+        if _floor > 0:
+            _cheap = [c for c in candidates if 0 < float(getattr(c, "current_ltp", 0.0) or 0.0) < _floor]
+            if _cheap:
+                _cheap_ids = {id(c) for c in _cheap}
+                candidates = [c for c in candidates if id(c) not in _cheap_ids]
+                summary["below_price_floor"] = [c.symbol for c in _cheap]
+                if not candidates:
+                    summary["skipped_reason"] = "ALL_CANDIDATES_BELOW_PRICE_FLOOR"
+                    return _finalize()
     top_n = candidates[: max(1, _effective_top_n)]
     # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
     # at a time inside a plain `for` loop. Each individual check is now

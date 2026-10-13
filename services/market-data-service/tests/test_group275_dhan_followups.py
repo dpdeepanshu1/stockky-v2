@@ -163,6 +163,7 @@ def store(monkeypatch):
     monkeypatch.setenv("DHAN_LIVE_WRITE_CHUNK", "100")
     for k in list(live_store._stats):
         live_store._stats[k] = None if k == "last_error" else 0
+    live_store._last_sent.clear(); live_store._latest.clear(); live_store._prio.clear()
     live_store._last_warn = 0.0
     return eng
 

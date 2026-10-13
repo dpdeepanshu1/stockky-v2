@@ -59,7 +59,7 @@ def env(monkeypatch):
     monkeypatch.setattr(f, "FEED_BULK_MIN_SYMBOLS", 25)
     calls = {"bulk": [], "single": [], "down": False}
 
-    async def fake_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+    async def fake_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None, **kw):
         calls["bulk"].append(list(symbols))
         if stats is not None:
             stats.setdefault("failed", 0)
@@ -217,7 +217,7 @@ def test_distress_is_not_marked_when_the_bulk_fallback_recovers_every_held_symbo
     calls = {"n": 0}
     orig = f._bulk_ticks
 
-    async def flaky_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None):
+    async def flaky_bulk(client, symbols, *, timeout=None, max_age_s=None, stats=None, **kw):
         calls["n"] += 1
         if calls["n"] == 1:                                    # bulk-first misses, per-symbol also fails, last resort works
             if stats is not None:

@@ -82,6 +82,35 @@ def _hot_is_warming_empty(payload: Any) -> bool:
         return False
 
 
+# group344 (item 5 of the 13 Oct review: Hot Picks needs ~5 minutes to warm after a restart; every cycle waited 3 x 8 s and then fell to Tier 2,
+# and the empty "warming" answer was saved over the last good Tier 1 snapshot). Now: (1) an empty warming answer is never saved as the snapshot;
+# (2) while warming, the last good snapshot saved today within WATCHLIST_TIER1_SNAPSHOT_MAX_AGE_H hours (default 8, 0 = off) is used at once, with
+# no waiting; (3) when there is none, the wait still happens but its gap doubles after every spell that ended without data (cap 900 s).
+_warm_wait_fails = [0]
+_SNAP_STAMP = "_saved_at"
+
+
+def _stamp_snapshot(payload: dict) -> dict:
+    """A copy of payload carrying its save time (UTC ISO)."""
+    return {**payload, _SNAP_STAMP: _now().isoformat()}
+
+
+def _snapshot_fresh_enough(snap: Any, max_age_h: float) -> bool:
+    """True for a stamped snapshot saved today (UTC date) no more than max_age_h hours ago whose Hot Picks part lists something."""
+    try:
+        if max_age_h <= 0 or not isinstance(snap, dict) or not snap.get(_SNAP_STAMP):
+            return False
+        saved = datetime.fromisoformat(str(snap[_SNAP_STAMP]))
+        if saved.tzinfo is None:
+            saved = saved.replace(tzinfo=timezone.utc)
+        age_h = (_now() - saved).total_seconds() / 3600.0
+        hot = snap.get("hot_picks")
+        has = isinstance(hot, dict) and any(hot.get(k) for k in _HOT_BUCKET_KEYS)
+        return bool(has and 0 <= age_h <= max_age_h and saved.date() == _now().date())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _wait_for_hot_picks(payload: dict) -> dict:
     """Re-poll /stockky-hot while it still says "warming" with empty buckets. Returns the payload with the newest Hot
     Picks answer (the original one when nothing better came). Never raises."""
@@ -91,6 +120,7 @@ async def _wait_for_hot_picks(payload: dict) -> dict:
     if retries <= 0 or not _hot_is_warming_empty(payload):
         return payload
     import time as _t
+    gap_s = min(900.0, gap_s * (2 ** min(_warm_wait_fails[0], 4)))     # group344: back off after empty spells
     if _t.monotonic() - _warm_wait_last[0] < gap_s:
         return payload
     _warm_wait_last[0] = _t.monotonic()
@@ -109,7 +139,9 @@ async def _wait_for_hot_picks(payload: dict) -> dict:
             return payload
         if isinstance(hot, dict) and (any(hot.get(k) for k in _HOT_BUCKET_KEYS) or not hot.get("warming")):
             logger.info("watchlist/sources: Hot Picks ready after re-poll %d/%d", attempt, retries)
+            _warm_wait_fails[0] = 0
             return {**payload, "hot_picks": hot}
+    _warm_wait_fails[0] += 1
     logger.info("watchlist/sources: Hot Picks still warming after %d re-poll(s) - continuing without it this cycle", retries)
     return payload
 
@@ -184,9 +216,23 @@ async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
 
     payload = await api_gateway_breaker.call(_tier1_call, fallback=_tier1_fallback)
     if payload and isinstance(payload, dict) and _hot_is_warming_empty(payload):
-        payload = await _wait_for_hot_picks(payload)       # group 226
+        # group344: today's last good snapshot beats waiting (and beats Tier 2) while Hot Picks warms up.
+        _snap = None
+        try:
+            _snap = load_snapshot(db, "tier1_hot_picks")
+        except Exception:  # noqa: BLE001
+            _snap = None
+        if _snapshot_fresh_enough(_snap, _env_num("WATCHLIST_TIER1_SNAPSHOT_MAX_AGE_H", 8.0)):
+            logger.info("watchlist/sources: Hot Picks is warming - using today's saved Tier 1 snapshot (saved %s) instead of waiting",
+                        _snap.get(_SNAP_STAMP))
+            payload = {k: v for k, v in _snap.items() if k != _SNAP_STAMP}
+            payload["from_snapshot"] = True
+        else:
+            payload = await _wait_for_hot_picks(payload)       # group 226
     if payload:
-        save_snapshot(db, "tier1_hot_picks", payload)
+        # group344: an empty "warming" answer must not overwrite the last good snapshot.
+        if not (isinstance(payload, dict) and _hot_is_warming_empty(payload)) and not (isinstance(payload, dict) and payload.get("from_snapshot")):
+            save_snapshot(db, "tier1_hot_picks", _stamp_snapshot(payload) if isinstance(payload, dict) else payload)
         candidates = _normalize_tier1(payload)
         if candidates:
             return candidates

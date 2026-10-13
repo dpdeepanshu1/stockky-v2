@@ -85,6 +85,9 @@ def _group340_off_by_default(monkeypatch):
     monkeypatch.setattr(_config, "SCALP_SLOT_NOTIONAL_CAP_MULT", 0.0, raising=False)
     monkeypatch.setattr(_config, "QUALITY_GATE_RESULT_TTL_S", 0.0, raising=False)
     monkeypatch.setattr(_config, "QUALITY_GATE_EVENT_MEMORY_H", 0.0, raising=False)
+    # group344: older tests use cheap fixture prices (Rs10-30) and fake event calls that never time out; tests/test_group344.py turns these on.
+    monkeypatch.setattr(_config, "PRICE_FLOOR_BEFORE_GATE", False, raising=False)
+    monkeypatch.setattr(_config, "QUALITY_GATE_EVENT_FAIL_BLOCK", False, raising=False)
     from orders import adaptive as _ad
     _ad.reset_history_cache()
     yield

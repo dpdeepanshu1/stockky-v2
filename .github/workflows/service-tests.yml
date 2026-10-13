@@ -11,6 +11,7 @@ on:
     paths:
       - "services/**"
       - "scripts/check_shared_copies.py"
+      - "scripts/check_merge_conflicts.py"
       - "scripts/shared_copies_baseline.json"
       - "scripts/gen_env_reference.py"
       - "scripts/_repo_walk.py"
@@ -23,6 +24,7 @@ on:
     paths:
       - "services/**"
       - "scripts/check_shared_copies.py"
+      - "scripts/check_merge_conflicts.py"
       - "scripts/shared_copies_baseline.json"
       - "scripts/gen_env_reference.py"
       - "scripts/_repo_walk.py"
@@ -42,6 +44,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: No leftover git merge-conflict markers (a half-resolved merge crash-looped position-stocks on 2026-10-13)
+        run: python3 scripts/check_merge_conflicts.py
       - name: A fix must land in every copy of a duplicated module
         run: python3 scripts/check_shared_copies.py
       - name: NSE holiday lists agree

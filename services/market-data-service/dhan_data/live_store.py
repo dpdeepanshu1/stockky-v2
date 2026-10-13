@@ -43,6 +43,11 @@ _latest: dict = {}           # symbol -> (monotonic ts, wall ts, row) of the new
 _prio: dict = {}             # symbol -> monotonic expiry of its priority mark
 _PRIO_TTL_S = 180.0
 _LATEST_MAX = 4000
+# group347 (13 Oct 09:39 log: "83 of 158 rows written ... DPY-4024 call timeout of 8000 ms" right after boot, while the AngelOne
+# feed was also merging into live_quotes): after a chunk times out, Oracle is saturated; hammering it every 1.2 s makes the held-position
+# reads time out too.  Now a timeout opens a short back-off (DHAN_LIVE_WRITE_BACKOFF_S, default 20 s; 0 = off) in which ONLY the
+# priority (held-position) rows are written.  Skipped rows are not marked as sent, so they go out on the first write after the back-off.
+_backoff_until = 0.0
 
 
 def write_mode() -> str:
@@ -80,6 +85,15 @@ def build_params(rows: List[dict]) -> List[dict]:
 def refresh_s() -> float:
     """DHAN_LIVE_WRITE_REFRESH_S (default 4; blank / bad -> 4; 0 or less = write every row, the old behaviour)."""
     return max(0.0, config.env_float("DHAN_LIVE_WRITE_REFRESH_S", 4.0, 0.0))
+
+
+def backoff_s() -> float:
+    """DHAN_LIVE_WRITE_BACKOFF_S (default 20; blank / bad -> 20; 0 = never back off)."""
+    return max(0.0, config.env_float("DHAN_LIVE_WRITE_BACKOFF_S", 20.0, 0.0))
+
+
+def in_backoff() -> bool:
+    return time.monotonic() < _backoff_until
 
 
 def mem_max_age_s() -> float:
@@ -229,6 +243,12 @@ def _write_sync(rows: List[dict]) -> int:
     if not params:
         return 0
     n_prio = sum(1 for p in params if _clean(p["s"]) in priority_symbols())
+    if in_backoff():
+        params = params[:n_prio]                  # Oracle just timed out: held positions only until the back-off ends
+        if not params:
+            with _lock:
+                _stats["backoff_skipped_batches"] = _stats.get("backoff_skipped_batches", 0) + 1
+            return 0
     from angelone_ws_feed import _get_live_quotes_engine, _ensure_schema
     engine, dialect = _get_live_quotes_engine()
     if engine is None:
@@ -255,6 +275,7 @@ def _write_sync(rows: List[dict]) -> int:
 
     def _write_chunk(chunk: list, may_split: bool) -> None:
         nonlocal written, last_exc
+        global _backoff_until
         try:
             with engine.begin() as conn:
                 conn.execute(stmt, chunk)
@@ -270,6 +291,8 @@ def _write_sync(rows: List[dict]) -> int:
                 _stats["failed_chunks"] += 1
                 if _is_timeout(e):
                     _stats["timeouts"] += 1
+                    if backoff_s() > 0:
+                        _backoff_until = time.monotonic() + backoff_s()
                 _stats["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
             # LOG FIX (2026-10-12): "333 of 483 rows written ... DPY-4024 call timeout of 8000 ms". A chunk that times out is
             # retried ONCE as two halves (each its own transaction, each well inside the call timeout) instead of losing every

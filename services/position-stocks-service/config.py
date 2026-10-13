@@ -492,6 +492,9 @@ EDIS_MORNING_CHECK_TIME_IST = _get_str("EDIS_MORNING_CHECK_TIME_IST", "09:00")
 # partially double-fill. A small sleep between cancel and sell gives the
 # broker time to acknowledge the cancellation. 0 = no delay (original behaviour).
 MANUAL_EXIT_CANCEL_WAIT_S = _get_float("MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
+# group348: before a flat SELL, re-read the super order and retry the leg cancel until no TARGET/STOP leg is live (rounds; 0 = off, old behaviour)
+LEG_CANCEL_VERIFY_ATTEMPTS = int(_get_float("LEG_CANCEL_VERIFY_ATTEMPTS", 3))
+LEG_CANCEL_VERIFY_WAIT_S = _get_float("LEG_CANCEL_VERIFY_WAIT_S", 0.4)
 
 # ── Quality-gate cache fallback (session68) ─────────────────────────────────
 # screening/quality_gate.py is fail-open, always — a timeout or non-200

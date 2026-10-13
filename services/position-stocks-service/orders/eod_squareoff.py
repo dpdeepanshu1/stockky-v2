@@ -220,6 +220,61 @@ def _existing_flat_sell(db: Session, pos: ScalpPosition) -> Optional[dict]:
     return None
 
 
+# group348 (13 Oct): MANALIPETC, INFOBEAN, JAYBARMARU, SATIN and FMGOETZE each show TWO sells and TWO buys at Dhan for one position (about
+# -Rs 41 in total).  Closing used to cancel the legs, sleep 0.5 s and sell, logging a failed cancel at INFO only -- so a stop/target leg that was
+# still live at the broker (for example a stop-limit leg waiting below the market) could fill AFTER our market SELL, leaving an accidental short
+# that then had to be bought back.  Now the legs are re-read and the cancel retried until none is live, and any leg still live after the SELL is
+# cancelled again.  Fails open: a lookup error never blocks or delays an exit.
+_LIVE_EXCLUDED = _FILLED_ORDER_STATUSES + _DEAD_ORDER_STATUSES + ("CLOSED", "INACTIVE")
+
+
+def _live_exit_legs(db: Session, pos: ScalpPosition) -> Optional[list]:
+    """Names of this position's super-order TARGET_LEG / STOP_LOSS_LEG that are still live at Dhan ([] = none), or None when the lookup failed."""
+    try:
+        rows = dhan_client.get_super_order_list(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("exit-leg check: %s (id=%s) super order lookup failed (%s) - skipped.", pos.symbol, pos.id, e)
+        return None
+    row = next((r for r in rows or [] if str(r.get("orderId") or "") == str(pos.dhan_super_order_id)), None)
+    if row is None:
+        return []
+    live = []
+    for leg in row.get("legDetails") or []:
+        name = str(leg.get("legName") or "")
+        if name in ("TARGET_LEG", "STOP_LOSS_LEG") and str(leg.get("orderStatus") or "").upper() not in _LIVE_EXCLUDED:
+            live.append(name)
+    return live
+
+
+def ensure_exit_legs_cancelled(db: Session, pos: ScalpPosition, *, attempts: Optional[int] = None) -> Optional[list]:
+    """Cancel the live exit legs and re-read until none is live (at most LEG_CANCEL_VERIFY_ATTEMPTS rounds; 0 = off). Returns the legs still
+    live afterwards ([] = clean) or None when the check was off or could not run. Never raises."""
+    try:
+        n = int(getattr(config, "LEG_CANCEL_VERIFY_ATTEMPTS", 3)) if attempts is None else int(attempts)
+        if n <= 0 or not (config.USE_SUPER_ORDER and pos.dhan_super_order_id) or pos.overnight_converted_to_cnc:
+            return None
+        wait = float(getattr(config, "LEG_CANCEL_VERIFY_WAIT_S", 0.4))
+        live = _live_exit_legs(db, pos)
+        for _ in range(n):
+            if not live:
+                return live
+            for leg in live:
+                try:
+                    dhan_client.cancel_super_order(db, order_id=pos.dhan_super_order_id, order_leg=leg)
+                except Exception as e:  # noqa: BLE001
+                    logger.info("exit-leg check: cancel of %s on %s (%s) not done: %s", leg, pos.dhan_super_order_id, pos.symbol, e)
+            if wait > 0:
+                time.sleep(wait)
+            live = _live_exit_legs(db, pos)
+        if live:
+            logger.warning("exit-leg check: %s (id=%s) still has live leg(s) %s at Dhan after %d cancel round(s) - selling anyway; "
+                           "they will be cancelled again right after the SELL.", pos.symbol, pos.id, live, n)
+        return live
+    except Exception as e:  # noqa: BLE001 - never block an exit
+        logger.warning("exit-leg check failed for %s: %s", getattr(pos, "symbol", "?"), e)
+        return None
+
+
 def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     """2026-09-15 fix (session40): places the flat-SELL for one position,
     retrying up to config.EOD_SELL_RETRY_ATTEMPTS times ONLY when the
@@ -705,6 +760,7 @@ def run_eod_squareoff(db: Session) -> int:
                 wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
                 if wait_s > 0:
                     time.sleep(wait_s)
+                ensure_exit_legs_cancelled(db, pos)      # group348: verify no leg is still live before the SELL
 
             # Always place a plain MARKET SELL to guarantee flat.
             #
@@ -997,9 +1053,12 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
         wait_s = getattr(config, "MANUAL_EXIT_CANCEL_WAIT_S", 0.5)
         if wait_s > 0:
             time.sleep(wait_s)
+        ensure_exit_legs_cancelled(db, pos)          # group348: verify no leg is still live before the SELL
 
     try:
         sell_result = _fire_flat_sell(db, pos)
+        if config.USE_SUPER_ORDER and pos.dhan_super_order_id:
+            ensure_exit_legs_cancelled(db, pos, attempts=1)   # group348: a leg that woke up during the SELL must not fill later
     except PositionAlreadyFlat as _paf:
         raise ManualCloseRejected(f"Already closed — {_paf}")
     except exit_retry.ExitInCooldown as _eic:

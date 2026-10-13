@@ -2140,6 +2140,19 @@ def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db
         raise HTTPException(status_code=502, detail=f"Dhan funds fetch failed: {e}")
 
 
+@app.get("/dhan/day-pnl")
+def dhan_day_pnl(db: Session = Depends(get_db)):
+    """group348: today's gross P&L per symbol computed from Dhan's own order book (all services), plus any symbol that is not flat
+    (net_qty < 0 = accidental short from a double sell). Read-only; compare it with the app's P&L."""
+    from orders import day_pnl
+    try:
+        orders = dhan_client.get_order_list(db)
+    except Exception as e:
+        logger.error("position-stocks: /dhan/day-pnl fetch failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Dhan fetch failed: {e}")
+    return day_pnl.summarize(orders)
+
+
 @app.get("/reconcile/pending")
 def reconcile_pending(db: Session = Depends(get_db)):
     """Read-only diagnostic (session 72, open-issue #5): every position still

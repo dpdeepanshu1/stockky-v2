@@ -142,7 +142,7 @@ def _learn_from_entry_rejection(db: Session, pos: ScalpPosition, entry_status: s
 # to go through this exact same pending-fill resolution path or it would
 # be stuck at its entry_price/₹0.0 placeholder forever, same bug this
 # tuple already fixed once for MANUAL_EXIT.
-_FLAT_SELL_PENDING_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT")
+from orders.statuses import FLAT_SELL_STATUSES as _FLAT_SELL_PENDING_STATUSES, TERMINAL_STATUSES as _TERMINAL_STATUSES   # group340: single source
 
 
 def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
@@ -1026,8 +1026,9 @@ def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
     # sell-pending one has its legs cancelled / is on its way out).
     if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
         try:
-            new_target = round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2)
-            new_stop = round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2)
+            # group340: store the tick-rounded price modify_super_order() really sends (DWARKESH: card 47.13 vs trigger 47.21)
+            new_target = dhan_client.round_to_tick(round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2))
+            new_stop = dhan_client.round_to_tick(round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2))
             # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down
             # by a late fill-price correction.
             if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
@@ -1226,6 +1227,7 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
 
 
 _last_auto_repair_ts = 0.0
+_auto_repair_logged: set = set()   # group340: (id, real entry, symbol) already announced by this process
 
 
 def auto_repair_closed_entry_prices(db: Session) -> int:
@@ -1247,9 +1249,19 @@ def auto_repair_closed_entry_prices(db: Session) -> int:
         res = repair_closed_entry_prices(db, apply=True)
         n = len(res.get("changes") or [])
         if n:
-            logger.warning("reconcile: auto-repaired %d closed row(s) to real fills (P&L delta ₹%.2f): %s",
-                           n, res.get("total_pnl_delta", 0.0),
-                           ", ".join(str(c.get("symbol")) for c in res["changes"]))
+            changes = res["changes"]
+            if getattr(config, "RECONCILE_LOG_ONCE", True):
+                fresh = []
+                for c in changes:
+                    key = (c.get("id"), c.get("real_entry"), c.get("symbol"))
+                    if key not in _auto_repair_logged:
+                        _auto_repair_logged.add(key)
+                        fresh.append(c)
+                changes = fresh
+            if changes:
+                logger.warning("reconcile: auto-repaired %d closed row(s) to real fills (P&L delta ₹%.2f): %s",
+                               len(changes), res.get("total_pnl_delta", 0.0),
+                               ", ".join(str(c.get("symbol")) for c in changes))
         return n
     except Exception as e:  # never break the reconcile loop
         try:
@@ -1975,9 +1987,7 @@ def run_retention_cleanup(db: Session) -> int:
     from sqlalchemy import or_, and_
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=config.TRADE_HISTORY_RETENTION_DAYS)
-    terminal_statuses = (
-        "TARGET_HIT", "STOP_HIT", "EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT", "ERROR",
-    )
+    terminal_statuses = _TERMINAL_STATUSES
     rows = (
         db.query(ScalpPosition)
         .filter(ScalpPosition.status.in_(terminal_statuses))

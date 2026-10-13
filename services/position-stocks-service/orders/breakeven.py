@@ -146,6 +146,11 @@ def run_breakeven_stop(db: Session) -> int:
                 stop_loss_price=new_stop,
             )
 
+            # group340: read the leg back before saving the move (None = could not tell = as before)
+            if dhan_client.verify_stop_leg(db, order_id=pos.dhan_super_order_id, expected_price=new_stop) is False:
+                logger.warning("BREAKEVEN_STOP: %s (id=%d) move to ₹%.2f NOT confirmed by Dhan's order book - stored stop left at ₹%.2f",
+                               pos.symbol, pos.id, new_stop, pos.stop_price)
+                continue
             old_stop = pos.stop_price
             pos.stop_price = new_stop
             pos.stop_moved_to_breakeven = True

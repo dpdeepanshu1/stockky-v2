@@ -833,6 +833,70 @@ def modify_super_order(
     return _extract_data(resp) or {}
 
 
+_STOP_LEG_PRICE_KEYS = ("triggerPrice", "stopLossPrice", "stopPrice", "price")
+
+
+def read_stop_leg_price(row: dict) -> Optional[float]:
+    """STOP_LOSS_LEG stop price on one /v2/super/orders row, or None when no readable positive price is shown."""
+    if not isinstance(row, dict):
+        return None
+    for leg in row.get("legDetails") or []:
+        if isinstance(leg, dict) and str(leg.get("legName", "")).upper() == "STOP_LOSS_LEG":
+            for k in _STOP_LEG_PRICE_KEYS:
+                try:
+                    v = float(leg.get(k))
+                except (TypeError, ValueError):
+                    continue
+                if v > 0:
+                    return v
+    for k in ("stopLossPrice", "stop_loss_price"):
+        try:
+            v = float(row.get(k))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return None
+
+
+def _stop_leg_verdict(row: Optional[dict], expected_price: float, tolerance: Optional[float]) -> Optional[bool]:
+    if row is None:
+        return None
+    for leg in row.get("legDetails") or []:
+        if isinstance(leg, dict) and str(leg.get("legName", "")).upper() == "STOP_LOSS_LEG":
+            if str(leg.get("orderStatus") or "").upper() in ("REJECTED", "CANCELLED", "CANCELED", "EXPIRED"):
+                return False
+    seen = read_stop_leg_price(row)
+    if seen is None:
+        return None
+    tol = tolerance if tolerance is not None else tick_size_for_price(expected_price)
+    return abs(seen - float(expected_price)) <= tol + 1e-9
+
+
+def verify_stop_leg(db: Session, *, order_id: str, expected_price: float, tolerance: Optional[float] = None) -> Optional[bool]:
+    """Read the Super Order back after a stop move (group 340). True = Dhan's STOP_LOSS_LEG shows the price (within a tick); False = another
+    price or dead leg (re-read once after STOP_VERIFY_RETRY_WAIT_S first); None = could not tell / switched off (callers treat as 'as before').
+    Never raises."""
+    try:
+        import config as _cfg
+        import time as _t
+        if not getattr(_cfg, "STOP_VERIFY_ENABLED", True):
+            return None
+        def _look():
+            rows = get_super_order_list(db)
+            return next((r for r in rows if str(r.get("orderId") or "") == str(order_id)), None)
+        v = _stop_leg_verdict(_look(), expected_price, tolerance)
+        if v is False:
+            wait = float(getattr(_cfg, "STOP_VERIFY_RETRY_WAIT_S", 0.4) or 0.0)
+            if wait > 0:
+                _t.sleep(wait)
+            v = _stop_leg_verdict(_look(), expected_price, tolerance)
+        return v
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position-stocks: verify_stop_leg(%s) could not read the order back: %s", order_id, e)
+        return None
+
+
 def convert_position(
     db: Session,
     *,

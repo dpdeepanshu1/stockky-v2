@@ -722,6 +722,13 @@ async def import_broker_holdings(db: Session) -> int:
             stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
             stop_price = round(avg_price * (1 - stop_pct / 100.0), 2)
             target_price = round(avg_price * (1 + target_pct / 100.0), 2)
+            # group340: cap the imported target at IMPORT_TARGET_MAX_STOP_MULT x the stop distance (0 = off)
+            _tmult = float(getattr(config, "IMPORT_TARGET_MAX_STOP_MULT", 0.0) or 0.0)
+            if _tmult > 0 and stop_price < avg_price:
+                _tmax = round(avg_price + (avg_price - stop_price) * _tmult, 2)
+                if target_price > _tmax:
+                    target_price = _tmax
+                    target_pct = round((target_price - avg_price) / avg_price * 100.0, 2)
             basis_note = (
                 f"ATR-adaptive {stop_pct}%/{target_pct}% (atr%={atr_pct:.2f})" if atr_pct is not None
                 else f"flat {stop_pct}%/{target_pct}% (no live ATR at import time)"

@@ -130,6 +130,19 @@ def run_trailing_stop(db: Session) -> int:
                     pos.symbol, pos.id, new_stop, e, config.TRAIL_RETRY_BACKOFF_S,
                 )
                 continue
+            # group340: read the leg back; an accepted-but-unapplied modify must not be saved as a moved stop
+            if dhan_client.verify_stop_leg(db, order_id=pos.dhan_super_order_id, expected_price=new_stop) is False:
+                _next_attempt[pos.id] = now + max(config.TRAIL_RETRY_BACKOFF_S, config.TRAIL_MIN_INTERVAL_S)
+                logger.warning("TRAILING_STOP: %s (id=%d) modify to ₹%.2f NOT confirmed by Dhan's order book - stored stop left at ₹%.2f",
+                               pos.symbol, pos.id, new_stop, pos.stop_price)
+                try:
+                    import notifier
+                    notifier.notify_fire_and_forget(
+                        f"⚠️ <b>Stop move not confirmed</b> - {pos.symbol} x{pos.quantity}\n"
+                        f"Wanted ₹{new_stop:.2f}, Dhan's leg does not show it. Stored stop stays ₹{pos.stop_price:.2f}.")
+                except Exception as ne:  # noqa: BLE001
+                    logger.warning("TRAILING_STOP: %s verify alert failed: %s", pos.symbol, ne)
+                continue
             old_stop = pos.stop_price
             pos.stop_price = new_stop
             pos.stop_moved_to_breakeven = True

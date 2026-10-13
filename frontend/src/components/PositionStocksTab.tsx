@@ -86,7 +86,15 @@ function statusColor(status: string): string {
   // own color so it's visually distinguishable from a true manual exit,
   // not just a hold-orange lookalike.
   if (status === "STAGNATION_EXIT") return "text-signal-prepare";
+  // group 340: price sat under the stored stop and the watchdog closed it at market - a stop failure, loss colour.
+  if (status === "STOP_BREACH_EXIT") return "text-signal-sell";
   return "text-signal-avoid";
+}
+
+// group 340: a STOP_HIT that closed in profit is the trailing stop doing its job - say so instead of a loss-looking STOP_HIT.
+function statusLabel(p: { status: string; realized_pnl?: number | null }): string {
+  if (p.status === "STOP_HIT" && (p.realized_pnl ?? 0) > 0) return "TRAIL_STOP";
+  return p.status;
 }
 
 // Capital utilisation bar
@@ -2165,7 +2173,7 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}</span>
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
-          <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{p.status}</span>
+          <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{statusLabel(p)}</span>
           {/* AUDIT ADD (2026-09-19): overnight-carry badge — nothing on
               this card previously distinguished a CNC-carried position
               from a normal same-day INTRADAY one. */}

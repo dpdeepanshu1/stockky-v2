@@ -132,29 +132,104 @@ def _atr_proxy_pct(symbol: str, current_ltp: float) -> Optional[float]:
         return None
 
 
-def _bar_atr_pct(symbol: str, current_ltp: float) -> Optional[float]:
-    """Phase 2 volatility: mean (high-low)/close over the last
-    ADAPTIVE_BAR_LOOKBACK completed-or-forming ADAPTIVE_BAR_MINUTES bars built
-    from the tick buffer. Returns % of current_ltp, or None when fewer than
-    ADAPTIVE_BAR_MIN_BARS bars exist (caller falls back to the legacy path)."""
+def _ranges_from_ticks(symbol: str, width: int) -> dict:
+    """{bucket: [high, low]} from the live tick buffer (may be empty)."""
+    from feed import ws_client
+    bars: dict = {}
+    for ts, px in ws_client.get_tick_buffer(symbol):
+        if px <= 0:
+            continue
+        k = int(ts // width)
+        b = bars.get(k)
+        if b is None:
+            bars[k] = [px, px]
+        else:
+            if px > b[0]:
+                b[0] = px
+            if px < b[1]:
+                b[1] = px
+    return bars
+
+
+def _ranges_from_minute_bars(minute_bars, width: int) -> dict:
+    """{bucket: [high, low]} from 1-minute bar tuples (ts, o, h, l, c, v) grouped into `width`-second buckets."""
+    bars: dict = {}
+    for b in minute_bars or []:
+        try:
+            ts, hi, lo = float(b[0]), float(b[2]), float(b[3])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if hi <= 0 or lo <= 0 or hi < lo:
+            continue
+        k = int(ts // width)
+        cur = bars.get(k)
+        if cur is None:
+            bars[k] = [hi, lo]
+        else:
+            cur[0] = max(cur[0], hi)
+            cur[1] = min(cur[1], lo)
+    return bars
+
+
+# group 340: symbol -> (monotonic fetched_at, bars or None). One short market-data /history call per symbol, cached.
+_history_cache: dict = {}
+
+
+def reset_history_cache() -> None:
+    """Test helper."""
+    _history_cache.clear()
+
+
+def _fetch_history_minute_bars(symbol: str):
+    """Today's 1-minute bars: the bar store when it has enough, else one market-data /history call (short timeout, cached; misses cached
+    for ADAPTIVE_HISTORY_MISS_CACHE_S so a dead market-data cannot stall every entry). None on any failure."""
+    import time as _time
     try:
-        from feed import ws_client
-        buf = ws_client.get_tick_buffer(symbol)
+        from feed import bar_store
+        have = bar_store.get_bars(symbol)
+        if have and len(have) >= max(1, config.ADAPTIVE_BAR_MIN_BARS) * max(1, config.ADAPTIVE_BAR_MINUTES):
+            return have
+    except Exception as e:  # noqa: BLE001
+        logger.debug("adaptive: bar_store read failed for %s: %s", symbol, e)
+    now = _time.monotonic()
+    hit = _history_cache.get(symbol)
+    if hit is not None:
+        ttl = config.ADAPTIVE_HISTORY_CACHE_S if hit[1] else config.ADAPTIVE_HISTORY_MISS_CACHE_S
+        if now - hit[0] < ttl:
+            return hit[1]
+    bars = None
+    try:
+        import httpx
+        from urllib.parse import quote
+        from feed import bar_backfill
+        with httpx.Client(timeout=float(config.ADAPTIVE_HISTORY_TIMEOUT_S)) as client:
+            r = client.get(f"{config.MARKET_DATA_URL}/history/{quote(symbol, safe='&')}",
+                           params={"period": "1d", "interval": "1m"})
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            body = r.json()
+        candles = list(body.get("candles") or []) if isinstance(body, dict) else []
+        bars = bar_backfill.candles_to_bars(candles, None, float("inf")) or None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("adaptive: /history fetch failed for %s: %s", symbol, e)
+        bars = None
+    _history_cache[symbol] = (now, bars)
+    return bars
+
+
+def _bar_atr_pct(symbol: str, current_ltp: float) -> Optional[float]:
+    """Mean (high-low)/close over the last ADAPTIVE_BAR_LOOKBACK ADAPTIVE_BAR_MINUTES bars. Live tick buffer first; with fewer than
+    ADAPTIVE_BAR_MIN_BARS (group 340) the bar store / one cached /history call fills the earlier buckets (ADAPTIVE_HISTORY_ENABLED).
+    % of current_ltp, or None when no source has enough bars (legacy fallback)."""
+    try:
         width = max(1, config.ADAPTIVE_BAR_MINUTES) * 60
-        bars: dict = {}
-        for ts, px in buf:
-            if px <= 0:
-                continue
-            k = int(ts // width)
-            b = bars.get(k)
-            if b is None:
-                bars[k] = [px, px]
-            else:
-                if px > b[0]:
-                    b[0] = px
-                if px < b[1]:
-                    b[1] = px
-        if len(bars) < config.ADAPTIVE_BAR_MIN_BARS or current_ltp <= 0:
+        if current_ltp <= 0:
+            return None
+        bars = _ranges_from_ticks(symbol, width)
+        if len(bars) < config.ADAPTIVE_BAR_MIN_BARS and getattr(config, "ADAPTIVE_HISTORY_ENABLED", False):
+            for k, v in _ranges_from_minute_bars(_fetch_history_minute_bars(symbol), width).items():
+                bars.setdefault(k, v)          # live ticks win for buckets they cover
+        if len(bars) < config.ADAPTIVE_BAR_MIN_BARS:
             return None
         keys = sorted(bars)[-max(1, config.ADAPTIVE_BAR_LOOKBACK):]
         ranges = [(bars[k][0] - bars[k][1]) / current_ltp * 100.0 for k in keys]
@@ -228,7 +303,7 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str) -> 
     )
 
 
-def compute(
+def _compute_levels(
     pct_change: float,
     current_ltp: float,
     symbol: Optional[str] = None,
@@ -349,3 +424,46 @@ def compute(
         range_position=range_pos_val,
         atr_proxy_pct=round(atr_pct, 4) if atr_pct is not None else None,
     )
+
+
+def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLevels:
+    """group 340: a target above SCALP_TARGET_CAP_PCT is cut to it; if R:R then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to
+    target/MIN_RR, never under SCALP_TARGET_CAP_MIN_STOP_PCT and never wider than before. Cap 0 = off. Never raises."""
+    try:
+        cap = float(getattr(config, "SCALP_TARGET_CAP_PCT", 0.0) or 0.0)
+        if cap <= 0 or levels.target_pct <= cap or current_ltp <= 0:
+            return levels
+        target_pct = cap
+        stop_pct = levels.stop_pct
+        min_rr = float(getattr(config, "SCALP_TARGET_CAP_MIN_RR", 0.0) or 0.0)
+        if min_rr > 0 and stop_pct > 0 and target_pct / stop_pct < min_rr:
+            floor = float(getattr(config, "SCALP_TARGET_CAP_MIN_STOP_PCT", 0.0) or 0.0)
+            stop_pct = min(stop_pct, max(target_pct / min_rr, floor))
+        from execution.dhan_client import tick_size_for_price as _tsz
+        band = _tsz(current_ltp)
+        target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
+        stop_price = round_to_tick(current_ltp * (1 - stop_pct / 100))
+        if target_price <= current_ltp:
+            target_price = round_to_tick(current_ltp + band)
+        if stop_price >= current_ltp:
+            stop_price = round_to_tick(current_ltp - band)
+        logger.info("adaptive: target cap %.2f%% -> %.2f%%, stop %.2f%% -> %.2f%%", levels.target_pct, target_pct, levels.stop_pct, stop_pct)
+        return AdaptiveLevels(
+            target_pct=round(target_pct, 4), stop_pct=round(stop_pct, 4),
+            target_price=target_price, stop_price=stop_price,
+            breakeven_trigger_pct=_breakeven_trigger(target_pct),
+            range_regime=levels.range_regime, range_position=levels.range_position,
+            atr_proxy_pct=levels.atr_proxy_pct,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("adaptive: target cap failed (keeping uncapped levels): %s", e)
+        return levels
+
+
+def compute(
+    pct_change: float,
+    current_ltp: float,
+    symbol: Optional[str] = None,
+) -> AdaptiveLevels:
+    """Adaptive target/stop for a BUY scalp, then the group 340 target cap (see apply_target_cap)."""
+    return apply_target_cap(_compute_levels(pct_change, current_ltp, symbol), current_ltp)

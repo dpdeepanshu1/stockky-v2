@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
+from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -611,6 +611,18 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _cal_reject, quality=quality)
         return None
 
+    # group340: cheap-stock floor (ENTRY_MIN_PRICE, 0 = off) and ordinary-day cut-off (SCALP_ENTRY_CUTOFF_IST, blank = off).
+    _min_px = float(getattr(config, "ENTRY_MIN_PRICE", 0.0) or 0.0)
+    if _min_px > 0 and 0 < candidate.current_ltp < _min_px:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", f"MIN_PRICE:ltp={candidate.current_ltp:.2f}<{_min_px:.2f}", quality=quality)
+        return None
+    _cut_reject = calendar_gate.scalp_cutoff_reason()
+    if _cut_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _cut_reject, quality=quality)
+        return None
+
     # group336: a large move with no news / catalyst behind it. "block" mode refuses it here; the default "size" mode shrinks it at sizing below.
     _cat_block, _cat_mult = catalyst_gate.decide(candidate.pct_change, getattr(quality, "has_positive_catalyst", None) if quality else None,
                                                   bool(getattr(quality, "bulk_deal_flag", False)) if quality else False)
@@ -658,8 +670,16 @@ def attempt_entry(
         raise
 
     # Quantity
-    raw_qty = int(position_value / candidate.current_ltp)
-    quantity = max(1, raw_qty)
+    # group340: sensible whole-share rounding; skip (not force 1 share) when one share costs far more than the budget.
+    quantity = sizing.compute_quantity(position_value, candidate.current_ltp)
+    if quantity is None:
+        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED",
+                       f"ONE_SHARE_EXCEEDS_BUDGET:price={candidate.current_ltp:.2f},budget={position_value:.2f}", quality=quality)
+        raise InsufficientCapitalSkip(
+            f"{candidate.symbol}: ONE_SHARE_EXCEEDS_BUDGET price=₹{candidate.current_ltp:.2f} budget=₹{position_value:.2f}"
+        )
     # group283 (plan C3 size-down): do not let the order eat its own touch (off unless ENTRY_BOOK_MAX_SHARE_PCT > 0).
     # group286: then the same against Dhan's 20-level ask book within ENTRY_DEPTH20_SLIP_PCT of the touch (off unless
     # ENTRY_DEPTH20_SLIP_PCT > 0). The second cap sees the quantity left after the first. Both fail open.
@@ -1125,7 +1145,14 @@ def attempt_manual_entry(
         if position_value is None:
             shared_symbol_lock.release(db, symbol)
             raise ManualEntryRejected("Insufficient available capital (or daily-loss kill switch tripped).")
-        quantity = max(1, int(position_value / current_ltp))
+        quantity = sizing.compute_quantity(position_value, current_ltp)
+        if quantity is None:
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, symbol)
+            raise ManualEntryRejected(
+                f"One share of {symbol} (₹{current_ltp:,.2f}) costs far more than the risk budget "
+                f"(₹{position_value:,.2f}) - entry skipped instead of forcing 1 share."
+            )
         actual_cost = quantity * current_ltp
         if actual_cost > position_value:
             shortfall = actual_cost - position_value

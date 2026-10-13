@@ -306,6 +306,13 @@ async def _graceful_shutdown():
         logger.info("Graceful shutdown commit: %s", phases)
     except Exception as e:
         logger.warning("Graceful shutdown commit failed: %s", e)
+    # group346: durable kv writes queued from the event loop (write-behind) must reach Oracle before we exit
+    try:
+        if _kv_cache is not None and hasattr(_kv_cache, "flush_pending"):
+            _drained = await asyncio.to_thread(_kv_cache.flush_pending, 10.0)
+            logger.info("kv write-behind flushed on shutdown: %s", _drained)
+    except Exception as e:
+        logger.warning("kv write-behind flush failed: %s", e)
     # Cancel quote loop task
     try:
         if _quote_loop_task is not None and not _quote_loop_task.done():
@@ -901,6 +908,39 @@ def _nse_api_block_seconds() -> float:
     return v if v >= 0 else 600.0
 
 
+# group346 (log review #16): the block pause above covers 401/403/429 only. Boards that answer 404 (retired endpoint),
+# 5xx (503 on bulk/block deals) or fail at the transport level were asked again on every recompute. One endpoint that
+# fails this way is now left alone for NSE_ENDPOINT_FAIL_PAUSE_S (default 900 s), doubling per further failure up to
+# NSE_ENDPOINT_FAIL_MAX_S (default 3600 s); a 200 clears it. Other endpoints are unaffected. 0 disables.
+_nse_endpoint_fail: dict = {}   # endpoint -> [consecutive_failures, paused_until_epoch]
+
+
+def _nse_endpoint_env(name: str, default: float) -> float:
+    try:
+        v = float((os.getenv(name) or "").strip() or default)
+        return v if v >= 0 else default
+    except ValueError:
+        return default
+
+
+def _nse_endpoint_paused(endpoint: str) -> bool:
+    ent = _nse_endpoint_fail.get(endpoint)
+    return bool(ent and ent[1] > time.time())
+
+
+def _nse_endpoint_note_failure(endpoint: str, why: str) -> None:
+    base = _nse_endpoint_env("NSE_ENDPOINT_FAIL_PAUSE_S", 900.0)
+    if base <= 0:
+        return
+    cap = max(base, _nse_endpoint_env("NSE_ENDPOINT_FAIL_MAX_S", 3600.0))
+    ent = _nse_endpoint_fail.setdefault(endpoint, [0, 0.0])
+    ent[0] += 1
+    pause = min(cap, base * (2 ** (ent[0] - 1)))
+    ent[1] = time.time() + pause
+    logger.warning("NSE API %s failed (%s) - not asking this endpoint again for %ds (failure #%d)",
+                   endpoint, why, int(pause), ent[0])
+
+
 def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
     global _nse_api_block_until, _nse_api_block_skipped
     cached = _redis_get(cache_key)
@@ -908,6 +948,8 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
         return cached
     if _nse_api_block_until and time.time() < _nse_api_block_until:
         _nse_api_block_skipped += 1
+        return cached if cached else None
+    if _nse_endpoint_paused(endpoint):
         return cached if cached else None
     try:
         client = _get_nse_client()
@@ -922,6 +964,7 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
             resp = client.get(url)
         if resp.status_code == 200:
             _nse_api_block_until = 0.0
+            _nse_endpoint_fail.pop(endpoint, None)
             data = resp.json()
             if isinstance(data, dict):
                 _redis_set(cache_key, data, ttl)
@@ -936,10 +979,13 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
                     endpoint, resp.status_code, int(_pause), _nse_api_block_skipped,
                 )
                 _nse_api_block_skipped = 0
+            elif resp.status_code == 404 or resp.status_code >= 500:
+                _nse_endpoint_note_failure(endpoint, f"HTTP {resp.status_code}")
             else:
                 logger.warning(f"NSE API {endpoint} returned {resp.status_code}")
     except Exception as e:
         logger.warning(f"Failed to fetch {endpoint}: {e}")
+        _nse_endpoint_note_failure(endpoint, type(e).__name__)
     if cached:
         return cached
     return None

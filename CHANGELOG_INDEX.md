@@ -1,11 +1,12 @@
-# Changelog index
+﻿# Changelog index
 
 Per-session fix notes live in `archive/session-notes/` (one file per
 session, dated). This file is just an index so they're discoverable
 without 50+ files cluttering the repo root.
 
-Most recent first — see each file for full detail:
+Most recent first â€” see each file for full detail:
 
+- 2026-10-13 (group 346)  The items group 345 left open. api-gateway `kv_cache` durable writes from the event-loop thread go to a write-behind writer (the loop was blocked 3.6-3.9 s in an Oracle commit; flushed at shutdown, `KV_WRITE_BEHIND=0` = old); AngelOne feed batches no longer wait for their `live_quotes` DB write (`ANGELONE_FEED_DB_ASYNC=0` = old); an NSE endpoint answering 404/5xx is left alone 15 min doubling to 1 h; retired / frozen news-feed primaries are skipped for 30 min once a fallback serves; frontend nginx 404s `/metrics`, `/actuator`, `.html` strays. **Tests were not run (sandbox could not install pytest); the logic was checked with stand-alone scripts.** Not code: RAMRAT fill (check Dhan, `/reconcile/pending`), BIRET / HEG / HDFIRE / UNIVAFOODS not in AngelOne's file. Details: `docs/GROUP346_REMAINING_LOG_ITEMS_LOOP_BLOCK_FEED_LAG_DEAD_FEEDS.md`.
 - 2026-10-13 (group 345)  Review of the post-344 log, 19 items. Breakeven stop modify backs off after a rejection and ignores stale ticks (AVTNPL looped ~100x); event service fetches one symbol once at a time and `/check` yields to live calls and stops at 240 s; held positions polled every tick by the Dhan poller; per-call Dhan breakdown; per-scan Surprise counters; board backfill 6/pass with empty-hold and pause; volume-shock rejects cached and price floor before history; price-only entry-gate rejects cooled 60 s; watchlist requeue cooldown 300 s. **Tests were not run (sandbox could not install pytest).** Details and the not-fixed items: `docs/GROUP345_LOG_REVIEW_BREAKEVEN_EVENT_SINGLE_FLIGHT_LOAD.md`.
 - 2026-10-13 (group 344)  Log review of the 13 Oct session, 10 items. Held-position quote path: Dhan live writer writes changed rows only, held symbols first, and `/live-quote` serves from memory; exit-fill lookups logged once with an `exit_audit` list on `/reconcile/repair-closed`; quality gate blocks an entry when the news service is down (retry once, 15 min fail-open valve); pre-open warm-up bounded; held-symbol feed-coverage check; Hot Picks uses today's snapshot while warming; price-blocked watchlist rows parked 5 min; Surprise scan counters and a 10 s per-symbol budget; AngelOne candle cooldown base 90 s; Dhan transient pause 5 s plus a partial-pricing breakdown; price floor before the quality gate. Details and the not-provable items: `docs/GROUP344_LOG_REVIEW_HELD_QUOTES_EXIT_AUDIT_EVENT_GATE.md`.
 - 2026-10-13 (group 343)  No code change. The VM build with group 342's `compileall` step failed on position-stocks: the `<<<<<<< HEAD` in `orders/reconcile.py` (line 1032) is committed on `backup-production`; the pull never touched that file. This zip carries the clean `reconcile.py` (2071 lines, no markers, includes group 341 `_rearm_legs`) - copy it over the repo file, run `python3 scripts/check_merge_conflicts.py`, commit, push, rebuild.
@@ -22,8 +23,8 @@ Most recent first — see each file for full detail:
 - 2026-10-12 (group 331)  Finishes group 330's two open items. real-trade: the pre-open snapshot now runs three passes (09:08, 09:11, 09:14; `PREOPEN_SNAPSHOT_PASSES_IST`) - a later pass adds / overrides gaps and never drops one, caches are warmed on the first pass only, per-pass coverage (queued / priced / fresh gap) is kept, a LOW COVERAGE warning fires when under 20% of queued names had a fresh price, new `GET /preopen/status`. Global cues for the carry decision (`entry_engine/global_cues.py`): Europe / Asia / US-futures day moves, no carry when the average is <= -0.9% or a US future <= -1.2% (fail open, `GLOBAL_CUES_ENABLED`). market-data: new `GET /global-cues` (allow-listed Yahoo symbols read directly - `/quote` would have turned `ES=F` into `ES=F.NS`). See docs/GROUP331_MULTIPASS_PREOPEN_GLOBAL_CUES.md
 - 2026-10-12 (group 330)  Both trading services, fail-open, each with its own switch: India VIX (real-trade: no new BUY at VIX >= 24, risk x0.7 at >= 18 or +10% day, no overnight carry at >= 20 or +6% day; position-stocks: market gate blocks at >= 24, size x0.7), VWAP gate (real-trade, long not > 0.15% under the day's VWAP), 09:08 pre-open snapshot + cache warm-up + gap gate (real-trade `entry_engine/preopen.py`, position-stocks `screening/preopen.py`, new job), negative-news block (real-trade entry + carry; position-stocks quality gate), real-trade carry context at the close (Nifty <= -0.8% vs prev close / VIX / negative news). Also market-data `/quote` + `/quotes/bulk` now pass Dhan avg_price, circuit limits, spread and book value through (they were dropped, which left group 329's circuit and spread checks inert). See docs/GROUP330_VIX_VWAP_PREOPEN_NEWS_CARRY.md
 - 2026-10-12 (group 329)  Both trading services, fail-open: exchange circuit-band gate (no BUY within 1% of upper / 2% of lower circuit), results-day gate (no BUY on a stock reporting today; no overnight carry into results today / next session), spread/book re-check at BUY time (real-trade), weekend/holiday carry bar +0.5% per extra closed day. Combined cross-service loss cap deliberately NOT re-added (removed by user decision). See docs/GROUP329_CIRCUIT_EARNINGS_GATES.md
-- 2026-10-11 (group 324, board)  Frontend only: Market Board restyled to the order-block.com look — dark `.ob` terminal island (`board/board.css`), sector→tile flow lanes (`flowGeometry.ts`, `FlowLines.tsx`, `ghostLayout.ts`, `boardState.ts`), animated tiles, richer stock popup + candle chart, placeholder/last-session states; journal cards and Real Trade "positions and candidates" panel use the same island; `flowGeometry` test added to `scripts/docker_frontend_check.sh`. Merged with the UI refresh above. See docs/GROUP324_ORDERBLOCK_BOARD_LOOK.md
-- 2026-10-11 (group 324)  Frontend only, no service code: UI refresh — fixed Tailwind dropping every opacity variant on the themed colours (`text-mist/60`, `border-slate/40` … ~600 uses never rendered), new accent/buy/sell/warn token set (amber no longer both brand and warning, AA contrast in both themes), Inter with tabular figures, 8-11px text lifted a step, grouped sidebar + top bar + mobile bar that now includes Auto Trade and Position Stocks, page titles with a one-line description, shared `SubTabs` for both trading services, mobile form/tap-target fixes. Not visually verified (no browser in sandbox). See docs/GROUP324_UI_REFRESH_NAV_TOKENS_SUBTABS.md
+- 2026-10-11 (group 324, board)  Frontend only: Market Board restyled to the order-block.com look â€” dark `.ob` terminal island (`board/board.css`), sectorâ†’tile flow lanes (`flowGeometry.ts`, `FlowLines.tsx`, `ghostLayout.ts`, `boardState.ts`), animated tiles, richer stock popup + candle chart, placeholder/last-session states; journal cards and Real Trade "positions and candidates" panel use the same island; `flowGeometry` test added to `scripts/docker_frontend_check.sh`. Merged with the UI refresh above. See docs/GROUP324_ORDERBLOCK_BOARD_LOOK.md
+- 2026-10-11 (group 324)  Frontend only, no service code: UI refresh â€” fixed Tailwind dropping every opacity variant on the themed colours (`text-mist/60`, `border-slate/40` â€¦ ~600 uses never rendered), new accent/buy/sell/warn token set (amber no longer both brand and warning, AA contrast in both themes), Inter with tabular figures, 8-11px text lifted a step, grouped sidebar + top bar + mobile bar that now includes Auto Trade and Position Stocks, page titles with a one-line description, shared `SubTabs` for both trading services, mobile form/tap-target fixes. Not visually verified (no browser in sandbox). See docs/GROUP324_UI_REFRESH_NAV_TOKENS_SUBTABS.md
 - 2026-10-11 (group 323)  Ops only, no service code: `scripts/vm_ops.sh` (heartbeat cron that refuses the `YOUR-UUID` placeholder and replaces the broken line, sampler start/stop/status/report with exactly-one-process guard, encrypted `.env` backup + chmod 600, read-only SSH / open-port / firewall audit, cron schedule for the sampler and the 09:30 / 10:15 IST checks, one-screen checklist), `scripts/monday_check.py` (read-only live check: health, session verdict must be `open` at 10:15, quote age, depth20 + order-WS `layout_verdict`, docker log FAIL / suspect / CRITICAL scan, writes `~/check_logs/<date>_<label>ist_live.log`), fallback `scripts/stats_loop.sh` with `--report` peaks. See docs/GROUP323_VM_OPS_HEARTBEAT_SAMPLER_MONDAY_CHECK.md
 - 2026-10-11 (group 322)  real-trade: per-trade risk % capped at the daily-loss % (`RISK_CAP_TRADE_RISK_AT_DAILY_LOSS`), overnight carry needs `OVERNIGHT_HOLD_MIN_GAIN_PCT` (1.5) gain over entry; position-stocks: depth gate refuses a name with no depth reading once depth has been seen flowing (`ENTRY_DEPTH_MISSING=auto`); market-data depth20 and position-stocks order WS drop / flag bad layouts and expose raw frame samples + `layout_verdict`; guard tests pin silent excepts on money paths. Also: optional broker-side CNC stop (`execution/broker_stop.py`, `BROKER_STOP_ENABLED`, OFF, untested against live Dhan; cancelled before any software SELL, ignored by pending-sell checks), `BOARD_GATE_MODE=auto` (enforce only once the shadow report's promotion rule is met), `scripts/strategy_readout.py` (entry-window verdict from your 14-day reports) - see `docs/GROUP322_RISK_CAP_CARRY_BAR_DEPTH_MISSING_LAYOUT_CHECK.md`
 - 2026-10-11 (group 321)  Safety: the price-based closed-market verdict now stops only NEW entries; real-trade's stop/emergency exit loop and EOD square-off, and position-stocks' exit reconcile / EOD loop, use calendar + clock only (`is_market_open_ist(honor_session_proof=False)`); a stale feed can no longer switch off stops. Verdict changes are logged (`session-proof`); Dhan rows feed the proof; the Nifty probe has its own thread (`SESSION_NIFTY_THREAD`); real-trade alerts when a held position has no quote for `EXIT_NO_PRICE_ALERT_CYCLES` (6) exit cycles. See docs/GROUP321_EXITS_IGNORE_PRICE_PROOF_NO_PRICE_ALERT.md
@@ -171,13 +172,13 @@ Most recent first — see each file for full detail:
   Item 14 of the open list, first half. New `shared_symbol_lock.sweep_stale` (young claims and dead-exit-SELL locks kept, throttled, never raises) called from the fast reconcile loop; `cleanup_stale` at startup unchanged (`SYMBOL_LOCK_SWEEP_INTERVAL_S` 60, `SYMBOL_LOCK_SWEEP_MIN_AGE_S` 600, 0 = off). COHANCE half not changed: the priority lane comes from OPEN rows in `trade_positions`, needs that row. Doc: docs/GROUP210_SYMBOL_LOCK_SWEEP.md. Tests: position-stocks-service/tests/test_group210_symbol_lock_sweep.py (10).
 - 2026-10-06 (group 209)  A margin rejection pauses all new entries for 5 min; a failed order placement rests that symbol 5 min (position-stocks-service).
   Item 15 of the open list, second half. New `orders/entry_pause.py`; `attempt_entry` and `reconcile._learn_from_entry_rejection` start the pauses (`ENTRY_MARGIN_PAUSE_MINUTES`, `ENTRY_ORDER_FAILED_COOLDOWN_MINUTES`, 0 = off); margin-rejected rows no longer count against the symbol's group-192 cooldown/day cap. Doc: docs/GROUP209_ENTRY_MARGIN_PAUSE.md. Tests: position-stocks-service/tests/test_group209_entry_pause.py (14) plus an autouse reset in conftest.py.
-- 2026-10-06 (group 208)  Live Dhan panel: only open positions, real LTP, no cost-as-P&L; capital card no longer shows a false ₹0 (real-trade-service + frontend).
+- 2026-10-06 (group 208)  Live Dhan panel: only open positions, real LTP, no cost-as-P&L; capital card no longer shows a false â‚¹0 (real-trade-service + frontend).
   Item 13 of the open list. New `portfolio/broker_view.py`; `/dhan/positions` adds `rows`/`open_count` with priority-lane LTPs; `RealAutoTrade.tsx` and `CapitalSplitCard.tsx` updated. Ledger drift not changed (needs your numbers). Doc: docs/GROUP208_BROKER_PANEL.md. Tests: real-trade-service/tests/test_group208_broker_view.py, test_main_routes_trading.py (12 new/changed).
 - 2026-10-06 (group 207)  Trade History totals count only settled trades; breakeven is not a loss (position-stocks-service + frontend).
   Item 12 of the open list. New `orders/trade_stats.py`; `/trades/history` summary gains `breakeven`, `pending_reconcile`, `error_trades` and excludes placeholder/ERROR rows from win rate and P&L; `/trades/breakdown` skips placeholders; dashboard card shows BE and the not-counted line. Doc: docs/GROUP207_TRADE_SUMMARY_COUNTS.md. Tests: tests/test_group207_trade_stats.py, test_main.py (16 new).
 - 2026-10-06 (group 206)  a rejected duplicate SELL no longer turns a filled trade into ERROR (position-stocks-service).
   Item 11 of the open list (AVALON). `_fire_flat_sell` skips the SELL when the bracket exit already filled and adopts an already-placed order on retry; `_reconcile_eod_pending` looks for the real exit before writing ERROR; `POST /reconcile/repair-dead-sell-errors` (dry run by default) repairs today's damaged rows. Doc: docs/GROUP206_DUPLICATE_SELL_ERROR.md. Tests: position-stocks-service/tests/test_reconcile.py, test_eod_squareoff.py (19 new/changed).
-- 2026-10-06 (group 205)  flat-SELL exits keep their pending marker, so the real fill is booked instead of a permanent ₹0 (position-stocks-service).
+- 2026-10-06 (group 205)  flat-SELL exits keep their pending marker, so the real fill is booked instead of a permanent â‚¹0 (position-stocks-service).
   Item 10 of the open list. `reconcile.py`: the super-order fallback no longer clears `*_PENDING_RECONCILE` when the flat SELL is not resolvable yet; new `rearm_cleared_placeholder_exits` + `POST /reconcile/rearm-placeholder-exits` (dry run by default) repairs rows already damaged. Doc: docs/GROUP205_PENDING_MARKER_KEPT.md. Tests: position-stocks-service/tests/test_reconcile.py (8 new/changed).
 - 2026-10-06 (group 204)  one Yahoo live socket, one subscribe, no lost universe (market-data-service).
   Item 5 of the open list. `yahoo_ws_feed.py`: thread start is atomic under a lock; a clean `listen()` return now closes the old socket, logs and waits 5 s instead of silently re-subscribing; a `_DESIRED` set means reconnects and idle periods keep the refreshed universe (it used to fall back to the boot list); the client is published only after the first subscribe; subscribe lines say why (`connection #N, <reason>`). Doc: docs/GROUP204_YAHOO_WS_SINGLE_SOCKET.md. Tests: market-data-service/tests/test_group204_yahoo_ws_single_socket.py (14, run under a stand-in runner, not real pytest).
@@ -369,7 +370,7 @@ Most recent first — see each file for full detail:
   1 new test (unrun here: no pytest/fastapi; branch run against stubs). Details: `docs/GROUP122_MOVERS_EMPTY_LOG_THROTTLE.md`.
 - 2026-10-04 (group 121)  Log-audit item: after-hours "10 symbol(s) scored -> 1 rows upserted" (real-trade-service).
   Not lost symbols: after a restart the earlier pass's rows are already stored, so only the 1 new symbol was written. The summary line now says
-  `N scored -> W new/updated, U already stored at an equal or higher score (unchanged), F failed`, and the Telegram header adds `· U already stored`.
+  `N scored -> W new/updated, U already stored at an equal or higher score (unchanged), F failed`, and the Telegram header adds `Â· U already stored`.
   No write/scoring/notification-rule change. 3 new tests (unrun here: no pytest/sqlalchemy; function run against stubs). Details: `docs/GROUP121_AFTERHOURS_ALREADY_STORED_LOG.md`.
 - 2026-10-04 (group 120)  Log-audit item: startup quote burst (api-gateway).
   The boot pre-warm ran a full ~1,000-symbol surprise quote sweep immediately on every start. It now waits `SURPRISE_BOOT_WARM_DELAY_SEC` (default 20, 0 = old), skips the sweep when the market is closed and a saved result exists, and otherwise reuses a fresh saved result (`cached=True`).
@@ -958,7 +959,7 @@ Most recent first — see each file for full detail:
   api-gateway kv_cache + hotpicks/ipo/surprise schema 548; analysis-intelligence kv_cache 239. The new
   tests fail against the old oracle_compat. NEEDS REBUILD: all services that bundle oracle_compat
   (`docker compose build` then `up -d`); expect WARNING lines only if a DDL genuinely fails.
-- 2026-10-03 (group 35) — `notifier.py` in real-trade-service and position-stocks-service: a FAILED
+- 2026-10-03 (group 35) â€” `notifier.py` in real-trade-service and position-stocks-service: a FAILED
   delivery no longer eats the 5-minute dedup window. `_should_send` still reserves the slot before
   delivery (keeps simultaneous identical sends race-free), but when every channel fails the slot is
   shortened to `_DEDUP_RETRY_AFTER_FAIL_S` (30s), so the same alert (SELL failed / exit blocked) is
@@ -970,7 +971,7 @@ Most recent first — see each file for full detail:
   real-trade test_notifier 81 passed; position-stocks full suite 2339 passed. Unrelated sandbox
   failures (oracledb/dhanhq not installed) fail identically on the original upload. NEEDS REBUILD:
   `docker compose build real-trade-service position-stocks-service && docker compose up -d` both.
-- 2026-10-03 (group 34) — api-gateway `requirements.txt`: added `pyjwt==2.8.0` (same pin as
+- 2026-10-03 (group 34) â€” api-gateway `requirements.txt`: added `pyjwt==2.8.0` (same pin as
   real-trade-service / position-stocks-service). It was only in `requirements-test.txt`, so the
   Docker image had no PyJWT and `qstash_client.verify_signature` hit its ImportError path and
   accepted every `/ops/qstash/tick` callback unverified (warning log only). New drift guard
@@ -980,7 +981,7 @@ Most recent first — see each file for full detail:
   then restart; confirm with `docker compose exec api-gateway python -c "import jwt;print(jwt.__version__)"`.
   Tests: test_requirements_pins + test_qstash_client 31 passed (sandbox, httpx/pytest only; full
   `bash run_tests.sh` not run here, re-run on the VM).
-- 2026-10-02 (group 33) — debt-to-equity scale fixed at the source. `market-data-service/main.py`
+- 2026-10-02 (group 33) â€” debt-to-equity scale fixed at the source. `market-data-service/main.py`
   `_normalize_de_ratio` gained `yahoo_percent=False`; the Yahoo `info["debtToEquity"]` call site
   now passes `True`, because Yahoo's field is ALWAYS a percent (30 = 0.3x), so non-financials are
   divided by 100 at any magnitude (before, a Yahoo "30" stayed 30 and was scored as 30x leverage
@@ -993,7 +994,7 @@ Most recent first — see each file for full detail:
   rows (models trained on old rows, and 24h-cached values, see the old scale until retrained /
   expired). The one-line call site is not covered by any test (no existing test exercises
   `_get_fundamentals_inner`); the helper has new unit tests. market-data suite 577 passed.
-- 2026-10-02 (group 32) — removed the remaining hardcoded "Aug-2026: Nifty -7% 6m, FII net-short"
+- 2026-10-02 (group 32) â€” removed the remaining hardcoded "Aug-2026: Nifty -7% 6m, FII net-short"
   claims that never tracked real data: `real-trade-service/candidate_engine/candidates.py`
   (`market_note` is now `""`), `api-gateway/surprise_scanner.py` (`market_note` is now
   "high buy_pct = strong signal" on hits and "thresholds raised for quality" on the scan summary),
@@ -1003,7 +1004,7 @@ Most recent first — see each file for full detail:
   Comments/docstrings mentioning Aug-2026 left alone. decision-prediction-service has no test
   suite (syntax-checked only). api-gateway `run_tests.sh` exit 0 / 100%; real-trade-service
   `pytest --cov=.` 2751 passed, 1 skipped, 100%.
-- 2026-10-02 (group 31) — api-gateway `main.py` `/ops/check-alert`: added a per-process cool-down.
+- 2026-10-02 (group 31) â€” api-gateway `main.py` `/ops/check-alert`: added a per-process cool-down.
   The same problem set (same open-circuit set / error-rate condition) is notified at most once per
   `OPS_ALERT_COOLDOWN_SEC` (default 900; 0 disables; bad value -> 900). A new problem alerts
   immediately, recovery clears the state, and the cool-down is only recorded after a SUCCESSFUL
@@ -1011,29 +1012,29 @@ Most recent first — see each file for full detail:
   suppressed: true, cooldown_remaining_sec`. State is in-memory, so a restart can repeat one alert.
   Pin in `test_main_ops_routes.py` rewritten + 7 new tests. `bash run_tests.sh` for api-gateway:
   exit 0, 100% coverage.
-- 2026-10-02 (group 30) — api-gateway `ipo_scanner.py`: dropped the hardcoded "Market context
+- 2026-10-02 (group 30) â€” api-gateway `ipo_scanner.py`: dropped the hardcoded "Market context
   (Aug-2026): Nifty -7% in 6m, FII net-short" sentence from every IPO `buy_suggestion.rationale`
   (it never tracked real data and was already stale); the rationale now ends with the bars in
-  force: "Decision bars: BUY_NOW≥70, PREPARE≥58." Removed the matching stale comment in
+  force: "Decision bars: BUY_NOWâ‰¥70, PREPAREâ‰¥58." Removed the matching stale comment in
   `_build_ipo_suggestion`. Pin in `test_ipo_scanner.py` rewritten. NOT changed: the same stale
   Aug-2026 market text still appears in `real-trade-service/candidate_engine/candidates.py`
   (`market_note`), `api-gateway/surprise_scanner.py` (`market_note`, 2 places),
   `decision-prediction-service/decision/main.py` (a label) and in docstrings. `bash run_tests.sh`
   for api-gateway: exit 0, 100% coverage.
-- 2026-10-02 (group 29) — api-gateway `main.py` `/ops/qstash/tick`: removed the no-op "warm" list
+- 2026-10-02 (group 29) â€” api-gateway `main.py` `/ops/qstash/tick`: removed the no-op "warm" list
   (it only appended the names `/health` and `/ops/keepalive`, nothing was called) and the unused
   `_get_http_client()` call; the response is now `{"ok": true, "source": "qstash"}` plus
   `keepalive` / `keepalive_error` when the body asks for a wake. Nothing in the repo reads
   `warm`. Pin in `test_main_ops_routes.py` rewritten. The alert cool-down pin is left as is (needs
   a de-dup state/TTL design). `bash run_tests.sh` for api-gateway: exit 0, 100% coverage.
-- 2026-10-02 (group 28) — api-gateway `main.py` `/ops/qstash/tick`: a crash inside the QStash
+- 2026-10-02 (group 28) â€” api-gateway `main.py` `/ops/qstash/tick`: a crash inside the QStash
   signature check now fails CLOSED (503 "QStash signature verification unavailable", logged with
   traceback, nothing runs) instead of being swallowed and running the tick unauthenticated. Missing
   signing keys / PyJWT in `qstash_client.verify_signature` still accept by design (unchanged).
   Pin in `test_main_ops_routes.py` rewritten; log test added. Two other NOT FIXED pins in that file
   (alert cool-down, "warm" list) left as is, they need a product decision. `bash run_tests.sh` for
   api-gateway: exit 0, 100% coverage.
-- 2026-10-02 (group 27) — real-trade-service, tests only, no production code changed. Fixed the 26
+- 2026-10-02 (group 27) â€” real-trade-service, tests only, no production code changed. Fixed the 26
   failing tests in the full suite: (1) `test_feed_remaining_coverage.py` `_run` used
   `asyncio.get_event_loop()`, which raises on Python 3.12+ after any earlier file calls
   `asyncio.run()`; it now uses its own loop per call (19 tests). (2) `test_afterhours_scan_orchestration.py`
@@ -1041,14 +1042,14 @@ Most recent first — see each file for full detail:
   `AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS` (5) against the real clock; the default is now yesterday
   (7 tests; these failed even when the file was run alone). `pytest --cov=.` in a clean venv:
   2751 passed, 1 skipped, 100% coverage.
-- 2026-10-02 (group 26) — real-trade-service `auth/dhan_credentials.py`: `refresh_if_totp_enabled`
+- 2026-10-02 (group 26) â€” real-trade-service `auth/dhan_credentials.py`: `refresh_if_totp_enabled`
   now also rejects a missing/empty `DHAN_PIN` before any HTTP call (was sent as `pin=""`, wasting a
   TOTP attempt on a request Dhan can only reject). Pin in `test_dhan_credentials.py` rewritten
   (PIN added to the missing-credential parametrize, plus an empty-PIN test; log message now names
   all three vars). `test_dhan_credentials.py`: 157 passed. (Group 26 note corrected in group 27:
   the 26 full-suite failures were 19 in `test_feed_remaining_coverage.py` + 7 in
   `test_afterhours_scan_orchestration.py`, not all in the feed file; both fixed in group 27.)
-- 2026-10-02 (group 25) — analysis-intelligence-service `fundamental/peers.py`: `normalize_sector`
+- 2026-10-02 (group 25) â€” analysis-intelligence-service `fundamental/peers.py`: `normalize_sector`
   is now idempotent (canonical names like "IT", "Finance", "Infra", "Capital Goods" map to
   themselves). `analyze()` feeds the normalised sector back into `peers_for()`, which returned no
   peers for those four sectors for any symbol outside the curated list. Pin in
@@ -1056,50 +1057,50 @@ Most recent first — see each file for full detail:
   `test_peers.py`. The other fundamental pin (debt-to-equity <= 50 not rescaled) left as is: the
   percent-vs-multiple heuristic is ambiguous, needs your call. `./run_tests.sh` in a clean venv:
   exit 0, 100% coverage.
-- 2026-10-02 (group 24) — analysis-intelligence-service `news/main.py`: `_base_symbol` now
+- 2026-10-02 (group 24) â€” analysis-intelligence-service `news/main.py`: `_base_symbol` now
   upper-cases/strips before removing the `.NS`/`.BO` suffix (and only strips a trailing one), so
   `tcs.ns` resolves to `TCS` and finds its company-name hint instead of searching news for
   `TCS.NS`. Pin in `test_news_main.py` rewritten to assert the fix. `./run_tests.sh` in a clean
   venv: exit 0, 100% coverage.
-- 2026-10-02 (group 23) — analysis-intelligence-service `fundamental/rate_limiter.py`:
+- 2026-10-02 (group 23) â€” analysis-intelligence-service `fundamental/rate_limiter.py`:
   `_cfg` now parses `RL_<PROVIDER>_RPS` and `RL_<PROVIDER>_BURST` independently, so a typo in
   one no longer discards a valid value for the other (pin in `test_rate_limiter.py` rewritten to
   assert the fix). Also fixed `test_event_depth.py::test_earnings_days_out_propagated`, which
   built its date from a hardcoded `_NOW` while the code reads the real clock (failed on the
   group 22 zip too). `./run_tests.sh` in a clean venv: exit 0, 100% coverage.
-- `SESSION126_ANALYSIS_INTEL_INDIANAPI_FALLBACK_COVERAGE_2026-09-29.md` —
+- `SESSION126_ANALYSIS_INTEL_INDIANAPI_FALLBACK_COVERAGE_2026-09-29.md` â€”
   analysis-intelligence-service `fundamental/indianapi_fallback.py` 93% -> expected 100%: kv_cache
   import fallback, in-process pacing sleep, suggested_timeout failure, redis-client guard. Tests only.
   35/35 passed via a hand-rolled pytest stand-in with line tracing (all 8 target lines hit); NOT run
-  under real pytest/coverage — re-run on the VM. Next: `event/event_depth.py` (97%).
-- `SESSION125_ANALYSIS_INTEL_MAIN_SENTIMENT_COVERAGE_2026-09-29.md` —
+  under real pytest/coverage â€” re-run on the VM. Next: `event/event_depth.py` (97%).
+- `SESSION125_ANALYSIS_INTEL_MAIN_SENTIMENT_COVERAGE_2026-09-29.md` â€”
   analysis-intelligence-service: root `main.py` (real source executed against a temp fake-sub-app
   tree so failure branches count for the real file) and `sentiment/main.py` (batch/individual
   fallbacks, adjustment failures, double-checked cache, `__main__` block). Tests only. Passed in
-  an earlier sandbox (1741 passed, both files 100%); re-applied here and compile-checked only —
+  an earlier sandbox (1741 passed, both files 100%); re-applied here and compile-checked only â€”
   re-run on the VM. Next: `fundamental/indianapi_fallback.py` (93%).
-- `SESSION124_ANALYSIS_INTEL_RATE_LIMIT_REPORT_COVERAGE_2026-09-29.md` —
+- `SESSION124_ANALYSIS_INTEL_RATE_LIMIT_REPORT_COVERAGE_2026-09-29.md` â€”
   analysis-intelligence-service `rate_limit_report.py`: 35 test functions appended to
   `tests/test_rate_limit_report.py` covering the `_kv_get`/`_kv_set` sys.path fallback,
   stats/event edge cases, gateway POST and status extraction. Tests only; not run
-  in-sandbox (no pytest) — confirm with the coverage command in the note.
-- `SESSION123_ANALYSIS_INTEL_SERVICE_MAIN_COVERAGE_2026-09-29.md` —
+  in-sandbox (no pytest) â€” confirm with the coverage command in the note.
+- `SESSION123_ANALYSIS_INTEL_SERVICE_MAIN_COVERAGE_2026-09-29.md` â€”
   analysis-intelligence-service root `main.py`: new `tests/test_service_main.py`
   (fake sub-app trees + one real-mount smoke test; temp trees under `__pycache__` so
   they stay out of coverage). Fixed a wrong `''`-on-sys.path assertion. Tests only; not
-  re-run in-sandbox (no pytest) — run `./run_tests.sh` to confirm. Session-122 roadmap
+  re-run in-sandbox (no pytest) â€” run `./run_tests.sh` to confirm. Session-122 roadmap
   is now complete.
-- `SESSION112_ROUND29_CONFIG_ADMIN_HASH_B64_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND29_CONFIG_ADMIN_HASH_B64_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `config.py` 471-475 closed: the
   ADMIN_PASSWORD_HASH_B64 decode block, ported from real-trade-service's
-  identical block + its `importlib.reload` fixture pattern. Pure stdlib —
+  identical block + its `importlib.reload` fixture pattern. Pure stdlib â€”
   all 4 tests actually run for real in-sandbox (no stub needed), not just
   hand-traced. This clears the entire round-24 source-file list; only
   tests/*.py files' own coverage gaps remain, flagged round 28, still out
   of scope pending an explicit go-ahead.
-- `SESSION112_ROUND28_REMAINING_ONE_LINE_GAPS_2026-09-25.md` — position-
+- `SESSION112_ROUND28_REMAINING_ONE_LINE_GAPS_2026-09-25.md` â€” position-
   stocks-service: closed all five remaining 1-2 line source gaps from the
-  round-24 list — `eod_squareoff.py` 147-148 (notify_critical exception
+  round-24 list â€” `eod_squareoff.py` 147-148 (notify_critical exception
   swallow), `adaptive.py` 113 (ATR sample<2 guard, forced via monkeypatched
   `ATR_LOOKBACK`), `entry.py` 109 (reentry guard's unresolvable `closed_at`
   fail-open), `reconcile.py` 232 (legacy-backfill blank orderId skip),
@@ -1107,7 +1108,7 @@ Most recent first — see each file for full detail:
   monkeypatched `_WINDOW_CONVICTION_MULT`). Tests only. `config.py`
   471-475 still open (importlib.reload risk); several `tests/*.py` files'
   own coverage gaps flagged but not yet in scope.
-- `SESSION112_ROUND27_EOD_SQUAREOFF_STAGNATION_EXIT_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND27_EOD_SQUAREOFF_STAGNATION_EXIT_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `orders/eod_squareoff.py` 1044-1045 closed:
   `run_stagnation_exit`'s `except Exception: continue` guarding a
   malformed `opened_at`, via monkeypatched `as_aware` (same isolation
@@ -1115,15 +1116,15 @@ Most recent first — see each file for full detail:
   Still open from round-24: `eod_squareoff.py`'s other 2 lines (needs a
   fresh coverage run to confirm), and the four 1-line gaps in
   `adaptive.py` / `entry.py` / `reconcile.py` / `screening/engine.py`.
-- `SESSION112_ROUND26_WS_CLIENT_LOOP_COVERAGE_CLOSEOUT_2026-09-25.md` —
+- `SESSION112_ROUND26_WS_CLIENT_LOOP_COVERAGE_CLOSEOUT_2026-09-25.md` â€”
   position-stocks-service `feed/ws_client.py` last 4 missing lines closed
   (510-511, 542, 549): `_ws_loop`'s heartbeat-send exception guard, the
   stale-tick buffer-prune eviction, and the `_last_quote` write (needed a
-  full ≥347-byte depth frame, ported from `test_ws_client.py`'s builder).
+  full â‰¥347-byte depth frame, ported from `test_ws_client.py`'s builder).
   Tests only. Next per the round-24 coverage run: `orders/
   eod_squareoff.py` (4), or the four 1-line gaps in `adaptive.py` /
   `entry.py` / `reconcile.py` / `screening/engine.py`.
-- `SESSION112_ROUND25_DHAN_CLIENT_COVERAGE_CLOSEOUT_2026-09-25.md` —
+- `SESSION112_ROUND25_DHAN_CLIENT_COVERAGE_CLOSEOUT_2026-09-25.md` â€”
   position-stocks-service `execution/dhan_client.py` all 10 remaining
   missing lines closed (156-157, 161-163, 244, 246, 252-253, 960-961):
   `_get_sdk_client`'s two SDK-version ImportError branches (forced via
@@ -1133,7 +1134,7 @@ Most recent first — see each file for full detail:
   the round-24 coverage run: `feed/ws_client.py` (4), `orders/
   eod_squareoff.py` (4), or the four 1-line gaps in `adaptive.py` /
   `entry.py` / `reconcile.py` / `screening/engine.py`.
-- `SESSION112_ROUND24_DB_ORACLE_DDL_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND24_DB_ORACLE_DDL_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `db.py` `_ensure_columns`'s Oracle-dialect DDL
   branch (lines 296-298), tests only. New test in `tests/test_db.py`
   monkeypatches `DATABASE_URL` to an Oracle DSN to exercise the
@@ -1143,89 +1144,89 @@ Most recent first — see each file for full detail:
   `feed/ws_client.py` (4), `orders/eod_squareoff.py` (4), or the four
   1-line gaps in `orders/adaptive.py` / `entry.py` / `reconcile.py` /
   `screening/engine.py`.
-- `SESSION112_ROUND23_CONFIG_GETTERS_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND23_CONFIG_GETTERS_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `config.py` `_get_float`/`_get_int` malformed-env-var
   fallback branches (lines 31-32, 38-39), tests only. New
   `tests/test_config_getters.py` (8 tests). Picked up in a fresh
   conversation with no memory of the session that produced the prior
-  coverage table — not re-verified against a real coverage run (no
+  coverage table â€” not re-verified against a real coverage run (no
   pytest/coverage in this sandbox, no network). See the note at the top
   of the session file. Next: re-run coverage for real before continuing
   down that table, since its line numbers may be stale.
-- `SESSION112_ROUND16_DHAN_CLIENT_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND16_DHAN_CLIENT_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `execution/dhan_client.py` (the only module
-  allowed to hold a decrypted Dhan credential / call Dhan's API) 21% → 
+  allowed to hold a decrypted Dhan credential / call Dhan's API) 21% â†’
   target ~95%+, tests only, no production change. New
   `tests/test_dhan_client.py`: pure tick-rounding/classifier logic tested
   directly; every SDK-facing function (`place_order`, `place_super_order`
   incl. the MARKET direct-HTTP bump/clamp path, `get_trade_history`
   pagination, `place_cnc_stop_loss_market`'s 4 raise conditions, eDIS,
   `convert_position`, etc.) tested against a `SimpleNamespace` fake SDK
-  client. No `sqlalchemy`/`httpx`/`dhanhq` in this sandbox — pure-logic
+  client. No `sqlalchemy`/`httpx`/`dhanhq` in this sandbox â€” pure-logic
   math/classifiers re-verified standalone (all passed); SDK-facing tests
-  traced by hand against the source, not executed — re-run pytest to
+  traced by hand against the source, not executed â€” re-run pytest to
   confirm. No new production bug found this round. Next:
   `feed/scrip_master.py` (22%).
-- `SESSION112_ROUND15_DB_TEST_FAILURES_FIX_2026-09-25.md` — first real
+- `SESSION112_ROUND15_DB_TEST_FAILURES_FIX_2026-09-25.md` â€” first real
   pytest run of round 14's new `tests/test_db.py` (position-stocks-service)
   found 3 failures, all in `TestEnsureColumns`. **One real fix:**
   `_ensure_columns` built its `inspect(engine)` once, outside the
   per-entry `try/except`, so a failure there crashed `init_tables()`
   instead of being logged and skipped like every other migration failure
-  — moved inside the loop. Two test-file bugs also fixed: a no-op test
+  â€” moved inside the loop. Two test-file bugs also fixed: a no-op test
   that only pre-created 1 of 12 columns, and a "failed ALTER" test whose
   `ctx.__enter__` override was an instance attribute the `with` statement
   never actually looked up (rewritten with `@contextlib.contextmanager`).
-  `sqlalchemy`/`pytest` still unavailable in this sandbox (no network) —
+  `sqlalchemy`/`pytest` still unavailable in this sandbox (no network) â€”
   fixes are statically verified (`py_compile`) only; re-run pytest to
   confirm. Next: `execution/dhan_client.py` (21%).
 - `SESSION112_ROUND7_SHARED_EXPOSURE_COVERAGE_AND_ROLLBACK_GUARD_2026-09-25.md`
-  — position-stocks-service `capital/shared_exposure.py` 36% → 100% (whole
+  â€” position-stocks-service `capital/shared_exposure.py` 36% â†’ 100% (whole
   `capital/` package now 100%). **One real fix:** `publish_own_exposure`'s
   except-handler called `db.rollback()` unguarded, so a dead connection made
   it raise despite its documented "never raises" contract, out of
   `ledger.sync_from_broker` and `POST /ledger/sync`; now guarded like its
   siblings (red test first, then fix). New `tests/test_shared_exposure.py`
-  (36 tests) incl. unstubbed ledger→publish wiring and a cross-service drift
-  guard. Suite 1577 → 1613 passed, 87%. 22 mutations, 0 survivors. Same
+  (36 tests) incl. unstubbed ledgerâ†’publish wiring and a cross-service drift
+  guard. Suite 1577 â†’ 1613 passed, 87%. 22 mutations, 0 survivors. Same
   unguarded rollback flagged (not changed) in real-trade-service's copy.
   Next: `tz_utils.py` (71%).
-- `SESSION112_ROUND6_SHARED_ORDER_BUDGET_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND6_SHARED_ORDER_BUDGET_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `capital/shared_order_budget.py` (cross-service Dhan
-  order-rate guard) 55% → 100%, tests only. New
+  order-rate guard) 55% â†’ 100%, tests only. New
   `tests/test_shared_order_budget.py` (38 tests) incl. a stale-identity-map
   regression proving the cap is enforced by the atomic UPDATE, exits never
-  gated, fail-open, `status()`. Suite 1539 → 1577 passed. 29 mutations, 0
+  gated, fail-open, `status()`. Suite 1539 â†’ 1577 passed. 29 mutations, 0
   survivors. Flags `_get_or_create_row` as dead code (unchanged). Next:
   `capital/shared_exposure.py` (36%).
-- `SESSION112_ROUND5_SHARED_SYMBOL_LOCK_COVERAGE_2026-09-25.md` —
+- `SESSION112_ROUND5_SHARED_SYMBOL_LOCK_COVERAGE_2026-09-25.md` â€”
   position-stocks-service `capital/shared_symbol_lock.py` (cross-service
-  same-symbol guard) 30% → 100%, tests only. New
+  same-symbol guard) 30% â†’ 100%, tests only. New
   `tests/test_shared_symbol_lock.py` (54 tests) incl. a REAL unique-constraint
   IntegrityError race (lost / won-by-self) and fail-open on every error path.
-  Suite 1485 → 1539 passed, 84% → 86%. 36 mutations, 0 survivors. Flags one
+  Suite 1485 â†’ 1539 passed, 84% â†’ 86%. 36 mutations, 0 survivors. Flags one
   cosmetic `cleanup_stale` startup-log inaccuracy (not changed). Next:
   `capital/shared_order_budget.py` (55%).
-- `SESSION112_ROUND4_LEDGER_COVERAGE_2026-09-25.md` — position-stocks-service
-  `capital/ledger.py` (the money engine) 53% → 100%, tests only, no production
+- `SESSION112_ROUND4_LEDGER_COVERAGE_2026-09-25.md` â€” position-stocks-service
+  `capital/ledger.py` (the money engine) 53% â†’ 100%, tests only, no production
   change. New `tests/test_ledger_coverage.py` (82 tests) incl. the REAL
   `sync_peer_pnl` (shared fixture stubs it), capital-erosion add-back,
   kill-switch trip boundary + gate mirror, `EXIT_LEGS_REJECTED` handling.
-  Suite 1403 → 1485 passed, 82% → 84%. 41 mutations, 0 real survivors (2
+  Suite 1403 â†’ 1485 passed, 82% â†’ 84%. 41 mutations, 0 real survivors (2
   provably equivalent). Next: `capital/shared_symbol_lock.py` (30%).
-- `SESSION111_NOTIFY_FIRE_AND_FORGET_EXIT_PATH_FIX_2026-09-25.md` — `notify_sync`
+- `SESSION111_NOTIFY_FIRE_AND_FORGET_EXIT_PATH_FIX_2026-09-25.md` â€” `notify_sync`
   could block its caller for a ~42s worst case (service timeout + direct-Telegram
   timeout + its own HTML-retry timeout), and `exit_engine/exit.py` called it 14
-  times inline while holding the per-mode exit lock — one slow Telegram delivery
+  times inline while holding the per-mode exit lock â€” one slow Telegram delivery
   for one position's exit stalled protective stop-loss checks for every other
   open position in the same tick, and skipped the next 5-10s tick outright.
   Fixed with a new `notifier.notify_fire_and_forget` (same dedup + delivery,
   off a daemon thread, no return value) and a one-line import-alias change in
-  `exit_engine/exit.py` — no call sites touched. real-trade-service 2725 passed,
+  `exit_engine/exit.py` â€” no call sites touched. real-trade-service 2725 passed,
   0 xfailed, 100% (8320 stmts). 30 mutations, 0 real survivors.
   `position-stocks-service`'s equivalent call sites not ported this round
   (flagged as open).
-- `SESSION110_PARTIAL_FILL_INCREMENT_PRICING_AND_STAGE_TIMINGS_2026-09-24.md` —
+- `SESSION110_PARTIAL_FILL_INCREMENT_PRICING_AND_STAGE_TIMINGS_2026-09-24.md` â€”
   the last xfail is gone. **`execution/reconcile.py`** booked every partial-fill
   increment at Dhan's *cumulative* average price (5 @ 100 then 5 @ 102 booked as
   100 + 101: position average, cash and SELL P&L all drifted); each increment is
@@ -1234,17 +1235,17 @@ Most recent first — see each file for full detail:
   fallbacks to the old behaviour whenever paise-rounding noise or inconsistent
   broker data makes the derivation untrustworthy; also wired into the
   `expire_stale_orders` late-fill path. **`pipeline_status`/`cycle_runner`:** stage
-  timings for the three concurrent stages were misattributed since session48b —
+  timings for the three concurrent stages were misattributed since session48b â€”
   now exact. real-trade-service 2716 passed, 0 xfailed, 100% (8304 stmts).
   30 mutations, 0 real survivors.
-- `SESSION109_REAL_TRADE_TAIL_COVERAGE_AND_FILLEDQTY_FIX_2026-09-24.md` —
+- `SESSION109_REAL_TRADE_TAIL_COVERAGE_AND_FILLEDQTY_FIX_2026-09-24.md` â€”
   **real-trade-service production code 100%** (8226 stmts, 0 missed; 2667
   passed). Two silent-failure bugs fixed. (1) `execution/reconcile.py` stamped a
   `TRADED` order `FILLED` with no position/cash booked when Dhan's `filledQty`
-  was non-numeric (never re-polled, so the fill vanished from the books) — now
+  was non-numeric (never re-polled, so the fill vanished from the books) â€” now
   left pending and retried. (2) `risk_engine/engine.py`: a BUY with a **NaN**
   stop / entry / qty / adj_risk_pct was **APPROVED at full size** (NaN compares
-  False, so every cap was skipped) — now rejected `invalid_order`; SELLs
+  False, so every cap was skipped) â€” now rejected `invalid_order`; SELLs
   unaffected. The old "unreachable" sizing guard became the directly-tested
   `_qty_within_risk_cap()`. Also: never-awaited coroutine in
   `feed._schedule_atr_refresh`, legacy `Query.get()` in `exit._load_profile`, a
@@ -1252,17 +1253,17 @@ Most recent first — see each file for full detail:
   keyword-drift guard vs analysis-intelligence-service, new `.coveragerc`
   (omits dev harness + `tests/`, so not comparable with the old 98%).
   19 mutations, 0 survivors.
-- `SESSION108_POSITION_STOCKS_ORACLE_COMPAT_COVERAGE_2026-09-24.md` —
-  `position-stocks-service/oracle_compat.py` 15%→100% (110 stmts, 30/30
+- `SESSION108_POSITION_STOCKS_ORACLE_COMPAT_COVERAGE_2026-09-24.md` â€”
+  `position-stocks-service/oracle_compat.py` 15%â†’100% (110 stmts, 30/30
   branches; still 100% with the `# pragma: no cover` lines counted). Finishes a
   half-done draft (88%, 5 failing). New `tests/test_oracle_compat.py` (104
   tests): exact-string SQL for both dialects, the Postgres upsert executed for
   real on SQLite, real `exec_ddl_safe` DDL, the `connect` call-timeout listener
   fired from the pool's dispatch, lazy real Oracle engine build when `oracledb`
-  is installed. position-stocks 1233→1337 passed, 78%→80%. 53 mutations, 0
+  is installed. position-stocks 1233â†’1337 passed, 78%â†’80%. 53 mutations, 0
   survivors. No production code changed. Next: `pipeline_status.py`,
   `capital/shared_symbol_lock.py`, `capital/shared_exposure.py`.
-- `SESSION99_SECRET_IN_URL_LOG_LEAK_FIX_ROUND2_2026-09-24.md` — session98's
+- `SESSION99_SECRET_IN_URL_LOG_LEAK_FIX_ROUND2_2026-09-24.md` â€” session98's
   "still open" secret-in-URL leak, closed in the two services it named, plus
   one more found along the way. **`market-data-service/main.py`:** TwelveData,
   Polygon and AlphaVantage API keys were in query strings, logged in full at
@@ -1272,18 +1273,18 @@ Most recent first — see each file for full detail:
   session98. **Also found:** `position-stocks-service/feed/ws_client.py` puts
   the AngelOne feed token and API key in the WS URL; the `websockets` library
   logs the full request line at DEBUG via its own `"websockets.client"`
-  logger — lower severity (this service's `LOG_LEVEL` defaults to INFO, so it
+  logger â€” lower severity (this service's `LOG_LEVEL` defaults to INFO, so it
   doesn't leak today) but fixed the same way since `LOG_LEVEL=DEBUG` is a real
   supported knob. All three reproduced live (real httpx `MockTransport` /
   real local `websockets` server-client round-trip) both leaking pre-fix and
   clean post-fix; regression tests fail on the old files. market-data-service
   24 passed (14+10 new); analysis-intelligence-service 8 passed (new);
   position-stocks-service 1232 passed (1225+7 new).
-- `SESSION98_NOTIFIER_COVERAGE_AND_SECRET_IN_URL_LOG_LEAK_FIX_2026-09-24.md` —
-  `notifier.py` 23%(unstable)→100%; new `tests/test_notifier.py` (64 tests, real
+- `SESSION98_NOTIFIER_COVERAGE_AND_SECRET_IN_URL_LOG_LEAK_FIX_2026-09-24.md` â€”
+  `notifier.py` 23%(unstable)â†’100%; new `tests/test_notifier.py` (64 tests, real
   httpx via MockTransport). **Security fix in 4 files / 3 services:** httpx logs
   every request URL at INFO and services run `basicConfig(INFO)`, so the
-  Telegram **bot token** was in the logs on every send — and in
+  Telegram **bot token** was in the logs on every send â€” and in
   `notification-scheduler-service` (the platform's *primary* alert path) also the
   **Discord/Slack webhook URLs** and **CallMeBot apikey**; a revoked webhook even
   returned its URL in the `/notify` response (`HTTPStatusError` embeds the URL).
@@ -1291,13 +1292,13 @@ Most recent first — see each file for full detail:
   `real-trade-service/notifier.py`, `position-stocks-service/notifier.py`,
   `notification-scheduler-service/notification/main.py` and
   `scheduler/governance_check.py`; regression tests fail on the old code. **Check
-  your logs and rotate secrets — see the note.** Same class still open in
+  your logs and rotate secrets â€” see the note.** Same class still open in
   `market-data-service` / `analysis-intelligence-service` (API keys in query
   strings). real-trade-service 2253 passed/1 skipped/1 xfailed, 96%;
   position-stocks 1225 passed; notification-scheduler 21 passed (first tests
   there). 52 mutations, 0 survivors.
-- `SESSION97_DB_MIGRATIONS_COVERAGE_AND_DRIFT_GUARD_2026-09-24.md` —
-  `db.py` 7%→100% (521/521). New `tests/test_db.py` (217 tests): every one of
+- `SESSION97_DB_MIGRATIONS_COVERAGE_AND_DRIFT_GUARD_2026-09-24.md` â€”
+  `db.py` 7%â†’100% (521/521). New `tests/test_db.py` (217 tests): every one of
   the 22 boot-time migrations executed on a real *legacy* SQLite schema (Oracle
   branch captured via recorded SQL and checked for parity/type/length/default
   against `models.py`); legacy rows read back with the same defaults as new
@@ -1306,94 +1307,94 @@ Most recent first — see each file for full detail:
   `tests/test_db_postgres_live.py` (5 tests, skipped without `pgserver`) runs
   the Postgres SQL on a real PostgreSQL. **One production fix:**
   `_normalize_pg_url` left `&&` when `channel_binding` sat mid-query, which
-  libpq rejects. VM-equivalent run: 2189 passed, 1 skipped, 1 xfailed; 94%→96%.
-  60 mutations, 0 survivors. Note: `notifier.py` coverage (52→48→23%) is
-  incidental, not a regression — it has no direct tests; next candidate.
-- `SESSION96_DHAN_CREDENTIALS_COVERAGE_AND_PIN_LEAK_FIX_2026-09-24.md` —
-  `auth/dhan_credentials.py` 18%→100% (215/215). New
+  libpq rejects. VM-equivalent run: 2189 passed, 1 skipped, 1 xfailed; 94%â†’96%.
+  60 mutations, 0 survivors. Note: `notifier.py` coverage (52â†’48â†’23%) is
+  incidental, not a regression â€” it has no direct tests; next candidate.
+- `SESSION96_DHAN_CREDENTIALS_COVERAGE_AND_PIN_LEAK_FIX_2026-09-24.md` â€”
+  `auth/dhan_credentials.py` 18%â†’100% (215/215). New
   `tests/test_dhan_credentials.py` (156 tests, real SQLite + real Fernet + real
   pyotp). **Two production fixes:** (1) `refresh_if_totp_enabled()` logged AND
-  Telegrammed `str(HTTPStatusError)`, which contains the full request URL —
-  `...generateAccessToken?dhanClientId=..&pin=<PIN>&totp=..` — so any 4xx/5xx
+  Telegrammed `str(HTTPStatusError)`, which contains the full request URL â€”
+  `...generateAccessToken?dhanClientId=..&pin=<PIN>&totp=..` â€” so any 4xx/5xx
   leaked the Dhan PIN; now redacted via `_redact_secrets()` before log/notify
-  (check your log/Telegram history — see note). (2) a swallowed DB failure in
+  (check your log/Telegram history â€” see note). (2) a swallowed DB failure in
   that function left the caller's Session in `PendingRollbackError` for the
   next query in `cycle_runner`; now healed via `_heal_session()` (rolls back
   only a poisoned session). Regression tests fail on the pre-fix code (24
   failures); mutation-checked (38 regressions, 0 survivors). Full suite: 1972
-  passed, 1 xfailed; overall 93%→94%.
-- `SESSION95_LOCAL_CACHE_COVERAGE_2026-09-24.md` — `resilience/local_cache.py`
-  45%→100% (62/62). New `tests/test_local_cache.py` (32 tests) against a real
+  passed, 1 xfailed; overall 93%â†’94%.
+- `SESSION95_LOCAL_CACHE_COVERAGE_2026-09-24.md` â€” `resilience/local_cache.py`
+  45%â†’100% (62/62). New `tests/test_local_cache.py` (32 tests) against a real
   in-memory SQLite DB: the 2026-09-12 two-writer `IntegrityError` race
   reproduced for real (loser's write lands via the UPDATE fallback), the
   2026-09-16 empty-positions snapshot regression, the 2026-09-12
   PARTIALLY_CLOSED reconcile fix, exact `RECONCILE_MISMATCH` audit detail,
   and a `String(64)` key-length audit of every key the service writes
-  (longest 42 — no bug). Mutation-checked (14 regressions, 0 survivors).
+  (longest 42 â€” no bug). Mutation-checked (14 regressions, 0 survivors).
   Full suite: 1816 passed, 1 xfailed; overall 93%. No production code
   changed. Observations: `json.dumps` sits outside `save_snapshot`'s `try`;
   startup reconcile is false-positive-prone by design (snapshot precedes
   exits).
-- `SESSION94_CYCLE_RUNNER_COVERAGE_2026-09-24.md` — `cycle_runner.py`
-  7%→100% (122/122). New `tests/test_cycle_runner.py` (64 tests) covers the
+- `SESSION94_CYCLE_RUNNER_COVERAGE_2026-09-24.md` â€” `cycle_runner.py`
+  7%â†’100% (122/122). New `tests/test_cycle_runner.py` (64 tests) covers the
   function every REAL/DEMO cycle funnels through: manual market-hours
   warning, REAL token pre-flight (TOTP gating, early auto-disarm with nothing
   downstream executed), the session48b concurrent
-  dynamic_universe→watchlist ‖ candidates stage (proven with events, not
+  dynamic_universeâ†’watchlist â€– candidates stage (proven with events, not
   just call order), exit-lock acquire/release incl. a real `threading.Lock`,
   position snapshot, and the real `pipeline_status` contract.
   Mutation-checked (16 deliberate regressions, all caught). Full
-  `real-trade-service` suite: 1784 passed, 1 xfailed; overall 92%→93%.
+  `real-trade-service` suite: 1784 passed, 1 xfailed; overall 92%â†’93%.
   No production code changed. **Finding, not fixed:** `pipeline_status`'s
   single "current stage" slot is overwritten by the three concurrent stages,
   so per-stage `stage_timings_ms` are misattributed since session48b
-  (observability only) — see the note for numbers and options.
-- `SESSION93_INTRADAY_ELIGIBILITY_COVERAGE_2026-09-24.md` —
+  (observability only) â€” see the note for numbers and options.
+- `SESSION93_INTRADAY_ELIGIBILITY_COVERAGE_2026-09-24.md` â€”
   `intraday_eligibility.py` first direct coverage (every other test
   monkeypatched its public functions away, so its cross-service
   `scalp_intraday_restricted` mirroring had never run under test).
-- `SESSION92_AFTERHOURS_SCAN_FINAL_COVERAGE_GAPS_2026-09-24.md` —
+- `SESSION92_AFTERHOURS_SCAN_FINAL_COVERAGE_GAPS_2026-09-24.md` â€”
   `watchlist_engine/afterhours_scan.py` final 3 gaps closed (now 100%);
   VM run confirmed session91's rounds 1-3 (1694 passed, 1 xfailed).
-- `SESSION91_AFTERHOURS_FETCHERS_COVERAGE_ROUND2_2026-09-24.md` — round 2:
+- `SESSION91_AFTERHOURS_FETCHERS_COVERAGE_ROUND2_2026-09-24.md` â€” round 2:
   new `tests/test_afterhours_scan_fetchers.py` (20 tests) covers
-  `_fetch_rss_items`, `_fetch_bulk_deal_hits`, and `_validate_symbols` —
+  `_fetch_rss_items`, `_fetch_bulk_deal_hits`, and `_validate_symbols` â€”
   the three network/circuit-breaker-dependent functions in
-  `watchlist_engine/afterhours_scan.py` — using the same
+  `watchlist_engine/afterhours_scan.py` â€” using the same
   `httpx.AsyncClient` + breaker-`.call()` mocking pattern already
   established in `tests/test_watchlist_sources.py`. **Not run through live
-  pytest — no network in this sandbox**; hand-traced against the real
+  pytest â€” no network in this sandbox**; hand-traced against the real
   source. Deferred to round 3: `run_afterhours_scan` and
   `finalize_nextday_watchlist`, the two DB-writing orchestrators. No
   production code changed.
-- `SESSION91_AFTERHOURS_PURE_HELPERS_COVERAGE_ROUND1_2026-09-24.md` — new
+- `SESSION91_AFTERHOURS_PURE_HELPERS_COVERAGE_ROUND1_2026-09-24.md` â€” new
   `tests/test_afterhours_scan_pure_helpers.py` (31 tests) covers
   `watchlist_engine/afterhours_scan.py`'s five self-contained helpers
   (`_has_uncontextualized_negative`, `_score_headline`,
-  `_parse_item_datetime`, `_is_within_max_age`, `_parse_feed_items`) —
+  `_parse_item_datetime`, `_is_within_max_age`, `_parse_feed_items`) â€”
   only `_extract_symbol` (the MANINDS/EKC/OLAELEC/RAYMONDREL/UTLSOLAR
   name-alias fix, already present coming into this round) had direct tests
-  before. **Not run through live pytest — no network in this sandbox**;
+  before. **Not run through live pytest â€” no network in this sandbox**;
   written and hand-traced against the real source instead, same caveat as
   sessions 76/77/82c/86. Deferred: the two DB-writing orchestrators
   (`run_afterhours_scan`, `finalize_nextday_watchlist`) and the three
   httpx-calling fetchers. No production code changed.
-- `SESSION88_CANDIDATES_COVERAGE_100_PERCENT_2026-09-23.md` —
-  100%-coverage plan: `candidate_engine/candidates.py` finished, 65%→100%
+- `SESSION88_CANDIDATES_COVERAGE_100_PERCENT_2026-09-23.md` â€”
+  100%-coverage plan: `candidate_engine/candidates.py` finished, 65%â†’100%
   (689/689 statements). New `tests/test_candidates_orchestration.py` (24
   tests, round 3) covers the three DB-writing cycle orchestrators
   session87 deferred (`_refresh_standard_candidates`,
   `_refresh_volume_shock_candidates`, `refresh_candidates`) plus the 6
   stray single-line gaps session87's note called out by number. No
-  production-code bugs found — pure coverage-closing pass. Full
+  production-code bugs found â€” pure coverage-closing pass. Full
   `real-trade-service` suite: 1150 passed, 1 xfailed, no regressions;
-  overall repo coverage 78%→80%. `position-stocks-service` re-confirmed
+  overall repo coverage 78%â†’80%. `position-stocks-service` re-confirmed
   unchanged (1221 passed).
-- `SESSION87_CANDIDATES_COVERAGE_ROUNDS_1_2_2026-09-23.md` — 100%-coverage
-  plan follow-up: `candidate_engine/candidates.py`, 0%→65%, both rounds
+- `SESSION87_CANDIDATES_COVERAGE_ROUNDS_1_2_2026-09-23.md` â€” 100%-coverage
+  plan follow-up: `candidate_engine/candidates.py`, 0%â†’65%, both rounds
   actually run through live pytest+coverage (this sandbox had working
   network/pip access). Landed session86's drafted-but-unlanded round 1
-  (`tests/test_candidates_helpers.py`, 107 tests — sector-peer-history
+  (`tests/test_candidates_helpers.py`, 107 tests â€” sector-peer-history
   cache, adaptive-param refresh, HTTP fetch wrappers, quality gate, pure
   analysis helpers, source row-normalizers, dedupe-cooldown lookup),
   fixing one real bug the run caught in session86's own draft (a test
@@ -1406,8 +1407,8 @@ Most recent first — see each file for full detail:
   session's own first-draft test fixtures/assertions, not the production
   code. Full suite: 1126 passed, 1 xfailed, no regressions. Deferred to a
   follow-up round: `_refresh_standard_candidates`, `_refresh_volume_shock_
-  candidates`, `refresh_candidates` — the DB-writing cycle orchestrators.
-- `SESSION86_AUTO_PILOT_ORCHESTRATION_COVERAGE_2026-09-23.md` — 100%-coverage
+  candidates`, `refresh_candidates` â€” the DB-writing cycle orchestrators.
+- `SESSION86_AUTO_PILOT_ORCHESTRATION_COVERAGE_2026-09-23.md` â€” 100%-coverage
   plan follow-up: second (and final) coverage round on `execution/
   auto_pilot.py`, targeting the cycle-orchestration layer session85
   deliberately left out. New `tests/test_auto_pilot_orchestration.py` (120
@@ -1418,87 +1419,87 @@ Most recent first — see each file for full detail:
   scan`, `_schedule_tick_body` and all five of its scheduled automations,
   all five background loops, the remaining `_afterhours_scan_body` branches,
   the after-hours lock + manual trigger, and `start()`. Moves `auto_pilot.py`
-  31%→~99% (pending VM confirmation). **Not run through live pytest this
-  session** (no network in this sandbox, unlike session85's) — verified
+  31%â†’~99% (pending VM confirmation). **Not run through live pytest this
+  session** (no network in this sandbox, unlike session85's) â€” verified
   structurally instead: py_compile plus an AST sweep confirming every
   referenced `ap.<name>`, every dotted monkeypatch target, and every model
   kwarg/attribute actually exists in the target module. Same caveat as
-  sessions 76/77/82c — user should confirm with a real pytest+coverage run.
+  sessions 76/77/82c â€” user should confirm with a real pytest+coverage run.
   No production code changed, tests only.
-- `SESSION85_AUTO_PILOT_HELPERS_COVERAGE_2026-09-23.md` — 100%-coverage plan
+- `SESSION85_AUTO_PILOT_HELPERS_COVERAGE_2026-09-23.md` â€” 100%-coverage plan
   follow-up: first coverage round on `execution/auto_pilot.py`, the largest
   remaining gap (750 stmts). New `tests/test_auto_pilot_helpers.py` (56
-  tests) covers the self-contained helpers — locks, reconcile-throttle,
+  tests) covers the self-contained helpers â€” locks, reconcile-throttle,
   `_summarize`, overnight-hold/edis gate toggles, `_needs_cnc_sell`,
   gate-off alerting, the afterhours-window/market-date calcs, and the full
   `_select_overnight_holds` eligibility/ranking/cap pipeline. Moves
-  `auto_pilot.py` 19%→31%. **Actually executed this session** (sandbox now
-  has working pytest + network, unlike prior sessions): full suite run —
+  `auto_pilot.py` 19%â†’31%. **Actually executed this session** (sandbox now
+  has working pytest + network, unlike prior sessions): full suite run â€”
   869 passed, 1 xfailed, no regressions; confirms session84's two modules
   and the three previously-100% modules are still 100%. Cycle orchestration
   (`_full_tick_body`, `_prepick`, `_eod_squareoff`, background loops) left
   for a follow-up round; `candidate_engine/candidates.py` (0%, 2077 lines)
   still untouched. No production code changed, tests only.
-- `SESSION84_SHARED_ORDER_BUDGET_AND_SYMBOL_LOCK_COVERAGE_2026-09-23.md` —
-  100%-coverage plan follow-up: `execution/shared_order_budget.py` (44%→100%)
-  and `execution/shared_symbol_lock.py` (41%→100%) closed with 2 new test
+- `SESSION84_SHARED_ORDER_BUDGET_AND_SYMBOL_LOCK_COVERAGE_2026-09-23.md` â€”
+  100%-coverage plan follow-up: `execution/shared_order_budget.py` (44%â†’100%)
+  and `execution/shared_symbol_lock.py` (41%â†’100%) closed with 2 new test
   files; confirmed via a real VM pytest run that `exit_engine/exit.py`,
   `portfolio/portfolio.py`, `execution/dhan_client.py` are genuinely 100%;
   flagged `execution/auto_pilot.py` (19%, 611 lines) as the next, largest
   gap and `candidate_engine/candidates.py` (0%, never tested) after that;
   no production code changed, tests only
-- `SESSION83_CLAMP_FOR_ATR_IMPORTERROR_COVERAGE_2026-09-21.md` — 100%-coverage
+- `SESSION83_CLAMP_FOR_ATR_IMPORTERROR_COVERAGE_2026-09-21.md` â€” 100%-coverage
   plan, Phase 1 #1 closed out: `_clamp_for_atr`'s `return_sanity` ImportError
   fallback (the last zero-coverage item session82c flagged) now has 2 direct
   tests; `exit_engine/exit.py` confirmed at 84% coverage via a real pytest run
   (sandbox had pypi egress this session); no new bugs found
-- `2026-09-21-session82c-eval-mode-isolation.md` — real bug: `evaluate_mode`'s
+- `2026-09-21-session82c-eval-mode-isolation.md` â€” real bug: `evaluate_mode`'s
   per-position loop had no exception isolation, so one bad position could
   abort stop/target evaluation for every other open position that cycle;
   fixed with try/except + HOLD audit log per position; also added first-ever
   direct tests for `_load_profile`/`_trail_atr_mult`
-- `SESSION82_ANGELONE_CROSS_LOOP_LOCK_READTIMEOUT_ROOT_CAUSE_2026-09-21.md` —
+- `SESSION82_ANGELONE_CROSS_LOOP_LOCK_READTIMEOUT_ROOT_CAUSE_2026-09-21.md` â€”
   root cause of the ReadTimeout storm: `AngelOneSession`'s single shared
   `asyncio.Lock` bound to whichever event loop touched it first, crashing the
   ws-feed background thread for good on any cross-loop contention; fixed with
   a per-event-loop lock (then a follow-up fix, 82b, to stop it leaking memory
   via one-shot `asyncio.run()` loops using a `WeakKeyDictionary`)
-- `SESSION81_STALE_TEST_FIXES_AFTER_SESSION79_80_CHANGES_2026-09-21.md` — 3
+- `SESSION81_STALE_TEST_FIXES_AFTER_SESSION79_80_CHANGES_2026-09-21.md` â€” 3
   tests updated to match two already-deliberate production changes (session79's
   `MIN_TRADE_VALUE` default drop, session80's dead-exit-leg detection now
-  requiring every leg dead, not just one) — no application code changed
-- `SESSION77_COVERAGE_PLAN_PHASE1_PART2_2026-09-21.md` — 100%-coverage plan,
+  requiring every leg dead, not just one) â€” no application code changed
+- `SESSION77_COVERAGE_PLAN_PHASE1_PART2_2026-09-21.md` â€” 100%-coverage plan,
   Phase 1 continued: 21 new tests for `exit_engine/exit.py`'s
-  CDSL/insufficient-funds/oversell(×3)/exchange-not-allowed branches, both
+  CDSL/insufficient-funds/oversell(Ã—3)/exchange-not-allowed branches, both
   `_cutoff_key` siblings (intraday-cutoff, security-intraday-restricted),
   and the generic-rejection streak escalation state machine; no new bugs found
-- `SESSION77_COVERAGE_PLAN_PHASE1_PART1_2026-09-21.md` — 100%-coverage plan,
+- `SESSION77_COVERAGE_PLAN_PHASE1_PART1_2026-09-21.md` â€” 100%-coverage plan,
   Phase 1 continued: 12 new tests for `exit_engine/exit.py`'s
   `expire_stale_exit_orders()` and `_send_real_sell`'s success/invalid-IP/
   pre-migration-fallback paths, all previously 0% direct; no new bugs found
-- `SESSION76_CIRCUIT_LIMIT_EXIT_RESEND_FIX_2026-09-21.md` — `_send_real_sell`'s
+- `SESSION76_CIRCUIT_LIMIT_EXIT_RESEND_FIX_2026-09-21.md` â€” `_send_real_sell`'s
   circuit-limit rejection branch never set the `_cutoff_key` resend-suppression
   flag its sibling branches use, so a circuit-locked position's SELL was
   resent to Dhan every exit cycle all day instead of once; fixed, 2 new tests
-- `SESSION75_STUCK_RECONCILE_STATUS_FILTER_FIX_2026-09-20.md` — real bug found
+- `SESSION75_STUCK_RECONCILE_STATUS_FILTER_FIX_2026-09-20.md` â€” real bug found
   from live `/reconcile/pending` data: `resolve_stuck_pending()`'s status
   filter silently excluded STOP_HIT/TARGET_HIT rows from ever being
   self-healed or aged-out, so a stale EOD_SQUAREOFF sentinel could sit
   forever on an already-correctly-resolved position; fixed, 4 new tests
-- `SESSION74_DEEP_AUDIT_NO_NEW_BUGS_2026-09-20.md` — full (not pattern-swept)
+- `SESSION74_DEEP_AUDIT_NO_NEW_BUGS_2026-09-20.md` â€” full (not pattern-swept)
   read of decision-prediction-service's `training/models.py` and
   `training/app.py`, plus a repo-wide sweep for mutable-default-args/bare-except/
-  unguarded-division; no new bugs found — remaining open items are config
+  unguarded-division; no new bugs found â€” remaining open items are config
   decisions, infra, or awaiting live verification, not code
-- `SESSION73_CROSS_SERVICE_AUDIT_FIXES_2026-09-20.md` — capital_share_cap
+- `SESSION73_CROSS_SERVICE_AUDIT_FIXES_2026-09-20.md` â€” capital_share_cap
   blind spot to the other service's holdings (new shared-exposure table),
   position-stocks-service exit-placement retry backoff (mirrors
   real-trade-service's session40 fix), overnight-hold sector diversification cap
-- `SESSION24_ROOT_DEDUP_CLEANUP.md` — removed root-level duplicates left
+- `SESSION24_ROOT_DEDUP_CLEANUP.md` â€” removed root-level duplicates left
   behind by a previous zip repackage (files were already archived but
   never deleted from root)
-- 2026-09-11 — quality gate, intraday-restriction list, Dhan P&L summary,
-  overnight orchestrator, Reset Failures fix (this session — see the PR/
+- 2026-09-11 â€” quality gate, intraday-restriction list, Dhan P&L summary,
+  overnight orchestrator, Reset Failures fix (this session â€” see the PR/
   commit this shipped in, not yet filed as its own archive note)
 - `SESSION23_EOD_SAME_DAY_ENTRY_AND_US_SECTOR_SIGNAL.md`
 - `SESSION22_EOD_SQUAREOFF_TIME_AND_OVERNIGHT_SIGNAL_SCAN.md`
@@ -1514,7 +1515,7 @@ Most recent first — see each file for full detail:
 - `CLAUDE_SESSION.md`, `CLAUDE_SESSION3.md`
 
 Older notes (pre-Sept 2026) are one level deeper, already archived from a
-prior cleanup — same folder, just look for the earlier dates.
+prior cleanup â€” same folder, just look for the earlier dates.
 
 Setup/deploy docs stay at repo root, not here: `README.md`,
 `DEPLOY_GUIDE.md`, `SETUP-GUIDE.md`, `ORACLE_SETUP_GUIDE.md`.

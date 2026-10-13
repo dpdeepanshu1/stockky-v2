@@ -118,6 +118,35 @@ _FALLBACKS_ENABLED = (os.getenv("NEWS_FEED_FALLBACKS") or "1").strip().lower() n
 _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
 _lock = threading.Lock()
 
+# group346 (log review #17): a primary feed that is retired (404/410), frozen (all entries stale) or serving HTML was
+# re-downloaded on every cache expiry only to fail and be answered by its fallback. Once a fallback has served for it,
+# the primary is not tried again for NEWS_FEED_PRIMARY_DEAD_TTL_SEC (default 1800 s; 0 disables) - the fallback is used
+# straight away. Transient errors (timeouts, 5xx, bot-gate statuses) never mark a primary dead.
+PRIMARY_DEAD_TTL_SEC = _env_int("NEWS_FEED_PRIMARY_DEAD_TTL_SEC", 1800, 0, 86400)
+_primary_dead_until: Dict[str, float] = {}
+_DEAD_STATUSES = frozenset({404, 410})
+
+
+def _primary_is_dead(url: str) -> bool:
+    if PRIMARY_DEAD_TTL_SEC <= 0 or url not in _FALLBACKS or not _FALLBACKS_ENABLED:
+        return False
+    with _lock:
+        until = _primary_dead_until.get(url)
+        if until is None:
+            return False
+        if until <= time.monotonic():
+            _primary_dead_until.pop(url, None)
+            return False
+        return True
+
+
+def _mark_primary_dead(url: str, info: Dict[str, Any]) -> None:
+    if PRIMARY_DEAD_TTL_SEC <= 0:
+        return
+    if info.get("status") in _DEAD_STATUSES or info.get("error") in ("all_stale", "html_instead_of_feed"):
+        with _lock:
+            _primary_dead_until[url] = time.monotonic() + PRIMARY_DEAD_TTL_SEC
+
 
 # group341: the same dead-feed warnings (cnbctv18 404, Moneycontrol / NDTV Profit frozen) were repeated on every cache expiry, 11 lines in
 # 20 minutes for three feeds that are already served by a fallback. WARNING once per message key per hour, DEBUG after that.
@@ -137,6 +166,7 @@ def _warn_throttled(key: str, msg: str, *args: Any) -> None:
 def clear_cache() -> None:
     with _lock:
         _cache.clear()
+        _primary_dead_until.clear()
 
 
 def _ttl_for(url: str) -> int:
@@ -233,7 +263,12 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
         if hit and hit[0] > now:
             return hit[1], dict(hit[2], cached=True)
 
-    raw, info = _download(url)
+    if _primary_is_dead(url):
+        raw, info = None, {"status": None, "error": "primary_known_dead"}
+    else:
+        raw, info = _download(url)
+        if raw is None:
+            _mark_primary_dead(url, info)
     if raw is None:
         parsed = _try_fallbacks(url, info)
         if parsed is not None:
@@ -254,6 +289,7 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
             info["error"] = "all_stale"
             fb_parsed = _try_fallbacks(url, info)
             if fb_parsed is not None:
+                _mark_primary_dead(url, {"status": 200, "error": "all_stale"})   # _try_fallbacks cleared info["error"]
                 parsed = fb_parsed
                 info["entries"] = len(parsed.entries)
         if info["entries"] == 0:

@@ -237,6 +237,14 @@
   "services/position-stocks-service/resilience/circuit_breaker.py": "b3d07eb3",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
+ "kv_cache::KV_WRITE_BEHIND": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "2f960328",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
  "kv_cache::_DURABLE_PREFIXES": {
   "services/analysis-intelligence-service/fundamental/kv_cache.py": "92a730d1",
   "services/api-gateway/kv_cache.py": "79894172",
@@ -252,6 +260,94 @@
   "services/decision-prediction-service/training/kv_cache.py": "afb35f6f",
   "services/market-data-service/kv_cache.py": "afb35f6f",
   "services/notification-scheduler-service/notification/kv_cache.py": "afb35f6f"
+ },
+ "kv_cache::_neon_delete_sync": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "cfb74b81",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_on_event_loop_thread": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "41484e68",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_enqueue": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "d4470725",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_idle": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "37317b46",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_lock": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "7723454e",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_pending": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "ebeaab57",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_stats": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "c5981450",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_thread": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "de471540",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_wake": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "46b95c13",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::_wb_worker": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "87f0075c",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::flush_pending": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "e5a0a7a4",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
  },
  "kv_cache::get_stale": {
   "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
@@ -269,9 +365,41 @@
   "services/market-data-service/kv_cache.py": "f482cbf0",
   "services/notification-scheduler-service/notification/kv_cache.py": "f482cbf0"
  },
+ "kv_cache::kv_delete": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "677c2fe0",
+  "services/api-gateway/kv_cache.py": "71d72452",
+  "services/decision-prediction-service/decision/kv_cache.py": "677c2fe0",
+  "services/decision-prediction-service/training/kv_cache.py": "677c2fe0",
+  "services/market-data-service/kv_cache.py": "677c2fe0",
+  "services/notification-scheduler-service/notification/kv_cache.py": "677c2fe0"
+ },
  "kv_cache::kv_get_stale": {
   "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
   "services/api-gateway/kv_cache.py": "88e6f541",
+  "services/decision-prediction-service/decision/kv_cache.py": "-",
+  "services/decision-prediction-service/training/kv_cache.py": "-",
+  "services/market-data-service/kv_cache.py": "-",
+  "services/notification-scheduler-service/notification/kv_cache.py": "-"
+ },
+ "kv_cache::kv_set": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "b585499a",
+  "services/api-gateway/kv_cache.py": "49140f2f",
+  "services/decision-prediction-service/decision/kv_cache.py": "b585499a",
+  "services/decision-prediction-service/training/kv_cache.py": "b585499a",
+  "services/market-data-service/kv_cache.py": "b585499a",
+  "services/notification-scheduler-service/notification/kv_cache.py": "b585499a"
+ },
+ "kv_cache::kv_set_many": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "23f0b6b2",
+  "services/api-gateway/kv_cache.py": "6a92044d",
+  "services/decision-prediction-service/decision/kv_cache.py": "23f0b6b2",
+  "services/decision-prediction-service/training/kv_cache.py": "23f0b6b2",
+  "services/market-data-service/kv_cache.py": "23f0b6b2",
+  "services/notification-scheduler-service/notification/kv_cache.py": "23f0b6b2"
+ },
+ "kv_cache::write_behind_status": {
+  "services/analysis-intelligence-service/fundamental/kv_cache.py": "-",
+  "services/api-gateway/kv_cache.py": "7dcd87ea",
   "services/decision-prediction-service/decision/kv_cache.py": "-",
   "services/decision-prediction-service/training/kv_cache.py": "-",
   "services/market-data-service/kv_cache.py": "-",

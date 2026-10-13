@@ -80,14 +80,11 @@ def _group340_off_by_default(monkeypatch):
     monkeypatch.setattr(_config, "STOP_WATCHDOG_ENABLED", False, raising=False)
     monkeypatch.setattr(_config, "ENTRY_MIN_PRICE", 0.0, raising=False)
     monkeypatch.setattr(_config, "SCALP_ENTRY_CUTOFF_IST", "", raising=False)
-<<<<<<< HEAD
-=======
     # group341: older tests assume the pre-group341 behaviour; tests/test_group341.py turns these on.
     monkeypatch.setattr(_config, "SCALP_POOL_COMMITTED_MARGIN_FRAC", 1.0, raising=False)
     monkeypatch.setattr(_config, "SCALP_SLOT_NOTIONAL_CAP_MULT", 0.0, raising=False)
     monkeypatch.setattr(_config, "QUALITY_GATE_RESULT_TTL_S", 0.0, raising=False)
     monkeypatch.setattr(_config, "QUALITY_GATE_EVENT_MEMORY_H", 0.0, raising=False)
->>>>>>> main
     from orders import adaptive as _ad
     _ad.reset_history_cache()
     yield

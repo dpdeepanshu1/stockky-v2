@@ -1029,44 +1029,8 @@ def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
     # group341: each leg is persisted as soon as Dhan accepts it, the stop is read back, and a leg that fails is retried on later
     # passes (the old code stored nothing if the second modify failed and never retried, because the entry price was already saved).
     if pos.status == "OPEN" and config.USE_SUPER_ORDER and pos.dhan_super_order_id:
-<<<<<<< HEAD
-        try:
-            # group340: store the tick-rounded price modify_super_order() really sends (DWARKESH: card 47.13 vs trigger 47.21)
-            new_target = dhan_client.round_to_tick(round(real_entry_price * (1 + pos.adaptive_target_pct / 100.0), 2))
-            new_stop = dhan_client.round_to_tick(round(real_entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2))
-            # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down
-            # by a late fill-price correction.
-            if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
-                new_stop = pos.stop_price
-            dhan_client.modify_super_order(
-                db, order_id=pos.dhan_super_order_id,
-                order_leg="TARGET_LEG", target_price=new_target,
-            )
-            dhan_client.modify_super_order(
-                db, order_id=pos.dhan_super_order_id,
-                order_leg="STOP_LOSS_LEG", stop_loss_price=new_stop,
-            )
-            old_target, old_stop = pos.target_price, pos.stop_price
-            pos.target_price = new_target
-            pos.stop_price = new_stop
-            db.commit()
-            logger.info(
-                "reconcile: %s (id=%d) re-armed target/stop legs for the "
-                "corrected fill price: target ₹%.2f -> ₹%.2f, stop ₹%.2f -> ₹%.2f",
-                pos.symbol, pos.id, old_target, new_target, old_stop, new_stop,
-            )
-        except Exception as e:
-            # Not fatal — legs stay at their original prices (pre-fix behaviour).
-            logger.warning(
-                "reconcile: %s (id=%d) failed to re-arm target/stop legs "
-                "after fill-price correction (%s) — legs remain at their "
-                "original prices",
-                pos.symbol, pos.id, e,
-            )
-=======
         _rearm_state.pop(pos.id, None)
         _rearm_legs(db, pos)
->>>>>>> main
     return True
 
 

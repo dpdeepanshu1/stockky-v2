@@ -81,6 +81,13 @@ def _cooldown_base_s() -> float:
     return _env_float("ANGELONE_GLOBAL_COOLDOWN_S", 30.0, 1.0, 600.0)
 
 
+def _candle_cooldown_base_s() -> float:
+    """group344: first candle cooldown. The 30 s base was refused again on the first call after it ended (trip #2, 13 Oct and 08 Oct),
+    so the candle family starts at ANGELONE_CANDLE_COOLDOWN_BASE_S (default 90 s) and then doubles up to the candle ceiling. Never
+    below the shared base. Set it to 30 for the old ladder."""
+    return max(_cooldown_base_s(), _env_float("ANGELONE_CANDLE_COOLDOWN_BASE_S", 90.0, 1.0, 3600.0))
+
+
 def _candle_cooldown_max_s() -> float:
     """group255: candle-only ceiling of the escalation ladder (30, 60, 120, 240 ... up to this). The 2026-10-08 log showed the
     first call after a 30 s candle cooldown refused again (0.0 s after it ended), i.e. AngelOne's block outlasts a minute-long
@@ -199,6 +206,7 @@ def trip(endpoint: str) -> float:
         _window = _ESCALATE_WINDOW_S
         if fam == CANDLE:
             cap = _candle_cooldown_max_s()
+            base = min(cap, _candle_cooldown_base_s())
             _window = _ESCALATE_WINDOW_S + st["dur"]     # a long cooldown must not outlast its own escalation window
             if _candle_series_start <= 0.0:
                 _candle_series_start = now

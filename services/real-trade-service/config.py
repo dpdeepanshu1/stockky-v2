@@ -494,6 +494,11 @@ PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
 PREOPEN_WARM_MAX_SYMBOLS = int(_og_float("PREOPEN_WARM_MAX_SYMBOLS", 40.0))
+# group344 (13 Oct log: "event fetch failed for RAMRAT (ReadTimeout)" while this warm-up ran 216 s over 60 symbols, one blocking call
+# after the other, against the same event service): the warm-up now stops after PREOPEN_WARM_BUDGET_S seconds (default 45; 0 = no limit) and
+# never runs once the market is open (PREOPEN_WARM_STOP_AT_OPEN=true) - a live entry check must not queue behind a cache warm-up.
+PREOPEN_WARM_BUDGET_S = _og_float("PREOPEN_WARM_BUDGET_S", 45.0)
+PREOPEN_WARM_STOP_AT_OPEN = ((os.getenv("PREOPEN_WARM_STOP_AT_OPEN") or "").strip() or "true").lower() == "true"
 
 # group 333 (2026-10-12): liquidity floor (entry_engine/liquidity_gate.py): normal daily turnover (20-session mean of volume x close, crore Rs), today's
 # turnover so far, and relative volume vs the normal pace of the session. A floor of 0 turns that test off; unknown inputs never block.

@@ -75,6 +75,8 @@ class QualitySignal:
     earnings_date: Optional[str] = None
     # group330: a "NEWS_NEGATIVE:..." reason from the same event-service answer (low event score / regulatory action / delisting risk / fresh miss).
     negative_news: Optional[str] = None
+    # group344: the event service did not answer (twice) and nothing is remembered for this symbol - no news / earnings check was possible.
+    event_unchecked: bool = False
 
     def passes(self) -> tuple[bool, str]:
         """Lenient pass/fail: only reject on data that IS present and below
@@ -84,6 +86,8 @@ class QualitySignal:
             return False, f"EARNINGS_TODAY: results dated {self.earnings_date} (today) - gap risk a stop cannot cover"
         if config.NEWS_NEGATIVE_BLOCK_ENABLED and self.negative_news:
             return False, self.negative_news
+        if self.event_unchecked and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
+            return False, "EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer - not entering without a news check (retried next cycle)"
         if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
             return False, f"fundamental_score {self.fundamental_score:.0f} < floor {config.MIN_FUNDAMENTAL_SCORE:.0f}"
         if self.technical_score is not None and self.technical_score < config.MIN_TECHNICAL_SCORE:
@@ -213,6 +217,8 @@ _earnings_seen: dict = {}
 # group330: symbol -> negative-news reason seen by the most recent _fetch_event_signal() call, consumed once by check().
 _news_seen: dict = {}
 
+# group344: monotonic time of the first event failure of the current unbroken run (None = the last event call worked).
+_event_fail_since: list = [None]
 # group341: symbols whose event call failed in the most recent check() (timeout / non-200), consumed once by check().
 _event_failed: set = set()
 # group341: symbol -> (monotonic ts, QualitySignal) for a FULLY fetched result, reused for QUALITY_GATE_RESULT_TTL_S seconds so the 10 s
@@ -273,11 +279,12 @@ def _earnings_date_from(body) -> Optional[str]:
         return None
 
 
-async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[bool], Optional[float], bool]:
+async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str, timeout: Optional[float] = None) -> tuple[Optional[bool], Optional[float], bool]:
     has_catalyst = event_score = None
     bulk_flag = False
     try:
-        r = await client.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/categorized", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/categorized",
+                             timeout=config.QUALITY_GATE_TIMEOUT_S if timeout is None else timeout)
         if r.status_code == 200:
             ej = r.json()
             has_catalyst = ej.get("has_positive_catalyst")
@@ -349,6 +356,18 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
             return _apply_cache_fallback(QualitySignal(symbol=symbol), cached)
 
     _ev_failed = symbol in _event_failed
+    if _ev_failed and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
+        # group344: one retry with a longer timeout before the symbol is treated as unchecked.
+        _rt = float(getattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 0.0) or 0.0)
+        if _rt > 0:
+            _event_failed.discard(symbol)
+            async with httpx.AsyncClient() as _c2:
+                _rc, _rs, _rb = await _fetch_event_signal(_c2, symbol, timeout=_rt)
+            if symbol not in _event_failed:
+                has_catalyst, event_score, bulk_flag = _rc, _rs, _rb
+                _ev_failed = False
+            else:
+                _ev_failed = True
     _event_failed.discard(symbol)
     _earn = _earnings_seen.pop(symbol, None)
     _neg = _news_seen.pop(symbol, None)
@@ -361,8 +380,25 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
                 _neg = _neg or _m[2]
         else:
             _event_memory[symbol] = (_time.time(), _earn, _neg)
+    # group344: event unknown (failed twice, nothing remembered) -> unchecked, unless the service has been down so long that blocking would just stop trading.
+    _unchecked = False
+    if getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
+        if not _ev_failed:
+            _event_fail_since[0] = None
+        else:
+            if _event_fail_since[0] is None:
+                _event_fail_since[0] = _time.monotonic()
+            _remembered = _mem_h > 0 and symbol in _event_memory and _time.time() - _event_memory[symbol][0] < _mem_h * 3600.0
+            if not _remembered:
+                _open_after = float(getattr(config, "QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S", 0.0) or 0.0)
+                if _open_after > 0 and _time.monotonic() - _event_fail_since[0] >= _open_after:
+                    logger.warning("quality_gate: the event service has failed for %.0fs - letting %s through without a news check (fail-open valve)",
+                                   _time.monotonic() - _event_fail_since[0], symbol)
+                else:
+                    _unchecked = True
     _sig = _apply_cache_fallback(QualitySignal(
         symbol=symbol,
+        event_unchecked=_unchecked,
         fundamental_score=fund_score,
         technical_score=tech_score,
         market_cap_cr=market_cap_cr,

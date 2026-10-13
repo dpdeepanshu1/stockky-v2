@@ -123,7 +123,7 @@ def _fakes(q, monkeypatch, *, fund=(60.0, 55.0, 5000.0), event_ok=True, earnings
             calls["ft"] += 1
         return fund
 
-    async def _ev(client, symbol):
+    async def _ev(client, symbol, timeout=None):
         if calls is not None:
             calls["ev"] += 1
         if event_ok:

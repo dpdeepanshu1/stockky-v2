@@ -67,3 +67,14 @@ def _g270_dhan_off_by_default(monkeypatch):
     test; the group270 tests turn it on explicitly with their own monkeypatch."""
     monkeypatch.setenv("DHAN_DATA_ENABLED", "0")
     yield
+
+
+@_pytest_g188.fixture(autouse=True)
+def _g344_old_candle_base_and_clean_live_store(monkeypatch):
+    """group344: the candle cooldown now starts at ANGELONE_CANDLE_COOLDOWN_BASE_S (default 90). Older tests assert the 30 s ladder, so they run
+    with the base pinned to the shared one; the group 344 tests set it themselves. Also clears the Dhan live writer's per-process memory."""
+    monkeypatch.setenv("ANGELONE_CANDLE_COOLDOWN_BASE_S", "1")
+    _l = sys.modules.get("dhan_data.live_store")
+    if _l is not None:
+        _l._last_sent.clear(); _l._latest.clear(); _l._prio.clear()
+    yield

@@ -1113,8 +1113,11 @@ def _retry_rearm_pending(db: Session, pos: ScalpPosition) -> None:
         _rearm_legs(db, pos)
 
 
+_exit_fill_logged: set = set()   # group344: (position id, fill) already announced by this process
+
+
 def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
-                              orders: Optional[list] = None) -> Optional[float]:
+                              orders: Optional[list] = None, *, quiet: bool = False) -> Optional[float]:
     """Real TARGET/STOP leg fill price from today's plain order book, used only
     when the nested leg dict carries no traded-price key (otherwise
     _extract_leg_price would fall back to the leg's static trigger price, which
@@ -1152,14 +1155,22 @@ def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
             continue
         found.append(avg)
     if len(found) == 1:
-        logger.info(
-            "reconcile: %s (id=%d) exit fill ₹%.2f taken from today's order book "
-            "(leg dict had no traded-price key; trigger ₹%.2f)",
-            pos.symbol, pos.id, found[0], ref_price,
-        )
+        # group344: the 5-minute auto-repair re-reads the same row and used to log this line again every time (it looked like a
+        # reconcile loop). Logged once per position and fill per process; the repair passes quiet=True for rows it only re-confirms.
+        _key = (pos.id, round(found[0], 4))
+        if not quiet or _key not in _exit_fill_logged:
+            if _key not in _exit_fill_logged:
+                _exit_fill_logged.add(_key)
+                logger.info(
+                    "reconcile: %s (id=%d) exit fill ₹%.2f taken from today's order book "
+                    "(leg dict had no traded-price key; trigger ₹%.2f)",
+                    pos.symbol, pos.id, found[0], ref_price,
+                )
         return found[0]
     return None
 
+
+_exit_fill_confirmed: set = set()   # group344: position ids whose booked exit already equals the order-book fill
 
 _REPAIR_SKIP_STATUSES = ("OPEN", "EXIT_LEGS_REJECTED", "ERROR")
 _REPAIR_MAX_DRIFT_PCT = 25.0
@@ -1191,7 +1202,7 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
             .order_by(ScalpPosition.id).all())
     rows = [p for p in rows if _ist_date_str(p.closed_at) == today]
     out: dict = {"date_ist": today, "applied": bool(apply), "changes": [], "skipped": [], "unchanged": 0,
-                 "total_pnl_delta": 0.0}
+                 "total_pnl_delta": 0.0, "exit_audit": []}
     if not rows:
         return out
     try:
@@ -1203,6 +1214,30 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
     order_book: Optional[list] = None   # fetched lazily, once, for TARGET/STOP exit-fill lookups
     for pos in rows:
         label = {"id": pos.id, "symbol": pos.symbol}
+        _ex_probe = None
+        if pos.status in ("TARGET_HIT", "STOP_HIT"):
+            # group344: one exit_audit row per closed TARGET/STOP trade (also rows skipped below for entry reasons), so the booked exit can be
+            # compared with Dhan's trade book by hand. The order-book lookup is done once per row once it has confirmed the fill.
+            if order_book is None:
+                try:
+                    order_book = dhan_client.get_order_list(db) or []
+                except Exception as e:
+                    order_book = []
+                    out["exit_error"] = f"order list fetch failed: {e}"
+            _confirmed = config.EXIT_FILL_CONFIRM_ONCE and pos.id in _exit_fill_confirmed
+            _ex_probe = None if _confirmed else (
+                _exit_fill_from_orderbook(db, pos, pos.exit_price, orders=order_book, quiet=True) if order_book else None)
+            _same = _ex_probe is not None and abs(_ex_probe - pos.exit_price) <= 1e-6
+            out["exit_audit"].append({
+                **label, "status": pos.status, "booked_exit": pos.exit_price,
+                "order_book_fill": _ex_probe if _ex_probe is not None else (pos.exit_price if _confirmed else None),
+                "verdict": ("confirmed earlier" if _confirmed else
+                            "booked exit is the order-book fill" if _same else
+                            "booked exit differs from the order-book fill (will be corrected)" if _ex_probe is not None else
+                            "no single matching SELL in today's order book - booked exit could be the trigger price, check Dhan's trade book"),
+            })
+            if _same and config.EXIT_FILL_CONFIRM_ONCE:
+                _exit_fill_confirmed.add(pos.id)
         if int(pos.overnight_stop_prior_qty or 0) + int(pos.overnight_stop_filled_qty_so_far or 0) > 0:
             out["skipped"].append({**label, "reason": "has overnight partial fills"})
             continue
@@ -1228,17 +1263,8 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
             continue
         new_entry = real if pos.entry_price else pos.entry_price
         new_exit = pos.exit_price
-        if pos.status in ("TARGET_HIT", "STOP_HIT"):
-            # Exit legs: the booked exit may be the leg's static trigger price, not the fill.
-            if order_book is None:
-                try:
-                    order_book = dhan_client.get_order_list(db) or []
-                except Exception as e:
-                    order_book = []
-                    out["exit_error"] = f"order list fetch failed: {e}"
-            ex = _exit_fill_from_orderbook(db, pos, pos.exit_price, orders=order_book) if order_book else None
-            if ex and abs(ex - pos.exit_price) > 1e-6:
-                new_exit = ex
+        if pos.status in ("TARGET_HIT", "STOP_HIT") and _ex_probe is not None and _ex_probe > 0 and abs(_ex_probe - pos.exit_price) > 1e-6:
+            new_exit = _ex_probe     # the booked exit may be the leg's static trigger price, not the fill
         if abs(new_entry - pos.entry_price) <= 1e-6 and abs(new_exit - pos.exit_price) <= 1e-6:
             out["unchanged"] += 1
             continue
@@ -1965,6 +1991,12 @@ def run_exit_reconciliation(db: Session) -> int:
             exit_price = _exit_fill_from_orderbook(db, pos, _trigger_price)
         if exit_price is None:
             exit_price = _extract_leg_price(hit_leg, row, own_fallback_price=_trigger_price)
+            if not _leg_has_fill_price(hit_leg):
+                # group344: no fill price on the leg and no unique order-book match: the booked exit may be the trigger price. The
+                # 5-minute repair keeps looking (GET/POST /reconcile/repair-closed lists it under exit_audit).
+                logger.warning("reconcile: %s (id=%d) %s booked at ₹%.2f - no fill price on the leg and no single matching SELL in the "
+                               "order book, so this may be the trigger price, not the fill; check Dhan's trade book",
+                               pos.symbol, pos.id, hit_kind, exit_price)
         realized_pnl = (exit_price - pos.entry_price) * pos.quantity
         realized_pnl_pct = (
             (exit_price - pos.entry_price) / pos.entry_price * 100.0

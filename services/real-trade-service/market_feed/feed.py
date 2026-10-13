@@ -1177,13 +1177,16 @@ def _bulk_reject_reason(item, *, now: Optional[datetime] = None, max_age_s: Opti
 
 async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout: Optional[float] = None,
                       max_age_s: Optional[float] = None, stats: Optional[dict] = None,
-                      schedule_atr: bool = True, chunk_size: Optional[int] = None) -> dict[str, Tick]:
+                      schedule_atr: bool = True, chunk_size: Optional[int] = None,
+                      priority: bool = False) -> dict[str, Tick]:
     """Best-effort chunked POST /quotes/bulk -> {symbol: Tick}. Never raises; a failed chunk just leaves
     its symbols out so the caller falls back to the per-symbol cascade for them.
 
     max_age_s: freshness limit for this call (default FEED_BULK_MAX_AGE_S).
     schedule_atr: False for dashboard-only callers (group243), which must not start ATR /history refreshes.
     chunk_size: symbols per request (default FEED_BULK_CHUNK_SIZE).
+    priority: group344 - True only for the held-position lane; market-data then writes these symbols to live_quotes first
+    and never skips them as "price unchanged".
     stats (optional, filled in place): "chunks", "failed" (chunks that errored or answered non-200),
     "failed_symbols" (the symbols of those chunks, group248) and
     "reasons" ({no_price|no_time|stale|other: n}) for rows that were returned but not usable."""
@@ -1210,7 +1213,7 @@ async def _bulk_ticks(client: httpx.AsyncClient, symbols: list[str], *, timeout:
     async def _post(chunk: list[str]) -> None:
         async with sem:
             try:
-                r = await client.post(f"{MARKET_DATA_URL}/quotes/bulk", json={"symbols": chunk}, timeout=to)
+                r = await client.post(f"{MARKET_DATA_URL}/quotes/bulk", json=({"symbols": chunk, "priority": True} if priority else {"symbols": chunk}), timeout=to)
                 if r.status_code != 200:
                     logger.warning("get_quotes: /quotes/bulk returned %d for %d symbol(s) — %s",
                                    r.status_code, len(chunk), r.text[:160])
@@ -1357,7 +1360,8 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
         if FEED_PRIORITY_BULK_FIRST and _time.monotonic() >= _PRIO_BULK_OFF_UNTIL[0]:
             stats: dict = {}
             bulk_task = asyncio.ensure_future(_bulk_ticks(client, todo, timeout=FEED_PRIORITY_BULK_TIMEOUT_S,
-                                                          max_age_s=FEED_PRIORITY_BULK_MAX_AGE_S, stats=stats))
+                                                          max_age_s=FEED_PRIORITY_BULK_MAX_AGE_S, stats=stats,
+                                                          priority=True))
             got: dict = {}
             if FEED_PRIORITY_HEDGE_S > 0:
                 await asyncio.wait({bulk_task}, timeout=FEED_PRIORITY_HEDGE_S)
@@ -1401,7 +1405,7 @@ async def _priority_quotes(symbols: list[str]) -> dict[str, Tick]:
         missing = [s for s in todo if s not in out]
         if missing:
             # 3) last resort: bulk again with the longer (scaled) timeout and the normal age limit
-            got = await _bulk_ticks(client, missing, timeout=FEED_BULK_TIMEOUT_S * FEED_PRIORITY_TIMEOUT_SCALE / 2)
+            got = await _bulk_ticks(client, missing, timeout=FEED_BULK_TIMEOUT_S * FEED_PRIORITY_TIMEOUT_SCALE / 2, priority=True)
             for sym, tick in got.items():
                 # bulk keys come back as clean symbols; map them onto the requested spelling
                 for want in missing:

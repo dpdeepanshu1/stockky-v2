@@ -170,6 +170,12 @@ def live_max_symbols() -> int:
     return env_int("DHAN_LIVE_MAX_SYMBOLS", 900, 1)
 
 
+def transient_pause_s() -> float:
+    """group344: pause after a TRANSIENT credentials read failure (db_unavailable / db_read_failed), e.g. the Oracle pool not up
+    yet at boot. Was a fixed 30 s (the 13 Oct boot lost 30 s of Dhan data). DHAN_TRANSIENT_PAUSE_S, default 5, floor 1."""
+    return env_float("DHAN_TRANSIENT_PAUSE_S", 5.0, 1.0)
+
+
 def live_write_chunk() -> int:
     """Rows per `live_quotes` transaction (blank or non-numeric -> 150; floor 10). One 900-row MERGE could outlast
     Oracle's 8 s call timeout (DPY-4024) and lose the whole batch; small chunks commit independently."""

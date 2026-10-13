@@ -1652,6 +1652,15 @@ async def _schedule_tick_body(mode: str) -> None:
         except Exception:
             logger.exception("[schedule] pre-open snapshot failed for %s (non-fatal)", mode)
 
+        # -- group344: warn when an open position's symbol has no primary price feed (AngelOne token / Dhan id). Throttled inside, report only.
+        try:
+            from market_feed import held_coverage as _hc
+            from portfolio.portfolio import held_exposure_positions
+            _held_syms_cov = [p.symbol for p in held_exposure_positions(db, mode)] if mode == "REAL" else []
+            await _hc.check(_held_syms_cov)
+        except Exception:
+            logger.debug("[schedule] held coverage check failed for %s (non-fatal)", mode, exc_info=True)
+
         # ── eDIS morning check (pre-open; market need not be open) ────────
         # 2026-09-19 (audit finding): runs before pre-pick's default 09:00
         # time is even reached in practice (default 09:00, same as

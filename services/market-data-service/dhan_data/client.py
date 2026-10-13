@@ -141,7 +141,7 @@ def note_failure(exc: Exception) -> None:
         # a transient DB read failure is not "no token": retry soon instead of idling 5 minutes
         _transient = str(exc) in ("db_read_failed", "db_unavailable")
         _pause(f"not configured ({exc})",
-               seconds=(30.0 if _transient else max(config.auth_pause_s(), 300.0)))
+               seconds=(config.transient_pause_s() if _transient else max(config.auth_pause_s(), 300.0)))
         return
     if isinstance(exc, DhanAuthError):
         creds.invalidate()

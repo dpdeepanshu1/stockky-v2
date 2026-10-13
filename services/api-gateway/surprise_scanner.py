@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+from time import monotonic as _monotonic   # group344: kept apart from `time` (tests swap that module for a fake clock)
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -63,6 +64,13 @@ BULK_CHUNK = max(1, int(float(((os.getenv("SURPRISE_BULK_CHUNK") or "").strip() 
 BULK_TIMEOUT = float(((os.getenv("SURPRISE_BULK_TIMEOUT") or "").strip() or "15"))
 BULK_CONCURRENCY = max(1, int(float(((os.getenv("SURPRISE_BULK_CONCURRENCY") or "").strip() or "2"))))
 BULK_MAX_AGE_SEC = float(((os.getenv("SURPRISE_BULK_MAX_AGE_SEC") or "").strip() or "30"))
+# group344 (13 Oct log: "surprise scan 22-55 s, upstream_calls=1007, cache_hits=0", over the 20 s budget so a stale result was served):
+#  * the counters now say what happened: `bulk_priced` (answered by the bulk prefetch), `cache_hits` (the shared bulk cache), `single_calls`
+#    (one GET /quote each, the slow path), `unpriced`, `over_budget`; `upstream_calls` = bulk requests + single_calls (it used to count every
+#    bulk-priced symbol as its own upstream call, which made the scan look like 1007 calls);
+#  * the per-symbol fallback has a time budget, SURPRISE_SINGLE_BUDGET_S (default 10 s after the bulk prefetch; 0 = unlimited): symbols still
+#    unpriced when it ends are scored without a quote instead of holding the whole scan past its limit.
+SINGLE_BUDGET_S = float(((os.getenv("SURPRISE_SINGLE_BUDGET_S") or "").strip() or "10"))
 # 2026-09-03 fix: default cached_max_age_sec (below, in SurpriseStockEngine.scan)
 # was 90s while real-trade-service's pipeline cycle (AUTO_PILOT_INTERVAL_SECONDS,
 # config.py) defaults to 180s. That mismatch meant candidate_engine's
@@ -431,6 +439,8 @@ class SurpriseStockEngine:
         self._last_result: Optional[Dict[str, Any]] = None
         # group229: per-scan bulk prefetch {SYMBOL: tick}; reset at the start of every scan()
         self._bulk_ticks: Dict[str, dict] = {}
+        self._single_deadline: Optional[float] = None     # group344: monotonic end of the per-symbol fallback budget
+        self._scan_counts: Dict[str, int] = {}              # group344: per-scan source counters
 
     def _load_last_result_from_durable_cache(self) -> None:
         """Repopulate self._last_result/_last_scan_ts from the durable
@@ -1010,11 +1020,20 @@ class SurpriseStockEngine:
     async def _fetch_quote(self, client: httpx.AsyncClient, market_data_url: str, symbol: str) -> Optional[dict]:
         cached = self._tick_from_bulk_cache(symbol)
         if cached:
+            self._scan_counts["cache"] = self._scan_counts.get("cache", 0) + 1
             return cached
         prefetched = self._bulk_ticks.get(str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip())
         if prefetched:
-            return dict(prefetched)
+            self._scan_counts["bulk"] = self._scan_counts.get("bulk", 0) + 1
+            return {**prefetched, "_from_bulk": True}
+        if self._single_deadline is not None and _monotonic() >= self._single_deadline:
+            self._scan_counts["over_budget"] = self._scan_counts.get("over_budget", 0) + 1
+            return None
         async with self.semaphore:
+            if self._single_deadline is not None and _monotonic() >= self._single_deadline:
+                self._scan_counts["over_budget"] = self._scan_counts.get("over_budget", 0) + 1
+                return None
+            self._scan_counts["single"] = self._scan_counts.get("single", 0) + 1
             try:
                 r = await client.get(f"{market_data_url.rstrip('/')}/quote/{symbol}", timeout=QUOTE_TIMEOUT)
                 if r.status_code != 200:
@@ -1155,7 +1174,11 @@ class SurpriseStockEngine:
         quote_ok = cache_hits = upstream_calls = 0
         chunk = 25
         self._bulk_ticks = {}
+        self._scan_counts = {}
+        self._single_deadline = None
         await self._prefetch_bulk(client, market_data_url, keys)
+        if SINGLE_BUDGET_S > 0:
+            self._single_deadline = _monotonic() + SINGLE_BUDGET_S
         for i in range(0, len(keys), chunk):
             batch = keys[i: i + chunk]
             ticks = await asyncio.gather(
@@ -1175,6 +1198,12 @@ class SurpriseStockEngine:
                     scored = self.score_stock(sym, tick)
                 if scored:
                     results.append(scored)
+        self._single_deadline = None
+        _sc = dict(self._scan_counts)
+        if _sc:
+            # group344: real per-source counts (the legacy count above is kept only when _fetch_quote did not run, e.g. tests that stub it)
+            _bulk_reqs = (len(keys) + BULK_CHUNK - 1) // BULK_CHUNK if (BULK_PREFETCH and _sc.get("bulk")) else 0
+            upstream_calls = _sc.get("single", 0) + _bulk_reqs
 
         # Sector sympathy pass
         breakout_sectors = {
@@ -1216,6 +1245,10 @@ class SurpriseStockEngine:
             "quotes_ok":       quote_ok,
             "cache_hits":      cache_hits,
             "upstream_calls":  upstream_calls,
+            "bulk_priced":     _sc.get("bulk", 0),
+            "single_calls":    _sc.get("single", 0),
+            "over_budget":     _sc.get("over_budget", 0),
+            "unpriced":        max(0, len(keys) - quote_ok),
             "universe_scanned": len(keys),
             "elapsed_sec":     round(time.time() - t0, 2),
             "min_score":       MIN_SCORE,
@@ -1224,8 +1257,9 @@ class SurpriseStockEngine:
             "market_note":     "thresholds raised for quality",
         }
         # group341: the log showed scans start ("~1,005 quotes") but never finish, so nobody could tell whether they complete.
-        logger.info("surprise scan finished: %d rows from %d symbols in %.1fs (quotes_ok=%s, cache_hits=%s, upstream_calls=%s)%s",
-                    len(results), len(keys), result["elapsed_sec"], quote_ok, cache_hits, upstream_calls,
+        logger.info("surprise scan finished: %d rows from %d symbols in %.1fs (quotes_ok=%s, bulk_priced=%s, cache_hits=%s, single_calls=%s, over_budget=%s, upstream_calls=%s)%s",
+                    len(results), len(keys), result["elapsed_sec"], quote_ok, _sc.get("bulk", 0), cache_hits,
+                    _sc.get("single", 0), _sc.get("over_budget", 0), upstream_calls,
                     "" if not symbols else " [filtered request]")
         # Only cache full-universe scans (symbols=None) — a filtered
         # request isn't representative of "the last scored result" that

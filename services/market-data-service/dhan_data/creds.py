@@ -132,7 +132,12 @@ def get_credentials(force: bool = False) -> Tuple[str, str]:
     now = time.monotonic()
     with _lock:
         age = now - _cache["at"]
-        ttl = config.creds_cache_s() if _cache["value"] else _NEG_TTL_S
+        if _cache["value"]:
+            ttl = config.creds_cache_s()
+        elif _cache["reason"] in ("db_unavailable", "db_read_failed"):
+            ttl = min(_NEG_TTL_S, config.transient_pause_s())     # group344: a transient DB miss is retried soon, not after 30 s
+        else:
+            ttl = _NEG_TTL_S
         if not force and _cache["at"] and age < ttl:
             if _cache["value"]:
                 exp = _cache["expires_at"]

@@ -2109,6 +2109,41 @@ def _log_watchlist_summary(mode: str, verb: str, note: str, items: list) -> None
         pass
 
 
+# ── group344 (item 6 of the 13 Oct review): park rows that are price-blocked ───────────────────────────────────────
+# About 566 active rows were skipped every cycle for "x% below catalyst" and each one kept its symbol in the bulk quote list
+# (~680 symbols per cycle). A row skipped for a price reason (below / above its catalyst by more than the limit) is now parked for
+# WATCHLIST_PARK_S seconds (default 300, 0 = off): it stays "active" in the database but is not priced or re-checked until the park
+# ends, so it can still recover, just not every cycle. Rows skipped for any other reason (no previous close yet, depth) are never parked.
+_wl_parked: dict = {}      # row id -> monotonic time the park ends
+
+
+def _wl_park_s() -> float:
+    return _wl_env_float("WATCHLIST_PARK_S", 300.0)
+
+
+def _wl_is_parkable(reason: Optional[str]) -> bool:
+    r = str(reason or "")
+    return "below catalyst" in r or "above catalyst" in r
+
+
+def _wl_park(row_id, now_mono: float, secs: Optional[float] = None) -> None:
+    secs = _wl_park_s() if secs is None else secs
+    if secs > 0 and row_id is not None:
+        if len(_wl_parked) > 5000:
+            _wl_parked.clear()
+        _wl_parked[row_id] = now_mono + secs
+
+
+def _wl_is_parked(row_id, now_mono: float) -> bool:
+    until = _wl_parked.get(row_id)
+    if until is None:
+        return False
+    if now_mono >= until:
+        _wl_parked.pop(row_id, None)
+        return False
+    return True
+
+
 async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     """
     Trigger pass over active WatchlistEntry rows.
@@ -2170,6 +2205,19 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
             extra_tally["duplicates"] = len(_dups)
     if not active:
         return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0, **extra_tally}
+
+    # group344: rows parked for a price reason are neither priced nor re-checked until their park ends.
+    import time as _tm_park
+    _now_park = _tm_park.monotonic()
+    _parked_n = 0
+    if _wl_park_s() > 0:
+        _live = [r for r in active if not _wl_is_parked(r.id, _now_park)]
+        _parked_n = len(active) - len(_live)
+        active = _live
+        if _parked_n:
+            extra_tally["parked"] = _parked_n
+        if not active:
+            return {"watchlist_checked": 0, "band_ok": 0, "missed": 0, "queued": 0, "adverse": 0, **extra_tally}
 
     symbols = list({row.symbol for row in active})
     # group249: this trigger only QUEUES a candidate (the entry engine re-prices before any order), so a symbol bulk could
@@ -2298,6 +2346,8 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         _adv = _watchlist_adverse_reason(row, pct_move, tick, _baseline_just_set)
         if _adv:
             adverse += 1
+            if _wl_is_parkable(_adv):
+                _wl_park(row.id, _now_park)       # group344
             if _adverse_should_log(mode, row):
                 _held.append((row.symbol, f"catalyst={row.catalyst_type} tier={row.source_tier} {_adv}"))
             continue

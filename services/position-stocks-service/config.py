@@ -1057,3 +1057,18 @@ QUALITY_GATE_RESULT_TTL_S = _get_float("QUALITY_GATE_RESULT_TTL_S", 90.0)
 QUALITY_GATE_EVENT_MEMORY_H = _get_float("QUALITY_GATE_EVENT_MEMORY_H", 24.0)
 # Tick buffer: per-symbol cap (was a fixed 50,000 ticks x 2,600 subscribed symbols; the service grew 63 -> 364 MB of 400 in 20 minutes).
 WS_MAX_TICKS_PER_SYMBOL = _get_int("WS_MAX_TICKS_PER_SYMBOL", 4000)
+
+
+# group344 (13 Oct log: RAMRAT entered after "event fetch failed (ReadTimeout)", i.e. with no news / earnings check).
+# When the event call fails and nothing is remembered for the symbol (group 341 memory), the gate retries once with a longer timeout; if that
+# also fails, the candidate is rejected as EVENT_CHECK_UNAVAILABLE (it is looked at again next cycle) instead of passing unchecked.
+# Safety valve: if the event service has failed continuously for QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S seconds the gate fails open again and says so.
+# QUALITY_GATE_EVENT_FAIL_BLOCK=0 restores the old always-fail-open behaviour.
+QUALITY_GATE_EVENT_FAIL_BLOCK = _get_bool("QUALITY_GATE_EVENT_FAIL_BLOCK", True)
+QUALITY_GATE_EVENT_RETRY_TIMEOUT_S = _get_float("QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 6.0)
+QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S = _get_float("QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S", 900.0)
+# Price floor applied BEFORE the quality gate (HATHWAY at Rs10.6 used the gate's three calls although entry.py would reject it as PENNY_STOCK).
+# Uses MIN_STOCK_PRICE and ENTRY_MIN_PRICE; PRICE_FLOOR_BEFORE_GATE=0 turns this pre-filter off (entry.py still enforces the floor).
+PRICE_FLOOR_BEFORE_GATE = _get_bool("PRICE_FLOOR_BEFORE_GATE", True)
+# Today's closed TARGET/STOP rows: the order-book exit lookup is done once per row per process once it has confirmed the fill.
+EXIT_FILL_CONFIRM_ONCE = _get_bool("EXIT_FILL_CONFIRM_ONCE", True)

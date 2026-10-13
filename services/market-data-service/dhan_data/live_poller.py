@@ -41,6 +41,24 @@ def next_slice(universe: List[str], offset: int, size: int) -> tuple[List[str], 
     return chunk, (start + size) % n
 
 
+def priority_symbols() -> List[str]:
+    """group345 (13 Oct log: bulk calls for the held symbols all showed "fresh 0", each cycle then fell back to per-symbol /live-quote and /quote
+    calls): held positions and recently looked-up symbols are polled EVERY tick, outside the rotating slice, so they are never left out of a 900-symbol
+    window. Same source of truth as the AngelOne budget's POSITION lane (open rows of trade_positions / scalp_positions). Never raises."""
+    out: List[str] = []
+    try:
+        import angelone_budget as _bud
+        out.extend(sorted(_bud.position_symbols() or ()))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        extra = config.env_str("DHAN_POLLER_ALWAYS_SYMBOLS", "")
+        out.extend(x.strip().upper() for x in extra.split(",") if x.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    return list(dict.fromkeys(out))[:100]
+
+
 def _compare(rows: List[dict]) -> None:
     """Shadow comparison against AngelOne's in-memory live price. Never raises."""
     try:
@@ -107,6 +125,9 @@ def _run(get_universe: Callable[[], List[str]]) -> None:
             chunk, _offset = next_slice(universe, _offset, config.live_max_symbols())
             if chunk:
                 quotes.request(chunk, background=True)
+            prio = priority_symbols()
+            if prio:
+                quotes.request(prio, background=False)     # demand lane: re-polled every tick, ahead of the background slice
         except Exception as e:  # noqa: BLE001 - the poller must never die
             logger.debug("dhan poller loop error: %s", type(e).__name__)
         _stop.wait(config.live_poll_interval_s())

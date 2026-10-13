@@ -72,6 +72,7 @@ def env(monkeypatch):
     monkeypatch.setattr(ws_client, "get_tick_buffer", _ticks)
     monkeypatch.setattr(config, "USE_SUPER_ORDER", True)
     monkeypatch.setattr(config, "BREAKEVEN_STOP_BUFFER_TICKS", 2)
+    breakeven.reset_state()
     g = breakeven._get_gate_state(db)
     g.breakeven_stop_enabled = True
     db.commit()
@@ -250,9 +251,28 @@ class TestFailureIsolation:
         r.modify_error = RuntimeError("leg already filled")
         assert breakeven.run_breakeven_stop(db) == 0
         db.refresh(p)
-        assert p.stop_price == 99.0 and p.stop_moved_to_breakeven is False and sent["info"] == []
+        assert p.stop_price == 99.0 and p.stop_moved_to_breakeven is False
+        assert len(sent["info"]) == 1                              # group345: one notice, not one per retry
         r.modify_error = None
-        assert breakeven.run_breakeven_stop(db) == 1              # next tick simply tries again
+        assert breakeven.run_breakeven_stop(db) == 0 and len(r.modify_calls) == 1   # backing off: no Dhan call every tick
+        breakeven._next_attempt.clear()                            # backoff elapsed
+        assert breakeven.run_breakeven_stop(db) == 1              # then it tries again
+
+    def test_rejected_modify_is_not_retried_every_pass(self, env):
+        db, r, sent = env
+        p = mkpos(db, stop=99.0)
+        r.ticks[p.symbol] = 101.0
+        r.modify_error = RuntimeError("Modification Price is Greater Than LTP")
+        for _ in range(20):
+            breakeven.run_breakeven_stop(db)
+        assert len(r.modify_calls) == 1 and len(sent["info"]) == 1
+
+    def test_price_back_below_entry_leaves_original_stop(self, env):
+        # trigger reached earlier, but the price is now under the buffered entry: no exit-now stop is pushed
+        db, r, _ = env
+        p = mkpos(db, entry=100.0, trigger=-5.0)
+        r.ticks[p.symbol] = 100.01
+        assert breakeven.run_breakeven_stop(db) == 0 and r.modify_calls == []
 
     def test_one_bad_position_does_not_abort_the_pass(self, env, monkeypatch):
         db, r, _ = env

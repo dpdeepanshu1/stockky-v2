@@ -33,6 +33,7 @@ bound current_price.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -438,9 +439,47 @@ class SurpriseStockEngine:
         self._last_scan_ts: float = 0.0
         self._last_result: Optional[Dict[str, Any]] = None
         # group229: per-scan bulk prefetch {SYMBOL: tick}; reset at the start of every scan()
-        self._bulk_ticks: Dict[str, dict] = {}
-        self._single_deadline: Optional[float] = None     # group344: monotonic end of the per-symbol fallback budget
-        self._scan_counts: Dict[str, int] = {}              # group344: per-scan source counters
+        # group345 (13 Oct log: bulk_priced=1703 / 2010 for a 1007-symbol universe): two scans that overlapped shared ONE counter dict,
+        # one prefetch dict and one deadline, and each scan() reset them for the other. They are now per-scan (context-local): scan() sets
+        # its own at the start, and the tasks it spawns inherit them.
+        self._cv_bulk = contextvars.ContextVar("surprise_bulk_ticks", default=None)
+        self._cv_deadline = contextvars.ContextVar("surprise_single_deadline", default=None)
+        self._cv_counts = contextvars.ContextVar("surprise_scan_counts", default=None)
+        self._bulk_ticks = {}
+        self._single_deadline = None     # group344: monotonic end of the per-symbol fallback budget
+        self._scan_counts = {}           # group344: per-scan source counters
+
+    @property
+    def _bulk_ticks(self) -> Dict[str, dict]:
+        v = self._cv_bulk.get()
+        if v is None:
+            v = {}
+            self._cv_bulk.set(v)
+        return v
+
+    @_bulk_ticks.setter
+    def _bulk_ticks(self, value: Dict[str, dict]) -> None:
+        self._cv_bulk.set(value)
+
+    @property
+    def _scan_counts(self) -> Dict[str, int]:
+        v = self._cv_counts.get()
+        if v is None:
+            v = {}
+            self._cv_counts.set(v)
+        return v
+
+    @_scan_counts.setter
+    def _scan_counts(self, value: Dict[str, int]) -> None:
+        self._cv_counts.set(value)
+
+    @property
+    def _single_deadline(self) -> Optional[float]:
+        return self._cv_deadline.get()
+
+    @_single_deadline.setter
+    def _single_deadline(self, value: Optional[float]) -> None:
+        self._cv_deadline.set(value)
 
     def _load_last_result_from_durable_cache(self) -> None:
         """Repopulate self._last_result/_last_scan_ts from the durable

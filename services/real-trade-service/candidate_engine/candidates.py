@@ -523,7 +523,7 @@ def _reject_ttl_env(name: str, default: str) -> float:
 REJECT_CACHE_STABLE_S = _reject_ttl_env("REJECT_CACHE_STABLE_S", "3600")
 REJECT_CACHE_PRICE_S = _reject_ttl_env("REJECT_CACHE_PRICE_S", "900")
 _REJECT_STABLE_KINDS = ("price_floor", "downtrend_6m", "atr", "volume")
-_REJECT_PRICE_KINDS = ("bullish_score", "range_52w", "resistance")
+_REJECT_PRICE_KINDS = ("bullish_score", "range_52w", "resistance", "vs_return", "vs_volume")   # group345: the last two are the volume-shock track's
 _REJECT_CACHE: dict = {}   # symbol -> (monotonic ts, ist date str, result dict)
 _REJECT_CACHE_MAX = 3000
 
@@ -532,7 +532,12 @@ def clear_reject_cache() -> None:
     _REJECT_CACHE.clear()
 
 
+REJECT_CACHE_VS_S = _reject_ttl_env("REJECT_CACHE_VS_S", "300")   # group345: a flat stock can break out within minutes - shorter than the standard track's price kinds
+
+
 def _reject_ttl_for(kind) -> float:
+    if kind in ("vs_return", "vs_volume"):
+        return REJECT_CACHE_VS_S
     if kind in _REJECT_STABLE_KINDS:
         return REJECT_CACHE_STABLE_S
     if kind in _REJECT_PRICE_KINDS:
@@ -1737,6 +1742,24 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
     if isinstance(quote, Exception) or not quote:
         return {"reject_reason": "No quote available for volume-shock check.", "atr_pct": None}
 
+    # group345 (13 Oct log: HATHWAY, FILATFASH, BHANDARI, KRIDHANINF ... sub-Rs20 stocks cost a /history call every cycle and were only rejected on
+    # price afterwards): the price floor is judged on the quote, before any history call.
+    if isinstance(quote, dict):
+        try:
+            _q_px = float(quote.get("price") or quote.get("cmp") or 0)
+        except (TypeError, ValueError):
+            _q_px = 0.0
+        if 0 < _q_px < MIN_STOCK_PRICE:
+            return {
+                "reject_reason": (
+                    f"Price ₹{_q_px:.2f} is below ₹{MIN_STOCK_PRICE} minimum. "
+                    "Sub-₹20 stocks in India have operator activity risk, "
+                    "very wide bid-ask spreads, and illiquid exits. Skip."
+                ),
+                "atr_pct": None,
+                "reject_kind": "price_floor",
+            }
+
     # group154: reject a clearly-flat/falling symbol on the quote alone, before the history call.
     if VOLUME_SHOCK_QUOTE_PREFILTER and isinstance(quote, dict):
         _q_ret = _quote_return_pct(quote)
@@ -1748,6 +1771,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                     "(quote pre-check, history not fetched)."
                 ),
                 "atr_pct": None,
+                "reject_kind": "vs_return",
             }
 
     if VOLUME_SHOCK_NOHIST_TTL_S > 0 and _HIST_NONE_UNTIL.get(symbol, 0.0) > time.monotonic():
@@ -1786,6 +1810,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                 "very wide bid-ask spreads, and illiquid exits. Skip."
             ),
             "atr_pct": None,
+            "reject_kind": "price_floor",
         }
 
     # ── Genuine breakout return check ─────────────────────────────────────────
@@ -1801,6 +1826,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                 f"{VOLUME_SHOCK_MIN_RETURN_PCT}% volume-shock breakout threshold."
             ),
             "atr_pct": None,
+            "reject_kind": "vs_return",
         }
 
     # ── Genuine volume-shock check (today's vol vs 20-day average) ────────────
@@ -1827,6 +1853,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                 f"{VOLUME_SHOCK_MULTIPLIER}x volume-shock threshold."
             ),
             "atr_pct": None,
+            "reject_kind": "vs_volume",
         }
 
     # ── Position-safety check: ATR volatility cap (kept — see module docstring) ──
@@ -1865,6 +1892,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                     "1% per-trade risk cap."
                 ),
                 "atr_pct": atr_pct,
+                "reject_kind": "atr",
             }
 
     # ── HIGH CONVICTION classification (30-Aug-2026 backtest) ────────────────
@@ -2327,7 +2355,19 @@ async def _refresh_volume_shock_candidates(
         # return 200+ symbols, most outside the live-feed subscription, so
         # warm the quote cache in bulk BEFORE the per-symbol semaphore loop
         # below fires 200+ individually rate-limited /quote/{symbol} calls.
-        _bulk_q = await _prefetch_quotes_bulk(client, candidates)
+        # group345 (13 Oct log: ~170 volume-shock symbols re-evaluated every cycle, ~80 history calls + ~170 log lines): a definite rejection
+        # (price floor, return / volume threshold, ATR cap) is remembered per symbol, as the standard track already does (separate "vs:" keys,
+        # because the two tracks judge different things). Price floor / ATR 1 h, return / volume 15 min (REJECT_CACHE_STABLE_S / _PRICE_S).
+        _vs_cached: dict = {}
+        for _s in candidates:
+            _hit = _reject_cache_get("vs:" + _s)
+            if _hit is not None:
+                _vs_cached[_s] = _hit
+        if _vs_cached:
+            logger.info("candidate_engine: volume_shock %d of %d symbol(s) answered from the rejection cache, no quote/history calls (mode=%s)",
+                        len(_vs_cached), len(candidates), mode)
+        candidates = [_s for _s in candidates if _s not in _vs_cached]
+        _bulk_q = await _prefetch_quotes_bulk(client, candidates) if candidates else {}
         _bulk_n = sum(1 for _s in candidates if _bulk_quote_for(_bulk_q, _s))
         if USE_BULK_QUOTES and candidates:
             logger.info("candidate_engine: volume_shock priced %d of %d symbol(s) from the bulk answer; %d fall back to "
@@ -2347,6 +2387,9 @@ async def _refresh_volume_shock_candidates(
             for sym in candidates
         }
         vs_results = await asyncio.gather(*vs_tasks.values(), return_exceptions=True)
+        for _s, _r in zip(vs_tasks.keys(), vs_results):
+            if isinstance(_r, dict):
+                _reject_cache_put("vs:" + _s, _r)
 
     inserted = 0
     skipped  = 0

@@ -54,6 +54,7 @@ than aborting the whole pass.
 from __future__ import annotations
 
 import logging
+import time
 
 from sqlalchemy.orm import Session
 
@@ -62,6 +63,31 @@ from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
 
 logger = logging.getLogger("position-stocks-breakeven")
+
+# group345 (13 Oct log: AVTNPL's breakeven move was rejected "Modification Price is Greater Than LTP" every ~6 s, ~100 times in 12 min,
+# each with a full traceback and a Dhan call). A rejected modify now backs that position off (60 s, doubling to 15 min), is logged as
+# one line, and raises one Telegram notice per position. In-process only (lost on restart).
+_BACKOFF_FIRST_S = 60.0
+_BACKOFF_MAX_S = 900.0
+_TICK_MAX_AGE_S = 10.0          # a tick older than this is not trusted as "the price now" (applies to real epoch timestamps only)
+_next_attempt: dict = {}        # position id -> monotonic time before which no new attempt is made
+_fail_count: dict = {}          # position id -> consecutive rejected modifies
+_rej_notified: set = set()
+
+
+def reset_state() -> None:
+    """Test helper: forget backoffs and rejection notices."""
+    _next_attempt.clear()
+    _fail_count.clear()
+    _rej_notified.clear()
+
+
+def _back_off(pos_id) -> float:
+    n = _fail_count.get(pos_id, 0) + 1
+    _fail_count[pos_id] = n
+    wait = min(_BACKOFF_MAX_S, _BACKOFF_FIRST_S * (2 ** (n - 1)))
+    _next_attempt[pos_id] = time.monotonic() + wait
+    return wait
 
 
 def _get_gate_state(db: Session) -> ScalpGateState:
@@ -100,15 +126,22 @@ def run_breakeven_stop(db: Session) -> int:
         try:
             if not pos.entry_price or pos.entry_price <= 0:
                 continue
+            if time.monotonic() < _next_attempt.get(pos.id, 0.0):
+                continue  # group345: backing off after a rejected modify
 
             try:
                 from feed import ws_client
                 buf = ws_client.get_tick_buffer(pos.symbol)
                 ltp = buf[-1][1] if buf else None
+                tick_ts = buf[-1][0] if buf else None
             except Exception:
                 ltp = None
+                tick_ts = None
             if ltp is None or ltp <= 0:
                 continue  # no live price to judge gain by — try again next tick
+            # group345: a stale tick can show a price the market has already left (the cause of "Modification Price is Greater Than LTP")
+            if tick_ts and tick_ts > 1e9 and time.time() - tick_ts > _TICK_MAX_AGE_S:
+                continue
 
             unrealized_gain_pct = (ltp - pos.entry_price) / pos.entry_price * 100.0
             if unrealized_gain_pct < pos.breakeven_trigger_pct:
@@ -138,16 +171,40 @@ def run_breakeven_stop(db: Session) -> int:
             if new_stop >= ltp:
                 band = dhan_client.tick_size_for_price(ltp)
                 new_stop = dhan_client.round_to_tick(ltp - band)
+                # group345: the price has fallen back to / below the buffered entry. A stop pushed down to "one tick under the market" is
+                # an exit-now order, not a breakeven; leave the original stop leg and look again once the price is back above it.
+                if new_stop < pos.entry_price:
+                    continue
 
-            dhan_client.modify_super_order(
-                db,
-                order_id=pos.dhan_super_order_id,
-                order_leg="STOP_LOSS_LEG",
-                stop_loss_price=new_stop,
-            )
+            try:
+                dhan_client.modify_super_order(
+                    db,
+                    order_id=pos.dhan_super_order_id,
+                    order_leg="STOP_LOSS_LEG",
+                    stop_loss_price=new_stop,
+                )
+            except Exception as me:
+                wait = _back_off(pos.id)
+                logger.warning(
+                    "BREAKEVEN_STOP: %s (id=%d) modify to ₹%.2f (ltp ₹%.2f) rejected (%s) - original stop leg ₹%.2f unchanged, retry in %.0fs",
+                    pos.symbol, pos.id, new_stop, ltp, me, pos.stop_price, wait,
+                )
+                if pos.id not in _rej_notified:
+                    _rej_notified.add(pos.id)
+                    try:
+                        import notifier
+                        notifier.notify_fire_and_forget(
+                            f"⚠️ <b>Breakeven stop rejected</b> - {pos.symbol} x{pos.quantity}\n"
+                            f"Wanted ₹{new_stop:.2f}, Dhan said: {me}\n"
+                            f"Original stop ₹{pos.stop_price:.2f} is still in place. Retrying with backoff; check the position.")
+                    except Exception as ne:  # noqa: BLE001
+                        logger.warning("BREAKEVEN_STOP: %s rejection alert failed: %s", pos.symbol, ne)
+                continue
+            _fail_count.pop(pos.id, None)
 
             # group340: read the leg back before saving the move (None = could not tell = as before)
             if dhan_client.verify_stop_leg(db, order_id=pos.dhan_super_order_id, expected_price=new_stop) is False:
+                _back_off(pos.id)
                 logger.warning("BREAKEVEN_STOP: %s (id=%d) move to ₹%.2f NOT confirmed by Dhan's order book - stored stop left at ₹%.2f",
                                pos.symbol, pos.id, new_stop, pos.stop_price)
                 continue

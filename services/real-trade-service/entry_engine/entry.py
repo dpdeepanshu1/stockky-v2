@@ -2121,6 +2121,12 @@ def _wl_park_s() -> float:
     return _wl_env_float("WATCHLIST_PARK_S", 300.0)
 
 
+def _wl_requeue_s() -> float:
+    """group345 (13 Oct log: the same ~20 watchlist symbols - CNL, TRENT, NAUKRI, BEL ... - were queued again every cycle after the entry
+    engine consumed and rejected them): a row that was just queued is not queued again for this long. 0 = off."""
+    return _wl_env_float("WATCHLIST_REQUEUE_COOLDOWN_S", 300.0)
+
+
 def _wl_is_parkable(reason: Optional[str]) -> bool:
     r = str(reason or "")
     return "below catalyst" in r or "above catalyst" in r
@@ -2210,7 +2216,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
     import time as _tm_park
     _now_park = _tm_park.monotonic()
     _parked_n = 0
-    if _wl_park_s() > 0:
+    if _wl_park_s() > 0 or _wl_requeue_s() > 0:
         _live = [r for r in active if not _wl_is_parked(r.id, _now_park)]
         _parked_n = len(active) - len(_live)
         active = _live
@@ -2384,6 +2390,7 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         db.add(cand)
         already_queued_symbols.add(row.symbol)
         queued += 1
+        _wl_park(row.id, _now_park, secs=_wl_requeue_s())      # group345
         logger.info(
             "watchlist trigger[%s/%s]: QUEUED — catalyst=%s tier=%d "
             "catalyst_px=₹%.2f current_px=₹%.2f move=%.2f%%",

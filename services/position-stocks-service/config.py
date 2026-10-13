@@ -946,6 +946,9 @@ REAL_TRADE_SERVICE_URL = os.getenv(
 # Previously the same unaffordable symbol was retried every 10s cycle (TREL
 # 16x in 7 minutes), spamming candidate-log rows and quality-gate HTTP calls.
 CAPITAL_STARVED_COOLDOWN_S = _get_float("CAPITAL_STARVED_COOLDOWN_S", 120.0)
+# group345 (13 Oct log: SHRIRAMFIN / SAKSOFT / INDIAGLYCO (price guard, up ~10%) and GRMOVER (range gate) were quality-gated and rejected again every ~11 s):
+# a symbol that fails one of these price-only entry gates is left out of the candidate list for this many seconds. 0 = off.
+GATE_REJECT_COOLDOWN_S = _get_float("GATE_REJECT_COOLDOWN_S", 60.0)
 CAPITAL_STARVED_RETRY_ON_GROWTH_PCT = _get_float("CAPITAL_STARVED_RETRY_ON_GROWTH_PCT", 25.0)
 # #5: a *_PENDING_RECONCILE sentinel that still cannot be resolved this many
 # days after the row closed is rewritten to *_UNRESOLVED (explicit, no longer
@@ -1035,9 +1038,12 @@ BOARD_PROMOTE_MIN_SESSIONS = max(1, _get_int("BOARD_PROMOTE_MIN_SESSIONS", 10))
 BOARD_COST_PCT = max(0.0, _get_float("BOARD_COST_PCT", 0.12))                       # flat round-trip cost estimate, % of price
 BOARD_BACKFILL_ENABLED = _get_bool("BOARD_BACKFILL_ENABLED", True)                  # group311: fill today's earlier minutes after a mid-session restart
 BOARD_BACKFILL_TOP_N = max(1, _get_int("BOARD_BACKFILL_TOP_N", 120))                 # backfill the N most liquid symbols that start late
-BOARD_BACKFILL_PER_CYCLE = max(1, _get_int("BOARD_BACKFILL_PER_CYCLE", 12))          # history fetches per runner pass (6 s apart while a queue exists)
+BOARD_BACKFILL_PER_CYCLE = max(1, _get_int("BOARD_BACKFILL_PER_CYCLE", 6))          # history fetches per runner pass (6 s apart while a queue exists)
 BOARD_BACKFILL_TIMEOUT_S = max(1.0, _get_float("BOARD_BACKFILL_TIMEOUT_S", 8.0))
 BOARD_BACKFILL_RETRY_S = max(60, _get_int("BOARD_BACKFILL_RETRY_S", 900))            # a symbol is retried no sooner than this (hit or miss)
+# group345: an empty / failed history answer is not asked again for this long, and a mostly-empty batch pauses the backfill (see feed/bar_backfill.py)
+BOARD_BACKFILL_EMPTY_RETRY_S = max(60, _get_int("BOARD_BACKFILL_EMPTY_RETRY_S", 3600))
+BOARD_BACKFILL_PAUSE_S = max(30, _get_int("BOARD_BACKFILL_PAUSE_S", 300))
 BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes
 
 # ---- group341 (log review 2026-10-13) -------------------------------------------------------------------------------------------

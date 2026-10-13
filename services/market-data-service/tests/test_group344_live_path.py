@@ -153,3 +153,19 @@ def test_last_call_breakdown_is_a_copy():
     b = quotes.last_call_breakdown()
     b["requested"] = 99
     assert quotes._last_call["requested"] == 3
+
+
+def test_group345_breakdown_is_per_calling_thread():
+    import threading
+    from dhan_data import quotes
+    seen = {}
+
+    def run(name, n):
+        quotes._tl.last = {"requested": n, "fresh": n}
+        seen[name] = quotes.last_call_breakdown()["requested"]
+    ts = [threading.Thread(target=run, args=(f"t{i}", i + 1)) for i in range(3)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert seen == {"t0": 1, "t1": 2, "t2": 3}

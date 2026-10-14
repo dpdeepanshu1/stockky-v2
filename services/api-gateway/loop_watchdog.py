@@ -62,7 +62,20 @@ def _loop_thread_stack() -> Optional[str]:
         frame = sys._current_frames().get(tid) if tid is not None else None
         if frame is None:
             return None
-        return "".join(traceback.format_stack(frame)[-8:]).rstrip()
+        # group359: 8 frames of a blocking DB call are all driver / SQLAlchemy internals (the 14 Oct "oracledb rollback ... SSL" stall
+        # never showed which route called it). Keep the last 8, and add the innermost frame that is OUR code (not site-packages /
+        # the stdlib / the kv_cache + oracle_compat shims) as a "called from" line so the log names the handler.
+        frames = traceback.extract_stack(frame)
+        text = "".join(traceback.format_list(frames[-8:])).rstrip()
+        for fr in reversed(frames):
+            fn = (fr.filename or "").replace("\\", "/")
+            if "site-packages" in fn or "/lib/python" in fn or "dist-packages" in fn or fn.startswith("<"):
+                continue
+            if "loop_watchdog" in fn or fn.endswith(("/kv_cache.py", "/oracle_compat.py")):
+                continue                      # the cache / driver shim is the victim, not the caller we want to name
+            text += f"\ncalled from our code: {fn}:{fr.lineno} in {fr.name}()"
+            break
+        return text
     except Exception:  # noqa: BLE001 - diagnostics must never raise
         return None
 

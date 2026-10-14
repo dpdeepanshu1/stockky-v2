@@ -556,6 +556,91 @@ def write_behind_status() -> dict:
     return {"enabled": KV_WRITE_BEHIND, "pending": pending, **_wb_stats}
 
 
+# ── group359: bounded durable READS issued from the asyncio event-loop thread ──────────────────────────────────
+# group346 moved durable WRITES off the loop, but `kv_get` / `kv_get_stale` / `kv_get_many` are still plain sync functions that
+# `async def` handlers call directly: on a memory miss they ran `eng.connect()` + SELECT + the pool's rollback-on-return (a network
+# round trip over SSL) ON the loop thread. 14 Oct 10:38 log: "event loop blocked for 3.2s ... oracledb rollback, closing a connection
+# over SSL". A read that is slow, or a pool wait (CACHE_DB_POOL_TIMEOUT), froze every other route for as long as Oracle took.
+# Now, when the caller is the loop thread, the DB part runs on a small worker pool and the caller waits at most
+# KV_LOOP_READ_TIMEOUT_S (default 1.5 s). On timeout the caller gets the same "not found" answer a failed read already gave
+# (None / {} / (None, None)); the worker keeps going and WARMS the memory cache when it finishes, so the next call is a memory hit.
+# One in-flight read per key (callers join it), and past KV_LOOP_READ_MAX_INFLIGHT (default 64) further reads are shed as misses.
+# Callers on worker threads (asyncio.to_thread, background threads) are unchanged. KV_LOOP_READ_GUARD=0 turns this off.
+KV_LOOP_READ_GUARD = (os.getenv("KV_LOOP_READ_GUARD") or "1").strip().lower() not in ("0", "false", "no", "off")
+_lr_lock = threading.RLock()
+_lr_inflight: dict = {}
+_lr_pool = None
+_lr_stats = {"guarded": 0, "joined": 0, "timeouts": 0, "shed": 0}
+
+
+def _lr_env_float(name: str, default: float, floor: float) -> float:
+    try:
+        v = float(((os.getenv(name) or "").strip() or default))
+    except ValueError:
+        return float(default)
+    return v if v == v and v >= floor else float(default)
+
+
+def _lr_env_int(name: str, default: int, floor: int) -> int:
+    try:
+        v = int(((os.getenv(name) or "").strip() or default))
+    except ValueError:
+        return int(default)
+    return v if v >= floor else int(default)
+
+
+def _lr_clear(token, fut) -> None:
+    with _lr_lock:
+        if _lr_inflight.get(token) is fut:
+            _lr_inflight.pop(token, None)
+
+
+def _guarded_read(token, fn, default):
+    """Run `fn()` (a durable read). On the event-loop thread it runs on a worker and the caller waits at most
+    KV_LOOP_READ_TIMEOUT_S, returning `default` on timeout; anywhere else it just runs `fn()`. Exceptions from `fn` propagate as before."""
+    global _lr_pool
+    if not (KV_LOOP_READ_GUARD and _on_event_loop_thread()):
+        return fn()
+    with _lr_lock:
+        fut = _lr_inflight.get(token)
+        if fut is None:
+            if len(_lr_inflight) >= _lr_env_int("KV_LOOP_READ_MAX_INFLIGHT", 64, 1):
+                _lr_stats["shed"] += 1
+                return default
+            if _lr_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                _lr_pool = ThreadPoolExecutor(max_workers=_lr_env_int("KV_LOOP_READ_WORKERS", 4, 1),
+                                              thread_name_prefix="kv-loop-read")
+            fut = _lr_pool.submit(fn)
+            _lr_inflight[token] = fut
+            fut.add_done_callback(lambda f, t=token: _lr_clear(t, f))
+            _lr_stats["guarded"] += 1
+        else:
+            _lr_stats["joined"] += 1
+    from concurrent.futures import TimeoutError as _FutTimeout
+
+    try:
+        return fut.result(timeout=_lr_env_float("KV_LOOP_READ_TIMEOUT_S", 1.5, 0.1))
+    except _FutTimeout:
+        _lr_stats["timeouts"] += 1
+        return default
+
+
+def loop_read_guard_status() -> dict:
+    with _lr_lock:
+        return {"enabled": KV_LOOP_READ_GUARD, "inflight": len(_lr_inflight), **_lr_stats}
+
+
+def _fetch_and_warm(key: str):
+    """(value, seconds_until_expiry) from the durable store; a hit also warms the memory cache (so a read that outlived its
+    caller's wait still helps the next call)."""
+    val, remaining = _neon_fetch(key)
+    if val is not None:
+        _mem.set(key, val, ttl=_capped_mem_ttl(remaining))
+    return val, remaining
+
+
 def _neon_delete_sync(key: str) -> None:
     eng = _get_neon()
     if not eng:
@@ -587,9 +672,8 @@ def kv_get(key: str) -> Any:
         except Exception as e:
             logger.debug("redis get %s: %s", key, e)
     if _is_durable(key):
-        val, remaining = _neon_fetch(key)
+        val, _remaining = _guarded_read(("get", key), lambda: _fetch_and_warm(key), (None, None))
         if val is not None:
-            _mem.set(key, val, ttl=_capped_mem_ttl(remaining))
             return val
     return None
 
@@ -634,6 +718,10 @@ def kv_get_stale(key: str) -> Any:
     if val is not None:
         return val
     # 2. DB — ignore expires_at (stale-serve); works on Oracle + Postgres
+    return _guarded_read(("stale", key), lambda: _stale_db_read(key), None)
+
+
+def _stale_db_read(key: str) -> Any:
     eng = _get_neon()
     if not eng:
         return None
@@ -841,56 +929,64 @@ def kv_get_many(keys: list) -> dict:
     if eng and missing:
         durable_missing = [k for k in missing if _is_durable(k)]
         if durable_missing:
-            try:
-                from sqlalchemy import text
-                import datetime as _dt
-
-                with eng.connect() as conn:
-                    if _neon_dialect == "oracle" and _oc is not None:
-                        # Oracle has no array binding; expand IN and chunk under
-                        # the 1000-element IN-list cap.
-                        from sqlalchemy import bindparam
-
-                        stmt = text(
-                            "SELECT k, v, expires_at FROM stockky_kv WHERE k IN :keys"
-                        ).bindparams(bindparam("keys", expanding=True))
-                        rows = []
-                        _CH = 900
-                        for _i in range(0, len(durable_missing), _CH):
-                            _part = durable_missing[_i:_i + _CH]
-                            rows.extend(conn.execute(stmt, {"keys": _part}).fetchall())
-                    else:
-                        rows = conn.execute(
-                            text(
-                                "SELECT k, v, expires_at FROM stockky_kv WHERE k = ANY(:keys)"
-                            ),
-                            {"keys": durable_missing},
-                        ).fetchall()
-                    now = _dt.datetime.now(_dt.timezone.utc)
-                    for row in rows:
-                        k, v, exp = row[0], row[1], row[2]
-                        remaining = None
-                        if exp is not None:
-                            if getattr(exp, "tzinfo", None) is None:
-                                exp = exp.replace(tzinfo=_dt.timezone.utc)
-                            if exp < now:
-                                continue
-                            remaining = (exp - now).total_seconds()
-                        try:
-                            val = json.loads(v)
-                        except Exception:
-                            val = v
-                        _mem.set(k, val, ttl=_capped_mem_ttl(remaining))
-                        result[k] = val
-            except Exception as e:
-                logger.debug("neon get_many failed: %s", e)
-                # Safe fallback: individual gets
-                for k in durable_missing:
-                    val = _neon_get(k)
-                    if val is not None:
-                        result[k] = val
+            result.update(_guarded_read(("many", hash(tuple(sorted(durable_missing)))),
+                                        lambda: _many_db_read(eng, durable_missing), {}))
 
     return result
+
+
+def _many_db_read(eng, durable_missing: list) -> dict:
+    """The durable part of kv_get_many: one SELECT for `durable_missing`; found values also warm the memory cache."""
+    found: dict = {}
+    try:
+        from sqlalchemy import text
+        import datetime as _dt
+
+        with eng.connect() as conn:
+            if _neon_dialect == "oracle" and _oc is not None:
+                # Oracle has no array binding; expand IN and chunk under
+                # the 1000-element IN-list cap.
+                from sqlalchemy import bindparam
+
+                stmt = text(
+                    "SELECT k, v, expires_at FROM stockky_kv WHERE k IN :keys"
+                ).bindparams(bindparam("keys", expanding=True))
+                rows = []
+                _CH = 900
+                for _i in range(0, len(durable_missing), _CH):
+                    _part = durable_missing[_i:_i + _CH]
+                    rows.extend(conn.execute(stmt, {"keys": _part}).fetchall())
+            else:
+                rows = conn.execute(
+                    text(
+                        "SELECT k, v, expires_at FROM stockky_kv WHERE k = ANY(:keys)"
+                    ),
+                    {"keys": durable_missing},
+                ).fetchall()
+            now = _dt.datetime.now(_dt.timezone.utc)
+            for row in rows:
+                k, v, exp = row[0], row[1], row[2]
+                remaining = None
+                if exp is not None:
+                    if getattr(exp, "tzinfo", None) is None:
+                        exp = exp.replace(tzinfo=_dt.timezone.utc)
+                    if exp < now:
+                        continue
+                    remaining = (exp - now).total_seconds()
+                try:
+                    val = json.loads(v)
+                except Exception:
+                    val = v
+                _mem.set(k, val, ttl=_capped_mem_ttl(remaining))
+                found[k] = val
+    except Exception as e:
+        logger.debug("neon get_many failed: %s", e)
+        # Safe fallback: individual gets
+        for k in durable_missing:
+            val = _neon_get(k)
+            if val is not None:
+                found[k] = val
+    return found
 
 
 # Module-level API expected by api-gateway: _kv_cache.get / _kv_cache.set
@@ -932,24 +1028,28 @@ def cache_set(key: str, value: Any, ttl: Optional[int] = None) -> None:
 
 def status() -> dict:
     """Health snippet for /system/health or Service Manager."""
-    neon_ok = False
-    neon_err = None
-    try:
-        eng = _get_neon()
-        if eng is not None:
-            from sqlalchemy import text
+    def _probe():
+        try:
+            eng = _get_neon()
+            if eng is not None:
+                from sqlalchemy import text
 
-            with eng.connect() as conn:
-                conn.execute(text("SELECT 1 FROM dual" if _neon_dialect == "oracle" else "SELECT 1"))
-            neon_ok = True
-    except Exception as e:
-        neon_err = str(e)[:120]
+                with eng.connect() as conn:
+                    conn.execute(text("SELECT 1 FROM dual" if _neon_dialect == "oracle" else "SELECT 1"))
+                return True, None
+        except Exception as e:
+            return False, str(e)[:120]
+        return False, None
+
+    # group359: the probe is a DB round trip; from the event-loop thread it is bounded like the other durable reads
+    neon_ok, neon_err = _guarded_read(("status",), _probe, (False, "probe still running (event-loop guard)"))
     return {
         "use_redis": USE_REDIS,
         "memory_keys": len(_mem._store),
         "neon_connected": neon_ok,
         "neon_error": neon_err,
         "cache_database_configured": bool(_neon_url()),
+        "loop_read_guard": loop_read_guard_status(),
         "durable_backend": _neon_dialect,  # 'oracle' | 'postgresql'
     }
 

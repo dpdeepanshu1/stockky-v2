@@ -95,6 +95,49 @@ def _due() -> bool:
     return (time.monotonic() - _last_run_ts) >= REFRESH_INTERVAL_MIN * 60
 
 
+def _base_symbol(sym) -> str:
+    """'GERMAN.NS' / 'german' / ' GERMAN.BO ' -> 'GERMAN' (upper-case, exchange suffix and spaces removed)."""
+    t = str(sym or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if t.endswith(suf):
+            t = t[: -len(suf)]
+    return t.strip()
+
+
+# group358 (14 Oct 10:38 IST log: "dynamic_universe: added 60 symbols" and "dropped 31 inactive symbols" listed the SAME names - ADVANCE,
+# AEROFLEX, ANUHPHR, GERMAN, HALDYNGL ...; added ones bare, dropped ones with `.NS`): the event service stores every subscription as
+# `SYM.NS` (event/main.py _normalize), while the desired set from the scanners is bare `SYM`. The two sets were compared as raw
+# strings, so they never overlapped: every sync "added" the whole desired set and "dropped" the whole current set. That wiped each
+# symbol's last_known snapshot (so its next /check looked like a fresh change), cut the live subscriptions down and re-added them
+# every 20 minutes, and kept `kept` at 0. The diff now compares on the bare symbol; `to_add` stays bare (what /subscribe expects) and
+# `to_remove` keeps the stored spelling (so a `.BO` subscription is unsubscribed as `.BO`). DYNAMIC_UNIVERSE_DIFF_NORMALIZE=0
+# restores the old raw-string comparison.
+def _diff_normalize_enabled() -> bool:
+    raw = (os.getenv("DYNAMIC_UNIVERSE_DIFF_NORMALIZE") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _diff_universe(desired, current_auto) -> tuple:
+    """(to_add, to_remove, kept). Pure: desired is the wanted symbols, current_auto the stored auto subscriptions."""
+    if not _diff_normalize_enabled():
+        d, c = set(desired), set(current_auto)
+        return sorted(d - c), sorted(c - d), len(d & c)
+    want = {}
+    for s in desired:
+        b = _base_symbol(s)
+        if b:
+            want.setdefault(b, s)
+    have = {}
+    for s in current_auto:
+        b = _base_symbol(s)
+        if b:
+            have.setdefault(b, []).append(s)
+    to_add = sorted(b for b in want if b not in have)
+    to_remove = sorted(s for b, names in have.items() if b not in want for s in names)
+    kept = sum(1 for b in want if b in have)
+    return to_add, to_remove, kept
+
+
 async def refresh_dynamic_universe(db=None) -> Optional[dict]:
     """
     Call once per cycle from cycle_runner — this function no-ops (cheaply)
@@ -132,10 +175,9 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
         logger.warning("dynamic_universe: failed to read current subscriptions (%s), skipping sync", e)
         return None
 
-    to_add = sorted(set(desired) - current_auto)
-    to_remove = sorted(current_auto - set(desired))
+    to_add, to_remove, kept = _diff_universe(desired, current_auto)
 
-    result = {"added": [], "removed": [], "kept": len(set(desired) & current_auto)}
+    result = {"added": [], "removed": [], "kept": kept}
 
     if to_add:
         try:

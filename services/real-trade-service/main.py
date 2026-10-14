@@ -2512,7 +2512,13 @@ async def structure_status(
         prices = await _live_prices(rejected)
     except Exception as e:  # noqa: BLE001 - a status page must not raise
         logger.warning("structure status query failed: %s", e)
-    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices)}
+    try:
+        from exit_engine import structure_exit as _sx
+        _exit_stats = _sx.stats()
+    except Exception as e:  # noqa: BLE001
+        _exit_stats = {"error": str(e)[:80]}
+    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
+            "exit": _exit_stats}
 
 
 @app.get("/structure/edge/{mode}")

@@ -215,8 +215,9 @@ def evaluate_pending(db, now_ts: Optional[float] = None, batch: Optional[int] = 
     return res
 
 
-def report(db, days: int = 60, recent: int = 40, min_n: int = 20, now_ts: Optional[float] = None) -> Dict[str, Any]:
+def report(db, days: int = 60, recent: int = 40, min_n: Optional[int] = None, now_ts: Optional[float] = None) -> Dict[str, Any]:
     """Edge report over the last `days`: aggregate stats + the most recent rows (newest first) + the rejected symbols' outcomes."""
+    min_n = int(min_n) if min_n else int(getattr(config, "STRUCTURE_EDGE_MIN_N", 100))   # group365: 100 finished rows per side (was 20)
     _observation, _ = _ms()
     days = min(max(int(days), 1), 365)
     since = float(now_ts if now_ts is not None else time.time()) - days * 86400.0

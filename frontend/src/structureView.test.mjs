@@ -69,7 +69,7 @@ assert.deepEqual(ruleCounts(drows), [{ id: "P2_CHASE", label: "chasing the move"
 console.log("structureView group353 ok");
 
 // ── group355: status view model ─────────────────────────────────────────────────────────────────────────────────────────────────
-import { statusView, statusHeadline, modeInfo, sinceText, sinceTone, outcomeLine, reasonLabel, nodataLabel, windowText } from "./structureView.ts";
+import { exitView, statusView, statusHeadline, modeInfo, sinceText, sinceTone, outcomeLine, reasonLabel, nodataLabel, windowText } from "./structureView.ts";
 const realRaw = { mode: "DEMO", gate_mode: "enforce", hours: 24, process: { evaluated: 12 },
   stored: { decisions: 20, with_snapshot: 10, ok: 8, no_opinion: 2, would_reject: 4, enforced: 3, shadow_only: 1, coverage_pct: 80,
     by_reason: { chase: 2, bearish: 3, rr: 0 }, by_nodata: { no_summary: 2 }, avg_since_pct: -1.5, rejects_up: 1, rejects_down: 3,
@@ -224,3 +224,27 @@ assert.match(calibrationView({ calibration: { samples: 50, finished: 50, score: 
 assert.equal(calibrationView({ calibration: { samples: 50, finished: 50, score: { note: "insufficient_sample" }, rules: {} } }).score, null);
 assert.equal(calibrationView({ calibration: { samples: 5, finished: 5, rules: "junk", suggestions: "junk", score: "junk" } }).rules.length, 0);   // garbage never throws
 console.log("structureView group362 calibration ok");
+
+
+// ── group365: exitView ──
+{
+  const none = exitView(null);
+  assert.equal(none.present, false); assert.match(none.headline, /No exit data/); assert.equal(none.recent.length, 0);
+  assert.equal(exitView({}).present, false); assert.equal(exitView({ exit: "x" }).present, false);
+  const idle = exitView({ exit: { mode: "tighten", trail_enabled: true, counters: {}, recent: [] } });
+  assert.equal(idle.present, true); assert.equal(idle.modeLabel, "Tightening stops"); assert.equal(idle.modeTone, "good"); assert.match(idle.headline, /No open position/);
+  const live = exitView({ exit: { mode: "tighten", trail_enabled: true, counters: { evaluated: 12, no_opinion: 2, bearish: 3, tightened: 2, trailed: 1, exited: 0, log_only: 1 },
+    recent: [{ symbol: "TCS", action: "tighten", applied: true, signals: ["bearish_choch"], new_stop: 3980.5 },
+             { symbol: "INFY", action: "exit", applied: false, signals: ["bearish_bos", "bearish_choch"], new_stop: null },
+             { symbol: "WIPRO", action: "trail", applied: true, signals: [], new_stop: 250 }] } });
+  assert.equal(live.evaluated, 12); assert.equal(live.tightened, 2); assert.equal(live.trailed, 1);
+  assert.match(live.headline, /12 checks since restart · 3 bearish · 2 stops raised · 1 trailed/);
+  assert.equal(live.recent[0].text, "bearish change of character - stop raised to 3980.50");
+  assert.equal(live.recent[1].text, "bearish break of structure + bearish change of character - sold (not applied)");
+  assert.equal(live.recent[2].text, "stop follows structure to 250.00");
+  assert.equal(exitView({ exit: { mode: "log", counters: { evaluated: 1 } } }).modeTone, "warn");
+  assert.match(exitView({ exit: { mode: "off", counters: {} } }).headline, /price stops/);
+  assert.equal(exitView({ exit: { mode: "weird", counters: { evaluated: "x" } } }).evaluated, 0);
+  assert.equal(exitView({ exit: { mode: "exit", counters: { evaluated: 1, exited: 1 } } }).headline.includes("1 sold"), true);
+}
+console.log("exitView ok");

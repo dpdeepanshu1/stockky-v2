@@ -221,6 +221,7 @@ class TestTriggerPass:
         assert shock.status == "active"       # left untouched, not expired
 
     def test_no_flapping_across_cycles(self, db, monkeypatch):
+        monkeypatch.setenv("WATCHLIST_REQUEUE_COOLDOWN_S", "0")   # group345's 300 s requeue cooldown would skip the 2nd pass; this test is about row choice
         make_row(db, catalyst_price=100.0, tier=1, ctype="results")
         make_row(db, catalyst_price=104.0, tier=3, ctype="volume_shock")
         patch_quotes(monkeypatch, {"PACEDIGITK": 102.0})

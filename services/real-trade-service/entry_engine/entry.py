@@ -1988,6 +1988,50 @@ def _watchlist_tick_age_reason(tick) -> Optional[str]:
     return None
 
 
+def _wl_env_on(name: str, default: str = "1") -> bool:
+    return ((os.getenv(name) or "").strip().lower() or default) not in ("0", "false", "no", "off")
+
+
+def _watchlist_stale_price_reason(tick, *, baseline: bool) -> Optional[str]:
+    """group360 (14 Oct log item 10: GERMAN queued at `move=0.00%`): reason string when the price the trigger pass is about
+    to act on is not a live price, else None. Runs BEFORE the row's baseline (catalyst_price) is stored, because the
+    age check inside _watchlist_adverse_reason came after it: an old last-good copy (allow_stale=True serves ticks up to
+    FEED_LEFTOVER_STALE_S old) or a tick of unknown age could become the row's baseline, the same price then made
+    `pct_move` exactly 0.00%, and a Tier-3 row was queued in the same cycle on a price nobody had seen move.
+
+    Checks (WATCHLIST_STALE_PRICE_GATE=0 turns all of them off):
+      * baseline=True and the tick is older than WATCHLIST_MAX_TICK_AGE_S (for an existing baseline the same limit is
+        still applied afterwards by _watchlist_adverse_reason, unchanged);
+      * baseline=True and the tick's age is unknown (age_known False: `as_of` is only when WE received it) or the tick is a
+        `stale_last_good(...)` copy: the row waits for a tick of known, fresh age (WATCHLIST_BASELINE_AGE_UNKNOWN=allow
+        accepts unknown-age baselines again);
+      * the feed reports volume 0 for the day and the price is the previous close (or the previous close is unknown): the
+        stock has not traded today, so the price is yesterday's (WATCHLIST_NO_TRADE_HOLD=0 turns this one off).
+    A tick with no information (volume None, no age) never blocks except for the baseline rule. Never raises."""
+    try:
+        if not _wl_env_on("WATCHLIST_STALE_PRICE_GATE"):
+            return None
+        src = str(getattr(tick, "source", None) or "?")
+        if baseline:
+            if src.startswith("stale_last_good"):
+                return f"baseline price is a stale last-good copy ({src}) - waits for a live price"
+            if (not bool(getattr(tick, "age_known", True))
+                    and ((os.getenv("WATCHLIST_BASELINE_AGE_UNKNOWN") or "").strip().lower() or "refuse") != "allow"):
+                return f"baseline price age unknown (source {src}) - waits for a price with a known age"
+            _old = _watchlist_tick_age_reason(tick)
+            if _old:
+                return _old
+        if _wl_env_on("WATCHLIST_NO_TRADE_HOLD"):
+            vol = getattr(tick, "volume", None)
+            if vol is not None and float(vol) <= 0:
+                chg = _tick_day_change_pct(tick)
+                if chg is None or abs(chg) < 0.005:
+                    return "no trades today (volume 0): the price is the previous close"
+    except Exception:  # noqa: BLE001 - a guard bug must never stop the trigger pass
+        return None
+    return None
+
+
 def _watchlist_depth_reason(tick) -> Optional[str]:
     """group277: reason string when the tick's depth says the stock is too expensive to trade, else None. Never raises."""
     try:
@@ -2334,6 +2378,15 @@ async def evaluate_watchlist_entries(db: Session, mode: str) -> dict:
         #     Fall through to the band-check immediately so these rows don't sit
         #     NEVER TOUCHED until the next cycle (which may not come until the
         #     next market session for intraday-created entries).
+        # group360: not a live price (old / unknown-age baseline, or a stock with no trade today): hold the row this cycle
+        # BEFORE its baseline is stored from that price.
+        _stale = _watchlist_stale_price_reason(tick, baseline=(row.catalyst_price == 0.0))
+        if _stale:
+            extra_tally["stale_price"] = extra_tally.get("stale_price", 0) + 1
+            if _adverse_should_log(mode, row):
+                _held.append((row.symbol, f"catalyst={row.catalyst_type} tier={row.source_tier} {_stale}"))
+            continue
+
         _baseline_just_set = False
         if row.catalyst_price == 0.0:
             _baseline_just_set = True

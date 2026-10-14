@@ -311,6 +311,26 @@ class TestRefreshDynamicUniverseSync:
 
         return result
 
+    # group358: the event service stores subscriptions as SYM.NS, the scanners give bare SYM
+    def test_suffixed_subscriptions_match_bare_desired_symbols(self):
+        names = ["ADVANCE", "GERMAN", "HALDYNGL"]
+        result = self._run_with_desired_and_current(
+            desired=names, current=[n + ".NS" for n in names])
+        assert result["added"] == [] and result["removed"] == []
+        assert result["kept"] == 3
+
+    def test_only_the_really_new_and_really_stale_names_change(self):
+        result = self._run_with_desired_and_current(
+            desired=["KEEP", "NEW"], current=["KEEP.NS", "OLD.NS"])
+        assert result["added"] == ["NEW"]                    # bare, what /subscribe takes
+        assert result["removed"] == ["OLD.NS"]               # stored spelling
+        assert result["kept"] == 1
+
+    def test_switch_off_restores_the_raw_string_diff(self, monkeypatch):
+        monkeypatch.setenv("DYNAMIC_UNIVERSE_DIFF_NORMALIZE", "0")
+        result = self._run_with_desired_and_current(desired=["GERMAN"], current=["GERMAN.NS"])
+        assert result["added"] == ["GERMAN"] and result["removed"] == ["GERMAN.NS"] and result["kept"] == 0
+
     def test_new_symbols_are_subscribed(self):
         result = self._run_with_desired_and_current(
             desired=["INFY", "TCS"],
@@ -426,3 +446,39 @@ class TestRefreshDynamicUniverseSync:
         assert "added" in result
         assert "removed" in result
         assert "kept" in result
+
+
+class TestDiffUniverse:
+    """group358: pure diff on the bare symbol."""
+
+    def test_base_symbol(self):
+        assert du._base_symbol(" german.ns ") == "GERMAN"
+        assert du._base_symbol("HEG.BO") == "HEG"
+        assert du._base_symbol("TCS") == "TCS"
+        assert du._base_symbol(None) == "" and du._base_symbol("") == ""
+
+    def test_the_log_case_adds_and_drops_nothing(self):
+        names = ["ADVANCE", "AEROFLEX", "ANUHPHR", "ARVEE", "CGVAK", "ECORECO", "GERMAN", "HALDYNGL", "HILINFRA"]
+        assert du._diff_universe(names, {n + ".NS" for n in names}) == ([], [], 9)
+
+    def test_bo_subscription_is_unsubscribed_as_bo(self):
+        add, rem, kept = du._diff_universe(["TCS"], {"TCS.NS", "HEG.BO"})
+        assert add == [] and rem == ["HEG.BO"] and kept == 1
+
+    def test_both_spellings_stored_are_both_removed(self):
+        add, rem, kept = du._diff_universe(["TCS"], {"OLD.NS", "OLD.BO"})
+        assert add == ["TCS"] and rem == ["OLD.BO", "OLD.NS"] and kept == 0
+
+    def test_blank_entries_are_ignored(self):
+        assert du._diff_universe(["", "TCS"], {"", " "}) == (["TCS"], [], 0)
+
+    def test_blank_switch_means_on(self, monkeypatch):
+        monkeypatch.setenv("DYNAMIC_UNIVERSE_DIFF_NORMALIZE", "  ")
+        assert du._diff_normalize_enabled() is True
+        for v in ("0", "false", "OFF", "no"):
+            monkeypatch.setenv("DYNAMIC_UNIVERSE_DIFF_NORMALIZE", v)
+            assert du._diff_normalize_enabled() is False
+
+    def test_switch_off_is_raw_string_diff(self, monkeypatch):
+        monkeypatch.setenv("DYNAMIC_UNIVERSE_DIFF_NORMALIZE", "0")
+        assert du._diff_universe(["A"], {"A.NS"}) == (["A"], ["A.NS"], 0)

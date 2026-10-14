@@ -311,19 +311,121 @@ def _clean(symbol: str) -> str:
     return (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
 
 
+# group357 (14 Oct 10:38 log: "dhan live_quotes write: 0 of 1 rows written ... QueuePool limit of size 1 overflow 1 reached,
+# connection timed out, timeout 10.00" and "dhan creds: trade_credentials read failed: TimeoutError"): the two live_quotes writers
+# (this feed and dhan_data/live_store.py) borrowed kv_cache's ONE durable engine, the same pool that serves every kv read/write,
+# /live-quote reads and the Dhan credentials read.  With a 1+1 pool a single slow MERGE chunk starved all of them.  The writers now
+# get their OWN small engine (same database, same wallet / URL, separate pool), so a stalled write can no longer take the shared
+# pool with it, and the shared pool is left for reads.  LIVE_QUOTES_DB_SEPARATE_ENGINE=0 = the old shared engine.
+_LQ_LOCK = threading.Lock()
+_LQ_STATE: dict = {"shared_id": None, "engine": None, "retry_at": 0.0, "kind": "shared", "error": None}
+_LQ_RETRY_S = 60.0
+
+
+def _lq_env(name: str, default: str) -> str:
+    """Blank-safe env read: a blank value counts as unset."""
+    return (os.getenv(name) or "").strip() or default
+
+
+def _lq_env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(_lq_env(name, str(default)))
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(hi, v))
+
+
+def live_quotes_separate_engine() -> bool:
+    """LIVE_QUOTES_DB_SEPARATE_ENGINE (default on; 0/false/off/no = writers share kv_cache's engine as before)."""
+    return _lq_env("LIVE_QUOTES_DB_SEPARATE_ENGINE", "1").lower() not in ("0", "false", "off", "no")
+
+
+def _build_live_quotes_engine(dialect: str):
+    """A dedicated engine for the live_quotes writers, or None when it cannot be built (caller keeps the shared one).
+    Oracle: LIVE_QUOTES_DB_POOL_SIZE (default 2) / LIVE_QUOTES_DB_MAX_OVERFLOW (default 1), through the same
+    oracle_compat.build_oracle_engine as kv_cache so the wallet, DSN and DPY-4024 call timeout are identical.
+    Postgres (Neon free tier): default 1 + 0, hard cap 2 + 1, so the extra engine stays inside the connection limit."""
+    import kv_cache as _kv
+    url = _kv._neon_url()
+    if not url:
+        return None
+    recycle = _lq_env("LIVE_QUOTES_DB_POOL_RECYCLE", _lq_env("CACHE_DB_POOL_RECYCLE", "300"))
+    timeout = _lq_env("LIVE_QUOTES_DB_POOL_TIMEOUT", "10")
+    if dialect == "oracle":
+        _oc = getattr(_kv, "_oc", None)
+        if _oc is None:
+            return None
+        eng, _ = _oc.build_oracle_engine(
+            url,
+            db_pool_size=str(_lq_env_int("LIVE_QUOTES_DB_POOL_SIZE", 2, 1, 8)),
+            db_max_overflow=str(_lq_env_int("LIVE_QUOTES_DB_MAX_OVERFLOW", 1, 0, 8)),
+            db_pool_recycle=recycle,
+            db_pool_timeout=timeout,
+        )
+        return eng
+    from sqlalchemy import create_engine
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=_lq_env_int("LIVE_QUOTES_DB_POOL_SIZE", 1, 1, 2),
+        max_overflow=_lq_env_int("LIVE_QUOTES_DB_MAX_OVERFLOW", 0, 0, 1),
+        pool_recycle=int(recycle) if recycle.isdigit() else 180,
+        pool_use_lifo=True,
+        pool_timeout=int(timeout) if timeout.isdigit() else 10,
+        connect_args={
+            "connect_timeout": _lq_env_int("CACHE_DB_CONNECT_TIMEOUT", 6, 1, 60),
+            "application_name": "stockky-live-quotes",
+        },
+    )
+
+
+def live_quotes_engine_status() -> dict:
+    """Which engine the live_quotes writers are using: kind 'dedicated' | 'shared', plus the last build error."""
+    with _LQ_LOCK:
+        return {"kind": _LQ_STATE["kind"], "separate_enabled": live_quotes_separate_engine(),
+                "error": _LQ_STATE["error"]}
+
+
 def _get_live_quotes_engine():
-    """Reuse market-data-service's existing, already-working dual-dialect
-    (Oracle Autonomous DB + Neon/Postgres) durable engine from kv_cache.py,
-    rather than `from db import get_engine` — that module does not exist
-    in this service (it's a real-trade-service-only file); importing it
-    here would raise ModuleNotFoundError on every call. Returns
-    (engine_or_None, dialect_str)."""
+    """The engine the live_quotes WRITERS use. A dedicated pool (see group357 above) on the same database as
+    market-data-service's durable KV engine (kv_cache.py); the shared engine when the separate one is switched off or
+    cannot be built. Reads (/live-quote, kv, Dhan credentials) stay on the shared engine. Returns (engine_or_None,
+    dialect_str). Never raises."""
     try:
         from kv_cache import _get_neon, _dialect
-        return _get_neon(), _dialect()
+        shared = _get_neon()
+        dialect = _dialect()
     except Exception as e:
         logger.debug("live_quotes: could not get durable engine: %s", e)
         return None, "postgresql"
+    if shared is None or not live_quotes_separate_engine():
+        with _LQ_LOCK:
+            _LQ_STATE["kind"] = "shared"
+        return shared, dialect
+    with _LQ_LOCK:
+        if _LQ_STATE["shared_id"] == id(shared):
+            if _LQ_STATE["engine"] is not None:
+                return _LQ_STATE["engine"], dialect
+            if time.monotonic() < _LQ_STATE["retry_at"]:
+                return shared, dialect            # a recent build failed: keep using the shared engine, retry later
+        try:
+            eng = _build_live_quotes_engine(dialect)
+        except Exception as e:  # noqa: BLE001
+            eng = None
+            _LQ_STATE["error"] = f"{type(e).__name__}: {str(e)[:100]}"
+            logger.warning("live_quotes: dedicated engine could not be built (%s); using the shared engine", _LQ_STATE["error"])
+        _LQ_STATE["shared_id"] = id(shared)
+        _LQ_STATE["engine"] = eng
+        if eng is None:
+            _LQ_STATE["kind"] = "shared"
+            _LQ_STATE["retry_at"] = time.monotonic() + _LQ_RETRY_S
+            return shared, dialect
+        _LQ_STATE["kind"] = "dedicated"
+        _LQ_STATE["error"] = None
+        logger.info("live_quotes: dedicated writer engine ready (%s, pool %s+%s)", dialect,
+                    getattr(eng.pool, "size", lambda: "?")() if hasattr(eng, "pool") else "?",
+                    getattr(eng.pool, "_max_overflow", "?") if hasattr(eng, "pool") else "?")
+        return eng, dialect
 
 
 _schema_ready = False

@@ -134,3 +134,44 @@ assert.equal(cv.rules.length, 1); assert.equal(cv.rules[0].current, "1.5"); asse
 assert.match(cv.score, /did rank/); assert.match(cv.suggestions[0], /try 2 instead of 1\.5/);
 assert.equal(calibrationView({ calibration: { advisory: true, error: "boom" } }).error, "boom");
 assert.equal(edgeView({ stats: { total: 5, conclusion: "weird" } }).tone, "mute");
+
+import { prepareNoteLines } from "./structureView.ts";
+const pn = prepareNoteLines({
+  ZED: { headline: "Structure event: fresh bullish break of structure", turned_bad: false, flipped: false },
+  BAD: { headline: "Structure now blocks entry: chase 1.9 ATR", turned_bad: true, flipped: false },
+  FLIP: { headline: "Structure now blocks entry: chase 1.9 ATR (passed at the last stored price)", turned_bad: true, flipped: true },
+  EMPTY: { headline: null, turned_bad: true }, JUNK: 5, NUL: null,
+});
+assert.deepEqual(pn.map((x) => x.symbol), ["FLIP", "BAD", "ZED"]);
+assert.deepEqual(pn.map((x) => x.tone), ["warn", "warn", "good"]); assert.equal(pn[0].flipped, true); assert.equal(pn[1].flipped, false);
+assert.equal(prepareNoteLines({ A: { headline: "x" }, B: { headline: "y" }, C: { headline: "z" } }, 2).length, 2);
+assert.equal(prepareNoteLines({ A: { headline: "x" } }, 0).length, 0);
+for (const g of [null, undefined, [], "x", 3, {}]) assert.deepEqual(prepareNoteLines(g), []);
+console.log("prepareNoteLines ok");
+
+// ---- group 373: sniper badge + held-back lines
+import { sniperBadge, sniperHeldBackLines } from "./structureView.ts";
+{
+  const okRec = { gate_mode: "enforce", opinion: "ok", would_reject: false, enforced: true, reasons: [], live: { chase_atr: 0.34, rr: 1.94 } };
+  const b = sniperBadge(okRec);
+  assert.equal(b.label, "Structure OK"); assert.equal(b.tone, "good"); assert.match(b.title, /chase 0\.3 ATR, structure R:R 1\.9/);
+  assert.equal(sniperBadge({ gate_mode: "enforce", opinion: "ok", would_reject: false }).title, "Passed the daily-structure check.");
+  const nb = sniperBadge({ gate_mode: "enforce", opinion: "no_opinion", no_data: "no structure summary" });
+  assert.equal(nb.label, "No structure read"); assert.equal(nb.tone, "mute"); assert.match(nb.title, /no structure summary/);
+  assert.match(sniperBadge({ opinion: "no_opinion" }).title, /No daily structure available/);
+  const wb = sniperBadge({ opinion: "ok", would_reject: true, enforced: false, reasons: ["chase 2.2 ATR"] });
+  assert.equal(wb.label, "Structure warns"); assert.equal(wb.tone, "warn"); assert.equal(wb.title, "chase 2.2 ATR");
+  assert.equal(sniperBadge(null), null); assert.equal(sniperBadge(undefined), null); assert.equal(sniperBadge("x"), null);
+  assert.equal(sniperBadge([]), null); assert.equal(sniperBadge({ gate_mode: "off", opinion: "ok" }), null);
+
+  assert.deepEqual(sniperHeldBackLines(null), []); assert.deepEqual(sniperHeldBackLines("x"), []); assert.deepEqual(sniperHeldBackLines([null, 1, {}, { symbol: " " }]), []);
+  const hl = sniperHeldBackLines([
+    { symbol: "ABC", price: 101.5, reasons: ["chase 2.2 ATR", "stretch 3.4 ATR", "third"] },
+    { symbol: "ABC", reasons: ["dup"] }, { symbol: "XYZ", reasons: [] },
+  ]);
+  assert.equal(hl.length, 2);
+  assert.deepEqual(hl[0], { symbol: "ABC", text: "chase 2.2 ATR; stretch 3.4 ATR (at ₹101.50)" });
+  assert.equal(hl[1].text, "daily structure advises against entering now");
+  assert.equal(sniperHeldBackLines([{ symbol: "A" }, { symbol: "B" }], 1).length, 1);
+  assert.equal(sniperHeldBackLines([{ symbol: "A" }], 0).length, 0);
+}

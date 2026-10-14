@@ -34,7 +34,7 @@ Changes from original, all market-intelligence derived:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("buy-sniper")
 
@@ -216,7 +216,341 @@ def _rationale(s: Dict[str, Any], action: str, conv: float) -> str:
     return f"{core}. Confirmation required before entry. {note}"
 
 
-def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) -> Optional[Dict[str, Any]]:
+# -- Daily market-structure gate (group 357, WS-4; always live since group370) -------------------------------------------------------------
+# "Good stock, bad ENTRY?" Same rules and defaults as real-trade's entry_engine/structure_gate.py. SNIPER_STRUCTURE_MODE: enforce (default,
+# the card is dropped) | off (kill switch, card byte-for-byte as before). There is no record-only (shadow) mode: any other value, including a
+# stale "shadow", is enforce. No / stale / insufficient structure = NO OPINION = never blocks and is never bullish. Pure, never raises.
+import math as _math
+from datetime import datetime as _dt, timezone as _tz
+
+_SG_OK_QUALITIES = ("ok", "limited")
+
+
+def _sg_mode() -> str:
+    return "off" if ((_os.getenv("SNIPER_STRUCTURE_MODE") or "").strip().lower() == "off") else "enforce"
+
+
+def _sg_float(name: str, default: float) -> float:
+    try:
+        v = float(((_os.getenv(name) or "").strip() or default))
+        return v if _math.isfinite(v) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _sg_bool(name: str, default: bool) -> bool:
+    return ((_os.getenv(name) or "").strip() or ("true" if default else "false")).lower() in ("1", "true", "yes", "on")
+
+
+STRUCTURE_MAX_CHASE_ATR = _sg_float("STRUCTURE_MAX_CHASE_ATR", 1.5)
+STRUCTURE_MAX_STRETCH_ATR = _sg_float("STRUCTURE_MAX_STRETCH_ATR", 3.0)
+STRUCTURE_MIN_ROOM_ATR = _sg_float("STRUCTURE_MIN_ROOM_ATR", 0.5)
+STRUCTURE_MIN_RR = _sg_float("STRUCTURE_MIN_RR", 1.2)
+STRUCTURE_REJECT_STOP_WIDE = _sg_bool("STRUCTURE_REJECT_STOP_WIDE", True)
+STRUCTURE_BEARISH_BLOCK = _sg_bool("STRUCTURE_BEARISH_BLOCK", True)
+STRUCTURE_BEARISH_BOS_BARS = int(_sg_float("STRUCTURE_BEARISH_BOS_BARS", 5))
+STRUCTURE_MAX_AGE_DAYS = _sg_float("STRUCTURE_MAX_AGE_DAYS", 7.0)
+STRUCTURE_MAX_PRICE_DEV_PCT = _sg_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)
+
+
+def _sg_f(v: Any) -> Optional[float]:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if _math.isfinite(x) else None
+
+
+def _sg_pos(v: Any) -> Optional[float]:
+    x = _sg_f(v)
+    return x if x is not None and x > 0 else None
+
+
+def _structure_summary(row: Any) -> Optional[Dict[str, Any]]:
+    """The flat ms_* summary on a scan row: `structure_summary`, or ms_* keys on the row itself. None when absent."""
+    if not isinstance(row, dict):
+        return None
+    s = row.get("structure_summary")
+    if isinstance(s, dict) and s:
+        return s
+    flat = {k: v for k, v in row.items() if isinstance(k, str) and k.startswith("ms_")}
+    return flat or None
+
+
+_sg_summary = _structure_summary  # short alias used inside this module
+
+
+def _sg_age_days(asof: Any) -> Optional[float]:
+    try:
+        if asof is None:
+            return None
+        if isinstance(asof, (int, float)):
+            ts = float(asof)
+            d = _dt.fromtimestamp(ts / 1000.0 if ts > 1e11 else ts, tz=_tz.utc)
+        else:
+            d = _dt.fromisoformat(str(asof).strip().replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=_tz.utc)
+        return max(0.0, (_dt.now(_tz.utc) - d).total_seconds() / 86400.0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _sg_no_data(summary: Optional[Dict[str, Any]], px: Optional[float]) -> Optional[str]:
+    if not isinstance(summary, dict):
+        return "no structure summary"
+    q = summary.get("ms_quality")
+    if q not in _SG_OK_QUALITIES:
+        return f"structure quality '{q or 'unavailable'}'"
+    age = _sg_age_days(summary.get("ms_asof"))
+    if STRUCTURE_MAX_AGE_DAYS > 0 and age is not None and age > STRUCTURE_MAX_AGE_DAYS:
+        return f"structure last bar is {age:.0f}d old"
+    msp = _sg_pos(summary.get("ms_price"))
+    if px is None or msp is None:
+        return "no price to compare"
+    dev = STRUCTURE_MAX_PRICE_DEV_PCT
+    if dev > 0 and abs(px - msp) / msp * 100.0 > dev:
+        return f"price {px:.2f} is {abs(px - msp) / msp * 100:.0f}% from the structure close {msp:.2f} (split / bad data)"
+    if _sg_pos(summary.get("ms_atr")) is None:
+        return "no ATR in the structure summary"
+    return None
+
+
+def _sg_live(summary: Dict[str, Any], px: float) -> Dict[str, Optional[float]]:
+    """chase / stretch / room (ATR) and R:R re-expressed at the card price (the summary was computed at the structure close)."""
+    msp, atr = _sg_pos(summary.get("ms_price")), _sg_pos(summary.get("ms_atr"))
+    out: Dict[str, Optional[float]] = {"chase_atr": None, "stretch_atr": None, "room_atr": None, "rr": None}
+    if msp is None or atr is None:
+        return out
+    d = (px - msp) / atr
+    c, st, r = _sg_f(summary.get("ms_chase_atr")), _sg_f(summary.get("ms_stretch_atr")), _sg_f(summary.get("ms_room_atr"))
+    out["chase_atr"] = round(max(0.0, c + d), 3) if c is not None else None
+    out["stretch_atr"] = round(st + d, 3) if st is not None else None
+    out["room_atr"] = round(r - d, 3) if r is not None else None
+    stop, target = _sg_pos(summary.get("ms_stop")), _sg_pos(summary.get("ms_target"))
+    if stop is not None and target is not None and stop < px < target:
+        out["rr"] = round((target - px) / (px - stop), 3)
+    return out
+
+
+def structure_verdict(row: Any, price: Any, mode: Optional[str] = None) -> Dict[str, Any]:
+    """Pure verdict for one scan row at `price`. Keys: gate_mode, opinion ('ok' | 'no_opinion'), would_reject, enforced, reasons[], no_data,
+    live{chase_atr, stretch_atr, room_atr, rr}, stop, target, rr. Never raises."""
+    m = mode if mode in ("off", "enforce") else _sg_mode()
+    v: Dict[str, Any] = {"gate_mode": m, "opinion": "no_opinion", "would_reject": False, "enforced": False, "reasons": [], "no_data": None,
+                         "live": {}, "stop": None, "target": None, "rr": None}
+    try:
+        summary = _sg_summary(row)
+        px = _sg_pos(price)
+        nd = _sg_no_data(summary, px)
+        if nd:
+            v["no_data"] = nd
+            return v
+        live = _sg_live(summary, px)
+        v["live"], v["opinion"] = live, "ok"
+        v["stop"], v["target"], v["rr"] = _sg_pos(summary.get("ms_stop")), _sg_pos(summary.get("ms_target")), live["rr"]
+        reasons: List[str] = []
+        lim = STRUCTURE_MAX_CHASE_ATR
+        if lim > 0 and live["chase_atr"] is not None and live["chase_atr"] > lim:
+            reasons.append(f"chase {live['chase_atr']:.1f} ATR above the nearest demand/imbalance zone (max {lim:g})")
+        lim = STRUCTURE_MAX_STRETCH_ATR
+        if lim > 0 and live["stretch_atr"] is not None and live["stretch_atr"] > lim:
+            reasons.append(f"price stretched {live['stretch_atr']:.1f} ATR above EMA20 (max {lim:g})")
+        lim = STRUCTURE_MIN_ROOM_ATR
+        if lim > 0 and live["room_atr"] is not None and live["room_atr"] < lim:
+            reasons.append(f"only {max(0.0, live['room_atr']):.1f} ATR of room to the next resistance (min {lim:g})")
+        lim = STRUCTURE_MIN_RR
+        flags = summary.get("ms_rr_flags") or []
+        if lim > 0 and live["rr"] is not None and live["rr"] < lim:
+            reasons.append(f"structure R:R {live['rr']:.2f} below {lim:g}")
+        if STRUCTURE_REJECT_STOP_WIDE and isinstance(flags, (list, tuple)) and "stop_too_wide" in flags:
+            reasons.append("structural stop is too wide")
+        if STRUCTURE_BEARISH_BLOCK:
+            if summary.get("ms_trend") == "bearish":
+                reasons.append("daily structure is bearish")
+            else:
+                bars = _sg_f(summary.get("ms_bos_bars"))
+                if (summary.get("ms_bos_dir") == "bearish" and not summary.get("ms_bos_failed") and bars is not None
+                        and bars <= STRUCTURE_BEARISH_BOS_BARS):
+                    reasons.append(f"fresh bearish break of structure {int(bars)} bar(s) ago")
+        v["reasons"] = reasons
+        if reasons:
+            v["would_reject"] = True
+            v["enforced"] = (m == "enforce")
+        return v
+    except Exception as e:  # noqa: BLE001
+        logger.debug("sniper structure verdict failed (no opinion): %s", e)
+        v.update(opinion="no_opinion", would_reject=False, enforced=False, reasons=[], no_data="evaluation error")
+        return v
+
+
+def _sg_symbol(s: Any) -> str:
+    return str((s or {}).get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+
+
+def _payload_rows(payload: Any) -> List[Any]:
+    """The scan rows inside a flexible find-buys payload (stocks / all_results / results / recommendations / rows / data, or a bare list)."""
+    stocks: List[Any] = []
+    if isinstance(payload, dict):
+        for key in ("stocks", "all_results", "results", "recommendations", "rows"):
+            v = payload.get(key)
+            if isinstance(v, list) and v:
+                stocks = v
+                break
+        if not stocks and isinstance(payload.get("data"), list):
+            stocks = payload["data"]
+    elif isinstance(payload, list):
+        stocks = payload
+    return stocks
+
+
+
+
+def symbols_needing_structure(payload: Any, limit: int = 12) -> List[str]:
+    """Best-conviction buy candidates that carry no structure summary yet (the route fetches those). [] when the gate is off / bad input."""
+    try:
+        if _sg_mode() == "off":
+            return []
+        min_c = MIN_CONVICTION
+        if isinstance(payload, dict) and payload.get("min_conviction") is not None:
+            try:
+                min_c = float(payload["min_conviction"])
+            except (TypeError, ValueError):
+                min_c = MIN_CONVICTION
+        best: Dict[str, float] = {}
+        for s in _payload_rows(payload):
+            if not isinstance(s, dict) or s.get("_meta") or str(s.get("decision") or "").upper() == "ERROR":
+                continue
+            if not _is_buy_candidate(s, min_conviction=min_c) or _structure_summary(s) is not None:
+                continue
+            sym = _sg_symbol(s)
+            if sym:
+                best[sym] = max(best.get(sym, 0.0), _sector_adjusted_conviction(s, _conviction(s)))
+        return [k for k, _ in sorted(best.items(), key=lambda kv: -kv[1])][:max(0, int(limit))]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+# -- PREPARE-to-Buy refresh notes (group 358, LOG-ONLY) -----------------------------------------------------------------------------------------
+# After /data-feed/refresh-prepare-to-buy patches fresh quotes onto PREPARE rows, say WHY a row deserves a second look: the structure now fails
+# the entry check at the fresh price ("turned bad"; "flipped" when it still passed at the last stored price) or a P9 structure event is near the
+# bar (fresh BOS / CHOCH / sweep / price inside a zone / golden fib). Notes never change a row, a decision or a quote patch.
+# SNIPER_PREPARE_STRUCTURE_MODE: log (default) | off. Independent of SNIPER_STRUCTURE_MODE (the card gate): the card gate off must not silence notes.
+# prepare_triggers() mirrors decision-prediction's structure_policy.prepare_triggers (a randomised test pins the two together).
+_PREP_TRIGGER_TEXT = {
+    "bos_near": "fresh bullish break of structure",
+    "choch": "bullish change of character",
+    "sweep": "bullish liquidity sweep",
+    "entering_fvg": "price inside a bullish imbalance zone",
+    "entering_ob": "price inside a bullish demand zone",
+    "entering_fib": "price in the Fibonacci golden zone",
+}
+
+
+def _prep_mode() -> str:
+    return "off" if ((_os.getenv("SNIPER_PREPARE_STRUCTURE_MODE") or "").strip().lower() == "off") else "log"
+
+
+def _prep_num(v: Any) -> Optional[float]:
+    """Same as structure_policy._num: bools and non-finite values are not numbers."""
+    try:
+        if v is None or isinstance(v, bool):
+            return None
+        f = float(v)
+        return f if _math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def prepare_triggers(row: Any, price: Any = None) -> List[str]:
+    """P9 structure events near the current bar for a PREPARE row (mirror of structure_policy.prepare_triggers). [] when there is no summary.
+    Does not judge data quality (the note does)."""
+    try:
+        sm = _structure_summary(row)
+        if not isinstance(sm, dict):
+            return []
+        msp, atr, px_in = _prep_num(sm.get("ms_price")), _prep_num(sm.get("ms_atr")), _prep_num(price)
+        px = px_in if (px_in and msp and atr and atr > 0) else None   # structure_policy sets price_used only with all three
+        bos_bars, choch_bars, sweep_bars = _prep_num(sm.get("ms_bos_bars")), _prep_num(sm.get("ms_choch_bars")), _prep_num(sm.get("ms_sweep_bars"))
+        t: List[str] = []
+        if sm.get("ms_bos_dir") == "bullish" and bos_bars is not None and bos_bars <= 3 and not bool(sm.get("ms_bos_failed")):
+            t.append("bos_near")
+        if sm.get("ms_choch_dir") == "bullish" and choch_bars is not None and choch_bars <= 5:
+            t.append("choch")
+        if sm.get("ms_sweep_dir") == "bullish" and sweep_bars is not None and sweep_bars <= 3:
+            t.append("sweep")
+        ref = px or msp
+        for name, side, top, bot, st in (
+                ("entering_fvg", sm.get("ms_fvg_side"), _prep_num(sm.get("ms_fvg_top")), _prep_num(sm.get("ms_fvg_bottom")), sm.get("ms_fvg_status")),
+                ("entering_ob", sm.get("ms_ob_side"), _prep_num(sm.get("ms_ob_top")), _prep_num(sm.get("ms_ob_bottom")), sm.get("ms_ob_status"))):
+            if side == "bullish" and ref and top and bot and st not in ("filled", "broken", "expired") and bot * 0.995 <= ref <= top * 1.005:
+                t.append(name)
+        if bool(sm.get("ms_in_golden")):
+            t.append("entering_fib")
+        return t
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def prepare_refresh_note(row: Any, price: Any, old_price: Any = None) -> Dict[str, Any]:
+    """One PREPARE row at the fresh `price`. Keys: opinion ('ok' | 'no_opinion' | 'off'), turned_bad, flipped, reasons[], triggers[], headline, no_data.
+    `old_price` is the price stored before the refresh (None / bad = unknown, never flipped). Pure, never raises."""
+    n: Dict[str, Any] = {"opinion": "no_opinion", "turned_bad": False, "flipped": False, "reasons": [], "triggers": [], "headline": None, "no_data": None}
+    try:
+        if _prep_mode() == "off":
+            n["opinion"] = "off"
+            return n
+        px = _sg_pos(price)
+        nd = _sg_no_data(_structure_summary(row), px)
+        if nd:
+            n["no_data"] = nd
+            return n
+        n["opinion"] = "ok"
+        v = structure_verdict(row, px, mode="enforce")   # the card gate's own switch must not silence the notes
+        n["triggers"] = prepare_triggers(row, px)
+        if v.get("would_reject"):
+            n["turned_bad"] = True
+            n["reasons"] = list(v.get("reasons") or [])
+            old = _sg_pos(old_price)
+            if old is not None:
+                ov = structure_verdict(row, old, mode="enforce")
+                n["flipped"] = bool(ov.get("opinion") == "ok" and not ov.get("would_reject"))
+            n["headline"] = "Structure now blocks entry: " + "; ".join(n["reasons"]) + (" (passed at the last stored price)" if n["flipped"] else "")
+        elif n["triggers"]:
+            n["headline"] = "Structure event: " + ", ".join(_PREP_TRIGGER_TEXT.get(k, k) for k in n["triggers"])
+        return n
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare refresh note failed (no opinion): %s", e)
+        return {"opinion": "no_opinion", "turned_bad": False, "flipped": False, "reasons": [], "triggers": [], "headline": None, "no_data": "evaluation error"}
+
+
+def prepare_refresh_report(rows: Any, live: Any, old_prices: Any = None) -> Dict[str, Any]:
+    """Notes for every refreshed symbol. rows {sym: feed row}, live {sym: fresh price}, old_prices {sym: price before the refresh}. A refreshed
+    symbol with no usable row / summary is `no_opinion`. `notes` holds only the interesting rows (turned bad or a trigger). Never raises."""
+    rep: Dict[str, Any] = {"mode": _prep_mode(), "checked": 0, "no_opinion": 0, "turned_bad": 0, "flipped": 0, "with_triggers": 0, "notes": {}}
+    try:
+        if rep["mode"] == "off":
+            return rep
+        rows = rows if isinstance(rows, dict) else {}
+        old_prices = old_prices if isinstance(old_prices, dict) else {}
+        for sym, px in (live.items() if isinstance(live, dict) else []):
+            n = prepare_refresh_note(rows.get(sym), px, old_prices.get(sym))
+            if n["opinion"] != "ok":
+                rep["no_opinion"] += 1
+                continue
+            rep["checked"] += 1
+            rep["turned_bad"] += 1 if n["turned_bad"] else 0
+            rep["flipped"] += 1 if n["flipped"] else 0
+            rep["with_triggers"] += 1 if n["triggers"] else 0
+            if n["turned_bad"] or n["triggers"]:
+                rep["notes"][sym] = n
+        return rep
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare refresh report failed: %s", e)
+        return rep
+
+
+def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT, _rejected: Optional[list] = None) -> Optional[Dict[str, Any]]:
     """Turn one scan row into a sniper card, or None if not actionable.
 
     NEW: R:R enforcement — if the implied reward < MIN_REWARD_RISK × risk,
@@ -266,11 +600,20 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) 
         )
         return None
 
+    # -- Daily-structure gate (group 357 / 370): runs AFTER the sniper's own R:R check, so only cards that would otherwise surface are judged.
+    _sv = None
+    if _sg_mode() != "off":
+        _sv = structure_verdict(s, px)
+        if _sv["enforced"]:
+            if isinstance(_rejected, list):
+                _rejected.append({"symbol": _sg_symbol(s), "price": px, "reasons": list(_sv["reasons"])})
+            return None
+
     buy_low    = round(px * 0.995, 2)
     buy_high   = round(px * 1.008, 2)
     profit_abs = round(px * (eff_target_pct / 100.0), 2)
 
-    return {
+    card = {
         "symbol":              str(s.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip(),
         "action":              action,
         "buy_price_range":     f"₹{buy_low} - ₹{buy_high}",
@@ -297,20 +640,20 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT) 
         "value_buy":           bool(MIN_PRICE <= px <= VALUE_BUY_THRESHOLD),
         "market_context":      "Nifty correction — only high-R:R setups surfaced",
     }
+    if _sv is not None:
+        # structural stop / target are DISPLAY ONLY: the card's own stop_loss / target_price / reward_risk_ratio are unchanged
+        card["structure"] = {k: _sv[k] for k in ("gate_mode", "opinion", "would_reject", "enforced", "reasons", "no_data", "live", "stop", "target", "rr")}
+    return card
 
 
-def filter_actionable_buy_suggestions(
-    scanned_stocks: List[Dict[str, Any]],
-    target_count: int = DEFAULT_TARGET_COUNT,
-    min_conviction: float = MIN_CONVICTION,
-) -> List[Dict[str, Any]]:
-    """Select 1..target_count buy setups with clear entry/exit math.
-    Sorted by conviction descending. R:R-failed cards excluded entirely."""
+def _filter_with_rejects(scanned_stocks: List[Dict[str, Any]], target_count: int = DEFAULT_TARGET_COUNT,
+                         min_conviction: float = MIN_CONVICTION) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(cards, structure_rejected). structure_rejected lists only rows the structure gate itself dropped (an R:R-failed row is never blamed on it)."""
     if not isinstance(scanned_stocks, list):
-        return []
+        return [], []
     target_count = max(1, min(int(target_count or DEFAULT_TARGET_COUNT), 10))
-
     candidates: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
     seen = set()
     for s in scanned_stocks:
         if not isinstance(s, dict):
@@ -319,7 +662,7 @@ def filter_actionable_buy_suggestions(
             continue
         if not _is_buy_candidate(s, min_conviction=min_conviction):
             continue
-        card = build_suggestion(s)
+        card = build_suggestion(s, _rejected=rejected)
         if not card or not card.get("symbol"):
             continue
         sym = card["symbol"]
@@ -327,30 +670,25 @@ def filter_actionable_buy_suggestions(
             continue
         seen.add(sym)
         candidates.append(card)
+    candidates.sort(key=lambda x: (x.get("conviction_score") or 0, x.get("reward_risk_ratio") or 0), reverse=True)
+    return candidates[:target_count], rejected
 
-    # Sort by conviction desc, then by R:R desc as tiebreaker
-    candidates.sort(
-        key=lambda x: (x.get("conviction_score") or 0, x.get("reward_risk_ratio") or 0),
-        reverse=True,
-    )
-    return candidates[:target_count]
+
+def filter_actionable_buy_suggestions(
+    scanned_stocks: List[Dict[str, Any]],
+    target_count: int = DEFAULT_TARGET_COUNT,
+    min_conviction: float = MIN_CONVICTION,
+) -> List[Dict[str, Any]]:
+    """Select 1..target_count buy setups with clear entry/exit math.
+    Sorted by conviction descending. R:R-failed and structure-blocked cards excluded entirely."""
+    return _filter_with_rejects(scanned_stocks, target_count, min_conviction)[0]
 
 
 def suggestions_from_scan_payload(
     payload: Dict[str, Any], target_count: int = DEFAULT_TARGET_COUNT
 ) -> Dict[str, Any]:
     """Accept flexible FE payloads and return suggestions."""
-    stocks: List[Any] = []
-    if isinstance(payload, dict):
-        for key in ("stocks", "all_results", "results", "recommendations", "rows"):
-            v = payload.get(key)
-            if isinstance(v, list) and v:
-                stocks = v
-                break
-        if not stocks and isinstance(payload.get("data"), list):
-            stocks = payload["data"]
-    elif isinstance(payload, list):
-        stocks = payload
+    stocks = _payload_rows(payload)
 
     tc = target_count
     if isinstance(payload, dict) and payload.get("target_count") is not None:
@@ -366,7 +704,13 @@ def suggestions_from_scan_payload(
         except (TypeError, ValueError):
             min_c = MIN_CONVICTION
 
-    suggestions = filter_actionable_buy_suggestions(stocks, target_count=tc, min_conviction=min_c)
+    suggestions, rejected = _filter_with_rejects(stocks, target_count=tc, min_conviction=min_c)
+    if suggestions:
+        message = None
+    elif rejected:
+        message = f"{len(rejected)} setup(s) were held back by the daily-structure check (chasing / stretched / no room / bearish)"
+    else:
+        message = "No setups meet conviction / R:R / decision criteria"
     return {
         "ok":           True,
         "count":        len(suggestions),
@@ -375,5 +719,7 @@ def suggestions_from_scan_payload(
         "min_conviction": min_c,
         "target_count": tc,
         "market_context": _market_context_note(),
-        "message": None if suggestions else "No setups meet conviction / R:R / decision criteria",
+        "structure_mode": _sg_mode(),
+        "structure_rejected": rejected,
+        "message": message,
     }

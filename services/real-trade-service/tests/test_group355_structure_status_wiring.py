@@ -15,6 +15,8 @@ from tests.test_group351_structure_entry_wiring import _cand, _cfg, _sum  # noqa
 
 
 def test_entry_records_counters_and_ring(db, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")   # group370: the gate is live (the shared fixture leaves it off)
     _cand(db, _sum(ms_trend="bearish"))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})
     approve_all(monkeypatch)

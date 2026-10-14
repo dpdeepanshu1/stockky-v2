@@ -22,7 +22,8 @@ def _reset_obs():
 
 
 def test_entry_stores_the_verdict_as_an_observation(db, monkeypatch):
-    import models
+    import config, models
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")   # group370: the gate is live (the shared fixture leaves it off)
     _cand(db, _sum(ms_trend="bearish"))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})
     approve_all(monkeypatch)
@@ -35,7 +36,8 @@ def test_entry_stores_the_verdict_as_an_observation(db, monkeypatch):
 
 
 def test_a_second_cycle_the_same_day_does_not_add_a_second_row(db, monkeypatch):
-    import models
+    import config, models
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")   # group370: the gate is live (the shared fixture leaves it off)
     _cand(db, _sum(ms_trend="bearish"))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})
     approve_all(monkeypatch)

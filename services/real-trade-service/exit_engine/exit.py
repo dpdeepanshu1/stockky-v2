@@ -1633,8 +1633,8 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             except Exception as _sx_exc:  # noqa: BLE001 - structure is advisory; never stop the exit loop
                 try:
                     db.rollback()
-                except Exception:
-                    pass
+                except Exception as _sx_rb:  # noqa: BLE001 - the rollback itself failed: say so instead of a silent pass
+                    logger.debug("exit structure step rollback failed for %s (ignored): %s", position.symbol, _sx_rb)
                 logger.debug("exit structure step failed for %s (ignored): %s", position.symbol, _sx_exc)
 
             # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────

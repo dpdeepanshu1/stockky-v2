@@ -367,6 +367,11 @@ async def _event_shared_wait(symbol: str, wait_s: float) -> Optional[tuple]:
     loop = asyncio.get_running_loop()
     task = _event_inflight.get(symbol)
     if task is None or task.done() or task.get_loop() is not loop:
+        # group372: the one request may have answered in the gap between this check's first and second wait (its done-callback already
+        # unregistered it and left the good answer in _event_late) - use that answer instead of sending a SECOND request for the same symbol.
+        _kept = _event_late.get(symbol)
+        if _kept is not None and _time.monotonic() - _kept[0] <= float(getattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 0.0) or 0.0):
+            return False, (_kept[1], _kept[2], _kept[3]), _kept[4], _kept[5]
         task = loop.create_task(_event_worker(symbol))
         _event_inflight[symbol] = task
         task.add_done_callback(lambda t, _s=symbol: _event_task_done(_s, t))
@@ -416,6 +421,10 @@ async def _ft_shared_wait(symbol: str, wait_s: float) -> Optional[tuple]:
     loop = asyncio.get_running_loop()
     task = _ft_inflight.get(symbol)
     if task is None or task.done() or task.get_loop() is not loop:
+        # group372: answered in the gap between the first and second wait (done-callback left it in _ft_late): use it, no second request.
+        _kept = _ft_late.get(symbol)
+        if _kept is not None and _time.monotonic() - _kept[0] <= float(getattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 0.0) or 0.0):
+            return _kept[1], _kept[2], _kept[3]
         task = loop.create_task(_ft_worker(symbol))
         _ft_inflight[symbol] = task
         task.add_done_callback(lambda t, _s=symbol: _ft_task_done(_s, t))

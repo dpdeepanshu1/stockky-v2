@@ -8,6 +8,7 @@
  */
 import React from "react";
 import BottomSheet from "./BottomSheet";
+import { sniperBadge, sniperHeldBackLines, type SniperStructureRecord, type Tone } from "../structureView";
 
 export interface BuySuggestion {
   symbol: string;
@@ -31,6 +32,8 @@ export interface BuySuggestion {
   sector?: string | null;
   rationale: string;
   decision?: string;
+  /** group 373: additive daily-structure record from the gateway (display only). */
+  structure?: SniperStructureRecord | null;
 }
 
 export interface BuySniperModalProps {
@@ -40,6 +43,16 @@ export interface BuySniperModalProps {
   loading?: boolean;
   error?: string | null;
   onSelectSymbol?: (symbol: string) => void;
+  /** group 373: setups the daily-structure check held back (find-buys -> structure_rejected) and the gateway message. */
+  structureRejected?: Array<{ symbol: string; price?: number; reasons?: string[] }> | null;
+  message?: string | null;
+}
+
+function toneClass(t: Tone): string {
+  if (t === "good") return "bg-signal-buy/10 text-signal-buy border-signal-buy/30";
+  if (t === "bad") return "bg-signal-sell/10 text-signal-sell border-signal-sell/30";
+  if (t === "warn") return "bg-signal-prepare/10 text-signal-prepare border-signal-prepare/30";
+  return "bg-mist/10 text-mist border-slate/60";
 }
 
 function fmtInr(n: number | undefined | null): string {
@@ -65,8 +78,11 @@ export function BuySniperModal({
   loading = false,
   error = null,
   onSelectSymbol,
+  structureRejected = null,
+  message = null,
 }: BuySniperModalProps) {
   const list = Array.isArray(suggestions) ? suggestions : [];
+  const heldBack = sniperHeldBackLines(structureRejected);
 
   return (
     <BottomSheet
@@ -105,7 +121,9 @@ export function BuySniperModal({
           ) : list.length === 0 ? (
             <div className="py-12 text-center">
               <p className="font-display text-sm text-mist">
-                No ≤ ₹5000 setups meet conviction / decision criteria right now.
+                {heldBack.length > 0 && message
+                  ? message
+                  : "No ≤ ₹5000 setups meet conviction / decision criteria right now."}
               </p>
               <p className="text-[11px] text-mist/70 mt-2 max-w-md mx-auto">
                 Need PREPARE TO BUY / BUY NOW (or strong HOLD breakout) with conviction ≥ 58 and a
@@ -141,6 +159,17 @@ export function BuySniperModal({
                           >
                             {s.action}
                           </span>
+                          {(() => {
+                            const b = sniperBadge(s.structure);
+                            return b ? (
+                              <span
+                                title={b.title}
+                                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${toneClass(b.tone)}`}
+                              >
+                                {b.label}
+                              </span>
+                            ) : null;
+                          })()}
                           {s.sector ? (
                             <span className="text-[10px] text-mist truncate max-w-[8rem]">
                               {s.sector}
@@ -225,6 +254,20 @@ export function BuySniperModal({
               ))}
             </div>
           )}
+          {!loading && !error && heldBack.length > 0 ? (
+            <div className="mt-4 rounded-2xl border border-slate bg-graphite/40 px-4 py-3">
+              <p className="font-display text-[11px] uppercase tracking-widest text-mist mb-1.5">
+                Held back by the daily-structure check
+              </p>
+              <ul className="space-y-1">
+                {heldBack.map((h) => (
+                  <li key={h.symbol} className="text-[11px] text-mist leading-relaxed">
+                    <span className="font-semibold text-paper">{h.symbol}</span> — {h.text}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
     </BottomSheet>
   );

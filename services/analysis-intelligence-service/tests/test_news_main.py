@@ -888,7 +888,7 @@ class TestScoreHeadlineConfigErrorPause:
         msgs = [r.getMessage() for r in caplog.records if "HF API error" in r.getMessage()]
         assert len(msgs) == 1
         assert "400" in msgs[0] and "not supported by any provider" in msgs[0] and nm.HF_MODEL in msgs[0]
-        assert "1800" in msgs[0]
+        assert "21600" in msgs[0]   # group341: "not supported by any provider" is a setup error, paused 6 h (21600 s), not the 1800 s default
 
     def test_pause_expires(self, monkeypatch):
         monkeypatch.setattr(nm.httpx, "post", lambda *a, **k: _Resp(400))

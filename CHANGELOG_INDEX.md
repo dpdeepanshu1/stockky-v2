@@ -1,3 +1,9 @@
+- group373: Buy Sniper structure badges + held-back list (frontend), training `app.py` entry-structure wiring (group 359 hook was missing), exit.py silent except, `_warn_throttled`; stale tests fixed in 5 services. All service suites green (see doc). Doc: `docs/GROUP373_SNIPER_BADGES_AND_SUITES_GREEN.md`.
+- group372 (update 3): position-stocks `board_gate.py` missing `import time` (board-gate log rows were never written), quality gate no longer sends a second event / fund-tech request when the first answered between its two waits. Position-stocks suite all green.
+- group372 (update 2): position-stocks board A/B in `screening/ms_engine_switch.py` (compare, ab_report, `BOARD_AB_*`), `board.py` passes the symbol. Doc section in `docs/GROUP372_*.md`.
+- group372 (update): position-stocks structure observation hooked (gate `capture`, `entry.py` record, boot loop, `GET /structure/edge`, `STRUCTURE_OBS_*` config, `PS_` overrides). Doc section in `docs/GROUP372_*.md`.
+- group372: gateway structure-refresh job hooked (3 routes, QStash action `structure-refresh`, jobs snapshot), PREPARE refresh notes in `buy_sniper.py` + `refresh_prepare_to_buy` reply, `DataFeedStore.replace_fields`, env docs. Doc: `docs/GROUP372_STRUCTURE_REFRESH_AND_PREPARE_NOTES_HOOKED.md`.
+- group371: Buy Sniper structure gate rebuilt in `buy_sniper.py` (enforce | off, no shadow), `main.py` fetches `/structure/{sym}` for candidates without a summary, `sniper_observation` hooked (record, `GET /scan/find-buys/edge`, `POST .../edge/evaluate`, tick `sniper-observe-eval`). Doc: `docs/GROUP371_SNIPER_STRUCTURE_GATE_REBUILT.md`.
 - group370: structure rules always live (no shadow), strict BUY NOW (P7/P8), PREPARE recompute + P9 upgrade active. Doc: `docs/GROUP370_ALWAYS_LIVE_STRUCTURE_RULES.md`.
 # Changelog index
 

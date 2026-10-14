@@ -777,6 +777,8 @@ def jenv(monkeypatch):
 class TestCollectJobSnapshots:
     def test_everything_is_collected_under_its_own_key(self, jenv):
         out = gw._collect_job_snapshots()
+        assert "structure_refresh" in out       # group372: always present (idle), not part of the fakes below
+        out.pop("structure_refresh")
         assert out == {"data_feed": {"status": "idle"}, "refill_additional": {"status": "idle"},
                        "surprise_premarket": {"is_running": False}, "ipo_scan": {"status": "idle"},
                        "rate_limits": {"yfinance": {"queued": 0}}, "yahoo_ws_feed": {"connected": True}}
@@ -789,7 +791,7 @@ class TestCollectJobSnapshots:
         jenv.raises = {name}
         with caplog.at_level("DEBUG"):
             out = gw._collect_job_snapshots()
-        assert key not in out and len(out) == 5 and "jobs snapshot" in caplog.text
+        assert key not in out and len(out) == 6 and "structure_refresh" in out and "jobs snapshot" in caplog.text   # 5 faked sources + the group372 structure_refresh job
 
     def test_yahoo_status_needs_a_200_and_survives_errors(self, jenv):
         jenv.yahoo = (503, {"connected": False})
@@ -800,7 +802,7 @@ class TestCollectJobSnapshots:
     def test_all_sources_failing_gives_an_empty_snapshot(self, jenv):
         jenv.raises = {"feed", "refill", "premarket", "ipo", "rl"}
         jenv.yahoo_raises = True
-        assert gw._collect_job_snapshots() == {}
+        assert set(gw._collect_job_snapshots()) == {"structure_refresh"}   # group372: the real job snapshot is not one of the failing fakes
 
 
 class TestJobIsActive:
@@ -970,7 +972,7 @@ class TestWarmSurpriseScanCache:
         class Engine:
             _last_result = None
 
-            async def scan(self, client=None, market_data_url=None, cached=False):
+            async def scan(self, client=None, market_data_url=None, cached=False, symbols=None, force_reload_static=False):
                 e.scan_calls.append((client, market_data_url))
                 e.scan_kwargs.append({"cached": cached})
                 if e.scan_raises:
@@ -1129,7 +1131,7 @@ class TestSurpriseBootWarmDelay:
         class Engine:
             _last_result = None
 
-            async def scan(self, client=None, market_data_url=None, cached=False):
+            async def scan(self, client=None, market_data_url=None, cached=False, symbols=None, force_reload_static=False):
                 order.append("scan")
 
         lenv.limit = 99

@@ -120,12 +120,12 @@ def test_failed_or_old_bearish_break_does_not_block():
     assert not m.structure_verdict(_row(_sum(ms_bos_dir="bearish", ms_bos_bars=9, ms_bos_failed=False)), 100.0)["would_reject"]
 
 
-def test_shadow_attaches_would_reject_but_keeps_the_card():
+def test_stale_shadow_value_is_live_enforce():
+    # group370: there is no record-only mode; a stale SNIPER_STRUCTURE_MODE=shadow drops the card like enforce
     m = _load(SNIPER_STRUCTURE_MODE="shadow")
-    c = m.build_suggestion(_row(_sum(ms_chase_atr=2.5)))
-    assert c is not None and c["structure"]["would_reject"] is True and c["structure"]["enforced"] is False
+    assert m._sg_mode() == "enforce" and m.build_suggestion(_row(_sum(ms_chase_atr=2.5))) is None
     out = m.suggestions_from_scan_payload({"stocks": [_row(_sum(ms_chase_atr=2.5))]})
-    assert out["count"] == 1 and out["structure_rejected"] == [] and out["structure_mode"] == "shadow"
+    assert out["count"] == 0 and out["structure_mode"] == "enforce" and len(out["structure_rejected"]) == 1
 
 
 def test_off_leaves_the_card_without_a_structure_key():

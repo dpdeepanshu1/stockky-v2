@@ -401,14 +401,19 @@ class TestBatcher:
         m = self._universe(60)
         calls = _quote_server(monkeypatch, {v: 100.0 + i for i, v in enumerate(m.values())})
         out, errs = {}, []
+        # Starting 60 threads takes longer than the default batch window on a loaded machine (the full suites run in parallel in CI),
+        # which split the callers over two requests. Widen the window and release every caller at once: the test is about sharing, not timing.
+        monkeypatch.setattr(config, "quote_batch_window_s", lambda: 1.0)
+        go = threading.Event()
 
         def worker(sym):
+            go.wait(10)
             try:
                 out[sym] = quotes.get_quote(sym)
             except Exception as e:      # noqa: BLE001
                 errs.append(e)
         ts = [threading.Thread(target=worker, args=(s,)) for s in m]
-        [t.start() for t in ts]; [t.join(10) for t in ts]
+        [t.start() for t in ts]; go.set(); [t.join(15) for t in ts]
         assert not errs and all(out[s] and out[s]["price"] > 0 for s in m)
         assert len(calls) == 1                                  # 60 callers, ONE request
         assert sorted(calls[0]["NSE_EQ"]) == sorted(m.values())

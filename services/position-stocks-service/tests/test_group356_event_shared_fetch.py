@@ -234,3 +234,16 @@ def test_fund_tech_that_never_answers_stays_fail_open(gate, monkeypatch):
     sig = asyncio.run(gate.check("DARK", cached=None))
     assert sig.passes()[0] and "floor check skipped" in sig.passes()[1]
     assert "DARK" not in gate._ft_late
+
+
+def test_answer_landing_between_the_two_waits_is_reused_not_requested_again(gate, monkeypatch):
+    """group372: the request finished after the first wait timed out and before the second wait started (its done-callback had already
+    unregistered it): the second wait must return the kept answer, not start a second request."""
+    import time as _t
+    calls = []
+    _fakes(monkeypatch, delay=0.0, calls=calls)
+    qg._event_late["RACE"] = (_t.monotonic(), True, 70.0, False, None, None)
+    qg._ft_late["RACE"] = (_t.monotonic(), 60.0, 55.0, 5000.0)
+    ev = asyncio.run(qg._event_shared_wait("RACE", 0.05))
+    ft = asyncio.run(qg._ft_shared_wait("RACE", 0.05))
+    assert ev == (False, (True, 70.0, False), None, None) and ft == (60.0, 55.0, 5000.0) and calls == []

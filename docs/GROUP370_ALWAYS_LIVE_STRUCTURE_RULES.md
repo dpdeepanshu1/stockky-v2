@@ -14,8 +14,8 @@
 - **docker-compose.yml / .env.example**: the group 369 "SAFE ROLLOUT" block (which forced shadow everywhere) is removed; compose default is `full`.
 
 ## Not done here (still open)
-- api-gateway `buy_sniper.py` has NO structure gate in this tree (the group 357 tests / doc exist, the code does not) - needs a rebuild; `SNIPER_STRUCTURE_MODE` is read nowhere.
-- gateway `sniper_observation.py` / `structure_refresh.py` are not hooked into `main.py`; position-stocks `ScalpStructureObservation` is not hooked.
+- (done in group 371) api-gateway `buy_sniper.py` structure gate rebuilt and wired: see `docs/GROUP371_SNIPER_STRUCTURE_GATE_REBUILT.md`.
+- gateway `structure_refresh.py` is not hooked into `main.py` (routes `/data-feed/structure-refresh*`, tick action, jobs snapshot, `stockky_prepare_structure_total`); position-stocks `ScalpStructureObservation` is not hooked. (`sniper_observation.py` is hooked since group 371.)
 - Frontend shadow / observe-only labels; backtest / walk-forward on real data; unadjusted-data split test; full CI with real FastAPI.
 
 ## Verified in the sandbox

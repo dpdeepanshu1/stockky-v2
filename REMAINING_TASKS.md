@@ -12,6 +12,8 @@
 - **Structure refresh job (g360):** `POST /data-feed/structure-refresh` refreshes the feed rows' `ms_*` keys after the close; see `docs/GROUP360_STRUCTURE_REFRESH_JOB_GATEWAY_COUNTERS.md`.
 - **Trades tab entry structure (g359):** the structure record is stored once at paper-trade entry (`feature_snapshot.structure_entry`, no schema change), returned by `GET /api/trades` as `structure`, and shown in the Trades tab. See `docs/GROUP359_TRADES_ENTRY_STRUCTURE_SNAPSHOT.md`.
 
+- **Structure exit + edge floor + board golden (g365):** real-trade watches daily structure on open positions (`STRUCTURE_EXIT_MODE=tighten`, live), `STRUCTURE_EDGE_MIN_N=100`, `PS_*` overrides, legacy board golden. See `docs/GROUP365_STRUCTURE_EXIT_AND_EDGE_FLOOR.md`.
+
 ## Verify on your side (not run in the sandbox: no pypi / npm)
 1. Real `pytest` for: api-gateway (`test_buy_sniper`, `test_group357_*`, `test_group358_*`, `test_group349_ms_passthrough`), real-trade, position-stocks (incl. the SQLite round-trip and `test_group356_structure_observation_wiring`), decision-prediction (incl. `training/tests/test_group359_structure_entry.py`), technical. Expected failures: only the known 4 `test_oracle_compat`.
 2. `npm ci && npx tsc --noEmit && npm run build` in `frontend/` (only a syntax-level pass and the node tests were run).

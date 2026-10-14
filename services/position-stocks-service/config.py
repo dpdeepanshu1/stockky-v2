@@ -53,6 +53,13 @@ def _get_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
+def _ps(name: str) -> str:
+    """group365: the env NAME to read for a position-stocks setting that shares its generic name with real-trade / api-gateway in the one .env.
+    `PS_<name>` wins when set, otherwise the generic `<name>` (unchanged behaviour), so the scalper can stay looser than real-trade
+    (e.g. PS_STRUCTURE_MAX_CHASE_ATR=4.0 next to STRUCTURE_MAX_CHASE_ATR=1.5) without editing either service."""
+    return ("PS_" + name) if (os.getenv("PS_" + name) or "").strip() else name
+
+
 
 PORT = _get_int("PORT", 8006)
 
@@ -1032,15 +1039,15 @@ if BOARD_GATE_MODE not in ("off", "shadow", "enforce", "auto"):
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
 #   STRUCTURE_GATE_MODE   off | shadow (log + store the verdict, never refuse) | enforce (default: refuse with STRUCTURE_* reason)
-STRUCTURE_GATE_MODE = _get_str("STRUCTURE_GATE_MODE", "enforce").lower()
+STRUCTURE_GATE_MODE = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
 if STRUCTURE_GATE_MODE not in ("off", "shadow", "enforce"):
     STRUCTURE_GATE_MODE = "enforce"
-STRUCTURE_REQUIRE_DATA = _get_bool("STRUCTURE_REQUIRE_DATA", False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
-STRUCTURE_BEARISH_BLOCK = _get_bool("STRUCTURE_BEARISH_BLOCK", True)                    # bearish daily trend / fresh (not failed) bearish BOS
+STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
+STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
-STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float("STRUCTURE_MAX_CHASE_ATR", 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
-STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float("STRUCTURE_MAX_STRETCH_ATR", 5.0))      # live price above the daily EMA20, in daily ATR
-STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float("STRUCTURE_MIN_ROOM_ATR", 0.3))            # room to the next daily resistance, in daily ATR
+STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
+STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_STRETCH_ATR"), 5.0))      # live price above the daily EMA20, in daily ATR
+STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float(_ps("STRUCTURE_MIN_ROOM_ATR"), 0.3))            # room to the next daily resistance, in daily ATR
 STRUCTURE_MAX_AGE_DAYS = max(0.0, _get_float("STRUCTURE_MAX_AGE_DAYS", 7.0))            # last structure bar older than this = stale = no opinion
 STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)) # live price vs structure close further apart = split / bad data = no opinion
 STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
@@ -1050,6 +1057,7 @@ STRUCTURE_FAIL_TTL_S = max(10.0, _get_float("STRUCTURE_FAIL_TTL_S", 60.0))
 # and followed for 20 trading days (T+1/5/10/20 return, MFE, MAE, first touch of the structural target vs stop), so "did the gate turn away the
 # weaker ones?" has a measured answer (GET /structure/edge). One INSERT per symbol per day; the evaluator loop only reads daily history from
 # market-data. Never blocks or changes an entry.
+STRUCTURE_EDGE_MIN_N = max(5, _get_int("STRUCTURE_EDGE_MIN_N", 100))                  # group365: finished rows per side before the edge / calibration reports conclude (was 20)
 STRUCTURE_OBS_ENABLED = _get_bool("STRUCTURE_OBS_ENABLED", True)
 STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _get_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 1800.0))
 STRUCTURE_OBS_BATCH = max(1, _get_int("STRUCTURE_OBS_BATCH", 60))                         # symbols fetched per pass

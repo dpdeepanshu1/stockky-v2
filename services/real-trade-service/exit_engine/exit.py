@@ -1559,6 +1559,61 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 held += 1
                 continue
 
+            # ── 3b. Daily market structure while the position is open (group365) ───────────────────────────────
+            # A fresh bearish CHOCH / BOS that formed AFTER entry, with the trade in profit, raises the stop (never lowers it); in `exit`
+            # mode it sells. With the trade in profit the stop also follows the newest structural higher-low. Fail-open: any problem reading
+            # structure leaves the position exactly as the other checks would treat it.
+            if config.STRUCTURE_EXIT_MODE != "off":
+                try:
+                    from entry_engine import structure_gate as _sg_x
+                    from exit_engine import structure_exit as _sx
+                    # cache only: a slow gateway must never delay a stop check. A miss starts a background fetch (no opinion this cycle).
+                    _sx_sum = _sg_x.peek_summary(position.symbol)
+                    if _sx_sum is None:
+                        _sg_x.warm(position.symbol)
+                    _sx_v = _sx.evaluate(_sx_sum, entry_price=position.avg_entry_price, ltp=ltp, current_stop=position.current_stop,
+                                         atr=getattr(tick, "atr", None), opened_at=position.opened_at)
+                    _sx_act = _sx_v.get("action")
+                    _sx_apply = _sx_act in ("tighten", "trail", "exit") and _sx_v.get("mode") in ("tighten", "exit")
+                    _sx.record(position.symbol, mode, _sx_v, applied=_sx_apply, ltp=ltp)
+                    if _sx_apply and _sx_act in ("tighten", "trail") and _sx_v.get("new_stop") is not None:
+                        _old_stop = position.current_stop
+                        position.current_stop = float(_sx_v["new_stop"])
+                        _why = "; ".join(_sx_v.get("reasons") or []) or "daily structure"
+                        db.add(models.TradePositionEvent(
+                            position_id=position.id,
+                            event_type="STRUCTURE_TIGHTEN" if _sx_act == "tighten" else "STRUCTURE_TRAIL",
+                            detail=f"Stop \u20b9{_old_stop} \u2192 \u20b9{position.current_stop:.2f} (LTP \u20b9{ltp:.2f}): {_why}.",
+                        ))
+                        db.commit()
+                        _write_exit_decision(
+                            db, position, "TRAIL_STOP",
+                            f"Structure {'tighten' if _sx_act == 'tighten' else 'trail'}: stop to \u20b9{position.current_stop:.2f} - {_why}.", ltp,
+                        )
+                        trailed += 1
+                        continue
+                    if _sx_act == "exit":
+                        _why = "; ".join(_sx_v.get("reasons") or []) or "bearish daily structure"
+                        _write_exit_decision(
+                            db, position, "FULL_EXIT",
+                            f"Structure exit: {_why}. Position in profit at \u20b9{ltp:.2f}; closing {position.qty_open} shares.", ltp,
+                        )
+                        if mode == "DEMO":
+                            close_position(db, position, tick, position.qty_open, "structure_exit")
+                            full_exits += 1
+                        else:
+                            if _send_real_sell(db, position, position.qty_open, "structure_exit"):
+                                full_exits += 1
+                            else:
+                                held += 1
+                        continue
+                except Exception as _sx_err:  # noqa: BLE001
+                    try:
+                        db.rollback()
+                    except Exception as _rb_err:  # noqa: BLE001
+                        logger.debug("structure exit rollback failed for %s: %s", position.symbol, _rb_err)
+                    logger.debug("structure exit check failed for %s (ignored): %s", position.symbol, _sx_err)
+
             # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────
             # Creates a free-ride floor: once the trade is meaningfully in profit
             # (defined as 1×ATR gain), we protect that by moving stop to entry.

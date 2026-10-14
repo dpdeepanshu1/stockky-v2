@@ -250,6 +250,8 @@ export interface StructureStatusDoc {
   mode?: string; gate_mode?: string; hours?: number;
   process?: Record<string, any> | null;
   stored?: Record<string, any> | null;
+  /** group365 (real-trade only): the structure EXIT counters while positions are open. */
+  exit?: Record<string, any> | null;
 }
 export type StructureStatusKind = "real" | "position";
 export interface StatusCount { key: string; label: string; n: number }
@@ -491,7 +493,7 @@ export function calibrationView(raw: StructureEdgeDoc | null | undefined): Calib
   if (!c || typeof c !== "object") return null;
   const empty: CalibrationView = { available: false, headline: "", rules: [], score: null, suggestions: [], note: null, error: null };
   if (typeof c.error === "string") return { ...empty, error: c.error };
-  const samples = num(c.samples) ?? 0, finished = num(c.finished) ?? 0, minN = num(c.min_n) ?? 20, h = num(c.horizon);
+  const samples = num(c.samples) ?? 0, finished = num(c.finished) ?? 0, minN = num(c.min_n) ?? 100, h = num(c.horizon);
   if (samples === 0) return { ...empty, headline: "Calibration starts once verdicts have a finished outcome." };
   const enough = c.note !== "insufficient_sample";
   const headline = `Calibration (advisory) · ${finished} of ${samples} rows finished${h != null ? ` at ${h} days` : ""}`
@@ -650,4 +652,45 @@ export function tradeStructureTally(trades: unknown, minEach = 20): TradeStructu
   t.supportedAvgPct = t.supported ? Math.round(sSum / t.supported * 100) / 100 : null;
   t.smallSample = t.flagged < minEach || t.supported < minEach;
   return t;
+}
+
+
+// ── group365: structure EXIT view (real-trade GET /structure/status/{mode} -> exit) ─────────────────────────────────────────────────
+export interface ExitRecent { symbol: string; text: string; applied: boolean }
+export interface StructureExitView {
+  present: boolean; mode: string; modeLabel: string; modeTone: Tone; evaluated: number; noOpinion: number; bearish: number;
+  tightened: number; trailed: number; exited: number; logOnly: number; trailEnabled: boolean; recent: ExitRecent[]; headline: string;
+}
+const EXIT_MODE: Record<string, { label: string; tone: Tone }> = {
+  tighten: { label: "Tightening stops", tone: "good" },
+  exit: { label: "Tightening + selling", tone: "good" },
+  log: { label: "Watching only", tone: "warn" },
+  off: { label: "Off", tone: "mute" },
+};
+const EXIT_KIND: Record<string, string> = { bearish_choch: "bearish change of character", bearish_bos: "bearish break of structure" };
+
+/** Plain-words model of the exit counters. Never throws; `present` is false when the service sent no exit block (older build / error). */
+export function exitView(raw: StructureStatusDoc | null | undefined): StructureExitView {
+  const e = (raw && typeof raw === "object" && raw.exit && typeof raw.exit === "object" ? raw.exit : null) as Record<string, any> | null;
+  const c = (e && e.counters && typeof e.counters === "object" ? e.counters : {}) as Record<string, any>;
+  const mode = e && typeof e.mode === "string" ? e.mode : "unknown";
+  const mi = EXIT_MODE[mode] || { label: "Unknown", tone: "mute" as Tone };
+  const recent: ExitRecent[] = (e && Array.isArray(e.recent) ? e.recent : []).slice(0, 8).map((r: any) => {
+    const sig = Array.isArray(r?.signals) ? r.signals.map((k: unknown) => EXIT_KIND[String(k)] || String(k)).join(" + ") : "";
+    const act = r?.action === "tighten" ? "stop raised" : r?.action === "trail" ? "stop follows structure" : r?.action === "exit" ? "sold" : "noted";
+    const ns = num(r?.new_stop);
+    return { symbol: String(r?.symbol ?? "?"), applied: !!r?.applied,
+      text: `${sig ? sig + " - " : ""}${r?.applied ? act : act + " (not applied)"}${ns != null ? ` to ${ns.toFixed(2)}` : ""}` };
+  });
+  const v: StructureExitView = {
+    present: !!e, mode, modeLabel: mi.label, modeTone: mi.tone, evaluated: num(c.evaluated) ?? 0, noOpinion: num(c.no_opinion) ?? 0,
+    bearish: num(c.bearish) ?? 0, tightened: num(c.tightened) ?? 0, trailed: num(c.trailed) ?? 0, exited: num(c.exited) ?? 0,
+    logOnly: num(c.log_only) ?? 0, trailEnabled: !!(e && e.trail_enabled), recent, headline: "",
+  };
+  if (!v.present) v.headline = "No exit data from this service build.";
+  else if (v.mode === "off") v.headline = "Structure exit is off: open positions use only the price stops.";
+  else if (!v.evaluated) v.headline = "No open position has been checked since the service restarted.";
+  else v.headline = `${v.evaluated} check${v.evaluated === 1 ? "" : "s"} since restart · ${v.bearish} bearish · ${v.tightened} stop${v.tightened === 1 ? "" : "s"} raised`
+    + `${v.trailed ? ` · ${v.trailed} trailed` : ""}${v.exited ? ` · ${v.exited} sold` : ""}.`;
+  return v;
 }

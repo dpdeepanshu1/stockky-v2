@@ -372,6 +372,7 @@ _cache: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
 
 def reset() -> None:
     _cache.clear()
+    _inflight.clear()
     reset_stats()
 
 
@@ -407,6 +408,44 @@ async def fetch_summary(symbol: str) -> Optional[Dict[str, Any]]:
         for k in [k for k, v in _cache.items() if v[0] <= now][:1000]:
             _cache.pop(k, None)
     return summary
+
+
+_inflight: set = set()
+
+
+def peek_summary(symbol: str) -> Optional[Dict[str, Any]]:
+    """group365: the cached gateway summary for `symbol`, or None. Never does I/O - the exit loop uses this so a slow gateway can never delay a
+    stop check. A cached failure also reads as None (no opinion)."""
+    try:
+        hit = _cache.get(str(symbol or "").strip().upper())
+        return hit[1] if hit is not None and hit[0] > time.monotonic() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def warm(symbol: str) -> bool:
+    """group365: start a background fetch for `symbol` when nothing fresh is cached (one in flight per symbol). True when a task was started."""
+    try:
+        import asyncio
+        sym = str(symbol or "").strip().upper()
+        hit = _cache.get(sym)
+        if not sym or not config.STRUCTURE_FETCH_ENABLED or sym in _inflight or (hit is not None and hit[0] > time.monotonic()):
+            return False
+        loop = asyncio.get_running_loop()
+        _inflight.add(sym)
+
+        async def _run() -> None:
+            try:
+                await fetch_summary(sym)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                _inflight.discard(sym)
+
+        loop.create_task(_run())
+        return True
+    except Exception:  # noqa: BLE001 - no running loop etc.
+        return False
 
 
 async def get_summary(symbol: str, raw_payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:

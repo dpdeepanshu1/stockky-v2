@@ -145,7 +145,7 @@ def _row_dict(r: Any) -> Dict[str, Any]:
     return {"symbol": r.symbol, "mode": r.mode, "source": r.source, "obs_day": r.obs_day, "obs_ts": r.obs_ts, "price": r.price, "stop": r.stop,
             "target": r.target, "atr": r.atr, "verdict": r.verdict, "gate_mode": r.gate_mode, "ret_1d": r.ret_1d, "ret_5d": r.ret_5d,
             "ret_10d": r.ret_10d, "ret_20d": r.ret_20d, "mfe_pct": r.mfe_pct, "mae_pct": r.mae_pct, "first_touch": r.first_touch,
-            "bars_seen": r.bars_seen or 0, "complete": bool(r.is_complete)}
+            "bars_seen": r.bars_seen or 0, "complete": bool(r.is_complete), "summary_json": getattr(r, "summary_json", None)}
 
 
 def fetch_daily_bars(symbol: str, lookback_days: int) -> List[Any]:
@@ -222,6 +222,7 @@ def report(db, mode: str, days: int = 60, recent: int = 40, min_n: int = 20, now
     q = _since(db, str(mode).upper(), since)
     rows = [_row_dict(r) for r in q]
     agg = _observation.aggregate(rows, min_n=min_n)
+    cal = _calibration(_observation, rows, min_n)
     keep = ("symbol", "obs_day", "price", "stop", "target", "verdict", "gate_mode", "ret_1d", "ret_5d", "ret_10d", "ret_20d", "mfe_pct", "mae_pct",
             "first_touch", "bars_seen", "complete")
     out_rows = []
@@ -229,7 +230,17 @@ def report(db, mode: str, days: int = 60, recent: int = 40, min_n: int = 20, now
         item = {k: r.get(k) for k in keep}
         item["reasons"] = _loads(raw.reasons_json)
         out_rows.append(item)
-    return {"mode": str(mode).upper(), "days": days, "min_n": min_n, "stats": agg, "recent": out_rows, "process": stats()}
+    return {"mode": str(mode).upper(), "days": days, "min_n": min_n, "stats": agg, "calibration": cal, "recent": out_rows, "process": stats()}
+
+
+def _calibration(_observation: Any, rows: list, min_n: int) -> Dict[str, Any]:
+    """group362: advisory calibration of THIS gate's thresholds from its observed outcomes. Never raises; never changes a setting."""
+    try:
+        th = {"chase_atr": float(config.STRUCTURE_MAX_CHASE_ATR), "stretch_atr": float(config.STRUCTURE_MAX_STRETCH_ATR),
+              "room_atr": float(config.STRUCTURE_MIN_ROOM_ATR), "rr": float(config.STRUCTURE_MIN_RR), "bearish_bos_bars": int(config.STRUCTURE_BEARISH_BOS_BARS)}
+        return _observation.calibrate(rows, thresholds=th, min_n=min_n)
+    except Exception as e:  # noqa: BLE001
+        return {"advisory": True, "error": str(e)[:160]}
 
 
 def _loads(raw: Any) -> list:

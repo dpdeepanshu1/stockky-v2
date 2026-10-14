@@ -1015,6 +1015,8 @@ BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
 BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
 BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
 BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", True)                          # Group 349 / live since group354: Market Board zones/swings from stockky_ms.compat_board (any error falls back to the legacy code per call; set 0 to force legacy)
+BOARD_AB_ENABLED = _get_bool("BOARD_AB_ENABLED", True)                              # Group 362: while the engine serves the board, also run the legacy zone maths on the same bars and count the differences (/board/status ms_engine.ab); observational, never changes what is served
+BOARD_AB_MAX_COMPARES = max(0, _get_int("BOARD_AB_MAX_COMPARES", 100000))             # stop comparing after this many per process (0 = no cap); a trading day is roughly 20-25k fresh computations
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)

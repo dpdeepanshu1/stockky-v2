@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types structureView.test.mjs  (Node >= 22.6)
 import assert from "node:assert/strict";
-import { gateStatus, emptyReason, oneLine, groups, invalidation, badEntryText, stopLine, tally, coveragePct } from "./structureView.ts";
+import { tradeEntryView, tradeStructureTally, prepareNoteLines, gateStatus, emptyReason, oneLine, groups, invalidation, badEntryText, stopLine, tally, coveragePct } from "./structureView.ts";
 
 const ok = { opinion: "ok", would_reject: false, enforced: false, reasons: [],
   live: { chase_atr: 0.3, stretch_atr: 1.2, room_atr: 3, rr: 1.9 },
@@ -142,3 +142,85 @@ assert.deepEqual(ov.lines.map(l => l.kind + ":" + l.y), ["stop:95", "target:112"
 assert.equal(ov.zones.length, 1); assert.equal(ov.zones[0].label, "Demand zone fresh");
 assert.equal(chartOverlay(null).empty, true); assert.equal(chartOverlay({ quality: "insufficient" }).empty, true); assert.equal(chartOverlay("x").empty, true);
 console.log("chartOverlay tests ok");
+
+// ── group357: sniper card structure ─────────────────────────────────────────────────────────────────────────────────────────
+import { sniperStructureView, sniperRejectedText } from "./structureView.ts";
+assert.equal(sniperStructureView(null), null); assert.equal(sniperStructureView("x"), null); assert.equal(sniperStructureView(undefined), null);
+const sv0 = sniperStructureView({ opinion: "no_opinion", no_data: "no structure summary" });
+assert.equal(sv0.label, "No structure read for this stock"); assert.equal(sv0.tone, "mute"); assert.equal(sv0.stop, null); assert.equal(sv0.rr, null);
+const sv1 = sniperStructureView({ opinion: "ok", would_reject: false, enforced: false, stop: 96, target: 112, rr: 3, reasons: [] });
+assert.equal(sv1.tone, "good"); assert.equal(sv1.stop, "₹96.00"); assert.equal(sv1.target, "₹112.00"); assert.equal(sv1.rr, "3.00");
+const sv2 = sniperStructureView({ opinion: "ok", would_reject: true, enforced: false, reasons: ["chase 2.5 ATR"], live: { rr: 1.04 } });
+assert.equal(sv2.tone, "warn"); assert.match(sv2.label, /shadow, not applied/); assert.deepEqual(sv2.reasons, ["chase 2.5 ATR"]); assert.equal(sv2.rr, "1.04");
+assert.equal(sniperStructureView({ opinion: "ok", would_reject: true, enforced: true }).tone, "bad");
+assert.equal(sniperStructureView({ opinion: "ok", stop: -3, target: "x", rr: NaN }).stop, null);
+assert.equal(sniperRejectedText("enforce", []), null); assert.equal(sniperRejectedText("off", [{ symbol: "A" }]), null); assert.equal(sniperRejectedText("enforce", null), null);
+assert.equal(sniperRejectedText("enforce", [{ symbol: "TCS" }]), "1 setup turned away by daily structure (good stock, bad entry): TCS");
+assert.match(sniperRejectedText("enforce", ["A", "B", "C", "D", "E"].map(symbol => ({ symbol }))), /^5 setups .*: A, B, C \+2 more$/);
+console.log("sniperStructureView tests ok");
+
+// group358: PREPARE refresh notes
+assert.deepEqual(prepareNoteLines(null), []); assert.deepEqual(prepareNoteLines([1]), []); assert.deepEqual(prepareNoteLines("x"), []);
+const pn = prepareNoteLines({ EVT: { headline: "Structure event: bullish change of character", turned_bad: false },
+  OLD: { headline: "Structure now blocks entry: bearish", turned_bad: true, flipped: false },
+  FLIP: { headline: "Structure now blocks entry: chase (it passed at the last stored price)", turned_bad: true, flipped: true },
+  EMPTY: { headline: "  " }, NUL: null });
+assert.deepEqual(pn.map(x => x.symbol), ["FLIP", "OLD", "EVT"]); assert.equal(pn[0].tone, "warn"); assert.equal(pn[2].tone, "good");
+assert.equal(prepareNoteLines({ A: { headline: "a" }, B: { headline: "b" } }, 1).length, 1); assert.equal(prepareNoteLines({ A: { headline: "a" } }, 0).length, 0);
+console.log("prepareNoteLines tests ok");
+
+// group359: entry-time structure on paper trades
+const entrySnap = { v: 1, mode: "shadow", applied: false, original_decision: "BUY NOW", policy_decision: "WAIT", rules: [{ reason: "chasing: 2.1 ATR" }],
+  levels: { stop: 96, target: 112, rr: 1.9 }, summary_line: "Trend up · BOS up 2d" };
+for (const bad of [null, undefined, {}, "x", 5, { mode: "off" }]) { const v = tradeEntryView(bad); assert.equal(v.tone, "mute"); assert.equal(v.flagged, null); assert.match(v.label, /before snapshots/); }
+let entryV = tradeEntryView(entrySnap);
+assert.equal(entryV.tone, "warn"); assert.equal(entryV.flagged, true); assert.match(entryV.label, /would have changed BUY NOW → WAIT at entry \(shadow, not applied\)/);
+assert.equal(entryV.levels, "Structural stop ₹96.00 · target ₹112.00 · R:R 1.90"); assert.equal(entryV.line, "Trend up · BOS up 2d"); assert.deepEqual(entryV.reasons, ["chasing: 2.1 ATR"]);
+entryV = tradeEntryView({ ...entrySnap, applied: true }); assert.equal(entryV.tone, "bad"); assert.doesNotMatch(entryV.label, /shadow/); assert.equal(entryV.short, "flagged");
+entryV = tradeEntryView({ mode: "shadow", rules: [] }); assert.equal(entryV.tone, "good"); assert.equal(entryV.flagged, false); assert.equal(entryV.levels, null);
+entryV = tradeEntryView({ mode: "full", no_opinion: "structure stale", rules: [{ reason: "x" }] }); assert.equal(entryV.tone, "mute"); assert.equal(entryV.flagged, null); assert.match(entryV.label, /structure stale/);
+assert.equal(tradeEntryView({ mode: "shadow", rules: [{ reason: " " }, null, { reason: 5 }] }).flagged, false);   // blank reasons are not a flag
+assert.equal(tradeEntryView({ mode: "shadow", rules: [], levels: { stop: -1, target: "x", rr: NaN } }).levels, null);
+
+const closedT = (structure, pnl_pct, status = "CLOSED") => ({ status, pnl_pct, structure });
+const tallyR = tradeStructureTally([closedT(entrySnap, -2), closedT(entrySnap, -4), closedT({ mode: "shadow", rules: [] }, 3), closedT(null, 9), closedT({ mode: "shadow", no_opinion: "stale" }, 1),
+  closedT(entrySnap, null), closedT(entrySnap, 5, "OPEN"), null, "x"], 20);
+assert.deepEqual(tallyR, { closed: 6, withSnapshot: 4, flagged: 2, supported: 1, flaggedAvgPct: -3, supportedAvgPct: 3, smallSample: true });
+assert.equal(tradeStructureTally(undefined).closed, 0); assert.equal(tradeStructureTally("x").flaggedAvgPct, null);
+const manyT = [...Array(20)].map(() => closedT(entrySnap, -1)).concat([...Array(20)].map(() => closedT({ mode: "shadow", rules: [] }, 1)));
+assert.equal(tradeStructureTally(manyT).smallSample, false); assert.equal(tradeStructureTally(manyT, 21).smallSample, true);
+console.log("tradeEntryView tests ok");
+
+// ── group362: calibrationView ────────────────────────────────────────────────────────────────────────────────────────────────
+import { calibrationView } from "./structureView.ts";
+assert.equal(calibrationView(null), null); assert.equal(calibrationView({}), null); assert.equal(calibrationView({ calibration: null }), null);
+assert.equal(calibrationView({ calibration: { error: "boom" } }).error, "boom"); assert.equal(calibrationView({ calibration: { error: "boom" } }).available, false);
+const cal0 = calibrationView({ calibration: { samples: 0, finished: 0 } });
+assert.equal(cal0.available, false); assert.match(cal0.headline, /starts once/);
+const calSmall = calibrationView({ calibration: { samples: 12, finished: 5, min_n: 20, horizon: 5, note: "insufficient_sample", rules: {}, suggestions: [] } });
+assert.equal(calSmall.available, true); assert.match(calSmall.headline, /5 of 12 rows finished at 5 days · needs 20 to judge/); assert.equal(calSmall.note, "No rule has turned anything away yet.");
+const calFull = calibrationView({ calibration: {
+  advisory: true, samples: 120, finished: 90, min_n: 20, horizon: 10, note: null,
+  rules: {
+    chase: { rejected: { n: 40, mean: -2 }, passed: { n: 80, mean: 1.5 }, edge: 3.5, verdict: "helps", advice: "keep", current: 1.5, suggested: 2, walk_forward: { oos_edge: 1.2, stable: true } },
+    rr: { rejected: { n: 0 }, passed: { n: 120 }, edge: null, verdict: "insufficient_sample", advice: "collect_more", current: 1.2 },
+    room: { rejected: { n: 25, mean: 2 }, passed: { n: 95, mean: 0.5 }, edge: -1.5, verdict: "hurts", advice: "review_loosen", current: 0.5 },
+    stretch: { rejected: { n: 3 }, passed: { n: 117 }, edge: null, advice: "weird-value", current: 3 },
+  },
+  score: { monotonic: true, spread: 2.34, n: 90 },
+  suggestions: [{ rule: "chase", from: 1.5, to: 2, oos_edge: 1.234 }],
+} });
+assert.equal(calFull.available, true); assert.equal(calFull.error, null); assert.equal(calFull.note, null);
+assert.match(calFull.headline, /90 of 120 rows finished at 10 days$/);
+assert.deepEqual(calFull.rules.map(r => r.rule), ["chase", "room", "stretch"]);                 // rr never tripped, so it is not listed
+const ch = calFull.rules[0];
+assert.equal(ch.label, "Chasing past the zone"); assert.equal(ch.edge, "+3.5%"); assert.equal(ch.tone, "good"); assert.equal(ch.current, "1.5"); assert.equal(ch.suggested, "2");
+assert.equal(ch.rejectedN, 40); assert.equal(ch.passedN, 80); assert.match(ch.advice, /^Keep/);
+assert.equal(calFull.rules[1].tone, "warn"); assert.equal(calFull.rules[1].edge, "−1.5%"); assert.match(calFull.rules[1].advice, /^Review/);
+assert.equal(calFull.rules[2].tone, "mute"); assert.equal(calFull.rules[2].advice, "No clear effect yet"); assert.equal(calFull.rules[2].edge, "—");    // unknown advice -> neutral
+assert.equal(calFull.suggestions[0], "Chasing past the zone: 1.5 → 2 (out-of-sample +1.2%)");
+assert.match(calFull.score, /higher structure score went with better outcomes \(top vs bottom third \+2\.3%\)/i);
+assert.match(calibrationView({ calibration: { samples: 50, finished: 50, score: { monotonic: false, spread: -0.4 }, rules: {} } }).score, /did not rank outcomes cleanly \(top vs bottom third −0\.4%\)/);
+assert.equal(calibrationView({ calibration: { samples: 50, finished: 50, score: { note: "insufficient_sample" }, rules: {} } }).score, null);
+assert.equal(calibrationView({ calibration: { samples: 5, finished: 5, rules: "junk", suggestions: "junk", score: "junk" } }).rules.length, 0);   // garbage never throws
+console.log("structureView group362 calibration ok");

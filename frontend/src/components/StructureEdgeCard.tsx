@@ -3,7 +3,7 @@
 // Until enough observations have finished the card says so instead of drawing a conclusion.
 import { useCallback, useEffect, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
-import { edgeView, pctText, type StructureEdgeDoc, type Tone } from "../structureView";
+import { calibrationView, edgeView, pctText, type StructureEdgeDoc, type Tone } from "../structureView";
 
 const TONE: Record<Tone, string> = { good: "text-signal-buy", bad: "text-signal-sell", warn: "text-signal-hold", mute: "text-mist" };
 
@@ -28,6 +28,7 @@ export default function StructureEdgeCard({ load, title = "Structure gate — wh
   }, [refresh]);
 
   const v = edgeView(raw);
+  const cal = calibrationView(raw);
   return (
     <div className="rounded-2xl border border-slate bg-graphite p-3 font-display tabular-nums text-[11px]" data-testid="structure-edge-card">
       <div className="flex items-start justify-between gap-2">
@@ -71,6 +72,33 @@ export default function StructureEdgeCard({ load, title = "Structure gate — wh
             Average move after the verdict. A positive difference means the stocks the gate let through did better than the ones it turned away.
             {v.rejectedN > 0 && ` Of ${v.rejectedN} turned away: ${v.stopFirstRejected} hit the structural stop first, ${v.targetFirstRejected} the target.`}
           </p>
+          {cal && (
+            <div className="border-t border-slate/40 pt-2" data-testid="structure-calibration">
+              <p className="uppercase tracking-widest text-[9px] text-mist">{cal.error ? "Calibration (advisory)" : cal.headline}</p>
+              {cal.error && <p className="text-signal-sell">{cal.error}</p>}
+              {cal.note && <p className="text-mist">{cal.note}</p>}
+              {cal.rules.length > 0 && (
+                <ul className="mt-1 space-y-1">
+                  {cal.rules.map(r => (
+                    <li key={r.rule} className="flex items-start justify-between gap-2">
+                      <span className="min-w-0"><span className="text-paper">{r.label}</span>
+                        <span className="block text-mist">turned away {r.rejectedN} · let through {r.passedN}{r.current ? ` · limit ${r.current}` : ""}</span>
+                        <span className={`block ${TONE[r.tone]}`}>{r.advice}</span></span>
+                      <span className={`shrink-0 ${r.edge.startsWith("+") ? "text-signal-buy" : r.edge.startsWith("−") ? "text-signal-sell" : "text-mist"}`}>{r.edge}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {cal.score && <p className="mt-1 text-mist">{cal.score}</p>}
+              {cal.suggestions.length > 0 && (
+                <div className="mt-1 text-signal-hold">
+                  <span className="uppercase tracking-widest text-[9px]">Worth testing (not applied)</span>
+                  {cal.suggestions.map(t => <p key={t}>{t}</p>)}
+                </div>
+              )}
+              <p className="mt-1 text-[9px] text-mist">Advisory only. Rows overlap in time, so treat this as a hint; nothing here changes a setting.</p>
+            </div>
+          )}
           {v.recent.length > 0 && (
             <ul className="space-y-1">
               {v.recent.map((r, i) => (

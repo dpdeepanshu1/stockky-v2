@@ -404,6 +404,16 @@ export interface StructureEdgeDoc {
     by_verdict?: Record<string, EdgeVerdictStats>; edge?: Record<string, { edge?: number; rejected_n?: number; passed_n?: number }>;
   } | null;
   recent?: EdgeRow[]; process?: Record<string, any> | null;
+  calibration?: CalibrationDoc | null;     // group362: advisory calibration from the same observations (never applied automatically)
+}
+export interface CalibrationRuleDoc {
+  rejected?: { n?: number; mean?: number | null }; passed?: { n?: number; mean?: number | null }; edge?: number | null; verdict?: string; advice?: string;
+  current?: number | null; suggested?: number | null; walk_forward?: { oos_edge?: number | null; stable?: boolean | null } | null;
+}
+export interface CalibrationDoc {
+  advisory?: boolean; horizon?: number; min_n?: number; samples?: number; finished?: number; note?: string | null; error?: string;
+  rules?: Record<string, CalibrationRuleDoc>; score?: { monotonic?: boolean | null; spread?: number | null; n?: number; note?: string } | null;
+  suggestions?: Array<{ rule?: string; from?: number | null; to?: number | null; oos_edge?: number | null }>;
 }
 export interface EdgeHorizonView { h: string; rejected: number | null; passed: number | null; edge: number | null; rejectedN: number; passedN: number }
 export interface EdgeView {
@@ -457,6 +467,56 @@ export function edgeView(raw: StructureEdgeDoc | null | undefined): EdgeView {
   };
 }
 
+// ── group362: calibration view (advisory) ──────────────────────────────────────────────────────────────────────────────────────────
+export interface CalibrationRuleView { rule: string; label: string; rejectedN: number; passedN: number; edge: string; advice: string; tone: Tone; current: string | null; suggested: string | null }
+export interface CalibrationView {
+  available: boolean; headline: string; rules: CalibrationRuleView[]; score: string | null; suggestions: string[]; note: string | null; error: string | null;
+}
+const RULE_LABEL: Record<string, string> = {
+  chase: "Chasing past the zone", stretch: "Stretched above EMA20", room: "Little room to resistance", rr: "Reward : risk too low",
+  stop_wide: "Structural stop too wide", bearish: "Bearish structure",
+};
+const ADVICE: Record<string, { t: string; tone: Tone }> = {
+  keep: { t: "Keep — it turns away the weaker entries", tone: "good" },
+  review_loosen: { t: "Review — what it turned away did better", tone: "warn" },
+  no_evidence: { t: "No clear effect yet", tone: "mute" },
+  collect_more: { t: "Needs more finished observations", tone: "mute" },
+};
+const thText = (v: unknown): string | null => { const n = num(v); return n == null ? null : String(Math.round(n * 100) / 100); };
+
+/** The advisory calibration block of an edge reply, or null when the backend did not send one. Nothing here is a setting change: it only words
+ *  what the observations say, and a threshold hint appears only when the backend's out-of-sample test supports it. */
+export function calibrationView(raw: StructureEdgeDoc | null | undefined): CalibrationView | null {
+  const c = raw && typeof raw === "object" ? raw.calibration : null;
+  if (!c || typeof c !== "object") return null;
+  const empty: CalibrationView = { available: false, headline: "", rules: [], score: null, suggestions: [], note: null, error: null };
+  if (typeof c.error === "string") return { ...empty, error: c.error };
+  const samples = num(c.samples) ?? 0, finished = num(c.finished) ?? 0, minN = num(c.min_n) ?? 20, h = num(c.horizon);
+  if (samples === 0) return { ...empty, headline: "Calibration starts once verdicts have a finished outcome." };
+  const enough = c.note !== "insufficient_sample";
+  const headline = `Calibration (advisory) · ${finished} of ${samples} rows finished${h != null ? ` at ${h} days` : ""}`
+    + (enough ? "" : ` · needs ${minN} to judge`);
+  const rules: CalibrationRuleView[] = [];
+  for (const [rule, r] of Object.entries(c.rules && typeof c.rules === "object" ? c.rules : {})) {
+    const rejectedN = num(r?.rejected?.n) ?? 0, passedN = num(r?.passed?.n) ?? 0;
+    if (rejectedN === 0) continue;                       // a rule that never tripped has nothing to judge
+    const a = ADVICE[String(r?.advice)] ?? ADVICE.no_evidence;
+    const sug = thText(r?.suggested);
+    rules.push({ rule, label: RULE_LABEL[rule] ?? rule, rejectedN, passedN, edge: pctText(r?.edge), advice: a.t, tone: a.tone, current: thText(r?.current), suggested: sug });
+  }
+  const suggestions = (Array.isArray(c.suggestions) ? c.suggestions : []).map(x => {
+    const gain = num(x?.oos_edge);
+    return `${RULE_LABEL[String(x?.rule)] ?? String(x?.rule ?? "")}: ${thText(x?.from) ?? "?"} → ${thText(x?.to) ?? "?"}${gain != null ? ` (out-of-sample ${pctText(gain)})` : ""}`;
+  });
+  const sc = c.score && typeof c.score === "object" ? c.score : null;
+  const spread = sc ? num(sc.spread) : null;
+  const score = sc && typeof sc.monotonic === "boolean"
+    ? (sc.monotonic ? "A higher structure score went with better outcomes" : "The structure score did not rank outcomes cleanly") + (spread != null ? ` (top vs bottom third ${pctText(spread)})` : "")
+    : null;
+  const note = rules.length === 0 ? "No rule has turned anything away yet." : null;
+  return { available: true, headline, rules, score, suggestions, note, error: null };
+}
+
 // ── group356: chart overlay (StockChart) built from the gateway's market_structure block ──────────────────────────────────────────
 export interface OverlayLine { y: number; label: string; kind: "stop" | "target" | "support" | "resistance" }
 export interface OverlayZone { y1: number; y2: number; label: string; kind: "demand" | "imbalance" }
@@ -486,4 +546,108 @@ export function chartOverlay(block: any, spanPct = 25): ChartOverlay {
   }
   out.empty = out.lines.length === 0 && out.zones.length === 0;
   return out;
+}
+
+// ── group357 (WS-4): the structure record on a Buy Sniper card (buy_sniper.py `structure`) ──────────────────────────────────────────
+export interface SniperStructure {
+  gate_mode?: string; opinion?: string; would_reject?: boolean; enforced?: boolean; reasons?: string[]; no_data?: string | null;
+  live?: StructureLive; stop?: number | null; target?: number | null; rr?: number | null;
+}
+export interface SniperStructureView { label: string; tone: Tone; stop: string | null; target: string | null; rr: string | null; reasons: string[] }
+
+/** Plain-word view of a sniper card's structure record; null when the gate was off / the card carries none. Shadow is never described as applied. */
+export function sniperStructureView(st: SniperStructure | null | undefined): SniperStructureView | null {
+  if (!st || typeof st !== "object") return null;
+  const inr = (v: unknown) => { const n = num(v); return n != null && n > 0 ? `₹${n.toFixed(2)}` : null; };
+  const rr = num(st.rr) ?? num(st.live?.rr);
+  const reasons = Array.isArray(st.reasons) ? st.reasons.map(String) : [];
+  let label: string, tone: Tone;
+  if (st.opinion !== "ok") { label = "No structure read for this stock"; tone = "mute"; }
+  else if (!st.would_reject) { label = "Daily structure supports the entry"; tone = "good"; }
+  else if (st.enforced) { label = "Blocked by daily structure"; tone = "bad"; }
+  else { label = "Would be blocked — shadow, not applied"; tone = "warn"; }
+  return { label, tone, stop: inr(st.stop), target: inr(st.target), rr: rr == null ? null : rr.toFixed(2), reasons };
+}
+
+/** One line for the modal footer: how many candidates the daily-structure gate turned away. null when none / the gate was off. */
+export function sniperRejectedText(mode: unknown, rejected: Array<{ symbol?: string; reasons?: string[] }> | null | undefined): string | null {
+  if (mode === "off" || !Array.isArray(rejected) || rejected.length === 0) return null;
+  const syms = rejected.map(r => String(r?.symbol ?? "").trim()).filter(Boolean);
+  const n = syms.length;
+  const shown = syms.slice(0, 3).join(", ") + (n > 3 ? ` +${n - 3} more` : "");
+  return `${n} setup${n === 1 ? "" : "s"} turned away by daily structure (good stock, bad entry): ${shown}`;
+}
+
+// ── group358: PREPARE-to-Buy refresh notes (api-gateway /data-feed/refresh-prepare-to-buy `structure_notes`) ────────────────────────
+export interface PrepareStructureNote { headline?: string | null; turned_bad?: boolean; flipped?: boolean }
+export interface PrepareNoteLine { symbol: string; text: string; tone: Tone }
+
+/** The refresh reasons as display lines: structure turned bad first (a flip, i.e. it passed at the old price, leads), then events. Log-only
+ *  information: nothing here changes a decision. [] for anything that is not a usable notes object. */
+export function prepareNoteLines(notes: unknown, max = 8): PrepareNoteLine[] {
+  if (!notes || typeof notes !== "object" || Array.isArray(notes)) return [];
+  const out: Array<PrepareNoteLine & { rank: number }> = [];
+  for (const [symbol, raw] of Object.entries(notes as Record<string, unknown>)) {
+    const n = raw as PrepareStructureNote | null;
+    const text = n && typeof n.headline === "string" ? n.headline.trim() : "";
+    if (!symbol || !text) continue;
+    const bad = n?.turned_bad === true;
+    out.push({ symbol, text, tone: bad ? "warn" : "good", rank: bad ? (n?.flipped === true ? 0 : 1) : 2 });
+  }
+  out.sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol));
+  return out.slice(0, Math.max(0, max)).map(({ symbol, text, tone }) => ({ symbol, text, tone }));
+}
+
+// ── group359: the structure snapshot stored when a paper trade was entered (decision-prediction GET /api/trades `structure`) ──────────
+export interface TradeEntryStructure {
+  v?: number; mode?: string; applied?: boolean; original_decision?: string | null; policy_decision?: string | null;
+  rules?: Array<{ id?: string | null; to?: string | null; reason?: string | null }>; no_opinion?: string | null;
+  levels?: { stop?: number | null; target?: number | null; rr?: number | null } | null; features?: Record<string, any> | null; summary_line?: string | null;
+}
+export interface TradeEntryView { label: string; short: string; tone: Tone; reasons: string[]; levels: string | null; line: string | null; flagged: boolean | null }
+
+/** Plain-word view of the entry snapshot. null / unusable = the trade was opened before snapshots were stored: say so, never invent a read.
+ *  `flagged` is true when the policy objected at entry (rules fired), false when it supported the entry, null when there is no opinion. */
+export function tradeEntryView(e: TradeEntryStructure | null | undefined): TradeEntryView {
+  if (!e || typeof e !== "object" || !e.mode || e.mode === "off") {
+    return { label: "No structure snapshot (trade opened before snapshots were stored)", short: "—", tone: "mute", reasons: [], levels: null, line: null, flagged: null };
+  }
+  const reasons = (Array.isArray(e.rules) ? e.rules : []).map(r => (typeof r?.reason === "string" ? r.reason.trim() : "")).filter(Boolean);
+  const l = e.levels && typeof e.levels === "object" ? e.levels : null;
+  const parts = [num(l?.stop) != null && num(l!.stop)! > 0 ? `stop ₹${num(l!.stop)!.toFixed(2)}` : null,
+                 num(l?.target) != null && num(l!.target)! > 0 ? `target ₹${num(l!.target)!.toFixed(2)}` : null,
+                 num(l?.rr) != null ? `R:R ${num(l!.rr)!.toFixed(2)}` : null].filter(Boolean) as string[];
+  const levels = parts.length ? `Structural ${parts.join(" · ")}` : null;
+  const line = typeof e.summary_line === "string" && e.summary_line.trim() ? e.summary_line.trim() : null;
+  const from = e.original_decision || "the call", to = e.policy_decision || "a more cautious call";
+  if (e.no_opinion) return { label: `No structure read at entry: ${e.no_opinion}`, short: "no read", tone: "mute", reasons: [], levels, line, flagged: null };
+  if (reasons.length === 0) return { label: "Daily structure supported the entry", short: "supported", tone: "good", reasons, levels, line, flagged: false };
+  if (e.applied) return { label: `Structure changed ${from} → ${to} at entry`, short: "flagged", tone: "bad", reasons, levels, line, flagged: true };
+  return { label: `Structure would have changed ${from} → ${to} at entry (shadow, not applied)`, short: "flagged", tone: "warn", reasons, levels, line, flagged: true };
+}
+
+export interface TradeStructureTally {
+  closed: number; withSnapshot: number; flagged: number; supported: number; flaggedAvgPct: number | null; supportedAvgPct: number | null; smallSample: boolean;
+}
+/** How closed trades did, split by what structure said at entry. Only trades with a read (supported / flagged) and a numeric pnl_pct count.
+ *  Descriptive, not evidence: `smallSample` stays true until BOTH groups have at least `minEach` trades. */
+export function tradeStructureTally(trades: unknown, minEach = 20): TradeStructureTally {
+  const t: TradeStructureTally = { closed: 0, withSnapshot: 0, flagged: 0, supported: 0, flaggedAvgPct: null, supportedAvgPct: null, smallSample: true };
+  if (!Array.isArray(trades)) return t;
+  let fSum = 0, sSum = 0;
+  for (const raw of trades) {
+    const tr = raw as { status?: string; pnl_pct?: unknown; structure?: TradeEntryStructure | null } | null;
+    if (!tr || tr.status !== "CLOSED") continue;
+    t.closed++;
+    const v = tradeEntryView(tr.structure);
+    if (v.flagged == null) continue;
+    t.withSnapshot++;
+    const p = num(tr.pnl_pct);
+    if (p == null) continue;
+    if (v.flagged) { t.flagged++; fSum += p; } else { t.supported++; sSum += p; }
+  }
+  t.flaggedAvgPct = t.flagged ? Math.round(fSum / t.flagged * 100) / 100 : null;
+  t.supportedAvgPct = t.supported ? Math.round(sSum / t.supported * 100) / 100 : null;
+  t.smallSample = t.flagged < minEach || t.supported < minEach;
+  return t;
 }

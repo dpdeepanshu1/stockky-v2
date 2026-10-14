@@ -1052,6 +1052,8 @@ export default function Training() {
           <div className="mt-4 space-y-2" data-testid="training-structure-observations">
             <StructureEdgeCard title="Structure gate — swing entries (DEMO)" load={(d) => realTradeApi.structureEdge("DEMO", d)} />
             <StructureEdgeCard title="Structure gate — scalp entries" load={(d) => positionStocksApi.structureEdge(d)} />
+            {/* group362: the Buy Sniper's gate (group361 tracks every surfaced / turned-away setup the same way) */}
+            <StructureEdgeCard title="Structure gate — Buy Sniper" load={(d) => api.findBuysEdge(d)} />
           </div>
 
           {trainProgress?.detail && Object.keys(trainProgress.detail).length > 0 && (

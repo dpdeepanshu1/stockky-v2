@@ -4160,7 +4160,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
         pass
 
     # Prioritize watchlist / searched so useful picks surface early without shrinking universe
-    universe = _prioritize_universe(universe)
+    universe = await asyncio.to_thread(_prioritize_universe, universe)  # group361: off the event loop
     total = len(universe)
     processed = 0
     results = []
@@ -4194,7 +4194,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
         _status(0, message="Bulk-loading DB data-feed (single query)…")
         from data_feed import get_all_stock_feeds
         bases = [s.upper().replace(".NS", "").replace(".BO", "").strip() for s in universe]
-        prefetched_feeds = get_all_stock_feeds(bases) or {}
+        prefetched_feeds = await asyncio.to_thread(get_all_stock_feeds, bases) or {}  # group361: off the event loop
         for base, fed in prefetched_feeds.items():
             if fed and (
                 fed.get("fundamental_score") is not None
@@ -4486,7 +4486,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
     final_result = {
         "scanned": len(results),
         "universe_size": len(universe),
-        "watchlist_size": len(_load_watchlist()),
+        "watchlist_size": len(await asyncio.to_thread(_load_watchlist)),  # group361: off the event loop
         "recommendations": top_picks_short if "top_picks_short" in dir() else top_picks,
         "recommendations_short": top_picks_short if "top_picks_short" in dir() else top_picks,
         "recommendations_mid": top_picks_mid if "top_picks_mid" in dir() else [],
@@ -6463,7 +6463,7 @@ async def scan_batch(request: Request):
     if True:
         # One Neon bulk for this batch
         try:
-            batch_feeds = _feed_store().get_symbols_bulk(symbols) or {}
+            batch_feeds = await asyncio.to_thread(_feed_store().get_symbols_bulk, symbols) or {}  # group361: off the event loop
         except Exception:
             batch_feeds = {}
         tasks = [
@@ -6724,7 +6724,7 @@ async def stream_market_scan(
         except Exception:
             pass
         universe = (await asyncio.to_thread(_build_scan_universe_forced))
-    universe = _prioritize_universe(universe)
+    universe = await asyncio.to_thread(_prioritize_universe, universe)  # group361: off the event loop
     total = len(universe)
 
     async def event_generator():
@@ -6767,7 +6767,7 @@ async def stream_market_scan(
                 s.upper().replace(".NS", "").replace(".BO", "").strip()
                 for s in universe
             ]
-            prefetched = get_all_stock_feeds(bases) or {}
+            prefetched = await asyncio.to_thread(get_all_stock_feeds, bases) or {}  # group361: off the event loop
             # Also warm process-local store for any later get_symbol
             try:
                 store = _feed_store()
@@ -7919,7 +7919,7 @@ async def get_scan_universe(cached: bool = False):
         live = _redis_get(SCAN_UNIVERSE_KEY)
         if live and isinstance(live, list) and len(live) > 0:
             live = _filter_equities(live)
-            live = _filter_symbols_under_max_price(live)
+            live = await asyncio.to_thread(_filter_symbols_under_max_price, live)  # group361: off the event loop
             if len(live) >= 50:
                 searched = await _load_searched_safe()
                 movers, _partial = await _movers_with_deadline()
@@ -7938,7 +7938,7 @@ async def get_scan_universe(cached: bool = False):
                 stale = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
                 if stale and isinstance(stale, list) and len(stale) >= 50:
                     stale = _filter_equities(stale)
-                    stale = _filter_symbols_under_max_price(stale)
+                    stale = await asyncio.to_thread(_filter_symbols_under_max_price, stale)  # group361: off the event loop
                     if len(stale) >= 50:
                         # Repopulate live key (short TTL) so next caller is fast
                         _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
@@ -7986,7 +7986,7 @@ async def get_scan_universe(cached: bool = False):
         fb = []
         if isinstance(fallback, list) and len(fallback) >= 50:
             try:
-                fb = _filter_symbols_under_max_price(_filter_equities(fallback))
+                fb = await asyncio.to_thread(_filter_symbols_under_max_price, _filter_equities(fallback))  # group361: off the event loop
             except Exception as _fe:
                 logger.warning("scan/universe: fallback filter failed: %s", _fe)
                 fb = []
@@ -8027,7 +8027,7 @@ async def get_universe():
     # 1) Neon / data-feed (anti-amnesia primary source)
     try:
         from data_feed import list_feed_symbols_from_neon_under_max_price
-        symbols = list_feed_symbols_from_neon_under_max_price(MAX_UNIVERSE_PRICE) or []
+        symbols = await asyncio.to_thread(list_feed_symbols_from_neon_under_max_price, MAX_UNIVERSE_PRICE) or []  # group361: off the event loop
     except Exception as e:
         logger.debug("api/universe neon feed: %s", e)
         symbols = []
@@ -8059,7 +8059,7 @@ async def get_universe():
         except Exception:
             symbols = []
 
-    filtered = _filter_symbols_under_max_price(symbols)
+    filtered = await asyncio.to_thread(_filter_symbols_under_max_price, symbols)  # group361: off the event loop
     return filtered
 
 @app.delete("/scan/universe/cache")
@@ -8776,7 +8776,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     except Exception as e:
         logger.debug("hot seed from scan: %s", e)
 
-    watch = _load_watchlist() or []
+    watch = await asyncio.to_thread(_load_watchlist) or []  # group361: off the event loop
     momentum = []
     news_syms = []
     event_syms = []
@@ -8801,7 +8801,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         + list(scan_syms)
         + list(watch)
         + list(_load_searched() or [])[:40]
-        + list(_get_recent_ipos() or [])[:20]
+        + list(await asyncio.to_thread(_get_recent_ipos) or [])[:20]  # group361: off the event loop
     )
     # De-duplicate on the NORMALISED symbol ("AAA" == "AAA.NS" == "aaa.ns"),
     # keeping the first spelling seen, so one name is never fetched twice.
@@ -9791,7 +9791,7 @@ async def api_ipo_scan(
         background_tasks.add_task(run_ipo_scan, force=force, wipe=wipe)
         return {"accepted": True, "background": True, "force": force, "wipe": wipe, "message": "IPO scan started"}
     try:
-        result = run_ipo_scan(force=force, wipe=wipe)
+        result = await asyncio.to_thread(run_ipo_scan, force=force, wipe=wipe)  # group361: off the event loop
     except Exception as e:
         logger.exception("ipo/scan failed: %s", e)
         return {"accepted": False, "background": False, "status": "error", "error": str(e)[:200]}
@@ -9891,7 +9891,7 @@ async def api_ipo_add(body: IpoAddRequest):
     manual entry is."""
     try:
         from ipo_scanner import add_manual_ipo_by_name
-        result = add_manual_ipo_by_name(body.company_name)
+        result = await asyncio.to_thread(add_manual_ipo_by_name, body.company_name)  # group361: off the event loop
     except Exception as e:
         logger.exception("ipo/add failed: %s", e)
         return {"accepted": False, "message": f"IPO lookup failed: {str(e)[:160]}", "suggestions": []}
@@ -9943,7 +9943,7 @@ async def api_ipo_purge_non_equity():
     except Exception as e:
         return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
     try:
-        return purge_non_equity_ipos()
+        return await asyncio.to_thread(purge_non_equity_ipos)  # group361: off the event loop
     except Exception as e:
         logger.exception("ipo/purge-non-equity failed: %s", e)
         return {"status": "error", "error": str(e)[:160]}
@@ -10217,7 +10217,7 @@ async def api_surprise_premarket_proxy(request: Request):
         }
 
     try:
-        result = precalculate_surprise_baselines(symbols, force=force)
+        result = await asyncio.to_thread(precalculate_surprise_baselines, symbols, force=force)  # group361: off the event loop
     except Exception as e:
         # The background job logs and swallows a baseline error; the
         # synchronous path now reports it as a structured error instead of an
@@ -11066,6 +11066,16 @@ async def ops_loop_lag():
         return {"enabled": False, "error": str(e)[:160]}
 
 
+@app.get("/ops/db-latency")
+async def ops_db_latency():
+    """Oracle latency: per-engine connect / execute count, avg, p50, p95, max, the last slow statement, pool state, keep-warm counters."""
+    try:
+        import oracle_compat
+        return await asyncio.to_thread(oracle_compat.latency_snapshot)
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:160]}
+
+
 # group302: the boot warms (momentum movers -> scan universe, and the surprise scan) used to start together a few
 # seconds after boot, on top of the first page loads. They now go one after another: movers/universe first (after
 # GATEWAY_BOOT_WARM_DELAY_S, default 8 s open / GATEWAY_BOOT_WARM_CLOSED_DELAY_S, default 90 s when the market is
@@ -11548,7 +11558,7 @@ async def api_add_price_alert(request: Request):
     note = str(body.get("note") or "")
     if not sym or target <= 0:
         raise HTTPException(status_code=400, detail="symbol and target_price required")
-    entry = add_price_alert(sym, target, direction=direction, note=note)
+    entry = await asyncio.to_thread(add_price_alert, sym, target, direction=direction, note=note)  # group361: off the event loop
     return {"ok": True, "alert": entry}
 
 
@@ -11556,7 +11566,7 @@ async def api_add_price_alert(request: Request):
 @app.delete("/price-alerts/{alert_id}")
 async def api_delete_price_alert(alert_id: str):
     from data_feed import delete_price_alert
-    ok = delete_price_alert(alert_id)
+    ok = await asyncio.to_thread(delete_price_alert, alert_id)  # group361: off the event loop
     if not ok:
         raise HTTPException(status_code=404, detail="alert not found")
     return {"ok": True, "deleted": alert_id}
@@ -11883,7 +11893,7 @@ async def refresh_prepare_to_buy(
     )
 
     try:
-        candidates = find_prepare_to_buy_candidates(min_score=min_score, max_score=max_score)
+        candidates = await asyncio.to_thread(find_prepare_to_buy_candidates, min_score=min_score, max_score=max_score)  # group361: off the event loop
     except Exception as e:
         logger.exception("refresh_prepare_to_buy candidates: %s", e)
         raise HTTPException(status_code=500, detail=str(e)[:200])
@@ -12355,7 +12365,7 @@ async def purge_over_cap_feed_symbols():
             continue
         if isinstance(row, dict) and _row_price_over_cap(row, symbol=sym):
             try:
-                store.delete_symbol(sym)
+                await asyncio.to_thread(store.delete_symbol, sym)  # group361: off the event loop
                 purged.append(sym)
             except Exception as e:
                 logger.warning("purge_over_cap: failed to delete %s: %s", sym, e)
@@ -12707,7 +12717,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
         is_known_high_price = lambda _s: False  # noqa: E731
     if MAX_UNIVERSE_PRICE > 0 and is_known_high_price(base):
         try:
-            store.delete_symbol(base)
+            await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
         except Exception as e:
             logger.warning("repair: purge known-high-price %s failed: %s", base, e)
         return {
@@ -12725,7 +12735,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     # nothing useful forever. Purge instead and say so plainly.
     if current and _row_price_over_cap(current):
         try:
-            store.delete_symbol(base)
+            await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
         except Exception as e:
             logger.warning("repair: purge over-cap %s failed: %s", base, e)
         return {
@@ -12764,7 +12774,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
         _resolve_with_fallback = None
     if _is_known_delisted(base):
         try:
-            store.delete_symbol(base)
+            await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
         except Exception as e:
             logger.warning("repair: purge known-delisted %s failed: %s", base, e)
         return {
@@ -12788,7 +12798,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
     # from repeated failures rather than a verified corporate action).
     if _is_learned_delisted(base):
         try:
-            store.delete_symbol(base)
+            await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
         except Exception as e:
             logger.warning("repair: purge learned-delisted %s failed: %s", base, e)
         return {
@@ -12837,7 +12847,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                     # Confirmed non-NSE / genuinely delisted — purge instead
                     # of leaving this stuck as "price: missing" forever.
                     try:
-                        store.delete_symbol(base)
+                        await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
                     except Exception as e:
                         logger.warning("repair: purge unresolved %s failed: %s", base, e)
                     return {
@@ -12878,7 +12888,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                                 "repair price over cap %s — ₹%.2f > cap, purging from feed", base, px
                             )
                             try:
-                                store.delete_symbol(base)
+                                await asyncio.to_thread(store.delete_symbol, base)  # group361: off the event loop
                             except Exception as e:
                                 logger.warning("repair: purge over-cap %s failed: %s", base, e)
                             return {
@@ -14190,7 +14200,7 @@ async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         # so picks sitting in the durable table are not hidden.
         try:
             from hotpicks_store import hotpicks_db_payload
-            cached = hotpicks_db_payload()
+            cached = await asyncio.to_thread(hotpicks_db_payload)  # group361: off the event loop
         except Exception:
             cached = None
 

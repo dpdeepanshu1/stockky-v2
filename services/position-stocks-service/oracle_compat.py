@@ -30,8 +30,13 @@ services that only ever talk to Neon pay no import cost.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import os
+import sys
+import threading
+import time
+import weakref
 
 _log = logging.getLogger("oracle-compat")
 
@@ -174,6 +179,7 @@ def build_oracle_engine(url: str = "", **pool_overrides):
     )
     eng = create_engine(url, **kwargs)
     _attach_call_timeout(eng)
+    _attach_latency_probe(eng)   # group361: connect/query timing + keep-warm (never fatal)
     return eng, url
 
 
@@ -234,6 +240,239 @@ def _attach_call_timeout(eng) -> None:
                 _log.debug("could not set oracledb call_timeout: %s", e)
     except Exception as e:  # pragma: no cover - defensive, never fatal
         _log.warning("_attach_call_timeout setup failed (non-fatal): %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# group361: Oracle latency probe + keep-warm.
+#
+# Why: slow Oracle round trips (a 3.2 s rollback over SSL was logged on 2026-10-14) were
+# visible only as event-loop stalls; nothing said WHICH statement, how often, or whether the
+# time went into connecting (TLS handshake + auth, paid again whenever pool_recycle replaces a
+# connection or the network path dropped an idle one) or into the query itself.
+#
+#  * Probe: times every cursor execute and every NEW physical connection per engine, keeps
+#    count / slow count / max / p50 / p95, and logs a throttled WARNING for a slow one
+#    (ORACLE_SLOW_QUERY_MS, default 1500; 0 = no slow log). latency_snapshot() returns it.
+#  * Keep-warm: one daemon thread touches idle pooled connections every ORACLE_KEEPWARM_S
+#    seconds (default 60; 0 = off). A touch is a normal checkout, so pool_pre_ping and
+#    pool_recycle happen HERE (a reconnect or a dead-connection replace) instead of inside the
+#    next request. It only uses a connection that is already idle in the pool: it never opens a
+#    new session, so the Autonomous DB session count does not grow.
+# Both are best effort: any failure is logged at debug and ignored. They use event.listen
+# (not event.listens_for), and weakrefs, so a stub sqlalchemy or an un-weakref-able engine
+# simply skips them.
+# ─────────────────────────────────────────────────────────────────────────────
+_LAT_LOCK = threading.Lock()
+_LAT: dict = {}
+_LAT_SEQ = [0]
+_WARM = weakref.WeakSet()
+_WARM_STATE = {"thread": None, "ticks": 0, "pings": 0, "failures": 0, "last_failure": None}
+_WARM_STOP = threading.Event()
+_LOCAL = threading.local()
+_SLOW_LOG_GAP_S = 5.0
+
+
+def _env_num(name: str, default: float, lo: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return float(default)
+    try:
+        v = float(str(raw).strip())
+    except ValueError:
+        _log.warning("invalid %s=%r; using default %s", name, raw, default)
+        return float(default)
+    return max(lo, v)
+
+
+def _slow_ms() -> float:
+    return _env_num("ORACLE_SLOW_QUERY_MS", 1500.0)
+
+
+def _keepwarm_s() -> float:
+    return _env_num("ORACLE_KEEPWARM_S", 60.0)
+
+
+def _probe_enabled() -> bool:
+    return (os.environ.get("ORACLE_LATENCY_PROBE") or "1").strip() != "0"
+
+
+def _caller_label() -> str:
+    """Module that built the engine (first frame outside oracle_compat), e.g. 'kv_cache.py'."""
+    try:
+        f = sys._getframe(2)
+        here = os.path.basename(__file__)
+        while f is not None and os.path.basename(f.f_code.co_filename) == here:
+            f = f.f_back
+        return os.path.basename(f.f_code.co_filename) if f is not None else "unknown"
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
+
+
+def _pct(sorted_vals, q: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    i = min(len(sorted_vals) - 1, int(round(q * (len(sorted_vals) - 1))))
+    return round(sorted_vals[i], 1)
+
+
+def _record(stat: dict, kind: str, ms: float, what: str) -> None:
+    slow = _slow_ms()
+    with _LAT_LOCK:
+        stat[kind + "_n"] += 1
+        stat[kind + "_total_ms"] += ms
+        if ms > stat[kind + "_max_ms"]:
+            stat[kind + "_max_ms"] = ms
+        stat[kind + "_ring"].append(ms)
+        is_slow = slow > 0 and ms >= slow
+        log_it = False
+        if is_slow:
+            stat[kind + "_slow_n"] += 1
+            stat["last_slow"] = {"kind": kind, "ms": round(ms, 1), "what": what, "at": time.time()}
+            now = time.monotonic()
+            if now - stat["_last_log"][kind] >= _SLOW_LOG_GAP_S:   # throttled per kind
+                stat["_last_log"][kind] = now
+                log_it = True
+    if log_it:
+        _log.warning("oracle slow %s %.0f ms (engine=%s): %s", kind, ms, stat["label"], what)
+
+
+def _attach_latency_probe(eng) -> None:
+    try:
+        if not _probe_enabled():
+            return
+        from sqlalchemy import event
+        with _LAT_LOCK:
+            _LAT_SEQ[0] += 1
+            label = "%s#%d" % (_caller_label(), _LAT_SEQ[0])
+            stat = {"label": label, "_last_log": {"exec": 0.0, "connect": 0.0}, "last_slow": None}
+            for k in ("exec", "connect"):
+                stat[k + "_n"] = 0
+                stat[k + "_slow_n"] = 0
+                stat[k + "_total_ms"] = 0.0
+                stat[k + "_max_ms"] = 0.0
+                stat[k + "_ring"] = collections.deque(maxlen=256)
+            stat["engine_ref"] = weakref.ref(eng)
+            _LAT[label] = stat
+
+        def _before(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            try:
+                context._stockky_t0 = time.perf_counter()  # per-execution, so a raising query cannot skew the next
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        def _after(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            t0 = getattr(context, "_stockky_t0", None)
+            if t0 is None:  # pragma: no cover - defensive (probe attached mid-statement)
+                return
+            _record(stat, "exec", (time.perf_counter() - t0) * 1000.0, " ".join(str(statement).split())[:100])
+
+        def _do_connect(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
+            _LOCAL.connect_t0 = time.perf_counter()
+            return None  # let SQLAlchemy open the connection as usual
+
+        def _connected(dbapi_connection, connection_record):  # noqa: ANN001
+            t0 = _LOCAL.__dict__.pop("connect_t0", None)
+            if t0 is not None:
+                _record(stat, "connect", (time.perf_counter() - t0) * 1000.0, "new physical connection")
+
+        event.listen(eng, "before_cursor_execute", _before)
+        event.listen(eng, "after_cursor_execute", _after)
+        event.listen(eng, "do_connect", _do_connect)
+        event.listen(eng, "connect", _connected)
+        _register_keepwarm(eng)
+    except Exception as e:
+        _log.debug("_attach_latency_probe skipped: %s", e)
+
+
+def latency_snapshot() -> dict:
+    """Per-engine connect/execute latency + pool state + keep-warm counters (safe to call anywhere)."""
+    out = {"probe_enabled": _probe_enabled(), "slow_ms": _slow_ms(), "keepwarm_s": _keepwarm_s(), "engines": {}}
+    with _LAT_LOCK:
+        items = list(_LAT.items())
+    for label, st in items:
+        with _LAT_LOCK:
+            row = {}
+            for k in ("exec", "connect"):
+                vals = sorted(st[k + "_ring"])
+                n = st[k + "_n"]
+                row[k] = {
+                    "n": n, "slow_n": st[k + "_slow_n"],
+                    "avg_ms": round(st[k + "_total_ms"] / n, 1) if n else 0.0,
+                    "p50_ms": _pct(vals, 0.5), "p95_ms": _pct(vals, 0.95),
+                    "max_ms": round(st[k + "_max_ms"], 1),
+                }
+            row["last_slow"] = dict(st["last_slow"]) if st["last_slow"] else None
+            ref = st["engine_ref"]
+        eng = ref()
+        pool = getattr(eng, "pool", None) if eng is not None else None
+        row["pool"] = None
+        if pool is not None:
+            try:
+                row["pool"] = {"size": pool.size(), "checked_in": pool.checkedin(),
+                               "checked_out": pool.checkedout(), "overflow": pool.overflow()}
+            except Exception:  # pragma: no cover - defensive
+                row["pool"] = None
+        out["engines"][label] = row
+    out["keepwarm"] = {k: _WARM_STATE[k] for k in ("ticks", "pings", "failures", "last_failure")}
+    out["keepwarm"]["running"] = bool(_WARM_STATE["thread"] and _WARM_STATE["thread"].is_alive())
+    out["keepwarm"]["engines"] = len(_WARM)
+    return out
+
+
+def _ping(eng) -> bool:
+    """One normal checkout (pool_pre_ping / pool_recycle fire here) + a trivial statement."""
+    from sqlalchemy import text
+    sql = "SELECT 1 FROM DUAL" if getattr(getattr(eng, "dialect", None), "name", "") == "oracle" else "SELECT 1"
+    with eng.connect() as conn:
+        conn.execute(text(sql))
+    return True
+
+
+def _keepwarm_tick() -> int:
+    """Touch up to 5 idle pooled connections per engine, one at a time. Returns pings made."""
+    made = 0
+    _WARM_STATE["ticks"] += 1
+    for eng in list(_WARM):
+        try:
+            pool = getattr(eng, "pool", None)
+            idle = pool.checkedin() if pool is not None and hasattr(pool, "checkedin") else 0
+        except Exception:  # pragma: no cover - defensive
+            idle = 0
+        for _ in range(min(int(idle), 5)):
+            if _WARM_STOP.is_set():
+                return made
+            try:
+                _ping(eng)
+                made += 1
+                _WARM_STATE["pings"] += 1
+            except Exception as e:
+                _WARM_STATE["failures"] += 1
+                _WARM_STATE["last_failure"] = str(e)[:160]
+                _log.debug("oracle keep-warm ping failed: %s", e)
+                break
+    return made
+
+
+def _keepwarm_loop() -> None:
+    while not _WARM_STOP.wait(max(5.0, _keepwarm_s() or 60.0)):
+        if _keepwarm_s() <= 0:
+            continue
+        try:
+            _keepwarm_tick()
+        except Exception as e:  # pragma: no cover - defensive
+            _log.debug("oracle keep-warm tick failed: %s", e)
+
+
+def _register_keepwarm(eng) -> None:
+    if _keepwarm_s() <= 0:
+        return
+    _WARM.add(eng)  # TypeError for a non-weakref-able stub engine -> caller swallows it
+    th = _WARM_STATE["thread"]
+    if th is None or not th.is_alive():
+        _WARM_STOP.clear()
+        th = threading.Thread(target=_keepwarm_loop, name="oracle-keepwarm", daemon=True)
+        _WARM_STATE["thread"] = th
+        th.start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1215,6 +1215,7 @@ class TestStatus:
     def test_memory_only(self, kv):
         kv._mem.set("a", 1)
         s = kv.status()
+        assert s.pop("loop_read_guard")["enabled"] is True   # added by group359
         assert s == {"use_redis": False, "memory_keys": 1, "neon_connected": False,
                      "neon_error": None, "cache_database_configured": False,
                      "durable_backend": "postgresql"}

@@ -386,3 +386,144 @@ export function outcomeLine(v: StructureStatusView): string | null {
   const lean = v.avgSincePct < 0 ? "the gate mostly kept you out of drops" : v.avgSincePct > 0 ? "the gate mostly turned away stocks that kept rising" : "no clear lean";
   return `Rejected stocks moved ${avg} on average since (${v.down} down, ${v.up} up) — ${lean}. Small sample, a hint only.`;
 }
+
+// ── group356/362: "what happened next" edge report (GET /structure/edge[/{mode}] -> {stats, calibration, recent, ...}) ───────────────────
+/** Raw reply of the edge report. Loosely typed on purpose: edgeView() / calibrationView() read every field defensively. */
+export interface StructureEdgeDoc {
+  mode?: string; days?: number; min_n?: number;
+  stats?: Record<string, any> | null;
+  calibration?: Record<string, any> | null;
+  recent?: Array<Record<string, any>> | null;
+  process?: Record<string, any> | null;
+  error?: string | null;
+}
+
+/** "+0.4%" / "−1.2%" / "0.0%" / "—" (no value). Sign uses a real minus, same as sinceText. */
+export function pctText(v: unknown): string {
+  const n = num(v);
+  if (n == null) return "—";
+  const r = Math.round(n * 10) / 10;
+  return `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r).toFixed(1)}%`;
+}
+
+const EDGE_HORIZONS = ["1d", "5d", "10d", "20d"];
+const CONCLUSION: Record<string, { label: string; tone: Tone }> = {
+  gate_helps: { label: "Gate is helping", tone: "good" },
+  gate_hurts: { label: "Gate is costing gains", tone: "bad" },
+  inconclusive: { label: "No clear edge", tone: "warn" },
+  insufficient_sample: { label: "Not enough data yet", tone: "mute" },
+};
+const VERDICT_LABEL: Record<string, string> = {
+  rejected_enforced: "blocked", rejected_shadow: "would have blocked", passed: "let through", no_opinion: "no opinion",
+};
+
+export interface EdgeHorizonRow { h: string; rejected: number | null; rejectedN: number; passed: number | null; passedN: number; edge: number | null }
+export interface EdgeRecentRow { symbol: string; day: string; verdictLabel: string; text: string | null; tone: Tone; ret: string }
+export interface StructureEdgeView {
+  tone: Tone; conclusionLabel: string; headline: string; error: string | null;
+  horizons: EdgeHorizonRow[]; rejectedN: number; stopFirstRejected: number; targetFirstRejected: number; recent: EdgeRecentRow[];
+}
+
+const rec = (v: unknown): Record<string, any> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, any>) : {});
+const int0 = (v: unknown): number => { const n = num(v); return n == null ? 0 : Math.max(0, Math.round(n)); };
+const clip = (s: unknown, max: number): string | null => {
+  if (typeof s !== "string" || !s.trim()) return null;
+  const t = s.trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+};
+
+/** View model of the edge table. Never throws; null / garbage input gives an empty, honest "not enough data" view. */
+export function edgeView(raw: StructureEdgeDoc | null | undefined): StructureEdgeView {
+  const d = rec(raw);
+  const stats = rec(d.stats);
+  const byV = rec(stats.by_verdict);
+  const rej = rec(byV.rejected);
+  const pas = rec(byV.passed);
+  const edge = rec(stats.edge);
+  const horizons: EdgeHorizonRow[] = EDGE_HORIZONS.map(h => {
+    const a = rec(rec(rej.horizons)[h]);
+    const b = rec(rec(pas.horizons)[h]);
+    return { h, rejected: num(a.mean), rejectedN: int0(a.n), passed: num(b.mean), passedN: int0(b.n), edge: num(rec(edge[h]).edge) };
+  });
+  const conclusionKey = typeof stats.conclusion === "string" && CONCLUSION[stats.conclusion] ? stats.conclusion : "insufficient_sample";
+  const c = CONCLUSION[conclusionKey];
+  const total = int0(stats.total);
+  const complete = int0(stats.complete);
+  const minN = int0(d.min_n);
+  const ch = typeof stats.conclusion_horizon === "string" ? stats.conclusion_horizon : null;
+  let headline: string;
+  if (total === 0) headline = "No observations stored yet.";
+  else if (conclusionKey === "insufficient_sample") {
+    headline = `${total} observed, ${complete} fully tracked${minN > 0 ? ` — needs ${minN} finished on each side` : ""}.`;
+  } else {
+    const e = ch ? num(rec(edge[ch]).edge) : null;
+    headline = `${total} observed${ch && e != null ? ` · after ${ch.replace("d", " days")}, let-through stocks beat turned-away ones by ${pctText(e)}` : ""}.`;
+  }
+  const recent: EdgeRecentRow[] = (Array.isArray(d.recent) ? d.recent : []).slice(0, 40).map(r0 => {
+    const r = rec(r0);
+    const verdict = typeof r.verdict === "string" ? r.verdict : "";
+    const got = ["ret_20d", "ret_10d", "ret_5d", "ret_1d"].map(k => num(r[k])).find(x => x != null) ?? null;
+    const wasRejected = verdict === "rejected_enforced" || verdict === "rejected_shadow";
+    let tone: Tone = "mute";
+    if (got != null && got !== 0) tone = wasRejected ? (got < 0 ? "good" : "warn") : (got > 0 ? "good" : "bad");
+    const reasons = Array.isArray(r.reasons) ? r.reasons : [];
+    return {
+      symbol: typeof r.symbol === "string" ? r.symbol : "?", day: typeof r.obs_day === "string" ? r.obs_day : "",
+      verdictLabel: VERDICT_LABEL[verdict] ?? (verdict || "unknown"), text: clip(reasons[0], 140), tone, ret: got == null ? "—" : pctText(got),
+    };
+  });
+  const error = clip(d.error, 200);
+  return {
+    tone: c.tone, conclusionLabel: c.label, headline, error, horizons, rejectedN: int0(rej.n),
+    stopFirstRejected: int0(rej.stop_first), targetFirstRejected: int0(rej.target_first), recent,
+  };
+}
+
+export interface CalibrationRuleView { rule: string; label: string; rejectedN: number; passedN: number; current: string | null; edge: string; advice: string; tone: Tone }
+export interface CalibrationView {
+  error: string | null; headline: string; note: string | null; rules: CalibrationRuleView[]; score: string | null; suggestions: string[];
+}
+
+const ADVICE_TEXT: Record<string, { text: string; tone: Tone }> = {
+  keep: { text: "Earning its place — keep.", tone: "good" },
+  review_loosen: { text: "Turned away stocks that did fine — worth reviewing.", tone: "warn" },
+  no_evidence: { text: "No clear evidence either way.", tone: "mute" },
+  collect_more: { text: "Not enough finished observations yet.", tone: "mute" },
+};
+const RULE_LABEL: Record<string, string> = { ...REASON_LABEL, stop_wide: REASON_LABEL.stop_wide, bearish: REASON_LABEL.bearish };
+
+/** View model of the advisory calibration block, or null when the report carries none. Advisory only: nothing here changes a setting. */
+export function calibrationView(raw: StructureEdgeDoc | null | undefined): CalibrationView | null {
+  const cal = rec(rec(raw).calibration);
+  if (!Object.keys(cal).length) return null;
+  const error = clip(cal.error, 200);
+  if (error) return { error, headline: "Calibration (advisory)", note: null, rules: [], score: null, suggestions: [] };
+  const h = num(cal.horizon);
+  const finished = int0(cal.finished);
+  const minN = int0(cal.min_n);
+  const note = cal.note === "insufficient_sample"
+    ? `Only ${finished} observation${finished === 1 ? "" : "s"} finished${h != null ? ` at ${h} days` : ""}; ${minN > 0 ? `${minN} are needed before the advice means much` : "too few for advice"}.` : null;
+  const th = rec(cal.thresholds);
+  const thKey: Record<string, string> = { chase: "chase_atr", stretch: "stretch_atr", room: "room_atr", rr: "rr" };
+  const rules: CalibrationRuleView[] = Object.entries(rec(cal.rules)).map(([rule, r0]) => {
+    const r = rec(r0);
+    const a = ADVICE_TEXT[typeof r.advice === "string" ? r.advice : ""] ?? ADVICE_TEXT.no_evidence;
+    const cur = num(r.current ?? th[thKey[rule] ?? ""]);
+    return {
+      rule, label: RULE_LABEL[rule] ?? rule, rejectedN: int0(rec(r.rejected).n), passedN: int0(rec(r.passed).n),
+      current: cur == null ? null : String(cur), edge: pctText(r.edge), advice: a.text, tone: a.tone,
+    };
+  }).filter(r => r.rejectedN > 0);
+  const sc = rec(cal.score);
+  let score: string | null = null;
+  if (typeof sc.monotonic === "boolean") {
+    score = sc.monotonic ? "A higher structure score did rank better outcomes." : "A higher structure score did not rank outcomes reliably.";
+  } else if (int0(sc.n) > 0) score = "Score ranking: not enough observations yet.";
+  const suggestions = (Array.isArray(cal.suggestions) ? cal.suggestions : []).map(s0 => {
+    const s = rec(s0);
+    const from = num(s.from), to = num(s.to);
+    if (typeof s.rule !== "string" || to == null) return null;
+    return `${RULE_LABEL[s.rule] ?? s.rule}: try ${to}${from == null ? "" : ` instead of ${from}`}${num(s.oos_edge) != null ? ` (out-of-sample ${pctText(s.oos_edge)})` : ""}`;
+  }).filter((x): x is string => x != null);
+  return { error: null, headline: `Calibration (advisory)${h != null ? ` · ${h}-day horizon` : ""}`, note, rules, score, suggestions };
+}

@@ -127,7 +127,9 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
             reasons.append(f"stretched {m['stretch_atr']:.1f} daily ATR above EMA20 (max {lim:g})")
         lim = _cfg("STRUCTURE_MIN_ROOM_ATR", 0.3)
         if lim > 0 and m["room_atr"] is not None and m["room_atr"] < lim:
-            reasons.append(f"only {max(0.0, m['room_atr']):.1f} daily ATR of room to the next resistance (min {lim:g})")
+            raw_room = m["room_atr"]
+            past = f" [raw {raw_room:.1f}: live price is {abs(raw_room):.1f} ATR beyond the cached resistance - possible breakout]" if raw_room <= -0.05 else ""
+            reasons.append(f"only {max(0.0, m['room_atr']):.1f} daily ATR of room to the next resistance (min {lim:g}){past}")
         if getattr(config, "STRUCTURE_BEARISH_BLOCK", True):
             if summary.get("ms_trend") == "bearish":
                 reasons.append("daily structure is bearish")
@@ -172,7 +174,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, errors=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -216,6 +218,10 @@ def record(symbol: str, verdict: Dict[str, Any], gate_mode: str, enforced: bool,
             for r in verdict.get("reasons") or []:
                 k = reason_key(r)
                 _stats["by_reason"][k] = _stats["by_reason"].get(k, 0) + 1
+            # group366: a room rejection whose RAW room is negative = the live price is already past the cached resistance (possible breakout)
+            _rm = (verdict.get("metrics") or {}).get("room_atr")
+            if isinstance(_rm, (int, float)) and _rm <= -0.05 and any(reason_key(r) == "room" for r in verdict.get("reasons") or []):
+                _stats["room_past_resistance"] = _stats.get("room_past_resistance", 0) + 1
         if enforced:
             _stats["enforced"] += 1
             if not verdict.get("would_reject"):

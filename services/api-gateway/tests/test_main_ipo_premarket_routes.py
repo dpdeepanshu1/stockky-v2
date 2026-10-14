@@ -588,8 +588,17 @@ def _jbody(symbols):
 @pytest.fixture
 def threads(monkeypatch):
     created = []
+    _real_thread = threading.Thread
 
     class FakeThread:
+        def __new__(cls, *a, **kw):
+            # group361: asyncio.to_thread's executor workers (named "asyncio_N") must stay REAL threads, or a
+            # route that offloads work with to_thread waits forever on a worker that never runs.
+            # (the loop's own helper threads: executor workers "asyncio_N" and the executor-shutdown thread, which has no name)
+            if str(kw.get("name") or "").startswith("asyncio") or (kw.get("daemon") is None and not kw.get("name")):
+                return _real_thread(*a, **kw)
+            return super().__new__(cls)
+
         def __init__(self, target=None, daemon=None, name=None, **kw):
             self.target, self.daemon, self.name, self.started = target, daemon, name, False
             created.append(self)

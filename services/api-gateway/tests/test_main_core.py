@@ -1743,6 +1743,11 @@ def nse(monkeypatch):
     monkeypatch.setattr(gw, "time", clock)
     monkeypatch.setattr(gw, "_nse_client", None)
     monkeypatch.setattr(gw, "_nse_client_ts", 0.0)
+    # group346 keeps a process-global per-endpoint failure pause (epoch deadlines); tests here run on a fake clock near 5000,
+    # so a deadline left behind by another test file would read as "paused for the next 50 years". Start every test clean.
+    monkeypatch.setattr(gw, "_nse_endpoint_fail", {})
+    monkeypatch.setattr(gw, "_nse_api_block_until", 0.0)
+    monkeypatch.setattr(gw, "_nse_api_block_skipped", 0)
     return clock
 
 

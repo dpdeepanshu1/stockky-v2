@@ -10,6 +10,8 @@ on:
     branches: [main, backup-production]
     paths:
       - "services/**"
+      - "shared/market_structure/**"
+      - "scripts/sync_market_structure.py"
       - "scripts/check_shared_copies.py"
       - "scripts/check_merge_conflicts.py"
       - "scripts/shared_copies_baseline.json"
@@ -23,6 +25,8 @@ on:
   pull_request:
     paths:
       - "services/**"
+      - "shared/market_structure/**"
+      - "scripts/sync_market_structure.py"
       - "scripts/check_shared_copies.py"
       - "scripts/check_merge_conflicts.py"
       - "scripts/shared_copies_baseline.json"

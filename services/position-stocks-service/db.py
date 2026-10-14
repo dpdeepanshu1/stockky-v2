@@ -204,6 +204,7 @@ _COLUMN_MIGRATIONS = [
     # group280: price at signal time, for the entry-slippage measure (see models.py).
     ("scalp_positions", "signal_price", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "min_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_positions", "structure_json", "CLOB", "TEXT", None, None),   # group354
     # 2026-09-18 (user audit finding): marks a carried-overnight position
     # that was successfully converted INTRADAY -> CNC via
     # execution/dhan_client.py::convert_position — see the

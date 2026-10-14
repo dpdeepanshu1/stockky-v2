@@ -123,3 +123,14 @@ def _g344_legacy_defaults(monkeypatch):
     except Exception:
         pass
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _structure_gate_no_network_by_default(monkeypatch):
+    """group 351: entry_engine/structure_gate.py would fetch the daily structure from the api-gateway for each candidate. Pre-existing
+    tests must never hit the network (and no summary = no opinion = no behaviour change); tests/test_group351_structure_gate.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "STRUCTURE_FETCH_ENABLED", False, raising=False)
+    mod = _sys_g172.modules.get("entry_engine.structure_gate")
+    if mod is not None:
+        mod.reset()

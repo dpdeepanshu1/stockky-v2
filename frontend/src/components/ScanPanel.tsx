@@ -7,6 +7,7 @@ import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
+import { decisionTally, ruleCounts } from "../structureView";
 
 interface Props {
   result: ScanResult;
@@ -681,6 +682,22 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           <p className="text-mist text-sm max-w-md mx-auto mb-0">
             {result.scanned} stocks scanned. None cleared the conviction bar today.
           </p>
+          {(() => {
+            // group353: why nothing qualified, from the daily-structure policy (shadow rows are labelled "would", never "did")
+            const rows = (result.all_results && result.all_results.length ? result.all_results : result.results) || [];
+            const t = decisionTally(rows);
+            if (t.checked === 0) return null;
+            const rc = ruleCounts(rows).slice(0, 4);
+            return (
+              <div className="mt-3 text-mist text-xs max-w-md mx-auto" data-testid="scan-structure-summary">
+                <p className="mb-1">
+                  Daily structure checked {t.checked} stocks: {t.wouldChange} {t.applied > 0 ? "downgraded" : "would be downgraded (shadow, not applied)"}
+                  {t.noOpinion > 0 ? `, ${t.noOpinion} had no structure data` : ""}.
+                </p>
+                {rc.length > 0 && <p className="mb-0">{rc.map(x => `${x.label} ×${x.n}`).join(" · ")}</p>}
+              </div>
+            );
+          })()}
           {(result.watchlist_candidates?.length ?? 0) > 0 && (
             <div className="mt-6">
               <p className="text-mist/60 text-sm mb-2">Worth watching:</p>

@@ -15,6 +15,8 @@ interface AuditStats {
   health_score: number;
   incomplete_stocks: IncompleteStock[];
   required_fields?: string[];
+  /** group356: share of audited feed rows with a usable daily market-structure read */
+  structure_coverage?: { checked: number; usable: number; pct: number | null; by_quality?: Record<string, number> };
 }
 
 interface RefillAllJob {
@@ -242,6 +244,13 @@ export default function DataHealthAudit() {
         <div className="scan-stat">
           <span className="scan-stat-label">Missing data</span>
           <span className="scan-stat-value text-signal-sell">{stats?.incomplete_count ?? "—"}</span>
+        </div>
+        <div className="scan-stat" data-testid="structure-coverage"
+          title={stats?.structure_coverage?.by_quality ? Object.entries(stats.structure_coverage.by_quality).map(([q, n]) => `${q}: ${n}`).join(" · ") : ""}>
+          <span className="scan-stat-label">Structure read</span>
+          <span className={`scan-stat-value ${stats?.structure_coverage?.pct == null ? "" : stats.structure_coverage.pct < 50 ? "text-signal-hold" : "text-signal-buy"}`}>
+            {stats?.structure_coverage?.pct == null ? "—" : `${stats.structure_coverage.pct}%`}
+          </span>
         </div>
       </div>
 

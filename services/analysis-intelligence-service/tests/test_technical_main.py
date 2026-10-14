@@ -1276,7 +1276,9 @@ class TestBollingerSupportResistance:
 
 class TestSimpleRoutes:
     def test_health(self):
-        assert tm.health() == {"status": "ok", "service": "technical-analysis-service"}
+        h = tm.health()
+        assert h["status"] == "ok" and h["service"] == "technical-analysis-service"
+        assert "engine_version" in h["structure"]          # group352: additive structure counters
 
     def test_root(self):
         r = tm.root()
@@ -2069,6 +2071,7 @@ class TestAnalyzeResultShape:
             "rsi", "adx", "atr", "ema20", "ema50", "ema200", "bb_upper", "bb_lower",
             "volume_surge", "volume_ratio", "delivery_pct", "delivery_source",
             "extended", "extended_short", "data_insufficient", "adaptive_params_used", "reasons",
+            "sma20", "macd", "macd_hist", "market_structure", "structure_summary",      # group349 additive keys
         }
         assert r["symbol"] == "TCS"
         assert r["close"] == round(r["close"], 2)

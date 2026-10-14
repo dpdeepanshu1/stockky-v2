@@ -36,6 +36,9 @@ def _board_gate_off_by_default(monkeypatch):
     older test; test_group309_board_log_gate_report.py turns it back on explicitly."""
     import config as _config
     monkeypatch.setattr(_config, "BOARD_GATE_MODE", "off", raising=False)
+    # group354: both are LIVE by default now; older tests exercise the legacy board and an entry with no structure data
+    monkeypatch.setattr(_config, "BOARD_USE_MS_ENGINE", False, raising=False)
+    monkeypatch.setattr(_config, "STRUCTURE_GATE_MODE", "off", raising=False)
     yield
 
 

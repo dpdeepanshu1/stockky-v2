@@ -150,6 +150,8 @@ class ScalpPosition(Base):
     # the real fill, so (entry_price - signal_price) / signal_price is the entry slippage. Nullable: older rows have none.
     signal_price = Column(Float, nullable=True)
     min_price_seen = Column(Float, nullable=True)
+    # group354: JSON snapshot of the daily market-structure gate's view at entry (orders/structure_gate.py). Nullable: older rows have none.
+    structure_json = Column(Text, nullable=True)
 
     # 2026-09-18 (user audit finding): see the migration entry in db.py and
     # the OVERNIGHT_HOLD_ENABLED comment block in config.py.
@@ -564,3 +566,42 @@ class ScalpBoardLog(Base):
     fwd30_pct = Column(Float, nullable=True)
     fwd60_pct = Column(Float, nullable=True)
     fwd_close_pct = Column(Float, nullable=True)
+
+
+class ScalpStructureObservation(Base):
+    """group356 (WS-6): one concrete daily-structure gate verdict on one symbol on one IST day (first verdict of the day wins), followed for
+    20 trading days. Refused candidates are stored exactly like the ones that passed so the gate can be judged against what it turned away
+    (stockky_ms.observation). New table (create_all, no column migration). Outcome columns are filled by orders/structure_observation.py's
+    evaluator; `is_complete` = T+20 exists."""
+    __tablename__ = "scalp_structure_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False)
+    source = Column(String(24), nullable=False, default="position_stocks")
+    mode = Column(String(8), nullable=True)               # kept for the shared engine row shape; always NULL here
+    obs_day = Column(String(10), nullable=False)          # IST date YYYY-MM-DD
+    obs_ts = Column(Float, nullable=False)                # epoch seconds of the verdict
+    price = Column(Float, nullable=False)
+    stop = Column(Float, nullable=True)                   # the structure's own stop / target (ms_stop / ms_target)
+    target = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    verdict = Column(String(24), nullable=False)          # rejected_enforced | rejected_shadow | passed (no_opinion is not stored)
+    gate_mode = Column(String(10), nullable=True)
+    reasons_json = Column(Text, nullable=True)
+    summary_json = Column(Text, nullable=True)
+    ret_1d = Column(Float, nullable=True)
+    ret_5d = Column(Float, nullable=True)
+    ret_10d = Column(Float, nullable=True)
+    ret_20d = Column(Float, nullable=True)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+    first_touch = Column(String(8), nullable=True)
+    bars_seen = Column(Integer, nullable=False, default=0)
+    is_complete = Column(Boolean, nullable=False, default=False)
+    evaluated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_scalp_structure_obs_day_symbol", "obs_day", "symbol"),
+        Index("ix_scalp_structure_obs_pending", "is_complete", "obs_ts"),
+    )

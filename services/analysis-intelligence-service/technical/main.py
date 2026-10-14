@@ -349,6 +349,10 @@ def _fetch_history_from_market_data(symbol: str, period: str = "6mo", force: boo
         if resp.status_code == 200:
             data = resp.json()
             df = _candles_to_df(data.get("candles", []))
+            try:
+                _md_state.last_source = data.get("source") if isinstance(data, dict) else None   # group 352: provider tag for block["frame"]
+            except Exception:  # noqa: BLE001
+                pass
             if df is not None and len(df) >= 5:
                 return df
             _set_md_failure("thin")       # 200 but (almost) no bars: another period cannot add any
@@ -441,6 +445,7 @@ def _fetch_history(symbol: str, force: bool = False):
             df = _fetch_history_from_market_data(symbol, period=period, force=force)
             if df is not None:
                 if len(df) >= 20:
+                    _remember_full_frame(symbol, df, getattr(_md_state, "last_source", None))   # group 352: structure wants the untrimmed frame
                     return _trim_to_analysis_window(df)
                 # Short but real data (e.g. a recent listing): a different period
                 # cannot add bars, so keep it and stop instead of asking again.
@@ -595,6 +600,89 @@ except Exception:  # noqa: BLE001
 
 _STRUCTURE_STALE_DAYS = 7
 
+# -- group 352 (F7): structure sees the FULL daily history and CLOSED bars only ------------------------------------------------
+# Indicators run on a trimmed ~6-month window (scores were tuned on it); that starves Fibonacci / 52-week levels of history, and
+# today's still-forming bar makes swings / BOS repaint during the session. Keep the untrimmed frame the fetch already paid for
+# (bounded + short-lived), drop today's bar until close + STRUCTURE_BAR_CLOSE_BUFFER_MIN, and report what was used (block["frame"]).
+_FULL_FRAMES: dict = {}
+_FULL_FRAMES_MAX = 64
+_FULL_FRAMES_TTL_S = 900
+_FULL_FRAMES_LOCK = threading.Lock()
+_STRUCT_COUNTERS = {"computed": 0, "full_frame": 0, "trimmed_frame": 0, "forming_dropped": 0, "unavailable": 0, "errors": 0, "cache_hits": 0}
+
+
+def _remember_full_frame(symbol, df, source=None):
+    """Keep the untrimmed frame for the structure pass. Bounded (64 symbols), short-lived (15 min); never raises."""
+    try:
+        if df is None or len(df) < 20:
+            return
+        with _FULL_FRAMES_LOCK:
+            now = time.time()
+            for k in [k for k, v in _FULL_FRAMES.items() if now - v[0] > _FULL_FRAMES_TTL_S]:
+                _FULL_FRAMES.pop(k, None)
+            while len(_FULL_FRAMES) >= _FULL_FRAMES_MAX:
+                _FULL_FRAMES.pop(min(_FULL_FRAMES, key=lambda k: _FULL_FRAMES[k][0]), None)
+            _FULL_FRAMES[str(symbol)] = (now, df, source)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _bar_close_buffer_min() -> int:
+    try:
+        return max(0, int((os.getenv("STRUCTURE_BAR_CLOSE_BUFFER_MIN") or "20").strip()))
+    except Exception:  # noqa: BLE001
+        return 20
+
+
+def _drop_forming_bar(frame, now_ist=None):
+    """Drop the last bar when it is today's (IST) and the session has not closed + buffer yet. Returns (frame, dropped)."""
+    try:
+        if frame is None or len(frame) < 2:
+            return frame, False
+        now_ist = now_ist or datetime.now(ZoneInfo("Asia/Kolkata"))
+        last_day = pd.Timestamp(frame.index[-1]).date()
+        if last_day != now_ist.date():
+            return frame, False
+        close_dt = now_ist.replace(hour=15, minute=30, second=0, microsecond=0) + pd.Timedelta(minutes=_bar_close_buffer_min())
+        if now_ist < close_dt:
+            return frame.iloc[:-1], True
+        return frame, False
+    except Exception:  # noqa: BLE001
+        return frame, False
+
+
+def _structure_frame(sym, df, now_ist=None):
+    """(frame, meta) the structure engine runs on: untrimmed when the stored frame matches the analysis frame, closed bars only."""
+    frame, full, src = df, False, None
+    try:
+        with _FULL_FRAMES_LOCK:
+            hit = _FULL_FRAMES.get(str(sym))
+        if hit and time.time() - hit[0] <= _FULL_FRAMES_TTL_S:
+            cand = hit[1]
+            if len(cand) >= len(df) and pd.Timestamp(cand.index[-1]) == pd.Timestamp(df.index[-1]):
+                frame, full, src = cand, len(cand) > len(df), hit[2]
+    except Exception:  # noqa: BLE001
+        frame, full = df, False
+    frame, dropped = _drop_forming_bar(frame, now_ist)
+    try:
+        last_bar = str(pd.Timestamp(frame.index[-1]).date())
+    except Exception:  # noqa: BLE001
+        last_bar = None
+    return frame, {"bars": int(len(frame)), "full_history": bool(full), "forming_bar_dropped": bool(dropped), "source": src, "last_bar": last_bar}
+
+
+def _structure_params():
+    """STRUCTURE_PARAMS_JSON -> MSParams (bad JSON / unknown keys ignored -> defaults)."""
+    raw = (os.getenv("STRUCTURE_PARAMS_JSON") or "").strip()
+    if not raw:
+        return None
+    try:
+        from stockky_ms.params import from_dict
+        d = json.loads(raw)
+        return from_dict(d) if isinstance(d, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def _structure_enabled() -> bool:
     return (os.getenv("STRUCTURE_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
@@ -615,18 +703,37 @@ def _df_to_bars(df):
     return out
 
 
-def _structure_for_df(df, ctx=None):
-    """Returns (block, summary) or (None, None). Never raises."""
+def _structure_for_df(df, ctx=None, sym=None):
+    """Returns (block, summary) or (None, None). Never raises. Runs on the untrimmed closed-bar frame when available (group 352)."""
     if _ms_analyze is None or not _structure_enabled() or df is None or len(df) < 5:
         return None, None
     try:
-        last = pd.Timestamp(df.index[-1])
+        frame, meta = _structure_frame(sym, df) if sym else (df, {"bars": int(len(df)), "full_history": False, "forming_bar_dropped": False, "source": None, "last_bar": None})
+        if frame is None or len(frame) < 5:
+            return None, None
+        ctx2 = dict(ctx or {})
+        if meta.get("full_history") or meta.get("forming_bar_dropped"):
+            try:   # the caller's ema20 was computed on the trimmed / forming frame; recompute on the frame structure actually saw
+                ctx2["ema20"] = float(frame["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
+            except Exception:  # noqa: BLE001
+                pass
+        last = pd.Timestamp(frame.index[-1])
         if last.tzinfo is None:
             last = last.tz_localize("UTC")
         stale = (pd.Timestamp.now(tz="UTC") - last) > pd.Timedelta(days=_STRUCTURE_STALE_DAYS)
-        block = _ms_analyze(_df_to_bars(df), ctx=ctx or {}, stale=bool(stale))
+        params = _structure_params()
+        block = _ms_analyze(_df_to_bars(frame), params=params, ctx=ctx2, stale=bool(stale))
+        if isinstance(block, dict):
+            block["frame"] = meta
+            _STRUCT_COUNTERS["computed"] += 1
+            _STRUCT_COUNTERS["full_frame" if meta["full_history"] else "trimmed_frame"] += 1
+            if meta["forming_bar_dropped"]:
+                _STRUCT_COUNTERS["forming_dropped"] += 1
+            if block.get("quality") in ("unavailable", "insufficient"):
+                _STRUCT_COUNTERS["unavailable"] += 1
         return block, _ms_flatten(block)
     except Exception as e:  # noqa: BLE001
+        _STRUCT_COUNTERS["errors"] += 1
         logger.warning("Technical: market-structure analyze failed (%s); continuing without it", e)
         return None, None
 
@@ -660,12 +767,13 @@ def _structure_cached(sym, df, ctx=None, force=False):
             return None, None
         flags = f"{int(bool((ctx or {}).get('extended')))}{int(bool((ctx or {}).get('extended_short')))}"
         key = f"tech_ms:{sym}:{flags}"
-        sig = [str(pd.Timestamp(df.index[-1])), int(len(df))]
+        sig = [str(pd.Timestamp(df.index[-1])), int(len(df)), _structure_frame(sym, df)[1]]
         if not force and _structure_cache_ttl() > 0:
             hit = _cache_get(key)
             if isinstance(hit, dict) and hit.get("sig") == sig and hit.get("block") is not None:
+                _STRUCT_COUNTERS["cache_hits"] += 1
                 return hit["block"], hit.get("summary")
-        block, summary = _structure_for_df(df, ctx)
+        block, summary = _structure_for_df(df, ctx, sym)
         if block is not None and _structure_cache_ttl() > 0:
             try:
                 _cache_set(key, {"sig": sig, "block": block, "summary": summary}, ttl=_structure_cache_ttl())
@@ -674,7 +782,7 @@ def _structure_cached(sym, df, ctx=None, force=False):
         return block, summary
     except Exception as e:  # noqa: BLE001
         logger.warning("Technical: structure cache path failed for %s (%s); computing uncached", sym, e)
-        return _structure_for_df(df, ctx)
+        return _structure_for_df(df, ctx, sym)
 
 
 def _attach_structure(result, block, summary):
@@ -765,7 +873,14 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "technical-analysis-service"}
+    try:
+        _ev = None
+        if _ms_analyze is not None:
+            from stockky_ms.ms_types import MS_ENGINE_VERSION as _ev  # noqa: N811
+    except Exception:  # noqa: BLE001
+        _ev = None
+    return {"status": "ok", "service": "technical-analysis-service",
+            "structure": {"enabled": bool(_structure_enabled() and _ms_analyze is not None), "engine_version": _ev, **_STRUCT_COUNTERS}}
 
 @app.get("/")
 def root():

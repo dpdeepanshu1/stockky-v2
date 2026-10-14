@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, vwap_gate
+from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -357,7 +357,7 @@ _skip_state = _threading.local()
 _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "PENNY_STOCK", "RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "ENTRY_REJECTED_TODAY", "REENTRY_", "ALREADY_OPEN_HERE",
     "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
-    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE",
+    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_",
 )
 
 
@@ -637,6 +637,18 @@ def attempt_entry(
     if _board_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _board_reject, quality=quality)
+        return None
+
+    # group354: daily market-structure gate (orders/structure_gate.py). Live by default; refuses only a clear daily-structure no-go,
+    # no / stale data is "no opinion"; fails open. The snapshot is stored on the position.
+    _struct_cap: dict = {}
+    _struct_reject, _struct_snap = structure_gate.check(candidate.symbol, candidate.current_ltp, capture=_struct_cap)
+    if _struct_cap:   # group356: follow the verdict (passed or refused) for 20 sessions; never raises
+        structure_observation.record(db, candidate.symbol, candidate.current_ltp, _struct_cap.get("verdict") or {}, _struct_cap.get("summary"),
+                                     _struct_cap.get("gate_mode") or "", bool(_struct_cap.get("enforced")))
+    if _struct_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _struct_reject, quality=quality)
         return None
 
     # Reserve capital (also checks kill switch again in the ledger)
@@ -932,6 +944,7 @@ def attempt_entry(
         status="OPEN",
         entry_price=candidate.current_ltp,
         signal_price=candidate.current_ltp,                  # group280: slippage = fill vs this
+        structure_json=_struct_snap,                          # group354
         quantity=quantity,
         target_price=levels.target_price,
         stop_price=levels.stop_price,

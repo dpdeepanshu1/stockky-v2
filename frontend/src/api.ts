@@ -1,3 +1,4 @@
+import type { DecisionStructure } from "./structureView";
 // frontend/src/api/api.ts
 
 const STORAGE_KEY = "stockky:api_url";
@@ -67,6 +68,8 @@ export interface FundamentalMetrics {
 
 export interface Decision {
   symbol: string;
+  /** group353: daily market-structure policy record (shadow by default). Absent on older / fast-path rows. */
+  structure?: DecisionStructure | null;
   /** Label only (group105): technical read rests on a minimal / fallback price history. Absent on fast-path rows. */
   technical_thin?: boolean;
   decision: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL" | "WAIT";
@@ -1715,6 +1718,10 @@ export const api = {
 
   getWeeklyTradeReport: (weeks = 12) =>
     request<TradeReportBucket[]>(`/training/api/trades/report/weekly?weeks=${weeks}`, undefined, 2, 30000),
+
+  // group356: the gateway's daily market-structure block for one symbol (never throws on the server side: market_structure is null when unavailable)
+  getStockStructure: (symbol: string) =>
+    request<{ symbol: string; market_structure: any | null }>(`/stock/${encodeURIComponent(symbol)}/structure`, undefined, 1, 25000),
 
   getStockHistory: async (symbol: string, period: string = "1mo") => {
     try {

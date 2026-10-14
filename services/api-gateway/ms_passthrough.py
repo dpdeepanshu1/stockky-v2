@@ -63,4 +63,8 @@ def feed_keys(src: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Only the non-None ms_* keys, for seeding a feed row without clobbering real values with nulls."""
     if not enabled():
         return {}
+    # No valid block -> nothing to seed. (safe_summary() would still say ms_quality='unavailable', a non-None value; seeding that
+    # made every technical reply without a structure block look like a patched feed field and stamped a fake quality on the row.)
+    if safe_block(src) is None:
+        return {}
     return {k: v for k, v in safe_summary(src).items() if v is not None and k in SUMMARY_KEYS}

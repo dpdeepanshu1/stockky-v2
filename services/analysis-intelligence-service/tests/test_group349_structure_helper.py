@@ -18,7 +18,10 @@ def _load_helpers():
     a = src.index("# ── Market-structure engine")
     b = src.index('@app.get("/sector-strength/{symbol}")')
     store = {}
-    ns = {"os": os, "pd": pd, "json": json, "logger": logging.getLogger("t"), "get_cache_ttl": lambda: 300,
+    import threading, time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ns = {"os": os, "pd": pd, "json": json, "threading": threading, "time": time, "datetime": datetime, "ZoneInfo": ZoneInfo, "logger": logging.getLogger("t"), "get_cache_ttl": lambda: 300,
           "_cache_get": lambda k: store.get(k), "_cache_set": lambda k, v, ttl=None: store.__setitem__(k, v), "_store": store}
     exec(compile(src[a:b], "helpers", "exec"), ns)
     return ns

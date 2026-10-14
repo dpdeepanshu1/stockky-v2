@@ -2,6 +2,9 @@
 
 import { useEffect, useState, useRef } from "react";
 import TrainingProgressPanel from "./TrainingProgressPanel";
+import StructureEdgeCard from "./StructureEdgeCard";
+import { realTradeApi } from "../realTradeApi";
+import { positionStocksApi } from "../positionStocksApi";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
 export default function Training() {
@@ -1043,6 +1046,13 @@ export default function Training() {
             title="Training pipeline"
           />
           <StageTracker stage={trainProgress?.stage} />
+
+          {/* group356 (WS-6): the structure gate's own track record - what the stocks it turned away did over the next 20 trading days.
+              This is the evidence the gate thresholds get calibrated on; DEMO needs no login, REAL lives on the Real Auto Trade tab. */}
+          <div className="mt-4 space-y-2" data-testid="training-structure-observations">
+            <StructureEdgeCard title="Structure gate — swing entries (DEMO)" load={(d) => realTradeApi.structureEdge("DEMO", d)} />
+            <StructureEdgeCard title="Structure gate — scalp entries" load={(d) => positionStocksApi.structureEdge(d)} />
+          </div>
 
           {trainProgress?.detail && Object.keys(trainProgress.detail).length > 0 && (
             <div className="mt-4 bg-ink/40 border border-slate/30 rounded-2xl p-3 font-display tabular-nums text-xs">

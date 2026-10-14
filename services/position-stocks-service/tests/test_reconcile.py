@@ -67,6 +67,9 @@ class Broker:
 
 @pytest.fixture()
 def env(monkeypatch):
+    # group341's re-arm queue is process-global and keyed by position id; every test gets a fresh in-memory DB whose ids restart at 1,
+    # so a leg move left pending by one test would otherwise be retried (and its modify calls counted) inside the next one.
+    reconcile._rearm_state.clear()
     eng = create_engine("sqlite:///:memory:")
     models.Base.metadata.create_all(eng)
     db = sessionmaker(bind=eng)()
@@ -118,6 +121,7 @@ def env(monkeypatch):
     db.commit()
     yield db, b, sent
     db.close()
+    reconcile._rearm_state.clear()
 
 
 # ── Builders / readers ───────────────────────────────────────────────────────

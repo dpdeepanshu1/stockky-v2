@@ -132,6 +132,8 @@ services:
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
       NEWS_URL: http://analysis-intelligence-service:8000/news
       EVENT_URL: http://analysis-intelligence-service:8000/event
+      # group 353: daily market-structure policy. shadow = record what it would do, change nothing.
+      STRUCTURE_POLICY_MODE: ${STRUCTURE_POLICY_MODE:-full}
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}

@@ -12228,6 +12228,14 @@ async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
     return await run_in_threadpool(_compute_feed_audit, limit)
 
 
+def _structure_coverage(by_quality: dict) -> dict:
+    """group356: share of the audited feed rows that carry a usable daily market-structure read (ms_quality ok / limited). Pure."""
+    total = sum(by_quality.values())
+    usable = sum(n for q, n in by_quality.items() if q in ("ok", "limited"))
+    return {"checked": total, "usable": usable, "pct": round(100.0 * usable / total, 1) if total else None,
+            "by_quality": dict(sorted(by_quality.items(), key=lambda kv: -kv[1]))}
+
+
 def _compute_feed_audit(limit: int) -> dict:
     """The actual (synchronous, DB/store-backed) audit walk — see the
     run_in_threadpool BUG FIX note on audit_missing_feed_data above for why
@@ -12264,6 +12272,7 @@ def _compute_feed_audit(limit: int) -> dict:
     over_cap = []
     complete_count = 0
     total = 0
+    _ms_by_quality: dict = {}
     for sym in symbols:
         total += 1
         try:
@@ -12272,6 +12281,9 @@ def _compute_feed_audit(limit: int) -> dict:
             row = {}
         if not isinstance(row, dict):
             row = {}
+        # group356: daily market-structure coverage of the feed (ms_quality is carried on the row by ms_passthrough.feed_keys)
+        _msq = str(row.get("ms_quality") or "none")
+        _ms_by_quality[_msq] = _ms_by_quality.get(_msq, 0) + 1
         # Stocks whose price is over the ₹MAX_UNIVERSE_PRICE cap should never
         # have been fed — they're not "incomplete" (repair can't legally
         # populate a price under-cap for them), they're stale writes from
@@ -12309,6 +12321,7 @@ def _compute_feed_audit(limit: int) -> dict:
         "over_cap_count": len(over_cap),
         "over_cap_stocks": over_cap[:200],
         "health_score": health,
+        "structure_coverage": _structure_coverage(_ms_by_quality),
         "incomplete_stocks": incomplete,
         "required_fields": list(_REQUIRED_FEED_FIELDS),
         "message": (

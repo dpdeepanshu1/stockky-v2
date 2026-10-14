@@ -65,3 +65,10 @@ if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
             f(); print("ok", n)
+
+
+def test_feed_keys_empty_without_a_valid_block():
+    # a technical reply with no (or an unsupported) structure block seeds nothing and so is not reported as a patched field
+    assert mp.feed_keys({"rsi": 33}) == {}
+    assert mp.feed_keys({"market_structure": {"schema_version": 99}}) == {}
+    assert mp.feed_keys(None) == {}

@@ -981,11 +981,11 @@ OPENING_GATE_MIN_OR_TICKS = _get_int("OPENING_GATE_MIN_OR_TICKS", 10)           
 OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT = _get_float("OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT", 0.0)
 OPENING_GATE_NIFTY_MIN_VS_PREV_PCT = _get_float("OPENING_GATE_NIFTY_MIN_VS_PREV_PCT", 0.0)
 
-# group 269: shadow mode. OPENING_GATE_SHADOW=1 -> while the gate is active (09:15 until the settle time) NO entry is placed;
+# group 269 shadow mode REMOVED (group370): the opening gate is always live; OPENING_GATE_ENABLED=false is its only off switch.
+# (old text: OPENING_GATE_SHADOW=1 -> while the gate is active (09:15 until the settle time) NO entry is placed;
 # a symbol that passes every gate check is logged once per day as SKIPPED "OPENING_SHADOW:WOULD_ENTER ltp=..." (with the same
 # gap/range/OR/Nifty numbers as an ENTERED row) so the 09:15 entries can be judged against later prices before real money is
 # used. Rejected symbols are logged as before. Default 0 = the gate is live (group 268 behaviour).
-OPENING_GATE_SHADOW = _get_bool("OPENING_GATE_SHADOW", False)
 
 # ── Opening gate: previous-day candle checks (group 270, 2026-10-09) ─────────
 # Read from market-data-service /history (daily candles) by a background thread (screening/prev_day.py), never on the entry
@@ -1022,16 +1022,16 @@ BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                  
 # observations over BOARD_PROMOTE_MIN_SESSIONS sessions, bootstrap CI says what it blocks does clearly worse), then enforce; re-checked
 # every BOARD_AUTO_REFRESH_S over the last BOARD_AUTO_DAYS days and drops back to shadow if the verdict stops holding.
 BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "enforce").lower()
-if BOARD_GATE_MODE not in ("off", "shadow", "enforce", "auto"):
-    BOARD_GATE_MODE = "enforce"
+if BOARD_GATE_MODE != "off":
+    BOARD_GATE_MODE = "enforce"          # group370: always live; a stale "shadow" / "auto" in an old .env is enforce
 # group354: DAILY MARKET-STRUCTURE GATE on the automatic scalp entry (orders/structure_gate.py). "Good scalp, bad daily location?" - reads the
 # technical service's daily market_structure summary via api-gateway GET /stock/{symbol}/structure (cached, fail-open: no / stale /
 # insufficient structure = no opinion, never a block). LIVE by default; the scalper buys strength on purpose, so the defaults block only the
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
-#   STRUCTURE_GATE_MODE   off | shadow (log + store the verdict, never refuse) | enforce (default: refuse with STRUCTURE_* reason)
+#   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | off (kill switch); a stale "shadow" = enforce
 STRUCTURE_GATE_MODE = _get_str("STRUCTURE_GATE_MODE", "enforce").lower()
-if STRUCTURE_GATE_MODE not in ("off", "shadow", "enforce"):
+if STRUCTURE_GATE_MODE != "off":
     STRUCTURE_GATE_MODE = "enforce"
 STRUCTURE_REQUIRE_DATA = _get_bool("STRUCTURE_REQUIRE_DATA", False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
 STRUCTURE_BEARISH_BLOCK = _get_bool("STRUCTURE_BEARISH_BLOCK", True)                    # bearish daily trend / fresh (not failed) bearish BOS
@@ -1044,8 +1044,6 @@ STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT",
 STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
 STRUCTURE_CACHE_TTL_S = max(30.0, _get_float("STRUCTURE_CACHE_TTL_S", 600.0))
 STRUCTURE_FAIL_TTL_S = max(10.0, _get_float("STRUCTURE_FAIL_TTL_S", 60.0))
-BOARD_AUTO_REFRESH_S = max(60, _get_int("BOARD_AUTO_REFRESH_S", 3600))
-BOARD_AUTO_DAYS = max(1, min(120, _get_int("BOARD_AUTO_DAYS", 30)))
 BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours
 BOARD_LOG_TOP_N = max(1, _get_int("BOARD_LOG_TOP_N", 20))                           # rows per side per snapshot
 BOARD_CONVICTION_WEIGHTS = _get_str("BOARD_CONVICTION_WEIGHTS", "")                 # "strength=0.5,volume=0.2,..." (optional)

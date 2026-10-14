@@ -566,3 +566,40 @@ class ScalpBoardLog(Base):
     fwd30_pct = Column(Float, nullable=True)
     fwd60_pct = Column(Float, nullable=True)
     fwd_close_pct = Column(Float, nullable=True)
+
+
+class ScalpStructureObservation(Base):
+    """group356 (WS-6): one row per symbol / mode / IST day = what the daily structure gate saw, and (filled later by the evaluator)
+    what the stock did over the next 1/5/10/20 sessions. Read-only evidence; nothing in the entry path reads it back."""
+    __tablename__ = "scalp_structure_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False)
+    source = Column(String(24), nullable=False)
+    mode = Column(String(8), nullable=True)
+    obs_day = Column(String(10), nullable=False)            # IST "YYYY-MM-DD"
+    obs_ts = Column(Float, nullable=False)                  # epoch seconds
+    price = Column(Float, nullable=False)
+    stop = Column(Float, nullable=True)
+    target = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    verdict = Column(String(24), nullable=False)            # passed | rejected_enforced (legacy rows: rejected_shadow)
+    gate_mode = Column(String(12), nullable=True)
+    reasons_json = Column(Text, nullable=True)
+    summary_json = Column(Text, nullable=True)
+    ret_1d = Column(Float, nullable=True)
+    ret_5d = Column(Float, nullable=True)
+    ret_10d = Column(Float, nullable=True)
+    ret_20d = Column(Float, nullable=True)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+    first_touch = Column(String(12), nullable=True)
+    bars_seen = Column(Integer, nullable=False, default=0)
+    is_complete = Column(Boolean, nullable=False, default=False)
+    evaluated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_scalp_struct_obs_day", "mode", "symbol", "obs_day"),
+        Index("ix_scalp_struct_obs_pending", "is_complete", "obs_ts"),
+    )

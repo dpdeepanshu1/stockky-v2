@@ -45,8 +45,11 @@ to try to recover automatically instead of giving up):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -380,20 +383,73 @@ def _kv():
     return kv_cache
 
 
-def _load_learned_renames() -> Dict[str, Any]:
+# group368: the learned-renames / learned-delisted reads used to call kv_get() directly. Called from the event loop (via
+# _clean_equity_symbol -> resolve_base_symbol) that blocked the loop for 3.2 s in the boot log - the KV_LOOP_READ_GUARD still lets the
+# loop thread wait up to KV_LOOP_READ_TIMEOUT_S (default 1.5 s). On the loop thread the reads below now serve a short-TTL cache and
+# refresh it in a background thread (a cold cache returns {} = "nothing learned yet", the same fail-open answer as a KV error).
+# Off the loop thread the read stays direct, so worker threads and writers always see fresh data.
+_LEARNED_CACHE_TTL_S = max(0.0, float(__import__("os").getenv("LEARNED_RENAMES_CACHE_TTL_S", "60") or 60))
+_learned_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_learned_refreshing: set = set()
+_learned_lock = threading.Lock()
+
+
+def _on_loop_thread() -> bool:
     try:
-        val = _kv().kv_get(_LEARNED_RENAMES_KEY)
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _read_learned_direct(key: str) -> Dict[str, Any]:
+    try:
+        val = _kv().kv_get(key)
         return val if isinstance(val, dict) else {}
     except Exception:
         return {}
+
+
+def _refresh_learned(key: str) -> None:
+    try:
+        data = _read_learned_direct(key)
+        with _learned_lock:
+            _learned_cache[key] = (time.monotonic() + _LEARNED_CACHE_TTL_S, data)
+    finally:
+        with _learned_lock:
+            _learned_refreshing.discard(key)
+
+
+def _read_learned(key: str) -> Dict[str, Any]:
+    if not _on_loop_thread():
+        return _read_learned_direct(key)
+    now = time.monotonic()
+    with _learned_lock:
+        hit = _learned_cache.get(key)
+        fresh = hit is not None and hit[0] > now
+        start = (not fresh) and key not in _learned_refreshing
+        if start:
+            _learned_refreshing.add(key)
+    if start:
+        try:
+            threading.Thread(target=_refresh_learned, args=(key,), daemon=True, name="learned-cache-refresh").start()
+        except Exception:
+            with _learned_lock:
+                _learned_refreshing.discard(key)
+    return dict(hit[1]) if hit is not None else {}
+
+
+def _invalidate_learned_cache() -> None:
+    with _learned_lock:
+        _learned_cache.clear()
+
+
+def _load_learned_renames() -> Dict[str, Any]:
+    return _read_learned(_LEARNED_RENAMES_KEY)
 
 
 def _load_learned_delisted() -> Dict[str, Any]:
-    try:
-        val = _kv().kv_get(_LEARNED_DELISTED_KEY)
-        return val if isinstance(val, dict) else {}
-    except Exception:
-        return {}
+    return _read_learned(_LEARNED_DELISTED_KEY)
 
 
 def is_learned_delisted(symbol: str) -> bool:
@@ -415,20 +471,22 @@ def learn_rename(old_symbol: str, new_symbol: str, source: str = "manual") -> No
     if not old or not new or old == new:
         return
     try:
-        data = _load_learned_renames()
+        data = _read_learned_direct(_LEARNED_RENAMES_KEY)
         data[old] = {
             "to": new,
             "source": source,
             "learned_at": datetime.now(timezone.utc).isoformat(),
         }
         _kv().kv_set(_LEARNED_RENAMES_KEY, data, ttl=None)  # durable, no expiry
+        _invalidate_learned_cache()
         logger.info("symbol_aliases: learned rename %s -> %s (source=%s)", old, new, source)
         # A confirmed rename supersedes any earlier "probably delisted" guess.
         try:
-            delisted = _load_learned_delisted()
+            delisted = _read_learned_direct(_LEARNED_DELISTED_KEY)
             if old in delisted:
                 delisted.pop(old, None)
                 _kv().kv_set(_LEARNED_DELISTED_KEY, delisted, ttl=None)
+            _invalidate_learned_cache()
         except Exception:
             pass
     except Exception as e:
@@ -449,9 +507,10 @@ def record_resolution_failure(symbol: str) -> int:
         counts[base] = n
         _kv().kv_set(_FAILURE_COUNTS_KEY, counts, ttl=30 * 86400)
         if n >= MAX_FAILURE_STREAK:
-            delisted = _load_learned_delisted()
+            delisted = _read_learned_direct(_LEARNED_DELISTED_KEY)
             delisted[base] = {"marked_at": datetime.now(timezone.utc).isoformat(), "failures": n}
             _kv().kv_set(_LEARNED_DELISTED_KEY, delisted, ttl=None)
+            _invalidate_learned_cache()
             logger.info(
                 "symbol_aliases: %s hit %s consecutive resolution failures — "
                 "marked probably-delisted (learned, not hardcoded)", base, n,

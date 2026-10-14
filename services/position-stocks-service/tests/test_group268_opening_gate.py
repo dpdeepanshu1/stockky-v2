@@ -191,23 +191,9 @@ def test_entry_default_window_now_opens_at_0915():
     assert (main._NO_ENTRY_BEFORE.hour, main._NO_ENTRY_BEFORE.minute) == (9, 15)
 
 
-# ── group 269: shadow mode ───────────────────────────────────────────────────
-def test_shadow_active_only_with_flag_and_inside_window(w, monkeypatch):
-    monkeypatch.setattr(config, "OPENING_GATE_SHADOW", False)
-    assert og.shadow_active(at(9, 40)) is False
-    monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
-    assert og.shadow_active(at(9, 40)) is True
-    assert og.shadow_active(at(10, 5)) is False
-    monkeypatch.setattr(config, "OPENING_GATE_ENABLED", False)
-    assert og.shadow_active(at(9, 40)) is False
-
-
-def test_shadow_first_time_once_per_symbol_per_day(w):
-    og.reset_shadow()
-    assert og.shadow_first_time("AAA", at(9, 40)) is True
-    assert og.shadow_first_time("AAA", at(9, 41)) is False
-    assert og.shadow_first_time("BBB", at(9, 41)) is True
-    assert og.shadow_first_time("AAA", datetime(2026, 10, 12, 9, 40, tzinfo=IST)) is True
+# group 269 shadow mode removed in group370: the opening gate is always live
+def test_no_shadow_api_any_more():
+    assert not hasattr(og, "shadow_active") and not hasattr(og, "shadow_first_time") and not hasattr(config, "OPENING_GATE_SHADOW")
 
 
 # ── group 270: previous-day candle checks ────────────────────────────────────

@@ -62,7 +62,7 @@ def test_nodata_key(text, key):
 
 
 def test_record_counts_and_ring():
-    sg.record("aaa", _v(), "shadow", False, 10.0)
+    sg.record("aaa", _v(), "enforce", False, 10.0)
     sg.record("BBB", _v(would_reject=True, reasons=["daily structure is bearish", "chase 5.0 daily ATR above x"]), "enforce", True, 20.0)
     sg.record("CCC", _v(opinion="no_opinion", no_data="no structure summary"), "enforce", True)
     st = sg.stats()
@@ -75,7 +75,7 @@ def test_record_counts_and_ring():
 
 def test_stats_empty_and_reset():
     assert sg.stats()["coverage_pct"] is None
-    sg.record("A", _v(), "shadow", False)
+    sg.record("A", _v(), "enforce", False)
     sg.reset()
     assert sg.stats()["evaluated"] == 0
 
@@ -84,13 +84,13 @@ def test_record_never_raises():
     class Boom(dict):
         def get(self, *a, **k):
             raise RuntimeError("x")
-    sg.record("A", Boom(), "shadow", False)
+    sg.record("A", Boom(), "enforce", False)
     assert sg.stats()["errors"] == 1
 
 
 def test_ring_bounded():
     for i in range(130):
-        sg.record(f"S{i}", _v(), "shadow", False)
+        sg.record(f"S{i}", _v(), "enforce", False)
     assert sg.stats()["evaluated"] == 130 and len(sg.stats()["recent"]) == 30 and len(sg._recent) == 100
 
 
@@ -111,13 +111,13 @@ def test_check_records_enforced_refusal(monkeypatch):
     assert st["recent"][0]["symbol"] == "XYZ" and st["recent"][0]["price"] == 100.0
 
 
-def test_check_shadow_records_but_allows(monkeypatch):
-    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "shadow", raising=False)
+def test_check_stale_shadow_value_enforces(monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "shadow", raising=False)      # group370: no record-only mode
     monkeypatch.setattr(sg, "fetch_summary", lambda s: _sum(ms_trend="bearish"))
     reason, snap = sg.check("XYZ", 100.0)
-    assert reason is None and snap
+    assert reason and snap
     st = sg.stats()
-    assert st["would_reject"] == 1 and st["enforced"] == 0
+    assert st["would_reject"] == 1 and st["enforced"] == 1
 
 
 def test_check_off_records_nothing(monkeypatch):

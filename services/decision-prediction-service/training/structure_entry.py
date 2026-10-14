@@ -18,7 +18,7 @@ MAX_RULES = 8
 MAX_TEXT = 200
 MAX_BYTES = 4000
 
-_MODES = ("shadow", "caps", "full")           # "off" means the policy never looked: nothing worth storing
+_MODES = ("shadow", "caps", "full")           # shadow/caps only for rows stored BEFORE group370 (policy is always full now); "off" = never looked: not stored
 _FEATURE_NUM = ("bos_bars", "choch_bars", "chase_atr", "stretch_atr", "room_atr", "rr", "stop", "target", "tqs", "groups", "ms_price", "atr")
 _FEATURE_STR = ("quality", "trend", "bos_dir", "choch_dir", "asof", "ver")
 

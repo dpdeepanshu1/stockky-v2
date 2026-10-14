@@ -33,8 +33,8 @@ def _cand(db, summary, symbol="GOODCO"):
 
 @pytest.fixture(autouse=True)
 def _cfg(monkeypatch):
-    for k, v in (("STRUCTURE_GATE_MODE", "shadow"), ("STRUCTURE_GATE_DEMO_MODE", "shadow"), ("STRUCTURE_REQUIRE_DATA", False),
-                 ("STRUCTURE_STOP_MODE", "shadow"), ("STRUCTURE_MAX_CHASE_ATR", 1.5), ("STRUCTURE_MAX_STRETCH_ATR", 3.0),
+    for k, v in (("STRUCTURE_GATE_MODE", "off"), ("STRUCTURE_GATE_DEMO_MODE", "off"), ("STRUCTURE_REQUIRE_DATA", False),
+                 ("STRUCTURE_STOP_MODE", "off"), ("STRUCTURE_MAX_CHASE_ATR", 1.5), ("STRUCTURE_MAX_STRETCH_ATR", 3.0),
                  ("STRUCTURE_MIN_ROOM_ATR", 0.5), ("STRUCTURE_MIN_RR", 1.2), ("STRUCTURE_BEARISH_BLOCK", True),
                  ("STRUCTURE_REJECT_STOP_WIDE", True), ("STRUCTURE_MAX_AGE_DAYS", 7.0), ("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0),
                  ("STRUCTURE_BEARISH_BOS_BARS", 5), ("STRUCTURE_STOP_MAX_RISK_MULT", 1.6), ("STRUCTURE_STOP_MIN_RISK_MULT", 0.5)):
@@ -46,16 +46,20 @@ def _dec(db, symbol="GOODCO"):
     return db.query(models.TradeDecision).filter_by(symbol=symbol).one()
 
 
-def test_shadow_records_would_reject_but_still_enters(db, monkeypatch):
+def test_old_shadow_value_is_live_and_waits(db, monkeypatch):
+    # group370: there is no record-only mode; a stale "shadow" in an old .env is read as enforce
+    assert config._sg_mode("STRUCTURE_GATE_MODE", "enforce") == "enforce"
+    monkeypatch.setenv("STRUCTURE_GATE_DEMO_MODE", "shadow")
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", config._sg_mode("STRUCTURE_GATE_DEMO_MODE", "enforce"))
     _cand(db, _sum(ms_trend="bearish"))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})
     approve_all(monkeypatch)
     tally = run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-    assert tally["entered"] == 1
+    assert tally["entered"] == 0 and tally["waited"] == 1
     d = _dec(db)
-    assert d.action == "ENTER" and d.gate_tag is None
+    assert d.action == "WAIT" and d.gate_tag == "structure"
     doc = json.loads(d.structure_json)
-    assert doc["would_reject"] is True and doc["enforced"] is False and doc["gate_mode"] == "shadow"
+    assert doc["would_reject"] is True and doc["enforced"] is True and doc["gate_mode"] == "enforce"
 
 
 def test_enforce_waits_with_structure_tag(db, monkeypatch):
@@ -118,16 +122,17 @@ def test_gate_crash_fails_open(db, monkeypatch):
     assert run(entry.evaluate_mode(db, "DEMO", gate_armed=True))["entered"] == 1
 
 
-def test_structural_stop_used_only_when_on_and_sane(db, monkeypatch):
-    # ATR 2.0 -> ATR stop 1.5x = 3% below entry (~97); structural stop 96.5 is 1.17x that risk -> sane
+def test_structural_stop_not_used_when_kill_switch_off(db, monkeypatch):
+    # STRUCTURE_STOP_MODE=off (kill switch): the ATR stop stays, no structural levels are computed
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")
     quotes_map = {"GOODCO": tick(100.0, symbol="GOODCO")}
     _cand(db, _sum(ms_stop=96.5))
     quotes(monkeypatch, quotes_map)
     approve_all(monkeypatch)
     run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-    shadow_stop = _dec(db).proposed_stop
+    atr_stop = _dec(db).proposed_stop
     lv = json.loads(_dec(db).structure_json)["levels"]
-    assert lv["sane"] is True and lv["use"] is False and shadow_stop != pytest.approx(96.5, abs=0.01)
+    assert lv["use"] is False and atr_stop != pytest.approx(96.5, abs=0.01)
 
 
 def test_structural_stop_on_replaces_atr_stop(db, monkeypatch):

@@ -1,3 +1,4 @@
+- group370: structure rules always live (no shadow), strict BUY NOW (P7/P8), PREPARE recompute + P9 upgrade active. Doc: `docs/GROUP370_ALWAYS_LIVE_STRUCTURE_RULES.md`.
 # Changelog index
 
 Per-session fix notes live in `archive/session-notes/` (one file per

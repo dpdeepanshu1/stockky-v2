@@ -30,7 +30,7 @@ def test_entry_stores_the_verdict_as_an_observation(db, monkeypatch):
     rows = db.query(models.StructureObservation).all()
     assert len(rows) == 1
     r = rows[0]
-    assert r.symbol == "GOODCO" and r.mode == "DEMO" and r.price == 100.0 and r.verdict in ("rejected_enforced", "rejected_shadow") and r.is_complete is False
+    assert r.symbol == "GOODCO" and r.mode == "DEMO" and r.price == 100.0 and r.verdict == "rejected_enforced" and r.is_complete is False
     assert r.stop is not None and r.target is not None
 
 

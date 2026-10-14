@@ -1,4 +1,4 @@
-"""group309: board_log, board_gate (off/shadow/enforce, fail-open), board_report (stats + promotion rule)."""
+"""group309/370: board_log, board_gate (enforce / off kill switch, fail-open), board_report (stats + promotion rule)."""
 from __future__ import annotations
 
 import os
@@ -20,7 +20,7 @@ T0 = 1_790_000_100.0 - (1_790_000_100.0 % 60)
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     board_log.reset()
-    monkeypatch.setattr(config, "BOARD_GATE_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "BOARD_GATE_MODE", "enforce", raising=False)
     monkeypatch.setattr(config, "BOARD_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "BOARD_CHASE_ATR", 1.5, raising=False)
     monkeypatch.setattr(board_log, "_ensure_thread", lambda: None)
@@ -117,11 +117,12 @@ def test_gate_modes(monkeypatch):
     monkeypatch.setattr(config, "BOARD_GATE_MODE", "off", raising=False)
     monkeypatch.setattr(board_gate, "evaluate", lambda *a: (_ for _ in ()).throw(AssertionError("must not run")))
     assert board_gate.check("A", 100.0) is None and board_log.stats()["queued"] == 0
-    monkeypatch.setattr(config, "BOARD_GATE_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "BOARD_GATE_MODE", "shadow", raising=False)      # a stale old value is live (enforce), never record-only
+    assert board_gate.effective_mode() == "enforce"
     monkeypatch.setattr(board_gate, "evaluate", lambda *a: _facts(2.4))
-    assert board_gate.check("A", 100.0) is None
+    assert board_gate.check("A", 100.0).startswith("BOARD_CHASE:")
     row = board_log._q.get_nowait()
-    assert row["kind"] == "entry" and row["note"] == "would_block:extended" and row["chase_atr"] == 2.4 and row["side"] == "bull"
+    assert row["kind"] == "entry" and row["note"] == "enforced:extended" and row["chase_atr"] == 2.4 and row["side"] == "bull"
     monkeypatch.setattr(board_gate, "evaluate", lambda *a: _facts(0.3)); board_gate.check("A", 100.0)
     monkeypatch.setattr(board_gate, "evaluate", lambda *a: None); board_gate.check("A", 100.0)
     assert [board_log._q.get_nowait()["note"] for _ in range(2)] == ["pass", "no_zone_data"]

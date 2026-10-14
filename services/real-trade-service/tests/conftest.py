@@ -37,9 +37,6 @@ def _opening_gate_off_by_default(monkeypatch):
     tests/test_group268_opening_gate.py turns it back on and pins the clock."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "OPENING_GATE_ENABLED", False, raising=False)
-    monkeypatch.setattr(_cfg, "OPENING_GATE_SHADOW", False, raising=False)
-    from entry_engine import opening_gate as _og
-    _og.reset_shadow()
     from entry_engine import prev_day as _pd
     _pd.reset()
     yield
@@ -134,3 +131,13 @@ def _structure_gate_no_network_by_default(monkeypatch):
     mod = _sys_g172.modules.get("entry_engine.structure_gate")
     if mod is not None:
         mod.reset()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _exit_hold_audit_every_cycle(monkeypatch):
+    """group368: existing exit tests expect one HOLD audit row per evaluation; the throttle is off unless a test turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "EXIT_HOLD_AUDIT_SECONDS", 0, raising=False)
+    mod = _sys_g172.modules.get("exit_engine.exit")
+    if mod is not None and hasattr(mod, "_HOLD_AUDIT_LAST"):
+        mod._HOLD_AUDIT_LAST.clear()

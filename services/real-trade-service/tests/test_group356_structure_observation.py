@@ -63,10 +63,10 @@ def test_record_stores_passed_and_rejected_but_not_no_opinion():
     db = FakeDb()
     with _patched(db):
         assert so.record(db, "tcs", "REAL", 100.0, _v(), SUMMARY, "enforce", False, NOW) is True
-        assert so.record(db, "infy", "REAL", 100.0, _v(reject=True, reasons=["chase 2.0 ATR"]), SUMMARY, "shadow", False, NOW) is True
+        assert so.record(db, "infy", "REAL", 100.0, _v(reject=True, reasons=["chase 2.0 ATR"]), SUMMARY, "enforce", True, NOW) is True
         assert so.record(db, "wipro", "REAL", 100.0, _v(reject=True, reasons=["x"]), SUMMARY, "enforce", True, NOW) is True
         assert so.record(db, "itc", "REAL", 100.0, _v("no_opinion"), None, "enforce", False, NOW) is False
-    assert [r.verdict for r in db.rows] == ["passed", "rejected_shadow", "rejected_enforced"]
+    assert [r.verdict for r in db.rows] == ["passed", "rejected_enforced", "rejected_enforced"]
     r = db.rows[0]
     assert r.symbol == "TCS" and r.mode == "REAL" and r.stop == 95.0 and r.target == 110.0 and r.atr == 2.0 and r.is_complete is False
     assert not hasattr(r, "complete") and "evaluated_at" in r.__dict__ and r.evaluated_at is None
@@ -108,8 +108,7 @@ def _bars(obs_ts, closes):
 
 
 def _seed(db, symbol="TCS", verdict="passed", ts=NOW):
-    so.record(db, symbol, "REAL", 100.0, _v(reject=verdict != "passed", reasons=["x"]), SUMMARY, "enforce" if verdict == "rejected_enforced" else "shadow",
-              verdict == "rejected_enforced", ts)
+    so.record(db, symbol, "REAL", 100.0, _v(reject=verdict != "passed", reasons=["x"]), SUMMARY, "enforce", verdict == "rejected_enforced", ts)
 
 
 def test_evaluate_fills_outcomes_and_completes_after_20_sessions():
@@ -170,7 +169,7 @@ def test_report_aggregates_rejected_against_passed():
     with _patched(db):
         for i in range(25):
             _seed(db, f"P{i}", "passed", NOW - i * 60)
-            _seed(db, f"R{i}", "rejected_shadow", NOW - i * 60)
+            _seed(db, f"R{i}", "rejected_enforced", NOW - i * 60)
         for r in db.rows:
             ok = r.verdict == "passed"
             r.ret_10d, r.bars_seen, r.mfe_pct, r.mae_pct, r.first_touch = (2.0 if ok else -2.0), 10, 3.0, -1.0, ("target" if ok else "stop")

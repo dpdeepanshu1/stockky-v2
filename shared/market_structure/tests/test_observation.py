@@ -12,19 +12,19 @@ OBS_TS = 1_700_000_000 + 4 * 3600          # a trading-hours stamp
 
 
 def _row(verdict="passed", **kw):
-    return new_observation("tcs", "real_trade", OBS_TS, 100.0, verdict, stop=95.0, target=110.0, atr=2.0, mode="real", gate_mode="shadow",
+    return new_observation("tcs", "real_trade", OBS_TS, 100.0, verdict, stop=95.0, target=110.0, atr=2.0, mode="real", gate_mode="enforce",
                            reasons=["chase 2.0 ATR"], summary={"ms_tqs": 61, "ms_trend": "bullish", "junk": 1}, **kw)
 
 
 def test_classify():
     assert classify("no_opinion", True, True) == "no_opinion"
     assert classify("ok", False, False) == "passed"
-    assert classify("ok", True, False) == "rejected_shadow"
+    assert classify("ok", True, False) == "rejected_enforced"   # no record-only mode any more
     assert classify("ok", True, True) == "rejected_enforced"
 
 
 def test_new_observation_shape_and_guards():
-    r = _row("rejected_shadow")
+    r = _row("rejected_enforced")
     assert r["symbol"] == "TCS" and r["mode"] == "REAL" and r["obs_day"] == ist_date(OBS_TS) and r["complete"] is False and r["bars_seen"] == 0
     assert json.loads(r["reasons_json"]) == ["chase 2.0 ATR"] and json.loads(r["summary_json"]) == {"ms_tqs": 61, "ms_trend": "bullish"}
     assert all(r[k] is None for k in OUTCOME_FIELDS if k not in ("bars_seen", "complete"))
@@ -77,7 +77,8 @@ def test_candles_to_bars_cleans_and_orders():
 def _rows(verdict, rets, h="ret_10d"):
     out = []
     for x in rets:
-        r = _row(verdict)
+        r = _row("rejected_enforced" if verdict == "rejected_shadow" else verdict)
+        r["verdict"] = verdict          # "rejected_shadow" = a legacy row written before group370; still read as rejected
         r.update({h: x, "bars_seen": 10, "complete": False, "mfe_pct": abs(x), "mae_pct": -abs(x) / 2, "first_touch": "target" if x > 0 else "stop"})
         out.append(r)
     return out

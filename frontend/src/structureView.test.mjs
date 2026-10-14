@@ -111,3 +111,26 @@ assert.equal(outcomeLine(statusView("real", {})), null);
 assert.equal(reasonLabel("zzz"), "zzz"); assert.equal(nodataLabel("stale"), "Stale structure data");
 assert.equal(windowText(24), "24 hours"); assert.equal(windowText(168), "7 days"); assert.equal(windowText(6), "6 hours");
 console.log("structureView group355 ok");
+
+// ── group356/362: edge report view model ──
+import { edgeView, calibrationView, pctText } from "./structureView.ts";
+assert.equal(pctText(0.44), "+0.4%"); assert.equal(pctText(-1.24), "−1.2%"); assert.equal(pctText(0), "0.0%"); assert.equal(pctText(null), "—"); assert.equal(pctText("x"), "—");
+const ev0 = edgeView(null);
+assert.equal(ev0.conclusionLabel, "Not enough data yet"); assert.equal(ev0.horizons.length, 4); assert.equal(ev0.recent.length, 0); assert.equal(calibrationView(null), null); assert.equal(calibrationView({}), null);
+const edoc = { min_n: 100, stats: { total: 300, complete: 120, conclusion: "gate_helps", conclusion_horizon: "5d",
+  by_verdict: { rejected: { n: 40, stop_first: 9, target_first: 3, horizons: { "5d": { n: 30, mean: -1.2 } } }, passed: { n: 200, horizons: { "5d": { n: 150, mean: 0.4 } } } },
+  edge: { "5d": { edge: 1.6, rejected_n: 30, passed_n: 150 } } },
+  recent: [{ symbol: "ABC", obs_day: "2026-10-01", verdict: "rejected_shadow", ret_5d: -2.5, reasons: ["chase 2.2 ATR"] }, { symbol: "XYZ", obs_day: "2026-10-02", verdict: "passed", ret_1d: -0.5 }],
+  calibration: { advisory: true, horizon: 5, min_n: 100, finished: 120, thresholds: { chase_atr: 1.5 },
+    rules: { chase: { rejected: { n: 30 }, passed: { n: 90 }, edge: 0.9, advice: "keep" }, rr: { rejected: { n: 0 }, passed: { n: 5 }, edge: null, advice: "collect_more" } },
+    score: { n: 120, monotonic: true }, suggestions: [{ rule: "chase", from: 1.5, to: 2, oos_edge: 0.4 }] } };
+const ev = edgeView(edoc);
+assert.equal(ev.tone, "good"); assert.equal(ev.conclusionLabel, "Gate is helping"); assert.match(ev.headline, /\+1\.6%/);
+assert.deepEqual(ev.horizons[1], { h: "5d", rejected: -1.2, rejectedN: 30, passed: 0.4, passedN: 150, edge: 1.6 });
+assert.equal(ev.rejectedN, 40); assert.equal(ev.stopFirstRejected, 9); assert.equal(ev.targetFirstRejected, 3);
+assert.equal(ev.recent[0].tone, "good"); assert.equal(ev.recent[0].ret, "−2.5%"); assert.equal(ev.recent[0].verdictLabel, "would have blocked"); assert.equal(ev.recent[1].tone, "bad");
+const cv = calibrationView(edoc);
+assert.equal(cv.rules.length, 1); assert.equal(cv.rules[0].current, "1.5"); assert.equal(cv.rules[0].edge, "+0.9%"); assert.equal(cv.rules[0].tone, "good");
+assert.match(cv.score, /did rank/); assert.match(cv.suggestions[0], /try 2 instead of 1\.5/);
+assert.equal(calibrationView({ calibration: { advisory: true, error: "boom" } }).error, "boom");
+assert.equal(edgeView({ stats: { total: 5, conclusion: "weird" } }).tone, "mute");

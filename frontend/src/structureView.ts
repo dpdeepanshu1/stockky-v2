@@ -527,3 +527,76 @@ export function calibrationView(raw: StructureEdgeDoc | null | undefined): Calib
   }).filter((x): x is string => x != null);
   return { error: null, headline: `Calibration (advisory)${h != null ? ` · ${h}-day horizon` : ""}`, note, rules, score, suggestions };
 }
+
+// ---- group 372: Prepare-to-Buy refresh notes (reply of POST /data-feed/refresh-prepare-to-buy -> structure_notes). Log-only in the backend.
+export interface PrepareNoteLine { symbol: string; text: string; tone: Tone; flipped: boolean }
+
+/** Lines for the notes list under "Refresh Prepare-to-Buy": flips first (bad now, passed at the last stored price), then other turned-bad rows,
+ *  then structure events. Alphabetical inside each group, at most `max` lines, garbage -> []. */
+export function prepareNoteLines(notes: unknown, max = 8): PrepareNoteLine[] {
+  if (!notes || typeof notes !== "object" || Array.isArray(notes)) return [];
+  const rows: Array<PrepareNoteLine & { rank: number }> = [];
+  for (const [symbol, raw] of Object.entries(notes as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object") continue;
+    const n = raw as Record<string, unknown>;
+    const headline = typeof n.headline === "string" ? n.headline.trim() : "";
+    if (!headline) continue;
+    const bad = n.turned_bad === true;
+    const flipped = bad && n.flipped === true;
+    rows.push({ symbol, text: headline, tone: bad ? "warn" : "good", flipped, rank: flipped ? 0 : bad ? 1 : 2 });
+  }
+  rows.sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol));
+  const cap = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 8;
+  return rows.slice(0, cap).map(({ rank: _r, ...line }) => line);
+}
+
+// ---- group 373: Buy Sniper card badge + "held back" list (POST /api/scan/find-buys -> suggestions[].structure, structure_rejected, message)
+export interface SniperStructureRecord {
+  gate_mode?: string; opinion?: string; would_reject?: boolean; enforced?: boolean; reasons?: string[]; no_data?: string | null;
+  live?: { chase_atr?: number | null; stretch_atr?: number | null; room_atr?: number | null; rr?: number | null } | null;
+  stop?: number | null; target?: number | null; rr?: number | null;
+}
+export interface SniperBadge { label: string; tone: Tone; title: string }
+
+/** Small badge for a surfaced Buy Sniper card. null = the record is missing (older server / gate off): show nothing, never a false "OK".
+ *  A card that carries `would_reject` without `enforced` is labelled as a warning, not as blocked. Never throws. */
+export function sniperBadge(s: SniperStructureRecord | null | undefined): SniperBadge | null {
+  if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+  if (s.gate_mode === "off") return null;
+  const reasons = (Array.isArray(s.reasons) ? s.reasons : []).filter((x): x is string => typeof x === "string" && x.trim() !== "");
+  if (s.opinion !== "ok") {
+    const why = typeof s.no_data === "string" && s.no_data.trim() ? s.no_data.trim() : "No daily structure available for this stock.";
+    return { label: "No structure read", tone: "mute", title: `Not checked against the daily structure: ${why}` };
+  }
+  if (s.would_reject === true) {
+    return { label: "Structure warns", tone: "warn", title: reasons.length ? reasons.join("; ") : "The daily structure advises against this entry." };
+  }
+  const live = s.live && typeof s.live === "object" ? s.live : {};
+  const bits: string[] = [];
+  const ch = num(live.chase_atr), rr = num(live.rr) ?? num(s.rr);
+  if (ch != null) bits.push(`chase ${ch.toFixed(1)} ATR`);
+  if (rr != null) bits.push(`structure R:R ${rr.toFixed(1)}`);
+  return { label: "Structure OK", tone: "good", title: bits.length ? `Passed the daily-structure check (${bits.join(", ")}).` : "Passed the daily-structure check." };
+}
+
+export interface SniperHeldBackLine { symbol: string; text: string }
+
+/** Lines for "held back by the daily-structure check": one per symbol, first two reasons, at most `max` lines. Garbage -> []. */
+export function sniperHeldBackLines(rejected: unknown, max = 6): SniperHeldBackLine[] {
+  if (!Array.isArray(rejected)) return [];
+  const out: SniperHeldBackLine[] = [];
+  const seen = new Set<string>();
+  for (const r0 of rejected) {
+    if (!r0 || typeof r0 !== "object") continue;
+    const r = r0 as Record<string, unknown>;
+    const symbol = typeof r.symbol === "string" ? r.symbol.trim() : "";
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    const reasons = (Array.isArray(r.reasons) ? r.reasons : []).filter((x): x is string => typeof x === "string" && x.trim() !== "");
+    const px = num(r.price);
+    const text = reasons.slice(0, 2).join("; ") || "daily structure advises against entering now";
+    out.push({ symbol, text: px != null ? `${text} (at ₹${px.toFixed(2)})` : text });
+  }
+  const cap = Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 6;
+  return out.slice(0, cap);
+}

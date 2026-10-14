@@ -66,7 +66,7 @@ def test_record_stores_passed_and_rejected_but_not_no_opinion():
         assert so.record(db, "infy", 100.0, _v(reject=True, reasons=["chase 2.0 ATR"]), SUMMARY, "shadow", False, NOW) is True
         assert so.record(db, "wipro", 100.0, _v(reject=True, reasons=["x"]), SUMMARY, "enforce", True, NOW) is True
         assert so.record(db, "itc", 100.0, _v("no_opinion"), None, "enforce", False, NOW) is False
-    assert [r.verdict for r in db.rows] == ["passed", "rejected_shadow", "rejected_enforced"]
+    assert [r.verdict for r in db.rows] == ["passed", "rejected_enforced", "rejected_enforced"]   # group370: no record-only mode, a verdict that would reject is always enforced
     r = db.rows[0]
     assert r.symbol == "TCS" and r.mode is None and r.source == "position_stocks" and r.stop == 95.0 and r.target == 110.0 and r.atr == 2.0 and r.is_complete is False
     assert not hasattr(r, "complete") and "evaluated_at" in r.__dict__ and r.evaluated_at is None

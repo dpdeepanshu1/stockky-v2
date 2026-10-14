@@ -1,4 +1,4 @@
-> NOTE (group 370): structure rules are always live now (no shadow mode); P7/P8 strict, PREPARE recompute + P9 active. Still open: sniper gate code missing in buy_sniper.py, gateway/position-stocks observation hooks, frontend items, backtest. See docs/GROUP370_*.md.
+> NOTE (group 371): the Buy Sniper structure gate is rebuilt in buy_sniper.py and wired (route fetch, observation record, edge report, tick action). Structure rules are always live (no shadow mode). Group 372 hooked the gateway structure_refresh job and the PREPARE notes. Position-stocks observation hook done (group 372 update). Frontend badge labels done in group 373. Still open: backtest on real data. Board A/B code landed in position-stocks (read the verdict in /board/status after a live session). See docs/GROUP370_*.md, GROUP371_*.md and GROUP372_*.md.
 
 > NOTE (group 369): items below about a 'lost' structure_policy.py, real-trade gate and frontend are STALE - those exist now. See docs/GROUP369_*.md for the current open list.
 
@@ -22,7 +22,7 @@
 1. **Verify on your side** (above), plus start the gateway and technical service once and hit `/stock/RELIANCE/structure` and `/technical/structure/RELIANCE`. The routes were only checked by source inspection and helper tests, not live.
 2. ~~**Technical `lite` switch + cache**~~ DONE (group 350): `lite=1` param, `tech_ms:` structure cache (`STRUCTURE_CACHE_TTL_S`), size guard (`STRUCTURE_MAX_BYTES`). Still to verify live under real FastAPI.
 3. **Board A/B:** turn `BOARD_USE_MS_ENGINE=1` on one instance, compare a day of live boards old vs new (expect only the one-bar zone difference), then decide.
-4. **Gateway scan / sniper:** carry `ms_*` into the scan payload, the sniper chase gate (`ms_chase_atr`) and the PREPARE refresh (log-only first). Not done: today the keys only reach feed rows, `/stock/{symbol}` and the decide payload.
+4. **Gateway scan / sniper:** the sniper chase gate and its outcome tracking are done (group 371). The post-close structure refresh job, its routes / tick action and the PREPARE refresh notes (`stockky_prepare_structure_total`) are done (group 372). Schedule the QStash tick `structure-refresh` daily after the close.
 5. **Decision service:** `structure_policy.py` (lost; rules P1-P9 from the plan) that reads `structure_summary`; shadow mode first (log only, no effect on entries), params hash logged with every decision. The decision service currently ignores the new payload key.
 6. **Training / learning:** store `params_hash`, `engine_version` and the `ms_*` keys with each training row (`StructureObservation`, T+1/5/10/20 evaluator); do not retrain on mixed versions.
 7. **real-trade:** `structure_gate.py` using `ms_loc_score` / `ms_rr` as an advisory input only, behind a flag, shadow first; `structure_json` column.

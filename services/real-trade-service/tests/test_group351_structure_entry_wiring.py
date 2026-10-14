@@ -136,6 +136,7 @@ def test_structural_stop_not_used_when_kill_switch_off(db, monkeypatch):
 
 
 def test_structural_stop_on_replaces_atr_stop(db, monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")   # group370: the structural levels are only computed while the gate is live
     monkeypatch.setattr(config, "STRUCTURE_STOP_MODE", "on")
     _cand(db, _sum(ms_stop=96.5))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})

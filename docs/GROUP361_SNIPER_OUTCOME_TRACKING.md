@@ -4,7 +4,7 @@ real-trade and position-stocks store a `StructureObservation` per symbol / day (
 
 ## What is recorded
 After every `/scan/find-buys` answer, one row per symbol per IST day (the first concrete verdict of the day wins):
-- surfaced card with a structure verdict -> `passed`, or `rejected_shadow` when `SNIPER_STRUCTURE_MODE=shadow` flagged it
+- surfaced card with a structure verdict -> `passed`
 - `structure_rejected` setups (enforce) -> `rejected_enforced`
 - gate off / no opinion / no price -> nothing
 

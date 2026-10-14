@@ -1052,6 +1052,9 @@ export const api = {
       suggestions: any[];
       scanned_input?: number;
       error?: string;
+      message?: string;
+      structure_mode?: string;
+      structure_rejected?: Array<{ symbol: string; price?: number; reasons?: string[] }>;
     }>(
       "/api/scan/find-buys",
       {

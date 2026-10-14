@@ -171,7 +171,8 @@ def test_trigger_live_tick_still_sets_baseline_and_queues_tier3(monkeypatch):
     from market_feed.feed import Tick
     db = _db()
     row = _row(db, catalyst_price=0.0)
-    t = Tick(symbol="GERMAN", price=50.0, as_of=datetime.now(timezone.utc), atr=1.0, source="dhan", volume=9000)
+    # prev_close: since group230 a Tier 3 row with an unknown day change is re-checked next cycle (WATCHLIST_REQUIRE_PREV_CLOSE), and +1% is its day floor
+    t = Tick(symbol="GERMAN", price=50.0, as_of=datetime.now(timezone.utc), atr=1.0, source="dhan", volume=9000, prev_close=49.0)
     tally = _run(db, monkeypatch, t)
     db.refresh(row)
     assert row.catalyst_price == 50.0 and tally["queued"] == 1 and "stale_price" not in tally

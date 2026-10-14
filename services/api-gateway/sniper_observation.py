@@ -6,7 +6,7 @@ engine `stockky_ms.observation` (classify / new_observation / due / bars_after /
 by the same rules.
 
 RECORD   after every /scan/find-buys answer: one row per symbol per IST day (the first concrete verdict wins)
-           * surfaced cards that carry a structure verdict -> `passed` (or `rejected_shadow` when SNIPER_STRUCTURE_MODE=shadow flagged it)
+           * surfaced cards that carry a structure verdict -> `passed`
            * `structure_rejected` setups (enforce mode)    -> `rejected_enforced`
            * no gate / no opinion / no price               -> nothing stored
          Recording never raises, never delays the response (the route hands it to a worker thread) and never changes a card.

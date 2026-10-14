@@ -1015,6 +1015,8 @@ BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
 BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
 BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
 BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", True)                          # Group 349 / live since group354: Market Board zones/swings from stockky_ms.compat_board (any error falls back to the legacy code per call; set 0 to force legacy)
+BOARD_AB_ENABLED = _get_bool("BOARD_AB_ENABLED", True)                                 # group362: while the engine serves the board, also run the legacy maths on the same bars and count the differences (observational, never changes what is served)
+BOARD_AB_MAX_COMPARES = max(0, _get_int("BOARD_AB_MAX_COMPARES", 100000))             # comparisons per process (0 = no cap)
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)
@@ -1030,20 +1032,34 @@ if BOARD_GATE_MODE != "off":
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
 #   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | off (kill switch); a stale "shadow" = enforce
-STRUCTURE_GATE_MODE = _get_str("STRUCTURE_GATE_MODE", "enforce").lower()
+def _ps(name: str) -> str:
+    """group365/372: the scalper may stay looser than real-trade on the SHARED structure names. `PS_<name>` wins when it is set (a blank one is ignored),
+    otherwise the shared `<name>` is read as before."""
+    return "PS_" + name if (os.getenv("PS_" + name) or "").strip() else name
+
+
+STRUCTURE_GATE_MODE = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
 if STRUCTURE_GATE_MODE != "off":
     STRUCTURE_GATE_MODE = "enforce"
-STRUCTURE_REQUIRE_DATA = _get_bool("STRUCTURE_REQUIRE_DATA", False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
-STRUCTURE_BEARISH_BLOCK = _get_bool("STRUCTURE_BEARISH_BLOCK", True)                    # bearish daily trend / fresh (not failed) bearish BOS
+STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
+STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
-STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float("STRUCTURE_MAX_CHASE_ATR", 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
-STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float("STRUCTURE_MAX_STRETCH_ATR", 5.0))      # live price above the daily EMA20, in daily ATR
-STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float("STRUCTURE_MIN_ROOM_ATR", 0.3))            # room to the next daily resistance, in daily ATR
+STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
+STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_STRETCH_ATR"), 5.0))      # live price above the daily EMA20, in daily ATR
+STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float(_ps("STRUCTURE_MIN_ROOM_ATR"), 0.3))            # room to the next daily resistance, in daily ATR
 STRUCTURE_MAX_AGE_DAYS = max(0.0, _get_float("STRUCTURE_MAX_AGE_DAYS", 7.0))            # last structure bar older than this = stale = no opinion
 STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)) # live price vs structure close further apart = split / bad data = no opinion
 STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
 STRUCTURE_CACHE_TTL_S = max(30.0, _get_float("STRUCTURE_CACHE_TTL_S", 600.0))
 STRUCTURE_FAIL_TTL_S = max(10.0, _get_float("STRUCTURE_FAIL_TTL_S", 60.0))
+# group356/372 (WS-6): what the gate saw per symbol / IST day and what the stock did over the next 1/5/10/20 sessions (scalp_structure_observations,
+# background evaluator, GET /structure/edge). Read-only evidence: nothing in the entry path reads it back. STRUCTURE_OBS_ENABLED=false = record and evaluate nothing.
+STRUCTURE_OBS_ENABLED = _get_bool("STRUCTURE_OBS_ENABLED", True)
+STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _get_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
+STRUCTURE_OBS_BATCH = max(1, _get_int("STRUCTURE_OBS_BATCH", 25))                       # symbols per evaluator pass
+STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _get_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
+STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _get_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0))    # no bars after the day for this long = closed
+STRUCTURE_EDGE_MIN_N = max(1, _get_int("STRUCTURE_EDGE_MIN_N", 100))                    # finished rows per side before the edge report draws a conclusion
 BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours
 BOARD_LOG_TOP_N = max(1, _get_int("BOARD_LOG_TOP_N", 20))                           # rows per side per snapshot
 BOARD_CONVICTION_WEIGHTS = _get_str("BOARD_CONVICTION_WEIGHTS", "")                 # "strength=0.5,volume=0.2,..." (optional)

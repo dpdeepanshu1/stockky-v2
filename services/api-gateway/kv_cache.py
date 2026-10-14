@@ -68,6 +68,7 @@ _DURABLE_PREFIXES = (
     "stockky:last_full_scan",
     "stockky:market_movers_last_known",  # 2026-10-04: closed-market Movers panel was empty after every restart (memory-only)
     "stockky:lock:",
+    "stockky:sniper_obs:",  # group361: Buy Sniper structure-gate outcome rows (one shard per IST day + index) must survive a restart
     "stockky:notification_config",
     "stockky:notification:",
     "indianapi:fundamentals:",

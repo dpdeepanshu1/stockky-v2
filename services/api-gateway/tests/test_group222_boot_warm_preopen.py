@@ -31,7 +31,7 @@ def env(monkeypatch):
     class Engine:
         _last_result = None
 
-        async def scan(self, client=None, market_data_url=None, cached=False):
+        async def scan(self, client=None, market_data_url=None, cached=False, symbols=None, force_reload_static=False):
             e.scans.append(cached)
 
         def _load_last_result_from_durable_cache(self):

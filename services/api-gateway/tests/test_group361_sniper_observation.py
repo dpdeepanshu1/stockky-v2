@@ -83,13 +83,14 @@ class TestBuildRows:
         assert "chase" in json.loads(out["CHASE"]["reasons_json"])[0]
         assert json.loads(out["GOOD"]["summary_json"])["ms_trend"] == "bullish"
 
-    def test_shadow_mode_surfaced_but_flagged(self, monkeypatch):
+    def test_stale_shadow_value_is_enforce_not_record_only(self, monkeypatch):
+        # group370: there is no record-only mode any more; a stale SNIPER_STRUCTURE_MODE=shadow drops the card and is recorded as enforced
         monkeypatch.setenv("SNIPER_STRUCTURE_MODE", "shadow")
         rows = [scan_row("CHASE", ms_chase_atr=4.0)]
         res = sniper(rows)
-        assert len(res["suggestions"]) == 1 and res["structure_rejected"] == []
+        assert res["suggestions"] == [] and [r["symbol"] for r in res["structure_rejected"]] == ["CHASE"] and res["structure_mode"] == "enforce"
         out = so.build_rows({"stocks": rows}, res, T0)
-        assert [r["verdict"] for r in out] == ["rejected_shadow"] and out[0]["gate_mode"] == "shadow"
+        assert [r["verdict"] for r in out] == ["rejected_enforced"] and out[0]["gate_mode"] == "enforce"
 
     def test_gate_off_stores_nothing(self, monkeypatch):
         monkeypatch.setenv("SNIPER_STRUCTURE_MODE", "off")

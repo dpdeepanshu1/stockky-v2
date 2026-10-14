@@ -361,8 +361,10 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
         return "{}"
 
 
-def check(symbol: str, ltp: float) -> Tuple[Optional[str], Optional[str]]:
-    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects (mode enforce). Never raises (fails open)."""
+def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[str]]:
+    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects (mode enforce). Never raises (fails open).
+    `capture` (group372, optional): when a dict is passed it receives `verdict`, `summary`, `gate_mode`, `enforced` of this check so the caller can store a
+    structure observation; it stays empty when the gate is off or failed."""
     m = mode()
     if m == "off":
         return None, None
@@ -377,6 +379,8 @@ def check(symbol: str, ltp: float) -> Tuple[Optional[str], Optional[str]]:
         enforced = bool(block)
         snap = snapshot(summary, v, m, enforced)
         record(symbol, v, m, enforced, ltp)   # group 355
+        if isinstance(capture, dict):
+            capture.update(verdict=v, summary=summary, gate_mode=m, enforced=enforced)
         return block, snap
     except Exception as e:  # noqa: BLE001 - a gate bug must never stop an entry
         logger.warning("structure gate failed for %s (allowing): %s", symbol, e)

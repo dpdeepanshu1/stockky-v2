@@ -266,6 +266,16 @@ async def lifespan(app: FastAPI):
         except Exception as _be:  # noqa: BLE001
             logger.warning("position-stocks-service: Market Board not started (%s: %s)", type(_be).__name__, _be)
 
+    # group356/372 (WS-6): background evaluator that fills in what each stored structure observation did over the next 1/5/10/20 sessions.
+    # Read-only evidence; history HTTP + DB run on a worker thread; never raises into boot; STRUCTURE_OBS_ENABLED=false starts nothing.
+    _struct_obs_task = None
+    if getattr(config, "STRUCTURE_OBS_ENABLED", True):
+        try:
+            from orders import structure_observation as _struct_obs
+            _struct_obs_task = asyncio.create_task(_struct_obs.run_loop(_db.get_session_factory()), name="position-stocks-structure-obs-loop")
+        except Exception as _se:  # noqa: BLE001
+            logger.warning("position-stocks-service: structure observation loop not started (%s: %s)", type(_se).__name__, _se)
+
     # Start background trading loop
     _bg_task = asyncio.create_task(_trading_loop(), name="position-stocks-trading-loop")
     # BUG FIX (session47): independent fast reconcile/EOD loop — see the
@@ -298,6 +308,12 @@ async def lifespan(app: FastAPI):
         _board_task.cancel()
         try:
             await _board_task
+        except asyncio.CancelledError:
+            pass
+    if _struct_obs_task is not None:
+        _struct_obs_task.cancel()
+        try:
+            await _struct_obs_task
         except asyncio.CancelledError:
             pass
     _bg_task.cancel()
@@ -2461,6 +2477,18 @@ def structure_status(hours: int = 24, db: Session = Depends(get_db)):
     except Exception as e:  # noqa: BLE001 - a status page must not raise
         logger.warning("structure status query failed: %s", e)
     return {"gate_mode": _sg.mode(), "hours": hours, "process": process, "stored": _sg.tally_stored(log_rows, pos_rows)}
+
+
+@app.get("/structure/edge")
+async def structure_edge(days: int = 60, recent: int = 40, db: Session = Depends(get_db)):
+    """group356/365/372: the structure-gate edge report - did the stocks the gate passed / turned away go up or down over the next 1/5/10/20 sessions
+    (needs STRUCTURE_EDGE_MIN_N finished rows per side before it draws a conclusion), plus advisory calibration. Read-only; nothing in the entry path reads it."""
+    from orders import structure_observation as _so
+    try:
+        return await asyncio.to_thread(_so.report, db, days, recent)
+    except Exception as e:  # noqa: BLE001 - a report page must not raise
+        logger.warning("structure edge report failed: %s", e)
+        return {"error": str(e)[:160], "process": _so.stats()}
 
 
 @app.get("/board/status")

@@ -7,7 +7,7 @@ import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
-import { decisionTally, ruleCounts } from "../structureView";
+import { decisionTally, ruleCounts, prepareNoteLines } from "../structureView";
 
 interface Props {
   result: ScanResult;
@@ -108,8 +108,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
+  const [sniperHeldBack, setSniperHeldBack] = useState<Array<{ symbol: string; price?: number; reasons?: string[] }>>([]);
+  const [sniperMessage, setSniperMessage] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const [prepareNotes, setPrepareNotes] = useState<ReturnType<typeof prepareNoteLines>>([]);
   const [sendingToTrade, setSendingToTrade] = useState<string | null>(null); // "SYMBOL:DEMO" | "SYMBOL:REAL"
   const [sendTradeMsg, setSendTradeMsg] = useState<{ symbol: string; text: string; ok: boolean } | null>(null);
 
@@ -230,6 +233,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setSniperLoading(true);
     setSniperError(null);
     setSuggestions([]);
+    setSniperHeldBack([]);
+    setSniperMessage(null);
     try {
       const rows =
         (result?.all_results && result.all_results.length > 0
@@ -243,6 +248,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         min_conviction: 58,
       });
       setSuggestions((data?.suggestions || []) as BuySuggestion[]);
+      setSniperHeldBack(Array.isArray(data?.structure_rejected) ? data.structure_rejected : []);
+      setSniperMessage(typeof data?.message === "string" ? data.message : null);
       if (data?.error) setSniperError(String(data.error));
     } catch (err: any) {
       console.error("Failed to find buys:", err);
@@ -256,8 +263,10 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const handleRefreshPrepareToBuy = async () => {
     setIsRefreshing(true);
     setRefreshMsg(null);
+    setPrepareNotes([]);
     try {
       const res = await api.refreshPrepareToBuy(58, 68);
+      setPrepareNotes(prepareNoteLines(res?.structure_notes));
       const n = res?.refreshed_count ?? 0;
       const total = (res?.symbols || []).length;
       setRefreshMsg(
@@ -530,6 +539,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         </div>
         {refreshMsg && (
           <p className="font-display tabular-nums text-[10px] text-signal-hold/90 mt-2 mb-0">{refreshMsg}</p>
+        )}
+        {prepareNotes.length > 0 && (
+          <ul className="list-none m-0 mt-1 p-0 space-y-0.5">
+            {prepareNotes.map((n) => (
+              <li key={n.symbol} className={`font-display text-[10px] ${n.tone === "warn" ? "text-amber-400" : "text-emerald-400"}`}>
+                <span className="font-semibold">{n.symbol}</span> {n.text}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
@@ -883,6 +901,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         loading={sniperLoading}
         error={sniperError}
         onSelectSymbol={onSelect}
+        structureRejected={sniperHeldBack}
+        message={sniperMessage}
       />
     </div>
   );

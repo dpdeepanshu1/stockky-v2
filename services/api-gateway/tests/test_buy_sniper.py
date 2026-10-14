@@ -418,6 +418,9 @@ class TestBuildSuggestionCard:
     def test_full_card_with_flat_fallbacks(self, bs):
         card = bs.build_suggestion(row(technical_score=80, fundamental_score=65, sector="FMCG", change_pct=1.5,
                                        holding_period="1 week"))
+        # group370: the daily-structure gate adds an additive `structure` record (no summary = no opinion); every other field is unchanged
+        st = card.pop("structure")
+        assert st["opinion"] == "no_opinion" and st["enforced"] is False and st["gate_mode"] == "enforce"
         assert card == {
             "symbol": "ABC",
             "action": "BUY NOW",
@@ -712,7 +715,7 @@ class TestSuggestionsFromPayload:
     def test_response_shape(self, bs):
         out = bs.suggestions_from_scan_payload({"stocks": GOOD})
         assert set(out) == {"ok", "count", "suggestions", "scanned_input", "min_conviction", "target_count",
-                            "market_context", "message"}
+                            "market_context", "message", "structure_mode", "structure_rejected"}
         assert out["ok"] is True and out["count"] == 2 and out["scanned_input"] == 2
         assert [c["symbol"] for c in out["suggestions"]] == ["A", "B"]
         assert out["min_conviction"] == 62 and out["target_count"] == 4

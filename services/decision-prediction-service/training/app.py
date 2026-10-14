@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # scrubs non-finite floats to null before dumping. Aliased so every existing
 # `JSONResponse(...)` call site is fixed with no further changes.
 from json_safe import SafeJSONResponse as JSONResponse
+import structure_entry as _se   # group359/373: entry-time market-structure snapshot kept inside feature_snapshot
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any   # <-- fixed: added Dict, Any
 import joblib
@@ -210,6 +211,7 @@ class PredictionSnapshotCreate(BaseModel):
     sector: Optional[str] = None
     valuation: Optional[str] = None
     feature_snapshot: Optional[dict] = None
+    structure: Optional[dict] = None   # group359: the /decide `structure` record sent with the pick (sanitised by structure_entry)
     # Accept extra keys the frontend may still send (score aliases, etc.)
     class Config:
         extra = "ignore"
@@ -830,7 +832,7 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
             debt_to_equity=pred.debt_to_equity,
             roe=pred.roe,
             roce=pred.roce,
-            feature_snapshot=pred.feature_snapshot,
+            feature_snapshot=_se.attach(pred.feature_snapshot, pred.structure) or pred.feature_snapshot,
             model_version=None,
             created_at=ist_now(),
             t1_success=0,
@@ -1184,6 +1186,16 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
                     record_status = "updated"
                 else:
                     record_status = "already_recorded"
+                # group359 structure entry backfill: a row stored before the structure record existed gets it ONCE (never rewritten),
+                # and BEFORE the trade below opens. A failure here never blocks the commit.
+                try:
+                    _fs_new = _se.attach(existing.feature_snapshot, pick.structure)
+                    if _fs_new is not None:
+                        existing.feature_snapshot = _fs_new
+                        db.commit()
+                except Exception as _se_exc:  # noqa: BLE001
+                    db.rollback()
+                    logger.debug("structure entry backfill skipped for %s: %s", pick.symbol, _se_exc)
             else:
                 pred_id = f"STK-{datetime.now(IST).strftime('%Y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
                 snapshot = PredictionSnapshot(
@@ -1199,7 +1211,7 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
                     market_mood=pick.market_mood, nifty_change_pct=pick.nifty_change_pct,
                     sensex_change_pct=pick.sensex_change_pct, rsi=pick.rsi, macd=pick.macd, ema=pick.ema,
                     volume_ratio=pick.volume_ratio, debt_to_equity=pick.debt_to_equity, roe=pick.roe, roce=pick.roce,
-                    feature_snapshot=pick.feature_snapshot, model_version=None, created_at=ist_now(),
+                    feature_snapshot=_se.attach(pick.feature_snapshot, pick.structure) or pick.feature_snapshot, model_version=None, created_at=ist_now(),
                     t1_success=0, t5_success=0, overall_success=0,
                 )
                 db.add(snapshot)
@@ -1401,6 +1413,17 @@ async def list_trades(status: str = "all"):
         except Exception:
             pass
         rows = q.order_by(PaperTrade.entry_date.desc()).all()
+        entries: Dict[str, Any] = {}   # group359: prediction_id -> the structure snapshot taken at entry (a failed lookup just means none)
+        try:
+            _pids = [t.prediction_id for t in rows if t.prediction_id]
+            if _pids:
+                for _pid, fs in db.query(PredictionSnapshot.prediction_id, PredictionSnapshot.feature_snapshot).filter(
+                        PredictionSnapshot.prediction_id.in_(_pids)).all():
+                    _e = _se.read_entry(fs)
+                    if _e is not None:
+                        entries[_pid] = _e
+        except Exception as _le:  # noqa: BLE001
+            logger.debug("trades: structure entry lookup failed (ignored): %s", _le)
         return JSONResponse(content=convert_numpy([{
             "trade_id": t.trade_id, "prediction_id": t.prediction_id, "symbol": t.symbol,
             "capital_allocated": t.capital_allocated, "entry_price": t.entry_price, "quantity": t.quantity,
@@ -1410,6 +1433,7 @@ async def list_trades(status: str = "all"):
             "exit_date": t.exit_date.isoformat() if t.exit_date else None, "exit_reason": t.exit_reason,
             "pnl_amount": t.pnl_amount, "pnl_pct": t.pnl_pct,
             "last_marked_at": t.last_marked_at.isoformat() if t.last_marked_at else None,
+            "structure": entries.get(t.prediction_id),
         } for t in rows]))
     finally:
         db.close()

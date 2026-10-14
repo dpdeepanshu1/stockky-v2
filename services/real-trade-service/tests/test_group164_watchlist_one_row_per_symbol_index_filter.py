@@ -221,8 +221,6 @@ class TestTriggerPass:
         assert shock.status == "active"       # left untouched, not expired
 
     def test_no_flapping_across_cycles(self, db, monkeypatch):
-        monkeypatch.setenv("WATCHLIST_REQUEUE_COOLDOWN_S", "0")      # group345 parks a just-queued row for 300 s; this test is about re-evaluation
-        entry._wl_parked.clear()
         make_row(db, catalyst_price=100.0, tier=1, ctype="results")
         make_row(db, catalyst_price=104.0, tier=3, ctype="volume_shock")
         patch_quotes(monkeypatch, {"PACEDIGITK": 102.0})

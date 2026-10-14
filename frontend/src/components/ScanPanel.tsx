@@ -8,8 +8,6 @@ import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { decisionTally, ruleCounts } from "../structureView";
-import { sniperRejectedText, prepareNoteLines } from "../structureView";
-import type { PrepareNoteLine } from "../structureView";
 
 interface Props {
   result: ScanResult;
@@ -74,7 +72,6 @@ export function toActionablePick(d: Decision): ActionablePick {
     roce: null, // not present in Decision/FundamentalMetrics from api-gateway today
     rsi: null, macd: null, ema: null, volume_ratio: null, // decision-engine doesn't populate these yet either
     market_mood: null, nifty_change_pct: null, sensex_change_pct: null, // not exposed on Decision today
-    structure: d.structure ?? null, // group359: stored at entry so the Trades tab can show what structure said when the trade was opened
   };
 }
 
@@ -109,12 +106,10 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   // Step 4 — Buy Sniper
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
-  const [structureNote, setStructureNote] = useState<string | null>(null);  // group357: "N setups turned away by daily structure"
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
-  const [refreshNotes, setRefreshNotes] = useState<PrepareNoteLine[]>([]); // group358: why a refreshed PREPARE row deserves a second look (log-only)
   const [sendingToTrade, setSendingToTrade] = useState<string | null>(null); // "SYMBOL:DEMO" | "SYMBOL:REAL"
   const [sendTradeMsg, setSendTradeMsg] = useState<{ symbol: string; text: string; ok: boolean } | null>(null);
 
@@ -235,7 +230,6 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setSniperLoading(true);
     setSniperError(null);
     setSuggestions([]);
-    setStructureNote(null);
     try {
       const rows =
         (result?.all_results && result.all_results.length > 0
@@ -249,7 +243,6 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         min_conviction: 58,
       });
       setSuggestions((data?.suggestions || []) as BuySuggestion[]);
-      setStructureNote(sniperRejectedText(data?.structure_mode, data?.structure_rejected));
       if (data?.error) setSniperError(String(data.error));
     } catch (err: any) {
       console.error("Failed to find buys:", err);
@@ -263,10 +256,8 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const handleRefreshPrepareToBuy = async () => {
     setIsRefreshing(true);
     setRefreshMsg(null);
-    setRefreshNotes([]);
     try {
       const res = await api.refreshPrepareToBuy(58, 68);
-      setRefreshNotes(prepareNoteLines(res?.structure_notes));
       const n = res?.refreshed_count ?? 0;
       const total = (res?.symbols || []).length;
       setRefreshMsg(
@@ -539,15 +530,6 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         </div>
         {refreshMsg && (
           <p className="font-display tabular-nums text-[10px] text-signal-hold/90 mt-2 mb-0">{refreshMsg}</p>
-        )}
-        {refreshNotes.length > 0 && (
-          <ul className="mt-1 mb-0 pl-0 list-none space-y-0.5" aria-label="Prepare-to-Buy structure notes">
-            {refreshNotes.map((n) => (
-              <li key={n.symbol} className={`text-[10px] ${n.tone === "warn" ? "text-signal-hold" : "text-mint/80"}`}>
-                <span className="font-semibold text-paper">{n.symbol}</span> · {n.text}
-              </li>
-            ))}
-          </ul>
         )}
       </div>
 
@@ -900,7 +882,6 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         suggestions={suggestions}
         loading={sniperLoading}
         error={sniperError}
-        structureNote={structureNote}
         onSelectSymbol={onSelect}
       />
     </div>

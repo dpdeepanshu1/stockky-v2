@@ -1,4 +1,4 @@
-import type { DecisionStructure, StructureEdgeDoc, TradeEntryStructure } from "./structureView";
+import type { DecisionStructure } from "./structureView";
 // frontend/src/api/api.ts
 
 const STORAGE_KEY = "stockky:api_url";
@@ -428,8 +428,6 @@ export interface PaperTrade {
   pnl_amount: number | null;
   pnl_pct: number | null;
   last_marked_at: string | null;
-  /** group359: daily-structure snapshot taken when the trade was entered; null/absent for trades opened before it was stored. */
-  structure?: TradeEntryStructure | null;
 }
 
 export interface PortfolioSummary {
@@ -529,8 +527,6 @@ export interface ActionablePick {
   valuation?: string | null;
   market_sentiment_adjustment?: number | null;
   feature_snapshot?: Record<string, unknown> | null;
-  /** group359: the decision service's `structure` record at the moment of the pick; the training service stores a sanitised copy at entry. */
-  structure?: DecisionStructure | null;
 }
 
 export interface ActionableCommitResult {
@@ -1032,8 +1028,6 @@ export const api = {
       "stop_loss",
       "sector",
       "holding_period",
-      // group357: the daily-structure summary (flat ms_* dict) the sniper's structure gate reads; without it the gate has no opinion
-      "structure_summary",
     ] as const;
     const trim = (rows?: any[]) =>
       Array.isArray(rows)
@@ -1057,8 +1051,6 @@ export const api = {
       count: number;
       suggestions: any[];
       scanned_input?: number;
-      structure_mode?: string;
-      structure_rejected?: Array<{ symbol: string; reasons: string[] }>;
       error?: string;
     }>(
       "/api/scan/find-buys",
@@ -1071,13 +1063,6 @@ export const api = {
       30000
     );
   },
-
-  /**
-   * Buy Sniper structure-gate edge report (group361/362): what the setups the gate turned away did next vs the ones it let through, plus the
-   * advisory calibration. GET /api/scan/find-buys/edge. The gateway answers {ok:false,error} instead of throwing, which the card shows.
-   */
-  findBuysEdge: (days = 60) =>
-    request<StructureEdgeDoc & { ok?: boolean }>(`/api/scan/find-buys/edge?days=${encodeURIComponent(String(days))}`, undefined, 1, 20000),
 
   /**
    * Stream full-market scan as NDJSON (one JSON object per line).
@@ -1733,10 +1718,6 @@ export const api = {
 
   getWeeklyTradeReport: (weeks = 12) =>
     request<TradeReportBucket[]>(`/training/api/trades/report/weekly?weeks=${weeks}`, undefined, 2, 30000),
-
-  // group356: the gateway's daily market-structure block for one symbol (never throws on the server side: market_structure is null when unavailable)
-  getStockStructure: (symbol: string) =>
-    request<{ symbol: string; market_structure: any | null }>(`/stock/${encodeURIComponent(symbol)}/structure`, undefined, 1, 25000),
 
   getStockHistory: async (symbol: string, period: string = "1mo") => {
     try {

@@ -608,39 +608,6 @@ class DataFeedStore:
         except Exception as e:
             logger.debug("data_feed index persist: %s", e)
 
-    def replace_fields(self, symbol: str, set_fields: Dict[str, Any], drop_keys=(), ttl: int = DATA_FEED_TTL) -> bool:
-        """group360: update ONE existing row, replacing a field GROUP (e.g. the flat `ms_*` market-structure keys).
-
-        put_symbol is merge-never-wipe: a key missing from the new payload keeps its old value, which is right for prices / fundamentals
-        but wrong for a group that is replaced as a whole (an old demand zone must not survive next to a new `ms_asof`). Here `drop_keys`
-        are removed first, then `set_fields` is applied verbatim (None values are skipped, nothing else is merged or normalised).
-        Never creates a row (a symbol outside the feed is not added) and never touches the index. Returns True when the row was written."""
-        base = _norm_sym(symbol)
-        if not base or not isinstance(set_fields, dict):
-            return False
-        try:
-            existing = self.get_symbol(base)
-        except Exception:
-            existing = None
-        if not isinstance(existing, dict) or not existing:
-            return False
-        row = dict(existing)
-        for k in drop_keys or ():
-            row.pop(k, None)
-        row.update({k: v for k, v in set_fields.items() if v is not None})
-        row["updated_at"] = _now_iso()
-        key, alias_key = DATA_FEED_PREFIX + base, FEED_ALIAS_PREFIX + base
-        _LOCAL_SYMBOLS[key] = row
-        _LOCAL_SYMBOLS[alias_key] = row
-        wrote = False
-        for k in (key, alias_key, FEED_LEGACY_PREFIX + base):
-            try:
-                self._set(k, row, ttl=ttl)
-                wrote = True
-            except Exception as e:
-                logger.debug("data_feed replace_fields write %s: %s", k, e)
-        return wrote
-
     def put_symbols_bulk(self, payload_map: Dict[str, dict], ttl: int = DATA_FEED_TTL) -> int:
         """
         Bulk version of put_symbol — the fix for the "no bulk feeding" slowness.

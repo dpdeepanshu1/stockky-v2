@@ -8,7 +8,7 @@
 // trust boundary, different blast radius" principle the whole real-trade
 // architecture is built around.
 
-import type { StructureEdgeDoc, StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
+import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
 
 const STORAGE_URL_KEY = "stockky:real_trade_api_url";
 const STORAGE_TOKEN_KEY = "stockky:real_trade_session_token";
@@ -515,9 +515,6 @@ export const realTradeApi = {
   gateStatus: (mode: "DEMO" | "REAL") => rtRequest<GateStatus>(`/status/${mode}`, {}, false),
 
   // group355: how the daily market-structure gate is behaving (counters since restart + stored entry decisions). Read-only; REAL needs the admin session.
-  // group356: did what the structure gate turned away really do worse than what it let through? (followed for 20 trading days)
-  structureEdge: (mode: "DEMO" | "REAL", days = 60) =>
-    rtRequest<StructureEdgeDoc>(`/structure/edge/${mode}?days=${encodeURIComponent(String(days))}`, {}, mode === "REAL"),
   structureStatus: (mode: "DEMO" | "REAL", hours = 24) =>
     rtRequest<StructureStatusDoc>(`/structure/status/${mode}?hours=${encodeURIComponent(String(hours))}`, {}, mode === "REAL"),
 

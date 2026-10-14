@@ -1,7 +1,6 @@
 // frontend/src/components/SurpriseStocks.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api"; // all calls use getApiUrl() — never relative /api on separate Render hosts
-import { sniperRejectedText } from "../structureView";
 import { formatInrPrice, getSafePrice } from "../priceDisplay";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
@@ -67,7 +66,6 @@ export default function SurpriseStocks({
   const [stocks, setStocks] = useState<SurpriseStock[]>([]);
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
-  const [structureNote, setStructureNote] = useState<string | null>(null);  // group357: "N setups turned away by daily structure"
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -206,7 +204,6 @@ export default function SurpriseStocks({
     setSniperLoading(true);
     setSniperError(null);
     setSuggestions([]);
-    setStructureNote(null);
     try {
       const mapped = stocks.map((s) => {
         const safePrice = getSafePrice(s as any);
@@ -243,7 +240,6 @@ export default function SurpriseStocks({
         min_conviction: 30,
       });
       setSuggestions((data?.suggestions || []) as BuySuggestion[]);
-      setStructureNote(sniperRejectedText(data?.structure_mode, data?.structure_rejected));
       if (data?.error) setSniperError(String(data.error));
     } catch (err: any) {
       console.error("Sniper error:", err);
@@ -973,7 +969,6 @@ export default function SurpriseStocks({
         suggestions={suggestions}
         loading={sniperLoading}
         error={sniperError}
-        structureNote={structureNote}
         onSelectSymbol={onSelect}
       />
     </div>

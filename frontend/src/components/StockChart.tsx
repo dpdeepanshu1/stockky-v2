@@ -20,9 +20,8 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   AreaChart, Area, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid,
-  ReferenceDot, ReferenceLine, ReferenceArea,
+  ReferenceDot,
 } from "recharts";
-import { chartOverlay, type ChartOverlay } from "../structureView";
 import { api, StockHistory } from "../api";
 
 interface Props {
@@ -63,9 +62,6 @@ export default function StockChart({ symbol, compact = false }: Props) {
   const [data, setData] = useState<StockHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showStructure, setShowStructure] = useState(false);   // group356: structure overlay (off by default; off for compact charts)
-  const [overlay, setOverlay] = useState<ChartOverlay | null>(null);
-  const [overlayErr, setOverlayErr] = useState(false);
   const [scrub, setScrub] = useState<{ label: string; close: number } | null>(null);
 
   const colors = useThemeChartColors();
@@ -88,17 +84,6 @@ export default function StockChart({ symbol, compact = false }: Props) {
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
-
-  // group356: fetch the daily structure only when the overlay is switched on (one request per symbol; failure just hides the overlay)
-  useEffect(() => {
-    if (!showStructure || compact) return;
-    let alive = true;
-    setOverlay(null); setOverlayErr(false);
-    api.getStockStructure(symbol)
-      .then(r => { if (alive) setOverlay(chartOverlay(r?.market_structure)); })
-      .catch(() => { if (alive) setOverlayErr(true); });
-    return () => { alive = false; };
-  }, [showStructure, symbol, compact]);
 
   const chartData = (data?.points ?? []).map((p) => ({
     date: p.date,
@@ -140,14 +125,8 @@ export default function StockChart({ symbol, compact = false }: Props) {
             {symbol}
           </span>
         )}
-        {!compact && (
-          <button type="button" onClick={() => setShowStructure(v => !v)} aria-pressed={showStructure}
-            className={`ml-auto mr-2 px-2 py-1 rounded-full border text-[10px] ${showStructure ? "border-signal-buy text-signal-buy" : "border-slate text-mist"}`}>
-            Structure
-          </button>
-        )}
         {/* Groww-style pill segmented control */}
-        <div className={`flex gap-0.5 bg-ink border border-slate rounded-full p-0.5 ${compact ? "ml-auto" : ""}`}>
+        <div className="flex gap-0.5 bg-ink border border-slate rounded-full p-0.5 ml-auto">
           {PERIODS.map((p) => (
             <button
               key={p.key}
@@ -260,15 +239,6 @@ export default function StockChart({ symbol, compact = false }: Props) {
               animationDuration={500}
               activeDot={{ r: 5, fill: lineColor, stroke: colors.panel, strokeWidth: 2 }}
             />
-            {showStructure && !compact && overlay && overlay.zones.map((z, i) => (
-              <ReferenceArea key={`z${i}`} y1={z.y1} y2={z.y2} fill={z.kind === "demand" ? colors.buy : colors.muted} fillOpacity={0.12} strokeOpacity={0}
-                ifOverflow="extendDomain" label={{ value: z.label, position: "insideTopLeft", fill: colors.muted, fontSize: 9 }} />
-            ))}
-            {showStructure && !compact && overlay && overlay.lines.map((l, i) => (
-              <ReferenceLine key={`l${i}`} y={l.y} ifOverflow="extendDomain" strokeDasharray="4 3" strokeWidth={1}
-                stroke={l.kind === "stop" || l.kind === "resistance" ? colors.sell : colors.buy}
-                label={{ value: l.label, position: "insideBottomRight", fill: colors.muted, fontSize: 9 }} />
-            ))}
             {scrub && (
               <ReferenceDot
                 x={scrub.label}
@@ -282,9 +252,6 @@ export default function StockChart({ symbol, compact = false }: Props) {
             )}
           </AreaChart>
         </ResponsiveContainer>
-      )}
-      {showStructure && !compact && (overlayErr || (overlay && overlay.empty)) && (
-        <p className="mt-1 text-[10px] text-mist">{overlayErr ? "Structure levels could not be loaded." : "No usable daily structure for this stock yet."}</p>
       )}
     </div>
   );

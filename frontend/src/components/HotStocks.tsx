@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { sniperRejectedText } from "../structureView";
 import { useStockkyRealtime } from "../useRealtime";
 import ConvictionCard from "./ConvictionCard";
 import Pipeline from "./Pipeline";
@@ -306,7 +305,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
   } | null>(null);
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
-  const [structureNote, setStructureNote] = useState<string | null>(null);  // group357: "N setups turned away by daily structure"
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [stopBusy, setStopBusy] = useState(false);
@@ -522,7 +520,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
     setSniperLoading(true);
     setSniperError(null);
     setSuggestions([]);
-    setStructureNote(null);
     try {
       // Work off whatever picks are already loaded; if none are (the user hit
       // this before running/refreshing a Hot Picks search), pull the persisted
@@ -594,7 +591,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         min_conviction: 55,
       });
       setSuggestions((res?.suggestions || []) as BuySuggestion[]);
-      setStructureNote(sniperRejectedText(res?.structure_mode, res?.structure_rejected));
       if (res?.error) setSniperError(String(res.error));
     } catch (err: any) {
       console.error("Hot picks sniper error:", err);
@@ -906,7 +902,6 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
         suggestions={suggestions}
         loading={sniperLoading}
         error={sniperError}
-        structureNote={structureNote}
         onSelectSymbol={onAnalyze}
       />
     </div>

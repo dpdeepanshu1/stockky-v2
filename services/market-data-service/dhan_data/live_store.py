@@ -96,6 +96,19 @@ def in_backoff() -> bool:
     return time.monotonic() < _backoff_until
 
 
+def note_timeout() -> None:
+    """group356: another live_quotes writer (the AngelOne feed's) just hit an Oracle call timeout. Open the same short back-off this
+    writer uses, so BOTH stop hammering a saturated database and only held-position rows are written until it ends. Never raises."""
+    global _backoff_until
+    try:
+        with _lock:
+            _stats["timeouts"] += 1
+            if backoff_s() > 0:
+                _backoff_until = max(_backoff_until, time.monotonic() + backoff_s())
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def mem_max_age_s() -> float:
     """DHAN_LIVE_MEM_MAX_AGE_S (default 6; 0 = never answer /live-quote from memory)."""
     return max(0.0, config.env_float("DHAN_LIVE_MEM_MAX_AGE_S", 6.0, 0.0))

@@ -497,33 +497,6 @@ STRUCTURE_FETCH_ENABLED = ((os.getenv("STRUCTURE_FETCH_ENABLED") or "").strip() 
 STRUCTURE_FETCH_TIMEOUT_S = _og_float("STRUCTURE_FETCH_TIMEOUT_S", 3.0)
 STRUCTURE_CACHE_TTL_S = _og_float("STRUCTURE_CACHE_TTL_S", 600.0)
 STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
-# group365: STRUCTURE EXIT (exit_engine/structure_exit.py) - the same daily structure, watched while the position is OPEN.
-#   STRUCTURE_EXIT_MODE  off | log (record the signal only) | tighten (DEFAULT, live: in profit, a fresh bearish CHOCH / bearish BOS raises the stop
-#                        to at least breakeven and to LTP - STRUCTURE_EXIT_TIGHT_ATR x ATR; ratchet only, never loosens) | exit (tighten + sell the
-#                        position when it is in profit on such a signal). Never touches a losing position (its own stop already protects it).
-#   STRUCTURE_TRAIL_ENABLED  true: lift the stop under the newest structural higher-low / demand zone (summary ms_stop) once that level is at or above
-#                        entry and at least STRUCTURE_TRAIL_MIN_ATR below the price (ratchet only).
-# A signal only counts when it formed on a daily bar AFTER the entry day (an older break is not news), and no / stale / split-affected
-# structure is "no opinion" (same rules as the entry gate).
-_sem = (os.getenv("STRUCTURE_EXIT_MODE") or "").strip().lower()
-STRUCTURE_EXIT_MODE = _sem if _sem in ("off", "log", "tighten", "exit") else "tighten"
-STRUCTURE_EXIT_TIGHT_ATR = max(0.0, _og_float("STRUCTURE_EXIT_TIGHT_ATR", 0.75))
-STRUCTURE_EXIT_CHOCH_BARS = max(1, int(_og_float("STRUCTURE_EXIT_CHOCH_BARS", 3.0)))
-STRUCTURE_EXIT_BOS_BARS = max(1, int(_og_float("STRUCTURE_EXIT_BOS_BARS", 3.0)))
-STRUCTURE_TRAIL_ENABLED = ((os.getenv("STRUCTURE_TRAIL_ENABLED") or "").strip() or "true").lower() == "true"
-STRUCTURE_TRAIL_MIN_ATR = max(0.0, _og_float("STRUCTURE_TRAIL_MIN_ATR", 1.0))
-# group365: the edge / calibration reports need this many FINISHED rows per side before they conclude anything (was 20; the plan asked for 200
-# signals per comparison cell, 100 is the floor used here). Lower it only to look, never to act.
-STRUCTURE_EDGE_MIN_N = max(5, int(_og_float("STRUCTURE_EDGE_MIN_N", 100.0)))
-# group356 (WS-6) structure OBSERVATION: every concrete gate verdict (passed / rejected, enforced or shadow) is stored as a row and followed for
-# 20 trading days (T+1/5/10/20 return, MFE, MAE, first touch of the structural target vs stop), so "did the gate turn away the weaker ones?" has
-# a measured answer (GET /structure/edge/{mode}). Recording is one INSERT per symbol per day; evaluation runs in a background loop and only
-# reads daily history from market-data. Never blocks or changes an entry.
-STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() == "true"
-STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 1800.0))   # how often the evaluator wakes
-STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 60.0)))                       # symbols fetched per pass
-STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
-STRUCTURE_OBS_GIVE_UP_DAYS = max(25, int(_og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0)))        # a row with no bars after this many days is closed
 
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:

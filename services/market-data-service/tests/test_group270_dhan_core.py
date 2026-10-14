@@ -399,17 +399,11 @@ class TestBatcher:
 
     def test_many_concurrent_single_symbol_callers_share_one_upstream_call(self, monkeypatch):
         m = self._universe(60)
-        # group363: the module fixture's 30 ms batch window is shorter than the time a loaded CI runner needs to
-        # spin up 60 threads, so the last few callers landed in a second batch (assert 2 == 1). Widen the window
-        # for this test and release all callers together from a barrier so the join is not timing-dependent.
-        monkeypatch.setenv("DHAN_QUOTE_BATCH_WINDOW_MS", "1000")
         calls = _quote_server(monkeypatch, {v: 100.0 + i for i, v in enumerate(m.values())})
         out, errs = {}, []
-        gate = threading.Barrier(len(m), timeout=10)
 
         def worker(sym):
             try:
-                gate.wait()
                 out[sym] = quotes.get_quote(sym)
             except Exception as e:      # noqa: BLE001
                 errs.append(e)

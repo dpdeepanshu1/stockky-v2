@@ -20,6 +20,10 @@ import watchlist_engine.dynamic_universe as du
 def _clean(monkeypatch):
     monkeypatch.delenv("DYNAMIC_UNIVERSE_CHECK_BACKGROUND", raising=False)
     monkeypatch.delenv("DYNAMIC_UNIVERSE_CHECK_TIMEOUT_S", raising=False)
+    # group356: these tests are about the background thread itself, not the restart / market-open hold (own test file)
+    monkeypatch.setenv("DYNAMIC_UNIVERSE_CHECK_STARTUP_HOLD_S", "0")
+    monkeypatch.setenv("DYNAMIC_UNIVERSE_CHECK_OPEN_HOLD_MIN", "0")
+    du._CHECK_PENDING[0] = False
     du._CHECK_RUNNING[0] = False
     du._CHECK_LAST.update({"started": 0, "finished": 0, "ok": None, "elapsed_s": None, "skipped_busy": 0})
     du._last_run_ts = None

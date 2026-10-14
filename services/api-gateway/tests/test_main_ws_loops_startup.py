@@ -729,7 +729,7 @@ class JEnv:
     def __init__(self):
         self.sources = {"feed": {"status": "idle"}, "refill": {"status": "idle"},
                         "premarket": {"is_running": False}, "ipo": {"status": "idle"},
-                        "rl": {"yfinance": {"queued": 0}}, "sr": {"status": "idle"}}      # sr = group360 structure_refresh
+                        "rl": {"yfinance": {"queued": 0}}}
         self.raises = set()
         self.yahoo = (200, {"connected": True})
         self.yahoo_raises = False
@@ -769,8 +769,6 @@ def jenv(monkeypatch):
     monkeypatch.setattr(surprise_premarket, "get_premarket_progress", src("premarket"))
     monkeypatch.setattr(ipo_scanner, "get_ipo_scan_progress", src("ipo"))
     monkeypatch.setattr(gw._rl, "stats", src("rl"))
-    import structure_refresh
-    monkeypatch.setattr(structure_refresh, "get_job", src("sr"))
     monkeypatch.setattr(gw.httpx, "get", get)
     monkeypatch.setattr(gw, "MARKET_DATA_URL", "http://md.local")
     return env
@@ -781,18 +779,17 @@ class TestCollectJobSnapshots:
         out = gw._collect_job_snapshots()
         assert out == {"data_feed": {"status": "idle"}, "refill_additional": {"status": "idle"},
                        "surprise_premarket": {"is_running": False}, "ipo_scan": {"status": "idle"},
-                       "structure_refresh": {"status": "idle"},
                        "rate_limits": {"yfinance": {"queued": 0}}, "yahoo_ws_feed": {"connected": True}}
         assert jenv.yahoo_calls == [("http://md.local/internal/yahoo-ws-status", 3)]
 
     @pytest.mark.parametrize("name,key", [("feed", "data_feed"), ("refill", "refill_additional"),
                                           ("premarket", "surprise_premarket"), ("ipo", "ipo_scan"),
-                                          ("rl", "rate_limits"), ("sr", "structure_refresh")])
+                                          ("rl", "rate_limits")])
     def test_each_failing_source_is_dropped_without_affecting_the_others(self, jenv, name, key, caplog):
         jenv.raises = {name}
         with caplog.at_level("DEBUG"):
             out = gw._collect_job_snapshots()
-        assert key not in out and len(out) == 6 and "jobs snapshot" in caplog.text
+        assert key not in out and len(out) == 5 and "jobs snapshot" in caplog.text
 
     def test_yahoo_status_needs_a_200_and_survives_errors(self, jenv):
         jenv.yahoo = (503, {"connected": False})
@@ -801,7 +798,7 @@ class TestCollectJobSnapshots:
         assert "yahoo_ws_feed" not in gw._collect_job_snapshots()
 
     def test_all_sources_failing_gives_an_empty_snapshot(self, jenv):
-        jenv.raises = {"feed", "refill", "premarket", "ipo", "rl", "sr"}
+        jenv.raises = {"feed", "refill", "premarket", "ipo", "rl"}
         jenv.yahoo_raises = True
         assert gw._collect_job_snapshots() == {}
 

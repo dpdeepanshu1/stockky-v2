@@ -247,7 +247,7 @@
  },
  "kv_cache::_DURABLE_PREFIXES": {
   "services/analysis-intelligence-service/fundamental/kv_cache.py": "92a730d1",
-  "services/api-gateway/kv_cache.py": "8d301b98",
+  "services/api-gateway/kv_cache.py": "79894172",
   "services/decision-prediction-service/decision/kv_cache.py": "92a730d1",
   "services/decision-prediction-service/training/kv_cache.py": "92a730d1",
   "services/market-data-service/kv_cache.py": "4920783e",

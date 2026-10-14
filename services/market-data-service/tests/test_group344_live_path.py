@@ -40,6 +40,7 @@ def test_failed_rows_are_not_remembered_as_sent(store, monkeypatch):
     store.fail_on = {1}
     assert live_store._write_sync(_rows(10)) == 0
     store.fail_on = set()
+    live_store._backoff_until = 0.0     # group347: the timeout above opened the Oracle back-off; this test is about the retry, not the back-off
     assert live_store._write_sync(_rows(10)) == 10
 
 

@@ -378,5 +378,10 @@ def submit(rows: List[dict]) -> None:
 
 
 def status() -> dict:
+    try:
+        from angelone_ws_feed import live_quotes_engine_status as _les
+        _eng = _les()
+    except Exception:  # noqa: BLE001
+        _eng = None
     with _lock:
-        return {**_stats, "write_mode": write_mode(), "writing": should_write()}
+        return {**_stats, "write_mode": write_mode(), "writing": should_write(), "engine": _eng}

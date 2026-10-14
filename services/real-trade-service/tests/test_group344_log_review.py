@@ -100,6 +100,8 @@ def test_only_price_reasons_are_parkable():
 
 def test_in_band_row_is_never_parked(db, monkeypatch):
     monkeypatch.setenv("WATCHLIST_PARK_S", "300")
+    monkeypatch.setenv("WATCHLIST_REQUEUE_COOLDOWN_S", "0")         # group345's post-queue cooldown is a different park; off here
+    entry._wl_parked.clear()
     make_row(db, symbol="OK", catalyst_price=100.0)
     calls = []
     _quotes(monkeypatch, 100.5, calls)

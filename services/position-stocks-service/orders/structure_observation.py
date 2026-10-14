@@ -115,7 +115,7 @@ def _exists(db, symbol: str, obs_day: str) -> bool:
 
 def _pending(db, limit: int) -> list:
     M = _model()
-    return db.query(M).filter(M.is_complete.is_(False)).order_by(M.obs_ts.asc()).limit(limit).all()
+    return db.query(M).filter(M.is_complete == False).order_by(M.obs_ts.asc()).limit(limit).all()  # noqa: E712 - plain == on purpose: Oracle NUMBER(1) cannot take IS 0 (ORA-00908)
 
 
 def _since(db, since_ts: float, limit: int = 5000) -> list:

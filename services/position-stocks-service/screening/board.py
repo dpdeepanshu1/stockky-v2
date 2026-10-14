@@ -109,7 +109,7 @@ def zone_view(symbol: str, side: str, ltp: float, bars1m: Optional[list] = None,
     if hit and hit[0] == key:
         base = hit[1]
     else:
-        zones, sw = ms_engine_switch.zones_and_swings(bars, config.BOARD_ZONE_ATR_MULT, config.BOARD_ZONE_FULL_RANGE, symbol=symbol)
+        zones, sw = ms_engine_switch.zones_and_swings(bars, config.BOARD_ZONE_ATR_MULT, config.BOARD_ZONE_FULL_RANGE)
         orr = ms.opening_range(bars1m, open_ts, 15) if open_ts else None
         pdd = {"high": pd.high, "low": pd.low, "close": pd.close} if pd else None
         base = {"zones": zones, "swings": sw, "or": orr, "prev": pdd, "bars": bars}

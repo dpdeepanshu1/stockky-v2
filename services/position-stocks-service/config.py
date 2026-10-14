@@ -53,13 +53,6 @@ def _get_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-def _ps(name: str) -> str:
-    """group365: the env NAME to read for a position-stocks setting that shares its generic name with real-trade / api-gateway in the one .env.
-    `PS_<name>` wins when set, otherwise the generic `<name>` (unchanged behaviour), so the scalper can stay looser than real-trade
-    (e.g. PS_STRUCTURE_MAX_CHASE_ATR=4.0 next to STRUCTURE_MAX_CHASE_ATR=1.5) without editing either service."""
-    return ("PS_" + name) if (os.getenv("PS_" + name) or "").strip() else name
-
-
 
 PORT = _get_int("PORT", 8006)
 
@@ -1022,8 +1015,6 @@ BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
 BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
 BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
 BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", True)                          # Group 349 / live since group354: Market Board zones/swings from stockky_ms.compat_board (any error falls back to the legacy code per call; set 0 to force legacy)
-BOARD_AB_ENABLED = _get_bool("BOARD_AB_ENABLED", True)                              # Group 362: while the engine serves the board, also run the legacy zone maths on the same bars and count the differences (/board/status ms_engine.ab); observational, never changes what is served
-BOARD_AB_MAX_COMPARES = max(0, _get_int("BOARD_AB_MAX_COMPARES", 100000))             # stop comparing after this many per process (0 = no cap); a trading day is roughly 20-25k fresh computations
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)
@@ -1039,30 +1030,20 @@ if BOARD_GATE_MODE not in ("off", "shadow", "enforce", "auto"):
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
 #   STRUCTURE_GATE_MODE   off | shadow (log + store the verdict, never refuse) | enforce (default: refuse with STRUCTURE_* reason)
-STRUCTURE_GATE_MODE = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
+STRUCTURE_GATE_MODE = _get_str("STRUCTURE_GATE_MODE", "enforce").lower()
 if STRUCTURE_GATE_MODE not in ("off", "shadow", "enforce"):
     STRUCTURE_GATE_MODE = "enforce"
-STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
-STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
+STRUCTURE_REQUIRE_DATA = _get_bool("STRUCTURE_REQUIRE_DATA", False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
+STRUCTURE_BEARISH_BLOCK = _get_bool("STRUCTURE_BEARISH_BLOCK", True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
-STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
-STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_STRETCH_ATR"), 5.0))      # live price above the daily EMA20, in daily ATR
-STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float(_ps("STRUCTURE_MIN_ROOM_ATR"), 0.3))            # room to the next daily resistance, in daily ATR
+STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float("STRUCTURE_MAX_CHASE_ATR", 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
+STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float("STRUCTURE_MAX_STRETCH_ATR", 5.0))      # live price above the daily EMA20, in daily ATR
+STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float("STRUCTURE_MIN_ROOM_ATR", 0.3))            # room to the next daily resistance, in daily ATR
 STRUCTURE_MAX_AGE_DAYS = max(0.0, _get_float("STRUCTURE_MAX_AGE_DAYS", 7.0))            # last structure bar older than this = stale = no opinion
 STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)) # live price vs structure close further apart = split / bad data = no opinion
 STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
 STRUCTURE_CACHE_TTL_S = max(30.0, _get_float("STRUCTURE_CACHE_TTL_S", 600.0))
 STRUCTURE_FAIL_TTL_S = max(10.0, _get_float("STRUCTURE_FAIL_TTL_S", 60.0))
-# group356 (WS-6) structure OBSERVATION: every concrete daily-structure verdict on a scalp candidate (passed / refused, enforced or shadow) is stored
-# and followed for 20 trading days (T+1/5/10/20 return, MFE, MAE, first touch of the structural target vs stop), so "did the gate turn away the
-# weaker ones?" has a measured answer (GET /structure/edge). One INSERT per symbol per day; the evaluator loop only reads daily history from
-# market-data. Never blocks or changes an entry.
-STRUCTURE_EDGE_MIN_N = max(5, _get_int("STRUCTURE_EDGE_MIN_N", 100))                  # group365: finished rows per side before the edge / calibration reports conclude (was 20)
-STRUCTURE_OBS_ENABLED = _get_bool("STRUCTURE_OBS_ENABLED", True)
-STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _get_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 1800.0))
-STRUCTURE_OBS_BATCH = max(1, _get_int("STRUCTURE_OBS_BATCH", 60))                         # symbols fetched per pass
-STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _get_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
-STRUCTURE_OBS_GIVE_UP_DAYS = max(25, _get_int("STRUCTURE_OBS_GIVE_UP_DAYS", 45))          # a row with no bars after this many days is closed
 BOARD_AUTO_REFRESH_S = max(60, _get_int("BOARD_AUTO_REFRESH_S", 3600))
 BOARD_AUTO_DAYS = max(1, min(120, _get_int("BOARD_AUTO_DAYS", 30)))
 BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours
@@ -1111,8 +1092,20 @@ WS_MAX_TICKS_PER_SYMBOL = _get_int("WS_MAX_TICKS_PER_SYMBOL", 4000)
 # Safety valve: if the event service has failed continuously for QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S seconds the gate fails open again and says so.
 # QUALITY_GATE_EVENT_FAIL_BLOCK=0 restores the old always-fail-open behaviour.
 QUALITY_GATE_EVENT_FAIL_BLOCK = _get_bool("QUALITY_GATE_EVENT_FAIL_BLOCK", True)
-QUALITY_GATE_EVENT_RETRY_TIMEOUT_S = _get_float("QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 6.0)
+QUALITY_GATE_EVENT_RETRY_TIMEOUT_S = _get_float("QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 8.0)  # group356: 6 -> 8 (extra wait on the SAME in-flight request)
 QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S = _get_float("QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S", 900.0)
+# group356 (14 Oct 10:38 IST restart log: event / technical / fundamental all hit ReadTimeout for 7 symbols together, V2RETAIL and EMBDL
+# were skipped as EVENT_CHECK_UNAVAILABLE, and the event answers arrived a few seconds AFTER the gate gave up - the retry had just
+# sent a SECOND request to a service that was already busy with the first, and the late answer was thrown away).
+# With QUALITY_GATE_EVENT_SHARED_FETCH on (default) the event call runs as ONE in-flight request per symbol (hard limit
+# QUALITY_GATE_EVENT_BG_TIMEOUT_S, default 45 s) that the gate WAITS on: QUALITY_GATE_TIMEOUT_S first, then up to
+# QUALITY_GATE_EVENT_RETRY_TIMEOUT_S more on the same request (no second request). If it still has not answered, the request keeps
+# running and its answer is kept for QUALITY_GATE_EVENT_LATE_TTL_S seconds, so the next cycle uses it instead of starting over.
+# Only a symbol that is still unanswered is rejected as EVENT_CHECK_UNAVAILABLE, exactly as before. QUALITY_GATE_EVENT_SHARED_FETCH=0
+# restores the group344 behaviour (a second request with its own timeout).
+QUALITY_GATE_EVENT_SHARED_FETCH = _get_bool("QUALITY_GATE_EVENT_SHARED_FETCH", True)
+QUALITY_GATE_EVENT_BG_TIMEOUT_S = max(5.0, _get_float("QUALITY_GATE_EVENT_BG_TIMEOUT_S", 45.0))
+QUALITY_GATE_EVENT_LATE_TTL_S = max(0.0, _get_float("QUALITY_GATE_EVENT_LATE_TTL_S", 300.0))
 # Price floor applied BEFORE the quality gate (HATHWAY at Rs10.6 used the gate's three calls although entry.py would reject it as PENNY_STOCK).
 # Uses MIN_STOCK_PRICE and ENTRY_MIN_PRICE; PRICE_FLOOR_BEFORE_GATE=0 turns this pre-filter off (entry.py still enforces the floor).
 PRICE_FLOOR_BEFORE_GATE = _get_bool("PRICE_FLOOR_BEFORE_GATE", True)

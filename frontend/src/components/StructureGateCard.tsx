@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";
 import {
-  exitView, outcomeLine, sinceText, sinceTone, statusView, windowText,
+  outcomeLine, sinceText, sinceTone, statusView, windowText,
   type StructureStatusDoc, type StructureStatusKind, type Tone,
 } from "../structureView";
 
@@ -33,7 +33,6 @@ export default function StructureGateCard({ kind, load, title = "Daily structure
 
   const v = statusView(kind, raw);
   const outcome = outcomeLine(v);
-  const xv = kind === "real" ? exitView(raw) : null;
   return (
     <div className="rounded-2xl border border-slate bg-graphite p-3 font-display tabular-nums text-[11px]" data-testid="structure-gate-card">
       <div className="flex items-start justify-between gap-2">
@@ -89,25 +88,6 @@ export default function StructureGateCard({ kind, load, title = "Daily structure
                 })}
               </ul>
               {outcome && <p className="mt-2 text-mist">{outcome}</p>}
-            </div>
-          )}
-
-          {xv && xv.present && (
-            <div data-testid="structure-exit-block">
-              <p className="uppercase tracking-widest text-[9px] text-mist mb-1">
-                Open positions · structure exit <span className={`font-bold ${TONE[xv.modeTone]}`}>{xv.modeLabel}</span>
-              </p>
-              <p className="text-mist">{xv.headline}</p>
-              {xv.recent.length > 0 && (
-                <ul className="mt-1 space-y-1">
-                  {xv.recent.map((r, i) => (
-                    <li key={`${r.symbol}-${i}`} className="flex items-start justify-between gap-2">
-                      <span className="font-bold text-paper">{r.symbol}</span>
-                      <span className={`min-w-0 break-words text-right ${r.applied ? "text-signal-buy" : "text-signal-hold"}`}>{r.text}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
             </div>
           )}
 

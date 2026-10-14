@@ -150,9 +150,7 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
             reasons.append(f"price stretched {m['stretch_atr']:.1f} ATR above EMA20 (max {lim:g})")
         lim = float(config.STRUCTURE_MIN_ROOM_ATR or 0.0)
         if lim > 0 and m["room_atr"] is not None and m["room_atr"] < lim:
-            raw_room = m["room_atr"]
-            past = f" [raw {raw_room:.1f}: live price is {abs(raw_room):.1f} ATR beyond the cached resistance - possible breakout]" if raw_room <= -0.05 else ""
-            reasons.append(f"only {max(0.0, m['room_atr']):.1f} ATR of room to the next resistance (min {lim:g}){past}")
+            reasons.append(f"only {max(0.0, m['room_atr']):.1f} ATR of room to the next resistance (min {lim:g})")
         lim = float(config.STRUCTURE_MIN_RR or 0.0)
         flags = summary.get("ms_rr_flags") or []
         if lim > 0 and m["rr"] is not None and m["rr"] < lim:
@@ -244,7 +242,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, fetch_disabled=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, fetch_disabled=0, errors=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -289,10 +287,6 @@ def record(symbol: str, trade_mode: str, verdict: Dict[str, Any], gate_mode: str
             for r in verdict.get("reasons") or []:
                 k = reason_key(r)
                 _stats["by_reason"][k] = _stats["by_reason"].get(k, 0) + 1
-            # group366: a room rejection whose RAW room is negative = the live price is already past the cached resistance (possible breakout)
-            _rm = (verdict.get("metrics") or {}).get("room_atr")
-            if isinstance(_rm, (int, float)) and _rm <= -0.05 and any(reason_key(r) == "room" for r in verdict.get("reasons") or []):
-                _stats["room_past_resistance"] = _stats.get("room_past_resistance", 0) + 1
         if enforced:
             _stats["enforced"] += 1
             if not verdict.get("would_reject"):
@@ -378,7 +372,6 @@ _cache: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
 
 def reset() -> None:
     _cache.clear()
-    _inflight.clear()
     reset_stats()
 
 
@@ -414,44 +407,6 @@ async def fetch_summary(symbol: str) -> Optional[Dict[str, Any]]:
         for k in [k for k, v in _cache.items() if v[0] <= now][:1000]:
             _cache.pop(k, None)
     return summary
-
-
-_inflight: set = set()
-
-
-def peek_summary(symbol: str) -> Optional[Dict[str, Any]]:
-    """group365: the cached gateway summary for `symbol`, or None. Never does I/O - the exit loop uses this so a slow gateway can never delay a
-    stop check. A cached failure also reads as None (no opinion)."""
-    try:
-        hit = _cache.get(str(symbol or "").strip().upper())
-        return hit[1] if hit is not None and hit[0] > time.monotonic() else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def warm(symbol: str) -> bool:
-    """group365: start a background fetch for `symbol` when nothing fresh is cached (one in flight per symbol). True when a task was started."""
-    try:
-        import asyncio
-        sym = str(symbol or "").strip().upper()
-        hit = _cache.get(sym)
-        if not sym or not config.STRUCTURE_FETCH_ENABLED or sym in _inflight or (hit is not None and hit[0] > time.monotonic()):
-            return False
-        loop = asyncio.get_running_loop()
-        _inflight.add(sym)
-
-        async def _run() -> None:
-            try:
-                await fetch_summary(sym)
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                _inflight.discard(sym)
-
-        loop.create_task(_run())
-        return True
-    except Exception:  # noqa: BLE001 - no running loop etc.
-        return False
 
 
 async def get_summary(symbol: str, raw_payload: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:

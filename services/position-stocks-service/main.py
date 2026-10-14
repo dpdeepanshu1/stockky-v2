@@ -266,15 +266,6 @@ async def lifespan(app: FastAPI):
         except Exception as _be:  # noqa: BLE001
             logger.warning("position-stocks-service: Market Board not started (%s: %s)", type(_be).__name__, _be)
 
-    # group356: follows every stored daily-structure verdict for 20 sessions (orders/structure_observation.py). Never fatal.
-    _struct_obs_task = None
-    if config.STRUCTURE_OBS_ENABLED:
-        try:
-            from orders import structure_observation as _struct_obs
-            _struct_obs_task = asyncio.create_task(_struct_obs.run_loop(_db.get_session_factory()), name="position-stocks-structure-observation")
-        except Exception as _so_e:  # noqa: BLE001
-            logger.warning("position-stocks-service: structure observation evaluator not started (%s: %s)", type(_so_e).__name__, _so_e)
-
     # Start background trading loop
     _bg_task = asyncio.create_task(_trading_loop(), name="position-stocks-trading-loop")
     # BUG FIX (session47): independent fast reconcile/EOD loop — see the
@@ -301,12 +292,6 @@ async def lifespan(app: FastAPI):
         _order_ws_task.cancel()
         try:
             await _order_ws_task
-        except asyncio.CancelledError:
-            pass
-    if _struct_obs_task is not None:
-        _struct_obs_task.cancel()
-        try:
-            await _struct_obs_task
         except asyncio.CancelledError:
             pass
     if _board_task is not None:
@@ -2476,27 +2461,6 @@ def structure_status(hours: int = 24, db: Session = Depends(get_db)):
     except Exception as e:  # noqa: BLE001 - a status page must not raise
         logger.warning("structure status query failed: %s", e)
     return {"gate_mode": _sg.mode(), "hours": hours, "process": process, "stored": _sg.tally_stored(log_rows, pos_rows)}
-
-
-@app.get("/structure/edge")
-def structure_edge(days: int = 60, recent: int = 40, db: Session = Depends(get_db)):
-    """group 356 (WS-6): did what the daily-structure gate turned away really do worse than what it let through? Aggregates the stored
-    observations of the last `days` (per verdict: T+1/5/10/20 mean / median / win %, MFE / MAE, target-vs-stop first touch; edge = passed -
-    rejected) with the newest rows. `conclusion` stays insufficient_sample until both sides have enough finished rows. Read-only."""
-    from orders import structure_observation as _so
-    try:
-        return _so.report(db, days, min(max(int(recent), 0), 200))
-    except Exception as e:  # noqa: BLE001 - a status page must not raise
-        logger.warning("structure edge report failed: %s", e)
-        return {"days": days, "stats": None, "recent": [], "process": _so.stats(), "error": str(e)[:160]}
-
-
-@app.post("/structure/observations/evaluate")
-def structure_observations_evaluate(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
-    """group 356: run one evaluator pass now (the background loop does this every STRUCTURE_OBS_EVAL_INTERVAL_S): fetch daily history for the
-    pending symbols and fill their T+N outcomes. Returns the pass counters."""
-    from orders import structure_observation as _so
-    return {"result": _so.evaluate_pending(db), "process": _so.stats()}
 
 
 @app.get("/board/status")

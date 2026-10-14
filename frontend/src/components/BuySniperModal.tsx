@@ -8,7 +8,6 @@
  */
 import React from "react";
 import BottomSheet from "./BottomSheet";
-import { sniperStructureView, type SniperStructure, type Tone } from "../structureView";
 
 export interface BuySuggestion {
   symbol: string;
@@ -32,9 +31,6 @@ export interface BuySuggestion {
   sector?: string | null;
   rationale: string;
   decision?: string;
-  reward_risk_ratio?: number;
-  /** group357: the daily market-structure record (buy_sniper.py); absent when the gate is off */
-  structure?: SniperStructure | null;
 }
 
 export interface BuySniperModalProps {
@@ -44,16 +40,7 @@ export interface BuySniperModalProps {
   loading?: boolean;
   error?: string | null;
   onSelectSymbol?: (symbol: string) => void;
-  /** group357: e.g. "2 setups turned away by daily structure (good stock, bad entry): TCS, INFY" */
-  structureNote?: string | null;
 }
-
-const TONE_CLASS: Record<Tone, string> = {
-  good: "text-signal-buy",
-  bad: "text-signal-sell",
-  warn: "text-signal-prepare",
-  mute: "text-mist",
-};
 
 function fmtInr(n: number | undefined | null): string {
   if (n == null || !Number.isFinite(Number(n)) || Number(n) <= 0) return "—";
@@ -78,7 +65,6 @@ export function BuySniperModal({
   loading = false,
   error = null,
   onSelectSymbol,
-  structureNote = null,
 }: BuySniperModalProps) {
   const list = Array.isArray(suggestions) ? suggestions : [];
 
@@ -125,19 +111,10 @@ export function BuySniperModal({
                 Need PREPARE TO BUY / BUY NOW (or strong HOLD breakout) with conviction ≥ 58 and a
                 valid price. Run a lite/full scan first, then try again.
               </p>
-              {structureNote ? (
-                <p className="text-[11px] text-signal-prepare mt-3 max-w-md mx-auto">{structureNote}</p>
-              ) : null}
             </div>
           ) : (
-            <>
-            {structureNote ? (
-              <p className="text-[11px] text-signal-prepare mb-3">{structureNote}</p>
-            ) : null}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {list.map((s) => {
-                const sv = sniperStructureView(s.structure);
-                return (
+              {list.map((s) => (
                 <div
                   key={s.symbol}
                   className="bg-ink border border-slate hover:border-signal-buy/40 rounded-2xl p-4 transition shadow-glow-sm"
@@ -213,12 +190,6 @@ export function BuySniperModal({
                         {fmtInr(s.stop_loss)}
                       </span>
                     </div>
-                    {s.reward_risk_ratio != null && Number.isFinite(Number(s.reward_risk_ratio)) ? (
-                      <div className="flex justify-between gap-2">
-                        <span className="text-mist shrink-0">Reward : risk</span>
-                        <span className="text-right">{Number(s.reward_risk_ratio).toFixed(2)}</span>
-                      </div>
-                    ) : null}
                     <div className="flex justify-between gap-2">
                       <span className="text-mist shrink-0">Holding</span>
                       <span className="text-right">
@@ -234,20 +205,6 @@ export function BuySniperModal({
                       </div>
                     )}
                   </div>
-
-                  {sv ? (
-                    <div className="mt-3 pt-2 border-t border-slate text-[11px] leading-relaxed" data-testid="sniper-structure">
-                      <div className={`font-semibold ${TONE_CLASS[sv.tone]}`}>{sv.label}</div>
-                      {sv.stop || sv.target || sv.rr ? (
-                        <div className="text-mist mt-0.5">
-                          Structure levels: stop {sv.stop ?? "—"} · target {sv.target ?? "—"} · R:R {sv.rr ?? "—"}
-                        </div>
-                      ) : null}
-                      {sv.reasons.map((r) => (
-                        <div key={r} className="text-mist">• {r}</div>
-                      ))}
-                    </div>
-                  ) : null}
 
                   {s.rationale ? (
                     <p className="text-[11px] text-mist mt-3 pt-2 border-t border-slate leading-relaxed">
@@ -265,10 +222,8 @@ export function BuySniperModal({
                     </button>
                   ) : null}
                 </div>
-                );
-              })}
+              ))}
             </div>
-            </>
           )}
         </div>
     </BottomSheet>

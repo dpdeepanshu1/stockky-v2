@@ -16,7 +16,6 @@ import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi
 import CapitalSplitCard from "./CapitalSplitCard";
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
-import StructureEdgeCard from "./StructureEdgeCard";
 import { coveragePct, gateStatus, tally as structureTally } from "../structureView";
 import MarketBoard from "./board/MarketBoard";
 import ShortlistPanel from "./board/ShortlistPanel";
@@ -2508,8 +2507,6 @@ export default function RealAutoTrade() {
               {/* group355: how the daily-structure gate is behaving for this mode (read-only; REAL needs the admin session) */}
               <StructureGateCard key={`sg-${mode}-${loggedIn ? "in" : "out"}`} kind="real" title={`Daily structure gate — ${mode}`}
                 load={(h) => (mode === "REAL" && !loggedIn ? Promise.reject(new Error("Log in as admin to see the REAL structure gate status.")) : realTradeApi.structureStatus(mode, h))} />
-              <StructureEdgeCard key={`se-${mode}-${loggedIn ? "in" : "out"}`} title={`Structure gate — what happened next (${mode})`}
-                load={(d) => (mode === "REAL" && !loggedIn ? Promise.reject(new Error("Log in as admin to see the REAL structure edge report.")) : realTradeApi.structureEdge(mode, d))} />
 
               {candidates.length === 0 ? (
                 <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">

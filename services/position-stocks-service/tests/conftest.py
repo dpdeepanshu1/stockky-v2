@@ -95,3 +95,18 @@ def _group340_off_by_default(monkeypatch):
     _ad.reset_history_cache()
     yield
     _ad.reset_history_cache()
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _event_shared_fetch_off_by_default(monkeypatch):
+    """group356: quality_gate runs the event call as one shared in-flight request by default. Older tests patch _fetch_event_signal /
+    the httpx client and count the group344 retry call directly, so they run the legacy path; test_group356_event_shared_fetch.py
+    turns the shared path on explicitly."""
+    import config as _config
+    from screening import quality_gate as _qg
+    monkeypatch.setattr(_config, "QUALITY_GATE_EVENT_SHARED_FETCH", False, raising=False)
+    _qg._event_late.clear()
+    _qg._event_inflight.clear()
+    yield
+    _qg._event_late.clear()
+    _qg._event_inflight.clear()

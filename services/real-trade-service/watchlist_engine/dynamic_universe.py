@@ -32,7 +32,7 @@ from typing import Optional
 import httpx
 
 import config
-from tz_utils import is_market_open_ist
+from tz_utils import is_market_open_ist, IST
 
 logger = logging.getLogger("real-trade-dynamic-universe")
 
@@ -47,6 +47,46 @@ REFRESH_INTERVAL_MIN = 20
 MAX_AUTO_SYMBOLS = 60
 
 _last_run_ts: Optional[float] = None
+_PROCESS_START = time.monotonic()
+
+# group356 (14 Oct 10:38 IST restart log): the first dynamic-universe sync after a restart added 60 symbols and started /check at once;
+# /check walks every subscription (news + event fetch each, ~5 s per symbol) and kept analysis-intelligence-service busy for the full 240 s,
+# exactly while position-stocks-service's quality gate needed that service for its own event / technical / fundamental calls
+# (7 symbols got ReadTimeout together, V2RETAIL and EMBDL were skipped as EVENT_CHECK_UNAVAILABLE). /check is only a cache warm-up
+# (nothing in the cycle reads an answer from it), so it now WAITS: not during the first DYNAMIC_UNIVERSE_CHECK_STARTUP_HOLD_S seconds
+# of the process (default 300) and not during the first DYNAMIC_UNIVERSE_CHECK_OPEN_HOLD_MIN minutes after the 09:15 IST open
+# (default 10). The subscriptions themselves are still synced immediately; the held /check starts on the first cycle after the hold
+# ends (it does not wait for the next 20-minute sync). Either value = 0 turns that hold off.
+_CHECK_PENDING = [False]
+
+
+def _env_float_blank_safe(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    try:
+        v = float(raw) if raw else default
+    except ValueError:
+        return default
+    return v if v == v and v >= 0 else default
+
+
+def _check_hold_remaining_s(now_mono: Optional[float] = None, now_ist=None) -> float:
+    """Seconds the /check warm-up must still wait (0 = may start now). Never raises."""
+    try:
+        remaining = 0.0
+        startup = _env_float_blank_safe("DYNAMIC_UNIVERSE_CHECK_STARTUP_HOLD_S", 300.0)
+        if startup > 0:
+            age = (time.monotonic() if now_mono is None else now_mono) - _PROCESS_START
+            remaining = max(remaining, startup - age)
+        open_hold = _env_float_blank_safe("DYNAMIC_UNIVERSE_CHECK_OPEN_HOLD_MIN", 10.0) * 60.0
+        if open_hold > 0:
+            from datetime import datetime
+            ist = now_ist if now_ist is not None else datetime.now(IST)
+            since_open = (ist - ist.replace(hour=9, minute=15, second=0, microsecond=0)).total_seconds()
+            if 0 <= since_open < open_hold:
+                remaining = max(remaining, open_hold - since_open)
+        return max(0.0, remaining)
+    except Exception:  # noqa: BLE001 - a hold must never break the sync
+        return 0.0
 
 
 def _due() -> bool:
@@ -65,6 +105,11 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
 
     if not is_market_open_ist():
         return None
+    # group356: a /check that was held back at the last sync starts as soon as the hold is over.
+    if _CHECK_PENDING[0] and _check_hold_remaining_s() <= 0:
+        _CHECK_PENDING[0] = False
+        if _check_background_enabled() and _start_check_background(_check_background_timeout_s()):
+            logger.info("dynamic_universe: held /check started in the background to warm the event cache")
     if not _due():
         return None
     _last_run_ts = time.monotonic()
@@ -133,6 +178,11 @@ async def refresh_dynamic_universe(db=None) -> Optional[dict]:
     # worker threads, which would cancel a background asyncio task) and only one runs at a time.
     # DYNAMIC_UNIVERSE_CHECK_BACKGROUND=0 restores the old wait-for-it behaviour.
     if _check_background_enabled():
+        _hold = _check_hold_remaining_s()
+        if _hold > 0:
+            _CHECK_PENDING[0] = True
+            logger.info("dynamic_universe: /check held back for %.0fs more (restart / market-open quiet window) so the quality gate keeps the analysis service to itself", _hold)
+            return result
         if _start_check_background(_check_background_timeout_s()):
             logger.info("dynamic_universe: /check started in the background to warm the event cache")
         else:

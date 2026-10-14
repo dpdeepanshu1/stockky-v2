@@ -156,8 +156,7 @@ _warned_at: Dict[str, float] = {}
 
 def _warn_throttled(key: str, msg: str, *args: Any) -> None:
     now = time.time()
-    last = _warned_at.get(key)
-    if last is None or now - last >= _WARN_EVERY_S:      # the first warning for a key always goes out, whatever the clock reads
+    if now - _warned_at.get(key, 0.0) >= _WARN_EVERY_S:
         _warned_at[key] = now
         logger.warning(msg, *args)
     else:

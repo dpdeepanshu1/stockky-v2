@@ -170,7 +170,57 @@ DB_ASYNC_WRITES = ((os.getenv("ANGELONE_FEED_DB_ASYNC") or "").strip() or "1") n
 _DB_PENDING: Dict[str, tuple] = {}
 _DB_PENDING_LOCK = threading.Lock()
 _db_writer_busy = False
-_db_async_stats = {"queued_rows": 0, "written_rows": 0, "coalesced_rows": 0, "passes": 0}
+_db_async_stats = {"queued_rows": 0, "written_rows": 0, "coalesced_rows": 0, "passes": 0,
+                   "unchanged_skipped": 0, "backoff_skipped": 0, "failed_passes": 0}
+
+# group356 (14 Oct 10:38 IST boot log: "live_quotes MERGE ... 8 s call timeout, 444 of 474 rows written" while the Dhan writer and this one
+# were both merging into live_quotes right after the restart): this writer re-sent every queued row on every poll even when the price had
+# not moved, and it kept writing while Oracle was already timing out. The Dhan writer (dhan_data/live_store.py, group344/347) already
+# skips unchanged rows and backs off after a timeout; this one now does the same, sharing that back-off:
+#   * a row whose price is unchanged is skipped for the refresh window (DHAN_LIVE_WRITE_REFRESH_S, default 4 s; 0 = write every row);
+#   * after a write times out, only held-position (priority) rows are written until the shared back-off ends (DHAN_LIVE_WRITE_BACKOFF_S);
+#   * skipped / failed rows are never marked as sent, so they go out on the first write that can.
+# ANGELONE_FEED_DB_CHANGE_ONLY=0 restores the old write-everything behaviour.
+_AO_LAST_SENT: Dict[str, tuple] = {}      # symbol -> (ltp, monotonic ts) of the last row written successfully
+_AO_LAST_SENT_MAX = 6000
+
+
+def _change_only_enabled() -> bool:
+    return ((os.getenv("ANGELONE_FEED_DB_CHANGE_ONLY") or "").strip() or "1").lower() not in ("0", "false", "no", "off")
+
+
+def _ao_prepare_rows(rows: list) -> list:
+    """Rows [(sym, ltp, o, h, l, c, vol), ...] that are worth writing now: priority symbols always; others only when the price changed
+    within the refresh window and the shared Oracle back-off is not open. Never raises (on any problem every row is kept)."""
+    if not _change_only_enabled():
+        return rows
+    try:
+        from dhan_data import live_store as _ls
+        prio = _ls.priority_symbols()
+        window = _ls.refresh_s()
+        backoff = _ls.in_backoff()
+        now = time.monotonic()
+        keep, skipped_same, skipped_backoff = [], 0, 0
+        for r in rows:
+            sym = str(r[0]).upper()
+            if sym in prio:
+                keep.append(r)
+                continue
+            if backoff:
+                skipped_backoff += 1
+                continue
+            prev = _AO_LAST_SENT.get(r[0])
+            if window > 0 and prev is not None and prev[0] == r[1] and (now - prev[1]) < window:
+                skipped_same += 1
+                continue
+            keep.append(r)
+        if skipped_same or skipped_backoff:
+            _db_async_stats["unchanged_skipped"] += skipped_same
+            _db_async_stats["backoff_skipped"] += skipped_backoff
+        return keep
+    except Exception as e:  # noqa: BLE001
+        logger.debug("live_quotes change-only filter skipped: %s", e)
+        return rows
 
 
 def _db_writer_drain() -> None:
@@ -183,7 +233,23 @@ def _db_writer_drain() -> None:
                     return
                 chunk_syms = list(_DB_PENDING.keys())[:BATCH_SIZE]
                 rows = [_DB_PENDING.pop(k) for k in chunk_syms]
-            _upsert_ticks_batch_sync(rows)   # never raises
+            rows = _ao_prepare_rows(rows)    # group356: unchanged rows / Oracle back-off
+            if not rows:
+                continue
+            ok = _upsert_ticks_batch_sync(rows)   # never raises; False = the write failed
+            if ok is False:
+                _db_async_stats["failed_passes"] += 1
+                with _DB_PENDING_LOCK:
+                    for r in rows:
+                        _AO_LAST_SENT.pop(r[0], None)     # a failed row must be sent again, not skipped as unchanged
+                continue
+            if ok is True:
+                _now_m = time.monotonic()
+                with _DB_PENDING_LOCK:
+                    if len(_AO_LAST_SENT) > _AO_LAST_SENT_MAX:
+                        _AO_LAST_SENT.clear()
+                    for r in rows:
+                        _AO_LAST_SENT[r[0]] = (r[1], _now_m)
             _db_async_stats["written_rows"] += len(rows)
             _db_async_stats["passes"] += 1
     except Exception as e:  # noqa: BLE001 - the in-memory cache is the primary store
@@ -356,13 +422,14 @@ def _upsert_ticks_batch_sync(rows: list) -> None:
 
     `rows` is a list of (sym, ltp, o, h, l, c, vol) tuples, the same arguments
     _upsert_tick_sync takes. Rows without a symbol/price are skipped, like the
-    single-row writer. Never raises (the in-memory cache is the primary store)."""
+    single-row writer. Never raises (the in-memory cache is the primary store).
+    group356: returns False when the write failed (the caller then re-sends those rows later), True otherwise."""
     clean = [r for r in rows if r and r[0] and r[1]]
     if not clean:
-        return
+        return True
     engine, dialect = _get_live_quotes_engine()
     if engine is None:
-        return
+        return True
     _ensure_schema(engine, dialect)
     try:
         from sqlalchemy import text as _text
@@ -394,8 +461,18 @@ def _upsert_ticks_batch_sync(rows: list) -> None:
             )
         with engine.begin() as conn:
             conn.execute(_text(sql), params)
+        return True
     except Exception as e:
         logger.debug("live_quotes batch upsert of %d rows failed (non-fatal): %s", len(clean), e)
+        # group356: an Oracle call timeout opens the back-off shared with the Dhan writer (DPY-4024 = oracledb call timeout)
+        _txt = f"{type(e).__name__} {e}"
+        if "DPY-4024" in _txt or "timed out" in _txt.lower() or "timeout" in _txt.lower():
+            try:
+                from dhan_data import live_store as _ls
+                _ls.note_timeout()
+            except Exception:  # noqa: BLE001
+                pass
+        return False
 
 
 def _on_tick_sync(tick: dict, write_db: bool = True):

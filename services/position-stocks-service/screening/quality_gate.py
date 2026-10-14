@@ -156,10 +156,11 @@ def upsert_cache_batch(db: Session, signals: list[QualitySignal]) -> None:
     db.commit()
 
 
-async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float]]:
+async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str, timeout: Optional[float] = None) -> tuple[Optional[float], Optional[float]]:
     fund_score = market_cap_cr = None
     try:
-        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{quote(symbol, safe='&')}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.FUNDAMENTAL_URL}/analyze/{quote(symbol, safe='&')}",
+                             timeout=config.QUALITY_GATE_TIMEOUT_S if timeout is None else timeout)
         if r.status_code == 200:
             fj = r.json()
             fund_score = fj.get("fundamental_score")
@@ -179,10 +180,11 @@ async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str) -> tuple[Op
     return fund_score, market_cap_cr
 
 
-async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[float]:
+async def _fetch_technical(client: httpx.AsyncClient, symbol: str, timeout: Optional[float] = None) -> Optional[float]:
     tech_score = None
     try:
-        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{quote(symbol, safe='&')}", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        r = await client.get(f"{config.TECHNICAL_URL}/analyze/{quote(symbol, safe='&')}",
+                             timeout=config.QUALITY_GATE_TIMEOUT_S if timeout is None else timeout)
         if r.status_code == 200:
             tech_score = r.json().get("technical_score")
     except Exception as e:
@@ -191,7 +193,7 @@ async def _fetch_technical(client: httpx.AsyncClient, symbol: str) -> Optional[f
     return tech_score
 
 
-async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str, timeout: Optional[float] = None) -> tuple[Optional[float], Optional[float], Optional[float]]:
     """Runs the fundamental and technical calls concurrently, not sequentially.
     FIXED session 29: these were two independent `await`s back to back inside
     one function — real latency was fund_time + tech_time, not max(fund_time,
@@ -204,8 +206,8 @@ async def _fetch_fund_tech(client: httpx.AsyncClient, symbol: str) -> tuple[Opti
     staleness already tracked from session 25/26 (more wall-clock time between
     the screener's price snapshot and the real fill)."""
     (fund_score, market_cap_cr), tech_score = await asyncio.gather(
-        _fetch_fundamental(client, symbol),
-        _fetch_technical(client, symbol),
+        _fetch_fundamental(client, symbol, timeout),
+        _fetch_technical(client, symbol, timeout),
     )
     return fund_score, tech_score, market_cap_cr
 
@@ -229,11 +231,21 @@ _result_cache: dict = {}
 _event_memory: dict = {}
 
 
+# group356: symbol -> the ONE in-flight event request (asyncio task) shared by every waiter, and symbol -> the answer of a request that
+# finished after its waiters gave up: (monotonic ts, has_catalyst, event_score, bulk_flag, earnings_date, negative_news).
+_event_inflight: dict = {}
+_event_late: dict = {}
+
+
 def reset_runtime_state() -> None:
     """group341: forget the result cache, event memory and failure marks (tests / manual reset)."""
     _event_failed.clear()
     _result_cache.clear()
     _event_memory.clear()
+    _event_late.clear()
+    _event_inflight.clear()
+    _ft_late.clear()
+    _ft_inflight.clear()
 
 # event types that are a hard negative on their own (decayed impact at / below the limit): a regulatory action, delisting risk, a FRESH earnings miss.
 _HARD_NEGATIVE_TYPES = {"regulatory_action": -8.0, "delisting_risk": -8.0, "earnings_miss": -15.0}
@@ -306,6 +318,142 @@ async def _fetch_event_signal(client: httpx.AsyncClient, symbol: str, timeout: O
     return has_catalyst, event_score, bulk_flag
 
 
+def _shared_fetch_enabled() -> bool:
+    return bool(getattr(config, "QUALITY_GATE_EVENT_SHARED_FETCH", False))
+
+
+async def _event_worker(symbol: str) -> tuple:
+    """group356: ONE event request for `symbol` with the long hard limit. Returns (failed, (catalyst, score, bulk), earnings_date,
+    negative_news). The side-channel dicts _fetch_event_signal() writes are read and cleared in the same step it returns (no await in
+    between), so a concurrent check() of the same symbol can never see or lose them. Never raises."""
+    hard = float(getattr(config, "QUALITY_GATE_EVENT_BG_TIMEOUT_S", 45.0) or 45.0)
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await _fetch_event_signal(client, symbol, timeout=hard)
+        failed = symbol in _event_failed
+        _event_failed.discard(symbol)
+        return failed, res, _earnings_seen.pop(symbol, None), _news_seen.pop(symbol, None)
+    except asyncio.CancelledError:
+        _event_failed.discard(symbol)
+        raise
+    except Exception as e:  # noqa: BLE001 - a quality signal must never be able to crash the trading loop
+        _event_failed.discard(symbol)
+        logger.info("quality_gate: shared event fetch for %s crashed (%s)", symbol, str(e) or type(e).__name__)
+        return True, (None, None, False), None, None
+
+
+def _event_task_done(symbol: str, task) -> None:
+    """Done-callback of the shared request: unregister it, and keep a GOOD answer so the next check() of the symbol can use it even if
+    every waiter had already given up. Never raises."""
+    try:
+        if _event_inflight.get(symbol) is task:
+            _event_inflight.pop(symbol, None)
+        if task.cancelled():
+            return
+        failed, res, earn, neg = task.result()
+        if failed:
+            return
+        if len(_event_late) > 500:
+            _event_late.clear()
+        _event_late[symbol] = (_time.monotonic(), res[0], res[1], res[2], earn, neg)
+        _event_memory[symbol] = (_time.time(), earn, neg)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _event_shared_wait(symbol: str, wait_s: float) -> Optional[tuple]:
+    """Wait up to `wait_s` for the shared in-flight event request of `symbol` (starting it when none is running). Returns its result
+    tuple, or None when it has not answered yet - it keeps running either way (shielded), and a later waiter joins it."""
+    loop = asyncio.get_running_loop()
+    task = _event_inflight.get(symbol)
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(_event_worker(symbol))
+        _event_inflight[symbol] = task
+        task.add_done_callback(lambda t, _s=symbol: _event_task_done(_s, t))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=max(0.05, float(wait_s)))
+    except asyncio.TimeoutError:
+        return None
+
+
+# group356b: the same one-request-per-symbol + keep-the-late-answer treatment for the fundamental / technical calls (they stay fail-open:
+# a field that never arrives is still just "unknown"; but a slow answer is no longer thrown away, and a symbol with no cached scores
+# gets the retry window before it passes through unfiltered). symbol -> (monotonic ts, fundamental, technical, market_cap_cr).
+_ft_inflight: dict = {}
+_ft_late: dict = {}
+
+
+async def _ft_worker(symbol: str) -> tuple:
+    hard = float(getattr(config, "QUALITY_GATE_EVENT_BG_TIMEOUT_S", 45.0) or 45.0)
+    try:
+        async with httpx.AsyncClient() as client:
+            return await _fetch_fund_tech(client, symbol, timeout=hard)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.info("quality_gate: shared fund/tech fetch for %s crashed (%s)", symbol, str(e) or type(e).__name__)
+        return None, None, None
+
+
+def _ft_task_done(symbol: str, task) -> None:
+    try:
+        if _ft_inflight.get(symbol) is task:
+            _ft_inflight.pop(symbol, None)
+        if task.cancelled():
+            return
+        f, t, m = task.result()
+        if f is None and t is None and m is None:
+            return
+        if len(_ft_late) > 500:
+            _ft_late.clear()
+        _ft_late[symbol] = (_time.monotonic(), f, t, m)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _ft_shared_wait(symbol: str, wait_s: float) -> Optional[tuple]:
+    """Like _event_shared_wait, for the fundamental + technical pair. None = not answered yet (it keeps running)."""
+    loop = asyncio.get_running_loop()
+    task = _ft_inflight.get(symbol)
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(_ft_worker(symbol))
+        _ft_inflight[symbol] = task
+        task.add_done_callback(lambda t, _s=symbol: _ft_task_done(_s, t))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=max(0.05, float(wait_s)))
+    except asyncio.TimeoutError:
+        return None
+
+
+def _take_late_ft(symbol: str) -> Optional[tuple]:
+    hit = _ft_late.pop(symbol, None)
+    if hit is None:
+        return None
+    ttl = float(getattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 0.0) or 0.0)
+    if ttl <= 0 or _time.monotonic() - hit[0] > ttl:
+        return None
+    return hit
+
+
+async def _ft_first(symbol: str, late_ft: Optional[tuple]) -> tuple:
+    """((fund, tech, mcap), pending): a kept late answer, else the shared request for QUALITY_GATE_TIMEOUT_S."""
+    if late_ft is not None:
+        return (late_ft[1], late_ft[2], late_ft[3]), False
+    r = await _ft_shared_wait(symbol, config.QUALITY_GATE_TIMEOUT_S)
+    return (r, False) if r is not None else ((None, None, None), True)
+
+
+def _take_late_event(symbol: str) -> Optional[tuple]:
+    """A fresh answer left by an earlier request that outlived its waiters (consumed once), else None."""
+    hit = _event_late.pop(symbol, None)
+    if hit is None:
+        return None
+    ttl = float(getattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 0.0) or 0.0)
+    if ttl <= 0 or _time.monotonic() - hit[0] > ttl:
+        return None
+    return hit
+
+
 def _apply_cache_fallback(signal: QualitySignal, cached: Optional[QualitySignal]) -> QualitySignal:
     """session68: fill in whichever fields this live fetch didn't return
     (still None) from the last-known-good cached signal. Live data always
@@ -342,12 +490,47 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
     _news_seen.pop(symbol, None)          # group330: same rule for the negative-news reason
     _earnings_seen.pop(symbol, None)      # group329: never reuse a date left by an earlier, failed check
     _event_failed.discard(symbol)
+    _shared = _shared_fetch_enabled()
+    _late = _take_late_event(symbol) if _shared else None
+    _late_ft = _take_late_ft(symbol) if _shared else None
+    _ft_pending = False       # group356b: the shared fund/tech request has not answered yet after the first wait
+    _ev_pending = False       # group356: the shared event request has not answered yet after the first wait
     async with httpx.AsyncClient() as client:
         try:
-            (fund_score, tech_score, market_cap_cr), (has_catalyst, event_score, bulk_flag) = await asyncio.gather(
-                _fetch_fund_tech(client, symbol),
-                _fetch_event_signal(client, symbol),
-            )
+            if _shared:
+                # group356: a good answer left by an earlier cycle's request is used as is; otherwise wait on the one in-flight request.
+                if _late is not None:
+                    (fund_score, tech_score, market_cap_cr), _ft_pending = await _ft_first(symbol, _late_ft)
+                    has_catalyst, event_score, bulk_flag = _late[1], _late[2], _late[3]
+                    if _late[4]:
+                        _earnings_seen[symbol] = _late[4]
+                    if _late[5]:
+                        _news_seen[symbol] = _late[5]
+                else:
+                    ((fund_score, tech_score, market_cap_cr), _ft_pending), _ev1 = await asyncio.gather(
+                        _ft_first(symbol, _late_ft),
+                        _event_shared_wait(symbol, config.QUALITY_GATE_TIMEOUT_S),
+                    )
+                    if _ev1 is None:
+                        has_catalyst = event_score = None
+                        bulk_flag = False
+                        _ev_pending = True
+                    else:
+                        _failed, _res, _e, _n = _ev1
+                        has_catalyst, event_score, bulk_flag = _res
+                        if _failed:
+                            _event_failed.add(symbol)
+                        else:
+                            _event_late.pop(symbol, None)       # answered directly: nothing left over for the next cycle
+                            if _e:
+                                _earnings_seen[symbol] = _e
+                            if _n:
+                                _news_seen[symbol] = _n
+            else:
+                (fund_score, tech_score, market_cap_cr), (has_catalyst, event_score, bulk_flag) = await asyncio.gather(
+                    _fetch_fund_tech(client, symbol),
+                    _fetch_event_signal(client, symbol),
+                )
         except Exception as e:
             # Belt-and-suspenders — asyncio.gather itself shouldn't raise given
             # the inner functions already swallow their own exceptions, but a
@@ -355,8 +538,42 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
             logger.error("quality_gate: unexpected error for %s: %s", symbol, e, exc_info=True)
             return _apply_cache_fallback(QualitySignal(symbol=symbol), cached)
 
+    # group356b: a symbol with no cached scores at all would pass the fundamental / technical floors unchecked, so it gets the same
+    # retry window on its (single) in-flight request; one that has cached scores keeps the quick fail-open path (the late answer
+    # refreshes the cache next cycle).
+    _ft_need = _ft_pending and (cached is None or (cached.fundamental_score is None and cached.technical_score is None
+                                                   and cached.market_cap_cr is None))
+    if _ev_pending or _ft_need:
+        # group356: still unanswered after QUALITY_GATE_TIMEOUT_S - keep waiting on the SAME request (no second one) for the retry window.
+        # With the fail-block switched off the gate stays fail-open and quick: no extra wait (the answer is still kept for next cycle).
+        _rtw = float(getattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 0.0) or 0.0)
+        _rw = _rtw if getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True) else 0.0
+
+        async def _no_wait():
+            return None
+        _ev2, _ft2 = await asyncio.gather(
+            _event_shared_wait(symbol, _rw) if (_ev_pending and _rw > 0) else _no_wait(),
+            _ft_shared_wait(symbol, _rtw) if (_ft_need and _rtw > 0) else _no_wait(),
+        )
+        if _ft2 is not None:
+            fund_score, tech_score, market_cap_cr = _ft2
+            _ft_late.pop(symbol, None)
+    if _ev_pending:
+        if _ev2 is None:
+            _event_failed.add(symbol)         # still running; its answer is kept for the next cycle by _event_task_done()
+        else:
+            _failed, _res, _e, _n = _ev2
+            has_catalyst, event_score, bulk_flag = _res
+            if _failed:
+                _event_failed.add(symbol)
+            else:
+                _event_late.pop(symbol, None)
+                if _e:
+                    _earnings_seen[symbol] = _e
+                if _n:
+                    _news_seen[symbol] = _n
     _ev_failed = symbol in _event_failed
-    if _ev_failed and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
+    if _ev_failed and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True) and not _shared:
         # group344: one retry with a longer timeout before the symbol is treated as unchecked.
         _rt = float(getattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 0.0) or 0.0)
         if _rt > 0:

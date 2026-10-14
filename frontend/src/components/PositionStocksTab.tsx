@@ -31,7 +31,6 @@ import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
-import StructureEdgeCard from "./StructureEdgeCard";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -1459,7 +1458,6 @@ export default function PositionStocksTab() {
 
       {/* group355: how the daily-structure gate is behaving on the scalp entry (read-only) */}
       <StructureGateCard kind="position" title="Daily structure gate" load={(h) => positionStocksApi.structureStatus(h)} />
-      <StructureEdgeCard title="Structure gate — what happened next" load={(d) => positionStocksApi.structureEdge(d)} />
 
       {/* ── Candidate log (why entered/skipped) ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">

@@ -110,5 +110,5 @@ def test_structure_skip_is_symbol_specific():
 
 def test_live_defaults_are_pinned():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.py"), encoding="utf-8").read()
-    assert '_get_str(_ps("STRUCTURE_GATE_MODE"), "enforce")' in src and '_get_str("BOARD_GATE_MODE", "enforce")' in src
+    assert '_get_str("STRUCTURE_GATE_MODE", "enforce")' in src and '_get_str("BOARD_GATE_MODE", "enforce")' in src
     assert '_get_bool("BOARD_USE_MS_ENGINE", True)' in src

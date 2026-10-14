@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, structure_gate, structure_observation, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, structure_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -929,7 +929,6 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _sg_enforced = bool(_sg_block) and _sg_mode == "enforce"
                 decision.structure_json = structure_gate.snapshot(_sg_sum, _sg_ver, _sg_mode, _sg_enforced, _sg_lv, _sg_src)
                 structure_gate.record(cand.symbol, mode, _sg_ver, _sg_mode, _sg_enforced, tick.price, _sg_src)   # group 355: counters + recent ring
-                structure_observation.record(db, cand.symbol, mode, tick.price, _sg_ver, _sg_sum, _sg_mode, _sg_enforced)   # group 356: follow the verdict for 20 sessions
                 if _sg_enforced:
                     _wait_with_preview(_sg_block)
                     decision.gate_tag = _sg_tag

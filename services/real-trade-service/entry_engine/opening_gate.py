@@ -44,30 +44,6 @@ def is_active(mode: str, now: Optional[datetime] = None) -> bool:
         return False
 
 
-_shadow_seen: set = set()
-
-
-def shadow_active(mode: str, now: Optional[datetime] = None) -> bool:
-    try:
-        return bool(config.OPENING_GATE_SHADOW) and is_active(mode, now)
-    except Exception:
-        return False
-
-
-def shadow_first_time(mode: str, symbol: str, now: Optional[datetime] = None) -> bool:
-    key = (ist_now(now).date().isoformat(), mode, symbol)
-    if key in _shadow_seen:
-        return False
-    if len(_shadow_seen) > 5000:
-        _shadow_seen.clear()
-    _shadow_seen.add(key)
-    return True
-
-
-def reset_shadow() -> None:
-    _shadow_seen.clear()
-
-
 def reject_reason(mode: str, tick, now: Optional[datetime] = None, stop_pct: Optional[float] = None) -> Optional[str]:
     """None when the entry may be evaluated (or the gate is not active), else a short reason starting with OPENING_GATE."""
     try:

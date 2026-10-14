@@ -1,3 +1,7 @@
+> NOTE (group 370): structure rules are always live now (no shadow mode); P7/P8 strict, PREPARE recompute + P9 active. Still open: sniper gate code missing in buy_sniper.py, gateway/position-stocks observation hooks, frontend items, backtest. See docs/GROUP370_*.md.
+
+> NOTE (group 369): items below about a 'lost' structure_policy.py, real-trade gate and frontend are STALE - those exist now. See docs/GROUP369_*.md for the current open list.
+
 # Remaining tasks: market-structure engine (after group 349, session 4)
 
 ## Done so far

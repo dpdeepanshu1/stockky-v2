@@ -3,9 +3,15 @@
 Reads the flat `ms_*` summary (technical /analyze -> gateway payload) and answers ONE question for a BUY NOW candidate: is this a good
 ENTRY, not just a good stock? It can only ever make a decision MORE conservative (BUY NOW -> PREPARE TO BUY / WAIT); it never upgrades.
 
-STRUCTURE_POLICY_MODE: off | shadow (record what it would do, change nothing) | caps (apply downgrades) | full (default since group354: caps +
-structural stop/target replace the legacy levels when sane). Every threshold below is still a HYPOTHESIS until the observation / backtest
-work (WS-6/7) calibrates it, but the policy can only ever TIGHTEN a decision, so it runs live; set STRUCTURE_POLICY_MODE=shadow to go back.
+ALWAYS LIVE (group370: the record-only "shadow" and "caps" modes were removed). The policy applies its downgrades and, when sane, replaces
+the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is the only switch (emergency kill switch); any other value = live.
+Every threshold below is still a HYPOTHESIS until the backtest (scripts/structure_backtest.py) calibrates it - skips are silent, so run it.
+
+BUY NOW needs ALL of: >= groups_min (3) independent confirming groups, entry-location score >= loc_min (55), and a bullish BOS that has not
+failed and is <= bos_max_bars (10) bars old. A missing value counts as NOT met (unknown is never bullish) once a usable summary exists.
+PREPARE TO BUY (group370): the arithmetic is recomputed at the live price and a PREPARE whose hard rules (chase / stretch / R:R / bearish)
+now fail goes to WAIT; a PREPARE that passes EVERY BUY NOW requirement AND has a P9 trigger (fresh BOS / CHOCH / sweep / zone / fib) is
+upgraded to BUY NOW - only when the caller says the upgrade is allowed (good data quality, not already owned).
 
 Unknown is never bullish: quality unavailable / insufficient / stale, or a summary missing, means "no opinion" (decision untouched)."""
 from __future__ import annotations
@@ -14,17 +20,20 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-MODES = ("off", "shadow", "caps", "full")
+MODES = ("off", "full")
 BUY_NOW, PREPARE, WAIT = "BUY NOW", "PREPARE TO BUY", "WAIT"
 _SEVERITY = {PREPARE: 1, WAIT: 2}
+_HARD_RULES = ("P2_CHASE", "P3_STRETCH", "P4_RR", "P5_TREND")   # rules whose verdict is WAIT; re-checked on a PREPARE
 
 DEFAULTS: Dict[str, float] = {
     "chase_atr_max": 1.5,        # P2 price already this many ATR beyond the structure reference
     "stretch_atr_max": 3.0,      # P3 price this many ATR above EMA20
     "rr_min": 1.2,               # P4 structure R:R floor
     "room_atr_min": 0.8,         # P6 less than this much room to the next resistance
-    "tqs_min": 40.0,             # P7 technical quality score floor (with < 2 independent groups)
-    "groups_min": 2.0,           # P7
+    "tqs_min": 40.0,             # kept for env compatibility; no longer used (P7 is the independent-group count)
+    "groups_min": 3.0,           # P7 BUY NOW needs at least this many independent confirming groups
+    "loc_min": 55.0,             # P7 BUY NOW needs an entry-location score of at least this
+    "bos_max_bars": 10.0,        # P8 BUY NOW needs a non-failed bullish BOS at most this many bars old
     "choch_reversal_bars": 10.0,  # P5 a bullish CHOCH this recent excuses a bearish trend
     "max_price_drift_pct": 15.0,  # live price vs structure close: beyond this the summary is too old to use
     "stop_ratio_lo": 0.5,        # full mode: structural stop distance vs legacy stop distance sanity band
@@ -33,8 +42,14 @@ DEFAULTS: Dict[str, float] = {
 
 
 def policy_mode() -> str:
+    """full (always live) | off (kill switch). A stale "shadow" / "caps" in an old .env is live (full), never record-only."""
     m = (os.getenv("STRUCTURE_POLICY_MODE") or "full").strip().lower()
-    return m if m in MODES else "full"
+    return "off" if m == "off" else "full"
+
+
+def prepare_upgrade_enabled() -> bool:
+    """P9 upgrade kill switch (STRUCTURE_PREPARE_UPGRADE=0/false/off). On by default."""
+    return (os.getenv("STRUCTURE_PREPARE_UPGRADE") or "1").strip().lower() not in ("0", "false", "off", "no")
 
 
 def _params() -> Dict[str, float]:
@@ -132,15 +147,24 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
             add("P5_TREND", WAIT, "daily structure is bearish (lower highs / lower lows) with no recent bullish change of character")
     if f["room_atr"] is not None and f["room_atr"] < p["room_atr_min"]:
         add("P6_ROOM", PREPARE, f"only {max(f['room_atr'], 0):.1f} ATR of room to the next resistance")
-    if f["groups"] is not None and f["tqs"] is not None and f["groups"] < p["groups_min"] and f["tqs"] < p["tqs_min"]:
-        add("P7_QUALITY", PREPARE, f"thin confirmation: {int(f['groups'])} independent group(s) positive, quality {int(f['tqs'])}/100")
-    if f["bos_failed"] and f["bos_dir"] == "bullish":
+    if f["groups"] is None or f["groups"] < p["groups_min"]:
+        got = "unknown" if f["groups"] is None else f"{int(f['groups'])}"
+        add("P7_QUALITY", PREPARE, f"thin confirmation: {got} independent group(s) positive, BUY NOW needs {int(p['groups_min'])}")
+    if f["loc_score"] is None or f["loc_score"] < p["loc_min"]:
+        got = "unknown" if f["loc_score"] is None else f"{int(f['loc_score'])}"
+        add("P7_LOCATION", PREPARE, f"entry location score {got} is below {int(p['loc_min'])}")
+    bars = f["bos_bars"]
+    if f["bos_dir"] == "bullish" and f["bos_failed"]:
         add("P8_FAILED_BOS", PREPARE, "the last bullish break of structure failed (closed back inside)")
+    elif f["bos_dir"] != "bullish" or bars is None:
+        add("P8_NO_BOS", PREPARE, "no bullish break of structure to confirm the entry")
+    elif bars > p["bos_max_bars"]:
+        add("P8_OLD_BOS", PREPARE, f"the bullish break of structure is {int(bars)} bars old (max {int(p['bos_max_bars'])})")
     return fired
 
 
 def prepare_triggers(f: Dict[str, Any]) -> List[str]:
-    """P9: why a PREPARE TO BUY should be refreshed (structure events near the current bar). Informational only."""
+    """P9: structure events near the current bar. On a PREPARE TO BUY, one of these plus a clean BUY NOW check upgrades it (apply_policy)."""
     t: List[str] = []
     if f.get("bos_dir") == "bullish" and f.get("bos_bars") is not None and f["bos_bars"] <= 3 and not f.get("bos_failed"):
         t.append("bos_near")
@@ -170,10 +194,24 @@ def _wait_zone(f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return best
 
 
+def _structural_levels(f: Dict[str, Any], p: Dict[str, float], price: Any, legacy: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """The structural stop / target as replacement levels - only when sane (stop < price < target, stop distance within the band of the legacy one)."""
+    sl, tg, px = f["stop"], f["target"], _num(price)
+    lstop = _num(legacy.get("stop_loss"))
+    if sl is not None and tg is not None and px and sl < px < tg:
+        if lstop is not None and lstop < px:
+            ratio = (px - sl) / (px - lstop)
+            if not (p["stop_ratio_lo"] <= ratio <= p["stop_ratio_hi"]):
+                return None
+        return {"stop_loss": round(sl, 2), "target": round(tg, 2)}
+    return None
+
+
 def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
-                 explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None) -> Dict[str, Any]:
-    """Returns {'decision': final, 'structure': block-for-the-response, 'levels': optional replacement levels}. Never raises."""
-    mode = mode if mode in MODES else policy_mode()
+                 explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True) -> Dict[str, Any]:
+    """Returns {'decision': final, 'structure': block-for-the-response, 'levels': optional replacement levels}. Never raises.
+    `mode` is "off" or anything else (= live). `allow_upgrade=False` stops a P9 PREPARE -> BUY NOW upgrade (the caller knows the data quality)."""
+    mode = "off" if mode == "off" else ("full" if mode else policy_mode())
     legacy = legacy or {}
     out_struct: Dict[str, Any] = {"mode": mode, "applied": False, "original_decision": decision, "policy_decision": decision,
                                   "rules": [], "no_opinion": None, "legacy_levels": legacy, "structural_levels": None, "wait_for_entry": None,
@@ -194,29 +232,39 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
             return res
         if f["stop"] is not None and f["target"] is not None:
             out_struct["structural_levels"] = {"stop": f["stop"], "target": f["target"], "rr": f["rr"]}
-        if decision != BUY_NOW:
-            return res       # the policy only ever tightens a BUY NOW; it never promotes anything
+        if decision not in (BUY_NOW, PREPARE):
+            return res       # WAIT / DO NOT BUY / HOLD are never touched
         fired = _rules(f, p)
+        if decision == PREPARE:
+            # group370: the PREPARE arithmetic (chase / stretch / R:R / trend at the LIVE price) is ACTIVE, not informational.
+            hard = [r for r in fired if r["id"] in _HARD_RULES]
+            if hard:
+                out_struct["rules"] = hard
+                out_struct["policy_decision"] = WAIT
+                out_struct["wait_for_entry"] = _wait_zone(f)
+                out_struct["applied"] = True
+                res["decision"] = WAIT
+                return res
+            trig = out_struct["prepare_triggers"]
+            if not fired and trig and allow_upgrade and prepare_upgrade_enabled():
+                up = {"id": "P9_UPGRADE", "to": BUY_NOW, "reason": "structure confirms the entry now (" + ", ".join(trig) + "); every BUY NOW requirement is met"}
+                out_struct["rules"] = [up]
+                out_struct["policy_decision"] = BUY_NOW
+                out_struct["applied"] = True
+                res["decision"] = BUY_NOW
+                res["levels"] = _structural_levels(f, p, price, legacy)
+            return res
         out_struct["rules"] = fired
         if not fired:
+            res["levels"] = _structural_levels(f, p, price, legacy)
             return res
         final = max((r["to"] for r in fired), key=lambda t: _SEVERITY[t])
         out_struct["policy_decision"] = final
         if final == WAIT:
             out_struct["wait_for_entry"] = _wait_zone(f)
-        if mode in ("caps", "full"):
-            out_struct["applied"] = True
-            res["decision"] = final
-        if mode == "full":
-            sl, tg, px = f["stop"], f["target"], _num(price)
-            lstop = _num(legacy.get("stop_loss"))
-            if sl is not None and tg is not None and px and sl < px < tg:
-                ok = True
-                if lstop is not None and lstop < px:
-                    ratio = (px - sl) / (px - lstop)
-                    ok = p["stop_ratio_lo"] <= ratio <= p["stop_ratio_hi"]
-                if ok:
-                    res["levels"] = {"stop_loss": round(sl, 2), "target": round(tg, 2)}
+        out_struct["applied"] = True
+        res["decision"] = final
+        res["levels"] = _structural_levels(f, p, price, legacy)
         return res
     except Exception as e:  # noqa: BLE001 - the policy must never break a decision
         out_struct["no_opinion"] = f"policy error: {type(e).__name__}"

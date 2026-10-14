@@ -180,54 +180,18 @@ class TestEvaluateModeIntegration:
         assert db.query(models.TradeCandidate).filter_by(consumed=False).count() == 1
 
 
-class TestShadowMode:
-    def test_shadow_logs_once_keeps_candidate_queued_and_enters_nothing(self, db, monkeypatch, caplog):
-        import logging
-        opening_gate.reset_shadow()
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
+class TestAlwaysLive:
+    """group370: the record-only shadow mode of this gate was removed. A candidate that passes the checks is ENTERED, also inside the window."""
+
+    def test_passing_candidate_inside_the_window_is_entered_not_held(self, db, monkeypatch):
         make_candidate(db, symbol="GOOD", conviction=80.0)
         quotes(monkeypatch, {"GOOD": tk(symbol="GOOD")})
         _approve_all(monkeypatch)
         at(monkeypatch, "09:30")
-        with caplog.at_level(logging.INFO):
-            t1 = run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-            t2 = run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-        assert t1["entered"] == 0 and t2["entered"] == 0
-        assert db.query(models.TradeCandidate).filter_by(consumed=False).count() == 1
-        assert sum("OPENING_SHADOW would enter GOOD" in r.getMessage() for r in caplog.records) == 1
-
-    def test_shadow_line_carries_stop_and_target_pct(self, db, monkeypatch, caplog):
-        import logging
-        opening_gate.reset_shadow()
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
-        make_candidate(db, symbol="GOOD", conviction=80.0)
-        quotes(monkeypatch, {"GOOD": tk(symbol="GOOD")})            # atr 2.0 on 101 -> 1.98% -> stop 1.5x = 2.97%, target 5.94%
-        _approve_all(monkeypatch)
-        at(monkeypatch, "09:30")
-        with caplog.at_level(logging.INFO):
-            run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-        msgs = [r.getMessage() for r in caplog.records if "OPENING_SHADOW would enter GOOD" in r.getMessage()]
-        assert len(msgs) == 1 and msgs[0].endswith("stop_pct=2.97 target_pct=5.94 pd_close_pos=0.83 atr_pct=2.96")
-
-    def test_after_settle_shadow_stops_and_candidate_is_entered(self, db, monkeypatch):
-        opening_gate.reset_shadow()
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
-        make_candidate(db, symbol="GOOD", conviction=80.0)
-        quotes(monkeypatch, {"GOOD": tk(symbol="GOOD")})
-        _approve_all(monkeypatch)
-        at(monkeypatch, "10:05")
         assert run(entry.evaluate_mode(db, "DEMO", gate_armed=True))["entered"] == 1
 
-    def test_shadow_helpers(self, monkeypatch):
-        opening_gate.reset_shadow()
-        at(monkeypatch, "09:40")
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", False)
-        assert opening_gate.shadow_active("REAL") is False
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
-        assert opening_gate.shadow_active("REAL") is True
-        assert opening_gate.shadow_first_time("REAL", "X") is True
-        assert opening_gate.shadow_first_time("REAL", "X") is False
-        assert opening_gate.shadow_first_time("DEMO", "X") is True
+    def test_shadow_api_is_gone(self):
+        assert not hasattr(config, "OPENING_GATE_SHADOW") and not hasattr(opening_gate, "shadow_active")
 
 
 # ── group 270: previous-day candle checks ────────────────────────────────────
@@ -313,18 +277,14 @@ class TestPrevDayIntegration:
         run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
         assert seen == [["GOOD"]]                                   # nothing prefetched after the settle time
 
-    def test_shadow_mode_also_applies_the_previous_day_check(self, db, monkeypatch, gate_on, caplog):
-        import logging
-        opening_gate.reset_shadow()
-        monkeypatch.setattr(config, "OPENING_GATE_SHADOW", True)
+    def test_weak_previous_day_keeps_the_candidate_queued(self, db, monkeypatch, gate_on):
         gate_on["pd"] = prev_day.PrevDay(high=102.0, low=99.0, close=99.2, atr=3.0, date="2026-10-08")
         make_candidate(db, symbol="WEAK", conviction=80.0)
         quotes(monkeypatch, {"WEAK": tk(symbol="WEAK")})
         _approve_all(monkeypatch)
         at(monkeypatch, "09:30")
-        with caplog.at_level(logging.INFO):
-            run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
-        assert not any("OPENING_SHADOW would enter" in r.getMessage() for r in caplog.records)   # rejected, so not a would-enter
+        assert run(entry.evaluate_mode(db, "DEMO", gate_armed=True))["entered"] == 0
+        assert db.query(models.TradeCandidate).filter_by(consumed=False).count() == 1
 
 
 # ── prev_day module (same logic as position-stocks-service/screening/prev_day.py) ─────────────────────

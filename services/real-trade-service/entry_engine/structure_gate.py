@@ -4,9 +4,9 @@ QUESTION IT ANSWERS: "good stock, bad entry?" The candidate already passed the s
 daily structure (technical service `market_structure` summary, flat `ms_*` keys): chasing above the nearest demand / imbalance zone, a
 stretched price, no room to the next resistance, a poor structure R:R, a bearish daily structure.
 
-SHADOW-FIRST: config.STRUCTURE_GATE_MODE / STRUCTURE_GATE_DEMO_MODE = off | shadow | enforce. In shadow the gate only RECORDS what it would
-have rejected (decision.structure_json); enforce turns it into a WAIT (gate_tag="structure"). Every threshold is a hypothesis until the
-backtest / observation data calibrates it.
+LIVE: config.STRUCTURE_GATE_MODE / STRUCTURE_GATE_DEMO_MODE = enforce (default) | off (kill switch). enforce turns a rejection into a WAIT
+(gate_tag="structure") and stores the verdict on decision.structure_json. There is no record-only (shadow) mode. Every threshold is a
+hypothesis until the backtest / observation data calibrates it (scripts/structure_backtest.py).
 
 NO DATA = NO OPINION: missing / unavailable / insufficient / stale quality, an old last bar, or a live price far from the structure close
 (split / bad data) never blocks and is never bullish - unless STRUCTURE_REQUIRE_DATA=true (then it WAITs, tag structure_nodata).
@@ -46,12 +46,12 @@ def _pos(v) -> Optional[float]:
 
 
 def mode_for(trade_mode: str) -> str:
-    """off | shadow | enforce for REAL / DEMO."""
+    """enforce | off for REAL / DEMO. Anything that is not exactly "off" is live."""
     try:
         m = config.STRUCTURE_GATE_MODE if str(trade_mode).upper() == "REAL" else config.STRUCTURE_GATE_DEMO_MODE
-        return m if m in ("off", "shadow", "enforce") else "shadow"
+        return "off" if m == "off" else "enforce"
     except Exception:  # noqa: BLE001
-        return "off"
+        return "enforce"
 
 
 def extract_summary(payload: Any) -> Optional[Dict[str, Any]]:
@@ -150,7 +150,11 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
             reasons.append(f"price stretched {m['stretch_atr']:.1f} ATR above EMA20 (max {lim:g})")
         lim = float(config.STRUCTURE_MIN_ROOM_ATR or 0.0)
         if lim > 0 and m["room_atr"] is not None and m["room_atr"] < lim:
-            reasons.append(f"only {max(0.0, m['room_atr']):.1f} ATR of room to the next resistance (min {lim:g})")
+            _room_txt = f"only {max(0.0, m['room_atr']):.1f} ATR of room to the next resistance (min {lim:g})"
+            if m["room_atr"] < 0:
+                # group366: the clamp above hid that the live price is already BEYOND the cached resistance (a possible breakout, not "no room")
+                _room_txt += f" [raw {m['room_atr']:.1f}: live price is {abs(m['room_atr']):.1f} ATR beyond the cached resistance - possible breakout]"
+            reasons.append(_room_txt)
         lim = float(config.STRUCTURE_MIN_RR or 0.0)
         flags = summary.get("ms_rr_flags") or []
         if lim > 0 and m["rr"] is not None and m["rr"] < lim:
@@ -242,7 +246,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, fetch_disabled=0, errors=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, fetch_disabled=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -287,6 +291,8 @@ def record(symbol: str, trade_mode: str, verdict: Dict[str, Any], gate_mode: str
             for r in verdict.get("reasons") or []:
                 k = reason_key(r)
                 _stats["by_reason"][k] = _stats["by_reason"].get(k, 0) + 1
+                if k == "room" and "[raw -" in str(r):
+                    _stats["room_past_resistance"] = _stats.get("room_past_resistance", 0) + 1     # group366: breakout-like room rejections
         if enforced:
             _stats["enforced"] += 1
             if not verdict.get("would_reject"):
@@ -318,7 +324,7 @@ def tally_decisions(rows: Iterable[Dict[str, Any]], prices: Optional[Dict[str, f
     """Aggregate stored entry decisions. Each row: {symbol, created_at (iso str), price (proposed entry), structure_json (str|dict)}, newest first.
     Pure. `since_pct` = live price vs the price at the decision: positive on a rejected symbol = it went up after the gate said no."""
     prices = prices or {}
-    out: Dict[str, Any] = {"decisions": 0, "with_snapshot": 0, "ok": 0, "no_opinion": 0, "would_reject": 0, "enforced": 0, "shadow_only": 0,
+    out: Dict[str, Any] = {"decisions": 0, "with_snapshot": 0, "ok": 0, "no_opinion": 0, "would_reject": 0, "enforced": 0,
                            "by_reason": {}, "by_nodata": {}, "rejects": [], "avg_since_pct": None, "rejects_up": 0, "rejects_down": 0,
                            "coverage_pct": None}
     seen: set = set()
@@ -341,7 +347,8 @@ def tally_decisions(rows: Iterable[Dict[str, Any]], prices: Optional[Dict[str, f
             out["by_nodata"][k] = out["by_nodata"].get(k, 0) + 1
         if doc.get("would_reject"):
             out["would_reject"] += 1
-            out["enforced" if doc.get("enforced") else "shadow_only"] += 1
+            if doc.get("enforced"):
+                out["enforced"] += 1
             for reason in doc.get("reasons") or []:
                 k = reason_key(reason)
                 out["by_reason"][k] = out["by_reason"].get(k, 0) + 1
@@ -368,11 +375,53 @@ def tally_decisions(rows: Iterable[Dict[str, Any]], prices: Optional[Dict[str, f
 
 # ── live summary fetch (api-gateway /stock/{symbol}/structure), cached, fail-open ─────────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
+_inflight: Dict[str, Any] = {}      # symbol -> the running background fetch task (group365 warm)
 
 
 def reset() -> None:
     _cache.clear()
+    _inflight.clear()
     reset_stats()
+
+
+def peek_summary(symbol: str) -> Optional[Dict[str, Any]]:
+    """group365: the CACHED summary only (fresh entry, not a cached failure). Never does I/O - safe inside the exit loop."""
+    try:
+        hit = _cache.get(str(symbol or "").strip().upper())
+        if hit is not None and hit[0] > time.monotonic() and isinstance(hit[1], dict):
+            return hit[1]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def warm(symbol: str) -> bool:
+    """group365: start ONE background fetch for `symbol` so the next exit pass finds it cached. True only when a fetch was started;
+    False when fetching is off, one is already running, or there is no running event loop. Never raises, never waits."""
+    try:
+        if not config.STRUCTURE_FETCH_ENABLED:
+            return False
+        sym = str(symbol or "").strip().upper()
+        if not sym or sym in _inflight:
+            return False
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        async def _run():
+            try:
+                await fetch_summary(sym)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                _inflight.pop(sym, None)
+
+        _inflight[sym] = loop.create_task(_run())
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def fetch_summary(symbol: str) -> Optional[Dict[str, Any]]:

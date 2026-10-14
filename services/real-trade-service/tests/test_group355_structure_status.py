@@ -62,7 +62,7 @@ def test_reason_keys_match_real_evaluate_output():
 
 
 def test_record_counts_ok_reject_nodata_and_ring():
-    sg.record("aaa", "demo", _verdict(), "shadow", False, 100.0, "payload")
+    sg.record("aaa", "demo", _verdict(), "enforce", False, 100.0, "payload")
     sg.record("BBB", "REAL", _verdict(would_reject=True, reasons=["chase 2.0 ATR above x", "daily structure is bearish"]), "enforce", True, 50.0, "gateway")
     sg.record("CCC", "REAL", _verdict(opinion="no_opinion", no_data="no structure summary"), "enforce", True, None, None)
     st = sg.stats()
@@ -82,19 +82,19 @@ def test_record_never_raises():
     class Boom(dict):
         def get(self, *a, **k):
             raise RuntimeError("x")
-    sg.record("A", "DEMO", Boom(), "shadow", False)
+    sg.record("A", "DEMO", Boom(), "enforce", False)
     assert sg.stats()["errors"] == 1
 
 
 def test_ring_is_bounded():
     for i in range(130):
-        sg.record(f"S{i}", "DEMO", _verdict(), "shadow", False)
+        sg.record(f"S{i}", "DEMO", _verdict(), "enforce", False)
     st = sg.stats()
     assert st["evaluated"] == 130 and len(st["recent"]) == 30 and len(sg._recent) == 100
 
 
 def test_reset_clears_counters():
-    sg.record("A", "DEMO", _verdict(), "shadow", False)
+    sg.record("A", "DEMO", _verdict(), "enforce", False)
     sg.reset()
     assert sg.stats()["evaluated"] == 0 and sg.stats()["recent"] == []
 
@@ -136,7 +136,7 @@ def test_tally_basic_and_moves():
     ]
     t = sg.tally_decisions(rows, {"UP": 110.0, "DOWN": 180.0})
     assert t["decisions"] == 7 and t["with_snapshot"] == 5 and t["ok"] == 4 and t["no_opinion"] == 1
-    assert (t["would_reject"], t["enforced"], t["shadow_only"]) == (3, 2, 1)
+    assert (t["would_reject"], t["enforced"]) == (3, 2) and "shadow_only" not in t
     assert t["by_reason"] == {"chase": 2, "rr": 1, "bearish": 1} and t["by_nodata"] == {"quality": 1}
     assert t["coverage_pct"] == 80.0
     assert [r["symbol"] for r in t["rejects"]] == ["UP", "DOWN"]

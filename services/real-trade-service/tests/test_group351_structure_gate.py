@@ -1,5 +1,5 @@
 """group 351: daily market-structure gate (entry_engine/structure_gate.py) - pure verdicts, no-data = no opinion, live adjustment,
-structural stop sanity, snapshot, mode selection, and the entry.py wiring (shadow records / enforce WAITs / fail-open)."""
+structural stop sanity, snapshot, mode selection, and the entry.py wiring (always-live enforce WAITs / off kill switch / fail-open)."""
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -23,8 +23,8 @@ def _defaults(monkeypatch):
     for k, v in (("STRUCTURE_MAX_CHASE_ATR", 1.5), ("STRUCTURE_MAX_STRETCH_ATR", 3.0), ("STRUCTURE_MIN_ROOM_ATR", 0.5),
                  ("STRUCTURE_MIN_RR", 1.2), ("STRUCTURE_REJECT_STOP_WIDE", True), ("STRUCTURE_BEARISH_BLOCK", True),
                  ("STRUCTURE_BEARISH_BOS_BARS", 5), ("STRUCTURE_MAX_AGE_DAYS", 7.0), ("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0),
-                 ("STRUCTURE_REQUIRE_DATA", False), ("STRUCTURE_STOP_MODE", "shadow"), ("STRUCTURE_STOP_MAX_RISK_MULT", 1.6),
-                 ("STRUCTURE_STOP_MIN_RISK_MULT", 0.5), ("STRUCTURE_GATE_MODE", "shadow"), ("STRUCTURE_GATE_DEMO_MODE", "shadow")):
+                 ("STRUCTURE_REQUIRE_DATA", False), ("STRUCTURE_STOP_MODE", "on"), ("STRUCTURE_STOP_MAX_RISK_MULT", 1.6),
+                 ("STRUCTURE_STOP_MIN_RISK_MULT", 0.5), ("STRUCTURE_GATE_MODE", "enforce"), ("STRUCTURE_GATE_DEMO_MODE", "enforce")):
         monkeypatch.setattr(config, k, v, raising=False)
     sg.reset()
 
@@ -81,8 +81,10 @@ def test_zero_threshold_disables_check(monkeypatch):
 
 def test_mode_for(monkeypatch):
     monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "enforce")
-    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "shadow")
-    assert sg.mode_for("REAL") == "enforce" and sg.mode_for("DEMO") == "shadow"
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "off")
+    assert sg.mode_for("REAL") == "enforce" and sg.mode_for("DEMO") == "off"
+    monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "shadow")      # a stale old value is live, never record-only
+    assert sg.mode_for("DEMO") == "enforce"
 
 
 def test_extract_summary_variants():
@@ -94,11 +96,9 @@ def test_extract_summary_variants():
 
 
 def test_structural_levels_sanity(monkeypatch):
-    # ATR stop 97 (risk 3 at entry 100); structural stop 96 -> 1.33x -> sane, but shadow does not use it
+    # ATR stop 97 (risk 3 at entry 100); structural stop 96 -> 1.33x -> sane and used (mode "on" is the default)
     lv = sg.structural_levels(_summary(), 100.0, 97.0, 106.0)
-    assert lv["sane"] and not lv["use"]
-    monkeypatch.setattr(config, "STRUCTURE_STOP_MODE", "on")
-    assert sg.structural_levels(_summary(), 100.0, 97.0, 106.0)["use"]
+    assert lv["sane"] and lv["use"]
     assert not sg.structural_levels(_summary(ms_stop=90.0), 100.0, 97.0, 106.0)["sane"]      # 3.3x -> too wide
     assert not sg.structural_levels(_summary(ms_stop=98.9), 100.0, 97.0, 106.0)["sane"]      # 0.37x -> hair-thin
     assert not sg.structural_levels(_summary(ms_stop=101.0), 100.0, 97.0, 106.0)["sane"]     # above entry
@@ -108,8 +108,8 @@ def test_structural_levels_sanity(monkeypatch):
 
 def test_snapshot_is_json_and_bounded():
     v = sg.evaluate(_summary(ms_trend="bearish"), 100.0)
-    doc = json.loads(sg.snapshot(_summary(), v, "shadow", False, {"mode": "shadow"}, "payload"))
-    assert doc["would_reject"] is True and doc["gate_mode"] == "shadow" and doc["summary"]["ms_trend"] == "bullish"
+    doc = json.loads(sg.snapshot(_summary(), v, "enforce", True, {"mode": "on"}, "payload"))
+    assert doc["would_reject"] is True and doc["gate_mode"] == "enforce" and doc["summary"]["ms_trend"] == "bullish"
 
 
 def test_get_summary_prefers_payload_then_gateway_failopen(monkeypatch):

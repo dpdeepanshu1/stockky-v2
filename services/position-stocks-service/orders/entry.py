@@ -518,23 +518,7 @@ def attempt_entry(
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", opening_reject, quality=quality)
         return None
-    # group 269: shadow mode - the symbol passed the gate but no order is placed inside the window; log it once a day.
-    if opening_gate.shadow_active():
-        shared_symbol_lock.release(db, candidate.symbol)
-        _sh_levels = compute_levels(candidate.pct_change, candidate.current_ltp, symbol=candidate.symbol)
-        _sh_stop = opening_gate.stop_reject(candidate.symbol, _sh_levels.stop_pct)
-        if _sh_stop:                      # shadow mode applies the stop check too, so WOULD_ENTER means every check passed
-            _log_candidate(db, candidate, "SKIPPED", _sh_stop, quality=quality)
-            return None
-        if opening_gate.shadow_first_time(candidate.symbol):
-            _log_candidate(db, candidate, "SKIPPED",
-                           f"OPENING_SHADOW:WOULD_ENTER ltp={candidate.current_ltp:.2f}"
-                           f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}"
-                           # group 271: the levels a real entry would have used, so the row can be judged against later prices
-                           f" stop={_sh_levels.stop_price:.2f}({_sh_levels.stop_pct:.2f}%)"
-                           f" target={_sh_levels.target_price:.2f}({_sh_levels.target_pct:.2f}%)",
-                           quality=quality)
-        return None
+    # (group370: the group 269 opening-gate shadow branch was removed; the gate above is always live.)
 
     # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
     price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp)
@@ -631,7 +615,7 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _cat_block, quality=quality)
         return None
 
-    # group309: Market Board chase guard. shadow (default) only logs; enforce refuses an entry that is > BOARD_CHASE_ATR ATRs past
+    # group309/370: Market Board chase guard (always live). Refuses an entry that is > BOARD_CHASE_ATR ATRs past
     # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
     _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
     if _board_reject:

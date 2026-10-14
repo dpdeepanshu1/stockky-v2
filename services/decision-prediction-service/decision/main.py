@@ -847,6 +847,63 @@ async def record_prediction_for_training(
         logger.error(f"Error recording prediction for {symbol}: {e}")
 
 
+# ── group368 (item 8): the training record carries the FINAL decision and the structure block ─────────────────────────────────────────
+_RECORDABLE = (Decision.BUY_NOW.value, Decision.PREPARE_TO_BUY.value)
+
+
+def _structure_snapshot(response) -> dict | None:
+    """Compact, JSON-safe copy of response["structure"] for feature_snapshot (rule ids, levels and the handful of features that
+    explain the verdict). None when the response has no structure block."""
+    st = response.get("structure") if isinstance(response, dict) else None
+    if not isinstance(st, dict):
+        return None
+    f = st.get("features") if isinstance(st.get("features"), dict) else {}
+    keep = ("quality", "trend", "tqs", "loc_score", "rr", "chase_atr", "stretch_atr", "room_atr", "bos_dir", "bos_bars", "atr", "asof", "ver")
+    return {
+        "mode": st.get("mode"),
+        "applied": bool(st.get("applied")),
+        "original_decision": st.get("original_decision"),
+        "policy_decision": st.get("policy_decision"),
+        "rules": [r.get("id") for r in (st.get("rules") or []) if isinstance(r, dict)],
+        "no_opinion": st.get("no_opinion"),
+        "structural_levels": st.get("structural_levels"),
+        "features": {k: f.get(k) for k in keep if f.get(k) is not None},
+    }
+
+
+def _queue_training_record(background_tasks, args: dict, response) -> bool:
+    """Queue record_prediction_for_training with the FINAL decision / levels / confidence from `response` and the structure snapshot in
+    feature_snapshot. `args` (the pre-policy kwargs) is never mutated. Only a final BUY NOW / PREPARE TO BUY is recorded; a pick the
+    structure policy demoted to WAIT is recorded only with STRUCTURE_RECORD_DEMOTED=1 (the evaluator scores WAIT as "did not rise", so
+    recording demoted picks by default would mix them into the classifier labels). Returns True when a record was queued."""
+    if background_tasks is None or not isinstance(args, dict) or not isinstance(response, dict):
+        return False
+    final = response.get("decision")
+    snap = _structure_snapshot(response)
+    if final not in _RECORDABLE:
+        demoted = bool(snap and snap.get("applied") and snap.get("original_decision") == Decision.BUY_NOW.value)
+        if not (demoted and os.getenv("STRUCTURE_RECORD_DEMOTED", "").strip().lower() in ("1", "true", "yes", "on")):
+            return False
+    out = dict(args)
+    out["decision"] = final
+    cs = response.get("combined_score")
+    if isinstance(cs, (int, float)) and not isinstance(cs, bool):
+        out["confidence"] = cs
+    er = response.get("entry_range")
+    if isinstance(er, dict):
+        out["entry_range"] = {"low": er.get("low"), "high": er.get("high")}
+    for k_args, k_resp in (("target", "target"), ("stop_loss", "stop_loss")):
+        v = response.get(k_resp)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k_args] = v
+    feats = dict(out.get("features") or {})
+    if snap is not None:
+        feats["structure"] = snap
+    out["features"] = feats
+    background_tasks.add_task(record_prediction_for_training, **out)
+    return True
+
+
 
 def _assess_data_quality(
     technical: dict,
@@ -1569,6 +1626,7 @@ async def _decide_impl(
         if fundamental.get("metrics"):
             response["fundamental_metrics"] = fundamental["metrics"]
 
+        _train_args = None   # group368
         if decision in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY) and close:
             # ema alignment as a descriptive label — technical-analysis-service
             # exposes ema20/ema50/ema200 as three separate numbers, not a
@@ -1584,8 +1642,10 @@ async def _decide_impl(
                 else:
                     ema_label = "mixed"
 
-            background_tasks.add_task(
-                record_prediction_for_training,
+            # group368 (item 8): do NOT record here - this is the PRE-policy decision. The call is deferred until the multi-horizon,
+            # data-quality and structure steps have run, then made with the FINAL decision / levels and the `structure` block attached
+            # (see _queue_training_record below the structure policy).
+            _train_args = dict(
                 symbol=symbol.upper(),
                 decision=decision.value,
                 confidence=combined,
@@ -1660,17 +1720,22 @@ async def _decide_impl(
             logger.warning("multi-horizon attach failed: %s", _mh_err)
 
         # group353 (WS-5): daily market-structure policy - the LAST step (after data-quality gate and multi-horizon), so nothing
-        # downstream can undo it, and the original / policy decisions are both recorded. Shadow by default; it only ever tightens.
+        # downstream can undo it, and the original / policy decisions are both recorded. Always live (group370): tightens BUY NOW, re-checks PREPARE, and upgrades a PREPARE to BUY NOW only on P9 + every requirement met.
         try:
             if _ms_apply_policy is not None and isinstance(technical, dict):
                 _sum = technical.get("structure_summary")
                 if not isinstance(_sum, dict) and isinstance(prefetched, dict):
                     _sum = prefetched.get("structure_summary")
                 _blk = technical.get("market_structure") if isinstance(technical.get("market_structure"), dict) else None
+                # P9 upgrade is allowed only on solid data: not already owned, no provisional / blocked data quality, confidence not Low.
+                _dq_up = response.get("data_quality") or data_quality or {}
+                _allow_up = (not already_owned and isinstance(_dq_up, dict) and bool(_dq_up.get("actionable_ok"))
+                             and not (_dq_up.get("provisional") or _dq_up.get("block_buy_now")) and response.get("confidence") != "Low")
                 _pol = _ms_apply_policy(
                     response.get("decision"), _sum, response.get("close"),
                     legacy={"entry_range": response.get("entry_range"), "target": response.get("target"), "stop_loss": response.get("stop_loss")},
                     explain=(_blk or {}).get("explain"),
+                    allow_upgrade=_allow_up,
                 )
                 _st = _pol["structure"]
                 _st["summary_line"] = _ms_summary_line(_st)
@@ -1684,10 +1749,16 @@ async def _decide_impl(
                     response["target"] = _pol["levels"]["target"]
                 if _st.get("rules"):
                     response.setdefault("reasons", {})
-                    _tag = "" if _st.get("applied") else " (shadow - not applied)"
-                    response["reasons"]["structure"] = [r["reason"] + _tag for r in _st["rules"]]
+                    response["reasons"]["structure"] = [r["reason"] for r in _st["rules"]]
         except Exception as _ms_err:  # noqa: BLE001
             logger.warning("structure policy failed for %s (%s); decision unchanged", symbol, _ms_err)
+
+        # group368 (item 8): record for training with the FINAL decision and the structure block (after every step that can change it).
+        try:
+            if _train_args is not None:
+                _queue_training_record(background_tasks, _train_args, response)
+        except Exception as _tr_err:  # noqa: BLE001 - recording is evidence only, never changes a decision
+            logger.warning("training record skipped for %s (%s)", symbol, _tr_err)
 
         # Cache successful decide payload for free-tier scan speed
         try:

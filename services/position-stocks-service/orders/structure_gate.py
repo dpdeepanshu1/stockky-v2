@@ -5,7 +5,7 @@ in the DAILY structure (technical service `market_structure` summary, flat `ms_*
 GET /stock/{symbol}/structure): a bearish daily trend, a fresh bearish break of structure, almost no room under the next daily resistance, an
 extreme chase above the nearest demand/imbalance zone or an extreme stretch above the daily EMA20.
 
-LIVE: config.STRUCTURE_GATE_MODE = off | shadow | enforce (default enforce). It can only ever REFUSE an entry (never create one).
+LIVE: config.STRUCTURE_GATE_MODE = enforce (default, always live) | off (kill switch). It can only ever REFUSE an entry (never create one).
 NO DATA = NO OPINION: a missing / unavailable / insufficient / stale summary, an old last bar, or a live price far from the structure close
 (split / bad data) never blocks and is never bullish - unless STRUCTURE_REQUIRE_DATA=true.
 The scalper buys strength on purpose, so the default limits are looser than real-trade's swing entry gate; every limit is an env var and 0
@@ -51,7 +51,7 @@ def _cfg(name: str, dflt: float) -> float:
 
 def mode() -> str:
     m = str(getattr(config, "STRUCTURE_GATE_MODE", "enforce") or "enforce").lower()
-    return m if m in ("off", "shadow", "enforce") else "enforce"
+    return "off" if m == "off" else "enforce"
 
 
 def _age_days(asof) -> Optional[float]:
@@ -127,7 +127,11 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
             reasons.append(f"stretched {m['stretch_atr']:.1f} daily ATR above EMA20 (max {lim:g})")
         lim = _cfg("STRUCTURE_MIN_ROOM_ATR", 0.3)
         if lim > 0 and m["room_atr"] is not None and m["room_atr"] < lim:
-            reasons.append(f"only {max(0.0, m['room_atr']):.1f} daily ATR of room to the next resistance (min {lim:g})")
+            _room_txt = f"only {max(0.0, m['room_atr']):.1f} daily ATR of room to the next resistance (min {lim:g})"
+            if m["room_atr"] < 0:
+                # group366: the clamp above hid that the live price is already BEYOND the cached resistance (a possible breakout, not "no room")
+                _room_txt += f" [raw {m['room_atr']:.1f}: live price is {abs(m['room_atr']):.1f} ATR beyond the cached resistance - possible breakout]"
+            reasons.append(_room_txt)
         if getattr(config, "STRUCTURE_BEARISH_BLOCK", True):
             if summary.get("ms_trend") == "bearish":
                 reasons.append("daily structure is bearish")
@@ -172,7 +176,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, errors=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -216,6 +220,8 @@ def record(symbol: str, verdict: Dict[str, Any], gate_mode: str, enforced: bool,
             for r in verdict.get("reasons") or []:
                 k = reason_key(r)
                 _stats["by_reason"][k] = _stats["by_reason"].get(k, 0) + 1
+                if k == "room" and "[raw -" in str(r):
+                    _stats["room_past_resistance"] = _stats.get("room_past_resistance", 0) + 1     # group366: breakout-like room rejections
         if enforced:
             _stats["enforced"] += 1
             if not verdict.get("would_reject"):
@@ -253,7 +259,7 @@ def with_moves(recent: Iterable[Dict[str, Any]], prices: Dict[str, float]) -> Li
 def tally_stored(log_rows: Iterable[Dict[str, Any]], position_rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """What the DB says. log_rows: scalp_candidate_log {symbol, reason, decision, created_at}; the gate refuses with reason
     'STRUCTURE_BAD_LOCATION:<reasons>' or 'STRUCTURE_NODATA:<why>'. position_rows: scalp_positions {symbol, structure_json} - the snapshot
-    stored on every entry that got through (shadow-mode would-rejects and no-opinion entries show up here). Pure."""
+    stored on every entry that got through (no-opinion entries show up here). Pure."""
     out: Dict[str, Any] = {"refused": 0, "refused_bad_location": 0, "refused_nodata": 0, "by_reason": {}, "by_nodata": {}, "refused_symbols": [],
                            "entered_with_snapshot": 0, "entered_ok": 0, "entered_no_opinion": 0, "entered_would_reject": 0,
                            "entered_by_reason": {}, "coverage_pct": None}
@@ -356,7 +362,7 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
 
 
 def check(symbol: str, ltp: float) -> Tuple[Optional[str], Optional[str]]:
-    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned only when the mode is enforce. Never raises (fails open)."""
+    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects (mode enforce). Never raises (fails open)."""
     m = mode()
     if m == "off":
         return None, None
@@ -368,12 +374,10 @@ def check(symbol: str, ltp: float) -> Tuple[Optional[str], Optional[str]]:
             block = f"{PREFIX}BAD_LOCATION:{v['reason']}"
         elif v["opinion"] == "no_opinion" and getattr(config, "STRUCTURE_REQUIRE_DATA", False):
             block = f"{PREFIX}NODATA:{v.get('no_data')}"
-        enforced = bool(block) and m == "enforce"
+        enforced = bool(block)
         snap = snapshot(summary, v, m, enforced)
         record(symbol, v, m, enforced, ltp)   # group 355
-        if block and m == "shadow":
-            logger.info("structure gate SHADOW would refuse %s: %s", symbol, block)
-        return (block if enforced else None), snap
+        return block, snap
     except Exception as e:  # noqa: BLE001 - a gate bug must never stop an entry
         logger.warning("structure gate failed for %s (allowing): %s", symbol, e)
         return None, None

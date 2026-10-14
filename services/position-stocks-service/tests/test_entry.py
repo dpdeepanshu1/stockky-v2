@@ -1150,35 +1150,16 @@ class TestOpeningGateWiring:
         assert log.decision == "ENTERED" and "gap=+0.50% range_pos=0.82" in log.reason
 
 
-class TestOpeningShadowWiring:
-    def _shadow(self, monkeypatch, active=True):
+class TestOpeningGateAlwaysLive:
+    """group370: the group 269 record-only shadow branch was removed; a symbol that passes the opening gate is entered, also inside the window."""
+
+    def test_passing_symbol_is_entered_not_held(self, env, monkeypatch):
         from screening import opening_gate
-        opening_gate.reset_shadow()
+        db, b, _ = env
+        b.stop_pct = 2.0
         monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
-        monkeypatch.setattr(opening_gate, "shadow_active", lambda now=None: active)
-        monkeypatch.setattr(opening_gate, "entry_features", lambda sym, ltp, now=None: " gap=+0.50%")
-
-    def test_shadow_logs_would_enter_once_and_places_no_order(self, env, monkeypatch):
-        db, b, _ = env
-        self._shadow(monkeypatch)
-        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
-        assert_clean_skip(env, "ABC", "OPENING_SHADOW:WOULD_ENTER ltp=500.00 gap=+0.50%")
-        assert entry.attempt_entry(db, cand(ltp=500.0)) is None           # second scan: no second row
-        assert db.query(models.ScalpCandidateLog).filter(models.ScalpCandidateLog.reason.like("OPENING_SHADOW%")).count() == 1
-
-    def test_shadow_row_carries_the_stop_and_target_levels(self, env, monkeypatch):
-        db, b, _ = env
-        b.stop_pct = 2.0
-        self._shadow(monkeypatch)
-        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
-        log = last_log(db)
-        assert log.reason.startswith("OPENING_SHADOW:WOULD_ENTER ltp=500.00 gap=+0.50%")
-        assert " stop=" in log.reason and "(2.00%)" in log.reason and " target=" in log.reason and "(1.00%)" in log.reason
-
-    def test_shadow_off_enters_normally(self, env, monkeypatch):
-        db, b, _ = env
-        b.stop_pct = 2.0
-        self._shadow(monkeypatch, active=False)
+        monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: None)
+        assert not hasattr(opening_gate, "shadow_active") and not hasattr(config, "OPENING_GATE_SHADOW")
         assert entry.attempt_entry(db, cand(ltp=500.0)) is not None
 
 
@@ -1188,16 +1169,6 @@ class TestOpeningStopAtrWiring:
         db, b, _ = env
         b.stop_pct = 0.5
         monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
-        monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: "OPENING_GATE:STOP_TOO_TIGHT:test")
-        assert entry.attempt_entry(db, cand(ltp=500.0)) is None
-        assert_clean_skip(env, "ABC", "OPENING_GATE:STOP_TOO_TIGHT")
-
-    def test_shadow_applies_the_stop_check_too(self, env, monkeypatch):
-        from screening import opening_gate
-        db, b, _ = env
-        opening_gate.reset_shadow()
-        monkeypatch.setattr(opening_gate, "reject_reason", lambda sym, ltp, now=None: None)
-        monkeypatch.setattr(opening_gate, "shadow_active", lambda now=None: True)
         monkeypatch.setattr(opening_gate, "stop_reject", lambda sym, stop, now=None: "OPENING_GATE:STOP_TOO_TIGHT:test")
         assert entry.attempt_entry(db, cand(ltp=500.0)) is None
         assert_clean_skip(env, "ABC", "OPENING_GATE:STOP_TOO_TIGHT")

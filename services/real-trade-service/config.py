@@ -430,9 +430,7 @@ OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_
 OPENING_GATE_MIN_CHANGE_PCT = _og_float("OPENING_GATE_MIN_CHANGE_PCT", -0.5)   # price vs previous close, lower bound
 OPENING_GATE_MAX_CHANGE_PCT = _og_float("OPENING_GATE_MAX_CHANGE_PCT", 3.0)    # upper bound; chasing a bigger move at the open is skipped
 OPENING_GATE_MAX_RANGE_POS = _og_float("OPENING_GATE_MAX_RANGE_POS", 0.88)     # 0 disables
-# group 269: shadow mode. true -> inside the gate window no candidate is entered; one that passes the gate is logged once per
-# symbol per day as "OPENING_SHADOW would enter" and stays queued. Default false = the gate is live (group 268).
-OPENING_GATE_SHADOW = ((os.getenv("OPENING_GATE_SHADOW") or "").strip() or "false").lower() == "true"
+# (group 269 shadow mode for this gate was removed in group370: the opening gate is always live; OPENING_GATE_ENABLED=false is the only off switch.)
 # group 270: previous-day candle checks (entry_engine/prev_day.py: background fetch of market-data /history, never on the
 # entry path; a cache miss holds the candidate back for that cycle). Previous day must have closed in the upper half of its
 # range; the stop must be at least FRAC x the daily ATR % (0 disables either check).
@@ -463,16 +461,16 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 
 # group 351 (2026-10-13): DAILY MARKET-STRUCTURE GATE (entry_engine/structure_gate.py). Reads the technical service's market_structure
 # summary (ms_*) for the candidate and answers "good stock, bad entry?" - chasing above the nearest demand/imbalance zone, a stretched
-# price, no room to the next resistance, structure R:R too low, broken/bearish structure. SHADOW-FIRST: every threshold below is a
-# HYPOTHESIS until the backtest/observation data (WS-6/7) calibrates it. group354: LIVE by default - the gate can only ever WAIT (it never
-# creates an entry), a missing / stale structure is "no opinion", and every verdict is stored on the decision, so a wrong threshold costs a
-# skipped trade, never a bad one. Set STRUCTURE_GATE_MODE=shadow (record only) or off to loosen it.
-#   STRUCTURE_GATE_MODE       REAL mode:  off | shadow (record would_reject, never block) | enforce (default: WAIT with gate_tag=structure)
+# price, no room to the next resistance, structure R:R too low, broken/bearish structure. Every threshold below is a HYPOTHESIS until
+# the backtest/observation data (scripts/structure_backtest.py) calibrates it. ALWAYS LIVE (group370: shadow mode removed) - the gate can
+# only ever WAIT (it never creates an entry), a missing / stale structure is "no opinion", and every verdict is stored on the decision, so a
+# wrong threshold costs a skipped trade, never a bad one (which is why the backtest still has to be run: skips are silent).
+#   STRUCTURE_GATE_MODE       REAL mode:  enforce (default: WAIT with gate_tag=structure) | off (kill switch). Any other value (incl. a stale "shadow") = enforce.
 #   STRUCTURE_GATE_DEMO_MODE  DEMO mode:  same values; defaults to STRUCTURE_GATE_MODE
 # Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true.
 def _sg_mode(name, default):
     v = (os.getenv(name) or "").strip().lower()
-    return v if v in ("off", "shadow", "enforce") else default
+    return "off" if v == "off" else "enforce"   # a stale "shadow" in an old .env is live
 STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
 STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
 STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or "false").lower() == "true"
@@ -485,11 +483,10 @@ STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() 
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts
 STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 7.0)         # last structure bar older than this = stale = no opinion
 STRUCTURE_MAX_PRICE_DEV_PCT = _og_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)  # live entry vs structure close further apart = split/bad data = no opinion
-# Structural stop option: off | shadow (default: record the structural stop next to the ATR stop) | on (use it when it is sane).
-# STRUCTURE_STOP_MODE: off | shadow (record the structural stop next to the ATR stop) | on (default, group354: use it when it is sane -
-# below entry and within [MIN, MAX] x the ATR-stop risk). "enforce" is accepted as an alias of "on".
+# STRUCTURE_STOP_MODE: on (default: use the structural stop when it is sane - below entry and within [MIN, MAX] x the ATR-stop risk) |
+# off (kill switch). "enforce" is an alias of "on"; any other value (incl. a stale "shadow") = on.
 _ssm = (os.getenv("STRUCTURE_STOP_MODE") or "").strip().lower()
-STRUCTURE_STOP_MODE = "off" if _ssm == "off" else ("shadow" if _ssm == "shadow" else "on")
+STRUCTURE_STOP_MODE = "off" if _ssm == "off" else "on"
 STRUCTURE_STOP_MAX_RISK_MULT = _og_float("STRUCTURE_STOP_MAX_RISK_MULT", 1.6)   # structural risk may be at most this x the ATR-stop risk
 STRUCTURE_STOP_MIN_RISK_MULT = _og_float("STRUCTURE_STOP_MIN_RISK_MULT", 0.5)   # ... and at least this x (a hair-thin stop is noise)
 # Where the live summary comes from when the candidate payload has none: api-gateway GET /stock/{symbol}/structure (cached, fail-open).
@@ -497,6 +494,23 @@ STRUCTURE_FETCH_ENABLED = ((os.getenv("STRUCTURE_FETCH_ENABLED") or "").strip() 
 STRUCTURE_FETCH_TIMEOUT_S = _og_float("STRUCTURE_FETCH_TIMEOUT_S", 3.0)
 STRUCTURE_CACHE_TTL_S = _og_float("STRUCTURE_CACHE_TTL_S", 600.0)
 STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
+# group356/365 (WS-6 + structure exit): every one of these is LIVE by default.
+#   STRUCTURE_OBS_*   what the gate saw per symbol/day and what the stock did next (structure_observations table, background evaluator)
+#   STRUCTURE_EDGE_MIN_N  finished rows per side before the edge / calibration report draws a conclusion
+#   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten (default) | exit
+STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
+STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
+STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
+STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0))
+STRUCTURE_EDGE_MIN_N = max(1, int(_og_float("STRUCTURE_EDGE_MIN_N", 100)))
+_sxm = (os.getenv("STRUCTURE_EXIT_MODE") or "").strip().lower()
+STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "tighten"
+STRUCTURE_EXIT_TIGHT_ATR = max(0.0, _og_float("STRUCTURE_EXIT_TIGHT_ATR", 0.75))
+STRUCTURE_EXIT_CHOCH_BARS = max(1, int(_og_float("STRUCTURE_EXIT_CHOCH_BARS", 3)))
+STRUCTURE_EXIT_BOS_BARS = max(1, int(_og_float("STRUCTURE_EXIT_BOS_BARS", 3)))
+STRUCTURE_TRAIL_ENABLED = ((os.getenv("STRUCTURE_TRAIL_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+STRUCTURE_TRAIL_MIN_ATR = max(0.0, _og_float("STRUCTURE_TRAIL_MIN_ATR", 1.0))
 
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
@@ -1237,6 +1251,8 @@ def _bs_int(name: str, default: int) -> int:
 # group 340 (2026-10-12): imported demat holdings (portfolio.py) got targets of +9.75% / +13.5% against ~1.8% stops, unreachable inside a
 # 10-day time stop. The imported target is capped at this multiple of the stop distance (0 = no cap).
 IMPORT_TARGET_MAX_STOP_MULT = max(0.0, _bs_float("IMPORT_TARGET_MAX_STOP_MULT", 2.5))
+# group368: an unchanged HOLD audit row is written at most this often per position (0 = every 8 s cycle, the old behaviour)
+EXIT_HOLD_AUDIT_SECONDS = max(0, _bs_int("EXIT_HOLD_AUDIT_SECONDS", 60))
 BROKER_STOP_ENABLED = _bs_bool("BROKER_STOP_ENABLED", "false")
 BROKER_STOP_BUFFER_PCT = max(0.0, _bs_float("BROKER_STOP_BUFFER_PCT", 0.5))
 BROKER_STOP_MIN_MOVE_PCT = max(0.0, _bs_float("BROKER_STOP_MIN_MOVE_PCT", 0.25))

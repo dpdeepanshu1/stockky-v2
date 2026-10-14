@@ -228,6 +228,17 @@ async def startup() -> None:
         _dhan_client_warm.start_security_warm_task()
     except Exception as _e:
         logger.debug("startup Dhan security warm-up not started (non-fatal): %s", _e)
+    # group356: background evaluator that fills in what each stored structure observation did over the next 1/5/10/20 sessions.
+    # Read-only evidence, runs history HTTP + DB on a worker thread, never raises into boot; STRUCTURE_OBS_ENABLED=false makes it a no-op.
+    try:
+        import asyncio as _aio_obs
+        from db import get_session_factory as _get_session_factory_obs
+        from entry_engine import structure_observation as _struct_obs
+        if getattr(config, "STRUCTURE_OBS_ENABLED", True):
+            globals()["_STRUCT_OBS_TASK"] = _aio_obs.get_running_loop().create_task(
+                _struct_obs.run_loop(_get_session_factory_obs()))
+    except Exception as _e:
+        logger.debug("startup structure observation loop not started (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any
@@ -2463,7 +2474,7 @@ async def structure_status(
     mode: str, hours: int = 24, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
     """group 355: how the daily market-structure gate is behaving - config, process counters since boot, and what the stored ENTRY decisions
-    of the last `hours` say (coverage = share with a usable structure, would_reject / enforced / shadow-only, reason buckets, the symbols it
+    of the last `hours` say (coverage = share with a usable structure, would_reject / enforced, reason buckets, the symbols it
     turned away with the move since). Read-only; nothing in the entry path reads it back."""
     mode = mode.upper()
     if mode not in ("DEMO", "REAL"):
@@ -2484,7 +2495,31 @@ async def structure_status(
         prices = await _live_prices(rejected)
     except Exception as e:  # noqa: BLE001 - a status page must not raise
         logger.warning("structure status query failed: %s", e)
-    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices)}
+    try:
+        from exit_engine import structure_exit as _structure_exit
+        _exit_stats = _structure_exit.stats()      # group365: what the daily structure did to OPEN positions (read-only)
+    except Exception as e:  # noqa: BLE001
+        _exit_stats = {"error": str(e)[:120]}
+    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
+            "exit": _exit_stats}
+
+
+@app.get("/structure/observations/{mode}")
+async def structure_observations(
+    mode: str, days: int = 60, recent: int = 40, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """group356/365: the structure-gate edge report - did the stocks it passed / turned away go up or down over the next 1/5/10/20 sessions
+    (needs STRUCTURE_EDGE_MIN_N finished rows per side before it draws a conclusion). Read-only."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import structure_observation as _so
+    import asyncio as _aio
+    try:
+        return await _aio.to_thread(_so.report, db, mode, days, recent)
+    except Exception as e:  # noqa: BLE001 - a report page must not raise
+        logger.warning("structure observations report failed: %s", e)
+        return {"mode": mode, "error": str(e)[:160]}
 
 
 class ManualCloseRequest(BaseModel):

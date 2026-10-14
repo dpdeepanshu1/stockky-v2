@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -217,6 +219,10 @@ def _dp_guard_blocks_target_sale(position, ltp: float, qty_to_close: int) -> Opt
         return None
 
 
+# position id -> (monotonic time, normalised reasoning) of the last HOLD audit row written (group368)
+_HOLD_AUDIT_LAST: dict = {}
+
+
 def _write_exit_decision(
     db: Session,
     position: models.TradePosition,
@@ -224,8 +230,27 @@ def _write_exit_decision(
     reasoning: str,
     ltp: float,
 ) -> None:
-    """Write an audit exit decision row. Every evaluation — including HOLD —
-    gets logged per the plan's audit principle."""
+    """Write an audit exit decision row. Every evaluation that DECIDES something gets logged per the plan's audit principle.
+
+    group368: an unchanged HOLD is written at most once per EXIT_HOLD_AUDIT_SECONDS per position (default 60; 0 = every cycle, the old
+    behaviour). The exit loop runs every 8 s, so every HOLD was one synchronous Oracle INSERT per open position per pass - the boot log
+    showed those inserts taking 1.5 to 5.9 s inside the loop that is the only stop protection while BROKER_STOP_ENABLED is off. A HOLD
+    whose wording changes and every non-HOLD action is still written immediately."""
+    if action == "HOLD":
+        try:
+            interval = float(getattr(config, "EXIT_HOLD_AUDIT_SECONDS", 60) or 0)
+        except Exception:
+            interval = 0.0
+        if interval > 0:
+            key = re.sub(r"[\d.,₹-]+", "#", str(reasoning))[:80]
+            now = time.monotonic()
+            last = _HOLD_AUDIT_LAST.get(position.id)
+            if last is not None and last[1] == key and (now - last[0]) < interval:
+                return
+            _HOLD_AUDIT_LAST[position.id] = (now, key)
+            if len(_HOLD_AUDIT_LAST) > 2000:
+                for k in list(_HOLD_AUDIT_LAST)[:1000]:
+                    _HOLD_AUDIT_LAST.pop(k, None)
     db.add(models.TradeExitDecision(
         position_id=position.id,
         action=action,
@@ -1558,6 +1583,59 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 )
                 held += 1
                 continue
+
+            # ── 3b. Daily market structure while the position is open (group365) ─────────────────────────────
+            # Reads ONLY the structure cache (a miss starts a background fetch), so a slow gateway can never delay a stop
+            # check. Ratchet only: the stop is raised, never lowered; a losing position is never touched. Any error is
+            # swallowed and the checks below run exactly as before. STRUCTURE_EXIT_MODE: off | log | tighten | exit.
+            try:
+                from exit_engine import structure_exit as _sx
+                from entry_engine import structure_gate as _sgate
+                if _sx.mode() != "off" and ltp > position.avg_entry_price:
+                    _sx_sum = _sgate.peek_summary(position.symbol)
+                    if _sx_sum is None:
+                        _sgate.warm(position.symbol)
+                    else:
+                        _sx_v = _sx.evaluate(_sx_sum, entry_price=position.avg_entry_price, ltp=ltp, current_stop=position.current_stop,
+                                             atr=tick.atr, opened_at=position.opened_at)
+                        _sx_applied = False
+                        if _sx_v.get("action") in ("tighten", "trail") and _sx_v.get("new_stop") is not None:
+                            _old_sx = position.current_stop
+                            if _old_sx is None or float(_sx_v["new_stop"]) > float(_old_sx):
+                                position.current_stop = float(_sx_v["new_stop"])
+                                _sx_ev = "STRUCTURE_TIGHTEN" if _sx_v["action"] == "tighten" else "STRUCTURE_TRAIL"
+                                db.add(models.TradePositionEvent(
+                                    position_id=position.id, event_type=_sx_ev,
+                                    detail=(f"Stop raised to ₹{position.current_stop:.2f} (was ₹{_old_sx}) by the daily structure: "
+                                            + "; ".join(_sx_v.get("reasons") or [])[:300]),
+                                ))
+                                db.commit()
+                                _write_exit_decision(
+                                    db, position, "TRAIL_STOP",
+                                    f"Structure {_sx_v['action']}: stop ₹{position.current_stop:.2f} (was ₹{_old_sx}). "
+                                    + "; ".join(_sx_v.get("reasons") or [])[:200], ltp)
+                                _sx_applied = True
+                                trailed += 1
+                        elif _sx_v.get("action") == "exit" and _sx.mode() == "exit":
+                            _sx_applied = True
+                        _sx.record(position.symbol, mode, _sx_v, _sx_applied, ltp)
+                        if _sx_applied and _sx_v.get("action") == "exit":
+                            _write_exit_decision(db, position, "FULL_EXIT",
+                                                 "Structure exit: fresh bearish daily structure while in profit. "
+                                                 + "; ".join(_sx_v.get("reasons") or [])[:200], ltp)
+                            if mode == "DEMO":
+                                close_position(db, position, tick, position.qty_open, "structure_exit")
+                            elif not _send_real_sell(db, position, position.qty_open, "structure_exit"):
+                                held += 1
+                            continue
+                        if _sx_applied:
+                            continue
+            except Exception as _sx_exc:  # noqa: BLE001 - structure is advisory; never stop the exit loop
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                logger.debug("exit structure step failed for %s (ignored): %s", position.symbol, _sx_exc)
 
             # ── 4. Breakeven stop (once gain ≥ _be_trigger × ATR) ────────────────
             # Creates a free-ride floor: once the trade is meaningfully in profit

@@ -1,7 +1,7 @@
 """entry_engine/structure_observation.py - WS-6 for real-trade (group 356, 2026-10-14): what the daily structure gate saw, and what the stock did next.
 
 RECORD  (entry.py, right after the structure gate verdict): one row per symbol / mode / IST day (the first concrete verdict wins) in
-        structure_observations - passed, rejected_shadow and rejected_enforced alike. `no_opinion` is not stored (the gate counters already
+        structure_observations - passed and rejected_enforced alike (legacy rejected_shadow rows are read as rejected_enforced). `no_opinion` is not stored (the gate counters already
         count it). The row is added to the caller's session and committed with the decision; recording never raises and never changes an entry.
 EVALUATE (background loop, every STRUCTURE_OBS_EVAL_INTERVAL_S): for rows that are not complete and at least one session old, fetch daily
         candles from market-data /history, and fill T+1/5/10/20 return, MFE, MAE and the first touch of the structure's own target vs stop

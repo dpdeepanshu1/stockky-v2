@@ -635,31 +635,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             if _og_held == 1 and opening_guard.should_log(mode + ":gate"):
                 logger.info("entry_engine: %s %s %s (candidate left queued)", mode, cand.symbol, _og_reason)
             continue
-        # group 269: shadow mode - passed the gate, but nothing is entered inside the window; logged once a day, stays queued.
-        if opening_gate.shadow_active(mode):
-            waited += 1
-            _t = ticks.get(cand.symbol)
-            if opening_gate.shadow_first_time(mode, cand.symbol):
-                # group 271: stop/target % the entry would have used (same ATR rule as a real entry), so the line can be judged later
-                _sh_levels = ""
-                try:
-                    if _t is not None and _t.atr and _t.price:
-                        _s, _tg = _atr_stop_target_pct(_clamp_for_atr(_t.atr / _t.price * 100.0))
-                        _sh_levels = f" stop_pct={_s:.2f} target_pct={_tg:.2f}"
-                except Exception:
-                    _sh_levels = ""
-                try:                           # group 273: previous-day numbers, as the scalper's shadow row has
-                    _pdv = prev_day.peek(cand.symbol)
-                    if _pdv is not None and _pdv.close_pos is not None:
-                        _sh_levels += f" pd_close_pos={_pdv.close_pos:.2f}"
-                    if _pdv is not None and _pdv.atr_pct is not None:
-                        _sh_levels += f" atr_pct={_pdv.atr_pct:.2f}"
-                except Exception:
-                    pass
-                logger.info("entry_engine: %s OPENING_SHADOW would enter %s price=%.2f prev_close=%s day_range=%s-%s%s",
-                            mode, cand.symbol, getattr(_t, "price", 0.0) or 0.0, getattr(_t, "prev_close", None),
-                            getattr(_t, "day_low", None), getattr(_t, "day_high", None), _sh_levels)
-            continue
+        # (group370: the group 269 opening-gate shadow branch was removed; the gate above is always live.)
 
         cand.consumed = True
         tick     = ticks.get(cand.symbol)
@@ -910,7 +886,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── Gate 4e (group 351): daily market-structure ("good stock, bad entry?") ───────────────────────────────────────
         # Chase above the nearest demand/imbalance zone, stretched price, no room to resistance, poor structure R:R, bearish structure.
-        # SHADOW by default: records would_reject on decision.structure_json and never blocks; enforce = WAIT (gate_tag "structure").
+        # ALWAYS LIVE (group370): a rejection is a WAIT (gate_tag "structure"); the verdict is stored on decision.structure_json.
         # No / stale / insufficient structure data is "no opinion" (never blocks) unless STRUCTURE_REQUIRE_DATA. Never raises.
         # An optional structural stop (STRUCTURE_STOP_MODE=on) replaces the ATR stop only when sane. See entry_engine/structure_gate.py.
         _sg_mode = structure_gate.mode_for(mode)
@@ -929,6 +905,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _sg_enforced = bool(_sg_block) and _sg_mode == "enforce"
                 decision.structure_json = structure_gate.snapshot(_sg_sum, _sg_ver, _sg_mode, _sg_enforced, _sg_lv, _sg_src)
                 structure_gate.record(cand.symbol, mode, _sg_ver, _sg_mode, _sg_enforced, tick.price, _sg_src)   # group 355: counters + recent ring
+                try:                                                                                              # group356: what did the stock do next?
+                    from entry_engine import structure_observation as _so
+                    _so.record(db, cand.symbol, mode, tick.price, _sg_ver, _sg_sum, _sg_mode, _sg_enforced)
+                except Exception:  # noqa: BLE001 - evidence only, never changes an entry
+                    pass
                 if _sg_enforced:
                     _wait_with_preview(_sg_block)
                     decision.gate_tag = _sg_tag
@@ -936,8 +917,6 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _sg_block,
                                            "risk_verdict": None, "gate_tag": _sg_tag})
                     continue
-                if _sg_block and _sg_mode == "shadow":
-                    logger.info("entry_engine: %s %s structure SHADOW would reject: %s", mode, cand.symbol, _sg_block)
                 if _sg_lv.get("use") and _sg_lv.get("stop"):
                     stop_price = round(float(_sg_lv["stop"]), 2)
                     per_share_risk = entry_price - stop_price
@@ -1995,7 +1974,7 @@ def _wl_env_on(name: str, default: str = "1") -> bool:
 def _watchlist_stale_price_reason(tick, *, baseline: bool) -> Optional[str]:
     """group360 (14 Oct log item 10: GERMAN queued at `move=0.00%`): reason string when the price the trigger pass is about
     to act on is not a live price, else None. Runs BEFORE the row's baseline (catalyst_price) is stored, because the
-    age check inside _watchlist_adverse_reason came after it: an old last-good copy (allow_stale=True serves ticks up to
+    age check inside _watchlist_adverse_reason came after it: an old last-good copy (the stale-allowed quote mode serves ticks up to
     FEED_LEFTOVER_STALE_S old) or a tick of unknown age could become the row's baseline, the same price then made
     `pct_move` exactly 0.00%, and a Tier-3 row was queued in the same cycle on a price nobody had seen move.
 

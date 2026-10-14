@@ -79,11 +79,12 @@ def test_check_enforce_returns_reason_and_snapshot(monkeypatch):
     assert doc["enforced"] is True and doc["would_reject"] is True and doc["summary"]["ms_trend"] == "bearish"
 
 
-def test_check_shadow_never_refuses_but_records(monkeypatch):
-    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "shadow")
+def test_stale_shadow_value_is_live_and_refuses(monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "shadow")      # group370: no record-only mode; any non-"off" value enforces
+    assert sg.mode() == "enforce"
     monkeypatch.setattr(sg, "fetch_summary", lambda s: _sum(ms_trend="bearish"))
     reason, snap = sg.check("ABC", 100.0)
-    assert reason is None and json.loads(snap)["would_reject"] is True and json.loads(snap)["enforced"] is False
+    assert reason.startswith("STRUCTURE_BAD_LOCATION:") and json.loads(snap)["would_reject"] is True and json.loads(snap)["enforced"] is True
 
 
 def test_check_off_and_no_data_and_errors_fail_open(monkeypatch):

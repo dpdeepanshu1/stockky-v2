@@ -1,7 +1,7 @@
 """stockky_ms.observation - track what the structure gate saw and what the stock did next (WS-6). Pure; the services own the tables.
 
 An observation is one gate verdict on one symbol on one day: the price then, the structural stop / target, the verdict
-(rejected_enforced | rejected_shadow | passed | no_opinion) and, later, the forward outcome (T+1 / 5 / 10 / 20 trading days, MFE, MAE and the
+(rejected_enforced | passed | no_opinion; the gates always enforce, so every rejection is a real one) and, later, the forward outcome (T+1 / 5 / 10 / 20 trading days, MFE, MAE and the
 first touch of target vs stop). Rejected stocks are tracked exactly like the ones that passed, so the only fair question can be asked:
 "did what the gate turned away really do worse than what it let through?"
 
@@ -23,7 +23,8 @@ from .backtest import DEFAULT_THRESHOLDS, HORIZONS, RULES, calibration, forward_
 from .candles import day_key, ist_date
 from .ms_types import C, H, L, T, finite
 
-VERDICTS = ("rejected_enforced", "rejected_shadow", "passed", "no_opinion")
+VERDICTS = ("rejected_enforced", "passed", "no_opinion")
+_LEGACY_REJECTED = "rejected_shadow"   # rows written before group370; counted as rejected_enforced when read
 DAY_S = 86400
 HORIZON_MAX = max(HORIZONS)
 OUTCOME_FIELDS = tuple(f"ret_{h}d" for h in HORIZONS) + ("mfe_pct", "mae_pct", "first_touch", "bars_seen", "complete")
@@ -33,7 +34,7 @@ def classify(opinion: Any, would_reject: Any, enforced: Any) -> str:
     if opinion != "ok":
         return "no_opinion"
     if would_reject:
-        return "rejected_enforced" if enforced else "rejected_shadow"
+        return "rejected_enforced"        # `enforced` kept for call compatibility: there is no record-only mode any more
     return "passed"
 
 
@@ -104,13 +105,13 @@ def _stats(rows: List[Dict[str, Any]], h: int) -> Dict[str, Any]:
 
 def aggregate(rows: Iterable[Dict[str, Any]], min_n: int = 20, edge_pct: float = 0.5) -> Dict[str, Any]:
     """Per-verdict counts and forward stats at every horizon, MFE / MAE means, target-vs-stop first-touch rates, and the gate edge:
-    edge[h] = mean return of PASSED minus mean return of REJECTED (enforced + shadow). Positive = the gate turned away the weaker ones.
+    edge[h] = mean return of PASSED minus mean return of REJECTED (enforced; legacy shadow rows included). Positive = the gate turned away the weaker ones.
     conclusion: insufficient_sample | gate_helps | gate_hurts | inconclusive, judged on the longest horizon with >= min_n on both sides."""
     rs = [r for r in rows if isinstance(r, dict)]
     out: Dict[str, Any] = {"total": len(rs), "evaluated": sum(1 for r in rs if (r.get("bars_seen") or 0) > 0), "complete": sum(1 for r in rs if r.get("complete")),
                            "by_verdict": {}, "edge": {}, "conclusion": "insufficient_sample", "conclusion_horizon": None}
-    groups = {v: [r for r in rs if r.get("verdict") == v] for v in VERDICTS}
-    groups["rejected"] = groups["rejected_enforced"] + groups["rejected_shadow"]
+    groups = {v: [r for r in rs if r.get("verdict") == v or (v == "rejected_enforced" and r.get("verdict") == _LEGACY_REJECTED)] for v in VERDICTS}
+    groups["rejected"] = list(groups["rejected_enforced"])
     for v, g in groups.items():
         ev = [r for r in g if (r.get("bars_seen") or 0) > 0]
         touch = [r.get("first_touch") for r in ev if r.get("first_touch")]

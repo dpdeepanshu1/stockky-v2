@@ -1,0 +1,152 @@
+{
+ "bearish_trend": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "daily structure is bearish"
+  ],
+  "would_reject": true
+ },
+ "chase": {
+  "metrics": {
+   "chase_atr": 2.5,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "chase 2.5 daily ATR above the nearest demand zone (max 1.5)"
+  ],
+  "would_reject": true
+ },
+ "clean": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [],
+  "would_reject": false
+ },
+ "fresh_bearish_bos": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "fresh bearish break of structure 2 bar(s) ago"
+  ],
+  "would_reject": true
+ },
+ "insufficient": {
+  "metrics": {},
+  "no_data": "structure quality 'insufficient'",
+  "opinion": "no_opinion",
+  "reasons": [],
+  "would_reject": false
+ },
+ "live_moved_up": {
+  "metrics": {
+   "chase_atr": 1.9,
+   "room_atr": 1.5,
+   "stretch_atr": 2.5
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "chase 1.9 daily ATR above the nearest demand zone (max 1.5)"
+  ],
+  "would_reject": true
+ },
+ "no_atr": {
+  "metrics": {},
+  "no_data": "no ATR in the structure summary",
+  "opinion": "no_opinion",
+  "reasons": [],
+  "would_reject": false
+ },
+ "no_price": {
+  "metrics": {},
+  "no_data": "no price to compare",
+  "opinion": "no_opinion",
+  "reasons": [],
+  "would_reject": false
+ },
+ "no_room": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 0.2,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "only 0.2 daily ATR of room to the next resistance (min 0.5)"
+  ],
+  "would_reject": true
+ },
+ "old_bearish_bos": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [],
+  "would_reject": false
+ },
+ "poor_rr": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [],
+  "would_reject": false
+ },
+ "price_far_from_close": {
+  "metrics": {},
+  "no_data": "live price 140.00 is 40% from the structure close 100.00 (split / bad data)",
+  "opinion": "no_opinion",
+  "reasons": [],
+  "would_reject": false
+ },
+ "stop_wide": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 1.0
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [],
+  "would_reject": false
+ },
+ "stretch": {
+  "metrics": {
+   "chase_atr": 0.4,
+   "room_atr": 3.0,
+   "stretch_atr": 3.6
+  },
+  "no_data": null,
+  "opinion": "ok",
+  "reasons": [
+   "stretched 3.6 daily ATR above EMA20 (max 3)"
+  ],
+  "would_reject": true
+ }
+}

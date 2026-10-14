@@ -266,6 +266,15 @@ async def lifespan(app: FastAPI):
         except Exception as _be:  # noqa: BLE001
             logger.warning("position-stocks-service: Market Board not started (%s: %s)", type(_be).__name__, _be)
 
+    # group356: follows every stored daily-structure verdict for 20 sessions (orders/structure_observation.py). Never fatal.
+    _struct_obs_task = None
+    if config.STRUCTURE_OBS_ENABLED:
+        try:
+            from orders import structure_observation as _struct_obs
+            _struct_obs_task = asyncio.create_task(_struct_obs.run_loop(_db.get_session_factory()), name="position-stocks-structure-observation")
+        except Exception as _so_e:  # noqa: BLE001
+            logger.warning("position-stocks-service: structure observation evaluator not started (%s: %s)", type(_so_e).__name__, _so_e)
+
     # Start background trading loop
     _bg_task = asyncio.create_task(_trading_loop(), name="position-stocks-trading-loop")
     # BUG FIX (session47): independent fast reconcile/EOD loop — see the
@@ -292,6 +301,12 @@ async def lifespan(app: FastAPI):
         _order_ws_task.cancel()
         try:
             await _order_ws_task
+        except asyncio.CancelledError:
+            pass
+    if _struct_obs_task is not None:
+        _struct_obs_task.cancel()
+        try:
+            await _struct_obs_task
         except asyncio.CancelledError:
             pass
     if _board_task is not None:
@@ -1858,6 +1873,7 @@ def positions(db: Session = Depends(get_db)):
             "symbol": r.symbol,
             "status": r.status,
             "window_source": r.window_source,
+            "structure": _structure_view(getattr(r, "structure_json", None)),   # group354
             "entry_price": r.entry_price,
             "exit_price": r.exit_price,
             "quantity": r.quantity,
@@ -2425,6 +2441,64 @@ def top_picks_route():
             "entered_symbol": _last_shortlist["entered_symbol"], "note": note, **built}
 
 
+@app.get("/structure/status")
+def structure_status(hours: int = 24, db: Session = Depends(get_db)):
+    """group 355: how the daily market-structure gate is behaving on the scalp entry - config, process counters since boot, the recent verdicts
+    (with the move since), and what the DB says over the last `hours` (entries it refused, and the snapshot stored on entries that got through).
+    Read-only; nothing in the entry path reads it back."""
+    from orders import structure_gate as _sg
+    hours = min(max(int(hours), 1), 24 * 14)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+    process = _sg.stats()
+    try:
+        prices = {}
+        for r in process.get("recent") or []:
+            sym = r.get("symbol")
+            if sym and sym not in prices:
+                try:
+                    v = ws_client.get_last_ltp(sym)
+                    prices[sym] = float(v) if v and v > 0 else None
+                except Exception:  # noqa: BLE001 - display only
+                    prices[sym] = None
+        if "recent" in process:
+            process["recent"] = _sg.with_moves(process["recent"], prices)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("structure status: price lookup failed (non-fatal): %s", e)
+    log_rows: list = []
+    pos_rows: list = []
+    try:
+        q = (db.query(ScalpCandidateLog).filter(ScalpCandidateLog.created_at >= since, ScalpCandidateLog.reason.like("STRUCTURE_%"))
+             .order_by(ScalpCandidateLog.created_at.desc()).limit(2000).all())
+        log_rows = [{"symbol": r.symbol, "reason": r.reason, "decision": r.decision, "created_at": iso_utc(r.created_at)} for r in q]
+        qp = (db.query(ScalpPosition).filter(ScalpPosition.opened_at >= since, ScalpPosition.structure_json.isnot(None))
+              .order_by(ScalpPosition.opened_at.desc()).limit(2000).all())
+        pos_rows = [{"symbol": r.symbol, "structure_json": r.structure_json} for r in qp]
+    except Exception as e:  # noqa: BLE001 - a status page must not raise
+        logger.warning("structure status query failed: %s", e)
+    return {"gate_mode": _sg.mode(), "hours": hours, "process": process, "stored": _sg.tally_stored(log_rows, pos_rows)}
+
+
+@app.get("/structure/edge")
+def structure_edge(days: int = 60, recent: int = 40, db: Session = Depends(get_db)):
+    """group 356 (WS-6): did what the daily-structure gate turned away really do worse than what it let through? Aggregates the stored
+    observations of the last `days` (per verdict: T+1/5/10/20 mean / median / win %, MFE / MAE, target-vs-stop first touch; edge = passed -
+    rejected) with the newest rows. `conclusion` stays insufficient_sample until both sides have enough finished rows. Read-only."""
+    from orders import structure_observation as _so
+    try:
+        return _so.report(db, days, min(max(int(recent), 0), 200))
+    except Exception as e:  # noqa: BLE001 - a status page must not raise
+        logger.warning("structure edge report failed: %s", e)
+        return {"days": days, "stats": None, "recent": [], "process": _so.stats(), "error": str(e)[:160]}
+
+
+@app.post("/structure/observations/evaluate")
+def structure_observations_evaluate(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """group 356: run one evaluator pass now (the background loop does this every STRUCTURE_OBS_EVAL_INTERVAL_S): fetch daily history for the
+    pending symbols and fill their T+N outcomes. Returns the pass counters."""
+    from orders import structure_observation as _so
+    return {"result": _so.evaluate_pending(db), "process": _so.stats()}
+
+
 @app.get("/board/status")
 def board_status():
     from feed import bar_backfill, bar_store, fno_list, sector_map
@@ -2434,7 +2508,17 @@ def board_status():
             "zone_tf_min": config.BOARD_ZONE_TF_MIN, "chase_atr": config.BOARD_CHASE_ATR,
             "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
             "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors()),
-            "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover)}
+            "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover),
+            "ms_engine": _ms_engine_status()}
+
+
+def _ms_engine_status() -> dict:
+    """group 351: which maths the board zones/swings run on (legacy vs stockky_ms), with fallback counters. Never raises."""
+    try:
+        from screening import ms_engine_switch
+        return ms_engine_switch.stats()
+    except Exception as e:  # noqa: BLE001
+        return {"requested": False, "active": False, "error": str(e)[:120]}
 
 
 @app.get("/board/self-check")
@@ -2674,6 +2758,18 @@ def manual_buy(
         "stop_price": pos.stop_price,
         "dhan_super_order_id": pos.dhan_super_order_id,
     }
+
+
+def _structure_view(raw):
+    """group354: parsed scalp_positions.structure_json for the dashboard (None when absent / unreadable)."""
+    if not raw:
+        return None
+    try:
+        import json as _json
+        v = _json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 @app.post("/positions/{position_id}/close")

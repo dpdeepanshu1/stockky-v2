@@ -26,6 +26,10 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from horizons import multi_horizon_decide
+try:
+    from structure_policy import apply_policy as _ms_apply_policy, summary_line as _ms_summary_line, policy_mode as _ms_policy_mode
+except Exception:  # noqa: BLE001 - the policy is additive; a broken import must never take the decision service down
+    _ms_apply_policy = _ms_summary_line = _ms_policy_mode = None
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 
 def _safe_int(val, default=50):
@@ -339,6 +343,7 @@ def health(warm: bool = False):
     return {
         "status": "ok",
         "service": "decision-engine-service",
+        "structure_policy_mode": (_ms_policy_mode() if _ms_policy_mode else "unavailable"),   # group353
         "warmed": warmed or None,
         "circuits": all_snapshots(),
     }
@@ -1052,6 +1057,7 @@ def _derive_technical_from_payload(payload: dict) -> dict:
         "macd": payload.get("macd") or payload.get("macd_hist"),
         "ema20": payload.get("ema20") or payload.get("ema"),
         "reasons": ["Short-circuit: technical derived from gateway/DB payload (no HTTP)"],
+        "structure_summary": payload.get("structure_summary") if isinstance(payload.get("structure_summary"), dict) else None,   # group353
         "from_payload": True,
         "data_insufficient": close is None,
     }
@@ -1652,6 +1658,36 @@ async def _decide_impl(
                     logger.debug("post-horizon quality gate: %s", _gq)
         except Exception as _mh_err:
             logger.warning("multi-horizon attach failed: %s", _mh_err)
+
+        # group353 (WS-5): daily market-structure policy - the LAST step (after data-quality gate and multi-horizon), so nothing
+        # downstream can undo it, and the original / policy decisions are both recorded. Shadow by default; it only ever tightens.
+        try:
+            if _ms_apply_policy is not None and isinstance(technical, dict):
+                _sum = technical.get("structure_summary")
+                if not isinstance(_sum, dict) and isinstance(prefetched, dict):
+                    _sum = prefetched.get("structure_summary")
+                _blk = technical.get("market_structure") if isinstance(technical.get("market_structure"), dict) else None
+                _pol = _ms_apply_policy(
+                    response.get("decision"), _sum, response.get("close"),
+                    legacy={"entry_range": response.get("entry_range"), "target": response.get("target"), "stop_loss": response.get("stop_loss")},
+                    explain=(_blk or {}).get("explain"),
+                )
+                _st = _pol["structure"]
+                _st["summary_line"] = _ms_summary_line(_st)
+                response["structure"] = _st
+                if _pol["decision"] != response.get("decision"):
+                    response["decision"] = _pol["decision"]
+                    if _pol["decision"] in (Decision.WAIT.value, Decision.DO_NOT_BUY.value):
+                        response["confidence"] = "Low"
+                if _pol.get("levels"):
+                    response["stop_loss"] = _pol["levels"]["stop_loss"]
+                    response["target"] = _pol["levels"]["target"]
+                if _st.get("rules"):
+                    response.setdefault("reasons", {})
+                    _tag = "" if _st.get("applied") else " (shadow - not applied)"
+                    response["reasons"]["structure"] = [r["reason"] + _tag for r in _st["rules"]]
+        except Exception as _ms_err:  # noqa: BLE001
+            logger.warning("structure policy failed for %s (%s); decision unchanged", symbol, _ms_err)
 
         # Cache successful decide payload for free-tier scan speed
         try:

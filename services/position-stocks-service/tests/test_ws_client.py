@@ -359,7 +359,10 @@ class TestBufferPruning:
         assert wsc._MAX_BUFFER_AGE_S == 65 * 60
 
     def test_max_ticks_backstop(self):
-        assert wsc._MAX_TICKS == 50_000
+        # group341: the backstop is now config-driven (WS_MAX_TICKS_PER_SYMBOL, default 4000), floored at 500
+        import config as _cfg
+        assert wsc._MAX_TICKS == max(500, int(getattr(_cfg, "WS_MAX_TICKS_PER_SYMBOL", 4000) or 4000))
+        assert wsc._MAX_TICKS >= 500
 
 
 # ══════════════════════════════════════════════════════════════════════════════

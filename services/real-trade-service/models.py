@@ -314,7 +314,49 @@ class TradeDecision(Base):
     # WAIT without brittle string-matching on `reasoning`. NULL for every
     # other gate's decisions (unaffected, no behavior change).
     gate_tag = Column(String(32), nullable=True)
+    # group 351: JSON snapshot of the daily market-structure gate's view for this ENTRY decision (summary subset, live chase/stretch/room/R:R,
+    # would_reject + reasons, shadow/enforce mode, structural stop vs ATR stop). NULL when the gate was off / not reached.
+    structure_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
+
+
+# ── group356 (WS-6): what the structure gate saw, and what the stock did next ──────────────────────────────────────────────────────────
+class StructureObservation(Base):
+    """One concrete structure-gate verdict on one symbol on one IST day (first verdict of the day wins), followed for 20 trading days.
+    Rejected stocks are stored exactly like the ones that passed so the gate can be judged against what it turned away
+    (stockky_ms.observation). Outcome columns are filled by entry_engine/structure_observation.py's evaluator; `is_complete` = T+20 exists."""
+    __tablename__ = "structure_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String(8), nullable=False)              # "DEMO" | "REAL"
+    symbol = Column(String(32), nullable=False)
+    source = Column(String(24), nullable=False, default="real_trade")
+    obs_day = Column(String(10), nullable=False)          # IST date YYYY-MM-DD
+    obs_ts = Column(Float, nullable=False)                # epoch seconds of the verdict
+    price = Column(Float, nullable=False)
+    stop = Column(Float, nullable=True)                   # the structure's own stop / target (ms_stop / ms_target), not the ATR ones
+    target = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    verdict = Column(String(24), nullable=False)          # rejected_enforced | rejected_shadow | passed (no_opinion is not stored)
+    gate_mode = Column(String(10), nullable=True)
+    reasons_json = Column(Text, nullable=True)
+    summary_json = Column(Text, nullable=True)
+    ret_1d = Column(Float, nullable=True)
+    ret_5d = Column(Float, nullable=True)
+    ret_10d = Column(Float, nullable=True)
+    ret_20d = Column(Float, nullable=True)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+    first_touch = Column(String(8), nullable=True)        # "target" | "stop" | NULL
+    bars_seen = Column(Integer, nullable=False, default=0)
+    is_complete = Column(Boolean, nullable=False, default=False)
+    evaluated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("ix_structure_obs_mode_day_symbol", "mode", "obs_day", "symbol"),
+        Index("ix_structure_obs_pending", "is_complete", "obs_ts"),
+    )
 
 
 # ── Orders / order lifecycle / fills ────────────────────────────────────────

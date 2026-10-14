@@ -153,6 +153,34 @@ async def _boot_forensics_shutdown():
         pass
 
 
+_STRUCT_OBS_TASK = None
+
+
+@_on_startup
+async def _structure_observation_startup():
+    """group 356: background evaluator that follows every stored structure-gate verdict for 20 sessions (entry_engine/structure_observation.py).
+    Inert when STRUCTURE_OBS_ENABLED=false; never blocks boot."""
+    global _STRUCT_OBS_TASK
+    try:
+        if not config.STRUCTURE_OBS_ENABLED:
+            return
+        import asyncio as _aio
+        from db import get_session_factory
+        from entry_engine import structure_observation as _so
+        _STRUCT_OBS_TASK = _aio.create_task(_so.run_loop(get_session_factory()), name="structure-observation-evaluator")
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("structure observation evaluator not started: %s", _e)
+
+
+@_on_shutdown
+async def _structure_observation_shutdown():
+    try:
+        if _STRUCT_OBS_TASK is not None:
+            _STRUCT_OBS_TASK.cancel()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @_on_startup
 async def startup() -> None:
     # Auto-Pilot (2026-08-27): a single asyncio background task IS started
@@ -2438,11 +2466,84 @@ async def list_candidates(
                 # badge/filter cost-gate rejections instead of relying on
                 # string-matching `reasoning`. None for every other gate.
                 "gate_tag": getattr(d, "gate_tag", None),
+                "structure": _structure_view(getattr(d, "structure_json", None)),
                 "evaluated_at": iso_utc(d.created_at),
                 "limit_distance_pct": limit_distance_pct,
             } if d else None,
         })
     return out
+
+
+def _structure_view(raw):
+    """group 351: parsed trade_decisions.structure_json for the dashboard (None when absent / unreadable)."""
+    if not raw:
+        return None
+    try:
+        import json as _json
+        v = _json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/structure/status/{mode}")
+async def structure_status(
+    mode: str, hours: int = 24, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """group 355: how the daily market-structure gate is behaving - config, process counters since boot, and what the stored ENTRY decisions
+    of the last `hours` say (coverage = share with a usable structure, would_reject / enforced / shadow-only, reason buckets, the symbols it
+    turned away with the move since). Read-only; nothing in the entry path reads it back."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import structure_gate as _sg
+    hours = min(max(int(hours), 1), 24 * 14)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+    rows: list = []
+    prices: dict = {}
+    try:
+        q = (db.query(models.TradeDecision)
+             .filter(models.TradeDecision.mode == mode, models.TradeDecision.decision_type == "ENTRY",
+                     models.TradeDecision.structure_json.isnot(None), models.TradeDecision.created_at >= since)
+             .order_by(models.TradeDecision.created_at.desc()).limit(2000).all())
+        rows = [{"symbol": d.symbol, "created_at": iso_utc(d.created_at), "price": d.proposed_price,
+                 "structure_json": d.structure_json} for d in q]
+        rejected = list(dict.fromkeys(r["symbol"] for r in rows if '"would_reject":true' in (r["structure_json"] or "")))[:30]
+        prices = await _live_prices(rejected)
+    except Exception as e:  # noqa: BLE001 - a status page must not raise
+        logger.warning("structure status query failed: %s", e)
+    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices)}
+
+
+@app.get("/structure/edge/{mode}")
+async def structure_edge(
+    mode: str, days: int = 60, recent: int = 40, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """group 356 (WS-6): did what the structure gate turned away really do worse than what it let through? Aggregates the stored observations
+    of the last `days` (per verdict: T+1/5/10/20 mean / median / win %, MFE / MAE, target-vs-stop first touch; edge = passed - rejected) with
+    the newest rows. `conclusion` stays insufficient_sample until both sides have enough finished rows. Read-only."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import structure_observation as _so
+    try:
+        return await run_in_threadpool(_so.report, db, mode, days, min(max(int(recent), 0), 200))
+    except Exception as e:  # noqa: BLE001 - a status page must not raise
+        logger.warning("structure edge report failed: %s", e)
+        return {"mode": mode, "days": days, "stats": None, "recent": [], "process": _so.stats(), "error": str(e)[:160]}
+
+
+@app.post("/structure/observations/{mode}/evaluate")
+async def structure_observations_evaluate(
+    mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """group 356: run one evaluator pass now (the background loop does this every STRUCTURE_OBS_EVAL_INTERVAL_S). Fetches daily history for
+    pending symbols and fills the T+N outcomes; returns the pass counters."""
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from entry_engine import structure_observation as _so
+    return {"mode": mode, "result": await run_in_threadpool(_so.evaluate_pending, db), "process": _so.stats()}
 
 
 class ManualCloseRequest(BaseModel):

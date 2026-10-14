@@ -29,6 +29,9 @@ import JournalPanel from "./board/JournalPanel";
 import ShortlistPanel from "./board/ShortlistPanel";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
+import StructurePanel from "./StructurePanel";
+import StructureGateCard from "./StructureGateCard";
+import StructureEdgeCard from "./StructureEdgeCard";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -1454,6 +1457,10 @@ export default function PositionStocksTab() {
         </div>
       )}
 
+      {/* group355: how the daily-structure gate is behaving on the scalp entry (read-only) */}
+      <StructureGateCard kind="position" title="Daily structure gate" load={(h) => positionStocksApi.structureStatus(h)} />
+      <StructureEdgeCard title="Structure gate — what happened next" load={(d) => positionStocksApi.structureEdge(d)} />
+
       {/* ── Candidate log (why entered/skipped) ── */}
       <div className="bg-graphite border border-slate rounded-2xl p-4">
         <div className="flex items-center justify-between mb-3">
@@ -2236,6 +2243,8 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           )}
         </div>
       </div>
+      {/* group354: how the daily-structure gate saw this entry (collapsed one-liner; renders nothing when there is no snapshot) */}
+      {p.structure && <StructurePanel snapshot={p.structure} atrStop={p.stop_price} />}
       {/* AUDIT ADD (session60): live current price / unrealized P&L for an
           OPEN position — mirrors real-trade-service's Positions tab, which
           has always shown Current + a live +/-% next to Entry/Stop/Target.

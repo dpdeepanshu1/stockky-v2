@@ -190,9 +190,11 @@ class TestScanCallsPrefetch:
                   "PEER": {"is_liquid": False, "sector": "IT"}}
         e = sc.SurpriseStockEngine()
         calls = []
+        seen_at_prefetch = []
 
         async def prefetch(client, url, symbols):
             calls.append(list(symbols))
+            seen_at_prefetch.append(dict(e._bulk_ticks))     # group345: the prefetch dict is per-scan (context-local), so look from inside the scan
             return 0
 
         async def fetch(client, url, sym):
@@ -213,4 +215,4 @@ class TestScanCallsPrefetch:
             pass                                                     # downstream result shaping is covered elsewhere
         assert calls[0] == ["LEAD", "B"]
         assert calls[1] == ["PEER"]
-        assert "STALE" not in e._bulk_ticks                          # reset at the start of every scan
+        assert "STALE" not in seen_at_prefetch[0]                    # reset at the start of every scan (group345: checked inside the scan's own context)

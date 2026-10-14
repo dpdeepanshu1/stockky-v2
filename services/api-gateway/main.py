@@ -5531,6 +5531,15 @@ async def ops_qstash_tick(request: Request):
             payload = _json.loads(body.decode() or "{}") if body else {}
         except Exception:
             payload = {}
+        if payload.get("action") == "structure-refresh":  # group360: schedule this ~16:00 IST on trading days (see docs)
+            results["structure_refresh"] = await asyncio.to_thread(
+                _start_structure_refresh, bool(payload.get("force")), payload.get("limit") if isinstance(payload.get("limit"), int) else None)
+        if payload.get("action") == "sniper-observe-eval":  # group361: schedule ~16:30 IST on trading days
+            try:
+                import sniper_observation as _so
+                results["sniper_observe_eval"] = await asyncio.to_thread(_so.evaluate_pending)
+            except Exception as e:  # noqa: BLE001
+                results["sniper_observe_eval"] = {"error": str(e)[:120]}
         if payload.get("action") in ("wake", "wake-all", "scan"):
             try:
                 await ops_keepalive(deep=False)
@@ -6986,6 +6995,110 @@ async def stream_market_scan(
 
 
 
+def _structure_metric(name: str, value: float = 1.0, **labels: Any) -> None:
+    """group360: bump a structure counter on /metrics. Never raises (a metrics problem must not touch a request)."""
+    try:
+        if value:
+            metrics.inc(name, float(value), **labels)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _sniper_attach_structure(payload: Dict[str, Any]) -> int:
+    """group 357 (WS-4): give the Buy Sniper's daily-structure gate something to judge. The scan rows the UI posts are trimmed, so most carry no
+    `structure_summary`; fetch it from the technical service for the best buy-candidates that lack one (bounded count, bounded time, concurrent)
+    and attach it in place. Fail-open: any error / timeout leaves the row without a summary = the gate has no opinion. Returns rows enriched."""
+    try:
+        import buy_sniper
+        if not ms_passthrough.enabled():
+            return 0
+        limit = max(0, int((os.getenv("SNIPER_STRUCTURE_FETCH_LIMIT") or "12").strip() or 12))
+        budget = max(1.0, float((os.getenv("SNIPER_STRUCTURE_FETCH_TIMEOUT_S") or "10").strip() or 10))
+        syms = buy_sniper.symbols_needing_structure(payload, limit=limit)
+        if not syms:
+            return 0
+        _structure_metric("stockky_sniper_structure_fetch_total", float(len(syms)), outcome="requested")
+        sem = asyncio.Semaphore(4)
+        found: Dict[str, Dict[str, Any]] = {}
+
+        async def _one(client: httpx.AsyncClient, sym: str) -> None:
+            async with sem:
+                try:
+                    resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{sym}", timeout=min(8.0, budget))
+                    if resp.status_code != 200:
+                        return
+                    data = resp.json()
+                    if ms_passthrough.safe_block(data) is not None:
+                        found[sym] = ms_passthrough.safe_summary(data)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("sniper structure fetch %s: %s", sym, e)
+
+        async with httpx.AsyncClient() as client:
+            tasks = [asyncio.ensure_future(_one(client, sym)) for sym in syms]
+            _, pending = await asyncio.wait(tasks, timeout=budget)
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        n = 0
+        for r in buy_sniper._payload_rows(payload):
+            if not isinstance(r, dict) or r.get("structure_summary"):
+                continue
+            sym = str(r.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
+            if sym in found:
+                r["structure_summary"] = found[sym]
+                n += 1
+        _structure_metric("stockky_sniper_structure_fetch_total", float(n), outcome="attached")
+        _structure_metric("stockky_sniper_structure_fetch_total", float(max(0, len(syms) - len(found))), outcome="missed")
+        return n
+    except Exception as e:  # noqa: BLE001
+        logger.debug("sniper structure attach skipped: %s", e)
+        return 0
+
+
+def _sniper_observe(payload: Any, out: Dict[str, Any]) -> None:
+    """group361 (WS-6): hand one find-buys answer to sniper_observation.record on a worker thread so the response never waits on the DB.
+    Never raises; SNIPER_OBS_ENABLED=0 turns it off."""
+    try:
+        import sniper_observation as _so
+        if not _so.enabled():
+            return
+
+        def _job() -> None:
+            n = _so.record(payload, out)
+            _structure_metric("stockky_sniper_obs_total", float(n), event="recorded")
+
+        asyncio.get_running_loop().run_in_executor(None, _job)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("sniper observe skipped: %s", e)
+
+
+@app.get("/api/scan/find-buys/edge")
+@app.get("/scan/find-buys/edge")
+async def find_buys_edge(days: int = 60, recent: int = 40, min_n: int = 20):
+    """Buy Sniper structure-gate edge: did the setups the gate turned away do worse than the ones it let through? Read-only report over the
+    stored observations (see sniper_observation.py). Judged on the longest horizon with >= min_n rows on both sides."""
+    try:
+        import sniper_observation as _so
+        return {"ok": True, **(await asyncio.to_thread(_so.report, None, days, recent, min_n))}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200]}
+
+
+@app.post("/api/scan/find-buys/edge/evaluate")
+@app.post("/scan/find-buys/edge/evaluate")
+async def find_buys_edge_evaluate():
+    """Run one evaluator pass now: fill T+1/5/10/20 outcomes for observations that are at least one session old. Also runs from the QStash tick
+    (`{"action":"sniper-observe-eval"}`, after the close)."""
+    try:
+        import sniper_observation as _so
+        res = await asyncio.to_thread(_so.evaluate_pending)
+        _structure_metric("stockky_sniper_obs_total", float(res.get("updated") or 0), event="evaluated")
+        return {"ok": True, **res, "process": _so.stats()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200]}
+
+
 @app.post("/api/scan/find-buys")
 @app.post("/scan/find-buys")
 async def find_actionable_buys(request: Request):
@@ -7002,6 +7115,7 @@ async def find_actionable_buys(request: Request):
         payload = {"stocks": payload if isinstance(payload, list) else []}
     try:
         from buy_sniper import suggestions_from_scan_payload
+        await _sniper_attach_structure(payload)  # group 357: fail-open; rows without a summary just get no structure opinion
         out = suggestions_from_scan_payload(payload)
         if not isinstance(out, dict):
             return {"ok": True, "count": 0, "suggestions": []}
@@ -7010,6 +7124,7 @@ async def find_actionable_buys(request: Request):
         if not isinstance(out.get("suggestions"), list):
             out["suggestions"] = []
         out.setdefault("count", len(out["suggestions"]))
+        _sniper_observe(payload, out)  # group361: record what the structure gate saw (worker thread, fail-open, never changes `out`)
         return out
     except Exception as e:
         logger.exception("find-buys failed")
@@ -10960,6 +11075,12 @@ def _collect_job_snapshots() -> dict:
         logger.debug("jobs snapshot refill_additional: %s", e)
 
     try:
+        import structure_refresh as _sr_snap
+        out["structure_refresh"] = _sr_snap.get_job()
+    except Exception as e:
+        logger.debug("jobs snapshot structure_refresh: %s", e)
+
+    try:
         from surprise_premarket import get_premarket_progress
         out["surprise_premarket"] = get_premarket_progress()
     except Exception as e:
@@ -10987,7 +11108,7 @@ def _collect_job_snapshots() -> dict:
 
 
 def _job_is_active(snap: dict) -> bool:
-    for key in ("data_feed", "refill_additional", "surprise_premarket", "ipo_scan"):
+    for key in ("data_feed", "refill_additional", "structure_refresh", "surprise_premarket", "ipo_scan"):
         entry = snap.get(key)
         if not isinstance(entry, dict):
             continue
@@ -11874,6 +11995,7 @@ async def refresh_prepare_to_buy(
     import asyncio
     from data_feed import (
         find_prepare_to_buy_candidates,
+        get_all_stock_feeds,
         patch_feed_price,
     )
 
@@ -11896,6 +12018,18 @@ async def refresh_prepare_to_buy(
     md_base = (MARKET_DATA_URL or "").rstrip("/")
     updated: list = []
     errors: list = []
+    # group 358: LOG-ONLY structure notes. Snapshot the stored rows / prices BEFORE patching (a store may hand back the very dict that
+    # patch_feed_price mutates); any failure here only costs the notes, never the refresh.
+    live_prices: Dict[str, float] = {}
+    feed_rows: Dict[str, Any] = {}
+    old_prices: Dict[str, float] = {}
+    try:
+        import buy_sniper
+        if buy_sniper._prep_mode() != "off":
+            feed_rows = {k: dict(v) for k, v in (get_all_stock_feeds(candidates) or {}).items() if isinstance(v, dict)}
+            old_prices = {k: buy_sniper._price(v) for k, v in feed_rows.items()}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare refresh structure snapshot skipped: %s", e)
 
     async with httpx.AsyncClient() as client:
         for symbol in candidates:
@@ -11913,6 +12047,8 @@ async def refresh_prepare_to_buy(
                                     break
                             except (TypeError, ValueError):
                                 pass
+                    if live_price:
+                        live_prices[symbol] = live_price
                     if live_price and patch_feed_price(symbol, live_price):
                         updated.append(symbol)
                 else:
@@ -11921,7 +12057,7 @@ async def refresh_prepare_to_buy(
                 errors.append({"symbol": symbol, "error": str(e)[:120]})
             await asyncio.sleep(0.3)
 
-    return {
+    resp = {
         "status": "success",
         "refreshed_count": len(updated),
         "symbols": candidates,
@@ -11931,6 +12067,24 @@ async def refresh_prepare_to_buy(
         "max_score": max_score,
         "message": f"Refreshed {len(updated)}/{len(candidates)} Prepare-to-Buy quotes",
     }
+    try:  # group 358: structure notes, log-only (the refresh above is already done and is never changed by this)
+        import buy_sniper
+        rep = buy_sniper.prepare_refresh_report(feed_rows, live_prices, old_prices)
+        if rep.get("mode") != "off":
+            resp["structure_mode"] = rep["mode"]
+            resp["structure_notes"] = rep["notes"]
+            resp["structure_counts"] = {k: rep[k] for k in ("checked", "no_opinion", "turned_bad", "flipped", "with_triggers")}
+            for _k in ("checked", "no_opinion", "turned_bad", "flipped", "with_triggers"):
+                _structure_metric("stockky_prepare_structure_total", float(rep.get(_k) or 0), kind=_k)
+            logger.info("prepare refresh structure: checked=%d no_opinion=%d turned_bad=%d (flipped=%d) triggers=%d",
+                        rep["checked"], rep["no_opinion"], rep["turned_bad"], rep["flipped"], rep["with_triggers"])
+            for sym, n in list(rep["notes"].items())[:20]:
+                logger.info("prepare refresh structure %s: %s", sym, n.get("headline"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare refresh structure notes skipped: %s", e)
+    return resp
+
+
 
 
 
@@ -12006,6 +12160,89 @@ async def data_feed_refill_additional(
     except Exception as e:
         logger.exception("data_feed_refill_additional: %s", e)
         raise HTTPException(status_code=500, detail=str(e)[:240])
+
+
+_STRUCTURE_REFRESH_START_LOCK = threading.Lock()
+
+
+def _start_structure_refresh(force: bool = False, limit: Optional[int] = None, dry_run: bool = False) -> Dict[str, Any]:
+    """group360: plan (and, unless dry_run, start in a daemon thread) the post-close `structure_only` refresh of the feed rows' ms_* keys.
+    Shared by the HTTP route and the QStash tick. Never raises; returns a small dict for the caller."""
+    if not _STRUCTURE_REFRESH_START_LOCK.acquire(blocking=False):  # two near-simultaneous triggers: the second is a no-op
+        return {"ok": True, "started": False, "already_running": True, "message": "A structure refresh is being started"}
+    try:
+        return _start_structure_refresh_locked(force, limit, dry_run)
+    finally:
+        _STRUCTURE_REFRESH_START_LOCK.release()
+
+
+def _start_structure_refresh_locked(force: bool, limit: Optional[int], dry_run: bool) -> Dict[str, Any]:
+    try:
+        import structure_refresh as _sr
+        if not _sr.enabled():
+            return {"ok": True, "started": False, "disabled": True, "message": "STRUCTURE_REFRESH_ENABLED is off"}
+        job = _sr.get_job()
+        if job.get("status") == "running":
+            return {"ok": True, "started": False, "already_running": True, **job}
+        store = _feed_store()
+        syms, tally, expected = _sr.plan(store, force=force, limit=limit)
+        info = {"expected_bar_date": expected.isoformat(), "selection": tally, "symbols": len(syms)}
+        if dry_run:
+            return {"ok": True, "started": False, "dry_run": True, "sample": syms[:20], **info}
+        if not syms:
+            return {"ok": True, "started": False, "message": "Nothing to refresh - every feed row already has the latest daily structure", **info}
+
+        def _worker(symbols=syms, sel=tally, frc=force):
+            try:
+                import httpx as _hx
+                conc = max(1, int((os.getenv("STRUCTURE_REFRESH_CONCURRENCY") or "3").strip() or 3))
+                limits = _hx.Limits(max_connections=conc * 2, max_keepalive_connections=conc)
+                with _hx.Client(follow_redirects=True, limits=limits) as client:
+                    _sr.run(symbols, store, _sr.make_fetcher(client), concurrency=conc, force=frc, tally=sel)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("structure_refresh worker: %s", e)
+                try:
+                    _sr._set_job(status="error", message=str(e)[:240])
+                except Exception:  # noqa: BLE001
+                    pass
+
+        _sr._set_job(status="running", message=f"Starting structure refresh for {len(syms)} symbols...", processed=0, total=len(syms),
+                     force=bool(force), selection=tally)
+        threading.Thread(target=_worker, name="structure-refresh", daemon=True).start()
+        return {"ok": True, "started": True, "message": f"Structure refresh started for {len(syms)} symbols", **info}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("start structure refresh: %s", e)
+        return {"ok": False, "started": False, "error": str(e)[:200]}
+
+
+@app.get("/data-feed/structure-refresh/status")
+@app.get("/api/data-feed/structure-refresh/status")
+def data_feed_structure_refresh_status():
+    """Status + lifetime counters of the post-close structure refresh job."""
+    try:
+        import structure_refresh as _sr
+        return {"ok": True, **_sr.get_job()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200], "status": "idle"}
+
+
+@app.post("/data-feed/structure-refresh")
+@app.post("/api/data-feed/structure-refresh")
+async def data_feed_structure_refresh(force: bool = False, limit: Optional[int] = None, dry_run: bool = False):
+    """Re-read ONLY the daily market structure for feed rows that have none / an old one (see structure_refresh.py). Returns at once; poll
+    GET /data-feed/structure-refresh/status. ?dry_run=1 only reports what would be refreshed. ?force=1 also re-reads rows that are current."""
+    return await asyncio.to_thread(_start_structure_refresh, force, limit, dry_run)
+
+
+@app.post("/data-feed/structure-refresh/stop")
+@app.post("/api/data-feed/structure-refresh/stop")
+def data_feed_structure_refresh_stop():
+    try:
+        import structure_refresh as _sr
+        _sr.request_stop()
+        return {"ok": True, "message": "Stop requested", **_sr.get_job()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200]}
 
 
 @app.get("/data-feed/meta")
@@ -12228,6 +12465,14 @@ async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
     return await run_in_threadpool(_compute_feed_audit, limit)
 
 
+def _structure_coverage(by_quality: dict) -> dict:
+    """group356: share of the audited feed rows that carry a usable daily market-structure read (ms_quality ok / limited). Pure."""
+    total = sum(by_quality.values())
+    usable = sum(n for q, n in by_quality.items() if q in ("ok", "limited"))
+    return {"checked": total, "usable": usable, "pct": round(100.0 * usable / total, 1) if total else None,
+            "by_quality": dict(sorted(by_quality.items(), key=lambda kv: -kv[1]))}
+
+
 def _compute_feed_audit(limit: int) -> dict:
     """The actual (synchronous, DB/store-backed) audit walk — see the
     run_in_threadpool BUG FIX note on audit_missing_feed_data above for why
@@ -12264,6 +12509,7 @@ def _compute_feed_audit(limit: int) -> dict:
     over_cap = []
     complete_count = 0
     total = 0
+    _ms_by_quality: dict = {}
     for sym in symbols:
         total += 1
         try:
@@ -12272,6 +12518,9 @@ def _compute_feed_audit(limit: int) -> dict:
             row = {}
         if not isinstance(row, dict):
             row = {}
+        # group356: daily market-structure coverage of the feed (ms_quality is carried on the row by ms_passthrough.feed_keys)
+        _msq = str(row.get("ms_quality") or "none")
+        _ms_by_quality[_msq] = _ms_by_quality.get(_msq, 0) + 1
         # Stocks whose price is over the ₹MAX_UNIVERSE_PRICE cap should never
         # have been fed — they're not "incomplete" (repair can't legally
         # populate a price under-cap for them), they're stale writes from
@@ -12309,6 +12558,7 @@ def _compute_feed_audit(limit: int) -> dict:
         "over_cap_count": len(over_cap),
         "over_cap_stocks": over_cap[:200],
         "health_score": health,
+        "structure_coverage": _structure_coverage(_ms_by_quality),
         "incomplete_stocks": incomplete,
         "required_fields": list(_REQUIRED_FEED_FIELDS),
         "message": (
@@ -12373,7 +12623,7 @@ async def purge_over_cap_feed_symbols():
 # browser/curl GET looked like it had "worked"). They now get the 405 the method deserves. The match
 # is exact and lowercase, so real (uppercase) NSE symbols can never collide with it.
 _FEED_POST_ONLY_ACTIONS = frozenset({
-    "hard-reset", "start-bulk-feed", "refresh-prepare-to-buy", "refill-additional",
+    "hard-reset", "start-bulk-feed", "refresh-prepare-to-buy", "refill-additional", "structure-refresh",
     "purge-over-cap", "update", "batch", "update-batch", "repair-batch", "repair-all",
     "run", "stop", "resume",
 })

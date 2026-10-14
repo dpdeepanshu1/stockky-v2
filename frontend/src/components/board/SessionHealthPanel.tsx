@@ -8,6 +8,7 @@ export default function SessionHealthPanel({ active }: { active: boolean }) {
   const [cal, setCal] = useState<any>(null);
   const [win, setWin] = useState<any>(null);
   const [tune, setTune] = useState<any>(null);
+  const [eng, setEng] = useState<any>(null);       // group351: which maths the board zones run on (GET /board/status ms_engine)
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -17,6 +18,7 @@ export default function SessionHealthPanel({ active }: { active: boolean }) {
       try { const c = await positionStocksApi.calendarToday(); if (alive) setCal(c); } catch (e: any) { if (alive) setErr(e?.message || "unavailable"); }
       try { const w = await positionStocksApi.windowsHealth(); if (alive) setWin(w); } catch { /* optional */ }
       try { const t = await positionStocksApi.tuningStopTarget(14); if (alive) setTune(t); } catch { /* optional */ }
+      try { const b = await positionStocksApi.boardStatus(); if (alive) setEng(b?.ms_engine ?? null); } catch { /* optional */ }
     })();
     return () => { alive = false; };
   }, [active]);
@@ -46,6 +48,17 @@ export default function SessionHealthPanel({ active }: { active: boolean }) {
               </div>
             ))}
             {windows.some(([, v]) => v.disabled) && <div className="text-[9px] text-mist">A paused window returns by itself when its losing trades age out of the look-back.</div>}
+          </div>
+        )}
+        {eng && (
+          <div className="text-mist" data-testid="ms-engine">
+            <div className="text-[10px] uppercase tracking-widest mb-1">Board zone engine</div>
+            <div>
+              <b className={eng.active ? "text-paper" : "text-mist"}>{eng.active ? `structure engine ${eng.engine_version ?? ""}` : "legacy zones"}</b>
+              {eng.requested && !eng.active && <span className="ml-1.5 text-signal-hold">requested but not available, running legacy</span>}
+              {eng.fallbacks > 0 && <span className="ml-1.5 text-signal-hold">{eng.fallbacks} fallback(s){eng.last_error ? `, last: ${eng.last_error}` : ""}</span>}
+              <span className="ml-1.5 tabular-nums">{eng.engine_calls ?? 0} engine / {eng.legacy_calls ?? 0} legacy calls</span>
+            </div>
           </div>
         )}
         {tune && (

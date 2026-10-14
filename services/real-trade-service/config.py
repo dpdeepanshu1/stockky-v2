@@ -461,6 +461,52 @@ ENTRY_DEPTH_RECHECK = ((os.getenv("ENTRY_DEPTH_RECHECK") or "").strip() or "true
 # 0 turns it off. A normal overnight (next session is tomorrow) is unchanged.
 OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT", 0.5)
 
+# group 351 (2026-10-13): DAILY MARKET-STRUCTURE GATE (entry_engine/structure_gate.py). Reads the technical service's market_structure
+# summary (ms_*) for the candidate and answers "good stock, bad entry?" - chasing above the nearest demand/imbalance zone, a stretched
+# price, no room to the next resistance, structure R:R too low, broken/bearish structure. SHADOW-FIRST: every threshold below is a
+# HYPOTHESIS until the backtest/observation data (WS-6/7) calibrates it. group354: LIVE by default - the gate can only ever WAIT (it never
+# creates an entry), a missing / stale structure is "no opinion", and every verdict is stored on the decision, so a wrong threshold costs a
+# skipped trade, never a bad one. Set STRUCTURE_GATE_MODE=shadow (record only) or off to loosen it.
+#   STRUCTURE_GATE_MODE       REAL mode:  off | shadow (record would_reject, never block) | enforce (default: WAIT with gate_tag=structure)
+#   STRUCTURE_GATE_DEMO_MODE  DEMO mode:  same values; defaults to STRUCTURE_GATE_MODE
+# Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true.
+def _sg_mode(name, default):
+    v = (os.getenv(name) or "").strip().lower()
+    return v if v in ("off", "shadow", "enforce") else default
+STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
+STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
+STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or "false").lower() == "true"
+STRUCTURE_MAX_CHASE_ATR = _og_float("STRUCTURE_MAX_CHASE_ATR", 1.5)       # live price above the nearest zone top, in ATR (0 disables)
+STRUCTURE_MAX_STRETCH_ATR = _og_float("STRUCTURE_MAX_STRETCH_ATR", 3.0)   # live price above EMA20, in ATR (0 disables)
+STRUCTURE_MIN_ROOM_ATR = _og_float("STRUCTURE_MIN_ROOM_ATR", 0.5)         # live price to the next resistance, in ATR (0 disables)
+STRUCTURE_MIN_RR = _og_float("STRUCTURE_MIN_RR", 1.2)                      # structure R:R at the live entry (0 disables)
+STRUCTURE_REJECT_STOP_WIDE = ((os.getenv("STRUCTURE_REJECT_STOP_WIDE") or "").strip() or "true").lower() == "true"
+STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() or "true").lower() == "true"   # bearish daily trend / fresh bearish BOS
+STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts
+STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 7.0)         # last structure bar older than this = stale = no opinion
+STRUCTURE_MAX_PRICE_DEV_PCT = _og_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)  # live entry vs structure close further apart = split/bad data = no opinion
+# Structural stop option: off | shadow (default: record the structural stop next to the ATR stop) | on (use it when it is sane).
+# STRUCTURE_STOP_MODE: off | shadow (record the structural stop next to the ATR stop) | on (default, group354: use it when it is sane -
+# below entry and within [MIN, MAX] x the ATR-stop risk). "enforce" is accepted as an alias of "on".
+_ssm = (os.getenv("STRUCTURE_STOP_MODE") or "").strip().lower()
+STRUCTURE_STOP_MODE = "off" if _ssm == "off" else ("shadow" if _ssm == "shadow" else "on")
+STRUCTURE_STOP_MAX_RISK_MULT = _og_float("STRUCTURE_STOP_MAX_RISK_MULT", 1.6)   # structural risk may be at most this x the ATR-stop risk
+STRUCTURE_STOP_MIN_RISK_MULT = _og_float("STRUCTURE_STOP_MIN_RISK_MULT", 0.5)   # ... and at least this x (a hair-thin stop is noise)
+# Where the live summary comes from when the candidate payload has none: api-gateway GET /stock/{symbol}/structure (cached, fail-open).
+STRUCTURE_FETCH_ENABLED = ((os.getenv("STRUCTURE_FETCH_ENABLED") or "").strip() or "true").lower() == "true"
+STRUCTURE_FETCH_TIMEOUT_S = _og_float("STRUCTURE_FETCH_TIMEOUT_S", 3.0)
+STRUCTURE_CACHE_TTL_S = _og_float("STRUCTURE_CACHE_TTL_S", 600.0)
+STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
+# group356 (WS-6) structure OBSERVATION: every concrete gate verdict (passed / rejected, enforced or shadow) is stored as a row and followed for
+# 20 trading days (T+1/5/10/20 return, MFE, MAE, first touch of the structural target vs stop), so "did the gate turn away the weaker ones?" has
+# a measured answer (GET /structure/edge/{mode}). Recording is one INSERT per symbol per day; evaluation runs in a background loop and only
+# reads daily history from market-data. Never blocks or changes an entry.
+STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() == "true"
+STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 1800.0))   # how often the evaluator wakes
+STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 60.0)))                       # symbols fetched per pass
+STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
+STRUCTURE_OBS_GIVE_UP_DAYS = max(25, int(_og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0)))        # a row with no bars after this many days is closed
+
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
 #      VIX_GATE_ENABLED         master switch for the VIX checks

@@ -1014,16 +1014,47 @@ BOARD_CACHE_S = max(0.0, _get_float("BOARD_CACHE_S", 1.0))
 BOARD_ZONES_ENABLED = _get_bool("BOARD_ZONES_ENABLED", True)
 BOARD_ZONE_TF_MIN = min(15, max(1, _get_int("BOARD_ZONE_TF_MIN", 5)))
 BOARD_ZONE_ATR_MULT = max(0.5, _get_float("BOARD_ZONE_ATR_MULT", 1.5))
-BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", False)                         # Group 349: Market Board zones/swings from stockky_ms.compat_board (legacy code stays the fallback)
+BOARD_USE_MS_ENGINE = _get_bool("BOARD_USE_MS_ENGINE", True)                          # Group 349 / live since group354: Market Board zones/swings from stockky_ms.compat_board (any error falls back to the legacy code per call; set 0 to force legacy)
+BOARD_AB_ENABLED = _get_bool("BOARD_AB_ENABLED", True)                              # Group 362: while the engine serves the board, also run the legacy zone maths on the same bars and count the differences (/board/status ms_engine.ab); observational, never changes what is served
+BOARD_AB_MAX_COMPARES = max(0, _get_int("BOARD_AB_MAX_COMPARES", 100000))             # stop comparing after this many per process (0 = no cap); a trading day is roughly 20-25k fresh computations
 BOARD_ZONE_FULL_RANGE = _get_bool("BOARD_ZONE_FULL_RANGE", False)                   # zone = whole candle instead of body + wick
 BOARD_CHASE_ATR = max(0.0, _get_float("BOARD_CHASE_ATR", 1.5))                      # > this many ATRs past the zone = "extended"
 # off = nothing; shadow = log what the chase guard WOULD refuse; enforce = actually refuse those entries (fails open on error)
-# group322: "auto" (default) = shadow until the shadow report's written promotion rule for the chase guard is met (BOARD_PROMOTE_MIN_OBS
+# group354: default is now "enforce" (the chase guard only ever REFUSES an entry, and fails open on missing data). "auto" = shadow until the shadow report's written promotion rule for the chase guard is met (BOARD_PROMOTE_MIN_OBS
 # observations over BOARD_PROMOTE_MIN_SESSIONS sessions, bootstrap CI says what it blocks does clearly worse), then enforce; re-checked
 # every BOARD_AUTO_REFRESH_S over the last BOARD_AUTO_DAYS days and drops back to shadow if the verdict stops holding.
-BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "auto").lower()
+BOARD_GATE_MODE = _get_str("BOARD_GATE_MODE", "enforce").lower()
 if BOARD_GATE_MODE not in ("off", "shadow", "enforce", "auto"):
-    BOARD_GATE_MODE = "auto"
+    BOARD_GATE_MODE = "enforce"
+# group354: DAILY MARKET-STRUCTURE GATE on the automatic scalp entry (orders/structure_gate.py). "Good scalp, bad daily location?" - reads the
+# technical service's daily market_structure summary via api-gateway GET /stock/{symbol}/structure (cached, fail-open: no / stale /
+# insufficient structure = no opinion, never a block). LIVE by default; the scalper buys strength on purpose, so the defaults block only the
+# clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
+# stretch / chase). Set a limit to 0 to switch that single test off.
+#   STRUCTURE_GATE_MODE   off | shadow (log + store the verdict, never refuse) | enforce (default: refuse with STRUCTURE_* reason)
+STRUCTURE_GATE_MODE = _get_str("STRUCTURE_GATE_MODE", "enforce").lower()
+if STRUCTURE_GATE_MODE not in ("off", "shadow", "enforce"):
+    STRUCTURE_GATE_MODE = "enforce"
+STRUCTURE_REQUIRE_DATA = _get_bool("STRUCTURE_REQUIRE_DATA", False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
+STRUCTURE_BEARISH_BLOCK = _get_bool("STRUCTURE_BEARISH_BLOCK", True)                    # bearish daily trend / fresh (not failed) bearish BOS
+STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
+STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float("STRUCTURE_MAX_CHASE_ATR", 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
+STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float("STRUCTURE_MAX_STRETCH_ATR", 5.0))      # live price above the daily EMA20, in daily ATR
+STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float("STRUCTURE_MIN_ROOM_ATR", 0.3))            # room to the next daily resistance, in daily ATR
+STRUCTURE_MAX_AGE_DAYS = max(0.0, _get_float("STRUCTURE_MAX_AGE_DAYS", 7.0))            # last structure bar older than this = stale = no opinion
+STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)) # live price vs structure close further apart = split / bad data = no opinion
+STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
+STRUCTURE_CACHE_TTL_S = max(30.0, _get_float("STRUCTURE_CACHE_TTL_S", 600.0))
+STRUCTURE_FAIL_TTL_S = max(10.0, _get_float("STRUCTURE_FAIL_TTL_S", 60.0))
+# group356 (WS-6) structure OBSERVATION: every concrete daily-structure verdict on a scalp candidate (passed / refused, enforced or shadow) is stored
+# and followed for 20 trading days (T+1/5/10/20 return, MFE, MAE, first touch of the structural target vs stop), so "did the gate turn away the
+# weaker ones?" has a measured answer (GET /structure/edge). One INSERT per symbol per day; the evaluator loop only reads daily history from
+# market-data. Never blocks or changes an entry.
+STRUCTURE_OBS_ENABLED = _get_bool("STRUCTURE_OBS_ENABLED", True)
+STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _get_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 1800.0))
+STRUCTURE_OBS_BATCH = max(1, _get_int("STRUCTURE_OBS_BATCH", 60))                         # symbols fetched per pass
+STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _get_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
+STRUCTURE_OBS_GIVE_UP_DAYS = max(25, _get_int("STRUCTURE_OBS_GIVE_UP_DAYS", 45))          # a row with no bars after this many days is closed
 BOARD_AUTO_REFRESH_S = max(60, _get_int("BOARD_AUTO_REFRESH_S", 3600))
 BOARD_AUTO_DAYS = max(1, min(120, _get_int("BOARD_AUTO_DAYS", 30)))
 BOARD_LOG_EVERY_S = max(60, _get_int("BOARD_LOG_EVERY_S", 300))                     # shadow snapshot cadence in market hours

@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, structure_gate, structure_observation, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -907,6 +907,43 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _g4d_reason,
                                    "risk_verdict": None, "gate_tag": _g4d_tag})
             continue
+
+        # ── Gate 4e (group 351): daily market-structure ("good stock, bad entry?") ───────────────────────────────────────
+        # Chase above the nearest demand/imbalance zone, stretched price, no room to resistance, poor structure R:R, bearish structure.
+        # SHADOW by default: records would_reject on decision.structure_json and never blocks; enforce = WAIT (gate_tag "structure").
+        # No / stale / insufficient structure data is "no opinion" (never blocks) unless STRUCTURE_REQUIRE_DATA. Never raises.
+        # An optional structural stop (STRUCTURE_STOP_MODE=on) replaces the ATR stop only when sane. See entry_engine/structure_gate.py.
+        _sg_mode = structure_gate.mode_for(mode)
+        if _sg_mode != "off":
+            try:
+                _sg_sum, _sg_src = await structure_gate.get_summary(cand.symbol, getattr(cand, "raw_payload", None))
+                _sg_ver = structure_gate.evaluate(_sg_sum, tick.price)
+                _sg_lv = structure_gate.structural_levels(_sg_sum, entry_price, stop_price, target_price)
+                _sg_block = None
+                _sg_tag = structure_gate.TAG
+                if _sg_ver["would_reject"]:
+                    _sg_block = _sg_ver["reason"]
+                elif _sg_ver["opinion"] == "no_opinion" and config.STRUCTURE_REQUIRE_DATA:
+                    _sg_block = f"STRUCTURE_NODATA: no usable daily structure ({_sg_ver.get('no_data')})"
+                    _sg_tag = structure_gate.TAG_NODATA
+                _sg_enforced = bool(_sg_block) and _sg_mode == "enforce"
+                decision.structure_json = structure_gate.snapshot(_sg_sum, _sg_ver, _sg_mode, _sg_enforced, _sg_lv, _sg_src)
+                structure_gate.record(cand.symbol, mode, _sg_ver, _sg_mode, _sg_enforced, tick.price, _sg_src)   # group 355: counters + recent ring
+                structure_observation.record(db, cand.symbol, mode, tick.price, _sg_ver, _sg_sum, _sg_mode, _sg_enforced)   # group 356: follow the verdict for 20 sessions
+                if _sg_enforced:
+                    _wait_with_preview(_sg_block)
+                    decision.gate_tag = _sg_tag
+                    db.add(decision)
+                    entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _sg_block,
+                                           "risk_verdict": None, "gate_tag": _sg_tag})
+                    continue
+                if _sg_block and _sg_mode == "shadow":
+                    logger.info("entry_engine: %s %s structure SHADOW would reject: %s", mode, cand.symbol, _sg_block)
+                if _sg_lv.get("use") and _sg_lv.get("stop"):
+                    stop_price = round(float(_sg_lv["stop"]), 2)
+                    per_share_risk = entry_price - stop_price
+            except Exception as _sg_err:  # noqa: BLE001 - a gate bug must never stop an entry
+                logger.warning("entry_engine: structure gate failed for %s (allowing): %s", cand.symbol, _sg_err)
 
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)

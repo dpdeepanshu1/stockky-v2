@@ -7,6 +7,8 @@ import BottomSheet from "./BottomSheet";
 import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
+import StructurePanel from "./StructurePanel";
+import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText } from "../structureView";
 
 // ── Types & helper for structured news (from v2) ──
 interface NewsItem {
@@ -315,6 +317,30 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           {liveQuote.as_of ? new Date(liveQuote.as_of).toLocaleTimeString("en-IN") : ""}
         </p>
       )}
+
+      {/* group353: daily structure — policy record, wait-for-entry range and the collapsible Trend/Momentum/Structure/Location/Risk panel */}
+      {(() => {
+        const ds = data.structure;
+        const snap = decisionToSnapshot(ds);
+        if (!snap) return null;
+        const rec = policyRecord(ds);
+        const wait = waitForEntryText(ds);
+        const prep = data.decision === "PREPARE TO BUY" ? prepareTriggerText(ds) : null;
+        const line = ds?.summary_line;
+        return (
+          <div className="space-y-2" data-testid="decision-structure">
+            {rec && (
+              <p className={`font-display tabular-nums text-[11px] rounded-lg border px-3 py-2 ${rec.tone === "bad" ? "border-signal-sell/40 text-signal-sell bg-signal-sell/10" : "border-signal-hold/40 text-signal-hold bg-signal-hold/10"}`}>
+                {rec.text}
+              </p>
+            )}
+            {wait && <p className="font-display tabular-nums text-[11px] text-mist">{wait}</p>}
+            {prep && <p className="font-display tabular-nums text-[11px] text-mist">{prep}</p>}
+            {!rec && line && <p className="font-display tabular-nums text-[10px] text-mist/70 sm:hidden">{line}</p>}
+            <StructurePanel snapshot={snap} atrStop={ds?.legacy_levels?.stop_loss ?? null} />
+          </div>
+        );
+      })()}
 
       {/* Decision header — compact terminal */}
       <div className={`dc-hero rounded-2xl border ${style.border} ${style.bg} p-4 sm:p-6`}>

@@ -27,7 +27,10 @@ _MOD_PATH = os.path.join(_SERVICE, "buy_sniper.py")
 _REPO = os.path.dirname(os.path.dirname(_SERVICE))
 
 _ENV_KEYS = ("SNIPER_MIN_CONVICTION", "SNIPER_MIN_PRICE", "MAX_PRICE", "VALUE_BUY_THRESHOLD",
-             "SNIPER_MIN_REWARD_RISK", "SNIPER_SECTOR_BONUS", "SNIPER_SECTOR_PENALTY")
+             "SNIPER_MIN_REWARD_RISK", "SNIPER_SECTOR_BONUS", "SNIPER_SECTOR_PENALTY", "SNIPER_STRUCTURE_MODE",
+             "STRUCTURE_MAX_CHASE_ATR", "STRUCTURE_MAX_STRETCH_ATR", "STRUCTURE_MIN_ROOM_ATR", "STRUCTURE_MIN_RR",
+             "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS", "STRUCTURE_MAX_PRICE_DEV_PCT", "STRUCTURE_MAX_AGE_DAYS",
+             "STRUCTURE_REJECT_STOP_WIDE")
 
 
 class Loader:
@@ -443,6 +446,9 @@ class TestBuildSuggestionCard:
             "decision": "BUY",
             "value_buy": True,
             "market_context": "Nifty correction — only high-R:R setups surfaced",
+            # group357: a row with no structure summary = no opinion (the card is unchanged otherwise)
+            "structure": {"gate_mode": "enforce", "opinion": "no_opinion", "would_reject": False, "reasons": [],
+                          "no_data": "no structure summary", "live": {}, "enforced": False, "stop": None, "target": None, "rr": None},
         }
 
     def test_defaults_for_missing_scores_and_holding_period(self, bs):
@@ -712,7 +718,7 @@ class TestSuggestionsFromPayload:
     def test_response_shape(self, bs):
         out = bs.suggestions_from_scan_payload({"stocks": GOOD})
         assert set(out) == {"ok", "count", "suggestions", "scanned_input", "min_conviction", "target_count",
-                            "market_context", "message"}
+                            "market_context", "structure_mode", "structure_rejected", "message"}
         assert out["ok"] is True and out["count"] == 2 and out["scanned_input"] == 2
         assert [c["symbol"] for c in out["suggestions"]] == ["A", "B"]
         assert out["min_conviction"] == 62 and out["target_count"] == 4

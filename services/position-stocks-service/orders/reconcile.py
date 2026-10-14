@@ -1085,8 +1085,8 @@ def _rearm_legs(db: Session, pos: ScalpPosition) -> bool:
     except Exception as e:  # noqa: BLE001
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as rb:  # noqa: BLE001
+            logger.warning("reconcile: %s (id=%d) rollback after re-arm error also failed: %s", pos.symbol, pos.id, rb)
         logger.warning("reconcile: %s (id=%d) re-arm error (try %d/%d): %s", pos.symbol, pos.id, st["tries"], _REARM_MAX_TRIES, e)
     if st["target"] and st["stop"]:
         _rearm_state.pop(pos.id, None)
@@ -1102,8 +1102,8 @@ def _rearm_legs(db: Session, pos: ScalpPosition) -> bool:
                 f"The {missing} leg could not be moved to the corrected fill price after {st['tries']} tries; "
                 f"Dhan still holds the original level. Check the super order."
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as ne:  # noqa: BLE001
+            logger.warning("reconcile: %s (id=%d) re-arm-failed notice not sent: %s", pos.symbol, pos.id, ne)
     return False
 
 
@@ -1344,8 +1344,8 @@ def auto_repair_closed_entry_prices(db: Session) -> int:
     except Exception as e:  # never break the reconcile loop
         try:
             db.rollback()
-        except Exception:
-            pass
+        except Exception as rb:
+            logger.warning("reconcile: rollback after auto-repair failure also failed: %s", rb)
         logger.warning("reconcile: auto-repair of closed entry prices failed: %s", e)
         return 0
 

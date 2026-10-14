@@ -49,6 +49,7 @@ GATEWAY_ONLY = {
     "stockky:hot_stocks",
     "stockky:surprise_scan:",
     "stockky:market_movers_last_known",  # 2026-10-04: closed-market Movers panel survives a restart
+    "stockky:sniper_obs:",  # group361: Buy Sniper structure-gate observations (gateway only)
 }
 GATEWAY_ONLY_HELPERS = ("kv_get_stale", "get_stale")
 

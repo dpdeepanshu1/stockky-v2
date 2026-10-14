@@ -14,6 +14,10 @@ import { SubTabs } from "./ui/SubTabs";
 // is a best-effort, non-blocking call).
 import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi";
 import CapitalSplitCard from "./CapitalSplitCard";
+import StructurePanel from "./StructurePanel";
+import StructureGateCard from "./StructureGateCard";
+import StructureEdgeCard from "./StructureEdgeCard";
+import { coveragePct, gateStatus, tally as structureTally } from "../structureView";
 import MarketBoard from "./board/MarketBoard";
 import ShortlistPanel from "./board/ShortlistPanel";
 import TopPicks from "./board/TopPicks";
@@ -2501,6 +2505,12 @@ export default function RealAutoTrade() {
                 Stocks pulled from Hot Picks / IPO / market scan, evaluated by the risk engine each cycle.
               </p>
 
+              {/* group355: how the daily-structure gate is behaving for this mode (read-only; REAL needs the admin session) */}
+              <StructureGateCard key={`sg-${mode}-${loggedIn ? "in" : "out"}`} kind="real" title={`Daily structure gate — ${mode}`}
+                load={(h) => (mode === "REAL" && !loggedIn ? Promise.reject(new Error("Log in as admin to see the REAL structure gate status.")) : realTradeApi.structureStatus(mode, h))} />
+              <StructureEdgeCard key={`se-${mode}-${loggedIn ? "in" : "out"}`} title={`Structure gate — what happened next (${mode})`}
+                load={(d) => (mode === "REAL" && !loggedIn ? Promise.reject(new Error("Log in as admin to see the REAL structure edge report.")) : realTradeApi.structureEdge(mode, d))} />
+
               {candidates.length === 0 ? (
                 <div className="bg-graphite border border-slate rounded-2xl p-6 text-center">
                   <p className="font-display tabular-nums text-sm text-mist">
@@ -2509,6 +2519,18 @@ export default function RealAutoTrade() {
                 </div>
               ) : (
                 <div className="space-y-2">
+                  {(() => {
+                    // group351: how the daily-structure gate treated the evaluated candidates (display only).
+                    const t = structureTally(candidates);
+                    if (t.checked === 0) return null;
+                    const cov = coveragePct(t);
+                    return (
+                      <p className="font-display tabular-nums text-[10px] text-mist" data-testid="structure-tally">
+                        Daily structure: {t.blocked} blocked · {t.shadow} would reject (shadow) · {t.noOpinion} no data
+                        {cov != null ? ` · coverage ${cov}%` : ""}
+                      </p>
+                    );
+                  })()}
                   {candidates.map(c => {
                     const d = c.latest_decision;
                     const actionColor = d?.action === "ENTER" ? "text-signal-buy"
@@ -2576,7 +2598,16 @@ export default function RealAutoTrade() {
                             {d.gate_tag === "cost_model" && (
                               <span className="font-bold mr-1 text-signal-hold">[COST GATE]</span>
                             )}
+                            {(d.gate_tag === "structure" || d.gate_tag === "structure_nodata") && (
+                              <span className="font-bold mr-1 text-signal-hold">[STRUCTURE GATE]</span>
+                            )}
                             {d.reasoning}
+                          </p>
+                        )}
+
+                        {d?.structure && !expanded && d.structure.would_reject && !d.structure.enforced && (
+                          <p className="font-display tabular-nums text-[10px] text-signal-hold mt-1">
+                            Structure: {gateStatus(d.structure).label}
                           </p>
                         )}
 
@@ -2592,6 +2623,7 @@ export default function RealAutoTrade() {
                                 <span className="text-mist">Risk engine verdict — </span>{d.risk_verdict_reason}
                               </p>
                             )}
+                            {d?.structure && <StructurePanel snapshot={d.structure} atrStop={d.proposed_stop} />}
                             <p className="font-display tabular-nums text-[9px] text-mist">Candidate #{c.id}{d ? " · has been evaluated" : " · awaiting first evaluation"}</p>
                           </div>
                         )}

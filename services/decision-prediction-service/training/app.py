@@ -31,6 +31,7 @@ from sqlalchemy.orm import sessionmaker
 from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade
 from pit_validation import validate_prediction_snapshot, validate_outcome_vs_prediction
 import trades as trades_module
+import structure_entry as _se   # group359: entry-time market-structure snapshot for paper trades
 from evaluate import (
     evaluate_t1 as _evaluate_t1_prediction,
     compute_training_metrics,
@@ -210,6 +211,8 @@ class PredictionSnapshotCreate(BaseModel):
     sector: Optional[str] = None
     valuation: Optional[str] = None
     feature_snapshot: Optional[dict] = None
+    # group359: the decision service's `structure` record at the moment of the pick (kept, sanitised, in feature_snapshot.structure_entry)
+    structure: Optional[dict] = None
     # Accept extra keys the frontend may still send (score aliases, etc.)
     class Config:
         extra = "ignore"
@@ -830,7 +833,7 @@ async def store_prediction(pred: PredictionSnapshotCreate, background_tasks: Bac
             debt_to_equity=pred.debt_to_equity,
             roe=pred.roe,
             roce=pred.roce,
-            feature_snapshot=pred.feature_snapshot,
+            feature_snapshot=_se.attach(pred.feature_snapshot, getattr(pred, "structure", None)) or pred.feature_snapshot,
             model_version=None,
             created_at=ist_now(),
             t1_success=0,
@@ -1168,6 +1171,15 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
                 except Exception:
                     score_moved = bool(req.force_refresh)
 
+                try:  # group359: backfill the entry snapshot once if the earlier same-day row has none (never overwrites)
+                    _fs = _se.attach(existing.feature_snapshot, getattr(pick, "structure", None))
+                    if _fs is not None:
+                        existing.feature_snapshot = _fs
+                        db.commit()
+                except Exception as _se_err:
+                    db.rollback()
+                    logger.debug("structure entry backfill skipped for %s: %s", pick.symbol, _se_err)
+
                 if req.force_refresh or score_moved:
                     for field in (
                         "price", "confidence", "combined_score", "technical_score", "fundamental_score",
@@ -1199,7 +1211,8 @@ async def commit_actionable_picks(req: ActionableCommitRequest, background_tasks
                     market_mood=pick.market_mood, nifty_change_pct=pick.nifty_change_pct,
                     sensex_change_pct=pick.sensex_change_pct, rsi=pick.rsi, macd=pick.macd, ema=pick.ema,
                     volume_ratio=pick.volume_ratio, debt_to_equity=pick.debt_to_equity, roe=pick.roe, roce=pick.roce,
-                    feature_snapshot=pick.feature_snapshot, model_version=None, created_at=ist_now(),
+                    feature_snapshot=_se.attach(pick.feature_snapshot, getattr(pick, "structure", None)) or pick.feature_snapshot,
+                    model_version=None, created_at=ist_now(),
                     t1_success=0, t5_success=0, overall_success=0,
                 )
                 db.add(snapshot)
@@ -1401,6 +1414,15 @@ async def list_trades(status: str = "all"):
         except Exception:
             pass
         rows = q.order_by(PaperTrade.entry_date.desc()).all()
+        entries: Dict[str, Any] = {}   # group359: prediction_id -> entry-time structure snapshot (None / missing = taken before this existed)
+        try:
+            ids = [t.prediction_id for t in rows if t.prediction_id]
+            for i in range(0, len(ids), 400):
+                for pid, fs in db.query(PredictionSnapshot.prediction_id, PredictionSnapshot.feature_snapshot).filter(
+                        PredictionSnapshot.prediction_id.in_(ids[i:i + 400])).all():
+                    entries[pid] = _se.read_entry(fs)
+        except Exception as _se_err:
+            logger.debug("trade structure entries unavailable: %s", _se_err)
         return JSONResponse(content=convert_numpy([{
             "trade_id": t.trade_id, "prediction_id": t.prediction_id, "symbol": t.symbol,
             "capital_allocated": t.capital_allocated, "entry_price": t.entry_price, "quantity": t.quantity,
@@ -1410,6 +1432,7 @@ async def list_trades(status: str = "all"):
             "exit_date": t.exit_date.isoformat() if t.exit_date else None, "exit_reason": t.exit_reason,
             "pnl_amount": t.pnl_amount, "pnl_pct": t.pnl_pct,
             "last_marked_at": t.last_marked_at.isoformat() if t.last_marked_at else None,
+            "structure": entries.get(t.prediction_id),
         } for t in rows]))
     finally:
         db.close()

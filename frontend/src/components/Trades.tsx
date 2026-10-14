@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
+import { tradeEntryView, tradeStructureTally } from "../structureView";
 import { getSafePrice } from "../priceDisplay";
 import StockChart from "./StockChart";
 import BottomSheet from "./BottomSheet";
@@ -700,6 +701,7 @@ export default function Trades() {
             <Empty text="No closed positions yet." />
           ) : (
             <div className="overflow-x-auto">
+              <StructureTallyLine trades={closedTrades} />
               <table className="w-full text-xs font-display tabular-nums">
                 <thead>
                   <tr className="text-mist/50 uppercase tracking-wider border-b border-slate/40">
@@ -708,6 +710,7 @@ export default function Trades() {
                     <th className="text-right py-2 px-2">Exit</th>
                     <th className="text-right py-2 px-2">P&amp;L</th>
                     <th className="text-right py-2 px-2">Reason</th>
+                    <th className="text-right py-2 px-2" title="What the daily market structure said when the trade was entered">Structure</th>
                     <th className="text-right py-2 px-2">Entered</th>
                     <th className="text-right py-2 pl-2">Exited</th>
                   </tr>
@@ -722,6 +725,7 @@ export default function Trades() {
                         {fmtPct(t.pnl_pct)}
                       </td>
                       <td className="text-right py-2 px-2 text-mist/60">{t.exit_reason?.replace(/_/g, " ") ?? "—"}</td>
+                      <td className="text-right py-2 px-2"><EntryStructureBadge trade={t} /></td>
                       <td className="text-right py-2 px-2 text-mist/50">{fmtDate(t.entry_date)}</td>
                       <td className="text-right py-2 pl-2 text-mist/50">{fmtDate(t.exit_date)}</td>
                     </tr>
@@ -788,6 +792,7 @@ function PositionCard({
               <div className={isUp ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(trade.pnl_amount)}</div>
             </div>
           </div>
+          <EntryStructure trade={trade} />
           <button
             onClick={(e) => { e.stopPropagation(); onClose(); }}
             disabled={closing}
@@ -798,6 +803,40 @@ function PositionCard({
         </div>
       )}
     </div>
+  );
+}
+
+const TONE_CLASS: Record<string, string> = { good: "text-signal-buy", bad: "text-signal-sell", warn: "text-signal-hold", mute: "text-mist/50" };
+
+/** group359: what the daily structure said when the trade was ENTERED (stored once, never recomputed). Informational: no trade is changed by it. */
+function EntryStructure({ trade }: { trade: PaperTrade }) {
+  const v = tradeEntryView(trade.structure);
+  return (
+    <div className="mt-3 font-display text-[11px]" data-testid="trade-entry-structure">
+      <div className="text-mist/40 text-[10px] uppercase">Structure at entry</div>
+      <div className={TONE_CLASS[v.tone]}>{v.label}</div>
+      {v.reasons.map((r, i) => <div key={i} className="text-mist/60">· {r}</div>)}
+      {v.levels && <div className="text-mist/60 tabular-nums">{v.levels}</div>}
+      {v.line && <div className="text-mist/50">{v.line}</div>}
+    </div>
+  );
+}
+
+function EntryStructureBadge({ trade }: { trade: PaperTrade }) {
+  const v = tradeEntryView(trade.structure);
+  return <span className={TONE_CLASS[v.tone]} title={[v.label, ...v.reasons].join(" · ")}>{v.short}</span>;
+}
+
+/** Closed trades split by what structure said at entry. Descriptive only; flagged "small sample" until both groups have 20 trades. */
+function StructureTallyLine({ trades }: { trades: PaperTrade[] }) {
+  const t = tradeStructureTally(trades);
+  if (t.withSnapshot === 0) return null;
+  const avg = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
+  return (
+    <p className="font-display tabular-nums text-[11px] text-mist/60 mb-2" data-testid="trade-structure-tally">
+      Entered with structure supporting: {t.supported} trade{t.supported === 1 ? "" : "s"}, avg {avg(t.supportedAvgPct)} · flagged at entry: {t.flagged}, avg {avg(t.flaggedAvgPct)}
+      {t.smallSample ? " (small sample: not evidence yet)" : ""}
+    </p>
   );
 }
 

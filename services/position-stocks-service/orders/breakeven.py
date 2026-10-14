@@ -171,9 +171,11 @@ def run_breakeven_stop(db: Session) -> int:
             if new_stop >= ltp:
                 band = dhan_client.tick_size_for_price(ltp)
                 new_stop = dhan_client.round_to_tick(ltp - band)
-                # group345: the price has fallen back to / below the buffered entry. A stop pushed down to "one tick under the market" is
-                # an exit-now order, not a breakeven; leave the original stop leg and look again once the price is back above it.
-                if new_stop < pos.entry_price:
+                # group345/354: the price has fallen back to / under the buffered entry. A stop pushed down to "one tick under the market" is
+                # an exit-now order, not a breakeven. It only counts as a real breakeven if it still sits STRICTLY above entry (a clamped stop
+                # that lands exactly on entry locks nothing and can fire on the next tick); otherwise leave the original stop leg and look
+                # again once the price has cleared the buffered entry.
+                if new_stop <= pos.entry_price:
                     continue
 
             try:

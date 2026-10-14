@@ -7,6 +7,9 @@ import { useStockkyRealtime } from "../useRealtime";
 import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
+import { decisionTally, ruleCounts } from "../structureView";
+import { sniperRejectedText, prepareNoteLines } from "../structureView";
+import type { PrepareNoteLine } from "../structureView";
 
 interface Props {
   result: ScanResult;
@@ -71,6 +74,7 @@ export function toActionablePick(d: Decision): ActionablePick {
     roce: null, // not present in Decision/FundamentalMetrics from api-gateway today
     rsi: null, macd: null, ema: null, volume_ratio: null, // decision-engine doesn't populate these yet either
     market_mood: null, nifty_change_pct: null, sensex_change_pct: null, // not exposed on Decision today
+    structure: d.structure ?? null, // group359: stored at entry so the Trades tab can show what structure said when the trade was opened
   };
 }
 
@@ -105,10 +109,12 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   // Step 4 — Buy Sniper
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
+  const [structureNote, setStructureNote] = useState<string | null>(null);  // group357: "N setups turned away by daily structure"
   const [sniperLoading, setSniperLoading] = useState(false);
   const [sniperError, setSniperError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const [refreshNotes, setRefreshNotes] = useState<PrepareNoteLine[]>([]); // group358: why a refreshed PREPARE row deserves a second look (log-only)
   const [sendingToTrade, setSendingToTrade] = useState<string | null>(null); // "SYMBOL:DEMO" | "SYMBOL:REAL"
   const [sendTradeMsg, setSendTradeMsg] = useState<{ symbol: string; text: string; ok: boolean } | null>(null);
 
@@ -229,6 +235,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
     setSniperLoading(true);
     setSniperError(null);
     setSuggestions([]);
+    setStructureNote(null);
     try {
       const rows =
         (result?.all_results && result.all_results.length > 0
@@ -242,6 +249,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         min_conviction: 58,
       });
       setSuggestions((data?.suggestions || []) as BuySuggestion[]);
+      setStructureNote(sniperRejectedText(data?.structure_mode, data?.structure_rejected));
       if (data?.error) setSniperError(String(data.error));
     } catch (err: any) {
       console.error("Failed to find buys:", err);
@@ -255,8 +263,10 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const handleRefreshPrepareToBuy = async () => {
     setIsRefreshing(true);
     setRefreshMsg(null);
+    setRefreshNotes([]);
     try {
       const res = await api.refreshPrepareToBuy(58, 68);
+      setRefreshNotes(prepareNoteLines(res?.structure_notes));
       const n = res?.refreshed_count ?? 0;
       const total = (res?.symbols || []).length;
       setRefreshMsg(
@@ -530,6 +540,15 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         {refreshMsg && (
           <p className="font-display tabular-nums text-[10px] text-signal-hold/90 mt-2 mb-0">{refreshMsg}</p>
         )}
+        {refreshNotes.length > 0 && (
+          <ul className="mt-1 mb-0 pl-0 list-none space-y-0.5" aria-label="Prepare-to-Buy structure notes">
+            {refreshNotes.map((n) => (
+              <li key={n.symbol} className={`text-[10px] ${n.tone === "warn" ? "text-signal-hold" : "text-mint/80"}`}>
+                <span className="font-semibold text-paper">{n.symbol}</span> · {n.text}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* ── Bento: stats + filters + actions ── */}
@@ -681,6 +700,22 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
           <p className="text-mist text-sm max-w-md mx-auto mb-0">
             {result.scanned} stocks scanned. None cleared the conviction bar today.
           </p>
+          {(() => {
+            // group353: why nothing qualified, from the daily-structure policy (shadow rows are labelled "would", never "did")
+            const rows = (result.all_results && result.all_results.length ? result.all_results : result.results) || [];
+            const t = decisionTally(rows);
+            if (t.checked === 0) return null;
+            const rc = ruleCounts(rows).slice(0, 4);
+            return (
+              <div className="mt-3 text-mist text-xs max-w-md mx-auto" data-testid="scan-structure-summary">
+                <p className="mb-1">
+                  Daily structure checked {t.checked} stocks: {t.wouldChange} {t.applied > 0 ? "downgraded" : "would be downgraded (shadow, not applied)"}
+                  {t.noOpinion > 0 ? `, ${t.noOpinion} had no structure data` : ""}.
+                </p>
+                {rc.length > 0 && <p className="mb-0">{rc.map(x => `${x.label} ×${x.n}`).join(" · ")}</p>}
+              </div>
+            );
+          })()}
           {(result.watchlist_candidates?.length ?? 0) > 0 && (
             <div className="mt-6">
               <p className="text-mist/60 text-sm mb-2">Worth watching:</p>
@@ -865,6 +900,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         suggestions={suggestions}
         loading={sniperLoading}
         error={sniperError}
+        structureNote={structureNote}
         onSelectSymbol={onSelect}
       />
     </div>

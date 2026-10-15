@@ -21,6 +21,22 @@ pieces below were rebuilt from the repo.
 - `.github/workflows/structure-backtest.yml` - manual run: fetch -> report -> run summary + artifact. Secrets: `MARKET_DATA_URL` (existing), `API_GATEWAY_URL` (existing, for the universe).
 - `scripts/test_ms_ab_report.py` (11 tests, also added to `service-tests.yml`).
 
+## Update: walk-forward tuner priced like a real trade
+`scripts/structure_backtest.py` entered at the signal-day close with no costs, so thresholds tuned with it would have looked better than anything tradable.
+It now defaults to `--entry next_open` (next open + `--slip-pct` 0.10, minus `--cost-pct` 0.30, same as `ms_ab_report.py`); `--entry close` keeps the old view.
+The output records the entry mode and costs. It also used to count `^NSEI.json` as a tradable symbol; the benchmark is now skipped.
+
+## Update 2: first real-data run and what it changed
+First run on the Oracle VM (129 symbols, 5y of Dhan daily candles, step 3, T+10): baseline 20,916 signals, candidate 1,972 (9.4% kept).
+Edge +0.54 pp, 90% bootstrap CI [-0.01, +1.29], P(edge>0) 0.94, both history halves positive (+0.54 / +0.50): verdict `no_edge` (close, not significant).
+Baseline alone: mean net +0.12%, median -0.80%, win 45.2%, profit factor 1.04. NO threshold or mode was changed from this: not significant, and the sample was the
+alphabetical head of the universe. Prices looked split-adjusted (14 one-day moves >25% in 142,218 bars, in 4 symbols).
+Operational findings: market-data caps history at `MAX_HISTORY_ROWS=260` (~1y) by default, so 5y needs `MAX_HISTORY_ROWS=1400` + `MAX_HISTORY_PERIOD=5y`
+in `.env` temporarily (revert afterwards); 129 symbols took ~12 min on 2 cores.
+Tooling changes: `fetch_history_for_backtest.py --sample N --seed` (random, seeded cross-section; `--limit` is the alphabetical head), the workflow now samples;
+`ms_ab_report.py` verdict `no_data` (an empty history folder used to read as `insufficient_sample`), progress lines on stderr, and per-rule `solo_edge_pp` /
+`drop_one_edge_pp` in the by-rule table (exploratory: six rules compared). 15 tests.
+
 ## How to run
 Actions -> Stockky Structure Backtest -> Run workflow (start with `limit=150`). Or locally:
 ```

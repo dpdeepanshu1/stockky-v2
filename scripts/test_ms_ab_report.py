@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import fetch_history_for_backtest as fh  # noqa: E402
 import ms_ab_report as ab  # noqa: E402
+import structure_backtest as sb  # noqa: E402
 
 DAY = 86400.0
 T0 = 1_700_000_000.0 - (1_700_000_000.0 % DAY)  # a 00:00 UTC stamp
@@ -95,6 +96,27 @@ def test_nifty_relative_and_regime_tags():
     assert r["bull"] in (True, False)
 
 
+def test_structure_backtest_net_samples_match_ab_pricing():
+    bars = _bars(200)
+    bars[131] = (bars[131][0], 100.0, 101.0, 99.0, 100.0, 1000.0)
+    orig = sb.replay
+    sb.replay = _fake_replay(GOOD)
+    try:
+        s = sb.net_samples(bars, 1, 0.30, 0.10)
+    finally:
+        sb.replay = orig
+    assert len(s) == 1
+    assert abs(s[0]["outcome"]["ret_1d"] - (-0.0999 - 0.30)) < 0.01  # same number as ms_ab_report's r1
+    assert abs(s[0]["price"] - 100.1) < 1e-9
+
+
+def test_structure_backtest_load_skips_the_benchmark():
+    with tempfile.TemporaryDirectory() as td:
+        for name in ("^NSEI", "AAA"):
+            (Path(td) / f"{name}.json").write_text(json.dumps({"candles": _candles(300)}))
+        assert [k for k, _ in sb.load(Path(td))] == ["AAA"]
+
+
 def _row(sym, month, ts, r, rej):
     return {"sym": sym, "month": month, "ts": ts, "rej": rej, "stop_first": False, "target_first": False, "mae": -1.0,
             "bull": True, "hv": False, **{f"r{h}": r for h in ab.HORIZONS}, **{f"x{h}": None for h in ab.HORIZONS}}
@@ -119,7 +141,7 @@ def test_verdict_pass_hurts_and_insufficient():
     assert bad["verdict"] == "hurts" and bad["edge_pp"] < 0, bad
     thin = ab.build_report(_synthetic(True, n_clusters=10), 10, 200, 200, meta)
     assert thin["verdict"] == "insufficient_sample"
-    assert ab.build_report([], 10, 50, 100, meta)["verdict"] == "insufficient_sample"
+    assert ab.build_report([], 10, 50, 100, meta)["verdict"] == "no_data"
 
 
 def test_pass_requires_both_halves_positive():
@@ -132,6 +154,37 @@ def test_pass_requires_both_halves_positive():
                 r[f"r{h}"] = -r[f"r{h}"]
     rep = ab.build_report(rows, 10, 50, 200, meta)
     assert rep["verdict"] != "pass", rep["verdict"]
+
+
+def test_by_rule_solo_and_drop_one_edges():
+    meta = {"symbols": 1, "skipped": 0, "benchmark": "x", "step": 1, "cost_pct": 0.3, "slip_pct": 0.1}
+    rows = []
+    for k in range(40):  # "room" rejects the bad days; "rr" rejects random good ones, so only room earns its place
+        rows.append(_row("S", f"m{k}", 1e9 + k, 2.0, []))
+        rows.append(_row("S", f"m{k}", 1e9 + k, -2.0, ["room"]))
+        rows.append(_row("S", f"m{k}", 1e9 + k, 2.0, ["rr"]))
+    rep = ab.build_report(rows, 10, 10, 50, meta)
+    room, rr = rep["by_rule"]["room"], rep["by_rule"]["rr"]
+    assert room["solo_edge_pp"] > 0 and room["drop_one_edge_pp"] > 0, room
+    assert rr["drop_one_edge_pp"] is not None and rr["drop_one_edge_pp"] <= 0.0001, rr  # dropping rr adds the good days back
+    assert "drop-one edge" in ab.to_markdown(rep)
+
+
+def test_fetcher_sample_is_random_seeded_and_not_the_alphabetical_head():
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    names = [f"S{k:03d}" for k in range(60)]
+    try:
+        picked = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as td:
+                fh.main([td, "--base", base, "--symbols", ",".join(names), "--sample", "10", "--seed", "3", "--sleep", "0", "--retries", "1"])
+                picked.append(sorted(p.stem for p in Path(td).iterdir() if p.stem != "^NSEI"))
+        assert picked[0] == picked[1] and len(picked[0]) == 10  # deterministic
+        assert picked[0] != names[:10]  # not the head of the list
+    finally:
+        srv.shutdown()
 
 
 def test_bootstrap_is_deterministic():
@@ -209,7 +262,7 @@ def test_cli_end_to_end_with_process_pool():
         rc = ab.main([td, "--min-n", "5", "--boot", "50", "--step", "10", "--jobs", "2"])
         assert rc in (0, 1)
         rep = json.loads((d / "ab_out" / "ab_report.json").read_text())
-        assert rep["verdict"] in ("insufficient_sample", "pass", "hurts", "no_edge")
+        assert rep["verdict"] in ("no_data", "insufficient_sample", "pass", "hurts", "no_edge")
         assert (d / "ab_out" / "ab_report.md").exists()
 
 

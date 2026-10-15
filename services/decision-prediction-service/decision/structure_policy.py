@@ -80,6 +80,23 @@ def _num(v: Any) -> Optional[float]:
         return None
 
 
+def _asof_iso(v: Any) -> Optional[str]:
+    """ms_asof as an ISO date (YYYY-MM-DD). The engine reports the last closed bar as epoch seconds (UTC or IST midnight - both land on the same
+    IST date); a date string passes through. Anything else is None (never raises)."""
+    try:
+        if v is None or isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            if v != v or v <= 0:
+                return None
+            from datetime import datetime, timedelta, timezone
+            return (datetime.fromtimestamp(float(v), tz=timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+        t = str(v).strip()[:10]
+        return t if len(t) == 10 and t[4] == "-" and t[7] == "-" else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_structure_features(summary: Optional[Dict[str, Any]], price: Optional[float] = None) -> Dict[str, Any]:
     """Flat features, shifted to the live `price` when it differs from the structure close (chase / stretch / room / R:R)."""
     s = summary if isinstance(summary, dict) else {}
@@ -94,7 +111,7 @@ def build_structure_features(summary: Optional[Dict[str, Any]], price: Optional[
         "chase_atr": _num(s.get("ms_chase_atr")), "stretch_atr": _num(s.get("ms_stretch_atr")), "room_atr": _num(s.get("ms_room_atr")),
         "rr": _num(s.get("ms_rr")), "stop": _num(s.get("ms_stop")), "target": _num(s.get("ms_target")),
         "rr_flags": list(s.get("ms_rr_flags") or []), "atr": _num(s.get("ms_atr")), "ms_price": _num(s.get("ms_price")),
-        "tqs": _num(s.get("ms_tqs")), "groups": _num(s.get("ms_groups")), "asof": s.get("ms_asof"), "ver": s.get("ms_ver"),
+        "tqs": _num(s.get("ms_tqs")), "groups": _num(s.get("ms_groups")), "asof": _asof_iso(s.get("ms_asof")), "ver": s.get("ms_ver"), "hash": s.get("ms_hash"),
         "price_used": None, "drift_pct": None, "live_adjusted": False,
     }
     px, msp, atr = _num(price), f["ms_price"], f["atr"]

@@ -127,7 +127,7 @@ def test_exit_mode_sells_only_in_profit_on_a_signal():
 
 def test_unknown_mode_falls_back_to_the_configured_one(monkeypatch):
     monkeypatch.setattr(config, "STRUCTURE_EXIT_MODE", "bogus", raising=False)
-    assert sx.mode() == "tighten"
+    assert sx.mode() == "exit"          # group 399: the fallback default is exit
     monkeypatch.setattr(config, "STRUCTURE_EXIT_MODE", "exit", raising=False)
     assert sx.mode() == "exit"
 

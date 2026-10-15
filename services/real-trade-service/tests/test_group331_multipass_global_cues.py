@@ -39,37 +39,37 @@ class _Tk:
 
 class TestMultiPass:
     def test_default_pass_times(self):
-        assert preopen._pass_times() == ["09:08", "09:11", "09:14"]
+        assert preopen._pass_times() == ["09:10", "09:12", "09:14"]   # group 399: first pass 09:10 (was 09:08)
 
     def test_override_and_blank_safe(self, monkeypatch):
         monkeypatch.setattr(config, "PREOPEN_SNAPSHOT_PASSES_IST", " 09:09 , 09:13 ")
         assert preopen._pass_times() == ["09:09", "09:13"]
         monkeypatch.setattr(config, "PREOPEN_SNAPSHOT_PASSES_IST", " , ")
-        assert preopen._pass_times() == ["09:08", "09:11", "09:14"] or preopen._pass_times() == ["09:08"]
+        assert preopen._pass_times() == ["09:10", "09:12", "09:14"] or preopen._pass_times() == ["09:10"]
 
     def test_due_progresses_pass_by_pass(self):
-        assert preopen.due(at(9, 7)) is False
-        assert preopen.due(at(9, 8)) is True
-        preopen.record({"A": _Tk(106, 100, at(9, 8))}, now=at(9, 8))
-        assert preopen.due(at(9, 9)) is False            # first pass done, next one not yet reached
-        assert preopen.due(at(9, 11)) is True            # second pass is due
-        preopen.record({"B": _Tk(97, 100, at(9, 11))}, now=at(9, 11))
-        assert preopen.due(at(9, 12)) is False
+        assert preopen.due(at(9, 9)) is False
+        assert preopen.due(at(9, 10)) is True
+        preopen.record({"A": _Tk(106, 100, at(9, 10))}, now=at(9, 10))
+        assert preopen.due(at(9, 11)) is False           # first pass done, next one not yet reached
+        assert preopen.due(at(9, 12)) is True            # second pass is due
+        preopen.record({"B": _Tk(97, 100, at(9, 12))}, now=at(9, 12))
+        assert preopen.due(at(9, 13)) is False
         assert preopen.due(at(9, 14)) is True
         preopen.record({}, now=at(9, 14))
         assert preopen.due(at(9, 14)) is False
         assert preopen.due(at(9, 16)) is False           # never after the bell
 
     def test_late_start_catches_up_in_one_pass(self):
-        assert preopen.due(at(9, 12)) is True            # restarted at 09:12: two passes are overdue, one run covers them
-        preopen.record({"A": _Tk(106, 100, at(9, 12))}, now=at(9, 12))
-        assert preopen.status()["passes_done"] == ["09:08", "09:11"]
+        assert preopen.due(at(9, 13)) is True            # restarted at 09:13: two passes are overdue, one run covers them
+        preopen.record({"A": _Tk(106, 100, at(9, 13))}, now=at(9, 13))
+        assert preopen.status()["passes_done"] == ["09:10", "09:12"]
         assert preopen.due(at(9, 13)) is False
         assert preopen.due(at(9, 14)) is True
 
     def test_later_pass_adds_and_overrides_but_never_drops(self):
-        preopen.record({"A": _Tk(106.5, 100, at(9, 8)), "B": _Tk(104, 100, at(9, 8))}, now=at(9, 8))
-        preopen.record({"B": _Tk(96, 100, at(9, 11)), "C": _Tk(107, 100, at(9, 11))}, now=at(9, 11))
+        preopen.record({"A": _Tk(106.5, 100, at(9, 10)), "B": _Tk(104, 100, at(9, 10))}, now=at(9, 10))
+        preopen.record({"B": _Tk(96, 100, at(9, 12)), "C": _Tk(107, 100, at(9, 12))}, now=at(9, 12))
         gaps = preopen.status()["gaps"]
         assert set(gaps) == {"A", "B", "C"}
         assert round(gaps["B"], 6) == -4.0               # the later reading replaced the earlier one
@@ -77,13 +77,13 @@ class TestMultiPass:
         assert preopen.gap_reason("B", at(9, 30)).startswith("PREOPEN_GAP_DOWN")
 
     def test_new_day_starts_clean(self):
-        preopen.record({"A": _Tk(106, 100, at(9, 8))}, now=at(9, 8))
+        preopen.record({"A": _Tk(106, 100, at(9, 10))}, now=at(9, 10))
         preopen._snap["coverage"].append({"queued": 1}); preopen._snap["warm_done"] = True
-        nxt = datetime(2026, 10, 13, 9, 8, tzinfo=IST)
+        nxt = datetime(2026, 10, 13, 9, 10, tzinfo=IST)
         assert preopen.due(nxt) is True
         preopen.record({"Z": _Tk(103, 100, nxt)}, now=nxt)
         st = preopen.status()
-        assert set(st["gaps"]) == {"Z"} and st["passes_done"] == ["09:08"] and st["coverage"] == []
+        assert set(st["gaps"]) == {"Z"} and st["passes_done"] == ["09:10"] and st["coverage"] == []
 
     def test_run_warms_once_and_records_coverage(self, monkeypatch):
         import market_feed.feed as feed
@@ -120,9 +120,9 @@ class TestMultiPass:
         async def boom(syms, **kw):
             raise RuntimeError("feed down")
         monkeypatch.setattr(feed, "get_quotes", boom)
-        monkeypatch.setattr(preopen, "_reached", lambda now=None: ["09:08"])
+        monkeypatch.setattr(preopen, "_reached", lambda now=None: ["09:10"])
         st = asyncio.run(preopen.run(["A"]))
-        assert st["passes_done"] == ["09:08"] and st["symbols_with_gap"] == 0
+        assert st["passes_done"] == ["09:10"] and st["symbols_with_gap"] == 0
 
 
 class TestGlobalCuesParse:
@@ -336,6 +336,6 @@ class TestAutoPilotCarryWiring:
 class TestPreopenStatusRoute:
     def test_route_returns_status(self):
         import main
-        preopen.record({"A": _Tk(106, 100, at(9, 8))}, now=at(9, 8))
+        preopen.record({"A": _Tk(106, 100, at(9, 10))}, now=at(9, 10))
         body = main.preopen_status()
-        assert body["symbols_with_gap"] == 1 and body["passes_done"] == ["09:08"] and "coverage" in body
+        assert body["symbols_with_gap"] == 1 and body["passes_done"] == ["09:10"] and "coverage" in body

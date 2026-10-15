@@ -1326,7 +1326,7 @@ async def _trading_loop() -> None:
             # tripped breaker can never silently skip the unconditional
             # exit-reconciliation / EOD-squareoff steps. See _run_cycle()'s
             # entry-attempt block for the full reasoning.
-            # group330: 09:08 pre-market plan (best-effort, once per IST day, never blocks the loop's own work).
+            # group330/399: 09:10 pre-market plan (best-effort, once per IST day, never blocks the loop's own work).
             try:
                 from screening import preopen as _preopen
                 if _preopen.due():

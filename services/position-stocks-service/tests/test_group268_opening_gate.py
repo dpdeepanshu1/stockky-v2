@@ -75,9 +75,15 @@ def test_good_candidate_passes_after_the_opening_range(w):
     assert og.reject_reason("AAA", 101.9, at(9, 40)) is None
 
 
-def test_too_early(w):
-    r = og.reject_reason("AAA", 101.0, at(9, 15, 10))     # group 390: only the first ~30 s are skipped (was 5 min)
+def test_too_early(w, monkeypatch):
+    monkeypatch.setattr(config, "OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.5)   # group 399: the wait is configurable; the default is now 0
+    r = og.reject_reason("AAA", 101.0, at(9, 15, 10))
     assert r.startswith("OPENING_GATE:TOO_EARLY")
+
+
+def test_group399_no_wait_at_the_bell_by_default(w):
+    r = og.reject_reason("AAA", 101.0, at(9, 15, 0))      # group 399: entries are evaluated from the first second
+    assert not (r or "").startswith("OPENING_GATE:TOO_EARLY")
 
 
 @pytest.mark.parametrize("open_px,code", [(104.0, "GAP_UP"), (98.5, "GAP_DOWN")])
@@ -397,7 +403,7 @@ def test_fetch_candles_uses_market_data_history(monkeypatch):
 
 # ── group 390: 09:15 entries ─────────────────────────────────────────────────
 def test_group390_default_wait_is_30_seconds():
-    assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.5
+    assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.0   # group 399: was 0.5
 
 
 def test_group390_entry_allowed_at_0916_with_no_range_yet(w):

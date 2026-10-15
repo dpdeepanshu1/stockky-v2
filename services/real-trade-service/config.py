@@ -426,7 +426,7 @@ def _og_float(name, default):
 
 OPENING_GATE_ENABLED = ((os.getenv("OPENING_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_SETTLE_IST = (os.getenv("OPENING_GATE_SETTLE_IST") or "").strip() or "10:00"
-OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.5)   # group 390: was 5; only the first ~30 s (auction prints) are skipped
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.0)   # group 399: 0 = no wait, entries from 09:15:00 (group 390: 0.5, group 268: 5)
 OPENING_GATE_RANGE_AFTER_MIN = _og_float("OPENING_GATE_RANGE_AFTER_MIN", 15.0)   # group 390: the day-range-position check applies only once the range has built up
 OPENING_GATE_MIN_CHANGE_PCT = _og_float("OPENING_GATE_MIN_CHANGE_PCT", -0.5)   # price vs previous close, lower bound
 OPENING_GATE_MAX_CHANGE_PCT = _og_float("OPENING_GATE_MAX_CHANGE_PCT", 3.0)    # upper bound; chasing a bigger move at the open is skipped
@@ -523,7 +523,7 @@ STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
 # group356/365 (WS-6 + structure exit): every one of these is LIVE by default.
 #   STRUCTURE_OBS_*   what the gate saw per symbol/day and what the stock did next (structure_observations table, background evaluator)
 #   STRUCTURE_EDGE_MIN_N  finished rows per side before the edge / calibration report draws a conclusion
-#   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten (default) | exit
+#   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten | exit (default since group 399)
 STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
 STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
@@ -531,7 +531,7 @@ STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIME
 STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0))
 STRUCTURE_EDGE_MIN_N = max(1, int(_og_float("STRUCTURE_EDGE_MIN_N", 100)))
 _sxm = (os.getenv("STRUCTURE_EXIT_MODE") or "").strip().lower()
-STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "tighten"
+STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "exit"   # group 399: default exit (was tighten)
 STRUCTURE_EXIT_TIGHT_ATR = max(0.0, _og_float("STRUCTURE_EXIT_TIGHT_ATR", 0.75))
 STRUCTURE_EXIT_CHOCH_BARS = max(1, int(_og_float("STRUCTURE_EXIT_CHOCH_BARS", 3)))
 STRUCTURE_EXIT_BOS_BARS = max(1, int(_og_float("STRUCTURE_EXIT_BOS_BARS", 3)))
@@ -559,17 +559,17 @@ VIX_FETCH_TIMEOUT_S = _og_float("VIX_FETCH_TIMEOUT_S", 3.0)
 #    VWAP. Needs avg_price on the market-data row (Dhan average_price); unknown never blocks.
 ENTRY_VWAP_GATE_ENABLED = ((os.getenv("ENTRY_VWAP_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 ENTRY_VWAP_TOLERANCE_PCT = _og_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
-#  * Pre-open snapshot (entry_engine/preopen.py): at PREOPEN_SNAPSHOT_TIME_IST (default 09:08, before the 09:15 bell) the indicative gap of the
+#  * Pre-open snapshot (entry_engine/preopen.py): at PREOPEN_SNAPSHOT_TIME_IST (default 09:10 since group 399, before the 09:15 bell) the indicative gap of the
 #    queued candidates is recorded and the caches (previous-day candles, results dates / news, VIX) are warmed. A candidate that gapped up
 #    PREOPEN_GAP_UP_BLOCK_PCT or more (chasing) or down PREOPEN_GAP_DOWN_BLOCK_PCT or more (falling) is not bought until PREOPEN_GAP_GATE_UNTIL_IST.
 #    A price that is not fresh (older than PREOPEN_MAX_PRICE_AGE_S) is not a pre-open price and is ignored. 0 disables a side.
 PREOPEN_SNAPSHOT_ENABLED = ((os.getenv("PREOPEN_SNAPSHOT_ENABLED") or "").strip() or "true").lower() == "true"
-PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:08"
-PREOPEN_SNAPSHOT_PASSES_IST = (os.getenv("PREOPEN_SNAPSHOT_PASSES_IST") or "").strip()    # "" = PREOPEN_SNAPSHOT_TIME_IST, 09:11, 09:14
+PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:10"   # group 399: was 09:08
+PREOPEN_SNAPSHOT_PASSES_IST = (os.getenv("PREOPEN_SNAPSHOT_PASSES_IST") or "").strip()    # "" = PREOPEN_SNAPSHOT_TIME_IST, 09:12, 09:14
 PREOPEN_GAP_GATE_UNTIL_IST = (os.getenv("PREOPEN_GAP_GATE_UNTIL_IST") or "").strip() or "11:00"
 PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
-PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
+PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 420.0)   # group 399: was 180; the 09:08-09:15 buffer sends no order updates, so a 09:14 pass sees a ~6 min old price
 PREOPEN_WARM_MAX_SYMBOLS = int(_og_float("PREOPEN_WARM_MAX_SYMBOLS", 40.0))
 # group344 (13 Oct log: "event fetch failed for RAMRAT (ReadTimeout)" while this warm-up ran 216 s over 60 symbols, one blocking call
 # after the other, against the same event service): the warm-up now stops after PREOPEN_WARM_BUDGET_S seconds (default 45; 0 = no limit) and
@@ -662,10 +662,10 @@ SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(((os.getenv("SCHEDULE_CHECK_INTERV
 # every OPENING_FAST_SCHEDULE_SECONDS and the full entry cycle every OPENING_FAST_CYCLE_SECONDS, so a 09:15 entry does not wait
 # for the next 60 s / 180 s tick. Outside the window the normal intervals apply. OPENING_FAST_CYCLE_SECONDS=0 turns the fast
 # cadence off for both loops.
-OPENING_FAST_START_IST = (os.getenv("OPENING_FAST_START_IST") or "").strip() or "09:14"
+OPENING_FAST_START_IST = (os.getenv("OPENING_FAST_START_IST") or "").strip() or "09:10"
 OPENING_FAST_END_IST = (os.getenv("OPENING_FAST_END_IST") or "").strip() or "09:30"
 OPENING_FAST_SCHEDULE_SECONDS = max(5, int(((os.getenv("OPENING_FAST_SCHEDULE_SECONDS") or "").strip() or "5")))
-OPENING_FAST_CYCLE_SECONDS = max(0, int(((os.getenv("OPENING_FAST_CYCLE_SECONDS") or "").strip() or "20")))
+OPENING_FAST_CYCLE_SECONDS = max(0, int(((os.getenv("OPENING_FAST_CYCLE_SECONDS") or "").strip() or "10")))
 
 # ── EOD signal scan (2026-09-10, session22 — user request) ─────────────────
 # "When market closes for the day, pick some stocks based on end-of-day

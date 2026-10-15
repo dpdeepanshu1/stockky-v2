@@ -105,8 +105,13 @@ class TestRejectReason:
         assert opening_gate.reject_reason("REAL", None) is None
 
     def test_too_early(self, monkeypatch):
-        at(monkeypatch, "09:15:10")      # group 390: only the first ~30 s are skipped (was 5 min)
+        monkeypatch.setattr(config, "OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.5)   # group 399: the wait is configurable; the default is now 0
+        at(monkeypatch, "09:15:10")
         assert opening_gate.reject_reason("REAL", tk()).startswith("OPENING_GATE:TOO_EARLY")
+
+    def test_group399_no_wait_at_the_bell_by_default(self, monkeypatch):
+        at(monkeypatch, "09:15:00")      # group 399: entries are evaluated from the first second
+        assert not (opening_gate.reject_reason("REAL", tk()) or "").startswith("OPENING_GATE:TOO_EARLY")
         at(monkeypatch, "09:16")
         assert opening_gate.reject_reason("REAL", tk(hi=101.0, lo=100.9, price=101.0)) is None
 
@@ -119,7 +124,7 @@ class TestRejectReason:
         assert opening_gate.reject_reason("REAL", tk(price=101.0, hi=None, lo=None)) == "OPENING_GATE:NO_DAY_RANGE"
 
     def test_group390_defaults(self):
-        assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.5
+        assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.0   # group 399: was 0.5
         assert config.ENTER_AT_OPEN_TIME_IST == "09:15"
 
     def test_change_vs_prev_close_band(self, monkeypatch):

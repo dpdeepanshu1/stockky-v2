@@ -295,6 +295,18 @@ def test_model_routes_and_oracle_identity_are_wired():
         assert f"    {col} = Column(" in m, col
 
 
+def test_table_is_created_on_first_use_in_every_route():
+    """init_db() exits early when paper_trades exists, so the routes must create decision_structure_observations themselves."""
+    a = open(os.path.join(HERE, "app.py"), encoding="utf-8").read()
+    m = open(os.path.join(HERE, "models.py"), encoding="utf-8").read()
+    assert "def ensure_structure_table(" in m and "StructureObservation.__table__.create(" in m and "checkfirst=True" in m
+    assert "ensure_structure_table" in a.split("from models import", 1)[1].splitlines()[0]
+    assert "status_code=503" in a.split("def _ensure_structure_table_or_503", 1)[1].split("@app.", 1)[0]
+    for fn in ("api_structure_observations", "api_structure_observations_list", "api_evaluate_structure", "api_structure_report"):
+        body = a.split(f"async def {fn}(", 1)[1].split("\n@app.", 1)[0]
+        assert "_ensure_structure_table_or_503()" in body.split("db = SessionLocal()")[0], fn
+
+
 if __name__ == "__main__":
     n = 0
     for k, v in sorted(globals().items()):

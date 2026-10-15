@@ -30,7 +30,7 @@ import numpy as np
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade, StructureObservation
+from models import Base, ensure_schema, ensure_structure_table, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade, StructureObservation
 from pit_validation import validate_prediction_snapshot, validate_outcome_vs_prediction
 import trades as trades_module
 from evaluate import (
@@ -928,6 +928,15 @@ async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50
 
 
 # ── group374: all-decision structure observations (plan WS-6) ───────────────────────────────────────────────────────────────────────
+def _ensure_structure_table_or_503():
+    """Create decision_structure_observations on first use (init_db skips existing DBs). 503 with the reason if that fails."""
+    try:
+        ensure_structure_table(engine)
+    except Exception as e:
+        logger.error("structure table create failed: %s", e)
+        raise HTTPException(status_code=503, detail=f"structure observations table unavailable: {str(e)[:200]}")
+
+
 @app.post("/api/structure/observations")
 async def api_structure_observations(request: Request):
     """Idempotent batch upsert (<= 100). Body: a list, or {"observations": [...]}. Evidence only: nothing here changes a decision."""
@@ -940,6 +949,7 @@ async def api_structure_observations(request: Request):
     items = body.get("observations") if isinstance(body, dict) else body
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="expected a list of observations")
+    _ensure_structure_table_or_503()
     db = SessionLocal()
     try:
         return JSONResponse(content={"ok": True, **_so.upsert_batch(db, StructureObservation, items)})
@@ -953,6 +963,7 @@ async def api_structure_observations(request: Request):
 
 @app.get("/api/structure/observations")
 async def api_structure_observations_list(symbol: Optional[str] = None, days: int = 30, limit: int = 200):
+    _ensure_structure_table_or_503()
     db = SessionLocal()
     try:
         since = (datetime.now(IST).date() - timedelta(days=max(1, min(int(days), 400)))).isoformat()
@@ -980,6 +991,7 @@ async def api_evaluate_structure(max_batch: int = 50):
     def _bench():
         return _fb("^NSEI", None, None)
 
+    _ensure_structure_table_or_503()
     db = SessionLocal()
     try:
         res = await asyncio.to_thread(_so.evaluate_pending, db, StructureObservation, _bars, _bench, max_batch)
@@ -995,6 +1007,7 @@ async def api_evaluate_structure(max_batch: int = 50):
 @app.get("/api/structure/report")
 async def api_structure_report(days: int = 60, min_n: int = 30):
     """Did the daily-structure policy help? BUY NOW that passed vs picks the policy demoted, per decision, with sample-size honesty."""
+    _ensure_structure_table_or_503()
     db = SessionLocal()
     try:
         return JSONResponse(content={"ok": True, **_so.report(db, StructureObservation, days=days, min_n=max(1, int(min_n)))})

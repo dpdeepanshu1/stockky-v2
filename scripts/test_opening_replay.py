@@ -135,6 +135,89 @@ def test_cli_stop_mults_flag():
         assert rep["stops"]["mults"] == [0.6]
 
 
+def rt(h, m, reason, pnl, qty=10, entry=100.0, close_min=5, day=12, mode="REAL", pid=None, **kw):
+    """A real-trade per-trade record (GET /positions/{mode}/records) opened at h:m IST."""
+    _n[0] += 1
+    o = datetime(2026, 10, day, h, m, tzinfo=IST)
+    r = {"position_id": pid if pid is not None else _n[0], "mode": mode, "symbol": f"R{_n[0]}", "exit_reason": reason, "gross_pnl": pnl, "quantity": qty,
+         "entry_price": entry, "exit_price": None, "stop_pct": None, "stop_basis": None, "max_gain_pct": None, "max_drawdown_pct": None,
+         "opened_at": o.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+         "closed_at": (o + timedelta(minutes=close_min)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
+    r.update(kw)
+    return r
+
+
+def test_rt_losing_stop_is_a_stop_out_but_a_profitable_stop_exit_is_not():
+    lose, win = orp.from_rt_record(rt(9, 20, "stop_hit", -30)), orp.from_rt_record(rt(9, 21, "stop_hit", 12))
+    assert lose["status"] == "STOP_HIT" and win["status"] == "STOP_EXIT_NOT_LOSING" and win["status"] not in orp.STOP_STATUSES
+    assert orp.from_rt_record(rt(9, 25, "stop_hit", 0))["status"] == "STOP_EXIT_NOT_LOSING"
+    assert orp.from_rt_record(rt(9, 22, "broker_stop", -5))["status"] == "STOP_HIT"
+    assert orp.from_rt_record(rt(9, 22, "emergency_gap_down", -5))["status"] == "STOP_HIT"
+    assert orp.from_rt_record(rt(9, 23, "target_hit", 40))["status"] == "TARGET_HIT"
+    assert orp.from_rt_record(rt(9, 24, None, 1))["status"] == "CLOSED"
+
+
+def test_rt_exit_price_is_derived_when_unknown_and_kept_when_known():
+    assert orp.from_rt_record(rt(9, 20, "target_hit", 50, qty=10, entry=100.0))["exit_price"] == 105.0
+    assert orp.from_rt_record(rt(9, 20, "target_hit", 50, exit_price=104.9))["exit_price"] == 104.9
+    assert orp.from_rt_record(rt(9, 20, "target_hit", 50, quantity=None))["exit_price"] is None
+
+
+def test_rt_records_replay_like_ledger_rows():
+    rows = [rt(9, 16, "stop_hit", -10, close_min=2), rt(9, 18, "stop_hit", -10, close_min=2), rt(9, 21, "target_hit", 40), rt(9, 40, "target_hit", 5, day=13)]
+    with tempfile.TemporaryDirectory() as d:
+        pth = Path(d, "rt.json")
+        pth.write_text(json.dumps({"mode": "REAL", "records": rows}))
+        rep = orp.replay(orp.load([str(pth)]), limit=2)
+    assert rep["opening_trades"] == 4 and rep["scenarios"]["pause_only"]["skipped"] == 1 and rep["scenarios"]["actual"]["pnl"] == 25.0
+
+
+def test_rt_records_without_size_or_time_are_not_replayed():
+    rows = [rt(9, 20, "target_hit", 50, quantity=None), rt(9, 21, "target_hit", 50, opened_at=None), rt(9, 22, "target_hit", 50)]
+    with tempfile.TemporaryDirectory() as d:
+        pth = Path(d, "rt.json")
+        pth.write_text(json.dumps({"records": rows}))
+        assert orp.replay(orp.load([str(pth)]))["opening_trades"] == 1
+
+
+def test_rt_stop_fields_feed_the_stops_section():
+    rows = [rt(9, 20, "stop_hit", -20, stop_pct=2.0, max_gain_pct=1.2, max_drawdown_pct=-2.0, stop_basis="atr"),
+            rt(9, 21, "target_hit", 30, stop_pct=2.0, max_gain_pct=4.0, max_drawdown_pct=-1.7, stop_basis="atr")]
+    with tempfile.TemporaryDirectory() as d:
+        pth = Path(d, "rt.json")
+        pth.write_text(json.dumps({"records": rows}))
+        g = orp.replay(orp.load([str(pth)]), stop_mults=(0.5,))["stops"]["groups"]
+    assert g["atr"]["trades"] == 2 and g["atr"]["stop_outs"] == 1 and g["atr"]["stopped_after_running_half_r"] == 1
+    assert g["atr"]["survivors_within_02r_of_stop"] == 1 and g["atr"]["tighter"][0]["stopped_at_tighter_level"] == 2
+
+
+def test_same_position_id_in_two_files_is_merged_but_modes_stay_apart():
+    a, b = rt(9, 20, "target_hit", 10, pid=7), rt(9, 20, "target_hit", 10, pid=7, mode="DEMO")
+    with tempfile.TemporaryDirectory() as d:
+        p1, p2 = Path(d, "a.json"), Path(d, "b.json")
+        p1.write_text(json.dumps({"records": [a]})); p2.write_text(json.dumps({"records": [a, b]}))
+        assert len(orp.load([str(p1), str(p2)])) == 2
+
+
+def test_mixing_ledger_and_real_trade_files_is_refused():
+    with tempfile.TemporaryDirectory() as d:
+        p1, p2 = Path(d, "a.json"), Path(d, "b.json")
+        p1.write_text(json.dumps({"trades": [t(9, 20, "TARGET_HIT", 10)]})); p2.write_text(json.dumps({"records": [rt(9, 21, "target_hit", 10)]}))
+        try:
+            orp.load([str(p1), str(p2)])
+            raise AssertionError("should refuse")
+        except ValueError as e:
+            assert "separate runs" in str(e)
+        assert orp.main([str(p1), str(p2)]) == 2
+
+
+def test_cli_reads_a_real_trade_export():
+    with tempfile.TemporaryDirectory() as d:
+        pth = Path(d, "rt.json")
+        pth.write_text(json.dumps({"records": [rt(9, 20, "target_hit", 10)]}))
+        assert orp.main([str(pth), "--out", d]) == 0 and Path(d, "opening_replay.md").exists()
+
+
 if __name__ == "__main__":
     for k, v in list(globals().items()):
         if k.startswith("test_"):

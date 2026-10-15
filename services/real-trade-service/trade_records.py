@@ -22,7 +22,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from tz_utils import as_aware, ist_now
+from tz_utils import as_aware, ist_now, iso_utc
 
 logger = logging.getLogger("real-trade-records")
 
@@ -81,6 +81,15 @@ def _vwap(order_ids: list, fills_by_order: dict) -> Optional[float]:
                 qty += q
                 val += q * p
     return round(val / qty, 4) if qty > 0 else None
+
+
+def _entry_qty(buys: list, fills_by_order: dict) -> Optional[int]:
+    """group 398: shares bought to open the position - the filled quantity of its BUY orders, else the orders' own quantity. None when unknown."""
+    filled = sum(_num(f.qty) or 0.0 for o in buys for f in fills_by_order.get(o.id, []))
+    if filled > 0:
+        return int(round(filled))
+    ordered = sum(_num(getattr(o, "qty", None)) or 0.0 for o in buys)
+    return int(round(ordered)) if ordered > 0 else None
 
 
 def _assign(positions: list, orders: list, fills_by_order: dict) -> dict:
@@ -193,6 +202,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             else:
                 pp, ps = _num(getattr(decision, "proposed_price", None)), _num(getattr(decision, "proposed_stop", None))
                 stop_pct = round((pp - ps) / pp * 100.0, 3) if pp and ps and pp > ps > 0 else None
+            exc = _excursion_pcts(entry, getattr(p, "max_price_seen", None), getattr(p, "min_price_seen", None))   # group 397
             stop_basis = getattr(decision, "stop_basis", None)
             stop_basis = stop_basis if isinstance(stop_basis, str) and stop_basis else None
             held = None
@@ -224,9 +234,50 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "gross_pnl": gross, "charges": charges, "charges_source": charges_src, "net_pnl": net,
                 "orders_matched": bool(buys or sells),
                 "stop_pct": stop_pct, "stop_basis": stop_basis,
+                "max_gain_pct": exc["max_gain_pct"], "max_drawdown_pct": exc["max_drawdown_pct"],
+                # group 398: what scripts/opening_replay.py needs to replay a real-trade export (opening time, close time, size)
+                "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at), "quantity": _entry_qty(buys, fills_by_order),
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("trade record for position %s skipped: %s: %s", getattr(p, "id", "?"), type(e).__name__, e)
+    return out
+
+
+def _excursion_pcts(entry, hi, lo) -> dict:
+    """group 397: max gain / max drawdown % vs entry from the stored peak / trough (None when either is missing). Pure."""
+    from exit_engine.excursion import excursion_pcts
+    return excursion_pcts(entry, hi, lo)
+
+
+STOP_REASONS = ("stop_hit", "broker_stop", "emergency_gap_down")      # exits that are the stop itself (group 394 definition)
+
+
+def stop_diagnostics(records: list, mults=(0.5, 0.75)) -> dict:
+    """group 397: stop indicators per stop basis (and `all`) over the records that carry their own stop AND an excursion.
+    stop_outs = exits by STOP_REASONS; stopped_after_running_half_r = stop-outs that had been up >= 0.5R first; survivors_within_02r =
+    other trades whose drawdown came within 0.2R of the stop; tighter[k] = trades whose drawdown reached k x their stop (a tighter stop
+    would have fired) and, of the non-stop-out ones, how many were winners (the winners a tighter stop would have killed).
+    Counts only - no P&L what-if (a record has no quantity). Pure."""
+    usable = [r for r in records if (r.get("stop_pct") or 0) > 0 and r.get("max_gain_pct") is not None and r.get("max_drawdown_pct") is not None]
+    groups: dict = {"all": usable}
+    for r in usable:
+        groups.setdefault(r.get("stop_basis") or "unknown", []).append(r)
+    out: dict = {"trades": len(records), "with_stop_and_excursion": len(usable), "mults": list(mults), "groups": {}}
+    for name, rows in groups.items():
+        stopped = [r for r in rows if r.get("exit_reason") in STOP_REASONS]
+        rest = [r for r in rows if r.get("exit_reason") not in STOP_REASONS]
+        tighter = []
+        for k in mults:
+            hit = [r for r in rows if r["max_drawdown_pct"] <= -k * r["stop_pct"]]
+            hit_rest = [r for r in hit if r.get("exit_reason") not in STOP_REASONS]
+            tighter.append({"mult": k, "would_stop": len(hit), "non_stop_out_trades_hit": len(hit_rest),
+                            "winners_killed": sum(1 for r in hit_rest if _pnl_used(r) > _EPS)})
+        out["groups"][name] = {
+            "trades": len(rows), "stop_outs": len(stopped),
+            "stopped_after_running_half_r": sum(1 for r in stopped if r["max_gain_pct"] >= 0.5 * r["stop_pct"]),
+            "survivors_within_02r": sum(1 for r in rest if r["max_drawdown_pct"] <= -0.8 * r["stop_pct"]),
+            "tighter": tighter,
+        }
     return out
 
 
@@ -269,7 +320,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "trades": len(records),
         "overall": _agg(records, min_trades_note) if records else None,
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
-        "by_source_tab": {}, "by_day": {}, "by_stop_basis": {},
+        "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "stop_diagnostics": None,
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
                  "entry_slippage_pct > 0 means the entry was paid above the signal price"),
@@ -290,6 +341,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         for r in records:
             groups[key(r)].append(r)
         out[name] = {k: _agg(v, min_trades_note) for k, v in sorted(groups.items())}
+    out["stop_diagnostics"] = stop_diagnostics(records)
     return out
 
 

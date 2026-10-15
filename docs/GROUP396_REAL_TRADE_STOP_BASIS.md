@@ -14,7 +14,7 @@ Group 395 tags where each position-stocks stop came from and exports it. Real-tr
 `GET /positions/REAL/report?days=14` now shows expectancy, win rate, payoff and average hold per stop basis. `GET /positions/REAL/records` lists each trade with `stop_pct` and `stop_basis`.
 
 ## What it cannot do
-- Real-trade records no highest / lowest price after entry (position-stocks does, via `max_price_seen` / `min_price_seen`). So the group 395 questions "did stopped trades first run in favour?" and the exact tighter-stop what-if cannot be answered for real-trade yet. That needs excursion tracking in the exit loop and is a separate change.
+- Group 396 alone could not answer "did stopped trades first run in favour?", because real-trade recorded no peak / trough after entry. Group 397 adds that (see `docs/GROUP397_REAL_TRADE_EXCURSION.md`).
 - `scripts/opening_replay.py` still reads the position-stocks `/trades/history` export, not a real-trade export.
 - Trades opened before this build, and positions imported from the broker, show `stop_basis` as `unknown`.
 - Small samples: groups under the report's `min_trades_note` are noise. No significance test.

@@ -296,8 +296,8 @@ class StructureObservation(Base):
     """group374: one row per (symbol, observation day, engine version, policy mode) for EVERY /decide answer that carried a daily-structure block
     (BUY NOW, PREPARE, WAIT, DO NOT BUY and policy-demoted picks). Inputs are written once a day; outcome columns are filled later from daily
     bars by structure_obs.evaluate_pending (entry = next session open, T+1/5/10/20, MFE/MAE, first-touch on the structural stop/target)."""
-    __tablename__ = "structure_observations"
-    __table_args__ = (UniqueConstraint("symbol", "obs_date", "engine_version", "policy_mode", name="uq_structure_obs_key"),)
+    __tablename__ = "decision_structure_observations"   # NOT "structure_observations": real-trade-service owns that name (group356, different columns) and every service shares one Oracle schema
+    __table_args__ = (UniqueConstraint("symbol", "obs_date", "engine_version", "policy_mode", name="uq_decision_struct_obs_key"),)
 
     id = _pk_column()
     symbol = Column(String(20), nullable=False, index=True)
@@ -988,7 +988,7 @@ _PK_TABLES = (
     "trade_backups",
     "training_runs",
     "model_artifacts",
-    "structure_observations",
+    "decision_structure_observations",
 )
 
 

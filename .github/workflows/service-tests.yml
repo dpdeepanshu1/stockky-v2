@@ -20,6 +20,8 @@ on:
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
       - "scripts/check_market_data_url_default.py"
+      - "scripts/legacy_gate_backtest.py"
+      - "scripts/test_legacy_gate_backtest.py"
       - "docker-compose.yml"
       - "scripts/check_table_name_collisions.py"
       - "scripts/ms_ab_report.py"
@@ -41,6 +43,8 @@ on:
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
       - "scripts/check_market_data_url_default.py"
+      - "scripts/legacy_gate_backtest.py"
+      - "scripts/test_legacy_gate_backtest.py"
       - "docker-compose.yml"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
@@ -78,7 +82,7 @@ jobs:
       - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
         run: |
           pip install pytest
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

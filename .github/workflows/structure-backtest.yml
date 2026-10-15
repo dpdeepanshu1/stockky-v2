@@ -79,6 +79,15 @@ jobs:
           python3 scripts/ms_ab_report.py hist --out ab_out --step "$STEP" --horizon "$HORIZON" --min-n "$MIN_N" --jobs "$(nproc)" | tee ab_out_console.txt
           cp ab_out/ab_report.md "$GITHUB_STEP_SUMMARY"
 
+      - name: Replay the legacy candidate gates (group 380)
+        env:
+          STEP: ${{ github.event.inputs.step || '3' }}
+          HORIZON: ${{ github.event.inputs.horizon || '10' }}
+          MIN_N: ${{ github.event.inputs.min_n || '200' }}
+        run: |
+          python3 scripts/legacy_gate_backtest.py hist --out gate_out --step "$STEP" --horizon "$HORIZON" --min-n "$MIN_N" --jobs "$(nproc)" | tee gate_out_console.txt
+          { echo; cat gate_out/gate_report.md; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -87,4 +96,6 @@ jobs:
           path: |
             ab_out/
             ab_out_console.txt
+            gate_out/
+            gate_out_console.txt
             sample_manifest.json

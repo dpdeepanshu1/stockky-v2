@@ -12,4 +12,5 @@ NOT run (record real counts here after your CI run): position-stocks (3.11/3.12)
 
 | Suite | passed | failed | date |
 |---|---|---|---|
-| (fill from CI) | | | |
+| VM run, 7 of 8 suites, 2026-10-15 (before the group378 test-harness fix; the 2 failures were `test_group368_analyze_baseline.py`, fixed in group378) | 21909 | 2 (+1 skipped) | 2026-10-15 |
+| still to record from your VM / CI: frontend `npm run build`, analysis-intelligence `./run_tests.sh` coverage gate (>= 95), Python 3.12 for position-stocks and real-trade | | | |

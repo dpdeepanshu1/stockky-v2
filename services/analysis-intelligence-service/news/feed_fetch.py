@@ -21,6 +21,7 @@ propagate to the caller exactly as before.
 from __future__ import annotations
 
 import calendar
+import datetime as _dt
 import logging
 import os
 import re
@@ -168,6 +169,66 @@ def clear_cache() -> None:
     with _lock:
         _cache.clear()
         _primary_dead_until.clear()
+        _health.clear()
+
+
+# group378: per-feed health, so "which feeds actually deliver news" is answerable from GET /news/feed-health instead of from log lines. One row
+# per primary URL (updated on every real download, not on cache hits). state: ok | fallback (primary dead / frozen / blocked, a fallback
+# served) | frozen (primary served but every item is old and no fallback replaced it) | blocked (bot-gate status, nothing served) | empty
+# (nothing served). Evidence only - nothing in the news score reads it.
+_health: Dict[str, Dict[str, Any]] = {}
+
+
+def _newest_age_hours(parsed: Any) -> Optional[float]:
+    best: Optional[float] = None
+    for e in (getattr(parsed, "entries", None) or []):
+        ts = _entry_epoch(e)
+        if ts is not None and (best is None or ts > best):
+            best = ts
+    return round(max(0.0, (time.time() - best) / 3600.0), 1) if best is not None else None
+
+
+def _health_state(info: Dict[str, Any], entries: int, newest_age_h: Optional[float]) -> str:
+    if info.get("via"):
+        return "fallback"
+    if entries <= 0:
+        return "blocked" if info.get("status") in _BLOCK_STATUSES else "empty"
+    if STALE_DAYS > 0 and newest_age_h is not None and newest_age_h > STALE_DAYS * 24:
+        return "frozen"
+    return "ok"
+
+
+def _record_health(url: str, source: str, info: Dict[str, Any], parsed: Any) -> None:
+    try:
+        entries = len(getattr(parsed, "entries", None) or [])
+        age = _newest_age_hours(parsed)
+        row = {
+            "source": source, "url": _short(url), "state": _health_state(info, entries, age), "http_status": info.get("status"),
+            "error": info.get("error"), "served_by": _short(info["via"]) if info.get("via") else "primary",
+            "entries": entries, "newest_item_age_h": age,
+            "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
+        with _lock:
+            prev = _health.get(url) or {}
+            row["checks"] = int(prev.get("checks", 0)) + 1
+            row["failures"] = int(prev.get("failures", 0)) + (0 if row["state"] in ("ok", "fallback") else 1)
+            _health[url] = row
+            if len(_health) > 200:
+                _health.pop(next(iter(_health)), None)
+    except Exception:  # noqa: BLE001 - evidence only
+        pass
+
+
+def health_snapshot() -> Dict[str, Any]:
+    """Per-feed health rows + a state tally. Safe to call anywhere."""
+    with _lock:
+        rows = sorted((dict(v) for v in _health.values()), key=lambda r: (r.get("state") == "ok", r.get("source") or ""))
+    tally: Dict[str, int] = {}
+    for r in rows:
+        tally[r["state"]] = tally.get(r["state"], 0) + 1
+    return {"feeds": rows, "tally": tally, "stale_days": STALE_DAYS, "fallbacks_enabled": _FALLBACKS_ENABLED,
+            "note": "Rows appear after a feed's first real download since boot. 'fallback' = the primary is dead / frozen / blocked and a Google News "
+                    "search served instead; 'blocked' / 'empty' / 'frozen' = no usable items from that source right now."}
 
 
 def _ttl_for(url: str) -> int:
@@ -309,6 +370,7 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
                     _cache.pop(k, None)
                 while len(_cache) > 400:
                     _cache.pop(next(iter(_cache)), None)
+    _record_health(url, source, info, parsed)
     return parsed, dict(info, cached=False)
 
 

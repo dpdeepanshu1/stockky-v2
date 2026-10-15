@@ -315,7 +315,7 @@ class TradeDecision(Base):
     # other gate's decisions (unaffected, no behavior change).
     gate_tag = Column(String(32), nullable=True)
     # group 351: JSON snapshot of the daily market-structure gate's view for this ENTRY decision (summary subset, live chase/stretch/room/R:R,
-    # would_reject + reasons, shadow/enforce mode, structural stop vs ATR stop). NULL when the gate was off / not reached.
+    # would_reject + reasons, enforce mode (legacy rows may say shadow), structural stop vs ATR stop). NULL when the gate was off / not reached.
     structure_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 

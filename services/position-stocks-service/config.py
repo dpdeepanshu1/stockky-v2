@@ -1041,7 +1041,7 @@ def _ps(name: str) -> str:
 STRUCTURE_GATE_MODE = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
 if STRUCTURE_GATE_MODE != "off":
     STRUCTURE_GATE_MODE = "enforce"
-STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), False)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
+STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), True)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
 STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
 STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR

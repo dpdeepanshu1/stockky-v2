@@ -467,13 +467,14 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 # wrong threshold costs a skipped trade, never a bad one (which is why the backtest still has to be run: skips are silent).
 #   STRUCTURE_GATE_MODE       REAL mode:  enforce (default: WAIT with gate_tag=structure) | off (kill switch). Any other value (incl. a stale "shadow") = enforce.
 #   STRUCTURE_GATE_DEMO_MODE  DEMO mode:  same values; defaults to STRUCTURE_GATE_MODE
-# Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true.
+# Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true (the default since group377).
 def _sg_mode(name, default):
     v = (os.getenv(name) or "").strip().lower()
     return "off" if v == "off" else "enforce"   # a stale "shadow" in an old .env is live
 STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
 STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
-STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or "false").lower() == "true"
+# group377: default TRUE (was false): no usable daily structure = WAIT (structure_nodata), never a silent pass. STRUCTURE_REQUIRE_DATA=false restores "no opinion".
+STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or "true").lower() == "true"
 STRUCTURE_MAX_CHASE_ATR = _og_float("STRUCTURE_MAX_CHASE_ATR", 1.5)       # live price above the nearest zone top, in ATR (0 disables)
 STRUCTURE_MAX_STRETCH_ATR = _og_float("STRUCTURE_MAX_STRETCH_ATR", 3.0)   # live price above EMA20, in ATR (0 disables)
 STRUCTURE_MIN_ROOM_ATR = _og_float("STRUCTURE_MIN_ROOM_ATR", 0.5)         # live price to the next resistance, in ATR (0 disables)
@@ -1253,7 +1254,9 @@ def _bs_int(name: str, default: int) -> int:
 IMPORT_TARGET_MAX_STOP_MULT = max(0.0, _bs_float("IMPORT_TARGET_MAX_STOP_MULT", 2.5))
 # group368: an unchanged HOLD audit row is written at most this often per position (0 = every 8 s cycle, the old behaviour)
 EXIT_HOLD_AUDIT_SECONDS = max(0, _bs_int("EXIT_HOLD_AUDIT_SECONDS", 60))
-BROKER_STOP_ENABLED = _bs_bool("BROKER_STOP_ENABLED", "false")
+# group377: ON by default (was off). A resting Dhan stop for CNC holdings from an earlier day; BROKER_STOP_ENABLED=false is the kill switch.
+# Not exercised against a live Dhan account in tests: watch the first real position (/orders, Dhan order book; needs eDIS / TPIN on the holding).
+BROKER_STOP_ENABLED = _bs_bool("BROKER_STOP_ENABLED", "true")
 BROKER_STOP_BUFFER_PCT = max(0.0, _bs_float("BROKER_STOP_BUFFER_PCT", 0.5))
 BROKER_STOP_MIN_MOVE_PCT = max(0.0, _bs_float("BROKER_STOP_MIN_MOVE_PCT", 0.25))
 BROKER_STOP_SYNC_SECONDS = max(5, _bs_int("BROKER_STOP_SYNC_SECONDS", 60))

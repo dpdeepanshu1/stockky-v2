@@ -78,4 +78,10 @@ def test_missing_summary_is_no_opinion_not_an_error():
             r = c.post("/decide/evaluate", json=p).json()
     finally:
         os.environ.pop("STRUCTURE_POLICY_MODE", None)
-    assert r["structure"]["no_opinion"] and r["decision"] == r["structure"]["original_decision"]
+    st = r["structure"]
+    assert st["no_opinion"]
+    # group377: a BUY NOW with no structure waits; any other decision is untouched
+    if st["original_decision"] == "BUY NOW":
+        assert r["decision"] == "WAIT" and [x["id"] for x in st["rules"]] == ["P1_NO_STRUCTURE"]
+    else:
+        assert r["decision"] == st["original_decision"]

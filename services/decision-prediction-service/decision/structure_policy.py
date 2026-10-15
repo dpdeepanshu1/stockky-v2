@@ -13,7 +13,9 @@ PREPARE TO BUY (group370): the arithmetic is recomputed at the live price and a 
 now fail goes to WAIT; a PREPARE that passes EVERY BUY NOW requirement AND has a P9 trigger (fresh BOS / CHOCH / sweep / zone / fib) is
 upgraded to BUY NOW - only when the caller says the upgrade is allowed (good data quality, not already owned).
 
-Unknown is never bullish: quality unavailable / insufficient / stale, or a summary missing, means "no opinion" (decision untouched)."""
+Unknown is never bullish: quality unavailable / insufficient / stale, or a summary missing, means "no opinion" (decision untouched) - EXCEPT a BUY NOW
+(group377, rule P1_NO_STRUCTURE): with no usable structure it becomes WAIT, because a good-looking stock with an unchecked entry is not BUY NOW.
+STRUCTURE_REQUIRE_FOR_BUY_NOW=false restores the old pass-through; the caller passes require_data=False for an already-owned stock."""
 from __future__ import annotations
 
 import json
@@ -45,6 +47,11 @@ def policy_mode() -> str:
     """full (always live) | off (kill switch). A stale "shadow" / "caps" in an old .env is live (full), never record-only."""
     m = (os.getenv("STRUCTURE_POLICY_MODE") or "full").strip().lower()
     return "off" if m == "off" else "full"
+
+
+def require_data_for_buy_now() -> bool:
+    """group377: STRUCTURE_REQUIRE_FOR_BUY_NOW (default on). Off = a BUY NOW without usable structure passes through untouched (the old behaviour)."""
+    return (os.getenv("STRUCTURE_REQUIRE_FOR_BUY_NOW") or "1").strip().lower() not in ("0", "false", "off", "no")
 
 
 def prepare_upgrade_enabled() -> bool:
@@ -225,9 +232,11 @@ def _structural_levels(f: Dict[str, Any], p: Dict[str, float], price: Any, legac
 
 
 def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
-                 explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True) -> Dict[str, Any]:
+                 explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True,
+                 require_data: Optional[bool] = None) -> Dict[str, Any]:
     """Returns {'decision': final, 'structure': block-for-the-response, 'levels': optional replacement levels}. Never raises.
-    `mode` is "off" or anything else (= live). `allow_upgrade=False` stops a P9 PREPARE -> BUY NOW upgrade (the caller knows the data quality)."""
+    `mode` is "off" or anything else (= live). `allow_upgrade=False` stops a P9 PREPARE -> BUY NOW upgrade (the caller knows the data quality).
+    `require_data` (default: STRUCTURE_REQUIRE_FOR_BUY_NOW, on): a BUY NOW with no usable structure becomes WAIT (P1_NO_STRUCTURE). Only BUY NOW is touched."""
     mode = "off" if mode == "off" else ("full" if mode else policy_mode())
     legacy = legacy or {}
     out_struct: Dict[str, Any] = {"mode": mode, "applied": False, "original_decision": decision, "policy_decision": decision,
@@ -246,6 +255,13 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
         why = _no_opinion(f, p)
         if why:
             out_struct["no_opinion"] = why
+            need = require_data_for_buy_now() if require_data is None else bool(require_data)
+            if need and decision == BUY_NOW:
+                out_struct["rules"] = [{"id": "P1_NO_STRUCTURE", "to": WAIT,
+                                        "reason": f"no usable daily structure ({why}) - a BUY NOW needs a checked entry, so it waits"}]
+                out_struct["policy_decision"] = WAIT
+                out_struct["applied"] = True
+                res["decision"] = WAIT
             return res
         if f["stop"] is not None and f["target"] is not None:
             out_struct["structural_levels"] = {"stop": f["stop"], "target": f["target"], "rr": f["rr"]}
@@ -285,6 +301,15 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
         return res
     except Exception as e:  # noqa: BLE001 - the policy must never break a decision
         out_struct["no_opinion"] = f"policy error: {type(e).__name__}"
+        try:
+            need = require_data_for_buy_now() if require_data is None else bool(require_data)
+        except Exception:  # noqa: BLE001
+            need = False
+        if need and mode != "off" and decision == BUY_NOW:      # group377: an entry the policy could not check is not a BUY NOW
+            out_struct["rules"] = [{"id": "P1_NO_STRUCTURE", "to": WAIT, "reason": f"structure policy could not evaluate ({type(e).__name__}) - waits"}]
+            out_struct["policy_decision"] = WAIT
+            out_struct["applied"] = True
+            return {"decision": WAIT, "structure": out_struct, "levels": None}
         return {"decision": decision, "structure": out_struct, "levels": None}
 
 

@@ -68,7 +68,7 @@ export interface FundamentalMetrics {
 
 export interface Decision {
   symbol: string;
-  /** group353: daily market-structure policy record (shadow by default). Absent on older / fast-path rows. */
+  /** group353: daily market-structure policy record. Live since group370 (the record-only "shadow" mode was removed); `mode: "shadow"` / `applied: false` only appears on rows stored before that. Absent on older / fast-path rows. */
   structure?: DecisionStructure | null;
   /** Label only (group105): technical read rests on a minimal / fallback price history. Absent on fast-path rows. */
   technical_thin?: boolean;

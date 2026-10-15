@@ -1,5 +1,5 @@
-// group355: how the daily market-structure gate is actually behaving - one card for both services. Shows the mode (enforcing / shadow / off),
-// how many candidates were checked, how many it blocked (or would have, in shadow), how many had no structure read, why it said no, and what
+// group355: how the daily market-structure gate is actually behaving - one card for both services. Shows the mode (enforcing / off; "shadow" appears only on
+// rows stored before group370 removed the record-only mode), how many candidates were checked, how many it blocked, how many had no structure read, why it said no, and what
 // the stocks it turned away did afterwards. Read-only; polls only while the tab is visible. Collapsed by default (mobile-safe).
 import { useCallback, useEffect, useState } from "react";
 import { setVisibleInterval } from "../visibleInterval";

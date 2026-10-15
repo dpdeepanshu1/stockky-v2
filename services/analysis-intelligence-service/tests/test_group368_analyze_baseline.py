@@ -78,3 +78,12 @@ def test_thin_and_missing_history_paths_have_no_structure_keys():
         r = H.run(c)
         assert not (set(r) & set(H.NEW_KEYS)), c["name"]
         assert r == g[c["name"]], c["name"]
+
+
+def test_harness_is_hermetic_about_delivery():
+    """group378: analyze() must not reach market-data for delivery % in the offline harness, whatever MARKET_DATA_URL is."""
+    import _analyze_harness as h
+    m = h.load_main()
+    assert type(m.httpx).__name__ == "_OfflineHttpx"
+    res = h.run(h.cases()[0], structure=False)
+    assert res.get("delivery_pct") is None and res.get("delivery_source") is None

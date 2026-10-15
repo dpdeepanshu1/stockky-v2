@@ -353,6 +353,15 @@ def health(warm: bool = False):
     }
 
 
+@app.get("/structure/observation-stats")
+async def structure_observation_stats():
+    """group378: why structure observations are (not) being logged since boot - decisions considered, how many had a usable structure block,
+    how many were skipped (no block / unusable quality / deduped), queued, posted ok / failed, and cache hits that skip logging."""
+    if _so_hook is None:
+        return {"enabled": False, "error": "structure_obs_hook not importable"}
+    return _so_hook.stats()
+
+
 @app.get("/circuits")
 def circuits_status():
     return {"circuits": all_snapshots()}
@@ -860,19 +869,29 @@ async def _post_structure_observation(payload: dict) -> None:
                               headers={"Content-Type": "application/json"}, timeout=10.0)
         if r.status_code not in (200, 201):
             logger.debug("structure observation not stored for %s: %s", payload.get("symbol"), r.status_code)
+            if _so_hook is not None:
+                _so_hook.count("post_failed")
+        elif _so_hook is not None:
+            _so_hook.count("posted_ok")
     except Exception as e:  # noqa: BLE001
         logger.debug("structure observation post failed for %s: %s", payload.get("symbol"), e)
+        if _so_hook is not None:
+            _so_hook.count("post_failed")
 
 
 def _queue_structure_observation(background_tasks, symbol: str, response) -> bool:
     """Queue one observation for the FINAL response. True when queued. Never raises, never changes the response."""
     try:
-        if background_tasks is None or _so_hook is None or not _so_hook.enabled():
+        if background_tasks is None or _so_hook is None:
+            return False
+        if not _so_hook.enabled():
+            _so_hook.count("disabled")
             return False
         payload = _so_hook.build_payload(symbol, response)
         if payload is None or not _so_hook.should_send(payload):
             return False
         background_tasks.add_task(_post_structure_observation, payload)
+        _so_hook.count("queued")
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -889,7 +908,7 @@ def _structure_snapshot(response) -> dict | None:
     if not isinstance(st, dict):
         return None
     f = st.get("features") if isinstance(st.get("features"), dict) else {}
-    keep = ("quality", "trend", "tqs", "loc_score", "rr", "chase_atr", "stretch_atr", "room_atr", "bos_dir", "bos_bars", "atr", "asof", "ver")
+    keep = ("quality", "trend", "tqs", "loc_score", "rr", "chase_atr", "stretch_atr", "room_atr", "bos_dir", "bos_bars", "atr", "asof", "ver", "hash")
     return {
         "mode": st.get("mode"),
         "applied": bool(st.get("applied")),
@@ -1273,6 +1292,8 @@ async def _decide_impl(
         if cached and isinstance(cached, dict) and cached.get("decision") and not _is_weak_decide_payload(cached):
             cached = dict(cached)
             cached["from_cache"] = True
+            if _so_hook is not None:
+                _so_hook.count("cache_served")   # group378: a cached decision is not re-logged (it was logged when computed)
             return cached
     try:
         client = _get_http_client()
@@ -1767,6 +1788,7 @@ async def _decide_impl(
                     legacy={"entry_range": response.get("entry_range"), "target": response.get("target"), "stop_loss": response.get("stop_loss")},
                     explain=(_blk or {}).get("explain"),
                     allow_upgrade=_allow_up,
+                    require_data=(False if already_owned else None),   # group377: owned stocks are advice only, never re-labelled for missing structure
                 )
                 _st = _pol["structure"]
                 _st["summary_line"] = _ms_summary_line(_st)

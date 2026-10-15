@@ -128,6 +128,10 @@ def _structure_gate_no_network_by_default(monkeypatch):
     tests must never hit the network (and no summary = no opinion = no behaviour change); tests/test_group351_structure_gate.py turns it on."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "STRUCTURE_FETCH_ENABLED", False, raising=False)
+    # group377: production default is REQUIRE_DATA=true (no structure = WAIT). Pre-existing entry tests have no summary and expect no behaviour change.
+    monkeypatch.setattr(_cfg, "STRUCTURE_REQUIRE_DATA", False, raising=False)
+    # group377: BROKER_STOP_ENABLED is ON by default; pre-existing exit tests must not run the broker-stop sync. test_group322 / test_group377 turn it on.
+    monkeypatch.setattr(_cfg, "BROKER_STOP_ENABLED", False, raising=False)
     mod = _sys_g172.modules.get("entry_engine.structure_gate")
     if mod is not None:
         mod.reset()

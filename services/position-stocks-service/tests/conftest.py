@@ -36,6 +36,8 @@ def _board_gate_off_by_default(monkeypatch):
     # group354: both are LIVE by default now; older tests exercise the legacy board and an entry with no structure data
     monkeypatch.setattr(_config, "BOARD_USE_MS_ENGINE", False, raising=False)
     monkeypatch.setattr(_config, "STRUCTURE_GATE_MODE", "off", raising=False)
+    # group377: production default is REQUIRE_DATA=true; older tests have no structure summary and expect no behaviour change (tests that want it set it)
+    monkeypatch.setattr(_config, "STRUCTURE_REQUIRE_DATA", False, raising=False)
     yield
 
 

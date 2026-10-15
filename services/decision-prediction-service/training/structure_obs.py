@@ -244,6 +244,7 @@ def summarize(rows: Iterable[Dict[str, Any]], min_n: int = 30) -> Dict[str, Any]
 
 _OUTCOME_COLS = ("eval_status", "bars_seen", "entry_date", "entry_price", "ret_1", "ret_5", "ret_10", "ret_20", "mfe_20", "mae_20", "hit_5pct_20",
                  "target_before_stop", "days_to_target", "entry_chase_atr", "nifty_ret_1", "nifty_ret_5", "nifty_ret_10", "nifty_ret_20")
+_LINEAGE_COLS = ("asof_date", "params_hash")
 _INPUT_COLS = ("asof_date", "params_hash", "price", "atr", "final_decision", "legacy_decision", "policy_applied", "rules", "combined_score",
                "technical_score", "tqs", "groups", "features", "levels")
 
@@ -266,6 +267,9 @@ def upsert_batch(db: Any, M: Any, items: Any, now: Optional[datetime] = None) ->
             out["inserted"] += 1
         elif (getattr(row, "eval_status", "pending") or "pending") == "pending":
             for k in _INPUT_COLS:
+                # group378: a later decision of the day that lacks lineage must not blank what an earlier one stored
+                if k in _LINEAGE_COLS and o[k] is None and getattr(row, k, None) is not None:
+                    continue
                 setattr(row, k, o[k])
             out["updated"] += 1
         else:

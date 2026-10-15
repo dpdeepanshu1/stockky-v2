@@ -12161,13 +12161,65 @@ def _start_structure_refresh_locked(force: bool, dry_run: bool, limit: Optional[
     return {"ok": True, "status": "running", "message": f"Structure refresh started for {len(syms)} symbols", **plan_info}
 
 
+_STRUCTURE_CATCHUP_TASK: Optional["asyncio.Task"] = None
+
+
+async def _structure_refresh_catchup_loop() -> None:
+    """group378: safety net for the post-close structure refresh. Every STRUCTURE_REFRESH_CATCHUP_INTERVAL_S (default 30 min), when the market
+    is closed and no refresh is running, start the normal refresh; it selects only rows with no / an old structure, so it is a no-op once
+    the feed is current. Covers a missed QStash / GitHub trigger and a restart after 16:00 IST. Never raises."""
+    import structure_refresh as _sr
+    try:
+        await asyncio.sleep(_sr.catchup_initial_delay_s())
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            if _sr.catchup_wanted(_market_session_phase_ist(), _sr.get_job().get("status")):
+                res = await asyncio.to_thread(_start_structure_refresh, False, False, None)
+                logger.info("structure refresh catch-up: %s (%s)", res.get("status"), res.get("message") or res.get("selection") or "")
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.debug("structure refresh catch-up tick failed (ignored): %s", e)
+        try:
+            await asyncio.sleep(_sr.catchup_interval_s())
+        except asyncio.CancelledError:
+            return
+
+
+@_on_startup
+async def _start_structure_refresh_catchup():
+    global _STRUCTURE_CATCHUP_TASK
+    try:
+        import structure_refresh as _sr
+        if not _sr.catchup_enabled():
+            logger.info("Startup: structure refresh catch-up off (STRUCTURE_REFRESH_ENABLED / STRUCTURE_REFRESH_CATCHUP)")
+            return
+        if _STRUCTURE_CATCHUP_TASK is None or _STRUCTURE_CATCHUP_TASK.done():
+            _STRUCTURE_CATCHUP_TASK = asyncio.create_task(_structure_refresh_catchup_loop(), name="structure-refresh-catchup")
+            logger.info("Startup: structure refresh catch-up loop started (every %ds when the market is closed)", int(_sr.catchup_interval_s()))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Startup warning (structure refresh catch-up, non-fatal): %s", e)
+
+
+@_on_shutdown
+async def _stop_structure_refresh_catchup():
+    t = _STRUCTURE_CATCHUP_TASK
+    if t is not None and not t.done():
+        t.cancel()
+
+
 @app.get("/data-feed/structure-refresh/status")
 @app.get("/api/data-feed/structure-refresh/status")
 def data_feed_structure_refresh_status():
     """Status of the post-close structure refresh job (+ lifetime counters of this process)."""
     try:
         import structure_refresh as _sr
-        return {"ok": True, **_sr.get_job()}
+        _t = _STRUCTURE_CATCHUP_TASK
+        _catchup = {"enabled": _sr.catchup_enabled(), "interval_s": _sr.catchup_interval_s(),
+                    "loop_running": bool(_t is not None and not _t.done()), "market_phase": _market_session_phase_ist()}   # group378
+        return {"ok": True, **_sr.get_job(), "catchup": _catchup}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)[:200], "status": "idle"}
 

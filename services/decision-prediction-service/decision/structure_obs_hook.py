@@ -14,10 +14,33 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 _SEEN: Dict[str, bool] = {}
 _LOCK = threading.Lock()
 _MAX_SEEN = 5000
+# group378: why observations are (not) being logged - counters since boot, exposed by GET /structure/observation-stats on the decision service.
+_STATS: Dict[str, int] = {"considered": 0, "built": 0, "skip_no_structure_block": 0, "skip_no_decision": 0, "skip_unusable_quality": 0,
+                          "skip_deduped": 0, "queued": 0, "posted_ok": 0, "post_failed": 0, "cache_served": 0, "disabled": 0}
 
 
 def enabled() -> bool:
     return (os.getenv("STRUCTURE_OBS_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def count(key: str, n: int = 1) -> None:
+    """Bump one of the _STATS counters (unknown keys are ignored). Never raises."""
+    try:
+        with _LOCK:
+            if key in _STATS:
+                _STATS[key] += n
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def stats() -> Dict[str, Any]:
+    """Counters since boot + the share of considered decisions that had a usable structure block."""
+    with _LOCK:
+        out: Dict[str, Any] = dict(_STATS)
+    c = out.get("considered") or 0
+    out["usable_share"] = round(out["built"] / c, 3) if c else None
+    out["enabled"] = enabled()
+    return out
 
 
 def _num(v: Any) -> Optional[float]:
@@ -34,13 +57,20 @@ def build_payload(symbol: str, response: Any, now: Optional[datetime] = None) ->
     try:
         if not isinstance(response, dict) or not symbol:
             return None
+        count("considered")
         st = response.get("structure")
         final = response.get("decision")
-        if not isinstance(st, dict) or not isinstance(final, str) or not final:
+        if not isinstance(st, dict):
+            count("skip_no_structure_block")
+            return None
+        if not isinstance(final, str) or not final:
+            count("skip_no_decision")
             return None
         f = st.get("features") if isinstance(st.get("features"), dict) else {}
         if (f.get("quality") or "unavailable") not in ("ok", "limited"):
+            count("skip_unusable_quality")
             return None          # no usable structure -> no row (unknown is never logged as a signal)
+        count("built")
         now = (now or datetime.now(_IST)).astimezone(_IST)
         sl = st.get("structural_levels") if isinstance(st.get("structural_levels"), dict) else {}
         return {
@@ -69,6 +99,7 @@ def should_send(payload: Dict[str, Any]) -> bool:
         key = "|".join(str(payload.get(k)) for k in ("symbol", "obs_date", "engine_version", "policy_mode", "final_decision", "policy_applied"))
         with _LOCK:
             if key in _SEEN:
+                _STATS["skip_deduped"] += 1
                 return False
             if len(_SEEN) >= _MAX_SEEN:
                 _SEEN.clear()
@@ -81,3 +112,5 @@ def should_send(payload: Dict[str, Any]) -> bool:
 def _reset_for_tests() -> None:
     with _LOCK:
         _SEEN.clear()
+        for k in _STATS:
+            _STATS[k] = 0

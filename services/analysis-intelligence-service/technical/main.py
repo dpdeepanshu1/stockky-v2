@@ -886,8 +886,18 @@ def health():
             from stockky_ms.ms_types import MS_ENGINE_VERSION as _ev  # noqa: N811
     except Exception:  # noqa: BLE001
         _ev = None
+    _info = None
+    try:
+        if _ms_analyze is not None:
+            from stockky_ms.info import engine_info
+            _info = engine_info(_structure_params())     # group403: params_hash of the params actually applied (STRUCTURE_PARAMS_JSON or the defaults)
+            if _info.get("params_hash") is None:
+                from stockky_ms.params import MSParams, params_hash
+                _info["params_hash"] = params_hash(MSParams())
+    except Exception:  # noqa: BLE001
+        _info = None
     return {"status": "ok", "service": "technical-analysis-service",
-            "structure": {"enabled": bool(_structure_enabled() and _ms_analyze is not None), "engine_version": _ev, **_STRUCT_COUNTERS}}
+            "structure": {"enabled": bool(_structure_enabled() and _ms_analyze is not None), "engine_version": _ev, "engine": _info, **_STRUCT_COUNTERS}}
 
 @app.get("/")
 def root():

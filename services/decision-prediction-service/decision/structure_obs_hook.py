@@ -79,6 +79,7 @@ def build_payload(symbol: str, response: Any, now: Optional[datetime] = None) ->
             "policy_mode": st.get("mode") or "full",
             "price": _num(response.get("close")) or _num(f.get("price_used")) or _num(f.get("ms_price")), "atr": _num(f.get("atr")),
             "final_decision": final, "legacy_decision": st.get("original_decision") or final,
+            "sector": response.get("sector") if isinstance(response.get("sector"), str) else None,
             "policy_applied": st.get("applied") is True,
             "rules": [r.get("id") for r in (st.get("rules") if isinstance(st.get("rules"), list) else []) if isinstance(r, dict) and r.get("id")],
             "combined_score": _num(response.get("combined_score")), "technical_score": _num(response.get("technical_score")),

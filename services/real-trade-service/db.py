@@ -154,6 +154,7 @@ def init_schema() -> None:
     _ensure_catalyst_price_source_column(eng, dialect())
     _ensure_hot_path_indexes(eng, dialect())
     _ensure_exit_retry_columns(eng, dialect())
+    _ensure_structure_obs_bench_columns(eng, dialect())
     _ensure_afterhours_gate_column(eng, dialect())
     _ensure_nextday_watchlist_indexes(eng, dialect())
     _ensure_afterhours_last_run_columns(eng, dialect())
@@ -297,6 +298,35 @@ def _ensure_account_columns(engine, dialect_name: str) -> None:
 # trade_gate_state existed before auto_pilot_enabled/auto_pilot_enabled_at
 # were added to models.py (2026-08-27, Auto-Pilot feature), so on any
 # already-deployed DB these two columns must be added by hand, once.
+# group402: structure_observations gained the market-relative return columns. create_all never adds a column to an existing table, so
+# add them once here (same idiom as above; a failure is logged and never stops the service booting).
+def _ensure_structure_obs_bench_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"].lower() for c in inspect(engine).get_columns("structure_observations")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect structure_observations columns: %s", e)
+        return
+    if not existing:        # table not there (create_all makes it with the columns)
+        return
+    ctype = "BINARY_DOUBLE" if dialect_name == "oracle" else "DOUBLE PRECISION"
+    for col_name in ("bench_ret_1d", "bench_ret_5d", "bench_ret_10d", "bench_ret_20d"):
+        if col_name in existing:
+            continue
+        sql = (f"ALTER TABLE structure_observations ADD ({col_name} {ctype})" if dialect_name == "oracle"
+               else f"ALTER TABLE structure_observations ADD COLUMN {col_name} {ctype}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added structure_observations.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add structure_observations.%s: %s", col_name, e)
+
+
 def _ensure_gate_state_columns(engine, dialect_name: str) -> None:
     from sqlalchemy import inspect, text
 

@@ -991,10 +991,13 @@ async def api_evaluate_structure(max_batch: int = 50):
     def _bench():
         return _fb("^NSEI", None, None)
 
+    def _sector_bench(index_symbol):
+        return _fb(index_symbol, None, None)
+
     _ensure_structure_table_or_503()
     db = SessionLocal()
     try:
-        res = await asyncio.to_thread(_so.evaluate_pending, db, StructureObservation, _bars, _bench, max_batch)
+        res = await asyncio.to_thread(_so.evaluate_pending, db, StructureObservation, _bars, _bench, max_batch, None, _sector_bench)
         return JSONResponse(content={"ok": True, "status": "structure evaluation complete", **res})
     except Exception as e:
         db.rollback()

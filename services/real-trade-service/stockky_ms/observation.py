@@ -9,6 +9,7 @@ first touch of target vs stop). Rejected stocks are tracked exactly like the one
   new_observation(...)    the row to insert (no outcome yet)
   due(row, now_ts)        whether (and how much history) the row still needs - a row is done once T+20 exists
   evaluate_row(row, bars_after)   outcome fields from the daily bars AFTER the observation day
+  bench_outcome(obs_ts, bars)     group402: the market (Nifty) return over the same sessions, so a pick can be judged against the market
   aggregate(rows)         per-verdict statistics + the gate edge, for the status endpoints and the dashboard
   calibrate(rows)         group362: from the OBSERVED outcomes, does each gate rule earn its place, does the score rank outcomes, and would a
                           different threshold have held up out-of-sample? Advisory only - nothing is ever applied automatically.
@@ -25,6 +26,7 @@ from .ms_types import C, H, L, T, finite
 
 VERDICTS = ("rejected_enforced", "passed", "no_opinion")
 _LEGACY_REJECTED = "rejected_shadow"   # rows written before group370; counted as rejected_enforced when read
+BENCH_FIELDS = tuple(f"bench_ret_{h}d" for h in HORIZONS)    # group402: market return over the same sessions as ret_{h}d
 DAY_S = 86400
 HORIZON_MAX = max(HORIZONS)
 OUTCOME_FIELDS = tuple(f"ret_{h}d" for h in HORIZONS) + ("mfe_pct", "mae_pct", "first_touch", "bars_seen", "complete")
@@ -95,6 +97,37 @@ def evaluate_row(row: Dict[str, Any], bars_after_obs: Sequence[Sequence[float]])
     return {k: o.get(k) for k in OUTCOME_FIELDS}
 
 
+def bench_outcome(obs_ts: Any, bench_bars: Sequence[Sequence[float]]) -> Dict[str, Optional[float]]:
+    """group402: BENCH_FIELDS for one observation from the benchmark's daily bars. Same basis as ret_{h}d (close of the h-th session after the
+    observation day), measured from the benchmark's close ON the observation day (the stock's entry price is intraday and the benchmark's
+    intraday level was not stored, so this is an approximation of a few tenths of a percent on a normal day). Every field is None when the
+    benchmark has no bar on the observation day or no session after it: unknown is never 0. Never raises."""
+    out: Dict[str, Optional[float]] = {k: None for k in BENCH_FIELDS}
+    try:
+        ts = _num(obs_ts)
+        if ts is None or not bench_bars:
+            return out
+        k = day_key(ts)
+        base = next((float(b[C]) for b in sorted(bench_bars, key=lambda x: x[T]) if day_key(b[T]) == k and finite(b[C]) and float(b[C]) > 0), None)
+        if base is None:
+            return out
+        after = bars_after(bench_bars, ts)
+        for h in HORIZONS:
+            if len(after) >= h and finite(after[h - 1][C]):
+                out[f"bench_ret_{h}d"] = round((float(after[h - 1][C]) / base - 1.0) * 100.0, 3)
+        return out
+    except Exception:  # noqa: BLE001
+        return {k: None for k in BENCH_FIELDS}
+
+
+def _excess(rows: List[Dict[str, Any]], h: int) -> Dict[str, Any]:
+    """group402: return minus the market's return at horizon h, over rows that have both. Rows without a benchmark value are left out, never counted as 0."""
+    ex = [float(r[f"ret_{h}d"]) - float(r[f"bench_ret_{h}d"]) for r in rows if finite(r.get(f"ret_{h}d")) and finite(r.get(f"bench_ret_{h}d"))]
+    if not ex:
+        return {"n": 0, "mean": None, "win_pct": None}
+    return {"n": len(ex), "mean": round(mean(ex), 3), "win_pct": round(100.0 * sum(1 for x in ex if x > 0) / len(ex), 1)}
+
+
 def _stats(rows: List[Dict[str, Any]], h: int) -> Dict[str, Any]:
     rets = [float(r[f"ret_{h}d"]) for r in rows if finite(r.get(f"ret_{h}d"))]
     if not rets:
@@ -120,7 +153,13 @@ def aggregate(rows: Iterable[Dict[str, Any]], min_n: int = 20, edge_pct: float =
         out["by_verdict"][v] = {"n": len(g), "evaluated": len(ev), "horizons": {f"{h}d": _stats(g, h) for h in HORIZONS},
                                 "mfe_mean": round(mean(mf), 3) if mf else None, "mae_mean": round(mean(ma), 3) if ma else None,
                                 "target_first": sum(1 for t in touch if t == "target"), "stop_first": sum(1 for t in touch if t == "stop"),
-                                "untouched": len(ev) - len(touch)}
+                                "untouched": len(ev) - len(touch),
+                                "excess": {f"{h}d": _excess(g, h) for h in HORIZONS}}
+    out["edge_excess"] = {}      # group402: the same edge after taking the market out (market up = both sides up)
+    for h in HORIZONS:
+        xa, xb = out["by_verdict"]["rejected"]["excess"][f"{h}d"], out["by_verdict"]["passed"]["excess"][f"{h}d"]
+        if xa["mean"] is not None and xb["mean"] is not None:
+            out["edge_excess"][f"{h}d"] = {"edge": round(xb["mean"] - xa["mean"], 3), "rejected_n": xa["n"], "passed_n": xb["n"]}
     best = None
     for h in HORIZONS:
         a, b = out["by_verdict"]["rejected"]["horizons"][f"{h}d"], out["by_verdict"]["passed"]["horizons"][f"{h}d"]

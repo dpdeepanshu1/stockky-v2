@@ -267,6 +267,11 @@ _COLUMN_MIGRATIONS = [
     # symbol is the PK (not an `id` column), so _ensure_oracle_autoincrement()
     # skips it automatically — correct. Add column entries here if new
     # columns are ever added to that table on a running deployment.
+    # group402: market-relative returns on the structure observations (nullable: NULL = not measured yet / no benchmark bars)
+    ("scalp_structure_observations", "bench_ret_1d", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_structure_observations", "bench_ret_5d", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_structure_observations", "bench_ret_10d", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
+    ("scalp_structure_observations", "bench_ret_20d", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
 ]
 
 

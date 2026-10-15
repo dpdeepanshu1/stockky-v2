@@ -145,7 +145,9 @@ def _row_dict(r: Any) -> Dict[str, Any]:
     return {"symbol": r.symbol, "mode": r.mode, "source": r.source, "obs_day": r.obs_day, "obs_ts": r.obs_ts, "price": r.price, "stop": r.stop,
             "target": r.target, "atr": r.atr, "verdict": r.verdict, "gate_mode": r.gate_mode, "ret_1d": r.ret_1d, "ret_5d": r.ret_5d,
             "ret_10d": r.ret_10d, "ret_20d": r.ret_20d, "mfe_pct": r.mfe_pct, "mae_pct": r.mae_pct, "first_touch": r.first_touch,
-            "bars_seen": r.bars_seen or 0, "complete": bool(r.is_complete), "summary_json": getattr(r, "summary_json", None)}
+            "bars_seen": r.bars_seen or 0, "complete": bool(r.is_complete), "summary_json": getattr(r, "summary_json", None),
+            "bench_ret_1d": getattr(r, "bench_ret_1d", None), "bench_ret_5d": getattr(r, "bench_ret_5d", None),
+            "bench_ret_10d": getattr(r, "bench_ret_10d", None), "bench_ret_20d": getattr(r, "bench_ret_20d", None)}
 
 
 def fetch_daily_bars(symbol: str, lookback_days: int) -> List[Any]:
@@ -163,10 +165,20 @@ def fetch_daily_bars(symbol: str, lookback_days: int) -> List[Any]:
 
 
 def evaluate_pending(db, now_ts: Optional[float] = None, batch: Optional[int] = None,
-                     fetch: Optional[Callable[[str, int], List[Any]]] = None) -> Dict[str, Any]:
-    """One evaluator pass (sync). Fills outcomes on pending rows whose symbol history could be fetched; commits once. Returns pass counters."""
+                     fetch: Optional[Callable[[str, int], List[Any]]] = None,
+                     fetch_bench: Optional[Callable[[int], List[Any]]] = None) -> Dict[str, Any]:
+    """One evaluator pass (sync). Fills outcomes on pending rows whose symbol history could be fetched; commits once. Returns pass counters.
+    group402: also fills bench_ret_{1,5,10,20}d (the market over the same sessions). `fetch_bench(lookback_days)` returns the benchmark's daily bars;
+    when neither `fetch` nor `fetch_bench` is given, the benchmark named by STRUCTURE_OBS_BENCH_SYMBOL is fetched once per pass through
+    fetch_daily_bars. A benchmark that cannot be fetched leaves the fields empty (the row's own outcome is still stored)."""
     _observation, _ = _ms()
+    if fetch_bench is None and fetch is None and str(getattr(config, "STRUCTURE_OBS_BENCH_SYMBOL", "") or "").strip():
+        _bench_sym = str(config.STRUCTURE_OBS_BENCH_SYMBOL).strip()
+
+        def fetch_bench(lb: int, _s=_bench_sym) -> List[Any]:  # noqa: E306
+            return fetch_daily_bars(_s, lb)
     fetch = fetch or fetch_daily_bars
+    bench_cache: Dict[str, Any] = {}
     now = float(now_ts if now_ts is not None else time.time())
     limit_syms = int(batch or config.STRUCTURE_OBS_BATCH)
     res = {"pending": 0, "symbols": 0, "updated": 0, "completed": 0, "gave_up": 0, "fetch_fail": 0}
@@ -196,6 +208,11 @@ def evaluate_pending(db, now_ts: Optional[float] = None, batch: Optional[int] = 
                 out = _observation.evaluate_row(_row_dict(r), after)
                 for k in ("ret_1d", "ret_5d", "ret_10d", "ret_20d", "mfe_pct", "mae_pct", "first_touch", "bars_seen"):
                     setattr(r, k, out[k])
+                bb = _bench_bars(fetch_bench, bench_cache)
+                if bb:
+                    for k, v in _observation.bench_outcome(r.obs_ts, bb).items():
+                        if v is not None:             # never blank a value an earlier pass stored
+                            setattr(r, k, v)
                 r.is_complete = bool(out["complete"])
                 r.evaluated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 res["updated"] += 1
@@ -214,6 +231,20 @@ def evaluate_pending(db, now_ts: Optional[float] = None, batch: Optional[int] = 
     return res
 
 
+def _bench_bars(fetch_bench: Optional[Callable[[int], List[Any]]], cache: Dict[str, Any]) -> Optional[List[Any]]:
+    """The benchmark's daily bars for this pass: fetched once with 120 calendar days (the longest lookback `due` ever asks for, so one
+    fetch covers every pending row); a failure is remembered so it is not retried within the pass. Never raises."""
+    if fetch_bench is None:
+        return None
+    if "bars" not in cache:
+        try:
+            cache["bars"] = fetch_bench(120) or None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("structure observation: benchmark history failed: %s", e)
+            cache["bars"] = None
+    return cache["bars"]
+
+
 def report(db, mode: str, days: int = 60, recent: int = 40, min_n: Optional[int] = None, now_ts: Optional[float] = None) -> Dict[str, Any]:
     """Edge report for one mode over the last `days`: aggregate stats + the most recent rows (newest first) + the rejected symbols' outcomes."""
     min_n = int(min_n) if min_n else int(getattr(config, "STRUCTURE_EDGE_MIN_N", 100))   # group365: 100 finished rows per side (was 20)
@@ -225,7 +256,7 @@ def report(db, mode: str, days: int = 60, recent: int = 40, min_n: Optional[int]
     agg = _observation.aggregate(rows, min_n=min_n)
     cal = _calibration(_observation, rows, min_n)
     keep = ("symbol", "obs_day", "price", "stop", "target", "verdict", "gate_mode", "ret_1d", "ret_5d", "ret_10d", "ret_20d", "mfe_pct", "mae_pct",
-            "first_touch", "bars_seen", "complete")
+            "first_touch", "bars_seen", "complete", "bench_ret_1d", "bench_ret_5d", "bench_ret_10d", "bench_ret_20d")
     out_rows = []
     for r, raw in list(zip(rows, q))[:max(0, int(recent))]:
         item = {k: r.get(k) for k in keep}

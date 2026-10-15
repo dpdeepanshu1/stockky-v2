@@ -8,7 +8,7 @@
  */
 import React from "react";
 import BottomSheet from "./BottomSheet";
-import { sniperBadge, sniperHeldBackLines, type SniperStructureRecord, type Tone } from "../structureView";
+import { sniperBadge, sniperHeldBackLines, sniperPlanRows, type SniperStructureRecord, type Tone } from "../structureView";
 
 export interface BuySuggestion {
   symbol: string;
@@ -219,6 +219,18 @@ export function BuySniperModal({
                         {fmtInr(s.stop_loss)}
                       </span>
                     </div>
+                    {sniperPlanRows(s.structure).map((r) => (
+                      <div key={r.label} className="flex justify-between gap-2" data-testid={`sniper-plan-${r.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                        <span className="text-mist shrink-0">{r.label}</span>
+                        <span
+                          className={`text-right ${
+                            r.tone === "good" ? "text-signal-buy" : r.tone === "bad" ? "text-signal-sell" : r.tone === "warn" ? "text-signal-prepare" : "text-paper"
+                          }`}
+                        >
+                          {r.text}
+                        </span>
+                      </div>
+                    ))}
                     <div className="flex justify-between gap-2">
                       <span className="text-mist shrink-0">Holding</span>
                       <span className="text-right">

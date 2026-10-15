@@ -1436,9 +1436,25 @@ class LoginRequest(BaseModel):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+_MS_INFO_CACHE: dict = {}
+
+
+def _structure_engine_info() -> dict:
+    """group403: which market-structure engine this service vendors (version + code fingerprint), for /health. Computed once; never raises."""
+    if not _MS_INFO_CACHE:
+        try:
+            from stockky_ms.info import engine_info
+            info = engine_info()
+            info.pop("params_hash", None)          # this service never overrides the engine's params, so a hash here would only mislead
+            _MS_INFO_CACHE.update(info)
+        except Exception as e:  # noqa: BLE001 - package not vendored in this image
+            _MS_INFO_CACHE.update({"error": str(e)[:120]})
+    return dict(_MS_INFO_CACHE)
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "position-stocks-service"}
+    return {"status": "ok", "service": "position-stocks-service", "structure_engine": _structure_engine_info()}
 
 
 @app.post("/auth/login")

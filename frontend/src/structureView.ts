@@ -555,6 +555,9 @@ export interface SniperStructureRecord {
   gate_mode?: string; opinion?: string; would_reject?: boolean; enforced?: boolean; reasons?: string[]; no_data?: string | null;
   live?: { chase_atr?: number | null; stretch_atr?: number | null; room_atr?: number | null; rr?: number | null } | null;
   stop?: number | null; target?: number | null; rr?: number | null;
+  /** group 400 (display only): nearest bullish demand / imbalance zone at or below the price, and the "wait for entry" call. */
+  entry_zone?: { kind?: string; bottom?: number | null; top?: number | null; status?: string | null; dist_pct?: number | null } | null;
+  wait_for_entry?: boolean; wait_reason?: string | null;
 }
 export interface SniperBadge { label: string; tone: Tone; title: string }
 
@@ -577,6 +580,32 @@ export function sniperBadge(s: SniperStructureRecord | null | undefined): Sniper
   if (ch != null) bits.push(`chase ${ch.toFixed(1)} ATR`);
   if (rr != null) bits.push(`structure R:R ${rr.toFixed(1)}`);
   return { label: "Structure OK", tone: "good", title: bits.length ? `Passed the daily-structure check (${bits.join(", ")}).` : "Passed the daily-structure check." };
+}
+
+export interface SniperPlanRow { label: string; text: string; tone: Tone }
+
+const inr = (n: number): string => `\u20b9${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** group 400: extra card rows from the structure record: structural stop, structural target (+R:R), entry zone, and a "wait for entry" line.
+ *  Only for a record with a real opinion; a missing level is skipped, never shown as 0 or a guess. These are the daily-structure levels,
+ *  separate from the card's own Target / Stop loss rows. Never throws; garbage -> []. */
+export function sniperPlanRows(s: SniperStructureRecord | null | undefined): SniperPlanRow[] {
+  if (!s || typeof s !== "object" || Array.isArray(s) || s.gate_mode === "off" || s.opinion !== "ok") return [];
+  const rows: SniperPlanRow[] = [];
+  const stop = num(s.stop), tgt = num(s.target), rr = num(s.rr) ?? num((s.live as { rr?: unknown } | null | undefined)?.rr);
+  if (stop != null && stop > 0) rows.push({ label: "Structure stop", text: inr(stop), tone: "bad" });
+  if (tgt != null && tgt > 0) rows.push({ label: "Structure target", text: rr != null ? `${inr(tgt)} (R:R ${rr.toFixed(1)})` : inr(tgt), tone: "good" });
+  const z = s.entry_zone && typeof s.entry_zone === "object" ? s.entry_zone : null;
+  const zb = z ? num(z.bottom) : null, zt = z ? num(z.top) : null;
+  if (z && zb != null && zt != null && zb > 0 && zt >= zb) {
+    const kind = z.kind === "imbalance" ? "imbalance" : "demand";
+    rows.push({ label: "Entry zone", text: `${inr(zb)} \u2013 ${inr(zt)} (${kind})`, tone: "mute" });
+  }
+  if (s.wait_for_entry === true) {
+    const why = typeof s.wait_reason === "string" && s.wait_reason.trim() ? s.wait_reason.trim() : "price is extended from the structure";
+    rows.push({ label: "Wait for entry", text: why, tone: "warn" });
+  }
+  return rows;
 }
 
 export interface SniperHeldBackLine { symbol: string; text: string }

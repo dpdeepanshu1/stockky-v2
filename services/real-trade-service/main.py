@@ -470,9 +470,26 @@ def _check_and_expire_gates(db: Session, mode: str) -> models.TradeGateState:
 
 
 # ── Routes: health / status ─────────────────────────────────────────────────
+
+_MS_INFO_CACHE: dict = {}
+
+
+def _structure_engine_info() -> dict:
+    """group403: which market-structure engine this service vendors (version + code fingerprint), for /health. Computed once; never raises."""
+    if not _MS_INFO_CACHE:
+        try:
+            from stockky_ms.info import engine_info
+            info = engine_info()
+            info.pop("params_hash", None)          # this service never overrides the engine's params, so a hash here would only mislead
+            _MS_INFO_CACHE.update(info)
+        except Exception as e:  # noqa: BLE001 - package not vendored in this image
+            _MS_INFO_CACHE.update({"error": str(e)[:120]})
+    return dict(_MS_INFO_CACHE)
+
+
 @app.get("/health")
 async def health():
-    return {"ok": True, "service": config.SERVICE_NAME, "phase": "1"}
+    return {"ok": True, "service": config.SERVICE_NAME, "phase": "1", "structure_engine": _structure_engine_info()}
 
 
 @app.get("/ops/db-latency")

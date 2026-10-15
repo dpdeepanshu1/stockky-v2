@@ -249,6 +249,7 @@ STRUCTURE_MIN_RR = _sg_float("STRUCTURE_MIN_RR", 1.2)
 STRUCTURE_REJECT_STOP_WIDE = _sg_bool("STRUCTURE_REJECT_STOP_WIDE", True)
 STRUCTURE_BEARISH_BLOCK = _sg_bool("STRUCTURE_BEARISH_BLOCK", True)
 STRUCTURE_BEARISH_BOS_BARS = int(_sg_float("STRUCTURE_BEARISH_BOS_BARS", 5))
+STRUCTURE_WAIT_CHASE_ATR = _sg_float("STRUCTURE_WAIT_CHASE_ATR", 0.75)   # group400: card says "wait for entry" from this chase (ATR); display only
 STRUCTURE_MAX_AGE_DAYS = _sg_float("STRUCTURE_MAX_AGE_DAYS", 7.0)
 STRUCTURE_MAX_PRICE_DEV_PCT = _sg_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)
 
@@ -333,12 +334,30 @@ def _sg_live(summary: Dict[str, Any], px: float) -> Dict[str, Optional[float]]:
     return out
 
 
+def _sg_entry_zone(summary: Dict[str, Any], px: float) -> Optional[Dict[str, Any]]:
+    """group400, display only: the nearest usable bullish demand (order-block) or imbalance zone at or below the price, from the ms_* summary.
+    {kind, bottom, top, status, dist_pct (price above the zone top; 0 inside)}. None when there is no such zone. Never invents one."""
+    best: Optional[Dict[str, Any]] = None
+    for kind, side, top, bot, st in (
+            ("demand", summary.get("ms_ob_side"), _sg_pos(summary.get("ms_ob_top")), _sg_pos(summary.get("ms_ob_bottom")), summary.get("ms_ob_status")),
+            ("imbalance", summary.get("ms_fvg_side"), _sg_pos(summary.get("ms_fvg_top")), _sg_pos(summary.get("ms_fvg_bottom")), summary.get("ms_fvg_status"))):
+        if side != "bullish" or top is None or bot is None or bot >= top or st in ("filled", "broken", "expired"):
+            continue
+        if bot > px * 1.005:            # a zone above the price is not an entry zone
+            continue
+        dist = max(0.0, (px - top) / top * 100.0)
+        if best is None or dist < best["dist_pct"]:
+            best = {"kind": kind, "bottom": round(bot, 2), "top": round(top, 2), "status": st if isinstance(st, str) else None, "dist_pct": round(dist, 2)}
+    return best
+
+
 def structure_verdict(row: Any, price: Any, mode: Optional[str] = None) -> Dict[str, Any]:
     """Pure verdict for one scan row at `price`. Keys: gate_mode, opinion ('ok' | 'no_opinion'), would_reject, enforced, reasons[], no_data,
-    live{chase_atr, stretch_atr, room_atr, rr}, stop, target, rr. Never raises."""
+    live{chase_atr, stretch_atr, room_atr, rr}, stop, target, rr, entry_zone, wait_for_entry, wait_reason (last three display only, group400). Never raises."""
     m = mode if mode in ("off", "enforce") else _sg_mode()
     v: Dict[str, Any] = {"gate_mode": m, "opinion": "no_opinion", "would_reject": False, "enforced": False, "reasons": [], "no_data": None,
-                         "live": {}, "stop": None, "target": None, "rr": None}
+                         "live": {}, "stop": None, "target": None, "rr": None,
+                         "entry_zone": None, "wait_for_entry": False, "wait_reason": None}
     try:
         summary = _sg_summary(row)
         px = _sg_pos(price)
@@ -374,6 +393,15 @@ def structure_verdict(row: Any, price: Any, mode: Optional[str] = None) -> Dict[
                         and bars <= STRUCTURE_BEARISH_BOS_BARS):
                     reasons.append(f"fresh bearish break of structure {int(bars)} bar(s) ago")
         v["reasons"] = reasons
+        v["entry_zone"] = _sg_entry_zone(summary, px)
+        wl = STRUCTURE_WAIT_CHASE_ATR
+        if reasons:
+            v["wait_for_entry"], v["wait_reason"] = True, reasons[0]
+        elif wl > 0 and live["chase_atr"] is not None and live["chase_atr"] >= wl:
+            ez = v["entry_zone"]
+            v["wait_for_entry"] = True
+            v["wait_reason"] = (f"{live['chase_atr']:.1f} ATR above the {ez['kind']} zone, better entry near \u20b9{ez['top']:g}" if ez
+                                else f"{live['chase_atr']:.1f} ATR above the nearest support, chasing")
         if reasons:
             v["would_reject"] = True
             v["enforced"] = (m == "enforce")
@@ -690,7 +718,7 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT, 
     }
     if _sv is not None:
         # structural stop / target are DISPLAY ONLY: the card's own stop_loss / target_price / reward_risk_ratio are unchanged
-        card["structure"] = {k: _sv[k] for k in ("gate_mode", "opinion", "would_reject", "enforced", "reasons", "no_data", "live", "stop", "target", "rr")}
+        card["structure"] = {k: _sv[k] for k in ("gate_mode", "opinion", "would_reject", "enforced", "reasons", "no_data", "live", "stop", "target", "rr", "entry_zone", "wait_for_entry", "wait_reason")}
     return card
 
 

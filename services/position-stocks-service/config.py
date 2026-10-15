@@ -786,6 +786,10 @@ MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
 # give away up to ~60% of the tightest stop before the trade started. Set ENTRY_MAX_SLIPPAGE_PCT=0.5 to restore.
 ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.25)
 ENTRY_MAX_TICK_AGE_S = _get_float("ENTRY_MAX_TICK_AGE_S", 45.0)
+# group389: the checks above fail open when the symbol has NO tick at all, so a MARKET entry could go out with no live price
+# to compare against (no stale-tick, no slippage check). ENTRY_REQUIRE_LIVE_TICK (default on) makes the automatic entry skip
+# such a symbol with reason NO_LIVE_TICK until the feed has a tick for it. ENTRY_REQUIRE_LIVE_TICK=0 restores the old behaviour.
+ENTRY_REQUIRE_LIVE_TICK = _get_bool("ENTRY_REQUIRE_LIVE_TICK", True)
 # group280 (plan Phase C3): Dhan 5-level depth read from market-data /quote just before an entry. Reject a name whose
 # bid-ask spread is above ENTRY_DEPTH_MAX_SPREAD_PCT (0 = off) or whose best-5 book (both sides, Rs) is below
 # ENTRY_MIN_BOOK_VALUE (0 = off). Unknown depth (no answer, timeout, no Dhan depth) never blocks. ENTRY_DEPTH_GATE=0 = off.

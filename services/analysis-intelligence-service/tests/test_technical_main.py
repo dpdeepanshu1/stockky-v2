@@ -2613,3 +2613,74 @@ class TestMdGuardWiring:
         monkeypatch.setattr(tm, "_md_guard_tried", True)
         assert tm._fetch_history_from_market_data("TCS") is None
         assert tm._md_state.last_failure == "transient"
+
+
+# ── group390: GET /structure/{symbol} and its ?extras=1 context (WS-14) ──────────────────────────────────────────
+
+def _walk_closes(n, seed=3):
+    import random
+    random.seed(seed)
+    px, out = 100.0, []
+    for _ in range(n):
+        px = max(5.0, px + random.gauss(0.1, 1.2))
+        out.append(px)
+    return out
+
+
+class TestStructureRouteExtras:
+    def _hist(self, monkeypatch, n=320):
+        df = _df(n, closes=_walk_closes(n))
+        monkeypatch.setattr(tm, "_fetch_history", lambda s, force=False: df)
+        monkeypatch.delenv("STRUCTURE_EXTRAS_ENABLED", raising=False)
+        monkeypatch.delenv("STRUCTURE_ENABLED", raising=False)
+        return df
+
+    def test_plain_response_has_no_extras(self, monkeypatch):
+        self._hist(monkeypatch)
+        r = tm.structure_only("ABC")
+        assert r["symbol"] == "ABC" and "market_structure" in r and "extras" not in r
+        monkeypatch.setattr(tm, "_fetch_history", lambda s, force=False: (_ for _ in ()).throw(AssertionError("not cached")))
+        assert tm.structure_only("ABC") == r
+
+    def test_extras_adds_context_and_keeps_the_plain_block(self, monkeypatch):
+        self._hist(monkeypatch)
+        plain = tm.structure_only("ABC")
+        r = tm.structure_only("ABC", extras=True)
+        assert r["market_structure"]["params_hash"] == plain["market_structure"]["params_hash"]
+        ex = r["extras"]
+        assert ex["context_only"] is True and ex["weekly"]["timeframe"] == "1w" and ex["volume_profile"]["method"] == "range_uniform"
+        assert ex["wyckoff"]["phase"] in ("markup", "markdown", "accumulation", "distribution", "unknown")
+        assert ex["features_v2"]["meta"]["params_hash"] == plain["market_structure"]["params_hash"]
+        assert "extras" not in tm.structure_only("ABC")
+
+    def test_extras_is_cached_and_force_bypasses(self, monkeypatch):
+        self._hist(monkeypatch)
+        first = tm.structure_only("ABC", extras=True)
+        monkeypatch.setattr(tm, "_fetch_history", lambda s, force=False: (_ for _ in ()).throw(AssertionError("not cached")))
+        assert tm.structure_only("ABC", extras=True) == first
+        with pytest.raises(AssertionError):
+            tm.structure_only("ABC", extras=True, force=True)
+
+    def test_extras_switch_and_missing_engine_return_503(self, monkeypatch):
+        self._hist(monkeypatch)
+        monkeypatch.setenv("STRUCTURE_EXTRAS_ENABLED", "0")
+        with pytest.raises(tm.HTTPException) as e:
+            tm.structure_only("ABC", extras=True)
+        assert e.value.status_code == 503
+        assert "market_structure" in tm.structure_only("ABC")
+        monkeypatch.setenv("STRUCTURE_EXTRAS_ENABLED", "1")
+        monkeypatch.setattr(tm, "_ms_extras", None)
+        with pytest.raises(tm.HTTPException) as e2:
+            tm.structure_only("ABC", extras=True)
+        assert e2.value.status_code == 503
+
+    def test_routes_503_when_engine_off_or_history_thin(self, monkeypatch):
+        self._hist(monkeypatch, n=4)
+        for extras in (False, True):
+            with pytest.raises(tm.HTTPException) as e:
+                tm.structure_only("THIN", extras=extras)
+            assert e.value.status_code == 503
+        monkeypatch.setenv("STRUCTURE_ENABLED", "0")
+        with pytest.raises(tm.HTTPException) as e2:
+            tm.structure_only("ABC", extras=True)
+        assert e2.value.status_code == 503

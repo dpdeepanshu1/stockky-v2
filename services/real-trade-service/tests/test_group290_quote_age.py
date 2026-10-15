@@ -196,8 +196,18 @@ class TestEntryQuoteAgeReason:
         assert entry._entry_quote_age_reason(_tick(35)) is not None
         assert entry._entry_quote_age_reason(_tick(2)) is None
 
-    def test_unknown_age_allowed_by_default(self):
+    def test_unknown_age_refused_by_default(self):
+        # group388: the default flipped from allow to refuse
+        why = entry._entry_quote_age_reason(_tick(0, known=False))
+        assert why is not None and "unknown" in why
+
+    def test_unknown_age_allowed_when_rolled_back(self, monkeypatch):
+        monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "allow")
         assert entry._entry_quote_age_reason(_tick(500, known=False)) is None
+
+    def test_unknown_age_blank_env_means_refuse(self, monkeypatch):
+        monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "   ")
+        assert entry._entry_quote_age_reason(_tick(0, known=False)) is not None
 
     def test_unknown_age_refused_when_asked(self, monkeypatch):
         monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "Refuse")
@@ -217,6 +227,16 @@ class TestEntryQuoteAgeReason:
         assert entry._entry_quote_age_reason(t) is not None
 
     def test_garbage_never_raises(self):
+        class Odd:
+            as_of = "yesterday"
+            source = None
+        # group388: an unreadable age is "unknown" - refused by default, no objection under the allow rollback
+        assert "unknown" in entry._entry_quote_age_reason(Odd())
+        assert "unknown" in entry._entry_quote_age_reason(None)
+
+    def test_garbage_is_no_objection_when_rolled_back(self, monkeypatch):
+        monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "allow")
+
         class Odd:
             as_of = "yesterday"
             source = None
@@ -377,14 +397,14 @@ class TestEvaluateModeAgeGate:
         assert run(entry.evaluate_mode(db, "DEMO", gate_armed=True))["entered"] == 1
         assert [c for c in calls if c["priority"]] == []
 
-    def test_unknown_age_enters_by_default(self, db, monkeypatch):
+    def test_unknown_age_enters_when_rolled_back_to_allow(self, db, monkeypatch):
+        monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "allow")
         _cand(db)
         _quotes(monkeypatch, {"TESTCO": _tick(0, known=False)})
         _approve(monkeypatch)
         assert run(entry.evaluate_mode(db, "DEMO", gate_armed=True))["entered"] == 1
 
-    def test_unknown_age_refused_when_asked(self, db, monkeypatch):
-        monkeypatch.setenv("ENTRY_QUOTE_AGE_UNKNOWN", "refuse")
+    def test_unknown_age_refused_by_default(self, db, monkeypatch):
         monkeypatch.setenv("ENTRY_QUOTE_AGE_HOLD_MIN", "0")
         _cand(db)
         _quotes(monkeypatch, {"TESTCO": _tick(0, known=False)})

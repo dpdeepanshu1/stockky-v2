@@ -109,3 +109,12 @@ def _event_shared_fetch_off_by_default(monkeypatch):
     yield
     _qg._event_late.clear()
     _qg._event_inflight.clear()
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _live_tick_requirement_off_by_default(monkeypatch):
+    """group389: production default is ENTRY_REQUIRE_LIVE_TICK=on (an automatic entry with no tick for the symbol is skipped).
+    Older entry tests build candidates without any tick buffer and expect no change; test_group389_require_live_tick.py turns it on."""
+    import config as _config
+    monkeypatch.setattr(_config, "ENTRY_REQUIRE_LIVE_TICK", False, raising=False)
+    yield

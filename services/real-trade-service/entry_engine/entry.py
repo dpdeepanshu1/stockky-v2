@@ -1879,8 +1879,9 @@ def _entry_quote_age_reason(tick, *, now=None) -> Optional[str]:
     older than ENTRY_MAX_QUOTE_AGE_S (default 10 s, 0 = off), else None.
 
     tick.as_of is the price's real time (market_feed.feed honours market-data's age_s). A tick whose age could not be
-    read (age_known False, or no datetime as_of) follows ENTRY_QUOTE_AGE_UNKNOWN: "allow" (default, the behaviour
-    before this group) or "refuse". A tick stamped in the future counts as age 0. Never raises (None = no objection)."""
+    read (age_known False, or no datetime as_of) follows ENTRY_QUOTE_AGE_UNKNOWN: "refuse" (default since group388: an
+    entry is never built on a price whose age nobody can state; the candidate is re-read once and held, like an old
+    price) or "allow" (the behaviour before group388, the rollback switch). A tick stamped in the future counts as age 0. Never raises (None = no objection)."""
     try:
         limit = _wl_env_float("ENTRY_MAX_QUOTE_AGE_S", 10.0)
         if limit <= 0:
@@ -1888,7 +1889,7 @@ def _entry_quote_age_reason(tick, *, now=None) -> Optional[str]:
         src = getattr(tick, "source", None) or "?"
         as_of = getattr(tick, "as_of", None)
         if not (bool(getattr(tick, "age_known", True)) and isinstance(as_of, datetime)):
-            if ((os.getenv("ENTRY_QUOTE_AGE_UNKNOWN") or "").strip().lower() or "allow") == "refuse":
+            if ((os.getenv("ENTRY_QUOTE_AGE_UNKNOWN") or "").strip().lower() or "refuse") != "allow":
                 return f"price age unknown (source {src}, ENTRY_QUOTE_AGE_UNKNOWN=refuse)"
             return None
         if as_of.tzinfo is None:

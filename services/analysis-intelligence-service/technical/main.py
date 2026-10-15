@@ -600,6 +600,10 @@ try:
 except Exception:  # noqa: BLE001
     _ms_analyze = None
     _ms_flatten = None
+try:   # group390 (WS-14): optional weekly / volume-profile / Wyckoff / V2-feature context; operator endpoint only, never in a decision
+    from stockky_ms.extras import analyze_extras as _ms_extras
+except Exception:  # noqa: BLE001
+    _ms_extras = None
 
 _STRUCTURE_STALE_DAYS = 7
 
@@ -1281,12 +1285,37 @@ def analyze(
         _cache_set(cache_key, result)
     return result
 
+def _extras_enabled() -> bool:
+    return (os.getenv("STRUCTURE_EXTRAS_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 @app.get("/structure/{symbol}")
-def structure_only(symbol: str, force: bool = False):
-    """Group 349: just the market-structure block (no scoring), for callers that only need structure. Cached like /analyze."""
+def structure_only(symbol: str, force: bool = False, extras: bool = False):
+    """Group 349: just the market-structure block (no scoring), for callers that only need structure. Cached like /analyze.
+
+    group390: `?extras=1` adds `extras` (weekly structure, volume profile, Wyckoff phase, V2 feature row). Context for the operator panel only; it is
+    cached under its own key so the plain response is byte-identical, and STRUCTURE_EXTRAS_ENABLED=0 switches it off (503)."""
     sym = normalize_symbol(symbol)
     if not _structure_enabled() or _ms_analyze is None:
         raise HTTPException(status_code=503, detail="market-structure engine not available")
+    if extras:
+        if not _extras_enabled() or _ms_extras is None:
+            raise HTTPException(status_code=503, detail="structure extras not available")
+        xkey = f"tech_structure_x:{sym}"
+        if not force:
+            hit = _cache_get(xkey)
+            if hit:
+                return hit
+        df = _fetch_history(sym, force=force)
+        block, summary = _structure_cached(sym, df, None, force=force)
+        if block is None:
+            raise HTTPException(status_code=503, detail="structure unavailable (history thin or engine error)")
+        frame, _meta = _structure_frame(sym, df)
+        result = {"symbol": sym}
+        _attach_structure(result, block, summary)
+        result["extras"] = _ms_extras(_df_to_bars(frame), params=_structure_params(), block=block)
+        _cache_set(xkey, result)
+        return result
     key = f"tech_structure:{sym}"
     if not force:
         cached = _cache_get(key)

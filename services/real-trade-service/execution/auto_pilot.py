@@ -1848,7 +1848,7 @@ async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[
 
 
 def _opening_fast_bounds():
-    return (parse_hhmm(config.OPENING_FAST_START_IST, 9, 14), parse_hhmm(config.OPENING_FAST_END_IST, 9, 30))
+    return (parse_hhmm(config.OPENING_FAST_START_IST, 9, 10), parse_hhmm(config.OPENING_FAST_END_IST, 9, 30))
 
 
 def _opening_fast_window(now=None) -> bool:
@@ -1906,7 +1906,7 @@ async def _schedule_loop() -> None:
                 await _schedule_tick(mode)
             except Exception:
                 logger.exception("schedule loop: unexpected error for %s", mode)
-        await asyncio.sleep(_schedule_sleep_seconds())    # group 390: 5 s from 09:14 to 09:30
+        await asyncio.sleep(_schedule_sleep_seconds())    # group 390/399: 5 s from 09:10 to 09:30
 
 
 async def _fast_exit_loop() -> None:
@@ -1937,7 +1937,7 @@ async def _full_cycle_loop() -> None:
                 await _full_tick(mode)
             except Exception:
                 logger.exception("full cycle loop: unexpected error for %s", mode)
-        await asyncio.sleep(_full_cycle_sleep_seconds())    # group 390: ~20 s from 09:14 to 09:30
+        await asyncio.sleep(_full_cycle_sleep_seconds())    # group 390/399: ~10 s from 09:10 to 09:30
 
 
 async def _totp_refresh_loop() -> None:

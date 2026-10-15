@@ -1,7 +1,7 @@
-"""screening/preopen.py - 09:08 pre-market plan: indicative gap snapshot + cache warm-up for the scalper (group 330, 2026-10-12).
+"""screening/preopen.py - 09:10 pre-market plan (09:08 until group 399): indicative gap snapshot + cache warm-up for the scalper (group 330, 2026-10-12).
 
 WHY: this service did nothing between boot and the 09:15 bell, then paid for cold caches (previous-day candles, Nifty / VIX reads) on the first
-scan, and had no view of which names were gapping hard. At PREOPEN_SNAPSHOT_TIME_IST (default 09:08, before the bell) one best-effort job:
+scan, and had no view of which names were gapping hard. At PREOPEN_SNAPSHOT_TIME_IST (default 09:10 since group 399, before the bell) one best-effort job:
   1. WARMS  the Nifty market-gate read, the VIX read and the previous-day candle cache of the F&O universe (capped PREOPEN_MAX_SYMBOLS);
   2. records the gap (price vs previous close) of those symbols from market-data POST /quotes/bulk when the row's price is fresh
      (age <= PREOPEN_MAX_PRICE_AGE_S; a row with no readable age is NOT used). gap_reason() then refuses to chase a gap-up >= PREOPEN_GAP_UP_BLOCK_PCT
@@ -47,7 +47,7 @@ def due(now: Optional[datetime] = None) -> bool:
         n = ist_now(now)
         if n.weekday() >= 5 or is_nse_holiday(n) or _snap["day"] == ist_today_str(now):
             return False
-        return (ist_time_at_or_after(parse_hhmm(config.PREOPEN_SNAPSHOT_TIME_IST, 9, 8), now)
+        return (ist_time_at_or_after(parse_hhmm(config.PREOPEN_SNAPSHOT_TIME_IST, 9, 10), now)
                 and not ist_time_at_or_after(parse_hhmm("09:15", 9, 15), now))
     except Exception:  # noqa: BLE001
         return False

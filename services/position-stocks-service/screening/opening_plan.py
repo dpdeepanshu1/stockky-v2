@@ -3,7 +3,7 @@
 WHY: at 09:15 a symbol has no 5-minute bars, so orders/adaptive.py fell through to the legacy path whose stop floor is MIN_STOP_PCT (2%) and whose
 target lands near 4.4% - the same flat levels for every name at the open. This module gives that moment a real volatility number instead:
   * at OPENING_PLAN_TIME_IST (default 09:10) build() reads the previous-session daily ATR % of each symbol from screening/prev_day.py (CACHE ONLY - the
-    09:08 pre-open snapshot warmed it; a miss starts prev_day's own background fetch and is retried by the next lookup);
+    09:10 pre-open snapshot warmed it; a miss starts prev_day's own background fetch and is retried by the next lookup);
   * bar_atr_pct(symbol) returns that ATR scaled to one ADAPTIVE_BAR_MINUTES bar (daily % x OPENING_PLAN_BAR_FRACTION) while the plan window is open,
     and adaptive._compute_levels feeds it to the same bar-level stop/target rules the live bars use.
 Live bars always win: the plan is only asked when the tick buffer / bar store / history call gave fewer than ADAPTIVE_BAR_MIN_BARS bars.

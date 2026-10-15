@@ -36,15 +36,15 @@ def reset() -> None:
 
 
 def _pass_times() -> list:
-    """The snapshot pass times (HH:MM, before the 09:15 bell). Default: PREOPEN_SNAPSHOT_TIME_IST, 09:11, 09:14 - a symbol with no fresh price
+    """The snapshot pass times (HH:MM, before the 09:15 bell). Default: PREOPEN_SNAPSHOT_TIME_IST (09:10), 09:12, 09:14 - a symbol with no fresh price
     at the first pass gets two more chances as the pre-open auction settles. PREOPEN_SNAPSHOT_PASSES_IST (comma list) overrides."""
     raw = (getattr(config, "PREOPEN_SNAPSHOT_PASSES_IST", "") or "").strip()
-    labels = [x.strip() for x in raw.split(",") if x.strip()] if raw else [config.PREOPEN_SNAPSHOT_TIME_IST, "09:11", "09:14"]
+    labels = [x.strip() for x in raw.split(",") if x.strip()] if raw else [config.PREOPEN_SNAPSHOT_TIME_IST, "09:12", "09:14"]
     return labels or [config.PREOPEN_SNAPSHOT_TIME_IST]
 
 
 def _reached(now=None) -> list:
-    return [lab for lab in _pass_times() if ist_time_at_or_after(parse_hhmm(lab, 9, 8), now)]
+    return [lab for lab in _pass_times() if ist_time_at_or_after(parse_hhmm(lab, 9, 10), now)]
 
 
 def gap_pct(price, prev_close) -> Optional[float]:

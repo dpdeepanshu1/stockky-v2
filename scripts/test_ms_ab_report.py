@@ -250,6 +250,65 @@ def test_fetcher_saves_benchmark_symbols_and_skips_dead_and_unsafe_names():
         srv.shutdown()
 
 
+def test_draw_sample_is_independent_of_input_order_and_reproducible():
+    names = [f"S{k:03d}" for k in range(60)]
+    a = fh.draw_sample(names, 10, 3)
+    b = fh.draw_sample(list(reversed(names)), 10, 3)
+    c = fh.draw_sample(names + names[:5], 10, 3)  # duplicates in the universe do not change the draw
+    assert a == b == c and len(a) == 10 and a == sorted(a)
+    assert fh.draw_sample(names, 10, 4) != a              # another seed, another sample
+    assert fh.draw_sample(names, 0, 3) == sorted(names)   # no sample = the whole sorted list
+    assert fh.draw_sample(names, 60, 3) == sorted(names)  # asking for more than exists = everything
+    big = [f"T{k:04d}" for k in range(1500)]
+    s400 = fh.draw_sample(big, 400, 7)
+    assert len(s400) == 400 and len(set(s400)) == 400 and s400 != sorted(big)[:400]
+
+
+def test_fetcher_writes_a_replayable_manifest_outside_the_history_folder():
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    names = [f"S{k:03d}" for k in range(40)]
+    try:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as md:
+            man = Path(md) / "sample.json"
+            fh.main([td, "--base", base, "--symbols", ",".join(names), "--sample", "8", "--seed", "5", "--manifest", str(man),
+                     "--sleep", "0", "--retries", "1"])
+            doc = json.loads(man.read_text())
+            assert doc["seed"] == 5 and doc["requested_sample"] == 8 and doc["universe_size"] == 40 and doc["drawn"] == 8
+            assert doc["symbols"] == fh.draw_sample(names, 8, 5)
+            saved = sorted(p.stem for p in Path(td).iterdir() if p.stem != "^NSEI")
+            assert saved == doc["symbols"]                      # exactly the manifest was downloaded
+            assert not any(p.name == "sample.json" for p in Path(td).iterdir())
+        # an unwritable manifest path stops the run before any download
+        with tempfile.TemporaryDirectory() as td:
+            assert fh.main([td, "--base", base, "--symbols", "AAA", "--manifest", "/nonexistent_dir_g379/m.json",
+                            "--sleep", "0", "--retries", "1"]) == 2
+            assert list(Path(td).iterdir()) == []
+    finally:
+        srv.shutdown()
+
+
+def test_report_sample_is_seeded_recorded_and_skips_the_benchmark():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        for name in ["^NSEI"] + [f"S{k:02d}" for k in range(12)]:
+            (d / f"{name}.json").write_text(json.dumps({"candles": _candles(300)}))
+        outs = []
+        for out in ("o1", "o2"):
+            ab.main([td, "--out", str(d / out), "--min-n", "5", "--boot", "20", "--step", "30", "--sample", "5", "--seed", "11"])
+            outs.append(json.loads((d / out / "ab_report.json").read_text()))
+        for rep in outs:
+            assert rep["meta"]["sample"] == {"requested": 5, "pool": 12, "drawn": 5, "seed": 11}
+            assert rep["meta"]["symbols"] + rep["meta"]["skipped"] == 5
+        assert outs[0]["meta"] == outs[1]["meta"] and outs[0]["signals"] == outs[1]["signals"]   # same seed, same sample, same numbers
+        assert "random seed 11" in (d / "o1" / "ab_report.md").read_text()
+        ab.main([td, "--out", str(d / "o3"), "--min-n", "5", "--boot", "20", "--step", "30"])      # no --sample: every file, no sample line
+        rep = json.loads((d / "o3" / "ab_report.json").read_text())
+        assert rep["meta"]["sample"] == {"requested": 0, "pool": 12, "drawn": 12, "seed": None}
+        assert "random seed" not in (d / "o3" / "ab_report.md").read_text()
+
+
 def test_fetcher_needs_a_base_url():
     assert fh.main(["/tmp/_x_hist", "--base", "", "--symbols", "A"]) == 2
 

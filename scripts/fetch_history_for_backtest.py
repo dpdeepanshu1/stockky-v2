@@ -2,11 +2,15 @@
 """fetch_history_for_backtest.py - download daily candles into one JSON per symbol, for scripts/ms_ab_report.py and scripts/structure_backtest.py.
 
   MARKET_DATA_URL=https://... python3 scripts/fetch_history_for_backtest.py OUT_DIR [--symbols RELIANCE,TCS | --symbols-file f.txt | --universe-url URL]
-        [--period 5y] [--sample 400 | --limit 0] [--seed 7] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI] [--max-failures-pct 60]
+        [--period 5y] [--sample 400 | --limit 0] [--seed 7] [--manifest sample.json] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI]
+        [--max-failures-pct 60]
 
 Symbols come from (first that is given): --symbols, --symbols-file (one per line, '#' comments), --universe-url (the gateway's /api/universe: a JSON list).
 The benchmark (default ^NSEI) is always fetched first and saved as ^NSEI.json; the A/B report needs it to tag regimes. Existing files with >= --min-bars
-candles are kept (re-run to resume) unless --refresh. Stdlib only. Exit 0 when the benchmark and at least one symbol were saved and the failure rate is
+candles are kept (re-run to resume) unless --refresh.
+--sample N draws N symbols at random from the de-duplicated, SORTED list, so the same --seed gives the same sample whatever order the universe endpoint
+returns (the old draw depended on that order). --manifest FILE writes the seed, the universe size and the exact symbols drawn (keep it outside OUT_DIR:
+the A/B report reads every *.json in OUT_DIR); feed its "symbols" back with --symbols to replay the identical sample. Stdlib only. Exit 0 when the benchmark and at least one symbol were saved and the failure rate is
 under --max-failures-pct; otherwise 1, so a CI run does not report on a hollow dataset.
 """
 from __future__ import annotations
@@ -54,6 +58,24 @@ def read_symbols(args: argparse.Namespace) -> List[str]:
     return out
 
 
+def draw_sample(symbols: List[str], n: int, seed: int) -> List[str]:
+    """N symbols drawn at random (seeded) from the sorted, de-duplicated list. The whole sorted list when n <= 0 or n >= its length.
+    Sorting first makes the draw independent of the order the universe came in, so a seed is a reproducible sample."""
+    import random
+    pool = sorted(set(symbols))
+    if n <= 0 or n >= len(pool):
+        return pool
+    return sorted(random.Random(seed).sample(pool, n))
+
+
+def write_manifest(path: str, universe: int, drawn: List[str], sample: int, seed: int, period: str) -> None:
+    """Record exactly which symbols a run used, so a result can be reproduced or compared across runs."""
+    import datetime
+    doc = {"created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "seed": seed,
+           "requested_sample": sample, "universe_size": universe, "drawn": len(drawn), "period": period, "symbols": drawn}
+    Path(path).write_text(json.dumps(doc, indent=1))
+
+
 def fetch_one(base: str, sym: str, period: str, retries: int, sleep: float, timeout: float) -> Optional[list]:
     url = f"{base}/history/{urllib.parse.quote(sym, safe='^')}?period={period}&interval=1d"
     for k in range(max(1, retries)):
@@ -82,6 +104,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--limit", type=int, default=0, help="first N symbols of the list (alphabetical universe = biased sample; prefer --sample)")
     ap.add_argument("--sample", type=int, default=0, help="N symbols drawn at random (seeded) from the list - an unbiased cross-section")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--manifest", default="", help="write the drawn symbols (and the seed) to this JSON file; keep it outside OUT_DIR")
     ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--timeout", type=float, default=90.0)
@@ -100,14 +123,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"could not read the symbol list: {e}", file=sys.stderr)
         return 2
+    universe_size = len(syms)
     if a.sample > 0 and len(syms) > a.sample:
-        import random
-        syms = sorted(random.Random(a.seed).sample(syms, a.sample))
+        syms = draw_sample(syms, a.sample, a.seed)
     elif a.limit > 0:
         syms = syms[: a.limit]
     if not syms:
         print("no symbols (use --symbols, --symbols-file or --universe-url)", file=sys.stderr)
         return 2
+
+    if a.manifest:
+        try:
+            write_manifest(a.manifest, universe_size, syms, a.sample, a.seed, a.period)
+        except OSError as e:
+            print(f"could not write the sample manifest {a.manifest}: {e}", file=sys.stderr)
+            return 2
 
     def keep(path: Path) -> bool:
         if a.refresh or not path.exists():

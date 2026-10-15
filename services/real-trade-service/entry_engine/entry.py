@@ -1821,24 +1821,9 @@ def _tick_day_change_pct(tick) -> Optional[float]:
 #   * ETF: symbol is in the built-in list / matches the name patterns / is in WATCHLIST_ETF_SYMBOLS.
 # The ETF test is by NAME only (there is no instrument-type field on a watchlist row), so it is a
 # heuristic: extend the list with WATCHLIST_ETF_SYMBOLS=SYM1,SYM2 when one slips through.
-_KNOWN_ETF_SYMBOLS = frozenset({
-    "MASPTOP50", "MAFANG", "MON100", "MAHKTECH", "MOM100", "MOM50", "MIDCAPETF", "MIDSMALL",
-    "NIFTYBEES", "BANKBEES", "JUNIORBEES", "GOLDBEES", "SILVERBEES", "LIQUIDBEES", "PSUBNKBEES",
-    "CPSEETF", "GOLDIETF", "SILVERIETF", "N100", "HNGSNGBEES", "ITBEES", "PHARMABEES",
-})
-
-
 def _wl_is_etf_symbol(symbol: str) -> bool:
-    sym = (symbol or "").strip().upper()
-    for suf in (".NS", ".BO"):
-        if sym.endswith(suf):
-            sym = sym[: -len(suf)]
-    if not sym:
-        return False
-    extra = {x.strip().upper() for x in (os.getenv("WATCHLIST_ETF_SYMBOLS") or "").split(",") if x.strip()}
-    if sym in _KNOWN_ETF_SYMBOLS or sym in extra:
-        return True
-    return sym.endswith("BEES") or sym.endswith("ETF") or "ETF" in sym
+    """group379: the name test lives in watchlist_engine/symbol_filter.is_etf_symbol, shared with the candidate engine."""
+    return _symbol_filter.is_etf_symbol(symbol)
 
 
 def _watchlist_instrument_reason(symbol: str, price) -> Optional[str]:

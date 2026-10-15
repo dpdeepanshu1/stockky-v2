@@ -1447,7 +1447,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
         return {}
 
     MARKET_DATA_URL = os.environ.get(
-        "MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com"
+        "MARKET_DATA_URL", "http://market-data-service:8001"
     ).rstrip("/")
 
     bases: List[str] = []

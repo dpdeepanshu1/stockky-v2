@@ -232,7 +232,7 @@ def test_service_urls_default_when_env_absent(monkeypatch, tmp_path):
     assert m.NOTIFICATION_URL == "https://notification-scheduler-service-x8vc.onrender.com/notification"
     # SCHEDULER_URL is the same host, different sub-app mount, without the /notification suffix
     assert m.SCHEDULER_URL == "https://notification-scheduler-service-x8vc.onrender.com/scheduler"
-    assert m.MARKET_DATA_URL == "https://market-data-service-r6d7.onrender.com"
+    assert m.MARKET_DATA_URL == "http://market-data-service:8001"
 
 
 def test_service_urls_derive_from_base_env(monkeypatch, tmp_path):

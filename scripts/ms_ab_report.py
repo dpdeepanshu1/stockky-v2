@@ -2,7 +2,7 @@
 """ms_ab_report.py - WS-7 / gate G2: does the daily-structure policy beat a technical-only baseline, out of sample, after costs?
 
   python3 scripts/ms_ab_report.py HIST_DIR [--out DIR] [--step 3] [--horizon 10] [--cost-pct 0.30] [--slip-pct 0.10] [--min-n 200]
-                                  [--jobs 1] [--boot 500] [--thresholds '{}']
+                                  [--jobs 1] [--boot 500] [--thresholds '{}'] [--sample 400 --seed 7]
 
 HIST_DIR: one JSON per symbol (market-data /history reply or a bare candle list; see scripts/fetch_history_for_backtest.py). A file named
 `^NSEI.json` (or NIFTY.json) is the benchmark: it is NOT traded, it tags regimes (bull/bear by 200-day SMA, high/low volatility by ATR% against its own
@@ -24,6 +24,9 @@ neighbouring days of one stock are not independent; seed 7). Verdict:
   pass                 edge > 0 with the bootstrap 5th percentile > 0, both halves of history positive, and the candidate mean net return > 0
   hurts                bootstrap 95th percentile of the edge < 0 (the rules removed the better entries)
   no_edge              anything else
+--sample N replays only N symbols drawn at random (seeded) from the sorted symbol files in HIST_DIR (the benchmark is never drawn): download a wide
+universe once, then run several seeds to see whether the verdict depends on WHICH 400 stocks were drawn. The seed, the drawn count and the pool size are
+written to the report. Without --sample every file is replayed.
 Output: ab_report.json + ab_report.md in --out (default HIST_DIR/ab_out). Stdlib only, deterministic.
 """
 from __future__ import annotations
@@ -252,6 +255,8 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     L_: List[str] = [f"# Structure policy A/B report (T+{rep['horizon']}, net of costs)", "",
                      f"**Verdict: `{rep['verdict']}`**", "",
                      f"- symbols: {m['symbols']} (skipped {m['skipped']}), benchmark: {m['benchmark']}, step {m['step']}, cost {m['cost_pct']}% round trip + {m['slip_pct']}% slippage",
+                     *([f"- sample: {m['sample']['drawn']} of {m['sample']['pool']} symbols, random seed {m['sample']['seed']}"]
+                       if (m.get("sample") or {}).get("seed") is not None else []),
                      f"- signals: baseline {s['baseline']}, candidate {s['candidate']} ({f(rep['kept_pct'])}% kept), rejected {s['rejected']}",
                      f"- edge (candidate - baseline mean net return): **{f(rep['edge_pp'])} pp**, 90% bootstrap CI {f(rep['bootstrap']['ci90'])}, "
                      f"P(edge>0) {f(rep['bootstrap']['p_edge_positive'])}, clusters {rep['bootstrap']['clusters']}",
@@ -290,6 +295,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--boot", type=int, default=500)
     ap.add_argument("--thresholds", default="{}")
+    ap.add_argument("--sample", type=int, default=0, help="replay N symbols drawn at random (seeded) from the files in HIST_DIR; 0 = all")
+    ap.add_argument("--seed", type=int, default=7, help="seed for --sample (the bootstrap keeps its own fixed seed)")
     a = ap.parse_args(argv)
     d = Path(a.dir)
     th = json.loads(a.thresholds)
@@ -306,7 +313,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             break
     if bench is None:
         print("no usable benchmark (^NSEI.json): regimes and NIFTY-relative returns will be empty", file=sys.stderr)
-    jobs = [(str(f), f.stem.upper(), a.step, th, a.cost_pct, a.slip_pct) for f in files if f.stem.upper() not in BENCH_NAMES]
+    stock_files = [f for f in files if f.stem.upper() not in BENCH_NAMES]
+    pool_size = len(stock_files)
+    if a.sample > 0 and pool_size > a.sample:
+        import random
+        stock_files = sorted(random.Random(a.seed).sample(stock_files, a.sample))
+    jobs = [(str(f), f.stem.upper(), a.step, th, a.cost_pct, a.slip_pct) for f in stock_files]
     rows: List[Dict[str, Any]] = []
     skipped = 0
     if a.jobs > 1:
@@ -325,7 +337,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"skip {res['sym']}: {res['err']}", file=sys.stderr)
         rows += res["rows"]
     meta = {"symbols": len(jobs) - skipped, "skipped": skipped, "benchmark": bname or "none", "step": a.step,
-            "cost_pct": a.cost_pct, "slip_pct": a.slip_pct, "thresholds": th}
+            "cost_pct": a.cost_pct, "slip_pct": a.slip_pct, "thresholds": th,
+            "sample": {"requested": a.sample, "pool": pool_size, "drawn": len(jobs), "seed": a.seed if a.sample > 0 else None}}
     rep = build_report(rows, a.horizon, a.min_n, a.boot, meta)
     out = Path(a.out) if a.out else d / "ab_out"
     out.mkdir(parents=True, exist_ok=True)

@@ -991,7 +991,7 @@ OPENING_GATE_NIFTY_MIN_VS_PREV_PCT = _get_float("OPENING_GATE_NIFTY_MIN_VS_PREV_
 # Read from market-data-service /history (daily candles) by a background thread (screening/prev_day.py), never on the entry
 # path. Inside the gate window (09:15 - OPENING_GATE_SETTLE_IST) the entry is skipped when the data is not cached yet (fails
 # closed; the next 10 s scan finds it).
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 OPENING_GATE_PREVDAY_TIMEOUT_S = _get_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0)
 OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _get_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)   # previous day closed in the upper half of its range; 0 disables
 OPENING_GATE_MIN_STOP_ATR_FRAC = _get_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)           # stop % must be >= this x daily ATR %; 0 disables

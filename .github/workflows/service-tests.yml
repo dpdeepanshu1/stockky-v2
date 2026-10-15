@@ -19,6 +19,8 @@ on:
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
+      - "scripts/check_market_data_url_default.py"
+      - "docker-compose.yml"
       - "scripts/check_table_name_collisions.py"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
@@ -38,6 +40,8 @@ on:
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
+      - "scripts/check_market_data_url_default.py"
+      - "docker-compose.yml"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
       - "docs/ENV_REFERENCE.md"
@@ -63,6 +67,10 @@ jobs:
         run: python3 scripts/check_holiday_lists_sync.py
       - name: docs/ENV_REFERENCE.md is current (regenerate with scripts/gen_env_reference.py)
         run: python3 scripts/gen_env_reference.py --check
+      - name: No service defaults MARKET_DATA_URL to a public onrender.com host (group379)
+        run: |
+          pip install pyyaml
+          python3 scripts/check_market_data_url_default.py
       - name: No cross-service table-name clashes (one shared Oracle schema)
         run: python3 scripts/check_table_name_collisions.py
       - name: No new direct yfinance imports outside the allow-list

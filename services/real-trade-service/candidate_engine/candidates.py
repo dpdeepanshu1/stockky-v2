@@ -82,6 +82,7 @@ from tz_utils import as_aware
 from portfolio.portfolio import held_exposure_positions
 from shared_adaptive import percentile_rank
 import adaptive_market_params as amp
+from watchlist_engine import symbol_filter as _symbol_filter   # group379: shared ETF name test
 
 logger = logging.getLogger("real-trade-candidates")
 
@@ -99,7 +100,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     return raw or (default.rstrip("/") if rstrip else default)
 
 
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 
 # ── Quality thresholds — market-intelligence derived, all env-overridable ────
 # Raised from 45 → 55 because in a choppy/weak market, borderline signals
@@ -120,6 +121,38 @@ DOWNTREND_6M_THRESHOLD = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").
 # 52w overextension: tightened to top 12% (was 15%) — in a choppy market,
 # stocks near yearly highs face heavy profit-booking.
 OVEREXTENDED_52W_TOP_PCT = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0"))
+
+# group379 (E1): the 52-week "top 12%" rule used to say "choppy/weak market" without ever looking at the market, and it
+# rejected stocks that had JUST made a new high (8 of 13 rejections in the 13-Oct log). Now:
+#   CANDIDATE_52W_RULE_ENABLED=0         the rule is off entirely (no 52w rejection at all)
+#   CANDIDATE_52W_REGIME_GATE=0          the rule applies in every regime (the old behaviour)
+#   CANDIDATE_52W_WEAK_REGIME_SCORE=50   with the gate on, the rule applies only while the market score (the same
+#                                        score the dashboard shows) is BELOW this. A missing / stale score = rule applies.
+#   CANDIDATE_52W_REGIME_MAX_AGE_MIN=30  a market score older than this counts as missing
+#   CANDIDATE_52W_FRESH_HIGH_EXEMPT=0    a fresh high is judged like any other price again (old behaviour)
+#   CANDIDATE_52W_FRESH_HIGH_PCT=1.0     "at the high" = price within this % of the 52w high (or above it)
+#   CANDIDATE_52W_FRESH_HIGH_DAYS=10     ... and that high was set within this many calendar days of the last bar
+#   CANDIDATE_52W_FRESH_HIGH_VOL_RATIO=1.2  ... and the 5-day average volume is at least this x the 20-day average
+# None of these numbers has been backtested (Group E3 / F): they are conservative starting points, not tuned values.
+def _env_flag_on(name: str, default: str = "1") -> bool:
+    return ((os.getenv(name) or "").strip() or default).lower() not in ("0", "false", "no", "off")
+
+
+def _env_float_or(name: str, default: float) -> float:
+    try:
+        return float(((os.getenv(name) or "").strip() or default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+RANGE_52W_ENABLED = _env_flag_on("CANDIDATE_52W_RULE_ENABLED")
+RANGE_52W_REGIME_GATE = _env_flag_on("CANDIDATE_52W_REGIME_GATE")
+RANGE_52W_WEAK_REGIME_SCORE = _env_float_or("CANDIDATE_52W_WEAK_REGIME_SCORE", 50.0)
+RANGE_52W_REGIME_MAX_AGE_MIN = _env_float_or("CANDIDATE_52W_REGIME_MAX_AGE_MIN", 30.0)
+FRESH_HIGH_EXEMPT = _env_flag_on("CANDIDATE_52W_FRESH_HIGH_EXEMPT")
+FRESH_HIGH_PCT = _env_float_or("CANDIDATE_52W_FRESH_HIGH_PCT", 1.0)
+FRESH_HIGH_DAYS = _env_float_or("CANDIDATE_52W_FRESH_HIGH_DAYS", 10.0)
+FRESH_HIGH_VOL_RATIO = _env_float_or("CANDIDATE_52W_FRESH_HIGH_VOL_RATIO", 1.2)
 
 # ATR cap: slightly tightened (7% vs 8%) for safer sizing in volatile conditions.
 MAX_ATR_PCT = float(((os.getenv("CANDIDATE_MAX_ATR_PCT") or "").strip() or "7.0"))
@@ -235,6 +268,32 @@ def _refresh_cycle_adaptive_params(db: Session) -> None:
         )
     except Exception as e:
         logger.warning("candidate_engine: adaptive param refresh failed (%s), keeping prior values", e)
+
+# group379 (E1): this cycle's market score, for the 52-week rule. entry_engine records every score it fetches from
+# GET /market/indices into MarketRegimeHistory, so the newest row IS the dashboard's market score; no extra network
+# call. None = no recent reading (the rule then applies exactly as before - missing data never relaxes a rule).
+_cycle_market_score: Optional[float] = None
+
+
+def _refresh_cycle_market_score(db: Session) -> None:
+    """Called once per refresh_candidates() cycle. Best-effort: any failure leaves the score unknown (None)."""
+    global _cycle_market_score
+    _cycle_market_score = None
+    try:
+        row = (
+            db.query(models.MarketRegimeHistory)
+            .order_by(models.MarketRegimeHistory.recorded_at.desc())
+            .first()
+        )
+        if row is None or row.score is None:
+            return
+        age_min = (datetime.now(timezone.utc) - as_aware(row.recorded_at)).total_seconds() / 60.0
+        if age_min <= RANGE_52W_REGIME_MAX_AGE_MIN:
+            _cycle_market_score = float(row.score)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("candidate_engine: market score read failed (%s), 52w rule applies as before", e)
+        _cycle_market_score = None
+
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
 MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "20.0"))
@@ -1262,6 +1321,65 @@ def _near_resistance(candles: list[dict], current_price: float) -> bool:
     return current_price >= recent_high * 0.98  # within 2% of 20-period high
 
 
+def _range_52w_applies() -> tuple[bool, Optional[float]]:
+    """(rule applies, market score used). With the regime gate on, the 52-week rule applies only in a weak market;
+    an unknown score keeps the rule on (fail toward the old, stricter behaviour)."""
+    score = _cycle_market_score
+    if not RANGE_52W_REGIME_GATE:
+        return True, score
+    if score is None:
+        return True, None
+    return score < RANGE_52W_WEAK_REGIME_SCORE, score
+
+
+def _volume_ratio_5_20(candles: Any) -> Optional[float]:
+    """5-bar average volume / 20-bar average volume, or None when there is not enough volume data (needs 10 bars)."""
+    if not isinstance(candles, list):
+        return None
+    vols = []
+    for c in candles:
+        try:
+            v = float((c or {}).get("volume") or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            vols.append(v)
+    if len(vols) < 10:
+        return None
+    avg20 = sum(vols[-20:]) / min(len(vols), 20)
+    if avg20 <= 0:
+        return None
+    return (sum(vols[-5:]) / min(len(vols[-5:]), 5)) / avg20
+
+
+def _fresh_high_breakout(candles_1y: Any, candles_recent: Any, current_price: float) -> Optional[str]:
+    """A note describing the breakout when the stock is AT a fresh 52-week high that volume confirms, else None.
+    Fresh = price is within FRESH_HIGH_PCT of the 52w high (or above it) AND the bar that set that high is no more than
+    FRESH_HIGH_DAYS before the last bar. Confirmed = 5-day avg volume >= FRESH_HIGH_VOL_RATIO x the 20-day avg.
+    Missing dates or too little volume data = not a confirmed breakout (the normal rules apply). Never raises."""
+    try:
+        if not FRESH_HIGH_EXEMPT or current_price <= 0 or not isinstance(candles_1y, list) or len(candles_1y) < 2:
+            return None
+        from datetime import date as _date
+        best = max((c for c in candles_1y if (c or {}).get("high")), key=lambda c: float(c["high"]), default=None)
+        if best is None:
+            return None
+        h52 = float(best["high"])
+        if h52 <= 0 or current_price < h52 * (1 - FRESH_HIGH_PCT / 100.0):
+            return None
+        last_d = _date.fromisoformat(str((candles_1y[-1] or {}).get("date") or "")[:10])
+        high_d = _date.fromisoformat(str(best.get("date") or "")[:10])
+        age_days = (last_d - high_d).days
+        if age_days < 0 or age_days > FRESH_HIGH_DAYS:
+            return None
+        ratio = _volume_ratio_5_20(candles_recent)
+        if ratio is None or ratio < FRESH_HIGH_VOL_RATIO:
+            return None
+        return f"52w fresh-high breakout (high {age_days}d old, volume x{ratio:.1f} of 20-day avg)"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── Multi-timeframe quality analysis ─────────────────────────────────────────
 
 # group247: cut the 6-month and 1-year views from one daily 1y series (see _multi_tf_analysis).
@@ -1462,8 +1580,12 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         }
 
     # ── Check 4: 52-week range position (overextension) ──────────────────────
+    # group379 (E1): (a) a stock AT a fresh, volume-confirmed 52-week high is a breakout, not an overextension, and is
+    # not rejected here (nor by check 7 below); (b) otherwise the rule applies only while the market is actually weak
+    # (see _range_52w_applies), and the reason now quotes the real market score instead of assuming "choppy".
     candles_1y = fetched.get("1y")
-    if isinstance(candles_1y, list) and candles_1y and current_price > 0:
+    breakout_note: Optional[str] = _fresh_high_breakout(candles_1y, fetched.get("1m"), current_price)
+    if RANGE_52W_ENABLED and not breakout_note and isinstance(candles_1y, list) and candles_1y and current_price > 0:
         highs = [float(c.get("high", 0)) for c in candles_1y if c.get("high")]
         lows  = [float(c.get("low",  0)) for c in candles_1y if c.get("low")]
         if highs and lows:
@@ -1471,13 +1593,20 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
             rng = h52 - l52
             if rng > 0:
                 pos_pct = (current_price - l52) / rng * 100
-                if pos_pct > (100 - OVEREXTENDED_52W_TOP_PCT):
+                _applies, _mscore = _range_52w_applies()
+                if pos_pct > (100 - OVEREXTENDED_52W_TOP_PCT) and _applies:
+                    if _mscore is None:
+                        _ctx = "market score unavailable, so the rule is applied as a precaution"
+                    else:
+                        _ctx = f"market score {_mscore:.0f}"
+                        if RANGE_52W_REGIME_GATE:
+                            _ctx += f" is below {RANGE_52W_WEAK_REGIME_SCORE:.0f} (weak market)"
                     return {
                         "reject_reason": (
                             f"Price in top {OVEREXTENDED_52W_TOP_PCT}% of 52w range "
-                            f"({pos_pct:.1f}%). "
-                            "Buying near yearly highs in a choppy/weak market "
-                            "invites profit-booking from existing holders. Poor R:R."
+                            f"({pos_pct:.1f}%), not a fresh volume-confirmed high; {_ctx}. "
+                            "Buying near yearly highs invites profit-booking from existing "
+                            "holders. Poor R:R."
                         ),
                         "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
                         "reject_kind": "range_52w",
@@ -1527,7 +1656,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
             }
 
         # ── Check 7: Not near recent resistance ───────────────────────────────
-        if current_price > 0 and _near_resistance(candles_1m, current_price):
+        if not breakout_note and current_price > 0 and _near_resistance(candles_1m, current_price):
             return {
                 "reject_reason": (
                     f"Price ₹{current_price:.2f} is within 2% of 20-day high — "
@@ -1545,7 +1674,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         "bullish_count": bullish_count,
         "atr_pct":       atr_pct,
         "current_price": current_price,
-        "market_note":   "",
+        "market_note":   breakout_note or "",
     }
 
 
@@ -2085,6 +2214,19 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
     # fresh duplicate row every single cycle.
     rows = [r for r in rows if r["symbol"] not in exclude_syms]
 
+    # group379 (E2): ETFs / index funds (ITBEES, ITIETF ...) are not stocks - they have no market cap, so the market-cap
+    # fetch failed for each and the candidate was rejected after a full set of history calls. Dropped by name BEFORE any
+    # quote / history / market-cap call. CANDIDATE_ETF_FILTER=0 turns this off.
+    if _symbol_filter.candidate_etf_filter_on():
+        _etf_rows = [r for r in rows if _symbol_filter.is_etf_symbol(r["symbol"])]
+        if _etf_rows:
+            _etf_ids = {id(r) for r in _etf_rows}
+            rows = [r for r in rows if id(r) not in _etf_ids]
+            logger.info(
+                "candidate_engine: dropped %d ETF/fund name(s) before any fetch (mode=%s): %s",
+                len(_etf_rows), mode, ",".join(sorted({r["symbol"] for r in _etf_rows}))[:200],
+            )
+
     # 2026-09-11 fix — see intraday_eligibility.py module docstring. Drop
     # symbols already known (from a real, previously-observed Dhan
     # rejection) to be unable to use product_type=INTRADAY, so this service
@@ -2338,6 +2480,13 @@ async def _refresh_volume_shock_candidates(
     async with httpx.AsyncClient() as client:
         candidates = await _fetch_volume_shock_universe(client)
         candidates = [s for s in candidates if s not in exclude_symbols]
+        if _symbol_filter.candidate_etf_filter_on():   # group379 (E2): same ETF name drop as the standard track
+            candidates, _etf_dropped = _symbol_filter.drop_etf_symbols(candidates)
+            if _etf_dropped:
+                logger.info(
+                    "candidate_engine: volume_shock dropped %d ETF/fund name(s) before any fetch (mode=%s): %s",
+                    len(_etf_dropped), mode, ",".join(sorted(set(_etf_dropped)))[:200],
+                )
         if _restricted:
             _before = len(candidates)
             candidates = [s for s in candidates if s not in _restricted]
@@ -2783,6 +2932,7 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     # is a global refresh rather than threading `db` through every nested
     # analysis function.
     _refresh_cycle_adaptive_params(db)
+    _refresh_cycle_market_score(db)   # group379: for the 52-week rule
 
     # Standard track: 6h dedupe cooldown (avoids duplicate cards for slow-moving signals)
     cooldown_syms = _recently_candidated_symbols(db, mode)

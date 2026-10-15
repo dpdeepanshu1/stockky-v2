@@ -73,6 +73,71 @@ def is_index_symbol(symbol: str) -> bool:
         return False
 
 
+# ── group379 (E2): one ETF / fund name test shared by the watchlist and the candidate engine ────────────────
+# ITBEES and ITIETF were entering the stock candidate engine and failing its market-cap fetch (an ETF has no
+# market cap), costing a fundamental call + history calls each cycle just to be rejected. The watchlist already
+# had a name test (entry.py _wl_is_etf_symbol, group157/169); it now lives here so both paths use ONE list.
+# The test is by NAME only (no instrument-type field exists), so it is a heuristic: extend it with
+# CANDIDATE_ETF_SYMBOLS / WATCHLIST_ETF_SYMBOLS (comma-separated) when one slips through.
+#   CANDIDATE_ETF_FILTER=0   stops the candidate engine dropping ETF names (the watchlist keeps its own switch)
+_KNOWN_ETF_SYMBOLS = frozenset({
+    "MASPTOP50", "MAFANG", "MON100", "MAHKTECH", "MOM100", "MOM50", "MIDCAPETF", "MIDSMALL",
+    "NIFTYBEES", "BANKBEES", "JUNIORBEES", "GOLDBEES", "SILVERBEES", "LIQUIDBEES", "PSUBNKBEES",
+    "CPSEETF", "GOLDIETF", "SILVERIETF", "N100", "HNGSNGBEES", "ITBEES", "PHARMABEES",
+    "ITIETF", "BANKBETA", "MONQ50", "AONESILVER", "GROWWMETAL",
+})
+_ETF_FUND_PATTERN = re.compile(
+    r"^SETF[A-Z0-9]"                    # SBI's SETF* series
+    r"|LIQUID"                          # LIQUIDPLUS / LIQUIDSBI / HDFCLIQUID
+    r"|GSEC"                            # gilt funds (GSEC10YEAR)
+    r"|^(?:SILVER|GOLD)(?:ADD|CASE)$"   # SILVERADD, GOLDCASE
+)
+
+
+def _strip_suffix(symbol) -> str:
+    sym = str(symbol or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if sym.endswith(suf):
+            sym = sym[: -len(suf)]
+    return sym.strip()
+
+
+def _etf_extras() -> set:
+    out = set()
+    for name in ("WATCHLIST_ETF_SYMBOLS", "CANDIDATE_ETF_SYMBOLS"):
+        out |= {_strip_suffix(x) for x in (os.getenv(name) or "").split(",") if x.strip()}
+    return out
+
+
+def is_etf_symbol(symbol) -> bool:
+    """True when the name looks like an ETF / index fund / liquid or gilt fund: built-in list, *BEES, *ETF,
+    anything containing ETF, a few fund-name patterns, or a symbol in WATCHLIST_ETF_SYMBOLS / CANDIDATE_ETF_SYMBOLS.
+    Suffixes (.NS / .BO) and case are ignored. Never raises."""
+    try:
+        sym = _strip_suffix(symbol)
+        if not sym:
+            return False
+        if sym in _KNOWN_ETF_SYMBOLS or sym in _etf_extras():
+            return True
+        if sym.endswith("BEES") or sym.endswith("ETF") or "ETF" in sym:
+            return True
+        return bool(_ETF_FUND_PATTERN.search(sym))
+    except Exception:
+        return False
+
+
+def candidate_etf_filter_on() -> bool:
+    return _flag("CANDIDATE_ETF_FILTER")
+
+
+def drop_etf_symbols(symbols: Iterable[str]) -> tuple[list, list]:
+    """(kept, dropped) in the original order. A non-string entry is kept untouched."""
+    kept, dropped = [], []
+    for s in symbols:
+        (dropped if (isinstance(s, str) and is_etf_symbol(s)) else kept).append(s)
+    return kept, dropped
+
+
 def _ts_key(row) -> float:
     ts = getattr(row, "catalyst_ts", None)
     if isinstance(ts, datetime):

@@ -39,7 +39,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
 
 
 # MUST point to your market-data-service
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 
 # ── Sector-relative valuation (from first version) ───────────────────
 # A P/E of 35 is expensive for a bank, ordinary for FMCG, and cheap for a

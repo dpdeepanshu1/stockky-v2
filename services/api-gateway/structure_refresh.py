@@ -75,6 +75,39 @@ def _close_buffer_min() -> int:
     return _env_int("STRUCTURE_BAR_CLOSE_BUFFER_MIN", 20)
 
 
+# ----------------------------------------------------------------------------- in-process catch-up (group378)
+# The job used to run ONLY when something outside the process asked for it (QStash tick / GitHub workflow). A missed trigger, a missing
+# API_GATEWAY_URL secret or a restart after 16:00 IST therefore left every feed row without `ms_*` keys, and the bulk scan (which reads
+# structure from the feed row) then had "no opinion" for every symbol -> no observations logged, REAL-mode `structure_nodata` WAITs.
+# The catch-up loop in main.py asks `catchup_wanted()` every STRUCTURE_REFRESH_CATCHUP_INTERVAL_S and, when the market is closed, starts the
+# normal refresh. The normal selection still decides WHAT to refresh (missing / stale rows only, rows tried within STRUCTURE_REFRESH_RECHECK_H
+# are skipped), so a catch-up that finds nothing to do is a cheap no-op. STRUCTURE_REFRESH_CATCHUP=0 turns just the catch-up off.
+CATCHUP_PHASES: Tuple[str, ...] = ("closed", "holiday")
+
+
+def catchup_enabled() -> bool:
+    return enabled() and (os.getenv("STRUCTURE_REFRESH_CATCHUP") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def catchup_interval_s() -> float:
+    return _env_float("STRUCTURE_REFRESH_CATCHUP_INTERVAL_S", 1800.0, lo=60.0)
+
+
+def catchup_initial_delay_s() -> float:
+    return _env_float("STRUCTURE_REFRESH_CATCHUP_DELAY_S", 180.0, lo=0.0)
+
+
+def catchup_wanted(phase: Optional[str], job_status: Optional[str]) -> bool:
+    """True when a catch-up refresh should be attempted now: catch-up on, market phase `closed` / `holiday` (never during pre-open, the
+    session or the 15:30-16:00 post window, so the technical service is not loaded while it serves the live market) and no run in flight.
+    Pure."""
+    if not catchup_enabled():
+        return False
+    if str(phase or "").lower() not in CATCHUP_PHASES:
+        return False
+    return str(job_status or "").lower() != "running"
+
+
 # ----------------------------------------------------------------------------- pure helpers
 def _is_holiday(d: date) -> bool:
     try:

@@ -40,15 +40,40 @@ def test_wait_and_do_not_buy_are_never_touched():
         assert sp.apply_policy(d, _sum(), 100.0)["decision"] == d
 
 
-def test_unknown_is_never_bullish_and_never_blocks():
-    for s in (None, {}, _sum(ms_quality="unavailable"), _sum(ms_quality="insufficient"), _sum(ms_atr=None)):
-        r = sp.apply_policy("BUY NOW", s, 100.0)
-        assert r["decision"] == "BUY NOW" and r["structure"]["no_opinion"]
+_UNKNOWN = (None, {}, _sum(ms_quality="unavailable"), _sum(ms_quality="insufficient"), _sum(ms_quality="stale"), _sum(ms_atr=None))
+
+
+def test_unknown_is_never_bullish_and_never_blocks_when_require_data_is_off():
+    for s in _UNKNOWN:
+        r = sp.apply_policy("BUY NOW", s, 100.0, require_data=False)
+        assert r["decision"] == "BUY NOW" and r["structure"]["no_opinion"] and r["structure"]["applied"] is False
+
+
+def test_group377_buy_now_without_usable_structure_waits():
+    for s in _UNKNOWN:
+        r = sp.apply_policy("BUY NOW", s, 100.0)          # default: STRUCTURE_REQUIRE_FOR_BUY_NOW on
+        assert r["decision"] == "WAIT" and r["structure"]["applied"] is True
+        assert [x["id"] for x in r["structure"]["rules"]] == ["P1_NO_STRUCTURE"] and r["structure"]["no_opinion"]
+
+
+def test_group377_only_buy_now_is_touched_by_the_data_requirement():
+    for d in ("PREPARE TO BUY", "WAIT", "DO NOT BUY", "HOLD"):
+        r = sp.apply_policy(d, None, 100.0)
+        assert r["decision"] == d and r["structure"]["applied"] is False
+
+
+def test_group377_env_switch_and_off_mode(monkeypatch):
+    monkeypatch.setenv("STRUCTURE_REQUIRE_FOR_BUY_NOW", "0")
+    assert sp.apply_policy("BUY NOW", None, 100.0)["decision"] == "BUY NOW"
+    monkeypatch.setenv("STRUCTURE_REQUIRE_FOR_BUY_NOW", "1")
+    assert sp.apply_policy("BUY NOW", None, 100.0)["decision"] == "WAIT"
+    assert sp.apply_policy("BUY NOW", None, 100.0, mode="off")["decision"] == "BUY NOW"     # kill switch beats everything
 
 
 def test_stale_price_drift_is_no_opinion():
-    r = sp.apply_policy("BUY NOW", _sum(ms_chase_atr=9), 140.0)
+    r = sp.apply_policy("BUY NOW", _sum(ms_chase_atr=9), 140.0, require_data=False)
     assert r["decision"] == "BUY NOW" and "too old" in r["structure"]["no_opinion"]
+    assert sp.apply_policy("BUY NOW", _sum(ms_chase_atr=9), 140.0)["decision"] == "WAIT"      # group377: stale structure is not a checked entry
 
 
 def test_live_price_shifts_chase_and_rr():
@@ -153,7 +178,8 @@ def test_never_raises_on_garbage():
     for s in ("x", 5, {"ms_quality": "ok", "ms_price": "abc", "ms_atr": object()}, {"ms_rr_flags": 7}):
         for d in ("BUY NOW", "PREPARE TO BUY"):
             r = sp.apply_policy(d, s, "bad")
-            assert r["decision"] == d
+            # group377: unusable structure never raises; a BUY NOW waits (P1_NO_STRUCTURE), a PREPARE is untouched
+            assert r["decision"] == ("WAIT" if d == "BUY NOW" else d)
 
 def test_asof_epoch_becomes_iso_date_and_hash_is_carried():
     """The engine reports ms_asof as epoch seconds; the observation row needs an ISO date (asof_date was stored NULL) and the params hash."""

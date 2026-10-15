@@ -91,6 +91,48 @@ def _stub_modules():
         sys.modules["httpx"] = hx
 
 
+class _OfflineClient:
+    """httpx.Client stand-in: every request raises, like a machine with no network. analyze() asks market-data for delivery % through
+    httpx.Client (not through _fetch_history / _fetch_quote_price), and MARKET_DATA_URL defaults to a public host, so without this a run on a
+    machine WITH internet got delivery_pct 50.0 / fallback_neutral instead of None (group378)."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def _boom(self, *a, **k):
+        raise ConnectionError("network disabled in the offline harness")
+
+    get = post = put = delete = request = _boom
+
+
+class _OfflineHttpx:
+    """The module's `httpx` name with Client / get / post disabled; everything else (exception classes ...) is the real module's."""
+
+    def __init__(self, real):
+        self._real = real
+        self.Client = self.AsyncClient = _OfflineClient
+
+    def get(self, *a, **k):
+        raise ConnectionError("network disabled in the offline harness")
+
+    post = get
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _block_network(m) -> None:
+    real = getattr(m, "httpx", None)
+    if real is not None and not isinstance(real, _OfflineHttpx):
+        m.httpx = _OfflineHttpx(real)
+
+
 _MAIN = None
 
 
@@ -104,6 +146,7 @@ def load_main():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     m._STRUCTURE_STALE_DAYS = 36500
+    _block_network(m)
     m._cache_get = lambda key: None
     m._cache_set = lambda key, value, ttl=None: None
     m._fetch_quote_price = lambda symbol: None

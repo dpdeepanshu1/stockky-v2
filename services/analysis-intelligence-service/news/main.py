@@ -765,6 +765,20 @@ def health():
     return {"status": "ok", "service": "news-intelligence-service"}
 
 
+@app.get("/feed-health")
+def feed_health():
+    """group378: which news feeds deliver right now - per feed: ok / fallback (a Google News search is standing in) / frozen / blocked / empty,
+    newest item age, HTTP status and who served it. Filled as feeds are downloaded (hit /news/analyze/<SYMBOL> once to populate after a boot)."""
+    try:
+        import feed_fetch as _ff
+    except Exception:  # noqa: BLE001
+        try:
+            from news import feed_fetch as _ff  # type: ignore
+        except Exception as e:  # noqa: BLE001
+            return {"feeds": [], "tally": {}, "error": str(e)[:160]}
+    return _ff.health_snapshot()
+
+
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     # INTEGRATION: news_quality multi-source + better summary (fallback to legacy below)

@@ -828,6 +828,17 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()}
 
 
+@app.get("/ops/db-latency")
+async def ops_db_latency():
+    """group378: Oracle latency for this service - per-engine connect / execute count, avg, p50, p95, max, the last slow
+    statement, pool state and keep-warm counters (same shape as the api-gateway endpoint)."""
+    try:
+        import oracle_compat
+        return await asyncio.to_thread(oracle_compat.latency_snapshot)
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:160]}
+
+
 def _session_nifty_price():
     """group320: current Nifty 50 price for the closed-market proof, through this service's own /quote path."""
     q = get_quote("^NSEI")

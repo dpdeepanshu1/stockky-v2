@@ -475,6 +475,18 @@ async def health():
     return {"ok": True, "service": config.SERVICE_NAME, "phase": "1"}
 
 
+@app.get("/ops/db-latency")
+def ops_db_latency():
+    """group378: Oracle latency for this service - per-engine connect / execute count, avg, p50, p95, max, the last slow
+    statement, pool state and keep-warm counters (same shape as the api-gateway endpoint). Sync route: FastAPI runs it in
+    its threadpool, so it never blocks the event loop."""
+    try:
+        import oracle_compat
+        return oracle_compat.latency_snapshot()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:160]}
+
+
 @app.get("/preopen/status")
 def preopen_status():
     """group331: today's 09:08 pre-open snapshot - passes done, per-pass coverage (queued / priced / fresh gaps) and the biggest gaps."""

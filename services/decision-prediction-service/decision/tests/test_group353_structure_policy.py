@@ -154,3 +154,10 @@ def test_never_raises_on_garbage():
         for d in ("BUY NOW", "PREPARE TO BUY"):
             r = sp.apply_policy(d, s, "bad")
             assert r["decision"] == d
+
+def test_asof_epoch_becomes_iso_date_and_hash_is_carried():
+    """The engine reports ms_asof as epoch seconds; the observation row needs an ISO date (asof_date was stored NULL) and the params hash."""
+    assert sp._asof_iso(1791936000.0) == "2026-10-14" and sp._asof_iso(1791916200) == "2026-10-14"
+    assert sp._asof_iso("2026-10-14") == "2026-10-14" and sp._asof_iso(None) is None and sp._asof_iso("x") is None and sp._asof_iso(True) is None
+    f = sp.build_structure_features({"ms_quality": "ok", "ms_asof": 1791936000.0, "ms_hash": "ab12cd34", "ms_ver": "1.0.0"}, None)
+    assert f["asof"] == "2026-10-14" and f["hash"] == "ab12cd34" and f["ver"] == "1.0.0"

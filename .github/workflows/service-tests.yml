@@ -19,6 +19,8 @@ on:
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
+      - "scripts/structure_gate_check.py"
+      - "scripts/test_structure_gate_check.py"
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
@@ -42,6 +44,8 @@ on:
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
       - "scripts/test_ms_ab_report.py"
+      - "scripts/structure_gate_check.py"
+      - "scripts/test_structure_gate_check.py"
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
@@ -82,7 +86,7 @@ jobs:
       - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
         run: |
           pip install pytest
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_structure_gate_check.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

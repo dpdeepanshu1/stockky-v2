@@ -1550,3 +1550,5 @@ prior cleanup — same folder, just look for the earlier dates.
 Setup/deploy docs stay at repo root, not here: `README.md`,
 `DEPLOY_GUIDE.md`, `SETUP-GUIDE.md`, `ORACLE_SETUP_GUIDE.md`.
 - group381: docs only - audited the 2026-10-15 remaining list against the zip (almost all done in groups 377-380), filled the results table in `docs/GROUP339_BASELINE.md`. Details: `docs/GROUP381_BASELINE_FILLED_REMAINING_AUDIT.md`.
+- group382: docs + tooling only - `scripts/structure_gate_check.py` reads A/B reports and `/api/structure/report` and says whether gates G2 / G4 of the execution plan pass; status of the rest of the plan. Details: `docs/GROUP382_STRUCTURE_PLAN_STATUS_AND_GATE_READOUT.md`.
+- group383: docs only - `docs/GROUP339_MARKET_STRUCTURE_ENGINE.md` (design, data flow, live defaults, rollback, gaps vs the plan), written from the code.

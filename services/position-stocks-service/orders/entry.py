@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, structure_gate, structure_observation, vwap_gate
+from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -419,6 +419,12 @@ def log_quality_reject(db: Session, candidate: Candidate, quality: QualitySignal
     _log_candidate(db, candidate, "SKIPPED", f"QUALITY_GATE:{reason}", quality=quality)
 
 
+def _stop_basis(levels) -> Optional[str]:
+    """group395: the stop's source tag (AdaptiveLevels.basis) for the position row; None when the levels carry no string tag. Never raises."""
+    b = getattr(levels, "basis", None)
+    return b if isinstance(b, str) and b else None
+
+
 def attempt_entry(
     db: Session,
     candidate: Candidate,
@@ -453,6 +459,12 @@ def attempt_entry(
     _pause = entry_pause.all_paused() or entry_pause.symbol_blocked(candidate.symbol)
     if _pause:
         _log_candidate(db, candidate, "SKIPPED", _pause, quality=quality)
+        return None
+
+    # group392: after OPENING_PAUSE_STOPOUTS stop-outs since the bell, no new automatic entry until the opening window ends.
+    _open_pause = opening_protect.pause_reason(db)
+    if _open_pause:
+        _log_candidate(db, candidate, "SKIPPED", _open_pause, quality=quality)
         return None
 
     # Max concurrent positions
@@ -725,6 +737,19 @@ def attempt_entry(
                 position_value = _cnew
             quantity = _cq
 
+    # group392: half size (OPENING_SIZE_MULT) inside the opening window; 1.0 outside it.
+    _open_mult = opening_protect.size_mult()
+    if _open_mult < 1.0 and quantity > 1:
+        _oq = max(1, int(quantity * _open_mult + 0.5))
+        if _oq < quantity:
+            logger.info("position-stocks entry: %s sized down %d -> %d shares (opening window x%.2f)",
+                        candidate.symbol, quantity, _oq, _open_mult)
+            _onew = _oq * candidate.current_ltp
+            if _onew < position_value:
+                ledger.release_capital(db, position_value=position_value - _onew, realized_pnl=0.0)
+                position_value = _onew
+            quantity = _oq
+
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:
         logger.warning(
@@ -933,6 +958,7 @@ def attempt_entry(
         entry_price=candidate.current_ltp,
         signal_price=candidate.current_ltp,                  # group280: slippage = fill vs this
         structure_json=_struct_snap,                          # group354
+        stop_basis=_stop_basis(levels),                        # group395
         quantity=quantity,
         target_price=levels.target_price,
         stop_price=levels.stop_price,
@@ -1247,6 +1273,7 @@ def attempt_manual_entry(
         status="OPEN",
         entry_price=current_ltp,
         signal_price=current_ltp,                            # group280
+        stop_basis=_stop_basis(levels),                      # group395
         quantity=quantity,
         target_price=levels.target_price,
         stop_price=levels.stop_price,

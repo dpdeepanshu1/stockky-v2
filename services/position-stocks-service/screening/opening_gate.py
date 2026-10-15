@@ -13,6 +13,11 @@ CHECKS (each can be switched off by setting its number to 0 / disabling the gate
      its upper half (OPENING_GATE_MIN_OR_POS) or above it, but not more than OPENING_GATE_MAX_ABOVE_OR_HIGH_PCT over the OR high
   6. Nifty: change vs its day open and vs the previous close both >= the configured minimums (skipped when MARKET_GATE_ENABLED=0)
 
+GROUP 390 (09:15 entries): the gate no longer blocks until 09:20. Checks that need a built-up range apply only once there is one:
+the day-range position (4), the opening-range tick count / position (5) and Nifty vs ITS day open (6) apply from
+OPENING_GATE_OR_MINUTES after the open. Before that, price vs previous close / day open, the gap, the previous-day candle and
+Nifty vs ITS previous close still apply.
+
 FAIL CLOSED: unlike every other gate in this service, missing data (no exchange day stats, no previous close, no Nifty reading,
 too few opening-range ticks) skips the entry while the gate is active. An internal error also skips it.
 
@@ -92,6 +97,7 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None) -> Op
         if not day_open or not prev_close:
             return "OPENING_GATE:NO_OPEN_OR_PREV_CLOSE"
 
+        or_settled = minutes_open >= config.OPENING_GATE_OR_MINUTES     # group 390: range-based checks need a built-up range
         gap = (day_open - prev_close) / prev_close * 100.0
         if config.OPENING_GATE_MAX_GAP_UP_PCT > 0 and gap > config.OPENING_GATE_MAX_GAP_UP_PCT:
             return f"OPENING_GATE:GAP_UP:{gap:+.2f}% > +{config.OPENING_GATE_MAX_GAP_UP_PCT:.2f}%"
@@ -102,7 +108,7 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None) -> Op
         if ltp < prev_close:
             return f"OPENING_GATE:BELOW_PREV_CLOSE:ltp {ltp:.2f} < prev close {prev_close:.2f}"
 
-        if config.OPENING_GATE_MAX_RANGE_POS > 0:
+        if config.OPENING_GATE_MAX_RANGE_POS > 0 and or_settled:
             if not day_high or not day_low or day_high <= day_low:
                 return "OPENING_GATE:NO_DAY_RANGE"
             rpos = max(0.0, min(1.0, (ltp - day_low) / (day_high - day_low)))
@@ -111,10 +117,10 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None) -> Op
                         f"(day_low={day_low:.2f} day_high={day_high:.2f})")
 
         orng = _opening_range(symbol, n)
-        if orng is None or orng[2] < config.OPENING_GATE_MIN_OR_TICKS:
-            return "OPENING_GATE:NO_OPENING_RANGE_DATA"
-        or_low, or_high, _cnt, complete = orng
-        if complete:
+        if or_settled and (orng is None or orng[2] < config.OPENING_GATE_MIN_OR_TICKS):
+            return "OPENING_GATE:NO_OPENING_RANGE_DATA"    # group 390: a thin/missing range only matters once the range is complete
+        if orng is not None and orng[3]:
+            or_low, or_high = orng[0], orng[1]
             span = or_high - or_low
             if span > 1e-9:
                 or_pos = (ltp - or_low) / span
@@ -142,7 +148,7 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None) -> Op
             nprev = trade_gates.last_nifty_prev_close_pct()
             if nifty is None or nprev is None:
                 return "OPENING_GATE:NO_NIFTY_DATA"
-            if nifty < config.OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT:
+            if or_settled and nifty < config.OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT:    # group 390: vs its own open is noise at 09:15-09:30
                 return f"OPENING_GATE:NIFTY_BELOW_OPEN:{nifty:+.2f}% < {config.OPENING_GATE_NIFTY_MIN_VS_OPEN_PCT:+.2f}%"
             if nprev < config.OPENING_GATE_NIFTY_MIN_VS_PREV_PCT:
                 return f"OPENING_GATE:NIFTY_BELOW_PREV_CLOSE:{nprev:+.2f}% < {config.OPENING_GATE_NIFTY_MIN_VS_PREV_PCT:+.2f}%"

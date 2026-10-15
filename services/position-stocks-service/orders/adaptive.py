@@ -107,6 +107,9 @@ class AdaptiveLevels:
     range_regime:          str   = "neutral"
     range_position:        Optional[float] = None
     atr_proxy_pct:         Optional[float] = None   # for dashboard/debug
+    # group 395: where the stop came from - "bars" (live 5-minute bars), "opening_plan" (group 391 previous-day ATR plan) or "legacy" (tick-buffer ATR / % of the
+    # signal move / flat floor). Stored on the position (stop_basis) and exported by /trades/history so a ledger can be split by it.
+    basis:                 str   = "legacy"
 
 
 def _atr_proxy_pct(symbol: str, current_ltp: float) -> Optional[float]:
@@ -265,7 +268,7 @@ def _intraday_range_position(symbol: str, current_ltp: float) -> Optional[float]
         return None
 
 
-def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str) -> AdaptiveLevels:
+def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, basis: str = "bars") -> AdaptiveLevels:
     """Phase 2 levels. stop = clamp(bar_atr x STOP_MULT, STOP_MIN, STOP_MAX);
     target = stop x TARGET_RR capped at TARGET_MAX; near-day-high trades get a
     20% smaller target (less room up). Breakeven trigger stays at 40% of target."""
@@ -300,6 +303,7 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str) -> 
         range_regime=range_regime,
         range_position=range_pos_val,
         atr_proxy_pct=round(bar_atr_pct, 4),
+        basis=basis,
     )
 
 
@@ -318,8 +322,19 @@ def _compute_levels(
     # ── Phase 2 (flag-gated, default OFF): candle-range stop/target ─────────
     if config.ADAPTIVE_BAR_ATR_ENABLED and symbol:
         bar_atr = _bar_atr_pct(symbol, current_ltp)
+        _basis = "bars"
+        if bar_atr is None:
+            # group 391: no live bars yet (the first minutes after the bell) - the 09:10 opening plan's expected bar range from the previous-session
+            # daily ATR, instead of the legacy path's flat 2% stop floor. Cache read only; None outside the plan window or with no previous-day data.
+            try:
+                from screening import opening_plan
+                bar_atr = opening_plan.bar_atr_pct(symbol)
+                _basis = "opening_plan"
+            except Exception as e:  # noqa: BLE001
+                logger.debug("adaptive: opening plan lookup failed for %s: %s", symbol, e)
+                bar_atr = None
         if bar_atr is not None:
-            return _compute_bar_levels(bar_atr, current_ltp, symbol)
+            return _compute_bar_levels(bar_atr, current_ltp, symbol, _basis)
 
     # ── Step 1: ATR-proxy based stop and target ────────────────────────────
     atr_pct = _atr_proxy_pct(symbol, current_ltp) if symbol else None
@@ -423,6 +438,7 @@ def _compute_levels(
         range_regime=range_regime,
         range_position=range_pos_val,
         atr_proxy_pct=round(atr_pct, 4) if atr_pct is not None else None,
+        basis="legacy",
     )
 
 
@@ -454,6 +470,7 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLeve
             breakeven_trigger_pct=_breakeven_trigger(target_pct),
             range_regime=levels.range_regime, range_position=levels.range_position,
             atr_proxy_pct=levels.atr_proxy_pct,
+            basis=levels.basis,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("adaptive: target cap failed (keeping uncapped levels): %s", e)

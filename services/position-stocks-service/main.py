@@ -1333,6 +1333,13 @@ async def _trading_loop() -> None:
                     await _preopen.run()
             except Exception:
                 logger.exception("pre-open snapshot failed (non-fatal)")
+            # group391: 09:10 opening plan (previous-day volatility per symbol, cache reads only; once per IST day, best-effort).
+            try:
+                from screening import opening_plan as _oplan, preopen as _pre2
+                if _oplan.due():
+                    _oplan.build(_pre2._universe())
+            except Exception:
+                logger.exception("opening plan build failed (non-fatal)")
             if not is_market_open_ist(honor_session_proof=False):   # group321: the cycle also reconciles exits + EOD; entries re-check below
                 continue
 
@@ -2080,6 +2087,18 @@ def trades_history(
                 "max_price_seen": r.max_price_seen,
                 "min_price_seen": r.min_price_seen,
                 **excursion.excursion_pcts(r),
+                # group395: the levels the trade was opened with, so a ledger export can be judged against its own stop (scripts/opening_replay.py).
+                # adaptive_stop_pct / adaptive_target_pct are the ORIGINAL distances (never rewritten after entry). stop_price / target_price are the
+                # values last stored: breakeven, trailing and reconcile can move stop_price, and stop_moved_to_breakeven is also set by the trailing stop.
+                # stop_basis says whether the stop came from live bars, the 09:10 opening plan or the legacy path (null on rows opened before group 395).
+                "stop_price": r.stop_price,
+                "target_price": r.target_price,
+                "adaptive_stop_pct": r.adaptive_stop_pct,
+                "adaptive_target_pct": r.adaptive_target_pct,
+                "breakeven_trigger_pct": r.breakeven_trigger_pct,
+                "stop_moved_to_breakeven": r.stop_moved_to_breakeven,
+                "signal_price": r.signal_price,
+                "stop_basis": r.stop_basis,
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,

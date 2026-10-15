@@ -110,6 +110,7 @@ from tz_utils import (
     parse_hhmm,
     ist_time_at_or_after,
     is_ist_weekday,
+    ist_now,
     as_aware,
 )
 
@@ -1846,6 +1847,49 @@ async def _daily_report_step(db, mode: str, *, force: bool = False) -> Optional[
         return None
 
 
+def _opening_fast_bounds():
+    return (parse_hhmm(config.OPENING_FAST_START_IST, 9, 14), parse_hhmm(config.OPENING_FAST_END_IST, 9, 30))
+
+
+def _opening_fast_window(now=None) -> bool:
+    """Group 390: True from OPENING_FAST_START_IST to OPENING_FAST_END_IST on a weekday (and when the fast cadence is on)."""
+    try:
+        if config.OPENING_FAST_CYCLE_SECONDS <= 0 or not is_ist_weekday(now):
+            return False
+        start, end = _opening_fast_bounds()
+        return start <= ist_now(now).time() < end
+    except Exception:
+        return False
+
+
+def _cap_to_window_start(normal: int, now=None) -> int:
+    """A long normal sleep must not overshoot the start of the fast window (e.g. a 180 s sleep begun at 09:12)."""
+    try:
+        if config.OPENING_FAST_CYCLE_SECONDS <= 0 or not is_ist_weekday(now):
+            return normal
+        n = ist_now(now)
+        start, _end = _opening_fast_bounds()
+        if n.time() >= start:
+            return normal
+        start_dt = n.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
+        wait = (start_dt - n).total_seconds()
+        return int(max(1, min(normal, wait + 1)))
+    except Exception:
+        return normal
+
+
+def _schedule_sleep_seconds(now=None) -> int:
+    if _opening_fast_window(now):
+        return config.OPENING_FAST_SCHEDULE_SECONDS
+    return _cap_to_window_start(config.SCHEDULE_CHECK_INTERVAL_SECONDS, now)
+
+
+def _full_cycle_sleep_seconds(now=None) -> int:
+    if _opening_fast_window(now):
+        return max(1, min(config.OPENING_FAST_CYCLE_SECONDS, config.AUTO_PILOT_INTERVAL_SECONDS))
+    return _cap_to_window_start(config.AUTO_PILOT_INTERVAL_SECONDS, now)
+
+
 async def _schedule_loop() -> None:
     """Time-of-day trigger loop for the three scheduled-automation features.
     Runs regardless of auto_pilot_enabled (these are their own toggles), but
@@ -1862,7 +1906,7 @@ async def _schedule_loop() -> None:
                 await _schedule_tick(mode)
             except Exception:
                 logger.exception("schedule loop: unexpected error for %s", mode)
-        await asyncio.sleep(config.SCHEDULE_CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(_schedule_sleep_seconds())    # group 390: 5 s from 09:14 to 09:30
 
 
 async def _fast_exit_loop() -> None:
@@ -1893,7 +1937,7 @@ async def _full_cycle_loop() -> None:
                 await _full_tick(mode)
             except Exception:
                 logger.exception("full cycle loop: unexpected error for %s", mode)
-        await asyncio.sleep(config.AUTO_PILOT_INTERVAL_SECONDS)
+        await asyncio.sleep(_full_cycle_sleep_seconds())    # group 390: ~20 s from 09:14 to 09:30
 
 
 async def _totp_refresh_loop() -> None:

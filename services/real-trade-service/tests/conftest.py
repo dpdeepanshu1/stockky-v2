@@ -32,6 +32,14 @@ def _opening_entry_guard_off_by_default(monkeypatch):
 
 
 @_pytest_g172.fixture(autouse=True)
+def _opening_protect_off_by_default(monkeypatch):
+    """group 394: entry_engine/opening_protect.py depends on the wall clock (09:15-09:45 IST: half size, pause after stop-outs). Pre-existing
+    tests predate it; tests/test_group394_opening_protect.py turns it back on and pins the clock."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPENING_PROTECT_ENABLED", False, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
 def _opening_gate_off_by_default(monkeypatch):
     """group 268: entry_engine/opening_gate.py depends on the wall clock (09:15-10:00 IST). Pre-existing tests predate it;
     tests/test_group268_opening_gate.py turns it back on and pins the clock."""

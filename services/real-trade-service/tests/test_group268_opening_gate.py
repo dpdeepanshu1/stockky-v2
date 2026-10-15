@@ -46,8 +46,10 @@ def gate_on(monkeypatch):
 
 
 def at(monkeypatch, hhmm, market_open=True):
-    h, m = (int(x) for x in hhmm.split(":"))
-    clock = lambda now=None: datetime(2026, 10, 9, h, m, tzinfo=IST)
+    parts = [int(x) for x in hhmm.split(":")]
+    h, m = parts[0], parts[1]
+    sec = parts[2] if len(parts) > 2 else 0
+    clock = lambda now=None: datetime(2026, 10, 9, h, m, sec, tzinfo=IST)
     for mod in (opening_gate, opening_guard):
         monkeypatch.setattr(mod, "ist_now", clock)
         monkeypatch.setattr(mod, "is_market_open_ist", lambda now=None: market_open)
@@ -103,10 +105,22 @@ class TestRejectReason:
         assert opening_gate.reject_reason("REAL", None) is None
 
     def test_too_early(self, monkeypatch):
-        at(monkeypatch, "09:18")
+        at(monkeypatch, "09:15:10")      # group 390: only the first ~30 s are skipped (was 5 min)
         assert opening_gate.reject_reason("REAL", tk()).startswith("OPENING_GATE:TOO_EARLY")
-        at(monkeypatch, "09:20")
-        assert opening_gate.reject_reason("REAL", tk()) is None
+        at(monkeypatch, "09:16")
+        assert opening_gate.reject_reason("REAL", tk(hi=101.0, lo=100.9, price=101.0)) is None
+
+    def test_group390_day_range_check_waits_for_the_range(self, monkeypatch):
+        at(monkeypatch, "09:16")
+        assert opening_gate.reject_reason("REAL", tk(price=101.0, hi=101.0, lo=100.9)) is None     # at the high, range 0.1 wide
+        assert opening_gate.reject_reason("REAL", tk(price=101.0, hi=None, lo=None)) is None       # no range yet: not fail-closed
+        at(monkeypatch, "09:30")
+        assert opening_gate.reject_reason("REAL", tk(price=101.9, hi=102.0, lo=99.5)).startswith("OPENING_GATE:NEAR_DAY_HIGH")
+        assert opening_gate.reject_reason("REAL", tk(price=101.0, hi=None, lo=None)) == "OPENING_GATE:NO_DAY_RANGE"
+
+    def test_group390_defaults(self):
+        assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.5
+        assert config.ENTER_AT_OPEN_TIME_IST == "09:15"
 
     def test_change_vs_prev_close_band(self, monkeypatch):
         at(monkeypatch, "09:30")

@@ -317,6 +317,9 @@ class TradeDecision(Base):
     # group 351: JSON snapshot of the daily market-structure gate's view for this ENTRY decision (summary subset, live chase/stretch/room/R:R,
     # would_reject + reasons, enforce mode (legacy rows may say shadow), structural stop vs ATR stop). NULL when the gate was off / not reached.
     structure_json = Column(Text, nullable=True)
+    # group 396: where this ENTRY decision's initial stop came from - "atr" (daily ATR x multiplier), "flat" (no usable ATR: flat % fallback) or
+    # "structure" (the group 351 structural stop replaced it). NULL on rows made before group 396 and on non-entry decisions.
+    stop_basis = Column(String(16), nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 
 

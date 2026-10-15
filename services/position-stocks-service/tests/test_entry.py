@@ -1372,3 +1372,32 @@ class TestCircuitGateWiring:
         monkeypatch.setattr(entry.depth_gate, "reject_reason", lambda s: None)
         monkeypatch.setattr(entry.circuit_gate, "reject_reason", lambda s, p: None)
         assert entry.attempt_entry(db, cand()) is not None
+
+
+# ── group392: opening protection wiring ──────────────────────────────────────────
+class TestOpeningProtectWiring:
+    def test_half_size_inside_the_window_and_unused_reservation_returned(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.opening_protect, "size_mult", lambda now=None: 0.5)
+        assert entry.attempt_entry(db, cand()) is not None          # default sizing is 40 sh @ 500
+        assert b.of("place_super_order")[0]["quantity"] == 20
+        assert available(db) == pytest.approx(LEDGER_AVAILABLE - 20 * 500.0)
+
+    def test_full_size_outside_the_window(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.opening_protect, "size_mult", lambda now=None: 1.0)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 40
+
+    def test_one_share_is_never_cut_to_zero(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.opening_protect, "size_mult", lambda now=None: 0.1)
+        monkeypatch.setattr(entry.depth_gate, "max_qty_from_book", lambda s, p: 1)
+        assert entry.attempt_entry(db, cand()) is not None
+        assert b.of("place_super_order")[0]["quantity"] == 1
+
+    def test_pause_after_stopouts_skips_cleanly(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(entry.opening_protect, "pause_reason", lambda d, now=None: "OPENING_PROTECT:PAUSED:2 stop-outs since the open (limit 2) - no new entries until 09:45")
+        assert entry.attempt_entry(db, cand()) is None
+        assert_clean_skip(env, "ABC", "OPENING_PROTECT:PAUSED")

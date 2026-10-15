@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, preopen, prev_day, structure_gate, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -216,6 +216,14 @@ def _atr_stop_target_pct(atr_pct: Optional[float]) -> tuple[float, float]:
     stop_pct   = max(MIN_STOP_PCT, min(atr_pct * ATR_STOP_MULTIPLIER, MAX_STOP_PCT))
     target_pct = stop_pct * (ATR_TARGET_MULTIPLIER / ATR_STOP_MULTIPLIER)
     return round(stop_pct, 2), round(target_pct, 2)
+
+
+def _atr_stop_basis(atr_pct: Optional[float]) -> str:
+    """group 396: \"atr\" when _atr_stop_target_pct used the ATR, \"flat\" when it fell back to the flat percentages. Never raises."""
+    try:
+        return "atr" if atr_pct is not None and atr_pct > 0 else "flat"
+    except TypeError:
+        return "flat"
 
 
 def _range_adjusted_stop_target(
@@ -511,6 +519,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
                 "entry_details": [], "opening_guard": _opening_reason}
 
+    # group 394: after OPENING_PAUSE_STOPOUTS losing stop-outs since the bell, no automatic entry is evaluated until the opening window ends.
+    # Same shape as the guard above: returns BEFORE the loop, so candidates stay queued (not consumed, not rejected) and are looked at normally
+    # once the pause lifts. See entry_engine/opening_protect.py (off with OPENING_PROTECT_ENABLED=false).
+    _protect_reason = opening_protect.pause_reason(db, mode)
+    if _protect_reason:
+        if opening_guard.should_log(mode + ":protect"):
+            logger.info("entry_engine: %s %s (%d candidate(s) left queued)", mode, _protect_reason, len(candidates))
+        return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
+                "entry_details": [], "opening_protect": _protect_reason}
+
     # Fetch adaptive regime once per cycle (not per candidate)
     regime_ok    = True
     market_score = 50
@@ -751,6 +769,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # affect qty, risk sizing, or order placement, which still happen
         # only after gates 3-5 pass below.) ───────────────────────────────
         stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
+        decision.stop_basis = _atr_stop_basis(atr_pct)                  # group 396: stop source tag (evidence only)
         # 2026-09-01 fix: entry_price is the actual LIMIT price sent to Dhan —
         # must be a valid NSE tick (₹0.05 multiple) or the broker rejects the
         # order outright. See execution/dhan_client.py's TICK_SIZE comment —
@@ -920,6 +939,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 if _sg_lv.get("use") and _sg_lv.get("stop"):
                     stop_price = round(float(_sg_lv["stop"]), 2)
                     per_share_risk = entry_price - stop_price
+                    decision.stop_basis = "structure"                   # group 396
             except Exception as _sg_err:  # noqa: BLE001 - a gate bug must never stop an entry
                 logger.warning("entry_engine: structure gate failed for %s (allowing): %s", cand.symbol, _sg_err)
 
@@ -966,6 +986,16 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
             continue
+
+        # group 394: half size (OPENING_SIZE_MULT) inside the opening window; unchanged outside it. Applied to the quantity, after the risk cap
+        # check above, so a 1-share trade that fits the full cap is not turned into a WAIT (same rule as position-stocks group 392).
+        _open_mult = opening_protect.size_mult(mode)
+        if _open_mult < 1.0 and proposed_qty > 1:
+            _oq = opening_protect.scaled_qty(proposed_qty, _open_mult)
+            if _oq < proposed_qty:
+                logger.info("entry_engine: %s %s sized down %d -> %d shares (opening window x%.2f)",
+                            mode, cand.symbol, proposed_qty, _oq, _open_mult)
+                proposed_qty = _oq
 
         # ── Risk engine ───────────────────────────────────────────────────────
         # §5 — pass avg_traded_value for liquidity floor check in risk_engine

@@ -7,7 +7,7 @@ service's 14-day breakdown showed entries before 10:30 won 1 of 10, so between t
 CHECKS (market_feed.Tick fields only; the tick has no day-open price, so change vs previous close is the gap proxy):
   1. at least OPENING_GATE_MIN_MINUTES_AFTER_OPEN minutes since 09:15
   2. price vs previous close within [OPENING_GATE_MIN_CHANGE_PCT, OPENING_GATE_MAX_CHANGE_PCT]
-  3. price not in the top (1 - OPENING_GATE_MAX_RANGE_POS) of the day high/low range (0 disables this check)
+  3. (group 390: only from OPENING_GATE_RANGE_AFTER_MIN minutes after the open) price not in the top (1 - OPENING_GATE_MAX_RANGE_POS) of the day high/low range (0 disables this check)
   4. (group 270) previous day closed in the upper half of its own range (entry_engine/prev_day.py, background-fetched daily
      candle; a cache miss holds the candidate back for that cycle)
   5. (group 270) the stop is not tighter than OPENING_GATE_MIN_STOP_ATR_FRAC x the daily ATR % (the tick's ATR). Here the
@@ -65,7 +65,8 @@ def reject_reason(mode: str, tick, now: Optional[datetime] = None, stop_pct: Opt
             return f"OPENING_GATE:BELOW_PREV_CLOSE:{chg:+.2f}% < {config.OPENING_GATE_MIN_CHANGE_PCT:+.2f}%"
         if chg > config.OPENING_GATE_MAX_CHANGE_PCT:
             return f"OPENING_GATE:EXTENDED:{chg:+.2f}% > {config.OPENING_GATE_MAX_CHANGE_PCT:+.2f}%"
-        if config.OPENING_GATE_MAX_RANGE_POS > 0:
+        # group 390: the day range only means something once the opening range has built up (at 09:15:30 high ~ low ~ price)
+        if config.OPENING_GATE_MAX_RANGE_POS > 0 and minutes_open >= config.OPENING_GATE_RANGE_AFTER_MIN:
             dh = getattr(tick, "day_high", None)
             dl = getattr(tick, "day_low", None)
             if not dh or not dl or dh <= dl:

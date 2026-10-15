@@ -632,6 +632,24 @@ PREOPEN_MAX_PRICE_AGE_S = _get_float("PREOPEN_MAX_PRICE_AGE_S", 180.0)
 PREOPEN_MAX_SYMBOLS = _get_int("PREOPEN_MAX_SYMBOLS", 150)
 PREOPEN_FETCH_TIMEOUT_S = _get_float("PREOPEN_FETCH_TIMEOUT_S", 6.0)
 
+# group 391 (2026-10-15): 09:10 opening plan (screening/opening_plan.py). At 09:15 a symbol has no 5-minute bars yet, so adaptive.compute() fell to the
+# legacy path whose stop floor is MIN_STOP_PCT (2%) and target ~4.4%. The plan turns each symbol's previous-session daily ATR (screening/prev_day.py,
+# cache only, no network on the entry path) into an expected 5-minute bar range (daily ATR % x OPENING_PLAN_BAR_FRACTION) and feeds the SAME bar-level
+# stop/target rules as the live path, until live bars exist or OPENING_PLAN_USE_UNTIL_IST. OPENING_PLAN_ENABLED=0 = old behaviour.
+# OPENING_PLAN_BAR_FRACTION is a tunable assumption (a typical 5-minute range as a share of the daily ATR), not a backtested value.
+OPENING_PLAN_ENABLED = _get_bool("OPENING_PLAN_ENABLED", True)
+OPENING_PLAN_TIME_IST = _get_str("OPENING_PLAN_TIME_IST", "09:10")
+OPENING_PLAN_USE_UNTIL_IST = _get_str("OPENING_PLAN_USE_UNTIL_IST", "10:00")
+OPENING_PLAN_BAR_FRACTION = _get_float("OPENING_PLAN_BAR_FRACTION", 0.25)
+
+# group 392 (2026-10-15): opening protection (orders/opening_protect.py). From 09:15 until OPENING_PROTECT_UNTIL_IST the automatic entry is sized at
+# OPENING_SIZE_MULT of the normal quantity (nearest share, never under 1), and after OPENING_PAUSE_STOPOUTS stop-outs since the bell no new automatic
+# entry is taken until the window ends. Manual BUYs are not touched (a person confirmed them). OPENING_PROTECT_ENABLED=0 = off.
+OPENING_PROTECT_ENABLED = _get_bool("OPENING_PROTECT_ENABLED", True)
+OPENING_PROTECT_UNTIL_IST = _get_str("OPENING_PROTECT_UNTIL_IST", "09:45")
+OPENING_SIZE_MULT = _get_float("OPENING_SIZE_MULT", 0.5)
+OPENING_PAUSE_STOPOUTS = _get_int("OPENING_PAUSE_STOPOUTS", 2)   # 0 = no pause
+
 # group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
 # depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.
 # ENTRY_VWAP_MAX_EXTENSION_PCT > 0 also refuses a chase that far ABOVE the VWAP (0 = off). Fails open on missing data.
@@ -974,7 +992,7 @@ PENDING_RECONCILE_SWEEP_INTERVAL_S = _get_float("PENDING_RECONCILE_SWEEP_INTERVA
 # gates. OPENING_GATE_ENABLED=0 turns the whole gate off (the 09:15 start then lets every normal rule through at the open).
 OPENING_GATE_ENABLED = _get_bool("OPENING_GATE_ENABLED", True)
 OPENING_GATE_SETTLE_IST = _get_str("OPENING_GATE_SETTLE_IST", "10:00")
-OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _get_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 5.0)   # no entry in the first minutes
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _get_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.5)   # group 390: only the first ~30 s (auction-driven prints) are skipped; was 5 min
 OPENING_GATE_MAX_GAP_UP_PCT = _get_float("OPENING_GATE_MAX_GAP_UP_PCT", 3.0)       # open vs previous close; 0 disables
 OPENING_GATE_MAX_GAP_DOWN_PCT = _get_float("OPENING_GATE_MAX_GAP_DOWN_PCT", 1.0)   # gap DOWN larger than this is skipped; 0 disables
 OPENING_GATE_MAX_RANGE_POS = _get_float("OPENING_GATE_MAX_RANGE_POS", 0.88)        # stricter than MAX_ENTRY_RANGE_POSITION; 0 disables

@@ -185,6 +185,16 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 if reason is None and str(getattr(closing_sell, "execution_source", "") or "").upper() == "MANUAL":
                     reason = "manual"
             tier = getattr(w, "source_tier", None)
+            # group 396: the stop the trade was opened with. initial_stop_distance is fixed at the opening fill (never trailed); the decision's
+            # proposed stop is the fallback for rows without it. stop_basis comes from the entry decision (atr / flat / structure; None before group 396).
+            isd = _num(getattr(p, "initial_stop_distance", None))
+            if isd is not None and isd > 0 and entry and entry > 0:
+                stop_pct = round(isd / entry * 100.0, 3)
+            else:
+                pp, ps = _num(getattr(decision, "proposed_price", None)), _num(getattr(decision, "proposed_stop", None))
+                stop_pct = round((pp - ps) / pp * 100.0, 3) if pp and ps and pp > ps > 0 else None
+            stop_basis = getattr(decision, "stop_basis", None)
+            stop_basis = stop_basis if isinstance(stop_basis, str) and stop_basis else None
             held = None
             if p.closed_at is not None:
                 held = round((as_aware(p.closed_at) - as_aware(p.opened_at)).total_seconds() / 60.0, 1)
@@ -213,6 +223,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "exit_reason": reason, "exits": len(sells), "entries": len(buys),
                 "gross_pnl": gross, "charges": charges, "charges_source": charges_src, "net_pnl": net,
                 "orders_matched": bool(buys or sells),
+                "stop_pct": stop_pct, "stop_basis": stop_basis,
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("trade record for position %s skipped: %s: %s", getattr(p, "id", "?"), type(e).__name__, e)
@@ -258,7 +269,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "trades": len(records),
         "overall": _agg(records, min_trades_note) if records else None,
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
-        "by_source_tab": {}, "by_day": {},
+        "by_source_tab": {}, "by_day": {}, "by_stop_basis": {},
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
                  "entry_slippage_pct > 0 means the entry was paid above the signal price"),
@@ -272,6 +283,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_catalyst_type": lambda r: r.get("catalyst_type") or "none",
         "by_source_tab": lambda r: r.get("source_tab") or "?",
         "by_day": lambda r: r.get("exit_day_ist") or "?",
+        "by_stop_basis": lambda r: r.get("stop_basis") or "unknown",
     }
     for name, key in keyers.items():
         groups: dict = defaultdict(list)

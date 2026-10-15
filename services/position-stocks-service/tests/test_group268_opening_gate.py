@@ -76,7 +76,7 @@ def test_good_candidate_passes_after_the_opening_range(w):
 
 
 def test_too_early(w):
-    r = og.reject_reason("AAA", 101.0, at(9, 18))
+    r = og.reject_reason("AAA", 101.0, at(9, 15, 10))     # group 390: only the first ~30 s are skipped (was 5 min)
     assert r.startswith("OPENING_GATE:TOO_EARLY")
 
 
@@ -393,3 +393,59 @@ def test_fetch_candles_uses_market_data_history(monkeypatch):
     monkeypatch.setattr(C, "get", lambda self, url, params=None: R2())
     with pytest.raises(RuntimeError):
         prev_day._fetch_candles("ABC")
+
+
+# ── group 390: 09:15 entries ─────────────────────────────────────────────────
+def test_group390_default_wait_is_30_seconds():
+    assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.5
+
+
+def test_group390_entry_allowed_at_0916_with_no_range_yet(w):
+    """A fresh range (high ~ low ~ price, few ticks) must not fail closed at the open; open/prev-close/gap checks still apply."""
+    w.stats = (100.4, 100.6, 100.4, 100.0)
+    w.ticks = [(ts(9, 15, 31), 100.5), (ts(9, 15, 40), 100.55)]      # 2 ticks only
+    assert og.reject_reason("AAA", 100.55, at(9, 16)) is None
+
+
+def test_group390_no_tick_data_at_all_is_fine_before_the_range_settles(w):
+    w.stats = (100.4, 100.6, 100.4, 100.0)
+    w.ticks = []
+    assert og.reject_reason("AAA", 100.55, at(9, 16)) is None
+
+
+def test_group390_thin_range_still_fails_closed_once_the_range_is_complete(w):
+    w.ticks = w.ticks[:3]
+    assert og.reject_reason("AAA", 101.9, at(9, 40)) == "OPENING_GATE:NO_OPENING_RANGE_DATA"
+
+
+def test_group390_still_blocked_below_open_at_0916(w):
+    w.stats = (100.6, 100.7, 100.4, 100.0)
+    assert og.reject_reason("AAA", 100.5, at(9, 16)).startswith("OPENING_GATE:BELOW_OPEN")
+
+
+def test_group390_still_blocked_by_gap_and_weak_prev_day_at_0916(w):
+    w.stats = (104.0, 104.2, 104.0, 100.0)
+    assert og.reject_reason("AAA", 104.1, at(9, 16)).startswith("OPENING_GATE:GAP_UP")
+    w.stats = (100.5, 100.6, 100.4, 100.0)
+    w.pd = prev_day.PrevDay(high=102.0, low=99.0, close=99.2, atr=3.0, date="2026-10-08")
+    assert og.reject_reason("AAA", 100.55, at(9, 16)).startswith("OPENING_GATE:PREV_DAY_WEAK_CLOSE")
+
+
+def test_group390_day_range_position_not_applied_until_the_range_builds(w):
+    w.stats = (100.5, 100.6, 100.4, 100.0)
+    assert og.reject_reason("AAA", 100.6, at(9, 16)) is None                   # at the day high, but the range is 0.2 wide
+    w.stats = (100.5, 103.0, 100.0, 100.0)
+    assert og.reject_reason("AAA", 102.95, at(9, 40)).startswith("OPENING_GATE:NEAR_DAY_HIGH")
+
+
+def test_group390_nifty_vs_open_only_after_the_range_settles_but_prev_close_always(w):
+    w.stats = (100.4, 100.6, 100.4, 100.0)
+    w.ticks = []
+    w.nifty, w.nifty_prev = -0.05, 0.3
+    assert og.reject_reason("AAA", 100.55, at(9, 16)) is None                  # vs its own open is noise this early
+    w.nifty, w.nifty_prev = 0.1, -0.3
+    assert og.reject_reason("AAA", 100.55, at(9, 16)).startswith("OPENING_GATE:NIFTY_BELOW_PREV_CLOSE")
+    w.stats = (100.5, 103.0, 100.0, 100.0)
+    w.ticks = [(ts(9, 15) + i * 30, 100.0 + (i % 5) * 0.5) for i in range(30)]
+    w.nifty, w.nifty_prev = -0.05, 0.3
+    assert og.reject_reason("AAA", 101.9, at(9, 40)).startswith("OPENING_GATE:NIFTY_BELOW_OPEN")

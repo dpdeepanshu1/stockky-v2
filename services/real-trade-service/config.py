@@ -386,7 +386,7 @@ AUTO_PILOT_NOTIFY_HEARTBEAT = os.getenv("AUTO_PILOT_NOTIFY_HEARTBEAT", "false").
 # etc.) is now the SOLE on/off authority for these features. Only the
 # time-of-day vars remain here.
 PREPICK_TIME_IST = os.getenv("PREPICK_TIME_IST", "09:00")
-ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:20")
+ENTER_AT_OPEN_TIME_IST = os.getenv("ENTER_AT_OPEN_TIME_IST", "09:15")   # group 390: was 09:20
 
 # ── Opening entry guard (2026-10-07, group 220) ───────────────────────────────
 # Review item 6. In the September trade file the five entries opened between 09:19 and 09:24 IST (3 trading days) all
@@ -426,7 +426,8 @@ def _og_float(name, default):
 
 OPENING_GATE_ENABLED = ((os.getenv("OPENING_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_SETTLE_IST = (os.getenv("OPENING_GATE_SETTLE_IST") or "").strip() or "10:00"
-OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 5.0)
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.5)   # group 390: was 5; only the first ~30 s (auction prints) are skipped
+OPENING_GATE_RANGE_AFTER_MIN = _og_float("OPENING_GATE_RANGE_AFTER_MIN", 15.0)   # group 390: the day-range-position check applies only once the range has built up
 OPENING_GATE_MIN_CHANGE_PCT = _og_float("OPENING_GATE_MIN_CHANGE_PCT", -0.5)   # price vs previous close, lower bound
 OPENING_GATE_MAX_CHANGE_PCT = _og_float("OPENING_GATE_MAX_CHANGE_PCT", 3.0)    # upper bound; chasing a bigger move at the open is skipped
 OPENING_GATE_MAX_RANGE_POS = _og_float("OPENING_GATE_MAX_RANGE_POS", 0.88)     # 0 disables
@@ -437,6 +438,30 @@ OPENING_GATE_MAX_RANGE_POS = _og_float("OPENING_GATE_MAX_RANGE_POS", 0.88)     #
 OPENING_GATE_PREVDAY_TIMEOUT_S = _og_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0)
 OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _og_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)
 OPENING_GATE_MIN_STOP_ATR_FRAC = _og_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)
+
+# ── Opening protection (group 394, 2026-10-16) ───────────────────────────────
+# Real-trade counterpart of position-stocks group 392 (entry_engine/opening_protect.py). From 09:15 until OPENING_PROTECT_UNTIL_IST an automatic
+# entry is cut to OPENING_SIZE_MULT of the risk-sized quantity (nearest share, a 1-share quantity is left alone), and once OPENING_PAUSE_STOPOUTS
+# losing stop-outs (stop_hit / broker_stop / emergency_gap_down) have closed since the bell, evaluate_mode() leaves the candidates queued until the
+# window ends (0 = no pause). Manual orders are never touched. 0.5 and 2 are judgement values, not backtested (scripts/opening_replay.py can check
+# them against your own ledger). OPENING_PROTECT_MODES: comma list, default REAL,DEMO (set REAL to keep DEMO as an unprotected control).
+# OPENING_PROTECT_ENABLED=false turns both off.
+def _op_int(name, default):
+    try:
+        return int(((os.getenv(name) or "").strip() or str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+OPENING_PROTECT_ENABLED = ((os.getenv("OPENING_PROTECT_ENABLED") or "").strip() or "true").lower() == "true"
+OPENING_PROTECT_UNTIL_IST = (os.getenv("OPENING_PROTECT_UNTIL_IST") or "").strip() or "09:45"
+OPENING_SIZE_MULT = _og_float("OPENING_SIZE_MULT", 0.5)
+OPENING_PAUSE_STOPOUTS = _op_int("OPENING_PAUSE_STOPOUTS", 2)
+OPENING_PROTECT_MODES = tuple(
+    m.strip().upper()
+    for m in ((os.getenv("OPENING_PROTECT_MODES") or "").strip() or "REAL,DEMO").split(",")
+    if m.strip()
+)
 OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_og_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday
 # group 329 (2026-10-12): two pre-buy checks a market professional makes before any entry. Both FAIL OPEN (missing data never blocks).
 #  * circuit band: no BUY within CIRCUIT_UPPER_BUFFER_PCT of the exchange upper circuit (a locked stock cannot be filled and
@@ -632,6 +657,15 @@ DAILY_REPORT_REFRESH_UNTIL_IST = ((os.getenv("DAILY_REPORT_REFRESH_UNTIL_IST") o
 
 # How often the time-trigger loop wakes to check the clock (seconds).
 SCHEDULE_CHECK_INTERVAL_SECONDS = max(20, int(((os.getenv("SCHEDULE_CHECK_INTERVAL_SECONDS") or "").strip() or "60")))
+
+# group 390: opening fast window. From OPENING_FAST_START_IST (HH:MM) to OPENING_FAST_END_IST on a weekday the schedule loop wakes
+# every OPENING_FAST_SCHEDULE_SECONDS and the full entry cycle every OPENING_FAST_CYCLE_SECONDS, so a 09:15 entry does not wait
+# for the next 60 s / 180 s tick. Outside the window the normal intervals apply. OPENING_FAST_CYCLE_SECONDS=0 turns the fast
+# cadence off for both loops.
+OPENING_FAST_START_IST = (os.getenv("OPENING_FAST_START_IST") or "").strip() or "09:14"
+OPENING_FAST_END_IST = (os.getenv("OPENING_FAST_END_IST") or "").strip() or "09:30"
+OPENING_FAST_SCHEDULE_SECONDS = max(5, int(((os.getenv("OPENING_FAST_SCHEDULE_SECONDS") or "").strip() or "5")))
+OPENING_FAST_CYCLE_SECONDS = max(0, int(((os.getenv("OPENING_FAST_CYCLE_SECONDS") or "").strip() or "20")))
 
 # ── EOD signal scan (2026-09-10, session22 — user request) ─────────────────
 # "When market closes for the day, pick some stocks based on end-of-day

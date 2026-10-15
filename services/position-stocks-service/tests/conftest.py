@@ -118,3 +118,12 @@ def _live_tick_requirement_off_by_default(monkeypatch):
     import config as _config
     monkeypatch.setattr(_config, "ENTRY_REQUIRE_LIVE_TICK", False, raising=False)
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _opening_protect_off_by_default(monkeypatch):
+    """group392: orders/opening_protect.py is time-of-day dependent (09:15-09:45 IST on a trading day: half size, pause after stop-outs).
+    Off for every older test so none can flake inside that window; test_group392_opening_protect.py turns it on and pins the clock."""
+    import config as _config
+    monkeypatch.setattr(_config, "OPENING_PROTECT_ENABLED", False, raising=False)
+    yield

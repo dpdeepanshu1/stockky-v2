@@ -152,6 +152,8 @@ class ScalpPosition(Base):
     min_price_seen = Column(Float, nullable=True)
     # group354: JSON snapshot of the daily market-structure gate's view at entry (orders/structure_gate.py). Nullable: older rows have none.
     structure_json = Column(Text, nullable=True)
+    # group395: where this position's stop came from - "bars" | "opening_plan" | "legacy" (orders/adaptive.py AdaptiveLevels.basis). Nullable: older rows have none.
+    stop_basis = Column(String(16), nullable=True)
 
     # 2026-09-18 (user audit finding): see the migration entry in db.py and
     # the OVERNIGHT_HOLD_ENABLED comment block in config.py.

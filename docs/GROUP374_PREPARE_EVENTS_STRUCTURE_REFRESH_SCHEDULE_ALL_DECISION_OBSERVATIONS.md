@@ -15,7 +15,7 @@ Without this the bulk scan used whatever structure the last manual run left on t
 - Tests: `test_group374_prepare_event_selection.py` (9). `test_group358_prepare_structure_notes.py` updated for `live` (20/20).
 
 ## 3. Every decision is observed, and scored at T+1/5/10/20
-- `training/models.py`: `StructureObservation` (`structure_observations`), unique (symbol, obs_date, engine_version, policy_mode); added to the Oracle identity-repair list. Created by the existing `create_all`.
+- `training/models.py`: `StructureObservation` (`decision_structure_observations`; was `structure_observations` until group 376, which collided with real-trade's table of the same name), unique (symbol, obs_date, engine_version, policy_mode); added to the Oracle identity-repair list. Created by the existing `create_all`.
 - `decision/structure_obs_hook.py` + `decision/main.py`: after the FINAL decision (multi-horizon, quality gate and structure policy all applied) and before the cache write, a background task posts one observation per
   (symbol, day, decision) for BUY NOW, PREPARE, WAIT, DO NOT BUY and policy-demoted picks. No usable structure (unavailable / insufficient / stale) = no row. Failures are debug-logged and dropped. `STRUCTURE_OBS_ENABLED=0` stops it.
 - `training/structure_obs.py` (pure core + DB glue):

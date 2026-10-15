@@ -287,7 +287,7 @@ def _src(name):
 def test_model_routes_and_oracle_identity_are_wired():
     ast.parse(_src("models.py")), ast.parse(_src("app.py"))
     m, a = _src("models.py"), _src("app.py")
-    assert "class StructureObservation(Base):" in m and '"structure_observations",' in m and "uq_structure_obs_key" in m
+    assert "class StructureObservation(Base):" in m and '"decision_structure_observations",' in m and "uq_decision_struct_obs_key" in m
     for route in ('"/api/structure/observations"', '"/api/evaluate/structure"', '"/api/structure/report"'):
         assert route in a
     assert "import structure_obs as _so" in a and "StructureObservation" in a.split("from models import", 1)[1].splitlines()[0]

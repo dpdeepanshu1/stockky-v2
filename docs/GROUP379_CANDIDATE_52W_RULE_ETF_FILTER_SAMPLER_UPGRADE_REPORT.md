@@ -29,6 +29,15 @@ from reading the code, not from rejection counts**: (1) near-resistance (same "c
 rule with the E1 changes, (3) weighted bullish score, (4) volume ratio. Needs your VM history; `scripts/ms_ab_report.py` replays structure rules, not these gates,
 so a gate replay would be new tooling.
 
+## E3 tooling (added in group 380) - `scripts/legacy_gate_backtest.py`
+Replays the daily-bar form of the legacy gates (6-month downtrend, 52-week top-12% before and after the fresh-high exemption, near 20-day high before and after
+the exemption, volume health) on the same history folder the A/B report uses, with no lookahead, next-open entry, slippage and cost, and reports per gate:
+days rejected, mean net return of passed vs rejected days, edge (pp), cluster-bootstrap 90% CI and a verdict (`helps` / `hurts` / `no_edge` /
+`insufficient_sample`). `exemption_test` compares the exempted fresh highs with the ones the legacy rule still rejects: that is the direct test of E1's
+exemption. `structure-backtest.yml` runs it after the A/B report (same sample, same seed) and puts the table in the run summary.
+Limits, stated in the script and in the report: every day of every sampled stock is replayed, not only the days a live candidate source would have proposed, and
+the market-score part of the 52-week rule cannot be replayed from daily candles. Treat a `helps` / `hurts` as a reason to look, not a tuning instruction.
+
 ## F1 - seeded random sample
 `scripts/fetch_history_for_backtest.py`: `--sample N` now draws from the sorted, de-duplicated universe (same seed = same symbols whatever order the universe
 endpoint returns; the old draw depended on that order), and `--manifest FILE` records seed, universe size and exact symbols. `scripts/ms_ab_report.py` gained

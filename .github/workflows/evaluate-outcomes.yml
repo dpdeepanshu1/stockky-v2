@@ -1,4 +1,4 @@
-# Daily T+1 / T+5 evaluation sweeps — free-tier safe (does not depend on
+# Daily T+1 / T+5 evaluation sweeps (+ group374: structure observations T+1/5/10/20 and the structure report) — free-tier safe (does not depend on
 # in-process background tasks that die when Render sleeps).
 #
 # Secrets:
@@ -58,6 +58,15 @@ jobs:
             curl -fsS -m 120 -X POST "$PATH_BASE/api/evaluate/t5?max_batch=${MAX_BATCH}" && break
             curl -fsS -m 120 -X POST "$PATH_BASE/evaluate/t5?max_batch=${MAX_BATCH}" && break
           done
+          # group374: score the all-decision structure observations (T+1/5/10/20, MFE/MAE, first touch), then print the report
+          sleep 5
+          for PATH_BASE in "$D/training" "$D"; do
+            curl -fsS -m 150 -X POST "$PATH_BASE/api/evaluate/structure?max_batch=${MAX_BATCH}" && break
+          done
+          for PATH_BASE in "$D/training" "$D"; do
+            curl -fsS -m 60 "$PATH_BASE/api/structure/report?days=60" | head -c 3000 && break
+          done
+          echo
           # Status snapshot
           curl -fsS -m 30 "$D/training/api/evaluate/status" || curl -fsS -m 30 "$D/api/evaluate/status" || true
           echo "Evaluate workflow done"

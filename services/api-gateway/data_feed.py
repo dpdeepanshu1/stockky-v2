@@ -1273,9 +1273,24 @@ def find_prepare_to_buy_candidates(
                 seen.add(base)
                 candidates.append(base)
 
+    # group374 (LIVE): rows outside the band whose daily structure shows a P9 event (bullish BOS / CHOCH / sweep / price in a zone or the golden
+    # fib) are quoted too. SNIPER_PREPARE_STRUCTURE_MODE=off switches it off. Fail-open: any error leaves the band selection as it was.
+    n_event = 0
+    try:
+        import buy_sniper as _bs
+        ev_rows = {_norm_sym(k): v for k, v in feeds.items() if isinstance(v, dict) and _norm_sym(k) not in seen}
+        for sym, trig in _bs.select_prepare_event_symbols(ev_rows, seen, _score_from_payload, min_score):
+            if sym and sym not in seen:
+                seen.add(sym)
+                candidates.append(sym)
+                n_event += 1
+                logger.info("prepare-to-buy structure event %s: %s", sym, ",".join(trig))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare-to-buy event selection: %s", e)
+
     logger.info(
-        "prepare-to-buy candidates: %s (band %.0f–%.0f)",
-        len(candidates), min_score, max_score,
+        "prepare-to-buy candidates: %s (band %.0f–%.0f, %s by structure event)",
+        len(candidates), min_score, max_score, n_event,
     )
     return candidates
 

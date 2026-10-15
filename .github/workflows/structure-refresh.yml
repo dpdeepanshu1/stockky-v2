@@ -1,0 +1,57 @@
+# Daily market-structure refresh (group 374). The daily bar is usable ~20 min after the 15:30 IST close, so this runs at 16:00 IST (10:30 UTC), Mon-Fri.
+# It POSTs the gateway's /data-feed/structure-refresh (returns at once; the work runs in a gateway thread), then polls .../status so the run log shows
+# what happened. A second pass runs at 08:15 IST (02:45 UTC) to catch rows the evening pass missed (holidays, a sleeping free-tier host).
+# Secret: API_GATEWAY_URL (https://...). Manual run: Actions -> Stockky Structure Refresh -> Run workflow (force=true re-reads rows that are already fresh).
+name: Stockky Structure Refresh
+
+on:
+  schedule:
+    - cron: "30 10 * * 1-5"
+    - cron: "45 2 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "force=true re-reads rows whose structure is already fresh"
+        required: false
+        default: "false"
+      limit:
+        description: "max symbols (0 = no limit)"
+        required: false
+        default: "0"
+
+jobs:
+  structure-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Trigger structure refresh and wait for it
+        env:
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+          LIMIT: ${{ github.event.inputs.limit || '0' }}
+        run: |
+          set +e
+          GW="${API_GATEWAY_URL%/}"
+          [ -n "$GW" ] || { echo "API_GATEWAY_URL secret missing"; exit 1; }
+          case "$GW" in http://*|https://*) ;; *) echo "URL must include https://"; exit 1;; esac
+          # wake the (free-tier) gateway first
+          curl -sS -m 40 "$GW/health?warm=true" >/dev/null || curl -sS -m 40 "$GW/health" >/dev/null || true
+          sleep 10
+          Q="force=${FORCE}"
+          [ "$LIMIT" != "0" ] && Q="$Q&limit=${LIMIT}"
+          ok=0
+          for i in 1 2 3; do
+            out=$(curl -sS -m 60 -X POST "$GW/data-feed/structure-refresh?$Q")
+            echo "start #$i: $out"
+            case "$out" in *'"status"'*) ok=1; break;; esac
+            sleep 20
+          done
+          [ "$ok" = "1" ] || { echo "could not start the structure refresh"; exit 1; }
+          # poll the status for up to ~30 minutes
+          for i in $(seq 1 60); do
+            sleep 30
+            st=$(curl -sS -m 30 "$GW/data-feed/structure-refresh/status")
+            echo "status $i: $(echo "$st" | head -c 400)"
+            case "$st" in *'"status":"running"'*|*'"status": "running"'*) ;; *) break;; esac
+          done
+          echo "Structure refresh workflow done"

@@ -18,6 +18,10 @@ report adds, per stop basis: stop-outs, the median stop %, stop-outs that had al
 stop. It also replays a TIGHTER stop (--stop-mults 0.5,0.75 = that fraction of the trade's own stop): a trade whose recorded drawdown reached the tighter level would certainly have
 been stopped there, so that what-if is exact apart from tick sampling, slippage and charges. A WIDER stop cannot be replayed (the ledger has no price path after the real stop), so
 only the indicators speak to "was the stop too tight". Rows exported before group 395 have no stop data and are counted but not used.
+Real-trade input (group398): the same tool reads the real-trade-service per-trade records, `curl -s "http://127.0.0.1:8007/positions/REAL/records?days=14&limit=1000" > rt_$(date +%F).json`
+(an object with a "records" list; use /positions/DEMO/records for DEMO). Those rows are converted to the same shape: gross P&L, entry quantity, opening / closing time, the stop and the
+peak / trough. A trade counts as a STOP-OUT only when it exited by stop_hit / broker_stop / emergency_gap_down AND lost money, which is exactly what group 394's pause counts. A record whose
+exit price is unknown (no fills matched) gets entry + P&L / quantity. Real-trade and position-stocks files must be replayed in separate runs (the tool refuses a mix).
 Output: prints markdown; with --out also writes opening_replay.json and opening_replay.md.
 """
 from __future__ import annotations
@@ -52,14 +56,51 @@ def hhmm(v: str, default: dtime) -> dtime:
         return default
 
 
+RT_STOP_REASONS = ("stop_hit", "broker_stop", "emergency_gap_down")      # real-trade exits that are the stop itself (group 394)
+
+
+def is_rt_record(r: dict) -> bool:
+    """A real-trade per-trade record (GET /positions/{mode}/records) rather than a position-stocks ledger row."""
+    return "position_id" in r and "gross_pnl" in r
+
+
+def from_rt_record(r: dict) -> dict:
+    """Convert one real-trade record to the position-stocks row shape this tool works on. A stop-out is a stop exit that LOST money (group 394 rule)."""
+    pnl = num(r.get("gross_pnl"))
+    qty = num(r.get("quantity"))
+    entry = num(r.get("entry_price"))
+    reason = str(r.get("exit_reason") or "").strip().lower()
+    if reason in RT_STOP_REASONS:
+        status = "STOP_HIT" if pnl is not None and pnl < 0 else "STOP_EXIT_NOT_LOSING"      # a stop exit that did not lose is not a stop-out (group 394)
+    else:
+        status = reason.upper() or "CLOSED"
+    exit_price = num(r.get("exit_price"))
+    if exit_price is None and entry and qty and qty > 0 and pnl is not None:
+        exit_price = round(entry + pnl / qty, 4)
+    return {"id": ("rt", r.get("mode"), r.get("position_id")), "symbol": r.get("symbol"), "status": status, "quantity": qty,
+            "realized_pnl": pnl, "exit_price": exit_price, "entry_price": entry, "opened_at": r.get("opened_at"), "closed_at": r.get("closed_at"),
+            "adaptive_stop_pct": r.get("stop_pct"), "max_gain_pct": r.get("max_gain_pct"), "max_drawdown_pct": r.get("max_drawdown_pct"),
+            "stop_basis": r.get("stop_basis"), "error_message": None}
+
+
 def load(paths: List[str]) -> List[dict]:
+    """Rows from the given files, merged by id. Position-stocks files and real-trade files cannot be mixed (ValueError)."""
     by_id: Dict[Any, dict] = {}
+    kinds = set()
     for p in paths:
         data = json.loads(Path(p).read_text(encoding="utf-8"))
-        rows = data.get("trades") if isinstance(data, dict) else data
+        rows = (data.get("trades") if "trades" in data else data.get("records")) if isinstance(data, dict) else data
         for r in rows or []:
-            if isinstance(r, dict):
-                by_id[r.get("id", (r.get("symbol"), r.get("opened_at")))] = r
+            if not isinstance(r, dict):
+                continue
+            if is_rt_record(r):
+                kinds.add("real-trade")
+                r = from_rt_record(r)
+            else:
+                kinds.add("position-stocks")
+            by_id[r.get("id", (r.get("symbol"), r.get("opened_at")))] = r
+    if len(kinds) > 1:
+        raise ValueError("these files mix position-stocks ledger exports and real-trade records - replay them in separate runs")
     return list(by_id.values())
 
 
@@ -219,7 +260,12 @@ def main(argv=None) -> int:
     ap.add_argument("--stop-mults", default="0.5,0.75", help="tighter-stop what-if: fractions of each trade's own stop (0.1 to 0.99), comma list; blank = skip")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
-    rep = replay(load(a.files), a.size_mult, a.pause_stopouts, a.until, a.min_n, parse_mults(a.stop_mults))
+    try:
+        rows = load(a.files)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    rep = replay(rows, a.size_mult, a.pause_stopouts, a.until, a.min_n, parse_mults(a.stop_mults))
     md = to_markdown(rep)
     print(md)
     if a.out:

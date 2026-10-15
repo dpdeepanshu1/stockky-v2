@@ -18,6 +18,7 @@ Files are merged by trade id. Output: a table of four scenarios (actual, size-on
 ## Limits
 - P&L scaling ignores size-dependent slippage and charges; a skipped trade leaves no trace (its slot could have gone to a later candidate - not replayed).
 - The ledger is a few days deep, so expect `insufficient_sample` for a while. No significance test.
+- Real-trade: since group 398 the tool also reads real-trade per-trade records (`docs/GROUP398_REAL_TRADE_REPLAY_INPUT.md`).
 - Stops: since group 395 the export carries each trade's own stop and the report has a Stops section (see `docs/GROUP395_STOP_BASIS_AND_EXPORT.md`). It still cannot say what stop the plan WOULD have set for a trade that used another path, and it cannot replay a wider stop.
 
 ## Tests

@@ -494,6 +494,10 @@ class TradePosition(Base):
     # (which have no way to know their original distance) fall back to the
     # old current_stop-based approximation in exit_engine.
     initial_stop_distance = Column(Float, nullable=True)
+    # group 397: highest / lowest price seen while the position was open (exit_engine/excursion.py, sampled once per exit cycle, evidence only).
+    # NULL on rows opened before group 397 or never priced. Max favourable / adverse excursion = these vs avg_entry_price.
+    max_price_seen = Column(Float, nullable=True)
+    min_price_seen = Column(Float, nullable=True)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
     realized_pnl = Column(Float, nullable=False, default=0.0)
     opened_at = Column(DateTime, nullable=False, default=_now)

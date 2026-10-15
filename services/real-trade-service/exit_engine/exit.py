@@ -58,6 +58,7 @@ import models
 from audit.logger import log_action
 from execution import dhan_client, shared_order_budget
 from market_feed.feed import get_quotes
+from exit_engine import excursion as _excursion   # group 397
 # session111 fix (#2 — notify_sync blocking up to ~42s inline in exit paths):
 # this module's evaluate_mode() runs inside _run_exit_tick_sync's per-mode
 # exit lock (auto_pilot.py) and fires a notification after almost every
@@ -1325,6 +1326,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
 
         ltp = tick.price
         _NO_PRICE_STREAK.pop((mode, position.symbol), None)
+        _excursion.record(db, position, tick, now)   # group 397: peak / trough since entry (evidence only, never raises)
 
         # REAL: if a SELL is already in-flight, don't re-evaluate until
         # reconcile confirms or rejects it. Prevents double-selling.

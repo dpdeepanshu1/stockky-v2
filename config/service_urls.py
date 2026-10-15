@@ -10,7 +10,7 @@ def _base(url: str) -> str:
 
 # ── Root hosts (5 Render services) ──────────────────────────────────────────
 API_GATEWAY_URL = _base(os.getenv("API_GATEWAY_URL", "https://api-gateway-puwd.onrender.com"))
-MARKET_DATA_URL = _base(os.getenv("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com"))
+MARKET_DATA_URL = _base(os.getenv("MARKET_DATA_URL", "http://market-data-service:8001"))
 ANALYSIS_INTELLIGENCE_URL = _base(
     os.getenv("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com")
 )

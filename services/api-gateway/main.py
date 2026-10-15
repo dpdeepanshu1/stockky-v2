@@ -150,7 +150,7 @@ _NS = _env_url("NOTIFICATION_SCHEDULER_URL", "https://notification-scheduler-ser
 DECISION_URL = _env_url("DECISION_URL", f"{_DP.rstrip('/')}/decision", rstrip=False)
 NOTIFICATION_URL = _env_url("NOTIFICATION_URL", _NS.rstrip('/') if _NS.rstrip('/').endswith('notification') else f"{_NS.rstrip('/')}/notification", rstrip=False)
 NEWS_URL = _env_url("NEWS_URL", f"{_AI.rstrip('/')}/news", rstrip=False)
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com", rstrip=False)
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001", rstrip=False)
 TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical", rstrip=False)
 FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental", rstrip=False)
 # 2026-09-11: base URL for the overnight-orchestrator proxy routes below —

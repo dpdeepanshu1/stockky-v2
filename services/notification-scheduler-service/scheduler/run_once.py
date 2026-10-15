@@ -94,6 +94,9 @@ HOLIDAYS_2026 = [
     "2026-11-10",  # Diwali Balipratipada
     "2026-11-24",  # Guru Nanak Jayanti
     "2026-12-25",  # Christmas
+    # 2027 PENDING (group379 G3): NSE has not published the 2027 trading holidays yet (expected in December 2026). Not guessed.
+    # When published add every date here AND in the other six copies, then run scripts/check_holiday_lists_sync.py.
+    # Until then every 2027 weekday counts as a trading day.
 ]
 
 _redis = None

@@ -383,7 +383,7 @@ def _baseline_row_from_frame(base: str, frame) -> Optional[Dict[str, Any]]:
 
 
 def _market_data_url() -> str:
-    return ((os.getenv("MARKET_DATA_URL") or "").strip() or "https://market-data-service-r6d7.onrender.com").rstrip("/")
+    return ((os.getenv("MARKET_DATA_URL") or "").strip() or "http://market-data-service:8001").rstrip("/")
 
 
 def bulk_baselines_from_market_data(

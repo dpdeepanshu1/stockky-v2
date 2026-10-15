@@ -245,7 +245,7 @@ def fetch_daily_bars(symbol: str, lookback_days: int) -> List[Any]:
     """Daily bars from market-data /history (sync). Raises on any failure."""
     import httpx
     _, _candles = _ms()
-    base = (os.getenv("MARKET_DATA_URL") or "https://market-data-service-r6d7.onrender.com").strip().rstrip("/")
+    base = (os.getenv("MARKET_DATA_URL") or "http://market-data-service:8001").strip().rstrip("/")
     period = "3mo" if lookback_days <= 80 else "6mo"
     with httpx.Client(timeout=_history_timeout()) as client:
         r = client.get(f"{base}/history/{_norm(symbol)}", params={"period": period, "interval": "1d"})

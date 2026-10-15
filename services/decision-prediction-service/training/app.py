@@ -129,7 +129,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     return raw or (default.rstrip("/") if rstrip else default)
 
 
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 SERVICE_URL = _env_url(
     "SERVICE_URL",
     _env_url(

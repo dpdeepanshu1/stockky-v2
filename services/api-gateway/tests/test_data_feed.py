@@ -1532,7 +1532,7 @@ class TestBulkYahooDownloadPrices:
         monkeypatch.setitem(sys.modules, "httpx",
                             fake_httpx(post=lambda url, **k: seen.append(url) or FakeResp(200, {"quotes": []})))
         df.bulk_yahoo_download_prices(["A"])
-        assert seen == ["https://market-data-service-r6d7.onrender.com/quotes/bulk"]
+        assert seen == ["http://market-data-service:8001/quotes/bulk"]
 
 
 # ── NSE bhavcopy ─────────────────────────────────────────────────────────────

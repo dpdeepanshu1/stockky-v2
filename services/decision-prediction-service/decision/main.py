@@ -77,7 +77,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
 _AI = _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com", rstrip=False)
 _DP = _env_url("DECISION_PREDICTION_URL", "https://decision-prediction-service.onrender.com", rstrip=False)
 TECHNICAL_URL = _env_url("TECHNICAL_URL", f"{_AI.rstrip('/')}/technical", rstrip=False)
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", f"{_AI.rstrip('/')}/fundamental", rstrip=False)
 NEWS_URL = _env_url("NEWS_URL", f"{_AI.rstrip('/')}/news", rstrip=False)
 EVENT_URL = _env_url("EVENT_URL", f"{_AI.rstrip('/')}/event", rstrip=False)
@@ -138,6 +138,9 @@ _NSE_HOLIDAYS_2026 = {
     "2026-11-10",  # Diwali Balipratipada
     "2026-11-24",  # Guru Nanak Jayanti
     "2026-12-25",  # Christmas
+    # 2027 PENDING (group379 G3): NSE has not published the 2027 trading holidays yet (expected in December 2026). Not guessed.
+    # When published add every date here AND in the other six copies, then run scripts/check_holiday_lists_sync.py.
+    # Until then every 2027 weekday counts as a trading day.
 }
 
 def _is_market_open() -> bool:

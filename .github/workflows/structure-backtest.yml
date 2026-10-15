@@ -2,7 +2,10 @@
 # Downloads daily candles through the market-data service, replays the structure engine with no look-ahead and compares the structure policy with a
 # technical-only baseline after costs (scripts/ms_ab_report.py). The report is printed in the run summary and uploaded as an artifact.
 # Secrets: MARKET_DATA_URL (required, https://...), API_GATEWAY_URL (optional: symbol universe from /api/universe; without it pass `symbols`).
-# Start small (limit=150 (a random sample, not the alphabetical head), about 15 minutes) and raise it once the numbers look sane. The verdict stays `insufficient_sample` below min_n signals.
+# The default is a random 400-symbol sample (not the alphabetical head), drawn with `seed` from the sorted universe, so the same seed is the same sample
+# whatever order the universe endpoint returns; the drawn symbols are saved in sample_manifest.json in the artifact. Change `seed` to check that the
+# verdict does not depend on WHICH 400 stocks were drawn. Lower `limit` (150 is about 15 minutes) if the market-data host rate limits. The verdict stays
+# `insufficient_sample` below min_n signals.
 name: Stockky Structure Backtest
 
 on:
@@ -11,7 +14,11 @@ on:
       limit:
         description: "random sample size (0 = whole universe; the market-data host is rate limited, so go up gradually)"
         required: false
-        default: "150"
+        default: "400"
+      seed:
+        description: "random seed for the sample (same seed = same symbols)"
+        required: false
+        default: "7"
       symbols:
         description: "optional comma-separated symbols (overrides the universe)"
         required: false
@@ -44,7 +51,8 @@ jobs:
         env:
           MARKET_DATA_URL: ${{ secrets.MARKET_DATA_URL }}
           API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
-          LIMIT: ${{ github.event.inputs.limit || '150' }}
+          LIMIT: ${{ github.event.inputs.limit || '400' }}
+          SEED: ${{ github.event.inputs.seed || '7' }}
           SYMBOLS: ${{ github.event.inputs.symbols || '' }}
           PERIOD: ${{ github.event.inputs.period || '5y' }}
         run: |
@@ -59,7 +67,7 @@ jobs:
             sleep 10
             SRC="--universe-url ${API_GATEWAY_URL%/}/api/universe"
           else echo "pass symbols or set the API_GATEWAY_URL secret"; exit 1; fi
-          python3 scripts/fetch_history_for_backtest.py hist $SRC --period "$PERIOD" --sample "$LIMIT" --sleep 1.5
+          python3 scripts/fetch_history_for_backtest.py hist $SRC --period "$PERIOD" --sample "$LIMIT" --seed "$SEED" --manifest sample_manifest.json --sleep 1.5
 
       - name: Run the A/B report
         env:
@@ -79,3 +87,4 @@ jobs:
           path: |
             ab_out/
             ab_out_console.txt
+            sample_manifest.json

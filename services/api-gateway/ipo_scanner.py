@@ -102,7 +102,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     return raw or (default.rstrip("/") if rstrip else default)
 
 
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 FUNDAMENTAL_URL = _env_url("FUNDAMENTAL_URL", _env_url("ANALYSIS_INTELLIGENCE_URL", "https://analysis-intelligence-service.onrender.com") + "/fundamental",)
 
 NSE_HEADERS = {

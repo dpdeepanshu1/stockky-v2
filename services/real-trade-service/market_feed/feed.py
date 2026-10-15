@@ -55,7 +55,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
 
 
 # Mirrors every other Stockky service's MARKET_DATA_URL env convention
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 
 # §1 — max age for live_quotes rows before we consider them stale.
 # If the AngelOne row is older than this, fall through to the yfinance path.

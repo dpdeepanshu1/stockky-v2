@@ -237,6 +237,44 @@ def summarize(rows: Iterable[Dict[str, Any]], min_n: int = 30) -> Dict[str, Any]
         "passed_buy_now": g_pass, "policy_demoted": g_dem,
         "edge": {"hit_5pct_passed_minus_demoted_pts": delta, "insufficient_sample": insufficient, "min_n": min_n,
                  "note": "A positive number means the policy kept the better setups. Not a verdict until both groups reach min_n fully evaluated rows."},
+        "prepare_upgrade": _prepare_upgrade(rs, min_n),
+    }
+
+
+def _prepare_upgrade(rs: List[Dict[str, Any]], min_n: int) -> Dict[str, Any]:
+    """group379 (F2): the policy's P9 PREPARE TO BUY -> BUY NOW upgrade is the only place the policy makes a call MORE aggressive than the legacy
+    engine, so it gets its own report. Three groups, all keyed on the pre-policy label (legacy_decision):
+      upgraded         legacy PREPARE TO BUY, final BUY NOW   (the upgrade under test)
+      held_at_prepare  legacy PREPARE TO BUY, final PREPARE TO BUY   (the control: same starting label, upgrade not applied)
+      kept_buy_now     legacy BUY NOW, final BUY NOW          (context: what an ordinary BUY NOW did over the same window)
+    `edge` = upgraded minus held_at_prepare (did the upgrade pick the better PREPAREs?) and, as context, upgraded minus kept_buy_now. A number is given
+    only when both groups have min_n fully evaluated (20-session) rows; before that `insufficient_sample` is true and every delta is None. Nothing
+    here is a verdict, and it cannot be one: a hit-rate difference without a confidence interval is a reason to look closer, not to switch the upgrade
+    on or off (STRUCTURE_PREPARE_UPGRADE=0 is the switch)."""
+    def pick(legacy: str, final: str) -> List[Dict[str, Any]]:
+        return [r for r in rs if r.get("legacy_decision") == legacy and r.get("final_decision") == final]
+    g_up = _group(pick("PREPARE TO BUY", "BUY NOW"), min_n)
+    g_held = _group(pick("PREPARE TO BUY", "PREPARE TO BUY"), min_n)
+    g_kept = _group(pick("BUY NOW", "BUY NOW"), min_n)
+
+    def delta(a: Dict[str, Any], b: Dict[str, Any], key: str) -> Optional[float]:
+        if a["insufficient_sample"] or b["insufficient_sample"]:
+            return None
+        x, y = a.get(key), b.get(key)
+        return round(x - y, 3) if isinstance(x, (int, float)) and isinstance(y, (int, float)) else None
+    return {
+        "upgraded": g_up, "held_at_prepare": g_held, "kept_buy_now": g_kept,
+        "edge": {
+            "insufficient_sample_vs_held": g_up["insufficient_sample"] or g_held["insufficient_sample"],
+            "insufficient_sample_vs_kept": g_up["insufficient_sample"] or g_kept["insufficient_sample"],
+            "min_n": min_n,
+            "hit_5pct_upgraded_minus_held_pts": delta(g_up, g_held, "hit_5pct_within_20d_pct"),
+            "avg_ret_20_upgraded_minus_held_pts": delta(g_up, g_held, "avg_ret_20"),
+            "hit_5pct_upgraded_minus_kept_buy_now_pts": delta(g_up, g_kept, "hit_5pct_within_20d_pct"),
+            "avg_ret_20_upgraded_minus_kept_buy_now_pts": delta(g_up, g_kept, "avg_ret_20"),
+            "note": "Positive vs held = the upgrade picked the better PREPAREs. Not a verdict until the groups reach min_n fully evaluated rows, and "
+                    "even then there is no confidence interval here.",
+        },
     }
 
 

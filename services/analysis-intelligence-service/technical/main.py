@@ -55,7 +55,7 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     return raw or (default.rstrip("/") if rstrip else default)
 
 
-MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "https://market-data-service-r6d7.onrender.com")
+MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 UPSTASH_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip() or None
 UPSTASH_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip() or None
 
@@ -117,6 +117,9 @@ _NSE_HOLIDAYS_2026 = {
     "2026-11-10",  # Diwali Balipratipada
     "2026-11-24",  # Guru Nanak Jayanti
     "2026-12-25",  # Christmas
+    # 2027 PENDING (group379 G3): NSE has not published the 2027 trading holidays yet (expected in December 2026). Not guessed.
+    # When published add every date here AND in the other six copies, then run scripts/check_holiday_lists_sync.py.
+    # Until then every 2027 weekday counts as a trading day.
 }
 
 def is_market_open() -> bool:

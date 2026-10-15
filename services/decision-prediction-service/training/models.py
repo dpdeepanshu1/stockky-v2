@@ -1123,6 +1123,33 @@ def _ensure_oracle_identity_impl(engine) -> bool:
 _INIT_DONE = False
 _INIT_LOCK = None
 
+_STRUCT_TABLE_READY = set()
+_STRUCT_TABLE_LOCK = __import__("threading").Lock()
+
+
+def ensure_structure_table(engine) -> bool:
+    """Create decision_structure_observations if missing (once per engine, on first use).
+
+    init_db() returns early whenever paper_trades already exists, so a table added to an
+    already-initialised database (Oracle VM) was never created. This creates only that one
+    table, checkfirst, and fixes the Oracle id generator. Raises on failure so the caller
+    can answer 503 instead of failing silently.
+    """
+    key = id(engine)
+    if key in _STRUCT_TABLE_READY:
+        return True
+    with _STRUCT_TABLE_LOCK:
+        if key in _STRUCT_TABLE_READY:
+            return True
+        StructureObservation.__table__.create(bind=engine, checkfirst=True)
+        try:
+            ensure_oracle_identity(engine)
+        except Exception:
+            pass
+        _STRUCT_TABLE_READY.add(key)
+        return True
+
+
 def init_db(engine=None):
     """Create all Stockky training/trades tables if missing (safe to call repeatedly).
 

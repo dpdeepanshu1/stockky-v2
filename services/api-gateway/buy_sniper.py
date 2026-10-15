@@ -431,11 +431,14 @@ def symbols_needing_structure(payload: Any, limit: int = 12) -> List[str]:
         return []
 
 
-# -- PREPARE-to-Buy refresh notes (group 358, LOG-ONLY) -----------------------------------------------------------------------------------------
+# -- PREPARE-to-Buy refresh: notes (group 358) + event-driven selection (group 374, LIVE) -----------------------------------------------------------------------------------------
 # After /data-feed/refresh-prepare-to-buy patches fresh quotes onto PREPARE rows, say WHY a row deserves a second look: the structure now fails
 # the entry check at the fresh price ("turned bad"; "flipped" when it still passed at the last stored price) or a P9 structure event is near the
 # bar (fresh BOS / CHOCH / sweep / price inside a zone / golden fib). Notes never change a row, a decision or a quote patch.
-# SNIPER_PREPARE_STRUCTURE_MODE: log (default) | off. Independent of SNIPER_STRUCTURE_MODE (the card gate): the card gate off must not silence notes.
+# group374: the same triggers now also DECIDE which rows get a fresh quote (select_prepare_event_symbols): a row outside the score band whose structure
+# shows a P9 event is quoted too, so a setup that is forming is not missed because its score sits a few points low.
+# SNIPER_PREPARE_STRUCTURE_MODE: live (default) | off. A stale "log" in an old .env means live. Independent of SNIPER_STRUCTURE_MODE (the card gate).
+# SNIPER_PREPARE_EVENT_MARGIN (default 8): rows down to min_score - margin may be selected by an event. SNIPER_PREPARE_EVENT_MAX (default 15): cap.
 # prepare_triggers() mirrors decision-prediction's structure_policy.prepare_triggers (a randomised test pins the two together).
 _PREP_TRIGGER_TEXT = {
     "bos_near": "fresh bullish break of structure",
@@ -448,7 +451,7 @@ _PREP_TRIGGER_TEXT = {
 
 
 def _prep_mode() -> str:
-    return "off" if ((_os.getenv("SNIPER_PREPARE_STRUCTURE_MODE") or "").strip().lower() == "off") else "log"
+    return "off" if ((_os.getenv("SNIPER_PREPARE_STRUCTURE_MODE") or "").strip().lower() == "off") else "live"
 
 
 def _prep_num(v: Any) -> Optional[float]:
@@ -489,6 +492,51 @@ def prepare_triggers(row: Any, price: Any = None) -> List[str]:
             t.append("entering_fib")
         return t
     except Exception:  # noqa: BLE001
+        return []
+
+
+def _prep_env_float(name: str, default: float) -> float:
+    try:
+        raw = (_os.getenv(name) or "").strip()
+        v = float(raw) if raw else default
+        return v if _math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def select_prepare_event_symbols(rows: Any, exclude: Any, score_of: Any, min_score: float) -> List[Tuple[str, List[str]]]:
+    """Rows OUTSIDE the PREPARE score band that show a structure event (prepare_triggers) with usable, fresh structure.
+    `rows` = {symbol: feed row}; `exclude` = symbols already selected; `score_of(row)` = conviction. Returns [(symbol, triggers)], best score first,
+    capped by SNIPER_PREPARE_EVENT_MAX. Skips BUY NOW (already actionable) and SELL rows. [] when the mode is off. Pure, never raises."""
+    try:
+        if _prep_mode() == "off" or not isinstance(rows, dict):
+            return []
+        floor = float(min_score) - max(0.0, _prep_env_float("SNIPER_PREPARE_EVENT_MARGIN", 8.0))
+        cap = int(_prep_env_float("SNIPER_PREPARE_EVENT_MAX", 15.0))
+        if cap <= 0:
+            return []
+        skip = set(exclude or ())
+        out: List[Tuple[float, str, List[str]]] = []
+        for sym, row in rows.items():
+            if sym in skip or not isinstance(row, dict):
+                continue
+            dec = str(row.get("decision") or row.get("action") or "").upper()
+            if "BUY NOW" in dec or "SELL" in dec:
+                continue
+            sc = float(score_of(row) or 0.0)
+            if sc < floor:
+                continue
+            sm = _structure_summary(row)
+            msp = _sg_pos(sm.get("ms_price")) if isinstance(sm, dict) else None
+            if _sg_no_data(sm, _sg_pos(row.get("price")) or msp):
+                continue
+            trig = prepare_triggers(row, None)
+            if trig:
+                out.append((sc, str(sym), trig))
+        out.sort(key=lambda t: (-t[0], t[1]))
+        return [(s_, t_) for _, s_, t_ in out[:cap]]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("prepare event selection failed (none selected): %s", e)
         return []
 
 

@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # `JSONResponse(...)` call site is fixed with no further changes.
 from json_safe import SafeJSONResponse as JSONResponse
 import structure_entry as _se   # group359/373: entry-time market-structure snapshot kept inside feature_snapshot
+import structure_obs as _so     # group374: all-decision structure observations + T+1/5/10/20 outcomes
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any   # <-- fixed: added Dict, Any
 import joblib
@@ -29,7 +30,7 @@ import numpy as np
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade
+from models import Base, ensure_schema, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade, StructureObservation
 from pit_validation import validate_prediction_snapshot, validate_outcome_vs_prediction
 import trades as trades_module
 from evaluate import (
@@ -924,6 +925,83 @@ async def api_evaluate_t5(background_tasks: BackgroundTasks, max_batch: int = 50
             logger.error("T+5 evaluation failed: %s", e)
     background_tasks.add_task(run_eval)
     return JSONResponse(content={"status": "T+5 evaluation triggered", "sync": False})
+
+
+# ── group374: all-decision structure observations (plan WS-6) ───────────────────────────────────────────────────────────────────────
+@app.post("/api/structure/observations")
+async def api_structure_observations(request: Request):
+    """Idempotent batch upsert (<= 100). Body: a list, or {"observations": [...]}. Evidence only: nothing here changes a decision."""
+    if not _so.enabled():
+        return JSONResponse(content={"ok": True, "disabled": True})
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+    items = body.get("observations") if isinstance(body, dict) else body
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="expected a list of observations")
+    db = SessionLocal()
+    try:
+        return JSONResponse(content={"ok": True, **_so.upsert_batch(db, StructureObservation, items)})
+    except Exception as e:
+        db.rollback()
+        logger.error("structure observations upsert failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    finally:
+        db.close()
+
+
+@app.get("/api/structure/observations")
+async def api_structure_observations_list(symbol: Optional[str] = None, days: int = 30, limit: int = 200):
+    db = SessionLocal()
+    try:
+        since = (datetime.now(IST).date() - timedelta(days=max(1, min(int(days), 400)))).isoformat()
+        q = db.query(StructureObservation)
+        if symbol:
+            q = q.filter_by(symbol=symbol.strip().upper())
+        rows = [_so.row_to_dict(r) for r in q.order_by(StructureObservation.id.desc()).limit(max(1, min(int(limit), 1000))).all()]
+        rows = [r for r in rows if (r.get("obs_date") or "") >= since]
+        return JSONResponse(content={"ok": True, "count": len(rows), "observations": rows})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    finally:
+        db.close()
+
+
+@app.post("/api/evaluate/structure")
+async def api_evaluate_structure(max_batch: int = 50):
+    """Score pending / partial observations (T+1/5/10/20, MFE/MAE, first touch). Sync, so a cron run gets real counts."""
+    max_batch = max(1, min(int(max_batch or 50), 150))
+    from evaluate import _fetch_bars as _fb
+
+    def _bars(sym):
+        return _fb(sym, None, None)
+
+    def _bench():
+        return _fb("^NSEI", None, None)
+
+    db = SessionLocal()
+    try:
+        res = await asyncio.to_thread(_so.evaluate_pending, db, StructureObservation, _bars, _bench, max_batch)
+        return JSONResponse(content={"ok": True, "status": "structure evaluation complete", **res})
+    except Exception as e:
+        db.rollback()
+        logger.error("structure evaluation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    finally:
+        db.close()
+
+
+@app.get("/api/structure/report")
+async def api_structure_report(days: int = 60, min_n: int = 30):
+    """Did the daily-structure policy help? BUY NOW that passed vs picks the policy demoted, per decision, with sample-size honesty."""
+    db = SessionLocal()
+    try:
+        return JSONResponse(content={"ok": True, **_so.report(db, StructureObservation, days=days, min_n=max(1, int(min_n)))})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    finally:
+        db.close()
 
 
 @app.get("/api/evaluate/status")

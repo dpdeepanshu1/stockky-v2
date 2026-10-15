@@ -18,6 +18,9 @@ on:
       - "scripts/gen_env_reference.py"
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
+      - "scripts/test_ms_ab_report.py"
+      - "scripts/ms_ab_report.py"
+      - "scripts/fetch_history_for_backtest.py"
       - "docs/ENV_REFERENCE.md"
       - ".env.example"
       - ".env.oracle.recommended"
@@ -33,6 +36,9 @@ on:
       - "scripts/gen_env_reference.py"
       - "scripts/_repo_walk.py"
       - "scripts/test_repo_scripts.py"
+      - "scripts/test_ms_ab_report.py"
+      - "scripts/ms_ab_report.py"
+      - "scripts/fetch_history_for_backtest.py"
       - "docs/ENV_REFERENCE.md"
       - ".env.example"
       - ".env.oracle.recommended"
@@ -61,7 +67,7 @@ jobs:
       - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
         run: |
           pip install pytest
-          python -m pytest scripts/test_repo_scripts.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

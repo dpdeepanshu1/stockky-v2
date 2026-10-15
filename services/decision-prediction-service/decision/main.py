@@ -30,6 +30,10 @@ try:
     from structure_policy import apply_policy as _ms_apply_policy, summary_line as _ms_summary_line, policy_mode as _ms_policy_mode
 except Exception:  # noqa: BLE001 - the policy is additive; a broken import must never take the decision service down
     _ms_apply_policy = _ms_summary_line = _ms_policy_mode = None
+try:
+    import structure_obs_hook as _so_hook
+except Exception:  # noqa: BLE001 - observation logging is evidence only; a broken import must never take the decision service down
+    _so_hook = None
 from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
 
 def _safe_int(val, default=50):
@@ -845,6 +849,33 @@ async def record_prediction_for_training(
                 logger.warning(f"Failed to record prediction: {response.status_code} - {response.text}")
     except Exception as e:
         logger.error(f"Error recording prediction for {symbol}: {e}")
+
+
+# ── group374: every decision with a usable structure block is logged (StructureObservation), including WAIT / DO NOT BUY and demoted picks ──
+async def _post_structure_observation(payload: dict) -> None:
+    """Background POST to the training service. Evidence only: any failure is logged at debug and dropped."""
+    try:
+        client = _get_http_client()
+        r = await client.post(f"{TRAINING_SERVICE_URL}/api/structure/observations", json={"observations": [payload]},
+                              headers={"Content-Type": "application/json"}, timeout=10.0)
+        if r.status_code not in (200, 201):
+            logger.debug("structure observation not stored for %s: %s", payload.get("symbol"), r.status_code)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("structure observation post failed for %s: %s", payload.get("symbol"), e)
+
+
+def _queue_structure_observation(background_tasks, symbol: str, response) -> bool:
+    """Queue one observation for the FINAL response. True when queued. Never raises, never changes the response."""
+    try:
+        if background_tasks is None or _so_hook is None or not _so_hook.enabled():
+            return False
+        payload = _so_hook.build_payload(symbol, response)
+        if payload is None or not _so_hook.should_send(payload):
+            return False
+        background_tasks.add_task(_post_structure_observation, payload)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ── group368 (item 8): the training record carries the FINAL decision and the structure block ─────────────────────────────────────────
@@ -1759,6 +1790,9 @@ async def _decide_impl(
                 _queue_training_record(background_tasks, _train_args, response)
         except Exception as _tr_err:  # noqa: BLE001 - recording is evidence only, never changes a decision
             logger.warning("training record skipped for %s (%s)", symbol, _tr_err)
+
+        # group374: log EVERY final decision that has a usable structure block (rejects included) for the outcome / false-negative report.
+        _queue_structure_observation(background_tasks, symbol, response)
 
         # Cache successful decide payload for free-tier scan speed
         try:

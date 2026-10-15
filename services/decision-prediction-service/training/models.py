@@ -12,7 +12,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import (
     Column, String, Float, Integer, Boolean, DateTime, JSON, Text, LargeBinary,
-    Identity, create_engine, inspect, text, desc
+    Identity, create_engine, inspect, text, desc, UniqueConstraint
 )
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base
@@ -290,6 +290,58 @@ class PredictionOutcome(Base):
 
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=ist_now)
+
+
+class StructureObservation(Base):
+    """group374: one row per (symbol, observation day, engine version, policy mode) for EVERY /decide answer that carried a daily-structure block
+    (BUY NOW, PREPARE, WAIT, DO NOT BUY and policy-demoted picks). Inputs are written once a day; outcome columns are filled later from daily
+    bars by structure_obs.evaluate_pending (entry = next session open, T+1/5/10/20, MFE/MAE, first-touch on the structural stop/target)."""
+    __tablename__ = "structure_observations"
+    __table_args__ = (UniqueConstraint("symbol", "obs_date", "engine_version", "policy_mode", name="uq_structure_obs_key"),)
+
+    id = _pk_column()
+    symbol = Column(String(20), nullable=False, index=True)
+    obs_date = Column(String(10), nullable=False, index=True)      # IST day the decision was made (YYYY-MM-DD)
+    asof_date = Column(String(10), nullable=True)                  # last closed daily bar the structure was computed on
+    engine_version = Column(String(20), nullable=False, default="")
+    params_hash = Column(String(20), nullable=True)
+    policy_mode = Column(String(12), nullable=False, default="full")
+    created_at = Column(DateTime, default=ist_now)
+
+    price = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    final_decision = Column(String(24), nullable=False)
+    legacy_decision = Column(String(24), nullable=True)            # the decision BEFORE the structure policy
+    policy_applied = Column(Integer, default=0)
+    rules = Column(PortableJSON, nullable=True)                    # rule ids that fired
+    combined_score = Column(Float, nullable=True)
+    technical_score = Column(Float, nullable=True)
+    tqs = Column(Float, nullable=True)
+    groups = Column(Float, nullable=True)
+    features = Column(PortableJSON, nullable=True)
+    levels = Column(PortableJSON, nullable=True)                   # structural stop / target / rr
+
+    # outcome (filled by the evaluator)
+    eval_status = Column(String(12), nullable=False, default="pending", index=True)   # pending | partial | done | no_data
+    eval_attempts = Column(Integer, default=0)
+    evaluated_at = Column(DateTime, nullable=True)
+    bars_seen = Column(Integer, nullable=True)
+    entry_date = Column(String(10), nullable=True)
+    entry_price = Column(Float, nullable=True)
+    ret_1 = Column(Float, nullable=True)
+    ret_5 = Column(Float, nullable=True)
+    ret_10 = Column(Float, nullable=True)
+    ret_20 = Column(Float, nullable=True)
+    mfe_20 = Column(Float, nullable=True)
+    mae_20 = Column(Float, nullable=True)
+    hit_5pct_20 = Column(Integer, nullable=True)
+    target_before_stop = Column(Integer, nullable=True)            # 1 target first, 0 stop first (stop wins a same-bar tie), None undecided
+    days_to_target = Column(Integer, nullable=True)
+    entry_chase_atr = Column(Float, nullable=True)
+    nifty_ret_1 = Column(Float, nullable=True)
+    nifty_ret_5 = Column(Float, nullable=True)
+    nifty_ret_10 = Column(Float, nullable=True)
+    nifty_ret_20 = Column(Float, nullable=True)
 
 
 class PortfolioAccount(Base):
@@ -936,6 +988,7 @@ _PK_TABLES = (
     "trade_backups",
     "training_runs",
     "model_artifacts",
+    "structure_observations",
 )
 
 

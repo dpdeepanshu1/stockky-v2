@@ -152,8 +152,8 @@ def test_off_mode_and_bad_mode():
     n = m.prepare_refresh_note(_row(ms_trend="bearish"), 100.0)
     assert n["opinion"] == "off" and n["headline"] is None
     assert m.prepare_refresh_report({"ABC": _row()}, {"ABC": 100.0})["notes"] == {}
-    assert bs(SNIPER_PREPARE_STRUCTURE_MODE="banana")._prep_mode() == "log"
-    assert bs()._prep_mode() == "log"
+    assert bs(SNIPER_PREPARE_STRUCTURE_MODE="banana")._prep_mode() == "live"
+    assert bs()._prep_mode() == "live"
 
 
 def test_prepare_mode_is_independent_of_the_sniper_gate_mode():
@@ -167,7 +167,7 @@ def test_report_counts_and_only_interesting_rows():
     live = {"BAD": 103.0, "QUIET": 100.0, "EVENT": 100.0, "NOSUM": 50.0, "GONE": 10.0}
     rep = m.prepare_refresh_report(rows, live, {"BAD": 100.0})
     assert (rep["checked"], rep["no_opinion"], rep["turned_bad"], rep["flipped"], rep["with_triggers"]) == (3, 2, 1, 1, 1)
-    assert sorted(rep["notes"]) == ["BAD", "EVENT"] and rep["mode"] == "log"
+    assert sorted(rep["notes"]) == ["BAD", "EVENT"] and rep["mode"] == "live"
 
 
 def test_garbage_never_raises():
@@ -279,7 +279,7 @@ def test_route_reply_carries_notes_and_the_refresh_itself_is_unchanged():
     out = _run(_route({"BAD": 103.0, "QUIET": 100.0, "NOSUM": 51.0}, feeds, ["BAD", "QUIET", "NOSUM"], patched)())
     assert patched == {"BAD": 103.0, "QUIET": 100.0, "NOSUM": 51.0}          # every quote still patched: log-only
     assert out["refreshed_count"] == 3 and out["updated"] == ["BAD", "QUIET", "NOSUM"] and out["message"] == "Refreshed 3/3 Prepare-to-Buy quotes"
-    assert out["structure_mode"] == "log" and list(out["structure_notes"]) == ["BAD"]
+    assert out["structure_mode"] == "live" and list(out["structure_notes"]) == ["BAD"]
     assert out["structure_notes"]["BAD"]["flipped"] is True                   # the old price was snapshotted before the patch mutated the row
     assert out["structure_counts"] == {"checked": 2, "no_opinion": 1, "turned_bad": 1, "flipped": 1, "with_triggers": 0}
 

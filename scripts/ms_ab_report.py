@@ -19,6 +19,7 @@ of the history and across market regimes. Tuning stays in scripts/structure_back
 
 Edge = candidate mean net return - baseline mean net return (percentage points). Its uncertainty is a cluster bootstrap (symbol x month blocks, because
 neighbouring days of one stock are not independent; seed 7). Verdict:
+  no_data              no signals at all (empty folder, missing history) - fix the download, do not read the tables
   insufficient_sample  candidate < --min-n signals, or baseline < --min-n, with a complete 20-session outcome  (nothing is promoted)
   pass                 edge > 0 with the bootstrap 5th percentile > 0, both halves of history positive, and the candidate mean net return > 0
   hurts                bootstrap 95th percentile of the edge < 0 (the rules removed the better entries)
@@ -197,6 +198,8 @@ def bootstrap_edge(base: Sequence[Dict[str, Any]], h: int, n_boot: int, seed: in
 
 def verdict(cand_n: int, base_n: int, edge: Optional[float], ci: Optional[List[float]], half_edges: List[Optional[float]],
             cand_mean: Optional[float], min_n: int) -> str:
+    if base_n == 0:
+        return "no_data"
     if cand_n < min_n or base_n < min_n or edge is None:
         return "insufficient_sample"
     if ci is not None and ci[1] < 0:
@@ -227,7 +230,11 @@ def build_report(rows: List[Dict[str, Any]], horizon: int, min_n: int, n_boot: i
         "by_rule": {}, "by_regime": {}}
     for rule in RULES:
         only = [r for r in base if rule in r["rej"]]
-        rep["by_rule"][rule] = {"rejected": _stats(only, horizon), "share_pct": round(100.0 * len(only) / len(base), 1) if base else None}
+        solo = [r for r in base if rule not in r["rej"]]  # gate made of this rule alone
+        no_other = [r for r in base if not (set(r["rej"]) - {rule})]  # full gate minus this rule
+        rep["by_rule"][rule] = {"rejected": _stats(only, horizon), "share_pct": round(100.0 * len(only) / len(base), 1) if base else None,
+                                "solo_edge_pp": _edge(base, solo, horizon),
+                                "drop_one_edge_pp": _edge(no_other, cand, horizon), "drop_one_n": len(no_other)}
     for name, pred in (("bull", lambda r: r["bull"] is True), ("bear", lambda r: r["bull"] is False),
                        ("high_vol", lambda r: r["hv"] is True), ("low_vol", lambda r: r["hv"] is False)):
         b2 = [r for r in base if pred(r)]
@@ -257,9 +264,12 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     L_ += ["", "## By horizon", "", "| T+ | baseline mean | candidate mean | edge pp |", "|---|---|---|---|"]
     for h, x in rep["by_horizon"].items():
         L_.append(f"| {h} | {f(x['baseline'].get('mean_net'))} | {f(x['candidate'].get('mean_net'))} | {f(x['edge_pp'])} |")
-    L_ += ["", "## Rejected by each rule (a day can trip several)", "", "| rule | share of baseline % | n | mean net % |", "|---|---|---|---|"]
+    L_ += ["", "## Rejected by each rule (a day can trip several)", "",
+           "solo edge = baseline filtered by this rule alone vs baseline. drop-one edge = full gate vs the gate without this rule (positive = the rule earns its place). "
+           "Exploratory: six rules are compared, so a single positive number is weak evidence.", "",
+           "| rule | share of baseline % | n | mean net % | solo edge pp | drop-one edge pp |", "|---|---|---|---|---|---|"]
     for k, x in rep["by_rule"].items():
-        L_.append(f"| {k} | {f(x['share_pct'])} | {x['rejected'].get('n', 0)} | {f(x['rejected'].get('mean_net'))} |")
+        L_.append(f"| {k} | {f(x['share_pct'])} | {x['rejected'].get('n', 0)} | {f(x['rejected'].get('mean_net'))} | {f(x['solo_edge_pp'])} | {f(x['drop_one_edge_pp'])} |")
     L_ += ["", "## By market regime", "", "| regime | baseline n | candidate n | edge pp | candidate mean % |", "|---|---|---|---|---|"]
     for k, x in rep["by_regime"].items():
         L_.append(f"| {k} | {x['baseline_n']} | {x['candidate_n']} | {f(x['edge_pp'])} | {f(x['candidate_mean_net'])} |")
@@ -300,8 +310,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     rows: List[Dict[str, Any]] = []
     skipped = 0
     if a.jobs > 1:
+        results = []
         with ProcessPoolExecutor(max_workers=a.jobs, initializer=_init_pool, initargs=(bench,)) as ex:
-            results = list(ex.map(stock_signals, jobs, chunksize=4))
+            for n, res in enumerate(ex.map(stock_signals, jobs, chunksize=2), 1):
+                results.append(res)
+                if n % 10 == 0 or n == len(jobs):
+                    print(f"progress {n}/{len(jobs)} symbols", file=sys.stderr, flush=True)
     else:
         _init_pool(bench)
         results = [stock_signals(j) for j in jobs]
@@ -319,6 +333,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     md = to_markdown(rep)
     (out / "ab_report.md").write_text(md)
     print(md)
+    if not rows:
+        print("NO SIGNALS: check that the history folder has symbol files with enough candles (and ^NSEI.json)", file=sys.stderr)
     return 0 if rows else 1
 
 

@@ -2,14 +2,14 @@
 # Downloads daily candles through the market-data service, replays the structure engine with no look-ahead and compares the structure policy with a
 # technical-only baseline after costs (scripts/ms_ab_report.py). The report is printed in the run summary and uploaded as an artifact.
 # Secrets: MARKET_DATA_URL (required, https://...), API_GATEWAY_URL (optional: symbol universe from /api/universe; without it pass `symbols`).
-# Start small (limit=150, about 15 minutes) and raise it once the numbers look sane. The verdict stays `insufficient_sample` below min_n signals.
+# Start small (limit=150 (a random sample, not the alphabetical head), about 15 minutes) and raise it once the numbers look sane. The verdict stays `insufficient_sample` below min_n signals.
 name: Stockky Structure Backtest
 
 on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "max symbols to fetch (0 = whole universe; the market-data host is rate limited, so go up gradually)"
+        description: "random sample size (0 = whole universe; the market-data host is rate limited, so go up gradually)"
         required: false
         default: "150"
       symbols:
@@ -59,7 +59,7 @@ jobs:
             sleep 10
             SRC="--universe-url ${API_GATEWAY_URL%/}/api/universe"
           else echo "pass symbols or set the API_GATEWAY_URL secret"; exit 1; fi
-          python3 scripts/fetch_history_for_backtest.py hist $SRC --period "$PERIOD" --limit "$LIMIT" --sleep 1.5
+          python3 scripts/fetch_history_for_backtest.py hist $SRC --period "$PERIOD" --sample "$LIMIT" --sleep 1.5
 
       - name: Run the A/B report
         env:

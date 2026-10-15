@@ -2,7 +2,7 @@
 """fetch_history_for_backtest.py - download daily candles into one JSON per symbol, for scripts/ms_ab_report.py and scripts/structure_backtest.py.
 
   MARKET_DATA_URL=https://... python3 scripts/fetch_history_for_backtest.py OUT_DIR [--symbols RELIANCE,TCS | --symbols-file f.txt | --universe-url URL]
-        [--period 5y] [--limit 0] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI] [--max-failures-pct 60]
+        [--period 5y] [--sample 400 | --limit 0] [--seed 7] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI] [--max-failures-pct 60]
 
 Symbols come from (first that is given): --symbols, --symbols-file (one per line, '#' comments), --universe-url (the gateway's /api/universe: a JSON list).
 The benchmark (default ^NSEI) is always fetched first and saved as ^NSEI.json; the A/B report needs it to tag regimes. Existing files with >= --min-bars
@@ -79,7 +79,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--universe-url", default="")
     ap.add_argument("--period", default="5y")
     ap.add_argument("--benchmark", default="^NSEI")
-    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=0, help="first N symbols of the list (alphabetical universe = biased sample; prefer --sample)")
+    ap.add_argument("--sample", type=int, default=0, help="N symbols drawn at random (seeded) from the list - an unbiased cross-section")
+    ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--timeout", type=float, default=90.0)
@@ -98,7 +100,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"could not read the symbol list: {e}", file=sys.stderr)
         return 2
-    if a.limit > 0:
+    if a.sample > 0 and len(syms) > a.sample:
+        import random
+        syms = sorted(random.Random(a.seed).sample(syms, a.sample))
+    elif a.limit > 0:
         syms = syms[: a.limit]
     if not syms:
         print("no symbols (use --symbols, --symbols-file or --universe-url)", file=sys.stderr)

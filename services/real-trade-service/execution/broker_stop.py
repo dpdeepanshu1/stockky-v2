@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 import config
 import models
+import notifier
 from execution import dhan_client
 from tz_utils import as_aware, ist_today_str
 
@@ -99,12 +100,18 @@ def trigger_for(stop: float, ltp: Optional[float]) -> Optional[float]:
 
 
 def _warn_once(symbol: str, msg: str, *args) -> None:
+    """Log a placement failure at most once per BROKER_STOP_ALERT_COOLDOWN_S per symbol and, on that same cadence, send a
+    Telegram alert: a held position with no resting broker stop is protected by the software stop alone (group384)."""
     cd = float(getattr(config, "BROKER_STOP_ALERT_COOLDOWN_S", 900) or 0)
     now = time.monotonic()
     if cd > 0 and now - _warned.get(symbol, -1e12) < cd:
         return
     _warned[symbol] = now
     logger.warning(msg, *args)
+    try:
+        notifier.notify_fire_and_forget("\u26a0\ufe0f " + (msg % args if args else msg) + " - the position has only its software stop.")
+    except Exception:  # noqa: BLE001
+        logger.debug("broker stop: alert failed", exc_info=True)
 
 
 def _broker_status(db: Session, order_id: str) -> Optional[str]:
@@ -160,16 +167,46 @@ def cancel_for_exit(db: Session, position) -> bool:
         return True
 
 
+def _is_trigger_price_error(msg: str) -> bool:
+    """Dhan's 'Trigger Price should be greater than Price' rejection (a SELL stop whose limit price is not below its trigger)."""
+    m = (msg or "").lower()
+    return "trigger price" in m and "greater than price" in m
+
+
+def limit_price_below(trigger: float, pct: float = 0.5) -> float:
+    """Tick-rounded limit price STRICTLY below `trigger` (Dhan needs trigger > price on a SELL stop-limit). `pct` is the gap
+    in percent; at least one tick is always kept so a low-priced stock can never round back up onto the trigger."""
+    tick = dhan_client.tick_size_for_price(trigger) or 0.05
+    px = dhan_client.round_to_tick(trigger * (1.0 - pct / 100.0))
+    if not px or px >= trigger:
+        px = dhan_client.round_to_tick(trigger - tick)
+    return px
+
+
+def _send_stop(db: Session, security_id: str, position, trigger: float, otype: str):
+    price = limit_price_below(trigger, 0.5) if otype == "STOP_LOSS" else 0.0
+    return dhan_client.place_order(
+        db, is_armed=True, security_id=security_id, exchange_segment=dhan_client.NSE_EQ_SEGMENT,
+        transaction_type="SELL", quantity=int(position.qty_open), order_type=otype, price=price,
+        product_type="CNC", tag="BSTOP", trigger_price=trigger,
+    )
+
+
 def _place(db: Session, position, trigger: float) -> bool:
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         otype = config.BROKER_STOP_ORDER_TYPE
-        price = dhan_client.round_to_tick(trigger * 0.995) if otype == "STOP_LOSS" else 0.0
-        res = dhan_client.place_order(
-            db, is_armed=True, security_id=security_id, exchange_segment=dhan_client.NSE_EQ_SEGMENT,
-            transaction_type="SELL", quantity=int(position.qty_open), order_type=otype, price=price,
-            product_type="CNC", tag="BSTOP", trigger_price=trigger,
-        )
+        try:
+            res = _send_stop(db, security_id, position, trigger, otype)
+        except Exception as first:  # noqa: BLE001
+            # Dhan rejected the stop for its trigger/price relation (seen live: BLEL, BAJAJFINSV, AVADHSUGAR). Retry ONCE as a
+            # stop-limit whose limit price is strictly below the trigger; any other error is not retried.
+            if not _is_trigger_price_error(str(first)):
+                raise
+            logger.info("broker stop for %s: Dhan rejected %s (%s) - retrying as STOP_LOSS with a limit below the trigger",
+                        position.symbol, otype, str(first)[:120])
+            otype = "STOP_LOSS"
+            res = _send_stop(db, security_id, position, trigger, otype)
         oid = str((res or {}).get("orderId") or (res or {}).get("order_id") or "")
         if not oid:
             raise RuntimeError(f"Dhan accepted the stop but returned no order id: {res}")

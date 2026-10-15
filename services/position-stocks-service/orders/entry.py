@@ -155,6 +155,10 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
                 age = time.time() - float(last_ts)
                 if max_age > 0 and age > max_age:
                     return _stale_tick_message(age, max_age)
+        if live is None and getattr(config, "ENTRY_REQUIRE_LIVE_TICK", True):
+            # group389: no usable tick at all -> there is no live price to check staleness or slippage against, and the
+            # entry is a MARKET order. Skip it until the feed has a tick for the symbol.
+            return "NO_LIVE_TICK:no live tick for the symbol - current price unknown"
         if live is not None and signal_ltp > 0 and config.ENTRY_MAX_SLIPPAGE_PCT > 0:
             slip = (live - signal_ltp) / signal_ltp * 100.0
             if slip > config.ENTRY_MAX_SLIPPAGE_PCT:

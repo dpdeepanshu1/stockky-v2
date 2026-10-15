@@ -27,14 +27,14 @@ order is sent at it.
      symbol per window) and is judged again next cycle, for up to `ENTRY_QUOTE_AGE_HOLD_MIN` minutes (default 10) after it was
      received. After that it is consumed as an ordinary WAIT naming the newest age ("Price too old to enter on: ...").
      `ENTRY_QUOTE_AGE_HOLD_MIN=0` = never hold.
-  3. unknown age (`age_known` False or no datetime `as_of`) follows `ENTRY_QUOTE_AGE_UNKNOWN`: `allow` (default, the
-     behaviour before this group, so an older market-data build does not stop every entry) or `refuse`.
+  3. unknown age (`age_known` False or no datetime `as_of`) follows `ENTRY_QUOTE_AGE_UNKNOWN`: `refuse` (default since group388: no entry on a price whose age nobody can state; the
+     candidate is re-read once and held like an old price) or `allow` (the earlier default, the rollback switch).
   - The helpers never raise; a bug in them means "no objection", never a stopped cycle.
 - Not changed on purpose: `manual_engine.py` (a human confirmed that price), and SELL/exit paths (a stale price must never
   block an exit). The watchlist trigger already had `WATCHLIST_MAX_TICK_AGE_S` (30 s); it now sees the honest age too.
 
 ### Rollout
-- Switch off: `ENTRY_MAX_QUOTE_AGE_S=0`. Strictest: `ENTRY_QUOTE_AGE_UNKNOWN=refuse` (only once market-data with group 289 is deployed).
+- Switch off: `ENTRY_MAX_QUOTE_AGE_S=0`. Unknown-age prices: `ENTRY_QUOTE_AGE_UNKNOWN=refuse` is the default since group388 (rollback: `allow`, needed only against a market-data build older than group 289).
 - Deploy market-data (group 289) BEFORE or with this zip; against an older market-data every `/quote` price is `age_known=False`
   and is allowed through by default.
 - Watch the `held back, price from ... is Ns old` log lines on the first live day.

@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 import config
 import models
+import notifier
 from execution import broker_stop as B
 from execution import dhan_client
 from exit_engine import exit as X
@@ -41,7 +42,8 @@ def rig(monkeypatch):
     monkeypatch.setattr(config, "BROKER_STOP_SYNC_SECONDS", 5)
     monkeypatch.setattr(config, "BROKER_STOP_CANCEL_MAX_FAILS", 3)
     monkeypatch.setattr(config, "BROKER_STOP_ORDER_TYPE", "STOP_LOSS_MARKET")
-    st = SimpleNamespace(placed=[], cancelled=[], cancel_error=None, book=[], place_error=None, n=0)
+    st = SimpleNamespace(placed=[], cancelled=[], cancel_error=None, book=[], place_error=None, n=0, alerts=[])
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", lambda text: st.alerts.append(text))
 
     def place_order(db_, **kw):
         if st.place_error:
@@ -312,3 +314,84 @@ def test_filled_broker_stop_closes_the_position(_rec_env):
     run(R.reconcile_real_orders(db))
     db.refresh(p)
     assert p.status == "CLOSED"
+
+
+# ---- group384: Dhan "Trigger Price should be greater than Price" fallback ----------------------
+
+TRIG_ERR = "Dhan API error: Trigger Price should be greater than Price"
+
+
+def test_limit_price_below_is_strictly_under_trigger_even_for_cheap_stocks():
+    for trig in (0.5, 1.0, 5.0, 19.95, 97.5, 450.0, 2100.0, 15000.0):
+        px = B.limit_price_below(trig)
+        assert 0 < px < trig, (trig, px)
+    assert B.limit_price_below(100.0, 0.5) == 99.5
+
+
+def test_trigger_price_error_detector():
+    assert B._is_trigger_price_error(TRIG_ERR)
+    assert B._is_trigger_price_error("trigger price should be GREATER THAN price")
+    assert not B._is_trigger_price_error("CDSL eDIS authorisation required")
+    assert not B._is_trigger_price_error("")
+
+
+def test_trigger_price_rejection_retries_once_as_stop_limit(rig, monkeypatch):
+    db, st = rig
+    calls = []
+
+    def flaky(db_, **kw):
+        calls.append(kw)
+        if kw["order_type"] == "STOP_LOSS_MARKET":
+            raise RuntimeError(TRIG_ERR)
+        st.n += 1
+        return {"orderId": f"BS{st.n}"}
+
+    monkeypatch.setattr(dhan_client, "place_order", flaky)
+    p = pos(db)
+    assert sync(db, [p])["placed"] == 1
+    assert [c["order_type"] for c in calls] == ["STOP_LOSS_MARKET", "STOP_LOSS"]
+    assert 0 < calls[1]["price"] < calls[1]["trigger_price"]
+    o = B.open_stop(db, "ABC")
+    assert o.order_type == "STOP_LOSS" and o.dhan_order_id == "BS1"
+
+
+def test_other_errors_are_not_retried(rig):
+    db, st = rig
+    st.place_error = RuntimeError("some other broker error")
+    assert sync(db, [pos(db)])["failed"] == 1
+    assert B.open_stop(db, "ABC") is None
+
+
+def test_trigger_price_rejection_that_also_fails_as_limit_warns_and_fails(rig, caplog):
+    db, st = rig
+    st.place_error = RuntimeError(TRIG_ERR)
+    with caplog.at_level("WARNING", logger="real-trade-broker-stop"):
+        assert sync(db, [pos(db)])["failed"] == 1
+    assert B.open_stop(db, "ABC") is None
+    assert any("could not be placed" in r.getMessage() for r in caplog.records)
+
+
+def test_limit_price_below_one_tick_fallback_when_percent_gap_rounds_onto_trigger():
+    # tiny trigger: a 0.5 % gap rounds back to the trigger, so the one-tick step is used instead
+    px = B.limit_price_below(1.0, 0.5)
+    assert 0 < px < 1.0
+
+
+def test_failed_stop_sends_one_alert_per_cooldown(rig):
+    db, st = rig
+    st.place_error = RuntimeError(TRIG_ERR)
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    sync(db, [p], now=1010.0)
+    assert len(st.alerts) == 1 and "ABC" in st.alerts[0] and "software stop" in st.alerts[0]
+
+
+def test_alert_failure_never_breaks_placement_path(rig, monkeypatch):
+    db, st = rig
+    st.place_error = RuntimeError("boom")
+
+    def bad(text):
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(notifier, "notify_fire_and_forget", bad)
+    assert sync(db, [pos(db)])["failed"] == 1

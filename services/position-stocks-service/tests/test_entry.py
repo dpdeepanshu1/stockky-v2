@@ -1046,12 +1046,45 @@ class TestScalpReviewGuards:
 
     # fail-open
     def test_no_ticks_at_all_fails_open(self, env):
+        # group389: fails open only with ENTRY_REQUIRE_LIVE_TICK off (the suite default; production default is on)
         self.live([])
         assert entry._price_guard_reject("ABC", 100.0) is None
 
     def test_feed_error_fails_open(self, env):
         self.mp.setattr(ws_client, "get_tick_buffer", lambda s: (_ for _ in ()).throw(RuntimeError("ws down")))
         assert entry._price_guard_reject("ABC", 100.0) is None
+
+    # group389: no tick at all is refused by default in production (ENTRY_REQUIRE_LIVE_TICK, on) - the suite pins it off
+    def test_no_live_tick_is_rejected_when_required(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", True)
+        self.live([])
+        assert entry._price_guard_reject("ABC", 100.0).startswith("NO_LIVE_TICK:")
+
+    def test_zero_price_tick_counts_as_no_live_tick_when_required(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", True)
+        self.live([(2, 0.0)])
+        assert entry._price_guard_reject("ABC", 100.0).startswith("NO_LIVE_TICK:")
+
+    def test_a_fresh_tick_passes_when_live_tick_is_required(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", True)
+        self.live([(2, 100.0)])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    def test_live_tick_requirement_can_be_switched_off(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", False)
+        self.live([])
+        assert entry._price_guard_reject("ABC", 100.0) is None
+
+    def test_attempt_entry_skips_cleanly_without_a_live_tick(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", True)
+        self.live([])
+        assert entry.attempt_entry(env[0], cand(ltp=500.0)) is None
+        assert_clean_skip(env, "ABC", "PRICE_GUARD:NO_LIVE_TICK")
+
+    def test_the_manual_buy_stale_check_is_unchanged_by_the_requirement(self, env):
+        self.mp.setattr(config, "ENTRY_REQUIRE_LIVE_TICK", True)
+        self.live([])
+        assert entry._stale_tick_reject("ABC") is None      # a human confirmed that price; still fails open
 
     # wiring into attempt_entry
     def test_attempt_entry_skips_cleanly_on_slippage(self, env):

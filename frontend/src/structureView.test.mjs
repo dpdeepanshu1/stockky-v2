@@ -150,7 +150,7 @@ for (const g of [null, undefined, [], "x", 3, {}]) assert.deepEqual(prepareNoteL
 console.log("prepareNoteLines ok");
 
 // ---- group 373: sniper badge + held-back lines
-import { sniperBadge, sniperHeldBackLines } from "./structureView.ts";
+import { sniperBadge, sniperHeldBackLines, sniperPlanRows } from "./structureView.ts";
 {
   const okRec = { gate_mode: "enforce", opinion: "ok", would_reject: false, enforced: true, reasons: [], live: { chase_atr: 0.34, rr: 1.94 } };
   const b = sniperBadge(okRec);
@@ -174,4 +174,25 @@ import { sniperBadge, sniperHeldBackLines } from "./structureView.ts";
   assert.equal(hl[1].text, "daily structure advises against entering now");
   assert.equal(sniperHeldBackLines([{ symbol: "A" }, { symbol: "B" }], 1).length, 1);
   assert.equal(sniperHeldBackLines([{ symbol: "A" }], 0).length, 0);
+}
+
+// ---- group 400: sniper plan rows (structure stop / target / entry zone / wait for entry)
+{
+  const rec = { gate_mode: "enforce", opinion: "ok", would_reject: false, stop: 96, target: 112, rr: 3,
+    entry_zone: { kind: "demand", bottom: 97, top: 99, status: "fresh", dist_pct: 1.01 }, wait_for_entry: false, wait_reason: null };
+  const rows = sniperPlanRows(rec);
+  assert.deepEqual(rows.map((r) => r.label), ["Structure stop", "Structure target", "Entry zone"]);
+  assert.equal(rows[0].text, "\u20b996.00"); assert.equal(rows[1].text, "\u20b9112.00 (R:R 3.0)");
+  assert.equal(rows[2].text, "\u20b997.00 \u2013 \u20b999.00 (demand)");
+  const w = sniperPlanRows({ ...rec, wait_for_entry: true, wait_reason: "0.9 ATR above the demand zone, better entry near \u20b999" });
+  assert.equal(w.at(-1).label, "Wait for entry"); assert.equal(w.at(-1).tone, "warn"); assert.match(w.at(-1).text, /better entry near/);
+  assert.equal(sniperPlanRows({ ...rec, wait_for_entry: true }).at(-1).text, "price is extended from the structure");
+  // no invention: missing / bad levels are skipped, never shown as 0
+  assert.deepEqual(sniperPlanRows({ opinion: "ok", stop: null, target: 0, entry_zone: { kind: "demand", bottom: 99, top: 97 } }), []);
+  assert.deepEqual(sniperPlanRows({ opinion: "ok", stop: "x", target: NaN, rr: 2 }), []);
+  assert.equal(sniperPlanRows({ opinion: "ok", target: 112 })[0].text, "\u20b9112.00");
+  assert.equal(sniperPlanRows({ opinion: "ok", entry_zone: { kind: "imbalance", bottom: 98, top: 99 } })[0].text, "\u20b998.00 \u2013 \u20b999.00 (imbalance)");
+  // no opinion / gate off / garbage -> nothing
+  for (const g of [null, undefined, [], "x", 3, {}, { opinion: "no_opinion", stop: 96 }, { gate_mode: "off", opinion: "ok", stop: 96 }]) assert.deepEqual(sniperPlanRows(g), []);
+  console.log("sniperPlanRows ok");
 }

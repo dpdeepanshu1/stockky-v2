@@ -529,6 +529,7 @@ STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
 STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
 STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0))
+STRUCTURE_OBS_BENCH_SYMBOL = (os.getenv("STRUCTURE_OBS_BENCH_SYMBOL") or "NIFTY").strip()   # group402: market benchmark for the edge report (market-data /history name); empty = no benchmark
 STRUCTURE_EDGE_MIN_N = max(1, int(_og_float("STRUCTURE_EDGE_MIN_N", 100)))
 _sxm = (os.getenv("STRUCTURE_EXIT_MODE") or "").strip().lower()
 STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "exit"   # group 399: default exit (was tighten)

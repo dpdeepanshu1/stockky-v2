@@ -9,7 +9,7 @@ import os
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ENV = ("SNIPER_MIN_CONVICTION", "SNIPER_MIN_PRICE", "MAX_PRICE", "SNIPER_MIN_REWARD_RISK", "SNIPER_STRUCTURE_MODE", "STRUCTURE_MAX_CHASE_ATR",
         "STRUCTURE_MAX_STRETCH_ATR", "STRUCTURE_MIN_ROOM_ATR", "STRUCTURE_MIN_RR", "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS",
-        "STRUCTURE_MAX_PRICE_DEV_PCT", "STRUCTURE_MAX_AGE_DAYS", "STRUCTURE_REJECT_STOP_WIDE")
+        "STRUCTURE_MAX_PRICE_DEV_PCT", "STRUCTURE_MAX_AGE_DAYS", "STRUCTURE_REJECT_STOP_WIDE", "STRUCTURE_WAIT_CHASE_ATR")
 
 
 try:  # under pytest: leave os.environ exactly as found (the plain `python3` runner needs nothing)
@@ -198,6 +198,57 @@ def test_rr_rejected_card_is_not_counted_as_a_structure_rejection():
     row = _row(_sum(ms_chase_atr=3.0), target=101.0, stop_loss=95.0)  # fails the sniper's own R:R first
     out = m.suggestions_from_scan_payload({"stocks": [row]})
     assert out["count"] == 0 and out["structure_rejected"] == []
+
+
+# ---- group 400: entry zone + "wait for entry" on the card (display only) ----
+_OB = {"ms_ob_side": "bullish", "ms_ob_top": 99.0, "ms_ob_bottom": 97.0, "ms_ob_status": "fresh"}
+
+
+def test_group400_card_carries_entry_zone_and_no_wait_when_close():
+    m = _load()
+    st = m.build_suggestion(_row(_sum(**_OB)))["structure"]
+    assert st["entry_zone"] == {"kind": "demand", "bottom": 97.0, "top": 99.0, "status": "fresh", "dist_pct": 1.01}
+    assert st["wait_for_entry"] is False and st["wait_reason"] is None
+
+
+def test_group400_wait_for_entry_when_price_is_extended_above_the_zone():
+    m = _load()
+    v = m.structure_verdict(_row(_sum(ms_chase_atr=0.9, **_OB)), 100.0)
+    assert v["opinion"] == "ok" and not v["would_reject"]
+    assert v["wait_for_entry"] is True and "demand zone" in v["wait_reason"] and "99" in v["wait_reason"]
+
+
+def test_group400_wait_without_a_zone_says_so_and_invents_none():
+    m = _load()
+    v = m.structure_verdict(_row(_sum(ms_chase_atr=1.0)), 100.0)
+    assert v["entry_zone"] is None and v["wait_for_entry"] is True and "nearest support" in v["wait_reason"]
+
+
+def test_group400_rejecting_reason_is_the_wait_reason():
+    m = _load(SNIPER_STRUCTURE_MODE="enforce")
+    v = m.structure_verdict(_row(_sum(ms_chase_atr=3.0, **_OB)), 100.0)
+    assert v["would_reject"] and v["wait_for_entry"] is True and v["wait_reason"] == v["reasons"][0]
+
+
+def test_group400_zone_ignores_filled_bearish_above_price_and_bad_numbers():
+    m = _load()
+    for bad in (dict(_OB, ms_ob_status="filled"), dict(_OB, ms_ob_side="bearish"), dict(_OB, ms_ob_bottom=105.0, ms_ob_top=107.0),
+                dict(_OB, ms_ob_top=96.0, ms_ob_bottom=97.0), dict(_OB, ms_ob_top="x")):
+        assert m.structure_verdict(_row(_sum(**bad)), 100.0)["entry_zone"] is None
+    fvg = {"ms_fvg_side": "bullish", "ms_fvg_top": 99.8, "ms_fvg_bottom": 98.5, "ms_fvg_status": "open"}
+    z = m.structure_verdict(_row(_sum(**_OB, **fvg)), 100.0)["entry_zone"]
+    assert z["kind"] == "imbalance" and z["top"] == 99.8          # the nearer zone wins
+
+
+def test_group400_wait_threshold_is_configurable_and_zero_turns_it_off():
+    assert _load(STRUCTURE_WAIT_CHASE_ATR=0).structure_verdict(_row(_sum(ms_chase_atr=1.2)), 100.0)["wait_for_entry"] is False
+    assert _load(STRUCTURE_WAIT_CHASE_ATR=1.4).structure_verdict(_row(_sum(ms_chase_atr=1.2)), 100.0)["wait_for_entry"] is False
+
+
+def test_group400_stop_target_rr_and_card_levels_are_unchanged():
+    m = _load()
+    c = m.build_suggestion(_row(_sum(ms_chase_atr=0.9, **_OB)))
+    assert c["stop_loss"] == m.build_suggestion(_row(SUM))["stop_loss"] and c["structure"]["stop"] == 96.0
 
 
 if __name__ == "__main__":

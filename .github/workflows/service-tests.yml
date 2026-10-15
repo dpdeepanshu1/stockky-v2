@@ -21,6 +21,12 @@ on:
       - "scripts/test_ms_ab_report.py"
       - "scripts/structure_gate_check.py"
       - "scripts/test_structure_gate_check.py"
+      - "scripts/board_parity_check.py"
+      - "scripts/test_board_parity_check.py"
+      - "scripts/calibration_pack.py"
+      - "scripts/test_calibration_pack.py"
+      - "scripts/vm_calibrate.sh"
+      - "scripts/test_vm_calibrate.py"
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
@@ -48,6 +54,12 @@ on:
       - "scripts/test_ms_ab_report.py"
       - "scripts/structure_gate_check.py"
       - "scripts/test_structure_gate_check.py"
+      - "scripts/board_parity_check.py"
+      - "scripts/test_board_parity_check.py"
+      - "scripts/calibration_pack.py"
+      - "scripts/test_calibration_pack.py"
+      - "scripts/vm_calibrate.sh"
+      - "scripts/test_vm_calibrate.py"
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
@@ -90,7 +102,7 @@ jobs:
       - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
         run: |
           pip install pytest
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_opening_replay.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_opening_replay.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

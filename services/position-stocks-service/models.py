@@ -596,6 +596,10 @@ class ScalpStructureObservation(Base):
     mfe_pct = Column(Float, nullable=True)
     mae_pct = Column(Float, nullable=True)
     first_touch = Column(String(12), nullable=True)
+    bench_ret_1d = Column(Float, nullable=True)             # group402: the market (Nifty) over the same sessions, for the market-relative edge
+    bench_ret_5d = Column(Float, nullable=True)
+    bench_ret_10d = Column(Float, nullable=True)
+    bench_ret_20d = Column(Float, nullable=True)
     bars_seen = Column(Integer, nullable=False, default=0)
     is_complete = Column(Boolean, nullable=False, default=False)
     evaluated_at = Column(DateTime, nullable=True)

@@ -20,6 +20,14 @@ import os
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+try:  # group401: sector label -> sector index (same folder; the tests load this module by path, so fall back to a path import)
+    import sector_index as _sx
+except ImportError:  # pragma: no cover
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("sector_index", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sector_index.py"))
+    _sx = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_sx)
+
 HORIZONS = (1, 5, 10, 20)
 WINDOW = 20
 MAX_BATCH = 100
@@ -102,7 +110,7 @@ def sanitize(raw: Any) -> Optional[Dict[str, Any]]:
             "final_decision": final, "legacy_decision": legacy, "policy_applied": 1 if raw.get("policy_applied") is True else 0,
             "rules": rules, "combined_score": _num(raw.get("combined_score")), "technical_score": _num(raw.get("technical_score")),
             "tqs": _num(raw.get("tqs")), "groups": _num(raw.get("groups")),
-            "features": feats, "levels": levels,
+            "features": feats, "levels": levels, "sector": _sx.clean_label(raw.get("sector")),
         }
         if len(json.dumps(out["features"], default=str)) > MAX_JSON_BYTES:
             out["features"] = {k: v for k, v in feats.items() if k in ("quality", "trend", "rr", "chase_atr", "asof")}
@@ -135,7 +143,7 @@ def _pct(a: float, b: float) -> float:
     return round((a / b - 1.0) * 100.0, 4)
 
 
-def evaluate(obs: Dict[str, Any], bars: Any, bench: Any = None, slip_pct: Optional[float] = None) -> Dict[str, Any]:
+def evaluate(obs: Dict[str, Any], bars: Any, bench: Any = None, slip_pct: Optional[float] = None, sector_bench: Any = None) -> Dict[str, Any]:
     """Outcome fields for one observation. Always returns a dict with `eval_status` in pending | partial | done:
     pending = no session after the observation day yet; partial = some of the 20 sessions exist; done = all 20. Never raises."""
     res: Dict[str, Any] = {"eval_status": "pending", "bars_seen": 0}
@@ -180,6 +188,14 @@ def evaluate(obs: Dict[str, Any], bars: Any, bench: Any = None, slip_pct: Option
                 for h in HORIZONS:
                     if len(win) >= h and win[h - 1]["date"] in bmap:
                         res[f"nifty_ret_{h}"] = _pct(bmap[win[h - 1]["date"]]["close"], b0["open"])
+        sb = _clean_bars(sector_bench)        # group401: the sector index over the same sessions, same open-to-close basis as nifty_ret_N
+        if sb:
+            smap = {b["date"]: b for b in sb}
+            s0 = smap.get(win[0]["date"])
+            if s0:
+                for h in HORIZONS:
+                    if len(win) >= h and win[h - 1]["date"] in smap:
+                        res[f"sector_ret_{h}"] = _pct(smap[win[h - 1]["date"]]["close"], s0["open"])
         res["eval_status"] = "done" if complete else "partial"
         return res
     except Exception:  # noqa: BLE001
@@ -199,6 +215,7 @@ def _group(rows: List[Dict[str, Any]], min_n: int) -> Dict[str, Any]:
     hits = [r["hit_5pct_20"] for r in done if r.get("hit_5pct_20") is not None]
     tb = [r["target_before_stop"] for r in rows if r.get("target_before_stop") is not None]
     rel = [r["ret_20"] - r["nifty_ret_20"] for r in done if r.get("ret_20") is not None and r.get("nifty_ret_20") is not None]
+    rel_s = [r["ret_20"] - r["sector_ret_20"] for r in done if r.get("ret_20") is not None and r.get("sector_ret_20") is not None]
     n_for_edge = len(done)
     return {
         "n": len(rows), "n_evaluated_5d": len(ev), "n_done_20d": len(done),
@@ -210,6 +227,7 @@ def _group(rows: List[Dict[str, Any]], min_n: int) -> Dict[str, Any]:
         "avg_mfe_20": _mean(r.get("mfe_20") for r in rows), "avg_mae_20": _mean(r.get("mae_20") for r in rows),
         "avg_entry_chase_atr": _mean(r.get("entry_chase_atr") for r in rows),
         "avg_rel_to_nifty_20": _mean(rel),
+        "avg_rel_to_sector_20": _mean(rel_s), "n_with_sector_20": len(rel_s),
         "insufficient_sample": n_for_edge < min_n,
     }
 
@@ -281,10 +299,11 @@ def _prepare_upgrade(rs: List[Dict[str, Any]], min_n: int) -> Dict[str, Any]:
 # ── DB glue (model class + session passed in; works on Postgres / SQLite / Oracle) ─────────────────────────────────────────────────────
 
 _OUTCOME_COLS = ("eval_status", "bars_seen", "entry_date", "entry_price", "ret_1", "ret_5", "ret_10", "ret_20", "mfe_20", "mae_20", "hit_5pct_20",
-                 "target_before_stop", "days_to_target", "entry_chase_atr", "nifty_ret_1", "nifty_ret_5", "nifty_ret_10", "nifty_ret_20")
-_LINEAGE_COLS = ("asof_date", "params_hash")
+                 "target_before_stop", "days_to_target", "entry_chase_atr", "nifty_ret_1", "nifty_ret_5", "nifty_ret_10", "nifty_ret_20",
+                 "sector_ret_1", "sector_ret_5", "sector_ret_10", "sector_ret_20")
+_LINEAGE_COLS = ("asof_date", "params_hash", "sector")
 _INPUT_COLS = ("asof_date", "params_hash", "price", "atr", "final_decision", "legacy_decision", "policy_applied", "rules", "combined_score",
-               "technical_score", "tqs", "groups", "features", "levels")
+               "technical_score", "tqs", "groups", "features", "levels", "sector")
 
 
 def upsert_batch(db: Any, M: Any, items: Any, now: Optional[datetime] = None) -> Dict[str, int]:
@@ -329,7 +348,8 @@ def row_to_dict(r: Any) -> Dict[str, Any]:
 
 
 def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_bench: Optional[Callable[[], Any]] = None,
-                     max_batch: int = 50, today: Optional[date] = None) -> Dict[str, Any]:
+                     max_batch: int = 50, today: Optional[date] = None,
+                     fetch_sector_bench: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
     """Score observations that are not 'done'. One history fetch per symbol per call. A row whose bars never arrive is left pending and given up
     on (eval_status 'no_data') GIVE_UP_DAYS after its observation day. Returns counts; never raises."""
     res = {"considered": 0, "evaluated": 0, "done": 0, "waiting": 0, "no_data": 0, "errors": 0}
@@ -342,6 +362,7 @@ def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_be
     rows = sorted(rows, key=lambda r: (str(getattr(r, "obs_date", "")), str(getattr(r, "symbol", ""))))[:max(1, min(int(max_batch), 300))]
     bench = None
     bars_cache: Dict[str, Any] = {}
+    sector_cache: Dict[str, Any] = {}     # group401: one fetch per sector index per call; a failed or unmapped sector is cached as None
     for r in rows:
         res["considered"] += 1
         try:
@@ -350,7 +371,17 @@ def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_be
                 bars_cache[sym] = fetch_bars(sym)
             if bench is None and fetch_bench is not None:
                 bench = fetch_bench() or []
-            out = evaluate(row_to_dict(r), bars_cache[sym], bench or None)
+            sbars = None
+            if fetch_sector_bench is not None:
+                sidx = _sx.index_for(getattr(r, "sector", None))
+                if sidx:
+                    if sidx not in sector_cache:
+                        try:
+                            sector_cache[sidx] = fetch_sector_bench(sidx) or None
+                        except Exception:  # noqa: BLE001
+                            sector_cache[sidx] = None
+                    sbars = sector_cache[sidx]
+            out = evaluate(row_to_dict(r), bars_cache[sym], bench or None, sector_bench=sbars)
             r.eval_attempts = int(getattr(r, "eval_attempts", 0) or 0) + 1
             if out["eval_status"] == "pending":
                 od = _iso(r.obs_date)

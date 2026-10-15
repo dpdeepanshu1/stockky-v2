@@ -342,6 +342,12 @@ class StructureObservation(Base):
     nifty_ret_5 = Column(Float, nullable=True)
     nifty_ret_10 = Column(Float, nullable=True)
     nifty_ret_20 = Column(Float, nullable=True)
+    # group401: sector-relative benchmark. `sector` is the label the decision service saw; sector_ret_N is that sector index over the same sessions
+    sector = Column(String(50), nullable=True)
+    sector_ret_1 = Column(Float, nullable=True)
+    sector_ret_5 = Column(Float, nullable=True)
+    sector_ret_10 = Column(Float, nullable=True)
+    sector_ret_20 = Column(Float, nullable=True)
 
 
 class PortfolioAccount(Base):
@@ -1127,6 +1133,36 @@ _STRUCT_TABLE_READY = set()
 _STRUCT_TABLE_LOCK = __import__("threading").Lock()
 
 
+_STRUCT_NEW_COLUMNS = (("sector", "VARCHAR(50)"), ("sector_ret_1", "FLOAT"), ("sector_ret_5", "FLOAT"), ("sector_ret_10", "FLOAT"), ("sector_ret_20", "FLOAT"))
+
+
+def _add_missing_structure_columns(engine) -> list:
+    """group401: a decision_structure_observations table created before the sector columns existed is missing them (create(checkfirst) skips an
+    existing table). Adds each missing column once, per dialect, and returns the names added. A failure on one column is logged and skipped, so
+    it can never stop the table from being used (the code reads these columns only through getattr / the ORM write of a value that is None)."""
+    import logging
+    added: list = []
+    try:
+        insp = inspect(engine)
+        have = {c["name"].lower() for c in insp.get_columns("decision_structure_observations")}
+        oracle = engine.dialect.name == "oracle"
+        for name, typ in _STRUCT_NEW_COLUMNS:
+            if name in have:
+                continue
+            ddl_type = typ.replace("VARCHAR(", "VARCHAR2(") if oracle else typ
+            sql = (f"ALTER TABLE decision_structure_observations ADD ({name} {ddl_type})" if oracle
+                   else f"ALTER TABLE decision_structure_observations ADD COLUMN {name} {ddl_type}")
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(sql))
+                added.append(name)
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger("training-db").warning("could not add %s to decision_structure_observations: %s", name, str(e)[:160])
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("training-db").warning("structure column check failed: %s", str(e)[:160])
+    return added
+
+
 def ensure_structure_table(engine) -> bool:
     """Create decision_structure_observations if missing (once per engine, on first use).
 
@@ -1142,6 +1178,7 @@ def ensure_structure_table(engine) -> bool:
         if key in _STRUCT_TABLE_READY:
             return True
         StructureObservation.__table__.create(bind=engine, checkfirst=True)
+        _add_missing_structure_columns(engine)
         try:
             ensure_oracle_identity(engine)
         except Exception:

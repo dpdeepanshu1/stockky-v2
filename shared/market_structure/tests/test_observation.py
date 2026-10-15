@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _bars import DAY, T0
 from market_structure.candles import candles_to_bars, day_key, ist_date
-from market_structure.observation import OUTCOME_FIELDS, aggregate, bars_after, classify, due, evaluate_row, new_observation
+from market_structure.observation import BENCH_FIELDS, OUTCOME_FIELDS, aggregate, bars_after, bench_outcome, classify, due, evaluate_row, new_observation
 
 OBS_TS = 1_700_000_000 + 4 * 3600          # a trading-hours stamp
 
@@ -99,3 +99,42 @@ def test_aggregate_small_or_empty_samples_do_not_conclude():
     few = aggregate(_rows("passed", [2.0] * 3) + _rows("rejected_shadow", [-2.0] * 3))
     assert few["conclusion"] == "insufficient_sample" and few["edge"]["10d"]["edge"] == 4.0
     assert aggregate([{"verdict": "passed"}, None, "x"])["total"] == 1
+
+
+# ---- group402: market-relative returns ------------------------------------------------------------------------------------------------
+def _bench_bars(closes, start=0):
+    """Daily bars from the observation day (start=0) on: bar i closes at closes[i]."""
+    return [(OBS_TS + (start + i) * DAY, c, c + 1, c - 1, c, 1.0) for i, c in enumerate(closes)]
+
+
+def test_bench_outcome_is_measured_from_the_close_on_the_observation_day():
+    out = bench_outcome(OBS_TS, _bench_bars([100.0] + [100.0 + i for i in range(1, 26)]))
+    assert set(out) == set(BENCH_FIELDS) and out["bench_ret_1d"] == 1.0 and out["bench_ret_5d"] == 5.0 and out["bench_ret_20d"] == 20.0
+    part = bench_outcome(OBS_TS, _bench_bars([100.0, 101.0, 102.0]))
+    assert part["bench_ret_1d"] == 1.0 and part["bench_ret_5d"] is None and part["bench_ret_20d"] is None
+
+
+def test_bench_outcome_unknown_is_none_never_zero():
+    none = {k: None for k in BENCH_FIELDS}
+    assert bench_outcome(OBS_TS, []) == none and bench_outcome(OBS_TS, None) == none and bench_outcome(None, _bench_bars([100.0, 101.0])) == none
+    assert bench_outcome(OBS_TS, _bench_bars([101.0, 102.0], start=1)) == none          # no bar ON the observation day -> no base -> unknown
+    assert bench_outcome(OBS_TS, _bench_bars([0.0, 101.0])) == none and bench_outcome(OBS_TS, "junk") == none
+
+
+def test_aggregate_excess_takes_the_market_out_of_the_edge():
+    rows = _rows("passed", [6.0] * 25) + _rows("rejected_enforced", [5.0] * 25)
+    for r in rows:
+        r["bench_ret_10d"] = 5.0
+    a = aggregate(rows)
+    assert a["edge"]["10d"]["edge"] == 1.0 and a["edge_excess"]["10d"] == {"edge": 1.0, "rejected_n": 25, "passed_n": 25}
+    assert a["by_verdict"]["passed"]["excess"]["10d"] == {"n": 25, "mean": 1.0, "win_pct": 100.0}
+    assert a["by_verdict"]["rejected"]["excess"]["10d"]["mean"] == 0.0 and a["by_verdict"]["rejected"]["excess"]["10d"]["win_pct"] == 0.0
+
+
+def test_aggregate_excess_ignores_rows_without_a_benchmark_value():
+    rows = _rows("passed", [6.0] * 4) + _rows("rejected_enforced", [5.0] * 4)
+    rows[0]["bench_ret_10d"] = 2.0
+    a = aggregate(rows)
+    assert a["by_verdict"]["passed"]["excess"]["10d"] == {"n": 1, "mean": 4.0, "win_pct": 100.0}
+    assert a["edge_excess"] == {} and a["by_verdict"]["passed"]["excess"]["5d"]["mean"] is None
+    assert aggregate(_rows("passed", [1.0] * 3))["edge_excess"] == {}

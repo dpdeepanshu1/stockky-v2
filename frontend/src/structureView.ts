@@ -162,6 +162,8 @@ export interface DecisionStructure {
   mode?: "off" | "shadow" | "caps" | "full" | string; applied?: boolean; original_decision?: string; policy_decision?: string;
   rules?: DecisionStructureRule[]; no_opinion?: string | null; summary_line?: string | null;
   wait_for_entry?: { low: number; high: number; kind: string } | null; prepare_triggers?: string[];
+  /** group415: zone names (entering_fvg / entering_ob / entering_fib) that excused an old break of structure; null/absent = a normal fresh-BOS pass. */
+  retest_entry?: string[] | null;
   legacy_levels?: { entry_range?: { low: number | null; high: number | null } | null; target?: number | null; stop_loss?: number | null } | null;
   structural_levels?: { stop?: number | null; target?: number | null; rr?: number | null } | null;
   features?: Record<string, any> | null; explain?: { positives?: string[]; warnings?: string[]; summary?: string } | null;
@@ -215,6 +217,17 @@ const TRIGGER_WORDS: Record<string, string> = {
 export function prepareTriggerText(ds: DecisionStructure | null | undefined): string | null {
   const t = (Array.isArray(ds?.prepare_triggers) ? ds!.prepare_triggers! : []).map(k => TRIGGER_WORDS[k]).filter(Boolean);
   return t.length ? `Re-check now: ${t.join(", ")}.` : null;
+}
+
+const RETEST_WORDS: Record<string, string> = { entering_fvg: "imbalance zone", entering_ob: "demand zone", entering_fib: "Fibonacci golden zone" };
+/** Badge for an entry that passed via the retest branch (old break of structure + retest + bullish change of character). null for a normal pass. */
+export function retestBadge(ds: { retest_entry?: string[] | null } | null | undefined): { label: string; title: string } | null {
+  const z = Array.isArray(ds?.retest_entry) ? ds!.retest_entry!.filter((k): k is string => typeof k === "string") : [];
+  if (!z.length) return null;
+  const names = z.map(k => RETEST_WORDS[k] || k);
+  const short = z.map(k => (k === "entering_ob" ? "OB" : k === "entering_fvg" ? "FVG" : k === "entering_fib" ? "Golden" : k));
+  return { label: `Retest: ${short.join(" / ")}`,
+    title: `Pullback entry: the break of structure is older than the usual window, but price is retesting the ${names.join(" / ")} and a bullish change of character confirmed it.` };
 }
 
 export interface DecisionTally { checked: number; wouldChange: number; applied: number; noOpinion: number }
@@ -560,6 +573,8 @@ export interface SniperStructureRecord {
   /** group 400 (display only): nearest bullish demand / imbalance zone at or below the price, and the "wait for entry" call. */
   entry_zone?: { kind?: string; bottom?: number | null; top?: number | null; status?: string | null; dist_pct?: number | null } | null;
   wait_for_entry?: boolean; wait_reason?: string | null;
+  /** Zone names (entering_fvg / entering_ob / entering_fib) that excused an old break of structure; null/absent = a normal fresh-BOS pass. Display only. */
+  retest_entry?: string[] | null;
 }
 export interface SniperBadge { label: string; tone: Tone; title: string }
 

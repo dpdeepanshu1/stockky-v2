@@ -8,7 +8,7 @@
  */
 import React from "react";
 import BottomSheet from "./BottomSheet";
-import { sniperBadge, sniperHeldBackLines, sniperPlanRows, type SniperStructureRecord, type Tone } from "../structureView";
+import { retestBadge, sniperBadge, sniperHeldBackLines, sniperPlanRows, type SniperStructureRecord, type Tone } from "../structureView";
 
 export interface BuySuggestion {
   symbol: string;
@@ -167,6 +167,18 @@ export function BuySniperModal({
                                 className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${toneClass(b.tone)}`}
                               >
                                 {b.label}
+                              </span>
+                            ) : null;
+                          })()}
+                          {(() => {
+                            const rb = retestBadge(s.structure);
+                            return rb ? (
+                              <span
+                                title={rb.title}
+                                data-testid="sniper-retest-badge"
+                                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${toneClass("good")}`}
+                              >
+                                {rb.label}
                               </span>
                             ) : null;
                           })()}

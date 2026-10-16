@@ -8,7 +8,7 @@ import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
 import StructurePanel from "./StructurePanel";
-import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText } from "../structureView";
+import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText, retestBadge } from "../structureView";
 
 // ── Types & helper for structured news (from v2) ──
 interface NewsItem {
@@ -325,10 +325,16 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
         if (!snap) return null;
         const rec = policyRecord(ds);
         const wait = waitForEntryText(ds);
+        const retest = retestBadge(ds);
         const prep = data.decision === "PREPARE TO BUY" ? prepareTriggerText(ds) : null;
         const line = ds?.summary_line;
         return (
           <div className="space-y-2" data-testid="decision-structure">
+            {retest && (
+              <p className="font-display tabular-nums text-[11px] rounded-lg border px-3 py-2 border-signal-buy/40 text-signal-buy bg-signal-buy/10" title={retest.title} data-testid="decision-retest-badge">
+                {retest.label}
+              </p>
+            )}
             {rec && (
               <p className={`font-display tabular-nums text-[11px] rounded-lg border px-3 py-2 ${rec.tone === "bad" ? "border-signal-sell/40 text-signal-sell bg-signal-sell/10" : "border-signal-hold/40 text-signal-hold bg-signal-hold/10"}`}>
                 {rec.text}

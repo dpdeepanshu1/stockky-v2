@@ -8,6 +8,7 @@ import {
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 import { SubTabs } from "./ui/SubTabs";
+import { NavIcon } from "./ui/NavIcon";
 // Cross-service, read-only: position-stocks-service's own capital ledger
 // and split percentage, used only to populate the "Position Stocks" side
 // of CapitalSplitCard below (see that component's docstring for why this
@@ -288,17 +289,17 @@ function Dot({ on, pulse }: { on: boolean; pulse?: boolean }) {
 // ── Tiny stat card ──────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
   return (
-    <div className="bg-graphite border border-slate rounded-2xl p-3 flex flex-col gap-0.5">
-      <p className="text-[10px] font-display tabular-nums uppercase tracking-widest text-mist">{label}</p>
-      <p className={`text-lg font-bold font-display tabular-nums ${color ?? "text-paper"}`}>{value}</p>
-      {sub && <p className="text-[10px] font-display tabular-nums text-mist">{sub}</p>}
+    <div className="rt-stat">
+      <p className="rt-stat-label font-display tabular-nums">{label}</p>
+      <p className={`rt-stat-value font-display tabular-nums ${color ?? "text-paper"}`}>{value}</p>
+      {sub && <p className="rt-stat-sub font-display tabular-nums">{sub}</p>}
     </div>
   );
 }
 
 // ── Section header ───────────────────────────────────────────────────────────
 function SectionHdr({ children }: { children: React.ReactNode }) {
-  return <p className="text-[10px] font-display tabular-nums uppercase tracking-widest text-mist mb-2">{children}</p>;
+  return <p className="rt-section-hdr font-display tabular-nums">{children}</p>;
 }
 
 // ── Live pipeline status (2026-08-27) — what the cycle is doing RIGHT NOW,
@@ -881,17 +882,10 @@ function PortfolioSummary({
 // ── Gate sequence steps ──────────────────────────────────────────────────────
 function GateStep({ n, label, done, active }: { n: number; label: string; done: boolean; active: boolean }) {
   return (
-    <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-colors ${
-      done ? "bg-signal-buy/5 border-signal-buy/20" :
-      active ? "bg-signal-hold/10 border-signal-hold/30 animate-pulse" :
-      "bg-graphite border-slate"
-    }`}>
-      <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
-        done ? "bg-signal-buy/20 text-signal-buy" :
-        active ? "bg-signal-hold/20 text-signal-hold" :
-        "bg-ink text-mist"
-      }`}>{done ? "✓" : n}</div>
-      <span className={`text-[11px] font-display tabular-nums ${done ? "text-signal-buy" : active ? "text-signal-hold" : "text-mist"}`}>{label}</span>
+    <div className={`rt-gate transition-colors ${active && !done ? "animate-pulse" : ""}`}
+      data-state={done ? "done" : active ? "active" : "idle"}>
+      <div className="rt-gate-n">{done ? "✓" : n}</div>
+      <span className="font-display tabular-nums">{label}</span>
     </div>
   );
 }
@@ -1563,21 +1557,23 @@ export default function RealAutoTrade() {
   ];
 
   return (
-    <div className="max-w-5xl mx-auto pb-8">
+    <div className="rt-page max-w-5xl mx-auto">
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-1 px-1">
-        <div className="flex items-center gap-2">
-          <span className="text-base">🤖</span>
-          <span className="font-display tabular-nums text-sm font-bold text-paper">Real Auto Trade</span>
-          {armed && <span className="text-[10px] font-display tabular-nums px-2 py-0.5 rounded-full bg-signal-buy/15 border border-signal-buy/30 text-signal-buy animate-pulse">ARMED</span>}
+      <div className="rt-head">
+        <div className="rt-title">
+          <span className="rt-title-icon" aria-hidden="true"><NavIcon name="bot" /></span>
+          <div className="min-w-0">
+            <h2 className="rt-title-text">
+              Real Auto Trade
+              {armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}
+            </h2>
+            <span className="rt-title-sub">{mode === "REAL" ? "Live Dhan orders" : "Simulated demo orders"}</span>
+          </div>
         </div>
-        <div className="flex gap-1.5">
+        <div className="rt-seg" role="group" aria-label="Trading mode">
           {(["DEMO", "REAL"] as Mode[]).map(m => (
-            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 rounded-xl font-display tabular-nums text-[11px] border transition-colors ${
-              mode === m
-                ? m === "DEMO" ? "bg-signal-buy/15 border-signal-buy/30 text-signal-buy" : "bg-signal-sell/15 border-signal-sell/30 text-signal-sell"
-                : "bg-graphite border-slate text-mist"
-            }`}>
+            <button key={m} type="button" onClick={() => setMode(m)} data-mode={m} data-active={mode === m}
+              aria-pressed={mode === m} className="rt-seg-btn">
               <Dot on={mode === m && armed} pulse /> {m}
             </button>
           ))}
@@ -1585,52 +1581,61 @@ export default function RealAutoTrade() {
       </div>
 
       {/* Phase notice */}
-      <p className="font-display tabular-nums text-[10px] text-signal-hold/70 mb-3 px-1">
+      <p className="rt-notice font-display tabular-nums">
         Phase 2 active — DEMO fully wired (candidates→risk→fill→exit). REAL places live Dhan orders & reconciles fills.
       </p>
 
       {/* Error banner */}
       {error && (
-        <div className="mb-3 px-3 py-2 rounded-xl bg-signal-sell/40 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell flex items-start justify-between gap-2">
+        <div className="rt-alert font-display tabular-nums" role="alert">
           <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-signal-sell hover:text-signal-sell flex-shrink-0">✕</button>
+          <button onClick={() => setError(null)} aria-label="Dismiss error">✕</button>
         </div>
       )}
 
       {/* ── Auth / session bar (REAL only) ──────────────────────────────── */}
       {mode === "REAL" && !loggedIn && !status?.armed ? (
-        <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
-          <SectionHdr>Admin login required for REAL mode</SectionHdr>
-          <div className="space-y-2">
-            <input className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
+        <div className="rt-login">
+          <div className="rt-login-head">
+            <span className="rt-login-icon" aria-hidden="true"><NavIcon name="lock" /></span>
+            <div className="min-w-0">
+              <h3 className="rt-login-title">Admin login required</h3>
+              <p className="rt-login-sub">REAL mode places live Dhan orders, so it needs an admin session.</p>
+            </div>
+          </div>
+          <div className="rt-field">
+            <label className="rt-label" htmlFor="rt-admin-user">Admin username</label>
+            <input id="rt-admin-user" type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
               placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
-            <input type="password" className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
+          </div>
+          <div className="rt-field">
+            <label className="rt-label" htmlFor="rt-admin-pass">Password</label>
+            <input id="rt-admin-pass" type="password" autoComplete="current-password"
               placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
               onKeyDown={e => e.key === "Enter" && void doLogin()} />
-            <button onClick={() => void doLogin()} disabled={loading || !password}
-              className="w-full py-2 rounded-xl bg-signal-prepare/15 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
-              {loading ? "Authenticating…" : "Authenticate"}
-            </button>
           </div>
+          <button onClick={() => void doLogin()} disabled={loading || !password} className="rt-btn rt-btn-primary">
+            {loading ? "Authenticating…" : "Authenticate"}
+          </button>
         </div>
       ) : (
         <>
           {mode === "REAL" && (
             loggedIn ? (
-              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-xl bg-signal-buy/5 border border-signal-buy/20">
-                <span className="font-display tabular-nums text-[11px] text-signal-buy flex items-center gap-1.5">
+              <div className="rt-session rt-session-ok">
+                <span className="font-display tabular-nums">
                   <Dot on={true} /> Admin session active ({username})
                 </span>
-                <button onClick={() => void doLogout()} className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-sell/10 border border-signal-sell/20 text-signal-sell">
+                <button onClick={() => void doLogout()} className="font-display tabular-nums">
                   Log out
                 </button>
               </div>
             ) : (
-              <div className="flex items-center justify-between mb-3 px-3 py-1.5 rounded-xl bg-signal-hold/5 border border-signal-hold/20">
-                <span className="font-display tabular-nums text-[11px] text-signal-hold">
+              <div className="rt-session rt-session-warn">
+                <span className="font-display tabular-nums">
                   Session expired — auto-pilot still running. Log in to make changes.
                 </span>
-                <button onClick={() => setActiveTab("overview")} className="font-display tabular-nums text-[10px] px-2 py-1 rounded bg-signal-prepare/10 border border-signal-prepare/20 text-signal-prepare">
+                <button onClick={() => setActiveTab("overview")} className="font-display tabular-nums">
                   Log in
                 </button>
               </div>
@@ -1704,16 +1709,15 @@ export default function RealAutoTrade() {
                 {/* Inline login form when armed but session expired —
                     don't block the full page, just gate the mutating actions */}
                 {mode === "REAL" && !loggedIn && armed && (
-                  <div className="mb-3 p-3 rounded-xl border border-signal-hold/20 bg-signal-hold/5 space-y-2">
-                    <p className="font-display tabular-nums text-[10px] text-signal-hold">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
-                    <div className="flex gap-2">
-                      <input className="flex-1 bg-ink border border-slate rounded px-2 py-1 font-display tabular-nums text-xs text-paper focus:outline-none"
+                  <div className="rt-login-inline">
+                    <p className="font-display tabular-nums">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
+                    <div className="rt-inline-row">
+                      <input type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
                         placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
-                      <input type="password" className="flex-1 bg-ink border border-slate rounded px-2 py-1 font-display tabular-nums text-xs text-paper focus:outline-none"
+                      <input type="password" autoComplete="current-password"
                         placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
                         onKeyDown={e => e.key === "Enter" && void doLogin()} />
-                      <button onClick={() => void doLogin()} disabled={loading || !password}
-                        className="px-3 py-1 rounded bg-signal-prepare/15 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
+                      <button onClick={() => void doLogin()} disabled={loading || !password} className="rt-btn rt-btn-primary" style={{ width: "auto" }}>
                         {loading ? "…" : "Login"}
                       </button>
                     </div>
@@ -1902,18 +1906,23 @@ export default function RealAutoTrade() {
                   {(!dhanAccount?.connected || showDhanForm) && (
                     <div className="mt-3 space-y-2 border-t border-slate pt-3">
                       <p className="font-display tabular-nums text-[10px] text-mist">{dhanAccount?.connected ? "Paste a fresh access token to rotate" : "Connect your Dhan account"}</p>
-                      <input className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
-                        placeholder="Dhan Client ID" value={dhanClientId} onChange={e => setDhanClientId(e.target.value)} />
-                      <input type="password" className="w-full bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none focus:border-slate"
-                        placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
-                      <div className="flex gap-2">
+                      <div className="rt-field">
+                        <label className="rt-label" htmlFor="rt-dhan-client">Dhan Client ID</label>
+                        <input id="rt-dhan-client" type="text" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                          placeholder="Dhan Client ID" value={dhanClientId} onChange={e => setDhanClientId(e.target.value)} />
+                      </div>
+                      <div className="rt-field">
+                        <label className="rt-label" htmlFor="rt-dhan-token">Access token</label>
+                        <input id="rt-dhan-token" type="password" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+                          placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
                         <button onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}
-                          className="flex-1 py-2 rounded-xl bg-signal-prepare/10 border border-signal-prepare/30 font-display tabular-nums text-xs text-signal-prepare disabled:opacity-40">
+                          className="rt-btn rt-btn-primary flex-1">
                           {loading ? "Connecting…" : dhanAccount?.connected ? "Save new token" : "Connect Dhan"}
                         </button>
                         {dhanAccount?.connected && (
-                          <button onClick={() => setShowDhanForm(false)}
-                            className="px-3 py-2 rounded-xl border border-slate font-display tabular-nums text-xs text-mist">
+                          <button onClick={() => setShowDhanForm(false)} className="rt-btn rt-btn-ghost">
                             Cancel
                           </button>
                         )}

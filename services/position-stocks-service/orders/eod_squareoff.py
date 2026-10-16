@@ -86,7 +86,7 @@ def _place_overnight_stop(
             "placed and confirmed: order_id=%s trigger=₹%.2f (%.1f%% below "
             "entry=₹%.2f)",
             pos.symbol, pos.id, order_id,
-            dhan_client.round_to_tick(trigger), stop_pct, pos.entry_price,
+            dhan_client.round_stop_to_tick(trigger), stop_pct, pos.entry_price,
         )
         return order_id
 

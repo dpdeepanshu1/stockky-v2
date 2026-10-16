@@ -116,9 +116,9 @@ def test_places_one_stop_for_held_position(rig):
     assert sync(db, [p])["placed"] == 1
     kw = st.placed[0]
     assert kw["order_type"] == "STOP_LOSS_MARKET" and kw["transaction_type"] == "SELL" and kw["product_type"] == "CNC"
-    assert kw["trigger_price"] == 97.51 and kw["price"] == 0.0 and kw["quantity"] == 10 and kw["tag"] == "BSTOP"
+    assert kw["trigger_price"] == 97.5 and kw["price"] == 0.0 and kw["quantity"] == 10 and kw["tag"] == "BSTOP"
     o = B.open_stop(db, "ABC")
-    assert o.exit_reason == "broker_stop" and o.dhan_order_id == "BS1" and o.limit_price == 97.51
+    assert o.exit_reason == "broker_stop" and o.dhan_order_id == "BS1" and o.limit_price == 97.5
 
 
 def test_same_day_position_gets_no_stop(rig):
@@ -272,7 +272,7 @@ def _po(**kw):
 
 def test_place_order_stop_sends_rounded_trigger(sdk):
     _po(trigger_price=97.53)
-    assert sdk.kw["trigger_price"] == dhan_client.round_to_tick(97.53) and sdk.kw["price"] == 0.0
+    assert sdk.kw["trigger_price"] == dhan_client.round_stop_to_tick(97.53) == 97.55 and sdk.kw["price"] == 0.0
 
 
 def test_place_order_market_sends_no_trigger_key(sdk):
@@ -569,3 +569,45 @@ def test_edis_alert_tells_the_user_what_to_do(rig, monkeypatch):
     sync(db, [pos(db)], now=1000.0)
     assert len(st.alerts) == 1
     assert "Verify Holdings" in st.alerts[0] and "software stop" in st.alerts[0] and "ABC" in st.alerts[0]
+
+
+# ---- group 412: stop prices must be valid whatever the real tick is (Railtel EXCH:16283, 86 rejected orders) -------------------
+
+def test_stop_prices_never_use_a_tick_finer_than_five_paise():
+    for px in (0.5, 19.97, 87.13, 243.59, 249.99, 456.783, 999.99):
+        r = dhan_client.round_stop_to_tick(px)
+        assert dhan_client.is_valid_tick_price(r, tick_size=0.05), (px, r)
+    assert dhan_client.round_stop_to_tick(243.59) == 243.6      # the exact Railtel price Dhan refused
+    assert dhan_client.round_stop_to_tick(0) == 0 and dhan_client.round_stop_to_tick("x") == "x"
+    assert dhan_client.round_stop_to_tick(1234.57) == 1234.6    # coarser bands (>=1,000: 0.10) are unchanged
+    assert dhan_client.stop_tick_for_price(243.59) == 0.05 and dhan_client.stop_tick_for_price(1500.0) == 0.10
+
+
+def test_place_order_stop_trigger_and_limit_are_five_paise_multiples(sdk):
+    _po(order_type="STOP_LOSS", trigger_price=243.59, price=242.37)
+    assert sdk.kw["trigger_price"] == 243.6 and sdk.kw["price"] == 242.35
+
+
+def test_trigger_and_stop_limit_price_for_a_cheap_stock_are_valid_ticks():
+    trig = B.trigger_for(244.83, 260.0)                         # 244.83 * 0.995 = 243.606 -> was 243.61 on a 0.01 tick
+    assert trig == 243.6 and dhan_client.is_valid_tick_price(trig, tick_size=0.05)
+    px = B.limit_price_below(trig, 0.5)
+    assert px < trig and dhan_client.is_valid_tick_price(px, tick_size=0.05)
+
+
+def test_tick_size_rejection_detector():
+    assert B._is_tick_size_error("EXCH:16283:The order price is not multiple of the tick size.")
+    assert B._is_tick_size_error("Dhan API error: price is not a multiple of the tick size")
+    assert not B._is_tick_size_error(TRIG_ERR) and not B._is_tick_size_error("CDSL eDIS authorisation required") and not B._is_tick_size_error("")
+
+
+def test_tick_size_rejection_backs_off_instead_of_resending_every_pass(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    st.place_error = RuntimeError("EXCH:16283:The order price is not multiple of the tick size.")
+    p = pos(db)
+    assert sync(db, [p], now=1000.0)["failed"] == 1
+    t = sync(db, [p], now=1010.0)
+    assert t["backoff"] == 1 and st.n == 0                       # Dhan is not called again inside the window
+    st.place_error = None
+    assert sync(db, [p], now=2000.0)["placed"] == 1              # after the window it is tried once more and succeeds

@@ -106,6 +106,30 @@ def round_to_tick(price: float, tick_size: Optional[float] = None) -> float:
         return price
 
 
+# group 412 (2026-10-16): STOP orders must carry an exchange-valid price whatever the security's real tick is.
+# Live failure: a Railtel delivery stop at 243.59 was rejected 86 times with "EXCH:16283: The order price is not multiple of the
+# tick size" - the <=250 band above assumes a 0.01 tick, which the exchange did not accept for that stock. A multiple of 0.05 is
+# also a multiple of 0.01, so stop/trigger prices are rounded on a tick of AT LEAST 0.05 (coarser bands above 1,000 unchanged).
+# Deliberately limited to stop / trigger prices; entry, target and super-order math keep tick_size_for_price() unchanged.
+STOP_MIN_TICK = 0.05
+
+
+def stop_tick_for_price(price: float) -> float:
+    """Tick used for stop / trigger prices: the price band's tick, but never finer than STOP_MIN_TICK."""
+    return max(float(tick_size_for_price(price)), STOP_MIN_TICK)
+
+
+def round_stop_to_tick(price: float) -> float:
+    """round_to_tick() with the STOP_MIN_TICK floor (see above). Non-positive / invalid input comes back unchanged."""
+    try:
+        price_f = float(price)
+    except (TypeError, ValueError):
+        return price
+    if price_f <= 0:
+        return price_f
+    return round_to_tick(price_f, tick_size=stop_tick_for_price(price_f))
+
+
 def is_valid_tick_price(price: float, tick_size: Optional[float] = None) -> bool:
     """`tick_size` resolves from `price`'s own NSE price band when not
     given (session41 fix), matching round_to_tick."""
@@ -1134,7 +1158,7 @@ def place_cnc_stop_loss_market(
             "protective stop order."
         )
 
-    trigger_price_rounded = round_to_tick(float(trigger_price))
+    trigger_price_rounded = round_stop_to_tick(float(trigger_price))   # group 412: >= 0.05 tick (EXCH:16283 on a sub-250 stop)
     if trigger_price_rounded <= 0:
         raise ValueError(
             f"place_cnc_stop_loss_market: trigger_price must be > 0 "

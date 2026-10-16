@@ -1117,3 +1117,27 @@ class TestCancelCncStopLossOrder:
         result = dc.cancel_cnc_stop_loss_order(DB, order_id="SL1")
         assert calls == ["SL1"]
         assert result["status"] == "CANCELLED"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# group 412: stop / trigger prices use a tick of at least 0.05 (Railtel EXCH:16283, 86 rejected delivery stops)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestStopTickFloor:
+    def test_stop_prices_are_always_valid_five_paise_multiples(self):
+        for px in (0.5, 19.97, 87.13, 243.59, 249.99, 456.783, 999.99):
+            r = dc.round_stop_to_tick(px)
+            assert dc.is_valid_tick_price(r, tick_size=0.05), (px, r)
+
+    def test_the_exact_railtel_price_dhan_refused(self):
+        assert dc.is_valid_tick_price(243.59, tick_size=0.05) is False
+        assert dc.round_stop_to_tick(243.59) == 243.6
+
+    def test_coarser_bands_unchanged_and_bad_input_safe(self):
+        assert dc.round_stop_to_tick(1234.57) == 1234.6
+        assert dc.stop_tick_for_price(87.13) == 0.05 and dc.stop_tick_for_price(1500.0) == 0.10
+        assert dc.round_stop_to_tick(0) == 0 and dc.round_stop_to_tick("x") == "x"
+
+    def test_entry_and_target_rounding_is_untouched(self):
+        assert dc.round_to_tick(87.13) == 87.13            # non-stop prices keep the existing band logic
+        assert dc.tick_size_for_price(87.13) == 0.01

@@ -120,7 +120,7 @@ def trigger_for(stop: float, ltp: Optional[float]) -> Optional[float]:
     """Tick-rounded trigger = software stop less the buffer; None unless it is below the live price (a sell stop at or above
     the market would trigger at once / be rejected - the software emergency exit owns that case)."""
     try:
-        trig = dhan_client.round_to_tick(float(stop) * (1.0 - float(config.BROKER_STOP_BUFFER_PCT) / 100.0))
+        trig = dhan_client.round_stop_to_tick(float(stop) * (1.0 - float(config.BROKER_STOP_BUFFER_PCT) / 100.0))
         if not trig or trig <= 0 or not ltp or float(ltp) <= 0 or trig >= float(ltp):
             return None
         return trig
@@ -196,6 +196,13 @@ def cancel_for_exit(db: Session, position) -> bool:
         return True
 
 
+def _is_tick_size_error(msg: str) -> bool:
+    """Exchange rejection EXCH:16283 'The order price is not multiple of the tick size'. Retrying the same price can never succeed
+    (group 412: a Railtel stop was re-sent 86 times), so the caller backs the symbol off instead of re-sending every pass."""
+    m = (msg or "").lower()
+    return "16283" in m or ("tick" in m and "multiple" in m)
+
+
 def _is_trigger_price_error(msg: str) -> bool:
     """Dhan's 'Trigger Price should be greater than Price' rejection (a SELL stop whose limit price is not below its trigger)."""
     m = (msg or "").lower()
@@ -205,10 +212,10 @@ def _is_trigger_price_error(msg: str) -> bool:
 def limit_price_below(trigger: float, pct: float = 0.5) -> float:
     """Tick-rounded limit price STRICTLY below `trigger` (Dhan needs trigger > price on a SELL stop-limit). `pct` is the gap
     in percent; at least one tick is always kept so a low-priced stock can never round back up onto the trigger."""
-    tick = dhan_client.tick_size_for_price(trigger) or 0.05
-    px = dhan_client.round_to_tick(trigger * (1.0 - pct / 100.0))
+    tick = dhan_client.stop_tick_for_price(trigger) or 0.05
+    px = dhan_client.round_stop_to_tick(trigger * (1.0 - pct / 100.0))
     if not px or px >= trigger:
-        px = dhan_client.round_to_tick(trigger - tick)
+        px = dhan_client.round_stop_to_tick(trigger - tick)
     return px
 
 
@@ -273,6 +280,14 @@ def _place(db: Session, position, trigger: float, now: Optional[float] = None) -
             _warn_once(position.symbol, "broker stop for %s refused: CDSL eDIS / TPIN authorisation is needed before Dhan "
                        "accepts a sell order on this holding (%s). Open the Dhan app -> Verify Holdings and enter the TPIN; "
                        "placement is retried automatically %s", position.symbol, msg[:160], retry)
+        elif _is_tick_size_error(msg):
+            # group 412: a deterministic exchange rejection - the same trigger would be refused again. Back off (same window as
+            # eDIS) instead of sending a doomed order every sync pass; the price is re-derived (and re-rounded) on the next try.
+            backoff = _edis_backoff_s()
+            if backoff > 0:
+                _edis_until[position.symbol] = (time.monotonic() if now is None else now) + backoff
+            _warn_once(position.symbol, "broker stop for %s rejected for tick size (trigger %.2f): %s - not retried for %d s",
+                       position.symbol, trigger, msg[:160], int(backoff))
         else:
             _warn_once(position.symbol, "broker stop for %s could not be placed: %s", position.symbol, msg[:200])
         return False

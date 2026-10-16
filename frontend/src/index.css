@@ -705,8 +705,8 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.08);
 }
 
-/* Toast */
-.fixed.top-4.right-4 {
+/* Toast (App.tsx only: Trades.tsx keeps its own success/error tints) */
+.app-toast {
   border-radius: var(--radius-sm) !important;
   border-color: rgb(var(--accent-rgb) / 0.35) !important;
   background: #0e1216 !important;
@@ -2337,7 +2337,7 @@ input:focus, textarea:focus, select:focus,
 }
 
 /* ── Toast, progress, chips ────────────────────────────────── */
-.fixed.top-4.right-4 {
+.app-toast {
   background: var(--panel) !important;
   border: 1px solid var(--border-strong) !important;
   border-radius: 12px !important;

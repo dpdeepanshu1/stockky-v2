@@ -44,7 +44,7 @@ assert.equal(coveragePct(t), 75); assert.equal(coveragePct(tally(null)), null); 
 console.log("structureView ok");
 
 // ── group353: decision-service record ───────────────────────────────────────────────────────────────────────────────────────────
-import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText, decisionTally, ruleCounts } from "./structureView.ts";
+import { decisionToSnapshot, policyRecord, waitForEntryText, prepareTriggerText, retestBadge, decisionTally, ruleCounts } from "./structureView.ts";
 const feat = { quality: "ok", ver: "1.0.0", trend: "bullish", bos_dir: "bullish", bos_bars: 2, chase_atr: 2.4, stretch_atr: 1, room_atr: 3, rr: 1.9, stop: 96, target: 108, ms_price: 100, rr_flags: [] };
 const dsShadow = { mode: "shadow", applied: false, original_decision: "BUY NOW", policy_decision: "WAIT", features: feat,
   rules: [{ id: "P2_CHASE", to: "WAIT", reason: "chasing: price 2.4 ATR beyond the structure reference (max 1.5)" }],
@@ -63,6 +63,10 @@ assert.match(policyRecord(dsApplied).text, /^BUY NOW → WAIT: chasing/); assert
 assert.equal(policyRecord({ mode: "shadow", rules: [], original_decision: "BUY NOW", policy_decision: "BUY NOW" }), null); assert.equal(policyRecord(null), null);
 assert.equal(waitForEntryText(dsShadow), "Wait for a pullback into the demand zone ₹95.00–₹97.00."); assert.equal(waitForEntryText({}), null);
 assert.equal(prepareTriggerText({ prepare_triggers: ["bos_near", "entering_fib", "zzz"] }), "Re-check now: a fresh break of structure, price in the Fibonacci golden zone."); assert.equal(prepareTriggerText({}), null);
+assert.deepEqual(retestBadge({ retest_entry: ["entering_ob", "entering_fib"] }).label, "Retest: OB / Golden"); assert.match(retestBadge({ retest_entry: ["entering_fvg"] }).title, /imbalance zone/);
+assert.equal(retestBadge({ retest_entry: ["entering_fvg", "entering_ob", "entering_fib"] }).label, "Retest: FVG / OB / Golden"); // sniper record shape (same field)
+assert.equal(retestBadge({ gate_mode: "enforce", opinion: "ok", would_reject: false }), null);
+assert.equal(retestBadge({ retest_entry: null }), null); assert.equal(retestBadge({ retest_entry: [] }), null); assert.equal(retestBadge({}), null); assert.equal(retestBadge(null), null);
 const drows = [{ structure: dsShadow }, { structure: dsApplied }, { structure: { mode: "shadow", no_opinion: "x" } }, { structure: { mode: "shadow", rules: [], original_decision: "BUY NOW", policy_decision: "BUY NOW" } }, {}, null];
 assert.deepEqual(decisionTally(drows), { checked: 4, wouldChange: 2, applied: 1, noOpinion: 1 });
 assert.deepEqual(ruleCounts(drows), [{ id: "P2_CHASE", label: "chasing the move", n: 2 }]);

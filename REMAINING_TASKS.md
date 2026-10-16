@@ -21,7 +21,7 @@ Run `scripts/structure_gate_check.py` on >= 2 seeds once the calibration run fin
 - Intraday (15m/5m) structure features and `independent_groups` counting in `scoring.py` (the policy has its own group count).
 - Walk-forward calibration from real data; `groups_min=2` is a judgement call.
 - WS-2: position-stocks still keeps legacy board bodies behind `BOARD_USE_MS_ENGINE`.
-- Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet.
+- Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet. The decision card shows a retest badge since group 417 (Buy Sniper card does not).
 
 ## Checks that need your VM / live market
 - `grep STRUCTURE_ .env` - old `STRUCTURE_EXIT_MODE=exit`, `STRUCTURE_STOP_MODE=on`, `STRUCTURE_PREPARE_UPGRADE=1`,

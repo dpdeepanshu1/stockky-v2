@@ -701,7 +701,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
             {result.scanned} stocks scanned. None cleared the conviction bar today.
           </p>
           {(() => {
-            // group353: why nothing qualified, from the daily-structure policy (shadow rows are labelled "would", never "did")
+            // group353: why nothing qualified, from the daily-structure policy (a flagged row that was not applied is never counted as downgraded)
             const rows = (result.all_results && result.all_results.length ? result.all_results : result.results) || [];
             const t = decisionTally(rows);
             if (t.checked === 0) return null;
@@ -709,7 +709,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
             return (
               <div className="mt-3 text-mist text-xs max-w-md mx-auto" data-testid="scan-structure-summary">
                 <p className="mb-1">
-                  Daily structure checked {t.checked} stocks: {t.wouldChange} {t.applied > 0 ? "downgraded" : "would be downgraded (shadow, not applied)"}
+                  Daily structure checked {t.checked} stocks: {t.wouldChange} {t.applied >= t.wouldChange ? "downgraded" : `flagged, ${t.applied} downgraded`}
                   {t.noOpinion > 0 ? `, ${t.noOpinion} had no structure data` : ""}.
                 </p>
                 {rc.length > 0 && <p className="mb-0">{rc.map(x => `${x.label} ×${x.n}`).join(" · ")}</p>}

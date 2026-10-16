@@ -107,7 +107,7 @@ def test_p8_needs_a_non_failed_bullish_bos_within_10_bars():
     assert r["decision"] == "PREPARE TO BUY" and r["structure"]["rules"][0]["id"] == "P8_OLD_BOS"
     r = sp.apply_policy("BUY NOW", _sum(ms_bos_failed=True), 100.0)
     assert r["decision"] == "PREPARE TO BUY" and r["structure"]["rules"][0]["id"] == "P8_FAILED_BOS"
-    for kw in ({"ms_bos_dir": None, "ms_bos_bars": None}, {"ms_bos_dir": "bearish"}, {"ms_bos_bars": None}):
+    for kw in ({"ms_bos_dir": None, "ms_bos_bars": None}, {"ms_bos_dir": "bearish", "ms_bos_bars": 9}, {"ms_bos_bars": None}):   # a FRESH bearish BOS is P5_BREAK / WAIT since group407; an old one is only "no bullish BOS"
         r = sp.apply_policy("BUY NOW", _sum(**kw), 100.0)
         assert r["decision"] == "PREPARE TO BUY" and r["structure"]["rules"][0]["id"] == "P8_NO_BOS", kw
 
@@ -187,3 +187,50 @@ def test_asof_epoch_becomes_iso_date_and_hash_is_carried():
     assert sp._asof_iso("2026-10-14") == "2026-10-14" and sp._asof_iso(None) is None and sp._asof_iso("x") is None and sp._asof_iso(True) is None
     f = sp.build_structure_features({"ms_quality": "ok", "ms_asof": 1791936000.0, "ms_hash": "ab12cd34", "ms_ver": "1.0.0"}, None)
     assert f["asof"] == "2026-10-14" and f["hash"] == "ab12cd34" and f["ver"] == "1.0.0"
+
+
+def test_fresh_bearish_bos_or_choch_waits_even_when_the_trend_is_not_bearish():      # group407, P5_BREAK
+    for kw in ({"ms_bos_dir": "bearish", "ms_bos_bars": 2, "ms_bos_failed": False}, {"ms_choch_dir": "bearish", "ms_choch_bars": 3}):
+        r = sp.apply_policy("BUY NOW", _sum(**kw), 100.0)
+        assert r["decision"] == "WAIT" and any(x["id"] == "P5_BREAK" for x in r["structure"]["rules"]), kw
+    # a PREPARE is re-checked too (P5_BREAK is a hard rule)
+    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_dir="bearish", ms_bos_bars=1), 100.0)["decision"] == "WAIT"
+
+
+def test_bearish_break_is_not_fired_when_old_failed_answered_or_disabled():
+    assert sp.apply_policy("BUY NOW", _sum(ms_bos_dir="bearish", ms_bos_bars=9, ms_bos_failed=False), 100.0)["decision"] == "PREPARE TO BUY"  # old bearish BOS: only P8 (not bullish)
+    assert not any(x["id"] == "P5_BREAK" for x in sp.apply_policy("BUY NOW", _sum(ms_bos_dir="bearish", ms_bos_bars=2, ms_bos_failed=True), 100.0)["structure"]["rules"])
+    answered = _sum(ms_choch_dir="bearish", ms_choch_bars=4)
+    answered.update(ms_bos_dir="bullish", ms_bos_bars=1)
+    assert any(x["id"] == "P5_BREAK" for x in sp.apply_policy("BUY NOW", answered, 100.0)["structure"]["rules"])
+    later = _sum(ms_bos_dir="bearish", ms_bos_bars=4, ms_choch_dir="bullish", ms_choch_bars=1)
+    assert not any(x["id"] == "P5_BREAK" for x in sp.apply_policy("BUY NOW", later, 100.0)["structure"]["rules"])
+    os.environ["STRUCTURE_POLICY_PARAMS_JSON"] = '{"bearish_break_bars": 0}'
+    try:
+        assert not any(x["id"] == "P5_BREAK" for x in sp.apply_policy("BUY NOW", _sum(ms_bos_dir="bearish", ms_bos_bars=1), 100.0)["structure"]["rules"])
+    finally:
+        os.environ.pop("STRUCTURE_POLICY_PARAMS_JSON", None)
+
+
+def test_bearish_trend_is_still_p5_trend_not_double_counted():
+    r = sp.apply_policy("BUY NOW", _sum(ms_trend="bearish", ms_bos_dir="bearish", ms_bos_bars=1), 100.0)
+    ids = [x["id"] for x in r["structure"]["rules"]]
+    assert "P5_TREND" in ids and "P5_BREAK" not in ids
+
+
+def test_target_too_close_is_prepare_not_buy_now():                                    # group407, P4_REWARD
+    r = sp.apply_policy("BUY NOW", _sum(ms_target=101.5, ms_rr=1.5, ms_stop=99.0), 100.0)   # +1.5% reward
+    ids = {x["id"]: x["to"] for x in r["structure"]["rules"]}
+    assert r["decision"] == "PREPARE TO BUY" and ids.get("P4_REWARD") == "PREPARE TO BUY"
+    assert sp.apply_policy("BUY NOW", _sum(), 100.0)["decision"] == "BUY NOW"           # +8% reward passes
+    os.environ["STRUCTURE_POLICY_PARAMS_JSON"] = '{"reward_pct_min": 0}'
+    try:
+        assert sp.apply_policy("BUY NOW", _sum(ms_target=101.5, ms_rr=1.5, ms_stop=99.0), 100.0)["decision"] == "BUY NOW"
+    finally:
+        os.environ.pop("STRUCTURE_POLICY_PARAMS_JSON", None)
+
+
+def test_reward_floor_uses_the_live_price():
+    # structure close 100, target 108; live price 106 leaves 1.9% to the target
+    r = sp.apply_policy("BUY NOW", _sum(ms_chase_atr=0.2), 106.0)
+    assert any(x["id"] == "P4_REWARD" for x in r["structure"]["rules"])

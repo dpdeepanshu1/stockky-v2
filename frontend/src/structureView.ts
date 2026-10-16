@@ -234,7 +234,9 @@ export function decisionTally(rows: Array<{ structure?: DecisionStructure | null
 /** Counts of which rule fired across scan rows, most common first - for the "why nothing qualified" summary. */
 export function ruleCounts(rows: Array<{ structure?: DecisionStructure | null }> | null | undefined): Array<{ id: string; label: string; n: number }> {
   const LABEL: Record<string, string> = { P2_CHASE: "chasing the move", P3_STRETCH: "stretched above average", P4_RR: "poor structure risk/reward",
-    P5_TREND: "bearish daily structure", P6_ROOM: "no room to resistance", P7_QUALITY: "thin confirmation", P8_FAILED_BOS: "failed breakout" };
+    P4_REWARD: "target too close", P5_TREND: "bearish daily structure", P5_BREAK: "fresh bearish break", P6_ROOM: "no room to resistance",
+    P7_QUALITY: "thin confirmation", P7_LOCATION: "poor entry location", P8_FAILED_BOS: "failed breakout", P8_NO_BOS: "no bullish breakout",
+    P8_OLD_BOS: "stale breakout", P1_NO_STRUCTURE: "no structure data" };
   const m = new Map<string, number>();
   for (const r of Array.isArray(rows) ? rows : []) {
     const s = r?.structure;

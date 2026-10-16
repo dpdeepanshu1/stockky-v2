@@ -47,7 +47,7 @@ def test_replay_agrees_with_the_live_policy_over_a_grid_of_summaries():
         ("bullish", "bearish", "range"),                                       # trend
         ("bullish", "bearish", None), (1, 4, 6, 9, 11, None), (False, True),    # bos dir / bars / failed
         ("bullish", "bearish", None), (2, 5, 8, None),                          # choch dir / bars
-        (1, 3, None), (40, 70, None), (101.5, 108.0, 99.0, None))               # groups, loc score, target
+        (1, 2, 3, None), (40, 70, None), (101.5, 108.0, 99.0, None))            # groups, loc score, target
     n = 0
     for tr, bd, bb, bf, cd, cb, g, loc, tg in grid:
         s = _summary(ms_trend=tr, ms_bos_dir=bd, ms_bos_bars=bb, ms_bos_failed=bf, ms_choch_dir=cd, ms_choch_bars=cb, ms_groups=g, ms_loc_score=loc, ms_target=tg)
@@ -62,3 +62,12 @@ def test_thresholds_can_be_overridden_and_zero_disables():
     f = policy_flags(s, {"reward_pct_min": 0, "bearish_break_bars": 0})
     assert not f["p4_reward"] and not f["p5_break"]
     assert policy_flags(_summary(ms_bos_bars=12), {"bos_max_bars": 15})["p8_old_bos"] is False
+
+
+def test_p7_defaults_group410_and_zero_switches_the_rule_off_on_both_sides():
+    assert sp.DEFAULTS["groups_min"] == 2.0 and sp.DEFAULTS["loc_min"] == 0.0
+    f = policy_flags(_summary(ms_groups=None, ms_loc_score=None))
+    assert f["p7_groups"] is True and f["p7_location"] is False          # unknown groups still not bullish; location rule is off
+    on = {"groups_min": 3, "loc_min": 55}
+    assert policy_flags(_summary(ms_loc_score=54), on)["p7_location"] is True and policy_flags(_summary(ms_loc_score=55), on)["p7_location"] is False
+    assert policy_flags(_summary(ms_groups=None), {"groups_min": 0})["p7_groups"] is False

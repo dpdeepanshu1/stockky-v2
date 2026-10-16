@@ -595,8 +595,10 @@ REJECT_CACHE_VS_S = _reject_ttl_env("REJECT_CACHE_VS_S", "300")   # group345: a 
 
 
 def _reject_ttl_for(kind) -> float:
-    if kind in ("vs_return", "vs_volume"):
+    if kind in ("vs_return", "vs_volume", "vs_delivery"):   # group410: vs_delivery added (delivery % can stop mattering once a symbol turns high-conviction, so short TTL)
         return REJECT_CACHE_VS_S
+    if kind == "vs_quality":
+        return REJECT_CACHE_PRICE_S      # group410: absolute-floor quality-gate rejections; the adaptive floors move, so not the 1 h stable TTL
     if kind in _REJECT_STABLE_KINDS:
         return REJECT_CACHE_STABLE_S
     if kind in _REJECT_PRICE_KINDS:
@@ -2077,6 +2079,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
                 "intraday/speculative churn rather than a real breakout."
             ),
             "atr_pct": atr_pct,
+            "reject_kind": "vs_delivery",
         }
 
     return {
@@ -2716,6 +2719,11 @@ async def _refresh_volume_shock_candidates(
                 )
                 skipped += 1
                 quality_rejected += 1
+                # group410 (16 Oct log: BIGBLOC / JKIPL re-fetched history + delivery + fundamentals + technical every ~12 s all morning):
+                # an ABSOLUTE-floor rejection is remembered like the other definite rejections. The sector-relative one depends on this
+                # cycle's peers, so it is not cached.
+                if str(gate_note).startswith(("fundamental_score", "technical_score", "market_cap")):
+                    _reject_cache_put("vs:" + sym, {"reject_reason": "quality gate: " + str(gate_note), "reject_kind": "vs_quality"})
                 continue
 
         # Elevate conviction_score for high-conviction signals

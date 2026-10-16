@@ -83,7 +83,7 @@ def main() -> int:
            "slip_pct": a.slip_pct if a.entry == "next_open" else 0.0, "symbols": symbols, "samples": len(samples), "with_outcome": len(done), "horizon": a.horizon,
            "rule_effects": rule_effects(done, a.horizon, th, a.min_n),
            "walk_forward": {r: walk_forward(done, r, g, horizon=a.horizon) for r, g in GRIDS.items()},
-           "calibration": {k: calibration(done, k, horizon=a.horizon) for k in ("ms_tqs", "ms_loc_score")}}
+           "calibration": {k: calibration(done, k, horizon=a.horizon) for k in ("ms_tqs", "ms_loc_score", "ms_groups")}}
     print(json.dumps(out, indent=1))
     return 0 if symbols else 1
 

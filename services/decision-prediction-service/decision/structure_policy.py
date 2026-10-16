@@ -7,7 +7,7 @@ ALWAYS LIVE (group370: the record-only "shadow" and "caps" modes were removed). 
 the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is the only switch (emergency kill switch); any other value = live.
 Every threshold below is still a HYPOTHESIS until the backtest (scripts/structure_backtest.py) calibrates it - skips are silent, so run it.
 
-BUY NOW needs ALL of: >= groups_min (3) independent confirming groups, entry-location score >= loc_min (55), a bullish BOS that has not
+BUY NOW needs ALL of: >= groups_min (2, group410; 0 = off) independent confirming groups, entry-location score >= loc_min (0 = OFF since group410: the score did not rank outcomes), a bullish BOS that has not
 failed and is <= bos_max_bars (10) bars old, a structural target at least reward_pct_min (2.5) % above the price (P4_REWARD, group 407), and no
 fresh bearish BOS / CHOCH within bearish_break_bars (5) bars unless a later bullish CHOCH answered it (P5_BREAK, group 407, WAIT). A missing value counts as NOT met (unknown is never bullish) once a usable summary exists.
 PREPARE TO BUY (group370): the arithmetic is recomputed at the live price and a PREPARE whose hard rules (chase / stretch / R:R / bearish)
@@ -36,8 +36,8 @@ DEFAULTS: Dict[str, float] = {
     "reward_pct_min": 2.5,       # P4_REWARD the structural target is less than this % above the live price (0 disables); BUY NOW -> PREPARE
     "bearish_break_bars": 5.0,   # P5_BREAK a fresh, not-failed bearish BOS or a bearish CHOCH this recent (same window as the real-trade gate); 0 disables
     "tqs_min": 40.0,             # kept for env compatibility; no longer used (P7 is the independent-group count)
-    "groups_min": 3.0,           # P7 BUY NOW needs at least this many independent confirming groups
-    "loc_min": 55.0,             # P7 BUY NOW needs an entry-location score of at least this
+    "groups_min": 2.0,           # P7 BUY NOW needs at least this many independent confirming groups (group410: was 3, which rejected 93% of days; 0 = off)
+    "loc_min": 0.0,              # P7 BUY NOW needs an entry-location score of at least this (group410: was 55; the score is not monotonic vs returns, so 0 = off)
     "bos_max_bars": 10.0,        # P8 BUY NOW needs a non-failed bullish BOS at most this many bars old
     "choch_reversal_bars": 10.0,  # P5 a bullish CHOCH this recent excuses a bearish trend
     "max_price_drift_pct": 15.0,  # live price vs structure close: beyond this the summary is too old to use
@@ -189,10 +189,10 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
             add("P4_REWARD", PREPARE, f"structural target is only {rw:.1f}% above the price (BUY NOW needs {p['reward_pct_min']:g}%)")
     if f["room_atr"] is not None and f["room_atr"] < p["room_atr_min"]:
         add("P6_ROOM", PREPARE, f"only {max(f['room_atr'], 0):.1f} ATR of room to the next resistance")
-    if f["groups"] is None or f["groups"] < p["groups_min"]:
+    if p["groups_min"] > 0 and (f["groups"] is None or f["groups"] < p["groups_min"]):
         got = "unknown" if f["groups"] is None else f"{int(f['groups'])}"
         add("P7_QUALITY", PREPARE, f"thin confirmation: {got} independent group(s) positive, BUY NOW needs {int(p['groups_min'])}")
-    if f["loc_score"] is None or f["loc_score"] < p["loc_min"]:
+    if p["loc_min"] > 0 and (f["loc_score"] is None or f["loc_score"] < p["loc_min"]):
         got = "unknown" if f["loc_score"] is None else f"{int(f['loc_score'])}"
         add("P7_LOCATION", PREPARE, f"entry location score {got} is below {int(p['loc_min'])}")
     bars = f["bos_bars"]

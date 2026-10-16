@@ -23,6 +23,7 @@ import {
 // trade-service's URL isn't configured in this browser).
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
+import { NavIcon } from "./ui/NavIcon";
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
@@ -164,7 +165,7 @@ function PipelineStage({
   detail: string[]; active: boolean;
 }) {
   return (
-    <div className={`rounded-xl border p-3 flex-1 min-w-[150px] ${active ? "bg-signal-buy/5 border-signal-buy/20" : "bg-ink border-slate"}`}>
+    <div className={`rounded-xl border p-3 flex-1 min-w-[min(150px,100%)] ${active ? "bg-signal-buy/5 border-signal-buy/20" : "bg-ink border-slate"}`}>
       <div className="flex items-center gap-1.5 mb-1.5">
         <div className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0 ${
           active ? "bg-signal-buy/20 text-signal-buy" : "bg-graphite text-mist"
@@ -781,9 +782,15 @@ export default function PositionStocksTab() {
 
   return (
     <div className="page-terminal space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="dash-section-title">Position Stocks — 1m / 5m / 15m / 60m Scalp Pool</p>
-        <span className="font-display tabular-nums text-[9px] text-mist">
+      <div className="rt-head ps-head">
+        <div className="rt-title">
+          <span className="rt-title-icon" aria-hidden="true"><NavIcon name="trend" /></span>
+          <div className="min-w-0">
+            <h2 className="rt-title-text">Position Stocks</h2>
+            <span className="rt-title-sub">1m / 5m / 15m / 60m scalp pool</span>
+          </div>
+        </div>
+        <span className="rt-updated font-display tabular-nums">
           {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
         </span>
       </div>
@@ -807,31 +814,37 @@ export default function PositionStocksTab() {
       )}
 
       {/* ── Admin auth ── */}
-      <div className="bg-graphite border border-slate rounded-2xl p-4">
-        {!loggedIn ? (
-          <>
-            <p className="dash-section-title mb-2">Admin login required</p>
-            <p className="font-display tabular-nums text-[10px] text-mist mb-2">Same admin credentials as Real Automatic Trade.</p>
-            {loginError && <p className="font-display tabular-nums text-[11px] text-signal-sell mb-2">{loginError}</p>}
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none"
-                placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
-              <input type="password" className="flex-1 bg-ink border border-slate rounded-xl px-3 py-2 font-display tabular-nums text-xs text-paper focus:outline-none"
-                placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && void doLogin()} />
-              <button onClick={() => void doLogin()} disabled={loginLoading || !password}
-                className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40">
-                {loginLoading ? "Logging in…" : "Log In"}
-              </button>
+      {!loggedIn ? (
+        <div className="rt-login">
+          <div className="rt-login-head">
+            <span className="rt-login-icon" aria-hidden="true"><NavIcon name="lock" /></span>
+            <div className="min-w-0">
+              <h3 className="rt-login-title">Admin login required</h3>
+              <p className="rt-login-sub">Same admin credentials as Real Automatic Trade.</p>
             </div>
-          </>
-        ) : (
-          <div className="flex items-center justify-between">
-            <p className="font-display tabular-nums text-xs text-signal-buy">● Admin session active ({username})</p>
-            <button onClick={() => void doLogout()} className="font-display tabular-nums text-[11px] text-mist hover:text-paper">Log out</button>
           </div>
-        )}
-      </div>
+          {loginError && <div className="rt-alert font-display tabular-nums" role="alert"><span>{loginError}</span></div>}
+          <div className="rt-field">
+            <label className="rt-label" htmlFor="ps-admin-user">Admin username</label>
+            <input id="ps-admin-user" type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+              placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
+          </div>
+          <div className="rt-field">
+            <label className="rt-label" htmlFor="ps-admin-pass">Password</label>
+            <input id="ps-admin-pass" type="password" autoComplete="current-password"
+              placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && void doLogin()} />
+          </div>
+          <button onClick={() => void doLogin()} disabled={loginLoading || !password} className="rt-btn rt-btn-primary">
+            {loginLoading ? "Logging in…" : "Log In"}
+          </button>
+        </div>
+      ) : (
+        <div className="rt-session rt-session-ok">
+          <span className="font-display tabular-nums">● Admin session active ({username})</span>
+          <button onClick={() => void doLogout()} className="font-display tabular-nums">Log out</button>
+        </div>
+      )}
 
       {/* ── Sub-tab nav ── */}
       <SubTabs<SubTab>

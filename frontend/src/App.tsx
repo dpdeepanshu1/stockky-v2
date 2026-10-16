@@ -1033,6 +1033,7 @@ export default function App() {
               <button
                 type="button"
                 className={`sidebar-link ${tab === item.id ? "active" : ""}`}
+                title={item.label}
                 aria-current={tab === item.id ? "page" : undefined}
                 onClick={() => goTo(item.id)}
               >
@@ -1067,7 +1068,11 @@ export default function App() {
           >
             <NavIcon name="menu" />
           </button>
-          <span className="brand-name">Stockky</span>
+          <span className="brand-mark brand-mark-sm" aria-hidden="true">S</span>
+          <div className="mtb-titles">
+            <span className="mtb-app">Stockky</span>
+            <span className="mtb-page">{navItems.find((i) => i.id === tab)?.label ?? ""}</span>
+          </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
@@ -1096,9 +1101,12 @@ export default function App() {
           />
           <aside className="mobile-drawer-panel">
             <div className="mobile-drawer-head">
-              <div>
-                <div className="brand-name">Stockky</div>
-                <div className="brand-sub">NSE research &amp; trading</div>
+              <div className="drawer-brand">
+                <span className="brand-mark" aria-hidden="true">S</span>
+                <div>
+                  <div className="brand-name">Stockky</div>
+                  <div className="brand-sub">NSE research &amp; trading</div>
+                </div>
               </div>
               <button type="button" className="icon-btn" aria-label="Close menu" onClick={() => setMobileMoreOpen(false)}>
                 <NavIcon name="x" />
@@ -1184,7 +1192,7 @@ export default function App() {
         </button>
         <button
           type="button"
-          className={`status-chip ${dbWakeState === "ok" ? "ok" : dbWakeState === "error" ? "bad" : dbWakeState === "waking" ? "warn" : ""}`}
+          className={`status-chip chip-db ${dbWakeState === "ok" ? "ok" : dbWakeState === "error" ? "bad" : dbWakeState === "waking" ? "warn" : ""}`}
           onClick={() => void wakeAllDbs()}
           disabled={dbWakeState === "waking"}
           title="Wake the Neon, training and cache databases (free-tier databases sleep when idle)"

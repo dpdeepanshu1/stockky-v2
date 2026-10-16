@@ -1,0 +1,741 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — DESIGN SYSTEM v3 (2026-10-16 fresh UI)
+
+   Loaded AFTER index.css (see main.tsx) so every rule here wins over the
+   v1/v2 layers at equal specificity. Presentation only: no component
+   logic, state, API call or handler depends on anything in this file.
+   To roll back the whole redesign, delete the import in main.tsx.
+
+   Look & feel
+     · midnight-indigo surfaces, violet accent (gains stay green, losses
+       stay red, caution stays amber — the accent is never a P&L colour)
+     · softer 18px cards, hairline borders, a faint top highlight
+     · glass top bars, pill navigation, floating mobile tab bar
+     · Plus Jakarta Sans for headings, Inter (tabular figures) for data
+     · every touch target >= 40px on phones, inputs 16px (no iOS zoom)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Tokens ───────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+  --bg-rgb: 9 11 20;
+  --panel-rgb: 17 20 34;
+  --panel-2-rgb: 24 28 46;
+  --border-rgb: 37 42 64;
+  --border-strong-rgb: 60 67 97;
+  --fg-rgb: 236 239 249;
+  --muted-rgb: 153 161 186;
+  --muted-2-rgb: 117 126 153;
+  --accent-rgb: 141 126 255;
+  --accent-2-rgb: 96 165 250;
+  --buy-rgb: 52 224 161;
+  --sell-rgb: 255 100 121;
+  --warn-rgb: 255 187 77;
+  --on-solid-rgb: 10 10 24;
+  --shadow-rgb: 0 0 0;
+
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --sidebar-w: 256px;
+  --topbar-h: 58px;
+  --card-shadow: 0 1px 0 rgb(255 255 255 / 0.035) inset, 0 1px 2px rgb(var(--shadow-rgb) / 0.30), 0 12px 32px rgb(var(--shadow-rgb) / 0.18);
+  --glass: rgb(var(--bg-rgb) / 0.78);
+  --font-head: "Plus Jakarta Sans", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+}
+
+html.light {
+  color-scheme: light;
+  --bg-rgb: 245 246 252;
+  --panel-rgb: 255 255 255;
+  --panel-2-rgb: 247 248 254;
+  --border-rgb: 228 231 244;
+  --border-strong-rgb: 195 201 226;
+  --fg-rgb: 18 20 40;
+  --muted-rgb: 84 91 118;
+  --muted-2-rgb: 100 108 135;
+  --accent-rgb: 88 70 235;
+  --accent-2-rgb: 37 99 235;
+  --buy-rgb: 4 120 87;
+  --sell-rgb: 197 38 62;
+  --warn-rgb: 146 80 0;
+  --on-solid-rgb: 255 255 255;
+  --shadow-rgb: 30 27 75;
+  --card-shadow: 0 1px 2px rgb(var(--shadow-rgb) / 0.06), 0 10px 28px rgb(var(--shadow-rgb) / 0.07);
+  --glass: rgb(var(--bg-rgb) / 0.82);
+}
+
+/* ── 2. Base ─────────────────────────────────────────────────────────── */
+html { scroll-behavior: smooth; }
+body {
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  letter-spacing: -0.005em;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+.page-title, .brand-name, .dash-section-title, .hot-section-title,
+.rt-title-text, .rt-login-title, .mtb-app, .mobile-drawer-head .brand-name {
+  font-family: var(--font-head);
+}
+.terminal-shell {
+  background:
+    radial-gradient(900px 520px at 8% -8%, rgb(var(--accent-rgb) / 0.10), transparent 60%),
+    radial-gradient(760px 460px at 100% 0%, rgb(var(--accent-2-rgb) / 0.07), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+}
+html.light .terminal-shell {
+  background:
+    radial-gradient(900px 520px at 8% -8%, rgb(var(--accent-rgb) / 0.07), transparent 60%),
+    radial-gradient(760px 460px at 100% 0%, rgb(var(--accent-2-rgb) / 0.05), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+}
+::selection { background: rgb(var(--accent-rgb) / 0.32); }
+:focus-visible { outline: 2px solid rgb(var(--accent-rgb) / 0.9); outline-offset: 2px; }
+
+button:not(:disabled) { transition: transform 0.12s ease, background-color 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s, filter 0.15s; }
+button:not(:disabled):active { transform: scale(0.98); }
+button:disabled { cursor: not-allowed; }
+
+.animate-fadeIn { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes v3Rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.terminal-main > * { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* ── 3. Cards ────────────────────────────────────────────────────────── */
+.terminal-panel, .bg-graphite, .hot-card, .conviction-card, .cc-card, .topo-shell,
+.signal-stream-card, .scanner-board, .signals-terminal, .manual-trade-panel, .hot-toolbar, .heat-scale {
+  background: var(--panel) !important;
+  border-color: rgb(var(--border-rgb)) !important;
+  box-shadow: var(--card-shadow);
+}
+.rounded-2xl { border-radius: var(--radius-lg); }
+.rounded-xl { border-radius: var(--radius-md); }
+.hot-card:hover, .conviction-card:hover, .cc-card[role="button"]:hover {
+  border-color: rgb(var(--accent-rgb) / 0.45) !important;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 16px 40px rgb(var(--shadow-rgb) / 0.28);
+  transform: translateY(-1px);
+}
+.hot-card, .conviction-card, .cc-card { transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s; }
+
+/* ── 4. Desktop sidebar ──────────────────────────────────────────────── */
+.terminal-sidebar {
+  background: rgb(var(--panel-rgb) / 0.86);
+  backdrop-filter: blur(18px) saturate(140%);
+  border-right: 1px solid rgb(var(--border-rgb));
+}
+.brand-mark {
+  width: 36px; height: 36px; border-radius: 12px;
+  background: linear-gradient(135deg, rgb(var(--accent-rgb)) 0%, rgb(var(--accent-2-rgb)) 100%);
+  color: rgb(var(--on-solid-rgb));
+  font-family: var(--font-head);
+  font-weight: 800; font-size: 1.05rem;
+  box-shadow: 0 6px 18px rgb(var(--accent-rgb) / 0.35), 0 0 0 1px rgb(255 255 255 / 0.12) inset;
+}
+.brand-mark-sm { width: 32px; height: 32px; border-radius: 10px; font-size: 0.95rem; }
+.brand-name { font-size: 1.1rem; font-weight: 800; letter-spacing: -0.02em; }
+.brand-sub { font-size: 0.72rem; color: rgb(var(--muted-2-rgb)); }
+
+.sidebar-nav { padding: 0.25rem 0.8rem 0.75rem; gap: 3px; }
+.sidebar-group-label {
+  margin: 1.15rem 0.6rem 0.4rem;
+  font-size: 0.68rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: rgb(var(--muted-2-rgb));
+}
+.sidebar-link {
+  position: relative;
+  min-height: 40px; padding: 0.5rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.875rem; font-weight: 500;
+  color: rgb(var(--muted-rgb));
+}
+.sidebar-link:hover { background: rgb(var(--accent-rgb) / 0.07); color: rgb(var(--fg-rgb)); }
+.sidebar-link.active {
+  background: linear-gradient(90deg, rgb(var(--accent-rgb) / 0.18), rgb(var(--accent-rgb) / 0.06));
+  color: rgb(var(--fg-rgb));
+  font-weight: 600;
+}
+.sidebar-link.active .nav-icon { color: rgb(var(--accent-rgb)); }
+.sidebar-link.active::before {
+  content: ""; position: absolute; left: -0.8rem; top: 9px; bottom: 9px; width: 3px;
+  border-radius: 0 3px 3px 0; background: rgb(var(--accent-rgb));
+}
+.sidebar-footer { border-top: 1px solid rgb(var(--border-rgb)); padding: 0.6rem 0.8rem 0.9rem; }
+
+/* ── 5. Desktop top bar ──────────────────────────────────────────────── */
+.app-topbar {
+  background: var(--glass);
+  backdrop-filter: blur(16px) saturate(150%);
+  border-bottom: 1px solid rgb(var(--border-rgb));
+  min-height: var(--topbar-h);
+}
+.topbar-search {
+  border-radius: 12px;
+  background: rgb(var(--panel-rgb));
+  border-color: rgb(var(--border-rgb));
+}
+.topbar-search:hover { border-color: rgb(var(--accent-rgb) / 0.5); }
+.status-chip {
+  background: rgb(var(--panel-rgb)); border-color: rgb(var(--border-rgb));
+  font-size: 0.78rem; font-weight: 600;
+}
+.status-chip.ok { color: rgb(var(--fg-rgb)); }
+.icon-btn { border-radius: 12px; background: rgb(var(--panel-rgb)); border-color: rgb(var(--border-rgb)); }
+.icon-btn:hover { border-color: rgb(var(--accent-rgb) / 0.5); color: rgb(var(--accent-rgb)); }
+
+/* ── 6. Page header, section titles ──────────────────────────────────── */
+.page-header { margin-bottom: 1.4rem; }
+.page-title { font-size: 1.65rem; font-weight: 800; letter-spacing: -0.025em; }
+.page-desc { color: rgb(var(--muted-rgb)); }
+
+/* ── 7. Buttons ──────────────────────────────────────────────────────── */
+.btn-terminal, .btn-primary-term, .scan-action-btn, .btn-scan-lite, .btn-scan-full {
+  min-height: 40px; border-radius: 12px; font-weight: 600;
+}
+.btn-primary-term {
+  background: linear-gradient(135deg, rgb(var(--accent-rgb)), rgb(var(--accent-2-rgb)));
+  border-color: transparent;
+  box-shadow: 0 6px 18px rgb(var(--accent-rgb) / 0.28);
+}
+.btn-primary-term:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-terminal { background: rgb(var(--panel-rgb)); border-color: rgb(var(--border-strong-rgb)); }
+
+/* ── 8. Sub-tabs → segmented pill scroller ───────────────────────────── */
+.subtabs {
+  position: relative;
+  gap: 0.3rem; padding: 0.3rem;
+  margin: 0 0 1.1rem;
+  border: 1px solid rgb(var(--border-rgb));
+  border-radius: 16px;
+  background: rgb(var(--panel-rgb));
+  box-shadow: var(--card-shadow);
+  scroll-snap-type: x proximity;
+  scroll-padding: 0 0.5rem;
+}
+.subtab {
+  min-height: 40px; padding: 0.45rem 0.95rem;
+  border-radius: 12px;
+  font-size: 0.85rem; font-weight: 600;
+  scroll-snap-align: center;
+}
+.subtab:hover { background: rgb(var(--accent-rgb) / 0.07); }
+.subtab[aria-selected="true"] {
+  background: rgb(var(--accent-rgb) / 0.16);
+  color: rgb(var(--accent-rgb));
+}
+html.light .subtab[aria-selected="true"] { background: rgb(var(--accent-rgb) / 0.10); }
+.subtab[aria-selected="true"]::after { display: none; }
+.subtab .count { background: rgb(var(--border-rgb)); }
+.subtab[aria-selected="true"] .count { background: rgb(var(--accent-rgb) / 0.22); color: rgb(var(--accent-rgb)); }
+
+/* ── 9. Forms ────────────────────────────────────────────────────────── */
+input[type="text"], input[type="number"], input[type="search"], input[type="password"], input[type="email"],
+textarea, select {
+  background: rgb(var(--panel-2-rgb)) !important;
+  border: 1px solid rgb(var(--border-strong-rgb));
+  border-radius: 12px;
+  transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: rgb(var(--accent-rgb));
+  box-shadow: 0 0 0 4px rgb(var(--accent-rgb) / 0.16);
+  outline: none;
+}
+
+/* ── 10. Tables, badges ──────────────────────────────────────────────── */
+.term-table th { background: rgb(var(--panel-2-rgb)); font-size: 0.72rem; letter-spacing: 0.02em; }
+.term-table tr:hover td { background: rgb(var(--accent-rgb) / 0.06); }
+.decision-badge, .cc-decision, .signal-pill-buy, .signal-pill-prepare, .signal-pill-avoid, .topo-online { font-weight: 700; }
+
+/* ── 11. Palette / modal surfaces ────────────────────────────────────── */
+.cmdk-overlay { background: rgb(var(--bg-rgb) / 0.66); backdrop-filter: blur(6px); }
+.cmdk-panel, .balance-modal {
+  background: rgb(var(--panel-rgb));
+  border: 1px solid rgb(var(--border-strong-rgb));
+  border-radius: 20px;
+  box-shadow: 0 30px 80px rgb(var(--shadow-rgb) / 0.45);
+}
+.cmdk-item[data-active="true"], .cmdk-item:hover { background: rgb(var(--accent-rgb) / 0.14); color: rgb(var(--accent-rgb)); }
+
+/* ── 12. Real Auto Trade — components ────────────────────────────────── */
+.rt-page { padding-bottom: 2rem; }
+
+.rt-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  margin: 0 0 0.9rem;
+}
+.rt-title { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+.rt-title-icon {
+  flex: none; width: 40px; height: 40px; display: grid; place-items: center;
+  border-radius: 13px;
+  background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.22), rgb(var(--accent-2-rgb) / 0.12));
+  border: 1px solid rgb(var(--accent-rgb) / 0.35);
+  color: rgb(var(--accent-rgb));
+}
+.rt-title-icon .nav-icon { width: 20px; height: 20px; }
+.rt-title-text { margin: 0; font-size: 1.15rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; color: rgb(var(--fg-rgb)); }
+.rt-title-sub { display: block; margin-top: 2px; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.rt-armed-pill {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  margin-left: 0.4rem; padding: 0.12rem 0.55rem; border-radius: 999px;
+  font-size: 0.68rem; font-weight: 800; letter-spacing: 0.06em;
+  color: rgb(var(--buy-rgb)); background: rgb(var(--buy-rgb) / 0.12); border: 1px solid rgb(var(--buy-rgb) / 0.35);
+  vertical-align: middle;
+}
+
+/* Segmented DEMO / REAL switch */
+.rt-seg {
+  display: inline-flex; flex: none; padding: 4px; gap: 4px;
+  border-radius: 14px; background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb));
+}
+.rt-seg-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  min-height: 38px; min-width: 88px; padding: 0.4rem 1rem;
+  border: 1px solid transparent; border-radius: 10px;
+  background: transparent; color: rgb(var(--muted-rgb));
+  font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em; cursor: pointer;
+}
+.rt-seg-btn:hover { color: rgb(var(--fg-rgb)); }
+.rt-seg-btn[data-active="true"][data-mode="DEMO"] {
+  background: rgb(var(--buy-rgb) / 0.14); border-color: rgb(var(--buy-rgb) / 0.4); color: rgb(var(--buy-rgb));
+}
+.rt-seg-btn[data-active="true"][data-mode="REAL"] {
+  background: rgb(var(--sell-rgb) / 0.14); border-color: rgb(var(--sell-rgb) / 0.45); color: rgb(var(--sell-rgb));
+}
+
+.rt-notice {
+  display: flex; gap: 0.5rem; align-items: flex-start;
+  margin: 0 0 0.9rem; padding: 0.55rem 0.8rem;
+  border-radius: 12px; font-size: 0.75rem; line-height: 1.45;
+  color: rgb(var(--muted-rgb));
+  background: rgb(var(--warn-rgb) / 0.07); border: 1px solid rgb(var(--warn-rgb) / 0.22);
+}
+.rt-alert {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 0.6rem;
+  margin: 0 0 0.9rem; padding: 0.65rem 0.85rem;
+  border-radius: 14px; font-size: 0.8125rem; line-height: 1.45;
+  color: rgb(var(--sell-rgb)); background: rgb(var(--sell-rgb) / 0.10); border: 1px solid rgb(var(--sell-rgb) / 0.35);
+  word-break: break-word;
+}
+.rt-alert button { flex: none; width: 32px; height: 32px; border-radius: 10px; color: inherit; }
+
+/* Login card */
+.rt-login {
+  width: 100%; max-width: 30rem; margin: 0 auto 1.25rem;
+  padding: 1.35rem;
+  border-radius: 22px;
+  background:
+    radial-gradient(420px 200px at 0% 0%, rgb(var(--accent-rgb) / 0.12), transparent 70%),
+    rgb(var(--panel-rgb));
+  border: 1px solid rgb(var(--border-strong-rgb));
+  box-shadow: var(--card-shadow);
+}
+.rt-login-head { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 1.1rem; }
+.rt-login-icon {
+  flex: none; width: 46px; height: 46px; display: grid; place-items: center;
+  border-radius: 15px; color: rgb(var(--on-solid-rgb));
+  background: linear-gradient(135deg, rgb(var(--accent-rgb)), rgb(var(--accent-2-rgb)));
+  box-shadow: 0 8px 22px rgb(var(--accent-rgb) / 0.32);
+}
+.rt-login-icon .nav-icon { width: 22px; height: 22px; }
+.rt-login-title { margin: 0; font-size: 1.1rem; font-weight: 800; letter-spacing: -0.02em; color: rgb(var(--fg-rgb)); }
+.rt-login-sub { margin: 2px 0 0; font-size: 0.78rem; line-height: 1.4; color: rgb(var(--muted-rgb)); }
+.rt-field { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.8rem; }
+.rt-label { font-size: 0.75rem; font-weight: 600; color: rgb(var(--muted-rgb)); }
+.rt-login input, .rt-field input { width: 100%; min-height: 46px; padding: 0.6rem 0.85rem; font-size: 1rem; }
+
+.rt-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  min-height: 44px; padding: 0.55rem 1.1rem; border-radius: 13px;
+  font-size: 0.875rem; font-weight: 700; cursor: pointer;
+  border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); color: rgb(var(--fg-rgb));
+}
+.rt-btn:disabled { opacity: 0.45; }
+.rt-btn-primary {
+  width: 100%; border-color: transparent; color: rgb(var(--on-solid-rgb));
+  background: linear-gradient(135deg, rgb(var(--accent-rgb)), rgb(var(--accent-2-rgb)));
+  box-shadow: 0 8px 22px rgb(var(--accent-rgb) / 0.3);
+}
+.rt-btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.rt-btn-ghost { background: transparent; color: rgb(var(--muted-rgb)); }
+
+/* Session strip */
+.rt-session {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+  margin: 0 0 0.9rem; padding: 0.55rem 0.7rem 0.55rem 0.9rem;
+  border-radius: 14px; font-size: 0.8125rem; font-weight: 600;
+}
+.rt-session > span { display: inline-flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.rt-session-ok { color: rgb(var(--buy-rgb)); background: rgb(var(--buy-rgb) / 0.08); border: 1px solid rgb(var(--buy-rgb) / 0.25); }
+.rt-session-warn { color: rgb(var(--warn-rgb)); background: rgb(var(--warn-rgb) / 0.09); border: 1px solid rgb(var(--warn-rgb) / 0.3); }
+.rt-session button {
+  flex: none; min-height: 34px; padding: 0.25rem 0.8rem; border-radius: 10px;
+  font-size: 0.75rem; font-weight: 700; border: 1px solid currentColor; background: transparent; color: inherit;
+}
+.rt-login-inline {
+  margin: 0 0 0.9rem; padding: 0.85rem; border-radius: 14px;
+  background: rgb(var(--warn-rgb) / 0.07); border: 1px solid rgb(var(--warn-rgb) / 0.28);
+}
+.rt-login-inline p { margin: 0 0 0.6rem; font-size: 0.78rem; color: rgb(var(--warn-rgb)); }
+.rt-inline-row { display: flex; gap: 0.5rem; }
+.rt-inline-row input { flex: 1; min-width: 0; }
+
+/* Shared Real-Trade building blocks (StatCard / SectionHdr / GateStep) */
+.rt-section-hdr {
+  margin: 0 0 0.65rem; font-size: 0.72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.07em; color: rgb(var(--muted-rgb));
+}
+.rt-stat {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  padding: 0.8rem 0.9rem; border-radius: var(--radius-lg);
+  background: var(--panel); border: 1px solid rgb(var(--border-rgb)); box-shadow: var(--card-shadow);
+}
+.rt-stat-label { font-size: 0.7rem; font-weight: 600; color: rgb(var(--muted-rgb)); letter-spacing: 0.02em; }
+.rt-stat-value { font-size: 1.2rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.25; overflow-wrap: anywhere; }
+.rt-stat-sub { font-size: 0.7rem; color: rgb(var(--muted-2-rgb)); overflow-wrap: anywhere; }
+
+.rt-gate {
+  display: flex; align-items: center; gap: 0.6rem; min-width: 0;
+  padding: 0.6rem 0.75rem; border-radius: 14px;
+  background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb));
+  font-size: 0.78rem; font-weight: 600; color: rgb(var(--muted-rgb));
+}
+.rt-gate-n {
+  flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 800; background: rgb(var(--border-rgb)); color: rgb(var(--muted-rgb));
+}
+.rt-gate[data-state="done"] { background: rgb(var(--buy-rgb) / 0.08); border-color: rgb(var(--buy-rgb) / 0.3); color: rgb(var(--buy-rgb)); }
+.rt-gate[data-state="done"] .rt-gate-n { background: rgb(var(--buy-rgb) / 0.2); color: rgb(var(--buy-rgb)); }
+.rt-gate[data-state="active"] { background: rgb(var(--warn-rgb) / 0.10); border-color: rgb(var(--warn-rgb) / 0.4); color: rgb(var(--warn-rgb)); }
+.rt-gate[data-state="active"] .rt-gate-n { background: rgb(var(--warn-rgb) / 0.22); color: rgb(var(--warn-rgb)); }
+
+/* Manual trade ticket (uses border-white/10 + text-paper/NN which vanish on the light theme) */
+.rt-ticket {
+  padding: 1rem; margin-bottom: 1rem; border-radius: var(--radius-lg);
+  background: var(--panel); border: 1px solid rgb(var(--border-rgb)); box-shadow: var(--card-shadow);
+}
+.rt-ticket .text-paper\/70, .rt-ticket .text-paper\/50, .rt-ticket .text-paper\/40 { color: rgb(var(--muted-rgb)); }
+.rt-ticket .border-white\/10 { border-color: rgb(var(--border-strong-rgb)); }
+.rt-ticket label { font-size: 0.75rem; font-weight: 600; color: rgb(var(--muted-rgb)); text-transform: none; }
+.rt-ticket input, .rt-ticket select { min-height: 44px; }
+.rt-ticket .rt-side { display: flex; gap: 4px; padding: 4px; border-radius: 13px; background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb)); }
+.rt-ticket .rt-side button { min-height: 40px; border-radius: 10px; font-weight: 800; letter-spacing: 0.03em; }
+html.light .rt-ticket [class~="text-white"] { color: rgb(var(--fg-rgb)); }
+
+/* ── 13. Mobile (phones & small tablets) ─────────────────────────────── */
+@media (max-width: 767px) {
+  body { font-size: 0.9375rem; }
+  .terminal-main { padding-left: 0.9rem !important; padding-right: 0.9rem !important; padding-top: 0.9rem; padding-bottom: calc(6.75rem + var(--safe-b)); }
+  .page-title { font-size: 1.4rem; }
+  .page-header { margin-bottom: 1rem; }
+
+  /* Top bar: brand mark + app name + current page, status + search on the right */
+  .terminal-topbar {
+    padding: calc(0.5rem + var(--safe-t)) 0.75rem 0.5rem;
+    background: var(--glass);
+    backdrop-filter: blur(16px) saturate(150%);
+    border-bottom: 1px solid rgb(var(--border-rgb));
+  }
+  .mobile-menu-btn { width: 42px; height: 42px; border-radius: 13px; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-rgb)); }
+  .mtb-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+  .mtb-app { font-size: 0.95rem; font-weight: 800; letter-spacing: -0.02em; color: rgb(var(--fg-rgb)); }
+  .mtb-page { font-size: 0.72rem; color: rgb(var(--muted-rgb)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 38vw; }
+  .terminal-topbar .icon-btn { width: 42px; height: 42px; }
+  .terminal-topbar .status-chip { min-height: 34px; padding: 0.25rem 0.6rem; }
+
+  /* Floating pill tab bar */
+  .terminal-bottom-nav {
+    left: 0.65rem; right: 0.65rem; bottom: calc(0.55rem + var(--safe-b));
+    padding: 0.35rem;
+    gap: 2px;
+    border: 1px solid rgb(var(--border-strong-rgb));
+    border-radius: 24px;
+    background: rgb(var(--panel-rgb) / 0.88);
+    backdrop-filter: blur(20px) saturate(160%);
+    box-shadow: 0 18px 44px rgb(var(--shadow-rgb) / 0.38), 0 1px 0 rgb(255 255 255 / 0.05) inset;
+  }
+  .terminal-bottom-nav button {
+    position: relative; flex: 1; min-width: 0; min-height: 54px;
+    padding: 0.3rem 0.1rem;
+    border-radius: 18px;
+    font-size: 0.66rem; font-weight: 600; letter-spacing: 0; text-transform: none;
+    color: rgb(var(--muted-rgb));
+  }
+  .terminal-bottom-nav button > * { position: relative; z-index: 1; }
+  .terminal-bottom-nav button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .terminal-bottom-nav button.active { color: rgb(var(--accent-rgb)); font-weight: 700; }
+  .terminal-bottom-nav button.active::before {
+    content: ""; position: absolute; inset: 3px 4px; border-radius: 16px;
+    background: rgb(var(--accent-rgb) / 0.15);
+  }
+  .terminal-bottom-nav .nav-icon { width: 22px; height: 22px; }
+
+  /* Slide-over menu */
+  .mobile-drawer-panel {
+    width: min(88vw, 330px); max-width: 330px;
+    border-radius: 0 26px 26px 0;
+    background: rgb(var(--panel-rgb));
+    border-right: 1px solid rgb(var(--border-strong-rgb));
+    padding-top: var(--safe-t);
+  }
+  .mobile-drawer-backdrop { background: rgb(var(--bg-rgb) / 0.7); backdrop-filter: blur(5px); }
+  .mobile-drawer-head { padding: 1rem 1rem 0.85rem; border-bottom: 1px solid rgb(var(--border-rgb)); }
+  .mobile-drawer-head .drawer-brand { display: flex; align-items: center; gap: 0.7rem; min-width: 0; }
+  .mobile-drawer-nav { padding: 0.35rem 0.65rem 0.75rem; gap: 3px; }
+  .mobile-drawer-group {
+    margin: 1rem 0.7rem 0.3rem; font-size: 0.68rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.08em; color: rgb(var(--muted-2-rgb));
+  }
+  .mobile-drawer-link { min-height: 48px; padding: 0.6rem 0.8rem; border-radius: 14px; font-size: 0.95rem; font-weight: 500; color: rgb(var(--fg-rgb)); }
+  .mobile-drawer-link:hover { background: rgb(var(--accent-rgb) / 0.08); }
+  .mobile-drawer-link.active {
+    background: linear-gradient(90deg, rgb(var(--accent-rgb) / 0.2), rgb(var(--accent-rgb) / 0.07));
+    color: rgb(var(--fg-rgb)); font-weight: 700;
+  }
+  .mobile-drawer-link.active .nav-icon { color: rgb(var(--accent-rgb)); }
+  .mobile-drawer-foot { padding: 0.5rem 0.65rem calc(0.75rem + var(--safe-b)); }
+
+  /* Command palette becomes a near-full-width sheet */
+  .cmdk-panel { width: calc(100vw - 1.25rem) !important; max-width: none; border-radius: 20px; }
+
+  /* Sub-tabs scroll edge-to-edge */
+  .subtabs { margin-left: -0.15rem; margin-right: -0.15rem; border-radius: 15px; }
+  .subtab { min-height: 42px; padding: 0.45rem 0.85rem; }
+
+  /* Toast sits above the floating tab bar */
+  .fixed.top-4.right-4 { top: calc(0.75rem + var(--safe-t)) !important; right: 0.75rem !important; left: 0.75rem !important; }
+
+  /* ── Real Auto Trade ── */
+  .rt-head { flex-direction: column; align-items: stretch; gap: 0.7rem; }
+  .rt-seg { width: 100%; }
+  .rt-seg-btn { flex: 1; min-height: 44px; }
+  .rt-login { padding: 1.1rem; border-radius: 20px; max-width: none; }
+  .rt-session { flex-wrap: wrap; }
+  .rt-inline-row { flex-direction: column; }
+  .rt-inline-row .rt-btn { width: 100%; }
+
+  /* Touch targets inside the Real Trade page */
+  .rt-page button:not(.subtab):not(.rt-seg-btn):not(.rt-btn) { min-height: 38px; }
+  .rt-page .grid-cols-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .rt-page .grid-cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rt-page .grid > *, .rt-page .flex-1 { min-width: 0; }
+  .rt-page table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  .rt-page pre, .rt-page code { white-space: pre-wrap; word-break: break-word; }
+
+  /* Any tab: wide tables scroll inside their card instead of breaking the page */
+  .terminal-main table { max-width: 100%; }
+  .scan-table-wrap, .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+}
+
+@media (max-width: 380px) {
+  .rt-seg-btn { min-width: 0; padding: 0.4rem 0.5rem; }
+  .rt-title-text { font-size: 1.05rem; }
+  .terminal-bottom-nav button { font-size: 0.62rem; }
+  .mtb-page { max-width: 28vw; }
+}
+
+/* Larger screens: roomier cards and a tidier Real Trade header */
+@media (min-width: 1024px) {
+  .terminal-main { padding-left: 2rem !important; padding-right: 2rem !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-main > *, .animate-fadeIn { animation: none !important; }
+  button:not(:disabled):active { transform: none; }
+}
+
+/* Ticket action buttons: bigger, thumb-friendly confirm / cancel */
+.rt-ticket button { min-height: 44px; border-radius: 12px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   14. Second pass — the rest of the app (2026-10-16)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.rt-updated { font-size: 0.72rem; color: rgb(var(--muted-2-rgb)); white-space: nowrap; flex: none; }
+.ps-head { align-items: center; }
+
+/* Bottom sheets (Buy Sniper, Services, stock popup …) — rounder, safe-area aware, bigger close target */
+[role="dialog"][aria-modal="true"].fixed > div { box-shadow: 0 -12px 48px rgb(var(--shadow-rgb) / 0.4); }
+[role="dialog"][aria-modal="true"] > .bg-graphite { border-color: rgb(var(--border-strong-rgb)) !important; }
+[role="dialog"][aria-modal="true"] button[aria-label="Close"] {
+  min-width: 40px; min-height: 40px; border-radius: 12px; display: inline-grid; place-items: center;
+}
+.balance-modal-overlay { background: rgb(var(--bg-rgb) / 0.7); backdrop-filter: blur(6px); }
+.balance-modal-grid strong { font-weight: 800; }
+
+/* Notification channel cards & settings forms */
+.terminal-main label { font-size: 0.78rem; }
+.terminal-main input[type="checkbox"], .terminal-main input[type="radio"] { accent-color: rgb(var(--accent-rgb)); }
+.terminal-main input[type="range"] { accent-color: rgb(var(--accent-rgb)); }
+
+/* Chips & toggles */
+.scanner-chip, .dash-lite-toggle { border-radius: 999px; }
+.scanner-chip { border-color: rgb(var(--border-strong-rgb)); }
+
+/* Section titles get a little accent tick so long pages scan faster */
+.dash-section-title, .hot-section-title { display: flex; align-items: center; gap: 0.5rem; }
+.dash-section-title::before, .hot-section-title::before {
+  content: ""; flex: none; width: 4px; height: 1em; border-radius: 3px;
+  background: linear-gradient(180deg, rgb(var(--accent-rgb)), rgb(var(--accent-2-rgb)));
+}
+
+/* Footer */
+.app-footer { border-top-color: rgb(var(--border-rgb)) !important; }
+
+@media (max-width: 767px) {
+  /* Every wide table scrolls inside its card (Scan, IPO health, Data audit were unwrapped) */
+  .terminal-main table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .terminal-main table th, .terminal-main table td { white-space: nowrap; }
+  .terminal-main table td.whitespace-normal, .terminal-main table td.break-words { white-space: normal; }
+
+  /* Bottom sheets: clear the home indicator and never exceed the screen */
+  [role="dialog"][aria-modal="true"].fixed { padding-bottom: 0; }
+  [role="dialog"][aria-modal="true"] .overflow-y-auto { padding-bottom: var(--safe-b); }
+  [role="dialog"][aria-modal="true"] > div { max-height: min(92dvh, 92vh); }
+  .balance-modal { width: calc(100vw - 1.5rem); }
+
+  /* Bigger, calmer controls on touch */
+  .terminal-main .btn-terminal, .terminal-main .btn-primary-term, .terminal-main .scan-action-btn,
+  .terminal-main .btn-scan-lite, .terminal-main .btn-scan-full { min-height: 44px; }
+  .terminal-main select { padding-right: 2rem; }
+  .terminal-main .flex.flex-wrap { row-gap: 0.5rem; }
+
+  /* Page title row with a trailing action stays on one line and truncates instead of overflowing */
+  .page-title, .rt-title-text { overflow-wrap: anywhere; }
+  .ps-head { flex-direction: row; align-items: center; }
+  .ps-head .rt-updated { align-self: flex-start; padding-top: 0.2rem; }
+
+  /* Cards use the full width; images/charts never push the page sideways */
+  .terminal-main img, .terminal-main svg, .terminal-main canvas { max-width: 100%; }
+  .recharts-wrapper { max-width: 100%; }
+}
+
+/* Very small phones */
+@media (max-width: 360px) {
+  .terminal-main { padding-left: 0.7rem !important; padding-right: 0.7rem !important; }
+  .rt-page .grid-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-title { font-size: 1.25rem; }
+}
+
+/* Landscape phones: keep the floating tab bar from eating the screen */
+@media (max-width: 900px) and (max-height: 480px) {
+  .terminal-bottom-nav button { min-height: 44px; }
+  .terminal-bottom-nav button span { display: none; }
+  .terminal-main { padding-bottom: calc(5rem + var(--safe-b)); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   15. Every screen size (2026-10-16)
+
+     phone       < 768     floating tab bar + drawer           (section 13)
+     tablet      768–1023  72px icon rail, trimmed top bar
+     laptop      1024–1439 full sidebar
+     desktop     ≥ 1440    wider, centred content column
+     large/4K    ≥ 2200    root font scales up (rem-based UI grows with it)
+     TV          html.tv   10-foot UI: big type, remote focus ring, safe
+                           margins, lighter rendering (auto-detected, or ?tv=1)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root { --content-max: 72rem; }
+
+/* ── Tablet: icon rail instead of a 256px sidebar ── */
+@media (min-width: 768px) and (max-width: 1023px) {
+  html:not(.tv) { --sidebar-w: 76px; }
+  html:not(.tv) .sidebar-brand { justify-content: center; padding: 1rem 0 0.75rem; }
+  html:not(.tv) .sidebar-brand > div { display: none; }
+  html:not(.tv) .sidebar-nav { padding: 0.25rem 0.6rem 0.75rem; }
+  html:not(.tv) .sidebar-group-label { height: 1px; margin: 0.7rem 0.4rem; padding: 0; font-size: 0; background: rgb(var(--border-rgb)); }
+  html:not(.tv) .sidebar-link { justify-content: center; gap: 0; padding: 0.65rem 0; font-size: 0; min-height: 44px; }
+  html:not(.tv) .sidebar-link .nav-icon { width: 22px; height: 22px; }
+  html:not(.tv) .sidebar-link .kbd, html:not(.tv) .sidebar-link .nav-badge { display: none; }
+  html:not(.tv) .sidebar-link.active::before { left: -0.6rem; }
+  html:not(.tv) .sidebar-footer { padding: 0.5rem 0.6rem 0.8rem; }
+
+  .app-topbar { padding-left: 1rem; padding-right: 1rem; gap: 0.5rem; }
+  .topbar-search { flex: 1 1 0; }
+  .topbar-search .kbd, .app-topbar .topbar-clock, .app-topbar .chip-db { display: none; }
+  .terminal-main { padding-left: 1.25rem !important; padding-right: 1.25rem !important; }
+  .page-title { font-size: 1.5rem; }
+  .rt-seg-btn { min-width: 80px; }
+}
+
+/* ── Laptop → desktop: centre a wider content column beside the sidebar ── */
+@media (min-width: 1440px) {
+  :root { --content-max: 90rem; }
+  .terminal-shell .terminal-main {
+    max-width: var(--content-max);
+    margin-left: calc(var(--sidebar-w) + max(0px, (100vw - var(--sidebar-w) - var(--content-max)) / 2));
+    margin-right: auto;
+  }
+  .app-footer { padding-left: calc(max(0px, (100vw - var(--sidebar-w) - var(--content-max)) / 2) + 1.5rem); }
+  .rt-page.max-w-5xl { max-width: 80rem; }
+}
+
+/* ── Large monitors / 4K: scale the whole rem-based UI ── */
+@media (min-width: 2200px) { html { font-size: 112.5%; } :root { --content-max: 100rem; } }
+@media (min-width: 2800px) { html { font-size: 125%; } :root { --content-max: 110rem; } }
+@media (min-width: 3400px) { html { font-size: 156%; } :root { --content-max: 110rem; } }
+
+/* ── TV / 10-foot UI ── */
+html.tv {
+  font-size: 125%;
+  --sidebar-w: 17rem;
+  --topbar-h: 4rem;
+  --content-max: 100rem;
+}
+@media (min-width: 1700px) { html.tv { font-size: 140%; } }
+@media (min-width: 2800px) { html.tv { font-size: 200%; } }
+
+/* safe margins so nothing sits in the overscan zone */
+html.tv .terminal-main { padding: 3vh 3.5vw 5vh !important; max-width: var(--content-max); }
+html.tv .app-topbar { padding-left: 3vw; padding-right: 3vw; }
+
+/* remote / D-pad focus: unmistakable and never clipped */
+html.tv :focus-visible {
+  outline: 3px solid rgb(var(--accent-rgb));
+  outline-offset: 3px;
+  box-shadow: 0 0 0 7px rgb(var(--accent-rgb) / 0.28);
+  border-radius: 12px;
+  z-index: 2;
+}
+html.tv button:focus-visible, html.tv [role="button"]:focus-visible, html.tv .sidebar-link:focus-visible { transform: scale(1.03); }
+html.tv input:focus-visible, html.tv select:focus-visible, html.tv textarea:focus-visible { outline-width: 3px; }
+
+/* big, easy targets */
+html.tv .sidebar-link { min-height: 3.2rem; font-size: 1rem; padding: 0.7rem 0.9rem; }
+html.tv .sidebar-group-label { font-size: 0.8rem; }
+html.tv .subtab { min-height: 3.2rem; font-size: 1rem; }
+html.tv .rt-btn, html.tv .btn-terminal, html.tv .btn-primary-term, html.tv .rt-seg-btn { min-height: 3.2rem; }
+html.tv input[type="text"], html.tv input[type="password"], html.tv input[type="number"], html.tv input[type="search"], html.tv select { min-height: 3.2rem; font-size: 1rem; }
+html.tv .page-title { font-size: 2rem; }
+html.tv .page-desc { font-size: 1rem; max-width: 60rem; }
+html.tv .rt-login { max-width: 38rem; }
+html.tv .rt-title-text { font-size: 1.5rem; }
+html.tv .rt-stat-value { font-size: 1.6rem; }
+html.tv .term-table th, html.tv .term-table td { padding: 0.8rem 1rem; }
+
+/* TV SoCs are slow: drop blur and entrance animation, use solid surfaces */
+html.tv *, html.tv *::before, html.tv *::after { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+html.tv .terminal-sidebar { background: rgb(var(--panel-rgb)); }
+html.tv .app-topbar { background: rgb(var(--bg-rgb)); }
+html.tv .terminal-shell { background: var(--bg); background-attachment: scroll; }
+html.tv .terminal-main > *, html.tv .animate-fadeIn { animation: none; }
+html.tv * { scrollbar-width: none; }
+html.tv *::-webkit-scrollbar { display: none; }
+html.tv .hot-card:hover, html.tv .conviction-card:hover { transform: none; }
+
+/* a 960×540 TV (1920×1080 at 2× DPR) lands in the tablet range: keep the full sidebar there */
+@media (min-width: 768px) and (max-width: 1023px) {
+  html.tv .terminal-main { padding-left: 3vw !important; padding-right: 3vw !important; }
+}
+
+/* TV: icons grow with the type */
+html.tv .nav-icon { width: 1.35rem; height: 1.35rem; }
+html.tv .rt-title-icon, html.tv .rt-login-icon, html.tv .brand-mark { width: 3rem; height: 3rem; }
+html.tv .rt-title-icon .nav-icon, html.tv .rt-login-icon .nav-icon { width: 1.5rem; height: 1.5rem; }
+html.tv .status-chip { font-size: 0.9rem; padding: 0.45rem 0.9rem; }
+html.tv .topbar-clock { font-size: 1rem; }

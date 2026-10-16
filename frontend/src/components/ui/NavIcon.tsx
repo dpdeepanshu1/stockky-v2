@@ -3,7 +3,7 @@
 // (theme-aware, and the active colour comes from CSS).
 export type IconName =
   | "home" | "bot" | "trend" | "flame" | "zap" | "tag" | "swap" | "star" | "bell"
-  | "database" | "flask" | "sliders" | "search" | "menu" | "sun" | "moon" | "layers" | "x";
+  | "database" | "flask" | "sliders" | "search" | "menu" | "sun" | "moon" | "layers" | "x" | "lock";
 
 const PATHS: Record<IconName, string> = {
   home: "M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z",
@@ -24,6 +24,7 @@ const PATHS: Record<IconName, string> = {
   moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
   layers: "M12 3l9 5-9 5-9-5z M3 13l9 5 9-5",
   x: "M6 6l12 12 M18 6L6 18",
+  lock: "M6 11h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z M8 11V8a4 4 0 0 1 8 0v3 M12 15v2",
 };
 
 export function NavIcon({ name, className = "nav-icon" }: { name: IconName; className?: string }) {

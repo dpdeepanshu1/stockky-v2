@@ -1297,6 +1297,9 @@ BROKER_STOP_MIN_MOVE_PCT = max(0.0, _bs_float("BROKER_STOP_MIN_MOVE_PCT", 0.25))
 BROKER_STOP_SYNC_SECONDS = max(5, _bs_int("BROKER_STOP_SYNC_SECONDS", 60))
 BROKER_STOP_CANCEL_MAX_FAILS = max(1, _bs_int("BROKER_STOP_CANCEL_MAX_FAILS", 3))
 BROKER_STOP_ALERT_COOLDOWN_S = max(0, _bs_int("BROKER_STOP_ALERT_COOLDOWN_S", 900))
+# After Dhan refuses a broker stop for a CDSL eDIS / TPIN reason, that symbol is not sent to Dhan again for this many seconds
+# (a retry cannot succeed until the user completes 'Verify Holdings' in the Dhan app), then it is tried once more. 0 = no backoff.
+BROKER_STOP_EDIS_BACKOFF_S = max(0, _bs_int("BROKER_STOP_EDIS_BACKOFF_S", 900))
 BROKER_STOP_ORDER_TYPE = ((os.getenv("BROKER_STOP_ORDER_TYPE") or "").strip() or "STOP_LOSS_MARKET").upper()
 if BROKER_STOP_ORDER_TYPE not in ("STOP_LOSS_MARKET", "STOP_LOSS"):
     BROKER_STOP_ORDER_TYPE = "STOP_LOSS_MARKET"

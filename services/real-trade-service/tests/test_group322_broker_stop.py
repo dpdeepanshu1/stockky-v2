@@ -395,3 +395,177 @@ def test_alert_failure_never_breaks_placement_path(rig, monkeypatch):
 
     monkeypatch.setattr(notifier, "notify_fire_and_forget", bad)
     assert sync(db, [pos(db)])["failed"] == 1
+
+
+# ---- group411: eDIS backoff + SL-M learning (the ABDL retry storm) ----------------------------
+
+EDIS_ERR = "Dhan API error: Insufficient Holding Quantity"
+
+
+def _abdl_like_dhan(monkeypatch, calls, edis_active=None):
+    """Fake Dhan exactly as in the live log: STOP_LOSS_MARKET -> trigger-price error, STOP_LOSS -> eDIS refusal
+    (until `edis_active['on']` is switched off, i.e. the user completed 'Verify Holdings')."""
+    edis_active = edis_active if edis_active is not None else {"on": True}
+    n = {"i": 0}
+
+    def fake(db_, **kw):
+        calls.append(kw["order_type"])
+        if kw["order_type"] == "STOP_LOSS_MARKET":
+            raise RuntimeError(TRIG_ERR)
+        if edis_active["on"]:
+            raise RuntimeError(EDIS_ERR)
+        n["i"] += 1
+        return {"orderId": f"BS{n['i']}"}
+
+    monkeypatch.setattr(dhan_client, "place_order", fake)
+    return edis_active
+
+
+def test_edis_refusal_backs_off_instead_of_resending_every_pass(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    calls = []
+    _abdl_like_dhan(monkeypatch, calls)
+    p = pos(db)
+    t = sync(db, [p], now=1000.0)
+    assert t["failed"] == 1 and t["backoff"] == 0
+    assert calls == ["STOP_LOSS_MARKET", "STOP_LOSS"]          # the one real attempt
+    for now in (1010.0, 1100.0, 1899.0):                          # still inside the 900 s window
+        t = sync(db, [p], now=now)
+        assert t["failed"] == 1 and t["backoff"] == 1 and t["placed"] == 0
+    assert calls == ["STOP_LOSS_MARKET", "STOP_LOSS"]          # Dhan was NOT called again
+    assert B.edis_backoff_left("ABC", now=1100.0) > 0
+
+
+def test_edis_backoff_expires_and_self_heals_after_authorisation(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    calls = []
+    edis = _abdl_like_dhan(monkeypatch, calls)
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    assert sync(db, [p], now=1500.0)["backoff"] == 1
+    edis["on"] = False                                           # user completes Verify Holdings in the Dhan app
+    t = sync(db, [p], now=1901.0)                                # window over -> one more try
+    assert t["placed"] == 1 and t["failed"] == 0
+    assert B.open_stop(db, "ABC").order_type == "STOP_LOSS"
+    assert B.edis_backoff_left("ABC", now=1902.0) == 0
+    assert sync(db, [p], now=1960.0)["kept"] == 1                # resting stop exists now
+
+
+def test_edis_backoff_zero_keeps_the_old_every_pass_behaviour(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 0)
+    calls = []
+    _abdl_like_dhan(monkeypatch, calls)
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    t = sync(db, [p], now=1010.0)
+    assert t["backoff"] == 0 and t["failed"] == 1
+    assert len(calls) >= 3                                       # Dhan is called again on the second pass
+
+
+def test_edis_backoff_is_per_symbol(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    seen = []
+
+    def fake(db_, **kw):
+        seen.append((kw["security_id"], kw["order_type"]))
+        if kw["security_id"] == "111":
+            raise RuntimeError(EDIS_ERR)
+        return {"orderId": "OK1"}
+
+    monkeypatch.setattr(dhan_client, "place_order", fake)
+    monkeypatch.setattr(dhan_client, "get_security_id", lambda db_, sym: "111" if sym == "AAA" else "222")
+    a, b = pos(db, symbol="AAA"), pos(db, symbol="BBB")
+    t = sync(db, [a, b], now=1000.0)
+    assert t["placed"] == 1 and t["failed"] == 1                 # BBB got its stop, AAA was refused
+    t = sync(db, [a, b], now=1010.0)
+    assert t["backoff"] == 1 and t["kept"] == 1                  # only AAA is backed off; BBB keeps its stop
+
+
+def test_edis_backoff_forgotten_when_position_is_gone(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    _abdl_like_dhan(monkeypatch, [])
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    assert B.edis_backoff_left("ABC", now=1001.0) > 0
+    sync(db, [], now=1010.0)                                     # position closed
+    assert B.edis_backoff_left("ABC", now=1011.0) == 0
+
+
+def test_non_edis_failure_is_not_backed_off(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    st.place_error = RuntimeError("some other broker error")
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    assert sync(db, [p], now=1010.0)["backoff"] == 0             # transient errors are still retried every pass
+
+
+def test_stop_limit_learned_after_first_trigger_price_rejection(rig, monkeypatch):
+    db, st = rig
+    calls = []
+
+    def fake(db_, **kw):
+        calls.append(kw["order_type"])
+        if kw["order_type"] == "STOP_LOSS_MARKET":
+            raise RuntimeError(TRIG_ERR)
+        return {"orderId": f"S{len(calls)}"}
+
+    monkeypatch.setattr(dhan_client, "place_order", fake)
+    a, b = pos(db, symbol="AAA"), pos(db, symbol="BBB")
+    assert sync(db, [a], now=1000.0)["placed"] == 1
+    assert calls == ["STOP_LOSS_MARKET", "STOP_LOSS"]
+    assert sync(db, [a, b], now=1010.0)["placed"] == 1           # BBB: straight to STOP_LOSS, no doomed SL-M first
+    assert calls[2:] == ["STOP_LOSS"]
+
+
+def test_slm_learning_is_set_when_stop_limit_fails_for_edis_not_for_trigger(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 0)
+    calls = []
+    _abdl_like_dhan(monkeypatch, calls)
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    sync(db, [p], now=1010.0)
+    assert calls == ["STOP_LOSS_MARKET", "STOP_LOSS", "STOP_LOSS"]  # second pass skips the SL-M that is known to fail
+
+
+def test_slm_not_learned_when_stop_limit_also_hits_the_trigger_error(rig, monkeypatch):
+    db, st = rig
+    calls = []
+
+    def fake(db_, **kw):
+        calls.append(kw["order_type"])
+        raise RuntimeError(TRIG_ERR)
+
+    monkeypatch.setattr(dhan_client, "place_order", fake)
+    p = pos(db)
+    sync(db, [p], now=1000.0)
+    sync(db, [p], now=1010.0)
+    assert calls == ["STOP_LOSS_MARKET", "STOP_LOSS", "STOP_LOSS_MARKET", "STOP_LOSS"]  # nothing was learned
+
+
+def test_configured_stop_limit_is_not_resent_unchanged_on_trigger_error(rig, monkeypatch):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_ORDER_TYPE", "STOP_LOSS")
+    calls = []
+
+    def fake(db_, **kw):
+        calls.append(kw["order_type"])
+        raise RuntimeError(TRIG_ERR)
+
+    monkeypatch.setattr(dhan_client, "place_order", fake)
+    assert sync(db, [pos(db)])["failed"] == 1
+    assert calls == ["STOP_LOSS"]                                # was sent twice before group411
+
+
+def test_edis_alert_tells_the_user_what_to_do(rig, monkeypatch):
+    db, st = rig
+    _abdl_like_dhan(monkeypatch, [])
+    sync(db, [pos(db)], now=1000.0)
+    assert len(st.alerts) == 1
+    assert "Verify Holdings" in st.alerts[0] and "software stop" in st.alerts[0] and "ABC" in st.alerts[0]

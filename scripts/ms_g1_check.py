@@ -91,6 +91,8 @@ def check_invariance(bars: Sequence[Sequence[float]], p: MSParams, cuts: int = 6
         pre = events_fn(bars[:k], p)
         if pre["start_ts"] is None or full["start_ts"] is None:
             continue
+        if pre.get("quality") == "insufficient":
+            continue                      # fewer than min_bars after the last corporate action: the engine makes no claim there, so there is nothing to compare
         floor, last = max(pre["start_ts"], full["start_ts"]), pre["last_ts"]
         want_sw = {key for key in pre["swings"] if key[0] >= floor}
         got_sw = {key for key, conf in full["swings"].items() if key[0] >= floor and conf <= last}

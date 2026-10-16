@@ -7,6 +7,7 @@
 #
 # Env: SEEDS="7 11 13"   one random sample per seed (same seed = same symbols); the A/B verdict must hold on every one
 #      LIMIT=400         symbols per sample (lower it, e.g. 150, if the market-data host rate limits)
+#      JOBS=N            parallel workers for the A/B replay (default: all CPUs);  smaller LIMIT / larger STEP = faster
 #      SYMBOLS=A,B,..    use these instead of the universe;  OUT_DIR=./calibration_out;  PERIOD=5y;  STEP=3;  HORIZON=10
 #      LIVE_REPORT_URL   GET /api/structure/report of decision-prediction (adds the G4 live check)
 #      PS_STATUS_URL     http://localhost:8006/board/status (adds the legacy-removal parity verdict); PS_TOKEN if it needs a bearer token
@@ -26,6 +27,7 @@ LIMIT="${LIMIT:-400}"
 PERIOD="${PERIOD:-5y}"
 STEP="${STEP:-3}"
 HORIZON="${HORIZON:-10}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 DRY_RUN="${DRY_RUN:-0}"
 MARKET_DATA_URL="${MARKET_DATA_URL:-http://localhost:8001}"
 API_GATEWAY_URL="${API_GATEWAY_URL:-http://localhost:8000}"
@@ -55,7 +57,7 @@ main() {
     [[ -z "$first" ]] && first="$hist"
     run "$PY" "$SCRIPTS/fetch_history_for_backtest.py" "$hist" "${src[@]}" --period "$PERIOD" --sample "$LIMIT" --seed "$seed" \
         --manifest "$OUT_DIR/sample_manifest_$seed.json" --sleep 1.5 || continue
-    run "$PY" "$SCRIPTS/ms_ab_report.py" "$hist" --out "$ab" --step "$STEP" --horizon "$HORIZON" && ab_args+=(--ab "$ab/ab_report.json")
+    run "$PY" "$SCRIPTS/ms_ab_report.py" "$hist" --out "$ab" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" && ab_args+=(--ab "$ab/ab_report.json")
   done
   if [[ -z "$first" ]]; then echo "no seeds given"; FAILED+=("no seeds"); return 1; fi
 

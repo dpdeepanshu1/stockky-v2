@@ -74,3 +74,13 @@ if __name__ == "__main__":
             v()
             n += 1
     print(f"{n} passed")
+
+
+def test_a_split_just_before_a_cut_is_not_a_violation():
+    """Real VM run (group 405): a split 30-50 bars before a cut leaves the prefix with < min_bars in its segment, the engine returns nothing for it
+    (quality `insufficient`) while the full run has more bars. That is not look-ahead: only cuts where the prefix makes a claim are compared."""
+    from _bars import scale
+    p = MSParams()
+    for jump_at in (30, 45, 100, 300):
+        b = walk(500, seed=3)
+        assert g.check_invariance(b[:jump_at] + scale(b[jump_at:], 0.5), p, 6) == [], jump_at

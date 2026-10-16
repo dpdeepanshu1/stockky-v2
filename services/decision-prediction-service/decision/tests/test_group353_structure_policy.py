@@ -169,7 +169,8 @@ def test_prepare_arithmetic_is_active_hard_rule_failure_goes_to_wait():
     assert sp.apply_policy("PREPARE TO BUY", _sum(ms_groups=1), 100.0)["decision"] == "PREPARE TO BUY"
 
 
-def test_p9_upgrade_prepare_to_buy_now_when_trigger_and_all_requirements_met():
+def test_p9_upgrade_prepare_to_buy_now_when_trigger_and_all_requirements_met(monkeypatch):
+    monkeypatch.setenv("STRUCTURE_PREPARE_UPGRADE", "1")   # group415: the upgrade is opt-in
     r = sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1), 100.0, legacy={"stop_loss": 95.0, "target": 110.0})
     assert r["decision"] == "BUY NOW" and r["structure"]["applied"] is True and r["structure"]["rules"][0]["id"] == "P9_UPGRADE"
     assert r["levels"] == {"stop_loss": 96.0, "target": 108.0}
@@ -181,6 +182,22 @@ def test_p9_upgrade_prepare_to_buy_now_when_trigger_and_all_requirements_met():
 def test_p9_upgrade_kill_switch(monkeypatch):
     monkeypatch.setenv("STRUCTURE_PREPARE_UPGRADE", "0")
     assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1), 100.0)["decision"] == "PREPARE TO BUY"
+
+
+def test_group415_p9_upgrade_is_off_by_default_and_opt_in(monkeypatch):
+    """The A/B verdict is no_edge (gate G2 not met), so the PREPARE -> BUY NOW upgrade needs an explicit STRUCTURE_PREPARE_UPGRADE=1."""
+    monkeypatch.delenv("STRUCTURE_PREPARE_UPGRADE", raising=False)
+    assert sp.prepare_upgrade_enabled() is False
+    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1), 100.0)["decision"] == "PREPARE TO BUY"
+    for v in ("1", "true", "ON", "yes"):
+        monkeypatch.setenv("STRUCTURE_PREPARE_UPGRADE", v)
+        assert sp.prepare_upgrade_enabled() is True
+        assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1), 100.0)["decision"] == "BUY NOW"
+    for v in ("", "0", "off", "garbage"):
+        monkeypatch.setenv("STRUCTURE_PREPARE_UPGRADE", v)
+        assert sp.prepare_upgrade_enabled() is False
+    monkeypatch.delenv("STRUCTURE_PREPARE_UPGRADE", raising=False)
+    assert sp.apply_policy("PREPARE TO BUY", _sum(), 108.0)["decision"] == "WAIT"   # demotion rules untouched
 
 
 def test_never_raises_on_garbage():

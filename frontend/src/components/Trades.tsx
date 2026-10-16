@@ -753,7 +753,9 @@ function PositionCard({
   const days = daysHeld(trade.entry_date);
   return (
     <div className="border border-slate/40 rounded-2xl overflow-hidden transition-all hover:border-slate/60">
-      <div onClick={onToggle} className="p-4 cursor-pointer flex items-center justify-between gap-4">
+      <div onClick={onToggle} role="button" tabIndex={0} aria-expanded={expanded}
+        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onToggle(); } }}
+        className="p-4 cursor-pointer flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
           <div className={`w-1.5 h-10 rounded-full shrink-0 ${isUp ? "bg-signal-buy" : "bg-signal-sell"}`} />
           <div className="min-w-0">

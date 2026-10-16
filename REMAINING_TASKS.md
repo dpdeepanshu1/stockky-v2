@@ -1,43 +1,47 @@
-> NOTE (group 412): Railtel delivery stop rejected 86x with EXCH:16283 (tick size). Stop/trigger prices now use a tick >= 0.05 in real-trade and position-stocks (`round_stop_to_tick`), and a tick-size rejection backs off like eDIS. Entry/target rounding still uses the 0.01 band below Rs 250 - grep the logs for 16283 after the next session; see docs/GROUP412_STOP_TICK_SIZE.md.
+# Remaining tasks (rewritten in group 416, after group 415)
 
-> NOTE (group 376): deploy the rename (decision-prediction-service rebuild) AFTER market close; then confirm `GET /training/api/structure/observations` answers and `POST /training/api/evaluate/structure` runs. Next backtest target: the legacy candidate gates (52w top-12% rule, weighted bullish score, volume ratio), which cause most 'no stock' days and were never tested.
-> NOTE (group 375): the backtest/calibration tooling now exists (`structure-backtest.yml`, `scripts/ms_ab_report.py`); First real run: `no_edge` (edge +0.54 pp, CI [-0.01, 1.29], 9.4% of baseline days kept). Re-run on a random 400-symbol sample before touching any threshold.
-> NOTE (group 374): structure refresh is scheduled (`.github/workflows/structure-refresh.yml`), the PREPARE refresh now selects structure-event rows (`SNIPER_PREPARE_STRUCTURE_MODE=live`), and every decision with usable structure is logged to `structure_observations` and scored at T+1/5/10/20 (`/api/evaluate/structure`, `/api/structure/report`). Still open: backtest/calibration on real data, ML features, weekly/intraday structure. See docs/GROUP374_*.md.
+The earlier list in this file (market-structure engine, "after group 349") described work that now exists: the policy
+(`structure_policy.py`), the real-trade gate, the frontend panel, observation logging, the backtest tooling and the retest
+branch. It was deleted rather than patched. Current state of the engine: `docs/GROUP339_MARKET_STRUCTURE_ENGINE.md`.
+Current defaults: `docs/GROUP415_EVIDENCE_GATED_STRUCTURE_DEFAULTS.md`.
 
-> NOTE (group 371): the Buy Sniper structure gate is rebuilt in buy_sniper.py and wired (route fetch, observation record, edge report, tick action). Structure rules are always live (no shadow mode). Group 372 hooked the gateway structure_refresh job and the PREPARE notes. Position-stocks observation hook done (group 372 update). Frontend badge labels done in group 373. Still open: backtest on real data. Board A/B code landed in position-stocks (read the verdict in /board/status after a live session). See docs/GROUP370_*.md, GROUP371_*.md and GROUP372_*.md.
+## Evidence gates (decide whether the structure rules earn their place)
+| Gate | Status |
+|---|---|
+| G1 correctness | Not verified on real data: corporate actions on >= 10 real splits/bonuses, truncation invariance, `/analyze` p95 latency |
+| G2 benefit | Not met. A/B verdict `no_edge` (group 375: +0.54 pp, CI [-0.01, 1.29]; group 410: +0.35 pp, CI [-1.63, 2.44], 71 signals) |
+| G3 stability | Not started |
+| G4 live | Not enough observed days |
 
-> NOTE (group 369): items below about a 'lost' structure_policy.py, real-trade gate and frontend are STALE - those exist now. See docs/GROUP369_*.md for the current open list.
+Until G2 passes: `STRUCTURE_PREPARE_UPGRADE`, `STRUCTURE_STOP_MODE` stay off and `STRUCTURE_EXIT_MODE` stays `log` (group 415).
+Run `scripts/structure_gate_check.py` on >= 2 seeds once the calibration run finishes (re-read seed 13's `summary.txt`; the earlier
+`no_edge` may not be from that seed).
 
-# Remaining tasks: market-structure engine (after group 349, session 4)
+## Not built
+- Intraday (15m/5m) structure features and `independent_groups` counting in `scoring.py` (the policy has its own group count).
+- Walk-forward calibration from real data; `groups_min=2` is a judgement call.
+- WS-2: position-stocks still keeps legacy board bodies behind `BOARD_USE_MS_ENGINE`.
+- Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet.
 
-## Done so far
-- Engine package `shared/market_structure/` (17 modules + `compat_board`), `analyze()` end to end, vendored into 5 services as `stockky_ms/` (`sync --check` clean).
-- **Wired (all flagged, fail-open):**
-  - position-stocks board switch (`BOARD_USE_MS_ENGINE`, default 0, legacy fallback)
-  - technical service `market_structure` + `structure_summary` on `/analyze`, `macd` / `macd_hist` / `sma20` keys, `GET /structure/{symbol}`
-  - gateway `ms_passthrough.py`, merge into `/stock/{symbol}`, `ms_*` seeding on repair, `structure_summary` in `/decide/evaluate` payload, `GET /stock/{symbol}/structure`
-- **Golden baseline:** `tests/test_engine_golden.py` + `golden/analyze_golden.json` (10 series, params hash d0042325).
-- **Tests (plain `python`, none under pytest):** package 34 + 3 golden; position-stocks 5 parity + 3 switch; technical helper 11; gateway 5.
+## Checks that need your VM / live market
+- `grep STRUCTURE_ .env` - old `STRUCTURE_EXIT_MODE=exit`, `STRUCTURE_STOP_MODE=on`, `STRUCTURE_PREPARE_UPGRADE=1`,
+  `STRUCTURE_MAX_AGE_DAYS=7` override the group 415 defaults.
+- `grep -c 16283` over 24h of logs. A hit on an entry, target or super-order leg means the 0.01 tick band below Rs 250 is wrong there too.
+- `/ops/db-latency` (Oracle writes up to 8 s seen in the exit loop).
+- REAL watchlist reject histogram; `legacy_gate_backtest.py` with a candidates `limit` above 500 (500 was returned, so counts were truncated).
+- `monday_check` during market hours on Mon 19 Oct (depth20 and session verdict are meaningless after the close).
+- Re-check `STRUCTURE_MAX_AGE_DAYS=5` in December when the 2027 NSE holiday list is out (worst 2026 case is 4.65 days on Mon 28 Dec).
+- Set `HF_MODEL` in `.env` to a model your token can use (the default Mistral-7B is rejected; no default is guessed from here).
 
-## Blocking / decisions for you
-1. ~~Confirm the 5 sync targets~~ DONE (confirmed by the owner): analysis-intelligence, api-gateway, position-stocks, decision-prediction, real-trade.
-2. The design document is lost, so thresholds in `params.py` are hypotheses. Send the original numbers if you have them.
-3. Run everything under real pytest (no network here): the new test files and the full position-stocks / analysis-intelligence / api-gateway / real-trade / decision suites. Expected failures: only the known 4 `test_oracle_compat`.
+## Known data issues
+- 28 of 150 history fetches failed (delisted, new IPOs, odd tickers): survivorship bias in the A/B.
+- The A/B baseline is a technical-only proxy, so a full-decision backtest is not possible.
+- `ms_loc_score` is not monotonic against returns (rule off since group 410).
 
-## Work list, in order
-1. **Verify on your side** (above), plus start the gateway and technical service once and hit `/stock/RELIANCE/structure` and `/technical/structure/RELIANCE`. The routes were only checked by source inspection and helper tests, not live.
-2. ~~**Technical `lite` switch + cache**~~ DONE (group 350): `lite=1` param, `tech_ms:` structure cache (`STRUCTURE_CACHE_TTL_S`), size guard (`STRUCTURE_MAX_BYTES`). Still to verify live under real FastAPI.
-3. **Board A/B:** turn `BOARD_USE_MS_ENGINE=1` on one instance, compare a day of live boards old vs new (expect only the one-bar zone difference), then decide.
-4. **Gateway scan / sniper:** the sniper chase gate and its outcome tracking are done (group 371). The post-close structure refresh job, its routes / tick action and the PREPARE refresh notes (`stockky_prepare_structure_total`) are done (group 372). Schedule the QStash tick `structure-refresh` daily after the close.
-5. **Decision service:** `structure_policy.py` (lost; rules P1-P9 from the plan) that reads `structure_summary`; shadow mode first (log only, no effect on entries), params hash logged with every decision. The decision service currently ignores the new payload key.
-6. **Training / learning:** store `params_hash`, `engine_version` and the `ms_*` keys with each training row (`StructureObservation`, T+1/5/10/20 evaluator); do not retrain on mixed versions.
-7. **real-trade:** `structure_gate.py` using `ms_loc_score` / `ms_rr` as an advisory input only, behind a flag, shadow first; `structure_json` column.
-8. **Frontend:** show trend, BOS/CHOCH, zone, FVG, sweep, levels and the `explain` text from `/stock/{symbol}/structure`; handle `quality` = limited / insufficient / stale / unavailable.
-9. **Rollout:** shadow, compare outcomes, enable per service. Review params with real data; there is no proven edge yet.
-10. **Housekeeping:** add `sync --check` and the golden test to CI / `check_shared_copies`; add `BOARD_USE_MS_ENGINE` to the env docs (it is read through `_get_bool`, so the generator misses it); `STRUCTURE_*` entries in `.env.oracle.example` / compose.
+## Not verified anywhere
+Frontend `npm run build`, Python 3.11/3.12 with pinned dependencies, real pytest runs of every suite (use `bash scripts/docker_test.sh`),
+anything needing live Dhan.
 
-## Known gaps
-- `compat_board` is rebuilt from the legacy code, not recovered; `swings()` with left/right < 1 returns [].
-- Detector and golden tests use synthetic bars, not real market data.
-- The golden file only freezes current behaviour; it does not prove the thresholds are right.
-- Dockerfiles need no change (`COPY . .`). The technical sub-app finds `stockky_ms` through the parent service folder; a standalone technical image has no block (by design).
+## Minor
+- The broker-stop SL-M-rejected flag is in memory: the first stop after each restart fails once and retries. Harmless.
+- Engine caveats: `compat_board` was rebuilt, not recovered; golden tests freeze behaviour, they do not prove thresholds.

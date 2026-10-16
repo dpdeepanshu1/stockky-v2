@@ -84,7 +84,8 @@ def rule_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]] =
 
 # group409: the decision policy's own BUY NOW rules (decision/structure_policy.py), replayable so a change to them can be tested on history before it
 # goes live. Same ids and meaning as the policy (group410: groups_min / loc_min of 0 switch their rule off, as in the policy); unlike the gate rules above a MISSING metric trips them (the policy: "unknown is never bullish").
-POLICY_THRESHOLDS: Dict[str, Any] = {"groups_min": 2.0, "loc_min": 0.0, "bos_max_bars": 10.0, "bearish_break_bars": 5.0, "reward_pct_min": 2.5}
+POLICY_THRESHOLDS: Dict[str, Any] = {"groups_min": 2.0, "loc_min": 0.0, "bos_max_bars": 10.0, "bearish_break_bars": 5.0, "reward_pct_min": 2.5,
+                                   "retest_entry": 0.0, "retest_confirm_bars": 5.0}   # group413: retest_entry 1 = the P8 retest / CHOCH branch (same meaning as decision/structure_policy.py)
 POLICY_RULES = ("p4_reward", "p5_break", "p7_groups", "p7_location", "p8_failed_bos", "p8_no_bos", "p8_old_bos")
 
 
@@ -104,6 +105,14 @@ def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]]
         answered = ch_dir == "bullish" and ch_b is not None and bool(hit) and ch_b < min(hit)
         brk = bool(hit) and not answered
     bullish = bos_dir == "bullish"
+    retest = False        # group413 P8 retest branch: old intact BOS + price inside a live bullish zone + a bullish CHOCH <= retest_confirm_bars old
+    if t["retest_entry"] > 0 and bullish and not failed and bos_b is not None and bos_b > t["bos_max_bars"] and s.get("ms_trend") != "bearish" \
+            and ch_dir == "bullish" and ch_b is not None and ch_b <= t["retest_confirm_bars"] and px:
+        for side, top, bot, st in ((s.get("ms_fvg_side"), _f(s.get("ms_fvg_top")), _f(s.get("ms_fvg_bottom")), s.get("ms_fvg_status")),
+                                   (s.get("ms_ob_side"), _f(s.get("ms_ob_top")), _f(s.get("ms_ob_bottom")), s.get("ms_ob_status"))):
+            if side == "bullish" and top and bot and st not in ("filled", "broken", "expired") and bot * 0.995 <= px <= top * 1.005:
+                retest = True
+        retest = retest or bool(s.get("ms_in_golden"))
     return {
         "p4_reward": bool(t["reward_pct_min"] > 0 and tg is not None and px and tg > px and (tg - px) / px * 100.0 < t["reward_pct_min"]),
         "p5_break": brk,
@@ -111,7 +120,7 @@ def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]]
         "p7_location": bool(t["loc_min"] > 0 and (loc is None or loc < t["loc_min"])),
         "p8_failed_bos": bullish and failed,
         "p8_no_bos": not (bullish and failed) and (not bullish or bos_b is None),
-        "p8_old_bos": not (bullish and failed) and bullish and bos_b is not None and bos_b > t["bos_max_bars"],
+        "p8_old_bos": not (bullish and failed) and bullish and bos_b is not None and bos_b > t["bos_max_bars"] and not retest,
     }
 
 

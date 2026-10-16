@@ -507,12 +507,13 @@ STRUCTURE_MIN_RR = _og_float("STRUCTURE_MIN_RR", 1.2)                      # str
 STRUCTURE_REJECT_STOP_WIDE = ((os.getenv("STRUCTURE_REJECT_STOP_WIDE") or "").strip() or "true").lower() == "true"
 STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() or "true").lower() == "true"   # bearish daily trend / fresh bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts
-STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 7.0)         # last structure bar older than this = stale = no opinion
+STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 5.0)         # last structure bar older than this = stale = no opinion (group415: was 7)
 STRUCTURE_MAX_PRICE_DEV_PCT = _og_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)  # live entry vs structure close further apart = split/bad data = no opinion
-# STRUCTURE_STOP_MODE: on (default: use the structural stop when it is sane - below entry and within [MIN, MAX] x the ATR-stop risk) |
-# off (kill switch). "enforce" is an alias of "on"; any other value (incl. a stale "shadow") = on.
+# STRUCTURE_STOP_MODE: off (default since group415: the ATR stop is used and no structural levels are computed) |
+# on (use the structural stop when it is sane - below entry and within [MIN, MAX] x the ATR-stop risk). "enforce" is an alias of "on";
+# any other value (incl. a stale "shadow") = off. Gate G3 of the execution plan (stability) is not started, so it is opt-in.
 _ssm = (os.getenv("STRUCTURE_STOP_MODE") or "").strip().lower()
-STRUCTURE_STOP_MODE = "off" if _ssm == "off" else "on"
+STRUCTURE_STOP_MODE = "on" if _ssm in ("on", "enforce") else "off"
 STRUCTURE_STOP_MAX_RISK_MULT = _og_float("STRUCTURE_STOP_MAX_RISK_MULT", 1.6)   # structural risk may be at most this x the ATR-stop risk
 STRUCTURE_STOP_MIN_RISK_MULT = _og_float("STRUCTURE_STOP_MIN_RISK_MULT", 0.5)   # ... and at least this x (a hair-thin stop is noise)
 # Where the live summary comes from when the candidate payload has none: api-gateway GET /stock/{symbol}/structure (cached, fail-open).
@@ -523,7 +524,7 @@ STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
 # group356/365 (WS-6 + structure exit): every one of these is LIVE by default.
 #   STRUCTURE_OBS_*   what the gate saw per symbol/day and what the stock did next (structure_observations table, background evaluator)
 #   STRUCTURE_EDGE_MIN_N  finished rows per side before the edge / calibration report draws a conclusion
-#   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten | exit (default since group 399)
+#   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten | exit (default log since group 415)
 STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
 STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
@@ -532,7 +533,7 @@ STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45
 STRUCTURE_OBS_BENCH_SYMBOL = (os.getenv("STRUCTURE_OBS_BENCH_SYMBOL") or "NIFTY").strip()   # group402: market benchmark for the edge report (market-data /history name); empty = no benchmark
 STRUCTURE_EDGE_MIN_N = max(1, int(_og_float("STRUCTURE_EDGE_MIN_N", 100)))
 _sxm = (os.getenv("STRUCTURE_EXIT_MODE") or "").strip().lower()
-STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "exit"   # group 399: default exit (was tighten)
+STRUCTURE_EXIT_MODE = _sxm if _sxm in ("off", "log", "tighten", "exit") else "log"   # group415: default log = record only (group 399 made it exit, group 365 tighten)
 STRUCTURE_EXIT_TIGHT_ATR = max(0.0, _og_float("STRUCTURE_EXIT_TIGHT_ATR", 0.75))
 STRUCTURE_EXIT_CHOCH_BARS = max(1, int(_og_float("STRUCTURE_EXIT_CHOCH_BARS", 3)))
 STRUCTURE_EXIT_BOS_BARS = max(1, int(_og_float("STRUCTURE_EXIT_BOS_BARS", 3)))

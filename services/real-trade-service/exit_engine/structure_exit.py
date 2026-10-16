@@ -14,7 +14,7 @@ position SAFER:
 Ratchet only: a stop is never lowered. A losing position is never touched (its own stop already protects it). No / stale / insufficient /
 split-affected structure = no opinion (same rules as the entry gate). Pure, never raises; the caller applies the verdict.
 
-STRUCTURE_EXIT_MODE: off | log (record only) | tighten | exit (default since group 399).
+STRUCTURE_EXIT_MODE: off | log (record only; default since group 415) | tighten | exit (the default from group 399 to 414).
 """
 from __future__ import annotations
 
@@ -49,8 +49,8 @@ def _pos(v) -> Optional[float]:
 
 
 def mode() -> str:
-    m = str(getattr(config, "STRUCTURE_EXIT_MODE", "exit") or "exit").strip().lower()
-    return m if m in MODES else "exit"
+    m = str(getattr(config, "STRUCTURE_EXIT_MODE", "log") or "log").strip().lower()
+    return m if m in MODES else "log"
 
 
 def _to_date(v) -> Optional[date]:

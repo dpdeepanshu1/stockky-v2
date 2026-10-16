@@ -99,6 +99,7 @@ COLUMN_FUNCS = [
     "_ensure_regime_override_columns",
     "_ensure_edis_check_columns",
     "_ensure_fill_notional_column",
+    "_ensure_structure_obs_bench_columns",   # group402: market-relative return columns on structure_observations
 ]
 INDEX_FUNCS = ["_ensure_hot_path_indexes", "_ensure_nextday_watchlist_indexes"]
 OTHER_FUNCS = ["_fix_stale_dhan_token_expiry", "_backfill_broker_imported_flag", "_ensure_oracle_autoincrement"]

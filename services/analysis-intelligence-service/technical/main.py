@@ -605,7 +605,7 @@ try:   # group390 (WS-14): optional weekly / volume-profile / Wyckoff / V2-featu
 except Exception:  # noqa: BLE001
     _ms_extras = None
 
-_STRUCTURE_STALE_DAYS = 7
+_STRUCTURE_STALE_DAYS = 5   # group415: was 7. Not 3 (the plan): Friday's bar is already ~3.2-3.4 days old at Monday 09:15 IST. 5 clears every 2026 trading day (worst 4.65, Mon 28 Dec)
 
 # -- group 352 (F7): structure sees the FULL daily history and CLOSED bars only ------------------------------------------------
 # Indicators run on a trimmed ~6-month window (scores were tuned on it); that starves Fibonacci / 52-week levels of history, and

@@ -28,3 +28,9 @@ Presentation-only redesign. No API call, state, handler or business logic change
 TV mode turns on automatically for Tizen, webOS, Android TV, Fire TV, Chromecast, etc.
 Force it with `?tv=1` (off with `?tv=0`); the choice is remembered in localStorage (`stockky_tv`).
 Code: `src/main.tsx` (detection) + `src/design-v3.css` §15.
+
+## Final sweep
+- Light theme: `text-white/NN`, `border-white/NN`, `bg-white/NN` utilities (IPO Feed Health, Surprise Stocks, ticket) remapped to theme tokens so they stay readable.
+- Hardcoded dark surfaces (status strip, scanner chips/headers, toast) now follow the theme.
+- `Trades.tsx`: expandable trade row is keyboard/remote focusable (Enter / Space) — behaviour unchanged.
+- Intentionally unchanged: the Board "terminal island" stays dark in light theme (by design, per board.css).

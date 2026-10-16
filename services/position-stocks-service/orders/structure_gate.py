@@ -79,7 +79,7 @@ def no_data_reason(summary: Optional[Dict[str, Any]], live_price) -> Optional[st
     if q not in _OK_QUALITIES:
         return f"structure quality '{q or 'unavailable'}'"
     age = _age_days(summary.get("ms_asof"))
-    max_age = _cfg("STRUCTURE_MAX_AGE_DAYS", 7.0)
+    max_age = _cfg("STRUCTURE_MAX_AGE_DAYS", 5.0)
     if max_age > 0 and age is not None and age > max_age:
         return f"structure last bar is {age:.0f}d old"
     px, msp = _pos(live_price), _pos(summary.get("ms_price"))

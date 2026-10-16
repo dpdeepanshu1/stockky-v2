@@ -8,7 +8,7 @@ the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is th
 Every threshold below is still a HYPOTHESIS until the backtest (scripts/structure_backtest.py) calibrates it - skips are silent, so run it.
 
 BUY NOW needs ALL of: >= groups_min (2, group410; 0 = off) independent confirming groups, entry-location score >= loc_min (0 = OFF since group410: the score did not rank outcomes), a bullish BOS that has not
-failed and is <= bos_max_bars (10) bars old, a structural target at least reward_pct_min (2.5) % above the price (P4_REWARD, group 407), and no
+failed and is <= bos_max_bars (10) bars old (group413, STRUCTURE_RETEST_ENTRY=1, default off: or an older intact BOS whose zone is being retested with a bullish CHOCH <= 5 bars old), a structural target at least reward_pct_min (2.5) % above the price (P4_REWARD, group 407), and no
 fresh bearish BOS / CHOCH within bearish_break_bars (5) bars unless a later bullish CHOCH answered it (P5_BREAK, group 407, WAIT). A missing value counts as NOT met (unknown is never bullish) once a usable summary exists.
 PREPARE TO BUY (group370): the arithmetic is recomputed at the live price and a PREPARE whose hard rules (chase / stretch / R:R / bearish)
 now fail goes to WAIT; a PREPARE that passes EVERY BUY NOW requirement AND has a P9 trigger (fresh BOS / CHOCH / sweep / zone / fib) is
@@ -39,6 +39,8 @@ DEFAULTS: Dict[str, float] = {
     "groups_min": 2.0,           # P7 BUY NOW needs at least this many independent confirming groups (group410: was 3, which rejected 93% of days; 0 = off)
     "loc_min": 0.0,              # P7 BUY NOW needs an entry-location score of at least this (group410: was 55; the score is not monotonic vs returns, so 0 = off)
     "bos_max_bars": 10.0,        # P8 BUY NOW needs a non-failed bullish BOS at most this many bars old
+    "retest_entry": 0.0,         # group413 P8 retest branch: 1 = an OLD (not failed) bullish BOS is accepted when price is retesting a live bullish zone AND a bullish CHOCH confirms it (STRUCTURE_RETEST_ENTRY env also sets it; default OFF until the replay shows it helps)
+    "retest_confirm_bars": 5.0,  # the confirming bullish CHOCH must be at most this many bars old
     "choch_reversal_bars": 10.0,  # P5 a bullish CHOCH this recent excuses a bearish trend
     "max_price_drift_pct": 15.0,  # live price vs structure close: beyond this the summary is too old to use
     "stop_ratio_lo": 0.5,        # full mode: structural stop distance vs legacy stop distance sanity band
@@ -58,12 +60,21 @@ def require_data_for_buy_now() -> bool:
 
 
 def prepare_upgrade_enabled() -> bool:
-    """P9 upgrade kill switch (STRUCTURE_PREPARE_UPGRADE=0/false/off). On by default."""
-    return (os.getenv("STRUCTURE_PREPARE_UPGRADE") or "1").strip().lower() not in ("0", "false", "off", "no")
+    """P9 PREPARE -> BUY NOW upgrade. group415: OFF by default (the A/B verdict is no_edge, gate G2 of the execution plan is not met);
+    STRUCTURE_PREPARE_UPGRADE=1/true/on/yes turns it on. The demotion rules (P1-P7) are not affected."""
+    return (os.getenv("STRUCTURE_PREPARE_UPGRADE") or "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def retest_entry_enabled() -> bool:
+    """group413: STRUCTURE_RETEST_ENTRY (default OFF). On = the P8 retest / CHOCH branch (see retest_confirmed). It can only let MORE entries
+    through the old-BOS rule, so it stays off until scripts/ms_ab_report.py --policy shows retest_entry=1 does not hurt."""
+    return (os.getenv("STRUCTURE_RETEST_ENTRY") or "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _params() -> Dict[str, float]:
     p = dict(DEFAULTS)
+    if retest_entry_enabled():
+        p["retest_entry"] = 1.0
     raw = (os.getenv("STRUCTURE_POLICY_PARAMS_JSON") or "").strip()
     if raw:
         try:
@@ -201,8 +212,42 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
     elif f["bos_dir"] != "bullish" or bars is None:
         add("P8_NO_BOS", PREPARE, "no bullish break of structure to confirm the entry")
     elif bars > p["bos_max_bars"]:
-        add("P8_OLD_BOS", PREPARE, f"the bullish break of structure is {int(bars)} bars old (max {int(p['bos_max_bars'])})")
+        if retest_confirmed(f, p) is None:
+            add("P8_OLD_BOS", PREPARE, f"the bullish break of structure is {int(bars)} bars old (max {int(p['bos_max_bars'])})")
     return fired
+
+
+def _zone_hits(f: Dict[str, Any]) -> List[str]:
+    """Which live bullish zones the price is inside: entering_fvg / entering_ob (0.5% tolerance) / entering_fib (golden pocket)."""
+    t: List[str] = []
+    px = f.get("price_used") or f.get("ms_price")
+    for name, side, top, bot, st in (("entering_fvg", f.get("fvg_side"), f.get("fvg_top"), f.get("fvg_bottom"), f.get("fvg_status")),
+                                     ("entering_ob", f.get("ob_side"), f.get("ob_top"), f.get("ob_bottom"), f.get("ob_status"))):
+        if side == "bullish" and px and top and bot and st not in ("filled", "broken", "expired") and bot * 0.995 <= px <= top * 1.005:
+            t.append(name)
+    if f.get("in_golden"):
+        t.append("entering_fib")
+    return t
+
+
+def retest_confirmed(f: Dict[str, Any], p: Dict[str, float]) -> Optional[List[str]]:
+    """group413 (plan P8 retest branch). For an OLD but intact bullish BOS (older than bos_max_bars, not failed): the pullback entry is sound when the
+    price is RETESTING a live bullish zone (order block / fair value gap / golden pocket) AND a bullish change of character confirmed it within
+    retest_confirm_bars. Returns the zone names that matched, or None. A bearish daily trend never qualifies (P5_TREND still decides)."""
+    try:
+        if p.get("retest_entry", 0.0) <= 0:
+            return None
+        if f.get("bos_dir") != "bullish" or f.get("bos_failed") or f.get("bos_bars") is None or f["bos_bars"] <= p["bos_max_bars"]:
+            return None
+        if f.get("trend") == "bearish":
+            return None
+        cb = f.get("choch_bars")
+        if f.get("choch_dir") != "bullish" or cb is None or cb > p["retest_confirm_bars"]:
+            return None
+        zones = _zone_hits(f)
+        return zones or None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def prepare_triggers(f: Dict[str, Any]) -> List[str]:
@@ -214,13 +259,7 @@ def prepare_triggers(f: Dict[str, Any]) -> List[str]:
         t.append("choch")
     if f.get("sweep_dir") == "bullish" and f.get("sweep_bars") is not None and f["sweep_bars"] <= 3:
         t.append("sweep")
-    px = f.get("price_used") or f.get("ms_price")
-    for name, side, top, bot, st in (("entering_fvg", f.get("fvg_side"), f.get("fvg_top"), f.get("fvg_bottom"), f.get("fvg_status")),
-                                     ("entering_ob", f.get("ob_side"), f.get("ob_top"), f.get("ob_bottom"), f.get("ob_status"))):
-        if side == "bullish" and px and top and bot and st not in ("filled", "broken", "expired") and bot * 0.995 <= px <= top * 1.005:
-            t.append(name)
-    if f.get("in_golden"):
-        t.append("entering_fib")
+    t.extend(_zone_hits(f))
     return t
 
 
@@ -259,7 +298,7 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
     legacy = legacy or {}
     out_struct: Dict[str, Any] = {"mode": mode, "applied": False, "original_decision": decision, "policy_decision": decision,
                                   "rules": [], "no_opinion": None, "legacy_levels": legacy, "structural_levels": None, "wait_for_entry": None,
-                                  "prepare_triggers": [], "features": None, "explain": explain if isinstance(explain, dict) else None}
+                                  "prepare_triggers": [], "retest_entry": None, "features": None, "explain": explain if isinstance(explain, dict) else None}
     res = {"decision": decision, "structure": out_struct, "levels": None}
     try:
         if mode == "off":
@@ -286,6 +325,7 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
         if decision not in (BUY_NOW, PREPARE):
             return res       # WAIT / DO NOT BUY / HOLD are never touched
         fired = _rules(f, p)
+        out_struct["retest_entry"] = retest_confirmed(f, p)      # group413: zones when the retest branch excused an old BOS, else None
         if decision == PREPARE:
             # group370: the PREPARE arithmetic (chase / stretch / R:R / trend at the LIVE price) is ACTIVE, not informational.
             hard = [r for r in fired if r["id"] in _HARD_RULES]

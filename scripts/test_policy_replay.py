@@ -71,3 +71,45 @@ def test_p7_defaults_group410_and_zero_switches_the_rule_off_on_both_sides():
     on = {"groups_min": 3, "loc_min": 55}
     assert policy_flags(_summary(ms_loc_score=54), on)["p7_location"] is True and policy_flags(_summary(ms_loc_score=55), on)["p7_location"] is False
     assert policy_flags(_summary(ms_groups=None), {"groups_min": 0})["p7_groups"] is False
+
+
+# ---- group413: P8 retest / CHOCH branch, live policy and replay must agree --------------------------------------------------------------------
+def _live_retest(summary, on):
+    f = sp.build_structure_features(summary, None)
+    p = sp._params()
+    p["retest_entry"] = 1.0 if on else 0.0
+    return {MAP[r["id"]] for r in sp._rules(f, p) if r["id"] in MAP}
+
+
+def _replay_retest(summary, on):
+    return {k for k, v in policy_flags(summary, {"retest_entry": 1.0 if on else 0.0}).items() if v}
+
+
+def test_retest_defaults_are_off_and_identical_on_both_sides():
+    assert sp.DEFAULTS["retest_entry"] == 0.0 and sp.DEFAULTS["retest_confirm_bars"] == 5.0
+    from market_structure.backtest import POLICY_THRESHOLDS
+    assert POLICY_THRESHOLDS["retest_entry"] == 0.0 and POLICY_THRESHOLDS["retest_confirm_bars"] == 5.0
+
+
+def test_retest_branch_replay_agrees_with_the_live_policy_over_a_grid():
+    grid = itertools.product(("bullish", "bearish", "range"), (4, 12, 30, None), (False, True), ("bullish", "bearish", None), (2, 5, 8, None),
+                             (None, "bullish", "bearish"), ("open", "filled"), (95.0, 99.8, 101.0), (False, True))
+    n = 0
+    for tr, bb, bf, cd, cb, fvg, fst, px, golden in grid:
+        s = _summary(ms_trend=tr, ms_bos_bars=bb, ms_bos_failed=bf, ms_choch_dir=cd, ms_choch_bars=cb, ms_fvg_side=fvg, ms_fvg_status=fst,
+                     ms_fvg_top=100.5, ms_fvg_bottom=98.0, ms_in_golden=golden, ms_price=px)
+        for on in (False, True):
+            assert _live_retest(s, on) == _replay_retest(s, on), (on, s)
+        n += 1
+    assert n > 3000
+
+
+def test_retest_branch_excuses_only_an_old_intact_bos():
+    base = dict(ms_bos_bars=14, ms_choch_dir="bullish", ms_choch_bars=3, ms_fvg_side="bullish", ms_fvg_status="open", ms_fvg_top=101.0, ms_fvg_bottom=98.0)
+    assert "p8_old_bos" in _replay_retest(_summary(**base), False)
+    assert "p8_old_bos" not in _replay_retest(_summary(**base), True)
+    assert "p8_old_bos" in _replay_retest(_summary(**dict(base, ms_choch_bars=7)), True)            # CHOCH too old
+    assert "p8_old_bos" in _replay_retest(_summary(**dict(base, ms_fvg_status="filled")), True)     # zone used up
+    assert "p8_old_bos" in _replay_retest(_summary(**dict(base, ms_fvg_top=90.0, ms_fvg_bottom=88.0)), True)   # not in a zone
+    assert "p8_failed_bos" in _replay_retest(_summary(**dict(base, ms_bos_failed=True)), True)      # failed BOS is never excused
+    assert "p8_no_bos" in _replay_retest(_summary(**dict(base, ms_bos_dir=None)), True)             # no BOS is never excused

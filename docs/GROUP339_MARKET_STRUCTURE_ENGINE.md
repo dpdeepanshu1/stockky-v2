@@ -32,12 +32,12 @@ Vendored byte-identical into 5 service folders as `stockky_ms/` (a container ima
 | Setting | Default | Meaning |
 |---|---|---|
 | `STRUCTURE_POLICY_MODE` | `full` | decision rules live; `off` = old decisions exactly |
-| `STRUCTURE_PREPARE_UPGRADE` | `1` | P9 upgrade on; `0` = demote-only |
+| `STRUCTURE_PREPARE_UPGRADE` | `0` (was `1` until group 415) | P9 upgrade off; `1` = on |
 | `STRUCTURE_REQUIRE_FOR_BUY_NOW` | `true` | no structure = WAIT |
 | `STRUCTURE_GATE_MODE` / `STRUCTURE_GATE_DEMO_MODE` | `enforce` | real-trade and position-stocks entry gate; `off` = kill switch |
 | `STRUCTURE_REQUIRE_DATA` | `true` | real-trade / position-stocks: no usable structure = WAIT |
-| `STRUCTURE_STOP_MODE` | `on` | structural stop used when sane (within 0.5x-1.6x of the ATR-stop risk); `off` = ATR stop |
-| `STRUCTURE_EXIT_MODE` | `exit` (was `tighten` until group 399) | `off` / `log` / `tighten` (raise stop only) / `exit` (sells an in-profit position on a fresh bearish daily-structure signal; a losing one is never touched) |
+| `STRUCTURE_STOP_MODE` | `off` (was `on` until group 415) | `off` = ATR stop; `on` = structural stop used when sane (within 0.5x-1.6x of the ATR-stop risk) |
+| `STRUCTURE_EXIT_MODE` | `log` (was `exit` from group 399 to 414) | `off` / `log` / `tighten` (raise stop only) / `exit` (sells an in-profit position on a fresh bearish daily-structure signal; a losing one is never touched) |
 | `SNIPER_STRUCTURE_MODE` | `enforce` | sniper drops chasing / stretched / no-room / bearish cards; `off` |
 | `STRUCTURE_MAX_CHASE_ATR` / `STRUCTURE_MAX_STRETCH_ATR` / `STRUCTURE_MIN_ROOM_ATR` / `STRUCTURE_MIN_RR` | 1.5 / 3.0 / 0.5 / 1.2 | real-trade limits (position-stocks 4.0 / 5.0 / 0.3) |
 | `STRUCTURE_OBS_ENABLED` | `true` | `false` = nothing recorded or evaluated |

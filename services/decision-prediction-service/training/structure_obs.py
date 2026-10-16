@@ -268,7 +268,7 @@ def _prepare_upgrade(rs: List[Dict[str, Any]], min_n: int) -> Dict[str, Any]:
     `edge` = upgraded minus held_at_prepare (did the upgrade pick the better PREPAREs?) and, as context, upgraded minus kept_buy_now. A number is given
     only when both groups have min_n fully evaluated (20-session) rows; before that `insufficient_sample` is true and every delta is None. Nothing
     here is a verdict, and it cannot be one: a hit-rate difference without a confidence interval is a reason to look closer, not to switch the upgrade
-    on or off (STRUCTURE_PREPARE_UPGRADE=0 is the switch)."""
+    on or off (STRUCTURE_PREPARE_UPGRADE=1 turns it on; it is off by default since group 415)."""
     def pick(legacy: str, final: str) -> List[Dict[str, Any]]:
         return [r for r in rs if r.get("legacy_decision") == legacy and r.get("final_decision") == final]
     g_up = _group(pick("PREPARE TO BUY", "BUY NOW"), min_n)

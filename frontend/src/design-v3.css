@@ -739,3 +739,31 @@ html.tv .rt-title-icon, html.tv .rt-login-icon, html.tv .brand-mark { width: 3re
 html.tv .rt-title-icon .nav-icon, html.tv .rt-login-icon .nav-icon { width: 1.5rem; height: 1.5rem; }
 html.tv .status-chip { font-size: 0.9rem; padding: 0.45rem 0.9rem; }
 html.tv .topbar-clock { font-size: 1rem; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   16. Final sweep — light-theme leftovers (2026-10-16)
+   Several components use white-alpha utilities (text-white/40, border-white/10,
+   bg-white/5 …) that are invisible on a light background, and a few legacy
+   rules hardcode dark hex colours. Remap them to the theme tokens.
+   ═══════════════════════════════════════════════════════════════════════ */
+html.light .text-white\/90, html.light .text-white\/80, html.light .text-white\/70 { color: rgb(var(--fg-rgb)); }
+html.light .text-white\/60, html.light .text-white\/50 { color: rgb(var(--muted-rgb)); }
+html.light .text-white\/40 { color: rgb(var(--muted-2-rgb)); }
+html.light .border-white\/5, html.light .border-white\/10, html.light .border-white\/15,
+html.light .border-white\/20 { border-color: rgb(var(--border-strong-rgb)); }
+html.light .bg-white\/5, html.light .bg-white\/10, html.light .bg-white\/15,
+html.light .bg-black\/30 { background-color: rgb(var(--panel-2-rgb)); }
+html.light .hover\:bg-white\/10:hover, html.light .hover\:bg-white\/15:hover { background-color: rgb(var(--accent-rgb) / 0.10); }
+html.light .border-white\/60 { border-color: rgb(var(--muted-rgb)); }
+
+/* legacy hardcoded dark surfaces */
+.terminal-status-strip, .scanner-chip, .scanner-board .term-table th {
+  background: rgb(var(--panel-2-rgb));
+  border-color: rgb(var(--border-rgb));
+}
+.fixed.top-4.right-4 {
+  background: rgb(var(--panel-rgb)) !important;
+  border: 1px solid rgb(var(--border-strong-rgb));
+  border-radius: 14px;
+  box-shadow: 0 16px 44px rgb(var(--shadow-rgb) / 0.35);
+}

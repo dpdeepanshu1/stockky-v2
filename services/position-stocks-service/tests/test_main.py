@@ -847,7 +847,11 @@ def test_fast_reconcile_loop_stuck_pending_exception_is_caught(db, monkeypatch):
 def test_health(client):
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "service": "position-stocks-service"}
+    body = r.json()
+    assert body["status"] == "ok" and body["service"] == "position-stocks-service"
+    # group403: /health also reports the vendored market-structure engine fingerprint (a dict; may be empty if the package is missing).
+    assert isinstance(body.get("structure_engine"), dict)
+    assert set(body) == {"status", "service", "structure_engine"}
 
 
 class TestLogin:

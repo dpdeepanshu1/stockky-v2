@@ -91,14 +91,23 @@ def test_rr_flags():
     assert sp.apply_policy("BUY NOW", _sum(ms_rr_flags=["no_target"]), 100.0)["decision"] == "WAIT"
 
 
-def test_p7_needs_three_independent_groups_and_location_55():
-    assert sp.apply_policy("BUY NOW", _sum(ms_groups=2), 100.0)["decision"] == "PREPARE TO BUY"
-    assert sp.apply_policy("BUY NOW", _sum(ms_groups=3), 100.0)["decision"] == "BUY NOW"
-    r = sp.apply_policy("BUY NOW", _sum(ms_loc_score=54), 100.0)
-    assert r["decision"] == "PREPARE TO BUY" and r["structure"]["rules"][0]["id"] == "P7_LOCATION"
-    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=55), 100.0)["decision"] == "BUY NOW"
+def test_p7_needs_two_independent_groups_and_location_is_off_by_default():
+    # group410: groups_min 3 -> 2 (3 rejected 93% of replayed days); loc_min 55 -> 0 (the location score did not rank forward returns)
+    r = sp.apply_policy("BUY NOW", _sum(ms_groups=1), 100.0)
+    assert r["decision"] == "PREPARE TO BUY" and r["structure"]["rules"][0]["id"] == "P7_QUALITY"
+    assert sp.apply_policy("BUY NOW", _sum(ms_groups=2), 100.0)["decision"] == "BUY NOW"
     assert sp.apply_policy("BUY NOW", _sum(ms_groups=None), 100.0)["decision"] == "PREPARE TO BUY"
-    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=None), 100.0)["decision"] == "PREPARE TO BUY"
+    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=5), 100.0)["decision"] == "BUY NOW"
+    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=None), 100.0)["decision"] == "BUY NOW"
+
+
+def test_p7_location_and_groups_can_be_restored_or_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("STRUCTURE_POLICY_PARAMS_JSON", '{"loc_min":55,"groups_min":3}')
+    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=54), 100.0)["structure"]["rules"][0]["id"] == "P7_LOCATION"
+    assert sp.apply_policy("BUY NOW", _sum(ms_loc_score=55), 100.0)["decision"] == "BUY NOW"
+    assert sp.apply_policy("BUY NOW", _sum(ms_groups=1), 100.0)["decision"] == "PREPARE TO BUY"
+    monkeypatch.setenv("STRUCTURE_POLICY_PARAMS_JSON", '{"groups_min":0}')
+    assert sp.apply_policy("BUY NOW", _sum(ms_groups=None), 100.0)["decision"] == "BUY NOW"
 
 
 def test_p8_needs_a_non_failed_bullish_bos_within_10_bars():
@@ -147,7 +156,7 @@ def test_params_override_and_bad_json(monkeypatch):
 
 
 def test_prepare_triggers_and_summary_line():
-    s = _sum(ms_bos_bars=1, ms_choch_dir="bullish", ms_choch_bars=2, ms_in_golden=True, ms_groups=2)
+    s = _sum(ms_bos_bars=1, ms_choch_dir="bullish", ms_choch_bars=2, ms_in_golden=True, ms_groups=1)
     r = sp.apply_policy("PREPARE TO BUY", s, 100.0)
     assert {"bos_near", "choch", "entering_fib"} <= set(r["structure"]["prepare_triggers"])
     assert sp.summary_line(r["structure"]).startswith("Trend up · BOS up 1d")
@@ -157,7 +166,7 @@ def test_prepare_triggers_and_summary_line():
 def test_prepare_arithmetic_is_active_hard_rule_failure_goes_to_wait():
     r = sp.apply_policy("PREPARE TO BUY", _sum(), 108.0)
     assert r["decision"] == "WAIT" and r["structure"]["applied"] is True
-    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_groups=2), 100.0)["decision"] == "PREPARE TO BUY"
+    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_groups=1), 100.0)["decision"] == "PREPARE TO BUY"
 
 
 def test_p9_upgrade_prepare_to_buy_now_when_trigger_and_all_requirements_met():
@@ -165,7 +174,7 @@ def test_p9_upgrade_prepare_to_buy_now_when_trigger_and_all_requirements_met():
     assert r["decision"] == "BUY NOW" and r["structure"]["applied"] is True and r["structure"]["rules"][0]["id"] == "P9_UPGRADE"
     assert r["levels"] == {"stop_loss": 96.0, "target": 108.0}
     assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=8), 100.0)["decision"] == "PREPARE TO BUY"
-    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1, ms_groups=2), 100.0)["decision"] == "PREPARE TO BUY"
+    assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1, ms_groups=1), 100.0)["decision"] == "PREPARE TO BUY"
     assert sp.apply_policy("PREPARE TO BUY", _sum(ms_bos_bars=1), 100.0, allow_upgrade=False)["decision"] == "PREPARE TO BUY"
 
 

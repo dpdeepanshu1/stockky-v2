@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
 
 from market_structure.atr import atr_series  # noqa: E402
-from market_structure.backtest import HORIZON_MAX, HORIZONS, forward_outcome, rule_flags  # noqa: E402
+from market_structure.backtest import HORIZON_MAX, HORIZONS, POLICY_RULES, forward_outcome, policy_flags, rule_flags  # noqa: E402
 from market_structure.candles import candles_to_bars, day_key, ist_date  # noqa: E402
 from market_structure.ms_types import C, O, T, finite  # noqa: E402
 from market_structure.replay import replay  # noqa: E402
@@ -118,6 +118,8 @@ def _rows(bars: Sequence[Sequence[float]], sym: str, step: int, th: Dict[str, An
         if oc["ret_20d"] is None:  # only complete 20-session outcomes, so every horizon uses the same days
             continue
         flags = rule_flags(s, th)
+        if th.get("policy"):                      # group409 --policy: the decision policy's BUY NOW rules count as rejections too
+            flags.update(policy_flags(s, th))
         row: Dict[str, Any] = {
             "sym": sym, "ts": bars[i][T], "month": ist_date(bars[i][T])[:7], "rej": [k for k, v in flags.items() if v],
             "stop_first": oc["first_touch"] == "stop", "target_first": oc["first_touch"] == "target", "mae": oc["mae_pct"],
@@ -231,7 +233,7 @@ def build_report(rows: List[Dict[str, Any]], horizon: int, min_n: int, n_boot: i
         "edge_pp": edge, "bootstrap": boot, "halves": {"first": half_edges[0], "second": half_edges[1], "cut": ist_date(cut) if rows else None},
         "by_horizon": {str(h): {"baseline": _stats(base, h), "candidate": _stats(cand, h), "edge_pp": _edge(base, cand, h)} for h in HORIZONS},
         "by_rule": {}, "by_regime": {}}
-    for rule in RULES:
+    for rule in RULES + (POLICY_RULES if (meta.get("thresholds") or {}).get("policy") else ()):
         only = [r for r in base if rule in r["rej"]]
         solo = [r for r in base if rule not in r["rej"]]  # gate made of this rule alone
         no_other = [r for r in base if not (set(r["rej"]) - {rule})]  # full gate minus this rule
@@ -271,7 +273,7 @@ def to_markdown(rep: Dict[str, Any]) -> str:
         L_.append(f"| {h} | {f(x['baseline'].get('mean_net'))} | {f(x['candidate'].get('mean_net'))} | {f(x['edge_pp'])} |")
     L_ += ["", "## Rejected by each rule (a day can trip several)", "",
            "solo edge = baseline filtered by this rule alone vs baseline. drop-one edge = full gate vs the gate without this rule (positive = the rule earns its place). "
-           "Exploratory: six rules are compared, so a single positive number is weak evidence.", "",
+           "Exploratory: several rules are compared, so a single positive number is weak evidence.", "",
            "| rule | share of baseline % | n | mean net % | solo edge pp | drop-one edge pp |", "|---|---|---|---|---|---|"]
     for k, x in rep["by_rule"].items():
         L_.append(f"| {k} | {f(x['share_pct'])} | {x['rejected'].get('n', 0)} | {f(x['rejected'].get('mean_net'))} | {f(x['solo_edge_pp'])} | {f(x['drop_one_edge_pp'])} |")
@@ -295,11 +297,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--boot", type=int, default=500)
     ap.add_argument("--thresholds", default="{}")
+    ap.add_argument("--policy", action="store_true",
+                    help="also replay the decision policy's BUY NOW rules (p4_reward, p5_break, p7_groups, p7_location, p8_*): the candidate = gate AND policy. "
+                         "Compare with a plain run on the same folder; the drop-one edge of p8_old_bos is the evidence for or against the 10-bar BOS age limit")
     ap.add_argument("--sample", type=int, default=0, help="replay N symbols drawn at random (seeded) from the files in HIST_DIR; 0 = all")
     ap.add_argument("--seed", type=int, default=7, help="seed for --sample (the bootstrap keeps its own fixed seed)")
     a = ap.parse_args(argv)
     d = Path(a.dir)
     th = json.loads(a.thresholds)
+    if a.policy:
+        th["policy"] = True
     files = sorted(d.glob("*.json"))
     bench, bname = None, None
     for f in files:

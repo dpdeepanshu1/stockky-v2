@@ -66,6 +66,8 @@ assert.equal(prepareTriggerText({ prepare_triggers: ["bos_near", "entering_fib",
 const drows = [{ structure: dsShadow }, { structure: dsApplied }, { structure: { mode: "shadow", no_opinion: "x" } }, { structure: { mode: "shadow", rules: [], original_decision: "BUY NOW", policy_decision: "BUY NOW" } }, {}, null];
 assert.deepEqual(decisionTally(drows), { checked: 4, wouldChange: 2, applied: 1, noOpinion: 1 });
 assert.deepEqual(ruleCounts(drows), [{ id: "P2_CHASE", label: "chasing the move", n: 2 }]);
+assert.deepEqual(ruleCounts([{ structure: { mode: "full", applied: true, original_decision: "BUY NOW", policy_decision: "WAIT", rules: [{ id: "P5_BREAK", to: "WAIT", reason: "x" }, { id: "P4_REWARD", to: "PREPARE TO BUY", reason: "y" }] } }]).map((x) => x.label).sort(),
+  ["fresh bearish break", "target too close"]);   // group407: every rule id the policy can fire has a plain label
 console.log("structureView group353 ok");
 
 // ── group355: status view model ─────────────────────────────────────────────────────────────────────────────────────────────────

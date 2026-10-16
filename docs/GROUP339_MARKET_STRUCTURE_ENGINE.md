@@ -37,7 +37,7 @@ Vendored byte-identical into 5 service folders as `stockky_ms/` (a container ima
 | `STRUCTURE_GATE_MODE` / `STRUCTURE_GATE_DEMO_MODE` | `enforce` | real-trade and position-stocks entry gate; `off` = kill switch |
 | `STRUCTURE_REQUIRE_DATA` | `true` | real-trade / position-stocks: no usable structure = WAIT |
 | `STRUCTURE_STOP_MODE` | `on` | structural stop used when sane (within 0.5x-1.6x of the ATR-stop risk); `off` = ATR stop |
-| `STRUCTURE_EXIT_MODE` | `tighten` | `off` / `log` / `tighten` (raise stop only) / `exit` (sells; opt-in) |
+| `STRUCTURE_EXIT_MODE` | `exit` (was `tighten` until group 399) | `off` / `log` / `tighten` (raise stop only) / `exit` (sells an in-profit position on a fresh bearish daily-structure signal; a losing one is never touched) |
 | `SNIPER_STRUCTURE_MODE` | `enforce` | sniper drops chasing / stretched / no-room / bearish cards; `off` |
 | `STRUCTURE_MAX_CHASE_ATR` / `STRUCTURE_MAX_STRETCH_ATR` / `STRUCTURE_MIN_ROOM_ATR` / `STRUCTURE_MIN_RR` | 1.5 / 3.0 / 0.5 / 1.2 | real-trade limits (position-stocks 4.0 / 5.0 / 0.3) |
 | `STRUCTURE_OBS_ENABLED` | `true` | `false` = nothing recorded or evaluated |

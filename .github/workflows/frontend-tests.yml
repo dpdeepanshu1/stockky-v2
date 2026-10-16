@@ -1,0 +1,35 @@
+# group408: the frontend had no CI step at all - a type error or a broken structureView helper only showed up on the Vercel / Docker build.
+# Runs the plain-Node helper tests (no framework: node --experimental-strip-types, Node >= 22.6) and the production build (tsc && vite build).
+name: Frontend tests and build
+
+on:
+  push:
+    branches: [main, backup-production]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-tests.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Helper tests
+        run: npm test
+      - name: Type-check and build
+        run: npm run build

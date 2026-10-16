@@ -82,6 +82,39 @@ def rule_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]] =
     }
 
 
+# group409: the decision policy's own BUY NOW rules (decision/structure_policy.py), replayable so a change to them can be tested on history before it
+# goes live. Same ids and meaning as the policy; unlike the gate rules above a MISSING metric trips them (the policy: "unknown is never bullish").
+POLICY_THRESHOLDS: Dict[str, Any] = {"groups_min": 3.0, "loc_min": 55.0, "bos_max_bars": 10.0, "bearish_break_bars": 5.0, "reward_pct_min": 2.5}
+POLICY_RULES = ("p4_reward", "p5_break", "p7_groups", "p7_location", "p8_failed_bos", "p8_no_bos", "p8_old_bos")
+
+
+def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    """Which decision-policy rules the flat ms_* summary trips at the structure close (no live-price shift). See POLICY_RULES."""
+    t = dict(POLICY_THRESHOLDS)
+    t.update({k: v for k, v in (th or {}).items() if k in POLICY_THRESHOLDS})
+    s = summary or {}
+    groups, loc = _f(s.get("ms_groups")), _f(s.get("ms_loc_score"))
+    bos_b, ch_b = _f(s.get("ms_bos_bars")), _f(s.get("ms_choch_bars"))
+    bos_dir, ch_dir, failed = s.get("ms_bos_dir"), s.get("ms_choch_dir"), bool(s.get("ms_bos_failed"))
+    px, tg = _f(s.get("ms_price")), _f(s.get("ms_target"))
+    brk = False
+    lim = t["bearish_break_bars"]
+    if s.get("ms_trend") != "bearish" and lim > 0:
+        hit = [b for d, b, ok in ((bos_dir, bos_b, not failed), (ch_dir, ch_b, True)) if d == "bearish" and ok and b is not None and b <= lim]
+        answered = ch_dir == "bullish" and ch_b is not None and bool(hit) and ch_b < min(hit)
+        brk = bool(hit) and not answered
+    bullish = bos_dir == "bullish"
+    return {
+        "p4_reward": bool(t["reward_pct_min"] > 0 and tg is not None and px and tg > px and (tg - px) / px * 100.0 < t["reward_pct_min"]),
+        "p5_break": brk,
+        "p7_groups": groups is None or groups < t["groups_min"],
+        "p7_location": loc is None or loc < t["loc_min"],
+        "p8_failed_bos": bullish and failed,
+        "p8_no_bos": not (bullish and failed) and (not bullish or bos_b is None),
+        "p8_old_bos": not (bullish and failed) and bullish and bos_b is not None and bos_b > t["bos_max_bars"],
+    }
+
+
 def build_samples(bars: Sequence[Sequence[float]], params: Optional[MSParams] = None, step: int = 1, warmup: Optional[int] = None,
                   only_quality: Sequence[str] = ("ok", "limited")) -> List[Dict[str, Any]]:
     """Replay `bars` and attach the forward outcome of buying at each replayed close with the engine's own structural stop / target.

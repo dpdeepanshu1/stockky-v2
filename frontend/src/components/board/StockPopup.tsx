@@ -130,7 +130,7 @@ export default function StockPopup({ row, onClose, reduced, extra }: { row: Boar
             {v?.backfilled && <div className="ob-note">Earlier candles were filled in after a restart; the day open is the first 1-minute candle's open when the exchange open was not available.</div>}
           </div>
           {extra}
-          <div className="text-[10px] text-mist">Zones and scores are hypotheses logged for a shadow study, not a proven edge or advice.</div>
+          <div className="text-[10px] text-mist">Zones and scores are hypotheses, not a proven edge or advice.</div>
         </div>
       )}
     </BottomSheet>

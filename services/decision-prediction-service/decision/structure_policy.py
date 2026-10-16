@@ -7,8 +7,9 @@ ALWAYS LIVE (group370: the record-only "shadow" and "caps" modes were removed). 
 the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is the only switch (emergency kill switch); any other value = live.
 Every threshold below is still a HYPOTHESIS until the backtest (scripts/structure_backtest.py) calibrates it - skips are silent, so run it.
 
-BUY NOW needs ALL of: >= groups_min (3) independent confirming groups, entry-location score >= loc_min (55), and a bullish BOS that has not
-failed and is <= bos_max_bars (10) bars old. A missing value counts as NOT met (unknown is never bullish) once a usable summary exists.
+BUY NOW needs ALL of: >= groups_min (3) independent confirming groups, entry-location score >= loc_min (55), a bullish BOS that has not
+failed and is <= bos_max_bars (10) bars old, a structural target at least reward_pct_min (2.5) % above the price (P4_REWARD, group 407), and no
+fresh bearish BOS / CHOCH within bearish_break_bars (5) bars unless a later bullish CHOCH answered it (P5_BREAK, group 407, WAIT). A missing value counts as NOT met (unknown is never bullish) once a usable summary exists.
 PREPARE TO BUY (group370): the arithmetic is recomputed at the live price and a PREPARE whose hard rules (chase / stretch / R:R / bearish)
 now fail goes to WAIT; a PREPARE that passes EVERY BUY NOW requirement AND has a P9 trigger (fresh BOS / CHOCH / sweep / zone / fib) is
 upgraded to BUY NOW - only when the caller says the upgrade is allowed (good data quality, not already owned).
@@ -25,13 +26,15 @@ from typing import Any, Dict, List, Optional
 MODES = ("off", "full")
 BUY_NOW, PREPARE, WAIT = "BUY NOW", "PREPARE TO BUY", "WAIT"
 _SEVERITY = {PREPARE: 1, WAIT: 2}
-_HARD_RULES = ("P2_CHASE", "P3_STRETCH", "P4_RR", "P5_TREND")   # rules whose verdict is WAIT; re-checked on a PREPARE
+_HARD_RULES = ("P2_CHASE", "P3_STRETCH", "P4_RR", "P5_TREND", "P5_BREAK")   # rules whose verdict is WAIT; re-checked on a PREPARE
 
 DEFAULTS: Dict[str, float] = {
     "chase_atr_max": 1.5,        # P2 price already this many ATR beyond the structure reference
     "stretch_atr_max": 3.0,      # P3 price this many ATR above EMA20
     "rr_min": 1.2,               # P4 structure R:R floor
     "room_atr_min": 0.8,         # P6 less than this much room to the next resistance
+    "reward_pct_min": 2.5,       # P4_REWARD the structural target is less than this % above the live price (0 disables); BUY NOW -> PREPARE
+    "bearish_break_bars": 5.0,   # P5_BREAK a fresh, not-failed bearish BOS or a bearish CHOCH this recent (same window as the real-trade gate); 0 disables
     "tqs_min": 40.0,             # kept for env compatibility; no longer used (P7 is the independent-group count)
     "groups_min": 3.0,           # P7 BUY NOW needs at least this many independent confirming groups
     "loc_min": 55.0,             # P7 BUY NOW needs an entry-location score of at least this
@@ -169,6 +172,21 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
         reversal = f["choch_dir"] == "bullish" and f["choch_bars"] is not None and f["choch_bars"] <= p["choch_reversal_bars"]
         if not reversal:
             add("P5_TREND", WAIT, "daily structure is bearish (lower highs / lower lows) with no recent bullish change of character")
+    if f["trend"] != "bearish" and p["bearish_break_bars"] > 0:          # a bearish trend is already P5_TREND
+        lim = p["bearish_break_bars"]
+        bos_b = f["bos_bars"] if (f["bos_dir"] == "bearish" and not f["bos_failed"] and f["bos_bars"] is not None and f["bos_bars"] <= lim) else None
+        ch_b = f["choch_bars"] if (f["choch_dir"] == "bearish" and f["choch_bars"] is not None and f["choch_bars"] <= lim) else None
+        hit = [b for b in (bos_b, ch_b) if b is not None]
+        # a bullish change of character that came AFTER the bearish break has already answered it (same exemption as the bearish-trend rule)
+        answered = f["choch_dir"] == "bullish" and f["choch_bars"] is not None and hit and f["choch_bars"] < min(hit)
+        if hit and not answered:
+            what = "break of structure" if bos_b is not None and (ch_b is None or bos_b <= ch_b) else "change of character"
+            add("P5_BREAK", WAIT, f"fresh bearish {what} {int(min(hit))} bar(s) ago (within {int(lim)}) with no later bullish change of character")
+    px_live = f.get("price_used") or f.get("ms_price")
+    if p["reward_pct_min"] > 0 and f["target"] is not None and px_live and f["target"] > px_live:
+        rw = (f["target"] - px_live) / px_live * 100.0
+        if rw < p["reward_pct_min"]:
+            add("P4_REWARD", PREPARE, f"structural target is only {rw:.1f}% above the price (BUY NOW needs {p['reward_pct_min']:g}%)")
     if f["room_atr"] is not None and f["room_atr"] < p["room_atr_min"]:
         add("P6_ROOM", PREPARE, f"only {max(f['room_atr'], 0):.1f} ATR of room to the next resistance")
     if f["groups"] is None or f["groups"] < p["groups_min"]:

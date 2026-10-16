@@ -18,6 +18,12 @@ DESIGN (kept deliberately small, and subordinate to the software exits):
   * Everything here is best effort: nothing raises into the exit loop; failures are logged (placement failures at most once per
     BROKER_STOP_ALERT_COOLDOWN_S per symbol, and an eDIS / TPIN rejection is named as such - a CNC stop on holdings needs it).
 
+  * eDIS backoff: an eDIS / TPIN refusal cannot be fixed by retrying (the TPIN is typed by a human on CDSL's page), so that symbol
+    is not sent to Dhan again for BROKER_STOP_EDIS_BACKOFF_S seconds, then tried once more (so it self-heals after the user
+    completes 'Verify Holdings'). Without this the same two doomed orders were re-sent every sync pass.
+  * SL-M learning: Dhan rejects STOP_LOSS_MARKET on equity with 'Trigger Price should be greater than Price'. Once the STOP_LOSS
+    retry gets past that validation, later placements in this process go straight to STOP_LOSS (one Dhan call instead of two).
+
 NOT verified against a live Dhan account. Try it with ONE small position first and read /orders and Dhan's order book.
 """
 from __future__ import annotations
@@ -41,6 +47,8 @@ BROKER_STOP_REASON = "broker_stop"
 _last_sync: dict = {}          # mode -> monotonic time of the last pass
 _cancel_fails: dict = {}       # symbol -> consecutive cancel failures
 _warned: dict = {}             # symbol -> monotonic time of the last placement warning
+_edis_until: dict = {}         # symbol -> clock time before which no placement is attempted (eDIS / TPIN refusal backoff)
+_slm_rejected: bool = False    # True once Dhan is known to reject STOP_LOSS_MARKET here (go straight to STOP_LOSS)
 
 
 def enabled() -> bool:
@@ -48,7 +56,28 @@ def enabled() -> bool:
 
 
 def reset_state() -> None:
-    _last_sync.clear(); _cancel_fails.clear(); _warned.clear()
+    global _slm_rejected
+    _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear()
+    _slm_rejected = False
+
+
+def _edis_backoff_s() -> float:
+    try:
+        return max(0.0, float(getattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900) or 0))
+    except Exception:  # noqa: BLE001
+        return 900.0
+
+
+def edis_backoff_left(symbol: str, now: Optional[float] = None) -> float:
+    """Seconds left before a placement may be retried for `symbol` after an eDIS / TPIN refusal (0 = free to try)."""
+    until = _edis_until.get(symbol)
+    if until is None:
+        return 0.0
+    left = until - (time.monotonic() if now is None else now)
+    if left <= 0:
+        _edis_until.pop(symbol, None)
+        return 0.0
+    return left
 
 
 def open_stop(db: Session, symbol: str) -> Optional[models.TradeOrder]:
@@ -192,21 +221,31 @@ def _send_stop(db: Session, security_id: str, position, trigger: float, otype: s
     )
 
 
-def _place(db: Session, position, trigger: float) -> bool:
+def _place(db: Session, position, trigger: float, now: Optional[float] = None) -> bool:
+    global _slm_rejected
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
         otype = config.BROKER_STOP_ORDER_TYPE
+        if otype == "STOP_LOSS_MARKET" and _slm_rejected:
+            otype = "STOP_LOSS"          # learned earlier in this process: Dhan rejects SL-M here
         try:
             res = _send_stop(db, security_id, position, trigger, otype)
         except Exception as first:  # noqa: BLE001
-            # Dhan rejected the stop for its trigger/price relation (seen live: BLEL, BAJAJFINSV, AVADHSUGAR). Retry ONCE as a
-            # stop-limit whose limit price is strictly below the trigger; any other error is not retried.
-            if not _is_trigger_price_error(str(first)):
+            # Dhan rejected the stop for its trigger/price relation (seen live: BLEL, BAJAJFINSV, AVADHSUGAR, ABDL). Retry ONCE as a
+            # stop-limit whose limit price is strictly below the trigger; any other error is not retried. A STOP_LOSS that was
+            # already a stop-limit is not re-sent unchanged.
+            if otype == "STOP_LOSS" or not _is_trigger_price_error(str(first)):
                 raise
             logger.info("broker stop for %s: Dhan rejected %s (%s) - retrying as STOP_LOSS with a limit below the trigger",
                         position.symbol, otype, str(first)[:120])
             otype = "STOP_LOSS"
-            res = _send_stop(db, security_id, position, trigger, otype)
+            try:
+                res = _send_stop(db, security_id, position, trigger, otype)
+            except Exception as second:  # noqa: BLE001
+                if not _is_trigger_price_error(str(second)):
+                    _slm_rejected = True  # the stop-limit got past trigger validation (e.g. eDIS refusal): SL-M is the broken one
+                raise
+            _slm_rejected = True
         oid = str((res or {}).get("orderId") or (res or {}).get("order_id") or "")
         if not oid:
             raise RuntimeError(f"Dhan accepted the stop but returned no order id: {res}")
@@ -216,6 +255,7 @@ def _place(db: Session, position, trigger: float) -> bool:
             exit_reason=BROKER_STOP_REASON,
         ))
         db.commit()
+        _edis_until.pop(position.symbol, None)
         logger.info("broker stop placed: %s x%s trigger %.2f (software stop %.2f) order %s",
                     position.symbol, position.qty_open, trigger, position.current_stop, oid)
         return True
@@ -226,8 +266,13 @@ def _place(db: Session, position, trigger: float) -> bool:
             pass
         msg = str(e)
         if dhan_client.is_cdsl_edis_error(msg):
+            backoff = _edis_backoff_s()
+            if backoff > 0:
+                _edis_until[position.symbol] = (time.monotonic() if now is None else now) + backoff
+            retry = "every %d min" % (max(1, int(backoff // 60))) if backoff > 0 else "on every sync pass"
             _warn_once(position.symbol, "broker stop for %s refused: CDSL eDIS / TPIN authorisation is needed before Dhan "
-                       "accepts a sell order on this holding (%s)", position.symbol, msg[:160])
+                       "accepts a sell order on this holding (%s). Open the Dhan app -> Verify Holdings and enter the TPIN; "
+                       "placement is retried automatically %s", position.symbol, msg[:160], retry)
         else:
             _warn_once(position.symbol, "broker stop for %s could not be placed: %s", position.symbol, msg[:200])
         return False
@@ -236,7 +281,7 @@ def _place(db: Session, position, trigger: float) -> bool:
 async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: Optional[float] = None) -> dict:
     """One pass: make sure every eligible held position has a resting stop at the right trigger. Throttled to once per
     BROKER_STOP_SYNC_SECONDS. Never raises."""
-    tally = {"checked": 0, "placed": 0, "replaced": 0, "kept": 0, "skipped": 0, "failed": 0}
+    tally = {"checked": 0, "placed": 0, "replaced": 0, "kept": 0, "skipped": 0, "failed": 0, "backoff": 0}
     try:
         if mode != "REAL" or not enabled():
             return tally
@@ -245,6 +290,9 @@ async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: O
             return tally
         _last_sync["REAL"] = now
         today = ist_today_str()
+        held = {p.symbol for p in positions}
+        for sym in [x for x in _edis_until if x not in held]:
+            _edis_until.pop(sym, None)       # position gone: forget its backoff
         for pos in positions:
             tally["checked"] += 1
             if skip_reason(pos, today) is not None:
@@ -269,12 +317,16 @@ async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: O
                 if not cancel_for_exit(db, pos):
                     tally["failed"] += 1
                     continue
-                if _place(db, pos, max(trig, cur) if same_qty else trig):
+                if _place(db, pos, max(trig, cur) if same_qty else trig, now):
                     tally["replaced"] += 1
                 else:
                     tally["failed"] += 1
                 continue
-            if _place(db, pos, trig):
+            if edis_backoff_left(pos.symbol, now) > 0:
+                tally["failed"] += 1         # still no resting stop (software stop only) - but Dhan is not called again yet
+                tally["backoff"] += 1
+                continue
+            if _place(db, pos, trig, now):
                 tally["placed"] += 1
             else:
                 tally["failed"] += 1

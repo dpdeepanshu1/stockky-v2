@@ -9,7 +9,7 @@ export interface StructureSummary {
   ms_fvg_side?: string | null; ms_fvg_status?: string | null; ms_ob_side?: string | null; ms_ob_status?: string | null;
   ms_in_golden?: boolean | null; ms_loc_score?: number | null; ms_rr?: number | null; ms_stop?: number | null; ms_target?: number | null;
   ms_chase_atr?: number | null; ms_stretch_atr?: number | null; ms_room_atr?: number | null; ms_atr?: number | null;
-  ms_tqs?: number | null; ms_groups?: number | null; ms_rr_flags?: string[] | null; ms_price?: number | null;
+  ms_tqs?: number | null; ms_groups?: number | null; ms_groups_strict?: number | null; ms_rr_flags?: string[] | null; ms_price?: number | null;
 }
 
 export interface StructureLive { chase_atr?: number | null; stretch_atr?: number | null; room_atr?: number | null; rr?: number | null }
@@ -159,7 +159,9 @@ export function coveragePct(t: RejectionTally): number | null {
 // ── group353: the decision service's own `structure` record (response.structure from /decide) ──────────────────────────────────────
 export interface DecisionStructureRule { id: string; to: string; reason: string }
 export interface DecisionStructure {
-  mode?: "off" | "shadow" | "caps" | "full" | string; applied?: boolean; original_decision?: string; policy_decision?: string;
+  mode?: "off" | "record" | "shadow" | "caps" | "full" | string; applied?: boolean; original_decision?: string; policy_decision?: string;
+  /** group422: rules that fired but are record-only (STRUCTURE_POLICY_MODE=record or STRUCTURE_POLICY_SHADOW_RULES) and the decision ALL rules would have given. */
+  shadow_rules?: DecisionStructureRule[]; would_be_decision?: string;
   rules?: DecisionStructureRule[]; no_opinion?: string | null; summary_line?: string | null;
   wait_for_entry?: { low: number; high: number; kind: string } | null; prepare_triggers?: string[];
   /** group415: zone names (entering_fvg / entering_ob / entering_fib) that excused an old break of structure; null/absent = a normal fresh-BOS pass. */
@@ -174,11 +176,12 @@ export function decisionToSnapshot(ds: DecisionStructure | null | undefined): St
   if (!ds || typeof ds !== "object" || !ds.mode || ds.mode === "off") return null;
   const f = (ds.features && typeof ds.features === "object" ? ds.features : {}) as Record<string, any>;
   const rules = Array.isArray(ds.rules) ? ds.rules : [];
+  const rec = Array.isArray(ds.shadow_rules) ? ds.shadow_rules : [];
   const noOp = ds.no_opinion || null;
   const sl = ds.structural_levels;
   return {
-    v: 1, gate_mode: ds.mode === "shadow" ? "shadow" : "enforce", enforced: !!ds.applied, source: "decision",
-    opinion: noOp ? "no_opinion" : "ok", would_reject: rules.length > 0, reasons: rules.map(r => r.reason), no_data: noOp,
+    v: 1, gate_mode: ds.mode === "shadow" || ds.mode === "record" || (!ds.applied && rec.length > 0) ? "shadow" : "enforce", enforced: !!ds.applied, source: "decision",
+    opinion: noOp ? "no_opinion" : "ok", would_reject: rules.length > 0 || rec.length > 0, reasons: [...rules, ...rec].map(r => r.reason), no_data: noOp,
     live: { chase_atr: num(f.chase_atr), stretch_atr: num(f.stretch_atr), room_atr: num(f.room_atr), rr: num(f.rr) },
     levels: sl && num(sl.stop) != null ? { mode: ds.mode, stop: num(sl.stop), target: num(sl.target), sane: true, use: ds.mode === "full" && !!ds.applied } : null,
     summary: {
@@ -186,7 +189,7 @@ export function decisionToSnapshot(ds: DecisionStructure | null | undefined): St
       ms_bos_failed: f.bos_failed ?? null, ms_choch_dir: f.choch_dir ?? null, ms_choch_bars: num(f.choch_bars),
       ms_fvg_side: f.fvg_side ?? null, ms_fvg_status: f.fvg_status ?? null, ms_ob_side: f.ob_side ?? null, ms_ob_status: f.ob_status ?? null,
       ms_in_golden: f.in_golden ?? null, ms_rr: num(f.rr), ms_stop: num(f.stop), ms_target: num(f.target), ms_chase_atr: num(f.chase_atr),
-      ms_stretch_atr: num(f.stretch_atr), ms_room_atr: num(f.room_atr), ms_tqs: num(f.tqs), ms_groups: num(f.groups),
+      ms_stretch_atr: num(f.stretch_atr), ms_room_atr: num(f.room_atr), ms_tqs: num(f.tqs), ms_groups: num(f.groups), ms_groups_strict: num(f.groups_strict),
       ms_rr_flags: Array.isArray(f.rr_flags) ? f.rr_flags : [], ms_price: num(f.ms_price),
     },
   };
@@ -196,10 +199,18 @@ export function decisionToSnapshot(ds: DecisionStructure | null | undefined): St
 export function policyRecord(ds: DecisionStructure | null | undefined): { text: string; tone: Tone; shadow: boolean } | null {
   if (!ds || typeof ds !== "object" || !ds.mode || ds.mode === "off") return null;
   const rules = Array.isArray(ds.rules) ? ds.rules : [];
-  if (!rules.length || !ds.original_decision || !ds.policy_decision || ds.original_decision === ds.policy_decision) return null;
-  const why = rules.map(r => r.reason).join("; ");
-  if (ds.applied) return { text: `${ds.original_decision} → ${ds.policy_decision}: ${why}`, tone: "bad", shadow: false };
-  return { text: `Structure would change ${ds.original_decision} → ${ds.policy_decision} — shadow, not applied: ${why}`, tone: "warn", shadow: true };
+  const rec = Array.isArray(ds.shadow_rules) ? ds.shadow_rules : [];
+  if (rules.length && ds.original_decision && ds.policy_decision && ds.original_decision !== ds.policy_decision) {
+    const why = rules.map(r => r.reason).join("; ");
+    if (ds.applied) return { text: `${ds.original_decision} → ${ds.policy_decision}: ${why}`, tone: "bad", shadow: false };
+    return { text: `Structure would change ${ds.original_decision} → ${ds.policy_decision} — shadow, not applied: ${why}`, tone: "warn", shadow: true };
+  }
+  // group422: nothing was applied, but record-only rules fired and ALL rules together would have changed the decision
+  if (!ds.applied && rec.length && ds.original_decision && ds.would_be_decision && ds.original_decision !== ds.would_be_decision) {
+    const why = rec.map(r => r.reason).join("; ");
+    return { text: `Structure would change ${ds.original_decision} → ${ds.would_be_decision} — shadow, not applied: ${why}`, tone: "warn", shadow: true };
+  }
+  return null;
 }
 
 /** "Wait for a pullback into the demand zone ₹95.00–₹97.00" when the policy found a sound re-entry area. */
@@ -248,13 +259,13 @@ export function decisionTally(rows: Array<{ structure?: DecisionStructure | null
 export function ruleCounts(rows: Array<{ structure?: DecisionStructure | null }> | null | undefined): Array<{ id: string; label: string; n: number }> {
   const LABEL: Record<string, string> = { P2_CHASE: "chasing the move", P3_STRETCH: "stretched above average", P4_RR: "poor structure risk/reward",
     P4_REWARD: "target too close", P5_TREND: "bearish daily structure", P5_BREAK: "fresh bearish break", P6_ROOM: "no room to resistance",
-    P7_QUALITY: "thin confirmation", P7_LOCATION: "poor entry location", P8_FAILED_BOS: "failed breakout", P8_NO_BOS: "no bullish breakout",
+    P7_QUALITY: "thin confirmation", P7X_INDEP: "thin independent evidence", P7_LOCATION: "poor entry location", P8_FAILED_BOS: "failed breakout", P8_NO_BOS: "no bullish breakout",
     P8_OLD_BOS: "stale breakout", P1_NO_STRUCTURE: "no structure data" };
   const m = new Map<string, number>();
   for (const r of Array.isArray(rows) ? rows : []) {
     const s = r?.structure;
     if (!s || !policyRecord(s)) continue;
-    for (const x of s.rules || []) m.set(x.id, (m.get(x.id) || 0) + 1);
+    for (const x of [...(s.rules || []), ...(s.applied ? [] : s.shadow_rules || [])]) m.set(x.id, (m.get(x.id) || 0) + 1);
   }
   return [...m.entries()].map(([id, n]) => ({ id, label: LABEL[id] || id, n })).sort((a, b) => b.n - a.n);
 }

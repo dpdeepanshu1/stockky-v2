@@ -82,3 +82,24 @@ def test_risk_group_penalises_wide_or_invalid_stops():
     assert risk_group({"rr": 2.5, "flags": ["invalid"]}, P) <= 0.3
     assert risk_group({"rr": None, "flags": []}, P) == 0.0
     assert risk_group({"rr": 2.5, "flags": []}, P) > risk_group({"rr": 1.3, "flags": []}, P) > risk_group({"rr": 0.5, "flags": []}, P)
+
+
+def test_group423_strict_groups_merge_zones_with_location_and_drop_risk():
+    from market_structure.scoring import strict_groups
+    # zones AND location both positive is ONE piece of evidence; risk never counts
+    assert strict_groups({"structure": 0.8, "zones": 0.9, "location": 0.9, "liquidity": 0.0, "risk": 1.0}) == 2
+    assert strict_groups({"structure": 0.0, "zones": 0.9, "location": 0.9, "liquidity": 0.0, "risk": 1.0}) == 1
+    assert strict_groups({"structure": 0.8, "zones": 0.0, "location": 0.6, "liquidity": 0.7, "risk": 0.0}) == 3
+    assert strict_groups({"structure": 0.49, "zones": 0.49, "location": 0.49, "liquidity": 0.49}) == 0
+    assert strict_groups({}) == 0
+
+
+def test_group423_strict_is_never_above_the_loose_count_and_bounded():
+    for seed in range(8):
+        b = analyze(walk(220, seed=seed, drift=(-0.2, 0.0, 0.3)[seed % 3]))
+        assert 0 <= b["independent_groups_strict"] <= 3
+        assert b["independent_groups_strict"] <= b["independent_groups_positive"]
+
+
+def test_group423_unusable_quality_has_no_strict_count():
+    assert _score(quality="stale", loc=GOOD_LOC, rr=GOOD_RR)["independent_groups_strict"] is None

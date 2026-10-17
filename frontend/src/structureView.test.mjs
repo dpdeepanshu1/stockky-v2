@@ -72,6 +72,16 @@ assert.deepEqual(decisionTally(drows), { checked: 4, wouldChange: 2, applied: 1,
 assert.deepEqual(ruleCounts(drows), [{ id: "P2_CHASE", label: "chasing the move", n: 2 }]);
 assert.deepEqual(ruleCounts([{ structure: { mode: "full", applied: true, original_decision: "BUY NOW", policy_decision: "WAIT", rules: [{ id: "P5_BREAK", to: "WAIT", reason: "x" }, { id: "P4_REWARD", to: "PREPARE TO BUY", reason: "y" }] } }]).map((x) => x.label).sort(),
   ["fresh bearish break", "target too close"]);   // group407: every rule id the policy can fire has a plain label
+// group422: record-only rules (mode "record" or STRUCTURE_POLICY_SHADOW_RULES): nothing applied, the would-be change is still shown and counted
+const dsRec = { mode: "record", applied: false, original_decision: "BUY NOW", policy_decision: "BUY NOW", would_be_decision: "WAIT", features: feat, rules: [],
+  shadow_rules: [{ id: "P2_CHASE", to: "WAIT", reason: "chasing: price 2.4 ATR beyond the structure reference (max 1.5)" }] };
+assert.match(policyRecord(dsRec).text, /would change BUY NOW → WAIT — shadow, not applied: chasing/); assert.equal(policyRecord(dsRec).shadow, true);
+assert.equal(decisionToSnapshot(dsRec).gate_mode, "shadow"); assert.equal(decisionToSnapshot(dsRec).would_reject, true); assert.equal(decisionToSnapshot(dsRec).enforced, false);
+assert.deepEqual(decisionTally([{ structure: dsRec }]), { checked: 1, wouldChange: 1, applied: 0, noOpinion: 0 });
+assert.deepEqual(ruleCounts([{ structure: dsRec }]), [{ id: "P2_CHASE", label: "chasing the move", n: 1 }]);
+const dsMixed = { ...dsApplied, shadow_rules: [{ id: "P8_NO_BOS", to: "WAIT", reason: "no breakout" }] };      // one rule live, one record-only: the applied line wins
+assert.match(policyRecord(dsMixed).text, /^BUY NOW → WAIT: chasing/); assert.equal(policyRecord(dsMixed).shadow, false);
+assert.equal(policyRecord({ mode: "full", applied: false, original_decision: "BUY NOW", policy_decision: "BUY NOW", would_be_decision: "BUY NOW", rules: [], shadow_rules: [] }), null);
 console.log("structureView group353 ok");
 
 // ── group355: status view model ─────────────────────────────────────────────────────────────────────────────────────────────────

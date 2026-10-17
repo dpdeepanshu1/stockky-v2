@@ -84,6 +84,7 @@
    }
   },
   "independent_groups_positive": 1,
+  "independent_groups_strict": 1,
   "last_close": 83.43,
   "levels": {
    "resistances": [
@@ -356,6 +357,7 @@
    }
   },
   "independent_groups_positive": 0,
+  "independent_groups_strict": 0,
   "last_close": 132.74,
   "levels": {
    "resistances": [
@@ -625,6 +627,7 @@
    }
   },
   "independent_groups_positive": 0,
+  "independent_groups_strict": 0,
   "last_close": 16.22,
   "levels": {
    "resistances": [
@@ -866,6 +869,7 @@
    }
   },
   "independent_groups_positive": 0,
+  "independent_groups_strict": 0,
   "last_close": 36.4,
   "levels": {
    "resistances": [
@@ -1119,6 +1123,7 @@
    }
   },
   "independent_groups_positive": 1,
+  "independent_groups_strict": 1,
   "last_close": 97.87,
   "levels": {
    "resistances": [
@@ -1417,6 +1422,7 @@
    }
   },
   "independent_groups_positive": 2,
+  "independent_groups_strict": 1,
   "last_close": 96.07,
   "levels": {
    "resistances": [
@@ -1686,6 +1692,7 @@
    }
   },
   "independent_groups_positive": 0,
+  "independent_groups_strict": 0,
   "last_close": 111.13,
   "levels": {
    "resistances": [
@@ -1992,6 +1999,7 @@
    }
   },
   "independent_groups_positive": 1,
+  "independent_groups_strict": 1,
   "last_close": 109.97,
   "levels": {
    "resistances": [
@@ -2300,6 +2308,7 @@
    }
   },
   "independent_groups_positive": 2,
+  "independent_groups_strict": 2,
   "last_close": 170.22,
   "levels": {
    "resistances": [
@@ -2575,6 +2584,7 @@
    }
   },
   "independent_groups_positive": 0,
+  "independent_groups_strict": 0,
   "last_close": 190.4,
   "levels": {
    "resistances": [

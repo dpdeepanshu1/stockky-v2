@@ -81,12 +81,17 @@ def build_payload(symbol: str, response: Any, now: Optional[datetime] = None) ->
             "final_decision": final, "legacy_decision": st.get("original_decision") or final,
             "sector": response.get("sector") if isinstance(response.get("sector"), str) else None,
             "policy_applied": st.get("applied") is True,
-            "rules": [r.get("id") for r in (st.get("rules") if isinstance(st.get("rules"), list) else []) if isinstance(r, dict) and r.get("id")],
+            # applied rules by id; record-only rules (group422) as "shadow:<id>" so a report can tell "demoted" from "would have been demoted"
+            "rules": [r.get("id") for r in (st.get("rules") if isinstance(st.get("rules"), list) else []) if isinstance(r, dict) and r.get("id")]
+                     + ["shadow:" + str(r.get("id")) for r in (st.get("shadow_rules") if isinstance(st.get("shadow_rules"), list) else [])
+                        if isinstance(r, dict) and r.get("id")],
             "combined_score": _num(response.get("combined_score")), "technical_score": _num(response.get("technical_score")),
             "tqs": _num(f.get("tqs")), "groups": _num(f.get("groups")),
-            "features": {k: f.get(k) for k in ("quality", "trend", "bos_dir", "bos_bars", "bos_failed", "choch_dir", "choch_bars", "chase_atr",
-                                               "stretch_atr", "room_atr", "rr", "stop", "target", "loc_score", "tqs", "groups", "atr", "asof", "ver")
-                         if f.get(k) is not None},
+            "features": {**{k: f.get(k) for k in ("quality", "trend", "bos_dir", "bos_bars", "bos_failed", "choch_dir", "choch_bars", "chase_atr",
+                                                  "stretch_atr", "room_atr", "rr", "stop", "target", "loc_score", "tqs", "groups", "groups_strict", "atr", "asof", "ver")
+                            if f.get(k) is not None},
+                         # the decision ALL rules would have produced (equals final_decision unless a record-only rule fired)
+                         **({"would_be": st["would_be_decision"]} if isinstance(st.get("would_be_decision"), str) and st.get("would_be_decision") else {})},
             "levels": {"stop": _num(sl.get("stop")), "target": _num(sl.get("target")), "rr": _num(sl.get("rr"))} if sl else
                       {"stop": _num(f.get("stop")), "target": _num(f.get("target")), "rr": _num(f.get("rr"))},
         }

@@ -54,7 +54,7 @@ def _unavailable(pr: Dict[str, Any], p: MSParams) -> Dict[str, Any]:
              "data_quality": dq, "trend": None, "strength": None, "bos": None, "choch": None, "liquidity": None, "fvg": None,
              "order_block": None, "fibonacci": _fib.empty_fib(), "location": _loc.empty_location(), "structure_rr": _loc.empty_rr(),
              "levels": {"supports": [], "resistances": []}, "atr": None, "last_close": pr["bars"][-1][C] if pr["bars"] else None,
-             "technical_quality_score": None, "independent_groups_positive": None, "groups": None}
+             "technical_quality_score": None, "independent_groups_positive": None, "groups": None, "independent_groups_strict": None}
     block["explain"] = explain_block(block)
     return block
 
@@ -137,7 +137,7 @@ def analyze(raw_bars: Sequence[Sequence[float]], params: Optional[MSParams] = No
         "swings": [{"kind": s_["kind"], "price": r2(s_["price"]), "label": s_.get("label"), "ts": s_["ts"]} for s_ in struct[-8:]],
         "atr": r2(a), "last_close": r2(price),
         "technical_quality_score": sc["technical_quality_score"], "independent_groups_positive": sc["independent_groups_positive"],
-        "groups": sc["groups"],
+        "groups": sc["groups"], "independent_groups_strict": sc.get("independent_groups_strict"),
     }
     block["explain"] = explain_block(block)
     return block

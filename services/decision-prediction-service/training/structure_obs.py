@@ -34,8 +34,8 @@ MAX_BATCH = 100
 MAX_JSON_BYTES = 6000
 GIVE_UP_DAYS = 45
 _DECISIONS = ("BUY NOW", "PREPARE TO BUY", "HOLD", "WAIT", "DO NOT BUY", "SELL", "AVOID")
-_FEATURE_NUM = ("bos_bars", "choch_bars", "chase_atr", "stretch_atr", "room_atr", "rr", "stop", "target", "tqs", "groups", "ms_price", "atr", "loc_score")
-_FEATURE_STR = ("quality", "trend", "bos_dir", "choch_dir", "asof", "ver", "hash")
+_FEATURE_NUM = ("bos_bars", "choch_bars", "chase_atr", "stretch_atr", "room_atr", "rr", "stop", "target", "tqs", "groups", "groups_strict", "ms_price", "atr", "loc_score")
+_FEATURE_STR = ("quality", "trend", "bos_dir", "choch_dir", "asof", "ver", "hash", "would_be")   # group422: would_be = the decision with every rule applied (record-only ones included)
 
 
 def _num(v: Any) -> Optional[float]:

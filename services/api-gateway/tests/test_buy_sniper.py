@@ -27,7 +27,9 @@ _MOD_PATH = os.path.join(_SERVICE, "buy_sniper.py")
 _REPO = os.path.dirname(os.path.dirname(_SERVICE))
 
 _ENV_KEYS = ("SNIPER_MIN_CONVICTION", "SNIPER_MIN_PRICE", "MAX_PRICE", "VALUE_BUY_THRESHOLD",
-             "SNIPER_MIN_REWARD_RISK", "SNIPER_SECTOR_BONUS", "SNIPER_SECTOR_PENALTY")
+             "SNIPER_MIN_REWARD_RISK", "SNIPER_SECTOR_BONUS", "SNIPER_SECTOR_PENALTY",
+             "SNIPER_HOLDING_MODE", "SNIPER_HOLDING_DURATION", "EOD_SQUAREOFF_TIME_IST", "OVERNIGHT_HOLD_ENABLED",
+             "OVERNIGHT_HOLD_ELIGIBLE_LABELS")
 
 
 class Loader:
@@ -434,8 +436,9 @@ class TestBuildSuggestionCard:
             "estimated_profit": "+6.5% (₹6.5/share)",
             "estimated_profit_pct": 6.5,
             "reward_risk_ratio": 2.03,
-            "holding_duration": "2 to 5 Trading Days",
+            "holding_duration": "Same day (auto square-off ~15:00 IST)",    # group421: follows the real EOD square-off, not a fixed "2 to 5 days"
             "holding_period": "1 week",
+            "holding_basis": {"basis": "auto", "eod_squareoff_ist": "15:00", "overnight_carry": False},
             "conviction_score": 70,
             "technical_score": 80,
             "fundamental_score": 65,
@@ -451,12 +454,51 @@ class TestBuildSuggestionCard:
     def test_defaults_for_missing_scores_and_holding_period(self, bs):
         card = bs.build_suggestion(row())
         assert card["technical_score"] == 70 and card["fundamental_score"] == 70
-        assert card["holding_period"] == "2-5 Days"
+        assert card["holding_period"] == card["holding_duration"] == "Same day (auto square-off ~15:00 IST)"
         assert card["change_pct"] == 0.0 and card["sector"] is None
 
     @pytest.mark.parametrize("blank", [None, ""])
     def test_blank_holding_period_uses_the_default(self, bs, blank):
-        assert bs.build_suggestion(row(holding_period=blank))["holding_period"] == "2-5 Days"
+        c = bs.build_suggestion(row(holding_period=blank))
+        assert c["holding_period"] == c["holding_duration"] == "Same day (auto square-off ~15:00 IST)"
+
+
+class TestHoldingProfile:
+    """group421: the card's holding text follows the real exit behaviour (EOD square-off, overnight-hold labels)."""
+
+    def test_default_is_same_day_with_the_square_off_time(self, bs):
+        p = bs.holding_profile(row())
+        assert p["duration"] == "Same day (auto square-off ~15:00 IST)" and p["overnight_carry"] is False and p["basis"] == "auto"
+
+    def test_square_off_time_comes_from_env(self, load):
+        m = load(EOD_SQUAREOFF_TIME_IST="15:15")
+        assert m.holding_profile(row())["duration"] == "Same day (auto square-off ~15:15 IST)"
+
+    @pytest.mark.parametrize("bad", ["", "25:00", "abc", "15", "15:75"])
+    def test_malformed_square_off_time_falls_back_to_1500(self, load, bad):
+        m = load(EOD_SQUAREOFF_TIME_IST=bad)
+        assert m.holding_profile(row())["eod_squareoff_ist"] == "15:00"
+
+    def test_overnight_hold_label_says_carry_only_if_in_profit(self, bs):
+        p = bs.holding_profile(row(entry_decision_label="VOLUME_SHOCK_UPPER_CIRCUIT"))
+        assert p["overnight_carry"] is True and "1 night" in p["duration"]
+
+    def test_carry_switch_off_means_same_day_again(self, load):
+        m = load(OVERNIGHT_HOLD_ENABLED="false")
+        assert m.holding_profile(row(entry_decision_label="VOLUME_SHOCK_UPPER_CIRCUIT"))["overnight_carry"] is False
+
+    def test_legacy_mode_restores_the_old_label(self, load):
+        m = load(SNIPER_HOLDING_MODE="legacy")
+        assert m.holding_profile(row())["duration"] == "2 to 5 Trading Days"
+        assert m.build_suggestion(row())["holding_duration"] == "2 to 5 Trading Days"
+
+    def test_custom_text_wins_over_the_mode(self, load):
+        m = load(SNIPER_HOLDING_DURATION="1 session", SNIPER_HOLDING_MODE="legacy")
+        assert m.holding_profile(row())["duration"] == "1 session"
+
+    @pytest.mark.parametrize("s", [None, [], "x", 5])
+    def test_never_raises_on_odd_input(self, bs, s):
+        assert isinstance(bs.holding_profile(s)["duration"], str)
 
     def test_zero_scores_also_get_the_default(self, bs):
         card = bs.build_suggestion(row(technical_score=0, fundamental_score=0))

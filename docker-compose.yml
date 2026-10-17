@@ -134,6 +134,7 @@ services:
       EVENT_URL: http://analysis-intelligence-service:8000/event
       # group 353/370: daily market-structure policy, always live (full). STRUCTURE_POLICY_MODE=off is the kill switch.
       STRUCTURE_POLICY_MODE: ${STRUCTURE_POLICY_MODE:-full}
+      STRUCTURE_POLICY_SHADOW_RULES: ${STRUCTURE_POLICY_SHADOW_RULES:-}
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training
       UPSTASH_REDIS_REST_URL: ${UPSTASH_REDIS_REST_URL:-}

@@ -59,6 +59,82 @@ def _bucket(ts) -> Optional[str]:
     return f"{t.hour:02d}:{0 if t.minute < 30 else 30:02d}"
 
 
+# ── exit-reason attribution and hold length (group 421) ────────────────────────────────────────────────────────────────
+# A record's exit_reason came only from the closing SELL order. Positions closed WITHOUT such an order (the holdings sync force-closing a
+# position the broker no longer holds, a DEMO close, a SELL fill that did not match the position by time) showed "unknown" - 2 of the 5
+# one-day trades in the 16 Oct export. Every one of those paths already writes a TradePositionEvent, so the reason is now read from
+# there as a fallback (no new column, so it also repairs old records). `exit_reason_source` says where the reason came from.
+_GENERIC_REASONS = ("exit", "sell", "closed", "close")
+EVENT_CLOSE_TYPES = ("CLOSED", "EXIT_SENT", "GHOST_CLOSED")
+HOLD_BUCKETS = ("same_day", "1_day", "2_5_days", "6_plus_days")
+
+
+def _event_reason(events) -> tuple:
+    """(reason, source) from one position's own events, newest closing event first; (None, None) when none says why. Pure; never raises."""
+    try:
+        evs = [e for e in (events or []) if str(getattr(e, "event_type", "") or "").upper() in EVENT_CLOSE_TYPES]
+        evs.sort(key=lambda e: as_aware(getattr(e, "occurred_at", None)) or datetime.min.replace(tzinfo=timezone.utc))
+        for e in reversed(evs):
+            kind = str(e.event_type).upper()
+            detail = str(getattr(e, "detail", "") or "")
+            if kind == "GHOST_CLOSED":
+                low = detail.lower()
+                if "sold at the broker" in low or "sold outside" in low or "externally" in low:
+                    return "sold_outside_app", "event_ghost_closed"
+                return "ghost_closed", "event_ghost_closed"
+            head = _norm_reason(detail.split(":", 1)[0]) if ":" in detail else None
+            if head and head not in _GENERIC_REASONS and " " not in head and len(head) <= 32:
+                return head, "event_closed" if kind == "CLOSED" else "event_exit_sent"
+    except Exception:  # noqa: BLE001
+        pass
+    return None, None
+
+
+def _is_nse_holiday_str(day: str) -> bool:
+    try:
+        from tz_utils import _NSE_HOLIDAYS_2026
+        return day in _NSE_HOLIDAYS_2026
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def trading_days_held(opened_at, closed_at) -> Optional[int]:
+    """Trading sessions after the entry's IST date up to and including the exit's IST date: 0 = same day, 1 = next session.
+    Weekends and the NSE holidays in tz_utils are skipped. None when either time is missing or the exit is before the entry. Pure."""
+    try:
+        if opened_at is None or closed_at is None:
+            return None
+        d0 = ist_now(as_aware(opened_at)).date()
+        d1 = ist_now(as_aware(closed_at)).date()
+        if d1 < d0:
+            return None
+        n, d = 0, d0
+        for _ in range(400):
+            if d >= d1:
+                break
+            d = d + timedelta(days=1)
+            if d.weekday() < 5 and not _is_nse_holiday_str(d.isoformat()):
+                n += 1
+        return n
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def hold_bucket(days) -> Optional[str]:
+    if days is None:
+        return None
+    return "same_day" if days <= 0 else "1_day" if days == 1 else "2_5_days" if days <= 5 else "6_plus_days"
+
+
+def _return_pct(entry, qty, net, gross, exit_price) -> tuple:
+    """(percent, basis): net P&L over the cost basis when the size is known, else the gross price move; (None, None) when neither."""
+    if entry and entry > 0 and qty and qty > 0 and net is not None:
+        return round(net / (entry * qty) * 100.0, 3), "net"
+    if entry and entry > 0 and exit_price and exit_price > 0:
+        return round((exit_price / entry - 1.0) * 100.0, 3), "gross_price"
+    return None, None
+
+
 def _order_time(order, fills_by_order: dict) -> Optional[datetime]:
     fl = [as_aware(f.filled_at) for f in fills_by_order.get(order.id, []) if getattr(f, "filled_at", None) is not None]
     if fl:
@@ -143,8 +219,12 @@ def _charges(order_ids: list, ledger_by_order: dict, pos) -> tuple:
 
 
 def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisions: Iterable, candidates: Iterable,
-                  watchlist: Iterable, ledger: Iterable) -> list:
-    """Pure: one dict per CLOSED, system-entered position that has a realized P&L (see module docstring)."""
+                  watchlist: Iterable, ledger: Iterable, events: Iterable = ()) -> list:
+    """Pure: one dict per CLOSED, system-entered position that has a realized P&L (see module docstring).
+    `events` (group 421, optional): TradePositionEvent rows; the exit reason falls back to them when no closing SELL order carries one."""
+    events_by_pos: dict = defaultdict(list)
+    for ev in events or ():
+        events_by_pos[getattr(ev, "position_id", None)].append(ev)
     closed = [p for p in positions
               if getattr(p, "status", None) == "CLOSED" and getattr(p, "realized_pnl", None) is not None
               and getattr(p, "opened_at", None) is not None and not getattr(p, "broker_imported", False)]
@@ -188,11 +268,19 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 net = round(nr, 2) if nr is not None else None
                 if net is not None:
                     charges_src = "net_realized_pnl"
-            reason = None
+            reason, reason_src = None, None
             if closing_sell is not None:
                 reason = _norm_reason(getattr(closing_sell, "exit_reason", None))
-                if reason is None and str(getattr(closing_sell, "execution_source", "") or "").upper() == "MANUAL":
-                    reason = "manual"
+                if reason is not None:
+                    reason_src = "order"
+                elif str(getattr(closing_sell, "execution_source", "") or "").upper() == "MANUAL":
+                    reason, reason_src = "manual", "order_manual"
+            if reason is None:                                     # group 421: the position's own events say why it closed
+                reason, reason_src = _event_reason(events_by_pos.get(p.id))
+            if reason is None and closing_sell is not None:
+                reason, reason_src = "unspecified_sell", "order_without_reason"   # a SELL filled but nothing recorded why
+            if reason is None:
+                reason_src = "none"
             tier = getattr(w, "source_tier", None)
             # group 396: the stop the trade was opened with. initial_stop_distance is fixed at the opening fill (never trailed); the decision's
             # proposed stop is the fallback for rows without it. stop_basis comes from the entry decision (atr / flat / structure; None before group 396).
@@ -208,6 +296,9 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             held = None
             if p.closed_at is not None:
                 held = round((as_aware(p.closed_at) - as_aware(p.opened_at)).total_seconds() / 60.0, 1)
+            qty_in = _entry_qty(buys, fills_by_order)
+            days_held = trading_days_held(p.opened_at, p.closed_at)
+            ret_pct, ret_basis = _return_pct(entry, qty_in, net, gross, exit_price)
             out.append({
                 "position_id": p.id, "mode": p.mode, "symbol": p.symbol,
                 "source_tab": getattr(p, "source_tab", None),
@@ -230,13 +321,15 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "exit_time_ist": _ist_hhmm(p.closed_at),
                 "exit_day_ist": ist_now(as_aware(p.closed_at)).strftime("%Y-%m-%d") if p.closed_at else None,
                 "held_minutes": held,
-                "exit_reason": reason, "exits": len(sells), "entries": len(buys),
+                "exit_reason": reason, "exit_reason_source": reason_src, "exits": len(sells), "entries": len(buys),
+                "held_days": days_held, "hold_bucket": hold_bucket(days_held),     # group 421: sessions held (0 = same day); see scripts/hold_bucket_check.py
+                "return_pct": ret_pct, "return_basis": ret_basis,
                 "gross_pnl": gross, "charges": charges, "charges_source": charges_src, "net_pnl": net,
                 "orders_matched": bool(buys or sells),
                 "stop_pct": stop_pct, "stop_basis": stop_basis,
                 "max_gain_pct": exc["max_gain_pct"], "max_drawdown_pct": exc["max_drawdown_pct"],
                 # group 398: what scripts/opening_replay.py needs to replay a real-trade export (opening time, close time, size)
-                "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at), "quantity": _entry_qty(buys, fills_by_order),
+                "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at), "quantity": qty_in,
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("trade record for position %s skipped: %s: %s", getattr(p, "id", "?"), type(e).__name__, e)
@@ -386,7 +479,16 @@ def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None) -> 
     watchlist: list = []
     for part in _chunks(w_ids):
         watchlist += db.query(models.WatchlistEntry).filter(models.WatchlistEntry.id.in_(part)).all()
-    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger)
+    events: list = []
+    try:                                                    # group 421: closing events explain positions that closed without a SELL order
+        for part in _chunks(sorted(p.id for p in positions)):
+            events += (db.query(models.TradePositionEvent)
+                       .filter(models.TradePositionEvent.position_id.in_(part),
+                               models.TradePositionEvent.event_type.in_(EVENT_CLOSE_TYPES)).all())
+    except Exception as e:  # noqa: BLE001 - attribution is best effort; the records themselves must still load
+        logger.warning("trade records: position events not loaded (%s: %s) - exit reasons come from orders only", type(e).__name__, e)
+        events = []
+    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger, events)
 
 
 # ── daily report: today's expectancy, stored as a snapshot and pushed once after the close (group 292) ─────────────────

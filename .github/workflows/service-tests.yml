@@ -33,6 +33,8 @@ on:
       - "scripts/test_legacy_gate_backtest.py"
       - "scripts/opening_replay.py"
       - "scripts/test_opening_replay.py"
+      - "scripts/hold_bucket_check.py"
+      - "scripts/test_hold_bucket_check.py"
       - "docker-compose.yml"
       - "scripts/check_table_name_collisions.py"
       - "scripts/ms_ab_report.py"
@@ -67,6 +69,8 @@ on:
       - "scripts/test_legacy_gate_backtest.py"
       - "scripts/opening_replay.py"
       - "scripts/test_opening_replay.py"
+      - "scripts/hold_bucket_check.py"
+      - "scripts/test_hold_bucket_check.py"
       - "docker-compose.yml"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
@@ -104,7 +108,7 @@ jobs:
       - name: Repo scripts (venv-safe scanning, version-stable shared-copy hash)
         run: |
           pip install pytest
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_opening_replay.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

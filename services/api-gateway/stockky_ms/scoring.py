@@ -22,6 +22,10 @@ from .params import MSParams
 
 GROUP_WEIGHTS = (("structure", 30), ("zones", 20), ("liquidity", 10), ("location", 25), ("risk", 15))
 GROUP_POSITIVE = 0.5
+# group423: the five groups above are NOT all independent. `location` is built from zone / fib / support / room, so it re-reads what `zones` already saw;
+# `risk` is computed from the stop / target that come from the same swings (and room is P6's input). So "2 groups positive" is often one piece of
+# evidence counted twice. The strict count merges zones + location into one "entry zone" evidence and drops risk (P4 gates R:R on its own):
+#   structure (trend / BOS / CHOCH) - entry_zone (zones OR location) - liquidity (sweep and reclaim)      -> 0..3
 
 
 def _g(d: Optional[Dict[str, Any]], k: str):
@@ -84,8 +88,14 @@ def risk_group(rr: Optional[Dict], p: MSParams) -> float:
     return f
 
 
+def strict_groups(raw: Dict[str, float]) -> int:
+    """group423: positive count over the three genuinely separate evidences (structure, entry zone = max(zones, location), liquidity)."""
+    entry = max(raw.get("zones") or 0.0, raw.get("location") or 0.0)
+    return sum(1 for v in (raw.get("structure") or 0.0, entry, raw.get("liquidity") or 0.0) if v >= GROUP_POSITIVE)
+
+
 def score_block(trend, bos, choch, sweep, ob, fvg, location, rr, quality: str, p: MSParams) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"technical_quality_score": None, "independent_groups_positive": None, "groups": None}
+    out: Dict[str, Any] = {"technical_quality_score": None, "independent_groups_positive": None, "groups": None, "independent_groups_strict": None}
     if quality not in (Q_OK, Q_LIMITED):
         return out
     raw = {
@@ -107,5 +117,6 @@ def score_block(trend, bos, choch, sweep, ob, fvg, location, rr, quality: str, p
         positive += 1 if raw[name] >= GROUP_POSITIVE else 0
     out["technical_quality_score"] = int(round(max(0.0, min(100.0, total / wsum * 100.0))))
     out["independent_groups_positive"] = positive
+    out["independent_groups_strict"] = strict_groups(raw)
     out["groups"] = groups
     return out

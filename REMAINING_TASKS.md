@@ -17,6 +17,15 @@ Until G2 passes: `STRUCTURE_PREPARE_UPGRADE`, `STRUCTURE_STOP_MODE` stay off and
 Run `scripts/structure_gate_check.py` on >= 2 seeds once the calibration run finishes (re-read seed 13's `summary.txt`; the earlier
 `no_edge` may not be from that seed).
 
+## Group 422: policy record-only path (shipped, OFF by default)
+To measure a stricter rule before it costs money: set `STRUCTURE_POLICY_SHADOW_RULES=P7,P8` (or `STRUCTURE_POLICY_MODE=record` for everything) on decision-prediction-service, let observations accumulate, then compare `features.would_be` with `final_decision`. Note that shadowing P7 / P8 LOOSENS live BUY NOW gating (those rules stop applying), so only do it deliberately. The real-trade `structure_gate` and the sniper gate are separate gates and are not covered. Group 423 shipped the strict independent-group count (see below).
+
+## Group 423: strict independent groups (shipped, OFF by default)
+Workflow: `STRUCTURE_POLICY_PARAMS_JSON={"groups_strict_min":2}` + `STRUCTURE_POLICY_SHADOW_RULES=P7X` on decision-prediction-service, let observations accumulate (the field only exists for scans made after the engine copy is deployed), then compare outcomes of days where `features.groups_strict` < 2 versus the rest before going live. Not wired into `ms_ab_report` / replay (`backtest.POLICY_RULES`) because old stored summaries lack `ms_groups_strict`; add that once enough new rows exist. No evidence yet that it helps (gate G2 is no_edge), so do not enable it live on theory.
+
+## Open design question (from the 16 Oct hold-time check, group 421)
+The daily-structure stop / target are multi-day levels, but real-trade squares off at ~15:00 unless the label is overnight-hold eligible, so structure R:R is never realised for BUY NOW / PREPARE entries. The card text now says so (group 421). Whether to add a swing-carry path for structure-confirmed entries is undecided and needs same-day vs next-day vs 2-5 day data: run `scripts/hold_bucket_check.py rt_*.json` on all exports.
+
 ## Not built
 - Intraday (15m/5m) structure features and `independent_groups` counting in `scoring.py` (the policy has its own group count).
 - Walk-forward calibration from real data; `groups_min=2` is a judgement call.

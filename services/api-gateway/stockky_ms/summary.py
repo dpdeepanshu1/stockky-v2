@@ -9,7 +9,7 @@ SUMMARY_KEYS = (
     "ms_bos_failed", "ms_choch_dir", "ms_choch_bars", "ms_sweep_dir", "ms_sweep_bars", "ms_sweep_strength", "ms_fvg_side",
     "ms_fvg_status", "ms_fvg_top", "ms_fvg_bottom", "ms_fvg_dist_pct", "ms_fvg_quality", "ms_ob_side", "ms_ob_status", "ms_ob_top",
     "ms_ob_bottom", "ms_ob_quality", "ms_fib_level", "ms_fib_dist_pct", "ms_in_golden", "ms_loc_score", "ms_rr", "ms_stop",
-    "ms_target", "ms_reward_pct", "ms_chase_atr", "ms_stretch_atr", "ms_room_atr", "ms_atr", "ms_tqs", "ms_groups",
+    "ms_target", "ms_reward_pct", "ms_chase_atr", "ms_stretch_atr", "ms_room_atr", "ms_atr", "ms_tqs", "ms_groups", "ms_groups_strict",
     "ms_rr_flags", "ms_price",
 )
 
@@ -49,4 +49,5 @@ def flatten_summary(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     out["ms_rr_flags"] = list(rr["flags"]) if isinstance(rr, dict) and rr.get("flags") else ([] if rr else None)
     out["ms_atr"], out["ms_price"] = block.get("atr"), block.get("last_close")
     out["ms_tqs"], out["ms_groups"] = block.get("technical_quality_score"), block.get("independent_groups_positive")
+    out["ms_groups_strict"] = block.get("independent_groups_strict")
     return out

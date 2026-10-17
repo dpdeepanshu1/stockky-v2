@@ -145,8 +145,9 @@ class TestBuildRecord:
         r = build([pos()], [order(1, "SELL", reason="  Trail  Stop ")])[0]
         assert r["exit_reason"] == "trail_stop"
 
-    def test_blank_reason_is_unknown(self):
-        assert build([pos()], [order(1, "SELL", reason="  ")])[0]["exit_reason"] is None
+    def test_blank_reason_is_unspecified_sell(self):
+        # group421: a filled SELL that recorded no reason is labelled "unspecified_sell" (was None -> "unknown" in the report)
+        assert build([pos()], [order(1, "SELL", reason="  ")])[0]["exit_reason"] == "unspecified_sell"
 
     def test_last_sell_names_the_exit_reason(self):
         o = [order(1, "BUY"), order(2, "SELL", reason="partial_target", at=utc(4, 30)),

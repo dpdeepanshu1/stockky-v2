@@ -3,8 +3,13 @@
 Reads the flat `ms_*` summary (technical /analyze -> gateway payload) and answers ONE question for a BUY NOW candidate: is this a good
 ENTRY, not just a good stock? It can only ever make a decision MORE conservative (BUY NOW -> PREPARE TO BUY / WAIT); it never upgrades.
 
-ALWAYS LIVE (group370: the record-only "shadow" and "caps" modes were removed). The policy applies its downgrades and, when sane, replaces
-the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is the only switch (emergency kill switch); any other value = live.
+LIVE BY DEFAULT (group370: the old "shadow" and "caps" values still mean LIVE, so a stale .env can never silently loosen the policy). The policy applies its
+downgrades and, when sane, replaces the legacy stop/target with the structural ones. STRUCTURE_POLICY_MODE=off is the emergency kill switch.
+group422 adds two OPT-IN record-only paths (defaults unchanged, nothing here loosens a live decision unless you set them):
+  STRUCTURE_POLICY_MODE=record            every rule is evaluated and logged, none is applied (the decision, levels and confidence stay as the legacy engine made them)
+  STRUCTURE_POLICY_SHADOW_RULES=P7,P8     only these rules are record-only (an id or an id prefix: P8 = P8_NO_BOS, P8_OLD_BOS, P8_FAILED_BOS); all the others stay live
+A record-only rule shows up in structure.shadow_rules and structure.would_be_decision, never in rules / policy_decision / applied, so the stored observation
+(legacy decision, would-be decision, later returns) is the counterfactual a gate needs. A PREPARE -> BUY NOW upgrade (P9) still needs every rule clear, record-only or not.
 Every threshold below is still a HYPOTHESIS until the backtest (scripts/structure_backtest.py) calibrates it - skips are silent, so run it.
 
 BUY NOW needs ALL of: >= groups_min (2, group410; 0 = off) independent confirming groups, entry-location score >= loc_min (0 = OFF since group410: the score did not rank outcomes), a bullish BOS that has not
@@ -23,7 +28,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-MODES = ("off", "full")
+MODES = ("off", "record", "full")
 BUY_NOW, PREPARE, WAIT = "BUY NOW", "PREPARE TO BUY", "WAIT"
 _SEVERITY = {PREPARE: 1, WAIT: 2}
 _HARD_RULES = ("P2_CHASE", "P3_STRETCH", "P4_RR", "P5_TREND", "P5_BREAK")   # rules whose verdict is WAIT; re-checked on a PREPARE
@@ -37,6 +42,7 @@ DEFAULTS: Dict[str, float] = {
     "bearish_break_bars": 5.0,   # P5_BREAK a fresh, not-failed bearish BOS or a bearish CHOCH this recent (same window as the real-trade gate); 0 disables
     "tqs_min": 40.0,             # kept for env compatibility; no longer used (P7 is the independent-group count)
     "groups_min": 2.0,           # P7 BUY NOW needs at least this many independent confirming groups (group410: was 3, which rejected 93% of days; 0 = off)
+    "groups_strict_min": 0.0,    # group423 P7X_INDEP: BUY NOW needs this many STRICTLY independent groups (structure / entry zone / liquidity; 0 = off, the default). Meant to be run record-only first: STRUCTURE_POLICY_SHADOW_RULES=P7X
     "loc_min": 0.0,              # P7 BUY NOW needs an entry-location score of at least this (group410: was 55; the score is not monotonic vs returns, so 0 = off)
     "bos_max_bars": 10.0,        # P8 BUY NOW needs a non-failed bullish BOS at most this many bars old
     "retest_entry": 0.0,         # group413 P8 retest branch: 1 = an OLD (not failed) bullish BOS is accepted when price is retesting a live bullish zone AND a bullish CHOCH confirms it (STRUCTURE_RETEST_ENTRY env also sets it; default OFF until the replay shows it helps)
@@ -49,9 +55,22 @@ DEFAULTS: Dict[str, float] = {
 
 
 def policy_mode() -> str:
-    """full (always live) | off (kill switch). A stale "shadow" / "caps" in an old .env is live (full), never record-only."""
+    """full (live, default) | record (group422: evaluate and log every rule, apply none) | off (kill switch).
+    A stale "shadow" / "caps" in an old .env is still live (full): only the explicit word `record` is record-only."""
     m = (os.getenv("STRUCTURE_POLICY_MODE") or "full").strip().lower()
-    return "off" if m == "off" else "full"
+    return "off" if m == "off" else "record" if m == "record" else "full"
+
+
+def shadow_rule_ids() -> List[str]:
+    """group422: STRUCTURE_POLICY_SHADOW_RULES, e.g. "P7,P8" or "P7_QUALITY,P8_NO_BOS" -> upper-case ids / prefixes (default none = every rule live)."""
+    raw = (os.getenv("STRUCTURE_POLICY_SHADOW_RULES") or "").replace(";", ",")
+    return [t.strip().upper() for t in raw.split(",") if t.strip()]
+
+
+def _is_shadow(rule_id: str, shadow: List[str]) -> bool:
+    """An id matches itself or an id prefix at an underscore boundary (P8 matches P8_NO_BOS, never P80_X)."""
+    rid = str(rule_id).upper()
+    return any(rid == s or rid.startswith(s + "_") for s in shadow)
 
 
 def require_data_for_buy_now() -> bool:
@@ -132,7 +151,7 @@ def build_structure_features(summary: Optional[Dict[str, Any]], price: Optional[
         "chase_atr": _num(s.get("ms_chase_atr")), "stretch_atr": _num(s.get("ms_stretch_atr")), "room_atr": _num(s.get("ms_room_atr")),
         "rr": _num(s.get("ms_rr")), "stop": _num(s.get("ms_stop")), "target": _num(s.get("ms_target")),
         "rr_flags": list(s.get("ms_rr_flags") or []), "atr": _num(s.get("ms_atr")), "ms_price": _num(s.get("ms_price")),
-        "tqs": _num(s.get("ms_tqs")), "groups": _num(s.get("ms_groups")), "asof": _asof_iso(s.get("ms_asof")), "ver": s.get("ms_ver"), "hash": s.get("ms_hash"),
+        "tqs": _num(s.get("ms_tqs")), "groups": _num(s.get("ms_groups")), "groups_strict": _num(s.get("ms_groups_strict")), "asof": _asof_iso(s.get("ms_asof")), "ver": s.get("ms_ver"), "hash": s.get("ms_hash"),
         "price_used": None, "drift_pct": None, "live_adjusted": False,
     }
     px, msp, atr = _num(price), f["ms_price"], f["atr"]
@@ -203,6 +222,9 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
     if p["groups_min"] > 0 and (f["groups"] is None or f["groups"] < p["groups_min"]):
         got = "unknown" if f["groups"] is None else f"{int(f['groups'])}"
         add("P7_QUALITY", PREPARE, f"thin confirmation: {got} independent group(s) positive, BUY NOW needs {int(p['groups_min'])}")
+    if p["groups_strict_min"] > 0 and (f["groups_strict"] is None or f["groups_strict"] < p["groups_strict_min"]):
+        got = "unknown" if f["groups_strict"] is None else f"{int(f['groups_strict'])}"
+        add("P7X_INDEP", PREPARE, f"only {got} strictly independent evidence group(s) (structure / entry zone / liquidity), BUY NOW needs {int(p['groups_strict_min'])}")
     if p["loc_min"] > 0 and (f["loc_score"] is None or f["loc_score"] < p["loc_min"]):
         got = "unknown" if f["loc_score"] is None else f"{int(f['loc_score'])}"
         add("P7_LOCATION", PREPARE, f"entry location score {got} is below {int(p['loc_min'])}")
@@ -290,16 +312,36 @@ def _structural_levels(f: Dict[str, Any], p: Dict[str, float], price: Any, legac
 
 def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
                  explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True,
-                 require_data: Optional[bool] = None) -> Dict[str, Any]:
+                 require_data: Optional[bool] = None, shadow_rules: Optional[List[str]] = None) -> Dict[str, Any]:
     """Returns {'decision': final, 'structure': block-for-the-response, 'levels': optional replacement levels}. Never raises.
-    `mode` is "off" or anything else (= live). `allow_upgrade=False` stops a P9 PREPARE -> BUY NOW upgrade (the caller knows the data quality).
-    `require_data` (default: STRUCTURE_REQUIRE_FOR_BUY_NOW, on): a BUY NOW with no usable structure becomes WAIT (P1_NO_STRUCTURE). Only BUY NOW is touched."""
-    mode = "off" if mode == "off" else ("full" if mode else policy_mode())
+    `mode`: "off" (kill switch), "record" (group422: every rule is evaluated and logged, none applied) or anything else (= live).
+    `shadow_rules` (default: STRUCTURE_POLICY_SHADOW_RULES): rule ids / prefixes that are record-only while the rest stay live.
+    `allow_upgrade=False` stops a P9 PREPARE -> BUY NOW upgrade (the caller knows the data quality).
+    `require_data` (default: STRUCTURE_REQUIRE_FOR_BUY_NOW, on): a BUY NOW with no usable structure becomes WAIT (P1_NO_STRUCTURE). Only BUY NOW is touched.
+    rules / policy_decision / applied describe what was APPLIED; shadow_rules / would_be_decision describe what ALL rules (record-only ones included) would have done."""
+    mode = "off" if mode == "off" else "record" if mode == "record" else ("full" if mode else policy_mode())
     legacy = legacy or {}
+    try:
+        shadow = [str(x).strip().upper() for x in (shadow_rules if shadow_rules is not None else shadow_rule_ids()) if str(x).strip()]
+    except Exception:  # noqa: BLE001
+        shadow = []
     out_struct: Dict[str, Any] = {"mode": mode, "applied": False, "original_decision": decision, "policy_decision": decision,
-                                  "rules": [], "no_opinion": None, "legacy_levels": legacy, "structural_levels": None, "wait_for_entry": None,
+                                  "rules": [], "shadow_rules": [], "would_be_decision": decision,
+                                  "no_opinion": None, "legacy_levels": legacy, "structural_levels": None, "wait_for_entry": None,
                                   "prepare_triggers": [], "retest_entry": None, "features": None, "explain": explain if isinstance(explain, dict) else None}
     res = {"decision": decision, "structure": out_struct, "levels": None}
+
+    def record_only(rule_id: str) -> bool:
+        return mode == "record" or _is_shadow(rule_id, shadow)
+
+    def split(rs: List[Dict[str, Any]]):
+        live = [r for r in rs if not record_only(r["id"])]
+        rec = [r for r in rs if record_only(r["id"])]
+        return live, rec
+
+    def worst(rs: List[Dict[str, Any]], default: str) -> str:
+        return max((r["to"] for r in rs), key=lambda t: _SEVERITY[t]) if rs else default
+
     try:
         if mode == "off":
             out_struct["no_opinion"] = "policy off"
@@ -314,11 +356,17 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
             out_struct["no_opinion"] = why
             need = require_data_for_buy_now() if require_data is None else bool(require_data)
             if need and decision == BUY_NOW:
-                out_struct["rules"] = [{"id": "P1_NO_STRUCTURE", "to": WAIT,
-                                        "reason": f"no usable daily structure ({why}) - a BUY NOW needs a checked entry, so it waits"}]
-                out_struct["policy_decision"] = WAIT
-                out_struct["applied"] = True
-                res["decision"] = WAIT
+                r1 = {"id": "P1_NO_STRUCTURE", "to": WAIT,
+                      "reason": f"no usable daily structure ({why}) - a BUY NOW needs a checked entry, so it waits"}
+                if record_only(r1["id"]):
+                    out_struct["shadow_rules"] = [r1]
+                    out_struct["would_be_decision"] = WAIT
+                else:
+                    out_struct["rules"] = [r1]
+                    out_struct["policy_decision"] = WAIT
+                    out_struct["would_be_decision"] = WAIT
+                    out_struct["applied"] = True
+                    res["decision"] = WAIT
             return res
         if f["stop"] is not None and f["target"] is not None:
             out_struct["structural_levels"] = {"stop": f["stop"], "target": f["target"], "rr": f["rr"]}
@@ -328,7 +376,11 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
         out_struct["retest_entry"] = retest_confirmed(f, p)      # group413: zones when the retest branch excused an old BOS, else None
         if decision == PREPARE:
             # group370: the PREPARE arithmetic (chase / stretch / R:R / trend at the LIVE price) is ACTIVE, not informational.
-            hard = [r for r in fired if r["id"] in _HARD_RULES]
+            hard_all = [r for r in fired if r["id"] in _HARD_RULES]
+            hard, hard_rec = split(hard_all)
+            out_struct["shadow_rules"] = hard_rec
+            if hard_all:
+                out_struct["would_be_decision"] = WAIT
             if hard:
                 out_struct["rules"] = hard
                 out_struct["policy_decision"] = WAIT
@@ -337,19 +389,25 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
                 res["decision"] = WAIT
                 return res
             trig = out_struct["prepare_triggers"]
-            if not fired and trig and allow_upgrade and prepare_upgrade_enabled():
+            # an upgrade LOOSENS a decision: only in live mode, and only with every rule clear (a record-only rule that fired still blocks it)
+            if not fired and trig and allow_upgrade and prepare_upgrade_enabled() and mode == "full":
                 up = {"id": "P9_UPGRADE", "to": BUY_NOW, "reason": "structure confirms the entry now (" + ", ".join(trig) + "); every BUY NOW requirement is met"}
                 out_struct["rules"] = [up]
                 out_struct["policy_decision"] = BUY_NOW
+                out_struct["would_be_decision"] = BUY_NOW
                 out_struct["applied"] = True
                 res["decision"] = BUY_NOW
                 res["levels"] = _structural_levels(f, p, price, legacy)
             return res
-        out_struct["rules"] = fired
-        if not fired:
-            res["levels"] = _structural_levels(f, p, price, legacy)
+        live, rec = split(fired)
+        out_struct["rules"] = live
+        out_struct["shadow_rules"] = rec
+        out_struct["would_be_decision"] = worst(fired, decision)
+        if not live:
+            if mode != "record":      # record mode leaves the legacy stop / target alone; a per-rule shadow of every fired rule behaves like "nothing fired"
+                res["levels"] = _structural_levels(f, p, price, legacy)
             return res
-        final = max((r["to"] for r in fired), key=lambda t: _SEVERITY[t])
+        final = worst(live, decision)
         out_struct["policy_decision"] = final
         if final == WAIT:
             out_struct["wait_for_entry"] = _wait_zone(f)
@@ -363,9 +421,10 @@ def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Option
             need = require_data_for_buy_now() if require_data is None else bool(require_data)
         except Exception:  # noqa: BLE001
             need = False
-        if need and mode != "off" and decision == BUY_NOW:      # group377: an entry the policy could not check is not a BUY NOW
+        if need and mode == "full" and decision == BUY_NOW:      # group377: an entry the policy could not check is not a BUY NOW (record mode never changes a decision)
             out_struct["rules"] = [{"id": "P1_NO_STRUCTURE", "to": WAIT, "reason": f"structure policy could not evaluate ({type(e).__name__}) - waits"}]
             out_struct["policy_decision"] = WAIT
+            out_struct["would_be_decision"] = WAIT
             out_struct["applied"] = True
             return {"decision": WAIT, "structure": out_struct, "levels": None}
         return {"decision": decision, "structure": out_struct, "levels": None}

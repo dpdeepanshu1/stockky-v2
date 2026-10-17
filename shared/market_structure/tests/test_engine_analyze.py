@@ -27,7 +27,7 @@ def _bars(seed=7, n=220):
 
 TOP_KEYS = {"schema_version", "engine_version", "params_hash", "quality", "data_quality", "trend", "strength", "bos", "choch", "liquidity",
             "fvg", "order_block", "fibonacci", "location", "structure_rr", "levels", "atr", "last_close", "technical_quality_score",
-            "independent_groups_positive", "groups", "explain"}
+            "independent_groups_positive", "independent_groups_strict", "groups", "explain"}
 
 
 def test_analyze_contract_and_json_safe():

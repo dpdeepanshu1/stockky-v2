@@ -56,6 +56,48 @@ VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
 
 DEFAULT_TARGET_COUNT = 4
 
+# ── Holding period shown on the card (group 421) ──────────────────────────────
+# The card used to say "2 to 5 Trading Days" for every row. The live system does not hold that long: real-trade-service squares every
+# open position off at EOD_SQUAREOFF_TIME_IST unless it is one of the few overnight-hold labels (OVERNIGHT_HOLD_ELIGIBLE_LABELS) and is
+# in profit. A 14-day export of 11 closed REAL trades had none held 2-5 days. The label now follows what the code does.
+#   SNIPER_HOLDING_DURATION=<text>   fixed text for every card (wins over the mode)
+#   SNIPER_HOLDING_MODE=legacy       the old "2 to 5 Trading Days" label (auto = default)
+LEGACY_HOLDING_DURATION = "2 to 5 Trading Days"
+_DEFAULT_CARRY_LABELS = "VOLUME_SHOCK_UPPER_CIRCUIT,VOLUME_SHOCK_HIGH_CONVICTION"
+
+
+def _eod_squareoff_hhmm() -> str:
+    """EOD_SQUAREOFF_TIME_IST as HH:MM (real-trade default 15:00). A malformed value falls back to 15:00. Never raises."""
+    raw = (_os.getenv("EOD_SQUAREOFF_TIME_IST") or "").strip() or "15:00"
+    try:
+        h, m = raw.split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return f"{h:02d}:{m:02d}"
+    except Exception:  # noqa: BLE001
+        pass
+    return "15:00"
+
+
+def holding_profile(s: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """{'duration', 'basis', 'eod_squareoff_ist', 'overnight_carry'} for a card. Pure; never raises (any failure = the same-day text)."""
+    try:
+        eod = _eod_squareoff_hhmm()
+        custom = (_os.getenv("SNIPER_HOLDING_DURATION") or "").strip()
+        if custom:
+            return {"duration": custom, "basis": "env", "eod_squareoff_ist": eod, "overnight_carry": None}
+        if (_os.getenv("SNIPER_HOLDING_MODE") or "auto").strip().lower() == "legacy":
+            return {"duration": LEGACY_HOLDING_DURATION, "basis": "legacy", "eod_squareoff_ist": eod, "overnight_carry": None}
+        carry_on = (_os.getenv("OVERNIGHT_HOLD_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
+        labels = {x.strip().upper() for x in (_os.getenv("OVERNIGHT_HOLD_ELIGIBLE_LABELS") or _DEFAULT_CARRY_LABELS).split(",") if x.strip()}
+        row = s if isinstance(s, dict) else {}
+        mine = {str(row.get(k) or "").strip().upper() for k in ("entry_decision_label", "tier_label", "decision", "signal")}
+        if carry_on and labels & mine:
+            return {"duration": "Same day; carries 1 night only if in profit", "basis": "auto", "eod_squareoff_ist": eod, "overnight_carry": True}
+        return {"duration": f"Same day (auto square-off ~{eod} IST)", "basis": "auto", "eod_squareoff_ist": eod, "overnight_carry": False}
+    except Exception:  # noqa: BLE001
+        return {"duration": "Same day (auto square-off ~15:00 IST)", "basis": "fallback", "eod_squareoff_ist": "15:00", "overnight_carry": False}
+
 # ATR-based stop/target (same as original — proven risk-management standard).
 ATR_STOP_MULTIPLIER   = 1.5
 ATR_TARGET_MULTIPLIER = 3.0
@@ -688,6 +730,7 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT, 
     buy_low    = round(px * 0.995, 2)
     buy_high   = round(px * 1.008, 2)
     profit_abs = round(px * (eff_target_pct / 100.0), 2)
+    _hp = holding_profile(s)
 
     card = {
         "symbol":              str(s.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip(),
@@ -702,8 +745,9 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT, 
         "estimated_profit":    f"+{eff_target_pct:.1f}% (₹{profit_abs}/share)",
         "estimated_profit_pct": eff_target_pct,
         "reward_risk_ratio":   round(reward / risk, 2),
-        "holding_duration":    "2 to 5 Trading Days",
-        "holding_period":      s.get("holding_period") or "2-5 Days",
+        "holding_duration":    _hp["duration"],
+        "holding_period":      s.get("holding_period") or _hp["duration"],
+        "holding_basis":       {"basis": _hp["basis"], "eod_squareoff_ist": _hp["eod_squareoff_ist"], "overnight_carry": _hp["overnight_carry"]},
         "conviction_score":    int(round(conv)),
         "technical_score":     tech,
         "fundamental_score":   fund,

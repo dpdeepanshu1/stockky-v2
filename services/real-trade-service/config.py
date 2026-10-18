@@ -503,7 +503,7 @@ STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or
 STRUCTURE_MAX_CHASE_ATR = _og_float("STRUCTURE_MAX_CHASE_ATR", 1.5)       # live price above the nearest zone top, in ATR (0 disables)
 STRUCTURE_MAX_STRETCH_ATR = _og_float("STRUCTURE_MAX_STRETCH_ATR", 3.0)   # live price above EMA20, in ATR (0 disables)
 STRUCTURE_MIN_ROOM_ATR = _og_float("STRUCTURE_MIN_ROOM_ATR", 0.5)         # live price to the next resistance, in ATR (0 disables)
-STRUCTURE_MIN_RR = _og_float("STRUCTURE_MIN_RR", 1.2)                      # structure R:R at the live entry (0 disables)
+STRUCTURE_MIN_RR = _og_float("STRUCTURE_MIN_RR", 0.0)                      # structure R:R floor at the live entry (0 disables). group424: OFF by default - the replay edge of this rule flipped sign between seeds (+0.39 / -0.19), so it is not proven to help; 1.2 restores the old floor
 STRUCTURE_REJECT_STOP_WIDE = ((os.getenv("STRUCTURE_REJECT_STOP_WIDE") or "").strip() or "true").lower() == "true"
 STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() or "true").lower() == "true"   # bearish daily trend / fresh bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts

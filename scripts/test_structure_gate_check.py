@@ -41,8 +41,18 @@ def test_ab_kept_pct_and_regime_fail():
 
 
 def test_ab_rule_note_does_not_fail():
-    r = g.check_ab(_ab(rules={"room": {"drop_one_edge_pp": 0.9, "drop_one_n": 100}}))
+    # negative drop-one edge = the gate does better WITHOUT the rule -> a note, never a FAIL by itself
+    r = g.check_ab(_ab(rules={"room": {"drop_one_edge_pp": -0.9, "drop_one_n": 100}}))
     assert r["status"] == g.PASS and any("room" in x for x in r["reasons"])
+
+
+def test_ab_rule_note_names_only_the_harmful_rule():
+    # group424 regression: seed 11 had bearish +0.07 (helps) and rr -0.19 (hurts); only rr may be named
+    r = g.check_ab(_ab(edge=0.0, rules={"bearish": {"drop_one_edge_pp": 0.07, "drop_one_n": 100},
+                                         "rr": {"drop_one_edge_pp": -0.19, "drop_one_n": 100}}))
+    txt = " ".join(r["reasons"])
+    assert "rr" in txt and "bearish" not in txt
+    assert g.check_ab(_ab(rules={"bearish": {"drop_one_edge_pp": 0.5, "drop_one_n": 100}}))["reasons"] == []
 
 
 def test_g2_no_input():

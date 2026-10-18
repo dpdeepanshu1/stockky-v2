@@ -104,7 +104,6 @@ def test_each_rule_fires_alone():
         "chase": _sum(ms_chase_atr=2.0),
         "stretched": _sum(ms_stretch_atr=3.5),
         "room": _sum(ms_room_atr=0.1),
-        "R:R": _sum(ms_target=103.0),
         "too wide": _sum(ms_rr_flags=["stop_too_wide"]),
         "bearish": _sum(ms_trend="bearish"),
         "bearish break": _sum(ms_bos_dir="bearish", ms_bos_bars=2, ms_bos_failed=False),
@@ -112,6 +111,15 @@ def test_each_rule_fires_alone():
     for name, summ in cases.items():
         v = m.structure_verdict(_row(summ), 100.0)
         assert v["would_reject"] and v["enforced"] and len(v["reasons"]) == 1, (name, v["reasons"])
+
+
+def test_rr_floor_is_off_by_default_and_back_with_the_env():
+    # group424: the R:R floor defaults to 0 (its replay edge was unstable across seeds); STRUCTURE_MIN_RR=1.2 restores the old floor
+    low_rr = _sum(ms_target=103.0)
+    v = _load().structure_verdict(_row(low_rr), 100.0)
+    assert not any("R:R" in r for r in v["reasons"]), v["reasons"]
+    v = _load(STRUCTURE_MIN_RR=1.2).structure_verdict(_row(low_rr), 100.0)
+    assert v["would_reject"] and v["enforced"] and len(v["reasons"]) == 1 and "R:R" in v["reasons"][0], v["reasons"]
 
 
 def test_failed_or_old_bearish_break_does_not_block():

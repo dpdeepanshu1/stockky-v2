@@ -27,7 +27,7 @@ RULE_MAP: Dict[str, tuple] = {
     "chase": ("STRUCTURE_MAX_CHASE_ATR", 1.5, "PS_STRUCTURE_MAX_CHASE_ATR", 4.0),
     "stretch": ("STRUCTURE_MAX_STRETCH_ATR", 3.0, "PS_STRUCTURE_MAX_STRETCH_ATR", 5.0),
     "room": ("STRUCTURE_MIN_ROOM_ATR", 0.5, "PS_STRUCTURE_MIN_ROOM_ATR", 0.3),
-    "rr": ("STRUCTURE_MIN_RR", 1.2, None, None),
+    "rr": ("STRUCTURE_MIN_RR", 0.0, None, None),
 }
 
 

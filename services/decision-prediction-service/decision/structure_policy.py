@@ -36,7 +36,7 @@ _HARD_RULES = ("P2_CHASE", "P3_STRETCH", "P4_RR", "P5_TREND", "P5_BREAK")   # ru
 DEFAULTS: Dict[str, float] = {
     "chase_atr_max": 1.5,        # P2 price already this many ATR beyond the structure reference
     "stretch_atr_max": 3.0,      # P3 price this many ATR above EMA20
-    "rr_min": 1.2,               # P4 structure R:R floor
+    "rr_min": 0.0,               # P4 structure R:R floor (group424: 0 = off by default, the rule's replay edge was unstable; no_target / stop_too_wide still fire; 1.2 = the old floor)
     "room_atr_min": 0.8,         # P6 less than this much room to the next resistance
     "reward_pct_min": 2.5,       # P4_REWARD the structural target is less than this % above the live price (0 disables); BUY NOW -> PREPARE
     "bearish_break_bars": 5.0,   # P5_BREAK a fresh, not-failed bearish BOS or a bearish CHOCH this recent (same window as the real-trade gate); 0 disables
@@ -196,7 +196,7 @@ def _rules(f: Dict[str, Any], p: Dict[str, float]) -> List[Dict[str, Any]]:
         add("P4_RR", WAIT, "no structural target above price")
     elif "stop_too_wide" in flags:
         add("P4_RR", WAIT, "structural stop too far below price")
-    elif f["rr"] is not None and f["rr"] < p["rr_min"]:
+    elif p["rr_min"] > 0 and f["rr"] is not None and f["rr"] < p["rr_min"]:
         add("P4_RR", WAIT, f"structure R:R {f['rr']:.2f} below {p['rr_min']:g}")
     if f["trend"] == "bearish":
         reversal = f["choch_dir"] == "bullish" and f["choch_bars"] is not None and f["choch_bars"] <= p["choch_reversal_bars"]

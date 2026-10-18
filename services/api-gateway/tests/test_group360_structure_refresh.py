@@ -226,7 +226,11 @@ class TestRefreshOne:
         def boom(_s):
             raise RuntimeError("x")
         assert sr.refresh_one("AAA", boom, st, NOW) == sr.FAILED
-        assert st.rows["AAA"] == {"ms_hash": "old"} and st.calls == []
+        # group424: old structure keys are kept, but each failed attempt is now recorded (it used to leave no trace, so the symbol was
+        # re-selected on every catch-up pass). Three failures at the same instant -> count 3.
+        row = st.rows["AAA"]
+        assert row["ms_hash"] == "old" and row[sr.FAIL_COUNT_KEY] == 3 and row[sr.FAILED_AT_KEY] == NOW.isoformat()
+        assert sr.REFRESHED_AT_KEY not in row
 
     def test_symbol_not_in_feed_is_not_added(self):
         st = FakeStore({})
@@ -249,6 +253,76 @@ class TestRefreshOne:
         st = FakeStore({"AAA": {"ms_hash": "old"}})
         assert sr.refresh_one("AAA", lambda s: block(), st, NOW) == sr.NO_BLOCK
         assert st.rows["AAA"]["ms_hash"] == "old"
+
+
+# ------------------------------------------------------------------ failure back-off (group 424)
+class TestFailureBackoff:
+    def failed_row(self, n=1, at=None, **extra):
+        r = {"price": 5, sr.FAILED_AT_KEY: (at or NOW).isoformat(), sr.FAIL_COUNT_KEY: n}
+        r.update(extra)
+        return r
+
+    def test_first_failure_recorded_then_counts_up(self):
+        st = FakeStore({"AAA": {"price": 1}})
+        assert sr.refresh_one("AAA", lambda s: None, st, NOW) == sr.FAILED
+        assert st.rows["AAA"][sr.FAIL_COUNT_KEY] == 1
+        assert sr.refresh_one("AAA", lambda s: None, st, NOW + timedelta(hours=2)) == sr.FAILED
+        assert st.rows["AAA"][sr.FAIL_COUNT_KEY] == 2
+        assert st.rows["AAA"][sr.FAILED_AT_KEY] == (NOW + timedelta(hours=2)).isoformat()
+
+    def test_failure_never_creates_a_row(self):
+        st = FakeStore({})
+        assert sr.refresh_one("NEW", lambda s: None, st, NOW) == sr.FAILED
+        assert "NEW" not in st.rows
+
+    def test_backoff_schedule(self):
+        assert [sr.fail_backoff_hours(n) for n in (0, 1, 2, 3, 4, 5, 6, 20)] == [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 24.0, 24.0]
+
+    def test_symbol_is_skipped_inside_backoff_and_returns_after(self):
+        exp = WED
+        row = self.failed_row(n=3)                       # 4 h wait
+        assert sr.needs_refresh(row, exp, now=NOW + timedelta(hours=3, minutes=59)) is None
+        assert sr.needs_refresh(row, exp, now=NOW + timedelta(hours=4, minutes=1)) == 0   # missing row -> priority 0
+
+    def test_force_ignores_backoff(self):
+        assert sr.needs_refresh(self.failed_row(n=5), WED, now=NOW + timedelta(minutes=1), force=True) is not None
+
+    def test_newer_answered_attempt_lifts_backoff(self):
+        row = self.failed_row(n=4, **{sr.REFRESHED_AT_KEY: (NOW + timedelta(minutes=5)).isoformat()})
+        assert sr._live_fail_count(row) == 0
+        assert not sr.in_fail_backoff(row, NOW + timedelta(minutes=6))
+
+    def test_select_symbols_leaves_backed_off_symbol_out(self):
+        rows = {"AAA": self.failed_row(n=2), "BBB": {"price": 1}}
+        syms, tally = sr.select_symbols(rows, WED, now=NOW + timedelta(minutes=30))
+        assert syms == ["BBB"] and tally["skipped"] == 1
+
+    def test_success_clears_failure_stamp(self):
+        st = FakeStore({"AAA": self.failed_row(n=3, ms_quality="ok", ms_asof="2026-10-09", ms_hash="old")})
+        assert sr.refresh_one("AAA", lambda s: block(), st, NOW + timedelta(hours=5)) == sr.REFRESHED
+        assert sr.FAILED_AT_KEY not in st.rows["AAA"] and sr.FAIL_COUNT_KEY not in st.rows["AAA"]
+
+    def test_unchanged_clears_failure_stamp(self):
+        st = FakeStore({"AAA": self.failed_row(n=2, ms_quality="ok", ms_asof="2026-10-14", ms_hash="h1")})
+        assert sr.refresh_one("AAA", lambda s: block(), st, NOW + timedelta(hours=5)) == sr.UNCHANGED
+        assert sr.FAILED_AT_KEY not in st.rows["AAA"] and sr.FAIL_COUNT_KEY not in st.rows["AAA"]
+
+    def test_no_block_answer_lifts_backoff_via_timestamp(self):
+        st = FakeStore({"AAA": self.failed_row(n=4)})
+        assert sr.refresh_one("AAA", lambda s: {"symbol": "AAA"}, st, NOW + timedelta(hours=1)) == sr.NO_BLOCK
+        assert sr._live_fail_count(st.rows["AAA"]) == 0
+
+    def test_failure_is_logged_with_the_symbol(self, caplog):
+        import logging
+        st = FakeStore({"TONBO": {"price": 1}})
+        with caplog.at_level(logging.WARNING, logger="structure-refresh"):
+            sr.refresh_one("TONBO", lambda s: None, st, NOW)
+        assert any("TONBO" in r.getMessage() for r in caplog.records)
+
+    def test_unreadable_failure_fields_are_ignored(self):
+        assert sr._live_fail_count({sr.FAILED_AT_KEY: "garbage", sr.FAIL_COUNT_KEY: 3}) == 0
+        assert sr._live_fail_count({sr.FAILED_AT_KEY: NOW.isoformat(), sr.FAIL_COUNT_KEY: "x"}) == 1
+        assert sr._live_fail_count(None) == 0
 
 
 # ------------------------------------------------------------------ plan + run

@@ -20,7 +20,7 @@ import models
 import trade_records as tr
 from execution import auto_pilot as ap
 from test_group290_trade_records import seed_trade
-from tz_utils import ist_today_str
+from tz_utils import IST, ist_today_str
 
 
 def ago(minutes: float) -> str:
@@ -201,7 +201,10 @@ def test_closed_count_counts_only_closed_positions_of_that_mode_and_ist_day(engi
         p = seed_trade(s, "DDD", mode="REAL", opened_min=30, closed_min=1)
         p.status = "OPEN"
         f = seed_trade(s, "EEE", mode="REAL", opened_min=30, closed_min=1)
-        f.closed_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1, hours=1)   # next IST day
+        # group424: "now + 25 h" is the NEXT IST day only before 23:00 IST (after that it is the day after tomorrow), so the test failed in the
+        # last hour of the IST day. Pin it to 01:00 IST on the next IST calendar day, whatever time the suite runs.
+        _next_midnight_ist = datetime.strptime(ist_today_str(), "%Y-%m-%d").replace(tzinfo=IST) + timedelta(days=1)
+        f.closed_at = (_next_midnight_ist + timedelta(hours=1)).astimezone(timezone.utc).replace(tzinfo=None)
         s.commit()
         today = ist_today_str()
         assert tr.closed_count_for_day(s, "REAL", today) == 1

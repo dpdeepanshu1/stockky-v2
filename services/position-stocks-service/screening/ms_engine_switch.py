@@ -1,7 +1,7 @@
 """Group 349: one place that decides whether the Market Board zones/swings come from the legacy code or from the new engine adapter.
 
-BOARD_USE_MS_ENGINE=0 (default) -> legacy `screening.market_structure` (unchanged behaviour).
-BOARD_USE_MS_ENGINE=1           -> `stockky_ms.compat_board` (same output shape; one documented one-bar difference in zone status).
+BOARD_USE_MS_ENGINE=1 (default, live since group354; config.py) -> `stockky_ms.compat_board` (same output shape; one documented one-bar difference in zone status).
+BOARD_USE_MS_ENGINE=0                                             -> legacy `screening.market_structure` (unchanged behaviour; the rollback switch).
 Any import or runtime error in the new path falls back to the legacy result for that call, so the board never breaks because of it.
 """
 from __future__ import annotations

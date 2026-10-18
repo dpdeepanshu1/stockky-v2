@@ -25,7 +25,7 @@ Vendored byte-identical into 5 service folders as `stockky_ms/` (a container ima
 5. **real-trade `entry_engine/structure_gate.py`** (Gate 4e): snapshot-based, no engine in the service; fetches the summary through the gateway (cached, fail-open on errors,
    but `STRUCTURE_REQUIRE_DATA=true` makes "no usable structure" a WAIT). Structural stop option (`STRUCTURE_STOP_MODE`). `exit_engine/structure_exit.py`: ratchet-only stop tightening/trailing
    of profitable positions. `trade_decisions.structure_json` stores the snapshot. The risk engine is not modified.
-6. **position-stocks**: daily-structure gate in `orders/structure_gate.py` (looser limits than real-trade), observation hook, board switch `BOARD_USE_MS_ENGINE` (default 0, legacy fallback).
+6. **position-stocks**: daily-structure gate in `orders/structure_gate.py` (looser limits than real-trade), observation hook, board switch `BOARD_USE_MS_ENGINE` (default 1 = new engine, live since group354; `0` forces the legacy code; any engine error falls back to legacy for that call).
 7. **frontend**: StructurePanel, StructureGateCard, StructureEdgeCard, sniper badges / held-back list, wait-for-entry text.
 
 ## 3. Defaults that matter (live money)
@@ -39,7 +39,7 @@ Vendored byte-identical into 5 service folders as `stockky_ms/` (a container ima
 | `STRUCTURE_STOP_MODE` | `off` (was `on` until group 415) | `off` = ATR stop; `on` = structural stop used when sane (within 0.5x-1.6x of the ATR-stop risk) |
 | `STRUCTURE_EXIT_MODE` | `log` (was `exit` from group 399 to 414) | `off` / `log` / `tighten` (raise stop only) / `exit` (sells an in-profit position on a fresh bearish daily-structure signal; a losing one is never touched) |
 | `SNIPER_STRUCTURE_MODE` | `enforce` | sniper drops chasing / stretched / no-room / bearish cards; `off` |
-| `STRUCTURE_MAX_CHASE_ATR` / `STRUCTURE_MAX_STRETCH_ATR` / `STRUCTURE_MIN_ROOM_ATR` / `STRUCTURE_MIN_RR` | 1.5 / 3.0 / 0.5 / 1.2 | real-trade limits (position-stocks 4.0 / 5.0 / 0.3) |
+| `STRUCTURE_MAX_CHASE_ATR` / `STRUCTURE_MAX_STRETCH_ATR` / `STRUCTURE_MIN_ROOM_ATR` / `STRUCTURE_MIN_RR` | 1.5 / 3.0 / 0.5 / 0 (group424: R:R floor off; 1.2 was the old value) | real-trade limits (position-stocks 4.0 / 5.0 / 0.3) |
 | `STRUCTURE_OBS_ENABLED` | `true` | `false` = nothing recorded or evaluated |
 
 ## 4. Rollback
@@ -50,11 +50,11 @@ No code deploy needed: set the env vars below and restart the service. The engin
 
 ## 5. Evidence and gates
 `python3 scripts/structure_gate_check.py --ab <ab_report.json> ... --live <report.json>` reports plan gates G2 (A/B benefit) and G4 (live observations).
-Latest known evidence: 346-symbol A/B `no_edge` (the `room` rule slightly negative); 1 live observation. Backtest tooling: `scripts/fetch_history_for_backtest.py`,
+Latest known evidence (group424): the 346-symbol A/B was `no_edge` (the `room` rule slightly negative); a later 177-symbol run (seed 7) was `pass` (+0.56 pp) but a 276-symbol run (seed 11) was `no_edge` (0.0 pp, 90% CI [-0.19, +0.21]), so no edge has replicated and G2 is not met. The `rr` rule's drop-one edge flipped sign (+0.39 on seed 7, -0.19 on seed 11): do not raise `STRUCTURE_MIN_RR` on that evidence. `chase`, `bearish` and `stop_wide` were non-negative on both seeds. Drop-one edge = candidate minus the gate without that rule, so a NEGATIVE value means the gate does better without it. 1 live observation. Backtest tooling: `scripts/fetch_history_for_backtest.py`,
 `scripts/ms_ab_report.py`, `scripts/legacy_gate_backtest.py`, workflow `structure-backtest.yml`. Thresholds are starting values, not calibrated.
 
 ## 6. Where the code differs from the plan
 - Rules are live (no shadow stage); plan D7 wanted off -> shadow -> caps -> full with gates in between.
-- Vendored into 5 services (plan: 3). `STRUCTURE_ENABLED` default is on, `STRUCTURE_POLICY_MODE` default is `full` (plan: shadow). P9 default on (plan: off).
-- Policy thresholds differ from the plan text (R:R minimum 1.2, rules named P1-P9 with their own ordering); see `decision/structure_policy.py`.
+- Vendored into 5 services (plan: 3). `STRUCTURE_ENABLED` default is on, `STRUCTURE_POLICY_MODE` default is `full` (plan: shadow). P9 (`STRUCTURE_PREPARE_UPGRADE`) default off since group 415 (plan: off).
+- Policy thresholds differ from the plan text (R:R minimum was 1.2, off by default since group424, rules named P1-P9 with their own ordering); see `decision/structure_policy.py`.
 - Not built: walk-forward calibration run, ML features v2, weekly / intraday structure, Wyckoff, volume profile; `screening/market_structure.py` bodies not replaced by the wrapper (switch instead).

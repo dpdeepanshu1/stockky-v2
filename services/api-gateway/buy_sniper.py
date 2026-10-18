@@ -287,7 +287,7 @@ def _sg_bool(name: str, default: bool) -> bool:
 STRUCTURE_MAX_CHASE_ATR = _sg_float("STRUCTURE_MAX_CHASE_ATR", 1.5)
 STRUCTURE_MAX_STRETCH_ATR = _sg_float("STRUCTURE_MAX_STRETCH_ATR", 3.0)
 STRUCTURE_MIN_ROOM_ATR = _sg_float("STRUCTURE_MIN_ROOM_ATR", 0.5)
-STRUCTURE_MIN_RR = _sg_float("STRUCTURE_MIN_RR", 1.2)
+STRUCTURE_MIN_RR = _sg_float("STRUCTURE_MIN_RR", 0.0)   # group424: off by default (same as real-trade); 1.2 restores the old floor
 STRUCTURE_REJECT_STOP_WIDE = _sg_bool("STRUCTURE_REJECT_STOP_WIDE", True)
 STRUCTURE_BEARISH_BLOCK = _sg_bool("STRUCTURE_BEARISH_BLOCK", True)
 STRUCTURE_BEARISH_BOS_BARS = int(_sg_float("STRUCTURE_BEARISH_BOS_BARS", 5))

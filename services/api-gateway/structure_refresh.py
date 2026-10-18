@@ -35,9 +35,18 @@ logger = logging.getLogger("structure-refresh")
 IST = timezone(timedelta(hours=5, minutes=30))
 
 REFRESHED_AT_KEY = "ms_refreshed_at"
+# group424: a failed fetch (the technical service answers 503 "history thin or engine error" for a new listing) used to leave no trace, so
+# the same symbol was re-selected on every catch-up pass for ever. A failure now stamps the attempt and a back-off (1 h, 2 h, 4 h ... 24 h)
+# keeps the symbol out of the selection. A later attempt that gets an answer (a newer `ms_refreshed_at`), or `force`, lifts it.
+FAILED_AT_KEY = "ms_failed_at"
+FAIL_COUNT_KEY = "ms_fail_n"
+FAIL_BACKOFF_BASE_H = 1.0
+FAIL_BACKOFF_MAX_H = 24.0
+FAIL_COUNT_CAP = 20
+FAIL_KEYS: Tuple[str, ...] = (FAILED_AT_KEY, FAIL_COUNT_KEY)
 SUMMARY_KEYS: Tuple[str, ...] = tuple(getattr(ms_passthrough, "SUMMARY_KEYS", ()) or ())
-# Every key this job owns on a feed row (replaced as one group).
-OWNED_KEYS: Tuple[str, ...] = SUMMARY_KEYS + (REFRESHED_AT_KEY,)
+# Every key this job owns on a feed row (replaced as one group; a successful refresh therefore also clears the failure stamp).
+OWNED_KEYS: Tuple[str, ...] = SUMMARY_KEYS + (REFRESHED_AT_KEY,) + FAIL_KEYS
 
 # Outcomes (also the counter names).
 REFRESHED, UNCHANGED, NO_BLOCK, FAILED, NOT_IN_FEED = "refreshed", "unchanged", "no_block", "failed", "not_in_feed"
@@ -172,6 +181,51 @@ def row_state(row: Any, expected: date) -> str:
     return "fresh"
 
 
+def _parse_ts(v: Any) -> Optional[datetime]:
+    """ISO timestamp (naive = IST) -> aware datetime; None when empty or unreadable."""
+    if not v:
+        return None
+    try:
+        t = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+        return t if t.tzinfo is not None else t.replace(tzinfo=IST)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _live_fail_count(row: Any) -> int:
+    """Consecutive-failure count recorded on a row; 0 when none, unreadable, or lifted by a newer answered attempt (`ms_refreshed_at`)."""
+    if not isinstance(row, dict):
+        return 0
+    failed = _parse_ts(row.get(FAILED_AT_KEY))
+    if failed is None:
+        return 0
+    refreshed = _parse_ts(row.get(REFRESHED_AT_KEY))
+    if refreshed is not None and refreshed > failed:
+        return 0
+    try:
+        return max(0, min(FAIL_COUNT_CAP, int(row.get(FAIL_COUNT_KEY) or 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def fail_backoff_hours(n: int) -> float:
+    """Wait after the n-th consecutive failure: 1 h, 2 h, 4 h ... capped at 24 h (0 for n <= 0)."""
+    if n <= 0:
+        return 0.0
+    return min(FAIL_BACKOFF_MAX_H, FAIL_BACKOFF_BASE_H * (2.0 ** (n - 1)))
+
+
+def in_fail_backoff(row: Any, now: Optional[datetime] = None) -> bool:
+    n = _live_fail_count(row)
+    if n <= 0:
+        return False
+    failed = _parse_ts(row.get(FAILED_AT_KEY))
+    if failed is None:
+        return False
+    elapsed = ((now or datetime.now(IST)) - failed).total_seconds()
+    return 0 <= elapsed < fail_backoff_hours(n) * 3600
+
+
 def needs_refresh(row: Any, expected: date, now: Optional[datetime] = None, force: bool = False,
                   recheck_hours: float = 6.0) -> Optional[int]:
     """Priority (0 = most urgent) or None when the row should be left alone.
@@ -179,17 +233,12 @@ def needs_refresh(row: Any, expected: date, now: Optional[datetime] = None, forc
     state = row_state(row, expected)
     if state == "fresh" and not force:
         return None
+    if not force and in_fail_backoff(row, now):  # group424: a symbol whose fetch keeps failing waits 1 h, 2 h, 4 h ... 24 h
+        return None
     if not force and recheck_hours > 0 and isinstance(row, dict):
-        tried = row.get(REFRESHED_AT_KEY)
-        if tried:
-            try:
-                t = datetime.fromisoformat(str(tried).strip().replace("Z", "+00:00"))
-                if t.tzinfo is None:
-                    t = t.replace(tzinfo=IST)
-                if 0 <= ((now or datetime.now(IST)) - t).total_seconds() < recheck_hours * 3600:
-                    return None
-            except Exception:  # noqa: BLE001
-                pass
+        t = _parse_ts(row.get(REFRESHED_AT_KEY))
+        if t is not None and 0 <= ((now or datetime.now(IST)) - t).total_seconds() < recheck_hours * 3600:
+            return None
     return {"missing": 0, "stale": 1, "fresh": 2}[state]
 
 
@@ -218,16 +267,31 @@ def select_symbols(rows: Dict[str, Any], expected: date, now: Optional[datetime]
     return syms, tally
 
 
+def _record_failure(sym: str, store: Any, stamp: str) -> None:
+    """Remember a failed fetch (stamp + consecutive count) and log the symbol. The old structure keys are kept. Never raises, never creates a row."""
+    try:
+        existing = store.get_symbol(sym)
+        if not isinstance(existing, dict) or not existing:
+            return
+        n = min(FAIL_COUNT_CAP, _live_fail_count(existing) + 1)
+        store.replace_fields(sym, {FAILED_AT_KEY: stamp, FAIL_COUNT_KEY: n})
+        logger.warning("structure_refresh: fetch failed for %s (consecutive failures=%d, next try in >= %.0f h)", sym, n, fail_backoff_hours(n))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("structure_refresh record failure %s: %s", sym, e)
+
+
 def refresh_one(sym: str, fetch: Callable[[str], Optional[Dict[str, Any]]], store: Any, now: Optional[datetime] = None) -> str:
     """Refresh one symbol's `ms_*` group. Returns one of REFRESHED / UNCHANGED / NO_BLOCK / FAILED / NOT_IN_FEED. Never raises."""
+    stamp = (now or datetime.now(IST)).isoformat()
     try:
         data = fetch(sym)
     except Exception as e:  # noqa: BLE001
         logger.debug("structure_refresh fetch %s: %s", sym, e)
+        _record_failure(sym, store, stamp)
         return FAILED
     if not isinstance(data, dict):
+        _record_failure(sym, store, stamp)
         return FAILED
-    stamp = (now or datetime.now(IST)).isoformat()
     try:
         keys = ms_passthrough.feed_keys(data)  # {} when disabled / no valid block / unknown schema_version
         if not keys:
@@ -243,7 +307,9 @@ def refresh_one(sym: str, fetch: Callable[[str], Optional[Dict[str, Any]]], stor
         same = (keys.get("ms_hash") is not None and keys.get("ms_hash") == existing.get("ms_hash")
                 and keys.get("ms_asof") == existing.get("ms_asof") and keys.get("ms_quality") == existing.get("ms_quality"))
         if same:
-            if not store.replace_fields(sym, {REFRESHED_AT_KEY: stamp}):  # touch only the attempt stamp
+            # touch only the attempt stamp (and clear a failure stamp left by earlier failed attempts, when there is one)
+            drop = FAIL_KEYS if any(k in existing for k in FAIL_KEYS) else ()
+            if not store.replace_fields(sym, {REFRESHED_AT_KEY: stamp}, drop_keys=drop):
                 return FAILED
             return UNCHANGED
         fields = dict(keys)

@@ -353,7 +353,7 @@ def _gate_thresholds() -> Dict[str, Any]:
         except (TypeError, ValueError):
             return default
     return {"chase_atr": f("STRUCTURE_MAX_CHASE_ATR", 1.5), "stretch_atr": f("STRUCTURE_MAX_STRETCH_ATR", 3.0), "room_atr": f("STRUCTURE_MIN_ROOM_ATR", 0.5),
-            "rr": f("STRUCTURE_MIN_RR", 1.2), "bearish_bos_bars": int(f("STRUCTURE_BEARISH_BOS_BARS", 5.0))}
+            "rr": f("STRUCTURE_MIN_RR", 0.0), "bearish_bos_bars": int(f("STRUCTURE_BEARISH_BOS_BARS", 5.0))}
 
 
 def report(kv: Optional[KvStore] = None, days: int = 60, recent: int = 40, min_n: int = 20, now_ts: Optional[float] = None) -> Dict[str, Any]:

@@ -57,10 +57,12 @@ def check_ab(rep: Dict[str, Any], name: str = "report") -> Dict[str, Any]:
         status = FAIL
         reasons.append("negative edge in regime(s): " + ", ".join(sorted(bad)))
     rules = rep.get("by_rule") or {}
-    hurting = [k for k, v in rules.items() if _num((v or {}).get("drop_one_edge_pp")) is not None and _num(v["drop_one_edge_pp"]) > (edge or 0) + 0.05
+    # drop_one_edge_pp = candidate minus the gate-without-this-rule (scripts/ms_ab_report.py): positive = the rule earns its place, NEGATIVE =
+    # the gate does better without it. (group424: this check used to be the other way round and named the helpful rule, not the harmful one.)
+    hurting = [k for k, v in rules.items() if _num((v or {}).get("drop_one_edge_pp")) is not None and _num(v["drop_one_edge_pp"]) < -0.05
                and (_num(v.get("drop_one_n")) or 0) >= 30]
     if hurting:
-        reasons.append("note: the gate does better WITHOUT rule(s) " + ", ".join(sorted(hurting)) + " (drop-one edge is higher)")
+        reasons.append("note: the gate does better WITHOUT rule(s) " + ", ".join(sorted(hurting)) + " (drop-one edge is negative)")
     return {"name": name, "status": status, "reasons": reasons, "edge_pp": edge, "kept_pct": kept}
 
 

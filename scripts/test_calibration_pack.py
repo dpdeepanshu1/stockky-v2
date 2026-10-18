@@ -35,7 +35,7 @@ def test_stable_rule_with_enough_rows_is_suggested_with_both_env_names():
 
 def test_rr_has_no_position_stocks_line():
     txt = c.render(_bt(rr=_wf([2.0, 2.0, 2.0, 2.0])), [])
-    assert "STRUCTURE_MIN_RR=2 (now 1.2)" in txt and "PS_STRUCTURE_MIN_RR" not in txt
+    assert "STRUCTURE_MIN_RR=2 (now 0)" in txt and "PS_STRUCTURE_MIN_RR" not in txt
 
 
 def test_noise_never_produces_a_suggestion():

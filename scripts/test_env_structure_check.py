@@ -9,17 +9,18 @@ def test_parse_env_last_wins_quotes_comments_export():
 
 
 def test_defaults_produce_no_findings():
-    _, f = e.check({"STRUCTURE_POLICY_MODE": "record", "STRUCTURE_EXIT_MODE": "LOG", "STRUCTURE_MAX_AGE_DAYS": "5", "OTHER": "x"})
+    _, f = e.check({"STRUCTURE_POLICY_MODE": "record", "STRUCTURE_EXIT_MODE": "LOG", "STRUCTURE_MAX_AGE_DAYS": "5", "CANDIDATE_52W_LOG_ONLY": "1", "CANDIDATE_52W_RULE_ENABLED": "1", "OTHER": "x"})
     assert f == []
 
 
 def test_old_overrides_are_flagged_with_direction():
-    env = e.parse_env("STRUCTURE_EXIT_MODE=exit\nSTRUCTURE_STOP_MODE=on\nSTRUCTURE_PREPARE_UPGRADE=1\nSTRUCTURE_MAX_AGE_DAYS=7\nSTRUCTURE_POLICY_MODE=full\nCANDIDATE_52W_LOG_ONLY=1\n")
+    env = e.parse_env("STRUCTURE_EXIT_MODE=exit\nSTRUCTURE_STOP_MODE=on\nSTRUCTURE_PREPARE_UPGRADE=1\nSTRUCTURE_MAX_AGE_DAYS=7\nSTRUCTURE_POLICY_MODE=full\nCANDIDATE_52W_LOG_ONLY=0\nCANDIDATE_52W_RULE_ENABLED=0\n")
     _, f = e.check(env)
     text = "\n".join(f)
     assert "TIGHTENS  STRUCTURE_EXIT_MODE=exit" in text and "TIGHTENS  STRUCTURE_STOP_MODE=on" in text
     assert "LOOSENS  STRUCTURE_PREPARE_UPGRADE=1" in text and "OVERRIDE  STRUCTURE_MAX_AGE_DAYS=7" in text
-    assert "TIGHTENS  STRUCTURE_POLICY_MODE=full" in text and "LOOSENS  CANDIDATE_52W_LOG_ONLY=1" in text
+    assert "TIGHTENS  STRUCTURE_POLICY_MODE=full" in text and "TIGHTENS  CANDIDATE_52W_LOG_ONLY=0" in text
+    assert "OVERRIDE  CANDIDATE_52W_RULE_ENABLED=0" in text
 
 
 def test_secret_like_names_are_hidden_and_unknown_keys_are_info():

@@ -30,8 +30,8 @@ INTENDED: Dict[str, Tuple[str, Dict[str, str], str]] = {
     "STRUCTURE_RETEST_ENTRY": ("0", {"1": "LOOSENS", "true": "LOOSENS", "on": "LOOSENS", "yes": "LOOSENS"}, "group413: retest branch off, no replay evidence"),
     "STRUCTURE_REQUIRE_FOR_BUY_NOW": ("1", {"0": "LOOSENS", "false": "LOOSENS", "off": "LOOSENS", "no": "LOOSENS"}, "group377: BUY NOW needs usable structure"),
     "STRUCTURE_GATE_MODE": ("enforce", {"off": "LOOSENS"}, "entry structure gate stays on (group415 'what stays on')"),
-    "CANDIDATE_52W_RULE_ENABLED": ("1", {"0": "LOOSENS", "false": "LOOSENS", "off": "LOOSENS", "no": "LOOSENS"}, "52-week rule on"),
-    "CANDIDATE_52W_LOG_ONLY": ("0", {"1": "LOOSENS", "true": "LOOSENS", "on": "LOOSENS", "yes": "LOOSENS"}, "group434c: log-only = rule stops rejecting"),
+    "CANDIDATE_52W_RULE_ENABLED": ("1", {"0": "OVERRIDE", "false": "OVERRIDE", "off": "OVERRIDE", "no": "OVERRIDE"}, "group440: rule hard-off (group420 recommended line) = nothing rejected AND nothing counted; compose default is log-only"),
+    "CANDIDATE_52W_LOG_ONLY": ("1", {"0": "TIGHTENS", "false": "TIGHTENS", "off": "TIGHTENS", "no": "TIGHTENS"}, "group440 compose default: log-only (rule evaluated + counted, never rejects); 0 = the rule rejects again"),
     "CANDIDATE_52W_FRESH_HIGH_EXEMPT": ("1", {"0": "TIGHTENS", "false": "TIGHTENS", "off": "TIGHTENS", "no": "TIGHTENS"}, "group379 exemption on"),
 }
 _SECRET = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)

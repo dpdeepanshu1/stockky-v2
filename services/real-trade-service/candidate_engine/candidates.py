@@ -151,11 +151,32 @@ def _env_float_or(name: str, default: float) -> float:
 RANGE_52W_ENABLED = _env_flag_on("CANDIDATE_52W_RULE_ENABLED")
 RANGE_52W_LOG_ONLY = _env_flag_on("CANDIDATE_52W_LOG_ONLY", "0")      # group434: default OFF (rule rejects as before)
 _R52_LOG_ONLY_N = {"would_reject": 0}
+_R52_LOG_ONLY_RECENT: list = []          # group440: newest last, capped; lets GET /range52w/status show WHICH symbols the rule would have blocked
+_R52_RECENT_MAX = 50
+
+
+def _r52_record_would_reject(symbol: str, pos_pct: float, score: Optional[float]) -> None:
+    """group440: counter + short in-memory history for the log-only mode. Never raises (it sits in the candidate path)."""
+    try:
+        _R52_LOG_ONLY_N["would_reject"] += 1
+        _R52_LOG_ONLY_RECENT.append({
+            "symbol": str(symbol), "pos_pct": round(float(pos_pct), 1),
+            "market_score": None if score is None else round(float(score), 1),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        if len(_R52_LOG_ONLY_RECENT) > _R52_RECENT_MAX:
+            del _R52_LOG_ONLY_RECENT[: len(_R52_LOG_ONLY_RECENT) - _R52_RECENT_MAX]
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def range_52w_log_only_stats() -> dict:
-    """group434: how many candidates the 52-week rule WOULD have rejected while CANDIDATE_52W_LOG_ONLY=1 (since boot, per process)."""
-    return {"log_only": bool(RANGE_52W_LOG_ONLY), "would_reject": _R52_LOG_ONLY_N["would_reject"]}
+    """group434: how many candidates the 52-week rule WOULD have rejected while CANDIDATE_52W_LOG_ONLY=1 (since boot, per process).
+    group440: plus the config in force and the last <=50 would-reject symbols (`recent`)."""
+    return {
+        "log_only": bool(RANGE_52W_LOG_ONLY), "rule_enabled": bool(RANGE_52W_ENABLED),
+        "would_reject": _R52_LOG_ONLY_N["would_reject"], "recent": list(_R52_LOG_ONLY_RECENT),
+    }
 RANGE_52W_REGIME_GATE = _env_flag_on("CANDIDATE_52W_REGIME_GATE")
 RANGE_52W_WEAK_REGIME_SCORE = _env_float_or("CANDIDATE_52W_WEAK_REGIME_SCORE", 50.0)
 RANGE_52W_REGIME_MAX_AGE_MIN = _env_float_or("CANDIDATE_52W_REGIME_MAX_AGE_MIN", 30.0)
@@ -1597,6 +1618,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
     # (see _range_52w_applies), and the reason now quotes the real market score instead of assuming "choppy".
     candles_1y = fetched.get("1y")
     breakout_note: Optional[str] = _fresh_high_breakout(candles_1y, fetched.get("1m"), current_price)
+    _r52_would_note: str = ""            # group440: set only in log-only mode when the rule would have rejected this candidate
     if RANGE_52W_ENABLED and not breakout_note and isinstance(candles_1y, list) and candles_1y and current_price > 0:
         highs = [float(c.get("high", 0)) for c in candles_1y if c.get("high")]
         lows  = [float(c.get("low",  0)) for c in candles_1y if c.get("low")]
@@ -1620,7 +1642,11 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
                         "holders. Poor R:R."
                     )
                     if RANGE_52W_LOG_ONLY:       # group434: measure the rule without letting it cost entries
-                        _R52_LOG_ONLY_N["would_reject"] += 1
+                        _r52_record_would_reject(symbol, pos_pct, _mscore)
+                        _r52_would_note = (
+                            f"52w log-only: rule would have rejected (at {pos_pct:.1f}% of 52w range, "
+                            f"market score {'n/a' if _mscore is None else format(_mscore, '.0f')})"
+                        )
                         logger.info("52W_LOG_ONLY would reject %s: %s", symbol, _reject_log_text(_r52_reason))
                     else:
                         return {
@@ -1691,7 +1717,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         "bullish_count": bullish_count,
         "atr_pct":       atr_pct,
         "current_price": current_price,
-        "market_note":   breakout_note or "",
+        "market_note":   breakout_note or _r52_would_note or "",
     }
 
 

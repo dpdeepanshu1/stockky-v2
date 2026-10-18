@@ -2505,6 +2505,23 @@ async def kronos_status(admin: Optional[str] = Depends(require_admin_if_real)):
     return _kg.stats()
 
 
+@app.get("/range52w/status")
+async def range52w_status(admin: Optional[str] = Depends(require_admin_if_real)):
+    """group440: 52-week "top 12%" candidate rule - is it live or log-only, how many candidates it WOULD have rejected since boot, and the last 50
+    symbols (with their range position and the market score). Read-only; nothing in the entry path reads it. Counters reset on restart."""
+    from candidate_engine import candidates as _cd
+    try:
+        out = dict(_cd.range_52w_log_only_stats())
+        out.update({
+            "regime_gate": bool(_cd.RANGE_52W_REGIME_GATE), "weak_regime_score": _cd.RANGE_52W_WEAK_REGIME_SCORE,
+            "fresh_high_exempt": bool(_cd.FRESH_HIGH_EXEMPT), "top_pct": _cd.OVEREXTENDED_52W_TOP_PCT,
+            "current_market_score": _cd._cycle_market_score,
+        })
+        return out
+    except Exception as e:  # noqa: BLE001 - status route must never 500
+        return {"error": str(e)[:200]}
+
+
 @app.get("/timesfm/status")
 async def timesfm_status(admin: Optional[str] = Depends(require_admin_if_real)):
     """group 434: TimesFM parameter record (Gate 4g, log only) - config and process counters since boot plus the last verdicts. Read-only; nothing in the entry path reads it."""

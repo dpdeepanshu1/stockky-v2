@@ -333,6 +333,9 @@ services:
       TIMESFM_URL: http://timesfm-forecast-service:8011
       TIMESFM_GATE_MODE: ${TIMESFM_GATE_MODE:-off}
       TIMESFM_GATE_DEMO_MODE: ${TIMESFM_GATE_DEMO_MODE:-}
+      # group 440: 52-week "top 12%" candidate rule defaults to LOG ONLY (evaluated, counted, shown on GET /range52w/status, never rejects). The 18 Oct hist400
+      # replay says it hurts in weak AND strong markets. LOOSENS an entry rule. Rollback: CANDIDATE_52W_LOG_ONLY=0 in .env (a value there wins over this default).
+      CANDIDATE_52W_LOG_ONLY: ${CANDIDATE_52W_LOG_ONLY:-1}
       # 2026-09-11 fix: needed for the volume-shock quality gate
       # (candidate_engine/candidates.py's fundamental/technical checks) —
       # previously undefined here, so it silently fell back to config.py's

@@ -293,6 +293,8 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             exc = _excursion_pcts(entry, getattr(p, "max_price_seen", None), getattr(p, "min_price_seen", None))   # group 397
             stop_basis = getattr(decision, "stop_basis", None)
             stop_basis = stop_basis if isinstance(stop_basis, str) and stop_basis else None
+            from entry_engine import order_flow as _of          # group 427: order-flow numbers recorded at the entry decision
+            flow = _of.parse(getattr(decision, "flow_json", None))
             held = None
             if p.closed_at is not None:
                 held = round((as_aware(p.closed_at) - as_aware(p.opened_at)).total_seconds() / 60.0, 1)
@@ -327,6 +329,9 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "gross_pnl": gross, "charges": charges, "charges_source": charges_src, "net_pnl": net,
                 "orders_matched": bool(buys or sells),
                 "stop_pct": stop_pct, "stop_basis": stop_basis,
+                "imbalance_5": flow.get("imbalance_5"), "imbalance_20": flow.get("imbalance_20"),
+                "flow_spread_pct": flow.get("spread_pct"), "flow_book_value_5": flow.get("book_value_5"),
+                "flow_vs_vwap_pct": flow.get("vs_vwap_pct"), "flow_day_pos": flow.get("day_pos"),
                 "max_gain_pct": exc["max_gain_pct"], "max_drawdown_pct": exc["max_drawdown_pct"],
                 # group 398: what scripts/opening_replay.py needs to replay a real-trade export (opening time, close time, size)
                 "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at), "quantity": qty_in,
@@ -334,6 +339,16 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
         except Exception as e:  # noqa: BLE001
             logger.warning("trade record for position %s skipped: %s: %s", getattr(p, "id", "?"), type(e).__name__, e)
     return out
+
+
+def _imb_bucket(v) -> str:
+    from entry_engine.order_flow import imbalance_bucket
+    return imbalance_bucket(v)
+
+
+def _spread_bucket(v) -> str:
+    from entry_engine.order_flow import spread_bucket
+    return spread_bucket(v)
 
 
 def _excursion_pcts(entry, hi, lo) -> dict:
@@ -413,7 +428,8 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "trades": len(records),
         "overall": _agg(records, min_trades_note) if records else None,
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
-        "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "stop_diagnostics": None,
+        "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "by_imbalance_5": {}, "by_imbalance_20": {}, "by_spread": {},
+        "stop_diagnostics": None,
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
                  "entry_slippage_pct > 0 means the entry was paid above the signal price"),
@@ -428,6 +444,10 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_source_tab": lambda r: r.get("source_tab") or "?",
         "by_day": lambda r: r.get("exit_day_ist") or "?",
         "by_stop_basis": lambda r: r.get("stop_basis") or "unknown",
+        # group 427: order-flow buckets (entries made before the record existed fall in "unknown")
+        "by_imbalance_5": lambda r: _imb_bucket(r.get("imbalance_5")),
+        "by_imbalance_20": lambda r: _imb_bucket(r.get("imbalance_20")),
+        "by_spread": lambda r: _spread_bucket(r.get("flow_spread_pct")),
     }
     for name, key in keyers.items():
         groups: dict = defaultdict(list)

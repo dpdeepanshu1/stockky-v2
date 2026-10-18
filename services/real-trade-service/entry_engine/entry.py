@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -770,6 +770,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # only after gates 3-5 pass below.) ───────────────────────────────
         stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
         decision.stop_basis = _atr_stop_basis(atr_pct)                  # group 396: stop source tag (evidence only)
+        order_flow.record(decision, tick)                               # group 427: order-flow numbers, record only (never raises)
         # 2026-09-01 fix: entry_price is the actual LIMIT price sent to Dhan —
         # must be a valid NSE tick (₹0.05 multiple) or the broker rejects the
         # order outright. See execution/dhan_client.py's TICK_SIZE comment —
@@ -1198,6 +1199,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict})
             continue
+        await order_flow.add_d20(decision, cand.symbol, proposed_qty)    # group 427: 20-level book for the record, never blocks
         staged_symbols.add(cand.symbol)
 
         # ── Approved — stage for this cycle's cross-candidate ranking ──────────

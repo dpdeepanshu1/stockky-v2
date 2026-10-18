@@ -205,6 +205,7 @@ _COLUMN_MIGRATIONS = [
     ("scalp_positions", "signal_price", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "min_price_seen", "BINARY_DOUBLE", "DOUBLE PRECISION", None, None),
     ("scalp_positions", "structure_json", "CLOB", "TEXT", None, None),   # group354
+    ("scalp_positions", "flow_json", "CLOB", "TEXT", None, None),   # group427
     ("scalp_positions", "stop_basis", "VARCHAR2(16)", "VARCHAR(16)", None, None),   # group395
     # 2026-09-18 (user audit finding): marks a carried-overnight position
     # that was successfully converted INTRADAY -> CNC via

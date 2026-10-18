@@ -1898,6 +1898,7 @@ def positions(db: Session = Depends(get_db)):
             "status": r.status,
             "window_source": r.window_source,
             "structure": _structure_view(getattr(r, "structure_json", None)),   # group354
+            "order_flow": (__import__("orders.order_flow", fromlist=["parse"]).parse(getattr(r, "flow_json", None)) or None),   # group427
             "entry_price": r.entry_price,
             "exit_price": r.exit_price,
             "quantity": r.quantity,

@@ -564,6 +564,19 @@ KRONOS_MIN_EDGE_X_COST = _og_float("KRONOS_MIN_EDGE_X_COST", 1.0)           # re
 KRONOS_MIN_P_TARGET = _og_float("KRONOS_MIN_P_TARGET", 0.10)                # reject when fewer than this share of paths reach the target before the stop (0 disables)
 KRONOS_COST_NOTIONAL = max(1000.0, _og_float("KRONOS_COST_NOTIONAL", 50000.0))  # trade value used to turn the cost model into a % (the gate runs before sizing)
 
+# ── group427: order-flow record on every entry decision (RECORD ONLY - nothing here blocks, sizes or orders anything) ─────────────────────
+#   ORDER_FLOW_RECORD       1 (default) | 0   write trade_decisions.flow_json: spread, best-5 bid/ask quantity and imbalance, book value, price vs
+#                           VWAP / open / day range, volume. Free: it reads the tick the entry already holds.
+#   ORDER_FLOW_DEPTH20      1 (default) | 0   for an approved (staged) entry also ask market-data /depth/{symbol} once for the 20-level book
+#                           (imbalance_20, what buying the planned size would cost). Needs DHAN_DEPTH20_ENABLED=1 on market-data; unknown = left out.
+#   ORDER_FLOW_DEPTH20_TIMEOUT_S   longest wait for that one call (default 1.5 s; slower = left out, the entry goes ahead unchanged)
+# Read the result with GET /records expectancy (by_imbalance_5 / by_imbalance_20 / by_spread groups) after about two weeks of trades.
+def _of_on(name, default="1"):
+    return (os.getenv(name) or default).strip().lower() not in ("0", "false", "no", "off")
+ORDER_FLOW_RECORD = _of_on("ORDER_FLOW_RECORD")
+ORDER_FLOW_DEPTH20 = _of_on("ORDER_FLOW_DEPTH20")
+ORDER_FLOW_DEPTH20_TIMEOUT_S = max(0.2, _og_float("ORDER_FLOW_DEPTH20_TIMEOUT_S", 1.5))
+
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
 #      VIX_GATE_ENABLED         master switch for the VIX checks

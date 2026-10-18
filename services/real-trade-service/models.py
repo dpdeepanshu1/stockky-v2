@@ -320,6 +320,9 @@ class TradeDecision(Base):
     # group 396: where this ENTRY decision's initial stop came from - "atr" (daily ATR x multiplier), "flat" (no usable ATR: flat % fallback) or
     # "structure" (the group 351 structural stop replaced it). NULL on rows made before group 396 and on non-entry decisions.
     stop_basis = Column(String(16), nullable=True)
+    # group 427: JSON of the order-flow numbers at decision time (spread, best-5 bid/ask quantity + imbalance, book value, price vs VWAP/open,
+    # day position, and for an approved entry the 20-level book). RECORD ONLY - nothing reads it to decide. NULL on older rows / when no depth was known.
+    flow_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 
 

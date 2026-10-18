@@ -111,6 +111,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--min-bars", type=int, default=250)
     ap.add_argument("--max-failures-pct", type=float, default=60.0)
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--benchmark-only", action="store_true", help="fetch / refresh just the benchmark (^NSEI.json, the exchange calendar the entry-rules backtest needs) and stop")
     a = ap.parse_args(argv)
     base = a.base.rstrip("/")
     if not base.startswith(("http://", "https://")):
@@ -118,6 +119,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if a.benchmark_only:                      # group427: hist400 had no ^NSEI.json; this adds it without touching the 400 stock files
+        bpath = out / f"{a.benchmark}.json"
+        if not a.refresh and bpath.exists():
+            try:
+                if len(candles_of(json.loads(bpath.read_text()))) >= a.min_bars:
+                    print(f"{bpath} already there")
+                    return 0
+            except Exception:  # noqa: BLE001
+                pass
+        c = fetch_one(base, a.benchmark, a.period, a.retries, a.sleep, a.timeout)
+        if not c or len(c) < a.min_bars:
+            print(f"benchmark {a.benchmark} unavailable ({len(c or [])} candles)", file=sys.stderr)
+            return 1
+        bpath.write_text(json.dumps({"symbol": a.benchmark, "candles": c}))
+        print(f"saved {bpath} ({len(c)} candles)")
+        return 0
     try:
         syms = read_symbols(a)
     except Exception as e:  # noqa: BLE001

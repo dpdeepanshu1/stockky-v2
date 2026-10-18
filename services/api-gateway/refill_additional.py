@@ -177,34 +177,11 @@ def _build_payload(sym: str, fund: Optional[dict], tech: Optional[dict], events:
     return row
 
 
-# group426: _hydrate_one tags the row it returns with this key when the fundamentals call gave nothing (non-200, timeout,
-# empty body). The runner pops it before the row is stored, so it never reaches the feed. Before this the refill saved the
-# technicals / events, counted the symbol OK and logged the failed fundamentals call at debug level only, so a run in which
-# every fundamentals call failed still ended "587/587 ok, 0 errors".
-_FUND_FAILED_KEY = "_fund_failed"
-
-
-def _priced_symbols(store, symbols: List[str]) -> set:
-    """Symbols whose stored feed row already has a price (one bulk read). The refill must not relabel such a row's `source`
-    (e.g. `nse_bhavcopy` -> `refill_additional`): the price in it was not written by this job. Any failure -> empty set (old behaviour)."""
-    try:
-        rows = store.get_symbols_bulk(list(symbols)) or {}
-    except Exception as e:  # noqa: BLE001 - best effort, the refill must never fail on this
-        logger.debug("refill priced-symbol lookup: %s", e)
-        return set()
-    out = set()
-    for sym, row in (rows.items() if isinstance(rows, dict) else []):
-        if isinstance(row, dict) and any(row.get(k) for k in ("last_price", "current_price", "price")):
-            out.add(_norm(sym))
-    return out
-
-
 def _hydrate_one(client: httpx.Client, sym: str) -> tuple[str, bool]:
     fund = _get_json(client, f"{FUNDAMENTAL_URL}/analyze/{sym}?force=true")
     tech = _get_json(client, f"{TECHNICAL_URL}/analyze/{sym}?force=true")
     events = _get_json(client, f"{EVENT_URL}/events/{sym}?force=true")
     row = _build_payload(sym, fund, tech, events)
-    row[_FUND_FAILED_KEY] = not fund
     return sym, row
 
 
@@ -239,9 +216,7 @@ def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
     total = len(symbols)
     ok_n = 0
     err_n = 0
-    fund_missing = 0     # group426: symbols whose fundamentals call returned nothing (they still count as ok when technicals / events were saved)
     processed = 0
-    priced = _priced_symbols(store, symbols)
     _set_job(
         status="running",
         message=f"Refill Additional Data: 0/{total} (concurrency={CONCURRENCY})…",
@@ -272,11 +247,7 @@ def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
 
                 try:
                     _, row = fut.result()
-                    if isinstance(row, dict) and row.pop(_FUND_FAILED_KEY, False):
-                        fund_missing += 1
                     if len(row) > 2:
-                        if _norm(sym) in priced:
-                            row.pop("source", None)    # keep the label of whatever wrote the price
                         store.put_symbol(sym, row)
                         ok_n += 1
                     else:
@@ -289,22 +260,16 @@ def run_refill_additional(symbols: Optional[List[str]] = None) -> dict:
                 if processed % 3 == 0 or processed == total:
                     _set_job(
                         status="running",
-                        message=f"Refill Additional Data: {processed}/{total} (ok={ok_n} err={err_n}"
-                                + (f" fund_missing={fund_missing})" if fund_missing else ")"),
+                        message=f"Refill Additional Data: {processed}/{total} (ok={ok_n} err={err_n})",
                         processed=processed,
                         total=total,
                         ok_count=ok_n,
                         error_count=err_n,
                     )
 
-    if fund_missing:
-        logger.warning("refill: fundamentals call returned nothing for %d/%d symbols (technicals / events were still saved) - "
-                       "check analysis-intelligence /fundamental/analyze", fund_missing, total)
     return _set_job(
         status="done",
-        message=f"Refill complete: {ok_n}/{total} ok, {err_n} errors"
-                + (f"; fundamentals missing for {fund_missing}" if fund_missing else ""),
-        fund_missing=fund_missing,
+        message=f"Refill complete: {ok_n}/{total} ok, {err_n} errors",
         processed=total,
         total=total,
         ok_count=ok_n,

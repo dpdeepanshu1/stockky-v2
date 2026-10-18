@@ -615,24 +615,7 @@ _FULL_FRAMES: dict = {}
 _FULL_FRAMES_MAX = 64
 _FULL_FRAMES_TTL_S = 900
 _FULL_FRAMES_LOCK = threading.Lock()
-_STRUCT_COUNTERS = {"computed": 0, "full_frame": 0, "trimmed_frame": 0, "forming_dropped": 0, "unavailable": 0, "errors": 0, "cache_hits": 0,
-                    # group426: freshly computed blocks that carried each event (plan WS-3: bos / choch / sweep / fvg / ob)
-                    "bos": 0, "choch": 0, "sweep": 0, "fvg": 0, "ob": 0}
-
-
-def _count_structure_events(block) -> None:
-    """Bump the per-event counters from a freshly computed structure block. Never raises."""
-    try:
-        if not isinstance(block, dict) or block.get("quality") in ("unavailable", "insufficient"):
-            return
-        liq = block.get("liquidity") if isinstance(block.get("liquidity"), dict) else {}
-        checks = {"bos": (block.get("bos"), "direction"), "choch": (block.get("choch"), "direction"),
-                  "sweep": (liq.get("sweep"), "direction"), "fvg": (block.get("fvg"), "side"), "ob": (block.get("order_block"), "side")}
-        for key, (v, field) in checks.items():
-            if isinstance(v, dict) and v.get(field):
-                _STRUCT_COUNTERS[key] += 1
-    except Exception:  # noqa: BLE001
-        pass
+_STRUCT_COUNTERS = {"computed": 0, "full_frame": 0, "trimmed_frame": 0, "forming_dropped": 0, "unavailable": 0, "errors": 0, "cache_hits": 0}
 
 
 def _remember_full_frame(symbol, df, source=None):
@@ -755,7 +738,6 @@ def _structure_for_df(df, ctx=None, sym=None):
                 _STRUCT_COUNTERS["forming_dropped"] += 1
             if block.get("quality") in ("unavailable", "insufficient"):
                 _STRUCT_COUNTERS["unavailable"] += 1
-            _count_structure_events(block)
         return block, _ms_flatten(block)
     except Exception as e:  # noqa: BLE001
         _STRUCT_COUNTERS["errors"] += 1

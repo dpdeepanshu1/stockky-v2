@@ -763,22 +763,7 @@ def build_suggestion(s: Dict[str, Any], est_profit_pct: float = EST_PROFIT_PCT, 
     if _sv is not None:
         # structural stop / target are DISPLAY ONLY: the card's own stop_loss / target_price / reward_risk_ratio are unchanged
         card["structure"] = {k: _sv[k] for k in ("gate_mode", "opinion", "would_reject", "enforced", "reasons", "no_data", "live", "stop", "target", "rr", "entry_zone", "wait_for_entry", "wait_reason")}
-        # group426: the frontend retest badge reads structure.retest_entry (group 414 P8). The gateway verdict never carried it. Display only.
-        card["structure"]["retest_entry"] = _retest_entry_zones(s)
     return card
-
-
-def _retest_entry_zones(row: Any) -> Optional[List[str]]:
-    """Zone names from the decision service's structure block (`structure.retest_entry`), or None. Never raises, never invents a value."""
-    try:
-        blk = row.get("structure") if isinstance(row, dict) else None
-        z = blk.get("retest_entry") if isinstance(blk, dict) else None
-        if isinstance(z, (list, tuple)):
-            names = [str(k) for k in z if isinstance(k, str) and k]
-            return names or None
-    except Exception:  # noqa: BLE001
-        pass
-    return None
 
 
 def _filter_with_rejects(scanned_stocks: List[Dict[str, Any]], target_count: int = DEFAULT_TARGET_COUNT,

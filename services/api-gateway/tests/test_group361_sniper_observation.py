@@ -53,8 +53,7 @@ class FakeKv:
 
 
 def summary(**kw):
-    # group426: the structure date must be recent relative to the REAL clock (the gate treats an older summary as no_data); it was a fixed 2026-10-13
-    base = {"ms_quality": "ok", "ms_trend": "bullish", "ms_asof": (datetime.now(IST) - timedelta(days=1)).date().isoformat(), "ms_price": 100.0, "ms_atr": 2.0, "ms_stop": 95.0,
+    base = {"ms_quality": "ok", "ms_trend": "bullish", "ms_asof": "2026-10-13", "ms_price": 100.0, "ms_atr": 2.0, "ms_stop": 95.0,
             "ms_target": 112.0, "ms_rr": 2.4, "ms_chase_atr": 0.4, "ms_stretch_atr": 1.0, "ms_room_atr": 3.0, "ms_rr_flags": [],
             "ms_bos_dir": None, "ms_bos_bars": None, "ms_bos_failed": None}
     base.update(kw)

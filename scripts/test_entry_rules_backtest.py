@@ -122,3 +122,34 @@ if __name__ == "__main__":
             n += 1
             print("ok", k)
     print(n, "tests passed")
+
+
+# ── group 427: progress lines + benchmark-only fetch ──────────────────────────────────────────────────────────────────────────────────────
+def _double(x):
+    return x * 2
+
+
+def test_run_jobs_keeps_order_and_reports_progress(capsys):
+    from _progress import run_jobs
+    assert run_jobs(_double, list(range(7)), 1, "t", every=3) == [0, 2, 4, 6, 8, 10, 12]
+    err = capsys.readouterr().err
+    assert "starting 7 symbols" in err and "3/7" in err and "7/7" in err
+
+
+def test_run_jobs_in_a_pool_keeps_order(capsys):
+    from _progress import run_jobs
+    assert run_jobs(_double, list(range(9)), 2, "t", every=4, chunksize=2) == [x * 2 for x in range(9)]
+    assert "9/9" in capsys.readouterr().err
+
+
+def test_fetch_benchmark_only(tmp_path, monkeypatch, capsys):
+    import fetch_history_for_backtest as f
+    candles = [{"t": i} for i in range(300)]
+    monkeypatch.setattr(f, "fetch_one", lambda *a, **k: candles)
+    monkeypatch.setattr(f, "candles_of", lambda doc: doc["candles"] if isinstance(doc, dict) else doc)
+    rc = f.main([str(tmp_path), "--base", "http://127.0.0.1:8001", "--benchmark-only"])
+    assert rc == 0 and (tmp_path / "^NSEI.json").exists()
+    assert f.main([str(tmp_path), "--base", "http://127.0.0.1:8001", "--benchmark-only"]) == 0     # second run: already there, no fetch
+    assert "already there" in capsys.readouterr().out
+    monkeypatch.setattr(f, "fetch_one", lambda *a, **k: [])
+    assert f.main([str(tmp_path), "--base", "http://127.0.0.1:8001", "--benchmark-only", "--refresh"]) == 1

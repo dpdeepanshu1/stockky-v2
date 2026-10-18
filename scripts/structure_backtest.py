@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
@@ -72,8 +73,13 @@ def main() -> int:
     a = ap.parse_args()
     th = json.loads(a.thresholds)
     samples, symbols = [], 0
+    t0 = time.monotonic()
+    _total = sum(1 for f in Path(a.dir).glob("*.json") if f.stem.upper() not in ("^NSEI", "NIFTY", "NSEI", "NIFTY50"))
+    print(f"[structure] starting about {_total} symbols (one at a time: this one is slow, a progress line follows every 5)", file=sys.stderr, flush=True)
     for sym, bars in load(Path(a.dir)):
         symbols += 1
+        if symbols % 5 == 0:                       # group427: a progress line so a long run does not look hung
+            print(f"[structure] {symbols}/{_total} symbols  elapsed {(time.monotonic() - t0) / 60:.1f} min", file=sys.stderr, flush=True)
         built = net_samples(bars, a.step, a.cost_pct, a.slip_pct) if a.entry == "next_open" else build_samples(bars, step=a.step)
         for s in built:
             s["symbol"] = sym

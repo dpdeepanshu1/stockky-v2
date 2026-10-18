@@ -210,12 +210,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.sample > 0 and pool > a.sample:
         files = sorted(random.Random(a.seed).sample(files, a.sample))
     jobs = [(str(f), f.stem.upper(), a.step, a.cost_pct, a.slip_pct) for f in files]
-    if a.jobs > 1:
-        from concurrent.futures import ProcessPoolExecutor
-        with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-            results = list(ex.map(_job, jobs, chunksize=4))
-    else:
-        results = [_job(j) for j in jobs]
+    from _progress import run_jobs                       # group427: a progress line so a long run does not look hung
+    results = run_jobs(_job, jobs, a.jobs, "legacy_gate")
     rows: List[Dict[str, Any]] = []
     skipped = 0
     for res in results:

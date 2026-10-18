@@ -254,6 +254,8 @@ def _wl_last_good_fallback(wanted: list) -> dict:
                                 spread_pct=t.spread_pct, book_value_5=t.book_value_5,
                                 upper_circuit=getattr(t, "upper_circuit", None), lower_circuit=getattr(t, "lower_circuit", None),
                                 vwap=getattr(t, "vwap", None),
+                                bid_qty_5=getattr(t, "bid_qty_5", None), ask_qty_5=getattr(t, "ask_qty_5", None),
+                                open_price=getattr(t, "open_price", None),
                                 age_known=getattr(t, "age_known", True))
     return out
 
@@ -539,7 +541,8 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
 
 class Tick:
     __slots__ = ("symbol", "price", "as_of", "atr", "source", "volume", "day_high", "day_low", "prev_close",
-                 "spread_pct", "book_value_5", "age_known", "upper_circuit", "lower_circuit", "vwap")
+                 "spread_pct", "book_value_5", "age_known", "upper_circuit", "lower_circuit", "vwap",
+                 "bid_qty_5", "ask_qty_5", "open_price")
 
     def __init__(self, symbol: str, price: float, as_of: datetime, atr: Optional[float], source: str,
                  volume: Optional[int] = None,
@@ -551,7 +554,10 @@ class Tick:
                  age_known: bool = True,
                  upper_circuit: Optional[float] = None,
                  lower_circuit: Optional[float] = None,
-                 vwap: Optional[float] = None):
+                 vwap: Optional[float] = None,
+                 bid_qty_5: Optional[float] = None,
+                 ask_qty_5: Optional[float] = None,
+                 open_price: Optional[float] = None):
         self.symbol   = symbol
         self.price    = price
         self.as_of    = as_of
@@ -585,6 +591,11 @@ class Tick:
         # group330: the day's volume-weighted average price (Dhan `average_price`, market-data `avg_price`) when the row carries it, else None.
         # Read only by entry_engine/vwap_gate.py; an unknown value never blocks.
         self.vwap = vwap
+        # group427: resting shares on the bid / ask side of the best five levels, and today's open, when market-data's row carries them
+        # (None otherwise). RECORDED on the entry decision (entry_engine/order_flow.py) and never used to block, size or order anything.
+        self.bid_qty_5 = bid_qty_5
+        self.ask_qty_5 = ask_qty_5
+        self.open_price = open_price
 
 
 def _lq_prev_close(lq, ltp) -> Optional[float]:
@@ -903,6 +914,9 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             prev_close=_safe_prev_close(q.get("previous_close") or q.get("prev_close")),
             spread_pct=_safe_depth_num(q.get("spread_pct")),
             book_value_5=_safe_depth_num(q.get("book_value_5")),
+            bid_qty_5=_safe_depth_num(q.get("bid_qty_5")),
+            ask_qty_5=_safe_depth_num(q.get("ask_qty_5")),
+            open_price=_safe_circuit(q.get("open")),
             upper_circuit=_safe_circuit(q.get("upper_circuit")),
             lower_circuit=_safe_circuit(q.get("lower_circuit")),
             vwap=_safe_circuit(q.get("avg_price")),
@@ -1145,6 +1159,9 @@ def _tick_from_bulk_item(item, *, now: Optional[datetime] = None, max_age_s: Opt
             prev_close=_safe_prev_close(item.get("previous_close") or item.get("prev_close")),
             spread_pct=_safe_depth_num(item.get("spread_pct")),
             book_value_5=_safe_depth_num(item.get("book_value_5")),
+            bid_qty_5=_safe_depth_num(item.get("bid_qty_5")),
+            ask_qty_5=_safe_depth_num(item.get("ask_qty_5")),
+            open_price=_safe_circuit(item.get("open")),
             upper_circuit=_safe_circuit(item.get("upper_circuit")),
             lower_circuit=_safe_circuit(item.get("lower_circuit")),
             vwap=_safe_circuit(item.get("avg_price")),
@@ -1284,6 +1301,8 @@ def _prio_last_good_fallback(wanted: list[str]) -> dict[str, Tick]:
                                 spread_pct=t.spread_pct, book_value_5=t.book_value_5,
                                 upper_circuit=getattr(t, "upper_circuit", None), lower_circuit=getattr(t, "lower_circuit", None),
                                 vwap=getattr(t, "vwap", None),
+                                bid_qty_5=getattr(t, "bid_qty_5", None), ask_qty_5=getattr(t, "ask_qty_5", None),
+                                open_price=getattr(t, "open_price", None),
                                 age_known=getattr(t, "age_known", True))
     return out
 

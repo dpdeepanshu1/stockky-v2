@@ -54,3 +54,6 @@ anything needing live Dhan.
 ## Minor
 - The broker-stop SL-M-rejected flag is in memory: the first stop after each restart fails once and retries. Harmless.
 - Engine caveats: `compat_board` was rebuilt, not recovered; golden tests freeze behaviour, they do not prove thresholds.
+
+## Group 427: order-flow record (shipped, record only)
+Let it collect for about two weeks of real trading days, then read `GET /records` (real-trade) `by_imbalance_5`, `by_imbalance_20`, `by_spread`, and position-stocks' positions `order_flow`. Only if a bucket is clearly worse on 100+ trades is a rule worth building (as a log-first gate, like group 425). Not recorded: cumulative volume delta / aggressor volume / absorption (no trade-by-trade feed). Still to run on the VM: `entry_rules_backtest.py`, `legacy_gate_backtest.py`, `structure_backtest.py` on hist400 (after `fetch_history_for_backtest.py hist400 --benchmark-only`), then paste the reports.

@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, structure_gate, structure_observation, vwap_gate
+from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -574,6 +574,9 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
         return None
 
+    # group427: order-flow numbers for the record (spread, best-5 imbalance, 20-level book). Record only; never raises, never blocks.
+    _flow_snap = order_flow.snapshot_json(candidate.symbol, candidate.current_ltp, None)
+
     # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.
     _circuit_reject = circuit_gate.reject_reason(candidate.symbol, candidate.current_ltp)
@@ -958,6 +961,7 @@ def attempt_entry(
         entry_price=candidate.current_ltp,
         signal_price=candidate.current_ltp,                  # group280: slippage = fill vs this
         structure_json=_struct_snap,                          # group354
+        flow_json=_flow_snap,                                  # group427
         stop_basis=_stop_basis(levels),                        # group395
         quantity=quantity,
         target_price=levels.target_price,

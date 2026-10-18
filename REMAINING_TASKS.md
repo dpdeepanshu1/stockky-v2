@@ -67,3 +67,7 @@ Let it collect for about two weeks of real trading days, then read `GET /records
 6. DONE in group 429: the Kronos wiring test is fixed in the zip. On the VM discard your local edit of that file before pulling (`git checkout -- services/real-trade-service/tests/test_group425_kronos_entry_wiring.py`).
 7. Intraday rules (opening, VWAP, depth gates) cannot be backtested on daily bars; they need recorded intraday data.
 8. Older open items: real NSE pre-open board, catalyst check, window auto-disable + width tuning, structure evidence gates G1-G4, swing-carry design question (group 421).
+
+## Group 430 follow-ups
+- Export the closed-trade records from 1 October onward (same way as `rt_*.json`) and run `python3 scripts/records_report.py rt_*.json --since 2026-10-01`; compare with the September picture (63 trades, net -1,439, the 09:xx-10:xx entry cluster lost 1,598 net, gaps through stops). That decides whether any live rule change is warranted.
+- Still open from group 428: paste the re-run entry_rules / legacy_gate reports (robust tables) and the structure_backtest report; the 52-week range gate stays as is until the robust result is in.

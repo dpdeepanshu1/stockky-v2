@@ -218,6 +218,20 @@ def _charges(order_ids: list, ledger_by_order: dict, pos) -> tuple:
     return None, None
 
 
+def _bot_entry_behind_import(pos, entry_order, fills_by_order: dict) -> bool:
+    """group438: a `broker_imported` position whose entry is really this service's own filled AUTO BUY (a Dhan order id, booked within
+    _ORDER_SLACK_BEFORE_S of opened_at). Before group 438 the reconcile loop imported a just-filled bot CNC entry before booking its
+    fill, so these rows look like imports although the bot chose and placed them."""
+    if not getattr(pos, "broker_imported", False) or entry_order is None:
+        return False
+    if str(getattr(entry_order, "execution_source", "") or "").upper() != "AUTO" or not getattr(entry_order, "dhan_order_id", None):
+        return False
+    t = _order_time(entry_order, fills_by_order)
+    if t is None:
+        return False
+    return abs((as_aware(pos.opened_at) - t).total_seconds()) <= _ORDER_SLACK_BEFORE_S
+
+
 def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisions: Iterable, candidates: Iterable,
                   watchlist: Iterable, ledger: Iterable, events: Iterable = (), include_imported: bool = False) -> list:
     """Pure: one dict per CLOSED, system-entered position that has a realized P&L (see module docstring).
@@ -225,10 +239,10 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
     events_by_pos: dict = defaultdict(list)
     for ev in events or ():
         events_by_pos[getattr(ev, "position_id", None)].append(ev)
-    closed = [p for p in positions
-              if getattr(p, "status", None) == "CLOSED" and getattr(p, "realized_pnl", None) is not None
-              and getattr(p, "opened_at", None) is not None
-              and (include_imported or not getattr(p, "broker_imported", False))]   # group433: include_imported opts the broker-imported rows in
+    closed_all = [p for p in positions
+                  if getattr(p, "status", None) == "CLOSED" and getattr(p, "realized_pnl", None) is not None
+                  and getattr(p, "opened_at", None) is not None]
+    closed = closed_all   # narrowed below, after the orders are matched (group438: imported rows must take part in the matching)
     orders = list(orders)
     fills_by_order: dict = defaultdict(list)
     for f in fills:
@@ -239,7 +253,11 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
     ledger_by_order: dict = defaultdict(list)
     for r in ledger:
         ledger_by_order[r.order_id].append(r)
-    assigned = _assign(closed, orders, fills_by_order)
+    assigned = _assign(closed_all, orders, fills_by_order)
+    # group433: include_imported opts the broker-imported rows in; group438: a bot entry that was booked through the import path is not an import
+    closed = [p for p in closed_all
+              if include_imported or not getattr(p, "broker_imported", False)
+              or _bot_entry_behind_import(p, (assigned[p.id]["buys"] or [None])[0], fills_by_order)]
 
     out = []
     for p in sorted(closed, key=lambda p: as_aware(p.closed_at or p.opened_at)):
@@ -304,7 +322,8 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             ret_pct, ret_basis = _return_pct(entry, qty_in, net, gross, exit_price)
             out.append({
                 "position_id": p.id, "mode": p.mode, "symbol": p.symbol,
-                "origin": "imported" if getattr(p, "broker_imported", False) else "system",   # group433 (additive)
+                "origin": "imported" if (getattr(p, "broker_imported", False) and not _bot_entry_behind_import(p, entry_order, fills_by_order)) else "system",   # group433; group438: bot entries recorded as imports count as system
+                "import_race": bool(_bot_entry_behind_import(p, entry_order, fills_by_order)),   # group438: True = the bot's own BUY, booked through the broker-import path
                 "source_tab": getattr(p, "source_tab", None),
                 "decision_label": getattr(p, "entry_decision_label", None),
                 "conviction": _num(getattr(p, "entry_conviction_score", None)),

@@ -152,6 +152,42 @@ def test_cli_end_to_end_is_seeded_and_skips_the_benchmark():
         assert json.loads((d / "o3" / "gate_report.json").read_text())["meta"]["sample"]["seed"] is None
 
 
+def test_regime_flags_mark_days_below_the_50_day_average():
+    c = [100.0] * 60 + [90.0] * 5 + [110.0] * 5            # flat, then a dip below the average, then a jump above it
+    flags = lg.regime_flags(_bars(c))
+    days = [lg.ist_date(T0 + k * DAY) for k in range(len(c))]
+    assert days[48] not in flags and days[49] in flags            # needs 50 bars of history
+    assert flags[days[49]] is False and flags[days[61]] is True and flags[days[68]] is False
+
+
+def test_split_by_regime_counts_unflagged_days():
+    flags = {"2026-01-01": True, "2026-01-02": False}
+    rows = [{"day": "2026-01-01"}, {"day": "2026-01-02"}, {"day": "2026-01-02"}, {"day": "2025-12-31"}]
+    weak, strong, unflagged = lg.split_by_regime(rows, flags)
+    assert (len(weak), len(strong), unflagged) == (1, 2, 1)
+
+
+def test_cli_adds_the_regime_section_when_a_benchmark_file_exists():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        _write_hist(d, ["^NSEI"] + [f"S{k:02d}" for k in range(6)])
+        assert lg.main([td, "--out", str(d / "o"), "--step", "5", "--min-n", "5", "--boot", "50"]) == 0
+        rep = json.loads((d / "o" / "gate_report.json").read_text())
+        br = rep["by_regime"]
+        assert br and br["benchmark"] == "^NSEI" and br["sma"] == 50 and set(br["weak"]["gates"]) == set(lg.REGIME_GATES)
+        assert br["weak"]["days"] + br["strong"]["days"] + br["unflagged_days"] == rep["days"]
+        assert "The 52-week rule by market regime" in (d / "o" / "gate_report.md").read_text()
+
+
+def test_cli_without_a_benchmark_file_has_no_regime_section():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        _write_hist(d, [f"S{k:02d}" for k in range(6)])
+        assert lg.main([td, "--out", str(d / "o"), "--step", "5", "--min-n", "5", "--boot", "50"]) == 0
+        assert json.loads((d / "o" / "gate_report.json").read_text())["by_regime"] is None
+        assert "market regime" not in (d / "o" / "gate_report.md").read_text()
+
+
 def test_empty_folder_exits_nonzero():
     with tempfile.TemporaryDirectory() as td:
         assert lg.main([td, "--boot", "50"]) == 1

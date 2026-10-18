@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from typing import Optional
 
@@ -310,6 +310,24 @@ def _should_log_recent_close_skip(symbol: str, closed_at) -> bool:
     return False
 
 
+def _has_pending_bot_buy(db: Session, symbol: str, window_min: float) -> bool:
+    """group438: True when this service's own BUY order for `symbol` is still PLACED / PARTIAL and was created within the last
+    `window_min` minutes (0 = guard off). reconcile_real_orders runs import_broker_holdings BEFORE it books pending order fills,
+    so a bot CNC BUY that had just filled at the broker showed up in Dhan's positions with no TradePosition yet and was imported
+    as `broker_imported` (ATR stop instead of the decision's stop, no decision label, and the fill was then ADDED on top of it
+    by record_real_fill). A bot order that is still waiting for its fill to be booked is not a foreign holding."""
+    if not window_min or window_min <= 0:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=float(window_min))
+    return db.query(models.TradeOrder).filter(
+        models.TradeOrder.mode == "REAL",
+        models.TradeOrder.symbol == symbol,
+        models.TradeOrder.side == "BUY",
+        models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+        models.TradeOrder.created_at >= cutoff,
+    ).first() is not None
+
+
 async def import_broker_holdings(db: Session) -> int:
     """Bring pre-existing Dhan demat holdings — stocks bought manually, or
     already sitting in the account before Stockky started trading it —
@@ -585,6 +603,11 @@ async def import_broker_holdings(db: Session) -> int:
             models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")),
         ).first()
         if already_tracked is not None:
+            continue
+
+        # group438: our own BUY is waiting for its fill to be booked - leave it to record_real_fill (see _has_pending_bot_buy)
+        if _has_pending_bot_buy(db, symbol, float(getattr(config, "IMPORT_SKIP_PENDING_BUY_MIN", 45.0) or 0.0)):
+            logger.info("import_broker_holdings: %s skipped - a BUY from this service is still PLACED/PARTIAL; its fill will be booked by reconcile, not imported.", symbol)
             continue
 
         # See BUG FIX (2026-09-08) in the docstring above: guard against

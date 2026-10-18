@@ -199,10 +199,44 @@ def to_markdown(rep: Dict[str, Any]) -> str:
                "| gate | days | median edge | clipped edge | day-cluster 90% CI | verdict (robust) |", "|---|---|---|---|---|---|"]
         for k, x in rep["gates_clean"].items():
             L_.append(f"| {k} | {x['population']} | {f(x.get('median_edge'))} | {f(x.get('wins_edge'))} | {f(x.get('day_ci'))} | {x.get('verdict_robust', x['verdict'])} |")
+    br = rep.get("by_regime")
+    if br:
+        L_ += ["", f"### The 52-week rule by market regime (weak = {br['benchmark']} close below its {br['sma']}-day average on the signal day; a stand-in for the market score)", "",
+               "| regime | days | gate | rejected % | edge pp | median edge | clipped edge | day-cluster 90% CI | verdict (robust) |", "|---|---|---|---|---|---|---|---|---|"]
+        for reg in ("weak", "strong"):
+            for k, x in br[reg]["gates"].items():
+                L_.append(f"| {reg} | {br[reg]['days']} | {k} | {f(x['rejected_pct'])} | {f(x['edge_pp'])} | {f(x.get('median_edge'))} | {f(x.get('wins_edge'))} | {f(x.get('day_ci'))} | {x.get('verdict_robust', x['verdict'])} |")
+        if br["unflagged_days"]:
+            L_.append(f"\n{br['unflagged_days']} days had no benchmark flag (too early in the benchmark history) and are in neither regime.")
     L_ += ["", "Edge = mean of the days the gate lets through minus mean of the days it rejects; positive = the gate removed the worse days (for `exemption_test`: the "
            "exempted fresh highs did better than the ones still rejected). Every day of every sampled stock is replayed, not only the days a live candidate source would "
-           "have proposed, and the market-score part of the 52-week rule is not replayed. `insufficient_sample` means nothing may be concluded."]
+           "have proposed, and the market-score part of the 52-week rule is replayed only through the Nifty-vs-50-day-average stand-in in the regime section. `insufficient_sample` means nothing may be concluded."]
     return "\n".join(L_) + "\n"
+
+
+REGIME_SMA = 50      # group439: "weak market" proxy = the Nifty close is below its own 50-day average on the signal day
+REGIME_GATES = ("range_52w_legacy", "range_52w_with_exemption", "exemption_test")
+
+
+def regime_flags(bench_bars: Sequence[Sequence[float]], sma: int = REGIME_SMA) -> Dict[str, bool]:
+    """IST date -> True when that day's benchmark close is below its trailing `sma`-day average (a weak market). Days with fewer than
+    `sma` bars of history are left out. This is a stand-in for the dashboard market score, which cannot be rebuilt from daily bars;
+    it is only used to ask whether the 52-week rule (live: applies only while the score is below CANDIDATE_52W_WEAK_REGIME_SCORE) earns
+    its place in weak markets and in strong ones separately."""
+    out: Dict[str, bool] = {}
+    closes = [float(b[C]) for b in bench_bars]
+    for i in range(sma - 1, len(closes)):
+        avg = sum(closes[i - sma + 1:i + 1]) / sma
+        if avg > 0:
+            out[ist_date(bench_bars[i][T])] = closes[i] < avg
+    return out
+
+
+def split_by_regime(rows: Sequence[Dict[str, Any]], flags: Dict[str, bool]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+    """(weak-market rows, strong-market rows, rows whose day has no benchmark flag)."""
+    weak = [r for r in rows if flags.get(r.get("day")) is True]
+    strong = [r for r in rows if flags.get(r.get("day")) is False]
+    return weak, strong, len(rows) - len(weak) - len(strong)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -241,6 +275,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep["jump_rows"] = len(rows) - len(clean)
     rep["jump_pct_of_rows"] = round(100.0 * rep["jump_rows"] / len(rows), 2) if rows else 0.0
     rep["gates_clean"] = gate_report(clean, a.horizon, a.min_n, a.boot) if rep["jump_rows"] else None
+    rep["by_regime"] = None                                                # group439: the 52-week rule in weak vs strong markets
+    bench_file = next((f for f in sorted(d.glob("*.json")) if f.stem.upper() in BENCH_NAMES), None)
+    if bench_file is not None and rows:
+        try:
+            weak, strong, unflagged = split_by_regime(rows, regime_flags(load_bars(bench_file)))
+            keep = lambda g: {k: v for k, v in g.items() if k in REGIME_GATES}  # noqa: E731
+            rep["by_regime"] = {"benchmark": bench_file.stem, "sma": REGIME_SMA, "unflagged_days": unflagged,
+                                "weak": {"days": len(weak), "gates": keep(gate_report(weak, a.horizon, a.min_n, a.boot))},
+                                "strong": {"days": len(strong), "gates": keep(gate_report(strong, a.horizon, a.min_n, a.boot))}}
+        except Exception as e:  # noqa: BLE001
+            print(f"regime split skipped: benchmark {bench_file.name} unreadable: {e}", file=sys.stderr)
     out = Path(a.out) if a.out else d / "gate_out"
     out.mkdir(parents=True, exist_ok=True)
     (out / "gate_report.json").write_text(json.dumps(rep, indent=1))

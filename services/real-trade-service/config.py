@@ -1408,3 +1408,8 @@ EXIT_TARGET_LIMIT_BUFFER_PCT = float(((os.getenv("EXIT_TARGET_LIMIT_BUFFER_PCT")
 # MARKET, so the position is never left with a dark stop for longer than
 # this window.
 EXIT_LIMIT_VALIDITY_MINUTES = int(((os.getenv("EXIT_LIMIT_VALIDITY_MINUTES") or "").strip() or "3"))
+
+# group438: import_broker_holdings leaves a symbol alone while this service's own BUY order for it is still PLACED / PARTIAL and younger than this many
+# minutes, so a bot entry that just filled is booked by record_real_fill (decision stop, label, product type) instead of being imported as a broker
+# holding. 0 = off (old behaviour).
+IMPORT_SKIP_PENDING_BUY_MIN = float(((os.getenv("IMPORT_SKIP_PENDING_BUY_MIN") or "").strip() or "45"))

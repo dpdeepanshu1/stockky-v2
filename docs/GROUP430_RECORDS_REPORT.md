@@ -20,3 +20,7 @@ Win % is the share of trades with `return_pct` above zero (same as the old scrip
 
 ## Verified
 `scripts/test_records_report.py`: 8 tests (parsing, de-duplication / mode filter / bad files, medians and outlier-free totals, `--since` / `--until`, order-flow buckets and the not-recorded-yet note, stop overshoot and late-eod listing, `(few)` mark / empty / missing fields, CLI end to end). Workflow YAML parses. Scripts suite: 67 tests expected (your run: 59, plus these 8).
+
+## group 434: --origin filter
+
+`records_report.py` and `hold_bucket_check.py` take `--origin system|imported|all` (default all). Use `--origin system` to judge the bot's own entry rules: broker-imported positions did not pass through those rules, and their `opened_at` is the import time (often just after 15:00 IST), so their hold length and "carried overnight" status are not real.

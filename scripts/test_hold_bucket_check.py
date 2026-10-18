@@ -100,3 +100,14 @@ def test_main_prints_text_and_json(tmp_path, capsys):
     assert "VERDICT" in capsys.readouterr().out
     assert H.main([str(f), "--json", "--min-trades", "1"]) == 0
     assert json.loads(capsys.readouterr().out)["trades"] == 1
+
+
+def test_origin_flag_limits_the_bucket_counts(tmp_path, capsys):
+    recs = [rec(1, "same_day", 1.0, origin="system"), rec(2, "same_day", -1.0, origin="imported"), rec(3, "1_day", -2.0, origin="imported")]
+    f = tmp_path / "rt_x.json"
+    f.write_text(json.dumps({"records": recs}))
+    assert H.main([str(f), "--origin", "imported", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["trades"] == 2 and out["buckets"]["same_day"]["n"] == 1
+    assert H.main([str(f), "--origin", "system", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["trades"] == 1

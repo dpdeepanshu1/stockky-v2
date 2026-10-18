@@ -106,3 +106,11 @@ def test_stale_note():
     assert "stale" in rr.stale_note("2026-10-07T09:00:00", "2026-10-18")
     assert rr.stale_note("2026-10-16T09:00:00", "2026-10-18") is None
     assert rr.stale_note(None, "2026-10-18") is None and rr.stale_note("garbage", "2026-10-18") is None
+
+
+def test_filter_origin_keeps_system_or_imported_and_treats_missing_as_system():
+    import records_report as R
+    recs = [{"position_id": 1, "origin": "system"}, {"position_id": 2, "origin": "imported"}, {"position_id": 3}]
+    assert [r["position_id"] for r in R.filter_origin(recs, "all")] == [1, 2, 3]
+    assert [r["position_id"] for r in R.filter_origin(recs, "system")] == [1, 3]
+    assert [r["position_id"] for r in R.filter_origin(recs, "imported")] == [2]

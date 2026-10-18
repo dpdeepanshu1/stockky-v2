@@ -132,8 +132,9 @@ services:
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
       NEWS_URL: http://analysis-intelligence-service:8000/news
       EVENT_URL: http://analysis-intelligence-service:8000/event
-      # group 353/370: daily market-structure policy, always live (full). STRUCTURE_POLICY_MODE=off is the kill switch.
-      STRUCTURE_POLICY_MODE: ${STRUCTURE_POLICY_MODE:-full}
+      # group 353/370: daily market-structure policy. group434: default is now `record` (every rule evaluated + logged, NONE applied) while gate G2 is no_edge.
+      # Set STRUCTURE_POLICY_MODE=full to put the rules back on live decisions; =off is the kill switch.
+      STRUCTURE_POLICY_MODE: ${STRUCTURE_POLICY_MODE:-record}
       STRUCTURE_POLICY_SHADOW_RULES: ${STRUCTURE_POLICY_SHADOW_RULES:-}
       PREDICTION_URL: http://decision-prediction-service:8000/prediction
       TRAINING_SERVICE_URL: http://decision-prediction-service:8000/training

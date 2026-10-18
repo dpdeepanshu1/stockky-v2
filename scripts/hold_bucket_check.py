@@ -198,10 +198,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Hold-length buckets for closed trades (read-only).")
     ap.add_argument("files", nargs="+", help="rt_*.json exports from GET /positions/REAL/records")
     ap.add_argument("--mode", default="REAL", help="REAL (default), DEMO, or ALL")
+    ap.add_argument("--origin", default="all", choices=["all", "system", "imported"], help="system = only the bot's own entries, imported = only broker-imported positions (their opened_at is the import time, so their hold length is unreliable); default all")
     ap.add_argument("--min-trades", type=int, default=20)
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     a = ap.parse_args(argv)
     recs = load_records(a.files)
+    if a.origin != "all":
+        recs = [r for r in recs if (r.get("origin") or "system") == a.origin]
     s = summarize(recs, None if a.mode.upper() == "ALL" else a.mode, max(1, a.min_trades))
     print(json.dumps(s, indent=2) if a.json else render(s))
     return 0

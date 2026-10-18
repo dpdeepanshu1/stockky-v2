@@ -146,6 +146,18 @@ def _structure_gate_no_network_by_default(monkeypatch):
 
 
 @_pytest_g172.fixture(autouse=True)
+def _kronos_gate_off_by_default(monkeypatch):
+    """group 425: entry_engine/kronos_gate.py would call the kronos-forecast-service worker. Pre-existing tests must never hit the network or be
+    changed by a KRONOS_* variable in the environment; tests/test_group425_* turn it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "KRONOS_GATE_MODE", "off", raising=False)
+    monkeypatch.setattr(_cfg, "KRONOS_GATE_DEMO_MODE", "off", raising=False)
+    mod = _sys_g172.modules.get("entry_engine.kronos_gate")
+    if mod is not None:
+        mod.reset()
+
+
+@_pytest_g172.fixture(autouse=True)
 def _exit_hold_audit_every_cycle(monkeypatch):
     """group368: existing exit tests expect one HOLD audit row per evaluation; the throttle is off unless a test turns it on."""
     import config as _cfg

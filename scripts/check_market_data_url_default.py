@@ -31,6 +31,7 @@ _MUST_SET = (
     "api-gateway",
     "real-trade-service",
     "position-stocks-service",
+    "kronos-forecast-service",
 )
 _RENDER_ON_DEFAULT = re.compile(r"MARKET_DATA_URL[^\n]*onrender\.com|onrender\.com[^\n]*MARKET_DATA_URL")
 

@@ -540,6 +540,30 @@ STRUCTURE_EXIT_BOS_BARS = max(1, int(_og_float("STRUCTURE_EXIT_BOS_BARS", 3)))
 STRUCTURE_TRAIL_ENABLED = ((os.getenv("STRUCTURE_TRAIL_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
 STRUCTURE_TRAIL_MIN_ATR = max(0.0, _og_float("STRUCTURE_TRAIL_MIN_ATR", 1.0))
 
+# group 425: KRONOS FORECAST GATE (entry_engine/kronos_gate.py, Gate 4f). Asks the kronos-forecast-service worker for N sampled 5-day price paths
+# for the candidate and compares the forecast edge with the round-trip cost. UNPROVEN: every threshold is a hypothesis until
+# scripts/kronos_backtest.py shows that vetoed candidates do worse than passed ones, net of charges. So it ships OFF.
+#   KRONOS_GATE_MODE       REAL mode:  off (default) | log (call the worker, store/count the verdict, NEVER block or change a target) | enforce (WAIT with gate_tag=kronos,
+#                          and Gate 5.6 uses min(fixed target, forecast EV) as its edge). Any other value = off (a typo must not switch a gate on).
+#   KRONOS_GATE_DEMO_MODE  DEMO mode:  same values; defaults to KRONOS_GATE_MODE
+# The worker being down / slow / unsure is "no opinion": it never blocks, whatever the mode.
+def _kg_mode(name, default):
+    v = (os.getenv(name) or "").strip().lower()
+    if not v:
+        v = default
+    return v if v in ("off", "log", "enforce") else "off"
+KRONOS_GATE_MODE = _kg_mode("KRONOS_GATE_MODE", "off")
+KRONOS_GATE_DEMO_MODE = _kg_mode("KRONOS_GATE_DEMO_MODE", KRONOS_GATE_MODE)
+KRONOS_URL = (os.getenv("KRONOS_URL") or "").strip().rstrip("/") or "http://kronos-forecast-service:8010"
+KRONOS_TIMEOUT_S = max(0.5, _og_float("KRONOS_TIMEOUT_S", 8.0))             # one forecast takes a few seconds on 1 CPU; slower than this = no opinion
+KRONOS_CACHE_TTL_S = max(0.0, _og_float("KRONOS_CACHE_TTL_S", 900.0))       # per symbol; the forecast only changes when a new daily bar arrives
+KRONOS_FAIL_TTL_S = max(0.0, _og_float("KRONOS_FAIL_TTL_S", 120.0))         # a failed fetch is not retried for this long (a dead worker is not hammered)
+KRONOS_HORIZON_BARS = max(1, int(_og_float("KRONOS_HORIZON_BARS", 5)))
+KRONOS_PATHS = max(2, int(_og_float("KRONOS_PATHS", 10)))
+KRONOS_MIN_EDGE_X_COST = _og_float("KRONOS_MIN_EDGE_X_COST", 1.0)           # reject when forecast EV % is below this x the round-trip cost % (0 disables)
+KRONOS_MIN_P_TARGET = _og_float("KRONOS_MIN_P_TARGET", 0.10)                # reject when fewer than this share of paths reach the target before the stop (0 disables)
+KRONOS_COST_NOTIONAL = max(1000.0, _og_float("KRONOS_COST_NOTIONAL", 50000.0))  # trade value used to turn the cost model into a % (the gate runs before sizing)
+
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
 #      VIX_GATE_ENABLED         master switch for the VIX checks

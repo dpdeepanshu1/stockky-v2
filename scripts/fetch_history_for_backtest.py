@@ -45,7 +45,19 @@ def read_symbols(args: argparse.Namespace) -> List[str]:
     elif args.symbols_file:
         raw = [ln.split("#", 1)[0] for ln in Path(args.symbols_file).read_text().splitlines()]
     elif args.universe_url:
-        body = _get_json(args.universe_url, 60)
+        # group433: the gateway can be restarting or busy when this runs (the 18 Oct VM runs got "Connection refused" and "Connection
+        # reset by peer" and every seed failed at once). Retry with a growing pause before giving up.
+        body, last = None, None
+        for k in range(max(1, int(getattr(args, "universe_retries", 5)))):
+            try:
+                body = _get_json(args.universe_url, 60)
+                break
+            except Exception as e:  # noqa: BLE001
+                last = e
+                if k + 1 < max(1, int(getattr(args, "universe_retries", 5))):
+                    time.sleep(min(60.0, float(getattr(args, "universe_wait", 5.0)) * (k + 1)))
+        if body is None:
+            raise last if last is not None else RuntimeError("empty symbol list response")
         if isinstance(body, dict):
             body = body.get("symbols") or body.get("universe") or []
         raw = [str(s) for s in body]
@@ -99,6 +111,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--symbols", default="")
     ap.add_argument("--symbols-file", default="")
     ap.add_argument("--universe-url", default="")
+    ap.add_argument("--universe-retries", type=int, default=5, help="attempts to read --universe-url (group433)")
+    ap.add_argument("--universe-wait", type=float, default=5.0, help="seconds between those attempts, growing by that much each time")
     ap.add_argument("--period", default="5y")
     ap.add_argument("--benchmark", default="^NSEI")
     ap.add_argument("--limit", type=int, default=0, help="first N symbols of the list (alphabetical universe = biased sample; prefer --sample)")

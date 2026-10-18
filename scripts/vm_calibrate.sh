@@ -47,7 +47,22 @@ run() {
   return $rc
 }
 
+# group433: wait until the gateway answers /health (up to GATEWAY_WAIT_S, default 180) before the first fetch. A run started right after
+# `docker compose up -d --build` hit a gateway that was still starting and every seed failed with "connection refused / reset".
+wait_gateway() {
+  [[ "$DRY_RUN" == "1" || -n "${SYMBOLS:-}" ]] && return 0
+  local waited=0 limit="${GATEWAY_WAIT_S:-180}"
+  while (( waited < limit )); do
+    curl -fsS -m 5 "${API_GATEWAY_URL%/}/health" >/dev/null 2>&1 && return 0
+    (( waited == 0 )) && echo "waiting for ${API_GATEWAY_URL%/}/health ..."
+    sleep 5; waited=$((waited + 5))
+  done
+  echo "WARNING: ${API_GATEWAY_URL%/}/health did not answer within ${limit}s; going on anyway"
+  return 0
+}
+
 main() {
+  wait_gateway
   local first="" ab_args=() live_args=() src
   if [[ -n "${SYMBOLS:-}" ]]; then src=(--symbols "$SYMBOLS"); else src=(--universe-url "${API_GATEWAY_URL%/}/api/universe"); fi
 

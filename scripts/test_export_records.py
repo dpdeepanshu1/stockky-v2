@@ -79,3 +79,11 @@ def test_truncation_warning_demo_needs_no_login_and_unreachable(tmp_path, monkey
     srv.shutdown()
     assert ex.main(["--base", "http://127.0.0.1:9", "--mode", "DEMO", "--out", str(tmp_path / "e.json")]) == 1
     assert "docker compose ps" in capsys.readouterr().err
+
+
+def test_group433_include_imported_is_sent_only_when_asked(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ex, "_req", lambda url, token, body, timeout: seen.append(url) or {"records": [], "total": 0})
+    ex.fetch("http://x", "REAL", 30, 100)
+    ex.fetch("http://x", "REAL", 30, 100, include_imported=True)
+    assert "include_imported" not in seen[0] and seen[1].endswith("&include_imported=true")

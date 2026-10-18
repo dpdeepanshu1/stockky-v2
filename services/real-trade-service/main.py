@@ -2037,7 +2037,7 @@ def _records_mode(mode: str) -> str:
 
 @app.get("/positions/{mode}/records")
 async def closed_position_records(
-    mode: str, days: int = 7, symbol: Optional[str] = None, limit: int = 200,
+    mode: str, days: int = 7, symbol: Optional[str] = None, limit: int = 200, include_imported: bool = False,
     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
 ):
     """Read-only (group 290): one record per CLOSED position of the last `days` days (1-60), newest first - tier, catalyst,
@@ -2047,7 +2047,7 @@ async def closed_position_records(
     mode = _records_mode(mode)
     days = max(1, min(int(days), 60))
     limit = max(1, min(int(limit), 1000))
-    recs = list(reversed(trade_records.load_records(db, mode, days, symbol)))
+    recs = list(reversed(trade_records.load_records(db, mode, days, symbol, include_imported=bool(include_imported))))
     return {"mode": mode, "days": days, "symbol": (symbol or "").upper() or None, "total": len(recs),
             "returned": min(len(recs), limit), "records": recs[:limit]}
 

@@ -33,8 +33,9 @@ def _req(url: str, token: str = "", body: Optional[Dict[str, Any]] = None, timeo
         return json.loads(r.read().decode("utf-8"))
 
 
-def fetch(base: str, mode: str, days: int, limit: int, token: str = "", timeout: float = 60.0) -> Dict[str, Any]:
-    return _req(f"{base.rstrip('/')}/positions/{mode.upper()}/records?days={max(1, min(days, 60))}&limit={max(1, min(limit, 1000))}", token, None, timeout)
+def fetch(base: str, mode: str, days: int, limit: int, token: str = "", timeout: float = 60.0, include_imported: bool = False) -> Dict[str, Any]:
+    extra = "&include_imported=true" if include_imported else ""
+    return _req(f"{base.rstrip('/')}/positions/{mode.upper()}/records?days={max(1, min(days, 60))}&limit={max(1, min(limit, 1000))}{extra}", token, None, timeout)
 
 
 def login(base: str, username: str, password: str, timeout: float = 30.0) -> str:
@@ -56,6 +57,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--mode", default="REAL")
     ap.add_argument("--days", type=int, default=60, help="1-60")
     ap.add_argument("--limit", type=int, default=1000, help="1-1000")
+    ap.add_argument("--include-imported", action="store_true", help="also export broker-imported positions (the default leaves them out; each record has origin=system|imported)")
     ap.add_argument("--out", default="")
     ap.add_argument("--user", default=os.getenv("ADMIN_USER", ""))
     a = ap.parse_args(argv)
@@ -67,7 +69,7 @@ def main(argv: Optional[list] = None) -> int:
             if not token:
                 print("login gave no token", file=sys.stderr)
                 return 1
-        doc = fetch(a.base, a.mode, a.days, a.limit, token)
+        doc = fetch(a.base, a.mode, a.days, a.limit, token, include_imported=a.include_imported)
     except urllib.error.HTTPError as e:
         print(f"{a.base}: HTTP {e.code} {'(login failed or the session token expired)' if e.code == 401 else ''}", file=sys.stderr)
         return 1

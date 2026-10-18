@@ -219,7 +219,7 @@ def _charges(order_ids: list, ledger_by_order: dict, pos) -> tuple:
 
 
 def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisions: Iterable, candidates: Iterable,
-                  watchlist: Iterable, ledger: Iterable, events: Iterable = ()) -> list:
+                  watchlist: Iterable, ledger: Iterable, events: Iterable = (), include_imported: bool = False) -> list:
     """Pure: one dict per CLOSED, system-entered position that has a realized P&L (see module docstring).
     `events` (group 421, optional): TradePositionEvent rows; the exit reason falls back to them when no closing SELL order carries one."""
     events_by_pos: dict = defaultdict(list)
@@ -227,7 +227,8 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
         events_by_pos[getattr(ev, "position_id", None)].append(ev)
     closed = [p for p in positions
               if getattr(p, "status", None) == "CLOSED" and getattr(p, "realized_pnl", None) is not None
-              and getattr(p, "opened_at", None) is not None and not getattr(p, "broker_imported", False)]
+              and getattr(p, "opened_at", None) is not None
+              and (include_imported or not getattr(p, "broker_imported", False))]   # group433: include_imported opts the broker-imported rows in
     orders = list(orders)
     fills_by_order: dict = defaultdict(list)
     for f in fills:
@@ -303,6 +304,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             ret_pct, ret_basis = _return_pct(entry, qty_in, net, gross, exit_price)
             out.append({
                 "position_id": p.id, "mode": p.mode, "symbol": p.symbol,
+                "origin": "imported" if getattr(p, "broker_imported", False) else "system",   # group433 (additive)
                 "source_tab": getattr(p, "source_tab", None),
                 "decision_label": getattr(p, "entry_decision_label", None),
                 "conviction": _num(getattr(p, "entry_conviction_score", None)),
@@ -463,7 +465,7 @@ def _chunks(seq: list, n: int = 500):
         yield seq[i:i + n]
 
 
-def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None) -> list:
+def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None, include_imported: bool = False) -> list:
     """Records for CLOSED positions of `mode` closed in the last `days` days (optionally one symbol). Read-only."""
     import models
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
@@ -508,7 +510,7 @@ def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None) -> 
     except Exception as e:  # noqa: BLE001 - attribution is best effort; the records themselves must still load
         logger.warning("trade records: position events not loaded (%s: %s) - exit reasons come from orders only", type(e).__name__, e)
         events = []
-    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger, events)
+    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger, events, include_imported=include_imported)
 
 
 # ── daily report: today's expectancy, stored as a snapshot and pushed once after the close (group 292) ─────────────────

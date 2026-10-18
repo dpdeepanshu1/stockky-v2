@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from market_structure.backtest import POLICY_RULES, policy_flags  # noqa: E402
 import structure_policy as sp  # noqa: E402
 
-MAP = {"P4_REWARD": "p4_reward", "P5_BREAK": "p5_break", "P7_QUALITY": "p7_groups", "P7_LOCATION": "p7_location",
+MAP = {"P4_REWARD": "p4_reward", "P5_BREAK": "p5_break", "P7_QUALITY": "p7_groups", "P7X_INDEP": "p7x_indep", "P7_LOCATION": "p7_location",
        "P8_FAILED_BOS": "p8_failed_bos", "P8_NO_BOS": "p8_no_bos", "P8_OLD_BOS": "p8_old_bos"}
 
 
@@ -113,3 +113,33 @@ def test_retest_branch_excuses_only_an_old_intact_bos():
     assert "p8_old_bos" in _replay_retest(_summary(**dict(base, ms_fvg_top=90.0, ms_fvg_bottom=88.0)), True)   # not in a zone
     assert "p8_failed_bos" in _replay_retest(_summary(**dict(base, ms_bos_failed=True)), True)      # failed BOS is never excused
     assert "p8_no_bos" in _replay_retest(_summary(**dict(base, ms_bos_dir=None)), True)             # no BOS is never excused
+
+
+# ---- group441: P7X_INDEP replayed; live policy and replay must agree, on and off ------------------------------------------------------------
+def _live_p7x(summary, strict_min):
+    f = sp.build_structure_features(summary, None)
+    p = sp._params()
+    p["groups_strict_min"] = float(strict_min)
+    return {MAP[r["id"]] for r in sp._rules(f, p) if r["id"] in MAP}
+
+
+def _replay_p7x(summary, strict_min):
+    return {k for k, v in policy_flags(summary, {"groups_strict_min": float(strict_min)}).items() if v}
+
+
+def test_p7x_default_is_off_and_missing_value_trips_only_when_on():
+    from market_structure.backtest import POLICY_THRESHOLDS
+    assert sp.DEFAULTS["groups_strict_min"] == 0.0 and POLICY_THRESHOLDS["groups_strict_min"] == 0.0
+    assert policy_flags(_summary(ms_groups_strict=0))["p7x_indep"] is False
+    assert policy_flags(_summary(), {"groups_strict_min": 2})["p7x_indep"] is True
+    assert policy_flags(_summary(ms_groups_strict=2), {"groups_strict_min": 2})["p7x_indep"] is False
+    assert policy_flags(_summary(ms_groups_strict=1), {"groups_strict_min": 2})["p7x_indep"] is True
+
+
+def test_p7x_replay_agrees_with_the_live_policy_over_a_grid():
+    n = 0
+    for strict_min, got in itertools.product((0, 1, 2, 3), (0, 1, 2, 3, None)):
+        s = _summary() if got is None else _summary(ms_groups_strict=got)
+        assert _live_p7x(s, strict_min) == _replay_p7x(s, strict_min), (strict_min, got)
+        n += 1
+    assert n == 20

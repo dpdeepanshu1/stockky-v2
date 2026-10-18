@@ -24,6 +24,16 @@ on:
       - "scripts/test_policy_replay.py"
       - "scripts/board_parity_check.py"
       - "scripts/test_board_parity_check.py"
+      - "scripts/p8_retest_evidence.py"
+      - "scripts/export_intraday.py"
+      - "scripts/_intraday_data.py"
+      - "scripts/intraday_gate_backtest.py"
+      - "scripts/ml_v2_walkforward.py"
+      - "scripts/retire_legacy_board.py"
+      - "scripts/test_p8_retest_evidence.py"
+      - "scripts/test_intraday_gate_backtest.py"
+      - "scripts/test_ml_v2_walkforward.py"
+      - "scripts/test_retire_legacy_board.py"
       - "scripts/calibration_pack.py"
       - "scripts/test_calibration_pack.py"
       - "scripts/vm_calibrate.sh"
@@ -70,6 +80,16 @@ on:
       - "scripts/test_policy_replay.py"
       - "scripts/board_parity_check.py"
       - "scripts/test_board_parity_check.py"
+      - "scripts/p8_retest_evidence.py"
+      - "scripts/export_intraday.py"
+      - "scripts/_intraday_data.py"
+      - "scripts/intraday_gate_backtest.py"
+      - "scripts/ml_v2_walkforward.py"
+      - "scripts/retire_legacy_board.py"
+      - "scripts/test_p8_retest_evidence.py"
+      - "scripts/test_intraday_gate_backtest.py"
+      - "scripts/test_ml_v2_walkforward.py"
+      - "scripts/test_retire_legacy_board.py"
       - "scripts/calibration_pack.py"
       - "scripts/test_calibration_pack.py"
       - "scripts/vm_calibrate.sh"
@@ -130,7 +150,7 @@ jobs:
           pip install pytest
           (cd services/kronos-forecast-service && pip install numpy pandas && python -m pytest tests -q)   # group425: pure stats + engine tests, no torch needed
           (cd services/timesfm-forecast-service && pip install fastapi httpx pydantic numpy && python -m pytest tests -q)   # group434: pure features / engine / fake-backend API tests, no model needed
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_export_records.py scripts/test_tsfm_probe.py scripts/test_tsfm_nightly.py scripts/test_calibration_status.py scripts/test_analyze_latency_check.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_export_records.py scripts/test_tsfm_probe.py scripts/test_tsfm_nightly.py scripts/test_calibration_status.py scripts/test_analyze_latency_check.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py scripts/test_p8_retest_evidence.py scripts/test_intraday_gate_backtest.py scripts/test_ml_v2_walkforward.py scripts/test_retire_legacy_board.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

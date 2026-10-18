@@ -596,8 +596,13 @@ services:
       - ANGELONE_API_KEY=${ANGELONE_API_KEY:-}
       - ANGELONE_TOTP_SECRET=${ANGELONE_TOTP_SECRET:-}
       - ANGELONE_STATIC_IP=${ANGELONE_STATIC_IP:-}
+      # group441: 1-minute bar recorder (record only). BAR_RECORD_ENABLED=false switches it off.
+      - BAR_RECORD_ENABLED=${BAR_RECORD_ENABLED:-true}
+      - BAR_RECORD_DIR=/data/bars
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      # group441: recorded 1-minute bars (feed/bar_recorder.py), one folder per IST day; survives rebuilds. Export with scripts/export_intraday.py
+      - bar-records:/data/bars
     depends_on:
       - real-trade-service
       - analysis-intelligence-service
@@ -617,6 +622,7 @@ services:
 
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
+  bar-records:
   tsfm-hf-cache:
   tsfm-cache:
   kronos-hf-cache:

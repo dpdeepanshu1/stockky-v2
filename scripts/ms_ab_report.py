@@ -298,7 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--boot", type=int, default=500)
     ap.add_argument("--thresholds", default="{}")
     ap.add_argument("--policy", action="store_true",
-                    help="also replay the decision policy's BUY NOW rules (p4_reward, p5_break, p7_groups, p7_location, p8_*): the candidate = gate AND policy. "
+                    help="also replay the decision policy's BUY NOW rules (p4_reward, p5_break, p7_groups, p7x_indep, p7_location, p8_*; p7x is off until --thresholds is given a groups_strict_min of 2 or more): the candidate = gate AND policy. "
                          "Compare with a plain run on the same folder; the drop-one edge of p8_old_bos is the evidence for or against the 10-bar BOS age limit")
     ap.add_argument("--sample", type=int, default=0, help="replay N symbols drawn at random (seeded) from the files in HIST_DIR; 0 = all")
     ap.add_argument("--seed", type=int, default=7, help="seed for --sample (the bootstrap keeps its own fixed seed)")

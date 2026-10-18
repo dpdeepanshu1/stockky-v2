@@ -127,3 +127,13 @@ def _opening_protect_off_by_default(monkeypatch):
     import config as _config
     monkeypatch.setattr(_config, "OPENING_PROTECT_ENABLED", False, raising=False)
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _bar_record_off_by_default(monkeypatch):
+    """group441: feed/bar_recorder.py writes files under BAR_RECORD_DIR; no older test may touch the disk (test_group441_bar_recorder.py turns it on in a temp dir)."""
+    import config as _config
+    monkeypatch.setattr(_config, "BAR_RECORD_ENABLED", False, raising=False)
+    from feed import bar_recorder as _br
+    _br.reset()
+    yield

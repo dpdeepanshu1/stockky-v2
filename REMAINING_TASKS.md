@@ -31,7 +31,7 @@ Workflow: `STRUCTURE_POLICY_PARAMS_JSON={"groups_strict_min":2}` + `STRUCTURE_PO
 The daily-structure stop / target are multi-day levels, but real-trade squares off at ~15:00 unless the label is overnight-hold eligible, so structure R:R is never realised for BUY NOW / PREPARE entries. The card text now says so (group 421). Whether to add a swing-carry path for structure-confirmed entries is undecided and needs same-day vs next-day vs 2-5 day data: run `scripts/hold_bucket_check.py rt_*.json` on all exports.
 
 ## Not built
-- Intraday (15m/5m) structure features and `independent_groups` counting in `scoring.py` (the policy has its own group count).
+- `independent_groups` counting in `scoring.py` (the policy has its own group count). (Intraday 15m/5m structure is now built as record / evidence only, group 441, see below.)
 - Walk-forward calibration from real data; `groups_min=2` is a judgement call.
 - WS-2: position-stocks still keeps legacy board bodies behind `BOARD_USE_MS_ENGINE`.
 - Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet. The decision card shows a retest badge since group 417; the Buy Sniper card carries `retest_entry` since group 426 (badge shows only when the branch is on).
@@ -78,3 +78,10 @@ Compose default `STRUCTURE_POLICY_MODE` is now `record` (docs/GROUP434_POLICY_RE
 ## Group 430 follow-ups
 - Export fresh records with `python3 scripts/export_records.py` (the 18 Oct run saw only 1 trade since 1 October: stale files), then run `python3 scripts/records_report.py rt_*.json --since 2026-10-01`; compare with the September picture (63 trades, net -1,439, the 09:xx-10:xx entry cluster lost 1,598 net, gaps through stops). That decides whether any live rule change is warranted.
 - Still open from group 428: the structure_backtest report (the entry_rules / legacy_gate robust tables were read in group 440; the 52-week gate moved to log-only). Also open: the group 438 doubled-quantity query result.
+
+## Group 441: evidence tools and the legacy-board retirement (built, nothing switched on)
+All of it needs data from the VM; none of it has run on real history.
+1. P8 retest: `python3 scripts/p8_retest_evidence.py HIST_DIR` on the hist400 folders (seeds 7 / 11 / 13). Only `retest_ok` on more than one seed justifies `STRUCTURE_POLICY_PARAMS_JSON={"retest_entry":1}`, record-only first. Same for P7X: `ms_ab_report.py` now replays `p7x_indep` (`groups_strict_min`), but old stored summaries have no `ms_groups_strict`, so use freshly replayed history.
+2. Intraday: after deploy, position-stocks records 1-minute bars to the `bar-records` volume (check `GET /board/status`, bar recorder block, after the first session). After >= 20 complete sessions run `scripts/export_intraday.py BAR_DIR` (look at `coverage.md` first) and `scripts/intraday_gate_backtest.py BAR_DIR`. `insufficient_sample` means wait, not "the gate is fine". Copy the volume off the VM before any `docker volume prune`.
+3. ML V2: `python3 scripts/ml_v2_walkforward.py HIST_DIR`. `pass` is evidence that the V2 features rank entries out of sample, not a model to deploy; promotion needs the registry, the evidence gates and a live-model comparison.
+4. Legacy board removal: `curl .../board/status > s.json; python3 scripts/board_parity_check.py --file s.json` must say GO first (>= 200 comparisons over >= 3 IST days, no fallbacks). Then `python3 scripts/retire_legacy_board.py --file s.json` (dry run), then `--apply`, run the position-stocks tests, redeploy, and only after a few clean sessions remove the A/B and the fallback in `screening/ms_engine_switch.py` by hand (the script deliberately does not touch it).

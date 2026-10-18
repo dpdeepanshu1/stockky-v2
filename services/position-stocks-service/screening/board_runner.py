@@ -37,7 +37,7 @@ def in_fill_window(now: float, market_open: bool) -> bool:
 
 def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[], list]] = None,
              session_factory: Optional[Callable] = None, today_fn: Optional[Callable[[], str]] = None,
-             backfill_fn: Optional[Callable[[], dict]] = None) -> dict:
+             backfill_fn: Optional[Callable[[], dict]] = None, record_fn: Optional[Callable[[float, bool], dict]] = None) -> dict:
     from feed import bar_backfill, bar_store
     from screening import board, board_log
     did = {"snapshot": False, "fill": 0, "pruned": 0, "backfill": 0}
@@ -83,6 +83,12 @@ def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[
                 _state["fills"] += did["fill"]
     except Exception as e:  # noqa: BLE001
         _failed("fill", e)
+    try:                                                    # group441: record the minute bars (own guard; never the runner's error count)
+        if config.BAR_RECORD_ENABLED:
+            from feed import bar_recorder
+            did["recorded"] = (record_fn or bar_recorder.run_once)(now, market_open)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("board runner record step failed (%s: %s)", type(e).__name__, e)
     return did
 
 

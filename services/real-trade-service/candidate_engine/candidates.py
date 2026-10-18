@@ -133,6 +133,9 @@ OVEREXTENDED_52W_TOP_PCT = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT
 #   CANDIDATE_52W_FRESH_HIGH_PCT=1.0     "at the high" = price within this % of the 52w high (or above it)
 #   CANDIDATE_52W_FRESH_HIGH_DAYS=10     ... and that high was set within this many calendar days of the last bar
 #   CANDIDATE_52W_FRESH_HIGH_VOL_RATIO=1.2  ... and the 5-day average volume is at least this x the 20-day average
+#   CANDIDATE_52W_LOG_ONLY=1             group434: the rule is evaluated and logged ("52W_LOG_ONLY would reject ...", counted in
+#                                        range_52w_log_only_stats()) but the candidate is NOT rejected. Default 0 = today's behaviour.
+#                                        THIS LOOSENS an entry rule: it lets near-52w-high stocks through, so run it deliberately.
 # None of these numbers has been backtested (Group E3 / F): they are conservative starting points, not tuned values.
 def _env_flag_on(name: str, default: str = "1") -> bool:
     return ((os.getenv(name) or "").strip() or default).lower() not in ("0", "false", "no", "off")
@@ -146,6 +149,13 @@ def _env_float_or(name: str, default: float) -> float:
 
 
 RANGE_52W_ENABLED = _env_flag_on("CANDIDATE_52W_RULE_ENABLED")
+RANGE_52W_LOG_ONLY = _env_flag_on("CANDIDATE_52W_LOG_ONLY", "0")      # group434: default OFF (rule rejects as before)
+_R52_LOG_ONLY_N = {"would_reject": 0}
+
+
+def range_52w_log_only_stats() -> dict:
+    """group434: how many candidates the 52-week rule WOULD have rejected while CANDIDATE_52W_LOG_ONLY=1 (since boot, per process)."""
+    return {"log_only": bool(RANGE_52W_LOG_ONLY), "would_reject": _R52_LOG_ONLY_N["would_reject"]}
 RANGE_52W_REGIME_GATE = _env_flag_on("CANDIDATE_52W_REGIME_GATE")
 RANGE_52W_WEAK_REGIME_SCORE = _env_float_or("CANDIDATE_52W_WEAK_REGIME_SCORE", 50.0)
 RANGE_52W_REGIME_MAX_AGE_MIN = _env_float_or("CANDIDATE_52W_REGIME_MAX_AGE_MIN", 30.0)
@@ -1603,16 +1613,21 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
                         _ctx = f"market score {_mscore:.0f}"
                         if RANGE_52W_REGIME_GATE:
                             _ctx += f" is below {RANGE_52W_WEAK_REGIME_SCORE:.0f} (weak market)"
-                    return {
-                        "reject_reason": (
-                            f"Price in top {OVEREXTENDED_52W_TOP_PCT}% of 52w range "
-                            f"({pos_pct:.1f}%), not a fresh volume-confirmed high; {_ctx}. "
-                            "Buying near yearly highs invites profit-booking from existing "
-                            "holders. Poor R:R."
-                        ),
-                        "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
-                        "reject_kind": "range_52w",
-                    }
+                    _r52_reason = (
+                        f"Price in top {OVEREXTENDED_52W_TOP_PCT}% of 52w range "
+                        f"({pos_pct:.1f}%), not a fresh volume-confirmed high; {_ctx}. "
+                        "Buying near yearly highs invites profit-booking from existing "
+                        "holders. Poor R:R."
+                    )
+                    if RANGE_52W_LOG_ONLY:       # group434: measure the rule without letting it cost entries
+                        _R52_LOG_ONLY_N["would_reject"] += 1
+                        logger.info("52W_LOG_ONLY would reject %s: %s", symbol, _reject_log_text(_r52_reason))
+                    else:
+                        return {
+                            "reject_reason": _r52_reason,
+                            "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
+                            "reject_kind": "range_52w",
+                        }
 
     # ── Check 5: ATR volatility cap ───────────────────────────────────────────
     # ATR is computed from the 1m (1mo/1d) candles already fetched above —

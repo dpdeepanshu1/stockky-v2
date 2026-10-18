@@ -203,18 +203,26 @@ def stale_note(last_closed: Optional[str], today: str, max_age_days: int = 5) ->
     return None
 
 
+def filter_origin(recs: List[Dict[str, Any]], origin: str) -> List[Dict[str, Any]]:
+    """Keep only records of the given origin ('system' or 'imported'); 'all' keeps everything. A record with no origin counts as system (older exports)."""
+    if origin in ("", "all", None):
+        return recs
+    return [r for r in recs if (r.get("origin") or "system") == origin]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="*", help="record export files (default rt_*.json in the current folder); shell globs work")
     ap.add_argument("--mode", default="REAL", help="REAL (default), DEMO, or '' for all")
     ap.add_argument("--since", default="", help="YYYY-MM-DD: only trades opened on/after this UTC date")
     ap.add_argument("--until", default="", help="YYYY-MM-DD: only trades opened on/before this UTC date")
+    ap.add_argument("--origin", default="all", choices=["all", "system", "imported"], help="system = only entries the bot made itself, imported = only broker-imported positions (their opened_at is the import time, not the buy time); default all")
     ap.add_argument("--min-n", type=int, default=10, help="groups under this many trades are marked (few)")
     ap.add_argument("--outlier-pct", type=float, default=15.0, help="a trade whose |return| is above this %% is an outlier in the robust totals")
     ap.add_argument("--json", default="", help="also write the full report to this JSON file")
     a = ap.parse_args(argv)
     paths = [p for pat in (a.files or ["rt_*.json"]) for p in (sorted(glob.glob(pat)) or [pat])]
-    recs = load_records(paths, a.mode or None)
+    recs = filter_origin(load_records(paths, a.mode or None), a.origin)
     if not recs:
         print(f"no records found in {len(paths)} file(s) (mode {a.mode or 'any'}); export them first - see docs/GROUP430_RECORDS_REPORT.md", file=sys.stderr)
         return 1

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 MODES = ("off", "record", "full")
@@ -310,7 +311,7 @@ def _structural_levels(f: Dict[str, Any], p: Dict[str, float], price: Any, legac
     return None
 
 
-def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
+def _apply_policy_impl(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
                  explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True,
                  require_data: Optional[bool] = None, shadow_rules: Optional[List[str]] = None) -> Dict[str, Any]:
     """Returns {'decision': final, 'structure': block-for-the-response, 'levels': optional replacement levels}. Never raises.
@@ -444,3 +445,56 @@ def summary_line(struct: Optional[Dict[str, Any]]) -> Optional[str]:
     if f.get("chase_atr") is not None:
         bits.append(f"chase {f['chase_atr']:.1f} ATR")
     return " · ".join(bits)
+
+
+# group434: rejection counters since boot (GET /structure/rejection-stats). "*_rejections" = the rule fired AND was applied (the decision was lowered);
+# "*_would_reject" = it fired but was record-only (STRUCTURE_POLICY_MODE=record or a shadow rule), so the decision was NOT changed. Each counter is bumped
+# once per decision. rr_* counts the whole P4_RR rule (ratio, no target, stop too far); chase_* is P2_CHASE. A P9 upgrade is not a rejection.
+_REJ_LOCK = threading.Lock()
+_REJ_KEYS = ("considered", "structure_rejections", "structure_would_reject", "rr_rejections", "rr_would_reject", "chase_rejections", "chase_would_reject")
+_REJ: Dict[str, int] = {k: 0 for k in _REJ_KEYS}
+
+
+def _tally(out: Dict[str, Any]) -> None:
+    """Bump the rejection counters from an apply_policy result. Never raises."""
+    try:
+        st = out.get("structure") or {}
+        if st.get("mode") == "off":
+            return
+        applied = [r for r in (st.get("rules") or []) if r.get("to") in (PREPARE, WAIT)]
+        rec = [r for r in (st.get("shadow_rules") or []) if r.get("to") in (PREPARE, WAIT)]
+        with _REJ_LOCK:
+            _REJ["considered"] += 1
+            if applied:
+                _REJ["structure_rejections"] += 1
+            elif rec:
+                _REJ["structure_would_reject"] += 1
+            for key, rid in (("rr", "P4_RR"), ("chase", "P2_CHASE")):
+                if any(r.get("id") == rid for r in applied):
+                    _REJ[key + "_rejections"] += 1
+                elif any(r.get("id") == rid for r in rec):
+                    _REJ[key + "_would_reject"] += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def rejection_stats() -> Dict[str, Any]:
+    with _REJ_LOCK:
+        out: Dict[str, Any] = dict(_REJ)
+    out["mode"] = policy_mode()
+    return out
+
+
+def _reset_rejection_stats_for_tests() -> None:
+    with _REJ_LOCK:
+        for k in _REJ:
+            _REJ[k] = 0
+
+
+def apply_policy(decision: str, summary: Optional[Dict[str, Any]], price: Optional[float], legacy: Optional[Dict[str, Any]] = None,
+                 explain: Optional[Dict[str, Any]] = None, mode: Optional[str] = None, allow_upgrade: bool = True,
+                 require_data: Optional[bool] = None, shadow_rules: Optional[List[str]] = None) -> Dict[str, Any]:
+    """See _apply_policy_impl. Same contract; additionally bumps the group434 rejection counters."""
+    res = _apply_policy_impl(decision, summary, price, legacy, explain, mode, allow_upgrade, require_data, shadow_rules)
+    _tally(res)
+    return res

@@ -28,8 +28,9 @@ from fastapi.responses import JSONResponse
 from horizons import multi_horizon_decide
 try:
     from structure_policy import apply_policy as _ms_apply_policy, summary_line as _ms_summary_line, policy_mode as _ms_policy_mode
+    from structure_policy import rejection_stats as _ms_rejection_stats
 except Exception:  # noqa: BLE001 - the policy is additive; a broken import must never take the decision service down
-    _ms_apply_policy = _ms_summary_line = _ms_policy_mode = None
+    _ms_apply_policy = _ms_summary_line = _ms_policy_mode = _ms_rejection_stats = None
 try:
     import structure_obs_hook as _so_hook
 except Exception:  # noqa: BLE001 - observation logging is evidence only; a broken import must never take the decision service down
@@ -363,6 +364,15 @@ async def structure_observation_stats():
     if _so_hook is None:
         return {"enabled": False, "error": "structure_obs_hook not importable"}
     return _so_hook.stats()
+
+
+@app.get("/structure/rejection-stats")
+async def structure_rejection_stats():
+    """group434: since boot, how many decisions the structure policy lowered (structure_rejections, rr_rejections, chase_rejections) and how many it
+    WOULD have lowered but only recorded (*_would_reject, record mode / shadow rules). Per-process: resets on restart, not shared across replicas."""
+    if _ms_rejection_stats is None:
+        return {"error": "structure_policy not importable"}
+    return _ms_rejection_stats()
 
 
 @app.get("/circuits")

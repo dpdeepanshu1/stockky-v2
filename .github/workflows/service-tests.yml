@@ -31,6 +31,14 @@ on:
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
+      - "scripts/entry_rules_backtest.py"
+      - "scripts/test_entry_rules_backtest.py"
+      - "scripts/_robust.py"
+      - "scripts/_progress.py"
+      - "scripts/test_robust_backtest.py"
+      - "scripts/fetch_history_for_backtest.py"
+      - "scripts/records_report.py"
+      - "scripts/test_records_report.py"
       - "scripts/opening_replay.py"
       - "scripts/test_opening_replay.py"
       - "scripts/hold_bucket_check.py"
@@ -67,6 +75,14 @@ on:
       - "scripts/check_market_data_url_default.py"
       - "scripts/legacy_gate_backtest.py"
       - "scripts/test_legacy_gate_backtest.py"
+      - "scripts/entry_rules_backtest.py"
+      - "scripts/test_entry_rules_backtest.py"
+      - "scripts/_robust.py"
+      - "scripts/_progress.py"
+      - "scripts/test_robust_backtest.py"
+      - "scripts/fetch_history_for_backtest.py"
+      - "scripts/records_report.py"
+      - "scripts/test_records_report.py"
       - "scripts/opening_replay.py"
       - "scripts/test_opening_replay.py"
       - "scripts/hold_bucket_check.py"
@@ -109,7 +125,7 @@ jobs:
         run: |
           pip install pytest
           (cd services/kronos-forecast-service && pip install numpy pandas && python -m pytest tests -q)   # group425: pure stats + engine tests, no torch needed
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

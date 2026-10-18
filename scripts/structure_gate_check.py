@@ -6,11 +6,15 @@ The execution plan (section 9) says the structure rules may be trusted in REAL m
 
   python3 scripts/structure_gate_check.py --ab ab_out/ab_report.json [--ab seed2/ab_report.json ...] [--live report.json]
 
-  --ab    one `ab_report.json` per random sample / seed (scripts/ms_ab_report.py). G2 needs EVERY one of them to pass.
+  --ab    one `ab_report.json` per random sample / seed (scripts/ms_ab_report.py). G2 needs EVERY one of them to pass. G3 (group 434) reads the SAME
+          reports: stability = the answer must not depend on which seed, which half of the history, which regime or which rule you look at.
   --live  the JSON of GET /api/structure/report (decision-prediction training app) for G4.
   --min-live-days / --min-live-n  G4 thresholds (defaults 20 observed sessions, 30 fully scored rows per group).
   --strict  exit 1 unless every gate that has input says PASS.
 
+G3 fails when ANY of these holds across the usable reports: a seed does not say `pass`; a seed's edge is not positive; a history half is not positive;
+a regime changes sign between seeds (n >= 30 each); a rule's drop-one edge is negative in every seed (`hurts`) or flips sign between seeds (`unstable`).
+A rule that is within +-0.05 pp everywhere is `neutral` (no demonstrated value: a note, not a failure). The per-rule table says which rule to switch off first.
 Verdicts: PASS | FAIL | NOT_ENOUGH_DATA | NO_INPUT. A FAIL or NOT_ENOUGH_DATA is a reason to keep the kill switches ready
 (STRUCTURE_POLICY_MODE=off, STRUCTURE_GATE_MODE=off, STRUCTURE_STOP_MODE=off, STRUCTURE_PREPARE_UPGRADE=0), never a tuning instruction.
 Stdlib only, reads files, changes nothing.
@@ -78,6 +82,95 @@ def check_g2(reports: List[Dict[str, Any]], names: Optional[List[str]] = None) -
     return {"gate": "G2", "status": status, "reasons": reasons, "items": items}
 
 
+RULE_EPS = 0.05          # pp: a drop-one edge inside +-RULE_EPS is "no measurable effect"
+
+
+def rule_stability(reports: List[Dict[str, Any]], names: Optional[List[str]] = None, min_n: int = 30) -> List[Dict[str, Any]]:
+    """Per rule, drop_one_edge_pp across the reports (positive = the rule earns its place, negative = the gate does better without it).
+    earns: >= +RULE_EPS in every seed. hurts: <= -RULE_EPS in every seed. unstable: one seed >= +RULE_EPS and another <= -RULE_EPS (the group 424b mistake:
+    a rule kept as 'non-negative on both seeds' that a third seed contradicts). neutral: anything else. not_enough: fewer than 2 seeds with >= min_n rows."""
+    rules = sorted({k for r in reports for k in (r.get("by_rule") or {})})
+    out = []
+    for rule in rules:
+        per: Dict[str, float] = {}
+        for i, r in enumerate(reports):
+            v = (r.get("by_rule") or {}).get(rule) or {}
+            e, n = _num(v.get("drop_one_edge_pp")), _num(v.get("drop_one_n")) or 0
+            if e is not None and n >= min_n:
+                per[(names or [])[i] if names and i < len(names) else f"report{i + 1}"] = e
+        vals = list(per.values())
+        if len(vals) < 2:
+            verdict = "not_enough"
+        elif all(v >= RULE_EPS for v in vals):
+            verdict = "earns"
+        elif all(v <= -RULE_EPS for v in vals):
+            verdict = "hurts"
+        elif any(v >= RULE_EPS for v in vals) and any(v <= -RULE_EPS for v in vals):
+            verdict = "unstable"
+        else:
+            verdict = "neutral"
+        out.append({"rule": rule, "per_seed": per, "verdict": verdict})
+    return out
+
+
+def check_g3(reports: List[Dict[str, Any]], names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """G3 (stability) over the same A/B reports as G2. Never PASS on fewer than 2 usable reports."""
+    if not reports:
+        return {"gate": "G3", "status": NOINPUT, "reasons": ["no A/B report given (--ab)"], "rules": []}
+    nm = lambda i: (names or [])[i] if names and i < len(names) else f"report{i + 1}"  # noqa: E731
+    bad_states = ("no_data", "insufficient_sample")
+    usable = [(nm(i), r) for i, r in enumerate(reports) if str(r.get("verdict") or "no_data") not in bad_states]
+    skipped = [nm(i) for i, r in enumerate(reports) if str(r.get("verdict") or "no_data") in bad_states]
+    reasons: List[str] = []
+    if skipped:
+        reasons.append("not usable (no_data / insufficient_sample): " + ", ".join(skipped))
+    if len(usable) < 2:
+        return {"gate": "G3", "status": NED, "reasons": reasons + [f"{len(usable)} usable report(s): stability needs at least 2 seeds"], "rules": []}
+    rep_only = [r for _, r in usable]
+    names_u = [n for n, _ in usable]
+    fails: List[str] = []
+    notes: List[str] = []
+    bad_v = [f"{n}: {r.get('verdict')}" for n, r in usable if r.get("verdict") != "pass"]
+    if bad_v:
+        fails.append("A/B verdict is not `pass` in every seed (" + "; ".join(bad_v) + ")")
+    neg = [f"{n} ({_num(r.get('edge_pp'))})" for n, r in usable if _num(r.get("edge_pp")) is None or _num(r.get("edge_pp")) <= 0]
+    if neg:
+        fails.append("edge is not positive in: " + ", ".join(neg))
+    badh = []
+    have_halves = False
+    for n, r in usable:
+        h = r.get("halves") or {}
+        a, b = _num(h.get("first")), _num(h.get("second"))
+        if a is None and b is None:
+            continue
+        have_halves = True
+        if a is None or b is None or a <= 0 or b <= 0:
+            badh.append(f"{n} (first {a}, second {b})")
+    if badh:
+        fails.append("a history half is not positive in: " + ", ".join(badh))
+    if not have_halves:
+        notes.append("note: the reports carry no per-half edges, so half stability was not checked")
+    flips = []
+    for reg in sorted({k for r in rep_only for k in (r.get("by_regime") or {})}):
+        vals = [(n, _num(((r.get("by_regime") or {}).get(reg) or {}).get("edge_pp"))) for n, r in usable
+                if (_num(((r.get("by_regime") or {}).get(reg) or {}).get("candidate_n")) or 0) >= 30]
+        vals = [(n, v) for n, v in vals if v is not None]
+        if any(v > 0 for _, v in vals) and any(v < 0 for _, v in vals):
+            flips.append(f"{reg} (" + ", ".join(f"{n} {v:+.2f}" for n, v in vals) + ")")
+    if flips:
+        fails.append("regime edge changes sign between seeds: " + "; ".join(flips))
+    rules = rule_stability(rep_only, names_u)
+    for r in rules:
+        d = ", ".join(f"{k} {v:+.2f}" for k, v in r["per_seed"].items())
+        if r["verdict"] == "hurts":
+            fails.append(f"rule `{r['rule']}` hurts in every seed ({d} pp): switch it off first")
+        elif r["verdict"] == "unstable":
+            fails.append(f"rule `{r['rule']}` flips sign between seeds ({d} pp): no evidence to keep it live")
+        elif r["verdict"] == "neutral":
+            notes.append(f"note: rule `{r['rule']}` shows no measurable effect ({d} pp)")
+    return {"gate": "G3", "status": FAIL if fails else PASS, "reasons": reasons + fails + notes, "rules": rules}
+
+
 def check_g4(live: Optional[Dict[str, Any]], min_days: int = 20, min_n: int = 30) -> Dict[str, Any]:
     """G4 on the live /api/structure/report: enough sessions, enough scored rows, passed BUY NOWs not worse than the demoted ones."""
     if not live:
@@ -115,6 +208,9 @@ def render(results: List[Dict[str, Any]]) -> str:
     for r in results:
         out.append(f"{r['gate']}: {r['status']}")
         out += [f"   - {x}" for x in r["reasons"]]
+        if r.get("rules"):
+            out.append("   rule stability (drop-one edge pp per seed; positive = the rule earns its place):")
+            out += [f"     {x['rule']:<10} {x['verdict']:<10} " + ", ".join(f"{k} {v:+.2f}" for k, v in x["per_seed"].items()) for x in r["rules"]]
     out += ["", "Kill switches: STRUCTURE_POLICY_MODE=off, STRUCTURE_GATE_MODE=off, STRUCTURE_STOP_MODE=off, STRUCTURE_EXIT_MODE=off, STRUCTURE_PREPARE_UPGRADE=0"]
     return "\n".join(out)
 
@@ -131,7 +227,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     live = json.loads(Path(a.live).read_text()) if a.live else None
     if isinstance(live, dict) and isinstance(live.get("report"), dict):
         live = live["report"]
-    res = [check_g2(reports, a.ab), check_g4(live, a.min_live_days, a.min_live_n)]
+    res = [check_g2(reports, a.ab), check_g3(reports, a.ab), check_g4(live, a.min_live_days, a.min_live_n)]
     print(render(res))
     if a.strict and any(r["status"] != PASS for r in res if r["status"] != NOINPUT):
         return 1

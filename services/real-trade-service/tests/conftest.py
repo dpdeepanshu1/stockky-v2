@@ -158,6 +158,18 @@ def _kronos_gate_off_by_default(monkeypatch):
 
 
 @_pytest_g172.fixture(autouse=True)
+def _timesfm_gate_off_by_default(monkeypatch):
+    """group 434: entry_engine/timesfm_gate.py (Gate 4g, log only) would call the timesfm-forecast-service cache. Pre-existing tests must never hit the
+    network or be changed by a TIMESFM_* variable in the environment; tests/test_group434_timesfm_gate.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "TIMESFM_GATE_MODE", "off", raising=False)
+    monkeypatch.setattr(_cfg, "TIMESFM_GATE_DEMO_MODE", "off", raising=False)
+    mod = _sys_g172.modules.get("entry_engine.timesfm_gate")
+    if mod is not None:
+        mod.reset()
+
+
+@_pytest_g172.fixture(autouse=True)
 def _exit_hold_audit_every_cycle(monkeypatch):
     """group368: existing exit tests expect one HOLD audit row per evaluation; the throttle is off unless a test turns it on."""
     import config as _cfg

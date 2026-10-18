@@ -704,13 +704,7 @@ class TestHydrateOne:
 
     def test_all_upstreams_down_gives_an_empty_row(self, m, env):
         _, row = m._hydrate_one(_client(env, m), "AAA")
-        assert row.pop(m._FUND_FAILED_KEY) is True      # group426: marker the runner strips before storing
         assert row == {"symbol": "AAA", "source": "refill_additional"}
-
-    def test_fund_marker_false_when_fundamentals_answered(self, m, env):
-        env.serve("AAA", fund={"pe_ratio": 9}, mod=m)
-        _, row = m._hydrate_one(_client(env, m), "AAA")
-        assert row[m._FUND_FAILED_KEY] is False
 
     def test_one_failing_upstream_does_not_block_the_others(self, m, env):
         env.serve("AAA", tech={"rsi": 40}, mod=m)
@@ -837,7 +831,7 @@ class TestRunOutcomes:
         env.serve("AAA", tech={"rsi": 50}, mod=m)
         out = m.run_refill_additional(["AAA", "GHOST"])
         assert (out["ok_count"], out["error_count"]) == (1, 1)
-        assert out["message"] == "Refill complete: 1/2 ok, 1 errors; fundamentals missing for 2"
+        assert out["message"] == "Refill complete: 1/2 ok, 1 errors"
         assert [s for s, _ in env.feed.store.put] == ["AAA"]
 
     def test_partial_data_is_enough(self, m, env):
@@ -893,15 +887,15 @@ class TestRunProgress:
         jobs = env.feed.store.jobs
         assert _statuses(env) == ["running", "running", "running", "running", "done"]
         assert [j["processed"] for j in jobs] == [0, 3, 6, 7, 7]
-        assert jobs[1]["message"] == "Refill Additional Data: 3/7 (ok=3 err=0 fund_missing=3)"
-        assert jobs[3]["message"] == "Refill Additional Data: 7/7 (ok=7 err=0 fund_missing=7)"
+        assert jobs[1]["message"] == "Refill Additional Data: 3/7 (ok=3 err=0)"
+        assert jobs[3]["message"] == "Refill Additional Data: 7/7 (ok=7 err=0)"
 
     def test_progress_carries_the_running_counters(self, m, env):
         env.serve("A", tech={"rsi": 1}, mod=m)
         env.serve("C", tech={"rsi": 1}, mod=m)
         m.run_refill_additional(["A", "GHOST", "C"])
         progress = env.feed.store.jobs[1]
-        assert progress["message"] == "Refill Additional Data: 3/3 (ok=2 err=1 fund_missing=3)"
+        assert progress["message"] == "Refill Additional Data: 3/3 (ok=2 err=1)"
         assert (progress["ok_count"], progress["error_count"]) == (2, 1)
 
     def test_single_symbol_still_reports_a_final_progress_tick(self, m, env):
@@ -975,7 +969,7 @@ class TestRunWithRealThreadPool:
         assert out["status"] == "done"
         assert (out["processed"], out["total"], out["ok_count"], out["error_count"]) == (20, 20, 15, 5)
         assert sorted(s for s, _ in env.feed.store.put) == sorted(syms[:15])
-        assert out["message"] == "Refill complete: 15/20 ok, 5 errors; fundamentals missing for 20"
+        assert out["message"] == "Refill complete: 15/20 ok, 5 errors"
 
     def test_concurrent_stop_returns_a_stopped_job(self, env):
         mod = env.load(sync=False, REFILL_CONCURRENCY="2")
@@ -1059,44 +1053,3 @@ class TestDrift:
                     with open(os.path.join(dirpath, f), encoding="utf-8", errors="ignore") as fh:
                         blob += fh.read()
         assert "/analyze/{" in blob and "/events/{" in blob
-
-
-# ── group426: fundamentals-missing count, price-source label kept ─────────────
-
-class TestGroup426Refill:
-    def test_fund_missing_is_counted_and_marker_never_stored(self, m, env):
-        env.serve("AAA", tech={"rsi": 40}, mod=m)          # fundamentals down, technicals answered
-        env.feed.store.symbols = ["AAA"]
-        out = m.run_refill_additional(["AAA"])
-        assert out["fund_missing"] == 1 and "fundamentals missing for 1" in out["message"]
-        assert out["message"].startswith("Refill complete: 1/1 ok, 0 errors")
-        (_, row), = env.feed.store.put
-        assert m._FUND_FAILED_KEY not in row and row["rsi"] == 40
-
-    def test_no_suffix_when_fundamentals_answered(self, m, env):
-        env.serve("AAA", fund={"pe_ratio": 9}, tech={"rsi": 40}, mod=m)
-        out = m.run_refill_additional(["AAA"])
-        assert out["fund_missing"] == 0 and out["message"] == "Refill complete: 1/1 ok, 0 errors"
-
-    def test_priced_row_keeps_its_source_label(self, m, env):
-        env.serve("AAA", fund={"pe_ratio": 9}, mod=m)
-        env.feed.store.get_symbols_bulk = lambda syms: {"AAA": {"price": 100.0, "source": "nse_bhavcopy"}}
-        m.run_refill_additional(["AAA"])
-        (_, row), = env.feed.store.put
-        assert "source" not in row                       # merge keeps the stored label
-
-    def test_unpriced_row_still_labelled(self, m, env):
-        env.serve("AAA", fund={"pe_ratio": 9}, mod=m)
-        env.feed.store.get_symbols_bulk = lambda syms: {"AAA": {"price": 0}}
-        m.run_refill_additional(["AAA"])
-        (_, row), = env.feed.store.put
-        assert row["source"] == "refill_additional"
-
-    def test_priced_lookup_failure_falls_back_to_old_behaviour(self, m, env):
-        env.serve("AAA", fund={"pe_ratio": 9}, mod=m)
-        def boom(syms):
-            raise RuntimeError("neon down")
-        env.feed.store.get_symbols_bulk = boom
-        m.run_refill_additional(["AAA"])
-        (_, row), = env.feed.store.put
-        assert row["source"] == "refill_additional"

@@ -88,6 +88,7 @@ def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 GROUPS: List[tuple] = [
+    ("origin (system entry vs broker-imported)", lambda r: r.get("origin")),
     ("decision_label", lambda r: r.get("decision_label")),
     ("source_tab", lambda r: r.get("source_tab")),
     ("tier_name", lambda r: r.get("tier_name")),

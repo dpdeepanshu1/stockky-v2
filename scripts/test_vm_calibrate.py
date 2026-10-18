@@ -8,7 +8,7 @@ SCRIPT = os.path.join(HERE, "vm_calibrate.sh")
 
 
 def _run(tmp_path, extra=None, py=None):
-    env = dict(os.environ, OUT_DIR=str(tmp_path / "out"))
+    env = dict(os.environ, OUT_DIR=str(tmp_path / "out"), GATEWAY_WAIT_S="0")   # group433: no real gateway in these tests, do not wait for one
     for k in ("SYMBOLS", "SEEDS", "LIMIT", "LIVE_REPORT_URL", "PS_STATUS_URL", "PS_TOKEN", "DRY_RUN", "PYTHON_BIN"):
         env.pop(k, None)
     env.update(extra or {})
@@ -60,3 +60,8 @@ def test_all_steps_ok_with_a_fake_python_exits_zero(tmp_path):
     r = _run(tmp_path, {"SEEDS": "7"}, py=_fake_py(tmp_path, body))
     assert r.returncode == 0, r.stdout
     assert "FAILED" not in r.stdout and "=== done." in r.stdout
+
+
+def test_group433_waits_for_the_gateway_then_goes_on(tmp_path):
+    r = _run(tmp_path, {"GATEWAY_WAIT_S": "6", "API_GATEWAY_URL": "http://127.0.0.1:9", "SEEDS": "7"}, py=_fake_py(tmp_path, "exit 3\n"))   # nothing listens on port 9
+    assert "waiting for http://127.0.0.1:9/health" in r.stdout and "did not answer within 6s" in r.stdout

@@ -332,3 +332,25 @@ if __name__ == "__main__":
             v()
             n += 1
     print(f"ok {n} tests")
+
+
+def test_group433_universe_read_is_retried(monkeypatch):
+    import argparse
+    calls = []
+
+    def flaky(url, timeout):
+        calls.append(url)
+        if len(calls) < 3:
+            raise ConnectionResetError("Connection reset by peer")
+        return ["tcs", "INFY.NS"]
+
+    monkeypatch.setattr(fh, "_get_json", flaky)
+    monkeypatch.setattr(fh.time, "sleep", lambda s: None)
+    a = argparse.Namespace(symbols="", symbols_file="", universe_url="http://gw/api/universe", universe_retries=5, universe_wait=0.0)
+    assert fh.read_symbols(a) == ["TCS", "INFY"] and len(calls) == 3
+    calls.clear()
+    monkeypatch.setattr(fh, "_get_json", lambda url, timeout: (_ for _ in ()).throw(ConnectionRefusedError("down")))
+    a.universe_retries = 2
+    import pytest
+    with pytest.raises(ConnectionRefusedError):
+        fh.read_symbols(a)

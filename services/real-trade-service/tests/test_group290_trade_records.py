@@ -387,3 +387,21 @@ class TestRoutes:
     def test_routes_do_not_shadow_the_close_route(self, client):
         paths = [(r.path, tuple(sorted(r.methods))) for r in __import__("main").app.routes if hasattr(r, "methods")]
         assert ("/positions/{mode}/{position_id}/close", ("POST",)) in paths
+
+
+class TestGroup433IncludeImported:
+    """group433: broker-imported rows stay out by default; include_imported opts them in and every record says where it came from."""
+
+    def _ps(self):
+        return [pos(1, broker_imported=True), pos(2, status="OPEN"), pos(3, pnl=None), pos(5)]
+
+    def test_default_unchanged(self):
+        assert [r["position_id"] for r in build(self._ps())] == [5]
+
+    def test_opt_in_adds_imported_only(self):
+        recs = tr.build_records(self._ps(), (), (), (), (), (), (), include_imported=True)
+        assert sorted(r["position_id"] for r in recs) == [1, 5]          # still no OPEN / pnl-less rows
+        assert {r["position_id"]: r["origin"] for r in recs} == {1: "imported", 5: "system"}
+
+    def test_origin_field_on_default_records(self):
+        assert build([pos(7)])[0]["origin"] == "system"

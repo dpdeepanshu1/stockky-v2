@@ -56,4 +56,14 @@ anything needing live Dhan.
 - Engine caveats: `compat_board` was rebuilt, not recovered; golden tests freeze behaviour, they do not prove thresholds.
 
 ## Group 427: order-flow record (shipped, record only)
-Let it collect for about two weeks of real trading days, then read `GET /records` (real-trade) `by_imbalance_5`, `by_imbalance_20`, `by_spread`, and position-stocks' positions `order_flow`. Only if a bucket is clearly worse on 100+ trades is a rule worth building (as a log-first gate, like group 425). Not recorded: cumulative volume delta / aggressor volume / absorption (no trade-by-trade feed). Still to run on the VM: `entry_rules_backtest.py`, `legacy_gate_backtest.py`, `structure_backtest.py` on hist400 (after `fetch_history_for_backtest.py hist400 --benchmark-only`), then paste the reports.
+Let it collect for about two weeks of real trading days, then read `GET /records` (real-trade) `by_imbalance_5`, `by_imbalance_20`, `by_spread`, and position-stocks' positions `order_flow`. Only if a bucket is clearly worse on 100+ trades is a rule worth building (as a log-first gate, like group 425). Not recorded: cumulative volume delta / aggressor volume / absorption (no trade-by-trade feed). Backtest status (hist400, 359 symbols): entry_rules and legacy_gate ran on 18 Oct; their calendar / floor rows were distorted by outliers, so group 428 added robust verdicts - re-run both and read the `verdict (robust)` tables and Part 1b. `structure_backtest.py` was started in the background (`hist400/structure.log`, `hist400/structure_out.json`); its report is still to be read.
+
+## Open after group 428 (priority order)
+1. Re-run `entry_rules_backtest.py` and `legacy_gate_backtest.py` on hist400 and paste both reports (robust tables + Part 1b decide which 18 Oct findings were real).
+2. Read the `structure_backtest.py` report (`hist400/structure.log`, `hist400/structure_out.json`).
+3. If the robust 52-week range result still says `hurts`: make the 52-week range gate log-only behind a switch (default = today's behaviour), compare outcomes, then decide.
+4. Collect about two weeks of order-flow records (group 427), then read `by_imbalance_5` / `by_imbalance_20` / `by_spread`; build a log-first gate only if a bucket is clearly worse on 100+ trades.
+5. Confirm weekly expiry dates (Thursday before 2025-09-01, Tuesday from) against the NSE circulars; the calendar rows depend on it.
+6. DONE in group 429: the Kronos wiring test is fixed in the zip. On the VM discard your local edit of that file before pulling (`git checkout -- services/real-trade-service/tests/test_group425_kronos_entry_wiring.py`).
+7. Intraday rules (opening, VWAP, depth gates) cannot be backtested on daily bars; they need recorded intraday data.
+8. Older open items: real NSE pre-open board, catalyst check, window auto-disable + width tuning, structure evidence gates G1-G4, swing-carry design question (group 421).

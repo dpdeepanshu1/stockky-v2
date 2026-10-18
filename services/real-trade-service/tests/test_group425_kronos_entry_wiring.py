@@ -95,8 +95,9 @@ def test_enforce_without_an_opinion_enters(db, monkeypatch, fc, raises):
 
 
 def test_gate_5_6_uses_forecast_ev_in_enforce_but_not_in_log(db, monkeypatch):
-    # EV 0.4% is above Gate 4f's floor (0.1 x cost) but far below the 3x-cost edge floor at Gate 5.6; the fixed 6% target would pass it.
-    for k, v in (("COST_MODEL_ENABLED", True), ("MIN_TRADE_VALUE", 1000.0), ("MIN_EDGE_TO_COST_RATIO", 3.0), ("KRONOS_MIN_EDGE_X_COST", 0.1)):
+    # EV 0.4% is above Gate 4f's floor (0.1 x cost) but below the 10x-cost edge floor at Gate 5.6 (about 3.7x at today's CNC charges on this trade size, so the
+    # floor is set well above that and the test does not depend on the exact charge constants); the fixed ~6% target (about 55x) would pass it.
+    for k, v in (("COST_MODEL_ENABLED", True), ("MIN_TRADE_VALUE", 1000.0), ("MIN_EDGE_TO_COST_RATIO", 10.0), ("KRONOS_MIN_EDGE_X_COST", 0.1)):
         monkeypatch.setattr(config, k, v)
     _worker(monkeypatch, _fc(ev_pct=0.4))
     monkeypatch.setattr(config, "KRONOS_GATE_DEMO_MODE", "log")
@@ -105,7 +106,7 @@ def test_gate_5_6_uses_forecast_ev_in_enforce_but_not_in_log(db, monkeypatch):
 
 
 def test_gate_5_6_enforce_waits_on_cost_model(db, monkeypatch):
-    for k, v in (("COST_MODEL_ENABLED", True), ("MIN_TRADE_VALUE", 1000.0), ("MIN_EDGE_TO_COST_RATIO", 3.0), ("KRONOS_MIN_EDGE_X_COST", 0.1)):
+    for k, v in (("COST_MODEL_ENABLED", True), ("MIN_TRADE_VALUE", 1000.0), ("MIN_EDGE_TO_COST_RATIO", 10.0), ("KRONOS_MIN_EDGE_X_COST", 0.1)):
         monkeypatch.setattr(config, k, v)
     _worker(monkeypatch, _fc(ev_pct=0.4))
     monkeypatch.setattr(config, "KRONOS_GATE_DEMO_MODE", "enforce")

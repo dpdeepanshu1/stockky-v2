@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from market_structure.ms_types import C, H, L, O, T, V  # noqa: E402
 from market_structure.candles import ist_date  # noqa: E402
 from ms_ab_report import BENCH_NAMES, load_bars  # noqa: E402
+from _robust import jump_in_window, robust_stats, robust_verdict  # noqa: E402  (group 428)
 
 HORIZONS = (1, 5, 10, 20)
 MIN_BARS = 260
@@ -99,13 +100,14 @@ def rows_for(bars: Sequence[Sequence[float]], sym: str, step: int, cost: float, 
     out: List[Dict[str, Any]] = []
     if len(bars) < MIN_BARS + max(HORIZONS) + 2:
         return out
+    closes = [float(b[C]) for b in bars]
     for i in range(MIN_BARS - 1, len(bars) - max(HORIZONS) - 1, max(1, step)):
         f = day_flags(bars, i)
         entry_open = float(bars[i + 1][O])
         if f is None or entry_open <= 0:
             continue
         entry = entry_open * (1.0 + slip / 100.0)
-        row: Dict[str, Any] = {"sym": sym, "month": ist_date(bars[i][T])[:7], **f}
+        row: Dict[str, Any] = {"sym": sym, "month": ist_date(bars[i][T])[:7], "day": ist_date(bars[i][T]), "jump": jump_in_window(closes, i - 20, i + max(HORIZONS) + 1, 35.0), **f}
         for h in HORIZONS:
             row[f"r{h}"] = round((float(bars[i + h][C]) / entry - 1.0) * 100.0 - cost, 3)
         out.append(row)
@@ -143,6 +145,10 @@ def gate_report(rows: Sequence[Dict[str, Any]], h: int, min_n: int, n_boot: int,
                      "mean_net_passed": round(mp, 3) if mp is not None else None,
                      "mean_net_rejected": round(mr, 3) if mr is not None else None,
                      "edge_pp": edge, "ci90": ci, "verdict": v}
+        rs = robust_stats(pr, rej, key, n_boot, seed)                      # group 428: median / clipped / day-cluster view of the same gate
+        if rs:
+            out[name].update(rs)
+        out[name]["verdict_robust"] = robust_verdict(v, rs)
     return out
 
 
@@ -184,6 +190,15 @@ def to_markdown(rep: Dict[str, Any]) -> str:
           "| gate | days | rejected % | passed mean % | rejected mean % | edge pp | 90% CI | verdict |", "|---|---|---|---|---|---|---|---|"]
     for k, x in rep["gates"].items():
         L_.append(f"| {k} | {x['population']} | {f(x['rejected_pct'])} | {f(x['mean_net_passed'])} | {f(x['mean_net_rejected'])} | {f(x['edge_pp'])} | {f(x['ci90'])} | {x['verdict']} |")
+    L_ += ["", "### Same gates, outlier-proof and day-clustered", "",
+           "| gate | median passed % | median rejected % | median edge | clipped edge | day-cluster 90% CI | extreme rows | verdict (robust) |", "|---|---|---|---|---|---|---|---|"]
+    for k, x in rep["gates"].items():
+        L_.append(f"| {k} | {f(x.get('median_passed'))} | {f(x.get('median_rejected'))} | {f(x.get('median_edge'))} | {f(x.get('wins_edge'))} | {f(x.get('day_ci'))} | {f(x.get('extreme_rows'))} | {x.get('verdict_robust', x['verdict'])} |")
+    if rep.get("gates_clean") is not None:
+        L_ += ["", f"### Same, WITHOUT the {rep['jump_rows']} days ({rep['jump_pct_of_rows']}%) whose window holds a one-day move over 35% (split / bonus / bad candle suspects)", "",
+               "| gate | days | median edge | clipped edge | day-cluster 90% CI | verdict (robust) |", "|---|---|---|---|---|---|"]
+        for k, x in rep["gates_clean"].items():
+            L_.append(f"| {k} | {x['population']} | {f(x.get('median_edge'))} | {f(x.get('wins_edge'))} | {f(x.get('day_ci'))} | {x.get('verdict_robust', x['verdict'])} |")
     L_ += ["", "Edge = mean of the days the gate lets through minus mean of the days it rejects; positive = the gate removed the worse days (for `exemption_test`: the "
            "exempted fresh highs did better than the ones still rejected). Every day of every sampled stock is replayed, not only the days a live candidate source would "
            "have proposed, and the market-score part of the 52-week rule is not replayed. `insufficient_sample` means nothing may be concluded."]
@@ -222,6 +237,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     meta = {"symbols": len(jobs) - skipped, "skipped": skipped, "step": a.step, "cost_pct": a.cost_pct, "slip_pct": a.slip_pct,
             "sample": {"requested": a.sample, "pool": pool, "drawn": len(jobs), "seed": a.seed if a.sample > 0 else None}}
     rep = {"meta": meta, "horizon": a.horizon, "days": len(rows), "gates": gate_report(rows, a.horizon, a.min_n, a.boot)}
+    clean = [r for r in rows if not r.get("jump")]                      # group 428: drop days whose window holds a >35 % one-day move
+    rep["jump_rows"] = len(rows) - len(clean)
+    rep["jump_pct_of_rows"] = round(100.0 * rep["jump_rows"] / len(rows), 2) if rows else 0.0
+    rep["gates_clean"] = gate_report(clean, a.horizon, a.min_n, a.boot) if rep["jump_rows"] else None
     out = Path(a.out) if a.out else d / "gate_out"
     out.mkdir(parents=True, exist_ok=True)
     (out / "gate_report.json").write_text(json.dumps(rep, indent=1))

@@ -2537,7 +2537,39 @@ def board_status():
             "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
             "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors()),
             "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover),
-            "ms_engine": _ms_engine_status()}
+            "ms_engine": _ms_engine_status(), "bar_record": _bar_record_status()}
+
+
+def _bar_record_status() -> dict:
+    """group441: the 1-minute bar recorder (feed/bar_recorder.py). Never raises."""
+    try:
+        from feed import bar_recorder
+        return bar_recorder.stats()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:120]}
+
+
+@app.get("/board/intraday/{symbol}")
+def board_intraday(symbol: str, tf: int = 15, days: int = 6):
+    """group441 (WS-15): intraday market structure of one symbol from the recorded 1-minute bars of the last `days` sessions plus today's live bars.
+    tf = 15 or 5. RECORD / DIAGNOSTIC ONLY - nothing in the entry path reads it. quality is `insufficient` until about two sessions are recorded."""
+    from feed import bar_recorder, bar_store
+    sym = (symbol or "").strip().upper()
+    if tf not in (5, 15):
+        raise HTTPException(status_code=400, detail="tf must be 5 or 15")
+    try:
+        from stockky_ms import intraday as _intra
+    except Exception:  # noqa: BLE001 - package not vendored in this image
+        raise HTTPException(status_code=503, detail="stockky_ms.intraday is not vendored in this image (run scripts/sync_market_structure.py)")
+    now = time.time()
+    today = bar_recorder.ist_date(now)
+    bars = bar_recorder.history_minutes(sym, max(1, min(int(days), 20)), before_date=today) + [list(b) for b in bar_store.get_bars(sym)]
+    out = _intra.analyze_intraday(bars, tf, now=now)
+    info = _intra.session_info(bars)
+    out["sessions"] = [{"day": bar_recorder.ist_date(v["first_ts"]), **{k: v[k] for k in ("minutes", "coverage", "complete")}} for _, v in sorted(info.items())]
+    out["symbol"] = sym
+    out["record_only"] = True
+    return out
 
 
 def _ms_engine_status() -> dict:

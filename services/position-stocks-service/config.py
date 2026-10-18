@@ -1108,6 +1108,15 @@ BOARD_BACKFILL_RETRY_S = max(60, _get_int("BOARD_BACKFILL_RETRY_S", 900))       
 BOARD_BACKFILL_EMPTY_RETRY_S = max(60, _get_int("BOARD_BACKFILL_EMPTY_RETRY_S", 3600))
 BOARD_BACKFILL_PAUSE_S = max(30, _get_int("BOARD_BACKFILL_PAUSE_S", 300))
 BOARD_PARAMS_VERSION = "b1"                                                          # bump when a BOARD_* default or formula changes
+# group441 (WS-15): record today's 1-minute bars (from the bar store) to disk, one file per symbol per IST day, so intraday (15m / 5m) structure and the
+# opening / VWAP / depth gates can be backtested later. RECORD ONLY: nothing in the entry path reads it. Needs a persistent volume at BAR_RECORD_DIR
+# (docker-compose mounts `bar-records`); an unwritable directory switches the recorder off by itself and /board/status says why.
+BAR_RECORD_ENABLED = _get_bool("BAR_RECORD_ENABLED", True)
+BAR_RECORD_DIR = _get_str("BAR_RECORD_DIR", "/data/bars")
+BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
+BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
+BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
+BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
 
 # ---- group341 (log review 2026-10-13) -------------------------------------------------------------------------------------------
 # Pool baseline: sync_from_broker() adds back this pool's committed capital to Dhan's FREE cash. Free cash only falls by the MARGIN an

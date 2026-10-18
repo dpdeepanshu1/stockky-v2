@@ -84,9 +84,9 @@ def rule_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]] =
 
 # group409: the decision policy's own BUY NOW rules (decision/structure_policy.py), replayable so a change to them can be tested on history before it
 # goes live. Same ids and meaning as the policy (group410: groups_min / loc_min of 0 switch their rule off, as in the policy); unlike the gate rules above a MISSING metric trips them (the policy: "unknown is never bullish").
-POLICY_THRESHOLDS: Dict[str, Any] = {"groups_min": 2.0, "loc_min": 0.0, "bos_max_bars": 10.0, "bearish_break_bars": 5.0, "reward_pct_min": 2.5,
+POLICY_THRESHOLDS: Dict[str, Any] = {"groups_min": 2.0, "groups_strict_min": 0.0, "loc_min": 0.0, "bos_max_bars": 10.0, "bearish_break_bars": 5.0, "reward_pct_min": 2.5,
                                    "retest_entry": 0.0, "retest_confirm_bars": 5.0}   # group413: retest_entry 1 = the P8 retest / CHOCH branch (same meaning as decision/structure_policy.py)
-POLICY_RULES = ("p4_reward", "p5_break", "p7_groups", "p7_location", "p8_failed_bos", "p8_no_bos", "p8_old_bos")
+POLICY_RULES = ("p4_reward", "p5_break", "p7_groups", "p7x_indep", "p7_location", "p8_failed_bos", "p8_no_bos", "p8_old_bos")
 
 
 def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
@@ -95,6 +95,7 @@ def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]]
     t.update({k: v for k, v in (th or {}).items() if k in POLICY_THRESHOLDS})
     s = summary or {}
     groups, loc = _f(s.get("ms_groups")), _f(s.get("ms_loc_score"))
+    gstrict = _f(s.get("ms_groups_strict"))     # group423 (replayed since group441): structure / entry zone / liquidity only
     bos_b, ch_b = _f(s.get("ms_bos_bars")), _f(s.get("ms_choch_bars"))
     bos_dir, ch_dir, failed = s.get("ms_bos_dir"), s.get("ms_choch_dir"), bool(s.get("ms_bos_failed"))
     px, tg = _f(s.get("ms_price")), _f(s.get("ms_target"))
@@ -117,6 +118,7 @@ def policy_flags(summary: Optional[Dict[str, Any]], th: Optional[Dict[str, Any]]
         "p4_reward": bool(t["reward_pct_min"] > 0 and tg is not None and px and tg > px and (tg - px) / px * 100.0 < t["reward_pct_min"]),
         "p5_break": brk,
         "p7_groups": bool(t["groups_min"] > 0 and (groups is None or groups < t["groups_min"])),
+        "p7x_indep": bool(t["groups_strict_min"] > 0 and (gstrict is None or gstrict < t["groups_strict_min"])),   # default 0 = off, same as the policy
         "p7_location": bool(t["loc_min"] > 0 and (loc is None or loc < t["loc_min"])),
         "p8_failed_bos": bullish and failed,
         "p8_no_bos": not (bullish and failed) and (not bullish or bos_b is None),

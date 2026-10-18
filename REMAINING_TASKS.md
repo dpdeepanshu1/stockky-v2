@@ -68,7 +68,7 @@ Compose default `STRUCTURE_POLICY_MODE` is now `record` (docs/GROUP434_POLICY_RE
 ## Open after group 428 (priority order)
 1. Re-run `entry_rules_backtest.py` and `legacy_gate_backtest.py` on hist400 and paste both reports (robust tables + Part 1b decide which 18 Oct findings were real).
 2. Read the `structure_backtest.py` report (`hist400/structure.log`, `hist400/structure_out.json`).
-3. BUILT in group 434c (`CANDIDATE_52W_LOG_ONLY`, default off). Still open: read the robust 52-week row; only if it says `hurts`, turn the switch on, compare outcomes, then decide.
+3. DONE in group 440: the robust 52-week rows say `hurts` in weak and strong markets, so `CANDIDATE_52W_LOG_ONLY` now defaults to 1 (compose). Still open: after about two weeks read `GET /range52w/status` (`recent`), compare those names' outcomes, then keep log-only, go hard-off, or roll back (`=0`). Check the VM `.env` with `scripts/env_structure_check.py` - a leftover `CANDIDATE_52W_RULE_ENABLED=0` means nothing is counted.
 4. Collect about two weeks of order-flow records (group 427), then read `by_imbalance_5` / `by_imbalance_20` / `by_spread`; build a log-first gate only if a bucket is clearly worse on 100+ trades.
 5. Confirm weekly expiry dates (Thursday before 2025-09-01, Tuesday from) against the NSE circulars; the calendar rows depend on it.
 6. DONE in group 429: the Kronos wiring test is fixed in the zip. On the VM discard your local edit of that file before pulling (`git checkout -- services/real-trade-service/tests/test_group425_kronos_entry_wiring.py`).
@@ -77,4 +77,4 @@ Compose default `STRUCTURE_POLICY_MODE` is now `record` (docs/GROUP434_POLICY_RE
 
 ## Group 430 follow-ups
 - Export fresh records with `python3 scripts/export_records.py` (the 18 Oct run saw only 1 trade since 1 October: stale files), then run `python3 scripts/records_report.py rt_*.json --since 2026-10-01`; compare with the September picture (63 trades, net -1,439, the 09:xx-10:xx entry cluster lost 1,598 net, gaps through stops). That decides whether any live rule change is warranted.
-- Still open from group 428: paste the re-run entry_rules / legacy_gate reports (robust tables) and the structure_backtest report; the 52-week range gate stays as is until the robust result is in.
+- Still open from group 428: the structure_backtest report (the entry_rules / legacy_gate robust tables were read in group 440; the 52-week gate moved to log-only). Also open: the group 438 doubled-quantity query result.

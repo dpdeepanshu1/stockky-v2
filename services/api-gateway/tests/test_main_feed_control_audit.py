@@ -180,6 +180,27 @@ class TestStartBulkFeed:
         assert bt.tasks[0].args == (["TCS", "INFY", "RELIANCE"],)
         assert bulk.stop_cleared == 1
 
+    def test_group426_universe_plus_feed_index_deduped(self, store, bulk, uni, monkeypatch):
+        monkeypatch.delenv("BULK_FEED_INCLUDE_INDEX", raising=False)
+        uni.symbols = ["TCS", "INFY"]
+        store.symbols = ["infy", "MARUTI", "ONGC"]
+        bt = BackgroundTasks()
+        out = _run(gw.start_bulk_feed(background_tasks=bt))
+        assert out["total"] == 4
+        assert bt.tasks[0].args == (["TCS", "INFY", "MARUTI", "ONGC"],)
+
+    def test_group426_include_index_off_restores_universe_only(self, store, bulk, uni, monkeypatch):
+        monkeypatch.setenv("BULK_FEED_INCLUDE_INDEX", "0")
+        uni.symbols = ["TCS"]
+        store.symbols = ["MARUTI"]
+        assert _run(gw.start_bulk_feed(background_tasks=BackgroundTasks()))["total"] == 1
+
+    def test_group426_feed_index_failure_keeps_universe(self, store, bulk, uni, monkeypatch):
+        monkeypatch.delenv("BULK_FEED_INCLUDE_INDEX", raising=False)
+        uni.symbols = ["TCS", "INFY"]
+        store.list_raises = True
+        assert _run(gw.start_bulk_feed(background_tasks=BackgroundTasks()))["total"] == 2
+
     def test_use_universe_false_skips_universe_and_uses_feed_index(self, store, bulk, uni):
         store.symbols = ["AAA", "BBB"]
         uni.symbols = ["ZZZ"]

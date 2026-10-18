@@ -466,9 +466,7 @@ services:
       start_period: 30s
     logging: *default-logging
     cpus: "1.0"
-    mem_limit: 2200m
-    cpus: "1.0"
-    mem_limit: 1800m
+    mem_limit: 2200m  # group436 fix: the block was duplicated (2200m and 1800m); kept the larger one - an OOM-kill is a silent SIGKILL
     mem_reservation: 600m
 
   frontend:

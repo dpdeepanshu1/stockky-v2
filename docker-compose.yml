@@ -323,6 +323,10 @@ services:
       API_GATEWAY_URL: http://api-gateway:8000
       MARKET_DATA_URL: http://market-data-service:8001
       EVENT_URL: http://analysis-intelligence-service:8000/event
+      # group 425: Kronos forecast gate worker (gate is OFF unless KRONOS_GATE_MODE / KRONOS_GATE_DEMO_MODE is log or enforce)
+      KRONOS_URL: http://kronos-forecast-service:8010
+      KRONOS_GATE_MODE: ${KRONOS_GATE_MODE:-off}
+      KRONOS_GATE_DEMO_MODE: ${KRONOS_GATE_DEMO_MODE:-}
       # 2026-09-11 fix: needed for the volume-shock quality gate
       # (candidate_engine/candidates.py's fundamental/technical checks) —
       # previously undefined here, so it silently fell back to config.py's
@@ -399,6 +403,29 @@ services:
     cpus: "0.70"
     mem_limit: 1000m
     mem_reservation: 400m
+
+  # group 425: Kronos-small forecast worker for entry Gate 4f. Safe to leave running with the gate off: it is only called when
+  # KRONOS_GATE_MODE / KRONOS_GATE_DEMO_MODE is log or enforce. One forecast at a time; first start downloads ~100 MB of model files into the hf-cache volume.
+  kronos-forecast-service:
+    build: ./services/kronos-forecast-service
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      KRONOS_PRELOAD: ${KRONOS_PRELOAD:-false}
+      KRONOS_TORCH_THREADS: ${KRONOS_TORCH_THREADS:-1}
+      PORT: "8010"
+    volumes:
+      - kronos-hf-cache:/app/.hf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    cpus: "1.0"
+    mem_limit: 1800m
+    mem_reservation: 600m
 
   frontend:
     build:
@@ -542,3 +569,7 @@ services:
     cpus: "0.30"
     mem_limit: 700m  # group341: was 400m - tick buffers took it to 91% within 20 min of the open (log 2026-10-13); see WS_MAX_TICKS_PER_SYMBOL
     mem_reservation: 128m
+
+# group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
+volumes:
+  kronos-hf-cache:

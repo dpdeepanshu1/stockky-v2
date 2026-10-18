@@ -2498,6 +2498,13 @@ def _structure_view(raw):
         return None
 
 
+@app.get("/kronos/status")
+async def kronos_status(admin: Optional[str] = Depends(require_admin_if_real)):
+    """group 425: Kronos forecast gate - config and process counters since boot plus the last verdicts. Read-only; nothing in the entry path reads it."""
+    from entry_engine import kronos_gate as _kg
+    return _kg.stats()
+
+
 @app.get("/structure/status/{mode}")
 async def structure_status(
     mode: str, hours: int = 24, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),

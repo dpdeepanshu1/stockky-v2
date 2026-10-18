@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, liquidity_gate, opening_gate, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -943,6 +943,31 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             except Exception as _sg_err:  # noqa: BLE001 - a gate bug must never stop an entry
                 logger.warning("entry_engine: structure gate failed for %s (allowing): %s", cand.symbol, _sg_err)
 
+        # ── Gate 4f (group 425): Kronos forecast ("does a sampled 5-bar forecast leave any edge after costs?") ────────────────────────
+        # OFF by default (config.KRONOS_GATE_MODE). log = ask the worker and record the verdict, never block; enforce = a rejection is a WAIT
+        # (gate_tag "kronos") and Gate 5.6 below uses min(fixed target, forecast EV) as its edge. A worker that is down / slow / unsure is
+        # "no opinion" and never blocks. Never raises. See entry_engine/kronos_gate.py.
+        _kg_mode = kronos_gate.mode_for(mode)
+        _kg_verdict = None
+        if _kg_mode != "off":
+            try:
+                _kg_stop_pct = (entry_price - stop_price) / entry_price * 100.0
+                _kg_tgt_pct = (target_price - entry_price) / entry_price * 100.0
+                _kg_fc = await kronos_gate.fetch_forecast(cand.symbol, tick.price, _kg_stop_pct, _kg_tgt_pct)
+                _kg_verdict = kronos_gate.evaluate(_kg_fc, kronos_gate.cost_pct_for(entry_price))
+                _kg_enforced = bool(_kg_verdict["would_reject"]) and _kg_mode == "enforce"
+                kronos_gate.record(cand.symbol, mode, _kg_verdict, _kg_mode, _kg_enforced, tick.price)
+                if _kg_enforced:
+                    _wait_with_preview(_kg_verdict["reason"])
+                    decision.gate_tag = kronos_gate.TAG
+                    db.add(decision)
+                    entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _kg_verdict["reason"],
+                                           "risk_verdict": None, "gate_tag": kronos_gate.TAG})
+                    continue
+            except Exception as _kg_err:  # noqa: BLE001 - a gate bug must never stop an entry
+                _kg_verdict = None
+                logger.warning("entry_engine: kronos gate failed for %s (allowing): %s", cand.symbol, _kg_err)
+
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)
         if rr < MIN_REWARD_RISK_RATIO:
@@ -1092,7 +1117,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             final_qty_for_cost = result.approved_qty or proposed_qty
             min_trade_value, min_edge_to_cost_ratio = _resolve_cost_gate_knobs(db, mode)
             cost_check = cost_model.evaluate_entry_cost_gate(
-                entry_price, final_qty_for_cost, target_pct, product_type=entry_prod,
+                entry_price, final_qty_for_cost,
+                kronos_gate.effective_target_pct(target_pct, _kg_verdict, _kg_mode),     # group 425: forecast EV instead of the fixed target (enforce only)
+                product_type=entry_prod,
                 min_trade_value=min_trade_value, min_edge_to_cost_ratio=min_edge_to_cost_ratio,
                 include_dp=_carry_overnight,
             )

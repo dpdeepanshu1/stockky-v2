@@ -11861,6 +11861,12 @@ async def hard_reset_database(preserve_days: int = 7):
 
 
 
+def _bulk_feed_include_index() -> bool:
+    """group426: BULK_FEED_INCLUDE_INDEX (default on, blank-safe): also price symbols already in the feed index, not only the scan universe."""
+    v = ((os.getenv("BULK_FEED_INCLUDE_INDEX") or "").strip() or "1").lower()
+    return v not in ("0", "false", "no", "off")
+
+
 @app.post("/data-feed/start-bulk-feed")
 @app.post("/api/data-feed/start-bulk-feed")
 @app.post("/api/feed/start-bulk-feed")
@@ -11893,6 +11899,17 @@ async def start_bulk_feed(
         except Exception as e:
             logger.warning("bulk-feed universe: %s", e)
             symbols = []
+        # group426: the scan universe (~500 symbols, sometimes a stale copy) is smaller than the feed index (587), so ~48 indexed
+        # symbols (MARUTI, ONGC, HAL ...) were never priced by this job. Append the indexed ones (duplicates are dropped below).
+        # BULK_FEED_INCLUDE_INDEX=0 restores the old list.
+        if symbols and _bulk_feed_include_index():
+            try:
+                _indexed = [x for x in (_feed_store().list_symbols() or []) if x]
+            except Exception:
+                _indexed = []
+            if _indexed:
+                logger.info("bulk-feed: scan universe %d + feed index %d (duplicates are dropped next)", len(symbols), len(_indexed))
+                symbols = list(symbols) + _indexed
     if not symbols:
         try:
             symbols = _feed_store().list_symbols() or []

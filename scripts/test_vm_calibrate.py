@@ -31,7 +31,7 @@ def test_dry_run_lists_every_step_and_runs_nothing(tmp_path):
     assert out.count("fetch_history_for_backtest.py") == 2 and out.count("ms_ab_report.py") == 2
     assert "--sample 150 --seed 7" in out and "--seed 11" in out
     assert "--universe-url http://localhost:8000/api/universe" in out
-    for tool in ("ms_g1_check.py", "structure_backtest.py", "structure_gate_check.py", "calibration_pack.py", "board_parity_check.py"):
+    for tool in ("ms_g1_check.py", "structure_backtest.py", "structure_gate_check.py", "calibration_pack.py", "board_parity_check.py", "calibration_status.py"):
         assert tool in out, tool
     assert not (tmp_path / "out" / "hist_7").exists()          # nothing was downloaded
     assert (tmp_path / "out" / "summary.txt").read_text().startswith("=== seed 7")
@@ -65,3 +65,29 @@ def test_all_steps_ok_with_a_fake_python_exits_zero(tmp_path):
 def test_group433_waits_for_the_gateway_then_goes_on(tmp_path):
     r = _run(tmp_path, {"GATEWAY_WAIT_S": "6", "API_GATEWAY_URL": "http://127.0.0.1:9", "SEEDS": "7"}, py=_fake_py(tmp_path, "exit 3\n"))   # nothing listens on port 9
     assert "waiting for http://127.0.0.1:9/health" in r.stdout and "did not answer within 6s" in r.stdout
+
+
+def test_group434_status_guard_runs_after_each_fetch_and_once_for_the_whole_run(tmp_path):
+    r = _run(tmp_path, {"DRY_RUN": "1", "SEEDS": "7 11", "LIMIT": "150"})
+    assert r.stdout.count("calibration_status.py --hist") == 2 and r.stdout.count("calibration_status.py --out-dir") == 1
+    assert "--manifest " in r.stdout and "sample_manifest_7.json" in r.stdout
+    first = r.stdout.index("fetch_history_for_backtest.py")
+    assert first < r.stdout.index("calibration_status.py --hist") < r.stdout.index("ms_ab_report.py")      # the guard sits between fetch and A/B
+
+
+def test_group434_symbols_mode_lowers_the_thresholds(tmp_path):
+    r = _run(tmp_path, {"DRY_RUN": "1", "SEEDS": "7", "SYMBOLS": "TCS,INFY"})
+    assert "--min-symbols 1" in r.stdout and "--min-signals 1" in r.stdout
+
+
+def test_group434_a_too_small_history_skips_that_seed_and_names_it(tmp_path):
+    # fake python: the fetch "works", the guard says no -> ms_ab_report must not run for that seed, and the run must fail
+    body = 'case "$1" in *calibration_status.py) echo "seed_7: 3 symbol file(s), need 50"; exit 1;; *ms_ab_report.py) echo AB_RAN; exit 0;; esac\necho "{}"\n'
+    r = _run(tmp_path, {"SEEDS": "7"}, py=_fake_py(tmp_path, body))
+    assert r.returncode == 1 and "AB_RAN" not in r.stdout and "FAILED steps:" in r.stdout and "calibration_status.py --hist" in r.stdout
+
+
+def test_group434_resume_keeps_a_complete_seed_and_does_not_fetch(tmp_path):
+    body = 'case "$1" in *calibration_status.py) exit 0;; *fetch_history_for_backtest.py) echo FETCH_RAN; exit 0;; esac\necho "{}"\n'
+    r = _run(tmp_path, {"SEEDS": "7", "RESUME": "1"}, py=_fake_py(tmp_path, body))
+    assert "seed 7 is already complete (RESUME=1)" in r.stdout and "FETCH_RAN" not in r.stdout

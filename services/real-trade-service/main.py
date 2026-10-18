@@ -2505,6 +2505,13 @@ async def kronos_status(admin: Optional[str] = Depends(require_admin_if_real)):
     return _kg.stats()
 
 
+@app.get("/timesfm/status")
+async def timesfm_status(admin: Optional[str] = Depends(require_admin_if_real)):
+    """group 434: TimesFM parameter record (Gate 4g, log only) - config and process counters since boot plus the last verdicts. Read-only; nothing in the entry path reads it."""
+    from entry_engine import timesfm_gate as _tg
+    return _tg.stats()
+
+
 @app.get("/structure/status/{mode}")
 async def structure_status(
     mode: str, hours: int = 24, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),

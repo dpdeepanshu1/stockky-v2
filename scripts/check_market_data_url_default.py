@@ -32,6 +32,7 @@ _MUST_SET = (
     "real-trade-service",
     "position-stocks-service",
     "kronos-forecast-service",
+    "timesfm-forecast-service",      # group434
 )
 _RENDER_ON_DEFAULT = re.compile(r"MARKET_DATA_URL[^\n]*onrender\.com|onrender\.com[^\n]*MARKET_DATA_URL")
 

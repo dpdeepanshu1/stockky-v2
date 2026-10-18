@@ -8,14 +8,18 @@ Current defaults: `docs/GROUP415_EVIDENCE_GATED_STRUCTURE_DEFAULTS.md`.
 ## Evidence gates (decide whether the structure rules earn their place)
 | Gate | Status |
 |---|---|
-| G1 correctness | Not verified on real data: corporate actions on >= 10 real splits/bonuses, truncation invariance, `/analyze` p95 latency |
+| G1 correctness | Not verified on real data: corporate actions on >= 10 real splits/bonuses, truncation invariance, `/analyze` p95 latency (live half: `scripts/analyze_latency_check.py`, group 436) |
 | G2 benefit | Not met. A/B verdict `no_edge` (group 375: +0.54 pp, CI [-0.01, 1.29]; group 410: +0.35 pp, CI [-1.63, 2.44], 71 signals) |
-| G3 stability | Not started |
+| G3 stability | Tooling built (group 436: `structure_gate_check.py` prints G3 and a per-rule table). No result yet: needs the calibration run (>= 2 complete seeds) |
 | G4 live | Not enough observed days |
 
 Until G2 passes: `STRUCTURE_PREPARE_UPGRADE`, `STRUCTURE_STOP_MODE` stay off and `STRUCTURE_EXIT_MODE` stays `log` (group 415).
 Run `scripts/structure_gate_check.py` on >= 2 seeds once the calibration run finishes (re-read seed 13's `summary.txt`; the earlier
 `no_edge` may not be from that seed).
+
+## Group 436: TimesFM parameter plan (built, OFF, unproven)
+Service, log-only Gate 4g, offline probe and nightly batch exist (`docs/GROUP434E_TIMESFM_PARAMETER_PLAN.md`). Still to do, in order: run `selfcheck.py` on the VM (the model adapters have never run on real weights), run `scripts/tsfm_probe.py` on seeds 7 / 11 / 13 and `--combine` (Gate A), then - only on a pass - the nightly batch + `TIMESFM_GATE_DEMO_MODE=log` and a replay (Gate B). There is no enforce mode and none should be added before Gate B.
+Calibration: use `RESUME=1 bash scripts/vm_calibrate.sh`; `python3 scripts/calibration_status.py --out-dir calibration_out` says which seeds are really complete.
 
 ## Group 422: policy record-only path (shipped, OFF by default)
 To measure a stricter rule before it costs money: set `STRUCTURE_POLICY_SHADOW_RULES=P7,P8` (or `STRUCTURE_POLICY_MODE=record` for everything) on decision-prediction-service, let observations accumulate, then compare `features.would_be` with `final_decision`. Note that shadowing P7 / P8 LOOSENS live BUY NOW gating (those rules stop applying), so only do it deliberately. The real-trade `structure_gate` and the sniper gate are separate gates and are not covered. Group 423 shipped the strict independent-group count (see below).

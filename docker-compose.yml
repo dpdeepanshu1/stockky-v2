@@ -328,6 +328,11 @@ services:
       KRONOS_URL: http://kronos-forecast-service:8010
       KRONOS_GATE_MODE: ${KRONOS_GATE_MODE:-off}
       KRONOS_GATE_DEMO_MODE: ${KRONOS_GATE_DEMO_MODE:-}
+      # group 434: TimesFM parameter record (Gate 4g). LOG ONLY, OFF unless TIMESFM_GATE_MODE / TIMESFM_GATE_DEMO_MODE is log (there is no enforce).
+      # It reads the nightly cache of timesfm-forecast-service (compose profile `timesfm`); with the service not running the gate simply has no opinion.
+      TIMESFM_URL: http://timesfm-forecast-service:8011
+      TIMESFM_GATE_MODE: ${TIMESFM_GATE_MODE:-off}
+      TIMESFM_GATE_DEMO_MODE: ${TIMESFM_GATE_DEMO_MODE:-}
       # 2026-09-11 fix: needed for the volume-shock quality gate
       # (candidate_engine/candidates.py's fundamental/technical checks) —
       # previously undefined here, so it silently fell back to config.py's
@@ -424,6 +429,44 @@ services:
       retries: 5
       start_period: 30s
     logging: *default-logging
+
+  # group 434: TimesFM parameter worker (range / volatility / volume / stop-touch probability, never a direction). NOT started by a plain `docker compose up`:
+  #   docker compose --profile timesfm up -d --build timesfm-forecast-service      then   python3 scripts/tsfm_nightly.py   after the end-of-day bars
+  # TSFM_BACKEND=timesfm25 (Apache weights, local, production-safe) | bigquery | research-3.0 (refuses TSFM_TRADE_MODE=REAL) | fake (wiring checks only).
+  # Build arg TSFM_INSTALL=timesfm25|bigquery|none picks what goes into the image. First start downloads ~800 MB of weights into the hf-cache volume.
+  timesfm-forecast-service:
+    profiles: ["timesfm"]
+    build:
+      context: ./services/timesfm-forecast-service
+      args:
+        TSFM_INSTALL: ${TSFM_INSTALL:-timesfm25}
+    environment:
+      MARKET_DATA_URL: http://market-data-service:8001
+      TSFM_BACKEND: ${TSFM_BACKEND:-timesfm25}
+      TSFM_TRADE_MODE: ${TSFM_TRADE_MODE:-REAL}
+      TSFM_CHECKPOINT: ${TSFM_CHECKPOINT:-}
+      TSFM_RESEARCH_CHECKPOINT: ${TSFM_RESEARCH_CHECKPOINT:-}
+      TSFM_RESEARCH_CLASS: ${TSFM_RESEARCH_CLASS:-}
+      TSFM_BQ_PROJECT: ${TSFM_BQ_PROJECT:-}
+      TSFM_HORIZON: ${TSFM_HORIZON:-5}
+      TSFM_MAX_AGE_DAYS: ${TSFM_MAX_AGE_DAYS:-5}
+      TSFM_PRELOAD: ${TSFM_PRELOAD:-false}
+      PORT: "8011"
+    ports:
+      - "127.0.0.1:8011:8011"
+    volumes:
+      - tsfm-hf-cache:/app/.hf
+      - tsfm-cache:/app/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    cpus: "1.0"
+    mem_limit: 2200m
     cpus: "1.0"
     mem_limit: 1800m
     mem_reservation: 600m
@@ -573,4 +616,6 @@ services:
 
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
+  tsfm-hf-cache:
+  tsfm-cache:
   kronos-hf-cache:

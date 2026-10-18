@@ -1,0 +1,6 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+httpx==0.25.2
+pydantic==2.5.3
+numpy>=1.26,<3
+# The model itself is installed in the Dockerfile (build arg TSFM_INSTALL), not here: the pure tests and the fake / bigquery backends need none of it.

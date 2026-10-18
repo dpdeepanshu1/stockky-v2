@@ -12,8 +12,12 @@
 #      LIVE_REPORT_URL   GET /api/structure/report of decision-prediction (adds the G4 live check)
 #      PS_STATUS_URL     http://localhost:8006/board/status (adds the legacy-removal parity verdict); PS_TOKEN if it needs a bearer token
 #      DRY_RUN=1         print the commands and run nothing;  PYTHON_BIN=python3
-# Steps: fetch history per seed -> ms_ab_report per seed -> ms_g1_check (first sample) -> structure_backtest (first sample)
-#        -> structure_gate_check -> calibration_pack (env lines; nothing is applied) -> board_parity_check.
+#      RESUME=1          (group434) keep a seed whose history + A/B report are already complete in OUT_DIR instead of downloading it again
+#      MIN_SYMBOLS=N     (group434) a seed's history must hold at least N symbols or its A/B is skipped (default: 60% of the manifest, else 50;
+#                        1 when SYMBOLS= is used);  MIN_SIGNALS=N  baseline signals a seed needs to count (default 30; 1 with SYMBOLS=)
+# Steps: fetch history per seed -> calibration_status guard (group434: a mostly failed download stops that seed) -> ms_ab_report per seed
+#        -> ms_g1_check (first sample) -> structure_backtest (first sample) -> structure_gate_check (G2 + G3 + G4, complete seeds only)
+#        -> calibration_pack (env lines; nothing is applied) -> calibration_status (whole run: names the seeds to re-run) -> board_parity_check.
 # Output: $OUT_DIR/summary.txt (everything printed) plus each tool's own files. Nothing is applied to any .env or service.
 # Exit 1 when a step failed to run or G1 / the parity check says FAIL / NO_GO; a NOT_ENOUGH_DATA verdict is not a failure.
 # ============================================================
@@ -29,6 +33,8 @@ STEP="${STEP:-3}"
 HORIZON="${HORIZON:-10}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 1)}"
 DRY_RUN="${DRY_RUN:-0}"
+RESUME="${RESUME:-0}"
+if [[ -n "${SYMBOLS:-}" ]]; then MIN_SYMBOLS="${MIN_SYMBOLS:-1}"; MIN_SIGNALS="${MIN_SIGNALS:-1}"; else MIN_SYMBOLS="${MIN_SYMBOLS:-0}"; MIN_SIGNALS="${MIN_SIGNALS:-30}"; fi
 MARKET_DATA_URL="${MARKET_DATA_URL:-http://localhost:8001}"
 API_GATEWAY_URL="${API_GATEWAY_URL:-http://localhost:8000}"
 export MARKET_DATA_URL
@@ -70,8 +76,17 @@ main() {
     echo "=== seed $seed"
     local hist="$OUT_DIR/hist_$seed" ab="$OUT_DIR/ab_$seed"
     [[ -z "$first" ]] && first="$hist"
+    # group434: RESUME=1 keeps a seed that already finished (history big enough + a real A/B report) so a re-run only redoes the missing ones
+    if [[ "$RESUME" == "1" && "$DRY_RUN" != "1" ]] && "$PY" "$SCRIPTS/calibration_status.py" --out-dir "$OUT_DIR" --seeds "$seed" \
+         --min-symbols "$MIN_SYMBOLS" --min-signals "$MIN_SIGNALS" >/dev/null 2>&1; then
+      echo "seed $seed is already complete (RESUME=1): keeping hist_$seed and ab_$seed"
+      ab_args+=(--ab "$ab/ab_report.json")
+      continue
+    fi
     run "$PY" "$SCRIPTS/fetch_history_for_backtest.py" "$hist" "${src[@]}" --period "$PERIOD" --sample "$LIMIT" --seed "$seed" \
         --manifest "$OUT_DIR/sample_manifest_$seed.json" --sleep 1.5 || continue
+    # group434: on 18 Oct two runs left hist_7 with 2-3 symbols (restarting gateway) and the A/B ran on nothing. Too few symbols = skip this seed.
+    run "$PY" "$SCRIPTS/calibration_status.py" --hist "$hist" --manifest "$OUT_DIR/sample_manifest_$seed.json" --min-symbols "$MIN_SYMBOLS" --label "seed_$seed" || continue
     run "$PY" "$SCRIPTS/ms_ab_report.py" "$hist" --out "$ab" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" && ab_args+=(--ab "$ab/ab_report.json")
   done
   if [[ -z "$first" ]]; then echo "no seeds given"; FAILED+=("no seeds"); return 1; fi
@@ -104,6 +119,9 @@ main() {
   else
     echo "no backtest output, so no suggestions"
   fi
+
+  echo "=== run status (group434: which seeds are complete)"
+  run "$PY" "$SCRIPTS/calibration_status.py" --out-dir "$OUT_DIR" --seeds "$SEEDS" --min-symbols "$MIN_SYMBOLS" --min-signals "$MIN_SIGNALS"
 
   if [[ -n "${PS_STATUS_URL:-}" ]]; then
     echo "=== board parity (legacy removal in position-stocks)"

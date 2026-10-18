@@ -129,7 +129,8 @@ jobs:
         run: |
           pip install pytest
           (cd services/kronos-forecast-service && pip install numpy pandas && python -m pytest tests -q)   # group425: pure stats + engine tests, no torch needed
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_export_records.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
+          (cd services/timesfm-forecast-service && pip install fastapi httpx pydantic numpy && python -m pytest tests -q)   # group434: pure features / engine / fake-backend API tests, no model needed
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_export_records.py scripts/test_tsfm_probe.py scripts/test_tsfm_nightly.py scripts/test_calibration_status.py scripts/test_analyze_latency_check.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py -q
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

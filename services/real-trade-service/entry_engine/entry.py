@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, vix_gate, vwap_gate
+from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -968,6 +968,20 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             except Exception as _kg_err:  # noqa: BLE001 - a gate bug must never stop an entry
                 _kg_verdict = None
                 logger.warning("entry_engine: kronos gate failed for %s (allowing): %s", cand.symbol, _kg_err)
+
+        # ── Gate 4g (group 434): TimesFM parameters ("what would the nightly range / volatility / volume forecast say?") ──────────────────
+        # LOG ONLY, OFF by default (config.TIMESFM_GATE_MODE). Reads the timesfm-forecast-service CACHE (no model call here), records a hypothetical
+        # verdict and one TIMESFM_GATE log line, and NEVER blocks or changes a stop / target / size: there is no enforce mode until the probe and the
+        # replay pass. A service that is down / slow / stale is "no opinion". Never raises. See entry_engine/timesfm_gate.py.
+        _tg_mode = timesfm_gate.mode_for(mode)
+        if _tg_mode != "off":
+            try:
+                _tg_stop_pct = (entry_price - stop_price) / entry_price * 100.0
+                _tg_tgt_pct = (target_price - entry_price) / entry_price * 100.0
+                _tg_ft = await timesfm_gate.fetch_features(cand.symbol, _tg_stop_pct, _tg_tgt_pct)
+                timesfm_gate.record(cand.symbol, mode, timesfm_gate.evaluate(_tg_ft), _tg_mode, tick.price, _tg_stop_pct, _tg_tgt_pct)
+            except Exception as _tg_err:  # noqa: BLE001 - a record-only gate must never stop an entry
+                logger.warning("entry_engine: timesfm gate failed for %s (ignored): %s", cand.symbol, _tg_err)
 
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)

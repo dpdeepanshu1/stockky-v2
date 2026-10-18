@@ -564,6 +564,26 @@ KRONOS_MIN_EDGE_X_COST = _og_float("KRONOS_MIN_EDGE_X_COST", 1.0)           # re
 KRONOS_MIN_P_TARGET = _og_float("KRONOS_MIN_P_TARGET", 0.10)                # reject when fewer than this share of paths reach the target before the stop (0 disables)
 KRONOS_COST_NOTIONAL = max(1000.0, _og_float("KRONOS_COST_NOTIONAL", 50000.0))  # trade value used to turn the cost model into a % (the gate runs before sizing)
 
+# group 434: TIMESFM PARAMETER RECORD (entry_engine/timesfm_gate.py, Gate 4g). LOG ONLY: it records what the nightly timesfm-forecast-service says about a
+# candidate's range / volatility / volume / stop-touch probability and what it WOULD have rejected, and never blocks. There is no enforce mode: the plan
+# allows a blocking rule only after the offline probe (scripts/tsfm_probe.py, Gate A) and the replay (Gate B) pass. Unproven; ships OFF.
+#   TIMESFM_GATE_MODE       REAL mode:  off (default) | log. Any other value, enforce included, is off (TIMESFM_GATE_REQUESTED shows what was asked for).
+#   TIMESFM_GATE_DEMO_MODE  DEMO mode:  same values; defaults to TIMESFM_GATE_MODE
+# The hot path reads the service's CACHE only (cached_only=true); a missing / stale / slow answer is "no opinion".
+def _tg_mode(name, default):
+    v = (os.getenv(name) or "").strip().lower() or default
+    return "log" if v == "log" else "off"
+TIMESFM_GATE_REQUESTED = (os.getenv("TIMESFM_GATE_MODE") or "").strip().lower() or "off"
+TIMESFM_GATE_MODE = _tg_mode("TIMESFM_GATE_MODE", "off")
+TIMESFM_GATE_DEMO_MODE = _tg_mode("TIMESFM_GATE_DEMO_MODE", TIMESFM_GATE_MODE)
+TIMESFM_URL = (os.getenv("TIMESFM_URL") or "").strip().rstrip("/") or "http://timesfm-forecast-service:8011"
+TIMESFM_TIMEOUT_S = max(0.2, _og_float("TIMESFM_TIMEOUT_S", 1.5))           # a cache read: slower than this = no opinion
+TIMESFM_CACHE_TTL_S = max(0.0, _og_float("TIMESFM_CACHE_TTL_S", 600.0))
+TIMESFM_FAIL_TTL_S = max(0.0, _og_float("TIMESFM_FAIL_TTL_S", 120.0))
+TIMESFM_MAX_VOL_RATIO = _og_float("TIMESFM_MAX_VOL_RATIO", 1.6)              # hypothetical reject: forecast volatility >= this x trailing (0 disables)
+TIMESFM_MAX_P_STOP = _og_float("TIMESFM_MAX_P_STOP", 0.35)                   # hypothetical reject: P(close <= stop within the horizon) >= this (0 disables)
+TIMESFM_MIN_VOLUME_PACE = _og_float("TIMESFM_MIN_VOLUME_PACE", 0.6)          # hypothetical reject: forecast volume < this x trailing average (0 disables)
+
 # ── group427: order-flow record on every entry decision (RECORD ONLY - nothing here blocks, sizes or orders anything) ─────────────────────
 #   ORDER_FLOW_RECORD       1 (default) | 0   write trade_decisions.flow_json: spread, best-5 bid/ask quantity and imbalance, book value, price vs
 #                           VWAP / open / day range, volume. Free: it reads the tick the entry already holds.

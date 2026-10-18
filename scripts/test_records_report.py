@@ -67,7 +67,8 @@ def test_stop_overshoot_and_late_eod_listing():
             rec(3, -2.0, held_days=4), rec(4, -1.0, held_days=0)]
     rep = rr.build_report(rows)
     sh = rep["stop_hits"]
-    assert sh["n"] == 2 and sh["with_stop_pct"] == 2 and sh["mean_overshoot_pct"] == 0.9 and sh["max_overshoot_pct"] == 1.8 and sh["with_max_gain"] == 0
+    assert sh["n"] == 2 and sh["with_stop_pct"] == 2 and sh["n_beyond"] == 1 and sh["n_inside"] == 1
+    assert sh["mean_overshoot_pct"] == 1.8 and sh["max_overshoot_pct"] == 1.8 and sh["with_max_gain"] == 0
     assert [r["position_id"] for r in rep["late_eod_squareoff"]] == [3]
 
 
@@ -88,3 +89,20 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert rr.main([str(f), "--since", "2026-10-05", "--json", str(out)]) == 0
     assert "Closed-trade report" in capsys.readouterr().out and json.loads(out.read_text())["trades"] > 0
     assert rr.main([str(tmp_path / "nothing_*.json")]) == 1
+
+
+def test_trailed_stop_is_not_called_an_overshoot_and_tiny_samples_get_no_charges_share():
+    rows = [rec(1, -1.98, exit_reason="stop_hit", stop_pct=4.67, gross_pnl=-1.0, charges=17.0)]       # stopped INSIDE its initial stop (trailed)
+    rep = rr.build_report(rows, min_n=10)
+    assert rep["stop_hits"]["n_beyond"] == 0 and rep["stop_hits"]["n_inside"] == 1 and rep["stop_hits"]["mean_overshoot_pct"] is None
+    assert rep["robust_totals"]["charges_share_of_gross_loss_pct"] is None
+    md = rr.to_markdown(rep)
+    assert "none lost more than the planned initial stop" in md and "MORE than" not in md.replace("lost MORE than the planned initial stop; none", "")
+    many = rr.build_report([rec(i, -1.0, gross_pnl=-10.0, charges=5.0) for i in range(1, 13)], min_n=10)
+    assert many["robust_totals"]["charges_share_of_gross_loss_pct"] == 50.0
+
+
+def test_stale_note():
+    assert "stale" in rr.stale_note("2026-10-07T09:00:00", "2026-10-18")
+    assert rr.stale_note("2026-10-16T09:00:00", "2026-10-18") is None
+    assert rr.stale_note(None, "2026-10-18") is None and rr.stale_note("garbage", "2026-10-18") is None

@@ -1,5 +1,7 @@
 # Group 426: refill honesty, bulk feed covers the whole index, sniper retest badge data, structure event counters
 
+> Re-applied as group432 on the group 429/431 base (the group 429 zip did not contain these changes).
+
 Four small changes from the 18 Oct review of the group 425 zip. No trading decision changes.
 
 ## 1. Refill Additional Data (`api-gateway/refill_additional.py`)

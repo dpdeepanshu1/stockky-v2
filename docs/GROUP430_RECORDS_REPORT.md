@@ -3,7 +3,7 @@
 Tooling only: nothing here changes a trading decision, and no service code changed.
 
 ## 1. `scripts/records_report.py`
-Replaces the throwaway `~/rt_split.py`. Read-only, standard library only. It reads the exports of real-trade-service `GET /positions/{mode}/records` (files holding `{"records": [...]}`; `days` 1-60, `limit` up to 1000, REAL mode needs the admin login) - export them the same way you made `rt_*.json` - de-duplicates by `position_id` (a later file wins) and prints:
+Replaces the throwaway `~/rt_split.py`. Read-only, standard library only. It reads the exports of real-trade-service `GET /positions/{mode}/records` (files holding `{"records": [...]}`; `days` 1-60, `limit` up to 1000, REAL mode needs the admin login) - export them with `python3 scripts/export_records.py` (group 431) - de-duplicates by `position_id` (a later file wins) and prints:
 - totals (gross, net, charges and the charges' share of a gross loss, mean / median / win %), the best trade and the net without it, and the net without every trade beyond `--outlier-pct` (default 15 %) - one big winner or a -40 % gap can no longer hide inside a mean;
 - tables by decision label, source tab, tier, entry hour IST, exit reason, hold bucket and stop basis, each with n, mean, MEDIAN, win %, gross, net, charges, and a `(few)` mark on any group under `--min-n` (default 10) trades - noise, do not act on it;
 - order-flow buckets (best-5 imbalance, 20-level imbalance, spread at entry) from the group 427 record; trades made before it show as `unknown`, and the report says so when none carries it yet;

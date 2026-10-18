@@ -30,7 +30,7 @@ The daily-structure stop / target are multi-day levels, but real-trade squares o
 - Intraday (15m/5m) structure features and `independent_groups` counting in `scoring.py` (the policy has its own group count).
 - Walk-forward calibration from real data; `groups_min=2` is a judgement call.
 - WS-2: position-stocks still keeps legacy board bodies behind `BOARD_USE_MS_ENGINE`.
-- Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet. The decision card shows a retest badge since group 417 (Buy Sniper card does not).
+- Retest/CHOCH entry branch exists (group 414, `STRUCTURE_RETEST_ENTRY`, default OFF) but has no replay evidence yet. The decision card shows a retest badge since group 417; the Buy Sniper card carries `retest_entry` since group 426 (badge shows only when the branch is on).
 
 ## Checks that need your VM / live market
 - `grep STRUCTURE_ .env` - old `STRUCTURE_EXIT_MODE=exit`, `STRUCTURE_STOP_MODE=on`, `STRUCTURE_PREPARE_UPGRADE=1`,
@@ -69,5 +69,5 @@ Let it collect for about two weeks of real trading days, then read `GET /records
 8. Older open items: real NSE pre-open board, catalyst check, window auto-disable + width tuning, structure evidence gates G1-G4, swing-carry design question (group 421).
 
 ## Group 430 follow-ups
-- Export the closed-trade records from 1 October onward (same way as `rt_*.json`) and run `python3 scripts/records_report.py rt_*.json --since 2026-10-01`; compare with the September picture (63 trades, net -1,439, the 09:xx-10:xx entry cluster lost 1,598 net, gaps through stops). That decides whether any live rule change is warranted.
+- Export fresh records with `python3 scripts/export_records.py` (the 18 Oct run saw only 1 trade since 1 October: stale files), then run `python3 scripts/records_report.py rt_*.json --since 2026-10-01`; compare with the September picture (63 trades, net -1,439, the 09:xx-10:xx entry cluster lost 1,598 net, gaps through stops). That decides whether any live rule change is warranted.
 - Still open from group 428: paste the re-run entry_rules / legacy_gate reports (robust tables) and the structure_backtest report; the 52-week range gate stays as is until the robust result is in.

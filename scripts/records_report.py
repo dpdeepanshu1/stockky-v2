@@ -5,7 +5,7 @@ Reads the exports of real-trade-service GET /positions/{mode}/records (JSON file
 trades did by label, source, tier, entry hour, exit reason, hold length and - once group 427 has been recording - by order-flow bucket (best-5 imbalance,
 20-level imbalance, spread). Pure standard library, read-only, changes nothing.
 
-  # on the VM, in the folder holding the exports (see docs/GROUP430_RECORDS_REPORT.md for the curl line):
+  # on the VM, in the folder holding the exports (python3 scripts/export_records.py makes a fresh one):
   python3 scripts/records_report.py rt_*.json                           # everything, REAL mode
   python3 scripts/records_report.py rt_*.json --since 2026-10-01        # only trades opened on/after that day (UTC date of opened_at)
   python3 scripts/records_report.py rt_*.json --mode DEMO --json out.json
@@ -125,15 +125,16 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
         "outliers": [{"position_id": r.get("position_id"), "symbol": r.get("symbol"), "return_pct": num(r.get("return_pct")), "exit_reason": r.get("exit_reason")} for r in big],
         "net_without_outliers": round(sum(num(r.get("net_pnl")) or 0.0 for r in keep_big)),
         "trades_without_outliers": len(keep_big),
-        "charges_share_of_gross_loss_pct": (round(100.0 * rep["all"]["charges"] / -rep["all"]["gross"], 0) if rep["all"]["gross"] < 0 else None),
+        "charges_share_of_gross_loss_pct": (round(100.0 * rep["all"]["charges"] / -rep["all"]["gross"], 0) if rep["all"]["gross"] < 0 and len(rows) >= min_n else None),
     }
     sl = [v for v in (num(r.get("entry_slippage_pct")) for r in rows) if v is not None]
     rep["entry_slippage_pct"] = {"n": len(sl), "mean": round(st.mean(sl), 3), "max": round(max(sl), 3)} if sl else None
     stops = [r for r in rows if r.get("exit_reason") == "stop_hit"]
     over = [(-num(r["return_pct"]) - num(r["stop_pct"])) for r in stops if num(r.get("return_pct")) is not None and num(r.get("stop_pct")) is not None]
     mg = [v for v in (num(r.get("max_gain_pct")) for r in stops) if v is not None]
-    rep["stop_hits"] = {"n": len(stops), "with_stop_pct": len(over),
-                        "mean_overshoot_pct": round(st.mean(over), 2) if over else None, "max_overshoot_pct": round(max(over), 2) if over else None,
+    beyond = [o for o in over if o > 0.05]                                  # lost MORE than the planned initial stop (a gap / slow fill)
+    rep["stop_hits"] = {"n": len(stops), "with_stop_pct": len(over), "n_beyond": len(beyond), "n_inside": len(over) - len(beyond),
+                        "mean_overshoot_pct": round(st.mean(beyond), 2) if beyond else None, "max_overshoot_pct": round(max(beyond), 2) if beyond else None,
                         "with_max_gain": len(mg), "mean_max_gain_pct_before_stop": round(st.mean(mg), 2) if mg else None}
     rep["late_eod_squareoff"] = [{"position_id": r.get("position_id"), "symbol": r.get("symbol"), "opened_at": r.get("opened_at"), "closed_at": r.get("closed_at"),
                                   "held_days": num(r.get("held_days")), "return_pct": num(r.get("return_pct"))}
@@ -161,8 +162,14 @@ def to_markdown(rep: Dict[str, Any]) -> str:
         L.append(f"Entry slippage: mean {sl['mean']}%, max {sl['max']}% over {sl['n']} trades.")
     sh = rep["stop_hits"]
     if sh["n"]:
-        L.append(f"Stop hits: {sh['n']}; " + (f"lost on average {f(sh['mean_overshoot_pct'])} points MORE than the planned stop (worst {f(sh['max_overshoot_pct'])}) over {sh['with_stop_pct']} with a recorded stop; " if sh["with_stop_pct"] else "no stop distance recorded on them; ")
-                 + (f"mean best gain before the stop {f(sh['mean_max_gain_pct_before_stop'])}% ({sh['with_max_gain']} trades)." if sh["with_max_gain"] else "no max-gain recorded on them."))
+        part = f"Stop hits: {sh['n']}"
+        if sh["with_stop_pct"]:
+            part += (f"; {sh['n_beyond']} lost MORE than the planned initial stop (on average {f(sh['mean_overshoot_pct'])} points more, worst {f(sh['max_overshoot_pct'])}); " if sh["n_beyond"] else "; none lost more than the planned initial stop; ")
+            part += f"{sh['n_inside']} closed inside it (a trailed / ratcheted stop)"
+        else:
+            part += "; no stop distance recorded on them"
+        part += (f"; mean best gain before the stop {f(sh['mean_max_gain_pct_before_stop'])}% ({sh['with_max_gain']} trades)." if sh["with_max_gain"] else "; no max-gain recorded on them.")
+        L.append(part)
     for title, g in rep["groups"].items():
         if title.startswith("order flow") and set(g) == {"unknown"}:
             L += ["", f"## {title}", "", "No trade carries these numbers yet (the group 427 record only exists on entries made after it was deployed)."]
@@ -182,6 +189,19 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     return "\n".join(L)
 
 
+def stale_note(last_closed: Optional[str], today: str, max_age_days: int = 5) -> Optional[str]:
+    """A warning when the newest trade in the files closed more than max_age_days before `today` (YYYY-MM-DD): the export is probably old. Pure."""
+    try:
+        from datetime import date
+        age = (date.fromisoformat(today) - date.fromisoformat(str(last_closed)[:10])).days
+    except (TypeError, ValueError):
+        return None
+    if age > max_age_days:
+        return (f"NOTE: the newest trade in these files closed on {str(last_closed)[:10]} ({age} days ago). If that is not what you expect, the export is stale: "
+                "run python3 scripts/export_records.py and report on the new file.")
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="*", help="record export files (default rt_*.json in the current folder); shell globs work")
@@ -199,6 +219,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     rep = build_report(recs, a.since, a.until, a.min_n, a.outlier_pct)
     print(to_markdown(rep))
+    from datetime import date
+    note = stale_note(max((str(r.get("closed_at") or "")[:10] for r in recs), default=None), date.today().isoformat())
+    if note:
+        print("\n" + note)
     if a.json:
         with open(a.json, "w", encoding="utf-8") as fh:
             json.dump(rep, fh, indent=1)

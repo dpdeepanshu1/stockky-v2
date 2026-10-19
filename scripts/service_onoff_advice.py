@@ -3,6 +3,7 @@
 
   python3 scripts/service_onoff_advice.py [--days 10] [--rt-url http://127.0.0.1:8005] [--ps-url http://127.0.0.1:8006] [--token T | TOKEN=T]
                                           [--min-n 8] [--min-days 3] [--pf-off 0.8] [--pf-keep 1.1] [--streak-off 3]
+                                          [--since 2026-10-19] [--include-today]
                                           [--out service_advice.txt] [--json service_advice.json]
   python3 scripts/service_onoff_advice.py --rt-file rt_2026-10-18.json --ps-file ps_hist.json     # offline, from saved exports
   python3 scripts/service_onoff_advice.py --from-csv daily_trades.csv                              # offline, from the daily_trades.csv this repo writes
@@ -19,6 +20,9 @@ Both services trade the same Dhan account, so it also reports the overlap (same 
 and which of the two has the better record when you can only keep one.
 
 It only RECOMMENDS. It never changes a switch, an order or a service. Turning a service off is your decision (its own Auto-Pilot / master switch).
+A trading day that is still in progress (run before 15:45 IST on a weekday) is NOT counted: its trades are shown in a NOTE, but they do not make a
+losing day, a streak or a trading-day count (--include-today overrides). --since YYYY-MM-DD judges only the days from that date on (use it after you change
+switches, so the old setup does not count against the new one); the 'NOT ENOUGH DATA' limits still apply, so a short window gives no call.
 Exit 0 = report written, nothing to act on; 1 = at least one service is TURN OFF, or no trades were found. Stdlib only.
 """
 from __future__ import annotations
@@ -108,6 +112,16 @@ def judge(rows: List[Dict[str, Any]], min_n: int = 8, min_days: int = 3, pf_off:
     if s["losing_streak_days"] >= 2:
         why.append(f"{s['losing_streak_days']} losing days in a row at the end")
     return {**s, "verdict": WATCH, "why": why or ["mixed result"]}
+
+
+def split_in_progress(rows: List[Dict[str, Any]], now: datetime, include_today: bool = False, cutoff_hhmm: tuple = (15, 45)) -> tuple:
+    """(rows to judge, rows of the day still in progress). The day is in progress on a weekday before 15:45 IST (EOD square-off and the
+    last exits are not booked yet), so it is no complete day: it must not count as a losing day, a streak day or a trading day."""
+    now = now.astimezone(IST)
+    if include_today or now.weekday() >= 5 or (now.hour, now.minute) >= cutoff_hhmm:
+        return rows, []
+    today = now.date().isoformat()
+    return [r for r in rows if r["day"] != today], [r for r in rows if r["day"] == today]
 
 
 def overlap(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -216,6 +230,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--streak-off", type=int, default=3)
     ap.add_argument("--out", default="")
     ap.add_argument("--json", default="")
+    ap.add_argument("--since", default="", help="judge only trades that closed on or after this IST date (YYYY-MM-DD), e.g. the day switches were changed")
+    ap.add_argument("--include-today", action="store_true", help="count today even before 15:45 IST (default: an unfinished day is left out)")
     ap.add_argument("--no-rt", action="store_true")
     ap.add_argument("--no-ps", action="store_true")
     ap.add_argument("--as-of", default="", help="treat this ISO time as 'now' (tests / re-running an old export)")
@@ -225,6 +241,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     now = (d.parse_ts(a.as_of) or datetime.now(IST)).astimezone(IST)
     cutoff = now - timedelta(days=max(1, a.days))
     rows = [r for r in rows if r["exit"] >= cutoff and (a.origin == "all" or r.get("origin", "system") == a.origin)]
+    if a.since:
+        try:
+            since = datetime.strptime(a.since.strip(), "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            print(f"--since must be a date like 2026-10-19, got {a.since!r}", file=sys.stderr)
+            return 2
+        rows = [r for r in rows if r["day"] >= since]
+        notes.append(f"window starts {since} (--since): earlier trades are not judged")
+    rows, today_rows = split_in_progress(rows, now, a.include_today)
+    if today_rows:
+        tn = d.stats(today_rows)
+        notes.append(f"today ({now.date().isoformat()}) is still in progress (before 15:45 IST): its {tn['n']} closed trade(s), net {d.money(tn['net'])}, are NOT counted. Run after 15:45 for the full day")
     header = [f"NOTE: {n}" for n in notes]
     if not rows:
         text = "SERVICE ON / OFF ADVICE\nNo closed trades found in the window: no recommendation.\n" + "\n".join(header) + "\n"

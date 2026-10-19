@@ -1,7 +1,7 @@
 // group 442: one place that talks to calibration-runner-service for the whole page: catalog, summary (what ran last, queue), starting a run (with the
 // market-hours confirm step) and the run window. Polls fast while something is queued / running, slowly otherwise, and only while the tab is visible.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACTIVE, ApiError, runnerApi, type Catalog, type RunRec, type Summary } from "../../calibrationApi";
+import { ACTIVE, ApiError, istStamp, relTime, runnerApi, telegramNote, type Catalog, type RunRec, type Summary } from "../../calibrationApi";
 import { setVisibleInterval } from "../../visibleInterval";
 import { Btn, Msg } from "./ui";
 import { Modal } from "./SwitchesPanel";
@@ -110,6 +110,8 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
 export function RunnerBanner() {
   const { summary, error, toast } = useRunner();
   const cur = summary?.state?.current;
+  const la = summary?.state?.last_automatic;
+  const laTone = la && ["failed", "timeout", "blocked"].includes(la.status) ? "border-signal-sell text-signal-sell" : la && la.status === "attention" ? "border-signal-hold text-signal-hold" : "border-slate";
   return (
     <div className="space-y-2">
       {error && <Msg kind="err">{error}</Msg>}
@@ -119,6 +121,10 @@ export function RunnerBanner() {
           <span className={`rounded-lg border px-2 py-0.5 ${summary.state.market_open_now ? "border-signal-hold text-signal-hold" : "border-slate"}`}>{summary.state.market_open_now ? "market hours: heavy runs are held back" : "market closed: heavy runs allowed"}</span>
           <span className="rounded-lg border border-slate px-2 py-0.5">IST {String(summary.state.now_ist || "").slice(11, 16)}</span>
           {cur && <span className="rounded-lg border border-signal-buy px-2 py-0.5 text-signal-buy">running: {cur.title}</span>}
+          {/* group 447: when the timetable last ran something by itself, and whether Telegram was told */}
+          <span data-testid="last-automatic" className={`rounded-lg border px-2 py-0.5 ${laTone}`} title={la ? `${la.title}: ${la.status}` : "No run has been started by the timetable yet"}>
+            {la ? `last automatic run: ${istStamp(la.finished_at)} IST (${relTime(la.finished_at)}) · ${la.title} · ${la.status}${la.telegram ? ` · ${telegramNote(la.telegram)}` : ""}` : "last automatic run: none yet"}
+          </span>
           {(summary.state.queued?.length ?? 0) > 0 && <span className="rounded-lg border border-slate px-2 py-0.5">{summary.state.queued.length} waiting</span>}
         </div>
       )}

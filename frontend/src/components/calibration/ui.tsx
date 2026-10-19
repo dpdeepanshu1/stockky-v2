@@ -35,6 +35,15 @@ export function Card({ title, right, children, tone }: { title?: ReactNode; righ
   );
 }
 
+/** A small pill that can act as a toggle (filter chips). */
+export function Chip({ children, onClick, active, tone, title }: { children: ReactNode; onClick?: () => void; active?: boolean; tone?: "good" | "warn" | "bad"; title?: string }) {
+  const c = tone === "bad" ? "border-signal-sell text-signal-sell" : tone === "warn" ? "border-signal-hold text-signal-hold" : tone === "good" ? "border-signal-buy text-signal-buy" : "border-slate text-mist";
+  const base = `inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 text-[11px] ${c} ${active ? "bg-white/10 font-bold" : ""}`;
+  return onClick
+    ? <button type="button" title={title} aria-pressed={!!active} onClick={onClick} className={`${base} hover:bg-white/5`}>{children}</button>
+    : <span title={title} className={base}>{children}</span>;
+}
+
 export function Btn({ children, onClick, disabled, primary, small, title }: { children: ReactNode; onClick?: () => void; disabled?: boolean; primary?: boolean; small?: boolean; title?: string }) {
   return (
     <button type="button" title={title} onClick={onClick} disabled={disabled} className={`${primary ? "btn-primary-term" : "btn-terminal"} ${small ? "!px-2 !py-1 !text-[11px]" : ""}`}>

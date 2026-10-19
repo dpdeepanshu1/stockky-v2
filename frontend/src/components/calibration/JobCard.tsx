@@ -1,6 +1,6 @@
 // group 442: one runnable job: what it does, when to run it, the last result, its options and a Run button.
 import { useState } from "react";
-import { downloadRunFile, fmtDur, relTime, type JobDef } from "../../calibrationApi";
+import { downloadRunFile, fmtDur, istStamp, relTime, type JobDef } from "../../calibrationApi";
 import { Btn, StatusPill } from "./ui";
 import { useRunner } from "./RunnerContext";
 
@@ -27,7 +27,7 @@ export default function JobCard({ job, compact }: { job: JobDef; compact?: boole
           <p className="text-[11px]"><b>When:</b> {job.when}</p>
           {last && (
             <p className="text-[11px] text-mist">
-              Last: {relTime(last.finished_at)}{" "}
+              Last result: {relTime(last.finished_at)} <span title="IST">({istStamp(last.finished_at)})</span>{" "}
               <button type="button" className="underline" onClick={() => openRun(last.run_id)}>open</button>{" "}
               <button type="button" className="underline" onClick={() => void downloadRunFile(last.run_id, "output.txt").catch(() => undefined)}>txt</button>
               {last.headline?.[0] && <span className="block truncate" title={(last.headline || []).join("\n")}>→ {last.headline[0]}</span>}

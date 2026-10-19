@@ -89,6 +89,42 @@ def test_csv_roundtrip_and_cli_exit_codes():
         assert s.rows_from_csv(str(p))[0]["entry"].strftime("%H:%M") == "10:00"
 
 
+def test_unfinished_day_is_not_counted():
+    rows = [row("real-trade", f"S{i}", DAYS[i % 5], -100) for i in range(10)] + [row("real-trade", "TODAY", "2026-10-19", -88)]
+    mid = datetime(2026, 10, 19, 14, 11, tzinfo=IST)                 # Monday, market open
+    keep, today = s.split_in_progress(rows, mid)
+    assert [r["symbol"] for r in today] == ["TODAY"] and len(keep) == 10
+    assert s.judge(keep)["losing_streak_days"] == 5 and s.judge(rows)["losing_streak_days"] == 6      # the old behaviour counted it
+    after = datetime(2026, 10, 19, 16, 5, tzinfo=IST)
+    assert s.split_in_progress(rows, after) == (rows, [])             # after 15:45 the day is complete
+    assert s.split_in_progress(rows, mid, include_today=True) == (rows, [])
+    assert s.split_in_progress(rows, datetime(2026, 10, 17, 11, 0, tzinfo=IST)) == (rows, [])           # Saturday: nothing is in progress
+
+
+def test_since_and_today_note_in_cli():
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "daily_trades.csv"
+        with open(p, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["day", "service", "symbol", "entry_ist", "exit_ist", "held_min", "pnl", "return_pct", "exit_reason", "quantity", "origin"])
+            for i in range(12):
+                dy = DAYS[i % 5]
+                w.writerow([dy, "real-trade", f"S{i}", f"{dy} 10:00", f"{dy} 14:30", 270, -100, -1.0, "stop_hit", 1, "system"])
+            w.writerow(["2026-10-19", "real-trade", "TODAY", "2026-10-19 10:00", "2026-10-19 13:30", 210, -88, -4.9, "stop_hit", 1, "system"])
+        out = Path(t) / "o.txt"
+        assert s.main(["--from-csv", str(p), "--as-of", "2026-10-19T14:11:00+05:30", "--out", str(out)]) == 1
+        txt = out.read_text()
+        assert "still in progress" in txt and "13 trades" not in txt and "12 trades over 5 day(s)" in txt
+        out2 = Path(t) / "o2.txt"
+        assert s.main(["--from-csv", str(p), "--as-of", "2026-10-19T16:10:00+05:30", "--out", str(out2)]) == 1
+        assert "13 trades over 6 day(s)" in out2.read_text() and "in progress" not in out2.read_text()
+        out3 = Path(t) / "o3.txt"
+        s.main(["--from-csv", str(p), "--since", "2026-10-15", "--as-of", "2026-10-19T16:10:00+05:30", "--out", str(out3)])
+        t3 = out3.read_text()
+        assert "window starts 2026-10-15" in t3 and "NOT ENOUGH DATA" in t3                 # 3 days and few trades: no call
+        assert s.main(["--from-csv", str(p), "--since", "tomorrow"]) == 2
+
+
 if __name__ == "__main__":
     for k, v in list(globals().items()):
         if k.startswith("test_"):

@@ -1,6 +1,6 @@
 // group 442: every ON / OFF switch of one service (real-trade or position-stocks), grouped, with LIVE / RESTART badges, a confirm step for anything that
 // LOOSENS a rule, the recommended value next to the current one, a one-click "move to recommended" (with a preview) and the change log.
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, controlApi, serviceUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type Svc } from "../../calibrationApi";
 import { Btn, Card, Msg } from "./ui";
 
@@ -251,17 +251,29 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: Svc; onChanged?
   );
 }
 
-export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+export function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  // group 447: a visible close icon (also Esc and a click outside), the page behind does not scroll, a long body scrolls inside the window
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") closeRef.current(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [onClose]);
+  }, []);
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
-      <div className="w-full max-w-lg rounded-2xl border border-slate bg-graphite p-4 text-[12px]" onClick={(e) => e.stopPropagation()}>
-        <h3 className="mb-2 text-[13px] font-bold">{title}</h3>
-        {children}
+      <div className={`flex max-h-[92vh] w-full ${wide ? "max-w-3xl" : "max-w-lg"} flex-col rounded-2xl border border-slate bg-graphite text-[12px] shadow-2xl`} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate px-4 py-2.5">
+          <h3 className="min-w-0 break-words text-[13px] font-bold">{title}</h3>
+          <button type="button" aria-label="Close" title="Close (Esc)" onClick={onClose}
+            className="shrink-0 rounded-lg border border-slate px-2 py-0.5 text-[14px] leading-none text-mist hover:border-signal-sell hover:text-signal-sell">✕</button>
+        </div>
+        <div className="overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   );

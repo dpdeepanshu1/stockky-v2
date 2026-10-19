@@ -61,15 +61,17 @@ class Run:
 
     def public(self) -> Dict[str, Any]:
         d = dict(self.d)
-        for k in ("queued_at", "started_at", "finished_at"):
-            d[k] = _iso(d[k])
+        for k in ("queued_at", "started_at", "finished_at", "notified_at"):
+            if k in d:
+                d[k] = _iso(d[k])
         return d
 
 
 class Runner:
     def __init__(self, data_dir: str, scripts_dir: str, ctx_base: Dict[str, Any], jobs: Dict[str, Dict[str, Any]], packs: Dict[str, Dict[str, Any]],
                  token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
-                 keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now):
+                 keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now,
+                 notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False):
         self.data = data_dir
         self.runs_dir = os.path.join(data_dir, "runs")
         self.ctx_base = dict(ctx_base)
@@ -80,6 +82,10 @@ class Runner:
         self.keep_runs, self.keep_days = keep_runs, keep_days
         self.guard_market = guard_market
         self.now_fn = now_fn
+        self.notify_fn = notify_fn      # group 447: (run dict, run dir) -> "sent" | note | None; announces automatic runs (see notify.py)
+        self.keep_latest_only = keep_latest_only   # group 447: a new result replaces the older one of the same job / pack (saves disk)
+        self.auto_path = os.path.join(data_dir, "state", "last_automatic.json")
+        self.auto: Dict[str, Any] = {"last": None, "by_pack": {}}
         os.makedirs(self.runs_dir, exist_ok=True)
         for sub in ("calibration_out", "exports"):
             os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
@@ -93,6 +99,9 @@ class Runner:
         self.thread: Optional[threading.Thread] = None
         self.index: Dict[str, Run] = {}
         self._load_history()
+        self._load_auto()
+        if self.keep_latest_only:
+            self.supersede_all()
 
     # ---------------------------------------------------------------- history on disk
     def _run_dir(self, rid: str) -> str:
@@ -169,10 +178,15 @@ class Runner:
                 r.d.update(status="blocked", note=blocked, finished_at=time.time())
                 self.index[rid] = r
                 self._save(r)
-                return r
-            self.index[rid] = r
-            self.queue.append(r)
-            self._save(r)
+            else:
+                self.index[rid] = r
+                self.queue.append(r)
+                self._save(r)
+        if blocked:
+            self.supersede(kind, target)
+            if trigger == "schedule":       # an automatic run that did not happen is exactly what you want to hear about
+                threading.Thread(target=self._after_run, args=(r,), name="notify-blocked", daemon=True).start()
+            return r
         self.wake.set()
         return r
 
@@ -268,7 +282,9 @@ class Runner:
     def state(self) -> Dict[str, Any]:
         with self.lock:
             return {"current": self.current.public() if self.current else None, "queued": [r.public() for r in self.queue], "market_open_now": market_open_now(self.now_fn()),
-                    "now_ist": self.now_fn().astimezone(IST).isoformat(timespec="seconds")}
+                    "now_ist": self.now_fn().astimezone(IST).isoformat(timespec="seconds"),
+                    "last_automatic": self.auto.get("last"), "last_automatic_by_pack": dict(self.auto.get("by_pack") or {}),
+                    "keep_latest_only": self.keep_latest_only}
 
     # ---------------------------------------------------------------- worker
     def start(self) -> None:
@@ -307,14 +323,106 @@ class Runner:
                 continue
             self.cancel_flag.clear()
             try:
-                self._execute(r)
-            except Exception as e:  # noqa: BLE001
-                r.d.update(status="failed", note=f"internal error: {type(e).__name__}: {e}", finished_at=time.time())
-                self._save(r)
+                try:
+                    self._execute(r)
+                except Exception as e:  # noqa: BLE001
+                    r.d.update(status="failed", note=f"internal error: {type(e).__name__}: {e}", finished_at=time.time())
+                    self._save(r)
+                self._after_run(r)          # group 447: before `current` is cleared, so drain() / the page see the run complete with its Telegram note
             finally:
                 with self.lock:
                     self.current = None
                     self.proc = None
+
+    # ---------------------------------------------------------------- after a run (group 447)
+    def _after_run(self, r: Run) -> None:
+        """Telegram for automatic runs, remember the last automatic run, then let the new result replace the older one. Never raises."""
+        self._notify_done(r)
+        try:
+            self._record_auto(r)
+            self.supersede(r.d["kind"], r.d["target"])
+        except Exception:  # noqa: BLE001 - bookkeeping must never touch the run
+            pass
+
+    def _notify_done(self, r: Run) -> None:
+        if not self.notify_fn:
+            return
+        try:
+            res = self.notify_fn(dict(r.d), self._run_dir(r.d["id"]))
+        except Exception as e:  # noqa: BLE001
+            res = f"error: {type(e).__name__}"
+        if res:
+            r.d.update(notified=res, notified_at=time.time())
+            try:
+                self._save(r)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _brief(r: Run) -> Dict[str, Any]:
+        return {"id": r.d["id"], "title": r.d.get("title", ""), "target": r.d["target"], "status": r.d["status"],
+                "finished_at": _iso(r.d.get("finished_at")), "telegram": r.d.get("notified") or ""}
+
+    def _load_auto(self) -> None:
+        """Kept in its own small file so replacing old run folders never loses 'when did the timetable last run'."""
+        try:
+            d = json.load(open(self.auto_path, encoding="utf-8"))
+            if isinstance(d, dict):
+                self.auto = {"last": d.get("last"), "by_pack": d.get("by_pack") or {}}
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        rs = sorted([r for r in self.index.values() if r.d.get("trigger") == "schedule" and r.d["status"] in FINAL and r.d.get("finished_at")],
+                    key=lambda x: x.d["finished_at"])      # first start after an upgrade: rebuild from the runs still on disk
+        for r in rs:
+            self.auto["last"] = self._brief(r)
+            if r.d.get("kind") == "pack":
+                self.auto["by_pack"][r.d["target"]] = self._brief(r)
+
+    def _record_auto(self, r: Run) -> None:
+        if r.d.get("trigger") != "schedule" or r.d["status"] not in FINAL or not r.d.get("finished_at"):
+            return
+        with self.lock:
+            b = self._brief(r)
+            self.auto["last"] = b
+            if r.d.get("kind") == "pack":
+                self.auto["by_pack"][r.d["target"]] = b
+            snap = json.loads(json.dumps(self.auto))
+        try:
+            os.makedirs(os.path.dirname(self.auto_path), exist_ok=True)
+            tmp = self.auto_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f)
+            os.replace(tmp, self.auto_path)
+        except OSError:
+            pass
+
+    # a run that holds a real result vs one that only says "did not run properly / was held back / was stopped"
+    _RESULT = ("success", "attention", "failed", "timeout")
+
+    def supersede(self, kind: str, target: str) -> int:
+        """keep_latest_only: for one job / pack keep the newest run that has a result, plus a newer blocked / cancelled note if there is one; delete the rest.
+        A blocked or cancelled run never replaces a real result. Queued / running runs are never touched."""
+        if not self.keep_latest_only:
+            return 0
+        with self.lock:
+            mine = sorted([r for r in self.index.values() if r.d["kind"] == kind and r.d["target"] == target and r.d["status"] in FINAL],
+                          key=lambda x: x.d["queued_at"], reverse=True)
+            keep: List[Run] = []
+            newest_result = next((r for r in mine if r.d["status"] in self._RESULT), None)
+            if newest_result:
+                keep.append(newest_result)
+            newest_note = next((r for r in mine if r.d["status"] not in self._RESULT), None)
+            if newest_note and (not newest_result or newest_note.d["queued_at"] > newest_result.d["queued_at"]):
+                keep.append(newest_note)
+            drop = [r for r in mine if r not in keep]
+            for r in drop:
+                shutil.rmtree(self._run_dir(r.d["id"]), ignore_errors=True)
+                self.index.pop(r.d["id"], None)
+            return len(drop)
+
+    def supersede_all(self) -> int:
+        return sum(self.supersede(k, t) for k, t in {(r.d["kind"], r.d["target"]) for r in list(self.index.values())})
 
     # ---------------------------------------------------------------- one run
     def _execute(self, r: Run) -> None:

@@ -1,7 +1,7 @@
 // group 442: the written plan (Monday / daily / Friday / Saturday / monthly) with a button on every line, what already runs by itself, the optional timetable
 // and the gate glossary. Same content on both service tabs; jobs that concern only the other service are hidden there.
 import { useCallback, useEffect, useState } from "react";
-import { relTime, runnerApi, type ScheduleSlot, type Svc } from "../../calibrationApi";
+import { istStamp, relTime, runnerApi, telegramNote, type ScheduleSlot, type Svc } from "../../calibrationApi";
 import { AUTOMATIC_ELSEWHERE, GATE_GLOSSARY, PLAN, jobAppliesTo } from "../../calibrationPlan";
 import { Btn, Card, Msg, StatusPill } from "./ui";
 import { useRunner } from "./RunnerContext";
@@ -71,13 +71,20 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
       <Card title="Optional timetable (IST)" right={sched && <Btn small primary={sched.enabled} onClick={() => void saveSched({ enabled: !sched.enabled })}>{sched.enabled ? "Timetable ON: switch off" : "Timetable OFF: switch on"}</Btn>}>
         <p className="mb-2 text-mist">When ON, the runner starts these packs by itself at the time shown. A slot missed while the runner was down is skipped, not caught up. Heavy packs that fall inside market hours are recorded as blocked.</p>
         {msg && <Msg kind="err">{msg}</Msg>}
+        <div className="mb-2 rounded-xl border border-slate p-2" data-testid="timetable-last">
+          <b>Last automatic run:</b>{" "}
+          {summary?.state?.last_automatic
+            ? <>{istStamp(summary.state.last_automatic.finished_at)} IST <span className="text-mist">({relTime(summary.state.last_automatic.finished_at)})</span> · {summary.state.last_automatic.title} <StatusPill status={summary.state.last_automatic.status} />{summary.state.last_automatic.telegram ? <span className="text-mist"> · {telegramNote(summary.state.last_automatic.telegram)}</span> : null}</>
+            : <span className="text-mist">none yet (the timetable has not started anything)</span>}
+          <span className="block text-[11px] text-mist">Every run the timetable starts or blocks sends a Telegram message through the notification service (RUNNER_NOTIFY_ENABLED). Runs you start with a button do not, unless RUNNER_NOTIFY_MANUAL=true.</span>
+        </div>
         {sched && (
           <table className="w-full text-[11px]"><thead className="text-left text-mist"><tr><th>On</th><th>Pack</th><th>Days</th><th>Time</th><th>Last fired</th></tr></thead>
             <tbody>
               {sched.entries.map((e) => (
                 <tr key={e.id} className="border-t border-slate">
                   <td className="py-1"><input type="checkbox" aria-label={`${e.id} enabled`} checked={e.enabled} onChange={(ev) => void saveSched({ entries: sched.entries.map((x) => (x.id === e.id ? { ...x, enabled: ev.target.checked } : x)) })} /></td>
-                  <td>{packOf(e.pack)?.title || e.pack}{e.first_week_only ? " (first week)" : ""}</td><td>{(e.days || []).map((d) => DAYS[d]).join(" ")}</td><td>{e.time}</td><td className="text-mist">{sched.last_fired?.[e.id] || "-"}</td>
+                  <td>{packOf(e.pack)?.title || e.pack}{e.first_week_only ? " (first week)" : ""}</td><td>{(e.days || []).map((d) => DAYS[d]).join(" ")}</td><td>{e.time}</td><td className="text-mist">{(() => { const a = summary?.state?.last_automatic_by_pack?.[e.pack]; return a ? <>{istStamp(a.finished_at)} <StatusPill status={a.status} />{a.telegram ? ` · ${telegramNote(a.telegram)}` : ""}</> : (sched.last_fired?.[e.id] || "-"); })()}</td>
                 </tr>
               ))}
             </tbody></table>

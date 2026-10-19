@@ -61,6 +61,9 @@ def gate_key(reason, decision):
     if not r:
         return "SKIPPED:(no reason)"
     parts = r.split(":")
+    if parts[0] == "QUALITY_GATE" and len(parts) > 1:
+        # one bucket per metric ("technical_score 35 < floor 40" and "... 33 < floor 40" are the same gate), so samples add up
+        return "QUALITY_GATE:" + (parts[1].strip().split(" ")[0] or "other")
     if parts[0] in ("RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "QUALITY_GATE", "BOARD_GATE"):
         return ":".join(parts[:2]) if len(parts) > 1 else parts[0]
     return parts[0][:40] if parts[0].isupper() else "OTHER:" + r.split(" ")[0][:30]

@@ -46,3 +46,8 @@ KEEP_DAYS = _i("RUNNER_KEEP_DAYS", 45)
 GUARD_MARKET_HOURS = _b("RUNNER_GUARD_MARKET_HOURS", True)
 SCHEDULER_ENABLED = _b("RUNNER_SCHEDULER_ENABLED", False)   # off until you switch it on in the page
 TOKEN_TTL_S = _i("RUNNER_TOKEN_TTL_S", 3600)
+# group 447: a Telegram message (through the notification service) when an AUTOMATIC run finishes or is blocked; manual runs only if asked
+NOTIFY_ENABLED = _b("RUNNER_NOTIFY_ENABLED", True)
+NOTIFY_MANUAL = _b("RUNNER_NOTIFY_MANUAL", False)
+# group 447: a new result of a job / pack replaces the older one (Runs & downloads shows one line per job); set false to keep the history again
+KEEP_LATEST_ONLY = _b("RUNNER_KEEP_LATEST_ONLY", True)

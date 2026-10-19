@@ -163,8 +163,20 @@ export interface RunRec {
   id: string; kind: "job" | "pack"; target: string; title: string; params: Record<string, any>; by: string; trigger: string; status: RunStatus;
   queued_at: string | null; started_at: string | null; finished_at: string | null; steps: RunStep[]; jobs: { id: string; title: string; status: RunStatus; seconds: number }[];
   headline: string[]; note: string; exit_summary: string; files?: { name: string; bytes: number }[];
+  notified?: string; notified_at?: string | null;     // group 447: the Telegram message of an automatic run ("sent" | "not delivered: ..." | "error: ...")
 }
-export interface RunnerState { current: RunRec | null; queued: RunRec[]; market_open_now: boolean; now_ist: string }
+/** group 447: the latest run the timetable started (blocked ones count: the timetable did fire). */
+export interface AutoRun { id: string; title: string; target: string; status: RunStatus; finished_at: string | null; telegram: string }
+export interface RunnerState {
+  current: RunRec | null; queued: RunRec[]; market_open_now: boolean; now_ist: string;
+  last_automatic?: AutoRun | null; last_automatic_by_pack?: Record<string, AutoRun>; keep_latest_only?: boolean;
+}
+/** "2026-10-19T16:09:12+05:30" -> "2026-10-19 16:09" (the runner already writes IST). */
+export const istStamp = (iso: string | null | undefined): string => (iso ? iso.slice(0, 16).replace("T", " ") : "-");
+/** Short Telegram note for a run: "Telegram sent" / "Telegram not delivered: ..." / "". */
+export const telegramNote = (t: string | null | undefined): string => (!t ? "" : t === "sent" ? "Telegram sent" : `Telegram ${t}`);
+/** How many runs per status, for the filter chips of Runs & downloads. */
+export const statusCounts = (runs: { status: string }[]): Record<string, number> => runs.reduce<Record<string, number>>((a, r) => { a[r.status] = (a[r.status] || 0) + 1; return a; }, {});
 export interface Summary {
   jobs: Record<string, { status: RunStatus; finished_at: string | null; run_id: string; headline: string[] } | null>;
   packs: Record<string, { status: RunStatus; finished_at: string | null; run_id: string } | null>;

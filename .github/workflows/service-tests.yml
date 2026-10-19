@@ -176,6 +176,7 @@ jobs:
           python scripts/check_control_catalog.py   # group442: every switch marked LIVE is read at call time by all its consumers
           python scripts/check_compose_gateway_url.py && python scripts/check_compose_ports_loopback.py && python scripts/check_market_data_url_default.py
           (cd services/calibration-runner-service && python tests/test_runner_engine.py)   # group442: runner engine, catalog flags vs the real scripts, scheduler (stdlib only)
+          (cd services/calibration-runner-service && python tests/test_notify.py)   # group447: Telegram for automatic runs, last-automatic timestamp, latest result only (stdlib only)
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

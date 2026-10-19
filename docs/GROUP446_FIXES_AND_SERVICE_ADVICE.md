@@ -24,6 +24,8 @@ Not changed: the entry time in `daily_trades`. It is `opened_at` of the position
 
 It also reports the overlap on the shared Dhan account (same symbol opened by both on the same day), the combined result, and which service has the better record if only one can run. Real-trade entries judged are the bot's own (`--origin system`, default); imported demat holdings are not the service's decisions.
 
+**Unfinished day and `--since` (446b, after the first live run):** run before 15:45 IST on a weekday, the day in progress is left out of the judgement (its trades are shown in a NOTE): it no longer counts as a losing day, a streak day or a trading day. `--include-today` overrides. `--since YYYY-MM-DD` (also a field on the job: "Judge only from date") judges only trades that closed on or after that day: use it after you change switches, so the old setup does not count against the new one. The not-enough-data limits still apply, so a short window gives no call.
+
 It RECOMMENDS ONLY. It never changes a switch or a service: turning one off is your decision (Auto-Pilot / master switch, outside market hours). Exit 0 = nothing to act on, 1 = a service is TURN OFF (the runner shows amber) or no trades were found.
 
 Runs by itself: new job `service_advice` (group "Every trading day") is the second step of the **Daily close pack**, which the timetable runs Mon-Fri at 16:05 IST. Output: `service_advice.txt` + `service_advice.json` in the run's downloads. By hand:
@@ -31,5 +33,6 @@ Runs by itself: new job `service_advice` (group "Every trading day") is the seco
 ```bash
 TOKEN=<admin token> python3 scripts/service_onoff_advice.py --days 10 --out service_advice.txt
 python3 scripts/service_onoff_advice.py --from-csv daily_trades.csv      # offline, from the CSV the Daily trades job writes
+python3 scripts/service_onoff_advice.py --since 2026-10-19 --days 10     # only the days after a switch change
 ```
 Thresholds: `--min-n 8 --min-days 3 --pf-off 0.8 --pf-keep 1.1 --streak-off 3`. A few days is a small sample: read one TURN OFF with 8-10 trades as "look hard", not as proof.

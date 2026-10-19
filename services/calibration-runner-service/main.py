@@ -56,8 +56,12 @@ def _safe_token() -> str:
 @app.on_event("startup")
 def _startup() -> None:
     global runner, sched
+    from notify import make_notifier
+    from runner import Redactor
+    notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET]))
     runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET],
-                    max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS)
+                    max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
+                    notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY)
     runner.start()
     sched = Scheduler(str(config.DATA_DIR / "state" / "schedule.json"), J.SCHEDULE_DEFAULT, runner.submit, list(J.PACK_MAP), enabled_default=config.SCHEDULER_ENABLED)
     sched.start()

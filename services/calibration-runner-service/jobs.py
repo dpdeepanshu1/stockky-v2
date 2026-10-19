@@ -79,8 +79,8 @@ def b_daily_trades(ctx, p):
 
 def b_service_advice(ctx, p):
     return [_py(ctx, "service_onoff_advice.py", "--days", p.get("days", 10), "--min-n", p.get("min_n", 8), "--min-days", p.get("min_days", 3),
-                "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], "--out", os.path.join(ctx["run"], "service_advice.txt"),
-                "--json", os.path.join(ctx["run"], "service_advice.json"), title="Which service to keep ON / pause (recommendation only)", env={"TOKEN": "{token}"})]
+                "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], *(["--since", p["since"]] if p.get("since") else []),
+                "--out", os.path.join(ctx["run"], "service_advice.txt"), "--json", os.path.join(ctx["run"], "service_advice.json"), title="Which service to keep ON / pause (recommendation only)", env={"TOKEN": "{token}"})]
 
 
 def b_export_records(ctx, p):
@@ -274,7 +274,8 @@ JOB_LIST = [
     _job("service_advice", "Service ON / OFF advice", "daily", "Every day after 15:45 IST, right after the daily trades",
          "Judges real-trade and position-stocks on their own real closed trades (net, win %, profit factor, result without the best trade, losing days in a row, overlap on the shared Dhan account) "
          "and says KEEP ON / WATCH / TURN OFF / NOT ENOUGH DATA for each. Recommends only: it never changes a switch.", b_service_advice,
-         [P("days", "Days", "int", 10, 3, 60), P("min_n", "Min trades per service", "int", 8, 3, 100), P("min_days", "Min trading days", "int", 3, 1, 30)], timeout_s=240,
+         [P("days", "Days", "int", 10, 3, 60), P("min_n", "Min trades per service", "int", 8, 3, 100), P("min_days", "Min trading days", "int", 3, 1, 30),
+          P("since", "Judge only from date (YYYY-MM-DD)", "str", "", help="Leave empty for the whole window. Use the day you changed switches, so the old setup does not count against the new one.")], timeout_s=240,
          after="TURN OFF means that service lost money on this window even without its best trade: pause its Auto-Pilot outside market hours, then re-run after more days. WATCH: change nothing today."),
     _job("export_records", "Save closed real-trade records", "daily", "Every day after close (records feed the weekly reports)", "Saves GET /positions/REAL/records to the exports folder.", b_export_records,
          [P("days", "Days", "int", 60, 1, 60), P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"])], timeout_s=240),

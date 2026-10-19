@@ -648,6 +648,11 @@ services:
       RUNNER_BAR_DIR: /data/bars
       # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
       RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-false}
+      # group 447: Telegram message (via notification-scheduler-service) when an AUTOMATIC run finishes or is blocked; RUNNER_NOTIFY_MANUAL=true also announces button runs
+      RUNNER_NOTIFY_ENABLED: ${RUNNER_NOTIFY_ENABLED:-true}
+      RUNNER_NOTIFY_MANUAL: ${RUNNER_NOTIFY_MANUAL:-false}
+      # group 447: a new result of a job / pack replaces the older one in Runs & downloads (saves disk); false = keep the history
+      RUNNER_KEEP_LATEST_ONLY: ${RUNNER_KEEP_LATEST_ONLY:-true}
       # heavy runs are refused 09:00-15:45 IST on weekdays unless the page confirms them
       RUNNER_GUARD_MARKET_HOURS: ${RUNNER_GUARD_MARKET_HOURS:-true}
     volumes:

@@ -1,0 +1,90 @@
+"""control/catalog.py (position-stocks-service) - the switches the Real Money Calibration page may change. See real-trade-service/control/catalog.py for the rules.
+
+The structure thresholds use the `PS_` name because config.py reads `PS_<name>` first when it is set (so the scalper can stay looser than real-trade); writing the
+PS_ name is the one that always wins."""
+from __future__ import annotations
+
+from control.kit import Flag
+
+SERVICE = "position-stocks-service"
+_C = "config"
+
+CATALOG = (
+    # ---------------- daily structure gate on the scalp entry ----------------
+    Flag("PS_STRUCTURE_GATE_MODE", "Structure gate", "Structure gate at entry", "enum", choices=("enforce", "off"),
+         help="enforce = refuse an entry with a bad daily structure (STRUCTURE_* reason); off = kill switch. Fails open on missing data.",
+         targets=((_C, "STRUCTURE_GATE_MODE"),), import_time_ok_files=("config.py",), live=True, shipped="enforce", recommended="enforce", looser="neutral",
+         evidence="G2 / G4 (structure_gate_check.py)"),
+    Flag("PS_STRUCTURE_REQUIRE_DATA", "Refuse when no structure data", "Structure gate at entry", "bool", looser="off",
+         help="true = refuse (STRUCTURE_NODATA) when no usable daily structure.", targets=((_C, "STRUCTURE_REQUIRE_DATA"),), live=True, shipped="true", recommended="true"),
+    Flag("PS_STRUCTURE_BEARISH_BLOCK", "Block bearish daily structure", "Structure gate at entry", "bool", looser="off",
+         help="Bearish daily trend / fresh bearish BOS blocks the scalp.", targets=((_C, "STRUCTURE_BEARISH_BLOCK"),), live=True, shipped="true", recommended="true"),
+    Flag("PS_STRUCTURE_MAX_CHASE_ATR", "Max chase above zone (daily ATR)", "Structure gate at entry", "float", lo=0, hi=12, looser="higher", zero_off=True,
+         help="0 = off.", targets=((_C, "STRUCTURE_MAX_CHASE_ATR"),), live=True, shipped="4.0", evidence="calibration_pack.py (PS_ names)"),
+    Flag("PS_STRUCTURE_MAX_STRETCH_ATR", "Max stretch above EMA20 (daily ATR)", "Structure gate at entry", "float", lo=0, hi=15, looser="higher", zero_off=True,
+         help="0 = off.", targets=((_C, "STRUCTURE_MAX_STRETCH_ATR"),), live=True, shipped="5.0"),
+    Flag("PS_STRUCTURE_MIN_ROOM_ATR", "Min room to resistance (daily ATR)", "Structure gate at entry", "float", lo=0, hi=5, looser="lower",
+         help="0 = off.", targets=((_C, "STRUCTURE_MIN_ROOM_ATR"),), live=True, shipped="0.3"),
+    Flag("STRUCTURE_MAX_AGE_DAYS", "Structure stale after (days)", "Structure gate at entry", "float", lo=1, hi=14, looser="higher",
+         help="Older than this = stale = no opinion. 5 clears every 2026 trading day.", targets=((_C, "STRUCTURE_MAX_AGE_DAYS"),), live=True, shipped="5", recommended="5",
+         evidence="group415; re-check in December"),
+    Flag("STRUCTURE_OBS_ENABLED", "Record structure observations", "Evidence recording", "bool", looser="neutral",
+         help="Evidence only (feeds G4). Keep ON.", targets=((_C, "STRUCTURE_OBS_ENABLED"),), live=True, shipped="true", recommended="true", evidence="G4 live"),
+    # ---------------- market board ----------------
+    Flag("BOARD_ENABLED", "Market Board", "Market Board", "bool", looser="neutral", help="The board runner (zones, shortlist, shadow log).",
+         targets=((_C, "BOARD_ENABLED"),), live=True, shipped="true", recommended="true"),
+    Flag("BOARD_GATE_MODE", "Board chase guard", "Market Board", "enum", choices=("enforce", "off"), looser="neutral",
+         help="enforce = the chase guard refuses entries; off = kill switch.", targets=((_C, "BOARD_GATE_MODE"),), import_time_ok_files=("config.py",), live=True,
+         shipped="enforce", recommended="enforce"),
+    Flag("BOARD_USE_MS_ENGINE", "Board runs on the new engine", "Market Board", "bool", looser="neutral",
+         help="true = zones/swings from stockky_ms.compat_board (live since group354); false = the legacy maths (rollback switch). Stops meaning 'legacy' once retire_legacy_board.py is applied.",
+         targets=((_C, "BOARD_USE_MS_ENGINE"),), live=True, shipped="true", recommended="true", evidence="board_parity_check.py (needs GO before the legacy code is removed)"),
+    Flag("BOARD_AB_ENABLED", "Board A/B comparison", "Market Board", "bool", looser="neutral",
+         help="Compares engine vs legacy zones on the same bars (observational). board_parity_check.py needs >= 200 comparisons over >= 3 days: keep ON until it says GO.",
+         targets=((_C, "BOARD_AB_ENABLED"),), live=True, shipped="true", recommended="true", evidence="board_parity_check.py"),
+    Flag("BOARD_ZONES_ENABLED", "Board zones", "Market Board", "bool", looser="neutral", help="Order-block zones on the board.", targets=((_C, "BOARD_ZONES_ENABLED"),),
+         live=True, shipped="true"),
+    Flag("BOARD_BACKFILL_ENABLED", "Board minute backfill", "Market Board", "bool", looser="neutral", help="Fills today's earlier minutes after a mid-session restart.",
+         targets=((_C, "BOARD_BACKFILL_ENABLED"),), live=True, shipped="true"),
+    # ---------------- entry guards ----------------
+    Flag("ENTRY_VWAP_GATE_ENABLED", "VWAP entry gate", "Entry guards", "bool", looser="off", help="Refuse an entry priced below VWAP (minus tolerance).",
+         targets=((_C, "ENTRY_VWAP_GATE_ENABLED"),), live=True, shipped="true", evidence="intraday_gate_backtest.py"),
+    Flag("ENTRY_VWAP_TOLERANCE_PCT", "VWAP tolerance (%)", "Entry guards", "float", lo=0, hi=2, looser="higher", help="How far below VWAP an entry may be.",
+         targets=((_C, "ENTRY_VWAP_TOLERANCE_PCT"),), live=True, shipped="0.15"),
+    Flag("ENTRY_LIQUIDITY_GATE_ENABLED", "Liquidity gate", "Entry guards", "bool", looser="off", help="Average turnover, day turnover and relative-volume checks.",
+         targets=((_C, "ENTRY_LIQUIDITY_GATE_ENABLED"),), live=True, shipped="true"),
+    Flag("ENTRY_MIN_AVG_TURNOVER_CR", "Min average turnover (Rs crore)", "Entry guards", "float", lo=0, hi=100, looser="lower", help="0 = off.",
+         targets=((_C, "ENTRY_MIN_AVG_TURNOVER_CR"),), live=True, shipped="3.0"),
+    Flag("ENTRY_MIN_RVOL", "Min relative volume", "Entry guards", "float", lo=0, hi=5, looser="lower", help="Day volume / expected volume so far. 0 = off.",
+         targets=((_C, "ENTRY_MIN_RVOL"),), live=True, shipped="0.35"),
+    Flag("ENTRY_DEPTH_GATE", "Market depth gate", "Entry guards", "bool", looser="off", help="Spread / book-value checks from live depth.",
+         targets=((_C, "ENTRY_DEPTH_GATE"),), live=True, shipped="true"),
+    Flag("ENTRY_PRECHECK", "Entry precheck", "Entry guards", "bool", looser="off", help="Cheap checks before the quality gate.", targets=((_C, "ENTRY_PRECHECK"),),
+         live=True, shipped="true"),
+    Flag("ENTRY_REQUIRE_LIVE_TICK", "Require a live tick", "Entry guards", "bool", looser="off", help="Refuse when the symbol has no fresh tick.",
+         targets=((_C, "ENTRY_REQUIRE_LIVE_TICK"),), live=True, shipped="true", recommended="true", evidence="group389 fail-closed"),
+    Flag("ENTRY_MAX_SLIPPAGE_PCT", "Max entry slippage (%)", "Entry guards", "float", lo=0, hi=5, looser="higher", help="Price may have moved this much since the decision.",
+         targets=((_C, "ENTRY_MAX_SLIPPAGE_PCT"),), live=True, shipped="0.25"),
+    # ---------------- opening protection ----------------
+    Flag("OPENING_GATE_ENABLED", "Opening quality gate", "Opening window", "bool", looser="off", help="Gap, range-position and previous-day checks near the open.",
+         targets=((_C, "OPENING_GATE_ENABLED"),), live=True, shipped="true", evidence="opening_replay.py"),
+    Flag("OPENING_PROTECT_ENABLED", "Opening protection", "Opening window", "bool", looser="off", help="Half size and a pause after stop-outs in the opening minutes.",
+         targets=((_C, "OPENING_PROTECT_ENABLED"),), live=True, shipped="true", evidence="opening_replay.py"),
+    Flag("OPENING_SIZE_MULT", "Opening size multiplier", "Opening window", "float", lo=0.1, hi=1, looser="higher", help="Share of the normal size while protection is on.",
+         targets=((_C, "OPENING_SIZE_MULT"),), live=True, shipped="0.5", evidence="opening_replay.py"),
+    Flag("OPENING_PAUSE_STOPOUTS", "Pause after N opening stop-outs", "Opening window", "int", lo=0, hi=10, looser="lower", help="0 = never pause.",
+         targets=((_C, "OPENING_PAUSE_STOPOUTS"),), live=True, shipped="2", evidence="opening_replay.py"),
+    Flag("OPENING_PLAN_ENABLED", "09:10 opening plan", "Opening window", "bool", looser="neutral", help="Plans stops from the pre-open snapshot.",
+         targets=((_C, "OPENING_PLAN_ENABLED"),), live=True, shipped="true"),
+    # ---------------- evidence recording ----------------
+    Flag("BAR_RECORD_ENABLED", "Record 1-minute bars", "Evidence recording", "bool", looser="neutral",
+         help="Writes today's minute bars to the bar-records volume so intraday structure and the VWAP / opening gates can be backtested (group441). Keep ON until ~20 sessions exist.",
+         targets=((_C, "BAR_RECORD_ENABLED"),), live=True, shipped="true", recommended="true", evidence="export_intraday.py / intraday_gate_backtest.py"),
+    Flag("ORDER_FLOW_RECORD", "Record order flow", "Evidence recording", "bool", looser="neutral", help="Best-5 imbalance and spread per entry (group427).",
+         targets=((_C, "ORDER_FLOW_RECORD"),), live=True, shipped="true", recommended="true", evidence="records_report.py"),
+    Flag("ORDER_FLOW_DEPTH20", "Record 20-level depth", "Evidence recording", "bool", looser="neutral", help="Also the 20-level imbalance.",
+         targets=((_C, "ORDER_FLOW_DEPTH20"),), live=True, shipped="true"),
+    # ---------------- money safety ----------------
+    Flag("OVERNIGHT_HOLD_ENABLED", "Overnight hold allowed", "Money safety", "bool", looser="neutral",
+         help="Off by default in the scalper: positions square off the same day.", targets=((_C, "OVERNIGHT_HOLD_ENABLED"),), live=True, shipped="false", evidence="hold_bucket_check.py"),
+)

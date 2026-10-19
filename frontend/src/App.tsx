@@ -19,6 +19,7 @@ import SurpriseStocks from "./components/SurpriseStocks";
 import IpoTracker from "./components/IpoTracker";
 import RealAutoTrade from "./components/RealAutoTrade";
 import PositionStocksTab from "./components/PositionStocksTab";
+import CalibrationControlTab from "./components/CalibrationControlTab";
 import DataFeed from "./components/DataFeed";
 import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
@@ -38,7 +39,7 @@ type ViewState =
   | { mode: "scan"; data: ScanResult }
   | { mode: "error"; message: string };
 
-type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist" | "realtrade" | "positionstocks";
+type Tab = "dashboard" | "notifications" | "training" | "trades" | "hot" | "surprise" | "ipo" | "datafeed" | "settings" | "watchlist" | "realtrade" | "positionstocks" | "calibration";
 
 // The five tabs the mobile bottom bar shows, in order. Explicit so that adding
 // a tab to navItems can never silently displace one of them.
@@ -962,6 +963,7 @@ export default function App() {
     { id: "surprise", label: "Surprise Momentum", group: "Navigate", hint: "tab", run: () => setTab("surprise") },
     { id: "ipo", label: "IPO Tracker", group: "Navigate", hint: "tab", keywords: "ipo listing new issue gmp", run: () => setTab("ipo") },
     { id: "positionstocks", label: "Position Stocks", group: "Navigate", hint: "tab", keywords: "scalp scalping momentum 5m 15m 60m", run: () => setTab("positionstocks") },
+    { id: "calibration", label: "Real Money Calibration", group: "Navigate", hint: "tab", keywords: "switches on off controls tests calibration retrain g1 g2 g3 g4 kronos timesfm daily trades pnl run", run: () => setTab("calibration") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
 
     { id: "trades", label: "Trades", group: "Navigate", hint: "tab", run: () => setTab("trades") },
@@ -984,6 +986,7 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", short: "Home", icon: "home", group: "" },
     { id: "realtrade", label: "Auto Trade", short: "Auto Trade", icon: "bot", group: "Trading" },
     { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "trend", group: "Trading" },
+    { id: "calibration", label: "Real Money Calibration", short: "Calibrate", icon: "sliders", group: "Trading" },
     { id: "trades", label: "Paper Trades", short: "Paper", icon: "swap", group: "Trading" },
     { id: "hot", label: "Hot Picks", short: "Picks", icon: "flame", group: "Discover" },
     { id: "surprise", label: "Surprise Momentum", short: "Surprise", icon: "zap", group: "Discover" },
@@ -1318,6 +1321,11 @@ export default function App() {
           <div className="page-terminal">
             <PageHeader title="Position Stocks" desc="Fast momentum trades that open and close within the day, using their own capital pool." />
             <PositionStocksTab />
+          </div>
+        ) : tab === "calibration" ? (
+          <div className="page-terminal">
+            <PageHeader title="Real Money Calibration" desc="Switch the real-money rules ON / OFF, see daily trades with entry and exit time, and run every test, calibration and training job from here." />
+            <CalibrationControlTab />
           </div>
         ) : tab === "settings" ? (
           <SettingsPage

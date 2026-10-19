@@ -129,4 +129,5 @@ def test_every_service_dockerfile_compiles_code_at_build_time():
     for df in sorted((ROOT / "services").glob("*/Dockerfile")):
         text = df.read_text()
         assert "compileall" in text, f"{df.parent.name}: no compileall step"
-        assert text.index("COPY . .") < text.index("compileall"), f"{df.parent.name}: compileall must run after COPY . ."
+        # group442: calibration-runner-service builds from the repo root, so it copies named files / folders instead of `COPY . .`; compileall must still come after all COPY lines
+        assert "COPY" in text and text.rindex("\nCOPY ") < text.index("compileall"), f"{df.parent.name}: compileall must run after the last COPY"

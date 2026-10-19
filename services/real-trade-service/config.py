@@ -1413,3 +1413,19 @@ EXIT_LIMIT_VALIDITY_MINUTES = int(((os.getenv("EXIT_LIMIT_VALIDITY_MINUTES") or 
 # minutes, so a bot entry that just filled is booked by record_real_fill (decision stop, label, product type) instead of being imported as a broker
 # holding. 0 = off (old behaviour).
 IMPORT_SKIP_PENDING_BUY_MIN = float(((os.getenv("IMPORT_SKIP_PENDING_BUY_MIN") or "").strip() or "45"))
+
+# ── Pullback re-arm (2026-10-19, entry_engine/pullback_rearm.py) ─────────────────────────────────────────────────
+# A candidate refused for chasing (drift gate / structure chase or stretch) is re-checked on a pullback + bounce instead of being
+# forgotten: a fresh copy is queued and only the chase checks are waived; every other gate, risk and sizing stay normal.
+PULLBACK_REARM_ENABLED = ((os.getenv("PULLBACK_REARM_ENABLED") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
+PULLBACK_REARM_MODES = (os.getenv("PULLBACK_REARM_MODES") or "").strip() or "REAL,DEMO"
+REARM_MIN_DAY_PCT = _og_float("REARM_MIN_DAY_PCT", 1.0)                 # arm only a stock already up this much on the day
+REARM_MIN_PULLBACK_PCT = _og_float("REARM_MIN_PULLBACK_PCT", 0.8)       # peak -> low, at least this deep ...
+REARM_MAX_PULLBACK_PCT = _og_float("REARM_MAX_PULLBACK_PCT", 3.5)       # ... and no deeper (deeper = the move failed; dropped)
+REARM_BOUNCE_PCT = _og_float("REARM_BOUNCE_PCT", 0.3)                   # price must be this far off the low
+REARM_HOLD_S = _og_float("REARM_HOLD_S", 30.0)                          # the low must be at least this old (no falling knife)
+REARM_MIN_BELOW_PEAK_PCT = _og_float("REARM_MIN_BELOW_PEAK_PCT", 0.3)  # not back at the high (that is chasing again)
+REARM_MAX_AGE_MIN = _og_float("REARM_MAX_AGE_MIN", 90.0)                # an armed setup expires after this
+REARM_MAX_ATTEMPTS = int(_og_float("REARM_MAX_ATTEMPTS", 2.0))          # per symbol per day
+REARM_MAX_ARMED = int(_og_float("REARM_MAX_ARMED", 25.0))
+REARM_WAIVER_S = _og_float("REARM_WAIVER_S", 420.0)                     # chase checks are waived this long after a re-queue (about two cycles)

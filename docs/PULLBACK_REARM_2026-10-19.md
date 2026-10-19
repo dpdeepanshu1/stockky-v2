@@ -21,3 +21,17 @@
    the usual ones. The ENTERED log row starts with PULLBACK_REARM:<why>.
 
 Switch off: PULLBACK_REARM_ENABLED=0. Tunables: REARM_* in position-stocks config.py.
+
+## real-trade-service re-arm (added later on 2026-10-19)
+real-trade used to refuse a stock for chasing (drift gate "ran +X% above signal ... Chasing", or the structure gate's chase / stretched-above-EMA20),
+consume the candidate and forget it. JUSTDIAL was missed that way. Now (entry_engine/pullback_rearm.py, wired in entry_engine/entry.py, GET /pullback-rearm on port 8005):
+1. ARM: a chase refusal arms the symbol per mode (REAL and DEMO separately) when it is up >= REARM_MIN_DAY_PCT (1.0 %) on the day. Quality, liquidity, VWAP,
+   regime, risk and bearish-structure refusals never arm (a pullback would not cure them).
+2. WATCH: at the start of every evaluate_mode() pass the armed symbols are priced (one bulk quote call) and judged with the same rules as position-stocks
+   (pullback 0.8-3.5 %, bounce >= 0.3 %, low held >= 30 s, >= 0.3 % under the peak, not below VWAP, expires after 90 min, 2 attempts/symbol/day).
+3. TRIGGER: a fresh copy of the refused candidate is queued (same conviction, label, source) and the CHASE checks only (drift, structure chase / stretch)
+   are waived for REARM_WAIVER_S (420 s, about two cycles). It then goes through every other gate, the risk engine, sizing, capital and the 50-point composite floor
+   exactly like any candidate. Its drift is scored as 0 so the composite floor does not silently re-block it. The stop is the normal real-trade stop (2 % minimum).
+4. Symbols already held, or that already have an unconsumed candidate, are not queued twice.
+Switch off: PULLBACK_REARM_ENABLED=0. REAL only or DEMO only: PULLBACK_REARM_MODES=REAL or DEMO. Tunables: REARM_* in real-trade config.py (same names as position-stocks).
+Compare modes after a couple of weeks: docker compose exec -T real-trade-service python - --days 14 < scripts/mode_compare.py

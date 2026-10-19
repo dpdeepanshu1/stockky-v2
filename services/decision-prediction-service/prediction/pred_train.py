@@ -46,7 +46,6 @@ from sklearn.metrics import (
     roc_auc_score,
     brier_score_loss,
     precision_recall_fscore_support,
-    precision_recall_curve,
     roc_curve,
     average_precision_score,
 )

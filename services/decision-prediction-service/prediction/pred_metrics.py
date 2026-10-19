@@ -2,8 +2,6 @@
 Financial metrics for evaluating strategy performance.
 """
 import numpy as np
-import pandas as pd
-from typing import Union, Dict
 
 def calculate_sharpe(returns, rf=0.0, periods=252):
     ret = np.array(returns)

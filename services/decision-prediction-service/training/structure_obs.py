@@ -18,7 +18,7 @@ import json
 import math
 import os
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 try:  # group401: sector label -> sector index (same folder; the tests load this module by path, so fall back to a path import)
     import sector_index as _sx

@@ -45,15 +45,15 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
               const ps = pack ? summary?.packs?.[pack.id] : null;
               return (
                 <li key={i} className="rounded-xl border border-slate p-2">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
                     <div className="min-w-0 flex-1">
                       <div className="font-bold">{row.when}</div>
                       <div>{row.what}</div>
                       {row.note && <div className="text-[11px] text-mist">{row.note}</div>}
                       {pack && <div className="mt-1 text-[11px] text-mist">Pack: {(pack.jobs || []).map(([id]) => jobTitle(id)).join(" → ")}</div>}
                     </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
-                      {pack && <><Btn primary small onClick={() => void start("pack", pack.id)}>Run pack</Btn><span className="text-[10px] text-mist"><StatusPill status={ps?.status || "never"} /> {ps ? relTime(ps.finished_at) : ""}</span></>}
+                    <div className="run-actions run-actions-wide">
+                      {pack && <><Btn primary small onClick={() => void start("pack", pack.id)}>Run pack</Btn><span className="run-actions-note text-[10px] text-mist"><StatusPill status={ps?.status || "never"} /> {ps ? relTime(ps.finished_at) : ""}</span></>}
                       {jobs.map((j) => <Btn key={j} small onClick={() => void start("job", j, {})}>{jobTitle(j)}</Btn>)}
                     </div>
                   </div>

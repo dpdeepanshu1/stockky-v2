@@ -22,7 +22,7 @@ Then pass X, y into your existing walk-forward + calibration training code.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd

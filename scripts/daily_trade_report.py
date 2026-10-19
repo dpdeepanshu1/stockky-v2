@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 IST = timezone(timedelta(hours=5, minutes=30))
 HOLD_BUCKETS = (("< 15 min", 0, 15), ("15-60 min", 15, 60), ("1-3 h", 60, 180), ("3 h - close", 180, 24 * 60), ("overnight+", 24 * 60, 10 ** 9))

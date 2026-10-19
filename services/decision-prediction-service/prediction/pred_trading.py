@@ -2,7 +2,6 @@
 Trading simulation with costs and signals.
 """
 import numpy as np
-from typing import Optional, Tuple
 
 class TradingSimulator:
     def __init__(self, long_threshold=0.0, short_threshold=0.0,

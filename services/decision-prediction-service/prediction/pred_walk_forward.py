@@ -1,10 +1,9 @@
 """
 Walk‑forward split with purging and embargo (lightweight, no big memory).
 """
-import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List
 
 @dataclass
 class Fold:

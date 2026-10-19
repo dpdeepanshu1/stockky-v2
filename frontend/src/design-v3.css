@@ -101,9 +101,12 @@ button:not(:disabled) { transition: transform 0.12s ease, background-color 0.15s
 button:not(:disabled):active { transform: scale(0.98); }
 button:disabled { cursor: not-allowed; }
 
-.animate-fadeIn { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+/* group 456: fill-mode was `both`, which keeps the final `transform: none` alive on the page wrapper after the animation ends. That makes the wrapper the containing block of every
+   position:fixed popup inside it, so a modal's dim layer covered the whole (tall) page and its window sat in the middle of the page, out of view. `backwards` only applies the
+   start of the animation, so popups are positioned against the screen again. */
+.animate-fadeIn { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
 @keyframes v3Rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.terminal-main > * { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.terminal-main > * { animation: v3Rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
 
 /* ── 3. Cards ────────────────────────────────────────────────────────── */
 .terminal-panel, .bg-graphite, .hot-card, .conviction-card, .cc-card, .topo-shell,
@@ -766,4 +769,17 @@ html.light .border-white\/60 { border-color: rgb(var(--muted-rgb)); }
   border: 1px solid rgb(var(--border-strong-rgb));
   border-radius: 14px;
   box-shadow: 0 16px 44px rgb(var(--shadow-rgb) / 0.35);
+}
+
+
+/* group 456: Real Money Calibration - the Run / Watch / Cancel buttons of a job or plan line form one aligned column */
+.run-actions { display: flex; flex-direction: column; align-items: stretch; gap: 0.25rem; flex-shrink: 0; width: 6.75rem; }
+.run-actions.run-actions-wide { width: 10.5rem; }
+.run-actions > button { width: 100%; justify-content: center; text-align: center; white-space: normal; line-height: 1.2; }
+.run-actions > button.run-link { width: auto; align-self: center; }
+.run-actions > .run-actions-note { text-align: center; }
+@media (max-width: 520px) {
+  .run-actions, .run-actions.run-actions-wide { width: 100%; flex-direction: row; flex-wrap: wrap; }
+  .run-actions > button { width: auto; flex: 1 1 6rem; }
+  .run-actions > .run-actions-note { flex: 1 1 100%; }
 }

@@ -5,7 +5,7 @@ Supports Log Return, Percentage Return, and Directional Classification.
 """
 import numpy as np
 import pandas as pd
-from typing import Optional, Tuple
+from typing import Optional
 
 class TargetGenerator:
     def __init__(

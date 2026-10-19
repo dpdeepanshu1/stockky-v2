@@ -31,7 +31,7 @@ from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 
 from models import Base, ensure_schema, ensure_structure_table, PredictionSnapshot, PredictionOutcome, TrainingRun, PaperTrade, StructureObservation
-from pit_validation import validate_prediction_snapshot, validate_outcome_vs_prediction
+from pit_validation import validate_prediction_snapshot
 import trades as trades_module
 from evaluate import (
     evaluate_t1 as _evaluate_t1_prediction,

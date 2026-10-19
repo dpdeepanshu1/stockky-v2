@@ -4,7 +4,7 @@ Short (3–21d) / Mid (1–6m) / Long (6–24m) with different weights.
 Free-tier only — pure Python, no paid APIs.
 """
 from __future__ import annotations
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional
 
 # Decision labels (unchanged)
 BUY_NOW = "BUY NOW"

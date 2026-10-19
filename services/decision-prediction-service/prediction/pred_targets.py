@@ -3,7 +3,6 @@ Lightweight target generation for financial time series.
 """
 import numpy as np
 import pandas as pd
-from typing import Optional, Union, Tuple
 
 class TargetGenerator:
     def __init__(self, target_type='Log_Return', forecast_horizon=5,

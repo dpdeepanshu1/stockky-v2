@@ -1,8 +1,6 @@
 """
 Feature engineering for stock data.
 """
-import pandas as pd
-import numpy as np
 
 FEATURE_COLUMNS = [
     'sma_10', 'sma_30', 'ema_10', 'rsi', 'volatility', 'volume_sma'

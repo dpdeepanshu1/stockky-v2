@@ -16,7 +16,6 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import httpx
 

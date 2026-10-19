@@ -52,6 +52,7 @@ except Exception as _rl_e:
 import feedparser
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect, Query, Depends
 from admin_guard import require_admin as _require_admin  # group 453
+import cors_policy as _cors_policy  # group 454
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -337,11 +338,15 @@ async def _graceful_shutdown():
     logger.info("Graceful shutdown complete")
 
 
-# --- CORS ---
+# --- CORS (group 454: origin allowlist via GATEWAY_CORS_ORIGINS; unset = wildcard as before; see cors_policy.py) ---
+_CORS_ORIGINS = _cors_policy.configured_origins()
+if _cors_policy.is_wildcard(_CORS_ORIGINS):
+    _CORS_ORIGINS = ["*"]
+    logger.warning("CORS: GATEWAY_CORS_ORIGINS is not set - any website origin may call the gateway from a browser. Set it to your site's origin(s).")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=False,   # the app authenticates with a Bearer header, never cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -349,9 +354,10 @@ app.add_middleware(
 @app.middleware("http")
 async def add_cors_header(request, call_next):
     response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
+    # wildcard mode only: stamp the "*" headers (they also cover responses the CORS middleware does not see). With an allowlist the
+    # CORSMiddleware above sets the headers for the allowed origins and this must NOT widen them.
+    if _cors_policy.is_wildcard():
+        response.headers.update(_cors_policy.WILDCARD_HEADERS)
     return response
 
 @app.exception_handler(Exception)
@@ -360,11 +366,7 @@ async def universal_exception_handler(request, exc):
     return JSONResponse(
         status_code=500,
         content={"detail": f"Internal server error: {str(exc)}"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*"
-        }
+        headers=_cors_policy.response_headers(request),
     )
 
 # ── Redis (OFF by default — USE_REDIS=1 to enable Upstash) ─────────────────────
@@ -10914,6 +10916,12 @@ async def websocket_endpoint(websocket: WebSocket):
       {"channel":"jobs","type":"jobs_snapshot","data_feed":{...},"refill_additional":{...},
        "surprise_premarket":{...},"rate_limits":{"yfinance":{...},"analysis":{...}}}
     """
+    # group 454: CORS does not cover websockets, so an allowlist is enforced here (a browser always sends Origin; non-browser clients may omit it)
+    _ws_hdrs = getattr(websocket, "headers", None)
+    _ws_origin = _ws_hdrs.get("origin") if _ws_hdrs is not None else None
+    if _ws_origin and not _cors_policy.origin_allowed(_ws_origin):
+        await websocket.close(code=1008)
+        return
     await ws_manager.connect(websocket)
     _ensure_quote_loop()
     _ensure_jobs_loop()

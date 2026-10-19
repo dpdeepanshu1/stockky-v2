@@ -20,6 +20,7 @@ import IpoTracker from "./components/IpoTracker";
 import RealAutoTrade from "./components/RealAutoTrade";
 import PositionStocksTab from "./components/PositionStocksTab";
 import CalibrationControlTab from "./components/CalibrationControlTab";
+import ErrorBoundary from "./components/ui/ErrorBoundary";
 import DataFeed from "./components/DataFeed";
 import DataHealthAudit from "./components/DataHealthAudit";
 import Trades from "./components/Trades";
@@ -1325,7 +1326,7 @@ export default function App() {
         ) : tab === "calibration" ? (
           <div className="page-terminal">
             <PageHeader title="Real Money Calibration" desc="Switch the real-money rules ON / OFF, see daily trades with entry and exit time, and run every test, calibration and training job from here." />
-            <CalibrationControlTab />
+            <ErrorBoundary label="Real Money Calibration"><CalibrationControlTab /></ErrorBoundary>
           </div>
         ) : tab === "settings" ? (
           <SettingsPage

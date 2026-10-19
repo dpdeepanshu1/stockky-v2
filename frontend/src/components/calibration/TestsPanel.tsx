@@ -16,14 +16,17 @@ export default function TestsPanel({ svc }: { svc: Svc }) {
   const groups = useMemo(() => {
     if (!catalog) return [];
     const ql = q.trim().toLowerCase();
-    return catalog.groups.map((g) => ({
+    return (catalog.groups || []).map((g) => ({
       ...g,
-      jobs: catalog.jobs.filter((j) => j.group === g.id && (all || jobAppliesTo(j.id, svc)) && (!ql || `${j.title} ${j.what} ${j.id}`.toLowerCase().includes(ql))),
+      jobs: (catalog.jobs || []).filter((j) => j.group === g.id && (all || jobAppliesTo(j.id, svc)) && (!ql || `${j.title} ${j.what} ${j.id}`.toLowerCase().includes(ql))),
     })).filter((g) => g.jobs.length);
   }, [catalog, q, all, svc]);
 
   if (!catalog) return <div className="text-mist">Loading jobs…</div>;
-  const dp = catalog.data_present;
+  const dp = { ...(catalog.data_present || {}) } as Partial<NonNullable<typeof catalog.data_present>>;
+  dp.history_folders = dp.history_folders || [];
+  dp.exports = dp.exports || [];
+  dp.bar_files = dp.bar_files || 0;
   const showSummary = async () => {
     try { setSum(await runnerApi.calibrationSummary()); setErr(null); } catch (e: any) { setSum(null); setErr(e?.message || String(e)); }
   };

@@ -13,16 +13,16 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
   const [sched, setSched] = useState<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
-  const loadSched = useCallback(async () => { try { setSched(await runnerApi.schedule()); } catch (e: any) { setMsg(e?.message || String(e)); } }, []);
+  const loadSched = useCallback(async () => { try { const sc = await runnerApi.schedule(); if (!sc || !Array.isArray(sc.entries)) throw new Error("unexpected timetable answer"); setSched(sc); } catch (e: any) { setMsg(e?.message || String(e)); } }, []);
   useEffect(() => { void loadSched(); }, [loadSched]);
 
   const saveSched = async (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => {
-    try { setSched(await runnerApi.putSchedule(body)); setMsg(null); } catch (e: any) { setMsg(e?.message || String(e)); }
+    try { const sc = await runnerApi.putSchedule(body); if (sc && Array.isArray(sc.entries)) setSched(sc); setMsg(null); } catch (e: any) { setMsg(e?.message || String(e)); }
   };
 
   if (!catalog) return <div className="text-mist">Loading the plan…</div>;
-  const jobTitle = (id: string) => catalog.jobs.find((j) => j.id === id)?.title || id;
-  const packOf = (id: string) => catalog.packs.find((p) => p.id === id);
+  const jobTitle = (id: string) => (catalog.jobs || []).find((j) => j.id === id)?.title || id;
+  const packOf = (id: string) => (catalog.packs || []).find((p) => p.id === id);
 
   return (
     <div className="space-y-3" data-testid={`plan-${svc}`}>
@@ -42,7 +42,7 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
             {sec.rows.map((row, i) => {
               const jobs = (row.jobs || []).filter((j) => jobAppliesTo(j, svc));
               const pack = row.pack ? packOf(row.pack) : undefined;
-              const ps = pack ? summary?.packs[pack.id] : null;
+              const ps = pack ? summary?.packs?.[pack.id] : null;
               return (
                 <li key={i} className="rounded-xl border border-slate p-2">
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -50,7 +50,7 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
                       <div className="font-bold">{row.when}</div>
                       <div>{row.what}</div>
                       {row.note && <div className="text-[11px] text-mist">{row.note}</div>}
-                      {pack && <div className="mt-1 text-[11px] text-mist">Pack: {pack.jobs.map(([id]) => jobTitle(id)).join(" → ")}</div>}
+                      {pack && <div className="mt-1 text-[11px] text-mist">Pack: {(pack.jobs || []).map(([id]) => jobTitle(id)).join(" → ")}</div>}
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
                       {pack && <><Btn primary small onClick={() => void start("pack", pack.id)}>Run pack</Btn><span className="text-[10px] text-mist"><StatusPill status={ps?.status || "never"} /> {ps ? relTime(ps.finished_at) : ""}</span></>}
@@ -77,7 +77,7 @@ export default function RunPlanPanel({ svc }: { svc: Svc }) {
               {sched.entries.map((e) => (
                 <tr key={e.id} className="border-t border-slate">
                   <td className="py-1"><input type="checkbox" aria-label={`${e.id} enabled`} checked={e.enabled} onChange={(ev) => void saveSched({ entries: sched.entries.map((x) => (x.id === e.id ? { ...x, enabled: ev.target.checked } : x)) })} /></td>
-                  <td>{packOf(e.pack)?.title || e.pack}{e.first_week_only ? " (first week)" : ""}</td><td>{e.days.map((d) => DAYS[d]).join(" ")}</td><td>{e.time}</td><td className="text-mist">{sched.last_fired[e.id] || "-"}</td>
+                  <td>{packOf(e.pack)?.title || e.pack}{e.first_week_only ? " (first week)" : ""}</td><td>{(e.days || []).map((d) => DAYS[d]).join(" ")}</td><td>{e.time}</td><td className="text-mist">{sched.last_fired?.[e.id] || "-"}</td>
                 </tr>
               ))}
             </tbody></table>

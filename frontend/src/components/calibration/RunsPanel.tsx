@@ -11,9 +11,9 @@ export function RunsPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const load = useCallback(async () => {
-    try { setRuns((await runnerApi.runs(80)).runs); setErr(null); } catch (e: any) { setErr(e?.message || String(e)); }
+    try { setRuns((await runnerApi.runs(80)).runs || []); setErr(null); } catch (e: any) { setErr(e?.message || String(e)); }
   }, []);
-  useEffect(() => { void load(); }, [load, summary?.state.current?.id, summary?.state.queued.length]);
+  useEffect(() => { void load(); }, [load, summary?.state?.current?.id, summary?.state?.queued?.length]);
 
   const shown = (runs || []).filter((r) => !filter || r.status === filter);
   return (
@@ -30,8 +30,8 @@ export function RunsPanel() {
             <div className="min-w-0 flex-1">
               <button type="button" className="text-left font-bold underline-offset-2 hover:underline" onClick={() => openRun(r.id)}>{r.title}</button>{" "}
               <StatusPill status={r.status} />
-              <div className="text-[10px] text-mist">{r.started_at ? r.started_at.slice(0, 16).replace("T", " ") : "queued"} IST · {r.trigger}{r.by ? ` · ${r.by}` : ""}{r.finished_at && r.started_at ? ` · ${fmtDur((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000)}` : ""}{catalog && r.kind === "pack" ? ` · ${r.jobs.length} jobs` : ""}</div>
-              {r.headline[0] && <div className="truncate text-[11px] text-mist" title={r.headline.join("\n")}>→ {r.headline[0]}</div>}
+              <div className="text-[10px] text-mist">{r.started_at ? r.started_at.slice(0, 16).replace("T", " ") : "queued"} IST · {r.trigger}{r.by ? ` · ${r.by}` : ""}{r.finished_at && r.started_at ? ` · ${fmtDur((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000)}` : ""}{catalog && r.kind === "pack" ? ` · ${(r.jobs || []).length} jobs` : ""}</div>
+              {r.headline?.[0] && <div className="truncate text-[11px] text-mist" title={(r.headline || []).join("\n")}>→ {r.headline[0]}</div>}
               {r.status === "blocked" && <div className="text-[11px] text-signal-hold">{r.note}</div>}
             </div>
             <div className="flex gap-1.5">
@@ -95,7 +95,7 @@ export function RunWindow() {
       </div>
       {err && <Msg kind="err">{err}</Msg>}
       {run?.headline?.length ? <div className="mb-2 rounded-lg border border-slate p-2 text-[11px]"><b>Headline lines</b>{run.headline.map((h, i) => <div key={i}>{h}</div>)}</div> : null}
-      {run && run.jobs.length > 0 && <div className="mb-2 text-[11px] text-mist">{run.jobs.map((j) => `${j.title}: ${j.status}`).join(" · ")}</div>}
+      {run && (run.jobs?.length ?? 0) > 0 && <div className="mb-2 text-[11px] text-mist">{(run.jobs || []).map((j) => `${j.title}: ${j.status}`).join(" · ")}</div>}
       <pre ref={box} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24; }} aria-label="Run output"
         className="h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-slate bg-black/30 p-2 text-[11px]">{text || (active ? "Waiting for output…" : "No output")}</pre>
       {run?.files && run.files.length > 1 && (

@@ -94,6 +94,14 @@ async function call<T>(base: string, token: string | null, path: string, init?: 
     if (resp.status === 401) { /* the page shows the login card again */ }
     throw new ApiError(resp.status, data && data.detail !== undefined ? data.detail : (typeof data === "string" ? data.slice(0, 200) : resp.statusText));
   }
+  // group 443: a 200 that is not JSON (index.html from the SPA fallback when the nginx /calibration/ or /control route is missing) used to be handed
+  // to the page as if it were data and crashed the render (blank page). Say what is wrong instead.
+  if (typeof data === "string" && data.trim()) {
+    const html = /^\s*<(!doctype|html)/i.test(data);
+    throw new ApiError(502, html
+      ? `${base}${path} answered with a web page instead of JSON: the nginx route for it is missing (install deploy/nginx-stockky.conf, or rebuild the frontend container).`
+      : `${base}${path} answered with text, not JSON: ${data.slice(0, 120)}`);
+  }
   return data as T;
 }
 

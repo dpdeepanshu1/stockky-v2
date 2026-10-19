@@ -40,6 +40,7 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
     try {
       const [c, s] = await Promise.all([runnerApi.catalog(), runnerApi.summary()]);
       if (!alive.current) return;
+      if (!c || !Array.isArray(c.jobs) || !s || !s.state) throw new Error("The runner answered with an unexpected shape (catalog / summary). Rebuild calibration-runner-service.");
       setCatalog(c);
       setSummary(s);
       setError(null);
@@ -54,12 +55,12 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
   }, []);
 
   const refreshSummary = useCallback(async () => {
-    try { const s = await runnerApi.summary(); if (alive.current) { setSummary(s); setError(null); } } catch { /* keep the last good one; reload() reports persistent errors */ }
+    try { const s = await runnerApi.summary(); if (alive.current && s && s.state) { setSummary(s); setError(null); } } catch { /* keep the last good one; reload() reports persistent errors */ }
   }, []);
 
   useEffect(() => { alive.current = true; setLoading(true); void reload(); return () => { alive.current = false; }; }, [reload, authKey]);
 
-  const active = !!summary && (summary.state.current != null || summary.state.queued.length > 0);
+  const active = !!summary?.state && (summary.state.current != null || (summary.state.queued?.length ?? 0) > 0);
   useEffect(() => setVisibleInterval(() => void refreshSummary(), active ? 4000 : 20000), [active, refreshSummary]);
 
   const start = useCallback(async (kind: "job" | "pack", target: string, params: Record<string, any> = {}) => {
@@ -108,17 +109,17 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
 
 export function RunnerBanner() {
   const { summary, error, toast } = useRunner();
-  const cur = summary?.state.current;
+  const cur = summary?.state?.current;
   return (
     <div className="space-y-2">
       {error && <Msg kind="err">{error}</Msg>}
       {toast && <Msg kind={toast.kind === "err" ? "err" : toast.kind === "warn" ? "warn" : "ok"}>{toast.text}</Msg>}
-      {summary && (
+      {summary?.state && (
         <div className="flex flex-wrap gap-2 text-[11px] text-mist">
           <span className={`rounded-lg border px-2 py-0.5 ${summary.state.market_open_now ? "border-signal-hold text-signal-hold" : "border-slate"}`}>{summary.state.market_open_now ? "market hours: heavy runs are held back" : "market closed: heavy runs allowed"}</span>
-          <span className="rounded-lg border border-slate px-2 py-0.5">IST {summary.state.now_ist.slice(11, 16)}</span>
+          <span className="rounded-lg border border-slate px-2 py-0.5">IST {String(summary.state.now_ist || "").slice(11, 16)}</span>
           {cur && <span className="rounded-lg border border-signal-buy px-2 py-0.5 text-signal-buy">running: {cur.title}</span>}
-          {summary.state.queued.length > 0 && <span className="rounded-lg border border-slate px-2 py-0.5">{summary.state.queued.length} waiting</span>}
+          {(summary.state.queued?.length ?? 0) > 0 && <span className="rounded-lg border border-slate px-2 py-0.5">{summary.state.queued.length} waiting</span>}
         </div>
       )}
     </div>

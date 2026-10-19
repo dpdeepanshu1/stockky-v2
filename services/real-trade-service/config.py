@@ -910,8 +910,8 @@ def startup_config_errors() -> list[str]:
 #   should stay constant regardless of bull/bear market.
 #
 RISK_MAX_POSITION_CONCENTRATION_PCT = float(((os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT") or "").strip() or "25.0"))
-RISK_MIN_STOCK_PRICE                = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip() or "20.0"))
-CANDIDATE_MIN_STOCK_PRICE           = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "20.0"))
+RISK_MIN_STOCK_PRICE                = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip() or "10.0"))
+CANDIDATE_MIN_STOCK_PRICE           = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "10.0"))
 # How long a symbol that already has a candidate row (this mode, any source
 # track) is skipped from being re-fetched/re-inserted. Without this, a
 # symbol that keeps qualifying every cycle (e.g. still sitting in the
@@ -999,8 +999,8 @@ CANDIDATE_OVEREXTENDED_52W_TOP_PCT  = float(((os.getenv("CANDIDATE_OVEREXTENDED_
 #      sector doesn't have enough same-cycle peers to make "adaptive"
 #      meaningful; the absolute floors still apply either way.
 VOLUME_SHOCK_QUALITY_GATE_ENABLED   = ((os.getenv("VOLUME_SHOCK_QUALITY_GATE_ENABLED") or "").strip() or "true").lower() == "true"
-VOLUME_SHOCK_FUND_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_FUND_ABS_FLOOR") or "").strip() or "35"))
-VOLUME_SHOCK_TECH_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR") or "").strip() or "35"))
+VOLUME_SHOCK_FUND_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_FUND_ABS_FLOOR") or "").strip() or "25"))
+VOLUME_SHOCK_TECH_ABS_FLOOR         = float(((os.getenv("VOLUME_SHOCK_TECH_ABS_FLOOR") or "").strip() or "25"))
 VOLUME_SHOCK_SECTOR_MIN_PEERS       = int(((os.getenv("VOLUME_SHOCK_SECTOR_MIN_PEERS") or "").strip() or "3"))
 VOLUME_SHOCK_SECTOR_PCTL_FLOOR      = float(((os.getenv("VOLUME_SHOCK_SECTOR_PCTL_FLOOR") or "").strip() or "30"))
 # 2026-09-18 audit fix #3: the sector-relative check above compares a
@@ -1052,7 +1052,7 @@ MARKET_CAP_SMALL_CR = float(((os.getenv("MARKET_CAP_SMALL_CR") or "").strip() or
 # in risk_engine/engine.py, not a tactical call — sub-₹500cr names have the
 # thinnest institutional coverage and are most exposed to pump-and-dump/
 # operator activity on NSE.
-MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR") or "").strip() or "500"))
+MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR") or "").strip() or "200"))
 # Static fallback (used until adaptive_market_params has 30 distinct days
 # of self-recorded history, or if it errors) and base value the regime tilt
 # is applied around.
@@ -1083,7 +1083,7 @@ MIN_MARKET_CAP_CR_ABSOLUTE_FLOOR = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_C
 # file's own Aug-28 header already documented (Midcap100 +12.88% 1Y vs
 # Nifty -1.08% at the time) once the adaptive tilt below loosens it back
 # down in a stronger reading.
-MIN_MARKET_CAP_CR_STATIC = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR") or "").strip() or "1500"))
+MIN_MARKET_CAP_CR_STATIC = float(((os.getenv("CANDIDATE_MIN_MARKET_CAP_CR") or "").strip() or "600"))
 
 # ── Adaptive threshold engine configuration ───────────────────────────────────
 # Controls how adaptive_thresholds.py computes the live regime gate.

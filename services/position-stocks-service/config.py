@@ -380,9 +380,9 @@ EVENT_URL = _env_url("EVENT_URL", f"{_ANALYSIS_INTELLIGENCE_URL}/event")
 # Lenient floors — same philosophy as real-trade-service's VOLUME_SHOCK_*
 # quality gate: only reject when data IS available and clearly below floor;
 # missing/timed-out data never rejects on its own.
-MIN_FUNDAMENTAL_SCORE = _get_float("MIN_FUNDAMENTAL_SCORE", 40.0)
-MIN_TECHNICAL_SCORE = _get_float("MIN_TECHNICAL_SCORE", 40.0)
-MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor — excludes micro-caps
+MIN_FUNDAMENTAL_SCORE = _get_float("MIN_FUNDAMENTAL_SCORE", 25.0)   # 2026-10-19: 40 -> 25 (intraday momentum; liquidity gates are the genuine-stock guard). Overnight carry keeps its own 60.
+MIN_TECHNICAL_SCORE = _get_float("MIN_TECHNICAL_SCORE", 30.0)   # 2026-10-19: 40 -> 30 (daily indicators lag a same-day move). Overnight carry keeps its own 60.
+MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 200.0)  # 2026-10-19: 500 -> 200 crore; the turnover floors (ENTRY_MIN_*_TURNOVER_CR) keep thin stocks out. Overnight carry keeps 2000.
 
 # ── Minimum stock price gate (2026-09-18, session67) ────────────────────────
 # Penny stocks (₹0.19, ₹0.50, etc.) look great on a percentage-change scan
@@ -392,7 +392,7 @@ MIN_MARKET_CAP_CR = _get_float("MIN_MARKET_CAP_CR", 500.0)  # ₹500 crore floor
 # restriction). Checked in entry.py BEFORE quality gate — no network call
 # needed, just a price comparison. Default ₹20 keeps all real intraday
 # names; override via env to raise if you want only mid/large-cap territory.
-MIN_STOCK_PRICE = _get_float("MIN_STOCK_PRICE", 20.0)
+MIN_STOCK_PRICE = _get_float("MIN_STOCK_PRICE", 10.0)   # 2026-10-19: 20 -> 10
 
 # ── EOD overnight carry (2026-09-18, session67) ──────────────────────────────
 # By default EOD squareoff closes ALL positions at 15:00 unconditionally.
@@ -743,6 +743,22 @@ ADAPTIVE_HISTORY_MISS_CACHE_S = _get_float("ADAPTIVE_HISTORY_MISS_CACHE_S", 120.
 SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 2.5)
 SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 1.5)
 SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 0.8)
+SCALP_TARGET_CAP_MIN_STOP_ATR_MULT = _get_float("SCALP_TARGET_CAP_MIN_STOP_ATR_MULT", 1.0)   # 2026-10-19: stop floor after a target cap = this x the symbol ATR proxy %; 0 = off
+
+# ── Pullback re-arm entries (2026-10-19, orders/pullback_rearm.py) ────────────────────────────────────────────────
+# A stock skipped for being at / extended above its high is re-checked on a pullback + bounce instead of being forgotten.
+PULLBACK_REARM_ENABLED = _get_bool("PULLBACK_REARM_ENABLED", True)
+REARM_MIN_DAY_PCT = _get_float("REARM_MIN_DAY_PCT", 1.5)                 # arm only a stock already up this much on the scan window
+REARM_MIN_PULLBACK_PCT = _get_float("REARM_MIN_PULLBACK_PCT", 0.8)       # peak -> low, at least this deep ...
+REARM_MAX_PULLBACK_PCT = _get_float("REARM_MAX_PULLBACK_PCT", 3.5)       # ... and no deeper (deeper = the move failed; dropped)
+REARM_BOUNCE_PCT = _get_float("REARM_BOUNCE_PCT", 0.3)                   # price must be this far off the low
+REARM_HOLD_S = _get_float("REARM_HOLD_S", 30.0)                          # the low must be at least this old (no falling knife)
+REARM_MIN_BELOW_PEAK_PCT = _get_float("REARM_MIN_BELOW_PEAK_PCT", 0.3)  # not back at the high (that is chasing again)
+REARM_MAX_AGE_MIN = _get_float("REARM_MAX_AGE_MIN", 90.0)                # an armed setup expires after this
+REARM_MAX_ATTEMPTS = _get_int("REARM_MAX_ATTEMPTS", 2)                   # per symbol per day
+REARM_MAX_ARMED = _get_int("REARM_MAX_ARMED", 25)
+REARM_STOP_BUFFER_PCT = _get_float("REARM_STOP_BUFFER_PCT", 0.15)        # stop sits this far under the pullback low
+REARM_MIN_STOP_PCT = _get_float("REARM_MIN_STOP_PCT", 0.7)               # ... but never closer than this to the entry
 # Share rounding (orders/sizing.py): floor() lost up to a share (CLEANMAX: budget ~1.9 shares -> 1). Round up when the extra share costs at most
 # SIZING_MAX_OVERSHOOT_PCT over the budget; when ONE share costs more than SIZING_ONE_SHARE_MAX_MULT x the budget, skip instead of forcing 1
 # share. SIZING_ROUNDING_ENABLED=0 = old behaviour.

@@ -161,7 +161,7 @@ from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, trailing
-from orders import adaptive
+from orders import adaptive, pullback_rearm
 from orders import calendar_gate, charges_ledger, excursion, review_stats, trade_stats, window_health
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
@@ -623,6 +623,56 @@ def _attempt_entry_with_skip_reason(db, candidate, quality=None):
     return res, _reason
 
 
+def _attempt_rearm_entry(db, candidate, quality, hit):
+    """2026-10-19: attempt_entry for a pullback re-arm trigger. Same thread-local skip handling as _attempt_entry_with_skip_reason, but a
+    skip here never starts the price-gate cooldown (the symbol was already armed because of one)."""
+    reset_last_skip()
+    res = attempt_entry(db, candidate, quality=quality, rearm=hit)
+    return res, (None if res else last_skip_reason())
+
+
+async def _pullback_rearm_step(db, trigger, gate, summary, _stage):
+    """2026-10-19: look at the armed pullback setups (orders/pullback_rearm.py) BEFORE the screener scan, because the screener drops a stock once
+    its window return fades - exactly what a pullback does. AUTO cycles only, behind the same switches as any automatic entry (auto-pilot,
+    free slot, loss brake, market filter, circuit breaker) and the same quality gate + attempt_entry gates. Returns the entered symbol or None.
+    Never raises: any failure here leaves the normal scan untouched."""
+    try:
+        if trigger != "AUTO" or not pullback_rearm.enabled() or not gate.auto_pilot_enabled:
+            return None
+        _t = time.perf_counter()
+        hits = pullback_rearm.scan()
+        if not hits:
+            return None
+        if _open_slots_full(db) is not None or circuit_breaker.is_open():
+            return None
+        if await asyncio.to_thread(trade_gates.loss_brake_reject, db) or await trade_gates.market_gate_reject():
+            return None
+        from screening.engine import Candidate as _Cand
+        for hit in hits:
+            pullback_rearm.consume(hit["symbol"])
+            cand = _Cand(symbol=hit["symbol"], window_minutes=int(hit["window_minutes"]), pct_change=float(hit["pct_change"]),
+                         current_ltp=float(hit["ltp"]), tick_activity=0)
+            _cache = quality_gate.get_cache_batch(db, [cand.symbol])
+            quality = await quality_gate.check(cand.symbol, cached=_cache.get(cand.symbol))
+            ok, reason = quality.passes()
+            if not ok:
+                log_quality_reject(db, cand, quality, reason)
+                logger.info("position-stocks: pullback re-arm %s refused by the quality gate - %s", cand.symbol, reason)
+                continue
+            result, skip = await asyncio.to_thread(_attempt_rearm_entry, db, cand, quality, hit)
+            if result:
+                circuit_breaker.record_success()
+                summary["entered_symbol"] = cand.symbol
+                summary["pullback_rearm"] = True
+                _stage("pullback_rearm", "Pullback Re-arm Entry", _t, symbol=cand.symbol, detail=f"ENTERED {cand.symbol} - {hit['why']}")
+                return cand.symbol
+            logger.info("position-stocks: pullback re-arm %s did not clear entry (%s)", cand.symbol, str(skip)[:120])
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position-stocks: pullback re-arm step failed (normal scan continues): %s", e, exc_info=True)
+        return None
+
+
 _last_shortlist: dict = {"at": None, "rows": [], "evaluated": 0, "passed": 0, "entered_symbol": None}   # group332/337: latest best-picks shortlist, for GET /shortlist
 
 
@@ -952,6 +1002,9 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # stuck in EXIT_LEGS_REJECTED is still real exposure, so it still counts
     # as "already have a position here" for this purpose.
     under_preferred = len(open_syms) < config.MIN_PREFERRED_SCALP_POSITIONS
+
+    if await _pullback_rearm_step(db, trigger, gate, summary, _stage):
+        return _finalize()
 
     _t = time.perf_counter()
     candidates = scan(open_symbols=open_syms, under_preferred=under_preferred)
@@ -2444,6 +2497,12 @@ def _board_open_symbols() -> list:
         return md_poller.open_position_symbols()
     except Exception:  # noqa: BLE001
         return []
+
+
+@app.get("/pullback-rearm")
+def pullback_rearm_route():
+    """2026-10-19: symbols armed for a pullback re-arm entry (what each is waiting on) and today's attempt counts. Read-only."""
+    return pullback_rearm.status()
 
 
 @app.get("/shortlist")

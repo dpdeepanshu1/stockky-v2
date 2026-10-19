@@ -327,7 +327,7 @@ def _refresh_cycle_market_score(db: Session) -> None:
 
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
-MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "20.0"))
+MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "10.0"))
 
 # Volume health: recent 5-day avg must be ≥ this fraction of 20-day avg.
 # Low-volume moves in choppy markets are fake — they reverse fast.
@@ -1517,6 +1517,15 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
     if isinstance(quote, Exception):
         quote = None
 
+    # Fix (2026-10-19): the "1d" return above is first-open -> last-close of the 60m bars, which ignores the
+    # overnight gap (PNB read +1.3% at 11:00 while +5.0% vs previous close; the weighted score then missed 4.0).
+    # When the live quote carries a usable previous close, "today's return" is price / previous_close.
+    if isinstance(quote, dict):
+        _live_1d = _quote_return_pct(quote)
+        _src = str(quote.get("source") or "").lower()
+        if _live_1d is not None and not (_src.startswith("last_close") or "bhavcopy" in _src):
+            tf_returns["1d"] = round(_live_1d, 2)
+
     current_price = float((quote or {}).get("price") or (quote or {}).get("cmp") or 0)
 
     # Data-starved marker: quote AND every single timeframe fetch came back
@@ -1561,7 +1570,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         return {
             "reject_reason": (
                 f"Price ₹{current_price:.2f} is below ₹{MIN_STOCK_PRICE} minimum. "
-                "Sub-₹20 stocks in India have operator activity risk, "
+                f"Sub-₹{MIN_STOCK_PRICE:g} stocks in India have operator activity risk, "
                 "very wide bid-ask spreads, and illiquid exits. Skip."
             ),
             "tf_returns": tf_returns, "bullish_count": 0, "atr_pct": None,
@@ -1888,6 +1897,47 @@ def _quote_return_pct(quote: dict) -> Optional[float]:
     return (px / prev - 1) * 100
 
 
+def _with_live_today_candle(candles: list, quote: Optional[dict], now_ist: Optional[datetime] = None) -> list:
+    """Fix (2026-10-19): the Dhan daily history has no candle for the CURRENT session, so candles[-1] was the
+    previous session. _volume_shock_analysis then read Friday's return / volume as "today's" (PNB 1.1%, PLATIND
+    0.5% and JAICORPLTD -3.5% logged all morning while the stocks were up +5% to +10%).
+
+    When the last candle is older than today, the market is live and the quote is demonstrably from the session
+    after that candle (its previous_close matches the last candle's close, source is not a stale last-close row),
+    append a synthetic candle built from the live quote (price + cumulative volume). Everything downstream
+    (prior close = candles[-2], 20d volume average, time-of-day volume fraction, pre-shock ATR on candles[:-1])
+    then works unchanged. Returns the original list when any condition is not met."""
+    try:
+        if not candles or not isinstance(quote, dict):
+            return candles
+        from zoneinfo import ZoneInfo
+        now = now_ist or datetime.now(ZoneInfo("Asia/Kolkata"))
+        today = now.strftime("%Y-%m-%d")
+        last = candles[-1] or {}
+        if str(last.get("date") or "")[:10] >= today:
+            return candles                      # history already has today's candle
+        if now.weekday() >= 5 or (now.hour, now.minute) < (9, 15):
+            return candles                      # weekend / pre-open: no live session yet
+        src = str(quote.get("source") or "").lower()
+        if src.startswith("last_close") or "bhavcopy" in src:
+            return candles
+        px = float(quote.get("price") or quote.get("cmp") or 0)
+        prev = float(quote.get("previous_close") or 0)
+        last_close = float(last.get("close") or 0)
+        vol = float(quote.get("volume") or 0)
+        if px <= 0 or prev <= 0 or last_close <= 0 or vol <= 0:
+            return candles
+        if abs(prev / last_close - 1) > 0.005:
+            return candles                      # quote is not from the session right after the last candle
+        hi = float(quote.get("day_high") or px)
+        lo = float(quote.get("day_low") or px)
+        synth = {"date": f"{today} 00:00", "open": prev, "high": max(hi, px), "low": min(lo, px),
+                 "close": px, "volume": vol, "synthetic_from_quote": True}
+        return list(candles) + [synth]
+    except Exception:  # noqa: BLE001
+        return candles
+
+
 async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: Optional[dict] = None) -> dict:
     """
     Option A (Issue 1 fix) — momentum-breakout quality gate.
@@ -1925,7 +1975,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
             return {
                 "reject_reason": (
                     f"Price ₹{_q_px:.2f} is below ₹{MIN_STOCK_PRICE} minimum. "
-                    "Sub-₹20 stocks in India have operator activity risk, "
+                    f"Sub-₹{MIN_STOCK_PRICE:g} stocks in India have operator activity risk, "
                     "very wide bid-ask spreads, and illiquid exits. Skip."
                 ),
                 "atr_pct": None,
@@ -1964,6 +2014,8 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
     if _HIST_NONE_UNTIL.pop(symbol, None) is not None:
         _persist_hist_state()
 
+    candles = _with_live_today_candle(candles, quote)
+
     current_price = float(quote.get("price") or quote.get("cmp") or 0)
 
     # ── quote object came back but with no usable price (edge case: quote
@@ -1978,7 +2030,7 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
         return {
             "reject_reason": (
                 f"Price ₹{current_price:.2f} is below ₹{MIN_STOCK_PRICE} minimum. "
-                "Sub-₹20 stocks in India have operator activity risk, "
+                f"Sub-₹{MIN_STOCK_PRICE:g} stocks in India have operator activity risk, "
                 "very wide bid-ask spreads, and illiquid exits. Skip."
             ),
             "atr_pct": None,

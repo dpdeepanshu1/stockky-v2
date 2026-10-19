@@ -295,10 +295,14 @@ def _conviction_adjusted_risk_pct(base_risk_pct: float, conviction_score: Option
     return round(base_risk_pct * (1.0 + adjust), 4)
 
 
+DRIFT_VWAP_ANCHOR = ((os.getenv("ENTRY_DRIFT_VWAP_ANCHOR") or "").strip() or "1") not in ("0", "false", "False")
+
+
 def _entry_drift_ok(
     current_price: float,
     signal_price: Optional[float],
     atr_pct: Optional[float],
+    vwap: Optional[float] = None,
 ) -> tuple[bool, str, float, float]:
     """Returns (ok, reason, drift_pct, max_drift_pct). drift_pct/max_drift_pct
     are exposed (2026-09-08 fix, part of the cycle-level quality filter — see
@@ -311,6 +315,20 @@ def _entry_drift_ok(
     drift_pct     = (current_price - signal_price) / signal_price * 100
     one_atr_pct   = atr_pct if (atr_pct and atr_pct > 0) else 3.0
     max_drift_pct = one_atr_pct * MAX_ENTRY_DRIFT_ATR
+    # 2026-10-19: a signal priced BEFORE a gap/breakout (JUSTDIAL signal 711 = previous close, trading 780) makes
+    # every later cycle read "ran +9.6% - chasing" for the whole day. When the move is past the limit measured from
+    # the signal, re-measure from the day's VWAP (where today's average buyer is) - a stock still within the same
+    # ATR-based limit of VWAP is not being chased. Only a HIGHER anchor is used, VWAP must be sane (within 15% of the
+    # price) and price must not be under it, so a genuinely extended stock is still refused.
+    if DRIFT_VWAP_ANCHOR and drift_pct > max_drift_pct:
+        try:
+            _v = float(vwap) if vwap is not None else 0.0
+        except (TypeError, ValueError):
+            _v = 0.0
+        if _v > signal_price and _v <= current_price and (current_price - _v) / _v <= 0.15:
+            _vd = (current_price - _v) / _v * 100
+            if _vd <= max_drift_pct:
+                return True, "", _vd, max_drift_pct
     if drift_pct > max_drift_pct:
         return False, (
             f"Price ₹{current_price:.2f} ran +{drift_pct:.1f}% above signal "
@@ -841,7 +859,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             continue
 
         # ── Gate 4: entry drift ───────────────────────────────────────────────
-        drift_ok, drift_reason, drift_pct, max_drift_pct = _entry_drift_ok(tick.price, cand.signal_price, atr_pct)
+        drift_ok, drift_reason, drift_pct, max_drift_pct = _entry_drift_ok(tick.price, cand.signal_price, atr_pct, getattr(tick, "vwap", None))
         if not drift_ok:
             _wait_with_preview(drift_reason)
             db.add(decision)

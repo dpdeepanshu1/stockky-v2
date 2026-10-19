@@ -1,0 +1,616 @@
+"""Run engine of calibration-runner-service (group 442): one queue, one job at a time, every run leaves a txt + artifacts under DATA_DIR/runs/<id>/.
+
+Status of a run: queued | running | success | attention | failed | timeout | cancelled | blocked
+  attention = the script ran and its own verdict says look at it (FAIL / NO_GO / NOT_ENOUGH_DATA); failed = it did not run properly.
+Nothing here is a shell; output is redacted of the tokens; output.txt is capped.
+"""
+from __future__ import annotations
+
+import glob as _glob
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+
+IST = timezone(timedelta(hours=5, minutes=30))
+FINAL = ("success", "attention", "failed", "timeout", "cancelled", "blocked")
+OUT_FLAGS = {"--out", "--csv", "--json", "--save", "--manifest", "--out-dir", "--header"}
+HEADLINE_RE = re.compile(r"(\bverdict\b|\bPASS\b|\bFAIL\b|\bNO_GO\b|\bGO\b|NOT_ENOUGH_DATA|NO_INPUT|\bWARN\b|\bSET [A-Z_]+=|KEEP THE CURRENT|\bCOMPLETE\b|\bINCOMPLETE\b|\bparity_ok\b)", re.I)
+_BEARER = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.=]{12,}")
+
+
+def ist_now() -> datetime:
+    return datetime.now(IST)
+
+
+def market_open_now(now: Optional[datetime] = None) -> bool:
+    """Mon-Fri 09:00-15:45 IST. Exchange holidays are not known here: on a holiday the guard is just stricter than needed."""
+    n = (now or ist_now()).astimezone(IST)
+    return n.weekday() < 5 and (9 * 60 <= n.hour * 60 + n.minute <= 15 * 60 + 45)
+
+
+def _iso(t: Optional[float]) -> Optional[str]:
+    return None if t is None else datetime.fromtimestamp(t, IST).isoformat(timespec="seconds")
+
+
+class Redactor:
+    def __init__(self, secrets_fn: Callable[[], List[str]]):
+        self.secrets_fn = secrets_fn
+
+    def __call__(self, text: str) -> str:
+        for s in self.secrets_fn():
+            if s and len(s) >= 8:
+                text = text.replace(s, "***")
+        return _BEARER.sub(r"\1***", text)
+
+
+class Run:
+    def __init__(self, rid: str, kind: str, target: str, title: str, params: Dict[str, Any], by: str, trigger: str):
+        self.d: Dict[str, Any] = {"id": rid, "kind": kind, "target": target, "title": title, "params": params, "by": by, "trigger": trigger, "status": "queued",
+                                  "queued_at": time.time(), "started_at": None, "finished_at": None, "steps": [], "jobs": [], "headline": [], "note": "", "exit_summary": ""}
+
+    def public(self) -> Dict[str, Any]:
+        d = dict(self.d)
+        for k in ("queued_at", "started_at", "finished_at"):
+            d[k] = _iso(d[k])
+        return d
+
+
+class Runner:
+    def __init__(self, data_dir: str, scripts_dir: str, ctx_base: Dict[str, Any], jobs: Dict[str, Dict[str, Any]], packs: Dict[str, Dict[str, Any]],
+                 token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
+                 keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now):
+        self.data = data_dir
+        self.runs_dir = os.path.join(data_dir, "runs")
+        self.ctx_base = dict(ctx_base)
+        self.jobs, self.packs = jobs, packs
+        self.token_fn = token_fn
+        self.redact = Redactor(lambda: [token_fn()] + (extra_secrets() if extra_secrets else []))
+        self.max_output, self.nice = max_output, nice
+        self.keep_runs, self.keep_days = keep_runs, keep_days
+        self.guard_market = guard_market
+        self.now_fn = now_fn
+        os.makedirs(self.runs_dir, exist_ok=True)
+        for sub in ("calibration_out", "exports"):
+            os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
+        self.lock = threading.RLock()
+        self.queue: Deque[Run] = deque()
+        self.current: Optional[Run] = None
+        self.cancel_flag = threading.Event()
+        self.proc: Optional[subprocess.Popen] = None
+        self.wake = threading.Event()
+        self.stop = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.index: Dict[str, Run] = {}
+        self._load_history()
+
+    # ---------------------------------------------------------------- history on disk
+    def _run_dir(self, rid: str) -> str:
+        return os.path.join(self.runs_dir, rid)
+
+    def _load_history(self) -> None:
+        for name in sorted(os.listdir(self.runs_dir)):
+            p = os.path.join(self.runs_dir, name, "meta.json")
+            try:
+                d = json.load(open(p, encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            r = Run(d["id"], d["kind"], d["target"], d.get("title", ""), d.get("params", {}), d.get("by", ""), d.get("trigger", ""))
+            r.d.update(d)
+            if r.d["status"] in ("queued", "running"):       # the container restarted in the middle of it
+                r.d["status"] = "failed"
+                r.d["note"] = "the runner restarted while this run was active"
+                r.d["finished_at"] = r.d.get("finished_at") or time.time()
+            self.index[r.d["id"]] = r
+
+    def _save(self, r: Run) -> None:
+        d = self._run_dir(r.d["id"])
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, "meta.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(r.d, f)
+        os.replace(tmp, os.path.join(d, "meta.json"))
+
+    def prune(self) -> int:
+        """Keep the newest keep_runs and nothing older than keep_days. Never touches queued / running runs."""
+        done = sorted([r for r in self.index.values() if r.d["status"] in FINAL], key=lambda r: r.d["queued_at"], reverse=True)
+        cutoff = time.time() - self.keep_days * 86400
+        drop = [r for i, r in enumerate(done) if i >= self.keep_runs or r.d["queued_at"] < cutoff]
+        for r in drop:
+            shutil.rmtree(self._run_dir(r.d["id"]), ignore_errors=True)
+            self.index.pop(r.d["id"], None)
+        return len(drop)
+
+    # ---------------------------------------------------------------- public API
+    def ctx(self, run_dir: str) -> Dict[str, Any]:
+        c = dict(self.ctx_base)
+        c.update({"run": run_dir, "cal": os.path.join(self.data, "calibration_out"), "exp": os.path.join(self.data, "exports"), "scripts": os.path.join(self.scripts_dir_value())})
+        return c
+
+    def scripts_dir_value(self) -> str:
+        return self.ctx_base["scripts"]
+
+    def submit(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None, by: str = "", trigger: str = "manual", confirm: bool = False) -> Run:
+        if kind == "job":
+            job = self.jobs.get(target)
+            if not job:
+                raise KeyError(f"unknown job {target}")
+            from jobs import coerce_params
+            p = coerce_params(job, params)
+            title, heavy, window = job["title"], job["heavy"], job["window"]
+        elif kind == "pack":
+            pack = self.packs.get(target)
+            if not pack:
+                raise KeyError(f"unknown pack {target}")
+            p, title = {}, pack["title"]
+            heavy = any(self.jobs[j]["heavy"] for j, _ in pack["jobs"])
+            window = "closed" if heavy else "any"
+        else:
+            raise KeyError("kind must be job or pack")
+        rid = f"{self.now_fn().strftime('%Y%m%d-%H%M%S')}-{target}-{secrets.token_hex(2)}"
+        r = Run(rid, kind, target, title, p, by, trigger)
+        with self.lock:
+            if any(q.d["target"] == target and q.d["kind"] == kind and q.d["params"] == p for q in self.queue):
+                raise ValueError(f"{title} is already waiting in the queue")
+            if len(self.queue) >= 20:
+                raise ValueError("the queue is full (20)")
+            blocked = self._guard(window, kind == "pack", confirm)
+            if blocked:
+                r.d.update(status="blocked", note=blocked, finished_at=time.time())
+                self.index[rid] = r
+                self._save(r)
+                return r
+            self.index[rid] = r
+            self.queue.append(r)
+            self._save(r)
+        self.wake.set()
+        return r
+
+    def _guard(self, window: str, is_pack: bool, confirm: bool) -> str:
+        if confirm or not self.guard_market:
+            return ""
+        opn = market_open_now(self.now_fn())
+        if window == "closed" and opn:
+            return ("Blocked: this run downloads or replays a lot and the trading containers share this machine. Market hours are 09:00-15:45 IST on weekdays. "
+                    "Run it after 15:45 or at the weekend, or confirm that you accept the load.")
+        if window == "open" and not opn:
+            return "Blocked: this check reads the live market state and is only meaningful 09:00-15:45 IST on a trading day. Confirm to run it anyway."
+        return ""
+
+    def cancel(self, rid: str) -> bool:
+        with self.lock:
+            r = self.index.get(rid)
+            if not r:
+                return False
+            if r in self.queue:
+                self.queue.remove(r)
+                r.d.update(status="cancelled", finished_at=time.time(), note="cancelled while queued")
+                self._save(r)
+                return True
+            if self.current is r:
+                self.cancel_flag.set()
+                p = self.proc
+                if p and p.poll() is None:
+                    try:
+                        p.terminate()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return True
+        return False
+
+    def list_runs(self, limit: int = 60, target: str = "") -> List[Dict[str, Any]]:
+        with self.lock:
+            rs = sorted(self.index.values(), key=lambda r: r.d["queued_at"], reverse=True)
+            if target:
+                rs = [r for r in rs if r.d["target"] == target]
+            return [r.public() for r in rs[:limit]]
+
+    def get(self, rid: str) -> Optional[Dict[str, Any]]:
+        r = self.index.get(rid)
+        if not r:
+            return None
+        d = r.public()
+        d["files"] = self.files(rid)
+        return d
+
+    def files(self, rid: str) -> List[Dict[str, Any]]:
+        base = self._run_dir(rid)
+        out = []
+        for root, _, names in os.walk(base):
+            for n in sorted(names):
+                p = os.path.join(root, n)
+                rel = os.path.relpath(p, base)
+                if rel in ("meta.json", "meta.json.tmp"):
+                    continue
+                out.append({"name": rel, "bytes": os.path.getsize(p)})
+        return sorted(out, key=lambda f: (f["name"] != "output.txt", f["name"]))
+
+    def file_path(self, rid: str, name: str) -> Optional[str]:
+        base = os.path.realpath(self._run_dir(rid))
+        p = os.path.realpath(os.path.join(base, name))
+        return p if p.startswith(base + os.sep) and os.path.isfile(p) else None
+
+    def tail(self, rid: str, offset: int = 0) -> Dict[str, Any]:
+        r = self.index.get(rid)
+        if not r:
+            return {"found": False}
+        p = os.path.join(self._run_dir(rid), "output.txt")
+        text, size = "", 0
+        if os.path.isfile(p):
+            size = os.path.getsize(p)
+            with open(p, "rb") as f:
+                f.seek(max(0, min(offset, size)))
+                text = f.read(256 * 1024).decode("utf-8", "replace")
+        return {"found": True, "status": r.d["status"], "offset": min(size, max(0, offset) + len(text.encode("utf-8"))), "size": size, "text": text}
+
+    def zip_run(self, rid: str, dest: str) -> Optional[str]:
+        if rid not in self.index:
+            return None
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in self.files(rid):
+                z.write(os.path.join(self._run_dir(rid), f["name"]), f["name"])
+        return dest
+
+    def latest(self, target: str) -> Optional[Dict[str, Any]]:
+        rs = [r for r in self.index.values() if r.d["target"] == target and r.d["status"] in FINAL and r.d["status"] != "blocked"]
+        return max(rs, key=lambda r: r.d["queued_at"]).public() if rs else None
+
+    def state(self) -> Dict[str, Any]:
+        with self.lock:
+            return {"current": self.current.public() if self.current else None, "queued": [r.public() for r in self.queue], "market_open_now": market_open_now(self.now_fn()),
+                    "now_ist": self.now_fn().astimezone(IST).isoformat(timespec="seconds")}
+
+    # ---------------------------------------------------------------- worker
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._loop, name="runner", daemon=True)
+        self.thread.start()
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.cancel_flag.set()
+        self.wake.set()
+
+    def drain(self, timeout: float = 60.0) -> bool:
+        """Tests: wait until nothing is queued or running."""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self.lock:
+                if not self.queue and self.current is None:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def _loop(self) -> None:
+        last_prune = 0.0
+        while not self.stop.is_set():
+            with self.lock:
+                r = self.queue.popleft() if self.queue else None
+                self.current = r
+            if r is None:
+                if time.time() - last_prune > 3600:
+                    self.prune()
+                    last_prune = time.time()
+                self.wake.wait(5)
+                self.wake.clear()
+                continue
+            self.cancel_flag.clear()
+            try:
+                self._execute(r)
+            except Exception as e:  # noqa: BLE001
+                r.d.update(status="failed", note=f"internal error: {type(e).__name__}: {e}", finished_at=time.time())
+                self._save(r)
+            finally:
+                with self.lock:
+                    self.current = None
+                    self.proc = None
+
+    # ---------------------------------------------------------------- one run
+    def _execute(self, r: Run) -> None:
+        d = self._run_dir(r.d["id"])
+        os.makedirs(d, exist_ok=True)
+        r.d.update(status="running", started_at=time.time())
+        self._save(r)
+        out = _Out(os.path.join(d, "output.txt"), self.max_output, self.redact)
+        out.line(f"# {r.d['title']}   [{r.d['kind']} {r.d['target']}]")
+        out.line(f"# started {self.now_fn().astimezone(IST).isoformat(timespec='seconds')} IST   by {r.d['by'] or '-'}   trigger {r.d['trigger']}")
+        if r.d["params"]:
+            out.line("# parameters: " + json.dumps(r.d["params"]))
+        out.line("# Nothing in this run changes a trading setting unless a step below says POST.")
+        out.line("")
+        ctx = self.ctx(d)
+        if r.d["kind"] == "job":
+            seq = [(r.d["target"], r.d["params"])]
+        else:
+            seq = [(jid, p) for jid, p in self.packs[r.d["target"]]["jobs"]]
+        from jobs import coerce_params
+        worst = "success"
+        rank = {"success": 0, "attention": 1, "failed": 2, "timeout": 3}
+        t0 = time.time()
+        for jid, given in seq:
+            job = self.jobs[jid]
+            if self.cancel_flag.is_set():
+                worst = "cancelled"
+                break
+            p = coerce_params(job, given)
+            out.line(f"\n{'=' * 78}\n## JOB {job['title']}  ({jid})\n{'=' * 78}")
+            job_status = "success"
+            try:
+                steps = job["builder"](ctx, p)
+            except Exception as e:  # noqa: BLE001
+                steps = []
+                job_status = "failed"
+                out.line(f"could not build the job: {e}")
+            jstart = time.time()
+            for i, st in enumerate(steps, 1):
+                if self.cancel_flag.is_set():
+                    job_status = "cancelled"
+                    break
+                left = job["timeout_s"] - (time.time() - jstart)
+                if left <= 0:
+                    job_status = "timeout"
+                    out.line("-- job time limit reached")
+                    break
+                res = self._step(st, i, len(steps), out, left, ctx)
+                r.d["steps"].append({"job": jid, "n": i, "title": st["title"], "status": res[0], "seconds": round(res[1], 1), "detail": res[2]})
+                if res[0] in ("failed", "timeout", "cancelled") and not st.get("soft"):
+                    job_status = res[0]
+                    break
+                if res[0] == "attention" and rank.get(job_status, 0) < 1:
+                    job_status = "attention"
+                self._save(r)
+            r.d["jobs"].append({"id": jid, "title": job["title"], "status": job_status, "seconds": round(time.time() - jstart, 1)})
+            out.line(f"-- job result: {job_status.upper()}   ({round(time.time() - jstart)} s)")
+            if job.get("after") and job_status in ("attention", "failed"):
+                out.line(f"-- what to do: {job['after']}")
+            if job_status == "cancelled":
+                worst = "cancelled"
+                break
+            if rank.get(job_status, 0) > rank.get(worst, 0):
+                worst = job_status
+        out.line(f"\n# finished in {round(time.time() - t0)} s: {worst.upper()}")
+        out.close()
+        r.d["headline"] = _headline(os.path.join(d, "output.txt"))
+        r.d["exit_summary"] = ", ".join(f"{j['id']}={j['status']}" for j in r.d["jobs"])
+        r.d.update(status=worst, finished_at=time.time())
+        self._save(r)
+
+    def _env(self, extra: Dict[str, str]) -> Dict[str, str]:
+        base = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "PYTHONPATH")}
+        base["PYTHONUNBUFFERED"] = "1"
+        base["PYTHONIOENCODING"] = "utf-8"
+        tok = self.token_fn()
+        for k, v in extra.items():
+            base[k] = str(v).replace("{token}", tok)
+        return base
+
+    def _step(self, st: Dict[str, Any], i: int, n: int, out: "_Out", left_s: float, ctx: Dict[str, Any]) -> Tuple[str, float, str]:
+        t0 = time.time()
+        out.line(f"\n--- step {i}/{n}: {st['title']}")
+        try:
+            if st["kind"] == "http":
+                res = self._http(st, out, left_s, ctx)
+            else:
+                res = self._cmd(st, out, left_s, ctx)
+        except Exception as e:  # noqa: BLE001
+            out.line(f"step error: {type(e).__name__}: {e}")
+            res = ("failed", f"{type(e).__name__}: {e}")
+        out.line(f"--- step result: {res[0]}" + (f" ({res[1]})" if res[1] else ""))
+        return res[0], time.time() - t0, res[1]
+
+    # ---- cmd
+    def _expand(self, st: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[Optional[List[str]], str]:
+        argv: List[str] = []
+        toks = list(st["argv"])
+        drop = set(st.get("drop_if_missing") or [])
+        if drop:
+            k = 0
+            kept: List[str] = []
+            while k < len(toks):
+                if k + 1 < len(toks) and toks[k].startswith("--") and toks[k + 1] in drop and not os.path.exists(toks[k + 1]):
+                    k += 2
+                    continue
+                kept.append(toks[k])
+                k += 1
+            toks = kept
+        tok = self.token_fn()
+        prev = ""
+        guard = [os.path.join(ctx["cal"], ""), os.path.join(ctx["exp"], ""), os.path.join(ctx.get("bars", "/nonexistent"), "")]
+        for t in toks:
+            if t.startswith("glob:"):
+                m = sorted(_glob.glob(t[5:]))
+                if not m:
+                    return None, f"input missing: nothing matches {t[5:]} (run the job that creates it first)"
+                argv += m
+            else:
+                if prev not in OUT_FLAGS and any(t.startswith(g) for g in guard):
+                    if not os.path.exists(t) or (os.path.isdir(t) and not os.listdir(t)):
+                        return None, f"input missing: {t} (run the job that creates it first)"
+                argv.append(t.replace("{token}", tok))
+            prev = t
+        return argv, ""
+
+    def _cmd(self, st: Dict[str, Any], out: "_Out", left_s: float, ctx: Dict[str, Any]) -> Tuple[str, str]:
+        argv, why = self._expand(st, ctx)
+        if argv is None:
+            out.line(why)
+            return "failed", why
+        script = next((a for a in argv[1:2] if a.endswith((".py", ".sh"))), None)
+        if script and not os.path.isfile(script):
+            out.line(f"script not found: {script}")
+            return "failed", "script not found"
+        out.line("$ " + self.redact(" ".join(argv)))
+        stdout_file = st.get("out_file") or ""
+        fh = open(stdout_file, "wb") if stdout_file else None
+        try:
+            p = subprocess.Popen(argv, stdout=fh or subprocess.PIPE, stderr=subprocess.STDOUT if not fh else subprocess.PIPE, env=self._env(st.get("env") or {}),
+                                 cwd=os.path.dirname(os.path.dirname(argv[1])) if script else None, preexec_fn=(lambda: os.nice(self.nice)) if self.nice else None)
+        except OSError as e:
+            out.line(f"could not start: {e}")
+            return "failed", str(e)
+        self.proc = p
+        deadline = time.time() + left_s
+        timed_out = False
+        err_lines: List[str] = []
+
+        def pump(stream, sink):
+            for raw in iter(stream.readline, b""):
+                sink(raw.decode("utf-8", "replace").rstrip("\n"))
+
+        t = threading.Thread(target=pump, args=(p.stdout if not fh else p.stderr, out.line if not fh else err_lines.append), daemon=True)
+        t.start()
+        while p.poll() is None:
+            if self.cancel_flag.is_set():
+                p.terminate()
+                break
+            if time.time() > deadline:
+                timed_out = True
+                p.terminate()
+                break
+            time.sleep(0.1)
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        t.join(timeout=5)
+        self.proc = None
+        if fh:
+            fh.close()
+            for ln in err_lines:
+                out.line(ln)
+            try:
+                with open(stdout_file, "rb") as f:
+                    body = f.read(200 * 1024).decode("utf-8", "replace")
+                out.line(body.rstrip("\n"))
+                if os.path.getsize(stdout_file) > 200 * 1024:
+                    out.line(f"[...truncated here; the full output is in {os.path.basename(stdout_file)}]")
+            except OSError:
+                pass
+            self._copy_artifact(stdout_file, ctx)
+        rc = p.returncode
+        if self.cancel_flag.is_set():
+            return "cancelled", "cancelled"
+        if timed_out:
+            return "timeout", "time limit"
+        if rc in st.get("ok", [0]):
+            return "success", ""
+        if rc in st.get("attention", [1]):
+            return "attention", f"exit {rc}: the script's own verdict says look at it"
+        return "failed", f"exit {rc}"
+
+    def _copy_artifact(self, path: str, ctx: Dict[str, Any]) -> None:
+        try:
+            shutil.copy2(path, os.path.join(ctx["run"], os.path.basename(path)))
+        except OSError:
+            pass
+
+    # ---- http
+    def _http(self, st: Dict[str, Any], out: "_Out", left_s: float, ctx: Dict[str, Any]) -> Tuple[str, str]:
+        url, method = st["url"], st.get("method", "GET")
+        hdr = {"Accept": "application/json"}
+        hdr["Authorization"] = "Bearer " + self.token_fn()     # services that need no login ignore it; the others accept this service token
+        out.line(f"{method} {self.redact(url)}")
+        expect = set(st.get("expect", [200]))
+        poll = st.get("poll")
+        deadline = time.time() + (min(left_s, float(poll["max_s"])) if poll else min(left_s, 180.0))
+        while True:
+            code, body = self._request(method if not poll else "GET", url, hdr, timeout=min(60.0, max(5.0, left_s)))
+            if poll is None or self.cancel_flag.is_set():
+                break
+            try:
+                val = str(json.loads(body).get(poll["key"], "")).lower()
+            except Exception:  # noqa: BLE001
+                val = ""
+            out.line(f"  poll: {poll['key']}={val or '?'} (http {code})")
+            if code in expect and val not in poll["until_not"]:
+                break
+            if time.time() > deadline:
+                out.line("  (stopped waiting; the work may still be running in that service)")
+                return "attention", "still running when the wait ended"
+            time.sleep(float(poll.get("every_s", 20)))
+        text = body if isinstance(body, str) else str(body)
+        shown = text[:20000]
+        try:
+            shown = json.dumps(json.loads(text), indent=1)[:20000]
+        except Exception:  # noqa: BLE001
+            pass
+        out.line(f"HTTP {code}")
+        out.line(shown + ("\n[...truncated]" if len(text) > len(shown) and len(shown) >= 20000 else ""))
+        if st.get("save") and code in expect:
+            name = st["save"].replace("{date}", self.now_fn().strftime("%Y-%m-%d"))
+            path = name if os.path.isabs(name) else os.path.join(ctx["run"], name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.redact(text))
+            out.line(f"saved {path}")
+            if not path.startswith(ctx["run"]):
+                self._copy_artifact(path, ctx)
+        if code in expect:
+            return "success", ""
+        if code == 0:
+            return "failed", f"no answer: {text[:160]}"
+        return "failed", f"HTTP {code}"
+
+    def _request(self, method: str, url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, str]:
+        data = b"" if method in ("POST", "PUT", "PATCH") else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed internal URLs from the catalog
+                return resp.status, resp.read(5 * 1024 * 1024).decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(65536).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            return 0, f"{type(e).__name__}: {e}"
+
+
+class _Out:
+    """output.txt writer: redacted, flushed per line (the page tails it), capped."""
+
+    def __init__(self, path: str, cap: int, redact: Callable[[str], str]):
+        self.f = open(path, "w", encoding="utf-8")
+        self.cap, self.redact, self.n, self.capped = cap, redact, 0, False
+        self.lock = threading.Lock()
+
+    def line(self, s: str) -> None:
+        with self.lock:
+            if self.capped:
+                return
+            s = self.redact(s) + "\n"
+            self.n += len(s.encode("utf-8"))
+            if self.n > self.cap:
+                self.f.write(f"\n[output cap of {self.cap // 1024} KB reached: the rest of the output is dropped. Result lines of the steps below may be missing.]\n")
+                self.capped = True
+            else:
+                self.f.write(s)
+            self.f.flush()
+
+    def close(self) -> None:
+        with self.lock:
+            self.capped = False
+            self.f.close()
+
+
+def _headline(path: str, limit: int = 8) -> List[str]:
+    out: List[str] = []
+    try:
+        for ln in open(path, encoding="utf-8", errors="replace"):
+            s = ln.strip()
+            if not s or s.startswith(("#", "$", "---", "===", "-- ")) or len(s) > 220:
+                continue
+            if HEADLINE_RE.search(s) and s not in out:
+                out.append(s)
+    except OSError:
+        return out
+    return out[:limit]

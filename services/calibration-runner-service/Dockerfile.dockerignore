@@ -1,0 +1,12 @@
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/.venv
+frontend
+archive
+data
+oracle_wallet
+calibration_out
+**/tests
+.git
+*.zip

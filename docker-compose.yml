@@ -369,6 +369,8 @@ services:
       TNS_ADMIN: /oracle_wallet
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      # group442: switches changed on the Real Money Calibration page (control/kit.py) are saved here and re-applied at boot; survives rebuilds
+      - control-state-rt:/data/control
     # depends_on intentionally removed (2026-09-03 durability upgrade):
     # real-trade-service must start on VM reboot without waiting on the rest
     # of the stack. It handles unreachable dependencies at runtime via
@@ -603,6 +605,8 @@ services:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       # group441: recorded 1-minute bars (feed/bar_recorder.py), one folder per IST day; survives rebuilds. Export with scripts/export_intraday.py
       - bar-records:/data/bars
+      # group442: switches changed on the Real Money Calibration page (control/kit.py) are saved here and re-applied at boot; survives rebuilds
+      - control-state-ps:/data/control
     depends_on:
       - real-trade-service
       - analysis-intelligence-service
@@ -620,9 +624,55 @@ services:
     mem_limit: 700m  # group341: was 400m - tick buffers took it to 91% within 20 min of the open (log 2026-10-13); see WS_MAX_TICKS_PER_SYMBOL
     mem_reservation: 128m
 
+  # group 442: Real Money Calibration runner. Runs the repo's calibration / evidence / report scripts one at a time (nice'd, capped) for the page's Run buttons
+  # and keeps each run's txt output for download. Read-only toward trading: it never changes a switch. Build context is the repo root (it carries scripts/ and shared/).
+  calibration-runner-service:
+    build:
+      context: .
+      dockerfile: services/calibration-runner-service/Dockerfile
+    ports:
+      - "127.0.0.1:8012:8012"
+    environment:
+      PORT: "8012"
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      REAL_TRADE_URL: http://real-trade-service:8005
+      POSITION_STOCKS_URL: http://position-stocks-service:8006
+      API_GATEWAY_URL: http://api-gateway:8000
+      MARKET_DATA_URL: http://market-data-service:8001
+      ANALYSIS_URL: http://analysis-intelligence-service:8000
+      DECISION_URL: http://decision-prediction-service:8000
+      NOTIFICATION_URL: http://notification-scheduler-service:8000
+      KRONOS_URL: http://kronos-forecast-service:8010
+      TIMESFM_URL: http://timesfm-forecast-service:8011
+      RUNNER_DATA_DIR: /data/runner
+      RUNNER_BAR_DIR: /data/bars
+      # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
+      RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-false}
+      # heavy runs are refused 09:00-15:45 IST on weekdays unless the page confirms them
+      RUNNER_GUARD_MARKET_HOURS: ${RUNNER_GUARD_MARKET_HOURS:-true}
+    volumes:
+      - runner-data:/data/runner
+      - bar-records:/data/bars:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    # trading containers come first: a replay here must never starve them (jobs are also nice'd 10 and run one at a time)
+    cpus: "0.50"
+    mem_limit: 900m
+    mem_reservation: 128m
+
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
   bar-records:
+  # group442: Real Money Calibration page state
+  control-state-rt:
+  control-state-ps:
+  runner-data:
   tsfm-hf-cache:
   tsfm-cache:
   kronos-hf-cache:

@@ -25,6 +25,7 @@ _MUST_SET = (
     "market-data-service",
     "notification-scheduler-service",
     "real-trade-service",
+    "calibration-runner-service",   # group442: its jobs download history through the gateway
 )
 
 

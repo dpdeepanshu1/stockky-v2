@@ -93,6 +93,9 @@ API endpoints:
 """
 from __future__ import annotations
 
+# group442: stored switch overrides (Real Money Calibration page) go into os.environ BEFORE config is read. Never blocks boot.
+import control.boot  # noqa: F401
+
 import asyncio
 import notifier
 import logging
@@ -342,6 +345,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# group442: Real Money Calibration switches (GET/POST/DELETE /control/..., admin session required). See control/kit.py.
+from control import kit as _control_kit  # noqa: E402
+from control.catalog import CATALOG as _CONTROL_CATALOG  # noqa: E402
+
+_control = _control_kit.Controller("position-stocks-service", _CONTROL_CATALOG, restart_hint="docker compose restart position-stocks-service")
+_control_kit.mount(app, _control, require_admin)
 
 
 # group 267 (2026-10-09): a request that cannot get a DB connection within DB_POOL_TIMEOUT used to surface as an unhandled

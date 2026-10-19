@@ -11,7 +11,7 @@ Only compare modes over the same days and read it as evidence, not proof: with f
 """
 import argparse
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--days", type=int, default=14)
@@ -21,7 +21,7 @@ import db        # noqa: E402  (available inside the service container)
 import models    # noqa: E402
 
 S = db.get_session_factory()()
-since = datetime.utcnow() - timedelta(days=args.days)
+since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=args.days)
 rows = (S.query(models.TradePosition)
         .filter(models.TradePosition.status == "CLOSED", models.TradePosition.closed_at >= since)
         .all())

@@ -62,6 +62,20 @@ def pin(monkeypatch):
     monkeypatch.setattr(config, "SHARED_DAILY_ORDER_BUDGET", 2)
 
 
+def _capture_alerts(monkeypatch, mod):
+    """group 448: stand-in for notifier.notify_fire_and_forget so no test ever sends a real Telegram; also resets the rate limiter."""
+    import types
+    sent = []
+    monkeypatch.setitem(sys.modules, "notifier", types.SimpleNamespace(notify_fire_and_forget=lambda text: sent.append(text)))
+    monkeypatch.setitem(mod._last_alert, "t", None)
+    return sent
+
+
+def _fail_open_switch(monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "SHARED_GATES_FAIL_CLOSED", False, raising=False)
+
+
 class TestGetOrCreateRow:
     def test_creates_row_when_missing(self, db):
         row = sob._get_or_create_row(db, "2026-09-23")
@@ -134,23 +148,37 @@ class TestCheckAndReserve:
         assert row.orders_placed_today == 2  # not incremented on the blocked call
         assert any("SHARED Dhan order budget exhausted" in r.message for r in caplog.records)
 
-    def test_fails_open_on_exception(self, db, monkeypatch, caplog):
+    def test_fails_closed_on_exception_with_alert(self, db, monkeypatch, caplog):
+        sent = _capture_alerts(monkeypatch, sob)
+
         def boom():
             raise RuntimeError("db is down")
         monkeypatch.setattr(sob, "ist_today_str", boom)
         with caplog.at_level(logging.ERROR, logger="real-trade-shared-order-budget"):
             result = sob.check_and_reserve(db)
-        assert result is True
+        assert result is False
         assert any("check_and_reserve failed" in r.message for r in caplog.records)
+        assert "failing CLOSED" in caplog.text
+        assert len(sent) == 1 and "New BUY entries are being refused" in sent[0]
+        sob.check_and_reserve(db)
+        assert len(sent) == 1       # rate-limited: no Telegram storm while the DB is down
+
+    def test_fail_open_switch_restores_old_behaviour(self, db, monkeypatch):
+        sent = _capture_alerts(monkeypatch, sob)
+        _fail_open_switch(monkeypatch)
+        monkeypatch.setattr(sob, "ist_today_str", lambda: (_ for _ in ()).throw(RuntimeError("db is down")))
+        assert sob.check_and_reserve(db) is True and sent == []
 
     def test_rollback_failure_inside_exception_handler_is_swallowed(self, db, monkeypatch):
-        """Even if db.rollback() itself raises inside the fail-open except
-        branch, check_and_reserve must still return True, not propagate."""
+        """Even if db.rollback() itself raises inside the except branch,
+        check_and_reserve must still return (False, fail-closed), not propagate."""
+        _capture_alerts(monkeypatch, sob)
+
         def boom():
             raise RuntimeError("db is down")
         monkeypatch.setattr(sob, "ist_today_str", boom)
         monkeypatch.setattr(db, "rollback", lambda: (_ for _ in ()).throw(RuntimeError("rollback also broken")))
-        assert sob.check_and_reserve(db) is True
+        assert sob.check_and_reserve(db) is False
 
 
 class TestRecordOrderUnconditional:

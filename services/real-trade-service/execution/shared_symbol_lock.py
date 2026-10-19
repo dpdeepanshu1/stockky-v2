@@ -24,11 +24,11 @@ releases this lock — only mode=="REAL" call sites check it (same
 convention as shared_order_budget.check_and_reserve, which manual_engine
 and entry.py only ever call on the REAL branch).
 
-FAIL-OPEN, ALWAYS: this is a soft cross-service guard, not a financial
-ledger. Any DB error is logged and treated as "allow the order" — a
-broken lock must never itself block a real entry or, especially, a real
-exit. Worst case on failure is a reversion to today's actual (buggy,
-pre-fix) behavior, never a new way to get a position stuck.
+FAIL-CLOSED FOR ENTRIES (group 448; was fail-open): if the DB cannot answer,
+try_claim() returns False, so the new BUY is refused and retried later, with a
+CRITICAL log and a rate-limited Telegram. Only BUY entries are gated (exits
+never are), so no position can get stuck. SHARED_GATES_FAIL_CLOSED=false
+restores the old fail-open behavior.
 
 Wired into:
   - entry_engine/entry.py's automatic REAL BUY path — claimed right before
@@ -53,6 +53,42 @@ from sqlalchemy.orm import Session
 from models import SharedSymbolLock
 
 logger = logging.getLogger("real-trade-shared-symbol-lock")
+SVC = "real-trade-service"
+
+# ── Fail-closed on a gate error (group 448) ──────────────────────────────────
+# Before: any DB error in this gate meant "allow the order", so during a DB hiccup both services could buy the same symbol / overshoot the shared
+# daily order budget. These gates only ever guard new BUY entries (exits are never gated), so refusing an entry while the gate cannot answer is safe:
+# the entry is simply skipped and retried later. Set SHARED_GATES_FAIL_CLOSED=false to get the old fail-open behaviour back.
+_ALERT_EVERY_S = 600.0
+_last_alert = {"t": None}
+
+
+def _fail_closed() -> bool:
+    try:
+        import config
+        return bool(getattr(config, "SHARED_GATES_FAIL_CLOSED", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _gate_failed(gate: str, err) -> bool:
+    """What the gate returns when it could not decide: True (allow) only if fail-closed is switched off. Loud: CRITICAL log + a rate-limited Telegram."""
+    if not _fail_closed():
+        logger.error("%s: %s could not decide (%s) - failing OPEN, order allowed (SHARED_GATES_FAIL_CLOSED=false)", SVC, gate, err)
+        return True
+    logger.critical("%s: %s could not decide (%s) - failing CLOSED, this entry is refused", SVC, gate, err)
+    import time as _time
+    now = _time.monotonic()
+    if _last_alert["t"] is None or now - _last_alert["t"] >= _ALERT_EVERY_S:
+        _last_alert["t"] = now
+        try:
+            from notifier import notify_fire_and_forget
+            notify_fire_and_forget(f"{SVC}: the {gate} check could not reach the database ({type(err).__name__}). "
+                                   "New BUY entries are being refused until it recovers. Exits are not affected.")
+        except Exception:  # noqa: BLE001 - the alert must never break the gate
+            pass
+    return False
+
 
 _SERVICE_NAME = "real-trade-service"
 
@@ -90,15 +126,16 @@ def try_claim(db: Session, symbol: str, mode: str = "REAL") -> bool:
                 )
                 return False
         except Exception as chk_e:  # noqa: BLE001
-            logger.warning("symbol lock race re-check for %s failed (%s) - keeping the claim", symbol, chk_e)
+            logger.warning("symbol lock race re-check for %s failed (%s)", symbol, chk_e)
+            return _gate_failed("symbol lock", chk_e)
         return True
     except Exception as e:
-        logger.error("shared_symbol_lock.try_claim(%s) failed (failing open): %s", symbol, e, exc_info=True)
+        logger.error("shared_symbol_lock.try_claim(%s) failed: %s", symbol, e, exc_info=True)
         try:
             db.rollback()
         except Exception:
             pass
-        return True
+        return _gate_failed("symbol lock", e)
 
 
 def release(db: Session, symbol: str) -> None:

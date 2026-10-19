@@ -932,6 +932,8 @@ ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINU
 # — see capital/shared_order_budget.py's docstring and models.py's
 # SharedOrderBudget for the full rationale.
 SHARED_DAILY_ORDER_BUDGET = _get_int("SHARED_DAILY_ORDER_BUDGET", 5000)
+# group 448: when the shared order budget / symbol lock cannot reach the DB, refuse the new BUY (true, default) instead of allowing it (false = old behaviour).
+SHARED_GATES_FAIL_CLOSED = _get_bool("SHARED_GATES_FAIL_CLOSED", True)
 
 LOG_LEVEL = _get_str("LOG_LEVEL", "INFO")
 

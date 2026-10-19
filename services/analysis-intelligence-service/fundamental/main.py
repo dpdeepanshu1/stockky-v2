@@ -80,8 +80,6 @@ SECTOR_TYPICAL_PE = {
     "Media": 20,
     "PSU Bank": 10,
     "Private Bank": 16,
-    "Financial Services": 17,
-    "Energy": 11,
 }
 DEFAULT_TYPICAL_PE = 22
 

@@ -35,7 +35,7 @@ export function RunsPanel() {
 
   return (
     <Card title="Runs and downloads" right={<Btn small onClick={() => void load()}>Refresh</Btn>}>
-      {latestOnly && <p className="mb-2 text-[11px] text-mist" data-testid="latest-only-note">One line per test: a new result replaces the older one, so the disk does not fill up. Download what you need before you run the same test again.</p>}
+      {latestOnly && <p className="mb-2 text-[11px] text-mist" data-testid="latest-only-note">One line per test and settings: a new result replaces the older one of the same test with the same options, so the disk does not fill up. Download what you need before you run the same test again.</p>}
       {err && <Msg kind="err">{err}</Msg>}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <Chip active={!filter} onClick={() => setFilter("")}>all {runs ? runs.length : ""}</Chip>
@@ -123,7 +123,7 @@ export function RunWindow() {
     <Modal wide title={run?.title || "Run"} onClose={close}>
       {gone ? (
         <div className="space-y-2">
-          <Msg kind="warn">This result is no longer on the runner: a newer run of the same test replaced it (only the latest result is kept). Close this window and open the newer one from "Runs & downloads".</Msg>
+          <Msg kind="warn">This result is no longer on the runner: a newer run of the same test with the same settings replaced it (only the latest result is kept). Close this window and open the newer one from "Runs & downloads".</Msg>
           <Btn small onClick={close}>Close</Btn>
         </div>
       ) : (<>

@@ -50,7 +50,8 @@ except Exception as _rl_e:
     logging.getLogger(__name__).warning("rate_limiter patch skipped: %s", _rl_e)
 
 import feedparser
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect, Query, Depends
+from admin_guard import require_admin as _require_admin  # group 453
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -8241,7 +8242,7 @@ def get_notification_config():
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
 
-@app.post("/notifications/config")
+@app.post("/notifications/config", dependencies=[Depends(_require_admin)])
 def set_notification_config(update: NotificationChannelUpdate):
     try:
         payload = update.model_dump(exclude_none=True)
@@ -8260,7 +8261,7 @@ def set_notification_config(update: NotificationChannelUpdate):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
 
-@app.delete("/notifications/config/{channel}")
+@app.delete("/notifications/config/{channel}", dependencies=[Depends(_require_admin)])
 def delete_notification_channel(channel: str):
     try:
         resp = httpx.delete(f"{NOTIFICATION_URL}/config/{channel}", timeout=10)
@@ -8270,7 +8271,7 @@ def delete_notification_channel(channel: str):
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
 
 
-@app.api_route("/notifications/call/me", methods=["GET", "POST"])
+@app.api_route("/notifications/call/me", dependencies=[Depends(_require_admin)], methods=["GET", "POST"])
 def notifications_call_me(request: Request, message: str = "Stockky test call alert"):
     """Proxy CallMeBot test / manual call. CallMeBot can be slow — use long timeout."""
     try:
@@ -8294,7 +8295,7 @@ def notifications_call_me(request: Request, message: str = "Stockky test call al
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"CallMeBot unreachable: {e}")
 
-@app.post("/notifications/test")
+@app.post("/notifications/test", dependencies=[Depends(_require_admin)])
 def test_notification_channels():
     """Proxy a real test send to every enabled channel.
 
@@ -8327,7 +8328,7 @@ def test_notification_channels():
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
 
-@app.post("/notifications/send-picks")
+@app.post("/notifications/send-picks", dependencies=[Depends(_require_admin)])
 def send_picks_to_telegram(payload: dict):
     recs = payload.get("recommendations", [])
     if not recs:
@@ -8508,7 +8509,7 @@ async def training_status():
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
 
-@app.post("/training/train")
+@app.post("/training/train", dependencies=[Depends(_require_admin)])
 async def trigger_training():
     try:
         client = _get_http_client()  # shared keepalive pool
@@ -10864,8 +10865,8 @@ async def _quote_broadcast_loop():
                         "type": "price_alert",
                         **{k: t.get(k) for k in ("symbol", "current_price", "target_price", "direction", "note", "id")},
                     })
-                except Exception:
-                    pass
+                except Exception as e_alert:   # group 451: was `pass` - a price alert that could not be sent vanished without a trace (its cooldown is already used)
+                    logger.warning("price alert for %s was NOT delivered: %s: %s", t.get("symbol"), type(e_alert).__name__, e_alert)
         except Exception as e:
             logger.debug("quote loop alerts: %s", e)
         # Open with quotes to push: 8s; preopen/post — or nothing to push (no
@@ -11423,7 +11424,7 @@ async def _warm_momentum_movers_cache():
         logger.debug("momentum-movers/scan-universe warm task not scheduled: %s", e)
 
 
-@app.post("/ops/circuit-reset")
+@app.post("/ops/circuit-reset", dependencies=[Depends(_require_admin)])
 @app.get("/ops/circuit-reset")
 async def ops_circuit_reset():
     """Force-close all circuit breakers after intentional warm-up / cold-start recovery.
@@ -11497,7 +11498,7 @@ async def ops_overnight_get_config():
         return {"ok": False, "error": str(e)[:200]}
 
 
-@app.post("/ops/overnight/config")
+@app.post("/ops/overnight/config", dependencies=[Depends(_require_admin)])
 async def ops_overnight_set_config(
     enabled: Optional[bool] = None,
     datafeed_time: Optional[str] = None,
@@ -11521,7 +11522,7 @@ async def ops_overnight_set_config(
         return {"ok": False, "error": str(e)[:200]}
 
 
-@app.post("/ops/overnight/run")
+@app.post("/ops/overnight/run", dependencies=[Depends(_require_admin)])
 async def ops_overnight_run(phase: str = "datafeed"):
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -11568,7 +11569,7 @@ async def ops_keepalive(deep: bool = False):
 
 
 
-@app.post("/ops/power-off")
+@app.post("/ops/power-off", dependencies=[Depends(_require_admin)])
 async def ops_power_off(background_tasks: BackgroundTasks):
     """Force-stop ALL user-initiated activity (same path as process shutdown).
 
@@ -11610,7 +11611,7 @@ async def ops_power_off(background_tasks: BackgroundTasks):
     }
 
 
-@app.post("/ops/resume-activity")
+@app.post("/ops/resume-activity", dependencies=[Depends(_require_admin)])
 def ops_resume_activity():
     """Clear Power-Off pause so scans / feeds / quotes can run again."""
     set_activity_paused(False)
@@ -11741,9 +11742,9 @@ async def api_evaluate_price_alerts():
     }
 
 
-@app.post("/data-feed/hard-reset")
-@app.post("/api/data-feed/hard-reset")
-@app.post("/api/feed/hard-reset")
+@app.post("/data-feed/hard-reset", dependencies=[Depends(_require_admin)])
+@app.post("/api/data-feed/hard-reset", dependencies=[Depends(_require_admin)])
+@app.post("/api/feed/hard-reset", dependencies=[Depends(_require_admin)])
 async def hard_reset_database(preserve_days: int = 7):
     """
     Wipes VOLATILE stockky_kv fields (price/volume) and re-asserts unique

@@ -74,6 +74,20 @@ def _racy_commit():
     raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
 
 
+def _capture_alerts(monkeypatch, mod):
+    """group 448: stand-in for notifier.notify_fire_and_forget so no test ever sends a real Telegram; also resets the rate limiter."""
+    import types
+    sent = []
+    monkeypatch.setitem(sys.modules, "notifier", types.SimpleNamespace(notify_fire_and_forget=lambda text: sent.append(text)))
+    monkeypatch.setitem(mod._last_alert, "t", None)
+    return sent
+
+
+def _fail_open_switch(monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "SHARED_GATES_FAIL_CLOSED", False, raising=False)
+
+
 class TestTryClaim:
     def test_claims_fresh_symbol(self, db):
         assert ssl.try_claim(db, "reliance", mode="REAL") is True
@@ -141,10 +155,11 @@ class TestTryClaim:
         monkeypatch.setattr(db, "commit", _racy_commit)
         assert ssl.try_claim(db, "infy") is True
 
-    def test_integrity_error_and_reselect_itself_fails_still_returns_true(self, db, monkeypatch):
+    def test_integrity_error_and_reselect_itself_fails_now_fails_closed(self, db, monkeypatch):
         """If the re-SELECT inside the except IntegrityError block also
-        raises, that inner exception is swallowed and the function still
-        fails open (True) -- a secondary error must never escape."""
+        raises, that inner exception is swallowed and the gate fails
+        CLOSED (False, group 448) -- we cannot tell who won the race."""
+        _capture_alerts(monkeypatch, ssl)
         calls = {"n": 0}
 
         def flaky_query(model):
@@ -155,23 +170,36 @@ class TestTryClaim:
 
         monkeypatch.setattr(db, "query", flaky_query)
         monkeypatch.setattr(db, "commit", _racy_commit)
-        assert ssl.try_claim(db, "wipro") is True
+        assert ssl.try_claim(db, "wipro") is False
 
-    def test_fails_open_on_generic_exception(self, db, monkeypatch, caplog):
+    def test_fails_closed_on_generic_exception_with_alert(self, db, monkeypatch, caplog):
+        sent = _capture_alerts(monkeypatch, ssl)
+
         def boom(*a, **kw):
             raise RuntimeError("db is down")
         monkeypatch.setattr(db, "query", boom)
         with caplog.at_level(logging.ERROR, logger="real-trade-shared-symbol-lock"):
             result = ssl.try_claim(db, "hdfc")
-        assert result is True
+        assert result is False
         assert any("try_claim(HDFC) failed" in r.message for r in caplog.records)
+        assert "failing CLOSED" in caplog.text and len(sent) == 1
+        ssl.try_claim(db, "hdfc")
+        assert len(sent) == 1       # rate-limited
+
+    def test_fail_open_switch_restores_old_behaviour(self, db, monkeypatch):
+        sent = _capture_alerts(monkeypatch, ssl)
+        _fail_open_switch(monkeypatch)
+        monkeypatch.setattr(db, "query", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db is down")))
+        assert ssl.try_claim(db, "hdfc") is True and sent == []
 
     def test_generic_exception_rollback_failure_is_swallowed(self, db, monkeypatch):
+        _capture_alerts(monkeypatch, ssl)
+
         def boom(*a, **kw):
             raise RuntimeError("db is down")
         monkeypatch.setattr(db, "query", boom)
         monkeypatch.setattr(db, "rollback", lambda: (_ for _ in ()).throw(RuntimeError("rollback broken too")))
-        assert ssl.try_claim(db, "hdfc") is True
+        assert ssl.try_claim(db, "hdfc") is False
 
 
 class TestRelease:

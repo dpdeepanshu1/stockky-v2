@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 try:  # group401: sector label -> sector index (same folder; the tests load this module by path, so fall back to a path import)
@@ -310,7 +310,7 @@ def upsert_batch(db: Any, M: Any, items: Any, now: Optional[datetime] = None) ->
     """Idempotent upsert of up to MAX_BATCH observations. Key = (symbol, obs_date, engine_version, policy_mode). An existing row whose outcome
     has not started (eval_status pending) takes the newest decision of the day; a row already being scored is never rewritten."""
     out = {"received": 0, "inserted": 0, "updated": 0, "kept": 0, "invalid": 0}
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)    # group 452: utcnow() is deprecated; same naive-UTC value
     for raw in (items if isinstance(items, list) else [])[:MAX_BATCH]:
         out["received"] += 1
         o = sanitize(raw)
@@ -394,7 +394,7 @@ def evaluate_pending(db: Any, M: Any, fetch_bars: Callable[[str], Any], fetch_be
             for k in _OUTCOME_COLS:
                 if k in out:
                     setattr(r, k, out[k])
-            r.evaluated_at = datetime.utcnow()
+            r.evaluated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             res["evaluated"] += 1
             if out["eval_status"] == "done":
                 res["done"] += 1

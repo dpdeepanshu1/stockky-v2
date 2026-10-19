@@ -64,15 +64,18 @@ def validate_entries(entries: Any, pack_ids: List[str]) -> List[Dict[str, Any]]:
 
 class Scheduler:
     def __init__(self, path: str, defaults: List[Dict[str, Any]], submit: Callable[..., Any], pack_ids: List[str], enabled_default: bool = False,
-                 now_fn: Callable[[], datetime] = ist_now):
+                 now_fn: Callable[[], datetime] = ist_now, on_skip: Optional[Callable[[Dict[str, Any], str], Any]] = None):
         self.path, self.submit, self.pack_ids, self.now_fn = path, submit, pack_ids, now_fn
+        self.on_skip = on_skip      # group 447: (slot, reason) -> told when a slot fired but could not be submitted
         self.lock = threading.Lock()
-        self.state: Dict[str, Any] = {"enabled": bool(enabled_default), "entries": [dict(e) for e in defaults], "last_fired": {}}
+        self.state: Dict[str, Any] = {"enabled": bool(enabled_default), "entries": [dict(e) for e in defaults], "last_fired": {}, "last_skipped": None}
         try:
             d = json.load(open(path, encoding="utf-8"))
             self.state["enabled"] = bool(d.get("enabled", self.state["enabled"]))
             self.state["entries"] = validate_entries(d.get("entries", self.state["entries"]), pack_ids)
             self.state["last_fired"] = {str(k): str(v) for k, v in (d.get("last_fired") or {}).items()}
+            ls = d.get("last_skipped")
+            self.state["last_skipped"] = ls if isinstance(ls, dict) else None
         except FileNotFoundError:
             pass
         except Exception:  # noqa: BLE001 - a damaged file falls back to the defaults, it never stops the runner
@@ -116,9 +119,30 @@ class Scheduler:
         for e in todo:
             try:
                 self.submit("pack", e["pack"], {}, "scheduler", "schedule")
-            except Exception:  # noqa: BLE001 - already queued / queue full: skipped, the day is still marked
-                pass
+            except Exception as ex:  # noqa: BLE001 - already queued / queue full: skipped, the day is still marked, but it is no longer silent
+                self._skipped(e, str(ex) or type(ex).__name__)
         return fired
+
+    def _skipped(self, e: Dict[str, Any], reason: str) -> None:
+        with self.lock:
+            self.state["last_skipped"] = {"slot": e["id"], "pack": e["pack"], "time": e["time"], "reason": reason[:300],
+                                          "at": self.now_fn().astimezone(IST).isoformat(timespec="seconds"), "telegram": ""}
+            try:
+                self._save()
+            except OSError:
+                pass
+        if self.on_skip:
+            try:
+                res = self.on_skip(e, reason)
+            except Exception as ex:  # noqa: BLE001
+                res = f"error: {type(ex).__name__}"
+            if res:
+                with self.lock:
+                    self.state["last_skipped"]["telegram"] = str(res)
+                    try:
+                        self._save()
+                    except OSError:
+                        pass
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():

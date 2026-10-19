@@ -226,6 +226,10 @@ services:
     env_file:
       - .env
     environment:
+      # group 453: same value as real-trade-service. The gateway verifies the admin session token on its dangerous routes
+      # (/notifications/config, /ops/power-off, /training/train, feed hard-reset, ...). Empty = those routes answer 503 (fail closed).
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      GATEWAY_ADMIN_GUARD: ${GATEWAY_ADMIN_GUARD:-true}
       MARKET_DATA_URL: http://market-data-service:8001
       TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental
@@ -483,6 +487,13 @@ services:
       - "127.0.0.1:5173:8080"
     depends_on:
       - api-gateway
+    # group449: the only service without a healthcheck; busybox wget ships in nginx:alpine, 127.0.0.1 because localhost may resolve to ::1 (nginx listens on IPv4 only)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     logging: *default-logging
     cpus: "0.10"

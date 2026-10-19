@@ -262,6 +262,85 @@ def test_latest_only_cleans_old_folders_at_start_and_last_automatic_survives_it(
         r3.shutdown()
 
 
+def test_restart_mid_run_is_announced_once_and_recorded():
+    d = tempfile.mkdtemp()
+    r, _ = _runner(d=d)
+    r.shutdown()
+    rid = "20261019-090000-p-abcd"
+    os.makedirs(os.path.join(d, "data", "runs", rid), exist_ok=True)
+    meta = {"id": rid, "kind": "pack", "target": "p", "title": "Pack P", "params": {}, "by": "scheduler", "trigger": "schedule", "status": "running",
+            "queued_at": time.time() - 60, "started_at": time.time() - 50}
+    json.dump(meta, open(os.path.join(d, "data", "runs", rid, "meta.json"), "w"))
+    calls = []
+    notifier = N.make_notifier("http://n", True, False, sender=lambda base, title, text, urgency="normal": calls.append((text, urgency)) or "sent")
+    r2, _ = _runner(notifier, d=d)
+    try:
+        for _ in range(100):
+            if calls:
+                break
+            time.sleep(0.05)
+        assert len(calls) == 1 and "FAILED" in calls[0][0] and "restarted" in calls[0][0] and calls[0][1] == "high"
+        la = r2.state()["last_automatic"]
+        assert la and la["id"] == rid and la["status"] == "failed" and la["telegram"] == "sent"
+        assert json.load(open(os.path.join(d, "data", "runs", rid, "meta.json")))["status"] == "failed"     # written back
+    finally:
+        r2.shutdown()
+    calls2 = []
+    r3, _ = _runner(N.make_notifier("http://n", True, False, sender=lambda *a, **k: calls2.append(a) or "sent"), d=d)
+    try:
+        time.sleep(0.3)
+        assert calls2 == []             # not announced a second time on the next restart
+    finally:
+        r3.shutdown()
+
+
+def test_skipped_timetable_slot_is_announced_and_remembered():
+    import scheduler as S
+    from datetime import datetime
+    d = tempfile.mkdtemp()
+    seen = []
+    on_skip = N.make_skip_notifier("http://n", True, lambda p: "Monday open pack", sender=lambda base, title, text, urgency="normal": seen.append((text, urgency)) or "sent")
+
+    def boom(*a, **k):
+        raise ValueError("Monday open pack is already waiting in the queue")
+    path = os.path.join(d, "state", "schedule.json")
+    s = S.Scheduler(path, J.SCHEDULE_DEFAULT, boom, list(J.PACK_MAP), True, now_fn=lambda: datetime(2026, 10, 19, 8, 52, tzinfo=S.IST), on_skip=on_skip)
+    assert s.tick() == ["s_monday_open"]
+    assert len(seen) == 1 and "SKIPPED" in seen[0][0] and "already waiting" in seen[0][0] and seen[0][1] == "high"
+    ls = s.get()["last_skipped"]
+    assert ls["slot"] == "s_monday_open" and ls["telegram"] == "sent" and "already waiting" in ls["reason"]
+    assert json.load(open(path))["last_skipped"]["slot"] == "s_monday_open"
+    assert s.tick() == [] and len(seen) == 1             # the day is still marked fired: no repeat message
+    off = N.make_skip_notifier("http://n", False)
+    assert off({"id": "x"}, "r") is None
+    bad = N.make_skip_notifier("http://n", True, sender=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert bad({"id": "x", "pack": "p"}, "r").startswith("error:")
+
+
+def test_latest_only_is_per_settings_not_per_test():
+    r, d = _runner(keep_latest_only=True)
+    try:
+        a = r.submit("job", "j", {}, "me")
+        assert r.drain(30)
+        a.d["params"] = {"days": 10}                       # pretend this run was made with other options than the next ones
+        r._save(a)
+        b = r.submit("job", "j", {}, "me")
+        assert r.drain(30)
+        assert set(_ids(r, "j")) == {a.d["id"], b.d["id"]}   # different settings: the 10-day run is NOT replaced by the default-settings run
+        c = r.submit("job", "j", {}, "me")
+        assert r.drain(30)
+        assert set(_ids(r, "j")) == {a.d["id"], c.d["id"]}   # same settings: the newer one replaces b
+    finally:
+        r.shutdown()
+    r2, _ = _runner(d=d, keep_latest_only=True)              # a restart (supersede_all) keeps one run per settings too
+    try:
+        assert set(_ids(r2, "j")) == {a.d["id"], c.d["id"]}
+        assert r2.supersede("job", "j") == 1                 # no settings given = the old per-test behaviour
+        assert _ids(r2, "j") == [c.d["id"]]
+    finally:
+        r2.shutdown()
+
+
 if __name__ == "__main__":
     for k, v in list(globals().items()):
         if k.startswith("test_"):

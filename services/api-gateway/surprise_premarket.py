@@ -848,13 +848,18 @@ def upsert_baselines(rows: List[Dict[str, Any]]) -> int:
             if eng is None:
                 return 0
             sql = text(sql_text)
+            bad, first_err = 0, None
             with eng.begin() as conn:
                 for r in rows:
                     try:
-                        conn.execute(sql, r)
+                        with conn.begin_nested():      # group 451: a SAVEPOINT per row - on Postgres one failed row aborts the whole transaction otherwise,
+                            conn.execute(sql, r)       # and every later row was dropped silently
                         n += 1
-                    except Exception:
-                        pass
+                    except Exception as e_row:
+                        bad += 1
+                        first_err = first_err or f"{r.get('symbol') if isinstance(r, dict) else '?'}: {e_row}"
+            if bad:
+                logger.error("upsert fallback: %d of %d rows were NOT stored (first: %s)", bad, len(rows), first_err)
             _maybe_dispose(eng)
         except Exception as e2:
             logger.error("upsert fallback failed: %s", e2)

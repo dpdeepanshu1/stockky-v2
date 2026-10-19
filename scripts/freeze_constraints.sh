@@ -8,7 +8,7 @@
 # To upgrade later: delete a service's constraints.txt, run this again, run the tests, redeploy.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-svcs=("$@"); [ ${#svcs[@]} -gt 0 ] || svcs=(analysis-intelligence-service api-gateway decision-prediction-service market-data-service notification-scheduler-service position-stocks-service real-trade-service)
+svcs=("$@"); [ ${#svcs[@]} -gt 0 ] || svcs=(analysis-intelligence-service api-gateway calibration-runner-service decision-prediction-service market-data-service notification-scheduler-service position-stocks-service real-trade-service)
 for svc in "${svcs[@]}"; do
   d="$root/services/$svc"
   tag="$(grep -m1 -E '^FROM python:' "$d/Dockerfile" | sed -E 's/^FROM (python:[^ ]+).*/\1/')"

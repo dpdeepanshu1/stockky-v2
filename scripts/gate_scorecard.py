@@ -20,7 +20,7 @@ import calendar
 import json
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--days", type=int, default=15)
@@ -35,7 +35,7 @@ import db        # noqa: E402  (available inside the service container)
 import models    # noqa: E402
 
 S = db.get_session_factory()()
-since = datetime.utcnow() - timedelta(days=args.days)
+since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=args.days)
 rows = (S.query(models.ScalpCandidateLog)
         .filter(models.ScalpCandidateLog.created_at >= since)
         .order_by(models.ScalpCandidateLog.id).all())

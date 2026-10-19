@@ -1096,6 +1096,8 @@ ADAPTIVE_STALE_THRESHOLD_DAYS = int(((os.getenv("ADAPTIVE_STALE_THRESHOLD_DAYS")
 # shared with position-stocks-service via the same Dhan account and the
 # same physical DB; see execution/shared_order_budget.py) ────────────────────
 SHARED_DAILY_ORDER_BUDGET = int(((os.getenv("SHARED_DAILY_ORDER_BUDGET") or "").strip() or "5000"))
+# group 448: when the shared order budget / symbol lock cannot reach the DB, refuse the new BUY (true, default) instead of allowing it (false = old behaviour).
+SHARED_GATES_FAIL_CLOSED = ((os.getenv("SHARED_GATES_FAIL_CLOSED") or "true").strip().lower() not in ("0", "false", "no", "off"))
 
 # ── Cross-service capital split (session52 fix) ───────────────────────────────
 # This service and position-stocks-service share ONE real Dhan account.

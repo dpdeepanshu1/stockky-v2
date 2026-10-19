@@ -573,8 +573,8 @@ def _send_telegram(cfg: dict, title: str, message: str):
                 if resp2.status_code == 200:
                     logger.info("Telegram part %d/%d sent (plain-text fallback)", idx, total)
                     continue
-            except Exception:
-                pass
+            except Exception as e_plain:    # group 451: was `pass` - the reason the last-resort send failed was lost
+                logger.error("Telegram plain-text fallback failed: %s", _redact_secrets(e_plain))
             return f"failed: HTTP {resp.status_code}" + (f" (part {idx}/{total})" if total > 1 else "")
         except httpx.HTTPError as e:
             logger.error("Telegram notification failed: %s", _redact_secrets(e))

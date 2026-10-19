@@ -25,6 +25,9 @@ def _isolate_env(monkeypatch):
     for name in _ISOLATED_ENV:
         monkeypatch.delenv(name, raising=False)
     # group302 staggers the boot warms (8 s market open / 90 s closed); tests await the warm for fractions of a second.
+    # group 453: the admin guard is ON in production; the pre-existing route tests call the protected routes without a token, so they run
+    # with it off. tests/test_admin_guard.py turns it back on explicitly.
+    monkeypatch.setenv("GATEWAY_ADMIN_GUARD", "false")
     monkeypatch.setenv("GATEWAY_BOOT_WARM_DELAY_S", "0")
     monkeypatch.setenv("GATEWAY_BOOT_WARM_CLOSED_DELAY_S", "0")
     monkeypatch.setenv("SURPRISE_BOOT_WARM_DELAY_SEC", "0")

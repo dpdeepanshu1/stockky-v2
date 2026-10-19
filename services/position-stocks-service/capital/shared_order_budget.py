@@ -19,10 +19,10 @@ DB-backed counter rather than Redis because this codebase's Redis layer is
 Upstash-based and optional/off-by-default — a real-money order-rate guard
 shouldn't depend on optional infrastructure.
 
-FAIL-OPEN, ALWAYS: this is a soft rate governor, not a financial ledger. One
-read + one upsert per order attempt. Any DB error is logged and treated as
-"allow the order" — a broken rate-governor must never itself block a real
-entry or, especially, a real exit.
+FAIL-CLOSED FOR ENTRIES (group 448; was fail-open): if the DB cannot answer,
+check_and_reserve() returns False and the new BUY is skipped (CRITICAL log +
+rate-limited Telegram). Exits are never gated. SHARED_GATES_FAIL_CLOSED=false
+restores the old fail-open behavior.
 
 execution/shared_order_budget.py in real-trade-service is the duplicated
 counterpart — same logic, not imported (same isolation rationale as every
@@ -40,6 +40,42 @@ from models import SharedOrderBudget
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-shared-order-budget")
+SVC = "position-stocks-service"
+
+# ── Fail-closed on a gate error (group 448) ──────────────────────────────────
+# Before: any DB error in this gate meant "allow the order", so during a DB hiccup both services could buy the same symbol / overshoot the shared
+# daily order budget. These gates only ever guard new BUY entries (exits are never gated), so refusing an entry while the gate cannot answer is safe:
+# the entry is simply skipped and retried later. Set SHARED_GATES_FAIL_CLOSED=false to get the old fail-open behaviour back.
+_ALERT_EVERY_S = 600.0
+_last_alert = {"t": None}
+
+
+def _fail_closed() -> bool:
+    try:
+        import config
+        return bool(getattr(config, "SHARED_GATES_FAIL_CLOSED", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _gate_failed(gate: str, err) -> bool:
+    """What the gate returns when it could not decide: True (allow) only if fail-closed is switched off. Loud: CRITICAL log + a rate-limited Telegram."""
+    if not _fail_closed():
+        logger.error("%s: %s could not decide (%s) - failing OPEN, order allowed (SHARED_GATES_FAIL_CLOSED=false)", SVC, gate, err)
+        return True
+    logger.critical("%s: %s could not decide (%s) - failing CLOSED, this entry is refused", SVC, gate, err)
+    import time as _time
+    now = _time.monotonic()
+    if _last_alert["t"] is None or now - _last_alert["t"] >= _ALERT_EVERY_S:
+        _last_alert["t"] = now
+        try:
+            from notifier import notify_fire_and_forget
+            notify_fire_and_forget(f"{SVC}: the {gate} check could not reach the database ({type(err).__name__}). "
+                                   "New BUY entries are being refused until it recovers. Exits are not affected.")
+        except Exception:  # noqa: BLE001 - the alert must never break the gate
+            pass
+    return False
+
 
 
 def _get_or_create_row(db: Session, today: str) -> SharedOrderBudget:
@@ -107,12 +143,12 @@ def check_and_reserve(db: Session) -> bool:
         )
         return False
     except Exception as e:
-        logger.error("position-stocks: shared_order_budget.check_and_reserve failed (failing open): %s", e, exc_info=True)
+        logger.error("position-stocks: shared_order_budget.check_and_reserve failed: %s", e, exc_info=True)
         try:
             db.rollback()
         except Exception:
             pass
-        return True
+        return _gate_failed("shared order budget", e)
 
 
 def record_order_unconditional(db: Session) -> None:

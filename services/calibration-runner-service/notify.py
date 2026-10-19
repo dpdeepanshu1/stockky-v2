@@ -51,6 +51,8 @@ def build_message(run: Dict[str, Any], run_dir: str) -> Dict[str, str]:
              + (f", took {_dur(run.get('started_at'), run.get('finished_at'))}" if run.get("started_at") else "")]
     if st == "blocked":
         lines += [str(run.get("note") or "")[:300], "It did NOT run."]
+    elif st in ("failed", "timeout") and run.get("note"):
+        lines.append(str(run.get("note"))[:300])
     jobs = run.get("jobs") or []
     if jobs:
         lines.append("")
@@ -97,3 +99,25 @@ def make_notifier(base_url: str, enabled: bool = True, manual: bool = False, red
         bad = str(run.get("status")) in ("failed", "timeout", "blocked", "attention")
         return sender(base_url, m["title"], text, "high" if bad else "normal")
     return notify
+
+
+def build_skip_message(slot: Dict[str, Any], pack_title: str, reason: str) -> Dict[str, str]:
+    """A timetable slot that fired but could not be submitted (already queued, queue full, unknown pack)."""
+    head = f"⛔ {pack_title or slot.get('pack')}: SKIPPED"
+    text = "\n".join([head, f"Automatic run (timetable) - slot {slot.get('id')} at {slot.get('time')} IST did NOT start.", str(reason)[:300],
+                      "It will not be retried today.", "", "Full text: Real Money Calibration > Runs & downloads."])
+    return {"title": "Stockky calibration", "message": text[:MAX_CHARS]}
+
+
+def make_skip_notifier(base_url: str, enabled: bool = True, titles: Optional[Callable[[str], str]] = None, redact: Optional[Callable[[str], str]] = None,
+                       sender: Callable[..., str] = send) -> Callable[[Dict[str, Any], str], Optional[str]]:
+    """Returns on_skip(slot, reason) -> result text, or None when notifications are off. Never raises."""
+    def on_skip(slot: Dict[str, Any], reason: str) -> Optional[str]:
+        if not enabled:
+            return None
+        try:
+            m = build_skip_message(slot, titles(slot.get("pack")) if titles else "", reason)
+            return sender(base_url, m["title"], redact(m["message"]) if redact else m["message"], "high")
+        except Exception as e:  # noqa: BLE001
+            return f"error: {type(e).__name__}"
+    return on_skip

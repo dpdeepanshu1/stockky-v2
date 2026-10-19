@@ -136,6 +136,21 @@ def _broken_db():
 # try_claim
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+def _capture_alerts(monkeypatch, mod):
+    """group 448: stand-in for notifier.notify_fire_and_forget so no test ever sends a real Telegram; also resets the rate limiter."""
+    import types
+    sent = []
+    monkeypatch.setitem(sys.modules, "notifier", types.SimpleNamespace(notify_fire_and_forget=lambda text: sent.append(text)))
+    monkeypatch.setitem(mod._last_alert, "t", None)
+    return sent
+
+
+def _fail_open_switch(monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "SHARED_GATES_FAIL_CLOSED", False, raising=False)
+
+
 class TestTryClaim:
     def test_fresh_symbol_is_claimed(self, db):
         assert sl.try_claim(db, "ABC") is True
@@ -207,30 +222,44 @@ class TestTryClaim:
         assert sl.try_claim(db, "ABC") is True
         db.rollback.assert_called_once()
 
-    def test_race_and_reread_failure_fails_open(self):
+    def test_race_and_reread_failure_fails_closed(self, monkeypatch):
+        _capture_alerts(monkeypatch, sl)
         db = MagicMock()
         db.query.return_value.filter_by.return_value.first.side_effect = [
             None, RuntimeError("reread failed"),
         ]
         db.commit.side_effect = _integrity_error()
-        assert sl.try_claim(db, "ABC") is True
+        assert sl.try_claim(db, "ABC") is False
 
-    def test_unexpected_error_fails_open_logs_and_rolls_back(self, caplog):
+    def test_unexpected_error_fails_closed_logs_alerts_and_rolls_back(self, caplog, monkeypatch):
+        sent = _capture_alerts(monkeypatch, sl)
         db = MagicMock()
         db.query.side_effect = RuntimeError("db down")
         with caplog.at_level(logging.ERROR, logger=LOGGER):
-            assert sl.try_claim(db, "abc") is True
-        assert "failing open" in caplog.text and "ABC" in caplog.text
+            assert sl.try_claim(db, "abc") is False
+        assert "failing CLOSED" in caplog.text and "ABC" in caplog.text
         db.rollback.assert_called_once()
+        assert len(sent) == 1 and "New BUY entries are being refused" in sent[0]
+        sl.try_claim(db, "abc")
+        assert len(sent) == 1       # rate-limited
 
-    def test_unexpected_error_with_failing_rollback_still_fails_open(self):
-        assert sl.try_claim(_broken_db(), "ABC") is True
+    def test_fail_open_switch_restores_old_behaviour(self, monkeypatch):
+        sent = _capture_alerts(monkeypatch, sl)
+        _fail_open_switch(monkeypatch)
+        db = MagicMock()
+        db.query.side_effect = RuntimeError("db down")
+        assert sl.try_claim(db, "ABC") is True and sent == []
 
-    def test_commit_error_other_than_integrity_fails_open(self):
+    def test_unexpected_error_with_failing_rollback_still_fails_closed(self, monkeypatch):
+        _capture_alerts(monkeypatch, sl)
+        assert sl.try_claim(_broken_db(), "ABC") is False
+
+    def test_commit_error_other_than_integrity_fails_closed(self, monkeypatch):
+        _capture_alerts(monkeypatch, sl)
         db = MagicMock()
         db.query.return_value.filter_by.return_value.first.return_value = None
         db.commit.side_effect = RuntimeError("disk full")
-        assert sl.try_claim(db, "ABC") is True
+        assert sl.try_claim(db, "ABC") is False
         db.rollback.assert_called_once()
 
 

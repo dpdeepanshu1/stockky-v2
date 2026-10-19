@@ -98,6 +98,7 @@ class Runner:
         self.stop = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.index: Dict[str, Run] = {}
+        self._interrupted: List[Run] = []      # runs that were active when the container went down; announced once in start()
         self._load_history()
         self._load_auto()
         if self.keep_latest_only:
@@ -120,6 +121,11 @@ class Runner:
                 r.d["status"] = "failed"
                 r.d["note"] = "the runner restarted while this run was active"
                 r.d["finished_at"] = r.d.get("finished_at") or time.time()
+                try:
+                    self._save(r)               # written back, so the next restart does not find it 'active' again and announce it twice
+                except OSError:
+                    pass
+                self._interrupted.append(r)
             self.index[r.d["id"]] = r
 
     def _save(self, r: Run) -> None:
@@ -183,7 +189,7 @@ class Runner:
                 self.queue.append(r)
                 self._save(r)
         if blocked:
-            self.supersede(kind, target)
+            self.supersede(kind, target, p)
             if trigger == "schedule":       # an automatic run that did not happen is exactly what you want to hear about
                 threading.Thread(target=self._after_run, args=(r,), name="notify-blocked", daemon=True).start()
             return r
@@ -292,6 +298,9 @@ class Runner:
             return
         self.thread = threading.Thread(target=self._loop, name="runner", daemon=True)
         self.thread.start()
+        if self._interrupted:               # group 447: a restart in the middle of a run used to leave no Telegram and no last-automatic record
+            pending, self._interrupted = self._interrupted, []
+            threading.Thread(target=lambda: [self._after_run(r) for r in pending], name="notify-interrupted", daemon=True).start()
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -340,7 +349,7 @@ class Runner:
         self._notify_done(r)
         try:
             self._record_auto(r)
-            self.supersede(r.d["kind"], r.d["target"])
+            self.supersede(r.d["kind"], r.d["target"], r.d.get("params") or {})
         except Exception:  # noqa: BLE001 - bookkeeping must never touch the run
             pass
 
@@ -400,13 +409,20 @@ class Runner:
     # a run that holds a real result vs one that only says "did not run properly / was held back / was stopped"
     _RESULT = ("success", "attention", "failed", "timeout")
 
-    def supersede(self, kind: str, target: str) -> int:
-        """keep_latest_only: for one job / pack keep the newest run that has a result, plus a newer blocked / cancelled note if there is one; delete the rest.
+    @staticmethod
+    def _same_settings(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+        return json.dumps(a or {}, sort_keys=True, default=str) == json.dumps(b or {}, sort_keys=True, default=str)
+
+    def supersede(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None) -> int:
+        """keep_latest_only: for one job / pack WITH THE SAME SETTINGS keep the newest run that has a result, plus a newer blocked / cancelled note if there is one;
+        delete the rest. (group 449: runs of one job with different options, e.g. daily_trades 10 days vs 30 days, no longer overwrite each other.)
+        params=None means every settings variant of that target at once (the old behaviour).
         A blocked or cancelled run never replaces a real result. Queued / running runs are never touched."""
         if not self.keep_latest_only:
             return 0
         with self.lock:
-            mine = sorted([r for r in self.index.values() if r.d["kind"] == kind and r.d["target"] == target and r.d["status"] in FINAL],
+            mine = sorted([r for r in self.index.values() if r.d["kind"] == kind and r.d["target"] == target and r.d["status"] in FINAL
+                           and (params is None or self._same_settings(r.d.get("params"), params))],
                           key=lambda x: x.d["queued_at"], reverse=True)
             keep: List[Run] = []
             newest_result = next((r for r in mine if r.d["status"] in self._RESULT), None)
@@ -422,7 +438,8 @@ class Runner:
             return len(drop)
 
     def supersede_all(self) -> int:
-        return sum(self.supersede(k, t) for k, t in {(r.d["kind"], r.d["target"]) for r in list(self.index.values())})
+        groups = {(r.d["kind"], r.d["target"], json.dumps(r.d.get("params") or {}, sort_keys=True, default=str)) for r in list(self.index.values())}
+        return sum(self.supersede(k, t, json.loads(pj)) for k, t, pj in groups)
 
     # ---------------------------------------------------------------- one run
     def _execute(self, r: Run) -> None:

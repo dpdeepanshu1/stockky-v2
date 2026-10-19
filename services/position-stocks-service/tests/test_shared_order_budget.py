@@ -104,6 +104,21 @@ def _hide_first_lookup(db):
 # _get_or_create_row (dead code — direct tests only)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+def _capture_alerts(monkeypatch, mod):
+    """group 448: stand-in for notifier.notify_fire_and_forget so no test ever sends a real Telegram; also resets the rate limiter."""
+    import types
+    sent = []
+    monkeypatch.setitem(sys.modules, "notifier", types.SimpleNamespace(notify_fire_and_forget=lambda text: sent.append(text)))
+    monkeypatch.setitem(mod._last_alert, "t", None)
+    return sent
+
+
+def _fail_open_switch(monkeypatch):
+    import config as _c
+    monkeypatch.setattr(_c, "SHARED_GATES_FAIL_CLOSED", False, raising=False)
+
+
 class TestGetOrCreateRow:
     def test_creates_row_when_missing(self, db):
         row = sob._get_or_create_row(db, TODAY)
@@ -266,7 +281,9 @@ class TestCheckAndReserve:
             assert sob.check_and_reserve(db) is False
         assert "budget exhausted (3/3 today" in caplog.text
 
-    def test_fails_open_on_update_error_logs_and_rolls_back(self, db, monkeypatch, caplog):
+    def test_fails_closed_on_update_error_logs_alerts_and_rolls_back(self, db, monkeypatch, caplog):
+        sent = _capture_alerts(monkeypatch, sob)
+
         def boom(*a, **k):
             raise RuntimeError("db down")
 
@@ -275,22 +292,34 @@ class TestCheckAndReserve:
         monkeypatch.setattr(db, "execute", boom)
         monkeypatch.setattr(db, "rollback", lambda: (rolled.append(1), real_rollback())[1])
         with caplog.at_level(logging.ERROR, logger=LOGGER):
-            assert sob.check_and_reserve(db) is True
-        assert "failing open" in caplog.text
+            assert sob.check_and_reserve(db) is False
+        assert "failing CLOSED" in caplog.text
         assert rolled == [1]
+        assert len(sent) == 1 and "New BUY entries are being refused" in sent[0]
+        sob.check_and_reserve(db)
+        assert len(sent) == 1       # rate-limited
 
-    def test_fails_open_on_ensure_row_error(self, db, monkeypatch):
+    def test_fails_closed_on_ensure_row_error(self, db, monkeypatch):
+        _capture_alerts(monkeypatch, sob)
+
         def boom(d, t):
             raise RuntimeError("cannot insert")
 
         monkeypatch.setattr(sob, "_ensure_row_exists", boom)
-        assert sob.check_and_reserve(db) is True
+        assert sob.check_and_reserve(db) is False
 
-    def test_rollback_failure_inside_handler_is_swallowed(self):
+    def test_fail_open_switch_restores_old_behaviour(self, db, monkeypatch):
+        sent = _capture_alerts(monkeypatch, sob)
+        _fail_open_switch(monkeypatch)
+        monkeypatch.setattr(sob, "_ensure_row_exists", lambda d, t: (_ for _ in ()).throw(RuntimeError("cannot insert")))
+        assert sob.check_and_reserve(db) is True and sent == []
+
+    def test_rollback_failure_inside_handler_is_swallowed(self, monkeypatch):
+        _capture_alerts(monkeypatch, sob)
         db = MagicMock()
         db.query.side_effect = RuntimeError("db down")
         db.rollback.side_effect = RuntimeError("rollback failed too")
-        assert sob.check_and_reserve(db) is True
+        assert sob.check_and_reserve(db) is False
 
 
 # ══════════════════════════════════════════════════════════════════════════════

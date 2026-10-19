@@ -269,8 +269,8 @@ def _load_last_decisions() -> dict:
 def _save_last_decisions(decisions: dict):
     try:
         _state_set(STATE_KEY, json.dumps(decisions))
-    except Exception:
-        pass
+    except Exception as e:      # group 451: was `pass` - when this fails the next run compares against stale decisions and repeats the same alerts
+        logger.warning("could not save the last decisions (%s: %s); the next run may repeat decision-change alerts", type(e).__name__, e)
 
 
 def check_decision_changes(all_results: list):

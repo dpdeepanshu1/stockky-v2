@@ -7,8 +7,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl bash \
     && rm -rf /var/lib/apt/lists/*
 
-COPY services/calibration-runner-service/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# group449: constraints.txt (made by scripts/freeze_constraints.sh) pins every dependency to the tested versions; optional until generated
+COPY services/calibration-runner-service/requirements.txt services/calibration-runner-service/constraints.tx[t] ./
+RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.txt -c constraints.txt; else pip install --no-cache-dir -r requirements.txt; fi
 
 # the service itself
 COPY services/calibration-runner-service/config.py services/calibration-runner-service/auth.py services/calibration-runner-service/jobs.py \

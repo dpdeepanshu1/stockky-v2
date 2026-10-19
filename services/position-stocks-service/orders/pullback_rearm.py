@@ -158,12 +158,12 @@ def _live(symbol: str) -> tuple:
     vwap = None
     try:
         rng = ws_client.get_day_range(symbol)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001 - a missing range just means no day-high test this pass
+        logger.debug("pullback-rearm: day range for %s unavailable: %s", symbol, e)
     try:
         vwap = ws_client.get_exchange_vwap(symbol)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001 - a missing VWAP just means no VWAP test this pass
+        logger.debug("pullback-rearm: vwap for %s unavailable: %s", symbol, e)
     return ltp, (rng[1] if rng else None), vwap
 
 

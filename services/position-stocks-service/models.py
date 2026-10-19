@@ -376,6 +376,18 @@ class ScalpGateState(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SharedAdminCredential(Base):
+    """group 460: the admin password changed from the login page (one row, key 'admin'), shared by real-trade-service and
+    position-stocks-service. Same table name and columns in both models.py files so either one's create_all() agrees on its shape.
+    Not prefixed trade_/scalp_ because it is explicitly shared. See auth/admin_override.py for the rules."""
+    __tablename__ = "stockky_shared_admin_credential"
+
+    key = Column(String(16), primary_key=True)
+    username = Column(String(64), nullable=False)
+    password_hash = Column(Text, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class SharedOrderBudget(Base):
     """Cross-service Dhan account-wide order-rate counter (tracking doc §3.8).
 

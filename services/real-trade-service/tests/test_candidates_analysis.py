@@ -205,7 +205,7 @@ class TestMultiTfAnalysisChecks:
 
         def _route(url, params):
             if "/quote/" in url:
-                return _FakeResponse(200, {"price": 15.0})
+                return _FakeResponse(200, {"price": 8.0})
             return _history_router(by_tf)(url, params)
         client = _RoutedAsyncClient(get_router=_route)
         result = run(cd._multi_tf_analysis(client, "TCS"))
@@ -324,7 +324,7 @@ class TestVolumeShockAnalysis:
 
     def test_below_min_price_rejects(self):
         client = _RoutedAsyncClient(get_router=_vs_router(
-            quote={"price": 15.0}, candles=_shock_candles(base=15.0),
+            quote={"price": 8.0}, candles=_shock_candles(base=8.0),
         ))
         result = run(cd._volume_shock_analysis(client, "TCS"))
         assert "below" in result["reject_reason"] and "minimum" in result["reject_reason"]

@@ -1,7 +1,8 @@
 // frontend/src/components/SurpriseStocks.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api"; // all calls use getApiUrl() — never relative /api on separate Render hosts
-import { formatInrPrice, getSafePrice } from "../priceDisplay";
+import { formatInrPrice, getSafePrice, resolveDisplayPrice } from "../priceDisplay";
+import { PriceRoll } from "./ui/motion";   // group 462 (phase 4)
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
@@ -919,7 +920,7 @@ export default function SurpriseStocks({
                   </span>
                 </td>
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
-                  {formatInrPrice(s as any, null, "—")}
+                  <PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} />
                 </td>
                 <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${Number(s.change_pct) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                   {Number(s.change_pct) >= 0 ? "+" : ""}

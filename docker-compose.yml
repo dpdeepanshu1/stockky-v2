@@ -359,6 +359,11 @@ services:
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
       ADMIN_PASSWORD_HASH_B64: ${ADMIN_PASSWORD_HASH_B64:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
+      # group 460: testing phase - a longer admin session (was 30 min) and "Change password" on the login page. The new password is one DB row
+      # shared with position-stocks-service, so keep ADMIN_PASSWORD_CHANGE_ENABLED the same on both. Lock-out? set ADMIN_IGNORE_PASSWORD_OVERRIDE=true and restart.
+      SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-480}
+      ADMIN_PASSWORD_CHANGE_ENABLED: ${ADMIN_PASSWORD_CHANGE_ENABLED:-true}
+      ADMIN_IGNORE_PASSWORD_OVERRIDE: ${ADMIN_IGNORE_PASSWORD_OVERRIDE:-false}
       DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
       DHAN_ENV: ${DHAN_ENV:-sandbox}
       DHAN_TOTP_ENABLED: ${DHAN_TOTP_ENABLED:-false}
@@ -535,6 +540,10 @@ services:
       - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
       - ADMIN_PASSWORD_HASH_B64=${ADMIN_PASSWORD_HASH_B64:-}
       - SESSION_SECRET=${SESSION_SECRET:-}
+      # group 460: same three settings as real-trade-service (see there)
+      - SESSION_IDLE_TIMEOUT_MINUTES=${SESSION_IDLE_TIMEOUT_MINUTES:-480}
+      - ADMIN_PASSWORD_CHANGE_ENABLED=${ADMIN_PASSWORD_CHANGE_ENABLED:-true}
+      - ADMIN_IGNORE_PASSWORD_OVERRIDE=${ADMIN_IGNORE_PASSWORD_OVERRIDE:-false}
       #
       # 2026-09-12 fix: ORACLE_WALLET_DIR/TNS_ADMIN and the wallet volume mount
       # below were missing entirely from this block. oracle_compat.py resolves

@@ -110,6 +110,11 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 SESSION_SECRET = (os.getenv("SESSION_SECRET") or "").strip()
 SESSION_IDLE_TIMEOUT_MINUTES = int(((os.getenv("SESSION_IDLE_TIMEOUT_MINUTES") or "").strip() or "30"))
 
+# group 460: "Change password" on the login page. OFF unless true here; the new password is one DB row shared with the other trading service
+# (keep the flag the same on both). ADMIN_IGNORE_PASSWORD_OVERRIDE=true is lock-out recovery: the env hash is used again.
+ADMIN_PASSWORD_CHANGE_ENABLED = (os.getenv("ADMIN_PASSWORD_CHANGE_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+ADMIN_IGNORE_PASSWORD_OVERRIDE = (os.getenv("ADMIN_IGNORE_PASSWORD_OVERRIDE") or "").strip().lower() in ("1", "true", "yes", "on")
+
 # ── Dhan credential encryption (Layer 2) ─────────────────────────────────────
 # Fernet key encrypting the stored Dhan client-id/access-token at rest.
 # Generate once with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

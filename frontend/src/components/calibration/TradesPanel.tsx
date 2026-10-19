@@ -85,7 +85,8 @@ export default function TradesPanel({ svc, onRunReport }: { svc: Svc; onRunRepor
               <tbody>
                 {totals.map((t) => (
                   <Fragment key={t.day}>
-                    <tr className="cursor-pointer border-t border-slate hover:bg-black/10" onClick={() => setOpenDay(openDay === t.day ? null : t.day)} aria-expanded={openDay === t.day}>
+                    <tr className="cursor-pointer border-t border-slate hover:bg-black/10 focus-visible:outline focus-visible:outline-1" tabIndex={0} role="button" onClick={() => setOpenDay(openDay === t.day ? null : t.day)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpenDay(openDay === t.day ? null : t.day); } }} aria-expanded={openDay === t.day}>
                       <td className="py-1">{openDay === t.day ? "▼" : "▶"} {t.day}</td><td>{t.n}</td><td>{t.wins} / {t.losses}</td><td>{t.firstEntry}</td><td>{t.lastExit}</td>
                       <td className={pnlClass(t.best)}>{money(t.best)}</td><td className={pnlClass(t.worst)}>{money(t.worst)}</td><td className={`text-right font-bold ${pnlClass(t.net)}`}>{money(t.net)}</td>
                     </tr>

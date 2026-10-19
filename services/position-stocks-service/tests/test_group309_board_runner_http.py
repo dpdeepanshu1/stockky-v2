@@ -91,7 +91,7 @@ SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 
 
 def test_static_checks_on_main():
-    assert re.findall(r'@app\.get\("(/board[^"]*)"\)', SRC) == ["/board/status", "/board/self-check", "/board/shadow-report", "/board", "/board/{symbol}"]
+    assert re.findall(r'@app\.get\("(/board[^"]*)"\)', SRC) == ["/board/status", "/board/intraday/{symbol}", "/board/self-check", "/board/shadow-report", "/board", "/board/{symbol}"]
     block = SRC[SRC.index('@app.get("/board/status")'):SRC.index("def board_symbol")]
     assert "require_admin" not in block and "@app.post" not in block and ".commit(" not in block
     assert "_board_runner.loop()" in SRC and "if config.BOARD_ENABLED:" in SRC and SRC.count("_board_task.cancel()") == 1

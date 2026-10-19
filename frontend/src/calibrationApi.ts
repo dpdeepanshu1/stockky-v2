@@ -53,6 +53,18 @@ function live(t: string | null): string | null {
 
 export const AUTH_LOST_EVENT = "stockky:calibration-auth-lost";
 
+/** group 457: seconds until the admin session token expires (null = unknown). A session is a FIXED window from login (30 min by default), it is not extended by use. */
+export function sessionSecondsLeft(): number | null {
+  const t = anyToken();
+  if (!t) return null;
+  try {
+    const part = t.split(".")[1];
+    if (!part) return null;
+    const exp = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/"))).exp;
+    return typeof exp === "number" ? Math.max(0, Math.floor(exp - Date.now() / 1000)) : null;
+  } catch { return null; }
+}
+
 /** Any valid admin session works for the runner; prefer the real-trade one. */
 export function anyToken(): string | null {
   return live(getRtToken()) || live(getPsToken());

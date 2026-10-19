@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { SubTabs } from "./ui/SubTabs";
 import { setRealTradeApiUrl } from "../realTradeApi";
 import { setPositionStocksApiUrl } from "../positionStocksApi";
-import { AUTH_LOST_EVENT, anyToken, deriveServiceUrls, getRunnerUrl, serviceUrl, loginBoth, logoutAll, setRunnerUrl, type Svc } from "../calibrationApi";
+import { AUTH_LOST_EVENT, anyToken, deriveServiceUrls, getRunnerUrl, serviceUrl, loginBoth, logoutAll, sessionSecondsLeft, setRunnerUrl, type Svc } from "../calibrationApi";
 import SwitchesPanel from "./calibration/SwitchesPanel";
 import TradesPanel from "./calibration/TradesPanel";
 import RunPlanPanel from "./calibration/RunPlanPanel";
@@ -43,7 +43,7 @@ function LoginCard({ onDone }: { onDone: () => void }) {
   };
   return (
     <Card title="Admin login">
-      <p className="mb-2 text-mist">Your session has expired or you are not logged in (sessions end after 30 idle minutes). Same admin username and password as Auto Trade. This page changes real-money switches and runs jobs, so it needs the login.</p>
+      <p className="mb-2 text-mist">Your session has expired or you are not logged in. A session lasts a fixed time after login (30 minutes by default) and is not extended while you use the page. Same admin username and password as Auto Trade. This page changes real-money switches and runs jobs, so it needs the login.</p>
       <form className="flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); void go(); }}>
         <label className="text-[11px]"><span className="block text-mist">Username</span><input value={u} onChange={(e) => setU(e.target.value)} autoComplete="username" className="rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
         <label className="text-[11px]"><span className="block text-mist">Password</span><input type="password" value={p} onChange={(e) => setP(e.target.value)} autoComplete="current-password" className="rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
@@ -51,6 +51,23 @@ function LoginCard({ onDone }: { onDone: () => void }) {
       </form>
       {err && <div className="mt-2"><Msg kind="err">{err}</Msg></div>}
     </Card>
+  );
+}
+
+/** group 457: the session is a fixed window, so say so BEFORE it ends (a long run would otherwise log you out in the middle of watching it). */
+function SessionNotice() {
+  const [left, setLeft] = useState<number | null>(() => sessionSecondsLeft());
+  useEffect(() => {
+    const id = setInterval(() => setLeft(sessionSecondsLeft()), 15000);
+    return () => clearInterval(id);
+  }, []);
+  if (left == null || left > 600) return null;
+  const mins = Math.max(1, Math.ceil(left / 60));
+  return (
+    <Msg kind="warn">
+      Your admin session ends in about {mins} min. It is a fixed time from login and is not extended while you use the page. A run that is already going keeps running on the server;
+      after you log in again, open it from "Runs &amp; downloads".
+    </Msg>
   );
 }
 
@@ -63,9 +80,9 @@ function ConnectionCard() {
     <details className="rounded-2xl border border-slate bg-graphite p-3 text-[12px]">
       <summary className="cursor-pointer text-[11px] font-bold uppercase tracking-widest text-mist">Connection {error ? "(problem)" : ""}</summary>
       <div className="mt-2 flex flex-wrap items-end gap-2">
-        <label className="text-[11px]"><span className="block text-mist">Runner URL (calibration-runner-service)</span><input value={url} onChange={(e) => setUrl(e.target.value)} className="w-72 rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
-        <label className="text-[11px]"><span className="block text-mist">Real Trade URL (real-trade-service)</span><input value={rtUrl} onChange={(e) => setRtUrl(e.target.value)} className="w-72 rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
-        <label className="text-[11px]"><span className="block text-mist">Position Stocks URL (position-stocks-service)</span><input value={psUrl} onChange={(e) => setPsUrl(e.target.value)} className="w-72 rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
+        <label className="text-[11px]"><span className="block text-mist">Runner URL (calibration-runner-service)</span><input value={url} onChange={(e) => setUrl(e.target.value)} className="w-full rounded-lg sm:w-72 border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
+        <label className="text-[11px]"><span className="block text-mist">Real Trade URL (real-trade-service)</span><input value={rtUrl} onChange={(e) => setRtUrl(e.target.value)} className="w-full rounded-lg sm:w-72 border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
+        <label className="text-[11px]"><span className="block text-mist">Position Stocks URL (position-stocks-service)</span><input value={psUrl} onChange={(e) => setPsUrl(e.target.value)} className="w-full rounded-lg sm:w-72 border border-slate bg-transparent px-2 py-1 text-[12px]" /></label>
         <Btn small onClick={() => { setRunnerUrl(url); setRealTradeApiUrl(rtUrl); setPositionStocksApiUrl(psUrl); window.location.reload(); }}>Save</Btn>
         <Btn small onClick={() => { logoutAll(); window.location.reload(); }}>Log out</Btn>
       </div>
@@ -79,10 +96,11 @@ function Body() {
   const [section, setSection] = useState<Section>("switches");
   const { start } = useRunner();
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
       <SubTabs items={SVC_ITEMS} value={svc} onChange={setSvc} label="Service" />
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
+      <SessionNotice />
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "trades" && <TradesPanel svc={svc} onRunReport={() => void start("job", "daily_trades", { days: 10, origin: "all" })} />}
       {section === "plan" && <RunPlanPanel svc={svc} />}

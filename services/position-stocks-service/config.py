@@ -962,6 +962,11 @@ ADMIN_USERNAME = _get_str("ADMIN_USERNAME", "admin")
 SESSION_SECRET = (os.getenv("SESSION_SECRET") or "").strip()
 SESSION_IDLE_TIMEOUT_MINUTES = _get_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
 
+# group 460: "Change password" on the login page. OFF unless true here; the new password is one DB row shared with the other trading service
+# (keep the flag the same on both). ADMIN_IGNORE_PASSWORD_OVERRIDE=true is lock-out recovery: the env hash is used again.
+ADMIN_PASSWORD_CHANGE_ENABLED = (os.getenv("ADMIN_PASSWORD_CHANGE_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+ADMIN_IGNORE_PASSWORD_OVERRIDE = (os.getenv("ADMIN_IGNORE_PASSWORD_OVERRIDE") or "").strip().lower() in ("1", "true", "yes", "on")
+
 # ── Notifications (session41 fix — STATUS.md open item #7) ─────────────
 # SAME env vars / SAME notification-scheduler-service routing convention
 # as real-trade-service's config.py + notifier.py, duplicated here per

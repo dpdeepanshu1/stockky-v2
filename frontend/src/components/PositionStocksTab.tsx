@@ -24,6 +24,7 @@ import {
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
 import { NavIcon } from "./ui/NavIcon";
+import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only)
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
@@ -781,7 +782,7 @@ export default function PositionStocksTab() {
   const killSwitchTripped = status?.daily_loss_kill_switch || ledger?.daily_loss_kill_switch_tripped;
 
   return (
-    <div className="page-terminal space-y-4">
+    <div className="page-terminal space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
       <div className="rt-head ps-head">
         <div className="rt-title">
           <span className="rt-title-icon" aria-hidden="true"><NavIcon name="trend" /></span>
@@ -2186,7 +2187,7 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
   // a manual way out).
   const canClose = onClose && (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED");
   return (
-    <div className="border border-slate rounded-xl p-3">
+    <GlintBox value={p.current_price} className="border border-slate rounded-xl p-3">
       <div className="flex items-center justify-between mb-2">
         <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}</span>
         <div className="flex items-center gap-2">
@@ -2269,7 +2270,7 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           backend as well. */}
       {(p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED") && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] mt-2 pt-2 border-t border-slate/50">
-          <div><span className="text-mist">Current </span><span className="tabular-nums text-paper">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+          <div><span className="text-mist">Current </span><span className="tabular-nums text-paper"><PriceRoll value={p.current_price} text={p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"} /></span></div>
           <div><span className="text-mist">Value </span><span className="tabular-nums text-paper">{p.current_amount != null ? fmtInr(p.current_amount) : "—"}</span></div>
           <div>
             <span className="text-mist">Unrealized </span>
@@ -2331,6 +2332,6 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           ? ` · Exit Order ${p.dhan_exit_order_id}`
           : ""}
       </p>
-    </div>
+    </GlintBox>
   );
 }

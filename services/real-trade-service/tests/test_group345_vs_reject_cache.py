@@ -12,7 +12,7 @@ def test_price_floor_is_judged_before_history(monkeypatch):
     async def boom(*a, **k):
         raise AssertionError("history must not be fetched for a sub-floor price")
     monkeypatch.setattr(ce, "_fetch_history", boom)
-    res = asyncio.run(ce._volume_shock_analysis(None, "HATHWAY", {"price": 10.6}))
+    res = asyncio.run(ce._volume_shock_analysis(None, "HATHWAY", {"price": 8.6}))
     assert res["reject_kind"] == "price_floor" and "minimum" in res["reject_reason"]
 
 

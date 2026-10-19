@@ -5,6 +5,10 @@ import "./index.css";
 import { installGatewayAuth } from "./gatewayAuth";
 import { getApiUrl } from "./api";
 import "./design-v3.css"; // fresh UI layer (2026-10-16) — loads last so it wins; delete this line to roll back
+import "./design-v4.css"; // group 460: fresh-green tokens + motion toolkit (loads after v3); delete this line to roll back
+import "./auth-login.css"; // group 460: login page, re-login overlay, session chip
+import "./light-contrast.css"; // group 464: light-theme button/colour contrast (delete this line to roll back)
+import "./alignment.css"; // group 465: layout alignment fixes (loads last; delete this line to roll back)
 
 // TV / 10-foot mode: auto-detected from the browser's user agent (Tizen, webOS,
 // Android TV, Fire TV, Chromecast, …). Force it on/off with ?tv=1 / ?tv=0 —
@@ -16,6 +20,13 @@ try {
   const uaTv = /SmartTV|SMART-TV|Tizen|Web0S|WebOS|NetCast|HbbTV|BRAVIA|VIDAA|CrKey|GoogleTV|Android ?TV|AppleTV|AFT[A-Z]|Roku|PhilipsTV/i.test(navigator.userAgent || "");
   if (pref === "1" || (pref !== "0" && uaTv)) document.documentElement.classList.add("tv");
 } catch { /* storage blocked — stay in normal mode */ }
+
+// group 460: lets design-v4.css pause looping animations while the browser tab is hidden
+try {
+  const markHidden = () => document.documentElement.setAttribute("data-hidden", String(document.hidden));
+  document.addEventListener("visibilitychange", markHidden);
+  markHidden();
+} catch { /* no document */ }
 
 installGatewayAuth(getApiUrl); // group 453: adds the admin session token to the gateway's protected routes
 

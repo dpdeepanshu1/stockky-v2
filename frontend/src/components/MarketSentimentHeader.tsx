@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Skeleton } from "./ui/motion";   // group 461 (phase 4)
 import { setVisibleInterval } from "../visibleInterval";
 import { api, MarketIndicesResponse } from "../api";
 
@@ -34,10 +35,10 @@ export default function MarketSentimentHeader() {
 
   if (loading && !data) {
     return (
-      <div className="bg-graphite border border-slate rounded-2xl p-6 animate-pulse">
+      <div className="bg-graphite border border-slate rounded-2xl p-6" role="status" aria-label="Loading market sentiment">
         <div className="flex justify-between items-center">
-          <div className="h-6 w-32 bg-slate/50 rounded"></div>
-          <div className="h-10 w-48 bg-slate/50 rounded"></div>
+          <Skeleton w={128} h={24} />
+          <Skeleton w={192} h={40} />
         </div>
       </div>
     );

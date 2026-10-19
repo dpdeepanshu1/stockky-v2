@@ -1502,6 +1502,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 _MS_INFO_CACHE: dict = {}
 
@@ -1541,6 +1546,20 @@ def login(body: LoginRequest):
     token, expires_at = issue_session_token(body.username)
     logger.info("position-stocks-service: admin login (%s)", body.username)
     return {"token": token, "expires_at": expires_at}
+
+
+@app.post("/auth/change-password")
+def change_password(body: ChangePasswordRequest, admin: str = Depends(require_admin)):
+    """group 460: change the admin password from the login page. Needs a valid session AND the current password. Stored as one DB row shared
+    with position-stocks-service (auth/admin_override.py); OFF unless ADMIN_PASSWORD_CHANGE_ENABLED=true."""
+    from auth import admin_override
+    try:
+        admin_override.change_password(admin, body.current_password, body.new_password, verify_admin_password)
+    except admin_override.ChangeRejected as e:
+        logger.warning("position-stocks: admin password change rejected (%s)", e.status)
+        raise HTTPException(status_code=e.status, detail=e.message)
+    logger.info("position-stocks-service: admin password changed (%s)", admin)
+    return {"ok": True}
 
 
 @app.post("/auth/logout")

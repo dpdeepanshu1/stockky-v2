@@ -9,6 +9,7 @@ import {
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 import { SubTabs } from "./ui/SubTabs";
 import { NavIcon } from "./ui/NavIcon";
+import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only, never P&L or order values)
 // Cross-service, read-only: position-stocks-service's own capital ledger
 // and split percentage, used only to populate the "Position Stocks" side
 // of CapitalSplitCard below (see that component's docstring for why this
@@ -184,7 +185,7 @@ function PositionCard({
   closing: boolean;
 }) {
   return (
-    <div className="bg-graphite border border-slate rounded-2xl p-4">
+    <GlintBox value={p.current_price} className="bg-graphite border border-slate rounded-2xl p-4">
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
@@ -237,7 +238,7 @@ function PositionCard({
       <div className="grid grid-cols-5 gap-2 font-display tabular-nums text-[10px] text-mist mb-3">
         <div>Qty<br/><span className="text-paper font-bold">{p.qty_open}</span></div>
         <div>Entry<br/><span className="text-paper font-bold">₹{p.avg_entry_price}</span></div>
-        <div>Current<br/><span className="text-signal-prepare font-bold">{p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"}</span></div>
+        <div>Current<br/><span className="text-signal-prepare font-bold"><PriceRoll value={p.current_price} text={p.current_price != null ? `₹${p.current_price.toFixed(2)}` : "—"} /></span></div>
         <div>
           Stop
           {p.stop_distance_pct != null && <span className="text-mist"> ({p.stop_distance_pct}%)</span>}
@@ -275,7 +276,7 @@ function PositionCard({
           </button>
         )}
       </div>
-    </div>
+    </GlintBox>
   );
 }
 
@@ -1557,7 +1558,8 @@ export default function RealAutoTrade() {
   ];
 
   return (
-    <div className="rt-page max-w-5xl mx-auto">
+    <div className="rt-page max-w-5xl mx-auto mode-frame" data-mode={mode}
+      data-frame-label={mode === "REAL" ? "REAL MONEY · live Dhan orders" : "DEMO · simulated orders, no money"}>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
       <div className="rt-head">
         <div className="rt-title">
@@ -2134,7 +2136,7 @@ export default function RealAutoTrade() {
                           const pnl = p.unrealized_pnl;   // null = unknown (never the day buy value)
                           const product = p.product;
                           return (
-                            <div key={i} className="bg-ink rounded-xl px-3 py-2 border border-slate">
+                            <GlintBox key={i} value={ltp} className="bg-ink rounded-xl px-3 py-2 border border-slate">
                               <div className="flex items-center justify-between">
                                 <div>
                                   <span className="font-display tabular-nums text-sm font-bold text-paper">{sym}</span>
@@ -2147,10 +2149,10 @@ export default function RealAutoTrade() {
                               <div className="flex gap-4 mt-1 font-display tabular-nums text-[10px] text-mist">
                                 <span>Qty <span className="text-paper">{qty}</span></span>
                                 <span>Avg <span className="text-paper">{avg != null ? `₹${avg.toFixed(2)}` : "—"}</span></span>
-                                <span>LTP <span className="text-paper">{ltp != null ? `₹${ltp.toFixed(2)}` : "—"}</span></span>
+                                <span>LTP <span className="text-paper"><PriceRoll value={ltp} text={ltp != null ? `₹${ltp.toFixed(2)}` : "—"} /></span></span>
                                 <span>Val <span className="text-paper">{p.cost_value != null ? fmtInr(p.cost_value, 0) : "—"}</span></span>
                               </div>
-                            </div>
+                            </GlintBox>
                           );
                         })}
                       </div>

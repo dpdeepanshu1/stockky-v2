@@ -511,6 +511,13 @@ def preopen_status():
     return preopen.status()
 
 
+@app.get("/pullback-rearm")
+def pullback_rearm_route():
+    """2026-10-19: symbols refused for chasing and waiting for a pullback re-arm (what each is waiting on), active waivers, today's attempts. Read-only."""
+    from entry_engine import pullback_rearm
+    return pullback_rearm.status()
+
+
 @app.get("/status/{mode}")
 async def gate_status(mode: str, db: Session = Depends(get_db)):
     """Public-ish (no admin auth) — the dashboard needs to render 🔴/🟢

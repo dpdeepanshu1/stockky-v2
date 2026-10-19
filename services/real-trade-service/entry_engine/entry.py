@@ -45,6 +45,7 @@ from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
+from entry_engine import pullback_rearm as _rearm
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -521,7 +522,60 @@ def _fetch_candidates(db: Session, mode: str) -> list:
 
 # ── Main evaluation cycle ─────────────────────────────────────────────────────
 
+async def _rearm_requeue(db: Session, mode: str) -> int:
+    """2026-10-19 pullback re-arm: look at the symbols refused for chasing (entry_engine/pullback_rearm.py) and, for each that has pulled back
+    and is bouncing, queue a fresh copy of the refused candidate. The chase checks are waived for it for a short time; every other gate,
+    the risk engine and sizing are the normal path. Never raises into the entry loop."""
+    try:
+        if not _rearm.enabled(mode):
+            return 0
+        syms = _rearm.armed_symbols(mode)
+        if not syms:
+            return 0
+        hits = _rearm.scan(mode, await get_quotes(syms))
+        if not hits:
+            return 0
+        held = _held_symbols_for_trigger(db, mode)
+        queued = 0
+        for h in hits:
+            sym = h["symbol"]
+            if sym in held:
+                _rearm.consume(mode, sym)          # already in the position: nothing to re-queue
+                continue
+            if db.query(models.TradeCandidate).filter_by(mode=mode, symbol=sym, consumed=False).first() is not None:
+                _rearm.consume(mode, sym)          # a candidate is already queued: it gets the waiver
+                continue
+            tmpl = db.get(models.TradeCandidate, h["template_candidate_id"]) if h.get("template_candidate_id") else None
+            if tmpl is None:
+                tmpl = (db.query(models.TradeCandidate).filter_by(mode=mode, symbol=sym)
+                        .order_by(models.TradeCandidate.received_at.desc()).first())
+            if tmpl is None:
+                _rearm.consume(mode, sym)
+                continue
+            db.add(models.TradeCandidate(
+                mode=mode, symbol=sym, source_tab=tmpl.source_tab, decision_label=tmpl.decision_label,
+                conviction_score=tmpl.conviction_score, signal_price=tmpl.signal_price, raw_payload=tmpl.raw_payload,
+                consumed=False, watchlist_entry_id=getattr(tmpl, "watchlist_entry_id", None),
+                overnight_priority=bool(getattr(tmpl, "overnight_priority", False)),
+                us_sector_bonus=float(getattr(tmpl, "us_sector_bonus", 0.0) or 0.0)))
+            _rearm.consume(mode, sym)
+            queued += 1
+            logger.info("pullback-rearm[%s]: RE-QUEUED %s at %.2f - %s (chase checks waived for %.0fs)", mode, sym, h["ltp"], h["why"],
+                        float(getattr(config, "REARM_WAIVER_S", 420.0)))
+        if queued:
+            db.commit()
+        return queued
+    except Exception as e:  # noqa: BLE001 - never stop the entry loop
+        logger.warning("pullback-rearm[%s]: requeue failed (ignored): %s", mode, e)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
+    await _rearm_requeue(db, mode)
     candidates = _fetch_candidates(db, mode)
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
@@ -860,7 +914,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── Gate 4: entry drift ───────────────────────────────────────────────
         drift_ok, drift_reason, drift_pct, max_drift_pct = _entry_drift_ok(tick.price, cand.signal_price, atr_pct, getattr(tick, "vwap", None))
+        if not drift_ok and drift_pct > 0 and _rearm.has_waiver(mode, cand.symbol):
+            # 2026-10-19 pullback re-arm: this symbol was refused for chasing, pulled back and is bouncing - the chase check is waived once.
+            logger.info("pullback-rearm[%s]: %s drift chase check waived (re-armed after a pullback)", mode, cand.symbol)
+            drift_ok = True
+            drift_pct = 0.0     # the pullback was confirmed: score it as "not extended" so the 50-point composite floor does not silently re-block it
         if not drift_ok:
+            if drift_pct > 0 and _rearm.is_chase_reason(drift_reason):
+                _rearm.arm(mode, cand.symbol, drift_reason, float(tick.price), _tick_day_change_pct(tick) or 0.0,
+                           getattr(tick, "day_high", None), candidate_id=cand.id)
             _wait_with_preview(drift_reason)
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
@@ -941,6 +1003,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     _sg_block = f"STRUCTURE_NODATA: no usable daily structure ({_sg_ver.get('no_data')})"
                     _sg_tag = structure_gate.TAG_NODATA
                 _sg_enforced = bool(_sg_block) and _sg_mode == "enforce"
+                _sg_reasons = list(_sg_ver.get("reasons") or [])
+                _sg_chase_only = bool(_sg_ver.get("would_reject")) and bool(_sg_reasons) and all(_rearm.is_chase_reason(r, structure=True) for r in _sg_reasons)
+                if _sg_enforced and _sg_chase_only and _rearm.has_waiver(mode, cand.symbol):
+                    logger.info("pullback-rearm[%s]: %s structure chase/stretch check waived (re-armed after a pullback)", mode, cand.symbol)
+                    _sg_enforced = False
                 decision.structure_json = structure_gate.snapshot(_sg_sum, _sg_ver, _sg_mode, _sg_enforced, _sg_lv, _sg_src)
                 structure_gate.record(cand.symbol, mode, _sg_ver, _sg_mode, _sg_enforced, tick.price, _sg_src)   # group 355: counters + recent ring
                 try:                                                                                              # group356: what did the stock do next?
@@ -949,6 +1016,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 except Exception:  # noqa: BLE001 - evidence only, never changes an entry
                     pass
                 if _sg_enforced:
+                    if _sg_chase_only:
+                        _rearm.arm(mode, cand.symbol, _sg_block, float(tick.price), _tick_day_change_pct(tick) or 0.0,
+                                   getattr(tick, "day_high", None), candidate_id=cand.id)
                     _wait_with_preview(_sg_block)
                     decision.gate_tag = _sg_tag
                     db.add(decision)

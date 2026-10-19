@@ -138,8 +138,11 @@ app.add_middleware(
 from control import kit as _control_kit  # noqa: E402
 from control.catalog import CATALOG as _CONTROL_CATALOG  # noqa: E402
 
-_control = _control_kit.Controller("real-trade-service", _CONTROL_CATALOG, restart_hint="docker compose restart real-trade-service")
-_control_kit.mount(app, _control, require_admin)
+try:  # a bug in the control page must never stop the trading service from booting
+    _control = _control_kit.Controller("real-trade-service", _CONTROL_CATALOG, restart_hint="docker compose restart real-trade-service")
+    _control_kit.mount(app, _control, require_admin)
+except Exception as _control_err:  # noqa: BLE001
+    logging.getLogger(__name__).error("group442: control routes NOT mounted (%s: %s) - the service keeps running without the Calibration page", type(_control_err).__name__, _control_err)
 
 
 @_on_startup

@@ -504,17 +504,24 @@ def mount(app: Any, controller: Controller, admin_dep: Callable[..., Any], prefi
     def flags(admin: str = Depends(admin_dep)):
         return controller.describe()
 
-    @router.post("/flags/{key}")
     def set_flag(key: str, body: SetBody, admin: str = Depends(admin_dep)):
         return _wrap(lambda: controller.set(key, body.value, admin or "admin", confirm=body.confirm, note=body.note))
+
+    # With `from __future__ import annotations` the annotations above are strings, and the body classes live inside mount(), so older
+    # FastAPI / pydantic (real-trade-service pins 0.104.1 / 2.5.3) cannot resolve "SetBody" and the service crash-looped at boot.
+    # Hand the real classes over before the route is registered.
+    set_flag.__annotations__["body"] = SetBody
+    router.post("/flags/{key}")(set_flag)
 
     @router.delete("/flags/{key}")
     def clear_flag(key: str, admin: str = Depends(admin_dep)):
         return _wrap(lambda: controller.clear(key, admin or "admin"))
 
-    @router.post("/preset/recommended")
     def preset(body: PresetBody, admin: str = Depends(admin_dep)):
         return _wrap(lambda: controller.preset_recommended(admin or "admin", dry_run=body.dry_run, confirm=body.confirm))
+
+    preset.__annotations__["body"] = PresetBody
+    router.post("/preset/recommended")(preset)
 
     @router.get("/audit")
     def audit(limit: int = 100, admin: str = Depends(admin_dep)):

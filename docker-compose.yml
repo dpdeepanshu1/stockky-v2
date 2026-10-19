@@ -230,6 +230,9 @@ services:
       # (/notifications/config, /ops/power-off, /training/train, feed hard-reset, ...). Empty = those routes answer 503 (fail closed).
       SESSION_SECRET: ${SESSION_SECRET:-}
       GATEWAY_ADMIN_GUARD: ${GATEWAY_ADMIN_GUARD:-true}
+      # group 454: browser origins allowed to call the gateway, comma separated (e.g. https://stockky.example.com,http://localhost:5173).
+      # Empty = any origin (the old behavior, logged as a warning at boot).
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-}
       MARKET_DATA_URL: http://market-data-service:8001
       TECHNICAL_URL: http://analysis-intelligence-service:8000/technical
       FUNDAMENTAL_URL: http://analysis-intelligence-service:8000/fundamental

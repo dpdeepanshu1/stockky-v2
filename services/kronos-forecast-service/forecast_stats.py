@@ -10,8 +10,7 @@ the STOP is counted first (conservative).
 """
 from __future__ import annotations
 
-import math
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np

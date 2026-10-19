@@ -6,7 +6,7 @@ Pure function over ScalpPosition rows; changes nothing."""
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, Optional
+from typing import Iterable
 
 from orders import excursion, trade_stats
 from tz_utils import as_aware, ist_now

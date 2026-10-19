@@ -18,12 +18,10 @@ from peer_multi_quarter import (
     _REV_G_KEYS,
     _ROE_KEYS,
     _pick,
-    build_peer_list,
     compute_peer_relative,
     detect_sector,
     has_sector_data,
     peers_for,
-    fetch_fundamentals,
     fetch_fundamentals_batch,
 )
 

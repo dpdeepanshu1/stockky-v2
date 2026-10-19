@@ -9,7 +9,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 import yfinance as yf
 import numpy as np
-import pandas as pd
 
 # ✅ Absolute import
 import models as db_models

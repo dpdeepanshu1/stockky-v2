@@ -23,7 +23,7 @@ import json
 import statistics as st
 import sys
 from collections import defaultdict
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 def num(x: Any) -> Optional[float]:

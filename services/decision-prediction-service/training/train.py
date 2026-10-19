@@ -5,7 +5,6 @@ Uses financial ML best practices: walk‑forward, per‑fold scaling, financial 
 Enhanced with model versioning, database logging, and configurable inputs.
 """
 import os
-import sys
 import json
 import logging
 import argparse
@@ -18,10 +17,9 @@ import gc
 import time
 import random
 import threading
-import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 
 # Import our modules
 from targets import TargetGenerator

@@ -14,7 +14,7 @@ This prevents look-ahead bias.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -29,15 +29,7 @@ _PRED_DIR = os.path.join(os.path.dirname(__file__), "..", "prediction")
 if _PRED_DIR not in sys.path:
     sys.path.insert(0, os.path.abspath(_PRED_DIR))
 
-from pred_features import (
-    FEATURE_COLUMNS,
-    TECHNICAL_COLUMNS,
-    FUNDAMENTAL_COLUMNS,
-    NEWS_COLUMNS,
-    build_full_feature_vector,
-    compute_technical_features,
-    _safe,
-)
+from pred_features import FEATURE_COLUMNS, FUNDAMENTAL_COLUMNS, build_full_feature_vector, _safe
 
 logger = logging.getLogger("feature_builder")
 

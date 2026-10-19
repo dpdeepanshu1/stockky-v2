@@ -29,7 +29,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from market_hours import is_feed_window_ist
 import session_proof

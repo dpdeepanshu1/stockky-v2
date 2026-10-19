@@ -170,8 +170,10 @@ def test_missing_inputs_fail_clearly_and_drop_if_missing():
               "o": _job("o", lambda c, p: [_cmd(c, "show.py", "--live", os.path.join(c["run"], "nope.json"), "--k", "v") | {"drop_if_missing": [os.path.join(c["run"], "nope.json")]}])}
     rm, rg, ro = r.submit("job", "m"), r.submit("job", "g"), r.submit("job", "o")
     assert r.drain(30)
-    assert r.index[rm.d["id"]].d["status"] == "failed" and "input missing" in open(os.path.join(d, "data", "runs", rm.d["id"], "output.txt")).read()
-    assert r.index[rg.d["id"]].d["status"] == "failed"
+    # group446: a missing input is "needs data first" (attention, amber), not a failed job (red)
+    assert r.index[rm.d["id"]].d["status"] == "attention" and "input missing" in open(os.path.join(d, "data", "runs", rm.d["id"], "output.txt")).read()
+    assert r.index[rm.d["id"]].d["steps"][0]["detail"].startswith("needs data first: ")
+    assert r.index[rg.d["id"]].d["status"] == "attention"
     assert r.index[ro.d["id"]].d["status"] == "success"
     assert "'--k', 'v'" in open(os.path.join(d, "data", "runs", ro.d["id"], "output.txt")).read() and "--live" not in open(os.path.join(d, "data", "runs", ro.d["id"], "output.txt")).read().split("args")[1]
     os.makedirs(os.path.join(cal, "hist_7"))

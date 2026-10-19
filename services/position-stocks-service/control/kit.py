@@ -328,8 +328,17 @@ class Controller:
     # -- reading
     def _desired(self, f: Flag, rec: Optional[Dict[str, Any]]) -> Optional[str]:
         if rec and rec.get("value") is not None:
-            return rec["value"]
-        return _env_value(f) or f.shipped
+            v: Optional[str] = rec["value"]
+        else:
+            v = _env_value(f) or f.shipped
+        # group 446: the running value is canonical ("3"), the shipped default was the raw catalog text ("3.0"), so a float switch showed
+        # PENDING RESTART although nothing differed. Both sides are compared in the same canonical form.
+        if v is None:
+            return None
+        try:
+            return canonical(f, v)
+        except ValueError:
+            return v
 
     def describe(self) -> Dict[str, Any]:
         ov = self.store.overrides()

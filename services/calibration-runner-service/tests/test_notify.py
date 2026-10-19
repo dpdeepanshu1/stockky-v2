@@ -134,6 +134,7 @@ def _runner(notify_fn=None, d=None, **kw):
     jobs = {"j": J._job("j", "Job J", "ops", "now", "test", lambda c, p: [J._py(c, "ok.py")], [], heavy=kw.pop("heavy", False)),
             "b": J._job("b", "Job B", "ops", "now", "test", lambda c, p: [J._py(c, "bad.py")], [])}
     packs = {"p": {"id": "p", "title": "Pack P", "when": "", "what": "", "jobs": [["j", {}]], "stop_on_failure": False}}
+    kw.setdefault("preflight_s", 0)      # group466: these tests use fake service URLs that never answer /health; preflight has its own tests
     r = R.Runner(os.path.join(d, "data"), sc, ctx, jobs, packs, lambda: TOKEN, nice=0, notify_fn=notify_fn, **kw)
     r.start()
     return r, d

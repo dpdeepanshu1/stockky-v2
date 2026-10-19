@@ -372,6 +372,7 @@ class TestStatuses:
         for s in statuses.FLAT_SELL_STATUSES:
             assert f'"{s}"' in api, f"{s} missing from positionStocksApi.ts"
         assert '"STOP_BREACH_EXIT"' in tab
+        assert '"CLOSE_ALL"' in tab   # group 466
 
 
 # ---------------------------------------------------------------- entry cut-off

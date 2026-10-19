@@ -8,6 +8,7 @@ import {
 } from "../realTradeApi";
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 import { SubTabs } from "./ui/SubTabs";
+import CloseAllDialog from "./CloseAllDialog";
 import { NavIcon } from "./ui/NavIcon";
 import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only, never P&L or order values)
 // Cross-service, read-only: position-stocks-service's own capital ledger
@@ -903,6 +904,7 @@ export default function RealAutoTrade() {
   const [regenLoading, setRegenLoading] = useState(false);
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
+  const [showCloseAll, setShowCloseAll] = useState(false);   // group 466
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
 
@@ -1755,6 +1757,17 @@ export default function RealAutoTrade() {
                   <button onClick={() => void doEmergencyPause()} className="px-4 py-2.5 rounded-xl bg-signal-sell/30 border border-signal-sell/40 font-display tabular-nums text-xs text-signal-sell">
                     🚨 PAUSE ALL
                   </button>
+                  <button onClick={() => setShowCloseAll(true)} className="px-4 py-2.5 rounded-xl bg-signal-sell/40 border border-signal-sell font-display tabular-nums text-xs text-signal-sell">
+                    🚨 CLOSE ALL
+                  </button>
+                  {showCloseAll && (
+                    <CloseAllDialog open={showCloseAll}
+                      title={`Close all and disarm — ${mode}`}
+                      detail={`This disarms ${mode}, cancels resting BUY orders and sends a MARKET SELL for every open position. It cannot be undone.`}
+                      onCancel={() => { setShowCloseAll(false); void loadStatus(mode); }}
+                      onConfirm={(phrase) => realTradeApi.closeAll(mode, phrase)}
+                    />
+                  )}
                 </div>
                 {status?.disarmed_reason && (
                   /outbound IP|invalid ip|not whitelisted/i.test(status.disarmed_reason) ? (

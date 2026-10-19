@@ -23,6 +23,7 @@ import {
 // trade-service's URL isn't configured in this browser).
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
+import CloseAllDialog from "./CloseAllDialog";
 import { NavIcon } from "./ui/NavIcon";
 import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only)
 import CapitalSplitCard from "./CapitalSplitCard";
@@ -92,6 +93,8 @@ function statusColor(status: string): string {
   if (status === "STAGNATION_EXIT") return "text-signal-prepare";
   // group 340: price sat under the stored stop and the watchdog closed it at market - a stop failure, loss colour.
   if (status === "STOP_BREACH_EXIT") return "text-signal-sell";
+  // group 466: Close-all-and-disarm exit (plain MARKET SELL, reconcile resolves the fill)
+  if (status === "CLOSE_ALL") return "text-signal-prepare";
   return "text-signal-avoid";
 }
 
@@ -404,6 +407,7 @@ export default function PositionStocksTab() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmKill, setConfirmKill] = useState(false);
+  const [showCloseAll, setShowCloseAll] = useState(false);   // group 466
   // AUDIT FIX (this session): backend POST /ledger/reset-daily existed with
   // no frontend wiring at all — see positionStocksApi.ts's resetLedgerDaily
   // comment. Same confirm-guard pattern as confirmKill, since this clears
@@ -1223,6 +1227,18 @@ export default function PositionStocksTab() {
           className="px-4 py-2 rounded-xl bg-graphite border border-slate font-display tabular-nums text-xs text-paper disabled:opacity-40">
           {busy === "disarm" ? "Disarming…" : "Disarm"}
         </button>
+        <button disabled={!loggedIn || busy !== null} onClick={() => setShowCloseAll(true)}
+          className="px-4 py-2 rounded-xl bg-signal-sell/40 border border-signal-sell/60 font-display tabular-nums text-xs text-paper disabled:opacity-40">
+          ⛔ Close all
+        </button>
+        {showCloseAll && (
+          <CloseAllDialog open={showCloseAll}
+            title="Close all and disarm — Position Stocks"
+            detail="This disarms the module, cancels resting BUY orders and sends a MARKET SELL for every open position. It cannot be undone."
+            onCancel={() => { setShowCloseAll(false); void loadAll(); }}
+            onConfirm={(phrase) => positionStocksApi.closeAll(phrase)}
+          />
+        )}
         <button disabled={!loggedIn || busy !== null || !!status?.auto_pilot_enabled} onClick={() => doAction("autopilot_enable")}
           className="px-4 py-2 rounded-xl bg-signal-buy/20 border border-signal-buy/40 font-display tabular-nums text-xs text-signal-buy disabled:opacity-40">
           {busy === "autopilot_enable" ? "Enabling…" : "Enable Auto-Pilot"}

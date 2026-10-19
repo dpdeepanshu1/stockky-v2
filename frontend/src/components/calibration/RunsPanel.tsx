@@ -1,7 +1,7 @@
 // group 442: run history with download, and the run window (live output while it runs, steps, files, cancel).
 // group 447: only the LATEST result of each test / pack is kept (a new run replaces the old one), filter chips with counts, search, close icon on the run window.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ACTIVE, ApiError, downloadRunFile, fmtDur, istStamp, relTime, runnerApi, statusCounts, telegramNote, type RunRec } from "../../calibrationApi";
+import { ACTIVE, ApiError, downloadRunFile, fmtDur, istStamp, relTime, runnerApi, statusCounts, telegramNote, type Catalog, type JobDef, type PackDef, type RunRec } from "../../calibrationApi";
 import { Btn, Card, Chip, Msg, StatusPill } from "./ui";
 import { Modal } from "./SwitchesPanel";
 import { useRunner } from "./RunnerContext";
@@ -13,8 +13,17 @@ const BORDER: Record<string, string> = {
 const TONE: Record<string, "good" | "warn" | "bad" | undefined> = { success: "good", attention: "warn", blocked: "warn", failed: "bad", timeout: "bad", running: "good" };
 const ORDER = ["running", "queued", "failed", "timeout", "attention", "blocked", "success", "cancelled"];
 
+/** group 466: a stopped run (timeout / failed / cancelled) of a test that saves each finished symbol can be continued instead of started over. */
+const isResumable = (r: RunRec, catalog: Catalog | null): boolean => {
+  if (!catalog || ACTIVE.includes(r.status) || r.status === "blocked" || r.status === "success") return false;
+  const find = (id: string) => (catalog.jobs || []).find((x: JobDef) => x.id === id);
+  if (r.kind === "job") return !!find(r.target)?.resumable;
+  const pack = (catalog.packs || []).find((p: PackDef) => p.id === r.target);
+  return !!pack && (pack.jobs || []).some(([jid]) => !!find(jid)?.resumable);
+};
+
 export function RunsPanel() {
-  const { summary, openRun } = useRunner();
+  const { summary, openRun, catalog, start } = useRunner();
   const [runs, setRuns] = useState<RunRec[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -64,6 +73,7 @@ export function RunsPanel() {
               </div>
               <div className="flex shrink-0 gap-1.5">
                 <Btn small onClick={() => openRun(r.id)}>Open</Btn>
+                {isResumable(r, catalog) && <Btn small primary onClick={() => void start(r.kind, r.target, r.params, true)} title="Run it again but reuse the symbols the stopped run already saved">Resume</Btn>}
                 {!ACTIVE.includes(r.status) && r.status !== "blocked" && <Btn small onClick={() => dl(r.id, "output.txt")}>txt</Btn>}
                 {!ACTIVE.includes(r.status) && r.status !== "blocked" && <Btn small onClick={() => dl(r.id, "zip")}>zip</Btn>}
               </div>
@@ -76,7 +86,7 @@ export function RunsPanel() {
 }
 
 export function RunWindow() {
-  const { openRunId, openRun } = useRunner();
+  const { openRunId, openRun, catalog, start } = useRunner();
   const [run, setRun] = useState<RunRec | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -130,8 +140,10 @@ export function RunWindow() {
         <div className="mb-2 flex flex-wrap items-center gap-2">
           {run && <StatusPill status={run.status} />}
           {run && <span className="text-[11px] text-mist">{run.id}</span>}
+          {run?.resume && <span className="rounded border border-slate px-1 text-[9px] text-mist" title="This run continued from the symbols an earlier run had saved">resume</span>}
           <span className="ml-auto flex flex-wrap gap-1.5">
             {active && <Btn small onClick={() => void runnerApi.cancel(openRunId).catch((e) => setErr(e?.message))}>Cancel run</Btn>}
+            {run && isResumable(run, catalog) && <Btn small primary onClick={() => { void start(run.kind, run.target, run.params, true); close(); }} title="Run it again but reuse the symbols the stopped run already saved">Resume (reuse saved symbols)</Btn>}
             <Btn small onClick={() => void copy()} disabled={!text}>{copied ? "Copied" : "Copy"}</Btn>
             <Btn small onClick={() => void downloadRunFile(openRunId, "output.txt").catch((e) => setErr(e?.message))}>Download txt</Btn>
             <Btn small onClick={() => void downloadRunFile(openRunId, "zip").catch((e) => setErr(e?.message))}>Zip</Btn>

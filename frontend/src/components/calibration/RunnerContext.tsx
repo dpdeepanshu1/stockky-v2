@@ -14,7 +14,7 @@ interface Ctx {
   loading: boolean;
   busyActive: boolean;
   reload: () => Promise<void>;
-  start: (kind: "job" | "pack", target: string, params?: Record<string, any>) => Promise<void>;
+  start: (kind: "job" | "pack", target: string, params?: Record<string, any>, resume?: boolean) => Promise<void>;      // group 466: resume = continue from the symbols a stopped run saved
   openRun: (id: string | null) => void;
   cancel: (id: string) => Promise<void>;
   openRunId: string | null;
@@ -34,7 +34,7 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [openRunId, setOpenRunId] = useState<string | null>(null);
-  const [blocked, setBlocked] = useState<{ run: RunRec; params: Record<string, any> } | null>(null);
+  const [blocked, setBlocked] = useState<{ run: RunRec; params: Record<string, any>; resume: boolean } | null>(null);
   const [toast, setToast] = useState<Ctx["toast"]>(null);
   const alive = useRef(true);
 
@@ -72,12 +72,12 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
   const active = !!summary?.state && (summary.state.current != null || (summary.state.queued?.length ?? 0) > 0);
   useEffect(() => setVisibleInterval(() => void refreshSummary(), active ? 4000 : 20000), [active, refreshSummary]);
 
-  const start = useCallback(async (kind: "job" | "pack", target: string, params: Record<string, any> = {}) => {
+  const start = useCallback(async (kind: "job" | "pack", target: string, params: Record<string, any> = {}, resume = false) => {
     setToast(null);
     try {
-      const run = await runnerApi.start(kind, target, params, false);
-      if (run.status === "blocked") { setBlocked({ run, params }); return; }
-      setToast({ kind: "ok", text: `Started: ${run.title}. It runs in the queue, one at a time.` });
+      const run = await runnerApi.start(kind, target, params, false, resume);
+      if (run.status === "blocked") { setBlocked({ run, params, resume }); return; }
+      setToast({ kind: "ok", text: `${resume ? "Resuming" : "Started"}: ${run.title}. It runs in the queue, one at a time.` });
       setOpenRunId(run.id);
       await refreshSummary();
     } catch (e: any) {
@@ -94,11 +94,11 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
 
   const confirmBlocked = useCallback(async () => {
     if (!blocked) return;
-    const { run, params } = blocked;
+    const { run, params, resume } = blocked;
     setBlocked(null);
     try {
-      const r = await runnerApi.start(run.kind, run.target, params, true);
-      setToast({ kind: "ok", text: `Started: ${r.title}.` });
+      const r = await runnerApi.start(run.kind, run.target, params, true, resume);
+      setToast({ kind: "ok", text: `${resume ? "Resuming" : "Started"}: ${r.title}.` });
       setOpenRunId(r.id);
       await refreshSummary();
     } catch (e: any) {

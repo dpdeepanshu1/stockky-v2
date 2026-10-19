@@ -56,15 +56,17 @@ def _safe_token() -> str:
 @app.on_event("startup")
 def _startup() -> None:
     global runner, sched
-    from notify import make_notifier, make_skip_notifier
+    from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
-    notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET]))
+    ob = Outbox(str(config.DATA_DIR / "outbox"), config.OUTBOX_MAX_AGE_S)      # group 466: an undelivered Telegram message is kept and retried
+    notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET]), outbox=ob)
     runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET],
                     max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
-                    notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY)
+                    notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S)
     runner.start()
+    start_outbox_flusher(ob, config.NOTIFICATION_URL, config.OUTBOX_RETRY_S)
     skip_notifier = make_skip_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, lambda p: (J.PACK_MAP.get(p) or {}).get("title", p or ""),
-                                       Redactor(lambda: [_safe_token(), config.SESSION_SECRET]))
+                                       Redactor(lambda: [_safe_token(), config.SESSION_SECRET]), outbox=ob)
     sched = Scheduler(str(config.DATA_DIR / "state" / "schedule.json"), J.SCHEDULE_DEFAULT, runner.submit, list(J.PACK_MAP), enabled_default=config.SCHEDULER_ENABLED,
                       on_skip=skip_notifier)
     sched.start()
@@ -121,12 +123,14 @@ class RunReq(BaseModel):
     target: str
     params: Dict[str, Any] = {}
     confirm: bool = False
+    resume: bool = False         # group 466: continue from the symbols a stopped run already saved
 
 
 @app.post("/runs")
 def create_run(req: RunReq, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     try:
-        r = _r().submit(req.kind, req.target, req.params, by=str(claims.get("sub") or ""), trigger="manual", confirm=req.confirm)
+        r = _r().submit(req.kind, req.target, req.params, by=str(claims.get("sub") or ""), trigger="manual",
+                        confirm=req.confirm, resume=req.resume)
     except KeyError as e:
         raise HTTPException(404, str(e).strip("'\""))
     except ValueError as e:

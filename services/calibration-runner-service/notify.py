@@ -3,11 +3,16 @@
 Goes through the repo's own notification service (POST <NOTIFICATION_URL>/notification/notify, channel "telegram"), the same path the trading services use,
 so it needs no token here. Plain text only (job titles, not ids: underscores break Markdown). Never raises: a failed message only gets a note on the run
 (`notified`) and never changes the run's status. Manual runs are not announced unless RUNNER_NOTIFY_MANUAL=true.
+
+group 466: a message the notification service could not take (it was restarting / starved of CPU right after the 16:05 close: "Telegram error: URLError")
+is kept in an Outbox folder on the data volume and sent again every RUNNER_OUTBOX_RETRY_S seconds until it goes through, is refused for good, or is older
+than RUNNER_OUTBOX_MAX_AGE_S. A failed run's message now also says WHICH step failed.
 """
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -60,6 +65,14 @@ def build_message(run: Dict[str, Any], run_dir: str) -> Dict[str, str]:
         lines += [f"{WORD.get(j.get('status'), str(j.get('status')).upper()):<9}{j.get('title')}" for j in jobs[:14]]
         if len(jobs) > 14:
             lines.append(f"... and {len(jobs) - 14} more")
+    bad_steps = [x for x in (run.get("steps") or []) if str(x.get("status")) in ("failed", "timeout", "cancelled")]
+    if bad_steps:                                                       # group 466: say WHAT failed, not just "failed"
+        lines += ["", "What failed:"]
+        for x in bad_steps[:6]:
+            det = str(x.get("detail") or "").strip()
+            lines.append(f"- {str(x.get('title') or x.get('job') or 'step')[:80]}" + (f": {det[:120]}" if det else ""))
+        if len(bad_steps) > 6:
+            lines.append(f"... and {len(bad_steps) - 6} more")
     advice = _advice_lines(run_dir)
     hl = [h for h in (run.get("headline") or []) if h][:4]
     if advice:
@@ -107,9 +120,113 @@ def send(base_url: str, title: str, message: str, urgency: str = "normal", timeo
     return last + (f" (after {tries} tries; check that notification-scheduler-service is running and NOTIFICATION_URL is right)" if tries > 1 else "")
 
 
+def retryable(result: Any) -> bool:
+    """True when a send result is worth trying again later: a connection / timeout / 5xx error. A 4xx or 'not delivered: ...' (no channel) is final."""
+    r = str(result or "")
+    return r.startswith("error:") and not r.startswith("error: HTTP 4")
+
+
+_AGAIN = " - will be sent again when the notification service is reachable"
+
+
+class Outbox:
+    """group 466: undelivered messages kept on disk (one small JSON file each) so a restart of this service or of the notification service loses nothing."""
+
+    def __init__(self, directory: str, max_age_s: float = 24 * 3600, max_items: int = 50):
+        self.dir = str(directory)
+        self.max_age_s = float(max_age_s)
+        self.max_items = max(1, int(max_items))
+        self._lock = threading.Lock()
+        self._n = 0
+
+    def _files(self) -> List[str]:
+        try:
+            return sorted(os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.startswith("ob_") and f.endswith(".json"))
+        except OSError:
+            return []
+
+    def pending(self) -> int:
+        return len(self._files())
+
+    def add(self, title: str, message: str, urgency: str = "normal") -> bool:
+        with self._lock:
+            try:
+                os.makedirs(self.dir, exist_ok=True)
+                self._n += 1
+                name = os.path.join(self.dir, f"ob_{int(time.time() * 1000):013d}_{os.getpid()}_{self._n:05d}.json")
+                tmp = name + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump({"title": title, "message": message, "urgency": urgency, "ts": time.time()}, fh)
+                os.replace(tmp, name)                                     # atomic: never a half-written message
+                for old in self._files()[:-self.max_items]:               # keep the newest max_items
+                    try:
+                        os.remove(old)
+                    except OSError:
+                        pass
+                return True
+            except OSError:
+                return False
+
+    def flush(self, base_url: str, sender: Callable[..., str] = send) -> Dict[str, int]:
+        """Try every kept message, oldest first. Stops at the first retryable failure (the service is still down: no point hammering it)."""
+        sent = dropped = 0
+        with self._lock:
+            files = self._files()
+            left = 0
+            for k, f in enumerate(files):
+                try:
+                    with open(f, encoding="utf-8") as fh:
+                        doc = json.load(fh)
+                    title, msg, urg, ts = str(doc["title"]), str(doc["message"]), str(doc.get("urgency") or "normal"), float(doc["ts"])
+                except Exception:  # noqa: BLE001 - unreadable file: nothing to send
+                    dropped += 1
+                    self._rm(f)
+                    continue
+                if time.time() - ts > self.max_age_s:
+                    dropped += 1
+                    self._rm(f)
+                    continue
+                try:
+                    res = sender(base_url, title, "(delayed) " + msg, urg, tries=1) if sender is send else sender(base_url, title, "(delayed) " + msg, urg)
+                except Exception as e:  # noqa: BLE001
+                    res = f"error: {type(e).__name__}"
+                if res == "sent":
+                    sent += 1
+                    self._rm(f)
+                elif retryable(res):
+                    left = len(files) - k
+                    break
+                else:
+                    dropped += 1
+                    self._rm(f)
+        return {"sent": sent, "dropped": dropped, "left": left}
+
+    @staticmethod
+    def _rm(f: str) -> None:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def start_outbox_flusher(outbox: Outbox, base_url: str, every_s: float = 60.0, sender: Callable[..., str] = send) -> threading.Thread:
+    """Daemon thread: send what is waiting, sleep, repeat. Never raises."""
+    def loop() -> None:
+        while True:
+            try:
+                if outbox.pending():
+                    outbox.flush(base_url, sender)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(max(0.5, float(every_s)))
+    t = threading.Thread(target=loop, name="outbox-flusher", daemon=True)
+    t.start()
+    return t
+
+
 def make_notifier(base_url: str, enabled: bool = True, manual: bool = False, redact: Optional[Callable[[str], str]] = None,
-                  sender: Callable[..., str] = send) -> Callable[[Dict[str, Any], str], Optional[str]]:
-    """Returns notify(run_dict, run_dir) -> result text, or None when this run is not announced."""
+                  sender: Callable[..., str] = send, outbox: Optional[Outbox] = None) -> Callable[[Dict[str, Any], str], Optional[str]]:
+    """Returns notify(run_dict, run_dir) -> result text, or None when this run is not announced. With an outbox an unreachable send is kept and retried."""
     def notify(run: Dict[str, Any], run_dir: str) -> Optional[str]:
         if not enabled:
             return None
@@ -118,7 +235,11 @@ def make_notifier(base_url: str, enabled: bool = True, manual: bool = False, red
         m = build_message(run, run_dir)
         text = redact(m["message"]) if redact else m["message"]
         bad = str(run.get("status")) in ("failed", "timeout", "blocked", "attention")
-        return sender(base_url, m["title"], text, "high" if bad else "normal")
+        urg = "high" if bad else "normal"
+        res = sender(base_url, m["title"], text, urg)
+        if outbox is not None and retryable(res) and outbox.add(m["title"], text, urg):
+            res = str(res) + _AGAIN
+        return res
     return notify
 
 
@@ -131,14 +252,18 @@ def build_skip_message(slot: Dict[str, Any], pack_title: str, reason: str) -> Di
 
 
 def make_skip_notifier(base_url: str, enabled: bool = True, titles: Optional[Callable[[str], str]] = None, redact: Optional[Callable[[str], str]] = None,
-                       sender: Callable[..., str] = send) -> Callable[[Dict[str, Any], str], Optional[str]]:
+                       sender: Callable[..., str] = send, outbox: Optional[Outbox] = None) -> Callable[[Dict[str, Any], str], Optional[str]]:
     """Returns on_skip(slot, reason) -> result text, or None when notifications are off. Never raises."""
     def on_skip(slot: Dict[str, Any], reason: str) -> Optional[str]:
         if not enabled:
             return None
         try:
             m = build_skip_message(slot, titles(slot.get("pack")) if titles else "", reason)
-            return sender(base_url, m["title"], redact(m["message"]) if redact else m["message"], "high")
+            text = redact(m["message"]) if redact else m["message"]
+            res = sender(base_url, m["title"], text, "high")
+            if outbox is not None and retryable(res) and outbox.add(m["title"], text, "high"):
+                res = str(res) + _AGAIN
+            return res
         except Exception as e:  # noqa: BLE001
             return f"error: {type(e).__name__}"
     return on_skip

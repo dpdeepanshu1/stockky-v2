@@ -678,6 +678,12 @@ services:
       RUNNER_KEEP_LATEST_ONLY: ${RUNNER_KEEP_LATEST_ONLY:-true}
       # heavy runs are refused 09:00-15:45 IST on weekdays unless the page confirms them
       RUNNER_GUARD_MARKET_HOURS: ${RUNNER_GUARD_MARKET_HOURS:-true}
+      # group 466: heavy jobs (replays, backtests, probes) get 6 h (was 2-3 h); a Telegram message that could not be delivered is kept and retried;
+      # an automatic run waits for the other services' /health before it starts
+      RUNNER_HEAVY_TIMEOUT_S: ${RUNNER_HEAVY_TIMEOUT_S:-21600}
+      RUNNER_OUTBOX_RETRY_S: ${RUNNER_OUTBOX_RETRY_S:-60}
+      RUNNER_OUTBOX_MAX_AGE_S: ${RUNNER_OUTBOX_MAX_AGE_S:-86400}
+      RUNNER_PREFLIGHT_S: ${RUNNER_PREFLIGHT_S:-60}
     volumes:
       - runner-data:/data/runner
       - bar-records:/data/bars:ro

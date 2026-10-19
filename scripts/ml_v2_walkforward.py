@@ -26,7 +26,6 @@ import hashlib
 import json
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -326,6 +325,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--all-days", action="store_true")
     ap.add_argument("--no-save", action="store_true")
+    ap.add_argument("--checkpoint", default="", help="folder where each finished symbol is saved as the run goes (group 466); emptied at the start unless --resume")
+    ap.add_argument("--resume", action="store_true", help="reuse the symbols already saved in --checkpoint (same file and settings), compute only the rest")
     a = ap.parse_args(argv)
     d = Path(a.dir)
     files = [f for f in sorted(d.glob("*.json")) if f.stem.upper() not in ab.BENCH_NAMES]
@@ -333,11 +334,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.sample > 0 and pool > a.sample:
         files = sorted(random.Random(a.seed).sample(files, a.sample))
     jobs = [(str(f), f.stem.upper(), a.step, a.horizon, a.cost_pct, a.slip_pct, a.all_days) for f in files]
-    if a.jobs > 1:
-        with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-            results = list(ex.map(_job, jobs, chunksize=2))
-    else:
-        results = [_job(j) for j in jobs]
+    from _progress import file_stamp, run_jobs, settings_stamp          # group466: progress lines + per-symbol checkpoint / resume
+    st = settings_stamp(a, str(d))
+    results = run_jobs(_job, jobs, max(1, a.jobs), "ml_v2", chunksize=2, ckpt=a.checkpoint, resume=a.resume, stamp=lambda j: file_stamp(j[0], st))
     rows: List[Dict[str, Any]] = []
     skipped = 0
     for res in results:

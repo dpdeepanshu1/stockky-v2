@@ -162,6 +162,7 @@ export interface JobParam { name: string; label: string; kind: "int" | "str" | "
 export interface JobDef {
   id: string; title: string; group: string; when: string; what: string; params: JobParam[]; heavy: boolean; window: "any" | "open" | "closed";
   timeout_s: number; needs: string[]; after: string; auto_elsewhere: boolean;
+  resumable?: boolean;      // group 466: the script saves each finished symbol, so a stopped run can be continued (Resume)
 }
 export interface PackDef { id: string; title: string; when: string; what: string; jobs: [string, Record<string, any>][]; stop_on_failure: boolean }
 export interface ScheduleSlot { id: string; pack: string; days: number[]; time: string; enabled: boolean; first_week_only?: boolean }
@@ -176,6 +177,7 @@ export interface RunRec {
   queued_at: string | null; started_at: string | null; finished_at: string | null; steps: RunStep[]; jobs: { id: string; title: string; status: RunStatus; seconds: number }[];
   headline: string[]; note: string; exit_summary: string; files?: { name: string; bytes: number }[];
   notified?: string; notified_at?: string | null;     // group 447: the Telegram message of an automatic run ("sent" | "not delivered: ..." | "error: ...")
+  resume?: boolean;      // group 466: this run continues from the symbols saved by an earlier run
 }
 /** group 447: the latest run the timetable started (blocked ones count: the timetable did fire). */
 export interface AutoRun { id: string; title: string; target: string; status: RunStatus; finished_at: string | null; telegram: string }
@@ -205,8 +207,8 @@ export const runnerApi = {
   runs: (limit = 60, target = "") => R<{ state: RunnerState; runs: RunRec[] }>(`/runs?limit=${limit}${target ? `&target=${encodeURIComponent(target)}` : ""}`),
   run: (id: string) => R<RunRec>(`/runs/${encodeURIComponent(id)}`),
   tail: (id: string, offset: number) => R<{ status: RunStatus; offset: number; size: number; text: string }>(`/runs/${encodeURIComponent(id)}/tail?offset=${offset}`),
-  start: (kind: "job" | "pack", target: string, params: Record<string, any> = {}, confirm = false) =>
-    R<RunRec>("/runs", { method: "POST", body: JSON.stringify({ kind, target, params, confirm }) }),
+  start: (kind: "job" | "pack", target: string, params: Record<string, any> = {}, confirm = false, resume = false) =>
+    R<RunRec>("/runs", { method: "POST", body: JSON.stringify({ kind, target, params, confirm, resume }) }),
   cancel: (id: string) => R<{ cancelled: boolean }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   schedule: () => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule"),
   putSchedule: (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule", { method: "PUT", body: JSON.stringify(body) }),

@@ -94,6 +94,7 @@ def _fresh(day: str) -> dict:
         "nifty_moved": False,
         "proven_open": False,  # sticky for the day once a real move is seen
         "last_status": None,   # group321: for transition logging
+        "late_first": {},      # group446: baseline prices taken AFTER the window when nothing was seen inside it (late restart)
     }
 
 
@@ -143,6 +144,20 @@ def observe(symbol: str, price, now: Optional[datetime] = None) -> None:
                     first[sym] = p
                     if sym in _NIFTY_KEYS:
                         st["nifty_seen"] = True
+                    return
+                # group446: the service (re)started after the window, so nothing was recorded inside it and the verdict stayed "unknown" for the
+                # whole day (the 10:15 live check FAILed after a 12:46 restart). Take the first price after the restart as the baseline: a later
+                # DIFFERENT price is a real move and proves the exchange is open. This can only prove "open", never "closed".
+                if not first and t <= _time(15, 30):
+                    late = st["late_first"]
+                    if sym not in late:
+                        late[sym] = p
+                    elif abs(late[sym] - p) > 1e-9:
+                        st["moved"].add(sym)
+                        if sym in _NIFTY_KEYS:
+                            st["nifty_moved"] = True
+                        if len(st["moved"]) >= MIN_MOVES:
+                            st["proven_open"] = True
                 return
             if abs(first[sym] - p) > 1e-9:
                 st["moved"].add(sym)
@@ -199,6 +214,7 @@ def status(now: Optional[datetime] = None) -> dict:
                 "nifty_seen": bool(st["nifty_seen"]),
                 "nifty_readings": int(st["nifty_obs"]),
                 "nifty_moved": bool(st["nifty_moved"]),
+                "late_baseline_symbols": len(st.get("late_first") or {}),
                 "window": f"{WINDOW_START.strftime('%H:%M')}-{WINDOW_END.strftime('%H:%M')} IST",
             }
             if st["proven_open"]:

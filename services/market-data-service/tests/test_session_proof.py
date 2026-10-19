@@ -73,6 +73,36 @@ def test_late_start_feed_never_closes_the_day():
     assert st["status"] == "unknown" and st["closed"] is False
 
 
+def test_late_restart_proves_open_from_a_later_move():
+    # group446: service restarted at 12:46, nothing recorded 09:15-10:00. The first price after the restart is the baseline;
+    # a later DIFFERENT price is a real move and proves the exchange is open (the 10:15 live check used to FAIL all day).
+    _feed(20, lambda i: 100 + i, at(12, 46))
+    assert sp.status(at(12, 47))["status"] == "unknown"
+    sp.observe("SYM4", 104.0, at(12, 50))                     # same price again: not a move
+    assert sp.status(at(12, 51))["status"] == "unknown"
+    sp.observe("SYM4", 104.35, at(12, 55))
+    st = sp.status(at(12, 56))
+    assert st["status"] == "open" and st["closed"] is False and st["late_baseline_symbols"] == 20
+
+
+def test_late_restart_can_never_prove_closed_and_stops_at_the_close():
+    for i in range(20):
+        sp.observe(f"SYM{i}", 100 + i, at(12, 46))
+        sp.observe(f"SYM{i}", 100 + i, at(13, 30))             # frozen prices after a late restart: still unknown, never closed
+    st = sp.status(at(14, 0))
+    assert st["status"] == "unknown" and st["closed"] is False
+    sp.reset_state()
+    sp.observe("SYM1", 100.0, at(16, 0))                       # after 15:30 the late baseline is not taken at all
+    sp.observe("SYM1", 101.0, at(16, 5))
+    assert sp.status(at(16, 6))["status"] == "unknown"
+
+
+def test_in_window_ticks_still_win_over_the_late_baseline():
+    _feed(20, lambda i: 100 + i, at(9, 16))
+    sp.observe("SYM3", 103.0, at(11, 0))                      # unchanged vs the in-window price: no move
+    assert sp.status(at(11, 1))["closed"] is True
+
+
 def test_ticks_before_the_bell_are_ignored():
     _feed(20, lambda i: 100 + i, at(9, 10))
     assert sp.status(at(10, 5))["status"] == "unknown"

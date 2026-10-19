@@ -445,6 +445,9 @@ class Runner:
         argv, why = self._expand(st, ctx)
         if argv is None:
             out.line(why)
+            # group 446: a missing input is a prerequisite that has not run yet (Saturday's weekly calibration), not a broken job: LOOK (amber), not FAILED (red)
+            if why.startswith("input missing"):
+                return "attention", "needs data first: " + why[len("input missing: "):]
             return "failed", why
         script = next((a for a in argv[1:2] if a.endswith((".py", ".sh"))), None)
         if script and not os.path.isfile(script):

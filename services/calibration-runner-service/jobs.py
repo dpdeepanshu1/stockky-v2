@@ -77,6 +77,12 @@ def b_daily_trades(ctx, p):
                 title="Daily trades: entry / exit time, P&L", env={"TOKEN": "{token}"})]
 
 
+def b_service_advice(ctx, p):
+    return [_py(ctx, "service_onoff_advice.py", "--days", p.get("days", 10), "--min-n", p.get("min_n", 8), "--min-days", p.get("min_days", 3),
+                "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], "--out", os.path.join(ctx["run"], "service_advice.txt"),
+                "--json", os.path.join(ctx["run"], "service_advice.json"), title="Which service to keep ON / pause (recommendation only)", env={"TOKEN": "{token}"})]
+
+
 def b_export_records(ctx, p):
     return [_py(ctx, "export_records.py", "--base", ctx["rt"], "--mode", p.get("mode", "REAL"), "--days", p.get("days", 60), "--include-imported",
                 "--out", os.path.join(ctx["exp"], "rt_latest.json"), title="Save closed real-trade records", env={"TOKEN": "{token}"})]
@@ -265,6 +271,11 @@ JOB_LIST = [
          "Every closed trade of real-trade and position-stocks per IST day: entry time, exit time, hold, P&L, reason; by entry hour, exit hour, hold, reason; best and worst.", b_daily_trades,
          [P("days", "Days", "int", 10, 1, 60), P("origin", "Entries", "choice", "all", choices=["all", "system", "imported"])], timeout_s=240,
          after="A bucket marked (few) is not a finding. Look for a bad entry hour or exit reason that repeats over several days."),
+    _job("service_advice", "Service ON / OFF advice", "daily", "Every day after 15:45 IST, right after the daily trades",
+         "Judges real-trade and position-stocks on their own real closed trades (net, win %, profit factor, result without the best trade, losing days in a row, overlap on the shared Dhan account) "
+         "and says KEEP ON / WATCH / TURN OFF / NOT ENOUGH DATA for each. Recommends only: it never changes a switch.", b_service_advice,
+         [P("days", "Days", "int", 10, 3, 60), P("min_n", "Min trades per service", "int", 8, 3, 100), P("min_days", "Min trading days", "int", 3, 1, 30)], timeout_s=240,
+         after="TURN OFF means that service lost money on this window even without its best trade: pause its Auto-Pilot outside market hours, then re-run after more days. WATCH: change nothing today."),
     _job("export_records", "Save closed real-trade records", "daily", "Every day after close (records feed the weekly reports)", "Saves GET /positions/REAL/records to the exports folder.", b_export_records,
          [P("days", "Days", "int", 60, 1, 60), P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"])], timeout_s=240),
     _job("records_report", "Closed-trade report", "weekly", "Friday after close", "One-command report on the saved real-trade records: robust totals, outliers, groups.", b_records_report,
@@ -328,8 +339,8 @@ PACKS: List[Dict[str, Any]] = [
      "what": "Health, switch snapshot, then the 09:30 live check. (Run the 10:15 check from the list after 10:15.)",
      "jobs": [["services_health", {}], ["control_snapshot", {}], ["monday_check_0930", {}]], "stop_on_failure": False},
     {"id": "daily_close", "title": "Daily close pack", "when": "Every trading day after 15:45 IST",
-     "what": "Daily trades with entry / exit time and P&L, save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
-     "jobs": [["daily_trades", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
+     "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
+     "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
      "what": "Closed-trade report, hold buckets, opening-window verdict, board parity, switch snapshot of changes.",
      "jobs": [["export_records", {}], ["records_report", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},

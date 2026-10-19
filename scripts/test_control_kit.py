@@ -67,6 +67,16 @@ def _clean_env():
             del os.environ[k]
 
 
+def test_float_default_written_as_3_0_is_not_pending_restart():
+    # group446: the running value reads back canonical ("3"), the catalog default was the raw text ("3.0"): that is NOT a pending restart.
+    _clean_env()
+    _fake(STRETCH=3.0)
+    c = _ctl((F("T_STRETCH", "stretch", "g", "float", "h", lo=0, hi=12, looser="higher", targets=(("fake_cfg_mod", "STRETCH"),), live=True, shipped="3.0"),))
+    row = [x for x in c.describe()["flags"] if x["key"] == "T_STRETCH"][0]
+    assert row["pending_restart"] is False and row["effective"] == "3"
+    _clean_env()
+
+
 def test_the_two_engine_copies_are_identical():
     a = hashlib.sha256((RT / "control" / "kit.py").read_bytes()).hexdigest()
     b = hashlib.sha256((PS / "control" / "kit.py").read_bytes()).hexdigest()

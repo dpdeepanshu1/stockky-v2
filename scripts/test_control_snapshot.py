@@ -26,6 +26,14 @@ def test_render_marks_overrides_pending_and_off_recommended():
     assert "PENDING RESTART (running off, saved log)" in t and "restart" in t.split("Mode C")[1].split("\n")[0]
 
 
+def test_long_titles_are_not_cut_at_44_characters():
+    # group446: real catalog titles are up to 46 characters and the 44-character cut hid the end of the longest ones; widened to 60
+    title = "Skip broker import while own BUY pending (minutes)"
+    assert len(title) > 44
+    doc = dict(DOC, flags=[dict(DOC["flags"][0], title=title)])
+    assert title in c.render(doc)
+
+
 def test_only_changes_hides_the_plain_switches():
     t = c.render(DOC, only_changes=True)
     assert "Gate A" not in t and "Gate B" in t and "Mode C" in t

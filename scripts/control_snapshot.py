@@ -55,7 +55,7 @@ def render(doc: Dict[str, Any], only_changes: bool = False) -> str:
                 marks.append(f"OVERRIDE by {o.get('by')} {str(o.get('at'))[:16]}")
             if only_changes and not marks:
                 continue
-            rows.append(f"  {str(f.get('title'))[:44]:<44} {_val(f.get('effective')):<9} {'live   ' if f.get('live') else 'restart'}  {f.get('source'):<8} {'; '.join(marks)}   [{f.get('key')}]")
+            rows.append(f"  {str(f.get('title'))[:60]:<60} {_val(f.get('effective')):<9} {'live   ' if f.get('live') else 'restart'}  {f.get('source'):<8} {'; '.join(marks)}   [{f.get('key')}]")
         if rows:
             L.append(f"-- {g}")
             L += rows

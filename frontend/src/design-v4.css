@@ -1,0 +1,184 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — DESIGN LAYER v4 (group 460): fresh-green brand tokens + a light motion toolkit
+   Loaded AFTER design-v3.css, so it wins. Roll back by deleting its import line in main.tsx.
+     · Colours are the same RGB-channel tokens, so every existing rule picks them up. Brand/accent = fresh green; --info = indigo for informational chips.
+       Gains stay green and losses stay red, ALWAYS with a sign or arrow next to the colour (never colour-only).
+     · Motion uses only transform and opacity (plus the stroke of one SVG line), no library. It is OFF under reduced-motion and in TV mode, and
+       paused while the browser tab is hidden (html[data-hidden]).
+   Motion classes: v4-roll (price roll), v4-glint-up/down (tick glint), v4-ind (sliding tab underline), v4-live-dot (market dot), v4-skel (skeleton), page rise.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* -- tokens ------------------------------------------------------------ */
+:root {
+  --accent-rgb: 46 224 170;
+  --accent-2-rgb: 20 184 140;
+  --info-rgb: 141 126 255;
+  --on-solid-rgb: 6 24 18;          /* dark text on the light-green fills of the dark theme */
+  --radius-pill: 999px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  --ease-out: cubic-bezier(0.22, 0.8, 0.3, 1);
+  --dur-fast: 140ms; --dur-med: 260ms; --dur-slow: 520ms;
+}
+html.light {
+  --accent-rgb: 0 122 88;           /* 5.3:1 against white (text and white-on-fill both pass AA) */
+  --accent-2-rgb: 0 138 100;
+  --info-rgb: 67 56 202;
+  --on-solid-rgb: 255 255 255;
+}
+
+/* -- typography: big tabular numbers ------------------------------------ */
+.num, .v4-roll, .v4-num { font-variant-numeric: tabular-nums lining-nums; letter-spacing: -0.01em; }
+.v4-num-lg { font-size: 1.75rem; font-weight: 700; line-height: 1.15; }
+
+/* -- 1. price roll ------------------------------------------------------ */
+.v4-roll { display: inline-block; will-change: transform, opacity; }
+.v4-roll.up { animation: v4-roll-up var(--dur-med) var(--ease-out); }
+.v4-roll.down { animation: v4-roll-down var(--dur-med) var(--ease-out); }
+@keyframes v4-roll-up { from { transform: translateY(70%); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes v4-roll-down { from { transform: translateY(-70%); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* -- 2. tick glint: a quick edge flash on a changed price --------------- */
+.v4-glint-up, .v4-glint-down { position: relative; }
+.v4-glint-up::after, .v4-glint-down::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; opacity: 0;
+  animation: v4-glint 700ms ease-out;
+}
+.v4-glint-up::after { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); background: linear-gradient(90deg, rgb(var(--buy-rgb) / 0.16), transparent 60%); }
+.v4-glint-down::after { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); background: linear-gradient(90deg, rgb(var(--sell-rgb) / 0.16), transparent 60%); }
+@keyframes v4-glint { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+/* -- 3. sliding tab underline (SubTabs) --------------------------------- */
+.subtabs.v4-slide { position: relative; }
+.subtabs .v4-ind {
+  position: absolute; left: 0; bottom: 2px; height: 3px; width: 100px; border-radius: 3px; pointer-events: none;
+  transform-origin: 0 0; background: rgb(var(--accent-rgb));
+  transition: transform var(--dur-med) var(--ease-out); opacity: 0;
+}
+.subtabs .v4-ind.ready { opacity: 1; }
+
+/* -- 4. market breathing dot -------------------------------------------- */
+.v4-live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: rgb(var(--buy-rgb)); animation: v4-breathe 2.2s ease-in-out infinite; }
+.v4-live-dot.stale, .v4-live-dot.closed { background: rgb(var(--muted-2-rgb)); animation: none; }  /* grey and still when data is stale or the market is shut */
+@keyframes v4-breathe { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.45); opacity: 0.55; } }
+
+/* -- 5. skeleton shimmer instead of spinners ---------------------------- */
+.v4-skel { position: relative; overflow: hidden; border-radius: 8px; background: rgb(var(--border-rgb) / 0.7); min-height: 12px; }
+.v4-skel::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(var(--panel-rgb) / 0.75), transparent);
+  animation: v4-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes v4-shimmer { to { transform: translateX(100%); } }
+
+/* -- 6. page transitions: a soft rise on every page mount ---------------- */
+.page-terminal, .dash-terminal { animation: v4-rise var(--dur-med) var(--ease-out); }
+@keyframes v4-rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 160ms; }
+
+/* -- off switches: reduced motion, TV mode, hidden tab ------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .v4-roll, .v4-live-dot, .v4-skel::after, .page-terminal, .dash-terminal,
+  .v4-glint-up::after, .v4-glint-down::after, [class*="auth-"] { animation: none !important; }
+  .subtabs .v4-ind { transition: none; }
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+}
+html.tv .v4-roll, html.tv .v4-live-dot, html.tv .v4-skel::after, html.tv .page-terminal, html.tv .dash-terminal,
+html.tv .v4-glint-up::after, html.tv .v4-glint-down::after, html.tv [class*="auth-"] { animation: none !important; }
+html.tv .subtabs .v4-ind { transition: none; }
+html[data-hidden="true"] .v4-live-dot, html[data-hidden="true"] .v4-skel::after, html[data-hidden="true"] [class*="auth-"] { animation-play-state: paused; }
+
+/* -- market state chip: the "live prices" dot breathes; stale/polling stays still and grey ---------------------------------------- */
+.status-chip.ok .dot { animation: v4-breathe 2.2s ease-in-out infinite; }
+html.tv .status-chip.ok .dot { animation: none; }
+@media (prefers-reduced-motion: reduce) { .status-chip.ok .dot { animation: none; } }
+html[data-hidden="true"] .status-chip.ok .dot { animation-play-state: paused; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PHASE 3 (group 461): REAL / DEMO frame on the three trading pages
+   A thin frame + a labelled ribbon, so the mode is readable from across the room and is never colour-only (the ribbon always spells it out).
+     REAL = red frame ("REAL MONEY ..."), DEMO = indigo frame ("DEMO ..."). Set data-mode and data-frame-label on the page root, class mode-frame.
+   ═══════════════════════════════════════════════════════════════════════ */
+.mode-frame { --frame-rgb: var(--info-rgb); position: relative; border: 1px solid rgb(var(--frame-rgb) / 0.35); border-radius: 18px; padding: 0 0.75rem 0.75rem; }
+.mode-frame[data-mode="REAL"] { --frame-rgb: var(--sell-rgb); border-color: rgb(var(--frame-rgb) / 0.5); }
+.mode-frame::before {
+  content: attr(data-frame-label); display: block; margin: 0 -0.75rem 0.75rem; padding: 0.35rem 0.9rem;
+  border-radius: 17px 17px 0 0; background: rgb(var(--frame-rgb) / 0.12); border-bottom: 1px solid rgb(var(--frame-rgb) / 0.35);
+  color: rgb(var(--frame-rgb)); font-size: 0.68rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase;
+}
+@media (max-width: 767px) { .mode-frame { padding: 0 0.5rem 0.6rem; border-radius: 14px; } .mode-frame::before { margin: 0 -0.5rem 0.6rem; border-radius: 13px 13px 0 0; } }
+html.tv .mode-frame { border-width: 3px; }
+html.tv .mode-frame::before { font-size: 0.9rem; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PHASE 5 (group 461): accessibility, phone / tablet / TV, performance
+   ═══════════════════════════════════════════════════════════════════════ */
+/* a visible keyboard / remote focus ring everywhere (mouse clicks do not show it) */
+:where(a, button, [role="button"], [role="tab"], input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; border-radius: 6px;
+}
+/* phones: every tap target is at least 44 px (WCAG 2.5.5); tablets keep 40 */
+@media (pointer: coarse) {
+  [role="button"], .subtab, .rt-seg-btn { min-height: 40px; }
+}
+@media (max-width: 767px) { [role="button"], .subtab, .rt-seg-btn { min-height: 44px; } }
+/* the sliding tab bar scrolls sideways on narrow screens instead of wrapping */
+@media (max-width: 767px) { .subtabs { overflow-x: auto; scrollbar-width: none; } .subtabs::-webkit-scrollbar { display: none; } }
+/* performance: long off-screen lists are not laid out or painted until scrolled near; the intrinsic size keeps the scrollbar steady */
+.v4-lazy { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+/* animations only run where they can be seen: no will-change on idle price spans, no filter cost on TV */
+.v4-roll:not(.up):not(.down) { will-change: auto; }
+html.tv * { backdrop-filter: none !important; }
+/* high-contrast users: frames and chips get a solid edge, motion stays off */
+@media (prefers-contrast: more) {
+  .mode-frame, .mode-frame::before { border-width: 2px; }
+  .v4-glint-up::after, .v4-glint-down::after { animation: none; opacity: 1; background: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v4-glint-up::after, .v4-glint-down::after { opacity: 0; }
+}
+/* print: no motion, no frames */
+@media print { .v4-roll, .v4-skel::after, .page-terminal { animation: none !important; } }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   GROUP 463: overall UI polish (presentation only; each block is independent, delete one to roll it back)
+   ═══════════════════════════════════════════════════════════════════════ */
+/* skip link: hidden until a keyboard / remote user tabs to it */
+.skip-link { position: fixed; left: 12px; top: -64px; z-index: 100; padding: 0.6rem 1rem; border-radius: 10px; font-weight: 700;
+  background: rgb(var(--accent-rgb)); color: rgb(var(--on-solid-rgb)); transition: top var(--dur-fast) var(--ease-out); }
+.skip-link:focus { top: calc(12px + env(safe-area-inset-top, 0px)); }
+#main-content:focus { outline: none; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+::selection { background: rgb(var(--accent-rgb) / 0.28); }
+
+/* empty states */
+.v4-empty { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; text-align: center; padding: 2rem 1rem; color: rgb(var(--muted-rgb)); }
+.v4-empty-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; margin-bottom: 0.25rem;
+  background: rgb(var(--accent-rgb) / 0.1); color: rgb(var(--accent-rgb)); }
+.v4-empty-icon .nav-icon { width: 22px; height: 22px; }
+.v4-empty-title { margin: 0; font-weight: 700; color: rgb(var(--fg-rgb)); }
+.v4-empty-hint { margin: 0; max-width: 34ch; font-size: 0.8rem; line-height: 1.45; }
+.v4-empty-action { margin-top: 0.6rem; }
+
+/* tables: header stays visible while the card scrolls, rows are easier to follow */
+.scan-table-wrap thead th, .term-table thead th { position: sticky; top: 0; z-index: 1; }
+.scan-table-wrap tbody tr:nth-child(even), .term-table tbody tr:nth-child(even) { background: rgb(var(--panel-2-rgb) / 0.35); }
+.scan-table-wrap tbody tr:hover, .term-table tbody tr:hover { background: rgb(var(--accent-rgb) / 0.07); }
+.scan-table-wrap td, .scan-table-wrap th, .term-table td, .term-table th { font-variant-numeric: tabular-nums; }
+
+/* cards: a little depth, a gentle lift when they are clickable */
+.bg-graphite { box-shadow: 0 1px 0 rgb(var(--border-rgb) / 0.5), 0 6px 18px -12px rgb(0 0 0 / 0.45); }
+html.light .bg-graphite { box-shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 6px 16px -12px rgb(15 23 42 / 0.18); }
+[role="button"].bg-ink\/60, [role="button"].group { transition: transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast), box-shadow var(--dur-fast); }
+@media (hover: hover) { [role="button"].group:hover { transform: translateY(-1px); } }
+html.tv [role="button"].group:hover { transform: none; }
+
+/* toast: sits below the notch, readable on phones */
+.app-toast { top: calc(1rem + env(safe-area-inset-top, 0px)) !important; max-width: min(92vw, 28rem); }
+@media (max-width: 767px) { .app-toast { right: 50% !important; transform: translateX(50%); } }
+
+/* thin themed scrollbars (not on TV, where they are hidden) */
+html:not(.tv) * { scrollbar-width: thin; scrollbar-color: rgb(var(--border-rgb)) transparent; }
+/* long numbers and symbols never push a card wider than the screen */
+.v4-roll, .num { overflow-wrap: anywhere; }
+h1, h2, .page-title { text-wrap: balance; }

@@ -5,8 +5,30 @@
 frontend
 archive
 data
-oracle_wallet
+**/oracle_wallet
 calibration_out
 **/tests
 .git
 *.zip
+
+# group 458: Docker reads THIS file instead of the root .dockerignore for this Dockerfile (build context = repo root), so the
+# secret / cache / test rules of the root file have to be repeated here, or a local .env would be sent to the daemon.
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+.env
+.env.*
+**/*.pyo
+**/*.egg-info
+venv
+**/.pytest_cache
+.pytest_cache
+.coverage
+.coverage.*
+htmlcov
+**/*,cover
+.coveragerc
+run_tests.sh

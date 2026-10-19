@@ -36,6 +36,14 @@ class AdminAuthError(Exception):
     pass
 
 
+def _override_hash():
+    try:
+        from auth import admin_override
+        return admin_override.stored_hash()
+    except Exception:  # noqa: BLE001 - never block a login on the optional override
+        return None
+
+
 def verify_admin_password(username: str, password: str) -> bool:
     """True only if username matches config.ADMIN_USERNAME AND the password
     verifies against the stored Argon2id hash. Never logs the password;
@@ -47,7 +55,8 @@ def verify_admin_password(username: str, password: str) -> bool:
     if username != config.ADMIN_USERNAME:
         return False
     try:
-        _hasher.verify(config.ADMIN_PASSWORD_HASH, password)
+        # group 460: a password changed from the page (shared DB row) wins over the env hash; None = feature off / no row / lookup failed
+        _hasher.verify(_override_hash() or config.ADMIN_PASSWORD_HASH, password)
         return True
     except (VerifyMismatchError, InvalidHashError):
         return False

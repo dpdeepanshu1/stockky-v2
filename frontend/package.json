@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --experimental-strip-types src/structureView.test.mjs && node --experimental-strip-types src/calibration.test.mjs && node --experimental-strip-types src/gatewayAuth.test.mjs && node --experimental-strip-types src/popupLayout.test.mjs"
+    "test": "node --experimental-strip-types src/structureView.test.mjs && node --experimental-strip-types src/calibration.test.mjs && node --experimental-strip-types src/gatewayAuth.test.mjs && node --experimental-strip-types src/popupLayout.test.mjs && node --experimental-strip-types src/adminSession.test.mjs && node --experimental-strip-types src/design-v4.test.mjs && node --experimental-strip-types src/lightContrast.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, MarketStock } from "../api";
+import { PriceRoll, GlintBox, Skeleton } from "./ui/motion";
+import { EmptyState } from "./ui/EmptyState";   // group 461 (phase 4)
 
 type MarketType = "gainers" | "losers" | "active" | "trending";
 
@@ -50,8 +52,8 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
 
   return (
     <div className="bg-graphite/30 rounded-2xl border border-slate/60 p-4 sm:p-6 animate-fadeIn">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="font-display text-xl text-paper">📊 Market Movers</h2>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-4">
+        <h2 className="font-display text-xl text-paper whitespace-nowrap">📊 Market Movers</h2>
         <div className="flex gap-1 flex-wrap">
           {["gainers", "losers", "active", "trending"].map((t) => (
             <button
@@ -72,9 +74,9 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
       </div>
 
       {loading && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 animate-pulse">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2" role="status" aria-label="Loading market movers">
           {[...Array(5)].map((_, i) => (
-            <div key={i} className="h-20 bg-slate/40 rounded-xl" />
+            <Skeleton key={i} h={80} className="rounded-xl" />
           ))}
         </div>
       )}
@@ -84,9 +86,7 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
       )}
 
       {!loading && !error && data.length === 0 && (
-        <p className="text-mist/60 text-sm font-mono text-center py-8">
-          No market data available at the moment. Please try again later.
-        </p>
+        <EmptyState title="No market data right now" hint="The list fills in when prices are available. Try again in a minute." />
       )}
 
       {!loading && !error && stale && data.length > 0 && (
@@ -99,9 +99,14 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
       {!loading && !error && data.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
           {data.map((stock, index) => (
-            <div
+            <GlintBox
               key={stock.symbol}
+              value={stock.price}
               onClick={() => onSelect(stock.symbol)}
+              role="button"
+              tabIndex={0}
+              aria-label={`Analyse ${stock.symbol}`}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(stock.symbol); } }}
               className="group bg-ink/60 border border-slate/40 rounded-xl p-3 hover:border-mist/60 hover:shadow-glow transition-all duration-300 cursor-pointer animate-fadeIn"
               style={{ animationDelay: `${index * 50}ms` }}
             >
@@ -114,18 +119,19 @@ export default function MarketMovers({ onSelect }: { onSelect: (symbol: string) 
                 </span>
               </div>
               <div className="text-sm font-display text-paper mt-1">
-                ₹{stock.price.toLocaleString("en-IN")}
+                <PriceRoll value={stock.price} text={`₹${stock.price.toLocaleString("en-IN")}`} />
               </div>
               <div className="text-[10px] font-mono text-mist/50">
                 {stock.volume ? `Vol: ${(stock.volume / 1000).toFixed(0)}k` : '—'}
               </div>
               <button
+                tabIndex={-1} aria-hidden="true"
                 onClick={(e) => { e.stopPropagation(); onSelect(stock.symbol); }}
                 className="mt-2 text-[10px] font-mono text-mist/40 hover:text-signal-prepare transition opacity-0 group-hover:opacity-100"
               >
                 Analyse →
               </button>
-            </div>
+            </GlintBox>
           ))}
         </div>
       )}

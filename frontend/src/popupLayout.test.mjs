@@ -18,4 +18,7 @@ const job = readFileSync(new URL("./components/calibration/JobCard.tsx", import.
 assert.match(job, /Watch/, "a running job needs a Watch button");
 assert.match(job, /Cancel/, "a running / queued job needs a Cancel button");
 assert.match(job, /Close options/, "the options panel needs a close button");
+const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
+assert.match(tab, /<SessionNotice \/>/, "the page must warn before the fixed-length admin session ends");
+assert.ok(!/30 idle minutes/.test(tab), "sessions are a fixed window from login, not idle-based");
 console.log("popupLayout ok");

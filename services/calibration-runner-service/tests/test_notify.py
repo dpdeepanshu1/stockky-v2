@@ -95,7 +95,32 @@ def test_send_posts_to_the_notification_service_telegram_channel():
         assert N.send(base, "T", "x").startswith("not delivered: No notification channel")
     finally:
         srv.shutdown()
-    assert N.send("http://127.0.0.1:1", "T", "x", timeout=1).startswith("error: ")
+    assert N.send("http://127.0.0.1:1", "T", "x", timeout=1, tries=1).startswith("error: ")
+
+
+def test_send_retries_a_connection_failure_and_says_why(monkeypatch):
+    # group 458: "Telegram error: URLError" - one try, no reason. Now: retried, and the text names the cause and the URL.
+    import urllib.error
+    calls = []
+
+    def flaky(req, timeout=0):
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+        class _R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"delivered": true}'
+        return _R()
+    monkeypatch.setattr(N.urllib.request, "urlopen", flaky)
+    assert N.send("http://n:8000", "T", "x", tries=3, pause=0) == "sent" and len(calls) == 3
+    calls.clear()
+    monkeypatch.setattr(N.urllib.request, "urlopen", lambda req, timeout=0: (_ for _ in ()).throw(urllib.error.URLError(OSError("Name or service not known"))))
+    out = N.send("http://n:8000", "T", "x", tries=2, pause=0)
+    assert out.startswith("error: URLError: ") and "Name or service not known" in out and "http://n:8000" in out and "after 2 tries" in out
+    monkeypatch.setattr(N.urllib.request, "urlopen", lambda req, timeout=0: (_ for _ in ()).throw(urllib.error.HTTPError("u", 401, "no", {}, None)))
+    assert N.send("http://n:8000", "T", "x", tries=3, pause=0).startswith("error: HTTP 401")   # a 4xx is final, not retried
 
 
 def _runner(notify_fn=None, d=None, **kw):

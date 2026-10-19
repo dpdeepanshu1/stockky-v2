@@ -1,0 +1,83 @@
+/* group 464: light-theme button + colour contrast.  Loads LAST (after design-v4 / auth-login);
+   delete the import in main.tsx to roll back.  Everything here is scoped to html.light.
+
+   What was wrong in light mode (measured, WCAG contrast):
+   1. `text-white` on pale tinted buttons / cards (bg-signal-*/10..30) = white on pastel, ~1.1:1 (invisible).
+      Plain `text-white` headings and `hover:text-white` links on the page background had the same problem.
+   2. Coloured label on its own 20-35% tint (text-signal-buy on bg-signal-buy/20) = 3.1-4.1:1, under AA 4.5.
+   3. Primary buttons: gradient end colour gave white text 4.36:1, and the hover `brightness(1.08)`
+      LIGHTENED the fill (white text fell to 3.8:1). Hover now darkens.
+   4. Disabled buttons used opacity .4-.5, which made white-on-green labels ~1.4:1 and washed the
+      whole control out. Disabled is now a flat, readable grey (or .7 opacity for tailwind-styled buttons).
+   5. Hover states using `hover:opacity-90` faded solid buttons.  */
+
+html.light {
+  --accent-2-rgb: 0 128 92;              /* white on it: 4.95:1 (was 4.36) */
+  /* darker "ink" of each signal colour for TEXT that sits on that colour's own tint (>=4.8:1 up to a 35% tint) */
+  --buy-ink-rgb: 3 84 61;
+  --sell-ink-rgb: 138 27 43;
+  --warn-ink-rgb: 102 56 0;
+  --accent-ink-rgb: 0 85 62;
+  --disabled-bg-rgb: 226 230 240;
+  --disabled-fg-rgb: 84 91 118;          /* on disabled-bg: 5.2:1 */
+}
+
+/* 1. text-white is only valid on solid fills; everywhere else it becomes the normal text colour */
+html.light .text-white:not([class*="bg-signal-"]):not([class*="bg-red-"]):not([class*="bg-emerald-"]):not([class*="bg-green-"]) { color: rgb(var(--fg-rgb)); }
+html.light .hover\:text-white:hover { color: rgb(var(--fg-rgb)); }
+
+/* solid fills keep white labels (explicit, so nothing above can reach them) */
+html.light [class~="bg-signal-buy"].text-white, html.light [class~="bg-signal-sell"].text-white,
+html.light [class~="bg-signal-prepare"].text-white, html.light [class~="bg-signal-hold"].text-white,
+html.light [class*="bg-signal-hold/80"].text-white, html.light [class*="bg-red-600"].text-white,
+html.light [class~="hover:bg-signal-hold"].text-white { color: rgb(var(--on-solid-rgb)); }
+
+/* 1+2. tinted fills: label uses the dark ink of the same hue */
+html.light [class*="bg-signal-buy/"]:is(.text-white, .text-signal-buy, .text-signal-buy\/90),
+html.light [class*="border-signal-buy/"].text-white:not([class*="bg-"]) { color: rgb(var(--buy-ink-rgb)); }
+html.light [class*="bg-signal-sell/"]:is(.text-white, .text-signal-sell, .text-signal-sell\/90),
+html.light [class*="border-signal-sell/"].text-white:not([class*="bg-"]) { color: rgb(var(--sell-ink-rgb)); }
+html.light [class*="bg-signal-prepare/"]:is(.text-white, .text-signal-prepare, .text-paper) { color: rgb(var(--accent-ink-rgb)); }
+html.light [class*="bg-signal-hold/"]:not([class*="bg-signal-hold/80"]):is(.text-white, .text-signal-hold, .text-signal-hold\/90),
+html.light [class*="border-signal-hold/"].text-white:not([class*="bg-"]) { color: rgb(var(--warn-ink-rgb)); }
+
+/* the dedicated button classes: same rule */
+html.light .btn-scan-full, html.light .scan-action-trade { color: rgb(var(--buy-ink-rgb)); }
+html.light .btn-scan-lite { color: rgb(var(--warn-ink-rgb)); }
+html.light .scan-action-danger { color: rgb(var(--sell-ink-rgb)); }
+html.light .scan-action-violet { color: rgb(var(--accent-ink-rgb)); }
+
+/* near-solid fills (80-90% alpha) let the page show through and drop white text under 4.5:1: make them solid */
+html.light [class*="bg-signal-hold/80"] { background-color: rgb(var(--warn-rgb)); }
+html.light [class*="bg-red-600/90"] { background-color: rgb(185 28 28); }
+html.light [class*="bg-red-600"].text-white, html.light [class*="bg-signal-hold/80"].text-white { color: #fff; }
+
+/* 3. primary buttons: hover darkens (never lightens, so white text keeps >=5:1) */
+html.light .btn-primary-term:hover:not(:disabled),
+html.light .rt-btn-primary:hover:not(:disabled) { filter: brightness(0.92); }
+html.light .btn-primary-term, html.light .rt-btn-primary { color: #fff; }
+html.light .btn-terminal:hover:not(:disabled), html.light .scan-action-btn:hover:not(:disabled) { color: rgb(var(--fg-rgb)); }
+html.light .btn-scan-lite:hover, html.light .btn-scan-full:hover { filter: none; }
+
+/* 5. no fading hovers on solid buttons */
+html.light [class*="hover:opacity-90"]:hover { opacity: 1; filter: brightness(0.92); }
+
+/* 4. disabled: flat and readable instead of faded */
+html.light .btn-terminal:disabled, html.light .scan-action-btn:disabled, html.light .rt-btn:disabled,
+html.light .btn-primary-term:disabled, html.light .rt-btn-primary:disabled {
+  opacity: 1; filter: none; box-shadow: none; cursor: not-allowed;
+  background: rgb(var(--disabled-bg-rgb)); border-color: rgb(var(--border-strong-rgb)); color: rgb(var(--disabled-fg-rgb));
+}
+html.light button:disabled[class*="disabled:opacity"] { opacity: 0.7; cursor: not-allowed; }
+html.light button:disabled[class*="bg-signal-"][class*="/"] { filter: saturate(0.6); }
+
+/* keyboard focus must be visible on every button in light mode (3:1 non-text contrast) */
+html.light button:focus-visible, html.light .btn-terminal:focus-visible, html.light .rt-btn:focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px;
+}
+
+/* users who ask the OS for more contrast get solid borders and full-ink labels */
+@media (prefers-contrast: more) {
+  html.light .btn-terminal, html.light .scan-action-btn, html.light .btn-scan-lite, html.light .btn-scan-full,
+  html.light .rt-btn { border-color: rgb(var(--fg-rgb)); }
+}

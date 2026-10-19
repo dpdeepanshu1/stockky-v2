@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -70,20 +71,40 @@ def build_message(run: Dict[str, Any], run_dir: str) -> Dict[str, str]:
     return {"title": "Stockky calibration", "head": title, "message": (title + "\n" + text)[:MAX_CHARS]}
 
 
-def send(base_url: str, title: str, message: str, urgency: str = "normal", timeout: float = 10.0) -> str:
-    """'sent' | 'not delivered: <why>' | 'error: <why>'. The notification service is mounted at /notification on its port."""
+def _why(e: BaseException) -> str:
+    """'URLError: [Errno 111] Connection refused' instead of a bare 'URLError' (the page shows this text, so it has to say what to fix)."""
+    inner = getattr(e, "reason", None) or e
+    detail = str(inner).strip()[:100]
+    return f"{type(e).__name__}: {detail}" if detail and detail != type(e).__name__ else type(e).__name__
+
+
+def send(base_url: str, title: str, message: str, urgency: str = "normal", timeout: float = 10.0, tries: int = 3, pause: float = 4.0) -> str:
+    """'sent' | 'not delivered: <why>' | 'error: <why>'. The notification service is mounted at /notification on its port.
+
+    group 458: a run that ends while the notification service is restarting / not up yet, or a one-off network hiccup, used to lose the message
+    after ONE 10 s try ("Telegram error: URLError"). Connection failures, timeouts and HTTP 502 / 503 / 504 are now retried (`tries` attempts,
+    `pause` seconds apart; worst case about 40 s, and only when Telegram is unreachable, before the next queued job starts). Other HTTP errors are final."""
     base = (base_url or "").rstrip("/")
     url = base + "/notify" if base.endswith("/notification") else base + "/notification/notify"
     body = json.dumps({"title": title, "message": message, "channel": "telegram", "urgency": urgency}).encode()
-    try:
-        req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed internal URL from the environment
-            doc = json.loads(resp.read().decode("utf-8", "replace") or "{}")
-    except urllib.error.HTTPError as e:
-        return f"error: HTTP {e.code}"
-    except Exception as e:  # noqa: BLE001
-        return f"error: {type(e).__name__}"
-    return "sent" if doc.get("delivered") else "not delivered: " + str(doc.get("note") or "no channel enabled")[:120]
+    last = "error: not tried"
+    for attempt in range(max(1, int(tries))):
+        if attempt:
+            time.sleep(max(0.0, pause))
+        try:
+            req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed internal URL from the environment
+                doc = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as e:
+            last = f"error: HTTP {e.code} from {base or '(no URL)'}"
+            if e.code in (502, 503, 504):
+                continue
+            return last
+        except Exception as e:  # noqa: BLE001 - URLError (refused / DNS / timeout), socket timeouts, bad JSON
+            last = f"error: {_why(e)} reaching {base or '(NOTIFICATION_URL is empty)'}"
+            continue
+        return "sent" if doc.get("delivered") else "not delivered: " + str(doc.get("note") or "no channel enabled")[:120]
+    return last + (f" (after {tries} tries; check that notification-scheduler-service is running and NOTIFICATION_URL is right)" if tries > 1 else "")
 
 
 def make_notifier(base_url: str, enabled: bool = True, manual: bool = False, redact: Optional[Callable[[str], str]] = None,

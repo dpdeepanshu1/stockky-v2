@@ -1,6 +1,7 @@
 // frontend/src/App.tsx
 
 import { Fragment, useState, useEffect, useRef, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { setVisibleInterval } from "./visibleInterval";
 import { api, getApiUrl, setApiUrl, apiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
 import Pipeline from "./components/Pipeline";
@@ -20,6 +21,7 @@ import IpoTracker from "./components/IpoTracker";
 import RealAutoTrade from "./components/RealAutoTrade";
 import PositionStocksTab from "./components/PositionStocksTab";
 import CalibrationControlTab from "./components/CalibrationControlTab";
+import { AdminGate, SessionChip } from "./components/AdminGate"; // group 460: one login for the three admin pages
 import ErrorBoundary from "./components/ui/ErrorBoundary";
 import DataFeed from "./components/DataFeed";
 import DataHealthAudit from "./components/DataHealthAudit";
@@ -999,11 +1001,20 @@ export default function App() {
     { id: "settings", label: "Settings", short: "Settings", icon: "sliders", group: "System" },
   ];
   const goTo = (id: Tab) => {
-    setTab(id);
-    if (id === "watchlist") setShowWatchlist(true);
-    else setShowWatchlist(false);
-    if (id !== "settings") setShowSettings(false);
-    setMobileMoreOpen(false);
+    const apply = () => {
+      setTab(id);
+      if (id === "watchlist") setShowWatchlist(true);
+      else setShowWatchlist(false);
+      if (id !== "settings") setShowSettings(false);
+      setMobileMoreOpen(false);
+    };
+    // group 460: soft cross-fade where the View Transitions API exists; off for reduced-motion and TV mode
+    try {
+      const vt = (document as any).startViewTransition;
+      const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("tv");
+      if (typeof vt === "function" && !calm) { vt.call(document, () => flushSync(apply)); return; }
+    } catch { /* fall through to the plain switch */ }
+    apply();
   };
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
 
@@ -1013,8 +1024,9 @@ export default function App() {
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} actions={cmdActions}
         symbolAction={(sym) => ({ id: `board-${sym}`, label: `${sym} — zones, levels, R:R`, group: "Market Board", hint: "popup", run: () => setBoardSym({ symbol: sym }) })} />
       <StockPopup row={boardSym} onClose={() => setBoardSym(null)} reduced={false} />
+      <a className="skip-link" href="#main-content">Skip to content</a>
       {statusMessage && (
-        <div className="app-toast fixed top-4 right-4 z-50 bg-graphite border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
+        <div role="status" aria-live="polite" className="app-toast fixed top-4 right-4 z-50 bg-graphite border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
           <p className="font-mono text-sm text-paper">{statusMessage}</p>
         </div>
       )}
@@ -1079,6 +1091,7 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <SessionChip />
           <button
             type="button"
             className={`status-chip ${backendUp === "up" ? "ok" : backendUp === "down" ? "bad" : "warn"}`}
@@ -1173,6 +1186,7 @@ export default function App() {
           <span className="kbd">Ctrl K</span>
         </button>
         <div className="topbar-spacer" />
+        <SessionChip />
         <button
           type="button"
           className={`status-chip ${wsLive ? "ok" : ""}`}
@@ -1261,7 +1275,8 @@ export default function App() {
         </div>
       )}
 
-      <main className="terminal-main max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8">
+      <main id="main-content" tabIndex={-1} className="terminal-main max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8">
+        <ErrorBoundary key={tab} label="This page">
         {tab === "notifications" ? (
           <div className="page-terminal">
             <PageHeader title="Alerts" desc="Notifications from the scanners and trading services, newest first." />
@@ -1314,20 +1329,26 @@ export default function App() {
             />
           </div>
         ) : tab === "realtrade" ? (
-          <div className="page-terminal">
-            <PageHeader title="Auto Trade" desc="Automated trading with your broker account. Switch between simulated (DEMO) and live (REAL) mode below." />
-            <RealAutoTrade />
-          </div>
+          <AdminGate title="Auto Trade" onExit={() => setTab("dashboard")}>
+            <div className="page-terminal">
+              <PageHeader title="Auto Trade" desc="Automated trading with your broker account. Switch between simulated (DEMO) and live (REAL) mode below." />
+              <RealAutoTrade />
+            </div>
+          </AdminGate>
         ) : tab === "positionstocks" ? (
-          <div className="page-terminal">
-            <PageHeader title="Position Stocks" desc="Fast momentum trades that open and close within the day, using their own capital pool." />
-            <PositionStocksTab />
-          </div>
+          <AdminGate title="Position Stocks" onExit={() => setTab("dashboard")}>
+            <div className="page-terminal">
+              <PageHeader title="Position Stocks" desc="Fast momentum trades that open and close within the day, using their own capital pool." />
+              <PositionStocksTab />
+            </div>
+          </AdminGate>
         ) : tab === "calibration" ? (
-          <div className="page-terminal">
-            <PageHeader title="Real Money Calibration" desc="Switch the real-money rules ON / OFF, see daily trades with entry and exit time, and run every test, calibration and training job from here." />
-            <ErrorBoundary label="Real Money Calibration"><CalibrationControlTab /></ErrorBoundary>
-          </div>
+          <AdminGate title="Real Money Calibration" onExit={() => setTab("dashboard")}>
+            <div className="page-terminal">
+              <PageHeader title="Real Money Calibration" desc="Switch the real-money rules ON / OFF, see daily trades with entry and exit time, and run every test, calibration and training job from here." />
+              <ErrorBoundary label="Real Money Calibration"><CalibrationControlTab /></ErrorBoundary>
+            </div>
+          </AdminGate>
         ) : tab === "settings" ? (
           <SettingsPage
             backendUp={backendUp}
@@ -1652,6 +1673,7 @@ export default function App() {
             </section>
           </>
         )}
+        </ErrorBoundary>
       </main>
 
       

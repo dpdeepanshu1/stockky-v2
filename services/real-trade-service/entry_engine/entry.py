@@ -569,8 +569,8 @@ async def _rearm_requeue(db: Session, mode: str) -> int:
         logger.warning("pullback-rearm[%s]: requeue failed (ignored): %s", mode, e)
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e2:  # noqa: BLE001
+            logger.debug("pullback-rearm[%s]: rollback after failed requeue also failed: %s", mode, e2)
         return 0
 
 

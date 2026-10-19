@@ -109,6 +109,7 @@ OTHER_FUNCS = ["_fix_stale_dhan_token_expiry", "_backfill_broker_imported_flag",
 # 2026-09-24, session97). See TestDriftGuard for how this is used.
 BASELINE_TEXT = """
 market_regime_history: id score recorded_at
+stockky_shared_admin_credential: key username password_hash updated_at
 stockky_shared_order_budget: id trade_date orders_placed_today updated_at
 stockky_shared_service_exposure: service_name open_positions_market_value updated_at
 stockky_shared_symbol_lock: id symbol held_by_service held_by_mode claimed_at updated_at

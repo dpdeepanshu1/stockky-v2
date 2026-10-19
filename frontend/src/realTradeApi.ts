@@ -533,6 +533,10 @@ export const realTradeApi = {
 
   logout: () => rtRequest<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 
+  // group 460: change the admin password (needs a valid session + the current password; the server may have it switched off).
+  changePassword: (current_password: string, new_password: string) =>
+    rtRequest<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
+
   connectDhan: (client_id: string, access_token: string) =>
     rtRequest<DhanStatus>(
       "/dhan/connect", { method: "POST", body: JSON.stringify({ client_id, access_token }) }

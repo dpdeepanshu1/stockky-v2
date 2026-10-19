@@ -436,12 +436,12 @@ def _arm_pullback(candidate: Candidate, reason: str) -> None:
             from feed import ws_client
             _r = ws_client.get_day_range(candidate.symbol)
             day_high = _r[1] if _r else None
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 - day high is optional for arming
+            logger.debug("pullback-rearm: day range for %s unavailable: %s", candidate.symbol, e)
         pullback_rearm.arm(candidate.symbol, reason, candidate.current_ltp, candidate.pct_change,
                            candidate.window_minutes, day_high=day_high)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001 - arming must never block an entry decision
+        logger.warning("pullback-rearm: could not arm %s (ignored): %s", getattr(candidate, "symbol", "?"), e)
 
 
 def attempt_entry(

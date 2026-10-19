@@ -480,6 +480,9 @@ export const positionStocksApi = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => psRequest<{ status: string }>("/auth/logout", { method: "POST" }, true),
+  // group 460: same as realTradeApi.changePassword (both services share the stored override).
+  changePassword: (current_password: string, new_password: string) =>
+    psRequest<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }, true),
 
   status: () => psRequest<ScalpStatus>("/status"),
   // ADDED (session48): live "what is the current/last cycle doing right

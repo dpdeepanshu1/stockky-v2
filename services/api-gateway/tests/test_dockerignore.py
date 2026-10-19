@@ -41,8 +41,39 @@ def _contexts():
 CONTEXTS = _contexts()
 
 
+def _ignore_path(ctx):
+    """The file Docker actually reads: `<Dockerfile>.dockerignore` wins over `.dockerignore` (BuildKit). A service whose Dockerfile is built
+    from the REPO ROOT (calibration-runner-service, it runs the repo's scripts/ and shared/) keeps its rules in Dockerfile.dockerignore,
+    because a .dockerignore inside the service folder would never be read for a root-level context."""
+    base = os.path.join(REPO, ctx) if ctx != "." else REPO
+    for name in ("Dockerfile.dockerignore", ".dockerignore"):
+        if os.path.isfile(os.path.join(base, name)):
+            return os.path.join(base, name)
+    return os.path.join(base, ".dockerignore")
+
+
+def _root_built(ctx):
+    return os.path.basename(_ignore_path(ctx)) == "Dockerfile.dockerignore"
+
+
+def _copy_sources(ctx):
+    """Sources of every COPY in a root-built Dockerfile (paths relative to the repo root; globs expanded, flags dropped)."""
+    import glob
+    with open(os.path.join(REPO, ctx, "Dockerfile"), encoding="utf-8") as fh:
+        text = fh.read().replace("\\\n", " ")
+    out = []
+    for ln in text.splitlines():
+        if not ln.startswith("COPY "):
+            continue
+        toks = [t for t in ln.split()[1:] if not t.startswith("--")]
+        for t in toks[:-1]:
+            hits = glob.glob(os.path.join(REPO, t)) if any(c in t for c in "*?[") else [os.path.join(REPO, t)]
+            out += [os.path.relpath(h, REPO).replace(os.sep, "/") for h in hits if os.path.exists(h)]
+    return out
+
+
 def _load(ctx):
-    path = os.path.join(REPO, ctx, ".dockerignore") if ctx != "." else os.path.join(REPO, ".dockerignore")
+    path = _ignore_path(ctx)
     with open(path, encoding="utf-8") as fh:
         return [ln.strip() for ln in fh if ln.strip() and not ln.strip().startswith("#")]
 
@@ -116,8 +147,8 @@ def test_every_dockerfile_directory_was_found():
 
 @pytest.mark.parametrize("ctx", CONTEXTS)
 def test_context_has_a_dockerignore(ctx):
-    path = os.path.join(REPO, ctx, ".dockerignore") if ctx != "." else os.path.join(REPO, ".dockerignore")
-    assert os.path.isfile(path), ctx + " has a Dockerfile but no .dockerignore"
+    path = _ignore_path(ctx)
+    assert os.path.isfile(path), ctx + " has a Dockerfile but no .dockerignore (or Dockerfile.dockerignore for a repo-root build)"
     assert _load(ctx), ctx + ": .dockerignore has no rules"
 
 
@@ -151,6 +182,16 @@ def test_root_context_blocks_the_oracle_wallet_and_node_modules():
 @pytest.mark.parametrize("ctx", CONTEXTS)
 def test_ignore_rules_only_drop_expendable_files(ctx):
     rules = _load(ctx)
+    if _root_built(ctx):
+        # repo-root context: the rules legitimately drop whole folders this image never copies (frontend, data, ...), so what must hold is
+        # that nothing the Dockerfile COPYs is dropped (test_build_inputs_survive) and that the copied folders lose only expendable files
+        for src in _copy_sources(ctx):
+            if os.path.isdir(os.path.join(REPO, src)):
+                for cur, _d, fs in os.walk(os.path.join(REPO, src)):
+                    for f in fs:
+                        rel = os.path.relpath(os.path.join(cur, f), REPO).replace(os.sep, "/")
+                        assert not _ignored(rel, rules) or _expendable(rel[len(src) + 1:]), (ctx, rel)
+        return
     dropped_needed = [rel for rel in _files(ctx) if _ignored(rel, rules) and not _expendable(rel)]
     assert dropped_needed == [], ctx
 
@@ -159,6 +200,12 @@ def test_ignore_rules_only_drop_expendable_files(ctx):
 def test_build_inputs_survive(ctx):
     # the files the Dockerfiles COPY by name, plus every runtime module / data file
     rules = _load(ctx)
+    if _root_built(ctx):
+        sources = _copy_sources(ctx)
+        assert sources, ctx + ": no COPY sources found"
+        for src in sources:
+            assert not _ignored(src, rules), (ctx, src)
+        return
     base = os.path.join(REPO, ctx) if ctx != "." else REPO
     for must in ("requirements.txt", "package.json", "nginx.conf", "index.html", "vite.config.ts", "main.py"):
         if os.path.isfile(os.path.join(base, must)):

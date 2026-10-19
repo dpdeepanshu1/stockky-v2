@@ -62,7 +62,7 @@ export function RunsPanel() {
                 {r.headline?.[0] && <div className="truncate text-[11px] text-mist" title={(r.headline || []).join("\n")}>→ {r.headline[0]}</div>}
                 {r.status === "blocked" && <div className="text-[11px] text-signal-hold">{r.note}</div>}
               </div>
-              <div className="flex gap-1.5">
+              <div className="flex shrink-0 gap-1.5">
                 <Btn small onClick={() => openRun(r.id)}>Open</Btn>
                 {!ACTIVE.includes(r.status) && r.status !== "blocked" && <Btn small onClick={() => dl(r.id, "output.txt")}>txt</Btn>}
                 {!ACTIVE.includes(r.status) && r.status !== "blocked" && <Btn small onClick={() => dl(r.id, "zip")}>zip</Btn>}

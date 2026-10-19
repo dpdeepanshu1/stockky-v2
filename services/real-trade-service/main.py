@@ -389,6 +389,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class ConnectDhanRequest(BaseModel):
     client_id: str
     access_token: str
@@ -728,6 +733,20 @@ async def auth_session(authorization: str = Header(default="")):
     if not authorization.startswith("Bearer "):
         return {"valid": False}
     return {"valid": bool(decode_session_token(authorization[len("Bearer "):].strip()))}
+
+
+@app.post("/auth/change-password")
+async def change_password(body: ChangePasswordRequest, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """group 460: change the admin password from the login page. Needs a valid session AND the current password. Stored as one DB row shared
+    with position-stocks-service (auth/admin_override.py); OFF unless ADMIN_PASSWORD_CHANGE_ENABLED=true."""
+    from auth import admin_override
+    try:
+        await run_in_threadpool(admin_override.change_password, admin, body.current_password, body.new_password, verify_admin_password)
+    except admin_override.ChangeRejected as e:
+        log_action(db, actor=admin, action="ADMIN_PASSWORD_CHANGE_REJECTED", detail=str(e.status))
+        raise HTTPException(status_code=e.status, detail=e.message)
+    log_action(db, actor=admin, action="ADMIN_PASSWORD_CHANGED")
+    return {"ok": True}
 
 
 @app.post("/auth/logout")

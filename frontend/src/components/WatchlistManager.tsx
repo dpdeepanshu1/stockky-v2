@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { EmptyState } from "./ui/EmptyState";   // group 463
 
 interface Props {
   symbols: string[];
@@ -65,15 +66,13 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
         </div>
 
         {symbols.length === 0 ? (
-          <p className="mono text-xs text-mist/50 py-6 text-center">
-            Empty — add NSE symbols to prioritize in market scans.
-          </p>
+          <EmptyState title="Your watchlist is empty" hint="Add NSE symbols above to follow them and scan them together." />
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {symbols.map((s) => (
               <div
                 key={s}
-                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition"
+                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
               >
                 <button
                   type="button"

@@ -454,6 +454,13 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLeve
         min_rr = float(getattr(config, "SCALP_TARGET_CAP_MIN_RR", 0.0) or 0.0)
         if min_rr > 0 and stop_pct > 0 and target_pct / stop_pct < min_rr:
             floor = float(getattr(config, "SCALP_TARGET_CAP_MIN_STOP_PCT", 0.0) or 0.0)
+            # 2026-10-19 (VIDYAWIRES: 0.8 % stop, stopped out in 11 min on ordinary noise): the floor also scales with the
+            # symbol's own volatility, so a capped-target trade is not squeezed inside one ATR. Never wider than the stop
+            # the levels already had (min() below), so this only limits how far the cap may tighten it.
+            _atr_mult = float(getattr(config, "SCALP_TARGET_CAP_MIN_STOP_ATR_MULT", 0.0) or 0.0)
+            _atr = levels.atr_proxy_pct
+            if _atr_mult > 0 and _atr and _atr > 0:
+                floor = max(floor, _atr_mult * float(_atr))
             stop_pct = min(stop_pct, max(target_pct / min_rr, floor))
         from execution.dhan_client import tick_size_for_price as _tsz
         band = _tsz(current_ltp)

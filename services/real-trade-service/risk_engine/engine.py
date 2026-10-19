@@ -59,7 +59,7 @@ MAX_POSITION_CONCENTRATION_PCT = float(
 # in the same cleanup (see below). Collapsed to one knob so retuning the
 # floor only ever requires touching one env var.
 MIN_STOCK_PRICE = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip()
-                         or (os.getenv("HARD_FLOOR_PRICE") or "").strip() or "20.0"))
+                         or (os.getenv("HARD_FLOOR_PRICE") or "").strip() or "10.0"))
 # ── Cross-service capital split (session52 fix — see config.py's
 # CAPITAL_SHARE_PCT comment in the main service config for the full
 # incident writeup). Kept as its own os.getenv() constant here, matching
@@ -370,7 +370,7 @@ def evaluate(
         return RiskResult(
             RiskVerdict.REJECTED, "min_price_floor",
             f"Entry price ₹{intent.entry_price:.2f} < ₹{MIN_STOCK_PRICE:.0f}. "
-            "Sub-₹20: operator risk, wide spreads, illiquid exits.",
+            f"Sub-₹{MIN_STOCK_PRICE:.0f}: operator risk, wide spreads, illiquid exits.",
         )
 
     # ── 4a-ii. Maximum price ceiling (BUY only) ───────────────────────────────

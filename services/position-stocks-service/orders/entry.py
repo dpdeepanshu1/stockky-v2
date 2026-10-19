@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
+from orders import pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -425,10 +425,30 @@ def _stop_basis(levels) -> Optional[str]:
     return b if isinstance(b, str) and b else None
 
 
+def _arm_pullback(candidate: Candidate, reason: str) -> None:
+    """2026-10-19: remember a candidate skipped for being at / extended above its high, so orders/pullback_rearm.py can look at it
+    again on a pullback. Never raises, never blocks."""
+    try:
+        if not pullback_rearm.is_arming_reason(reason):
+            return
+        day_high = None
+        try:
+            from feed import ws_client
+            _r = ws_client.get_day_range(candidate.symbol)
+            day_high = _r[1] if _r else None
+        except Exception:  # noqa: BLE001
+            pass
+        pullback_rearm.arm(candidate.symbol, reason, candidate.current_ltp, candidate.pct_change,
+                           candidate.window_minutes, day_high=day_high)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def attempt_entry(
     db: Session,
     candidate: Candidate,
     quality: Optional[QualitySignal] = None,
+    rearm: Optional[dict] = None,
 ) -> Optional[ScalpPosition]:
     """Try to enter a position for the given candidate.
     Returns the ScalpPosition if entered, None otherwise (also logs why).
@@ -517,8 +537,11 @@ def attempt_entry(
     # AUDIT FIX (this session): hard high/low-awareness gate — reject a
     # candidate sitting right at today's high outright, before any capital
     # is committed. See _range_gate_reject()'s docstring.
-    range_reject = _range_gate_reject(candidate.symbol, candidate.current_ltp)
+    # 2026-10-19: a pullback re-arm entry (orders/pullback_rearm.py) was already refused once for being at its high and has since
+    # pulled back and bounced - the NEAR_DAY_HIGH / EXTENDED_ABOVE_OR gates that armed it are waived, every other gate still applies.
+    range_reject = None if rearm else _range_gate_reject(candidate.symbol, candidate.current_ltp)
     if range_reject:
+        _arm_pullback(candidate, f"RANGE_GATE:{range_reject}")
         shared_symbol_lock.release(db, candidate.symbol)
         # Deliberately its own "RANGE_GATE:" prefix, not "QUALITY_GATE:" —
         # the dashboard's Quality Gate panel's floor text describes the
@@ -530,7 +553,11 @@ def attempt_entry(
 
     # group 268: opening-quality gate (09:15 until OPENING_GATE_SETTLE_IST). Fails CLOSED while active.
     opening_reject = opening_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if opening_reject and rearm and pullback_rearm.is_waived_opening_reason(opening_reject):
+        opening_reject = None
     if opening_reject:
+        if not rearm:
+            _arm_pullback(candidate, opening_reject)
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", opening_reject, quality=quality)
         return None
@@ -559,6 +586,18 @@ def attempt_entry(
     levels: AdaptiveLevels = compute_levels(
         candidate.pct_change, candidate.current_ltp, symbol=candidate.symbol
     )
+
+    # 2026-10-19: re-arm entry - stop just under the pullback low (never wider than the adaptive stop, never inside the noise floor).
+    if rearm:
+        try:
+            import dataclasses as _dc
+            from execution.dhan_client import round_to_tick as _rtt
+            _sp = pullback_rearm.structure_stop_pct(candidate.current_ltp, float(rearm.get("trough") or 0.0), levels.stop_pct)
+            if 0 < _sp < levels.stop_pct:
+                levels = _dc.replace(levels, stop_pct=_sp, stop_price=_rtt(candidate.current_ltp * (1 - _sp / 100.0)),
+                                     basis="pullback_rearm")
+        except Exception as _e:  # noqa: BLE001 - keep the adaptive stop
+            logger.debug("entry: re-arm stop override failed for %s: %s", candidate.symbol, _e)
 
     # group 270: inside the opening-gate window a stop tighter than a share of the daily ATR is noise-sized - skip.
     _stop_reject = opening_gate.stop_reject(candidate.symbol, levels.stop_pct)
@@ -994,7 +1033,8 @@ def attempt_entry(
 
     _nifty = trade_gates.last_nifty_change_pct()
     _log_candidate(db, candidate, "ENTERED",
-                   f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
+                   (f"PULLBACK_REARM:{rearm.get('why', '')} " if rearm else "")
+                   + f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
                    f" nifty_pct={'n/a' if _nifty is None else f'{_nifty:+.2f}'}"
                    f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}"
                    f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}",

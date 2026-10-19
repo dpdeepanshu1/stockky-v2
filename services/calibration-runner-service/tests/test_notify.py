@@ -301,7 +301,7 @@ def test_restart_mid_run_is_announced_once_and_recorded():
     r2, _ = _runner(notifier, d=d)
     try:
         for _ in range(100):
-            if calls:
+            if calls and (r2.state()["last_automatic"] or {}).get("telegram"):     # the notifier fires BEFORE the record is written: wait for the record too
                 break
             time.sleep(0.05)
         assert len(calls) == 1 and "FAILED" in calls[0][0] and "restarted" in calls[0][0] and calls[0][1] == "high"
@@ -366,8 +366,34 @@ def test_latest_only_is_per_settings_not_per_test():
         r2.shutdown()
 
 
+class _MiniMonkeyPatch:
+    """Just enough of pytest's monkeypatch for the stdlib runner below (setattr + undo)."""
+
+    def __init__(self):
+        self._undo = []
+
+    def setattr(self, target, name, value):
+        self._undo.append((target, name, getattr(target, name)))
+        setattr(target, name, value)
+
+    def undo(self):
+        while self._undo:
+            target, name, old = self._undo.pop()
+            setattr(target, name, old)
+
+
 if __name__ == "__main__":
+    import inspect
     for k, v in list(globals().items()):
         if k.startswith("test_"):
-            v()
+            params = list(inspect.signature(v).parameters)
+            unknown = [p for p in params if p != "monkeypatch"]
+            if unknown:
+                raise SystemExit(f"{k}: stdlib runner cannot supply fixture(s) {unknown} - run under pytest")
+            mp = _MiniMonkeyPatch() if params else None
+            try:
+                v(mp) if mp else v()
+            finally:
+                if mp:
+                    mp.undo()
             print("ok", k)

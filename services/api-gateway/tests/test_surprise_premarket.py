@@ -138,6 +138,11 @@ class FakeConn:
         self.db = db
         self.dialect = SimpleNamespace(name=db.dialect_name)
 
+    def begin_nested(self):
+        # SAVEPOINT stand-in (group 451): the real one rolls back only its own block and re-raises, so exceptions must propagate.
+        self.db.savepoints += 1
+        return _Savepoint()
+
     def execute(self, stmt, params=None):
         s = str(stmt)
         self.db.calls.append((s, params))
@@ -150,6 +155,14 @@ class FakeConn:
         if self.db.batches:
             return Res(rows=self.db.batches.pop(0))
         return Res(rows=self.db.rows)
+
+
+class _Savepoint:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False                                           # never swallow the error, like SQLAlchemy's SessionTransaction
 
 
 class _Ctx:
@@ -174,6 +187,7 @@ class FakeDB:
         self.calls = []
         self.on_execute = None
         self.disposed = 0
+        self.savepoints = 0
 
     @property
     def sqls(self):
@@ -1061,6 +1075,8 @@ class TestUpsertBaselines:
             assert pm.upsert_baselines([row_for("A"), row_for("BAD"), row_for("C")]) == 2
         assert "upsert_baselines failed (3 rows)" in caplog.text
         assert [c[1]["symbol"] for c in db.calls[1:]] == ["A", "BAD", "C"]
+        assert db.savepoints == 3                              # group 451: one SAVEPOINT per row, so a bad row cannot poison the rest
+        assert "1 of 3 rows were NOT stored" in caplog.text
         assert db.disposed == 1
 
     def test_fallback_engine_none(self, dbpm, monkeypatch):

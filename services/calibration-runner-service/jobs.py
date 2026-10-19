@@ -15,6 +15,19 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+
+def _heavy_timeout() -> int:
+    """group 466: time limit of the heavy jobs (replays, backtests, probes). The A/B replay of 355 symbols was killed at the old 2 h limit with 290 done.
+    Default 6 h; RUNNER_HEAVY_TIMEOUT_S (seconds) changes it; never below 1 h; an unreadable value falls back to 6 h."""
+    try:
+        v = int(float(os.environ.get("RUNNER_HEAVY_TIMEOUT_S", "").strip()))
+    except ValueError:
+        return 6 * 3600
+    return max(3600, v)
+
+
+HEAVY_S = _heavy_timeout()
+
 GROUPS = [
     ("monday", "Monday / start of a session"),
     ("daily", "Every trading day"),
@@ -46,6 +59,11 @@ def _urls_env(ctx: Dict[str, Any]) -> Dict[str, str]:
 
 def _hist(ctx: Dict[str, Any], seed: int) -> str:
     return os.path.join(ctx["cal"], f"hist_{seed}")
+
+
+def _ck(ctx: Dict[str, Any], name: str, seed: Any) -> List[str]:
+    """group 466: --checkpoint <cal>/ckpt/<name>_<seed> (every finished symbol is saved there) and, on a Resume run, --resume (only the missing symbols are computed)."""
+    return ["--checkpoint", os.path.join(ctx["cal"], "ckpt", f"{name}_{seed}")] + (["--resume"] if ctx.get("resume") else [])
 
 
 # ----------------------------------------------------------------------------------------------------- builders
@@ -152,7 +170,7 @@ def b_ab_report(ctx, p):
     s = int(p.get("seed", 7))
     extra = ["--policy"] if p.get("policy") else []
     return [_py(ctx, "ms_ab_report.py", "--out", os.path.join(ctx["cal"], f"ab_{s}"), "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", 2),
-                *extra, _hist(ctx, s), title=f"A/B replay, seed {s}", attention=())]
+                *extra, *_ck(ctx, "ab", s), _hist(ctx, s), title=f"A/B replay, seed {s}", attention=())]
 
 
 def b_g1_check(ctx, p):
@@ -178,22 +196,22 @@ def b_calibration_pack(ctx, p):
 
 def b_legacy_gate(ctx, p):
     return [_py(ctx, "legacy_gate_backtest.py", "--out", os.path.join(ctx["run"], "legacy"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 200),
-                _hist(ctx, int(p.get("seed", 7))), title="Legacy real-trade candidate gates after costs", attention=())]
+                *_ck(ctx, "legacy", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="Legacy real-trade candidate gates after costs", attention=())]
 
 
 def b_entry_rules(ctx, p):
     return [_py(ctx, "entry_rules_backtest.py", "--out", os.path.join(ctx["run"], "entry_rules"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2),
-                _hist(ctx, int(p.get("seed", 7))), title="Entry-path rules and stop / target width", attention=())]
+                *_ck(ctx, "entry", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="Entry-path rules and stop / target width", attention=())]
 
 
 def b_p8(ctx, p):
-    return [_py(ctx, "p8_retest_evidence.py", "--out", os.path.join(ctx["run"], "p8"), "--jobs", p.get("jobs", 2), _hist(ctx, int(p.get("seed", 7))),
+    return [_py(ctx, "p8_retest_evidence.py", "--out", os.path.join(ctx["run"], "p8"), "--jobs", p.get("jobs", 2), *_ck(ctx, "p8", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title="P8 retest / CHOCH branch evidence", attention=())]
 
 
 def b_ml_v2(ctx, p):
     return [_py(ctx, "ml_v2_walkforward.py", "--out", os.path.join(ctx["run"], "ml_v2"), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 200), "--no-save",
-                _hist(ctx, int(p.get("seed", 7))), title="ML V2 walk-forward (evidence only)", attention=())]
+                *_ck(ctx, "ml_v2", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="ML V2 walk-forward (evidence only)", attention=())]
 
 
 def b_intraday(ctx, p):
@@ -248,9 +266,10 @@ def b_live_structure_report(ctx, p):
     return [_http("Live structure report (G4 input)", "GET", ctx["decision"] + "/training/api/structure/report?days=60", save="live_structure.json")]
 
 
-def _job(id, title, group, when, what, builder, params=None, heavy=False, window="any", timeout_s=900, needs=None, after=None, auto=False, cadence=None):
+def _job(id, title, group, when, what, builder, params=None, heavy=False, window="any", timeout_s=900, needs=None, after=None, auto=False, cadence=None, resumable=False):
     return {"id": id, "title": title, "group": group, "when": when, "what": what, "builder": builder, "params": params or [], "heavy": heavy,
-            "window": window, "timeout_s": timeout_s, "needs": needs or [], "after": after or "", "auto_elsewhere": auto, "cadence": cadence}
+            "window": window, "timeout_s": timeout_s, "needs": needs or [], "after": after or "", "auto_elsewhere": auto, "cadence": cadence,
+            "resumable": resumable}      # resumable: the script saves each finished symbol, so the page offers Resume after a timeout / failure
 
 
 SEED = P("seed", "Sample seed", "int", 7, 1, 999, help="Same seed = same random symbols. Use 7, 11, 13.")
@@ -297,33 +316,33 @@ JOB_LIST = [
          [SEED, P("limit", "Symbols", "int", 400, 50, 800), P("period", "Period", "choice", "5y", choices=["2y", "5y", "10y"])], heavy=True, window="closed", timeout_s=3600),
     _job("calibration_full", "FULL calibration (all seeds, G1-G4, backtest, parity)", "weekly", "Saturday 08:00 IST (about 1-3 hours)",
          "Runs scripts/vm_calibrate.sh: history per seed, A/B, G1, walk-forward, G2/G3/G4, env-line pack, parity. Resumes seeds already complete.", b_calibration_full,
-         [P("seeds", "Seeds", "str", "7 11 13"), P("limit", "Symbols per seed", "int", 400, 50, 800), P("jobs", "Parallel workers", "int", 2, 1, 4)], heavy=True, window="closed", timeout_s=3 * 3600,
+         [P("seeds", "Seeds", "str", "7 11 13"), P("limit", "Symbols per seed", "int", 400, 50, 800), P("jobs", "Parallel workers", "int", 2, 1, 4)], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True,
          after="Read summary.txt. A FAIL or NOT_ENOUGH_DATA is a reason to keep kill switches ready, never a tuning instruction."),
     _job("calibration_status", "Did the calibration finish?", "weekly", "After the full calibration", "Checks that every seed has enough symbols and a real A/B verdict.", b_calibration_status, [P("seeds", "Seeds", "str", "7 11 13")], timeout_s=120),
     _job("ab_report", "A/B replay (one seed)", "weekly", "After fetch_history", "Does the structure policy beat a technical-only baseline, out of sample, after costs? (G2)", b_ab_report,
          [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"]), JOBS_P, P("policy", "Also replay BUY NOW rules", "bool", False)],
-         heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
+         heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("g1_check", "G1 offline: engine time", "monthly", "After fetch_history", "Is the engine fast enough on real history?", b_g1_check, [SEED, P("budget_ms", "Budget ms", "int", 50, 10, 500)], heavy=True, window="closed", timeout_s=1800, needs=["fetch_history"]),
     _job("structure_backtest", "Structure rules walk-forward", "weekly", "After fetch_history", "Which gate thresholds are stable out of sample.", b_structure_backtest,
-         [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"])], heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
+         [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"])], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
     _job("gate_check", "G2 / G3 / G4 verdict", "weekly", "After every A/B report", "Reads every seed's A/B report and the live structure report.", b_gate_check, timeout_s=300,
          after="PASS on all gates: structure rules may be trusted in REAL mode. FAIL / NOT_ENOUGH_DATA: keep the kill switches ready (STRUCTURE_POLICY_MODE / GATE_MODE / STOP_MODE off)."),
     _job("calibration_pack", "Env lines from the walk-forward", "monthly", "After the walk-forward", "Advisory env lines for the four gate thresholds. Applies nothing.", b_calibration_pack, timeout_s=120),
     _job("legacy_gate", "Legacy candidate gates after costs", "monthly", "Monthly, after fetch_history", "Did each legacy real-trade gate remove the worse entries?", b_legacy_gate, [SEED, JOBS_P, P("sample", "Symbols", "int", 200, 50, 800), P("step", "Step", "int", 3, 1, 10)],
-         heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
+         heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("entry_rules", "Entry-path rules and stop width", "monthly", "Monthly, after fetch_history", "Did the entry rules and the stop / target width help after costs?", b_entry_rules, [SEED, JOBS_P, P("step", "Step", "int", 3, 1, 10)],
-         heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
-    _job("p8_retest", "P8 retest / CHOCH evidence", "monthly", "Monthly", "Is the retest branch worth switching on (STRUCTURE_POLICY retest_entry=1)?", b_p8, [SEED, JOBS_P], heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
+         heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
+    _job("p8_retest", "P8 retest / CHOCH evidence", "monthly", "Monthly", "Is the retest branch worth switching on (STRUCTURE_POLICY retest_entry=1)?", b_p8, [SEED, JOBS_P], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("ml_v2", "ML V2 walk-forward", "monthly", "Monthly", "Does a model on the V2 structure features beat chance out of sample? Evidence only: nothing is trained into production.", b_ml_v2, [SEED, JOBS_P, P("sample", "Symbols", "int", 200, 50, 800)],
-         heavy=True, window="closed", timeout_s=2 * 3600, needs=["fetch_history"]),
+         heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("intraday_gates", "Intraday VWAP / opening gates", "monthly", "Monthly, after >= 10 recorded sessions", "Backtests the VWAP gate and the opening gate on the 1-minute bars position-stocks recorded.", b_intraday, [P("horizon", "Horizon (min)", "choice", "30", choices=["15", "30", "60"])],
          heavy=True, window="closed", timeout_s=3600),
     _job("tsfm_nightly", "TimesFM nightly cache", "daily", "Every day after 16:30 IST (daily bars in)", "Fills the TimesFM forecast cache. Needs the timesfm compose profile.", b_tsfm_nightly, [P("max_failed_pct", "Max failed %", "int", 40, 1, 100)], heavy=True, window="closed", timeout_s=3600),
     _job("tsfm_probe", "TimesFM Gate A probe (one seed)", "monthly", "Monthly, one seed at a time", "Does TimesFM predict the 5-day range / volume better than ATR / HAR? Out of sample.", b_tsfm_probe,
-         [SEED, P("max_forecasts", "Max forecasts", "int", 400, 20, 5000), P("per_symbol", "Days per symbol", "int", 20, 5, 100)], heavy=True, window="closed", timeout_s=3 * 3600, needs=["fetch_history"]),
+         [SEED, P("max_forecasts", "Max forecasts", "int", 400, 20, 5000), P("per_symbol", "Days per symbol", "int", 20, 5, 100)], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
     _job("tsfm_combine", "TimesFM Gate A across seeds", "monthly", "After 2-3 probe seeds", "Gate A verdict over every probe report.", b_tsfm_combine, timeout_s=120, needs=["tsfm_probe"]),
     _job("kronos_backtest", "Kronos Gate 4f backtest", "monthly", "Monthly (needs the Kronos container)", "Would the Kronos gate have helped? Bounded number of forecasts.", b_kronos,
-         [SEED, P("per_symbol", "Days per symbol", "int", 5, 1, 50), P("max_forecasts", "Max forecasts", "int", 300, 20, 3000)], heavy=True, window="closed", timeout_s=3 * 3600, needs=["fetch_history"]),
+         [SEED, P("per_symbol", "Days per symbol", "int", 5, 1, 50), P("max_forecasts", "Max forecasts", "int", 300, 20, 3000)], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
     _job("train_model", "Retrain the prediction model", "model", "Only when you want it now. It is ALREADY retrained 00:30 IST by GitHub Actions", "Starts POST /training/train/run on decision-prediction and waits for it.", b_train_model,
          [P("label_source", "Label source", "choice", "t1_outcome", choices=["t1_outcome", "trade_pnl"])], heavy=True, window="closed", timeout_s=1800, auto=True,
          after="409 means a training is already running: the nightly one, or this one started twice."),

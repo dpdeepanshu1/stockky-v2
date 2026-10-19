@@ -1751,6 +1751,62 @@ def disarm(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     return {"status": "disarmed"}
 
 
+class CloseAllRequest(BaseModel):
+    confirm: str = ""   # must be "CLOSE ALL" (typed in the dashboard dialog)
+
+
+@app.post("/close-all")
+async def close_all_and_disarm(body: CloseAllRequest = CloseAllRequest(), admin: str = Depends(require_admin),
+                               db: Session = Depends(get_db)):
+    """EMERGENCY CLOSE ALL (group 466): disarm, then flatten every open scalp position through close_position_now.
+
+    Confirm-gated: the body must carry confirm="CLOSE ALL", otherwise 400 and nothing happens. Disarms FIRST and stays disarmed
+    even if the sweep fails. Waits for the background cycle lock (CLOSE_ALL_LOCK_WAIT_S) so an in-flight entry cannot slip in;
+    if it is still busy the sweep runs anyway, twice, and merges the passes. The sweep runs on a worker thread (broker I/O).
+    Positions already flat or with a SELL working are skipped, never double-sold. Always allowed regardless of armed state."""
+    from orders import close_all as _ca
+    if not _ca.confirm_ok(body.confirm):
+        raise HTTPException(status_code=400, detail=f'Confirmation missing - send confirm="{_ca.CONFIRM_PHRASE}".')
+    was_armed = await asyncio.to_thread(_ca.disarm, db, _get_gate)
+    logger.warning("position-stocks-service: CLOSE ALL by %s (was_armed=%s)", admin, was_armed)
+
+    try:
+        wait_s = max(0.0, float(os.environ.get("CLOSE_ALL_LOCK_WAIT_S", "20") or 20))
+    except ValueError:
+        wait_s = 20.0
+    got_lock = False
+    try:
+        await asyncio.wait_for(_cycle_lock.acquire(), timeout=wait_s)
+        got_lock = True
+    except asyncio.TimeoutError:
+        logger.warning("position-stocks-service: close-all could not get the cycle lock in %.0fs - sweeping anyway", wait_s)
+    try:
+        first = await asyncio.to_thread(_ca.sweep, db)
+        result = first
+        if not got_lock:
+            await asyncio.sleep(1.5)
+            second = await asyncio.to_thread(_ca.sweep, db)
+            result = _ca.merge(first, second)
+    finally:
+        if got_lock:
+            _cycle_lock.release()
+
+    text = _ca.summary(result)
+    _ca.notify(admin, f"disarmed (was_armed={was_armed}); {text}")
+    logger.warning("position-stocks-service: CLOSE ALL done - %s", text)
+    return {
+        "ok": not result.get("failed"),
+        "disarmed": True,
+        "was_armed": was_armed,
+        "lock_busy": not got_lock,
+        "found": result.get("found", 0),
+        "sent": result.get("sent", 0),
+        "symbols": result.get("symbols", []),
+        "failed": result.get("failed", []),
+        "summary": f"position-stocks disarmed; {text}",
+    }
+
+
 @app.post("/service/enable")
 def service_enable(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Re-enable the whole module (screening + entries). Independent of

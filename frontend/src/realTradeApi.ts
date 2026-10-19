@@ -74,6 +74,23 @@ export function setSessionExpiredHandler(fn: (() => void) | null) {
   sessionExpiredHandler = fn;
 }
 
+// group 466: result of POST /close-all/{mode}
+export interface CloseAllResult {
+  ok: boolean;
+  mode: string;
+  disarmed: boolean;
+  was_armed: boolean;
+  locks_busy: boolean;
+  buys_cancelled: number;
+  buy_cancel_failed: string[];
+  found: number;
+  closed: number;
+  sent: number;
+  skipped_pending: string[];
+  failed: string[];
+  summary: string;
+}
+
 async function rtRequest<T>(path: string, init?: RequestInit, requireAuth = true): Promise<T> {
   const base = getRealTradeApiUrl();
   if (!base) {
@@ -616,6 +633,9 @@ export const realTradeApi = {
     ),
 
   emergencyPause: () => rtRequest<{ ok: boolean; paused: boolean }>("/emergency-pause", { method: "POST" }),
+  // group 466: disarm `mode`, cancel its resting BUYs, sell every open position. The server needs confirm="CLOSE ALL".
+  closeAll: (mode: "DEMO" | "REAL", confirm: string) =>
+    rtRequest<CloseAllResult>(`/close-all/${mode}`, { method: "POST", body: JSON.stringify({ confirm }) }, mode === "REAL"),
 
   riskEngineCheck: (body: { mode: string; symbol: string; side: string; qty: number; entry_price: number; stop_price: number }) =>
     rtRequest<{ verdict: string; check_name: string; reason: string; approved_qty: number | null }>(

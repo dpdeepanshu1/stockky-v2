@@ -36,7 +36,6 @@ import bisect
 import json
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -302,6 +301,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "Compare with a plain run on the same folder; the drop-one edge of p8_old_bos is the evidence for or against the 10-bar BOS age limit")
     ap.add_argument("--sample", type=int, default=0, help="replay N symbols drawn at random (seeded) from the files in HIST_DIR; 0 = all")
     ap.add_argument("--seed", type=int, default=7, help="seed for --sample (the bootstrap keeps its own fixed seed)")
+    ap.add_argument("--checkpoint", default="", help="folder where each finished symbol is saved as the run goes (group 466); emptied at the start unless --resume")
+    ap.add_argument("--resume", action="store_true", help="reuse the symbols already saved in --checkpoint (same file and settings), compute only the rest")
     a = ap.parse_args(argv)
     d = Path(a.dir)
     th = json.loads(a.thresholds)
@@ -328,16 +329,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     jobs = [(str(f), f.stem.upper(), a.step, th, a.cost_pct, a.slip_pct) for f in stock_files]
     rows: List[Dict[str, Any]] = []
     skipped = 0
-    if a.jobs > 1:
-        results = []
-        with ProcessPoolExecutor(max_workers=a.jobs, initializer=_init_pool, initargs=(bench,)) as ex:
-            for n, res in enumerate(ex.map(stock_signals, jobs, chunksize=2), 1):
-                results.append(res)
-                if n % 10 == 0 or n == len(jobs):
-                    print(f"progress {n}/{len(jobs)} symbols", file=sys.stderr, flush=True)
-    else:
-        _init_pool(bench)
-        results = [stock_signals(j) for j in jobs]
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _progress import file_stamp, run_jobs          # group466: progress lines + per-symbol checkpoint / resume
+    bstamp = file_stamp(str(next((f for f in files if f.stem.upper() in BENCH_NAMES), "")))
+    settings = json.dumps([a.step, th, a.cost_pct, a.slip_pct, bstamp], sort_keys=True, default=str)
+    results = run_jobs(stock_signals, jobs, max(1, a.jobs), "ab_report", chunksize=2, ckpt=a.checkpoint, resume=a.resume,
+                       stamp=lambda j: file_stamp(j[0], settings), initializer=_init_pool, initargs=(bench,))
     for res in results:
         if res["err"]:
             skipped += 1

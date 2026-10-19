@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -43,6 +44,11 @@ def _iso(t: Optional[float]) -> Optional[str]:
     return None if t is None else datetime.fromtimestamp(t, IST).isoformat(timespec="seconds")
 
 
+def _limit_text(seconds: Any) -> str:
+    s = float(seconds or 0)
+    return f"{s / 3600:g} h" if s >= 3600 else f"{s:g} s"
+
+
 class Redactor:
     def __init__(self, secrets_fn: Callable[[], List[str]]):
         self.secrets_fn = secrets_fn
@@ -71,7 +77,7 @@ class Runner:
     def __init__(self, data_dir: str, scripts_dir: str, ctx_base: Dict[str, Any], jobs: Dict[str, Dict[str, Any]], packs: Dict[str, Dict[str, Any]],
                  token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
                  keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now,
-                 notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False):
+                 notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False, preflight_s: float = 60.0):
         self.data = data_dir
         self.runs_dir = os.path.join(data_dir, "runs")
         self.ctx_base = dict(ctx_base)
@@ -84,6 +90,7 @@ class Runner:
         self.now_fn = now_fn
         self.notify_fn = notify_fn      # group 447: (run dict, run dir) -> "sent" | note | None; announces automatic runs (see notify.py)
         self.keep_latest_only = keep_latest_only   # group 447: a new result replaces the older one of the same job / pack (saves disk)
+        self.preflight_s = max(0.0, float(preflight_s))   # group 466: an automatic run waits at most this long for the stack to answer
         self.auto_path = os.path.join(data_dir, "state", "last_automatic.json")
         self.auto: Dict[str, Any] = {"last": None, "by_pack": {}}
         os.makedirs(self.runs_dir, exist_ok=True)
@@ -155,7 +162,8 @@ class Runner:
     def scripts_dir_value(self) -> str:
         return self.ctx_base["scripts"]
 
-    def submit(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None, by: str = "", trigger: str = "manual", confirm: bool = False) -> Run:
+    def submit(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None, by: str = "", trigger: str = "manual", confirm: bool = False,
+               resume: bool = False) -> Run:
         if kind == "job":
             job = self.jobs.get(target)
             if not job:
@@ -174,6 +182,7 @@ class Runner:
             raise KeyError("kind must be job or pack")
         rid = f"{self.now_fn().strftime('%Y%m%d-%H%M%S')}-{target}-{secrets.token_hex(2)}"
         r = Run(rid, kind, target, title, p, by, trigger)
+        r.d["resume"] = bool(resume)      # group 466: continue from the symbols a stopped run already saved (scripts started with --resume)
         with self.lock:
             if any(q.d["target"] == target and q.d["kind"] == kind and q.d["params"] == p for q in self.queue):
                 raise ValueError(f"{title} is already waiting in the queue")
@@ -221,10 +230,7 @@ class Runner:
                 self.cancel_flag.set()
                 p = self.proc
                 if p and p.poll() is None:
-                    try:
-                        p.terminate()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    self._signal_group(p, signal.SIGTERM)
                 return True
         return False
 
@@ -306,6 +312,20 @@ class Runner:
         self.stop.set()
         self.cancel_flag.set()
         self.wake.set()
+        p = self.proc
+        if p is not None and p.poll() is None:      # group 466: do not leave pool workers running after the service stops
+            self._signal_group(p, signal.SIGTERM)
+
+    @staticmethod
+    def _signal_group(p: "subprocess.Popen", sig: int) -> None:
+        """group 466: signal the child's whole process group (the child is started as its own session leader, so pgid == pid): pool workers die with the job."""
+        try:
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                p.send_signal(sig)
+            except Exception:  # noqa: BLE001 - already gone
+                pass
 
     def drain(self, timeout: float = 60.0) -> bool:
         """Tests: wait until nothing is queued or running."""
@@ -455,6 +475,11 @@ class Runner:
         out.line("# Nothing in this run changes a trading setting unless a step below says POST.")
         out.line("")
         ctx = self.ctx(d)
+        ctx["resume"] = bool(r.d.get("resume"))     # group 466: jobs.py adds --resume to the checkpointed scripts
+        if ctx["resume"]:
+            out.line("# RESUME: scripts reuse the symbols the earlier run already saved (a changed history file or setting is recomputed)")
+        if r.d["trigger"] == "schedule":
+            self._preflight(out, ctx)
         if r.d["kind"] == "job":
             seq = [(r.d["target"], r.d["params"])]
         else:
@@ -485,9 +510,12 @@ class Runner:
                 left = job["timeout_s"] - (time.time() - jstart)
                 if left <= 0:
                     job_status = "timeout"
-                    out.line("-- job time limit reached")
+                    out.line(f"-- job time limit reached ({_limit_text(job['timeout_s'])}; heavy jobs: RUNNER_HEAVY_TIMEOUT_S in seconds, default 21600)")
                     break
                 res = self._step(st, i, len(steps), out, left, ctx)
+                if res[0] == "timeout":
+                    out.line(f"-- stopped at the {_limit_text(job['timeout_s'])} limit of this job (heavy jobs: RUNNER_HEAVY_TIMEOUT_S in seconds, default 21600)"
+                             + ("; press Resume on this run to continue from the symbols already saved" if job.get("resumable") else ""))
                 r.d["steps"].append({"job": jid, "n": i, "title": st["title"], "status": res[0], "seconds": round(res[1], 1), "detail": res[2]})
                 if res[0] in ("failed", "timeout", "cancelled") and not st.get("soft"):
                     job_status = res[0]
@@ -510,6 +538,37 @@ class Runner:
         r.d["exit_summary"] = ", ".join(f"{j['id']}={j['status']}" for j in r.d["jobs"])
         r.d.update(status=worst, finished_at=time.time())
         self._save(r)
+
+    def _preflight(self, out: "_Out", ctx: Dict[str, Any]) -> None:
+        """group 466: an AUTOMATIC run (16:05 close pack) used to start while the other containers were still restarting / starved and lost its Telegram message.
+        Wait (at most preflight_s) until the services answer /health, then go on regardless: a run must never be blocked by this."""
+        if self.preflight_s <= 0:
+            return
+        hard = [(k, ctx.get(k)) for k in ("gw", "rt", "ps", "md", "decision", "notify") if ctx.get(k)]    # analysis / kronos / tsfm are optional: never waited for
+        end = time.time() + self.preflight_s
+        waited = False
+        while True:
+            down = [k for k, u in hard if not self._answers(str(u), min(3.0, max(0.5, end - time.time())))]
+            if not down:
+                out.line("-- services ready")
+                return
+            if time.time() >= end or self.cancel_flag.is_set() or self.stop.is_set():
+                out.line(f"-- services still not answering after {int(self.preflight_s)} s ({', '.join(down)}), running anyway")
+                return
+            if not waited:
+                out.line(f"-- waiting for services ({', '.join(down)}) up to {int(self.preflight_s)} s")
+                waited = True
+            time.sleep(min(2.0, max(0.1, end - time.time())))
+
+    @staticmethod
+    def _answers(base: str, timeout: float) -> bool:
+        try:
+            urllib.request.urlopen(urllib.request.Request(base.rstrip("/") + "/health", method="GET"), timeout=timeout).close()   # noqa: S310 - internal URL
+            return True
+        except urllib.error.HTTPError:
+            return True                      # it answered (401 / 404 is still an answer)
+        except Exception:  # noqa: BLE001 - refused / DNS / timeout
+            return False
 
     def _env(self, extra: Dict[str, str]) -> Dict[str, str]:
         base = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "PYTHONPATH")}
@@ -583,7 +642,8 @@ class Runner:
         fh = open(stdout_file, "wb") if stdout_file else None
         try:
             p = subprocess.Popen(argv, stdout=fh or subprocess.PIPE, stderr=subprocess.STDOUT if not fh else subprocess.PIPE, env=self._env(st.get("env") or {}),
-                                 cwd=os.path.dirname(os.path.dirname(argv[1])) if script else None, preexec_fn=(lambda: os.nice(self.nice)) if self.nice else None)
+                                 cwd=os.path.dirname(os.path.dirname(argv[1])) if script else None, preexec_fn=(lambda: os.nice(self.nice)) if self.nice else None,
+                                 start_new_session=True)      # group 466: own process group, so a timeout / cancel kills the pool workers too
         except OSError as e:
             out.line(f"could not start: {e}")
             return "failed", str(e)
@@ -600,18 +660,20 @@ class Runner:
         t.start()
         while p.poll() is None:
             if self.cancel_flag.is_set():
-                p.terminate()
+                self._signal_group(p, signal.SIGTERM)
                 break
             if time.time() > deadline:
                 timed_out = True
-                p.terminate()
+                self._signal_group(p, signal.SIGTERM)
                 break
             time.sleep(0.1)
         try:
             p.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            p.kill()
+            self._signal_group(p, signal.SIGKILL)
             p.wait()
+        if timed_out or self.cancel_flag.is_set():
+            self._signal_group(p, signal.SIGKILL)      # a pool worker that ignored SIGTERM
         t.join(timeout=5)
         self.proc = None
         if fh:

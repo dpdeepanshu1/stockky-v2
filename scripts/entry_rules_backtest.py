@@ -351,6 +351,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--sample", type=int, default=0)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--checkpoint", default="", help="folder where each finished symbol is saved as the run goes (group 466); emptied at the start unless --resume")
+    ap.add_argument("--resume", action="store_true", help="reuse the symbols already saved in --checkpoint (same file and settings), compute only the rest")
     ap.add_argument("--jump-pct", type=float, default=35.0, help="a one-day close move above this %% inside an entry's window marks it a split/bonus/bad-candle suspect (0 = off)")
     ap.add_argument("--min-effect-pp", type=float, default=0.05, help="smallest per-entry gain (percentage points) a stop/target cell needs to be called BETTER")
     ap.add_argument("--expiry-weekday", type=int, default=1, choices=range(5))
@@ -366,8 +368,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.sample > 0 and pool > a.sample:
         files = sorted(random.Random(a.seed).sample(files, a.sample))
     jobs = [(str(f), f.stem.upper(), a.step, a.cost_pct, a.slip_pct, a.expiry_weekday, switch, mdays, a.grid_horizon, a.jump_pct) for f in files]
-    from _progress import run_jobs                       # group427: a progress line so a long run does not look hung
-    results = run_jobs(_job, jobs, a.jobs, "entry_rules")
+    from _progress import file_stamp, run_jobs, settings_stamp   # group427 progress line; group466 per-symbol checkpoint / resume
+    st = settings_stamp(a, str(d))
+    results = run_jobs(_job, jobs, a.jobs, "entry_rules", ckpt=a.checkpoint, resume=a.resume, stamp=lambda j: file_stamp(j[0], st))
     rows: List[Dict[str, Any]] = []
     grids: List[Dict[Tuple[str, str], List[List[float]]]] = []
     skipped = 0

@@ -28,7 +28,6 @@ import argparse
 import json
 import random
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -260,6 +259,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--thresholds", default="{}")
     ap.add_argument("--sample", type=int, default=0)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--checkpoint", default="", help="folder where each finished symbol is saved as the run goes (group 466); emptied at the start unless --resume")
+    ap.add_argument("--resume", action="store_true", help="reuse the symbols already saved in --checkpoint (same file and settings), compute only the rest")
     a = ap.parse_args(argv)
     d = Path(a.dir)
     th = json.loads(a.thresholds)
@@ -279,12 +280,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.sample > 0 and pool > a.sample:
         stock_files = sorted(random.Random(a.seed).sample(stock_files, a.sample))
     jobs = [(str(f), f.stem.upper(), a.step, th, a.cost_pct, a.slip_pct) for f in stock_files]
-    if a.jobs > 1:
-        with ProcessPoolExecutor(max_workers=a.jobs, initializer=_init, initargs=(bench,)) as ex:
-            results = list(ex.map(_job, jobs, chunksize=2))
-    else:
-        _init(bench)
-        results = [_job(j) for j in jobs]
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _progress import file_stamp, run_jobs          # group466: progress lines + per-symbol checkpoint / resume
+    bstamp = file_stamp(str(next((f for f in files if f.stem.upper() in ab.BENCH_NAMES), "")))
+    settings = json.dumps([a.step, th, a.cost_pct, a.slip_pct, bstamp], sort_keys=True, default=str)
+    results = run_jobs(_job, jobs, max(1, a.jobs), "p8_retest", chunksize=2, ckpt=a.checkpoint, resume=a.resume,
+                       stamp=lambda j: file_stamp(j[0], settings), initializer=_init, initargs=(bench,))
     rows: List[Dict[str, Any]] = []
     skipped = 0
     for res in results:

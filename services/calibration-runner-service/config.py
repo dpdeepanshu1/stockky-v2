@@ -51,3 +51,10 @@ NOTIFY_ENABLED = _b("RUNNER_NOTIFY_ENABLED", True)
 NOTIFY_MANUAL = _b("RUNNER_NOTIFY_MANUAL", False)
 # group 447: a new result of a job / pack replaces the older one (Runs & downloads shows one line per job); set false to keep the history again
 KEEP_LATEST_ONLY = _b("RUNNER_KEEP_LATEST_ONLY", True)
+# group 466: heavy jobs (replays, backtests, probes) get 6 h (jobs.py reads RUNNER_HEAVY_TIMEOUT_S itself; never below 1 h)
+HEAVY_TIMEOUT_S = max(3600, _i("RUNNER_HEAVY_TIMEOUT_S", 6 * 3600))
+# group 466: a Telegram message that could not be delivered is kept in <data>/outbox and retried every OUTBOX_RETRY_S, dropped after OUTBOX_MAX_AGE_S
+OUTBOX_RETRY_S = max(10, _i("RUNNER_OUTBOX_RETRY_S", 60))
+OUTBOX_MAX_AGE_S = max(600, _i("RUNNER_OUTBOX_MAX_AGE_S", 24 * 3600))
+# group 466: an AUTOMATIC run waits at most this long for the other services to answer /health before it starts (0 = do not wait)
+PREFLIGHT_S = max(0, _i("RUNNER_PREFLIGHT_S", 60))

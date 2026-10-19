@@ -1090,6 +1090,47 @@ async def emergency_pause(db: Session = Depends(get_db)):
     return {"ok": True, "paused": True}
 
 
+class CloseAllRequest(BaseModel):
+    confirm: str = ""   # must be "CLOSE ALL" (typed in the dashboard dialog)
+
+
+@app.post("/close-all/{mode}")
+async def close_all_and_disarm(
+    mode: str, body: CloseAllRequest = CloseAllRequest(),
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """EMERGENCY CLOSE ALL (group 466): disarm `mode`, cancel its resting BUYs, then sell every open position.
+
+    Confirm-gated: the body must carry confirm="CLOSE ALL", otherwise 400 and nothing happens. REAL needs the admin login like
+    every other money-moving route; DEMO is open. Reuses the existing sell path (execution/close_all.py): MARKET SELL through
+    exit_engine._send_real_sell behind the pending-SELL guard, on a worker thread. The mode is disarmed FIRST and stays
+    disarmed even if a running cycle holds the lock (409, nothing sold). /emergency-pause stays the cheap "stop new trades only"
+    button; this one also flattens the book. Always allowed regardless of armed state."""
+    from execution import close_all as _close_all
+    mode = mode.upper()
+    if mode not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    if not _close_all.confirm_ok(body.confirm):
+        raise HTTPException(status_code=400, detail=f'Confirmation missing - send confirm="{_close_all.CONFIRM_PHRASE}".')
+    import asyncio as _asyncio
+    ticks = None
+    if mode == "DEMO":
+        try:
+            from market_feed.feed import get_quotes
+            from portfolio.portfolio import open_positions as _open_positions_ca
+            syms = list({p.symbol for p in _open_positions_ca(db, mode)})
+            ticks = await get_quotes(syms, priority=True) if syms else {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("close-all DEMO price fetch failed: %s", e)
+            ticks = {}
+    result = await _asyncio.to_thread(
+        _close_all.run_close_all, db, mode, actor=admin or "demo-user", confirmed=True, ticks=ticks,
+    )
+    if result.get("locks_busy"):
+        raise HTTPException(status_code=409, detail=result["summary"])
+    return result
+
+
 # ── Routes: risk engine self-test (no live order path exists yet — this is
 #    how the risk engine gets exercised/verified in Phase 1) ───────────────
 class RiskCheckRequest(BaseModel):

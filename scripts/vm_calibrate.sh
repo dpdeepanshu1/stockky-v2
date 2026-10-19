@@ -87,7 +87,9 @@ main() {
         --manifest "$OUT_DIR/sample_manifest_$seed.json" --sleep 1.5 || continue
     # group434: on 18 Oct two runs left hist_7 with 2-3 symbols (restarting gateway) and the A/B ran on nothing. Too few symbols = skip this seed.
     run "$PY" "$SCRIPTS/calibration_status.py" --hist "$hist" --manifest "$OUT_DIR/sample_manifest_$seed.json" --min-symbols "$MIN_SYMBOLS" --label "seed_$seed" || continue
-    run "$PY" "$SCRIPTS/ms_ab_report.py" "$hist" --out "$ab" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" && ab_args+=(--ab "$ab/ab_report.json")
+    # group466: each finished symbol is saved; with RESUME=1 a killed / timed-out replay continues instead of starting over (a changed history file is recomputed)
+    ab_ck=(--checkpoint "$OUT_DIR/ckpt/ab_$seed"); [[ "$RESUME" == "1" ]] && ab_ck+=(--resume)
+    run "$PY" "$SCRIPTS/ms_ab_report.py" "$hist" --out "$ab" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" "${ab_ck[@]}" && ab_args+=(--ab "$ab/ab_report.json")
   done
   if [[ -z "$first" ]]; then echo "no seeds given"; FAILED+=("no seeds"); return 1; fi
 

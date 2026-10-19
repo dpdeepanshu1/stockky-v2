@@ -31,6 +31,7 @@ def _runner(jobs, packs=None, **kw):
     sc = os.path.join(d, "scripts")
     os.makedirs(sc)
     kw.setdefault("nice", 0)
+    kw.setdefault("preflight_s", 0)      # group466: fake service URLs never answer /health; preflight has its own tests
     r = R.Runner(os.path.join(d, "data"), sc, _ctx(sc), jobs, packs or {}, lambda: TOKEN, **kw)
     r.start()
     return r, d, sc

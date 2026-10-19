@@ -6,8 +6,9 @@
 // All three accept the same admin session (one SESSION_SECRET), so the page reuses the tokens the Auto Trade and Position Stocks pages already stored.
 // Pure helpers at the bottom (trade rows, day totals) have no network and are covered by calibration.test.mjs.
 
-import { getRealTradeApiUrl, getSessionToken as getRtToken, setSessionToken as setRtToken, realTradeApi } from "./realTradeApi";
-import { getPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
+import { getRealTradeApiUrl, setRealTradeApiUrl, getSessionToken as getRtToken, setSessionToken as setRtToken, realTradeApi } from "./realTradeApi";
+import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
+import { getApiUrl } from "./api";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
 export * from "./calibrationTrades";
@@ -37,9 +38,44 @@ export function setRunnerUrl(url: string) {
   } catch { /* ignore */ }
 }
 
+/** group 444: a stored token whose JWT `exp` is already past is as good as none (the server answers 401 ExpiredSignatureError), so the page shows the login card instead of a wall of red errors. */
+function live(t: string | null): string | null {
+  if (!t) return null;
+  try {
+    const part = t.split(".")[1];
+    if (part) {
+      const exp = JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/"))).exp;
+      if (typeof exp === "number" && exp * 1000 <= Date.now()) return null;
+    }
+  } catch { /* not a JWT we can read: let the server decide */ }
+  return t;
+}
+
+export const AUTH_LOST_EVENT = "stockky:calibration-auth-lost";
+
 /** Any valid admin session works for the runner; prefer the real-trade one. */
 export function anyToken(): string | null {
-  return getRtToken() || getPsToken();
+  return live(getRtToken()) || live(getPsToken());
+}
+
+/**
+ * group 445: the two trading services each have their own URL, stored by the Auto Trade / Position Stocks pages. When one was never set it is "", every
+ * call went to the page's own origin (index.html, or the OTHER service's route) and the two tabs showed the same thing or the same error. In the normal
+ * deployment everything sits under one host (/api, /realtrade, /positionstocks, /calibration), so a missing URL is derived from the other service's URL
+ * or from the gateway URL and saved, exactly as if it had been typed in the page. A URL that is already set is never changed.
+ */
+export function deriveServiceUrls(): { rt: string; ps: string } {
+  let rt = getRealTradeApiUrl();
+  let ps = getPositionStocksApiUrl();
+  const swap = (u: string, from: string, to: string) => (new RegExp(`/${from}$`).test(u) ? u.replace(new RegExp(`/${from}$`), `/${to}`) : "");
+  let base = "";
+  try {
+    const g = (getApiUrl() || "").replace(/\/$/, "");
+    base = g.replace(/\/api$/, "");
+  } catch { /* storage blocked */ }
+  if (!rt) { rt = swap(ps, "positionstocks", "realtrade") || `${base}/realtrade`; try { setRealTradeApiUrl(rt); } catch { /* ignore */ } }
+  if (!ps) { ps = swap(rt, "realtrade", "positionstocks") || `${base}/positionstocks`; try { setPositionStocksApiUrl(ps); } catch { /* ignore */ } }
+  return { rt, ps };
 }
 
 export function serviceUrl(svc: Svc): string {
@@ -48,7 +84,7 @@ export function serviceUrl(svc: Svc): string {
 
 export function serviceToken(svc: Svc): string | null {
   // the two services share SESSION_SECRET, so either token is accepted by either one; prefer the service's own
-  return svc === "rt" ? getRtToken() || getPsToken() : getPsToken() || getRtToken();
+  return svc === "rt" ? live(getRtToken()) || live(getPsToken()) : live(getPsToken()) || live(getRtToken());
 }
 
 export async function loginBoth(username: string, password: string): Promise<{ rt: boolean; ps: boolean; error?: string }> {
@@ -91,7 +127,11 @@ async function call<T>(base: string, token: string | null, path: string, init?: 
     try { data = JSON.parse(raw); } catch { data = raw; }
   }
   if (!resp.ok) {
-    if (resp.status === 401) { /* the page shows the login card again */ }
+    if (resp.status === 401) {
+      // group 444: the session is dead (expired / idle timeout): forget it and tell the page, which then shows the login card
+      logoutAll();
+      try { window.dispatchEvent(new Event(AUTH_LOST_EVENT)); } catch { /* no window */ }
+    }
     throw new ApiError(resp.status, data && data.detail !== undefined ? data.detail : (typeof data === "string" ? data.slice(0, 200) : resp.statusText));
   }
   // group 443: a 200 that is not JSON (index.html from the SPA fallback when the nginx /calibration/ or /control route is missing) used to be handed

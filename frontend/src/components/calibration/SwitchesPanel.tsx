@@ -1,7 +1,7 @@
 // group 442: every ON / OFF switch of one service (real-trade or position-stocks), grouped, with LIVE / RESTART badges, a confirm step for anything that
 // LOOSENS a rule, the recommended value next to the current one, a one-click "move to recommended" (with a preview) and the change log.
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ApiError, controlApi, type FlagRow, type FlagsDoc, type PresetPlanRow, type Svc } from "../../calibrationApi";
+import { ApiError, controlApi, serviceUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type Svc } from "../../calibrationApi";
 import { Btn, Card, Msg } from "./ui";
 
 const SVC_NAME: Record<Svc, string> = { rt: "real-trade-service", ps: "position-stocks-service" };
@@ -34,7 +34,11 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: Svc; onChanged?
 
   const load = useCallback(async () => {
     try {
-      setDoc(await controlApi.flags(svc));
+      const d = await controlApi.flags(svc);
+      // group 445: both tabs showing the same switches means both URLs point at one service; say so instead of showing the wrong service's switches
+      if (!d || !Array.isArray(d.flags) || !d.summary) throw new Error(`${SVC_NAME[svc]} answered with an unexpected shape for /control/flags.`);
+      if (d.service && d.service !== SVC_NAME[svc]) throw new Error(`This tab's URL (${serviceUrl(svc) || "same site"}) belongs to ${d.service}, not ${SVC_NAME[svc]}. Fix it under Connection below.`);
+      setDoc(d);
       setErr(null);
     } catch (e: any) {
       setDoc(null);

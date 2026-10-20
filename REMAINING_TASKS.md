@@ -1,4 +1,25 @@
-# Remaining tasks (group 469 status, 2026-10-20)
+# Remaining tasks (group 470 status, 2026-10-20)
+
+## Built in group 470 (from reading the 19-20 Oct runner outputs; details `docs/GROUP470_RUN_OUTPUT_FIXES.md`)
+Token redaction (JWT / `--token`), `gate_check` + `calibration_pack` `--ab` repetition, snapshot / checkpoint "input missing" on first run, `monday_check` closed-market skip,
+TimesFM skip when the worker is not started, G1 footer + one 15 ms budget, slippage sign wording. Tests pass in the stand-in runner (no pytest in the sandbox); run `bash scripts/docker_test.sh` for the pytest-fixture tests.
+
+## Do first (your side)
+1. **Rotate `SESSION_SECRET`** (all services share it) and delete the `calibration_full` run (id `20261020-132048-calibration_full-15ee`) from the runner volume and from every copy of the zip: its `output.txt` holds a full admin JWT.
+2. **Rebuild and restart the calibration-runner image.** The saved `records_report.json` has no `performance` / `exit_slippage` keys, so the runner is running scripts older than group 467-469. Group 470 fixes only take effect after the rebuild.
+3. Check `docker logs` / the order book for **BLEL (entered 14 Oct 13:47, closed 15 Oct 15:00)** and **HDFCLIFE (entered 19 Oct 13:10, closed 20 Oct 08:57)**: both outlived the 15:00 square-off. HDFCLIFE was with `OVERNIGHT_HOLD_ENABLED=false`.
+4. Position-stocks order `221261016371707` (`STAGNATION_EXIT_SELL_DEAD`: cancelled, zero fill, "position may still be open at the broker"): confirm at the broker that the position is flat.
+5. If 50 ms was the intended G1 budget, set `G1_BUDGET_MS=50` (the monthly job is now stricter than before).
+
+## Decisions for you (not changed in code)
+- **Late entries.** 72 of 196 REAL trades were entered in the 15:xx hour: net -1,371, charges 1,182. Trades entered at 15:02 / 15:16 (CAMS, ADVAIT, BLUESTONE, TARIL) were carried to the next trading day. No general "no new entry after HH:MM" gate was found (only the expiry / pre-holiday 14:30 and an empty Friday cutoff in `calendar_gate.py`). Candidate: one general entry cutoff.
+- **Structure gate** is `enforce` in both services while G2 and G3 FAIL (policy keeps ~9.5 % of signals, needs 30 %; two of three seeds `no_edge`; G4 has 2 of 20 sessions). Option: `log` until the gates pass.
+- **real-trade** `service_advice` = TURN OFF (net -369 over 24 trades in the last 10 days; -3,134 over 196 trades since 1 Sep). Several real-trade entry gates were switched off on 19 Oct (VWAP gate, opening entry guard, depth re-check); one day of data cannot judge that change.
+- **Stop overshoot:** 17 of 24 stop hits lost more than the planned stop (worst 17.55 points), 5 `emergency_gap_down` exits (mean -13.5 %). `BROKER_STOP_ENABLED=true` has been on since 19 Oct, so re-measure after a week; consider a liquidity / circuit filter if it persists.
+- Attribution fields (`decision_label`, `source_tab`, `tier_name`, `stop_basis`, order-flow) are empty on most history (190 / 163 / 59 / 188 / 192 of 196); per-gate tables are only useful once new trades accumulate.
+- Entry slippage review says `not_material` (mean -0.034 %): the limit-order walk is not needed. Kronos: `NOT PROVEN` (passed trades did worse). Leave both off.
+
+## Earlier status (group 469)
 
 ## Built in groups 466-469 (needs your side to verify, see "Not verified")
 Close-all and disarm (the group466-closeall zip: real-trade + position-stocks, dashboard), whole-book performance block, charges share of gross profit,
@@ -6,7 +27,7 @@ log-only Mansfield RS + breadth, entry-slippage review script, calibration snaps
 Details: `docs/GROUP468_PERFORMANCE_EVIDENCE_APPROVE_FIRST.md`.
 
 ## Do on the VM (no code)
-1. Confirm `BROKER_STOP_ENABLED=true` in the live `.env`.
+1. `BROKER_STOP_ENABLED=true` was seen live in the 19 Oct switch snapshot (admin override); confirm it survives a restart (`.env`).
 2. Confirm the VM's static IPv4 is registered with Dhan and `/outbound-ip` returns it.
 3. One live check that market exits and the `STOP_LOSS_MARKET` broker stop behave under Market Price Protection; grep the logs for MPP rejections.
 4. Confirm no AMO orders are sent; one live pass of the token-expiry and auto-disarm path.

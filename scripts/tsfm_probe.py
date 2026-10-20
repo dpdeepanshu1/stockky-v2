@@ -31,7 +31,9 @@ import bisect
 import json
 import math
 import random
+import socket
 import sys
+import urllib.error
 import urllib.request
 from datetime import date
 from pathlib import Path
@@ -411,6 +413,19 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     return "\n".join(L)
 
 
+def service_not_running(url: str, timeout: float = 5.0) -> str:
+    """group470: a reason when the worker's NAME does not resolve (compose profile `timesfm` not started), else ''. Before this the probe made
+    hundreds of calls that all failed with 'Temporary failure in name resolution' and still wrote an empty report."""
+    try:
+        urllib.request.urlopen(url.rstrip("/") + "/health", timeout=timeout).close()
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), socket.gaierror):
+            return f"name does not resolve ({e.reason})"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("hist_dir", nargs="?", default="")
@@ -426,6 +441,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--holdout-only", action="store_true")
     ap.add_argument("--tsfm-url", default="http://localhost:8011")
     ap.add_argument("--no-model", action="store_true")
+    ap.add_argument("--require-service", action="store_true", help="a worker whose name does not resolve is a failure (exit 2), not a skip")
     ap.add_argument("--max-forecasts", type=int, default=0)
     ap.add_argument("--timeout", type=float, default=120.0)
     a = ap.parse_args(argv)
@@ -436,6 +452,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if res["status"] in ("PASS", "NOT_ENOUGH_DATA", "NO_INPUT") else 1
     if not a.hist_dir:
         ap.error("HIST_DIR or --combine is required")
+    if not a.no_model:
+        why = service_not_running(a.tsfm_url)
+        if why:
+            print(f"SKIPPED: TimesFM worker not running at {a.tsfm_url}: {why}. Start it with `docker compose --profile timesfm up -d timesfm-forecast-service`.")
+            return 2 if a.require_service else 0
     out = Path(a.out)
     data = load_dir(Path(a.hist_dir))
     if not data:

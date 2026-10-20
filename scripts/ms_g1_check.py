@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -182,8 +183,15 @@ def to_md(r: Dict[str, Any]) -> str:
         lines.append(f"- violations: {json.dumps(v, default=str)}")
     for v in c["corporate_actions"].get("broken", [])[:10]:
         lines.append(f"- broken: {json.dumps(v, default=str)}")
-    lines += ["", "Still manual: " + "; ".join(r["manual"]), "", "A FAIL means the engine used future data or mishandled a split: keep STRUCTURE_POLICY_MODE=off until fixed.",
-              "NOT_ENOUGH_DATA means the history set is too small to certify the gate - download more symbols, do not read it as PASS."]
+    # group470: the old footer said "future data / split" for ANY fail, including a latency-only one (19-20 Oct: truncation PASS, 8 splits OK, p95 57 ms)
+    correctness_fail = FAIL in (c["truncation_invariance"]["verdict"], c["corporate_actions"]["verdict"])
+    lines += ["", "Still manual: " + "; ".join(r["manual"]), ""]
+    if correctness_fail:
+        lines.append("A FAIL on truncation invariance or corporate actions means the engine used future data or mishandled a split: keep STRUCTURE_POLICY_MODE=off until fixed.")
+    if c["latency"]["verdict"] in (WARN, FAIL):
+        lines.append(f"Latency {c['latency']['verdict']} is a SPEED finding, not a correctness one: p95 {c['latency']['p95_ms']} ms against a {c['latency']['budget_ms']} ms budget "
+                     f"(PASS <= budget, WARN <= 3x, FAIL beyond). Judge it against the live /analyze latency check; the budget is a judgement call (--budget-ms / G1_BUDGET_MS).")
+    lines.append("NOT_ENOUGH_DATA means the history set is too small to certify the gate - download more symbols, do not read it as PASS.")
     return "\n".join(lines) + "\n"
 
 
@@ -194,7 +202,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--cuts", type=int, default=6)
     ap.add_argument("--min-ca", type=int, default=10)
     ap.add_argument("--min-symbols", type=int, default=20)
-    ap.add_argument("--budget-ms", type=float, default=15.0)
+    ap.add_argument("--budget-ms", type=float, default=float(os.environ.get("G1_BUDGET_MS", "15") or 15))
     ap.add_argument("--sample", type=int, default=0)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--strict", action="store_true")

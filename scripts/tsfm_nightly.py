@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -37,6 +38,21 @@ def post_batch(url: str, symbols: List[str], horizon: int, force: bool, timeout:
             if k + 1 < retries:
                 time.sleep(wait * (k + 1))
     raise RuntimeError(f"batch failed after {retries} attempts: {last}")
+
+
+def service_not_running(url: str, timeout: float = 5.0) -> str:
+    """group470: '' when the worker answers or fails in some other way (that is a real problem and keeps its normal failure path);
+    a reason string when the NAME does not resolve, which is what a compose service outside the running profile looks like
+    (`docker compose --profile timesfm up -d timesfm-forecast-service`). The nightly job used to burn 4 minutes and 754 failed
+    symbols every day for a service that was never started."""
+    try:
+        urllib.request.urlopen(url.rstrip("/") + "/health", timeout=timeout).close()
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), socket.gaierror):
+            return f"name does not resolve ({e.reason})"
+    except Exception:  # noqa: BLE001 - anything else is not the 'not started' case
+        pass
+    return ""
 
 
 def run(args: argparse.Namespace) -> Dict[str, Any]:
@@ -80,9 +96,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--retries", type=int, default=3)
     ap.add_argument("--retry-wait", type=float, default=5.0)
     ap.add_argument("--max-failed-pct", type=float, default=40.0)
+    ap.add_argument("--require-service", action="store_true", help="a worker whose name does not resolve is a failure, not a skip")
     a = ap.parse_args(argv)
     # read_symbols() also looks at these two; this tool has no sampling
     a.limit, a.sample, a.seed = 0, 0, 7
+    why = service_not_running(a.url)
+    if why and not a.require_service:
+        print(json.dumps({"skipped": True, "reason": f"TimesFM worker not running at {a.url}: {why}. Start it with `docker compose --profile timesfm up -d timesfm-forecast-service`, or ignore this while TimesFM is not in use (pass --require-service to make this a failure)."}))
+        return 0
     try:
         s = run(a)
     except RuntimeError as e:

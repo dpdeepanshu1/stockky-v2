@@ -63,7 +63,7 @@ def to_markdown(rep: Dict[str, Any]) -> str:
     o = rep["overall"]
     f = lambda v: "-" if v is None else str(v)  # noqa: E731
     L = [f"# Entry slippage review - {rep['trades']} trades, {rep['with_slippage']} with a slippage number", "",
-         f"Mean {f(o['mean_pct'])}%, median {f(o['median_pct'])}%, worst {f(o['worst_pct'])}%; paid above the signal in total: {f(o['rupees'])} rupees"
+         f"Mean {f(o['mean_pct'])}%, median {f(o['median_pct'])}%, worst {f(o['worst_pct'])}%; net rupees against the signal: {f(o['rupees'])} (+ paid above it, - paid below it, i.e. a gain)"
          + (f" ({rep['share_of_gross_pct']}% of the gross profit)" if rep.get("share_of_gross_pct") is not None else "") + ".",
          f"Verdict: **{rep['verdict']}** - {rep['reason']}.", ""]
     for title, key in (("entry hour IST", "by_hour"), ("source tab", "by_source_tab")):

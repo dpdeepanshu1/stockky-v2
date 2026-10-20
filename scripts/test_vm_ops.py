@@ -209,16 +209,26 @@ def test_market_is_open_now_clock_rule():
 
 
 def test_session_verdict_1015_must_be_open():
-    ok = M.check_session("1015", _fake({"/market/session": (200, {"status": "open", "day": "d"}, "")}))
+    now = datetime(2026, 10, 12, 5, 0, tzinfo=timezone.utc)          # Mon 10:30 IST: market hours (group470: the check is skipped outside them)
+    ok = M.check_session("1015", _fake({"/market/session": (200, {"status": "open", "day": "d"}, "")}), now)
     assert ok[0][0] == "OK"
-    bad = M.check_session("1015", _fake({"/market/session": (200, {"status": "unknown"}, "")}))
+    bad = M.check_session("1015", _fake({"/market/session": (200, {"status": "unknown"}, "")}), now)
     assert bad[0][0] == "FAIL" and "expected `open`" in bad[0][1]
-    wk = M.check_session("1015", _fake({"/market/session": (200, {"status": "unknown", "reason": "weekend"}, "")}))
+    wk = M.check_session("1015", _fake({"/market/session": (200, {"status": "unknown", "reason": "weekend"}, "")}), now)
     assert wk[0][0] == "INFO"
-    down = M.check_session("1015", _fake({}))
+    down = M.check_session("1015", _fake({}), now)
     assert down[0][0] == "FAIL"
-    early = M.check_session("0930", _fake({"/market/session": (200, {"status": "pending"}, "")}))
+    early = M.check_session("0930", _fake({"/market/session": (200, {"status": "pending"}, "")}), now)
     assert early[0][0] == "INFO"
+
+
+def test_session_verdict_is_skipped_not_failed_when_the_market_is_closed():
+    """group470: the 19 Oct run at 16:11 IST turned `unknown` into a FAIL on the 1015 label."""
+    after_close = datetime(2026, 10, 19, 10, 41, tzinfo=timezone.utc)   # Mon 16:11 IST
+    sunday = datetime(2026, 10, 11, 5, 0, tzinfo=timezone.utc)
+    for now in (after_close, sunday):
+        r = M.check_session("1015", _fake({"/market/session": (200, {"status": "unknown"}, "")}), now)
+        assert len(r) == 1 and r[0][0] == "INFO" and "market is closed" in r[0][1]
 
 
 def test_quote_age_over_20s_fails_only_in_market_hours():

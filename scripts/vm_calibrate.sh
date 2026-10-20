@@ -96,7 +96,7 @@ main() {
   if [[ -z "$first" ]]; then echo "no seeds given"; FAILED+=("no seeds"); return 1; fi
 
   echo "=== G1 correctness (first sample)"
-  run "$PY" "$SCRIPTS/ms_g1_check.py" "$first" --out "$OUT_DIR/g1"
+  run "$PY" "$SCRIPTS/ms_g1_check.py" "$first" --out "$OUT_DIR/g1" --budget-ms "${G1_BUDGET_MS:-15}"
   [[ "$DRY_RUN" != "1" && -f "$OUT_DIR/g1/g1_report.md" ]] && cat "$OUT_DIR/g1/g1_report.md"
 
   echo "=== walk-forward (first sample)"

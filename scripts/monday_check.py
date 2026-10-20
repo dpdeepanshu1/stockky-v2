@@ -77,6 +77,10 @@ def check_health(fetch=get_json):
 
 
 def check_session(label: str, fetch=get_json, now: datetime | None = None):
+    # group470: the session verdict is only meaningful while the market is open. Run at 16:11 (or at the weekend) it read `unknown`
+    # and the 10:15 label turned that into a FAIL. Outside Mon-Fri 09:15-15:30 IST the check is skipped, not failed.
+    if not market_is_open_now(now or datetime.now(IST)):
+        return [("INFO", f"session verdict not checked: the clock says the market is closed ({label} label); run it again during market hours")]
     code, js, err = fetch(base_url("market-data") + "/market/session")
     if not isinstance(js, dict):
         return [("FAIL", f"market-data /market/session unreadable ({code or err})")]

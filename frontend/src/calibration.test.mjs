@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { tradesFromRealTrade, tradesFromPositionStocks, dayTotals, bucketBy, tradesCsv, istDay, istHm, relTime, fmtDur } from "./calibrationTrades.ts";
-import { PLAN, JOB_SERVICES, jobAppliesTo, GATE_GLOSSARY } from "./calibrationPlan.ts";
+import { PLAN, JOB_SERVICES, jobAppliesTo, GATE_GLOSSARY, planRunAll } from "./calibrationPlan.ts";
 
 // real-trade records: UTC timestamps -> IST day / time, net P&L preferred, bad rows dropped
 const rt = tradesFromRealTrade({ records: [
@@ -83,4 +83,27 @@ assert.match(panel, /start\(r\.kind, r\.target, r\.params, true\)/);
 assert.match(panel, /Resume \(reuse saved symbols\)/);
 const ctxSrc = readFileSync(new URL("./components/calibration/RunnerContext.tsx", import.meta.url), "utf8");
 assert.match(ctxSrc, /runnerApi\.start\(run\.kind, run\.target, params, true, resume\)/, "the market-hours confirm must keep the resume flag");
+
+// group 471: "Run all test cases" plan: never the data-changing "model" group, heavy only on request, a job after the jobs it needs, per-service filter
+const J = (id, group, heavy = false, needs = []) => ({ id, group, heavy, needs });
+const cat = [J("records_report", "weekly", false, ["export_records"]), J("export_records", "daily"), J("train_model", "model", true), J("fetch_history", "weekly", true),
+  J("ab_report", "weekly", true, ["fetch_history"]), J("opening_replay", "weekly"), J("services_health", "ops")];
+const light = planRunAll(cat, "rt", false);
+assert.deepEqual(light.ids, ["export_records", "records_report", "services_health"], "needs first, no model group, no heavy, ps-only job left out of rt");
+assert.deepEqual(light.heavySkipped.sort(), ["ab_report", "fetch_history"]);
+const full = planRunAll(cat, "ps", true);
+assert.ok(full.ids.indexOf("fetch_history") < full.ids.indexOf("ab_report") && !full.ids.includes("train_model") && full.ids.includes("opening_replay"));
+assert.equal(new Set(full.ids).size, full.ids.length);
+// the real catalog: the planner picks no model-group job and every job it picks exists
+const realGroups = Object.fromEntries([...jobsPy.matchAll(/_job\("([a-z0-9_]+)", "[^"]*", "([a-z]+)"/g)].map((m) => [m[1], m[2]]));
+const realCat = Object.entries(realGroups).map(([id, group]) => J(id, group));
+for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); assert.ok(r.ids.length > 10 && r.ids.every((id) => realGroups[id] !== "model")); }
+// UI wiring
+const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
+assert.match(bar, /Run all test cases/);
+const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
+assert.match(tab, /section !== "runs" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads");
+assert.match(panel, /Download all latest results/);
+assert.match(api, /\/results\/latest\.zip/);
+assert.match(ctxSrc, /for \(let i = 0; i < ids\.length && !stopAll\.current/, "tests are started one after the other");
 console.log("calibration.test.mjs: ok");

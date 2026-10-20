@@ -13,6 +13,7 @@ import SwitchesPanel from "./calibration/SwitchesPanel";
 import TradesPanel from "./calibration/TradesPanel";
 import RunPlanPanel from "./calibration/RunPlanPanel";
 import TestsPanel from "./calibration/TestsPanel";
+import RunAllBar from "./calibration/RunAllBar";
 import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
@@ -101,6 +102,7 @@ function Body() {
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
       <SessionNotice />
+      {section !== "runs" && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "trades" && <TradesPanel svc={svc} onRunReport={() => void start("job", "daily_trades", { days: 10, origin: "all" })} />}
       {section === "plan" && <RunPlanPanel svc={svc} />}

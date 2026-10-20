@@ -1,7 +1,7 @@
 // group 442: run history with download, and the run window (live output while it runs, steps, files, cancel).
 // group 447: only the LATEST result of each test / pack is kept (a new run replaces the old one), filter chips with counts, search, close icon on the run window.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ACTIVE, ApiError, downloadRunFile, fmtDur, istStamp, relTime, runnerApi, statusCounts, telegramNote, type Catalog, type JobDef, type PackDef, type RunRec } from "../../calibrationApi";
+import { ACTIVE, ApiError, downloadLatestResults, downloadRunFile, fmtDur, istStamp, relTime, runnerApi, statusCounts, telegramNote, type Catalog, type JobDef, type PackDef, type RunRec } from "../../calibrationApi";
 import { Btn, Card, Chip, Msg, StatusPill } from "./ui";
 import { Modal } from "./SwitchesPanel";
 import { useRunner } from "./RunnerContext";
@@ -43,7 +43,7 @@ export function RunsPanel() {
   const dl = (id: string, name: string) => void downloadRunFile(id, name).catch((e) => setErr(e?.message));
 
   return (
-    <Card title="Runs and downloads" right={<Btn small onClick={() => void load()}>Refresh</Btn>}>
+    <Card title="Runs and downloads" right={<><Btn small primary onClick={() => void downloadLatestResults().catch((e) => setErr(e?.message || String(e)))} title="One zip: the newest result of every test, plus an index with each status">Download all latest results</Btn><Btn small onClick={() => void load()}>Refresh</Btn></>}>
       {latestOnly && <p className="mb-2 text-[11px] text-mist" data-testid="latest-only-note">One line per test and settings: a new result replaces the older one of the same test with the same options, so the disk does not fill up. Download what you need before you run the same test again.</p>}
       {err && <Msg kind="err">{err}</Msg>}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">

@@ -1,6 +1,6 @@
 // group 442: the written run plan shown on the Real Money Calibration page. Pure data, no network.
 // Job / pack ids are the ones of services/calibration-runner-service/jobs.py (a test, calibration.test.mjs, checks they still exist there).
-import type { Svc } from "./calibrationApi";
+import type { JobDef, Svc } from "./calibrationApi";
 
 export interface PlanRow { when: string; what: string; pack?: string; jobs?: string[]; note?: string }
 
@@ -73,3 +73,23 @@ export const GATE_GLOSSARY: { gate: string; means: string; job: string; exists: 
   { gate: "A/B board", means: "Engine board maths = legacy board maths, so the legacy code may go", job: "board_parity", exists: true },
   { gate: "G5 - G8, F3", means: "Not defined anywhere in this repo. Nothing is run or claimed for them.", job: "-", exists: false },
 ];
+
+/** group 471: which jobs "Run all test cases" starts for one service tab, in a safe order.
+ *  - the "model" group (retrain / score outcomes / structure refresh) is NOT a test: it changes data, so it is never part of "run all";
+ *  - heavy jobs (hours of replay / downloads, held back in market hours) only when asked for;
+ *  - a job runs after the jobs it needs (export_records before records_report ...), otherwise the catalog order is kept. */
+export function planRunAll(jobs: Pick<JobDef, "id" | "group" | "heavy" | "needs">[], svc: Svc, includeHeavy: boolean): { ids: string[]; heavySkipped: string[] } {
+  const heavySkipped: string[] = [];
+  const picked = jobs.filter((j) => j.group !== "model" && jobAppliesTo(j.id, svc) && (includeHeavy || !j.heavy || (heavySkipped.push(j.id), false)));
+  const inSet = new Set(picked.map((j) => j.id));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const visit = (j: Pick<JobDef, "id" | "needs">) => {
+    if (seen.has(j.id)) return;
+    seen.add(j.id);
+    for (const n of j.needs || []) { const d = picked.find((x) => x.id === n); if (d && inSet.has(n)) visit(d); }
+    out.push(j.id);
+  };
+  picked.forEach(visit);
+  return { ids: out, heavySkipped };
+}

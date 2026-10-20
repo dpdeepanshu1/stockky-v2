@@ -228,6 +228,13 @@ export async function downloadRunFile(id: string, file: string | "zip"): Promise
   saveBlob(blob, file === "zip" ? `${id}.zip` : `${id}_${file.split("/").pop()}`);
 }
 
+/** group 471: the latest result of every test in one zip (GET /results/latest.zip on the runner). */
+export async function downloadLatestResults(): Promise<void> {
+  const resp = await fetch(`${getRunnerUrl()}/results/latest.zip`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
+  if (!resp.ok) throw new ApiError(resp.status, resp.statusText || "download failed");
+  saveBlob(await resp.blob(), "latest_results.zip");
+}
+
 export function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

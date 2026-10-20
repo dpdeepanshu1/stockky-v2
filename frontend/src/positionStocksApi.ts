@@ -563,6 +563,12 @@ export const positionStocksApi = {
       body: JSON.stringify({ symbol, quantity: quantity ?? null }),
     }, true),
 
+  // group 469: approve-first mode (off unless APPROVE_FIRST_N > 0 on the server)
+  approvalsStatus: () => psRequest<any>("/approvals", undefined, true),
+  approveEntry: (symbol: string) => psRequest<any>(`/approvals/${encodeURIComponent(symbol)}/approve`, { method: "POST" }, true),
+  rejectEntry: (symbol: string) => psRequest<any>(`/approvals/${encodeURIComponent(symbol)}/reject`, { method: "POST" }, true),
+  resetApprovals: () => psRequest<any>("/approvals/reset", { method: "POST" }, true),
+
   // group 466: disarm, then flatten every open scalp position. The server needs confirm="CLOSE ALL".
   closeAll: (confirm: string) =>
     psRequest<{

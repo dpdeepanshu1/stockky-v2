@@ -43,6 +43,18 @@ def imb_bucket(v: Any) -> str:
     return "ask_heavy" if x < -0.2 else ("bid_heavy" if x > 0.2 else "balanced")
 
 
+def rs_bucket(v: Any) -> str:
+    """group468: Mansfield RS bucket (log-only evidence)."""
+    x = num(v)
+    return "unknown" if x is None else ("rs<0" if x < 0 else ("rs 0-2" if x < 2 else "rs>=2"))
+
+
+def breadth_bucket(v: Any) -> str:
+    """group468: breadth bucket, % of the candidate engine's universe above its 50-day EMA (log-only evidence)."""
+    x = num(v)
+    return "unknown" if x is None else ("breadth<35" if x < 35 else ("breadth 35-65" if x <= 65 else "breadth>65"))
+
+
 def spread_bucket(v: Any) -> str:
     x = num(v)
     if x is None:
@@ -87,6 +99,91 @@ def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def performance_block(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Whole-book performance on a daily net-P&L basis (additive rupees, not compounded): cumulative net per exit day (IST),
+    max drawdown in rupees with the peak and trough days, days spent underwater, Return/MaxDD, longest run of winning days
+    and the best single day. Pure; never raises."""
+    by_day: Dict[str, float] = defaultdict(float)
+    try:
+        for r in records:
+            day = r.get("exit_day_ist") or str(r.get("closed_at") or "")[:10]
+            v = num(r.get("net_pnl"))
+            if day and v is not None:
+                by_day[day] += v
+    except Exception:  # noqa: BLE001
+        pass
+    days = sorted(by_day)
+    if not days:
+        return {"days": 0, "equity": [], "max_drawdown": None, "drawdown_start": None, "drawdown_end": None,
+                "days_in_drawdown": None, "return_maxdd": None, "max_win_streak": None, "best_day": None, "total_net": None}
+    equity, cum = [], 0.0
+    for d in days:
+        cum += by_day[d]
+        equity.append((d, round(cum, 2)))
+    peak, peak_day = 0.0, None          # the book starts at 0 before the first day, so a first-day loss is a drawdown
+    mdd, mdd_start, mdd_end, underwater = 0.0, None, None, 0
+    for d, c in equity:
+        if c > peak:
+            peak, peak_day = c, d
+        elif c < peak:
+            underwater += 1
+            if peak - c > mdd + 1e-9:
+                mdd, mdd_start, mdd_end = peak - c, peak_day, d
+    total = equity[-1][1]
+    streak = best_streak = 0
+    for d in days:
+        if by_day[d] > 0:
+            streak += 1
+            best_streak = max(best_streak, streak)
+        else:
+            streak = 0
+    best_day = max(days, key=lambda d: by_day[d])        # ties -> earliest (days is sorted)
+    return {
+        "days": len(days),
+        "equity": [{"day": d, "cum_net": c} for d, c in equity],
+        "max_drawdown": round(mdd, 2),
+        "drawdown_start": mdd_start if mdd > 0 else None,   # None = the book never fell below a prior high
+        "drawdown_end": mdd_end,
+        "days_in_drawdown": underwater,
+        "return_maxdd": round(total / mdd, 2) if mdd > 0 else None,
+        "max_win_streak": best_streak,
+        "best_day": {"day": best_day, "net": round(by_day[best_day], 2)},
+        "total_net": total,
+    }
+
+
+def exit_slippage_stored(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """group469: exit fill vs the exit trigger stored on each record (exit_slippage_pct: the LTP at the exit decision, or the final stop
+    for a broker stop that fired on its own). Overall and per exit reason; None when no record carries one. Pure."""
+    by: Dict[str, List[float]] = defaultdict(list)
+    for r in records:
+        v = num(r.get("exit_slippage_pct"))
+        if v is not None:
+            by[str(r.get("exit_reason") or "unknown")].append(v)
+    if not by:
+        return None
+    fmt = lambda vs: {"n": len(vs), "mean": round(st.mean(vs), 3), "worst": round(min(vs), 3), "best": round(max(vs), 3)}  # noqa: E731
+    return {"overall": fmt([v for vs in by.values() for v in vs]), "by_exit_reason": {k: fmt(v) for k, v in sorted(by.items())}}
+
+
+def exit_slippage_pct(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Exit fill vs the trigger price. The records carry no per-exit trigger, so only stop_hit exits can be measured, against
+    the INITIAL stop entry*(1-stop_pct/100) (the stop may have trailed, so this is a proxy). + = filled above the trigger
+    (better for a long exit), - = worse. None when no stop_hit has all the numbers. Pure."""
+    vals = []
+    for r in records:
+        if r.get("exit_reason") != "stop_hit":
+            continue
+        entry, stop_pct, xp = num(r.get("entry_price")), num(r.get("stop_pct")), num(r.get("exit_price"))
+        if entry and entry > 0 and stop_pct and stop_pct > 0 and xp and xp > 0:
+            trigger = entry * (1.0 - stop_pct / 100.0)
+            if trigger > 0:
+                vals.append((xp - trigger) / trigger * 100.0)
+    if not vals:
+        return None
+    return {"n": len(vals), "mean": round(st.mean(vals), 3), "worst": round(min(vals), 3), "best": round(max(vals), 3)}
+
+
 GROUPS: List[tuple] = [
     ("origin (system entry vs broker-imported)", lambda r: r.get("origin")),
     ("decision_label", lambda r: r.get("decision_label")),
@@ -99,6 +196,8 @@ GROUPS: List[tuple] = [
     ("order flow: best-5 imbalance", lambda r: imb_bucket(r.get("imbalance_5"))),
     ("order flow: 20-level imbalance", lambda r: imb_bucket(r.get("imbalance_20"))),
     ("order flow: spread at entry", lambda r: spread_bucket(r.get("flow_spread_pct"))),
+    ("log-only: Mansfield RS at entry", lambda r: rs_bucket(r.get("log_mansfield_rs"))),
+    ("log-only: market breadth at entry", lambda r: breadth_bucket(r.get("log_breadth_pct"))),
 ]
 
 
@@ -127,7 +226,11 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
         "net_without_outliers": round(sum(num(r.get("net_pnl")) or 0.0 for r in keep_big)),
         "trades_without_outliers": len(keep_big),
         "charges_share_of_gross_loss_pct": (round(100.0 * rep["all"]["charges"] / -rep["all"]["gross"], 0) if rep["all"]["gross"] < 0 and len(rows) >= min_n else None),
+        "charges_share_of_gross_profit_pct": (round(100.0 * rep["all"]["charges"] / rep["all"]["gross"], 0) if rep["all"]["gross"] > 0 and len(rows) >= min_n else None),
     }
+    rep["performance"] = performance_block(rows)
+    rep["exit_slippage_pct"] = exit_slippage_pct(rows)
+    rep["exit_slippage"] = exit_slippage_stored(rows)
     sl = [v for v in (num(r.get("entry_slippage_pct")) for r in rows) if v is not None]
     rep["entry_slippage_pct"] = {"n": len(sl), "mean": round(st.mean(sl), 3), "max": round(max(sl), 3)} if sl else None
     stops = [r for r in rows if r.get("exit_reason") == "stop_hit"]
@@ -154,6 +257,7 @@ def to_markdown(rep: Dict[str, Any]) -> str:
         return "\n".join(L + ["No trades in range."])
     a, rt = rep["all"], rep["robust_totals"]
     L += [f"Totals: gross {a['gross']}, net {a['net']}, charges {a['charges']}" + (f" ({rt['charges_share_of_gross_loss_pct']:.0f}% of the gross loss)" if rt["charges_share_of_gross_loss_pct"] is not None else "")
+          + (f" ({rt['charges_share_of_gross_profit_pct']:.0f}% of the gross profit)" if rt.get("charges_share_of_gross_profit_pct") is not None else "")
           + f"; mean {f(a['mean_pct'])}%, median {f(a['median_pct'])}%, win {f(a['win_pct'], 0)}%.",
           f"Best trade: {rt['best_trade']['symbol']} (#{rt['best_trade']['position_id']}) {f(rt['best_trade']['return_pct'])}% / net {f(rt['best_trade']['net_pnl'], 0)}. Net without it: {rt['net_without_best_trade']}.",
           f"Net without the {len(rt['outliers'])} trade(s) beyond +/-{rep['outlier_pct']:g}%: {rt['net_without_outliers']} ({rt['trades_without_outliers']} trades)"
@@ -171,7 +275,32 @@ def to_markdown(rep: Dict[str, Any]) -> str:
             part += "; no stop distance recorded on them"
         part += (f"; mean best gain before the stop {f(sh['mean_max_gain_pct_before_stop'])}% ({sh['with_max_gain']} trades)." if sh["with_max_gain"] else "; no max-gain recorded on them.")
         L.append(part)
+    perf = rep.get("performance") or {}
+    if perf.get("days"):
+        L += ["", "## Whole-book performance (daily net P&L)", "", f"Days traded: {perf['days']}, total net {f(perf['total_net'])}."]
+        if perf.get("max_drawdown"):
+            L.append(f"Max drawdown {f(perf['max_drawdown'])} from {perf.get('drawdown_start') or 'start'} to {perf.get('drawdown_end') or '-'}; "
+                     f"{perf.get('days_in_drawdown')} day(s) underwater; Return/MaxDD {f(perf.get('return_maxdd'))}.")
+        else:
+            L.append("No drawdown: the book never closed a day below its prior high.")
+        txt = f"Longest run of winning days: {perf.get('max_win_streak')}"
+        if perf.get("best_day"):
+            txt += f"; best day {perf['best_day']['day']} {f(perf['best_day']['net'])}"
+        L.append(txt + ".")
+    xe = rep.get("exit_slippage")
+    if xe:
+        o = xe["overall"]
+        L.append(f"Exit slippage (fill vs the exit trigger, + = better than the trigger): mean {o['mean']}%, worst {o['worst']}%, best {o['best']}% over {o['n']} exits.")
+        for k, g in xe["by_exit_reason"].items():
+            L.append(f"- {k}: mean {g['mean']}%, worst {g['worst']}% ({g['n']})")
+    xs = rep.get("exit_slippage_pct")
+    if xs and not xe:
+        L.append(f"Exit slippage on stop hits (fill vs the initial stop; a trailed stop makes this approximate): mean {xs['mean']}%, "
+                 f"worst {xs['worst']}%, best {xs['best']}% over {xs['n']} trades.")
     for title, g in rep["groups"].items():
+        if title.startswith("log-only") and set(g) == {"unknown"}:
+            L += ["", f"## {title}", "", "No trade carries this number yet (recorded only on candidates made after group 468 was deployed)."]
+            continue
         if title.startswith("order flow") and set(g) == {"unknown"}:
             L += ["", f"## {title}", "", "No trade carries these numbers yet (the group 427 record only exists on entries made after it was deployed)."]
             continue

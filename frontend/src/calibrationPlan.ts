@@ -24,14 +24,15 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
   {
     id: "friday", title: "Friday after the close", blurb: "The weekly review of what the real money actually did.",
     rows: [
-      { when: "16:40 IST", what: "Closed-trade report, hold buckets, opening-window verdict, board parity, changed switches", pack: "friday_review", note: "board parity GO two Fridays in a row = the legacy board maths may be retired (scripts/retire_legacy_board.py, dry run first)." },
+      { when: "16:40 IST", what: "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, changed switches", pack: "friday_review", note: "board parity GO two Fridays in a row = the legacy board maths may be retired (scripts/retire_legacy_board.py, dry run first)." },
     ],
   },
   {
     id: "saturday", title: "Saturday morning (market closed)", blurb: "The heavy evidence run. Needs the machine quiet: it is refused during market hours unless you confirm.",
     rows: [
-      { when: "08:00 IST", what: "Full calibration: history for 3 seeds, A/B replay, G1, walk-forward, G2 / G3 / G4, env-line pack, board parity", pack: "weekly_calibration", note: "1 to 3 hours. A seed whose download mostly failed is not counted (calibration_status says which to re-run)." },
+      { when: "08:00 IST", what: "Full calibration: history for 3 seeds, A/B replay, G1, walk-forward, G2 / G3 / G4, env-line pack, board parity, then a switches + metrics snapshot and its comparison with the last run", pack: "weekly_calibration", note: "1 to 3 hours. A seed whose download mostly failed is not counted (calibration_status says which to re-run)." },
       { when: "after it", what: "G2 / G3 / G4 verdict on every complete seed", jobs: ["gate_check"] },
+      { when: "after it, and before / after any settings change", what: "Snapshot the switches + A/B metrics, then compare the last two snapshots", jobs: ["calibration_snapshot", "calibration_compare"], note: "The weekly pack already does both. Changes nothing." },
     ],
   },
   {
@@ -51,7 +52,7 @@ export const AUTOMATIC_ELSEWHERE = [
 
 /** Which service a job mostly concerns. Anything not listed shows on both tabs. */
 export const JOB_SERVICES: Record<string, Svc[]> = {
-  daily_trades: ["rt", "ps"], export_records: ["rt"], records_report: ["rt"], hold_bucket: ["rt"], strategy_readout: ["rt", "ps"], legacy_gate: ["rt"], entry_rules: ["rt"],
+  daily_trades: ["rt", "ps"], export_records: ["rt"], records_report: ["rt"], entry_slippage: ["rt"], hold_bucket: ["rt"], strategy_readout: ["rt", "ps"], legacy_gate: ["rt"], entry_rules: ["rt"],
   kronos_backtest: ["rt"], tsfm_nightly: ["rt"], tsfm_probe: ["rt"], tsfm_combine: ["rt"], latency_save: ["rt", "ps"], latency_compare: ["rt", "ps"],
   opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
 };

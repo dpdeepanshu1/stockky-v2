@@ -82,6 +82,7 @@ from tz_utils import as_aware
 from portfolio.portfolio import held_exposure_positions
 from shared_adaptive import percentile_rank
 import adaptive_market_params as amp
+from candidate_engine import log_context as _log_context   # group468
 from watchlist_engine import symbol_filter as _symbol_filter   # group379: shared ETF name test
 
 logger = logging.getLogger("real-trade-candidates")
@@ -1487,8 +1488,10 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     fetched  = dict(zip(tasks.keys(), results))
 
+    _log_ctx_daily = None
     if WEEKLY_FROM_DAILY:
         _daily = fetched.pop("1y_daily", None)
+        _log_ctx_daily = _daily
         _derived = _weekly_views_from_daily(_daily)
         if _derived is not None:
             fetched["6m"], fetched["1y"] = _derived
@@ -1499,6 +1502,12 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
                 return_exceptions=True,
             )
             fetched.update(dict(zip(_weekly_pair.keys(), _wk)))
+
+    if _log_ctx_daily:                      # group468: every symbol with a daily series feeds the breadth reading, rejected or not
+        try:
+            _log_context.record_breadth(symbol, _log_context.above_ema(_log_context._series(_log_ctx_daily), 50))
+        except Exception:  # noqa: BLE001
+            pass
 
     # Compute timeframe returns
     tf_returns: dict[str, Optional[float]] = {}
@@ -1720,6 +1729,8 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
             }
 
     # All checks passed
+    # group468: log-only Mansfield RS + breadth, recorded on the candidate, never used by any gate
+    _log_ctx = await _log_context.context_for(_fetch_history, client, symbol, _log_ctx_daily)
     return {
         "reject_reason": None,
         "tf_returns":    tf_returns,
@@ -1727,6 +1738,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         "atr_pct":       atr_pct,
         "current_price": current_price,
         "market_note":   breakout_note or _r52_would_note or "",
+        "log_ctx":       _log_ctx,
     }
 
 
@@ -2516,6 +2528,8 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
             "market_note":   tf.get("market_note", ""),
             "market_cap_cr": mcap_cr,
         }
+        if tf.get("log_ctx"):
+            payload["_log_only"] = tf["log_ctx"]      # group468: record only, no gate reads it
 
         db.add(models.TradeCandidate(
             mode=mode,
@@ -2536,6 +2550,18 @@ async def _refresh_standard_candidates(db: Session, mode: str, exclude_syms: set
         inserted, skipped, mode,
     )
     return inserted, seen_symbols
+
+
+async def _vs_log_context(symbol: str) -> Optional[dict]:
+    """group468: the log-only block for a volume-shock candidate (that track only fetches 1 month, so it reads the 1y/1d
+    series itself). Own short-lived client because the track's client is closed by then. Never raises; None when off."""
+    try:
+        if not _log_context._flag_on():
+            return None
+        async with httpx.AsyncClient() as c:
+            return await _log_context.context_for(_fetch_history, c, symbol, await _fetch_history(c, symbol, "1y", "1d"))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _refresh_volume_shock_candidates(
@@ -2862,6 +2888,12 @@ async def _refresh_volume_shock_candidates(
                 "market_note":      "Option A momentum-breakout (30-Aug-2026 NSE backtest calibrated)",
             },
         }
+        try:                                          # group468: log-only context (one cached 1y/1d fetch per symbol)
+            _vs_ctx = await _vs_log_context(sym)
+            if _vs_ctx:
+                payload["_log_only"] = _vs_ctx
+        except Exception:  # noqa: BLE001
+            pass
         db.add(models.TradeCandidate(
             mode=mode,
             symbol=sym,

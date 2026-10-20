@@ -13,6 +13,8 @@
 #      PS_STATUS_URL     http://localhost:8006/board/status (adds the legacy-removal parity verdict); PS_TOKEN if it needs a bearer token
 #      DRY_RUN=1         print the commands and run nothing;  PYTHON_BIN=python3
 #      RESUME=1          (group434) keep a seed whose history + A/B report are already complete in OUT_DIR instead of downloading it again
+#      SNAPSHOT_LABEL=x  (group469) after the run, store the gate settings + per-seed A/B metrics in $SNAPSHOT_STORE (default ./calibration_snapshots)
+#                        with scripts/calibration_snapshot.py so two runs can be compared; ENV_FILE=path to the .env (default <repo>/.env). Off when unset.
 #      MIN_SYMBOLS=N     (group434) a seed's history must hold at least N symbols or its A/B is skipped (default: 60% of the manifest, else 50;
 #                        1 when SYMBOLS= is used);  MIN_SIGNALS=N  baseline signals a seed needs to count (default 30; 1 with SYMBOLS=)
 # Steps: fetch history per seed -> calibration_status guard (group434: a mostly failed download stops that seed) -> ms_ab_report per seed
@@ -124,6 +126,12 @@ main() {
 
   echo "=== run status (group434: which seeds are complete)"
   run "$PY" "$SCRIPTS/calibration_status.py" --out-dir "$OUT_DIR" --seeds "$SEEDS" --min-symbols "$MIN_SYMBOLS" --min-signals "$MIN_SIGNALS"
+
+  if [[ -n "${SNAPSHOT_LABEL:-}" ]]; then
+    echo "=== calibration snapshot (group469: gate settings + per-seed metrics, for calibration_snapshot.py compare)"
+    local snap=("$PY" "$SCRIPTS/calibration_snapshot.py" snapshot --out-dir "$OUT_DIR" --env "${ENV_FILE:-$REPO_DIR/.env}" --label "$SNAPSHOT_LABEL" --store "${SNAPSHOT_STORE:-$REPO_DIR/calibration_snapshots}")
+    if [[ "$DRY_RUN" == "1" ]]; then printf '+ %s\n' "${snap[*]}"; else "${snap[@]}" || echo "(snapshot not saved: no A/B report to record; the run itself is unaffected)"; fi
+  fi
 
   if [[ -n "${PS_STATUS_URL:-}" ]]; then
     echo "=== board parity (legacy removal in position-stocks)"

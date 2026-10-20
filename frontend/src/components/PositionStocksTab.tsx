@@ -24,6 +24,7 @@ import {
 import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
 import CloseAllDialog from "./CloseAllDialog";
+import ApprovalsPanel from "./ApprovalsPanel";   // group 469
 import { NavIcon } from "./ui/NavIcon";
 import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only)
 import CapitalSplitCard from "./CapitalSplitCard";
@@ -1204,6 +1205,10 @@ export default function PositionStocksTab() {
           of its target, its stop-loss is moved up to entry price to lock in a wash on any reversal.
         </div>
       )}
+
+      <ApprovalsPanel loggedIn={loggedIn} source={{
+        status: positionStocksApi.approvalsStatus, approve: positionStocksApi.approveEntry,
+        reject: positionStocksApi.rejectEntry, reset: positionStocksApi.resetApprovals }} />
 
       <LivePipelineStatus live={pipelineLive} />
 

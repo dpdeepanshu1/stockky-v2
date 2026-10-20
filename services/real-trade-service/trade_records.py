@@ -232,10 +232,61 @@ def _bot_entry_behind_import(pos, entry_order, fills_by_order: dict) -> bool:
     return abs((as_aware(pos.opened_at) - t).total_seconds()) <= _ORDER_SLACK_BEFORE_S
 
 
+def _log_only_ctx(cand) -> dict:
+    """group468: the log-only Mansfield RS / breadth block the candidate engine stored in the candidate's raw_payload["_log_only"].
+    Record only: nothing gates on it. All None when absent (candidates made before group 468) or unparseable. Never raises."""
+    out = {"mansfield_rs": None, "above_ema50": None, "breadth_pct": None}
+    try:
+        import json as _json
+        raw = getattr(cand, "raw_payload", None)
+        payload = _json.loads(raw) if isinstance(raw, str) and raw else (raw if isinstance(raw, dict) else {})
+        blk = (payload or {}).get("_log_only") or {}
+        out["mansfield_rs"] = _num(blk.get("mansfield_rs"))
+        out["breadth_pct"] = _num(blk.get("breadth_pct"))
+        a = blk.get("above_ema50")
+        out["above_ema50"] = a if isinstance(a, bool) else None
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+_NON_EXIT_DECISIONS = ("HOLD", "TRAIL_STOP")
+
+
+def _exit_trigger(pos, reason, exit_decisions, exit_price) -> dict:
+    """group469: what the exit was triggered at, and how far the fill landed from it. Source order: (1) the LTP stored on the last
+    real exit decision of this position (HOLD / TRAIL_STOP rows are not exits) = 'decision_ltp'; (2) for a stop exit with no
+    decision (the broker-side stop fired on its own) the position's final stop = 'final_stop'. + = filled ABOVE the trigger
+    (better for a long exit), - = worse. All None when neither exists. Pure; never raises."""
+    out = {"exit_trigger_price": None, "exit_trigger_source": None, "exit_slippage_pct": None}
+    try:
+        trig, src = None, None
+        rows = [d for d in (exit_decisions or ()) if str(getattr(d, "action", "")).upper() not in _NON_EXIT_DECISIONS
+                and (_num(getattr(d, "ltp_at_decision", None)) or 0) > 0]
+        if rows:
+            last = max(rows, key=lambda d: (as_aware(d.evaluated_at) if getattr(d, "evaluated_at", None) else 0, getattr(d, "id", 0) or 0))
+            trig, src = _num(last.ltp_at_decision), "decision_ltp"
+        elif reason in STOP_REASONS:
+            cs = _num(getattr(pos, "current_stop", None))
+            if cs and cs > 0:
+                trig, src = cs, "final_stop"
+        if trig and trig > 0:
+            out["exit_trigger_price"], out["exit_trigger_source"] = round(trig, 4), src
+            if exit_price and exit_price > 0:
+                out["exit_slippage_pct"] = round((exit_price - trig) / trig * 100.0, 3)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisions: Iterable, candidates: Iterable,
-                  watchlist: Iterable, ledger: Iterable, events: Iterable = (), include_imported: bool = False) -> list:
+                  watchlist: Iterable, ledger: Iterable, events: Iterable = (), include_imported: bool = False,
+                  exit_decisions: Iterable = ()) -> list:
     """Pure: one dict per CLOSED, system-entered position that has a realized P&L (see module docstring).
     `events` (group 421, optional): TradePositionEvent rows; the exit reason falls back to them when no closing SELL order carries one."""
+    exit_dec_by_pos: dict = defaultdict(list)           # group469: TradeExitDecision rows, for the exit trigger price
+    for xd in exit_decisions or ():
+        exit_dec_by_pos[getattr(xd, "position_id", None)].append(xd)
     events_by_pos: dict = defaultdict(list)
     for ev in events or ():
         events_by_pos[getattr(ev, "position_id", None)].append(ev)
@@ -354,12 +405,30 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "flow_spread_pct": flow.get("spread_pct"), "flow_book_value_5": flow.get("book_value_5"),
                 "flow_vs_vwap_pct": flow.get("vs_vwap_pct"), "flow_day_pos": flow.get("day_pos"),
                 "max_gain_pct": exc["max_gain_pct"], "max_drawdown_pct": exc["max_drawdown_pct"],
+                **_exit_trigger(p, reason, exit_dec_by_pos.get(p.id), exit_price),     # group469: exit_trigger_price / _source / exit_slippage_pct
+                **{("log_" + k): v for k, v in _log_only_ctx(cand).items()},     # group468: log_mansfield_rs / log_above_ema50 / log_breadth_pct (record only)
                 # group 398: what scripts/opening_replay.py needs to replay a real-trade export (opening time, close time, size)
                 "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at), "quantity": qty_in,
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("trade record for position %s skipped: %s: %s", getattr(p, "id", "?"), type(e).__name__, e)
     return out
+
+
+def _rs_bucket(v) -> str:
+    """group468: Mansfield RS bucket for the evidence report (log-only)."""
+    x = _num(v)
+    if x is None:
+        return "unknown"
+    return "rs<0" if x < 0 else ("rs 0-2" if x < 2 else "rs>=2")
+
+
+def _breadth_bucket(v) -> str:
+    """group468: market-breadth bucket (% of the engine's universe above its 50-day EMA; log-only)."""
+    x = _num(v)
+    if x is None:
+        return "unknown"
+    return "breadth<35" if x < 35 else ("breadth 35-65" if x <= 65 else "breadth>65")
 
 
 def _imb_bucket(v) -> str:
@@ -418,6 +487,73 @@ def _mean(xs: list) -> Optional[float]:
     return round(sum(xs) / len(xs), 2) if xs else None
 
 
+def exit_slippage_summary(records: list) -> dict:
+    """group469: exit fill vs the stored exit trigger, overall and per exit reason. {} when no record has one. Pure."""
+    by: dict = defaultdict(list)
+    for r in records or ():
+        v = _num(r.get("exit_slippage_pct"))
+        if v is not None:
+            by[r.get("exit_reason") or "unknown"].append(v)
+    if not by:
+        return {}
+    allv = [v for vs in by.values() for v in vs]
+    f = lambda vs: {"n": len(vs), "mean": round(sum(vs) / len(vs), 3), "worst": round(min(vs), 3), "best": round(max(vs), 3)}  # noqa: E731
+    return {"overall": f(allv), "by_exit_reason": {k: f(v) for k, v in sorted(by.items())}}
+
+
+def performance_block(records: list) -> dict:
+    """Whole-book performance on a daily net-P&L basis (additive rupees, not compounded): cumulative net per exit day (IST),
+    max drawdown in rupees with the peak and trough days, days spent underwater, Return/MaxDD, longest run of winning days
+    and the best single day. Pure; never raises."""
+    by_day: dict = defaultdict(float)
+    try:
+        for r in records:
+            day = r.get("exit_day_ist") or str(r.get("closed_at") or "")[:10]
+            v = _num(r.get("net_pnl"))
+            if day and v is not None:
+                by_day[day] += v
+    except Exception:  # noqa: BLE001
+        pass
+    days = sorted(by_day)
+    if not days:
+        return {"days": 0, "equity": [], "max_drawdown": None, "drawdown_start": None, "drawdown_end": None,
+                "days_in_drawdown": None, "return_maxdd": None, "max_win_streak": None, "best_day": None, "total_net": None}
+    equity, cum = [], 0.0
+    for d in days:
+        cum += by_day[d]
+        equity.append((d, round(cum, 2)))
+    peak, peak_day = 0.0, None          # the book starts at 0 before the first day, so a first-day loss is a drawdown
+    mdd, mdd_start, mdd_end, underwater = 0.0, None, None, 0
+    for d, c in equity:
+        if c > peak:
+            peak, peak_day = c, d
+        elif c < peak:
+            underwater += 1
+            if peak - c > mdd + 1e-9:
+                mdd, mdd_start, mdd_end = peak - c, peak_day, d
+    total = equity[-1][1]
+    streak = best_streak = 0
+    for d in days:
+        if by_day[d] > 0:
+            streak += 1
+            best_streak = max(best_streak, streak)
+        else:
+            streak = 0
+    best_day = max(days, key=lambda d: by_day[d])        # ties -> earliest (days is sorted)
+    return {
+        "days": len(days),
+        "equity": [{"day": d, "cum_net": c} for d, c in equity],
+        "max_drawdown": round(mdd, 2),
+        "drawdown_start": mdd_start if mdd > 0 else None,   # None = the book never fell below a prior high
+        "drawdown_end": mdd_end,
+        "days_in_drawdown": underwater,
+        "return_maxdd": round(total / mdd, 2) if mdd > 0 else None,
+        "max_win_streak": best_streak,
+        "best_day": {"day": best_day, "net": round(by_day[best_day], 2)},
+        "total_net": total,
+    }
+
+
 def _agg(rows: list, min_trades_note: int) -> dict:
     used = [_pnl_used(r) for r in rows]
     wins = [x for x in used if x > _EPS]
@@ -427,11 +563,15 @@ def _agg(rows: list, min_trades_note: int) -> dict:
     charges = [r["charges"] for r in rows if r.get("charges") is not None]
     slips = [r["entry_slippage_pct"] for r in rows if r.get("entry_slippage_pct") is not None]
     held = [r["held_minutes"] for r in rows if r.get("held_minutes") is not None]
+    gross_sum = round(sum(r["gross_pnl"] for r in rows), 2)
+    charge_sum = round(sum(charges), 2) if charges else None
     return {
         "trades": len(rows), "wins": len(wins), "losses": len(losses),
         "win_rate_pct": round(100.0 * len(wins) / len(rows), 1),
-        "gross_pnl": round(sum(r["gross_pnl"] for r in rows), 2),
-        "charges": round(sum(charges), 2) if charges else None,
+        "gross_pnl": gross_sum,
+        "charges": charge_sum,
+        "charges_share_of_gross_profit_pct": (round(100.0 * charge_sum / gross_sum, 1)
+                                              if charge_sum is not None and gross_sum > 0 else None),
         "net_pnl": round(sum(nets), 2) if nets else None,
         "net_known_trades": len(nets),
         "expectancy": round(sum(used) / len(used), 2),
@@ -450,6 +590,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "overall": _agg(records, min_trades_note) if records else None,
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
         "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "by_imbalance_5": {}, "by_imbalance_20": {}, "by_spread": {},
+        "by_mansfield_rs": {}, "by_breadth": {},
         "stop_diagnostics": None,
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
@@ -469,6 +610,9 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_imbalance_5": lambda r: _imb_bucket(r.get("imbalance_5")),
         "by_imbalance_20": lambda r: _imb_bucket(r.get("imbalance_20")),
         "by_spread": lambda r: _spread_bucket(r.get("flow_spread_pct")),
+        # group468: log-only evidence buckets (candidates made before the record existed fall in "unknown")
+        "by_mansfield_rs": lambda r: _rs_bucket(r.get("log_mansfield_rs")),
+        "by_breadth": lambda r: _breadth_bucket(r.get("log_breadth_pct")),
     }
     for name, key in keyers.items():
         groups: dict = defaultdict(list)
@@ -476,6 +620,8 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
             groups[key(r)].append(r)
         out[name] = {k: _agg(v, min_trades_note) for k, v in sorted(groups.items())}
     out["stop_diagnostics"] = stop_diagnostics(records)
+    out["performance"] = performance_block(records)
+    out["exit_slippage"] = exit_slippage_summary(records)
     return out
 
 
@@ -529,7 +675,17 @@ def load_records(db, mode: str, days: int = 7, symbol: Optional[str] = None, inc
     except Exception as e:  # noqa: BLE001 - attribution is best effort; the records themselves must still load
         logger.warning("trade records: position events not loaded (%s: %s) - exit reasons come from orders only", type(e).__name__, e)
         events = []
-    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger, events, include_imported=include_imported)
+    exit_decisions: list = []
+    try:                                                    # group469: the LTP at each real exit decision = the exit trigger price
+        for part in _chunks(sorted(p.id for p in positions)):
+            exit_decisions += (db.query(models.TradeExitDecision)
+                               .filter(models.TradeExitDecision.position_id.in_(part),
+                                       ~models.TradeExitDecision.action.in_(_NON_EXIT_DECISIONS)).all())
+    except Exception as e:  # noqa: BLE001 - best effort; records must still load
+        logger.warning("trade records: exit decisions not loaded (%s: %s) - no exit trigger prices", type(e).__name__, e)
+        exit_decisions = []
+    return build_records(positions, orders, fills, decisions, candidates, watchlist, ledger, events, include_imported=include_imported,
+                         exit_decisions=exit_decisions)
 
 
 # ── daily report: today's expectancy, stored as a snapshot and pushed once after the close (group 292) ─────────────────
@@ -574,6 +730,8 @@ def build_daily_snapshot(db, mode: str, day: Optional[str] = None, *, week_days:
         "mode": mode, "day": day, "generated_at": datetime.now(timezone.utc).isoformat(),
         "today": expectancy_report(today), "week_days": week_days, "week": expectancy_report(recs),
         "records_today": today, "closed_count": closed_count,
+        # group469: drawdown over the rolling window (NOT the whole book: that is GET /records expectancy / scripts/records_report.py)
+        "week_performance": {k: v for k, v in performance_block(recs).items() if k != "equity"},
     }
 
 
@@ -606,6 +764,8 @@ def format_daily_message(snap: dict, *, updated: bool = False) -> str:
              f"Gross \u20b9{_money(t['gross_pnl'])}, charges \u20b9{charges}, net \u20b9{_money(t['net_pnl'])}",
              f"Expectancy \u20b9{_money(t['expectancy'])} per trade"
              + (f", payoff {t['payoff_ratio']:.2f}" if t.get("payoff_ratio") is not None else "")]
+    if t.get("gross_pnl") and t["gross_pnl"] > 0 and t.get("charges"):
+        lines.append(f"Charges were {100.0 * t['charges'] / t['gross_pnl']:.0f}% of the gross profit")
     if t.get("avg_entry_slippage_pct") is not None:
         lines.append(f"Avg entry slippage vs signal {t['avg_entry_slippage_pct']:+.2f}%")
     by = (snap.get("today") or {}).get("by_exit_reason") or {}
@@ -617,6 +777,10 @@ def format_daily_message(snap: dict, *, updated: bool = False) -> str:
     if w:
         lines.append(f"Last {snap.get('week_days')} days: {w['trades']} trades, expectancy \u20b9{_money(w['expectancy'])}"
                      f", win rate {w['win_rate_pct']:.0f}%")
+    wp = snap.get("week_performance") or {}
+    if wp.get("days", 0) >= 2 and wp.get("max_drawdown"):
+        lines.append(f"Last {snap.get('week_days')} days drawdown \u20b9{_money(wp['max_drawdown'])} "
+                     f"({wp.get('drawdown_start') or 'start'} to {wp.get('drawdown_end')}), net \u20b9{_money(wp.get('total_net'))}")
     pending = charges_pending(snap)
     if pending:
         lines.append(f"(charges still estimated for {pending} of {t['trades']} trades)")

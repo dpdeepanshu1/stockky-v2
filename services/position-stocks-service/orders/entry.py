@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -693,6 +693,27 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _struct_reject, quality=quality)
         return None
 
+    # group469: approve-first mode. OFF unless APPROVE_FIRST_N > 0. While a round is open (the gate settings changed) each automatic entry
+    # waits for your approval (POST /approvals/{symbol}/approve). Checked after EVERY other gate (so only an entry that would really go out asks you) and before capital is
+    # reserved; the symbol claim is released, so a held symbol costs nothing. The skip row is written once per symbol (the first time it is held); later cycles only set the in-memory reason.
+    # Fails open: any error inside the helper lets the entry proceed exactly as before.
+    if approve_first.active():
+        _ap = approve_first.gate(candidate.symbol, {"price": candidate.current_ltp, "pct_change": round(float(candidate.pct_change), 2),
+                                                    "window": candidate.window_label})
+        if not _ap["allowed"]:
+            shared_symbol_lock.release(db, candidate.symbol)
+            if _ap.get("new_pending"):
+                _log_candidate(db, candidate, "SKIPPED", "APPROVAL_PENDING", quality=quality)
+                notifier.notify_fire_and_forget(
+                    f"🕵️ <b>Approval needed</b> — {candidate.symbol}\n"
+                    f"₹{candidate.current_ltp:.2f} | {candidate.pct_change:+.2f}% over {candidate.window_label}\n"
+                    f"Settings changed recently; approve with POST /approvals/{candidate.symbol}/approve "
+                    f"({_ap['remaining']} approval(s) left). Not approved within {approve_first.ttl_s() / 60:.0f} min = not bought."
+                )
+            else:
+                _skip_state.reason = "APPROVAL_PENDING"
+            return None
+
     # Reserve capital (also checks kill switch again in the ledger)
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
     if position_value is None:
@@ -1063,6 +1084,7 @@ def attempt_entry(
         f"Window {candidate.window_label} | Capital ₹{position_value:,.2f} "
         f"| Super Order {dhan_super_order_id or 'N/A'}"
     )
+    approve_first.mark_entered(candidate.symbol, {"qty": quantity, "price": candidate.current_ltp})   # group469
     return pos
 
 

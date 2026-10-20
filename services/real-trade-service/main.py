@@ -1131,6 +1131,47 @@ async def close_all_and_disarm(
     return result
 
 
+# ── Approve-first mode (group 468, item 11) ─────────────────────────────────────────────────────────────────────────────────
+# Off unless APPROVE_FIRST_N > 0. While on, the first N automatic REAL entries after a gate-settings change wait for your approval
+# (entry_engine/approve_first.py). REAL needs the admin login like every other money-moving route.
+def _approvals_mode(mode: str) -> str:
+    mode = mode.upper()
+    if mode != "REAL":
+        raise HTTPException(status_code=400, detail="approve-first applies to REAL only")
+    return mode
+
+
+@app.get("/approvals/{mode}")
+async def approvals_status(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    from entry_engine import approve_first as _af
+    return _af.status(db, _approvals_mode(mode))
+
+
+@app.post("/approvals/{mode}/reset")
+async def approvals_reset(mode: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Start a fresh round of APPROVE_FIRST_N approvals now (as if the settings had just changed)."""
+    from entry_engine import approve_first as _af
+    return _af.do_reset(db, _approvals_mode(mode))
+
+
+@app.post("/approvals/{mode}/{symbol}/approve")
+async def approvals_approve(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    from entry_engine import approve_first as _af
+    res = _af.do_approve(db, _approvals_mode(mode), symbol)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not waiting for approval")
+    return res
+
+
+@app.post("/approvals/{mode}/{symbol}/reject")
+async def approvals_reject(mode: str, symbol: str, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    from entry_engine import approve_first as _af
+    res = _af.do_reject(db, _approvals_mode(mode), symbol)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not waiting for approval")
+    return res
+
+
 # ── Routes: risk engine self-test (no live order path exists yet — this is
 #    how the risk engine gets exercised/verified in Phase 1) ───────────────
 class RiskCheckRequest(BaseModel):

@@ -1,4 +1,36 @@
-# Remaining tasks (rewritten in group 416, after group 415)
+# Remaining tasks (group 469 status, 2026-10-20)
+
+## Built in groups 466-469 (needs your side to verify, see "Not verified")
+Close-all and disarm (the group466-closeall zip: real-trade + position-stocks, dashboard), whole-book performance block, charges share of gross profit,
+log-only Mansfield RS + breadth, entry-slippage review script, calibration snapshot / compare (also an opt-in step in vm_calibrate.sh), approve-first mode in real-trade AND position-stocks, per-exit trigger price + exit slippage on every record, window drawdown in the daily message.
+Details: `docs/GROUP468_PERFORMANCE_EVIDENCE_APPROVE_FIRST.md`.
+
+## Do on the VM (no code)
+1. Confirm `BROKER_STOP_ENABLED=true` in the live `.env`.
+2. Confirm the VM's static IPv4 is registered with Dhan and `/outbound-ip` returns it.
+3. One live check that market exits and the `STOP_LOSS_MARKET` broker stop behave under Market Price Protection; grep the logs for MPP rejections.
+4. Confirm no AMO orders are sent; one live pass of the token-expiry and auto-disarm path.
+5. One DEMO close-all and one small REAL close-all before relying on it (group 466).
+6. Run, on your machine: `npm install && npm run build`, and `bash scripts/docker_test.sh` (or pytest in each service). The group 466-468 code was only
+   run through a stand-in test runner in a sandbox without pytest, sqlalchemy, httpx or node_modules.
+
+## Wait for data, then decide
+- Mansfield RS and breadth are recording on new candidates (`CANDIDATE_LOG_CONTEXT=1`). After about 100 closed REAL trades run
+  `scripts/records_report.py` and read the two "log-only" tables. Build a rule only if a bucket is clearly better or worse.
+- Entry slippage: run `python3 scripts/entry_slippage_review.py rt_*.json` once there are 30+ trades. Build the limit-order walk only on a `material` verdict.
+- Calibration: the weekly pack now snapshots and compares automatically. For a settings change, run the page jobs `Calibration snapshot` before and after, then `Compare the last two snapshots`.
+- Friday pack now includes the Entry slippage review (verdict needs 30+ trades).
+- Exit slippage fills in only for trades closed after this version is deployed (older records have no trigger price).
+- Optional: turn on approve-first (`APPROVE_FIRST_N=3`) the next time you change any STRUCTURE_/CANDIDATE_/ENTRY_/RISK_ setting on REAL.
+
+## Not built
+- Nothing from the group 466-469 list is left unbuilt. Open design questions only: a limit-order walk (only if the slippage review says `material`),
+  and any rule based on Mansfield RS / breadth (only if a report shows an edge).
+
+---
+
+# Older notes (rewritten in group 416, after group 415)
+
 
 The earlier list in this file (market-structure engine, "after group 349") described work that now exists: the policy
 (`structure_policy.py`), the real-trade gate, the frontend panel, observation logging, the backtest tooling and the retest

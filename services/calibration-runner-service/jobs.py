@@ -111,6 +111,28 @@ def b_records_report(ctx, p):
                 os.path.join(ctx["exp"], "rt_latest.json"), title="Closed-trade report", attention=())]
 
 
+def b_entry_slippage(ctx, p):
+    """group 469: is paying above the signal price a material cost? Reads the saved records; changes nothing."""
+    return [_py(ctx, "entry_slippage_review.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), "--min-n", p.get("min_n", 30),
+                "--json", os.path.join(ctx["run"], "entry_slippage.json"), os.path.join(ctx["exp"], "rt_latest.json"), title="Entry slippage review", attention=(1,))]
+
+
+def _snap_store(ctx):
+    return os.path.join(ctx["cal"], "snapshots")
+
+
+def b_calibration_snapshot(ctx, p):
+    """group 469: store the switches in force (GET /control/flags of both services, effective values) plus the per-seed A/B metrics of the last run."""
+    return [_py(ctx, "calibration_snapshot.py", "snapshot", "--out-dir", ctx["cal"], "--label", p.get("label") or "weekly", "--store", _snap_store(ctx),
+                "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], title="Calibration snapshot (switches + A/B metrics)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_calibration_compare(ctx, p):
+    """group 469: the two newest snapshots side by side: which switches changed, how each seed's edge / kept % / signals moved, and why the runs may not be comparable."""
+    return [_py(ctx, "calibration_snapshot.py", "compare-last", "--store", _snap_store(ctx), "--json", os.path.join(ctx["run"], "snapshot_compare.json"),
+                title="Compare the last two calibration snapshots", attention=(1,))]
+
+
 def b_hold_bucket(ctx, p):
     return [_py(ctx, "hold_bucket_check.py", "--mode", p.get("mode", "REAL"), "--origin", p.get("origin", "system"), os.path.join(ctx["exp"], "rt_latest.json"),
                 title="Hold-length buckets")]
@@ -302,6 +324,19 @@ JOB_LIST = [
          [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"])], timeout_s=240, needs=["export_records"]),
     _job("hold_bucket", "Hold-length buckets", "weekly", "Friday after close", "Which hold lengths make or lose money.", b_hold_bucket,
          [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO", "ALL"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"])], timeout_s=240, needs=["export_records"]),
+    _job("entry_slippage", "Entry slippage review", "weekly", "Friday after close, once there are 30+ real trades",
+         "Is paying above the signal price a material cost? Mean / median / worst entry slippage, rupees paid above the signal, share of gross profit, by hour and source tab, "
+         "and a verdict: material / not material / too few trades. Decides whether the limit-order walk is worth building. Changes nothing.", b_entry_slippage,
+         [P("mode", "Mode", "choice", "REAL", choices=["REAL", "DEMO"]), P("origin", "Entries", "choice", "system", choices=["all", "system", "imported"]),
+          P("min_n", "Min trades for a verdict", "int", 30, 5, 500)], timeout_s=240, needs=["export_records"],
+         after="Build the adaptive limit-order walk only if the verdict is `material` on a sample this size. `too_few_trades`: wait."),
+    _job("calibration_snapshot", "Calibration snapshot", "weekly", "After a finished weekly calibration, and before / after any settings change",
+         "Stores the switches in force in both services (effective values) together with the per-seed A/B verdict, edge, CI and signal counts of the last calibration, "
+         "so two runs can be compared. Read-only.", b_calibration_snapshot, [P("label", "Label", "str", "weekly", help="e.g. before-chase-change")], timeout_s=180,
+         needs=["calibration_full"], after="Take one before and one after a settings change, then run `Compare the last two snapshots`."),
+    _job("calibration_compare", "Compare the last two snapshots", "weekly", "After the second snapshot of a before / after pair",
+         "Which switches changed and how each seed's edge, kept % and signal counts moved. Warns when the seeds differ, a seed is incomplete or no switch changed. "
+         "A change in edge inside the bootstrap CI is noise. Applies nothing.", b_calibration_compare, timeout_s=60),
     _job("strategy_readout", "Opening-window verdict", "weekly", "Friday after close", "Entries before the cutoff against later ones, from the live 14-day reports: SET / KEEP / NOT ENOUGH DATA.", b_strategy_readout,
          [P("days", "Days", "int", 14, 3, 60), P("cutoff", "Cutoff IST", "str", "10:30")], timeout_s=240),
     _job("opening_replay", "Opening protection replay", "weekly", "Every day after close (the ledger keeps only ~3 days)", "Saves today's position-stocks ledger and replays the opening protection over every saved ledger.", b_opening_replay, timeout_s=300),
@@ -362,11 +397,11 @@ PACKS: List[Dict[str, Any]] = [
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
-     "what": "Closed-trade report, hold buckets, opening-window verdict, board parity, switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, switch snapshot of changes.",
+     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
-     "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity) then the completeness check.",
-     "jobs": [["calibration_full", {}], ["calibration_status", {}]], "stop_on_failure": False},
+     "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
+     "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},
     {"id": "monthly_evidence", "title": "Monthly evidence pack", "when": "First Saturday of the month (market closed, several hours)",
      "what": "Legacy gates, entry rules, P8 retest, ML V2, intraday gates, TimesFM probe + combine, Kronos backtest. Needs a finished weekly calibration (history on disk).",
      "jobs": [["legacy_gate", {}], ["entry_rules", {}], ["p8_retest", {}], ["ml_v2", {}], ["intraday_gates", {}], ["tsfm_probe", {}], ["tsfm_combine", {}], ["kronos_backtest", {}]], "stop_on_failure": False},

@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, timesfm_gate, vix_gate, vwap_gate
+from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 
@@ -1494,6 +1494,27 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         entry_price, stop_price, target_price = e["entry_price"], e["stop_price"], e["target_price"]
         rr, adj_risk_pct, is_regime_override = e["rr"], e["adj_risk_pct"], e["is_regime_override"]
 
+        # group468 (item 11): approve-first mode. OFF unless APPROVE_FIRST_N > 0; REAL only. While the first N entries after a
+        # settings change are unapproved the candidate is held like a stale-price one (queued again, no decision row) and you are told
+        # once. Fails open: any error inside the helper lets the entry proceed exactly as before.
+        if approve_first.active(mode):
+            _ap = approve_first.gate(db, mode, cand.symbol, {
+                "qty": decision.proposed_qty, "price": entry_price, "stop": stop_price, "target": target_price,
+                "conviction": cand.conviction_score})
+            if not _ap["allowed"]:
+                cand.consumed = False
+                waited += 1
+                if _ap.get("new_pending"):
+                    await notify_async(
+                        f"🕵️ *Approval needed* — {cand.symbol}\n{decision.proposed_qty} @ ₹{entry_price:.2f} | stop ₹{stop_price:.2f} | "
+                        f"target ₹{target_price:.2f} | conviction {cand.conviction_score}\n"
+                        f"Settings changed recently; approve with POST /approvals/REAL/{cand.symbol}/approve "
+                        f"({_ap['remaining']} approval(s) left). Not approved within {approve_first.ttl_s() / 60:.0f} min = not bought."
+                    )
+                elif opening_guard.should_log(f"{mode}:approve_first:{cand.symbol}"):
+                    logger.info("entry_engine: %s %s held back, %s (candidate left queued)", mode, cand.symbol, _ap["reason"])
+                continue
+
         decision.action = "ENTER"
         if is_regime_override:
             decision.reasoning = (
@@ -1644,6 +1665,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 if not dhan_order_id:
                     raise RuntimeError(f"Dhan returned no order id: {broker_result}")
                 record_real_order_sent(db, order, dhan_order_id)
+                approve_first.mark_entered(db, mode, cand.symbol, {"qty": decision.proposed_qty, "price": entry_price})   # group468
                 await notify_async(
                     f"📤 *BUY sent (auto)*{' 🟡 REGIME OVERRIDE' if is_regime_override else ''} — {cand.symbol}\n"
                     f"{decision.proposed_qty} @ ₹{entry_price:.2f} "

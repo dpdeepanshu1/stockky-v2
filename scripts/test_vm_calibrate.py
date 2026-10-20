@@ -91,3 +91,18 @@ def test_group434_resume_keeps_a_complete_seed_and_does_not_fetch(tmp_path):
     body = 'case "$1" in *calibration_status.py) exit 0;; *fetch_history_for_backtest.py) echo FETCH_RAN; exit 0;; esac\necho "{}"\n'
     r = _run(tmp_path, {"SEEDS": "7", "RESUME": "1"}, py=_fake_py(tmp_path, body))
     assert "seed 7 is already complete (RESUME=1)" in r.stdout and "FETCH_RAN" not in r.stdout
+
+
+def test_group469_snapshot_step_is_opt_in(tmp_path):
+    off = _run(tmp_path, {"DRY_RUN": "1", "SEEDS": "7"})
+    assert off.returncode == 0 and "calibration_snapshot.py" not in off.stdout
+    on = _run(tmp_path, {"DRY_RUN": "1", "SEEDS": "7", "SNAPSHOT_LABEL": "before-change", "SNAPSHOT_STORE": str(tmp_path / "snaps")})
+    assert on.returncode == 0, on.stderr
+    assert "calibration_snapshot.py snapshot" in on.stdout and "--label before-change" in on.stdout and str(tmp_path / "snaps") in on.stdout
+
+
+def test_group469_snapshot_failure_does_not_fail_the_run(tmp_path):
+    py = _fake_py(tmp_path, '[[ "$*" == *calibration_snapshot.py* ]] && exit 1\nexit 0\n')
+    r = _run(tmp_path, {"SEEDS": "7", "SYMBOLS": "AAA", "SNAPSHOT_LABEL": "x"}, py=py)
+    assert "snapshot not saved" in r.stdout
+    assert "calibration_snapshot.py" not in " ".join(line for line in r.stdout.splitlines() if line.startswith("FAILED") or line.startswith("  python"))

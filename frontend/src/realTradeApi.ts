@@ -74,6 +74,20 @@ export function setSessionExpiredHandler(fn: (() => void) | null) {
   sessionExpiredHandler = fn;
 }
 
+// group 468: approve-first mode (GET/POST /approvals/REAL...)
+export interface ApprovalRow { symbol: string; qty?: number; price?: number; stop?: number; target?: number; conviction?: number; waiting_s?: number }
+export interface ApprovalsStatus {
+  enabled: boolean;
+  n?: number | null;
+  remaining?: number | null;
+  ttl_min?: number;
+  pending: ApprovalRow[];
+  approved: { symbol: string; expires_in_s: number }[];
+  rejected: { symbol: string; expires_in_s: number }[];
+  history: { symbol: string; at: number; qty?: number; price?: number }[];
+  error?: string;
+}
+
 // group 466: result of POST /close-all/{mode}
 export interface CloseAllResult {
   ok: boolean;
@@ -636,6 +650,12 @@ export const realTradeApi = {
   // group 466: disarm `mode`, cancel its resting BUYs, sell every open position. The server needs confirm="CLOSE ALL".
   closeAll: (mode: "DEMO" | "REAL", confirm: string) =>
     rtRequest<CloseAllResult>(`/close-all/${mode}`, { method: "POST", body: JSON.stringify({ confirm }) }, mode === "REAL"),
+
+  // group 468: approve-first mode (REAL only; off unless APPROVE_FIRST_N > 0 on the server)
+  approvalsStatus: () => rtRequest<ApprovalsStatus>("/approvals/REAL", undefined, true),
+  approveEntry: (symbol: string) => rtRequest<ApprovalsStatus>(`/approvals/REAL/${encodeURIComponent(symbol)}/approve`, { method: "POST" }, true),
+  rejectEntry: (symbol: string) => rtRequest<ApprovalsStatus>(`/approvals/REAL/${encodeURIComponent(symbol)}/reject`, { method: "POST" }, true),
+  resetApprovals: () => rtRequest<ApprovalsStatus>("/approvals/REAL/reset", { method: "POST" }, true),
 
   riskEngineCheck: (body: { mode: string; symbol: string; side: string; qty: number; entry_price: number; stop_price: number }) =>
     rtRequest<{ verdict: string; check_name: string; reason: string; approved_qty: number | null }>(

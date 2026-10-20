@@ -1755,6 +1755,39 @@ class CloseAllRequest(BaseModel):
     confirm: str = ""   # must be "CLOSE ALL" (typed in the dashboard dialog)
 
 
+# ── Approve-first mode (group 469) ──────────────────────────────────────────────────────────────────────────────────────────
+# Off unless APPROVE_FIRST_N > 0. While on, automatic entries wait for your approval after a gate-settings change (orders/approve_first.py).
+@app.get("/approvals")
+async def approvals_status(admin: str = Depends(require_admin)):
+    from orders import approve_first as _af
+    return _af.status()
+
+
+@app.post("/approvals/reset")
+async def approvals_reset(admin: str = Depends(require_admin)):
+    """Start a fresh round of APPROVE_FIRST_N approvals now (as if the settings had just changed)."""
+    from orders import approve_first as _af
+    return _af.do_reset()
+
+
+@app.post("/approvals/{symbol}/approve")
+async def approvals_approve(symbol: str, admin: str = Depends(require_admin)):
+    from orders import approve_first as _af
+    res = _af.do_approve(symbol)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not waiting for approval")
+    return res
+
+
+@app.post("/approvals/{symbol}/reject")
+async def approvals_reject(symbol: str, admin: str = Depends(require_admin)):
+    from orders import approve_first as _af
+    res = _af.do_reject(symbol)
+    if not res.get("ok"):
+        raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not waiting for approval")
+    return res
+
+
 @app.post("/close-all")
 async def close_all_and_disarm(body: CloseAllRequest = CloseAllRequest(), admin: str = Depends(require_admin),
                                db: Session = Depends(get_db)):

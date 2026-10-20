@@ -9,6 +9,7 @@ import {
 import ManualTradeTicket from "./trading/ManualTradeTicket";
 import { SubTabs } from "./ui/SubTabs";
 import CloseAllDialog from "./CloseAllDialog";
+import ApprovalsPanel from "./ApprovalsPanel";   // group 468
 import { NavIcon } from "./ui/NavIcon";
 import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only, never P&L or order values)
 // Cross-service, read-only: position-stocks-service's own capital ledger
@@ -2314,6 +2315,10 @@ export default function RealAutoTrade() {
                   fed by the same poll (now also active while this tab is
                   open — see the effect above), so you don't have to
                   switch tabs to see what a running cycle is doing. */}
+              {mode === "REAL" && <ApprovalsPanel loggedIn={loggedIn} source={{
+                status: realTradeApi.approvalsStatus, approve: realTradeApi.approveEntry,
+                reject: realTradeApi.rejectEntry, reset: realTradeApi.resetApprovals }} />}
+
               <PipelineLiveStatus pipeline={pipeline} mode={mode} />
               <div className="flex items-center justify-between">
                 <SectionHdr>Open positions — {mode} ({positions.length})</SectionHdr>

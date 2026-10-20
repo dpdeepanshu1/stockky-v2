@@ -182,6 +182,15 @@ def download_zip(rid: str, _: Dict[str, Any] = Depends(require_admin)):
     return FileResponse(tmp.name, filename=f"{rid}.zip", media_type="application/zip")
 
 
+@app.get("/results/latest.zip")
+def download_latest_zip(_: Dict[str, Any] = Depends(require_admin)):
+    """group 471: the latest result of every test in one zip (the 'Download all latest results' button)."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    _r().zip_latest(tmp.name)
+    return FileResponse(tmp.name, filename="latest_results.zip", media_type="application/zip")
+
+
 @app.get("/latest/{target}")
 def latest(target: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     return {"run": _r().latest(target)}

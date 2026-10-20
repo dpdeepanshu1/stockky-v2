@@ -7,6 +7,13 @@ import { setVisibleInterval } from "../../visibleInterval";
 import { Btn, Msg } from "./ui";
 import { Modal } from "./SwitchesPanel";
 
+/** group 471: progress of "Run all test cases" (one test after the other). */
+export interface RunAllState {
+  running: boolean; total: number; index: number; currentTitle: string; currentRunId: string | null;
+  counts: Record<string, number>; skipped: { title: string; why: string }[]; stopped: boolean; finished: boolean;
+}
+const NO_RUN_ALL: RunAllState = { running: false, total: 0, index: 0, currentTitle: "", currentRunId: null, counts: {}, skipped: [], stopped: false, finished: false };
+
 interface Ctx {
   catalog: Catalog | null;
   summary: Summary | null;
@@ -18,6 +25,9 @@ interface Ctx {
   openRun: (id: string | null) => void;
   cancel: (id: string) => Promise<void>;
   openRunId: string | null;
+  runAll: RunAllState;
+  startRunAll: (ids: string[]) => Promise<void>;      // group 471: start these tests one after the other (each waits for the one before)
+  stopRunAll: () => void;
   toast: { kind: "ok" | "warn" | "err"; text: string } | null;
 }
 
@@ -37,6 +47,9 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
   const [blocked, setBlocked] = useState<{ run: RunRec; params: Record<string, any>; resume: boolean } | null>(null);
   const [toast, setToast] = useState<Ctx["toast"]>(null);
   const alive = useRef(true);
+  const [runAll, setRunAll] = useState<RunAllState>(NO_RUN_ALL);
+  const stopAll = useRef(false);
+  const allRunId = useRef<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -106,9 +119,55 @@ export function RunnerProvider({ children, authKey }: { children: ReactNode; aut
     }
   }, [blocked, refreshSummary]);
 
+  // group 471: "Run all test cases". Each test is submitted only when the one before has ended, so the runner's queue (20, no duplicates) never overflows and
+  // Stop really stops. A test the market-hours rule holds back is listed as skipped, never forced. A 401 ends it (log in, run again).
+  const startRunAll = useCallback(async (ids: string[]) => {
+    if (runAll.running || ids.length === 0) return;
+    const title = (id: string) => (catalog?.jobs || []).find((j) => j.id === id)?.title || id;
+    stopAll.current = false;
+    let counts: Record<string, number> = {};
+    const skipped: { title: string; why: string }[] = [];
+    const push = (p: Partial<RunAllState>) => { if (alive.current) setRunAll((x) => ({ ...x, ...p })); };
+    setRunAll({ ...NO_RUN_ALL, running: true, total: ids.length });
+    for (let i = 0; i < ids.length && !stopAll.current && alive.current; i++) {
+      const id = ids[i];
+      push({ index: i + 1, currentTitle: title(id), currentRunId: null });
+      let run: RunRec;
+      try {
+        run = await runnerApi.start("job", id, {}, false, false);
+      } catch (e: any) {
+        if (e instanceof ApiError && e.status === 401) { skipped.push({ title: title(id), why: "login expired: log in again and re-run" }); break; }
+        skipped.push({ title: title(id), why: e?.message || String(e) });
+        push({ skipped: [...skipped] });
+        continue;
+      }
+      if (run.status === "blocked") { skipped.push({ title: title(id), why: (run.note || "held back by the market-hours rule").split(".")[0] }); push({ skipped: [...skipped] }); continue; }
+      allRunId.current = run.id;
+      push({ currentRunId: run.id });
+      const limit = Date.now() + (((catalog?.jobs || []).find((j) => j.id === id)?.timeout_s || 3600) + 900) * 1000;
+      let status: string = run.status;
+      while (ACTIVE.includes(status as any) && Date.now() < limit && alive.current) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try { status = (await runnerApi.run(run.id)).status; } catch (e: any) { if (e instanceof ApiError && e.status === 404) { status = "cancelled"; break; } }
+      }
+      allRunId.current = null;
+      counts = { ...counts, [status]: (counts[status] || 0) + 1 };
+      push({ counts });
+      await refreshSummary();
+    }
+    push({ running: false, finished: true, stopped: stopAll.current, skipped, currentRunId: null });
+    if (alive.current) setToast({ kind: stopAll.current ? "warn" : "ok", text: stopAll.current ? "Run all stopped." : "Run all finished: open \"Runs & downloads\" and use Download all latest results." });
+  }, [runAll.running, catalog, refreshSummary]);
+
+  const stopRunAll = useCallback(() => {
+    stopAll.current = true;
+    const id = allRunId.current;
+    if (id) void runnerApi.cancel(id).catch(() => undefined);      // the test that is running right now is cancelled too
+  }, []);
+
   const value = useMemo<Ctx>(() => ({
-    catalog, summary, error, loading, busyActive: active, reload, start, openRun: setOpenRunId, cancel, openRunId, toast,
-  }), [catalog, summary, error, loading, active, reload, start, cancel, openRunId, toast]);
+    catalog, summary, error, loading, busyActive: active, reload, start, openRun: setOpenRunId, cancel, openRunId, toast, runAll, startRunAll, stopRunAll,
+  }), [catalog, summary, error, loading, active, reload, start, cancel, openRunId, toast, runAll, startRunAll, stopRunAll]);
 
   return (
     <RunnerCtx.Provider value={value}>

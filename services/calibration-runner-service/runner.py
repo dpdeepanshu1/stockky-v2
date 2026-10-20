@@ -292,6 +292,26 @@ class Runner:
                 z.write(os.path.join(self._run_dir(rid), f["name"]), f["name"])
         return dest
 
+    def zip_latest(self, dest: str, targets: Optional[List[str]] = None) -> int:
+        """One zip with the LATEST finished result of every job (and pack): <target>/<its files>, plus _INDEX.txt (status, time, headline per target).
+        Returns how many results went in (0 = nothing has run yet; the zip then only holds the index)."""
+        ids = list(targets) if targets is not None else list(self.jobs) + list(self.packs)
+        rows: List[str] = []
+        n = 0
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+            for t in ids:
+                r = self.latest(t)
+                if not r:
+                    rows.append(f"{t}: never run")
+                    continue
+                n += 1
+                head = (r.get("headline") or [""])[0]
+                rows.append(f"{t}: {str(r.get('status')).upper()}  finished {r.get('finished_at') or '-'}  run {r['id']}" + (f"  -> {head}" if head else ""))
+                for f in self.files(r["id"]):
+                    z.write(os.path.join(self._run_dir(r["id"]), f["name"]), f"{t}/{f['name']}")
+            z.writestr("_INDEX.txt", "Latest result of every test (status OK / LOOK / FAILED ...):\n\n" + "\n".join(rows) + "\n")
+        return n
+
     def latest(self, target: str) -> Optional[Dict[str, Any]]:
         rs = [r for r in self.index.values() if r.d["target"] == target and r.d["status"] in FINAL and r.d["status"] != "blocked"]
         return max(rs, key=lambda r: r.d["queued_at"]).public() if rs else None

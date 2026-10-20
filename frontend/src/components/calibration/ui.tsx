@@ -15,9 +15,17 @@ const PILL: Record<string, string> = {
 };
 const LABEL: Record<string, string> = { success: "OK", attention: "LOOK", failed: "FAILED", timeout: "TIMEOUT", blocked: "BLOCKED", cancelled: "CANCELLED", running: "RUNNING", queued: "QUEUED", never: "NEVER RUN" };
 
+const MEANING: Record<string, string> = {
+  success: "OK: it ran and found nothing to worry about.",
+  attention: "LOOK: the test ran properly, but its own verdict says a person should look (FAIL / NO_GO / NOT_ENOUGH_DATA), or it needs data from a test that has not run yet. Not a crash: open the output.",
+  failed: "FAILED: the script or request itself broke (non-zero exit / HTTP error).",
+  timeout: "TIMEOUT: it hit its time limit and was stopped.",
+  blocked: "BLOCKED: not started (market-hours rule). Confirm to run it anyway.",
+};
+
 export function StatusPill({ status }: { status: RunStatus | "never" | null | undefined }) {
   const s = status || "never";
-  return <span className={`inline-block rounded-lg border px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${PILL[s] || PILL.never}`}>{LABEL[s] || s}</span>;
+  return <span title={MEANING[s]} className={`inline-block rounded-lg border px-1.5 py-0.5 text-[10px] font-bold tracking-wide ${PILL[s] || PILL.never}`}>{LABEL[s] || s}</span>;
 }
 
 export function Card({ title, right, children, tone }: { title?: ReactNode; right?: ReactNode; children: ReactNode; tone?: "warn" | "bad" | "good" }) {

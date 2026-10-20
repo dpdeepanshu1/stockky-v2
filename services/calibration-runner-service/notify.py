@@ -127,6 +127,16 @@ def retryable(result: Any) -> bool:
 
 
 _AGAIN = " - will be sent again when the notification service is reachable"
+_SEQ_LOCK = threading.Lock()
+_SEQ = 0
+
+
+def _next_seq() -> int:
+    """Process-wide counter: two Outbox objects on one folder (or two adds in the same millisecond) must never pick the same file name."""
+    global _SEQ
+    with _SEQ_LOCK:
+        _SEQ += 1
+        return _SEQ
 
 
 class Outbox:
@@ -152,8 +162,8 @@ class Outbox:
         with self._lock:
             try:
                 os.makedirs(self.dir, exist_ok=True)
-                self._n += 1
-                name = os.path.join(self.dir, f"ob_{int(time.time() * 1000):013d}_{os.getpid()}_{self._n:05d}.json")
+                self._n = _next_seq()
+                name = os.path.join(self.dir, f"ob_{int(time.time() * 1000):013d}_{os.getpid()}_{self._n:09d}.json")
                 tmp = name + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump({"title": title, "message": message, "urgency": urgency, "ts": time.time()}, fh)

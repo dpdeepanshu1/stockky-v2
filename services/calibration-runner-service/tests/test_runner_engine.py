@@ -101,6 +101,8 @@ def test_script_flags_are_accepted_by_the_scripts():
             if sp not in cache:
                 cache[sp] = subprocess.run([sys.executable, sp, "--help"], capture_output=True, text=True, timeout=60).stdout
             for a in st["argv"][2:]:
+                if a.startswith("globflag:"):          # group470: "globflag:--ab:<pattern>" carries a flag too
+                    a = a.split(":", 2)[1]
                 if a.startswith("--"):
                     assert a in cache[sp], f"{j['id']}: {os.path.basename(sp)} has no {a}"
 

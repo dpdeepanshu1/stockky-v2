@@ -25,9 +25,12 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 IST = timezone(timedelta(hours=5, minutes=30))
 FINAL = ("success", "attention", "failed", "timeout", "cancelled", "blocked")
-OUT_FLAGS = {"--out", "--csv", "--json", "--save", "--manifest", "--out-dir", "--header"}
+OUT_FLAGS = {"--out", "--csv", "--json", "--save", "--manifest", "--out-dir", "--header", "--checkpoint", "--store"}   # group470: --checkpoint / --store are created by the job that owns them, so a missing one is not "input missing"
 HEADLINE_RE = re.compile(r"(\bverdict\b|\bPASS\b|\bFAIL\b|\bNO_GO\b|\bGO\b|NOT_ENOUGH_DATA|NO_INPUT|\bWARN\b|\bSET [A-Z_]+=|KEEP THE CURRENT|\bCOMPLETE\b|\bINCOMPLETE\b|\bparity_ok\b)", re.I)
 _BEARER = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.=]{12,}")
+# group470: a token that reaches a log by another route (a `--token VALUE` argument, a `set -x` trace line, TOKEN=VALUE) was printed in clear
+_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}")
+_TOKEN_ARG = re.compile(r"(--token(?:=|\s+)|\b(?:PS_)?TOKEN=)[^\s'\"]{8,}")
 
 
 def ist_now() -> datetime:
@@ -57,7 +60,9 @@ class Redactor:
         for s in self.secrets_fn():
             if s and len(s) >= 8:
                 text = text.replace(s, "***")
-        return _BEARER.sub(r"\1***", text)
+        text = _BEARER.sub(r"\1***", text)
+        text = _TOKEN_ARG.sub(r"\1***", text)
+        return _JWT.sub("***", text)
 
 
 class Run:
@@ -612,7 +617,15 @@ class Runner:
         prev = ""
         guard = [os.path.join(ctx["cal"], ""), os.path.join(ctx["exp"], ""), os.path.join(ctx.get("bars", "/nonexistent"), "")]
         for t in toks:
-            if t.startswith("glob:"):
+            if t.startswith("globflag:"):
+                # group470: "globflag:--ab:<pattern>" -> `--ab f1 --ab f2 ...` for scripts whose flag is action="append" (a bare list of paths is a usage error)
+                _, flag, pat = t.split(":", 2)
+                m = sorted(_glob.glob(pat))
+                if not m:
+                    return None, f"input missing: nothing matches {pat} (run the job that creates it first)"
+                for f_ in m:
+                    argv += [flag, f_]
+            elif t.startswith("glob:"):
                 m = sorted(_glob.glob(t[5:]))
                 if not m:
                     return None, f"input missing: nothing matches {t[5:]} (run the job that creates it first)"

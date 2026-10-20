@@ -2,7 +2,7 @@
 
 A job is a list of STEPS built from a few validated parameters. Steps are plain dicts (JSON-serialisable, no shell):
   {"kind": "cmd",  "title", "argv": [...], "env": {...}, "ok": [0], "attention": [1], "out_file": "x.txt"}
-      argv tokens may be "glob:<pattern>" (expanded, sorted; no match -> the step is reported as missing input)
+      argv tokens may be "globflag:<flag>:<pattern>" (one `<flag> file` pair per match, for append-style flags) or "glob:<pattern>" (expanded, sorted; no match -> the step is reported as missing input)
   {"kind": "http", "title", "method", "url", "auth": bool, "save": "name.json", "expect": [200], "poll": {...}}
 Nothing is run through a shell, parameters are typed / bounded, and the admin token is never part of a step: `cmd` steps get it as env TOKEN
 and `http` steps as a header at run time, then the output is redacted.
@@ -196,7 +196,7 @@ def b_ab_report(ctx, p):
 
 
 def b_g1_check(ctx, p):
-    return [_py(ctx, "ms_g1_check.py", "--out", os.path.join(ctx["run"], "g1.json"), "--budget-ms", p.get("budget_ms", 50), _hist(ctx, int(p.get("seed", 7))),
+    return [_py(ctx, "ms_g1_check.py", "--out", os.path.join(ctx["run"], "g1.json"), "--budget-ms", p.get("budget_ms", 15), _hist(ctx, int(p.get("seed", 7))),
                 title="G1 offline: engine time budget")]
 
 
@@ -207,12 +207,12 @@ def b_structure_backtest(ctx, p):
 
 def b_gate_check(ctx, p):
     return [_http("Save live structure report (G4)", "GET", ctx["decision"] + "/training/api/structure/report?days=60", save="live_structure.json", expect=(200,)) | {"soft": True},
-            _py(ctx, "structure_gate_check.py", "--ab", "glob:" + os.path.join(ctx["cal"], "ab_*", "ab_report.json"), "--live", os.path.join(ctx["run"], "live_structure.json"),
+            _py(ctx, "structure_gate_check.py", "globflag:--ab:" + os.path.join(ctx["cal"], "ab_*", "ab_report.json"), "--live", os.path.join(ctx["run"], "live_structure.json"),
                 title="G2 / G3 / G4 verdict") | {"drop_if_missing": [os.path.join(ctx["run"], "live_structure.json")]}]
 
 
 def b_calibration_pack(ctx, p):
-    return [_py(ctx, "calibration_pack.py", "--backtest", os.path.join(ctx["cal"], "backtest.json"), "--ab", "glob:" + os.path.join(ctx["cal"], "ab_*", "ab_report.json"),
+    return [_py(ctx, "calibration_pack.py", "--backtest", os.path.join(ctx["cal"], "backtest.json"), "globflag:--ab:" + os.path.join(ctx["cal"], "ab_*", "ab_report.json"),
                 "--out", os.path.join(ctx["run"], "calibration_pack.md"), title="Env lines the walk-forward supports (advisory)", attention=())]
 
 
@@ -357,7 +357,7 @@ JOB_LIST = [
     _job("ab_report", "A/B replay (one seed)", "weekly", "After fetch_history", "Does the structure policy beat a technical-only baseline, out of sample, after costs? (G2)", b_ab_report,
          [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"]), JOBS_P, P("policy", "Also replay BUY NOW rules", "bool", False)],
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
-    _job("g1_check", "G1 offline: engine time", "monthly", "After fetch_history", "Is the engine fast enough on real history?", b_g1_check, [SEED, P("budget_ms", "Budget ms", "int", 50, 10, 500)], heavy=True, window="closed", timeout_s=1800, needs=["fetch_history"]),
+    _job("g1_check", "G1 offline: engine time", "monthly", "After fetch_history", "Is the engine fast enough on real history?", b_g1_check, [SEED, P("budget_ms", "Budget ms", "int", 15, 10, 500)], heavy=True, window="closed", timeout_s=1800, needs=["fetch_history"]),
     _job("structure_backtest", "Structure rules walk-forward", "weekly", "After fetch_history", "Which gate thresholds are stable out of sample.", b_structure_backtest,
          [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"])], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
     _job("gate_check", "G2 / G3 / G4 verdict", "weekly", "After every A/B report", "Reads every seed's A/B report and the live structure report.", b_gate_check, timeout_s=300,

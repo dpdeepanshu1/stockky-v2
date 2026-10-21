@@ -10,7 +10,7 @@ WHAT: edge = qty * entry * target_pct; cost = INTRADAY statutory levies for a bu
 buy) plus SCALP_COST_SLIPPAGE_ALLOWANCE_PCT of the trade value for spread / slippage. The entry is rejected when
 edge / cost < SCALP_MIN_EDGE_TO_COST_RATIO. Rates come from config (same env names as real-trade-service).
 
-HONEST LIMIT: at Rs 0 brokerage the levies are only about 0.04% of trade value, so with the 0.10% allowance the cost is
+HONEST LIMIT (group 480: brokerage is now min(Rs 20, 0.03 %) per leg, so the round trip is about 0.11 %, not 0.04 %): at Rs 0 brokerage the levies are only about 0.04% of trade value, so with the 0.10% allowance the cost is
 roughly 0.14% against a 1.4-3.5% target (ratio about 10-25): the gate then passes everything. It only bites when
 BROKERAGE_PER_ORDER is set (a flat fee on a small position), when the target is tiny, or when the allowance is raised.
 Pure functions, no DB, no network, never raises into the caller. Off with SCALP_COST_GATE_ENABLED=0.
@@ -46,7 +46,13 @@ def estimate_levies(entry_price: float, qty: int, exit_price: Optional[float] = 
     exit_price = entry_price if exit_price is None else exit_price
     buy_value = entry_price * qty
     sell_value = exit_price * qty
-    brokerage = config.BROKERAGE_PER_ORDER * 2
+    # group 480: per executed leg, the lower of the Rs cap and a percentage of that leg's value (never below the flat per-order figure)
+    pct = float(getattr(config, "SCALP_COST_GATE_BROKERAGE_PCT", 0.0) or 0.0)
+    cap = float(getattr(config, "SCALP_COST_GATE_BROKERAGE_CAP_RS", 20.0) or 0.0)
+    brokerage = sum(
+        max(config.BROKERAGE_PER_ORDER, min(cap, v * pct / 100.0) if pct > 0 else 0.0)
+        for v in (buy_value, sell_value)
+    )
     stt = sell_value * (config.STT_INTRADAY_SELL_PCT / 100.0)
     stamp = buy_value * (config.STAMP_DUTY_BUY_PCT_INTRADAY / 100.0)
     exchange = (buy_value + sell_value) * ((config.EXCHANGE_TXN_PCT + config.IPFT_PCT) / 100.0)   # NSE + IPFT

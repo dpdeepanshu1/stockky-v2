@@ -1268,6 +1268,17 @@ EXIT_DP_MIN_GAIN_RATIO   = float(((os.getenv("EXIT_DP_MIN_GAIN_RATIO") or "").st
 REENTRY_SAME_DAY_BLOCK   = ((os.getenv("REENTRY_SAME_DAY_BLOCK") or "").strip() or "true").lower() == "true"
 MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() or "3000.0"))
 
+# group 481 (2026-10-21): evidence-gated size ladder (entry_engine/size_ladder.py). The per-trade cap above grows by SIZE_LADDER_STEP_PCT per level, but
+# only while the stored daily NET P&L (after charges) earns it: level 1 after SIZE_LADDER_MIN_DAYS captured trading days, level 2 after twice that, each with a
+# positive total and at least SIZE_LADDER_MIN_POSITIVE_DAYS_PCT % positive days; the newest SIZE_LADDER_BRAKE_DAYS days summing below 0 drops it to level 0.
+# With today's results it stays at level 0 (no change). REAL only. SIZE_LADDER_ENABLED=false (or SIZE_LADDER_MAX_LEVEL=0) = the plain cap.
+SIZE_LADDER_ENABLED = ((os.getenv("SIZE_LADDER_ENABLED") or "").strip() or "true").lower() == "true"
+SIZE_LADDER_STEP_PCT = float(((os.getenv("SIZE_LADDER_STEP_PCT") or "").strip() or "25.0"))
+SIZE_LADDER_MAX_LEVEL = int(float(((os.getenv("SIZE_LADDER_MAX_LEVEL") or "").strip() or "2")))
+SIZE_LADDER_MIN_DAYS = int(float(((os.getenv("SIZE_LADDER_MIN_DAYS") or "").strip() or "10")))
+SIZE_LADDER_MIN_POSITIVE_DAYS_PCT = float(((os.getenv("SIZE_LADDER_MIN_POSITIVE_DAYS_PCT") or "").strip() or "60.0"))
+SIZE_LADDER_BRAKE_DAYS = int(float(((os.getenv("SIZE_LADDER_BRAKE_DAYS") or "").strip() or "3")))
+
 # ── Selective overnight hold (2026-09-18 — user audit finding) ───────────────
 # _eod_squareoff (execution/auto_pilot.py) used to flatten EVERY open
 # position at EOD_SQUAREOFF_TIME_IST, unconditionally — including positions
@@ -1405,6 +1416,11 @@ BROKER_STOP_ALERT_COOLDOWN_S = max(0, _bs_int("BROKER_STOP_ALERT_COOLDOWN_S", 90
 # After Dhan refuses a broker stop for a CDSL eDIS / TPIN reason, that symbol is not sent to Dhan again for this many seconds
 # (a retry cannot succeed until the user completes 'Verify Holdings' in the Dhan app), then it is tried once more. 0 = no backoff.
 BROKER_STOP_EDIS_BACKOFF_S = max(0, _bs_int("BROKER_STOP_EDIS_BACKOFF_S", 900))
+# group 479 (2026-10-21): a resting Dhan stop for SAME-DAY INTRADAY (MIS) positions too. Until now only positions held from an earlier day got one, and with
+# OVERNIGHT_HOLD_ENABLED=false (group 470) that is almost nothing, so a same-day stop was software-only (polled ~8 s: 17 of 41 stop hits filled beyond the
+# stop in the 21 Oct review). Needs ENTRY_PRODUCT_MODE=auto (otherwise no position is INTRADAY). Ships OFF: NOT verified against a live Dhan account -
+# turn it on with ONE small position and read Dhan's order book. The stop is cancelled before every software SELL exactly like the CNC one.
+BROKER_STOP_INTRADAY = _bs_bool("BROKER_STOP_INTRADAY", "false")
 BROKER_STOP_ORDER_TYPE = ((os.getenv("BROKER_STOP_ORDER_TYPE") or "").strip() or "STOP_LOSS_MARKET").upper()
 if BROKER_STOP_ORDER_TYPE not in ("STOP_LOSS_MARKET", "STOP_LOSS"):
     BROKER_STOP_ORDER_TYPE = "STOP_LOSS_MARKET"

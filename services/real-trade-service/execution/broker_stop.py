@@ -103,7 +103,9 @@ def skip_reason(position, today_ist: Optional[str] = None) -> Optional[str]:
     if not (position.current_stop or 0) > 0:
         return "no_stop"
     if position.entry_product_type in ("INTRADAY", "MIS"):
-        return "intraday"
+        if not getattr(config, "BROKER_STOP_INTRADAY", False):   # group479: opt-in resting stop for a same-day MIS position
+            return "intraday"
+        return None
     if not position.broker_imported:
         today = today_ist or ist_today_str()
         try:
@@ -223,7 +225,7 @@ def _send_stop(db: Session, security_id: str, position, trigger: float, otype: s
     return dhan_client.place_order(
         db, is_armed=True, security_id=security_id, exchange_segment=dhan_client.NSE_EQ_SEGMENT,
         transaction_type="SELL", quantity=int(position.qty_open), order_type=otype, price=price,
-        product_type="CNC", tag="BSTOP", trigger_price=trigger,
+        product_type=("INTRADAY" if getattr(position, "entry_product_type", None) in ("INTRADAY", "MIS") else "CNC"), tag="BSTOP", trigger_price=trigger,
     )
 
 

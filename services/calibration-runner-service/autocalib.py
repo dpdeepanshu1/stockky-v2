@@ -39,6 +39,9 @@ HISTORY_KEEP = 200
 # Switches that no test result may ever move. Each has a reason the page shows.
 PROTECTED: Dict[str, str] = {
     "BROKER_STOP_ENABLED": "money safety: the resting broker stop is never switched by a report",
+    "SIZE_LADDER_ENABLED": "money safety (group 481): position size is raised only by the stored net P&L rule, never switched by a report",
+    "SIZE_LADDER_MAX_LEVEL": "money safety (group 481): how far size may grow is your decision, not a report's",
+    "BROKER_STOP_INTRADAY": "money safety (group 479): the same-day resting stop is switched by you after a live check, never by a report",
     "STRUCTURE_REQUIRE_DATA": "fail-closed rule: no data means no entry",
     "PS_STRUCTURE_REQUIRE_DATA": "fail-closed rule: no data means no entry",
     "STRUCTURE_FETCH_ENABLED": "input of every structure rule",

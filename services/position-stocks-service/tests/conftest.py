@@ -137,3 +137,17 @@ def _bar_record_off_by_default(monkeypatch):
     from feed import bar_recorder as _br
     _br.reset()
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _group479_guards_off_by_default(monkeypatch):
+    """group479: the whole-day stop-out guard, the minimum-quantity check and the ORB recorder are new live rules; older tests predate them and
+    expect no behaviour change. tests/test_group479_*.py turn them on explicitly."""
+    import config as _config
+    monkeypatch.setattr(_config, "STOPOUT_GUARD_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "ENTRY_MIN_QTY", 0, raising=False)
+    monkeypatch.setattr(_config, "ORB_MODE", "off", raising=False)
+    from orders import orb_shadow as _orb
+    _orb._reset_for_tests()
+    yield
+    _orb._reset_for_tests()

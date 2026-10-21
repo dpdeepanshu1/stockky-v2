@@ -61,6 +61,13 @@ def _row(service: str, tid: Any, sym: Any, opened: Any, closed: Any, pnl: Any, r
             "held_min": max(0.0, (c - o).total_seconds() / 60.0), "pnl": p, "ret": num(ret), "reason": str(reason or "-"), "qty": num(qty), "origin": origin}
 
 
+def is_unbooked(r: Dict[str, Any]) -> bool:
+    """2026-10-20: a record with P&L exactly 0 and no return % has no real fill behind it (reconcile / ghost close, e.g. HDFCLIFE closed at
+    08:57 before the open). It is not a trade: counting it as a non-losing day reset the losing streak and flipped service_advice."""
+    pnl = r.get("net_pnl") if r.get("net_pnl") is not None else r.get("gross_pnl")
+    return num(pnl) == 0.0 and num(r.get("return_pct")) is None
+
+
 def rows_from_rt(doc: Any, origin: str = "all") -> List[Dict[str, Any]]:
     recs = doc.get("records") if isinstance(doc, dict) else doc
     out = []
@@ -69,6 +76,8 @@ def rows_from_rt(doc: Any, origin: str = "all") -> List[Dict[str, Any]]:
             continue
         og = str(r.get("origin") or "system")
         if origin != "all" and og != origin:
+            continue
+        if is_unbooked(r):
             continue
         pnl = r.get("net_pnl") if r.get("net_pnl") is not None else r.get("gross_pnl")
         x = _row("real-trade", r.get("position_id"), r.get("symbol"), r.get("opened_at"), r.get("closed_at"), pnl, r.get("return_pct"), r.get("exit_reason"),

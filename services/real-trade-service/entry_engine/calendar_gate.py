@@ -146,6 +146,24 @@ def entry_block_reason(now: Optional[datetime] = None) -> Optional[str]:
         return None
 
 
+def late_entry_block_reason(now: Optional[datetime] = None) -> Optional[str]:
+    """group 470: 'LATE_ENTRY_CUTOFF:...' once config.ENTRY_LAST_TIME_IST has passed on ANY trading day, else None. A blank / unreadable
+    time means no general cut-off. Independent of CALENDAR_RULES_ENABLED. Never raises (an error allows the entry)."""
+    try:
+        raw = str(getattr(config, "ENTRY_LAST_TIME_IST", "") or "").strip()
+        if not raw:
+            return None
+        t = parse_hhmm(raw, 14, 0)
+        if ist_now(now).weekday() >= 5:
+            return None
+        if ist_time_at_or_after(t, now):
+            return f"LATE_ENTRY_CUTOFF:no new entry after {raw} IST (late entries get squared off at 15:00 and the last hour is thin)"
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("late_entry_block_reason failed (allowing): %s", e)
+        return None
+
+
 def size_mult(now: Optional[datetime] = None) -> float:
     """1.0 on an ordinary day; the smallest applicable CALENDAR_*_SIZE_MULT (clamped 0.1..1.0) on an expiry / pre-holiday / Friday session."""
     try:

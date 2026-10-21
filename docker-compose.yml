@@ -684,6 +684,12 @@ services:
       RUNNER_OUTBOX_RETRY_S: ${RUNNER_OUTBOX_RETRY_S:-60}
       RUNNER_OUTBOX_MAX_AGE_S: ${RUNNER_OUTBOX_MAX_AGE_S:-86400}
       RUNNER_PREFLIGHT_S: ${RUNNER_PREFLIGHT_S:-60}
+      # group 476: switches that have a test are set from the test results; every change goes to Telegram. Page: Real Money Calibration > Auto-calibration
+      AUTOCALIB_ENABLED: ${AUTOCALIB_ENABLED:-true}
+      AUTOCALIB_DRY_RUN: ${AUTOCALIB_DRY_RUN:-false}
+      AUTOCALIB_COOLDOWN_H: ${AUTOCALIB_COOLDOWN_H:-24}
+      AUTOCALIB_MAX_AGE_DAYS: ${AUTOCALIB_MAX_AGE_DAYS:-40}
+      AUTOCALIB_STEP_PCT: ${AUTOCALIB_STEP_PCT:-25}
     volumes:
       - runner-data:/data/runner
       - bar-records:/data/bars:ro

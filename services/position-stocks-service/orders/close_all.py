@@ -38,7 +38,7 @@ def disarm(db, get_gate) -> bool:
         try:
             db.rollback()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("close-all: rollback after failed disarm also failed", exc_info=True)
         return False
 
 
@@ -71,7 +71,7 @@ def sweep(db) -> dict:
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("close-all: rollback after failed close of %s also failed", sym, exc_info=True)
     return res
 
 

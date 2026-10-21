@@ -44,6 +44,7 @@ def _ctx_base() -> Dict[str, Any]:
 
 runner: Optional[Runner] = None
 sched: Optional[Scheduler] = None
+auto: Optional[Any] = None       # group 476: AutoCalibrator
 
 
 def _safe_token() -> str:
@@ -55,14 +56,30 @@ def _safe_token() -> str:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global runner, sched
+    global runner, sched, auto
+    import notify as N
     from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
     ob = Outbox(str(config.DATA_DIR / "outbox"), config.OUTBOX_MAX_AGE_S)      # group 466: an undelivered Telegram message is kept and retried
     notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET]), outbox=ob)
+    import autocalib as AC
+    redact = Redactor(lambda: [_safe_token(), config.SESSION_SECRET])
     runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET],
                     max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
-                    notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S)
+                    notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S,
+                    after_fn=lambda run: auto.on_run_finished(run, J.PACK_MAP) if auto else None)
+
+    def _tell(title: str, message: str, urgency: str) -> Optional[str]:
+        text = redact(message)
+        res = N.send(config.NOTIFICATION_URL, title, text, urgency)
+        if N.retryable(res) and ob.add(title, text, urgency):
+            res = str(res) + " - will be sent again when the notification service is reachable"
+        return res
+    auto = AC.AutoCalibrator(str(config.DATA_DIR / "state" / "autocalib.json"),
+                             AC.ControlClient({AC.RT: config.REAL_TRADE_URL, AC.PS: config.POSITION_STOCKS_URL}, _safe_token),
+                             AC.RunnerEvidence(runner, J.PACK_MAP, config.AUTOCALIB_MAX_AGE_DAYS * 86400), notify=_tell,
+                             enabled=config.AUTOCALIB_ENABLED, dry_run=config.AUTOCALIB_DRY_RUN, cooldown_s=config.AUTOCALIB_COOLDOWN_H * 3600,
+                             step_pct=config.AUTOCALIB_STEP_PCT / 100.0)
     runner.start()
     start_outbox_flusher(ob, config.NOTIFICATION_URL, config.OUTBOX_RETRY_S)
     skip_notifier = make_skip_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, lambda p: (J.PACK_MAP.get(p) or {}).get("title", p or ""),
@@ -233,3 +250,43 @@ def put_schedule(req: SchedReq, _: Dict[str, Any] = Depends(require_admin)) -> D
         return sched.put(req.enabled, req.entries)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ----------------------------------------------------------------------------------------------- group 476: auto-calibration
+def _a() -> Any:
+    if auto is None:
+        raise HTTPException(503, "auto-calibration not started")
+    return auto
+
+
+@app.get("/autocalib/status")
+def autocalib_status(coverage: bool = True, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Settings, what each switch waits for, the change history, and (coverage=true) which switch of both services is automated / protected / manual."""
+    return _a().status(with_coverage=coverage)
+
+
+class AutoSettings(BaseModel):
+    enabled: Optional[bool] = None
+    dry_run: Optional[bool] = None
+    pinned: Optional[Any] = None
+
+
+@app.put("/autocalib/settings")
+def autocalib_settings(req: AutoSettings, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    pinned = req.pinned
+    if pinned is not None and (not isinstance(pinned, list) or not all(isinstance(x, str) for x in pinned)):
+        raise HTTPException(400, "pinned must be a list of switch names")
+    try:
+        return _a().configure(req.enabled, req.dry_run, pinned)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class AutoRun(BaseModel):
+    dry_run: Optional[bool] = None
+
+
+@app.post("/autocalib/run")
+def autocalib_run(req: AutoRun, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Evaluate every rule now. dry_run=true shows what would change and applies nothing (also the only mode while auto-calibration is switched off)."""
+    return _a().evaluate(trigger=f"manual by {claims.get('sub') or '-'}", force=True, dry_run=req.dry_run)

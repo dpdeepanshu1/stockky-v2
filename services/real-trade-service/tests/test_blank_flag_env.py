@@ -22,7 +22,7 @@ from risk_engine import engine  # noqa: E402
 
 CONFIG_FLAGS = (
     "ENTRY_CYCLE_QUALITY_FILTER_ENABLED", "VOLUME_SHOCK_QUALITY_GATE_ENABLED", "COST_MODEL_ENABLED",
-    "OVERNIGHT_HOLD_ENABLED", "OVERNIGHT_HOLD_REQUIRE_PROFITABLE", "OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS",
+    "OVERNIGHT_HOLD_REQUIRE_PROFITABLE", "OVERNIGHT_HOLD_PROFITABLE_NET_OF_COSTS",
     "EDIS_MORNING_CHECK_ENABLED", "EXIT_TARGET_USE_LIMIT",
 )
 ENGINE_VARS = ("RISK_MAX_STOCK_PRICE", "RISK_MAX_STOCK_PRICE_ADAPTIVE")
@@ -30,7 +30,7 @@ ENGINE_VARS = ("RISK_MAX_STOCK_PRICE", "RISK_MAX_STOCK_PRICE_ADAPTIVE")
 
 @pytest.fixture
 def reload_all():
-    names = CONFIG_FLAGS + ENGINE_VARS
+    names = CONFIG_FLAGS + ENGINE_VARS + ("OVERNIGHT_HOLD_ENABLED",)
     saved = {k: os.environ.get(k) for k in names}
 
     def go(env):
@@ -54,6 +54,15 @@ def test_blank_config_flags_keep_their_default_on(reload_all, blank):
     cfg, _ = reload_all({k: blank for k in CONFIG_FLAGS})
     for k in CONFIG_FLAGS:
         assert getattr(cfg, k) is True, k
+
+
+@pytest.mark.parametrize("blank", ["", "  ", "\t"])
+def test_blank_overnight_hold_flag_is_off_by_default(reload_all, blank):
+    """group470: the overnight carry is OFF by default (a blank variable keeps that); explicit true still turns it on."""
+    cfg, _ = reload_all({"OVERNIGHT_HOLD_ENABLED": blank})
+    assert cfg.OVERNIGHT_HOLD_ENABLED is False
+    cfg, _ = reload_all({"OVERNIGHT_HOLD_ENABLED": " TRUE "})
+    assert cfg.OVERNIGHT_HOLD_ENABLED is True
 
 
 def test_explicit_false_and_padded_true_still_work(reload_all):

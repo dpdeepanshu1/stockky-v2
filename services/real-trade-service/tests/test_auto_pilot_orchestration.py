@@ -1060,6 +1060,7 @@ def _pin_eod_scan_config(monkeypatch, **overrides):
         EOD_SIGNAL_SCAN_MAX_CANDIDATES=5,
         EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION=80.0,
         EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES=2,
+        EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED=True,
     )
     values.update(overrides)
     for k, v in values.items():
@@ -1120,6 +1121,26 @@ class TestEodSignalScan:
         run(ap._eod_signal_scan(db, "REAL", True))
         assert saved[0]["candidates"][0]["symbol"] == "QUEUEONLY"
         assert "Queued 1 more" in notes[0][0][0]
+
+    def test_high_conviction_not_entered_when_same_day_entry_off(self, db, monkeypatch):
+        """2026-10-20: default OFF - a 95-conviction pick is queued for tomorrow, never bought at 15:05."""
+        _pin_eod_scan_config(monkeypatch, EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED=False)
+        db.add(models.TradeCandidate(mode="REAL", symbol="HOTPICK", consumed=False,
+                                      decision_label="BUY NOW", conviction_score=95))
+        db.commit()
+        monkeypatch.setattr("candidate_engine.candidates.refresh_candidates", _async_return(0))
+        saved = []
+        monkeypatch.setattr("resilience.local_cache.save_snapshot", lambda db, key, payload: saved.append(payload))
+        monkeypatch.setattr(ap, "ist_today_str", lambda: "2026-09-23")
+        monkeypatch.setattr(ap, "notify_async", _async_recorder([]))
+        entered = []
+        async def _boom(*a, **k):
+            entered.append(1)
+            return {}
+        monkeypatch.setattr("entry_engine.entry.evaluate_mode", _boom)
+        run(ap._eod_signal_scan(db, "REAL", True))
+        assert entered == []
+        assert saved[0]["candidates"][0]["symbol"] == "HOTPICK"
 
     def test_high_conviction_entered_today(self, db, monkeypatch):
         _pin_eod_scan_config(monkeypatch)

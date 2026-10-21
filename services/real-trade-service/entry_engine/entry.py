@@ -43,7 +43,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, preopen, prev_day, structure_gate, timesfm_gate, vix_gate, vwap_gate
+from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, stopout_guard, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 
@@ -601,6 +601,18 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
                 "entry_details": [], "opening_protect": _protect_reason}
 
+    # group 471: whole-day stop-out guard. After STOPOUT_DAY_PAUSE_N losing stop-outs today, no automatic entry is evaluated (candidates stay
+    # queued); a symbol stopped out today is WAITed below (Gate 4d). Off with STOPOUT_GUARD_ENABLED=false. See entry_engine/stopout_guard.py.
+    _so_syms: set = set()
+    if stopout_guard.covers(mode):
+        _so_n, _so_syms = stopout_guard.stopouts_today(db, mode)
+        _so_reason = stopout_guard.pause_reason_from(_so_n)
+        if _so_reason:
+            if opening_guard.should_log(mode + ":stopout"):
+                logger.info("entry_engine: %s %s (%d candidate(s) left queued)", mode, _so_reason, len(candidates))
+            return {"evaluated": 0, "entered": 0, "waited": len(candidates), "rejected": 0,
+                    "entry_details": [], "stopout_guard": _so_reason}
+
     # Fetch adaptive regime once per cycle (not per candidate)
     regime_ok    = True
     market_score = 50
@@ -843,6 +855,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
         decision.stop_basis = _atr_stop_basis(atr_pct)                  # group 396: stop source tag (evidence only)
         order_flow.record(decision, tick)                               # group 427: order-flow numbers, record only (never raises)
+        orb_shadow.record(decision, tick)                               # group 470: opening-range-breakout verdict, record only (never raises)
         # 2026-09-01 fix: entry_price is the actual LIMIT price sent to Dhan —
         # must be a valid NSE tick (₹0.05 multiple) or the broker rejects the
         # order outright. See execution/dhan_client.py's TICK_SIZE comment —
@@ -970,6 +983,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
                           (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
                           (lambda: preopen.gap_reason(cand.symbol), "preopen_gap"),
+                          (lambda: stopout_guard.symbol_reason(cand.symbol, _so_syms), "stopout_symbol"),   # group471: no same-day re-buy after a stop-out
+                          (lambda: calendar_gate.late_entry_block_reason(), "late_day"),           # group470: one cut-off every day (ENTRY_LAST_TIME_IST)
                           (lambda: calendar_gate.entry_block_reason(), "calendar"),                # group336: expiry / pre-holiday / Friday cut-off
                           (lambda: liquidity_gate.reject_reason_tick(tick), "liquidity")):      # group333: volume / turnover floor
             _g4d_reason = _fn()
@@ -1104,6 +1119,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             adj_risk_pct *= _cal_mult
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
+        # group470: size on the risk a stop-out REALLY costs (stop distance + the usual fill beyond the stop). Floor of 1 share, so a trade
+        # that fits the plain cap is never turned into a WAIT by this.
+        _ovs_pct = float(getattr(config, "STOP_OVERSHOOT_ALLOWANCE_PCT", 0.0) or 0.0)
+        if _ovs_pct > 0 and proposed_qty > 0:
+            _ovs_qty = max(1, int(max_trade_risk // (per_share_risk + entry_price * _ovs_pct / 100.0)))
+            if _ovs_qty < proposed_qty:
+                logger.info("entry_engine: %s %s sized down %d -> %d shares (stop-overshoot allowance %.2f%%)",
+                            mode, cand.symbol, proposed_qty, _ovs_qty, _ovs_pct)
+                proposed_qty = _ovs_qty
 
         if proposed_qty <= 0:
             _wait_with_preview(
@@ -1203,6 +1227,21 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _re_reason,
                                        "risk_verdict": decision.risk_verdict, "gate_tag": "reentry_same_day"})
                 continue
+
+        # group 472: minimum shares per REAL entry (ENTRY_MIN_QTY, 0 = off). Too few shares cannot be scaled out or trailed.
+        _min_q = int(getattr(config, "ENTRY_MIN_QTY", 0) or 0)
+        _fq = int(result.approved_qty or proposed_qty or 0)
+        if mode == "REAL" and _min_q > 0 and _fq < _min_q:
+            _mq_reason = (f"MIN_QTY: only {_fq} share(s) fit the risk cap (minimum {_min_q}) - too few to take a partial profit or trail; "
+                          "waiting for a cheaper stock or a tighter stop.")
+            decision.action = "WAIT"
+            decision.reasoning = _mq_reason
+            decision.gate_tag = "min_qty"
+            waited += 1
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _mq_reason,
+                                   "risk_verdict": decision.risk_verdict, "gate_tag": "min_qty"})
+            continue
 
         # group 264: CNC vs INTRADAY for this entry (see entry_product.py) - decided once, used by the cost gate below and
         # by the order placement further down (carried on the staged dict).

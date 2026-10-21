@@ -104,6 +104,16 @@ def test_network_failure_is_reported_not_raised():
     assert rc == 1
 
 
+def test_unbooked_zero_pnl_record_is_not_a_trade():
+    """2026-10-20: HDFCLIFE-style record (pnl exactly 0, no return %, closed before the open) must not count as a trade."""
+    ghost = {"position_id": 9, "symbol": "GHOST", "opened_at": "2026-10-19T07:40:00Z", "closed_at": "2026-10-20T03:27:00Z", "net_pnl": 0.0, "gross_pnl": 0.0,
+             "return_pct": None, "exit_reason": "eod_squareoff", "quantity": 5, "origin": "system"}
+    rows = d.rows_from_rt({"records": [ghost, _rt(1, "AAA", "2026-10-15T03:50:00Z", "2026-10-15T09:20:00Z", 420.0, 1.4, "target_hit")]})
+    assert [r["symbol"] for r in rows] == ["AAA"]
+    real_flat = dict(ghost, symbol="FLAT", return_pct=0.0)      # a genuine break-even trade has a return % and stays
+    assert [r["symbol"] for r in d.rows_from_rt({"records": [real_flat]})] == ["FLAT"]
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

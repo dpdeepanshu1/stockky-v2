@@ -404,6 +404,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "imbalance_5": flow.get("imbalance_5"), "imbalance_20": flow.get("imbalance_20"),
                 "flow_spread_pct": flow.get("spread_pct"), "flow_book_value_5": flow.get("book_value_5"),
                 "flow_vs_vwap_pct": flow.get("vs_vwap_pct"), "flow_day_pos": flow.get("day_pos"),
+                **_orb_fields(flow.get("orb")),                                  # group 474: opening-range shadow verdict (record only)
                 "max_gain_pct": exc["max_gain_pct"], "max_drawdown_pct": exc["max_drawdown_pct"],
                 **_exit_trigger(p, reason, exit_dec_by_pos.get(p.id), exit_price),     # group469: exit_trigger_price / _source / exit_slippage_pct
                 **{("log_" + k): v for k, v in _log_only_ctx(cand).items()},     # group468: log_mansfield_rs / log_above_ema50 / log_breadth_pct (record only)
@@ -429,6 +430,27 @@ def _breadth_bucket(v) -> str:
     if x is None:
         return "unknown"
     return "breadth<35" if x < 35 else ("breadth 35-65" if x <= 65 else "breadth>65")
+
+
+def _orb_fields(orb) -> dict:
+    """group 474: flat opening-range-breakout shadow fields from flow_json["orb"] (entry_engine/orb_shadow.py). Pure, never raises.
+    orb_would_enter: True / False / None (no verdict recorded: entry outside 09:15-10:30 or made before group 470)."""
+    try:
+        if not isinstance(orb, dict):
+            return {"orb_would_enter": None, "orb_reasons": None, "orb_range_pct": None}
+        rs = orb.get("reasons")
+        first = (rs[0] if isinstance(rs, list) and rs else orb.get("reason"))
+        return {"orb_would_enter": (bool(orb["would_enter"]) if "would_enter" in orb else None),
+                "orb_reasons": first, "orb_range_pct": orb.get("range_pct")}
+    except Exception:  # noqa: BLE001
+        return {"orb_would_enter": None, "orb_reasons": None, "orb_range_pct": None}
+
+
+def _orb_bucket(r) -> str:
+    v = r.get("orb_would_enter")
+    if v is None:
+        return "no_verdict"
+    return "orb_would_enter" if v else "orb_would_skip:" + str(r.get("orb_reasons") or "?")
 
 
 def _imb_bucket(v) -> str:
@@ -611,6 +633,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_imbalance_20": lambda r: _imb_bucket(r.get("imbalance_20")),
         "by_spread": lambda r: _spread_bucket(r.get("flow_spread_pct")),
         # group468: log-only evidence buckets (candidates made before the record existed fall in "unknown")
+        "by_orb_shadow": _orb_bucket,                                     # group474: would an opening-range entry have taken this trade?
         "by_mansfield_rs": lambda r: _rs_bucket(r.get("log_mansfield_rs")),
         "by_breadth": lambda r: _breadth_bucket(r.get("log_breadth_pct")),
     }

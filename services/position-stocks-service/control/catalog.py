@@ -87,4 +87,20 @@ CATALOG = (
     # ---------------- money safety ----------------
     Flag("OVERNIGHT_HOLD_ENABLED", "Overnight hold allowed", "Money safety", "bool", looser="neutral",
          help="Off by default in the scalper: positions square off the same day.", targets=((_C, "OVERNIGHT_HOLD_ENABLED"),), live=True, shipped="false", evidence="hold_bucket_check.py"),
+    # ---------------- loss-review guards (group479, same names as real-trade-service) ----------------
+    Flag("STOPOUT_GUARD_ENABLED", "Whole-day stop-out guard", "Loss-review guards", "bool", looser="off",
+         help="group479: after STOPOUT_DAY_PAUSE_N losing stop-outs today no new automatic scalp; a symbol stopped out today is not re-bought today. false = rollback.",
+         targets=((_C, "STOPOUT_GUARD_ENABLED"),), live=True, shipped="true", recommended="true", evidence="21 Oct loss review (group479)"),
+    Flag("STOPOUT_DAY_PAUSE_N", "Losing stop-outs that pause the day", "Loss-review guards", "int", lo=0, hi=20, looser="higher", zero_off=True,
+         help="group479: this many losing stop-outs today = no new automatic entry until the next session. 0 = no day pause.",
+         targets=((_C, "STOPOUT_DAY_PAUSE_N"),), live=True, shipped="3", recommended="3", evidence="21 Oct loss review (group479)"),
+    Flag("STOPOUT_SYMBOL_BLOCK", "Do not re-buy a symbol stopped out today", "Loss-review guards", "bool", looser="off",
+         help="group479: a symbol with a losing stop-out today is skipped (STOPOUT_GUARD:SYMBOL).", targets=((_C, "STOPOUT_SYMBOL_BLOCK"),), live=True, shipped="true",
+         recommended="true", evidence="21 Oct loss review (group479)"),
+    Flag("ENTRY_MIN_QTY", "Minimum shares per entry", "Loss-review guards", "int", lo=0, hi=100, looser="lower",
+         help="group479: a sized quantity below this is skipped (MIN_QTY): too few shares cannot be scaled out or trailed. 0 = off.",
+         targets=((_C, "ENTRY_MIN_QTY"),), live=True, shipped="3", recommended="3", evidence="group479"),
+    Flag("ORB_MODE", "Opening-range shadow verdict", "Evidence recording", "enum", choices=("shadow", "off"), same_rank=("shadow", "off"),
+         help="group479: shadow = record an opening-range-breakout verdict per new position in flow_json (never blocks a trade); off stops the recording.",
+         targets=((_C, "ORB_MODE"),), import_time_ok_files=("config.py",), live=True, shipped="shadow", recommended="shadow", looser="neutral", evidence="records_report.py by_orb_shadow"),
 )

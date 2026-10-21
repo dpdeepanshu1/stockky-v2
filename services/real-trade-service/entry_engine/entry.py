@@ -46,6 +46,7 @@ from execution.dhan_client import round_to_tick
 from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, stopout_guard, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
+from entry_engine import size_ladder
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -469,9 +470,10 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         # 2026-09-21 (session79): flat max-trade-value cap — DB override
         # first, config.py default second, same resolution order as every
         # other admin-editable cost-gate knob on this row.
-        max_trade_value=(
-            risk.max_trade_value if risk.max_trade_value is not None
-            else config.MAX_TRADE_VALUE
+        # group 481: REAL only, grows past the base cap only while the stored daily net P&L has earned it (entry_engine/size_ladder.py)
+        max_trade_value=size_ladder.effective_cap(
+            db, mode,
+            risk.max_trade_value if risk.max_trade_value is not None else config.MAX_TRADE_VALUE,
         ),
     )
 

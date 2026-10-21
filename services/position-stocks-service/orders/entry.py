@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, structure_gate, structure_observation, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, orb_shadow, stopout_guard, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -487,6 +487,13 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _open_pause, quality=quality)
         return None
 
+    # group479: whole-day stop-out guard - STOPOUT_DAY_PAUSE_N losing stop-outs today pause every new automatic entry until the next session, and a
+    # symbol stopped out today is not re-bought today (orders/stopout_guard.py; counted from scalp_positions, fails open, STOPOUT_GUARD_ENABLED=false = off).
+    _so_reject = stopout_guard.entry_reason(db, candidate.symbol)
+    if _so_reject:
+        _log_candidate(db, candidate, "SKIPPED", _so_reject, quality=quality)
+        return None
+
     # Max concurrent positions
     open_count = _count_open_positions(db)
     if open_count >= config.MAX_CONCURRENT_SCALP_POSITIONS:
@@ -615,6 +622,11 @@ def attempt_entry(
 
     # group427: order-flow numbers for the record (spread, best-5 imbalance, 20-level book). Record only; never raises, never blocks.
     _flow_snap = order_flow.snapshot_json(candidate.symbol, candidate.current_ltp, None)
+    # group479: opening-range-breakout verdict for the record (orders/orb_shadow.py). Record only; never raises, never blocks.
+    try:
+        _flow_snap = orb_shadow.attach(_flow_snap, candidate.symbol, depth_gate._fresh_quote(candidate.symbol), candidate.current_ltp)
+    except Exception:  # noqa: BLE001
+        pass
 
     # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.
@@ -822,6 +834,15 @@ def attempt_entry(
         )
         quantity = 1
     else:
+        # group479: minimum whole shares (ENTRY_MIN_QTY, default 3, 0 = off), judged after every sizing step above. 1-2 shares cannot scale out or
+        # trail and pay the same fixed costs for less edge. The forced 1-share first live order (branch above) is a probe and is never gated.
+        _min_q = int(getattr(config, "ENTRY_MIN_QTY", 0) or 0)
+        if _min_q > 0 and quantity < _min_q:
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", f"MIN_QTY:qty={quantity}<{_min_q}:ltp={candidate.current_ltp:.2f}", quality=quality)
+            return None
+
         # group 218 (review item 5): skip an entry whose target cannot pay for its own round-trip costs. Checked with
         # the quantity that will really trade; the forced 1-share first live order above is a deliberate probe and
         # is not gated. See orders/cost_gate.py (off with SCALP_COST_GATE_ENABLED=0).

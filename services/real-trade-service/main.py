@@ -2664,6 +2664,8 @@ async def review_fixes_status(admin: Optional[str] = Depends(require_admin_if_re
             "stopout_guard": {"enabled": bool(config.STOPOUT_GUARD_ENABLED), "day_pause_n": config.STOPOUT_DAY_PAUSE_N,
                               "symbol_block": bool(config.STOPOUT_SYMBOL_BLOCK)},
         }
+        from entry_engine import size_ladder
+        out["size_ladder"] = {"enabled": bool(config.SIZE_LADDER_ENABLED), **size_ladder.status(db, "REAL", config.MAX_TRADE_VALUE)}
         for m in ("REAL", "DEMO"):
             n, syms = stopout_guard.stopouts_today(db, m)
             out["stopout_guard"][m.lower()] = {"losing_stopouts_today": n, "symbols": sorted(syms),

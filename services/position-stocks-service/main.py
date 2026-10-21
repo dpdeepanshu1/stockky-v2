@@ -2207,6 +2207,24 @@ def trades_report(days: int = 1, db: Session = Depends(get_db)):
     return {"days": days, **trade_report.report(rows)}
 
 
+@app.get("/review-fixes/status", dependencies=[Depends(require_admin)])
+def review_fixes_status(db: Session = Depends(get_db)):
+    """group479 (read-only): the effective settings of the loss-review guards (14:00 cut-off, whole-day stop-out pause, minimum shares, ORB recorder),
+    today's losing stop-outs and whether the pause is in force. Use it on the VM to confirm the new defaults really are live. No trading change."""
+    from orders import stopout_guard, orb_shadow
+    return {
+        "entry_cutoff_ist": config.SCALP_ENTRY_CUTOFF_IST,
+        "entry_min_qty": config.ENTRY_MIN_QTY,
+        "stopout_guard": stopout_guard.status(db),
+        "orb_mode": config.ORB_MODE,
+        "orb_counters": orb_shadow.stats(),
+        "loss_brake_enabled": config.LOSS_BRAKE_ENABLED,
+        "opening_pause_stopouts": config.OPENING_PAUSE_STOPOUTS,
+        "stagnation_exit_minutes": config.STAGNATION_EXIT_MINUTES,
+        "use_super_order": config.USE_SUPER_ORDER,
+    }
+
+
 @app.get("/trades/history")
 def trades_history(
     db: Session = Depends(get_db),

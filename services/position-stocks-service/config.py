@@ -592,6 +592,12 @@ SCAN_RVOL_SAMPLE_S = _get_float("SCAN_RVOL_SAMPLE_S", 5.0)
 SCALP_COST_GATE_ENABLED = _get_bool("SCALP_COST_GATE_ENABLED", True)
 SCALP_MIN_EDGE_TO_COST_RATIO = _get_float("SCALP_MIN_EDGE_TO_COST_RATIO", 3.0)
 SCALP_COST_SLIPPAGE_ALLOWANCE_PCT = _get_float("SCALP_COST_SLIPPAGE_ALLOWANCE_PCT", 0.10)
+# group 480 (2026-10-21): Dhan charges INTRADAY brokerage per executed order as the LOWER of Rs 20 and 0.03 % of the order value (dhan.co/pricing).
+# The gate used only the flat BROKERAGE_PER_ORDER (default 0), so it priced brokerage at Rs 0 and under-counted the round trip by about 0.06 %.
+# Each leg now costs max(BROKERAGE_PER_ORDER, min(SCALP_COST_GATE_BROKERAGE_CAP_RS, value x SCALP_COST_GATE_BROKERAGE_PCT / 100)).
+# Rollback: SCALP_COST_GATE_BROKERAGE_PCT=0 (the old Rs 0 behaviour). Feeds only this gate, not the charges ledger.
+SCALP_COST_GATE_BROKERAGE_PCT = _get_float("SCALP_COST_GATE_BROKERAGE_PCT", 0.03)
+SCALP_COST_GATE_BROKERAGE_CAP_RS = _get_float("SCALP_COST_GATE_BROKERAGE_CAP_RS", 20.0)
 
 # group 329 (2026-10-12): two pre-buy checks a market professional makes before any entry. Both FAIL OPEN (missing data never blocks).
 #   CIRCUIT_GATE_ENABLED        0 turns the circuit-band check off
@@ -768,7 +774,7 @@ SIZING_ONE_SHARE_MAX_MULT = _get_float("SIZING_ONE_SHARE_MAX_MULT", 1.5)
 # Cheap-stock floor (0 = off). Ships OFF: set e.g. 50 to skip sub-Rs50 names once the journal supports it.
 ENTRY_MIN_PRICE = _get_float("ENTRY_MIN_PRICE", 0.0)
 # Optional cut-off for ordinary days (blank = none). The two latest entries on 2026-10-12 (14:12, 14:29) lost; two trades prove nothing, so OFF.
-SCALP_ENTRY_CUTOFF_IST = _get_str("SCALP_ENTRY_CUTOFF_IST", "")
+SCALP_ENTRY_CUTOFF_IST = _get_str("SCALP_ENTRY_CUTOFF_IST", "14:00")   # group 479: default 14:00 (was blank). No new scalp after this on any day; the 21 Oct review showed late entries are the weakest and the real-trade 14:00 cut-off (group 470) is the same rule. Blank is NOT "off" now (blank = default); set 23:59 to disable.
 # Reconcile announces the same closed-trade fill correction once per process per position (was every 5 minutes, all day).
 RECONCILE_LOG_ONCE = _get_bool("RECONCILE_LOG_ONCE", True)
 
@@ -1185,3 +1191,25 @@ QUALITY_GATE_EVENT_LATE_TTL_S = max(0.0, _get_float("QUALITY_GATE_EVENT_LATE_TTL
 PRICE_FLOOR_BEFORE_GATE = _get_bool("PRICE_FLOOR_BEFORE_GATE", True)
 # Today's closed TARGET/STOP rows: the order-book exit lookup is done once per row per process once it has confirmed the fill.
 EXIT_FILL_CONFIRM_ONCE = _get_bool("EXIT_FILL_CONFIRM_ONCE", True)
+
+
+# ---- group 479 (2026-10-21): position-stocks parity with real-trade groups 470-472 -------------------------------------------------
+# Whole-day stop-out guard (orders/stopout_guard.py): after STOPOUT_DAY_PAUSE_N LOSING stop-outs today (STOP_HIT / STOP_BREACH_EXIT) no new
+# automatic entry until the next session; a symbol stopped out today is not re-bought today. Counted from scalp_positions (a restart does not reset
+# it). The group 392 opening pause (2 stop-outs until 09:45) stays and fires first inside its window. STOPOUT_GUARD_ENABLED=false = rollback.
+STOPOUT_GUARD_ENABLED = _get_bool("STOPOUT_GUARD_ENABLED", True)
+STOPOUT_DAY_PAUSE_N = _get_int("STOPOUT_DAY_PAUSE_N", 3)            # 0 = no day pause
+STOPOUT_SYMBOL_BLOCK = _get_bool("STOPOUT_SYMBOL_BLOCK", True)
+# Minimum whole shares per automatic entry, checked after every sizing step (VIX / calendar / opening half-size). Below it = SKIPPED (MIN_QTY).
+# 1-2 share trades cannot scale out or trail and pay the same fixed costs. 0 = off. The forced 1-share first live order is never gated.
+ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))
+# Opening-range-breakout recorder (orders/orb_shadow.py): RECORD ONLY. flow_json["orb"] on every new position says what a 5-minute opening-range
+# entry (price above the 09:15-09:20 range high and above VWAP, tight spread, limit just above the high, stop = range low) would have done.
+ORB_MODE = _get_str("ORB_MODE", "shadow").lower()                   # shadow | off
+ORB_RANGE_END_IST = _get_str("ORB_RANGE_END_IST", "09:20")
+ORB_CAPTURE_UNTIL_IST = _get_str("ORB_CAPTURE_UNTIL_IST", "09:26")
+ORB_LATEST_ENTRY_IST = _get_str("ORB_LATEST_ENTRY_IST", "10:30")
+ORB_LIMIT_BUFFER_PCT = max(0.0, _get_float("ORB_LIMIT_BUFFER_PCT", 0.10))
+ORB_MAX_SPREAD_PCT = max(0.0, _get_float("ORB_MAX_SPREAD_PCT", 0.30))
+ORB_MIN_RANGE_PCT = max(0.0, _get_float("ORB_MIN_RANGE_PCT", 0.30))
+ORB_MAX_RANGE_PCT = max(0.0, _get_float("ORB_MAX_RANGE_PCT", 3.0))

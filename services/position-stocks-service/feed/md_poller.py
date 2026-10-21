@@ -179,6 +179,11 @@ def ingest_rows(rows, now: Optional[float] = None) -> int:
         day_stats = (op, hi, lo, prev) if any(v is not None for v in (op, hi, lo, prev)) else None
         ws_client._last_tick_at = ts
         ws_client._ingest_tick(sym, price, ts, vol, None, None, day_stats, vwap)
+        try:   # group479: opening-range recorder (record only, time-gated, never raises)
+            from orders import orb_shadow
+            orb_shadow.record_quote(sym, row)
+        except Exception:  # noqa: BLE001
+            pass
         stored += 1
     _stats["ticks"] += stored
     return stored

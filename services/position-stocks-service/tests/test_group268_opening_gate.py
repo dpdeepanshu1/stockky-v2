@@ -361,6 +361,61 @@ def test_unusable_candles_are_not_cached(monkeypatch):
     prev_day.reset()
 
 
+def test_404_history_is_negative_cached_for_minutes(monkeypatch):
+    """2026-10-21: HDFIRE-class symbols (market-data /history -> 404) were re-asked every PREVDAY_RETRY_S."""
+    import time as _t
+    prev_day.reset()
+    calls = []
+    monkeypatch.setattr(prev_day, "_INLINE", True)
+    monkeypatch.setattr(prev_day, "ist_today_str", lambda now=None: "2026-10-09")
+
+    def nohist(sym):
+        calls.append(sym)
+        raise prev_day._NoHistory("history HTTP 404")
+    monkeypatch.setattr(prev_day, "_fetch_candles", nohist)
+    assert prev_day.get("HDFIRE") is None
+    assert prev_day._last_try["HDFIRE"] - _t.monotonic() > prev_day.PREVDAY_NODATA_RETRY_S - prev_day.PREVDAY_RETRY_S - 5
+    # still blocked after the normal 60 s window has passed
+    monkeypatch.setitem(prev_day._last_try, "HDFIRE", prev_day._last_try["HDFIRE"] - prev_day.PREVDAY_RETRY_S - 1)
+    assert prev_day.get("HDFIRE") is None
+    assert calls == ["HDFIRE"]
+    # ...and allowed again once the long window has passed
+    monkeypatch.setitem(prev_day._last_try, "HDFIRE", _t.monotonic() - prev_day.PREVDAY_NODATA_RETRY_S - 1)
+    prev_day.get("HDFIRE")
+    assert calls == ["HDFIRE", "HDFIRE"]
+    prev_day.reset()
+
+
+def test_transient_failure_keeps_the_short_retry_window(monkeypatch):
+    import time as _t
+    prev_day.reset()
+    monkeypatch.setattr(prev_day, "_INLINE", True)
+    monkeypatch.setattr(prev_day, "ist_today_str", lambda now=None: "2026-10-09")
+    monkeypatch.setattr(prev_day, "_fetch_candles", lambda sym: (_ for _ in ()).throw(RuntimeError("history HTTP 503")))
+    prev_day.get("AAA")
+    assert prev_day._last_try["AAA"] <= _t.monotonic()
+    prev_day.reset()
+
+
+def test_fetch_candles_maps_404_to_no_history(monkeypatch):
+    import httpx
+
+    class _R:
+        status_code = 404
+        def json(self):
+            return {}
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **k): return _R()
+    monkeypatch.setattr(httpx, "Client", _C)
+    import pytest
+    with pytest.raises(prev_day._NoHistory):
+        prev_day._fetch_candles("HDFIRE")
+
+
 def test_inflight_cap(monkeypatch):
     prev_day.reset()
     monkeypatch.setattr(prev_day, "_INLINE", True)

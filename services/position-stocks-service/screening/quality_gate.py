@@ -138,22 +138,35 @@ def upsert_cache_batch(db: Session, signals: list[QualitySignal]) -> None:
     — same reasoning as get_cache_batch above. Never overwrites an existing
     cached field with None; a symbol with nothing live this cycle is
     skipped entirely (stale cache stays as-is until it naturally ages out
-    via QUALITY_CACHE_MAX_AGE_HOURS)."""
-    for sig in signals:
-        if sig.fundamental_score is None and sig.technical_score is None and sig.market_cap_cr is None:
-            continue
-        row = db.query(ScalpQualityCache).filter_by(symbol=sig.symbol).one_or_none()
-        if row is None:
-            row = ScalpQualityCache(symbol=sig.symbol)
-            db.add(row)
-        if sig.fundamental_score is not None:
-            row.fundamental_score = sig.fundamental_score
-        if sig.technical_score is not None:
-            row.technical_score = sig.technical_score
-        if sig.market_cap_cr is not None:
-            row.market_cap_cr = sig.market_cap_cr
-        row.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    via QUALITY_CACHE_MAX_AGE_HOURS).
+
+    Best-effort, NEVER raises (2026-10-21): this is only a fallback cache, so
+    an Oracle timeout (DPY-4024) in the per-symbol query's autoflush or in the
+    commit used to propagate out and abort the whole trading cycle ("trading
+    loop error"). Any failure is now logged, the session is rolled back, and
+    the cycle carries on with live data (the cache simply isn't refreshed)."""
+    try:
+        for sig in signals:
+            if sig.fundamental_score is None and sig.technical_score is None and sig.market_cap_cr is None:
+                continue
+            row = db.query(ScalpQualityCache).filter_by(symbol=sig.symbol).one_or_none()
+            if row is None:
+                row = ScalpQualityCache(symbol=sig.symbol)
+                db.add(row)
+            if sig.fundamental_score is not None:
+                row.fundamental_score = sig.fundamental_score
+            if sig.technical_score is not None:
+                row.technical_score = sig.technical_score
+            if sig.market_cap_cr is not None:
+                row.market_cap_cr = sig.market_cap_cr
+            row.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as e:
+        logger.warning("quality_gate: cache upsert failed, skipped this cycle (%s)", str(e)[:200] or type(e).__name__)
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("quality_gate: rollback after failed cache upsert also failed", exc_info=True)
 
 
 async def _fetch_fundamental(client: httpx.AsyncClient, symbol: str, timeout: Optional[float] = None) -> tuple[Optional[float], Optional[float]]:

@@ -2624,14 +2624,14 @@ def _structure_view(raw):
 
 
 @app.get("/kronos/status")
-async def kronos_status(admin: Optional[str] = Depends(require_admin_if_real)):
+async def kronos_status(admin: Optional[str] = Depends(require_admin)):
     """group 425: Kronos forecast gate - config and process counters since boot plus the last verdicts. Read-only; nothing in the entry path reads it."""
     from entry_engine import kronos_gate as _kg
     return _kg.stats()
 
 
 @app.get("/range52w/status")
-async def range52w_status(admin: Optional[str] = Depends(require_admin_if_real)):
+async def range52w_status(admin: Optional[str] = Depends(require_admin)):
     """group440: 52-week "top 12%" candidate rule - is it live or log-only, how many candidates it WOULD have rejected since boot, and the last 50
     symbols (with their range position and the market score). Read-only; nothing in the entry path reads it. Counters reset on restart."""
     from candidate_engine import candidates as _cd
@@ -2648,7 +2648,7 @@ async def range52w_status(admin: Optional[str] = Depends(require_admin_if_real))
 
 
 @app.get("/review-fixes/status")
-async def review_fixes_status(admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """group 473: one read-only view of the 20 Oct review fixes (groups 470-472): the effective settings, whether the late-entry cut-off is
     blocking now, today's losing stop-outs and their symbols, and the opening-range shadow counters since boot. Nothing reads it to decide."""
     try:
@@ -2676,7 +2676,7 @@ async def review_fixes_status(admin: Optional[str] = Depends(require_admin_if_re
 
 
 @app.get("/timesfm/status")
-async def timesfm_status(admin: Optional[str] = Depends(require_admin_if_real)):
+async def timesfm_status(admin: Optional[str] = Depends(require_admin)):
     """group 434: TimesFM parameter record (Gate 4g, log only) - config and process counters since boot plus the last verdicts. Read-only; nothing in the entry path reads it."""
     from entry_engine import timesfm_gate as _tg
     return _tg.stats()

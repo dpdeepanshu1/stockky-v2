@@ -143,3 +143,15 @@ All of it needs data from the VM; none of it has run on real history.
 - Deploy: rebuild real-trade-service, position-stocks-service, calibration-runner-service, frontend; install nginx `/calibration/`; run `npm run build` (not run in the authoring sandbox). See `docs/GROUP442_REAL_MONEY_CALIBRATION_CONTROL.md`.
 - Not done by design: restart from the page; switches for G5-G8 / F3 (they do not exist in the repo).
 - Open: confirm on the VM that each LIVE switch really changes behaviour on the next cycle (the static proof covers the code, not a live trade); watch the first scheduled packs before leaving the timetable on.
+
+## Group 470 follow-ups (20 Oct review)
+- Confirm BROKER_STOP_ENABLED=true on the VM and test a resting stop on a small position.
+- Done in group 471: whole-day stop-out guard (day pause + no same-day re-buy). Still not built: per-fill overshoot measurement in the exit loop (needs fill vs stop join; record exit slippage already exists from group 469); flow stamping on skipped candidates; live opening-range entry (needs 30+ shadow would-enter rows with results).
+- Consider DEFAULT_RISK_PER_TRADE_PCT 5 -> 1-2 and a 25% position cap (about Rs4,500) with min 3 shares, only after stop fixes show positive expectancy.
+- Run the full real-trade pytest on CI (sandbox could not run the entry integration suite this pass).
+
+- Done in group 472: minimum 3 shares per REAL entry. Still open: 25% position cap (about Rs4,500, same-day only) after the stop fixes show positive expectancy; DEFAULT_RISK_PER_TRADE_PCT 5 -> 1-2 decision.
+- Done in group 473: GET /review-fixes/status on real-trade (check it on the VM after deploy: broker_stop_enabled must be true).
+- Note: DEFAULT_RISK_PER_TRADE_PCT only seeds a NEW db row; the live risk % is the stored row (set it on the Real Money page / risk config), and group322 already caps one trade at the daily-loss % (3). Not a code fix.
+- Done in group 474: by_orb_shadow in the trade-records report. Read it after 30+ closed trades with a verdict: if 'orb_would_enter' beats 'orb_would_skip:*' after charges, consider a live opening-range entry; else drop it.
+- Done in group 475: env_review_check.py. Run it on the VM before and after deploy. Flow stamping on skipped candidates: already covered for every gate after the quote-age check (order_flow.record runs before Gate 3); only never-queued watchlist rows have no flow, they have no decision row to hold it - left as is.

@@ -58,3 +58,10 @@ OUTBOX_RETRY_S = max(10, _i("RUNNER_OUTBOX_RETRY_S", 60))
 OUTBOX_MAX_AGE_S = max(600, _i("RUNNER_OUTBOX_MAX_AGE_S", 24 * 3600))
 # group 466: an AUTOMATIC run waits at most this long for the other services to answer /health before it starts (0 = do not wait)
 PREFLIGHT_S = max(0, _i("RUNNER_PREFLIGHT_S", 60))
+
+# group 476: auto-calibration. The switches that have a test are set from the test results (see autocalib.py); every change is sent to Telegram.
+AUTOCALIB_ENABLED = _b("AUTOCALIB_ENABLED", True)          # master switch; the page can change it (stored in <data>/state/autocalib.json, which then wins)
+AUTOCALIB_DRY_RUN = _b("AUTOCALIB_DRY_RUN", False)         # true = decide and report, apply nothing
+AUTOCALIB_COOLDOWN_H = max(0, _i("AUTOCALIB_COOLDOWN_H", 24))        # a switch changed by auto-calibration is left alone this long
+AUTOCALIB_MAX_AGE_DAYS = max(1, _i("AUTOCALIB_MAX_AGE_DAYS", 40))    # a test result older than this is not evidence
+AUTOCALIB_STEP_PCT = max(1, min(100, _i("AUTOCALIB_STEP_PCT", 25)))  # a number moves at most this % per evaluation

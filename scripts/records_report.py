@@ -78,6 +78,8 @@ def load_records(paths: Iterable[str], mode: Optional[str]) -> List[Dict[str, An
                 continue
             if mode and str(r.get("mode") or "").upper() != mode.upper():
                 continue
+            if num(r.get("net_pnl")) == 0.0 and num(r.get("return_pct")) is None and num(r.get("gross_pnl")) in (0.0, None):
+                continue          # 2026-10-20: unbooked / ghost record (P&L 0, no return %): no real fill, not a trade
             out[r["position_id"]] = r
     return list(out.values())
 

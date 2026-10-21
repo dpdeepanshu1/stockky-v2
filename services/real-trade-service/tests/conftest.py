@@ -177,3 +177,40 @@ def _exit_hold_audit_every_cycle(monkeypatch):
     mod = _sys_g172.modules.get("exit_engine.exit")
     if mod is not None and hasattr(mod, "_HOLD_AUDIT_LAST"):
         mod._HOLD_AUDIT_LAST.clear()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _late_entry_cutoff_off_by_default(monkeypatch):
+    """group 470: calendar_gate.late_entry_block_reason() reads the wall clock (no new entry from ENTRY_LAST_TIME_IST, 14:00 IST). Older
+    tests predate it and must not depend on the hour the suite runs; tests/test_group470_review_fixes.py pins the time and sets it itself."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_LAST_TIME_IST", "", raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _overnight_hold_on_for_older_tests(monkeypatch):
+    """group 470: the shipped OVERNIGHT_HOLD_ENABLED default is now false. Carry tests written before that exercise the selection logic and
+    assume it is on; tests/test_blank_flag_env.py and tests/test_group470_review_fixes.py check the real default."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OVERNIGHT_HOLD_ENABLED", True, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _stop_overshoot_allowance_off_for_older_tests(monkeypatch):
+    """group 470: older sizing tests assert exact share counts from the plain risk cap; the allowance is tested in test_group470_review_fixes.py."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "STOP_OVERSHOOT_ALLOWANCE_PCT", 0.0, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _stopout_guard_off_for_older_tests(monkeypatch):
+    """group 471: the whole-day stop-out guard reads closed positions; older entry tests predate it. tests/test_group471_stopout_guard.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "STOPOUT_GUARD_ENABLED", False, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _min_qty_off_for_older_tests(monkeypatch):
+    """group 472: older REAL entry tests use 1-2 share positions; the minimum is checked in tests/test_group472_min_qty.py."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_MIN_QTY", 0, raising=False)

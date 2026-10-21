@@ -82,7 +82,8 @@ class Runner:
     def __init__(self, data_dir: str, scripts_dir: str, ctx_base: Dict[str, Any], jobs: Dict[str, Dict[str, Any]], packs: Dict[str, Dict[str, Any]],
                  token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
                  keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now,
-                 notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False, preflight_s: float = 60.0):
+                 notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False, preflight_s: float = 60.0,
+                 after_fn: Optional[Callable[[Dict[str, Any]], Any]] = None):
         self.data = data_dir
         self.runs_dir = os.path.join(data_dir, "runs")
         self.ctx_base = dict(ctx_base)
@@ -93,6 +94,7 @@ class Runner:
         self.keep_runs, self.keep_days = keep_runs, keep_days
         self.guard_market = guard_market
         self.now_fn = now_fn
+        self.after_fn = after_fn        # group 476: called (in its own thread) with the finished run's public dict, e.g. auto-calibration
         self.notify_fn = notify_fn      # group 447: (run dict, run dir) -> "sent" | note | None; announces automatic runs (see notify.py)
         self.keep_latest_only = keep_latest_only   # group 447: a new result replaces the older one of the same job / pack (saves disk)
         self.preflight_s = max(0.0, float(preflight_s))   # group 466: an automatic run waits at most this long for the stack to answer
@@ -396,6 +398,15 @@ class Runner:
             self._record_auto(r)
             self.supersede(r.d["kind"], r.d["target"], r.d.get("params") or {})
         except Exception:  # noqa: BLE001 - bookkeeping must never touch the run
+            pass
+        if self.after_fn and r.d.get("status") != "blocked":
+            pub = r.public()
+            threading.Thread(target=self._call_after, args=(pub,), name="after-run", daemon=True).start()
+
+    def _call_after(self, pub: Dict[str, Any]) -> None:
+        try:
+            self.after_fn(pub)
+        except Exception:  # noqa: BLE001 - a hook problem never touches a run
             pass
 
     def _notify_done(self, r: Run) -> None:

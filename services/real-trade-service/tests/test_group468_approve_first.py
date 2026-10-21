@@ -6,6 +6,8 @@ import os
 import sys
 import types
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _spec = importlib.util.spec_from_file_location("g468_approve_first", os.path.join(_ROOT, "entry_engine", "approve_first.py"))
 af = importlib.util.module_from_spec(_spec)
@@ -102,12 +104,35 @@ class _FakeCache:
         cls.store[key] = payload
 
 
+_MISSING = object()
+_SAVED_MODS = {}
+
+
 def _install_fake_cache():
+    # Remember what was there so _restore_real_cache() can put it back: replacing sys.modules for the rest of the
+    # run broke every later test that imports resilience.local_cache (symbol_master, intraday_news, main startup).
+    for name in ("resilience", "resilience.local_cache"):
+        _SAVED_MODS.setdefault(name, sys.modules.get(name, _MISSING))
     pkg = types.ModuleType("resilience")
     mod = types.ModuleType("resilience.local_cache")
     mod.load_snapshot, mod.save_snapshot = _FakeCache.load_snapshot, _FakeCache.save_snapshot
     sys.modules["resilience"], sys.modules["resilience.local_cache"] = pkg, mod
     _FakeCache.store = {}
+
+
+def _restore_real_cache():
+    for name, mod in list(_SAVED_MODS.items()):
+        if mod is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
+    _SAVED_MODS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _real_cache_back_after_each_test():
+    yield
+    _restore_real_cache()
 
 
 def test_wrappers_end_to_end_and_off_by_default():

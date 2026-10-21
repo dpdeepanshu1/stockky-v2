@@ -14,15 +14,17 @@ import TradesPanel from "./calibration/TradesPanel";
 import RunPlanPanel from "./calibration/RunPlanPanel";
 import TestsPanel from "./calibration/TestsPanel";
 import RunAllBar from "./calibration/RunAllBar";
+import AutoCalibPanel from "./calibration/AutoCalibPanel";
 import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
-type Section = "switches" | "trades" | "plan" | "tests" | "runs";
+type Section = "switches" | "auto" | "trades" | "plan" | "tests" | "runs";
 
 const SVC_ITEMS: { id: Svc; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }];
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "switches", label: "Switches" },
+  { id: "auto", label: "Auto-calibration" },
   { id: "trades", label: "Daily trades" },
   { id: "plan", label: "Run plan" },
   { id: "tests", label: "Tests & training" },
@@ -104,6 +106,7 @@ function Body() {
       <SessionNotice />
       {section !== "runs" && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
+      {section === "auto" && <AutoCalibPanel />}
       {section === "trades" && <TradesPanel svc={svc} onRunReport={() => void start("job", "daily_trades", { days: 10, origin: "all" })} />}
       {section === "plan" && <RunPlanPanel svc={svc} />}
       {section === "tests" && <TestsPanel svc={svc} />}

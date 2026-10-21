@@ -945,6 +945,11 @@ def _overnight_hold_enabled(db, mode: str) -> bool:
     new toggle off. Fails open to the config default if the gate row is
     somehow missing (should not happen in practice — _eod_squareoff already
     requires a gate row to run at all)."""
+    # 2026-10-20 fix: the Real Money Calibration page switches config.OVERNIGHT_HOLD_ENABLED, but this function used to
+    # read only the gate row (column default True), so "Overnight hold allowed = false" on the page changed nothing.
+    # Now BOTH must allow it: either one being off keeps every position same-day.
+    if not config.OVERNIGHT_HOLD_ENABLED:
+        return False
     try:
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
     except Exception:
@@ -1459,10 +1464,16 @@ async def _eod_signal_scan(db, mode: str, gate_armed: bool) -> None:
 
     # picked is already sorted by conviction desc (inherited from pool) —
     # take the top N that clear the stricter same-day-entry bar.
-    same_day_entry = [
-        c for c in picked
-        if (c.conviction_score or 0) >= config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION
-    ][: config.EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES]
+    # 2026-10-20: a 15:05 fill is always an overnight CNC position (square-off already ran). The live records show those
+    # entries lose -2.9% on average, mostly in delivery charges, so the same-day tier is gated by the master switch
+    # EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED AND overnight holding being allowed. Off = every pick queues for tomorrow's open.
+    if config.EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED and _overnight_hold_enabled(db, mode):
+        same_day_entry = [
+            c for c in picked
+            if (c.conviction_score or 0) >= config.EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION
+        ][: config.EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES]
+    else:
+        same_day_entry = []
     same_day_ids = {c.id for c in same_day_entry}
     queue_only = [c for c in picked if c.id not in same_day_ids]
 

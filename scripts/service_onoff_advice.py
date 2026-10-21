@@ -57,6 +57,8 @@ def rows_from_csv(path: str) -> List[Dict[str, Any]]:
             except (KeyError, ValueError, TypeError):
                 continue
             p = d.num(r.get("pnl"))
+            if p == 0.0 and d.num(r.get("return_pct")) is None:
+                continue          # 2026-10-20: unbooked / ghost record (see daily_trade_report.is_unbooked), not a trade
             if p is None:
                 continue
             out.append({"service": r.get("service") or "?", "id": None, "symbol": r.get("symbol") or "?", "entry": o, "exit": c, "day": c.date().isoformat(),

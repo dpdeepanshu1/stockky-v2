@@ -661,6 +661,40 @@ CALENDAR_EXPIRY_WEEKDAY = int(_og_float("CALENDAR_EXPIRY_WEEKDAY", 1))      # 0=
 CALENDAR_EXPIRY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_EXPIRY_ENTRY_CUTOFF_IST", "14:30")
 CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "14:30")
 CALENDAR_FRIDAY_ENTRY_CUTOFF_IST = _cal_str("CALENDAR_FRIDAY_ENTRY_CUTOFF_IST", "")
+
+# group 470 (2026-10-20): ONE entry cut-off for every session (the CALENDAR_* cut-offs above only apply on expiry / pre-holiday days).
+# No new BUY from ENTRY_LAST_TIME_IST on, so a position is not opened in the thin last hour and then forced out by the 15:00 square-off.
+# Blank = no general cut-off. Independent of CALENDAR_RULES_ENABLED.
+ENTRY_LAST_TIME_IST = _cal_str("ENTRY_LAST_TIME_IST", "14:00")
+
+# group 470: stop-overshoot allowance used in SIZING. 17 of 24 stop-hit exits filled beyond the stop (3.1% on average, worst 17.6%), so a
+# trade sized to lose exactly (entry - stop) x qty really lost more. Size is now worked out on (entry - stop) + entry x this % per share.
+# 0 = old sizing. A 1-share trade that fits the plain cap still goes through.
+STOP_OVERSHOOT_ALLOWANCE_PCT = max(0.0, _og_float("STOP_OVERSHOOT_ALLOWANCE_PCT", 1.0))
+
+# group 470: opening-range-breakout recorder (entry_engine/orb_shadow.py). RECORD ONLY: ORB_MODE=shadow (default) writes what an
+# opening-range entry WOULD have done onto flow_json["orb"]; nothing is ordered or blocked. ORB_MODE=off stops it. No live mode exists.
+ORB_MODE = ((os.getenv("ORB_MODE") or "").strip().lower() or "shadow")
+if ORB_MODE not in ("off", "shadow"):
+    ORB_MODE = "shadow"
+ORB_RANGE_END_IST = (os.getenv("ORB_RANGE_END_IST") or "").strip() or "09:20"
+ORB_CAPTURE_UNTIL_IST = (os.getenv("ORB_CAPTURE_UNTIL_IST") or "").strip() or "09:26"
+ORB_LATEST_ENTRY_IST = (os.getenv("ORB_LATEST_ENTRY_IST") or "").strip() or "10:30"
+ORB_LIMIT_BUFFER_PCT = max(0.0, _og_float("ORB_LIMIT_BUFFER_PCT", 0.10))
+ORB_MAX_SPREAD_PCT = max(0.0, _og_float("ORB_MAX_SPREAD_PCT", 0.30))
+ORB_MIN_RANGE_PCT = max(0.0, _og_float("ORB_MIN_RANGE_PCT", 0.30))
+ORB_MAX_RANGE_PCT = max(0.0, _og_float("ORB_MAX_RANGE_PCT", 3.0))
+
+# group 471: whole-day stop-out guard (entry_engine/stopout_guard.py). After STOPOUT_DAY_PAUSE_N losing stop-outs today no new automatic entry
+# until the next session (0 = no pause); a symbol stopped out today is not re-bought today (STOPOUT_SYMBOL_BLOCK). Fails open.
+STOPOUT_GUARD_ENABLED = ((os.getenv("STOPOUT_GUARD_ENABLED") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
+STOPOUT_GUARD_MODES = {m.strip().upper() for m in ((os.getenv("STOPOUT_GUARD_MODES") or "").strip() or "REAL,DEMO").split(",") if m.strip()}
+STOPOUT_DAY_PAUSE_N = int(_og_float("STOPOUT_DAY_PAUSE_N", 3))
+STOPOUT_SYMBOL_BLOCK = ((os.getenv("STOPOUT_SYMBOL_BLOCK") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
+
+# group 472: minimum shares per REAL entry. 1-2 share trades cannot take a partial profit or trail (SUZLON, BLUESTONE in the 20 Oct review) and
+# pay the same fixed costs for less edge. A candidate whose risk-sized quantity is below this is WAITed (gate_tag min_qty). 0 = off. REAL only.
+ENTRY_MIN_QTY = max(0, int(_og_float("ENTRY_MIN_QTY", 3)))
 CALENDAR_EXPIRY_SIZE_MULT = _og_float("CALENDAR_EXPIRY_SIZE_MULT", 0.8)
 CALENDAR_PRE_HOLIDAY_SIZE_MULT = _og_float("CALENDAR_PRE_HOLIDAY_SIZE_MULT", 0.8)
 CALENDAR_FRIDAY_SIZE_MULT = _og_float("CALENDAR_FRIDAY_SIZE_MULT", 0.9)
@@ -768,6 +802,9 @@ EOD_SIGNAL_SCAN_MIN_CONVICTION = float(((os.getenv("EOD_SIGNAL_SCAN_MIN_CONVICTI
 # lost — see auto_pilot._eod_signal_scan.
 EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION = float(((os.getenv("EOD_SIGNAL_SCAN_ENTRY_MIN_CONVICTION") or "").strip() or "75.0"))
 EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES = int(((os.getenv("EOD_SIGNAL_SCAN_ENTRY_MAX_CANDIDATES") or "").strip() or "2"))
+# 2026-10-20: master switch for the same-day tier above. Default OFF: 15:05 entries are overnight CNC positions and the
+# REAL closed-trade records show them losing (hold_bucket: 1 day -2.98% vs same day -0.65%; charges dominate the loss).
+EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED = ((os.getenv("EOD_SIGNAL_SCAN_SAME_DAY_ENTRY_ENABLED") or "").strip() or "false").lower() in ("1", "true", "yes", "on")
 
 # ── After-hours news scan (2026-09-17, session56 — user request) ────────────
 # After market close, poll Moneycontrol/LiveMint/ET RSS feeds hourly, classify
@@ -1245,7 +1282,10 @@ MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() o
 # off exactly as before — this does not change behavior for the bulk of
 # positions, only for the specific cases the pipeline already has strong
 # evidence for.
-OVERNIGHT_HOLD_ENABLED = ((os.getenv("OVERNIGHT_HOLD_ENABLED") or "").strip() or "true").lower() == "true"
+# group 470 (2026-10-20): default is now FALSE. 20 Oct review of 196 REAL trades: the 85 one-day holds paid Rs16.8 charges each against Rs2.0 for
+# same-day trades, and the hold test shows one-day holds 2.3 points worse than same-day. OVERNIGHT_HOLD_ENABLED=true (and the Real Money
+# Calibration page switch) brings the selective carry back.
+OVERNIGHT_HOLD_ENABLED = ((os.getenv("OVERNIGHT_HOLD_ENABLED") or "").strip() or "false").lower() == "true"
 
 # Only these entry decision labels are eligible — deliberately excludes the
 # base "VOLUME_SHOCK" tier (48.1% backtested win rate, +0.66% mean — too

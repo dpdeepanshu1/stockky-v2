@@ -199,6 +199,21 @@ export interface Summary {
 
 const R = <T,>(path: string, init?: RequestInit) => call<T>(getRunnerUrl(), anyToken(), path, init);
 
+export interface AutoSettings { enabled: boolean; dry_run: boolean; pinned: string[]; cooldown_h: number; step_pct: number }
+export interface AutoRuleRow { key: string; service: string; title: string; tests: string[]; explain: string; pinned: boolean }
+export interface AutoChange { at: number; key: string; service: string; title: string; from: string | null; to: string; change: string; reason: string; applied_live: boolean; restart_required: boolean; trigger: string }
+export interface AutoCoverageRow { service: string; key: string; title: string | null; status: "automated" | "protected" | "manual"; why: string; effective: string | null }
+export interface AutoReportRow { key: string; service: string; title: string; status: string; detail: string; from: string | null; to: string | null; change: string | null; tests: string[] }
+export interface AutoReport { ran: boolean; reason?: string; at?: number; dry_run?: boolean; changed?: number; errors?: number; waiting?: number; rows: AutoReportRow[] }
+export interface AutoStatus {
+  settings: AutoSettings;
+  pending: Record<string, { to: string; votes: string[] }>;
+  last: (Omit<AutoReport, "rows"> & { rows: { key: string; status: string; from: string | null; to: string | null }[] }) | null;
+  history: AutoChange[];
+  rules: AutoRuleRow[];
+  coverage?: { switches: AutoCoverageRow[]; unreachable: { service: string; error: string }[]; counts: Record<string, number> };
+}
+
 export const runnerApi = {
   health: () => fetch(`${getRunnerUrl()}/health`).then((r) => r.json()),
   session: () => R<{ ok: boolean; user: string }>("/auth/session"),
@@ -212,6 +227,10 @@ export const runnerApi = {
   cancel: (id: string) => R<{ cancelled: boolean }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   schedule: () => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule"),
   putSchedule: (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule", { method: "PUT", body: JSON.stringify(body) }),
+  // group 476: auto-calibration (switches set from the test results)
+  autoStatus: () => R<AutoStatus>("/autocalib/status"),
+  autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[] }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
+  autoRun: (dry_run?: boolean) => R<AutoReport>("/autocalib/run", { method: "POST", body: JSON.stringify(dry_run === undefined ? {} : { dry_run }) }),
   calibrationSummary: async (): Promise<string> => {
     const resp = await fetch(`${getRunnerUrl()}/calibration-summary`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
     if (!resp.ok) throw new ApiError(resp.status, resp.status === 404 ? "No calibration summary yet: run the full calibration first." : resp.statusText);

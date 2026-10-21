@@ -216,6 +216,21 @@ class TestOvernightHoldEnabled:
         assert ap._overnight_hold_enabled(db, "REAL") is True
 
 
+class TestOvernightHoldConfigWins:
+    """2026-10-20: the page switch (config) must override a gate row that still says True."""
+    def test_config_off_beats_gate_row_true(self, db, monkeypatch):
+        db.add(models.TradeGateState(mode="REAL", overnight_hold_enabled=True))
+        db.commit()
+        monkeypatch.setattr(config, "OVERNIGHT_HOLD_ENABLED", False)
+        assert ap._overnight_hold_enabled(db, "REAL") is False
+
+    def test_config_on_and_gate_off_is_off(self, db, monkeypatch):
+        db.add(models.TradeGateState(mode="REAL", overnight_hold_enabled=False))
+        db.commit()
+        monkeypatch.setattr(config, "OVERNIGHT_HOLD_ENABLED", True)
+        assert ap._overnight_hold_enabled(db, "REAL") is False
+
+
 class TestEdisCheckEnabled:
     def test_reads_true_from_gate_row(self, db):
         db.add(models.TradeGateState(mode="REAL", edis_morning_check_enabled=True))

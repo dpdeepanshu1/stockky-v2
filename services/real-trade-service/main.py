@@ -645,7 +645,11 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             # shape the others use. Defaults True — see this column's
             # models.py docstring for why.
             "overnight_hold": {
-                "enabled": bool(getattr(gate, "overnight_hold_enabled", True)),
+                # 2026-10-20: effective value = config switch (Real Money Calibration page) AND gate row, same as
+                # auto_pilot._overnight_hold_enabled, so this row never shows ON while the page has it OFF.
+                "enabled": bool(config.OVERNIGHT_HOLD_ENABLED) and bool(getattr(gate, "overnight_hold_enabled", True)),
+                "config_enabled": bool(config.OVERNIGHT_HOLD_ENABLED),
+                "gate_enabled": bool(getattr(gate, "overnight_hold_enabled", True)),
             },
         },
         "account": {
@@ -2638,6 +2642,32 @@ async def range52w_status(admin: Optional[str] = Depends(require_admin_if_real))
             "fresh_high_exempt": bool(_cd.FRESH_HIGH_EXEMPT), "top_pct": _cd.OVEREXTENDED_52W_TOP_PCT,
             "current_market_score": _cd._cycle_market_score,
         })
+        return out
+    except Exception as e:  # noqa: BLE001 - status route must never 500
+        return {"error": str(e)[:200]}
+
+
+@app.get("/review-fixes/status")
+async def review_fixes_status(admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """group 473: one read-only view of the 20 Oct review fixes (groups 470-472): the effective settings, whether the late-entry cut-off is
+    blocking now, today's losing stop-outs and their symbols, and the opening-range shadow counters since boot. Nothing reads it to decide."""
+    try:
+        from entry_engine import calendar_gate, orb_shadow, stopout_guard
+        out = {
+            "overnight_hold_enabled": bool(config.OVERNIGHT_HOLD_ENABLED),
+            "entry_last_time_ist": config.ENTRY_LAST_TIME_IST,
+            "late_entry_blocked_now": calendar_gate.late_entry_block_reason(),
+            "stop_overshoot_allowance_pct": config.STOP_OVERSHOOT_ALLOWANCE_PCT,
+            "entry_min_qty": config.ENTRY_MIN_QTY,
+            "broker_stop_enabled": bool(config.BROKER_STOP_ENABLED),
+            "orb": {"mode": config.ORB_MODE, **orb_shadow.stats()},
+            "stopout_guard": {"enabled": bool(config.STOPOUT_GUARD_ENABLED), "day_pause_n": config.STOPOUT_DAY_PAUSE_N,
+                              "symbol_block": bool(config.STOPOUT_SYMBOL_BLOCK)},
+        }
+        for m in ("REAL", "DEMO"):
+            n, syms = stopout_guard.stopouts_today(db, m)
+            out["stopout_guard"][m.lower()] = {"losing_stopouts_today": n, "symbols": sorted(syms),
+                                               "paused": stopout_guard.pause_reason_from(n)}
         return out
     except Exception as e:  # noqa: BLE001 - status route must never 500
         return {"error": str(e)[:200]}

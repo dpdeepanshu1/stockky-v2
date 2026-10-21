@@ -14,7 +14,7 @@ RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.t
 # the service itself
 COPY services/calibration-runner-service/config.py services/calibration-runner-service/auth.py services/calibration-runner-service/jobs.py \
      services/calibration-runner-service/runner.py services/calibration-runner-service/scheduler.py services/calibration-runner-service/main.py \
-     services/calibration-runner-service/notify.py ./
+     services/calibration-runner-service/notify.py services/calibration-runner-service/autocalib.py ./
 
 # what the scripts import: the shared structure engine, and for Kronos the real-trade gate (config.py + entry_engine/kronos_gate.py only)
 COPY scripts /app/scripts

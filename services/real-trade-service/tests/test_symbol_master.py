@@ -160,6 +160,14 @@ class TestLoad:
         run(sm._load(db=None))  # must not raise
         assert sm._symbols == set()
 
+    def test_failure_log_names_the_exception_class_even_with_an_empty_message(self, monkeypatch, caplog):
+        """2026-10-21: httpx timeouts stringify to "" so the line used to end at 'live fetch failed:'."""
+        monkeypatch.setattr(sm.httpx, "AsyncClient",
+                            lambda **kw: _FakeAsyncClient(raises=sm.httpx.ReadTimeout("")))
+        with caplog.at_level("WARNING", logger="real-trade-symbol-master"):
+            run(sm._load(db=None))
+        assert "live fetch failed: ReadTimeout" in caplog.text
+
     def test_fetch_failure_falls_back_to_cache(self, db, monkeypatch):
         monkeypatch.setattr(sm.httpx, "AsyncClient",
                             lambda **kw: _FakeAsyncClient(raises=ConnectionError()))

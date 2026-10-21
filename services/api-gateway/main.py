@@ -10366,6 +10366,29 @@ async def api_surprise_stop():
         return {"ok": False, "error": str(e)[:160]}
 
 
+async def _redis_get_bounded(key: str):
+    """Read `key` WITHOUT blocking the event loop and WITHOUT an unbounded wait.
+
+    2026-10-21 (correction of the earlier plain `await asyncio.to_thread(_redis_get, ...)`): kv_cache already bounds
+    durable reads made from the loop thread (group359: KV_LOOP_READ_TIMEOUT_S, default 1.5 s, then a miss), but that
+    bound still FREEZES the loop for the wait (two reads = the 3.2 s stall the watchdog caught). A bare to_thread
+    removed the freeze but also the bound: a slow Oracle read then held /stockky-hot for the full Oracle time, and
+    real-trade's 25 s timeout feeds its "api-gateway DOWN" circuit breaker. Here the read runs on a worker thread
+    (the loop stays free) and the caller waits at most HOT_KV_READ_TIMEOUT_S (default = KV_LOOP_READ_TIMEOUT_S, 1.5 s);
+    on timeout the answer is a miss, and the worker keeps going and warms the memory cache for the next call."""
+    try:
+        _t = float(((os.getenv("HOT_KV_READ_TIMEOUT_S") or os.getenv("KV_LOOP_READ_TIMEOUT_S") or "").strip() or "1.5"))
+        if not (_t == _t and _t >= 0.1):
+            _t = 1.5
+    except (TypeError, ValueError):
+        _t = 1.5
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_redis_get, key), timeout=_t)
+    except asyncio.TimeoutError:
+        logger.info("stockky-hot: kv read %s exceeded %.1fs - treated as a miss (worker keeps warming the cache)", key, _t)
+        return None
+
+
 @app.get("/stockky-hot")
 async def stockky_hot_endpoint(force: bool = False, background_tasks: BackgroundTasks = None):
     """HTTP entry for Stockky 🔥 Stocks tab — full universe, batched internally.
@@ -10384,10 +10407,9 @@ async def stockky_hot_endpoint(force: bool = False, background_tasks: Background
     if force:
         return await stockky_hot_stocks(force=True, max_symbols=None, progress_cb=None)
 
-    # 2026-10-21: _redis_get can fall through to the Oracle-backed kv_cache; called
-    # straight from this async endpoint it blocked the event loop for 3.2 s while
-    # Oracle was slow (watchdog hit). Run it in a worker thread (same fix as s55/s71).
-    cached = await asyncio.to_thread(_redis_get, HOT_STOCKS_CACHE_KEY)
+    # 2026-10-21: _redis_get can fall through to the Oracle-backed kv_cache; called straight from this
+    # async endpoint it froze the event loop (3.2 s = two bounded 1.5 s reads). Off the loop AND bounded.
+    cached = await _redis_get_bounded(HOT_STOCKS_CACHE_KEY)
     if cached:
         return {**cached, "cached": True}
 
@@ -10400,7 +10422,7 @@ async def stockky_hot_endpoint(force: bool = False, background_tasks: Background
         except Exception as e:
             logger.warning("stockky-hot background warm-up failed to start: %s", e)
 
-    stale = await asyncio.to_thread(_redis_get, HOT_RESULT_KEY)
+    stale = await _redis_get_bounded(HOT_RESULT_KEY)
     if stale:
         return {**stale, "cached": True, "stale": True, "warming": True}
 
@@ -12166,17 +12188,23 @@ def _start_structure_refresh_locked(force: bool, dry_run: bool, limit: Optional[
     if job.get("status") == "running":
         return {"ok": True, "already_running": True, **job}
     store = _feed_store()
-    syms, tally, expected = _sr.plan(store, force=bool(force), limit=limit)
-    plan_info = {"selection": tally, "expected_bar_date": str(expected), "total": len(syms)}
-    if dry_run:
+    if dry_run:   # a dry run has to answer with the selection, so it plans before returning
+        syms, tally, expected = _sr.plan(store, force=bool(force), limit=limit)
+        plan_info = {"selection": tally, "expected_bar_date": str(expected), "total": len(syms)}
         return {"ok": True, "dry_run": True, "status": "dry_run", "would_refresh": len(syms), "symbols": syms[:50], **plan_info}
-    if not syms:
-        return {"ok": True, "status": "nothing_to_do", "message": "Every feed row already has the latest completed daily structure", **plan_info}
-    _sr._set_job(status="running", message=f"Structure refresh starting for {len(syms)} symbols", processed=0, total=len(syms), force=bool(force),
-                 selection=tally)
+    # group 486: planning reads EVERY feed row (a slow store read). It used to run before this function returned, so the POST blocked for the whole read
+    # and the daily_close job timed out at 60 s on 2026-10-21 although the docstring says "returns at once". Plan inside the worker thread instead.
+    _sr._set_job(status="running", message="Structure refresh: planning (reading the feed rows)", processed=0, total=0, force=bool(force), selection={})
 
     def _worker() -> None:
         try:
+            syms, tally, expected = _sr.plan(store, force=bool(force), limit=limit)
+            if not syms:
+                _sr._set_job(status="done", message="Nothing to do: every feed row already has the latest completed daily structure",
+                             processed=0, total=0, selection=tally, expected_bar_date=str(expected))
+                return
+            _sr._set_job(status="running", message=f"Structure refresh starting for {len(syms)} symbols", processed=0, total=len(syms),
+                         selection=tally, expected_bar_date=str(expected))
             with httpx.Client() as client:
                 _sr.run(syms, store, _sr.make_fetcher(client), force=bool(force), tally=tally)
         except Exception as e:  # noqa: BLE001
@@ -12187,7 +12215,7 @@ def _start_structure_refresh_locked(force: bool, dry_run: bool, limit: Optional[
                 pass
 
     threading.Thread(target=_worker, name="structure-refresh", daemon=True).start()
-    return {"ok": True, "status": "running", "message": f"Structure refresh started for {len(syms)} symbols", **plan_info}
+    return {"ok": True, "status": "running", "message": "Structure refresh started (planning in the background); poll /data-feed/structure-refresh/status"}
 
 
 _STRUCTURE_CATCHUP_TASK: Optional["asyncio.Task"] = None
@@ -14318,7 +14346,7 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     processed is the real symbol index, reported from stockky_hot_stocks's
     existing progress_cb hook, so the countdown means something.
     """
-    job = await asyncio.to_thread(hot_job_get, _redis_get)   # 2026-10-21: kv read can hit Oracle - off the event loop
+    job = hot_job_get(_redis_get)
     if job.get("status") == "running":
         return {"ok": True, "already_running": True, **job}
 
@@ -14332,8 +14360,7 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     except Exception as e:
         logger.debug("hotpicks pre-run setup skipped: %s", e)
 
-    await asyncio.to_thread(
-        hot_job_set,
+    hot_job_set(
         _redis_set,
         _redis_get,
         status="running",

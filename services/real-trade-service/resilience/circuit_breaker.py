@@ -15,12 +15,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Callable, Optional
 
 from notifier import notify_async
 
 logger = logging.getLogger("real-trade-circuit-breaker")
+
+
+def _probe_alert_repeat_s() -> float:
+    """group 485: seconds between repeated "probe failed again" Telegram alerts while a breaker stays down.
+    RT_BREAKER_PROBE_ALERT_REPEAT_S (default 1800 = 30 min; 0 = alert on every failed probe, the old behaviour)."""
+    try:
+        return max(0.0, float(os.getenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "1800")))
+    except (TypeError, ValueError):
+        return 1800.0
 
 
 def _alert(text: str) -> None:
@@ -56,6 +66,10 @@ class CircuitBreaker:
         self.cooldown_s = cooldown_s
         self._failures = 0
         self._opened_at: Optional[float] = None
+        # group 485: alert throttling + the reason of the latest failure (so an alert says WHAT failed).
+        self._last_error: Optional[str] = None
+        self._probe_alerts_sent = 0
+        self._last_probe_alert_at: Optional[float] = None
 
     @property
     def is_open(self) -> bool:
@@ -81,6 +95,7 @@ class CircuitBreaker:
             "name": self.name,
             "state": state,
             "consecutive_failures": self._failures,
+            "last_error": self._last_error,
             "failure_threshold": self.failure_threshold,
             "cooldown_s": self.cooldown_s,
             "seconds_until_retry": (
@@ -109,9 +124,15 @@ class CircuitBreaker:
             _alert(f"✅ Stockky: {self.name} recovered — back to full signal quality (Tier 1).")
         self._failures = 0
         self._opened_at = None
+        self._last_error = None
+        self._probe_alerts_sent = 0
+        self._last_probe_alert_at = None
 
-    def record_failure(self) -> None:
+    def record_failure(self, reason: Optional[str] = None) -> None:
         self._failures += 1
+        if reason:
+            self._last_error = str(reason)[:300]
+        why = f" Last error: {self._last_error}." if self._last_error else ""
         if self._opened_at is None:
             if self._failures >= self.failure_threshold:
                 self._opened_at = time.monotonic()
@@ -121,7 +142,7 @@ class CircuitBreaker:
                 )
                 _alert(
                     f"⚠️ Stockky: {self.name} is DOWN ({self._failures} consecutive failures). "
-                    f"Falling back to degraded signal sourcing for at least {self.cooldown_s:.0f}s."
+                    f"Falling back to degraded signal sourcing for at least {self.cooldown_s:.0f}s.{why}"
                 )
         else:
             # BUG FIX (2026-09-07): call() only reaches record_failure() while
@@ -142,17 +163,28 @@ class CircuitBreaker:
             # ever-growing elapsed floors at 0 and stays there. Re-arm the
             # clock here so a failed probe re-opens the breaker for another
             # full cooldown window, same as the initial trip.
-            self._opened_at = time.monotonic()
+            now = time.monotonic()
+            self._opened_at = now
             logger.warning(
                 "circuit_breaker[%s]: half-open probe failed (failure #%d) — "
                 "re-OPENING for another %.0fs",
                 self.name, self._failures, self.cooldown_s,
             )
-            _alert(
-                f"⚠️ Stockky: {self.name} probe failed again "
-                f"({self._failures} total consecutive failures) — still down, "
-                f"retrying in {self.cooldown_s:.0f}s."
-            )
+            # group 485: this alert used to fire on EVERY failed probe (every cooldown_s), so one long outage sent a
+            # Telegram message every 2 minutes (58 in a row on 2026-10-21). The first failed probe still alerts at once;
+            # after that a reminder goes out at most once per RT_BREAKER_PROBE_ALERT_REPEAT_S. Logging is unchanged.
+            gap = _probe_alert_repeat_s()
+            due = (self._probe_alerts_sent == 0 or gap <= 0 or self._last_probe_alert_at is None
+                   or (now - self._last_probe_alert_at) >= gap)
+            if due:
+                self._probe_alerts_sent += 1
+                self._last_probe_alert_at = now
+                _alert(
+                    f"⚠️ Stockky: {self.name} probe failed again "
+                    f"({self._failures} total consecutive failures) — still down, "
+                    f"retrying in {self.cooldown_s:.0f}s.{why}"
+                    + (f" (reminders every {gap / 60:.0f} min while it stays down)" if gap > 0 else "")
+                )
 
     async def call(
         self,
@@ -175,7 +207,7 @@ class CircuitBreaker:
             self.record_success()
             return result
         except Exception as exc:
-            self.record_failure()
+            self.record_failure(f"{type(exc).__name__}: {exc}".strip(": "))
             logger.warning(
                 "circuit_breaker[%s]: call failed (%s) — using fallback",
                 self.name, exc,

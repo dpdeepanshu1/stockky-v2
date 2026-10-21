@@ -626,7 +626,7 @@ def attempt_entry(
     try:
         _flow_snap = orb_shadow.attach(_flow_snap, candidate.symbol, depth_gate._fresh_quote(candidate.symbol), candidate.current_ltp)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("entry: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
 
     # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.

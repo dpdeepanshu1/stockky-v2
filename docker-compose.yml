@@ -61,8 +61,15 @@ services:
       TNS_ADMIN: /oracle_wallet
       # group270: must equal real-trade-service's key, or the stored Dhan token cannot be decrypted for market data
       DHAN_CREDENTIAL_ENC_KEY: ${DHAN_CREDENTIAL_ENC_KEY:-}
+      # 2026-10-21: the parsed AngelOne scrip-master map (~2.7k symbols, tens of KB) is snapshotted here so a container
+      # RECREATE (compose up --build) warm-starts instead of re-downloading the ~37 MB file under boot load. The old
+      # default path (/tmp) lived in the container filesystem and was lost on every recreate.
+      ANGELONE_SCRIP_MASTER_CACHE_PATH: /data/scrip-cache/angelone_scrip_master_cache.json
+      # Optional comma-separated mirror URLs tried if the primary download fails (leave empty unless verified).
+      ANGELONE_SCRIP_MASTER_FALLBACK_URLS: ${ANGELONE_SCRIP_MASTER_FALLBACK_URLS:-}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      - scrip-cache-md:/data/scrip-cache
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8001/health', timeout=5) or sys.exit(0)"]
@@ -624,8 +631,12 @@ services:
       # group441: 1-minute bar recorder (record only). BAR_RECORD_ENABLED=false switches it off.
       - BAR_RECORD_ENABLED=${BAR_RECORD_ENABLED:-true}
       - BAR_RECORD_DIR=/data/bars
+      # 2026-10-21: persist the parsed AngelOne scrip-master map across container recreates (see market-data-service)
+      - ANGELONE_SCRIP_MASTER_CACHE_PATH=/data/scrip-cache/position_stocks_scrip_master_cache.json
+      - ANGELONE_SCRIP_MASTER_FALLBACK_URLS=${ANGELONE_SCRIP_MASTER_FALLBACK_URLS:-}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      - scrip-cache-ps:/data/scrip-cache
       # group441: recorded 1-minute bars (feed/bar_recorder.py), one folder per IST day; survives rebuilds. Export with scripts/export_intraday.py
       - bar-records:/data/bars
       # group442: switches changed on the Real Money Calibration page (control/kit.py) are saved here and re-applied at boot; survives rebuilds
@@ -709,6 +720,9 @@ services:
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
   bar-records:
+  # 2026-10-21: parsed AngelOne scrip-master snapshots (one per service) so a recreate warm-starts
+  scrip-cache-md:
+  scrip-cache-ps:
   # group442: Real Money Calibration page state
   control-state-rt:
   control-state-ps:

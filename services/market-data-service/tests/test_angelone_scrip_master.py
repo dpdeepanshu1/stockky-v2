@@ -297,3 +297,83 @@ def test_bz_only_name_resolves_via_lookups_but_not_get_all_symbols(sm, monkeypat
     assert sm.get_token("BEBZ") == "5" and sm.get_token("ALL3") == "1"
     assert sm.get_tokens_bulk(["WARDINMOBI", "SBIN", "NOPE"]) == {"WARDINMOBI": "766360", "SBIN": "3045"}
     assert "WARDINMOBI" not in sm.get_all_symbols()
+
+
+# ── 2026-10-21: truncated download, fallback URLs, cold-wait short-circuit ────
+def test_truncated_download_is_rejected_not_accepted_as_a_partial_map(sm):
+    with pytest.raises(ValueError, match="truncated"):
+        list(sm._iter_json_array(['[{"token":"1","symbol":"A-EQ","exch_seg":"NSE"},']))
+
+
+class _Resp:
+    def __init__(self, chunks):
+        self._c = chunks
+
+    def raise_for_status(self):
+        pass
+
+    def iter_text(self):
+        return iter(self._c)
+
+
+class _Stream:
+    def __init__(self, resp):
+        self._r = resp
+
+    def __enter__(self):
+        return self._r
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_fallback_url_is_used_when_the_primary_fails(sm, monkeypatch):
+    good = ["[", '{"token":"3045","symbol":"SBIN-EQ","exch_seg":"NSE"}', "]"]
+    seen = []
+
+    def fake(method, url, timeout=None):
+        seen.append(url)
+        if url == "http://primary/x.json":
+            raise sm.httpx.ReadTimeout("t")
+        return _Stream(_Resp(good))
+    monkeypatch.setattr(sm.httpx, "stream", fake)
+    monkeypatch.setattr(sm, "SCRIP_MASTER_URL", "http://primary/x.json")
+    monkeypatch.setattr(sm, "_FALLBACK_URLS", ["http://mirror/x.json"])
+    eq, be = sm._fetch_map()
+    assert eq == {"SBIN": "3045"} and seen == ["http://primary/x.json", "http://mirror/x.json"]
+
+
+def test_all_urls_failing_raises_the_last_error(sm, monkeypatch):
+    def fake(method, url, timeout=None):
+        raise sm.httpx.ReadTimeout("t") if "primary" in url else sm.httpx.ConnectTimeout("c")
+    monkeypatch.setattr(sm.httpx, "stream", fake)
+    monkeypatch.setattr(sm, "SCRIP_MASTER_URL", "http://primary/x.json")
+    monkeypatch.setattr(sm, "_FALLBACK_URLS", ["http://mirror/x.json"])
+    with pytest.raises(sm.httpx.ConnectTimeout):
+        sm._fetch_map()
+
+
+def test_loop_of_get_token_calls_does_not_stack_waits_during_a_cold_download(sm, monkeypatch):
+    """/internal/feed-coverage calls get_token() for up to 200 symbols; each used to wait DEFAULT_WAIT_S behind the in-flight download."""
+    monkeypatch.setattr(sm, "DEFAULT_WAIT_S", 0.3)
+    sm._load_lock.acquire()
+    try:
+        t0 = time.monotonic()
+        for _ in range(200):
+            assert sm.get_token("SBIN") is None
+        took = time.monotonic() - t0
+    finally:
+        sm._load_lock.release()
+    assert took < 1.5, took                    # ~0.3 s for the first caller, instant for the rest (was 200 x 0.3 s = 60 s)
+
+
+def test_explicit_wait_callers_are_not_short_circuited(sm, monkeypatch):
+    monkeypatch.setattr(sm, "DEFAULT_WAIT_S", 0.1)
+    sm._load_lock.acquire()
+    try:
+        sm.ensure_loaded()                     # arms the short-circuit
+        t0 = time.monotonic()
+        sm.ensure_loaded(wait_s=0.3)
+        assert time.monotonic() - t0 >= 0.25
+    finally:
+        sm._load_lock.release()

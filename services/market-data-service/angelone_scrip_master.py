@@ -76,6 +76,15 @@ _CACHE_MAX_AGE_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_CACHE_MAX_AGE_S") or
 # Streaming-parse safety valve: if this much data accumulates without a single
 # complete JSON object being decodable, the payload is malformed — bail out.
 _MAX_PENDING_CHARS = 8 * 1024 * 1024
+# 2026-10-21: extra URLs tried in order when the primary download fails (comma-separated; empty by default - set it
+# only to a mirror you have verified serves the same file). Each URL gets its own _MAX_DOWNLOAD_S.
+_FALLBACK_URLS = [u.strip() for u in (os.getenv("ANGELONE_SCRIP_MASTER_FALLBACK_URLS") or "").split(",") if u.strip()]
+# 2026-10-21: after ONE default-wait caller has waited out DEFAULT_WAIT_S on the in-flight cold download, other
+# default-wait callers return at once for this long instead of each queueing their own DEFAULT_WAIT_S behind the lock
+# (a loop of N get_token() calls - /internal/feed-coverage takes up to 200 - used to stack N x 3 s on request threads,
+# which is what timed real-trade's /quotes/bulk and /quote calls out while the first download was in flight).
+# Callers that pass an explicit wait_s (the WS feeds, the movers sweep) are never short-circuited.
+_COLD_NOWAIT_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_COLD_NOWAIT_S") or "").strip() or "15"))
 
 _lock = threading.Lock()        # guards the map swap + failure bookkeeping (held for microseconds)
 _load_lock = threading.Lock()   # single-flight: held for the whole duration of a network fetch
@@ -88,6 +97,7 @@ _loaded_at: float = 0.0
 _fail_count: int = 0
 _next_retry_at: float = 0.0
 _disk_tried: bool = False
+_no_wait_until: float = 0.0   # wall-clock time until which default-wait cold callers skip the lock wait
 
 
 def _clean(symbol: str) -> str:
@@ -137,6 +147,10 @@ def _iter_json_array(chunks: Iterable[str]) -> Iterator[dict]:
                 break
             yield obj
             pos = end
+    if in_array:
+        # The chunks ran out before the closing "]": a truncated download (AngelOne has served this file with HTTP 200 and a
+        # cut-off body). Never accept a partial map as if it were the whole file - the caller records a failure and retries.
+        raise ValueError("scrip master payload ended before the closing ']' (truncated download)")
 
 
 def _rows_to_maps(rows: Iterable[dict]) -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -179,8 +193,8 @@ def _rows_to_map(rows: Iterable[dict]) -> Dict[str, str]:
     return _rows_to_maps(rows)[0]
 
 
-def _fetch_map() -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Download + stream-parse the scrip master -> (eq_map, be_map). Raises on any failure."""
+def _fetch_map_from(url: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Download + stream-parse ONE url. Raises on any failure."""
     deadline = time.monotonic() + _MAX_DOWNLOAD_S
     timeout = httpx.Timeout(connect=10.0, read=_READ_TIMEOUT_S, write=10.0, pool=10.0)
 
@@ -190,9 +204,26 @@ def _fetch_map() -> Tuple[Dict[str, str], Dict[str, str]]:
                 raise TimeoutError(f"scrip master download exceeded {_MAX_DOWNLOAD_S:.0f}s wall-clock cap")
             yield text
 
-    with httpx.stream("GET", SCRIP_MASTER_URL, timeout=timeout) as resp:
+    with httpx.stream("GET", url, timeout=timeout) as resp:
         resp.raise_for_status()
         return _rows_to_maps(_iter_json_array(_text_chunks(resp)))
+
+
+def _fetch_map() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Download the scrip master from SCRIP_MASTER_URL, then each ANGELONE_SCRIP_MASTER_FALLBACK_URLS entry if that fails.
+    Raises the last failure when every URL fails (earlier failures are logged)."""
+    urls = [SCRIP_MASTER_URL] + [u for u in _FALLBACK_URLS if u != SCRIP_MASTER_URL]
+    last_exc: Optional[BaseException] = None
+    for i, url in enumerate(urls):
+        try:
+            return _fetch_map_from(url)
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if i < len(urls) - 1:
+                logger.warning("scrip master download from %s failed (%s: %s) - trying the next URL",
+                               url, type(e).__name__, e)
+    assert last_exc is not None
+    raise last_exc
 
 
 # ── Disk snapshot ────────────────────────────────────────────────────────────
@@ -344,8 +375,14 @@ def ensure_loaded(wait_s: Optional[float] = None) -> None:
                 _load_lock.release()
         return
     # Cold: nothing to serve. Single-flight; waiters get a bounded wait.
-    timeout = DEFAULT_WAIT_S if wait_s is None else wait_s
+    global _no_wait_until
+    default_wait = wait_s is None
+    if default_wait and time.time() < _no_wait_until:
+        return          # a caller already waited out the in-flight download; don't make every request thread repeat it
+    timeout = DEFAULT_WAIT_S if default_wait else wait_s
     if not _load_lock.acquire(timeout=max(0.0, timeout)):
+        if default_wait:
+            _no_wait_until = time.time() + _COLD_NOWAIT_S
         return
     try:
         _refresh_locked()

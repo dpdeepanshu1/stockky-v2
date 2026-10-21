@@ -60,6 +60,7 @@ def test_without_a_token_the_real_sections_are_skipped_and_say_so(tmp_path):
     assert "skipped: set ADMIN_TOKEN" in out
     assert "charges split" not in out and "real-trade review status" not in out
     assert "position-stocks review status" in out and "gate scorecard" in out
+    assert "HTTP 401" not in out                              # no token -> skipped, not a 401 call
 
 
 def test_a_failed_export_is_reported_and_the_trade_reports_are_skipped(tmp_path):
@@ -86,3 +87,42 @@ def test_cap_limits_each_section(tmp_path):
     e.pop("ADMIN_TOKEN", None)
     subprocess.run(["bash", SCRIPT], capture_output=True, text=True, env=e, timeout=60)
     assert len((tmp_path / "r.txt").read_text()) < 3000
+
+
+def _login_curl(tmp_path, ok=True):
+    log = tmp_path / "curl_args.log"
+    login = 'cat >/dev/null; printf \'{"token": "tok-from-login"}\\n200\'' if ok else 'cat >/dev/null; printf \'{"detail": "Invalid admin credentials"}\\n401\''
+    body = ('echo "$@" >> "%s"\nurl="${@: -1}"\ncase "$url" in\n  *auth/login*) %s ;;\n' % (log, login)
+            + '  *positions/REAL/records*) cat "%s"; printf "\\n200" ;;\n  *) printf \'{"ok": true}\\n200 0.01\' ;;\nesac\n' % (tmp_path / "records.json"))
+    (tmp_path / "records.json").write_text(RECORDS)
+    return body, log
+
+
+def _run_login(tmp_path, ok):
+    body, log = _login_curl(tmp_path, ok)
+    envf = tmp_path / ".env"
+    envf.write_text("X=1\n")
+    curl = _fake(tmp_path, "curl", body)
+    docker = _fake(tmp_path, "docker", 'if [ "$2" = "ps" ]; then echo "real-trade-service  Up"; else cat >/dev/null; echo "Gate scorecard - fake"; fi\n')
+    e = dict(os.environ, CURL_BIN=curl, DOCKER_BIN=docker, ENV_FILE=str(envf), OUT=str(tmp_path / "r.txt"), REC=str(tmp_path / "rec.json"),
+             ADMIN_USERNAME="owner", ADMIN_PASSWORD="s3cret-pw")
+    e.pop("ADMIN_TOKEN", None)
+    r = subprocess.run(["bash", SCRIPT], capture_output=True, text=True, env=e, timeout=60)
+    return r, (tmp_path / "r.txt").read_text(), (log.read_text() if log.exists() else "")
+
+
+def test_login_with_username_and_password_gets_a_token_and_leaks_nothing(tmp_path):
+    r, out, args = _run_login(tmp_path, True)
+    assert "login ok (HTTP 200)" in out
+    assert "real-trade charges by component" in out and "charges split" in out
+    assert "Bearer tok-from-login" in args                    # the token was used for the REAL calls
+    assert "s3cret-pw" not in out and "s3cret-pw" not in r.stdout and "s3cret-pw" not in args   # password never in the report or on a command line
+    assert "tok-from-login" not in out
+
+
+def test_failed_login_is_reported_and_real_sections_are_skipped(tmp_path):
+    r, out, args = _run_login(tmp_path, False)
+    assert "login failed" in out and "HTTP 401" in out
+    assert "skipped: set ADMIN_TOKEN" in out
+    assert "charges split" not in out
+    assert "s3cret-pw" not in out

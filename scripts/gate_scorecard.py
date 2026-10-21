@@ -114,6 +114,8 @@ def forward(bars, t0):
 groups = defaultdict(list)
 seen = set()
 skipped_nobars = 0
+nobars_symbol = 0
+nobars_days = defaultdict(int)
 for r in rows:
     gk = gate_key(r.reason, r.decision)
     t0 = calendar.timegm(r.created_at.timetuple())
@@ -125,13 +127,22 @@ for r in rows:
     bars = load_bars(r.symbol, day)
     if not bars:
         skipped_nobars += 1
+        # group 482b: tell "no bar folder for that day at all" (recorder not running yet / not persisted) from "folder exists, this symbol was not recorded"
+        if os.path.isdir(os.path.join(args.bars_dir, day)):
+            nobars_symbol += 1
+        else:
+            nobars_days[day] += 1
         continue
     f = forward(bars, t0)
     if f:
         groups[gk].append(f)
 
 print(f"\nGate scorecard - last {args.days} days, target +{args.target}% / stop -{args.stop}% within 60 min, cost {args.cost}% round trip")
-print(f"rows read: {len(rows)}   de-duplicated samples with bars: {sum(len(v) for v in groups.values())}   no-bars (skipped): {skipped_nobars}\n")
+print(f"rows read: {len(rows)}   de-duplicated samples with bars: {sum(len(v) for v in groups.values())}   no-bars (skipped): {skipped_nobars}")
+if skipped_nobars:
+    nd = sum(nobars_days.values())
+    print(f"  of those: {nd} sit on {len(nobars_days)} day(s) with NO bar folder ({', '.join(sorted(nobars_days)[:6])}{' ...' if len(nobars_days) > 6 else ''}); {nobars_symbol} are on recorded days but the symbol was not recorded")
+print()
 hdr = f"{'gate':<46}{'n':>5}{'avg30':>8}{'avg60':>8}{'avgEOD':>8}{'tgt1st%':>9}{'stop1st%':>10}{'net60':>8}  verdict"
 print(hdr)
 print("-" * len(hdr))

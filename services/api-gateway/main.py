@@ -10384,7 +10384,10 @@ async def stockky_hot_endpoint(force: bool = False, background_tasks: Background
     if force:
         return await stockky_hot_stocks(force=True, max_symbols=None, progress_cb=None)
 
-    cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+    # 2026-10-21: _redis_get can fall through to the Oracle-backed kv_cache; called
+    # straight from this async endpoint it blocked the event loop for 3.2 s while
+    # Oracle was slow (watchdog hit). Run it in a worker thread (same fix as s55/s71).
+    cached = await asyncio.to_thread(_redis_get, HOT_STOCKS_CACHE_KEY)
     if cached:
         return {**cached, "cached": True}
 
@@ -10397,7 +10400,7 @@ async def stockky_hot_endpoint(force: bool = False, background_tasks: Background
         except Exception as e:
             logger.warning("stockky-hot background warm-up failed to start: %s", e)
 
-    stale = _redis_get(HOT_RESULT_KEY)
+    stale = await asyncio.to_thread(_redis_get, HOT_RESULT_KEY)
     if stale:
         return {**stale, "cached": True, "stale": True, "warming": True}
 
@@ -14315,7 +14318,7 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     processed is the real symbol index, reported from stockky_hot_stocks's
     existing progress_cb hook, so the countdown means something.
     """
-    job = hot_job_get(_redis_get)
+    job = await asyncio.to_thread(hot_job_get, _redis_get)   # 2026-10-21: kv read can hit Oracle - off the event loop
     if job.get("status") == "running":
         return {"ok": True, "already_running": True, **job}
 
@@ -14329,7 +14332,8 @@ async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True)
     except Exception as e:
         logger.debug("hotpicks pre-run setup skipped: %s", e)
 
-    hot_job_set(
+    await asyncio.to_thread(
+        hot_job_set,
         _redis_set,
         _redis_get,
         status="running",

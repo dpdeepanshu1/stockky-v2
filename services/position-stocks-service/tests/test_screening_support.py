@@ -144,6 +144,28 @@ class TestCache:
         qg.upsert_cache_batch(db, [QualitySignal("AAA"), QualitySignal("ZZZ")])
         assert db.query(models.ScalpQualityCache).count() == 1
 
+    def test_upsert_commit_failure_is_swallowed_and_rolled_back(self, db, monkeypatch):
+        """2026-10-21: an Oracle DPY-4024 on this commit used to abort the whole trading cycle."""
+        rolled = {"n": 0}
+        real_rollback = db.rollback
+
+        def boom():
+            raise RuntimeError("DPY-4024: call timeout of 8000 ms exceeded")
+
+        def rb():
+            rolled["n"] += 1
+            real_rollback()
+        monkeypatch.setattr(db, "commit", boom)
+        monkeypatch.setattr(db, "rollback", rb)
+        qg.upsert_cache_batch(db, [QualitySignal("AAA", 61.0, 52.0, 900.0)])   # must not raise
+        assert rolled["n"] == 1
+
+    def test_upsert_query_failure_is_swallowed(self, db, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("DPY-4024")
+        monkeypatch.setattr(db, "query", boom)
+        qg.upsert_cache_batch(db, [QualitySignal("AAA", 61.0)])                # must not raise
+
     def test_upsert_handles_a_batch(self, db):
         qg.upsert_cache_batch(db, [QualitySignal("AAA", 61.0), QualitySignal("BBB", None, 50.0)])
         assert db.query(models.ScalpQualityCache).count() == 2

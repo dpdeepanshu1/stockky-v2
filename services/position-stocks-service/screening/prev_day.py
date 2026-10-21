@@ -28,6 +28,7 @@ AVG_RANGE_WINDOW = 35        # group305: sessions averaged for the board's norma
 AVG_RANGE_MIN_DAYS = 10      # fewer completed days than this = no usable average (None)
 PREVDAY_MAX_INFLIGHT = 6
 PREVDAY_RETRY_S = 60.0
+PREVDAY_NODATA_RETRY_S = 300.0   # 2026-10-21: negative cache - a symbol market-data has NO history for (HTTP 404 / no usable candle) is not re-asked for this long
 _INLINE = False          # tests: run the fetch on the calling thread
 
 _lock = threading.Lock()
@@ -121,14 +122,28 @@ def parse_candles(candles: List[dict], today: str, max_age_days: Optional[int] =
         return None
 
 
+class _NoHistory(RuntimeError):
+    """market-data has no daily history for the symbol (HTTP 404) - a long negative-cache case, not a transient error."""
+
+
 def _fetch_candles(symbol: str) -> list:
     import httpx
     sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     with httpx.Client(timeout=config.OPENING_GATE_PREVDAY_TIMEOUT_S) as client:
         r = client.get(f"{config.MARKET_DATA_URL}/history/{quote(str(sym), safe='&')}", params={"period": "1mo", "interval": "1d"})
+    if r.status_code == 404:
+        raise _NoHistory("history HTTP 404")
     if r.status_code != 200:
         raise RuntimeError(f"history HTTP {r.status_code}")
     return (r.json() or {}).get("candles") or []
+
+
+def _extend_retry(symbol: str) -> None:
+    """Push the next allowed retry out to PREVDAY_NODATA_RETRY_S (get() compares now - _last_try against PREVDAY_RETRY_S, so
+    shifting _last_try forward by the difference lengthens the wait for this symbol only)."""
+    extra = max(0.0, PREVDAY_NODATA_RETRY_S - PREVDAY_RETRY_S)
+    with _lock:
+        _last_try[symbol] = time.monotonic() + extra
 
 
 def _worker(symbol: str) -> None:
@@ -140,6 +155,10 @@ def _worker(symbol: str) -> None:
                 _cache[symbol] = (today, pd)
         else:
             logger.info("prev_day: %s has no usable previous-day candle", symbol)
+            _extend_retry(symbol)
+    except _NoHistory as e:
+        logger.info("prev_day: %s has no history (%s) - not retrying for %ds", symbol, e, int(PREVDAY_NODATA_RETRY_S))
+        _extend_retry(symbol)
     except Exception as e:
         logger.info("prev_day: fetch for %s failed (%s: %s)", symbol, type(e).__name__, e)
     finally:

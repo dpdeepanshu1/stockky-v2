@@ -239,6 +239,19 @@ class TestStockkyHotEndpoint:
         assert out["warming"] is True and out["ok"] is True
         assert "failed to start" in caplog.text
 
+    def test_cache_reads_run_off_the_event_loop_thread(self, cenv, kv, monkeypatch):
+        """2026-10-21: _redis_get can hit Oracle (kv_cache); called on the loop it stalled the whole gateway for 3 s."""
+        import threading
+        seen = []
+        real_get = gw._redis_get
+
+        def spy(key):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return real_get(key)
+        monkeypatch.setattr(gw, "_redis_get", spy)
+        _run(gw.stockky_hot_endpoint(force=False, background_tasks=BackgroundTasks()))     # cold cache: 2 reads
+        assert seen and not any(seen)
+
     def test_without_background_tasks_no_job_is_started(self, cenv, kv):
         out = _run(gw.stockky_hot_endpoint(force=False))
         assert cenv.run_calls == [] and out["warming"] is True

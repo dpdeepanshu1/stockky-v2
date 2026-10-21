@@ -392,6 +392,30 @@ class TestPrevDayModule:
         monkeypatch.setattr(prev_day, "_fetch_candles", lambda sym: [])
         assert prev_day.get("AAA") is None and prev_day.peek("AAA") is None
 
+    def test_404_history_is_negative_cached_for_minutes(self, monkeypatch):
+        import time as _t
+        calls = []
+        monkeypatch.setattr(prev_day, "_INLINE", True)
+
+        def nohist(sym):
+            calls.append(sym)
+            raise prev_day._NoHistory("history HTTP 404")
+        monkeypatch.setattr(prev_day, "_fetch_candles", nohist)
+        assert prev_day.get("HDFIRE") is None
+        monkeypatch.setitem(prev_day._last_try, "HDFIRE", prev_day._last_try["HDFIRE"] - prev_day.PREVDAY_RETRY_S - 1)
+        assert prev_day.get("HDFIRE") is None
+        assert calls == ["HDFIRE"]
+        monkeypatch.setitem(prev_day._last_try, "HDFIRE", _t.monotonic() - prev_day.PREVDAY_NODATA_RETRY_S - 1)
+        prev_day.get("HDFIRE")
+        assert calls == ["HDFIRE", "HDFIRE"]
+
+    def test_transient_failure_keeps_the_short_retry_window(self, monkeypatch):
+        import time as _t
+        monkeypatch.setattr(prev_day, "_INLINE", True)
+        monkeypatch.setattr(prev_day, "_fetch_candles", lambda sym: (_ for _ in ()).throw(RuntimeError("history HTTP 503")))
+        prev_day.get("AAA")
+        assert prev_day._last_try["AAA"] <= _t.monotonic()
+
     def test_inflight_cap(self, monkeypatch):
         monkeypatch.setattr(prev_day, "_INLINE", True)
         for i in range(prev_day.PREVDAY_MAX_INFLIGHT):

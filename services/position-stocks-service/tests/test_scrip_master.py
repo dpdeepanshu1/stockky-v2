@@ -48,6 +48,7 @@ def _reset(monkeypatch=None):
     sm._fail_count = 0
     sm._next_retry_at = 0.0
     sm._disk_tried = False
+    sm._no_wait_until = 0.0
     # release _load_lock if it's somehow still held
     if sm._load_lock.locked():
         try:
@@ -725,3 +726,94 @@ class TestResetWithLockHeld:
             _reset()  # must not raise — the RuntimeError is swallowed
         finally:
             sm._load_lock = real_lock
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2026-10-21: truncated download, fallback URLs, cold-wait short-circuit
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTruncatedDownload:
+    def test_array_never_closed_raises(self):
+        with pytest.raises(ValueError, match="truncated"):
+            list(sm._iter_json_array(['[{"symbol":"SBIN-EQ","exch_seg":"NSE","token":"1"},']))
+
+    def test_truncated_body_is_a_failure_not_a_partial_map(self, monkeypatch):
+        chunks = ["[", '{"symbol":"SBIN-EQ","exch_seg":"NSE","token":"3045"},']          # no closing bracket
+        monkeypatch.setattr(sm.httpx, "stream", lambda method, url, timeout=None: _FakeHttpxStream(_FakeHttpxResponse(chunks)))
+        with pytest.raises(ValueError, match="truncated"):
+            sm._fetch_map()
+
+
+class TestFallbackUrls:
+    def _stream_by_url(self, monkeypatch, table, seen):
+        def fake(method, url, timeout=None):
+            seen.append(url)
+            v = table[url]
+            if isinstance(v, Exception):
+                raise v
+            return _FakeHttpxStream(_FakeHttpxResponse(v))
+        monkeypatch.setattr(sm.httpx, "stream", fake)
+
+    def test_falls_through_to_the_next_url(self, monkeypatch):
+        good = ["[", '{"symbol":"SBIN-EQ","exch_seg":"NSE","token":"3045"}', "]"]
+        seen = []
+        monkeypatch.setattr(sm, "SCRIP_MASTER_URL", "http://primary/x.json")
+        monkeypatch.setattr(sm, "_FALLBACK_URLS", ["http://mirror/x.json"])
+        self._stream_by_url(monkeypatch, {"http://primary/x.json": sm.httpx.ReadTimeout("t"), "http://mirror/x.json": good}, seen)
+        assert sm._fetch_map() == {"SBIN": "3045"}
+        assert seen == ["http://primary/x.json", "http://mirror/x.json"]
+
+    def test_all_urls_failing_raises_the_last_error(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(sm, "SCRIP_MASTER_URL", "http://primary/x.json")
+        monkeypatch.setattr(sm, "_FALLBACK_URLS", ["http://mirror/x.json"])
+        self._stream_by_url(monkeypatch, {"http://primary/x.json": sm.httpx.ReadTimeout("a"),
+                                          "http://mirror/x.json": sm.httpx.ConnectTimeout("b")}, seen)
+        with pytest.raises(sm.httpx.ConnectTimeout):
+            sm._fetch_map()
+        assert len(seen) == 2
+
+    def test_no_fallback_configured_behaves_as_before(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(sm, "SCRIP_MASTER_URL", "http://primary/x.json")
+        monkeypatch.setattr(sm, "_FALLBACK_URLS", [])
+        self._stream_by_url(monkeypatch, {"http://primary/x.json": sm.httpx.ReadTimeout("a")}, seen)
+        with pytest.raises(sm.httpx.ReadTimeout):
+            sm._fetch_map()
+        assert seen == ["http://primary/x.json"]
+
+
+class TestColdWaitShortCircuit:
+    def test_second_default_wait_caller_does_not_queue_behind_the_lock(self, monkeypatch):
+        _reset()
+        sm._disk_tried = True                         # no disk warm-start: this must be a truly cold map
+        monkeypatch.setattr(sm, "DEFAULT_WAIT_S", 0.3)
+        sm._load_lock.acquire()                       # a download is "in flight"
+        try:
+            t0 = time.monotonic()
+            sm.ensure_loaded()                        # waits the full 0.3 s, then arms the short-circuit
+            first = time.monotonic() - t0
+            t0 = time.monotonic()
+            for _ in range(50):
+                sm.ensure_loaded()                    # 50 callers: no wait each
+            rest = time.monotonic() - t0
+        finally:
+            sm._load_lock.release()
+            _reset()
+        assert first >= 0.25
+        assert rest < 0.2, rest                       # would be ~15 s without the short-circuit
+
+    def test_explicit_wait_is_never_short_circuited(self, monkeypatch):
+        _reset()
+        sm._disk_tried = True
+        monkeypatch.setattr(sm, "DEFAULT_WAIT_S", 0.1)
+        sm._load_lock.acquire()
+        try:
+            sm.ensure_loaded()                        # arms the short-circuit
+            t0 = time.monotonic()
+            sm.ensure_loaded(wait_s=0.3)              # WS-feed style caller still waits
+            waited = time.monotonic() - t0
+        finally:
+            sm._load_lock.release()
+            _reset()
+        assert waited >= 0.25

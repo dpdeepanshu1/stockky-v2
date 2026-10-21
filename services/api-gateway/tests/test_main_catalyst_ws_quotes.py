@@ -252,6 +252,45 @@ class TestStockkyHotEndpoint:
         _run(gw.stockky_hot_endpoint(force=False, background_tasks=BackgroundTasks()))     # cold cache: 2 reads
         assert seen and not any(seen)
 
+    def test_slow_kv_read_is_bounded_and_treated_as_a_miss(self, cenv, kv, monkeypatch):
+        """2026-10-21: a slow Oracle read must not hold /stockky-hot (real-trade's 25 s timeout feeds its api-gateway
+        circuit breaker). The read is capped at HOT_KV_READ_TIMEOUT_S and answered as a miss."""
+        import time
+        monkeypatch.setenv("HOT_KV_READ_TIMEOUT_S", "0.2")
+        kv.store[gw.HOT_STOCKS_CACHE_KEY] = {"news_driven": ["x"]}
+        real_get = gw._redis_get
+
+        def slow(key):
+            time.sleep(1.5)
+            return real_get(key)
+        monkeypatch.setattr(gw, "_redis_get", slow)
+
+        async def timed():
+            t0 = time.monotonic()                      # timed inside the loop: asyncio.run() itself joins the lingering worker threads
+            res = await gw.stockky_hot_endpoint(force=False, background_tasks=BackgroundTasks())
+            return res, time.monotonic() - t0
+        out, took = _run(timed())
+        assert took < 1.0, took                       # two bounded reads (~0.4 s), not 2 x 1.5 s
+        assert out["warming"] is True and out["ok"] is True
+
+    def test_event_loop_stays_responsive_during_a_slow_kv_read(self, cenv, kv, monkeypatch):
+        import asyncio, time
+        monkeypatch.setenv("HOT_KV_READ_TIMEOUT_S", "0.5")
+        monkeypatch.setattr(gw, "_redis_get", lambda key: (time.sleep(0.4), None)[1])
+        ticks = []
+
+        async def main():
+            async def ticker():
+                for _ in range(8):
+                    ticks.append(time.monotonic())
+                    await asyncio.sleep(0.05)
+            t = asyncio.create_task(ticker())
+            await gw.stockky_hot_endpoint(force=False, background_tasks=BackgroundTasks())
+            await t
+        _run(main())
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        assert gaps and max(gaps) < 0.3, gaps         # a blocking read would show a ~0.4 s gap
+
     def test_without_background_tasks_no_job_is_started(self, cenv, kv):
         out = _run(gw.stockky_hot_endpoint(force=False))
         assert cenv.run_calls == [] and out["warming"] is True

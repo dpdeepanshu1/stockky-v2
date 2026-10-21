@@ -224,7 +224,7 @@ def test_decision_helpers_for_every_test():
     assert A.r_tsfm({"tsfm_combine": sec('{"status": "FAIL"}')}, "log", {}).value == "off"
     assert A.r_tsfm({"tsfm_combine": sec("SKIPPED: not running")}, "off", {}).value is None
     g = sec("Market-structure promotion gates\n\nG2: FAIL\n   - x\nG3: PASS\n   - y\nG4: NOT_ENOUGH_DATA\n")
-    assert A.r_g3_stop({"gate_check": g}, "off", {}).value == "on" and A.r_g2_gate({"gate_check": g}, "enforce", {}).value == "off"
+    assert A.r_g3_stop({"gate_check": g}, "off", {}).value == "on" and A.r_g2_gate({"gate_check": g}, "enforce", {}).value is None
     assert A.r_g2_exit({"gate_check": g}, "tighten", {}).value == "log" and A.r_g2_exit({"gate_check": g}, "log", {}).value is None
     ok = sec("G2: PASS\nG3: FAIL\n")
     assert A.r_g2_gate({"gate_check": ok}, "off", {}).value == "enforce" and A.r_g3_stop({"gate_check": ok}, "on", {}).value == "off"

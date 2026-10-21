@@ -234,7 +234,10 @@ def r_g2_gate(evs, cur, ctx):
     if st == "PASS":
         return Decision("enforce", "G2 benefit passed: the structure gate is on", 1)
     if st == "FAIL":
-        return Decision("off", "G2 benefit failed: the structure gate is switched off (kill switch)", 1)
+        # group 486: G2 FAIL means "benefit NOT PROVEN" (no_edge / low kept share), not "the gate is harmful". The structure entry gate is one of the
+        # rules that stays on (scripts/env_structure_check.py, group415), and on 2026-10-21 01:28 this rule switched it off for REAL on a no_edge verdict,
+        # one day after the opening guards had been turned off by hand. A report never loosens it: switch it off yourself if you decide to.
+        return Decision(None, "G2 benefit not proven: the structure gate is left as it is (a report never switches an entry gate off)")
     return Decision(None, f"G2 is {st or 'missing'}: no change")
 
 

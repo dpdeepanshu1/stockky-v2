@@ -77,7 +77,8 @@ async def _load(db=None) -> None:
             return
         logger.warning("real-trade: symbol master live fetch returned 0 usable NSE-EQ rows")
     except Exception as e:
-        logger.warning("real-trade: symbol master live fetch failed: %s", e)
+        # httpx timeouts stringify to "" - always name the exception class (the log line used to end at the colon)
+        logger.warning("real-trade: symbol master live fetch failed: %s: %s", type(e).__name__, str(e) or "(no message)")
 
     # Live fetch failed or came back empty — fall back to the last good
     # snapshot rather than leaving _symbols empty for a whole scan pass.

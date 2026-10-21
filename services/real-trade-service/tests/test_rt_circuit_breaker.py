@@ -58,7 +58,7 @@ class TestStateMachine:
         assert b.is_open is False
         d = b.to_dict()
         assert d == {"name": "svc", "state": "closed", "consecutive_failures": 0, "failure_threshold": 3,
-                     "cooldown_s": 60.0, "seconds_until_retry": None}
+                     "cooldown_s": 60.0, "seconds_until_retry": None, "last_error": None}
 
     def test_opens_at_the_threshold_not_before(self, rig):
         b = cb.CircuitBreaker("svc", 3, 60.0)
@@ -139,6 +139,58 @@ class TestAlerts:
         now[0] += 61.0
         fail_n(b, 1)
         assert len(alerts) == 2 and "probe failed again" in alerts[1]
+
+    def test_repeated_failed_probes_are_throttled_but_first_still_alerts(self, rig, monkeypatch):
+        # group 485: 58 "probe failed again" Telegram messages in one outage -> one at once, then a reminder per 30 min.
+        monkeypatch.delenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", raising=False)
+        now, alerts = rig
+        b = cb.CircuitBreaker("api-gateway", 1, 120.0)
+        fail_n(b, 1)                                              # DOWN alert
+        for _ in range(20):                                       # 20 failed probes, 2 min apart = 40 min
+            now[0] += 121.0
+            fail_n(b, 1)
+        probes = [a for a in alerts if "probe failed again" in a]
+        assert len(alerts) - len(probes) == 1                     # still exactly one DOWN alert
+        assert 2 <= len(probes) <= 3                              # first at once + about one per 30 min, not 20
+
+    def test_probe_alert_repeat_zero_restores_every_probe_alert(self, rig, monkeypatch):
+        monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "0")
+        now, alerts = rig
+        b = cb.CircuitBreaker("svc", 1, 60.0)
+        fail_n(b, 1)
+        for _ in range(4):
+            now[0] += 61.0
+            fail_n(b, 1)
+        assert len([a for a in alerts if "probe failed again" in a]) == 4
+
+    def test_bad_repeat_value_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "soon")
+        assert cb._probe_alert_repeat_s() == 1800.0
+
+    def test_recovery_resets_the_probe_alert_throttle(self, rig, monkeypatch):
+        monkeypatch.delenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", raising=False)
+        now, alerts = rig
+        b = cb.CircuitBreaker("svc", 1, 60.0)
+        fail_n(b, 1); now[0] += 61.0; fail_n(b, 1)               # DOWN + first probe alert
+        async def ok():
+            b.record_success(); await asyncio.sleep(0); await asyncio.sleep(0)
+        now[0] += 61.0; asyncio.run(ok())                        # recovered
+        n = len(alerts)
+        fail_n(b, 1); now[0] += 61.0; fail_n(b, 1)               # a NEW outage: DOWN + first probe alert again
+        assert len(alerts) == n + 2 and "probe failed again" in alerts[-1]
+
+    def test_alerts_carry_the_last_error(self, rig):
+        now, alerts = rig
+        b = cb.CircuitBreaker("api-gateway", 1, 60.0)
+
+        async def fn():
+            raise RuntimeError("/stockky-hot ReadTimeout")
+
+        async def fb():
+            return None
+        run(b.call(fn, fallback=fb))
+        assert "RuntimeError: /stockky-hot ReadTimeout" in alerts[0]
+        assert b.to_dict()["last_error"].endswith("ReadTimeout")
 
     def test_alerting_without_an_event_loop_is_silent_and_safe(self, rig):
         _, alerts = rig

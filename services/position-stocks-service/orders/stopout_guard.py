@@ -72,7 +72,7 @@ def pause_reason_from(n: int) -> Optional[str]:
         if limit > 0 and n >= limit:
             return f"STOPOUT_GUARD:PAUSED:{n} losing stop-outs today (limit {limit}) - no new entries until the next session"
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("stopout_guard: pause_reason_from failed (no pause)", exc_info=True)
     return None
 
 
@@ -81,7 +81,7 @@ def symbol_reason(symbol: str, stopped: Set[str]) -> Optional[str]:
         if config.STOPOUT_SYMBOL_BLOCK and str(symbol or "").strip().upper() in stopped:
             return f"STOPOUT_GUARD:SYMBOL:{symbol} was stopped out today - not re-bought the same session"
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("stopout_guard: symbol_reason failed (no block)", exc_info=True)
     return None
 
 

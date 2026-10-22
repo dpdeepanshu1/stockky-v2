@@ -50,6 +50,8 @@ def bulk(monkeypatch):
     monkeypatch.setattr(main, "_angelone_quote_cooling", lambda: False)
     monkeypatch.setattr(main, "_cooldown_symbol_held", lambda s: str(s).upper().replace(".NS", "") in st["held"])
     monkeypatch.setattr(main, "_dhan_quote_position", lambda: "first")
+    st["unmapped"] = set()
+    monkeypatch.setattr(main, "_dhan_can_price", lambda base: base not in st["unmapped"])
 
     def _dhan(tickers, symbol_map, results):
         left = []
@@ -231,3 +233,36 @@ def test_real_429_is_still_reported(bulk, monkeypatch):
 def test_other_failures_still_report_502(bulk, monkeypatch):
     out, st = _run_with_yf_error(bulk, monkeypatch, RuntimeError("boom"))
     assert st["reported"] == [502]
+
+
+@needs_main
+def test_symbol_missing_from_dhans_scrip_map_keeps_the_yfinance_path(bulk):
+    cache, fb, st = bulk
+    names = _names(30)
+    st["dhan_prices"] = {n: 50.0 for n in names[:28]}
+    st["unmapped"] = {"S29"}                                   # only yfinance can price it
+    out = main._get_quotes_bulk_core(_breq(*names), {})
+    assert len(st["yf"]) == 1 and st["yf"][0].split() == ["S29.NS"]
+    assert main._LEFTOVER_STALE_STATS == {"served": 0, "unpriced": 1}      # S28 (mapped, unanswered) was dropped
+
+
+@needs_main
+def test_unmapped_symbol_with_a_recent_cached_row_is_still_served_from_cache(bulk):
+    cache, fb, st = bulk
+    names = _names(20)
+    st["dhan_prices"] = {n: 50.0 for n in names[:19]}
+    st["unmapped"] = {"S19"}
+    fb["quote:S19.NS"] = _row("S19", 8.0, age_s=40)
+    out = main._get_quotes_bulk_core(_breq(*names), {})
+    assert st["yf"] == []
+    assert {q["symbol"]: q["price"] for q in out["quotes"]}["S19"] == 8.0
+
+
+@needs_main
+def test_dhan_can_price_fails_safe_to_false(monkeypatch):
+    import dhan_data.scrip_master as dsm
+    monkeypatch.setattr(dsm, "security_id", lambda s: ("NSE_EQ", 1) if s == "TCS" else None)
+    assert main._dhan_can_price("TCS") is True
+    assert main._dhan_can_price("NOPE") is False
+    monkeypatch.setattr(dsm, "security_id", lambda s: 1 / 0)
+    assert main._dhan_can_price("TCS") is False

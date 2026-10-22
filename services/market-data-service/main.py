@@ -2638,6 +2638,16 @@ def _bulk_leftover_cfg() -> tuple:
     return on, mx, pct, age
 
 
+def _dhan_can_price(base: str) -> bool:
+    """group487: True when Dhan's scrip map has a row for `base`, i.e. Dhan could have priced it and only answered late.
+    False when it has none (only yfinance can price it) and on ANY error or an unloaded map (= the old path). Never raises."""
+    try:
+        from dhan_data import scrip_master as _dsm
+        return _dsm.security_id(base) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _leftover_stale_row(key_sym: str, out_sym: Optional[str], max_age: float) -> Optional[dict]:
     """group487: cached / last-good quote row of `key_sym`, at most `max_age` s old, tagged stale_leftover(<source>).
     None when there is none. Never raises."""
@@ -4078,8 +4088,8 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
         # group487: Dhan (or another provider) already priced almost the whole request and only a few symbols are left.
         # Sending those few to yf.download cost an 18 s hard timeout per call (2026-10-21 log) and the whole response
         # waited for it. They now get a cached price (<= QUOTE_BULK_LEFTOVER_MAX_AGE_S, default 180 s, tagged
-        # stale_leftover(<source>), real fetched_at kept) and, with none, are left out of this answer. Indices and held
-        # symbols keep the normal path. QUOTE_BULK_SMALL_LEFTOVER_SKIP=0 restores the old behaviour.
+        # stale_leftover(<source>), real fetched_at kept) and, with none, are left out of this answer. Indices, held symbols
+        # and symbols missing from Dhan's scrip map (yfinance is their only provider) keep the normal path. QUOTE_BULK_SMALL_LEFTOVER_SKIP=0 restores the old behaviour.
         try:
             _sl_on, _sl_max, _sl_pct, _sl_age = _bulk_leftover_cfg()
             _dhan_n = sum(1 for _r in results if isinstance(_r, dict) and _r.get("source") == "dhan")
@@ -4090,10 +4100,13 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                     if _m.startswith("^") or _cooldown_symbol_held(symbol_map.get(_m, _m)):
                         _left_sl.append(_m)
                         continue
-                    _row = _leftover_stale_row(_m, symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", ""), _sl_age)
+                    _base_sl = symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", "")
+                    _row = _leftover_stale_row(_m, _base_sl, _sl_age)
                     if _row:
                         results.append(_row)
                         _served_sl += 1
+                    elif not _dhan_can_price(_base_sl):
+                        _left_sl.append(_m)      # Dhan has no row for it: yfinance is its only provider, keep the old path
                     else:
                         _dropped_sl += 1
                 if _served_sl or _dropped_sl:

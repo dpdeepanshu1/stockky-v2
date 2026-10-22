@@ -11,7 +11,7 @@ dashboard as a 502 event although nothing was rate limited.
    request is already priced, and at most `QUOTE_BULK_SMALL_LEFTOVER_MAX` (default 8) symbols are left.
    Each leftover then gets a cached price no older than `QUOTE_BULK_LEFTOVER_MAX_AGE_S` (default 180 s), tagged
    `stale_leftover(<source>)` with its real `fetched_at`; with none it is left out of the answer. No `yf.download`.
-   Indices (`^...`) and held symbols keep the normal path.
+   Indices (`^...`), held symbols and (group489) symbols that are not in Dhan's scrip map keep the normal path.
 2. A yfinance hard timeout or open circuit in /quotes/bulk is logged as a warning and no longer reported as a 502
    rate-limit event. A real 429 ("Too Many Requests") and other errors are reported as before.
 
@@ -29,4 +29,10 @@ All are blank-safe.
 - Not part of this group: the scrip-master snapshot on a mounted volume and the staggered first download (next group).
 
 ## Tests
-`services/market-data-service/tests/test_group487_bulk_small_leftover.py` (13). Whole market-data suite: 1726 passed.
+`services/market-data-service/tests/test_group487_bulk_small_leftover.py` (16 after group489). Whole market-data suite passes.
+
+## group489 correction (audit of group487)
+The first version dropped every leftover that had no recent cached price. A symbol that is not in Dhan's scrip map can only be
+priced by yfinance, so it would never have been priced again through /quotes/bulk. Now only leftovers Dhan knows but did not
+answer in time are skipped. A leftover missing from Dhan's map (or any error / unloaded map, via `_dhan_can_price`) still goes
+to yfinance as before; a recent cached row is still served first for either kind.

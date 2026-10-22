@@ -428,3 +428,46 @@ if __name__ == "__main__":
             n += 1
             print("ok", name)
     print(f"{n} passed")
+
+
+def test_out_file_failed_run_keeps_the_previous_good_file():
+    """group491: a run that fails / is cut off must not empty the previous backtest.json at its start."""
+    r, d, sc = _runner({})
+    target = os.path.join(d, "data", "calibration_out", "backtest.json")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    open(target, "w").write(json.dumps({"good": 1}))
+    _script(sc, "w.py", "import sys; print('{\"half\":'); sys.exit(2)\n")
+    r.jobs = {"j": _job("j", lambda c, p: [_cmd(c, "w.py", out_file=target)])}
+    run = r.submit("job", "j")
+    assert r.drain(30)
+    assert json.load(open(target)) == {"good": 1}
+    assert not os.path.exists(target + ".part")
+    assert os.path.isfile(os.path.join(d, "data", "runs", run.d["id"], "backtest.json"))      # the run folder still shows what it produced
+    r.shutdown()
+
+
+def test_out_file_finished_run_replaces_the_file_and_leaves_no_part_file():
+    r, d, sc = _runner({})
+    target = os.path.join(d, "data", "calibration_out", "backtest.json")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    open(target, "w").write(json.dumps({"old": 1}))
+    _script(sc, "w.py", "import json; print(json.dumps({'new': 2}))\n")
+    r.jobs = {"j": _job("j", lambda c, p: [_cmd(c, "w.py", out_file=target)])}
+    r.submit("job", "j")
+    assert r.drain(30)
+    assert json.load(open(target)) == {"new": 2}
+    assert not os.path.exists(target + ".part")
+    r.shutdown()
+
+
+def test_out_file_finished_run_with_empty_output_keeps_the_previous_file():
+    r, d, sc = _runner({})
+    target = os.path.join(d, "data", "calibration_out", "backtest.json")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    open(target, "w").write(json.dumps({"old": 1}))
+    _script(sc, "w.py", "pass\n")
+    r.jobs = {"j": _job("j", lambda c, p: [_cmd(c, "w.py", out_file=target)])}
+    r.submit("job", "j")
+    assert r.drain(30)
+    assert json.load(open(target)) == {"old": 1}
+    r.shutdown()

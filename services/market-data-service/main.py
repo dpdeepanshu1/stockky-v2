@@ -2611,6 +2611,58 @@ def _cooldown_stale_row(key_sym: str, out_sym: Optional[str] = None) -> Optional
     return None
 
 
+_LEFTOVER_STALE_STATS = {"served": 0, "unpriced": 0}
+
+
+def _bulk_leftover_cfg() -> tuple:
+    """group487: (on, max leftover symbols, min % of the request already priced, max cached-row age in s). Blank-safe."""
+    on = ((os.getenv("QUOTE_BULK_SMALL_LEFTOVER_SKIP") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+    try:
+        mx = int(float((os.getenv("QUOTE_BULK_SMALL_LEFTOVER_MAX") or "").strip() or 8))
+    except ValueError:
+        mx = 8
+    if not (0 <= mx <= 200):
+        mx = 8
+    try:
+        pct = float((os.getenv("QUOTE_BULK_SMALL_LEFTOVER_MIN_PRICED_PCT") or "").strip() or 90.0)
+    except ValueError:
+        pct = 90.0
+    if not (pct == pct and 50.0 <= pct <= 100.0):
+        pct = 90.0
+    try:
+        age = float((os.getenv("QUOTE_BULK_LEFTOVER_MAX_AGE_S") or "").strip() or 180.0)
+    except ValueError:
+        age = 180.0
+    if not (age == age and 1.0 <= age <= 3600.0):
+        age = 180.0
+    return on, mx, pct, age
+
+
+def _leftover_stale_row(key_sym: str, out_sym: Optional[str], max_age: float) -> Optional[dict]:
+    """group487: cached / last-good quote row of `key_sym`, at most `max_age` s old, tagged stale_leftover(<source>).
+    None when there is none. Never raises."""
+    try:
+        key = f"quote:{key_sym}"
+        for getter in (_cache_get, _fallback_get):
+            try:
+                hit = getter(key)
+            except Exception:  # noqa: BLE001
+                hit = None
+            if _row_price(hit) is None:
+                continue
+            age = _quote_row_age_s(hit)
+            if age is None or age > max_age:
+                continue
+            row = _pad_quote_response(out_sym or key_sym, dict(hit))
+            _orig = str(row.get("source") or "cache")
+            if not _orig.startswith("stale_leftover"):
+                row["source"] = f"stale_leftover({_orig})"
+            return _sanitize_for_json(row)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("leftover stale row %s: %s", key_sym, e)
+    return None
+
+
 def _quote_angelone_first_cfg() -> tuple:
     on = ((os.getenv("QUOTE_ANGELONE_FIRST") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
     try:
@@ -3762,6 +3814,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
 
     if not yf_tickers:
         return {"ok": False, "error": "No valid symbols after normalize", "quotes": []}
+    _requested_n = len(yf_tickers)   # group487: the share Dhan / the other providers priced is judged against this
 
     # 2026-09-01 fix: this endpoint used to call yf.download() for every
     # requested symbol on every call, with no cache check at all — unlike
@@ -4021,6 +4074,39 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
         except Exception as _cde:  # noqa: BLE001
             logger.debug("quotes/bulk: cooldown stale gate failed (non-fatal): %s", _cde)
 
+    if yf_tickers:
+        # group487: Dhan (or another provider) already priced almost the whole request and only a few symbols are left.
+        # Sending those few to yf.download cost an 18 s hard timeout per call (2026-10-21 log) and the whole response
+        # waited for it. They now get a cached price (<= QUOTE_BULK_LEFTOVER_MAX_AGE_S, default 180 s, tagged
+        # stale_leftover(<source>), real fetched_at kept) and, with none, are left out of this answer. Indices and held
+        # symbols keep the normal path. QUOTE_BULK_SMALL_LEFTOVER_SKIP=0 restores the old behaviour.
+        try:
+            _sl_on, _sl_max, _sl_pct, _sl_age = _bulk_leftover_cfg()
+            _dhan_n = sum(1 for _r in results if isinstance(_r, dict) and _r.get("source") == "dhan")
+            if (_sl_on and _dhan_n > 0 and _requested_n > 0 and len(yf_tickers) <= _sl_max
+                    and 100.0 * (_requested_n - len(yf_tickers)) / _requested_n >= _sl_pct):
+                _left_sl, _served_sl, _dropped_sl = [], 0, 0
+                for _m in yf_tickers:
+                    if _m.startswith("^") or _cooldown_symbol_held(symbol_map.get(_m, _m)):
+                        _left_sl.append(_m)
+                        continue
+                    _row = _leftover_stale_row(_m, symbol_map.get(_m, _m).replace(".NS", "").replace(".BO", ""), _sl_age)
+                    if _row:
+                        results.append(_row)
+                        _served_sl += 1
+                    else:
+                        _dropped_sl += 1
+                if _served_sl or _dropped_sl:
+                    _LEFTOVER_STALE_STATS["served"] += _served_sl
+                    _LEFTOVER_STALE_STATS["unpriced"] += _dropped_sl
+                    logger.info("quotes/bulk: %d of %d symbols already priced (Dhan %d) - %d leftover symbol(s) served from a "
+                                "cached price (<= %.0fs old), %d left unpriced instead of going to yfinance, %d still for yfinance",
+                                _requested_n - len(yf_tickers), _requested_n, _dhan_n, _served_sl, _sl_age, _dropped_sl,
+                                len(_left_sl))
+                yf_tickers = _left_sl
+        except Exception as _sle:  # noqa: BLE001
+            logger.debug("quotes/bulk: small-leftover gate failed (non-fatal): %s", _sle)
+
     if not yf_tickers:
         # Everything was already fresh (cache, live feed, or AngelOne REST) —
         # no yfinance call needed at all this time.
@@ -4084,11 +4170,19 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
             auto_adjust=True,
         )
     except Exception as e:
-        logger.exception("yf.download bulk failed: %s", e)
-        try:
-            _report_rate_limit(429 if "429" in str(e) or "Too Many" in str(e) else 502, path="/quotes/bulk", detail=str(e)[:200])
-        except Exception:
-            pass
+        # group487: a hard timeout or an open yfinance circuit is a slow / unavailable provider, not a rate limit. They
+        # used to be reported as a 502 rate-limit event (dashboard + breaker feed) and logged with a full traceback.
+        _es = str(e)
+        _is_rl = "429" in _es or "Too Many" in _es
+        _is_slow = isinstance(e, TimeoutError) or "hard timeout" in _es or "circuit open" in _es
+        if _is_slow and not _is_rl:
+            logger.warning("yf.download bulk skipped: %s: %s", type(e).__name__, _es[:200])
+        else:
+            logger.exception("yf.download bulk failed: %s", e)
+            try:
+                _report_rate_limit(429 if _is_rl else 502, path="/quotes/bulk", detail=_es[:200])
+            except Exception:
+                pass
         # 2026-09-01 fix: this used to raise HTTPException(502) unconditionally,
         # discarding any quotes already served from cache/live feed above and
         # forcing every caller up the chain to handle a hard failure. Callers

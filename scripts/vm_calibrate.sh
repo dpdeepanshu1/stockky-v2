@@ -100,11 +100,13 @@ main() {
   [[ "$DRY_RUN" != "1" && -f "$OUT_DIR/g1/g1_report.md" ]] && cat "$OUT_DIR/g1/g1_report.md"
 
   echo "=== walk-forward (first sample)"
+  # group491: the walk-forward is the 2-hour step; each finished symbol is saved and RESUME=1 continues a killed run (a changed history file is recomputed)
+  wf_ck=(--checkpoint "$OUT_DIR/ckpt/structure_${first##*_}"); [[ "$RESUME" == "1" ]] && wf_ck+=(--resume)
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf '+ %s %s %s --step %s --horizon %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$OUT_DIR/backtest.json"
+    printf '+ %s %s %s --step %s --horizon %s --jobs %s %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$JOBS" "${wf_ck[*]}" "$OUT_DIR/backtest.json"
   else
-    printf '+ %s %s %s --step %s --horizon %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$OUT_DIR/backtest.json"
-    "$PY" "$SCRIPTS/structure_backtest.py" "$first" --step "$STEP" --horizon "$HORIZON" > "$OUT_DIR/backtest.json" || FAILED+=("structure_backtest")
+    printf '+ %s %s %s --step %s --horizon %s --jobs %s %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$JOBS" "${wf_ck[*]}" "$OUT_DIR/backtest.json"
+    "$PY" "$SCRIPTS/structure_backtest.py" "$first" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" "${wf_ck[@]}" > "$OUT_DIR/backtest.json" || FAILED+=("structure_backtest")
   fi
 
   echo "=== gate readout (G2 / G4)"

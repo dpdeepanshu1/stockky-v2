@@ -201,7 +201,8 @@ def b_g1_check(ctx, p):
 
 
 def b_structure_backtest(ctx, p):
-    return [_py(ctx, "structure_backtest.py", "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), _hist(ctx, int(p.get("seed", 7))),
+    return [_py(ctx, "structure_backtest.py", "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", 2),
+                *_ck(ctx, "structure", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title="Structure rules walk-forward (JSON also saved as backtest.json)", out_file=os.path.join(ctx["cal"], "backtest.json"), attention=())]
 
 
@@ -359,7 +360,7 @@ JOB_LIST = [
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("g1_check", "G1 offline: engine time", "monthly", "After fetch_history", "Is the engine fast enough on real history?", b_g1_check, [SEED, P("budget_ms", "Budget ms", "int", 15, 10, 500)], heavy=True, window="closed", timeout_s=1800, needs=["fetch_history"]),
     _job("structure_backtest", "Structure rules walk-forward", "weekly", "After fetch_history", "Which gate thresholds are stable out of sample.", b_structure_backtest,
-         [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"])], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
+         [SEED, P("step", "Step", "int", 3, 1, 10), P("horizon", "Horizon (days)", "choice", "10", choices=["1", "5", "10", "20"]), JOBS_P], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("gate_check", "G2 / G3 / G4 verdict", "weekly", "After every A/B report", "Reads every seed's A/B report and the live structure report.", b_gate_check, timeout_s=300,
          after="PASS on all gates: structure rules may be trusted in REAL mode. FAIL / NOT_ENOUGH_DATA: keep the kill switches ready (STRUCTURE_POLICY_MODE / GATE_MODE / STOP_MODE off)."),
     _job("calibration_pack", "Env lines from the walk-forward", "monthly", "After the walk-forward", "Advisory env lines for the four gate thresholds. Applies nothing.", b_calibration_pack, timeout_s=120),

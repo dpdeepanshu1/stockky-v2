@@ -339,7 +339,10 @@ ENTRY_OVERNIGHT_PRIORITY_BONUS = float(((os.getenv("ENTRY_OVERNIGHT_PRIORITY_BON
 # so a normal ATR-based stop distance can actually size a trade. Existing
 # DB rows already seeded at the old 1.0 default are corrected on startup —
 # see main.py's _migrate_risk_defaults().
-DEFAULT_RISK_PER_TRADE_PCT = float(((os.getenv("DEFAULT_RISK_PER_TRADE_PCT") or "").strip() or "5.0"))
+# E46 (2026-10-23): 5.0 -> 2.0. group322 already caps one trade's risk at the daily-loss % (3.0), so 5.0 never applied in full; the Rs 3,000
+# MAX_TRADE_VALUE cap decides the real size. 2.0 matches position-stocks and still leaves room (Rs ~219 at ~Rs 11k equity, where 1.0 starved
+# entries). Rows still at 5.0 that no admin edited are moved once by _migrate_risk_default_e46().
+DEFAULT_RISK_PER_TRADE_PCT = float(((os.getenv("DEFAULT_RISK_PER_TRADE_PCT") or "").strip() or "2.0"))
 DEFAULT_MAX_DAILY_LOSS_PCT = float(((os.getenv("DEFAULT_MAX_DAILY_LOSS_PCT") or "").strip() or "3.0"))
 DEFAULT_MAX_CONCURRENT_POSITIONS = int(((os.getenv("DEFAULT_MAX_CONCURRENT_POSITIONS") or "").strip() or "3"))
 DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(((os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_PCT") or "").strip() or "5.0"))

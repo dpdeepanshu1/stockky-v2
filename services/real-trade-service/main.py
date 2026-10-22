@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 import config
 import models
+from risk_engine.effective_risk import effective_risk_pct
 from auth.admin_auth import (
     require_admin, require_admin_if_real, verify_admin_password, issue_session_token, AdminAuthError,
 )
@@ -198,6 +199,7 @@ async def startup() -> None:
     init_schema()
     _seed_defaults()
     _migrate_risk_defaults()
+    _migrate_risk_default_e46()
     # 2026-09-02 Short-Term Trading Upgrade (resilience 3.1): compare the
     # last per-cycle open-positions snapshot (resilience/local_cache.py)
     # against live DB state. Never auto-corrects — just logs a
@@ -349,6 +351,7 @@ def _seed_defaults() -> None:
                     max_portfolio_risk_pct=config.DEFAULT_MAX_PORTFOLIO_RISK_PCT,
                     stale_data_seconds=config.DEFAULT_STALE_DATA_SECONDS,
                     max_tick_volatility_mult=config.DEFAULT_MAX_TICK_VOLATILITY_MULT,
+                    updated_by="system-seed",   # E47: a never-edited row follows the calibration page (risk_engine/effective_risk.py)
                 ))
             if not db.query(models.TradeAccount).filter_by(mode=mode).first():
                 capital = config.DEFAULT_DEMO_CAPITAL if mode == "DEMO" else 0.0
@@ -400,6 +403,42 @@ def _migrate_risk_defaults() -> None:
                     "(session79 cold-start fix — old value was still the stale "
                     "1.0%% seed default)", mode, old, risk.risk_per_trade_pct,
                 )
+        if changed:
+            db.commit()
+    finally:
+        db.close()
+
+
+# E46 (2026-10-23): the shipped default moved 5.0 -> 2.0. Same one-time idea as above, but narrower: a row is only moved when it is exactly
+# the OLD default AND nobody edited it (updated_by empty or one of our own migration tags). A row an admin saved (even at 5.0 on purpose)
+# carries that admin's name and is never touched. After the first boot it is a no-op.
+_E46_OLD_DEFAULT_RISK_PER_TRADE_PCT = 5.0
+_E46_SYSTEM_TAGS = ("", "system-seed", "system-migration-session79")   # None / empty = a legacy row nobody tagged
+
+
+def _migrate_risk_default_e46() -> None:
+    from db import get_session_factory
+    Session = get_session_factory()
+    db = Session()
+    try:
+        changed = False
+        for mode in ("DEMO", "REAL"):
+            risk = db.query(models.TradeRiskConfig).filter_by(mode=mode).first()
+            if risk is None:
+                continue
+            if risk.risk_per_trade_pct != _E46_OLD_DEFAULT_RISK_PER_TRADE_PCT:
+                continue
+            if (risk.updated_by or "") not in _E46_SYSTEM_TAGS:
+                continue
+            if float(config.DEFAULT_RISK_PER_TRADE_PCT) == _E46_OLD_DEFAULT_RISK_PER_TRADE_PCT:
+                continue   # operator pinned 5.0 via env: nothing to move
+            old = risk.risk_per_trade_pct
+            risk.risk_per_trade_pct = config.DEFAULT_RISK_PER_TRADE_PCT
+            risk.updated_at = datetime.now(timezone.utc)
+            risk.updated_by = "system-migration-e46"
+            changed = True
+            logger.info("real-trade: migrated %s risk_per_trade_pct %.2f%% -> %.2f%% (E46 default change; row was never edited by an admin)",
+                        mode, old, risk.risk_per_trade_pct)
         if changed:
             db.commit()
     finally:
@@ -689,7 +728,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "realized_pnl_total": account.realized_pnl_total if account else None,
         },
         "risk_config": {
-            "risk_per_trade_pct": risk.risk_per_trade_pct if risk else None,
+            "risk_per_trade_pct": effective_risk_pct(risk) if risk else None,
             "max_daily_loss_pct": risk.max_daily_loss_pct if risk else None,
             "max_concurrent_positions": risk.max_concurrent_positions if risk else None,
             "max_portfolio_risk_pct": risk.max_portfolio_risk_pct if risk else None,
@@ -995,7 +1034,7 @@ async def get_risk_config(mode: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"No risk config row for mode={mode}")
     return {
         "mode": mode,
-        "risk_per_trade_pct": risk.risk_per_trade_pct,
+        "risk_per_trade_pct": effective_risk_pct(risk),
         "max_daily_loss_pct": risk.max_daily_loss_pct,
         "max_concurrent_positions": risk.max_concurrent_positions,
         "max_portfolio_risk_pct": risk.max_portfolio_risk_pct,
@@ -1243,7 +1282,7 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     _streak, _streak_at = _pf_today_loss_streak(db, mode)
     account_state = AccountState(
         equity=account_row.current_equity,
-        risk_per_trade_pct=risk_row.risk_per_trade_pct,
+        risk_per_trade_pct=effective_risk_pct(risk_row),
         max_daily_loss_pct=risk_row.max_daily_loss_pct,
         max_concurrent_positions=risk_row.max_concurrent_positions,
         max_portfolio_risk_pct=risk_row.max_portfolio_risk_pct,

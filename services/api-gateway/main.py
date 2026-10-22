@@ -11716,51 +11716,15 @@ async def api_bulk_quote_cache():
     }
 
 
-@app.get("/api/price-alerts")
-@app.get("/price-alerts")
-async def api_list_price_alerts():
-    from data_feed import list_price_alerts
-    alerts = list_price_alerts()
-    return {"ok": True, "alerts": alerts, "count": len(alerts)}
-
-
-@app.post("/api/price-alerts")
-@app.post("/price-alerts")
-async def api_add_price_alert(request: Request):
-    """Body: {symbol, target_price, direction: above|below, note?}"""
-    from data_feed import add_price_alert
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    body = body or {}
-    if not isinstance(body, dict):
-        # A truthy non-object (e.g. [1]) used to crash on `.get` with a bare 500.
-        raise HTTPException(status_code=400, detail="request body must be a JSON object")
-    sym = str(body.get("symbol") or "").strip()
-    try:
-        target = float(body.get("target_price") or body.get("target") or 0)
-    except (TypeError, ValueError):
-        target = 0
-    if not math.isfinite(target):
-        # json.loads accepts NaN / Infinity, and `nan <= 0` is False, so they used to pass validation.
-        target = 0
-    direction = str(body.get("direction") or "above").lower()
-    note = str(body.get("note") or "")
-    if not sym or target <= 0:
-        raise HTTPException(status_code=400, detail="symbol and target_price required")
-    entry = await asyncio.to_thread(add_price_alert, sym, target, direction=direction, note=note)  # group361: off the event loop
-    return {"ok": True, "alert": entry}
-
-
-@app.delete("/api/price-alerts/{alert_id}")
-@app.delete("/price-alerts/{alert_id}")
-async def api_delete_price_alert(alert_id: str):
-    from data_feed import delete_price_alert
-    ok = await asyncio.to_thread(delete_price_alert, alert_id)  # group361: off the event loop
-    if not ok:
-        raise HTTPException(status_code=404, detail="alert not found")
-    return {"ok": True, "deleted": alert_id}
+# E48: the price-alert routes moved to gateway_routers/price_alerts.py (code unchanged). Included here, where they used to be, so route order is the
+# same; the handler names are re-exported so `main.api_list_price_alerts` and `gw.api_add_price_alert(...)` keep working.
+from gateway_routers.price_alerts import (  # noqa: E402
+    router as _price_alerts_router,
+    api_list_price_alerts,
+    api_add_price_alert,
+    api_delete_price_alert,
+)
+app.include_router(_price_alerts_router)
 
 
 @app.post("/api/price-alerts/evaluate")

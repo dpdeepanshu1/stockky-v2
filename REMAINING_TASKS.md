@@ -1,6 +1,12 @@
 # Remaining tasks
 
-> E44 (this zip): E31 route splitting done in App.tsx (docs/E31_ROUTE_SPLITTING.md). On the VM: `npm ci && npm run build`, confirm separate chunks, then open every tab once (spinner, then the page) and try the low-balance deposit prompt. Still open: F33 rest (gateway routers, installable package, merge the 11 requirements files), A6, C21 live, scheduler switches on the page.
+> E48 (this zip): gateway router split started with one tiny group (price alerts, docs/E48_GATEWAY_ROUTER_PILOT.md). On the VM: `cd services/api-gateway && bash run_tests.sh`, rebuild api-gateway, `curl /price-alerts`. Still open: the rest of the split (one group per release), installable package, C21 live.
+
+> E47: the risk-per-trade calibration switch now really reaches the engine (docs/E47_RISK_SWITCH_REACHES_ENGINE.md). On the VM: `bash scripts/docker_test.sh`, rebuild real-trade-service, change the value on the page and check `GET /risk-config/REAL` shows it. Still open: gateway router split, installable package, C21 live.
+
+> E46: the four open decisions are made (docs/E46_DECISIONS_AND_PIN_ALIGNMENT.md): risk per trade 2.0, Position Stocks entry cap 10, no new enforcement, sub-app pins aligned to the parent. On the VM: `bash scripts/docker_test.sh`, rebuild real-trade-service + position-stocks-service, expect one `migrated ... risk_per_trade_pct 5.00% -> 2.00%` log line. Still open: gateway router split and installable package (need pytest + a deploy-and-watch cycle), C21 live (needs the B-tools evidence).
+
+> E44: E31 route splitting done in App.tsx (docs/E31_ROUTE_SPLITTING.md). On the VM: `npm ci && npm run build`, confirm separate chunks, then open every tab once (spinner, then the page) and try the low-balance deposit prompt. Still open: F33 rest (gateway routers, installable package, merge the 11 requirements files), A6, C21 live, scheduler switches on the page.
 
 > E43 (this zip): F33 part 1 built: nightly backup + restore test (`scripts/backup_state.sh`, docs/F33_BACKUP_AND_RESTORE_TEST.md). On the VM: `bash scripts/backup_state.sh run`, `restore-test`, `schedule`; set `OFFSITE_CMD` so a copy leaves the VM. Still open from F33: gateway routers, installable package, merge the 11 requirements files. Also open: E31, A6, C21 live, calibration-page switches for the scheduler.
 

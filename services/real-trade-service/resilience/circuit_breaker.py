@@ -28,7 +28,7 @@ def _probe_alert_repeat_s() -> float:
     """group 485: seconds between repeated "probe failed again" Telegram alerts while a breaker stays down.
     RT_BREAKER_PROBE_ALERT_REPEAT_S (default 1800 = 30 min; 0 = alert on every failed probe, the old behaviour)."""
     try:
-        return max(0.0, float(os.getenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "1800")))
+        return max(0.0, float(((os.getenv("RT_BREAKER_PROBE_ALERT_REPEAT_S") or "").strip() or "1800")))
     except (TypeError, ValueError):
         return 1800.0
 

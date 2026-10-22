@@ -96,6 +96,23 @@ def render(bt: Any, abs_: List[Dict[str, Any]], min_oos_edge: float = 0.25, min_
     return "\n".join(L)
 
 
+def _load_json(path: str, what: str):
+    """Read one input JSON. An unreadable, empty or non-JSON file ends the run with one clear line instead of a traceback
+    (an empty backtest.json is what a walk-forward that was killed or failed leaves behind)."""
+    try:
+        text = Path(path).read_text()
+    except OSError as e:
+        raise SystemExit(f"calibration_pack: cannot read the {what} {path}: {e}")
+    if not text.strip():
+        raise SystemExit(f"calibration_pack: the {what} {path} is empty - the job that writes it did not finish; "
+                         "run it again (for the walk-forward: the Structure rules walk-forward job) and then this one.")
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise SystemExit(f"calibration_pack: the {what} {path} is not valid JSON ({e}); it starts with {text.strip()[:80]!r}. "
+                         "Run the job that writes it again.")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backtest", required=True, help="JSON printed by scripts/structure_backtest.py")
@@ -104,8 +121,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--min-oos-n", type=int, default=100)
     ap.add_argument("--out", default="")
     a = ap.parse_args(argv)
-    bt = json.loads(Path(a.backtest).read_text())
-    reports = [json.loads(Path(p).read_text()) for p in a.ab]
+    bt = _load_json(a.backtest, "walk-forward result")
+    reports = [_load_json(p, "A/B report") for p in a.ab]
     text = render(bt, reports, a.min_oos_edge, a.min_oos_n)
     print(text)
     if a.out:

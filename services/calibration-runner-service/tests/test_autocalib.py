@@ -82,8 +82,13 @@ def test_every_rule_points_at_a_real_switch_and_a_real_test():
         for t in r.tests:
             assert t in J.JOBS, f"{r.key}: unknown test {t}"
     assert len({(r.service, r.key) for r in A.RULES}) == len(A.RULES)
+    # group490: a protected key is real when it is a control-panel switch OR an env setting the service config really reads
+    # (SIZE_LADDER_MAX_LEVEL is a number read in real-trade's config.py, not a catalog Flag); a typo is still caught
+    cfg_src = "".join((HERE.parent / path / "config.py").read_text(encoding="utf-8")
+                      for path in ("real-trade-service", "position-stocks-service"))
     for k in A.PROTECTED:
-        assert any(k in c for c in cat.values()) or k.endswith("_DEMO_MODE") or k.startswith("PS_"), k
+        assert (any(k in c for c in cat.values()) or re.search(r'getenv\(\s*"%s"' % re.escape(k), cfg_src)
+                or k.endswith("_DEMO_MODE") or k.startswith("PS_")), k
 
 
 def test_loss_review_guards_are_protected():

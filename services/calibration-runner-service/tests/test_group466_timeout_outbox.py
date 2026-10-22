@@ -44,13 +44,12 @@ def test_heavy_limit_comes_from_the_environment_and_never_goes_below_one_hour(mo
 
 def test_resumable_jobs_get_checkpoint_args_and_resume_flag():
     ctx = dict(python="py", scripts="/s", cal="/cal", run="/run")
-    for jid, name in (("ab_report", "ab"), ("legacy_gate", "legacy"), ("entry_rules", "entry"), ("p8_retest", "p8"), ("ml_v2", "ml_v2")):
+    for jid, name in (("ab_report", "ab"), ("legacy_gate", "legacy"), ("entry_rules", "entry"), ("p8_retest", "p8"), ("ml_v2", "ml_v2"), ("structure_backtest", "structure")):
         assert J.JOBS[jid]["resumable"], jid
         argv = J.JOBS[jid]["builder"](ctx, J.coerce_params(J.JOBS[jid], {}))[0]["argv"]
         assert "--checkpoint" in argv and argv[argv.index("--checkpoint") + 1] == f"/cal/ckpt/{name}_7" and "--resume" not in argv, jid
         argv = J.JOBS[jid]["builder"](dict(ctx, resume=True), J.coerce_params(J.JOBS[jid], {}))[0]["argv"]
         assert "--resume" in argv, jid
-    assert not J.JOBS["structure_backtest"]["resumable"]
     assert all("resumable" in j for j in J.public_catalog()["jobs"])
 
 

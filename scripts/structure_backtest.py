@@ -3,6 +3,11 @@
 a walk-forward test per rule and the calibration of the quality score as JSON.
 
   python3 scripts/structure_backtest.py DIR [--step 3] [--horizon 10] [--min-n 20] [--thresholds '{"chase_atr":1.5}']
+                                        [--jobs 1] [--checkpoint FOLDER [--resume]]
+
+group 491: --checkpoint saves every finished symbol (the slow part, about 2 hours for 400 symbols) so a killed / timed-out run continues with --resume
+and computes only the missing symbols (a changed history file or changed --step / --entry / --cost-pct / --slip-pct is recomputed). The walk-forward and
+calibration at the end are cheap and always recomputed from the saved samples, so changing --horizon / --min-n / --thresholds reuses the checkpoint.
 
 DIR holds one JSON file per symbol: either the market-data /history reply ({"candles":[{date,open,high,low,close,volume},...]}) or a bare list of
 such candles (save with: curl $MARKET_DATA_URL/history/SYM?period=5y > DIR/SYM.json). Needs only the repo (shared/market_structure); no network.
@@ -13,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "shared"))
@@ -45,21 +49,53 @@ def net_samples(bars, step: int = 3, cost_pct: float = 0.30, slip_pct: float = 0
     return out
 
 
+BENCH_NAMES = ("^NSEI", "NIFTY", "NSEI", "NIFTY50")
+
+
+def load_one(f: Path):
+    """(SYMBOL, bars) for one history file, or None when it has fewer than 100 bars. Raises on an unreadable file."""
+    doc = json.loads(f.read_text())
+    candles = doc.get("candles") if isinstance(doc, dict) else doc
+    bars = candles_to_bars(candles)
+    return (f.stem.upper(), bars) if len(bars) >= 100 else None
+
+
 def load(dir_: Path):
     for f in sorted(dir_.glob("*.json")):
-        if f.stem.upper() in ("^NSEI", "NIFTY", "NSEI", "NIFTY50"):  # the benchmark tags regimes in ms_ab_report; it is never traded
+        if f.stem.upper() in BENCH_NAMES:  # the benchmark tags regimes in ms_ab_report; it is never traded
             continue
         try:
-            doc = json.loads(f.read_text())
-            candles = doc.get("candles") if isinstance(doc, dict) else doc
-            bars = candles_to_bars(candles)
-            if len(bars) >= 100:
-                yield f.stem.upper(), bars
+            got = load_one(f)
+            if got is not None:
+                yield got
         except Exception as e:  # noqa: BLE001
             print(f"skip {f.name}: {e}", file=sys.stderr)
 
 
-def main() -> int:
+def _job(job):
+    """One symbol (group 491, module level so a process pool can run it): {"sym", "samples", "err"}. samples is None when the file is skipped."""
+    path, step, entry, cost_pct, slip_pct = job
+    f = Path(path)
+    try:
+        got = load_one(f)
+    except Exception as e:  # noqa: BLE001
+        return {"sym": f.stem.upper(), "samples": None, "err": f"{type(e).__name__}: {e}"}
+    if got is None:
+        return {"sym": f.stem.upper(), "samples": None, "err": ""}
+    sym, bars = got
+    built = net_samples(bars, step, cost_pct, slip_pct) if entry == "next_open" else build_samples(bars, step=step)
+    for s in built:
+        s["symbol"] = sym
+    return {"sym": sym, "samples": built, "err": ""}
+
+
+def _stamp(path, step, entry, cost_pct, slip_pct):
+    """What decides a saved symbol: the history file (size, mtime) and the settings that change the samples. Not horizon / min-n / thresholds."""
+    from _progress import file_stamp
+    return file_stamp(path, step, entry, float(cost_pct), float(slip_pct))
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("dir")
     ap.add_argument("--step", type=int, default=3)
@@ -70,20 +106,24 @@ def main() -> int:
                     help="next_open (default): tradable, net of costs; close: the old signal-day-close, cost-free view")
     ap.add_argument("--cost-pct", type=float, default=0.30)
     ap.add_argument("--slip-pct", type=float, default=0.10)
-    a = ap.parse_args()
+    ap.add_argument("--jobs", type=int, default=1, help="parallel workers for the per-symbol replay (default 1: the old single process)")
+    ap.add_argument("--checkpoint", default="", help="folder where each finished symbol is saved as the run goes (group 491); emptied at the start unless --resume")
+    ap.add_argument("--resume", action="store_true", help="reuse the symbols already saved in --checkpoint (same file and settings), compute only the rest")
+    a = ap.parse_args(argv)
     th = json.loads(a.thresholds)
+    files = [f for f in sorted(Path(a.dir).glob("*.json")) if f.stem.upper() not in BENCH_NAMES]
+    jobs = [(str(f), a.step, a.entry, a.cost_pct, a.slip_pct) for f in files]
+    from _progress import run_jobs   # group427 progress line; group491 per-symbol checkpoint / resume (same helper as the other backtests)
+    results = run_jobs(_job, jobs, a.jobs, "structure", ckpt=a.checkpoint, resume=a.resume, key=lambda j: Path(j[0]).stem.upper(),
+                       stamp=lambda j: _stamp(j[0], *j[1:]))
     samples, symbols = [], 0
-    t0 = time.monotonic()
-    _total = sum(1 for f in Path(a.dir).glob("*.json") if f.stem.upper() not in ("^NSEI", "NIFTY", "NSEI", "NIFTY50"))
-    print(f"[structure] starting about {_total} symbols (one at a time: this one is slow, a progress line follows every 5)", file=sys.stderr, flush=True)
-    for sym, bars in load(Path(a.dir)):
+    for res in results:
+        if res["err"]:
+            print(f"skip {res['sym']}: {res['err']}", file=sys.stderr)
+        if res["samples"] is None:
+            continue
         symbols += 1
-        if symbols % 5 == 0:                       # group427: a progress line so a long run does not look hung
-            print(f"[structure] {symbols}/{_total} symbols  elapsed {(time.monotonic() - t0) / 60:.1f} min", file=sys.stderr, flush=True)
-        built = net_samples(bars, a.step, a.cost_pct, a.slip_pct) if a.entry == "next_open" else build_samples(bars, step=a.step)
-        for s in built:
-            s["symbol"] = sym
-            samples.append(s)
+        samples.extend(res["samples"])
     done = [s for s in samples if s["outcome"].get(f"ret_{a.horizon}d") is not None]
     out = {"entry": a.entry, "cost_pct": a.cost_pct if a.entry == "next_open" else 0.0,
            "slip_pct": a.slip_pct if a.entry == "next_open" else 0.0, "symbols": symbols, "samples": len(samples), "with_outcome": len(done), "horizon": a.horizon,

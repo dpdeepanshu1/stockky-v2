@@ -293,3 +293,19 @@ def test_module_singletons_have_the_documented_settings():
             cb.market_data_breaker.cooldown_s) == ("market-data-service", 10, 60.0)
     assert (cb.event_service_breaker.name, cb.event_service_breaker.failure_threshold,
             cb.event_service_breaker.cooldown_s) == ("event-service", 10, 90.0)
+
+
+def test_probe_alert_repeat_setting_is_blank_and_garbage_safe(monkeypatch):
+    from resilience import circuit_breaker as cb
+    monkeypatch.delenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", raising=False)
+    assert cb._probe_alert_repeat_s() == 1800.0
+    monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "  ")
+    assert cb._probe_alert_repeat_s() == 1800.0
+    monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "nonsense")
+    assert cb._probe_alert_repeat_s() == 1800.0
+    monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "0")
+    assert cb._probe_alert_repeat_s() == 0.0
+    monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "-5")
+    assert cb._probe_alert_repeat_s() == 0.0
+    monkeypatch.setenv("RT_BREAKER_PROBE_ALERT_REPEAT_S", "600")
+    assert cb._probe_alert_repeat_s() == 600.0

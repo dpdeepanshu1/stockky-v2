@@ -97,3 +97,18 @@ def test_g1_budget_is_the_same_everywhere():
     assert J.JOBS["g1_check"]["builder"](dict(python="p", scripts="/s", bars="/b", run="/r", cal="/c", exp="/e"), {})[0]["argv"].count("15") == 1
     sh = (HERE.parent.parent / "scripts" / "vm_calibrate.sh").read_text()
     assert 'G1_BUDGET_MS:-15' in sh
+
+
+def test_empty_json_input_is_needs_data_first_not_a_script_crash():
+    """group490: a killed walk-forward leaves an empty backtest.json; the pack job must report 'input missing', not run and crash."""
+    cal = tempfile.mkdtemp()
+    Path(cal, "backtest.json").write_text("")
+    Path(cal, "ab_7").mkdir()
+    Path(cal, "ab_7", "ab_report.json").write_text("{}")
+    r, ctx = _runner(cal)
+    st = [s for s in J.JOBS["calibration_pack"]["builder"](ctx, {}) if s["kind"] == "cmd"][-1]
+    argv, why = r._expand(st, ctx)
+    assert argv is None and why.startswith("input missing") and "backtest.json is empty" in why
+    Path(cal, "backtest.json").write_text("{}")
+    argv, why = r._expand(st, ctx)
+    assert argv is not None, why

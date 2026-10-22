@@ -91,3 +91,50 @@ def test_cli_writes_out_file():
         json.dump(_bt(chase=_wf([1.0] * 4)), open(bt, "w"))
         assert c.main(["--backtest", bt, "--out", out]) == 0
         assert "SUGGEST 1" in open(out).read()
+
+
+def _run_main(*argv):
+    import io
+    import contextlib
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            c.main(list(argv))
+    except SystemExit as e:
+        return str(e.code)
+    return None
+
+
+def test_empty_backtest_json_ends_with_one_clear_line_not_a_traceback():
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "backtest.json")
+    open(p, "w").write("")
+    msg = _run_main("--backtest", p)
+    assert msg and "empty" in msg and p in msg and "Traceback" not in msg
+
+
+def test_non_json_backtest_and_missing_file_are_clear_too():
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "backtest.json")
+    open(p, "w").write("Error: killed")
+    msg = _run_main("--backtest", p)
+    assert msg and "not valid JSON" in msg and "Error: killed" in msg
+    msg = _run_main("--backtest", os.path.join(d, "nope.json"))
+    assert msg and "cannot read" in msg
+
+
+def test_empty_ab_report_is_named_in_the_message():
+    d = tempfile.mkdtemp()
+    bt = os.path.join(d, "backtest.json")
+    ab = os.path.join(d, "ab_report.json")
+    open(bt, "w").write(json.dumps(_bt()))
+    open(ab, "w").write("")
+    msg = _run_main("--backtest", bt, "--ab", ab)
+    assert msg and "A/B report" in msg and ab in msg
+
+
+def test_good_inputs_still_work():
+    d = tempfile.mkdtemp()
+    bt = os.path.join(d, "backtest.json")
+    open(bt, "w").write(json.dumps(_bt()))
+    assert _run_main("--backtest", bt) is None

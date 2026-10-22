@@ -665,6 +665,10 @@ class Runner:
                 if prev not in OUT_FLAGS and any(t.startswith(g) for g in guard):
                     if not os.path.exists(t) or (os.path.isdir(t) and not os.listdir(t)):
                         return None, f"input missing: {t} (run the job that creates it first)"
+                    # group490: an EMPTY .json input is what a job that was killed or failed leaves behind (the walk-forward's backtest.json
+                    # is its redirected output); it is not usable data, so it is the same "needs data first" case, not a script crash
+                    if os.path.isfile(t) and t.endswith(".json") and os.path.getsize(t) == 0:
+                        return None, f"input missing: {t} is empty (the job that writes it did not finish; run it again)"
                 argv.append(t.replace("{token}", tok))
             prev = t
         return argv, ""

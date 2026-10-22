@@ -4,7 +4,7 @@
   "services/decision-prediction-service/decision/circuit_breaker.py": "1776449d",
   "services/market-data-service/circuit_breaker.py": "490d140e",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
-  "services/real-trade-service/resilience/circuit_breaker.py": "36362953"
+  "services/real-trade-service/resilience/circuit_breaker.py": "6ead7cc1"
  },
  "circuit_breaker::CircuitOpenError": {
   "services/api-gateway/circuit_breaker.py": "fe628847",
@@ -110,6 +110,13 @@
   "services/market-data-service/circuit_breaker.py": "-",
   "services/position-stocks-service/resilience/circuit_breaker.py": "04d0c7d0",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
+ },
+ "circuit_breaker::_probe_alert_repeat_s": {
+  "services/api-gateway/circuit_breaker.py": "-",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "-",
+  "services/market-data-service/circuit_breaker.py": "-",
+  "services/position-stocks-service/resilience/circuit_breaker.py": "-",
+  "services/real-trade-service/resilience/circuit_breaker.py": "abe6609b"
  },
  "circuit_breaker::_provider_from_breaker": {
   "services/api-gateway/circuit_breaker.py": "-",

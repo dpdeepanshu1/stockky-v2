@@ -687,13 +687,20 @@ class Runner:
             return "failed", "script not found"
         out.line("$ " + self.redact(" ".join(argv)))
         stdout_file = st.get("out_file") or ""
-        fh = open(stdout_file, "wb") if stdout_file else None
+        # group491: the output goes to <out_file>.part and replaces <out_file> only when the command finished (see below). Writing
+        # straight to out_file emptied the previous good file at the START of every run, so a run cut off by a restart (the 21 Oct
+        # calibration_full) left an empty backtest.json and the next job that reads it had nothing.
+        part_file = stdout_file + ".part" if stdout_file else ""
+        fh = open(part_file, "wb") if stdout_file else None
         try:
             p = subprocess.Popen(argv, stdout=fh or subprocess.PIPE, stderr=subprocess.STDOUT if not fh else subprocess.PIPE, env=self._env(st.get("env") or {}),
                                  cwd=os.path.dirname(os.path.dirname(argv[1])) if script else None, preexec_fn=(lambda: os.nice(self.nice)) if self.nice else None,
                                  start_new_session=True)      # group 466: own process group, so a timeout / cancel kills the pool workers too
         except OSError as e:
             out.line(f"could not start: {e}")
+            if fh:
+                fh.close()
+                self._drop(part_file)
             return "failed", str(e)
         self.proc = p
         deadline = time.time() + left_s
@@ -729,15 +736,18 @@ class Runner:
             for ln in err_lines:
                 out.line(ln)
             try:
-                with open(stdout_file, "rb") as f:
+                with open(part_file, "rb") as f:
                     body = f.read(200 * 1024).decode("utf-8", "replace")
                 out.line(body.rstrip("\n"))
-                if os.path.getsize(stdout_file) > 200 * 1024:
+                if os.path.getsize(part_file) > 200 * 1024:
                     out.line(f"[...truncated here; the full output is in {os.path.basename(stdout_file)}]")
             except OSError:
                 pass
-            self._copy_artifact(stdout_file, ctx)
+            self._copy_artifact(part_file, ctx, os.path.basename(stdout_file))      # the run folder always shows what this run produced
         rc = p.returncode
+        if fh:
+            finished = not timed_out and not self.cancel_flag.is_set() and (rc in st.get("ok", [0]) or rc in st.get("attention", [1]))
+            self._publish_out_file(part_file, stdout_file, finished)
         if self.cancel_flag.is_set():
             return "cancelled", "cancelled"
         if timed_out:
@@ -748,11 +758,30 @@ class Runner:
             return "attention", f"exit {rc}: the script's own verdict says look at it"
         return "failed", f"exit {rc}"
 
-    def _copy_artifact(self, path: str, ctx: Dict[str, Any]) -> None:
+    def _copy_artifact(self, path: str, ctx: Dict[str, Any], name: str = "") -> None:
         try:
-            shutil.copy2(path, os.path.join(ctx["run"], os.path.basename(path)))
+            shutil.copy2(path, os.path.join(ctx["run"], name or os.path.basename(path)))
         except OSError:
             pass
+
+    @staticmethod
+    def _drop(path: str) -> None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def _publish_out_file(self, part: str, final: str, finished: bool) -> None:
+        """group491: a command that finished (exit code it counts as a result) replaces the saved file with its output; one that was
+        cut off, timed out, was cancelled or crashed leaves the previous good file untouched. A finished command with EMPTY output
+        also keeps the previous file when there is one."""
+        try:
+            if finished and (os.path.getsize(part) > 0 or not os.path.exists(final)):
+                os.replace(part, final)
+            else:
+                self._drop(part)
+        except OSError:
+            self._drop(part)
 
     # ---- http
     def _http(self, st: Dict[str, Any], out: "_Out", left_s: float, ctx: Dict[str, Any]) -> Tuple[str, str]:

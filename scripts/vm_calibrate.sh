@@ -106,7 +106,15 @@ main() {
     printf '+ %s %s %s --step %s --horizon %s --jobs %s %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$JOBS" "${wf_ck[*]}" "$OUT_DIR/backtest.json"
   else
     printf '+ %s %s %s --step %s --horizon %s --jobs %s %s > %s\n' "$PY" "$SCRIPTS/structure_backtest.py" "$first" "$STEP" "$HORIZON" "$JOBS" "${wf_ck[*]}" "$OUT_DIR/backtest.json"
-    "$PY" "$SCRIPTS/structure_backtest.py" "$first" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" "${wf_ck[@]}" > "$OUT_DIR/backtest.json" || FAILED+=("structure_backtest")
+    # group491 (atomic): write to backtest.json.part and move it over backtest.json only when the walk-forward finished, so a run that is killed
+    # (a container restart) or fails no longer leaves an EMPTY backtest.json in place of the last good one. Together with the checkpoint above,
+    # a killed run keeps the last good file AND the symbols it already computed.
+    if "$PY" "$SCRIPTS/structure_backtest.py" "$first" --step "$STEP" --horizon "$HORIZON" --jobs "$JOBS" "${wf_ck[@]}" > "$OUT_DIR/backtest.json.part"; then
+      mv -f "$OUT_DIR/backtest.json.part" "$OUT_DIR/backtest.json"
+    else
+      rm -f "$OUT_DIR/backtest.json.part"
+      FAILED+=("structure_backtest")
+    fi
   fi
 
   echo "=== gate readout (G2 / G4)"

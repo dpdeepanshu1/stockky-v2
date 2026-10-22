@@ -39,6 +39,7 @@ from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_ord
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent, today_entry_count, today_loss_streak, working_buy_symbols
+from risk_engine.effective_risk import effective_risk_pct
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
@@ -426,7 +427,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
     _entries_today = today_entry_count(db, mode)   # A12: overtrading cap
     return AccountState(
         equity=account.current_equity,
-        risk_per_trade_pct=risk.risk_per_trade_pct,
+        risk_per_trade_pct=effective_risk_pct(risk),
         max_daily_loss_pct=risk.max_daily_loss_pct,
         max_concurrent_positions=risk.max_concurrent_positions,
         max_portfolio_risk_pct=risk.max_portfolio_risk_pct,

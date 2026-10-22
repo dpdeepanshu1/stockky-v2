@@ -53,6 +53,7 @@ from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
 from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry, working_buy_symbols
+from risk_engine.effective_risk import effective_risk_pct
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 
@@ -85,7 +86,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
     _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
     return AccountState(
         equity=account.current_equity,
-        risk_per_trade_pct=risk.risk_per_trade_pct,
+        risk_per_trade_pct=effective_risk_pct(risk),
         max_daily_loss_pct=risk.max_daily_loss_pct,
         max_concurrent_positions=risk.max_concurrent_positions,
         max_portfolio_risk_pct=risk.max_portfolio_risk_pct,

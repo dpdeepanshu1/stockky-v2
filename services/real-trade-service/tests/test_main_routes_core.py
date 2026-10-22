@@ -278,6 +278,61 @@ class TestMigrateRiskDefaults:
         db = _fresh_db()  # nothing seeded at all
         with mock.patch.object(db_module, "get_session_factory", return_value=_SessionFactory):
             main._migrate_risk_defaults()  # must not raise
+
+
+class TestMigrateRiskDefaultE46:
+    """E46: shipped default 5.0 -> 2.0. Only a never-edited row still at 5.0 moves."""
+
+    def _set(self, db, value, updated_by):
+        for m in ("DEMO", "REAL"):
+            r = db.query(models.TradeRiskConfig).filter_by(mode=m).first()
+            r.risk_per_trade_pct = value
+            r.updated_by = updated_by
+        db.commit()
+
+    def _run(self, default):
+        with mock.patch.object(db_module, "get_session_factory", return_value=_SessionFactory), \
+             mock.patch.object(config, "DEFAULT_RISK_PER_TRADE_PCT", default):
+            main._migrate_risk_default_e46()
+
+    def test_never_edited_row_at_5_moves_to_new_default(self):
+        db = _fresh_db()
+        _seed(db)
+        self._set(db, 5.0, None)
+        self._run(2.0)
+        db.expire_all()
+        for m in ("DEMO", "REAL"):
+            r = db.query(models.TradeRiskConfig).filter_by(mode=m).first()
+            assert r.risk_per_trade_pct == 2.0
+            assert r.updated_by == "system-migration-e46"
+
+    def test_row_saved_by_an_admin_is_left_alone_even_at_5(self):
+        db = _fresh_db()
+        _seed(db)
+        self._set(db, 5.0, "admin")
+        self._run(2.0)
+        db.expire_all()
+        for m in ("DEMO", "REAL"):
+            assert db.query(models.TradeRiskConfig).filter_by(mode=m).first().risk_per_trade_pct == 5.0
+
+    def test_env_pinned_to_5_is_a_no_op(self):
+        db = _fresh_db()
+        _seed(db)
+        self._set(db, 5.0, None)
+        self._run(5.0)
+        db.expire_all()
+        assert db.query(models.TradeRiskConfig).filter_by(mode="REAL").first().risk_per_trade_pct == 5.0
+
+    def test_second_run_is_a_no_op_and_missing_rows_are_skipped(self):
+        db = _fresh_db()
+        _seed(db)
+        self._set(db, 5.0, None)
+        self._run(2.0)
+        self._run(2.0)
+        db.expire_all()
+        assert db.query(models.TradeRiskConfig).filter_by(mode="DEMO").first().risk_per_trade_pct == 2.0
+        db2 = _fresh_db()   # nothing seeded
+        self._run(2.0)      # must not raise
         assert db.query(models.TradeRiskConfig).count() == 0
 
 

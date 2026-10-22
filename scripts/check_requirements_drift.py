@@ -8,7 +8,7 @@ parent service's requirements.txt.
 analysis-intelligence-service, decision-prediction-service and notification-scheduler-service each have a parent requirements.txt (what
 docker-compose builds) and one per sub-app (standalone builds). A package that is in a sub file but missing from the parent, or pinned
 differently, means "works standalone, breaks in the parent image" (or the reverse). Differences that exist TODAY are listed in BASELINE
-below on purpose: changing a pin in a live image is a decision for the owner, not for a lint. A NEW difference, or a baseline entry that no
+below on purpose (the parent file wins; a sub-app file is aligned to it, never the other way round). A NEW difference, or a baseline entry that no
 longer exists (fixed - delete the line), fails the check. Stdlib only, read-only; changes no file.
 """
 from __future__ import annotations
@@ -23,14 +23,8 @@ PARENTS = ("analysis-intelligence-service", "decision-prediction-service", "noti
 
 # (parent, sub-folder, file, package, kind) - the differences accepted on 2026-10-23. kind: "spec" = pinned differently, "missing" = absent in parent.
 BASELINE = {
-    ("analysis-intelligence-service", "event", "requirements.txt", "yfinance", "spec"),
-    ("analysis-intelligence-service", "fundamental", "requirements.txt", "httpx", "spec"),
-    ("analysis-intelligence-service", "news", "requirements.txt", "httpx", "spec"),
-    ("analysis-intelligence-service", "technical", "requirements.txt", "httpx", "spec"),
-    ("decision-prediction-service", "decision", "requirements.txt", "fastapi", "spec"),
-    ("decision-prediction-service", "decision", "requirements.txt", "uvicorn", "spec"),
-    ("decision-prediction-service", "decision", "requirements.txt", "httpx", "spec"),
-    ("decision-prediction-service", "decision", "requirements.txt", "pydantic", "spec"),
+    # E46 (2026-10-23): the 8 pin differences were fixed by moving every sub-app file to the parent's pin (compose builds the parent, so
+    # that is what runs and what the tests ran against). Only the two optional ML-extra packages remain, on purpose.
     ("decision-prediction-service", "prediction", "requirements-ml-extra.txt", "imbalanced-learn", "missing"),
     ("decision-prediction-service", "prediction", "requirements-ml-extra.txt", "shap", "missing"),
 }

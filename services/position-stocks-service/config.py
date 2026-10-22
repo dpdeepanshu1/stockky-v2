@@ -248,8 +248,8 @@ _STARTUP_ARMED_DEFAULT = False
 
 # ── Shared Dhan account-wide order-rate budget ──────────────────────────────
 DAILY_ORDER_BUDGET = _get_int("POSITION_STOCKS_DAILY_ORDER_BUDGET", 300)
-# E39: real cap on NEW automatic entries per IST day (orders/entry_cap.py). 0 = off. 15 ships (real-trade is 6; the scalper trades more often). Change it on the calibration page.
-MAX_ENTRIES_PER_DAY = _get_int("POSITION_STOCKS_MAX_ENTRIES_PER_DAY", 15)
+# E39: real cap on NEW automatic entries per IST day (orders/entry_cap.py). 0 = off. 10 ships (E46: two full turns of the 5 scalp slots, the same 2-turns ratio real-trade has with 3 slots and a cap of 6). Change it on the calibration page.
+MAX_ENTRIES_PER_DAY = _get_int("POSITION_STOCKS_MAX_ENTRIES_PER_DAY", 10)
 
 # ── Daily loss kill switch (tighter than real-trade-service's, by design) ──
 MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)

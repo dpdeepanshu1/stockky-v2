@@ -65,6 +65,19 @@ _FALLBACK_URLS = [u.strip() for u in (os.getenv("ANGELONE_SCRIP_MASTER_FALLBACK_
 # Callers that pass an explicit wait_s (the WS feeds, the movers sweep) are never short-circuited.
 _COLD_NOWAIT_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_COLD_NOWAIT_S") or "").strip() or "15"))
 
+# group488: after a container (re)start with a stored snapshot, the first background refresh of a STALE snapshot waits this
+# long (plus up to 50 % random jitter) counted from process start, so it does not hit AngelOne's file server at the same
+# moment as market-data-service, which fetches its own copy right at boot (default 0 there). The stale map keeps being served
+# meanwhile. A cold start with no map is never delayed. 0 switches it off.
+try:
+    _BG_START_DELAY_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_BG_START_DELAY_S") or "").strip() or "30"))
+except ValueError:
+    _BG_START_DELAY_S = 30.0
+if not (_BG_START_DELAY_S == _BG_START_DELAY_S and 0.0 <= _BG_START_DELAY_S <= 600.0):
+    _BG_START_DELAY_S = 30.0
+_PROC_START = time.time()
+_bg_first_done = False
+
 _lock = threading.Lock()        # guards the map swap + failure bookkeeping (held for microseconds)
 _load_lock = threading.Lock()   # single-flight: held for the whole duration of a network fetch
 _token_map: Dict[str, str] = {}   # e.g. "SBIN" -> "3045"
@@ -272,8 +285,23 @@ def _refresh_locked(force: bool = False) -> None:
     _save_disk(new_map)
 
 
+def _bg_start_wait_s() -> float:
+    """group488: seconds the first background refresh of this process still has to wait (0 when none / already done)."""
+    global _bg_first_done
+    if _bg_first_done or _BG_START_DELAY_S <= 0:
+        return 0.0
+    _bg_first_done = True
+    import random
+    due = _PROC_START + _BG_START_DELAY_S * (1.0 + random.uniform(0.0, 0.5))
+    return max(0.0, due - time.time())
+
+
 def _bg_refresh_and_release() -> None:
     try:
+        wait = _bg_start_wait_s()
+        if wait > 0:
+            logger.info("position-stocks: scrip master snapshot is stale - first refresh in %.0fs (staggered after boot)", wait)
+            time.sleep(wait)
         _refresh_locked()
     finally:
         _load_lock.release()

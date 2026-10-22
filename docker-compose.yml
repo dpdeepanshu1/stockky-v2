@@ -634,6 +634,9 @@ services:
       # 2026-10-21: persist the parsed AngelOne scrip-master map across container recreates (see market-data-service)
       - ANGELONE_SCRIP_MASTER_CACHE_PATH=/data/scrip-cache/position_stocks_scrip_master_cache.json
       - ANGELONE_SCRIP_MASTER_FALLBACK_URLS=${ANGELONE_SCRIP_MASTER_FALLBACK_URLS:-}
+      # group488: a stale snapshot is refreshed in the background this many seconds (+ up to 50 % jitter) after boot, so this service and
+      # market-data-service do not download the file at the same moment after `docker compose up`. 0 = off.
+      - ANGELONE_SCRIP_MASTER_BG_START_DELAY_S=${ANGELONE_SCRIP_MASTER_BG_START_DELAY_S:-30}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       - scrip-cache-ps:/data/scrip-cache

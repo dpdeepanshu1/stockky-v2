@@ -30,6 +30,7 @@ import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price mo
 import CapitalSplitCard from "./CapitalSplitCard";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
+import { EMOTION_LABEL, FALLBACK_EMOTIONS } from "./board/journalNotesView";
 import ShortlistPanel from "./board/ShortlistPanel";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
@@ -420,6 +421,8 @@ export default function PositionStocksTab() {
   // ADDED (this session — manual Buy control on the Positions tab)
   const [manualBuySymbol, setManualBuySymbol] = useState("");
   const [manualBuyQty, setManualBuyQty] = useState("");
+  const [manualBuyReason, setManualBuyReason] = useState("");     // E30: optional note saved to the journal with the order
+  const [manualBuyEmotion, setManualBuyEmotion] = useState("");
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [dhanAccount, setDhanAccount] = useState<DhanAccountStatus | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -660,10 +663,10 @@ export default function PositionStocksTab() {
     if (manualBuyQty.trim() && (!qty || qty <= 0)) { setError("Quantity must be a positive whole number."); return; }
     setBusy("manual_buy"); setError(null);
     try {
-      const r = await positionStocksApi.manualBuy(symbol, qty);
-      setManualBuySymbol(""); setManualBuyQty("");
+      const r = await positionStocksApi.manualBuy(symbol, qty, manualBuyReason.trim(), manualBuyEmotion);
+      setManualBuySymbol(""); setManualBuyQty(""); setManualBuyReason(""); setManualBuyEmotion("");
       await loadAll();
-      setError(null);
+      setError(r.journal_saved === false ? `${r.symbol} bought, but the journal note could not be saved. Add it again from the Board tab → Trade notes.` : null);
       // eslint-disable-next-line no-console
       console.info(`Manual BUY placed: ${r.symbol} x${r.quantity} @ ₹${r.entry_price}`);
     } catch (e: any) {
@@ -1640,6 +1643,20 @@ export default function PositionStocksTab() {
             <input value={manualBuyQty} onChange={e => setManualBuyQty(e.target.value)}
               placeholder="auto" inputMode="numeric" disabled={!loggedIn || busy !== null}
               className="px-3 py-2 rounded-xl bg-ink border border-slate font-display tabular-nums text-xs text-paper w-24 disabled:opacity-40" />
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Feeling (optional)</p>
+            <select value={manualBuyEmotion} onChange={e => setManualBuyEmotion(e.target.value)} disabled={!loggedIn || busy !== null}
+              className="px-2 py-2 rounded-xl bg-ink border border-slate font-display text-xs text-paper disabled:opacity-40">
+              <option value="">-</option>
+              {FALLBACK_EMOTIONS.map(e => <option key={e} value={e}>{EMOTION_LABEL[e]}</option>)}
+            </select>
+          </div>
+          <div>
+            <p className="text-[9px] text-mist uppercase tracking-widest mb-1">Why (optional, max 300)</p>
+            <input value={manualBuyReason} onChange={e => setManualBuyReason(e.target.value)} maxLength={300}
+              placeholder="e.g. breakout above day high" disabled={!loggedIn || busy !== null}
+              className="px-3 py-2 rounded-xl bg-ink border border-slate font-display text-xs text-paper w-56 disabled:opacity-40" />
           </div>
           <button disabled={!loggedIn || busy !== null || !manualBuySymbol.trim()} onClick={() => void doManualBuy()}
             className="px-4 py-2 rounded-xl bg-profit/20 border border-profit font-display tabular-nums text-xs text-profit disabled:opacity-40">

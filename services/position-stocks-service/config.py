@@ -248,6 +248,8 @@ _STARTUP_ARMED_DEFAULT = False
 
 # ── Shared Dhan account-wide order-rate budget ──────────────────────────────
 DAILY_ORDER_BUDGET = _get_int("POSITION_STOCKS_DAILY_ORDER_BUDGET", 300)
+# E39: real cap on NEW automatic entries per IST day (orders/entry_cap.py). 0 = off. 15 ships (real-trade is 6; the scalper trades more often). Change it on the calibration page.
+MAX_ENTRIES_PER_DAY = _get_int("POSITION_STOCKS_MAX_ENTRIES_PER_DAY", 15)
 
 # ── Daily loss kill switch (tighter than real-trade-service's, by design) ──
 MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
@@ -773,6 +775,9 @@ REARM_MIN_STOP_PCT = _get_float("REARM_MIN_STOP_PCT", 0.7)               # ... b
 # SIZING_MAX_OVERSHOOT_PCT over the budget; when ONE share costs more than SIZING_ONE_SHARE_MAX_MULT x the budget, skip instead of forcing 1
 # share. SIZING_ROUNDING_ENABLED=0 = old behaviour.
 SIZING_ROUNDING_ENABLED = _get_bool("SIZING_ROUNDING_ENABLED", True)
+# E30 (E37): trade journal notes (reason + feeling, orders/journal_notes.py). OFF = PUT /journal/notes is refused (409), a manual buy ignores `reason` / `emotion`,
+# and GET /journal/notes reports enabled=false. Notes already saved stay. Descriptive only: no gate, score or size ever reads a note.
+JOURNAL_NOTES_ENABLED = _get_bool("JOURNAL_NOTES_ENABLED", True)
 SIZING_MAX_OVERSHOOT_PCT = _get_float("SIZING_MAX_OVERSHOOT_PCT", 10.0)
 SIZING_ONE_SHARE_MAX_MULT = _get_float("SIZING_ONE_SHARE_MAX_MULT", 1.5)
 # Cheap-stock floor (0 = off). Ships OFF: set e.g. 50 to skip sub-Rs50 names once the journal supports it.

@@ -267,7 +267,7 @@ export function saveBlob(blob: Blob, name: string) {
 
 // ------------------------------------------------------------------ switches (control kit of each service)
 export interface FlagRow {
-  key: string; title: string; group: string; kind: "bool" | "enum" | "int" | "float"; help: string; choices: string[]; lo: number | null; hi: number | null; live: boolean;
+  key: string; title: string; group: string; kind: "bool" | "enum" | "int" | "float" | "time"; help: string; choices: string[]; lo: number | null; hi: number | null; live: boolean;
   shipped: string | null; recommended: string | null; looser: string; evidence: string; running: string | null; desired: string | null; effective: string | null;
   source: "override" | "env" | "default"; override: { value: string; by: string; at: string; note: string } | null; pending_restart: boolean;
   matches_recommended: boolean | null; restart_needed_on_change: boolean;

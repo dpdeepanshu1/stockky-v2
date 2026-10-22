@@ -332,6 +332,8 @@ class TestRequireAdminIfReal:
 class TestAuthConfigDiagnostics:
     def test_fully_configured_snapshot(self):
         d = auth_config_diagnostics()
+        sk = d.pop("session_keys")  # A4b: per-service secrets block, covered in the session_keys tests
+        assert sk["signing_mode"] == "legacy-shared"  # only the legacy SESSION_SECRET is set in this test setup
         assert d == {
             "session_secret_configured": True,
             "session_secret_length": len(SECRET),
@@ -388,7 +390,9 @@ class TestLogAuthConfig:
 
     def test_all_good_logs_info_only_no_errors(self, caplog):
         recs = self._run(caplog)
-        assert [r.levelno for r in recs] == [logging.INFO]
+        # INFO line + one WARNING (A4b): signing still uses the legacy shared SESSION_SECRET, not a per-service one. No ERROR.
+        assert [r.levelno for r in recs] == [logging.INFO, logging.WARNING]
+        assert "legacy shared SESSION_SECRET" in recs[1].getMessage()
         msg = recs[0].getMessage()
         assert "AUTH CONFIG [real-trade-service]" in msg
         assert SECRET not in msg and GOOD_HASH not in msg
@@ -397,7 +401,7 @@ class TestLogAuthConfig:
         monkeypatch.setattr(config, "SESSION_SECRET", "")
         errors = [r.getMessage() for r in self._run(caplog) if r.levelno == logging.ERROR]
         assert len(errors) == 1
-        assert "SESSION_SECRET is empty" in errors[0]
+        assert "every admin route will 401" in errors[0]
         assert "[real-trade-service]" in errors[0]
 
     def test_missing_hash_logs_login_impossible_error(self, monkeypatch, caplog):
@@ -419,5 +423,5 @@ class TestLogAuthConfig:
         monkeypatch.setattr(config, "ADMIN_PASSWORD_HASH", "")
         errors = [r.getMessage() for r in self._run(caplog) if r.levelno == logging.ERROR]
         assert len(errors) == 2
-        assert any("SESSION_SECRET is empty" in e for e in errors)
+        assert any("every admin route will 401" in e for e in errors)
         assert any("login is impossible" in e for e in errors)

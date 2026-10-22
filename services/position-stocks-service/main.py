@@ -63,6 +63,8 @@ API endpoints:
   GET  /positions                    — open + recent scalp positions (buy/sell price, P&L)
   GET  /trades/history                — full trade ledger with summary stats (win rate,
                                           total P&L), paginated
+  GET  /journal/notes                — E30: reason + feeling notes, win rate / P&L by feeling, manual trades without a note
+  PUT  /journal/notes/{position_id}  — E30: save / remove the reason + feeling of one trade (admin)
   GET  /candidates                   — latest screener output (no entry)
   GET  /candidates/log                — recent ScalpCandidateLog rows (why a
                                           candidate was entered/skipped, incl.
@@ -162,10 +164,10 @@ from auth import dhan_credentials_ro
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
-from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition
+from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition, ScalpTradeJournal
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, trailing
 from orders import adaptive, pullback_rearm
-from orders import calendar_gate, charges_ledger, excursion, review_stats, trade_stats, window_health
+from orders import calendar_gate, charges_ledger, excursion, journal_notes, review_stats, trade_stats, window_health
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
     ManualEntryRejected, InsufficientCapitalSkip,
@@ -2981,6 +2983,8 @@ def reconcile_route(admin: str = Depends(require_admin), db: Session = Depends(g
 class ManualBuyRequest(BaseModel):
     symbol: str
     quantity: Optional[int] = None  # None = size automatically, like an auto-entry would
+    reason: Optional[str] = None    # E30: why you are buying (up to 300 characters). Optional; saved to the journal after the order is placed
+    emotion: Optional[str] = None   # E30: one of orders/journal_notes.EMOTIONS. Optional
 
 
 @app.post("/positions/manual/buy")
@@ -2992,6 +2996,13 @@ def manual_buy(
     symbol = body.symbol.strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
+    try:                                                   # E30: a bad reason / emotion is refused BEFORE any order is placed
+        if config.JOURNAL_NOTES_ENABLED:                   # switch off (calibration page) = the note fields are ignored, the buy goes on
+            _j_reason, _j_emotion = journal_notes.clean_reason(body.reason), journal_notes.clean_emotion(body.emotion)
+        else:
+            _j_reason = _j_emotion = None
+    except journal_notes.JournalInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     ltp = ws_client.get_last_ltp(symbol)
     if not ltp or ltp <= 0:
@@ -3009,8 +3020,22 @@ def manual_buy(
     except ManualEntryRejected as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    journal_saved = None
+    if _j_reason or _j_emotion:                            # E30: the order is already placed - a journal failure must never turn it into an error
+        try:
+            journal_notes.upsert(db, ScalpTradeJournal, pos, _j_reason, _j_emotion)
+            journal_saved = True
+        except Exception:  # noqa: BLE001
+            logger.exception("journal note for manual buy %s not saved (the order itself was placed)", pos.id)
+            journal_saved = False
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
     return {
         "ok": True,
+        "journal_saved": journal_saved,
         "id": pos.id,
         "symbol": pos.symbol,
         "quantity": pos.quantity,
@@ -3055,6 +3080,52 @@ def manual_close(
         raise HTTPException(status_code=409, detail=str(e))
 
     return {"ok": True, "status": "pending_broker_confirmation", **result}
+
+# ── E30: trade journal notes (reason + feeling) ───────────────────────────────────────────────────────────────────────────────────────────
+class JournalNoteRequest(BaseModel):
+    reason: Optional[str] = None
+    emotion: Optional[str] = None     # blank for both = remove the note
+
+
+@app.put("/journal/notes/{position_id}")
+def journal_put_note(
+    position_id: int,
+    body: JournalNoteRequest,
+    admin: str = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Save (or, with both fields blank, remove) the reason and feeling for one trade. Works for any trade, manual or automatic, while the position
+    row still exists; the note keeps its own snapshot afterwards. Descriptive only - nothing reads it to allow, block or size a trade."""
+    if not config.JOURNAL_NOTES_ENABLED:
+        raise HTTPException(status_code=409, detail="Journal notes are switched off (JOURNAL_NOTES_ENABLED, Real Money Calibration page)")
+    try:
+        reason, emotion = journal_notes.clean_reason(body.reason), journal_notes.clean_emotion(body.emotion)
+    except journal_notes.JournalInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    pos = db.query(ScalpPosition).filter_by(id=position_id).first()
+    if pos is None:
+        raise HTTPException(status_code=404, detail="Position not found (it may have been cleaned up after the retention window)")
+    row = journal_notes.upsert(db, ScalpTradeJournal, pos, reason, emotion)
+    return {"ok": True, "removed": row is None, "note": journal_notes.note_dict(row, iso_utc) if row is not None else None}
+
+
+@app.get("/journal/notes")
+def journal_list_notes(db: Session = Depends(get_db), limit: int = 200):
+    """Newest-first notes, win rate / P&L by feeling over settled trades, and the recent MANUAL trades that have no note yet."""
+    lim = max(1, min(int(limit), 1000))
+    notes = db.query(ScalpTradeJournal).order_by(ScalpTradeJournal.updated_at.desc()).limit(lim).all()
+    journal_notes.refresh_snapshots(db, ScalpTradeJournal, ScalpPosition, notes)
+    recent = db.query(ScalpPosition).order_by(ScalpPosition.opened_at.desc()).limit(lim).all()
+    summary = journal_notes.summarize(notes)
+    return {
+        "enabled": bool(config.JOURNAL_NOTES_ENABLED),
+        "emotions": list(journal_notes.EMOTIONS),
+        "max_reason": journal_notes.MAX_REASON,
+        "notes": [journal_notes.note_dict(n, iso_utc) for n in notes],
+        **summary,
+        "manual_without_note": journal_notes.untagged_manual(recent, [n.position_id for n in notes]),
+    }
+
 
 # 2026-09-17 note: demat holdings deliberately do NOT get an endpoint here.
 # This service's positions are intraday scalp trades (ScalpPosition) — a

@@ -1,8 +1,24 @@
 # Remaining tasks
 
+> E44 (this zip): E31 route splitting done in App.tsx (docs/E31_ROUTE_SPLITTING.md). On the VM: `npm ci && npm run build`, confirm separate chunks, then open every tab once (spinner, then the page) and try the low-balance deposit prompt. Still open: F33 rest (gateway routers, installable package, merge the 11 requirements files), A6, C21 live, scheduler switches on the page.
+
+> E43 (this zip): F33 part 1 built: nightly backup + restore test (`scripts/backup_state.sh`, docs/F33_BACKUP_AND_RESTORE_TEST.md). On the VM: `bash scripts/backup_state.sh run`, `restore-test`, `schedule`; set `OFFSITE_CMD` so a copy leaves the VM. Still open from F33: gateway routers, installable package, merge the 11 requirements files. Also open: E31, A6, C21 live, calibration-page switches for the scheduler.
+
+> E42 (this zip): the E28 notification is built (server-side baseline + 5 % move alert, docs/E42_WATCHLIST_MOVE_ALERT.md). Check on the VM after rebuilding notification-scheduler-service: `POST /scheduler/watchlist-moves/run?dry_run=true` (first call records baselines), then `dry_run=false` once a stock has moved. Still open: PATTERN_ALERTS_* / WATCHLIST_MOVE_* on the calibration page (scheduler needs admin auth first), A6, C21 live, E31, F33.
+
+> E41 (this zip): the page now has time-of-day cut-offs (new `time` switch kind; docs/E41_TIME_CUTOFFS_ON_PAGE.md). A7 is on the page as `ENTRY_LAST_TIME_IST` (already 14:00). Still open: PATTERN_ALERTS_* switches (the scheduler needs admin auth first), A6, C21 live, E28 notification, E31, F33. Check on the VM: `tsc`, then Calibration -> Switches -> "Entry time limits" shows a time picker.
+
+> E40 (this zip): E26 finished: pattern / regime chips now show at the top of the stock page (docs/E40_DECISIONCARD_BADGES.md). Check on the VM: `npm ci && tsc && vite build`, open a stock, the "Market mood & patterns" box must appear above the chart. Still open: PATTERN_ALERTS_* switches, time-of-day cut-offs on the page, A6, C21 live, E28 notification, E31, F33.
+
+> E39 (this zip): Position Stocks now has a real daily entry cap (`POSITION_STOCKS_MAX_ENTRIES_PER_DAY`, ships 15, on the calibration page; docs/E39_PS_ENTRY_CAP.md). Pick your number. Still open: PATTERN_ALERTS_* switches, time-of-day cut-offs on the page, A6, C21 live, E26, E28 notification, E31, F33. Not run in the sandbox: pytest (the DB-counting test of the cap needs sqlalchemy).
+
 > E27 (this zip): candles on 1m / 5m / 15m / 30m / 1h / daily, backend + frontend (docs/E27_CANDLE_TIMEFRAMES.md). Check on the VM after rebuilding api-gateway, analysis-intelligence-service, market-data-service and frontend: open a position's Candles block, pick 1m / 5m / 15m / 30m / 1h and confirm candles appear with a time axis (outside market hours they show the last session). Not run in the sandbox: pytest, `npm ci`, full tsc / vite build.
 
-> E32 (this zip): E25 candlestick chart and E26 pattern / regime badges are built, plus a candles block under every position in Real Trade and Position Stocks (docs/E32_CANDLES_AND_PATTERNS.md). F32 is done (secrets scan in CI, see docs/F32_SECRETS_SCAN.md; the full pytest already ran in CI via the service-tests matrix). Still open: F33 (backups), C21 (wire patterns into scoring, log-only), C/E29 alerts, E28, E30, E31. (group 470 status, 2026-10-20)
+> E38 (this zip): the Real Money Calibration page now has every trading switch (docs/E38_CALIBRATION_SWITCHES.md) plus a guard test. Standing rule: every change = test + calibration switch + live wiring. Still open: PATTERN_ALERTS_* switches (scheduler service, not covered by the page), time-of-day cut-offs on the page, Position Stocks entry cap number, A6, A7, C21 live, E26, E28 notification, E31, F33.
+
+> E37: E30 is done (reason + feeling on Position Stocks trades, win rate by feeling, docs/E30_JOURNAL_NOTES.md). Check on the VM after rebuilding position-stocks-service and frontend: Position Stocks -> Board tab -> Trade notes -> add a note, reload, it must still be there. Not run in the sandbox: pytest, `npm ci` / full tsc (the npm and pip registries were blocked), the live service. Still open: F33 (backups), E28 (notification part), E31.
+
+> E32 (this zip): E25 candlestick chart and E26 pattern / regime badges are built, plus a candles block under every position in Real Trade and Position Stocks (docs/E32_CANDLES_AND_PATTERNS.md). F32 is done (secrets scan in CI, see docs/F32_SECRETS_SCAN.md; the full pytest already ran in CI via the service-tests matrix). C21 is done in E35 (patterns logged, log-only; docs/C21_PATTERN_LOGGING.md). E29 is done in E36 (daily watchlist digest, docs/E29_PATTERN_ALERTS.md). Still open: F33 (backups), E28 (notification part), E31. (group 470 status, 2026-10-20)
 
 ## Built in group 470 (from reading the 19-20 Oct runner outputs; details `docs/GROUP470_RUN_OUTPUT_FIXES.md`)
 Token redaction (JWT / `--token`), `gate_check` + `calibration_pack` `--ab` repetition, snapshot / checkpoint "input missing" on first run, `monday_check` closed-market skip,
@@ -16,7 +32,7 @@ TimesFM skip when the worker is not started, G1 footer + one 15 ms budget, slipp
 5. If 50 ms was the intended G1 budget, set `G1_BUDGET_MS=50` (the monthly job is now stricter than before).
 
 ## Decisions for you (not changed in code)
-- **Late entries.** 72 of 196 REAL trades were entered in the 15:xx hour: net -1,371, charges 1,182. Trades entered at 15:02 / 15:16 (CAMS, ADVAIT, BLUESTONE, TARIL) were carried to the next trading day. No general "no new entry after HH:MM" gate was found (only the expiry / pre-holiday 14:30 and an empty Friday cutoff in `calendar_gate.py`). Candidate: one general entry cutoff.
+- **Late entries.** 72 of 196 REAL trades were entered in the 15:xx hour: net -1,371, charges 1,182. Trades entered at 15:02 / 15:16 (CAMS, ADVAIT, BLUESTONE, TARIL) were carried to the next trading day. **Already fixed (A7 checked in E35):** a general 14:00 IST cutoff exists in both services (`ENTRY_LAST_TIME_IST` in real-trade, group 470; `SCALP_ENTRY_CUTOFF_IST` in position-stocks, group 479). The 15:xx entries above are from before that. Verify with `scripts/charges_split.py --since 2026-10-20`.
 - **Structure gate** is `enforce` in both services while G2 and G3 FAIL (policy keeps ~9.5 % of signals, needs 30 %; two of three seeds `no_edge`; G4 has 2 of 20 sessions). Option: `log` until the gates pass.
 - **real-trade** `service_advice` = TURN OFF (net -369 over 24 trades in the last 10 days; -3,134 over 196 trades since 1 Sep). Several real-trade entry gates were switched off on 19 Oct (VWAP gate, opening entry guard, depth re-check); one day of data cannot judge that change.
 - **Stop overshoot:** 17 of 24 stop hits lost more than the planned stop (worst 17.55 points), 5 `emergency_gap_down` exits (mean -13.5 %). `BROKER_STOP_ENABLED=true` has been on since 19 Oct, so re-measure after a week; consider a liquidity / circuit filter if it persists.

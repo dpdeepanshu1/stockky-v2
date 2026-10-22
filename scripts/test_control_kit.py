@@ -128,6 +128,41 @@ def test_classification():
     assert k(fl["T_N"], "2", "5") == "NEUTRAL" and k(fl["T_GATE"], None, "false") == "NEUTRAL"
 
 
+def test_time_of_day_switch_values_and_direction():
+    """E41: entry cut-offs are HH:MM switches; a LATER cut-off loosens."""
+    f = F("X_CUTOFF_IST", "cut-off", "g", "time", "h", looser="later", shipped="14:00", live=False)
+    assert kit.validate_flag(f) == []
+    assert kit.canonical(f, "9:05") == "09:05" and kit.canonical(f, " 14:30 ") == "14:30"
+    for bad in ("", "24:00", "14:60", "1430", "14:3", "abc", "14:00:00"):
+        try:
+            kit.canonical(f, bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should be refused")
+    assert kit.classify(f, "14:00", "14:30") == "LOOSENS"
+    assert kit.classify(f, "14:30", "14:00") == "TIGHTENS"
+    assert kit.classify(f, "14:00", "14:00") == "SAME"
+    g = F("X_EARLY", "t", "g", "time", "h", looser="earlier", shipped="09:20")
+    assert kit.classify(g, "09:20", "09:30") == "TIGHTENS" and kit.classify(g, "09:30", "09:20") == "LOOSENS"
+    assert F("X_BAD", "t", "g", "time", "h", looser="higher", shipped="14:00").looser == "higher"
+    assert any("looser" in x for x in kit.validate_flag(F("X_BAD", "t", "g", "time", "h", looser="higher", shipped="14:00")))
+    assert any("shipped" in x for x in kit.validate_flag(F("X_BLANK", "t", "g", "time", "h", looser="later", shipped="")))
+
+
+def test_entry_time_limits_are_on_the_page_with_the_config_defaults():
+    import ast
+    want = {"real-trade-service": {"ENTRY_LAST_TIME_IST": "14:00", "CALENDAR_EXPIRY_ENTRY_CUTOFF_IST": "14:30", "CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST": "14:30"},
+            "position-stocks-service": {"SCALP_ENTRY_CUTOFF_IST": "14:00", "CALENDAR_EXPIRY_ENTRY_CUTOFF_IST": "14:30", "CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST": "14:30"}}
+    for svc, keys in want.items():
+        cat = (ROOT / "services" / svc / "control" / "catalog.py").read_text()
+        cfg = (ROOT / "services" / svc / "config.py").read_text()
+        for k, v in keys.items():
+            assert f'Flag("{k}"' in cat, (svc, k)
+            # the shipped value on the page equals the default written in config.py
+            line = next(l for l in cfg.splitlines() if l.startswith(f"{k} = "))
+            assert f'"{v}"' in line, (svc, k, line)
+
+
 def test_catalog_entries_validate():
     for f in _flags():
         assert kit.validate_flag(f) == [], f.key

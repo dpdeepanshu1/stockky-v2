@@ -18,6 +18,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -30,8 +31,10 @@ DEFAULT_DIR = "/data/control"
 AUDIT_MAX_LINES = 2000
 _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off")
-KINDS = ("bool", "enum", "int", "float")
+_HHMM = re.compile(r"^(\d{1,2}):(\d{2})$")
+KINDS = ("bool", "enum", "int", "float", "time")
 LOOSER_BOOL = ("on", "off", "neutral")           # which bool value is LOOSER ("on": ON loosens, e.g. a log-only switch; "off": OFF loosens, e.g. a gate)
+LOOSER_TIME = ("later", "earlier", "neutral")    # time of day (HH:MM IST): does a LATER value loosen (an entry cut-off) or an EARLIER one
 LOOSER_NUM = ("higher", "lower", "neutral")      # numeric: does a HIGHER value loosen (a max-chase limit) or a LOWER one (a minimum room)
 
 
@@ -40,7 +43,7 @@ class Flag:
     key: str                                   # the environment variable (what .env / compose sets)
     title: str
     group: str
-    kind: str                                  # bool | enum | int | float
+    kind: str                                  # bool | enum | int | float | time (HH:MM IST)
     help: str
     targets: Tuple[Tuple[str, str], ...] = ()  # (module, attribute) rewritten when applied live
     live: bool = False                         # True = effective at once (proved by scripts/check_control_catalog.py)
@@ -83,6 +86,8 @@ def validate_flag(f: Flag) -> List[str]:
         p.append(f"looser must be one of {LOOSER_BOOL} for bool")
     if f.kind in ("int", "float") and f.looser not in LOOSER_NUM:
         p.append(f"looser must be one of {LOOSER_NUM} for a number")
+    if f.kind == "time" and f.looser not in LOOSER_TIME:
+        p.append(f"looser must be one of {LOOSER_TIME} for a time")
     if f.kind in ("int", "float") and (f.lo is None or f.hi is None or f.lo > f.hi):
         p.append("a number needs lo <= hi")
     for label, v in (("shipped", f.shipped), ("recommended", f.recommended)):
@@ -117,6 +122,11 @@ def canonical(f: Flag, raw: Any) -> str:
         if s not in f.choices:
             raise ValueError(f"expected one of {', '.join(f.choices)}")
         return s
+    if f.kind == "time":
+        m = _HHMM.match(s)
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            raise ValueError("expected a time of day as HH:MM (IST, 24-hour)")
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
     try:
         n = float(s)
     except ValueError:
@@ -169,6 +179,13 @@ def classify(f: Flag, old: Optional[str], new: str) -> str:
         return "LOOSENS" if b > a else ("TIGHTENS" if b < a else "NEUTRAL")
     if f.looser == "neutral":
         return "NEUTRAL"
+    if f.kind == "time":
+        try:
+            mo = int(old[:2]) * 60 + int(old[3:5])
+            mn = int(new[:2]) * 60 + int(new[3:5])
+        except (ValueError, IndexError):
+            return "NEUTRAL"
+        return ("LOOSENS" if mn > mo else "TIGHTENS") if f.looser == "later" else ("TIGHTENS" if mn > mo else "LOOSENS")
     fo, fn = float(old), float(new)
     if f.zero_off and f.looser == "higher":
         fo = float("inf") if fo == 0 else fo

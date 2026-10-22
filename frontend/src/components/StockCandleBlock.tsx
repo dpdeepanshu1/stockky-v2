@@ -14,7 +14,7 @@ import PatternBadges from "./PatternBadges";
 const cache = new Map<string, { at: number; ctx: ChartCtx }>();
 const inflight = new Map<string, Promise<ChartCtx>>();
 
-function loadCtx(symbol: string, tf: Tf, force = false): Promise<ChartCtx> {
+export function loadCtx(symbol: string, tf: Tf, force = false): Promise<ChartCtx> {
   const sym = symbol.toUpperCase().replace(/\.(NS|BO)$/i, "");
   const key = `${sym}|${tf}`;
   const info = tfInfo(tf);

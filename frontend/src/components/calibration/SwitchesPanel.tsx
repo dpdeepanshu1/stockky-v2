@@ -190,6 +190,12 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: Svc; onChanged?
                           <select value={draft ?? cur ?? ""} aria-label={f.title} disabled={busy === f.key} onChange={(e) => void apply(f, e.target.value)} className="rounded-lg border border-slate bg-transparent px-2 py-1 text-[12px]">
                             {f.choices.map((c) => <option key={c} value={c}>{c}</option>)}
                           </select>
+                        ) : f.kind === "time" ? (
+                          <>
+                            <input type="time" value={draft ?? cur ?? ""} aria-label={f.title} onChange={(e) => setDrafts((d) => ({ ...d, [f.key]: e.target.value }))}
+                              className="w-28 rounded-lg border border-slate bg-transparent px-2 py-1 text-right text-[12px]" />
+                            <Btn small disabled={!dirty || !draft || busy === f.key} onClick={() => void apply(f, draft as string)}>Apply</Btn>
+                          </>
                         ) : (
                           <>
                             <input type="number" inputMode="decimal" step={f.kind === "int" ? 1 : "any"} min={f.lo ?? undefined} max={f.hi ?? undefined} value={draft ?? cur ?? ""} aria-label={f.title}

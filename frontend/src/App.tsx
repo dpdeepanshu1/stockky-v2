@@ -1,6 +1,6 @@
 // frontend/src/App.tsx
 
-import { Fragment, useState, useEffect, useRef, useCallback } from "react";
+import { Fragment, Suspense, lazy, useState, useEffect, useRef, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { setVisibleInterval } from "./visibleInterval";
 import { api, getApiUrl, setApiUrl, apiUrl, Decision, ScanResult, wakeService, startSessionKeepAlive, stopSessionKeepAlive } from "./api";
@@ -9,23 +9,12 @@ import DecisionCard from "./components/DecisionCard";
 import SignalStream, { BreadthStrip } from "./components/SignalStream";
 import ScanPanel, { MultiHorizonScanLists } from "./components/ScanPanel";
 import WatchlistManager from "./components/WatchlistManager";
-import NotificationsPanel from "./components/NotificationsPanel";
 import SystemCheck from "./components/SystemCheck";
 import MarketMovers from "./components/MarketMovers";
 import ServiceManager from "./components/ServiceManager";
 import RateLimitDashboard from "./components/RateLimitDashboard";
-import Training from "./components/Training";
-import HotStocks from "./components/HotStocks";
-import SurpriseStocks from "./components/SurpriseStocks";
-import IpoTracker from "./components/IpoTracker";
-import RealAutoTrade from "./components/RealAutoTrade";
-import PositionStocksTab from "./components/PositionStocksTab";
-import CalibrationControlTab from "./components/CalibrationControlTab";
 import { AdminGate, SessionChip } from "./components/AdminGate"; // group 460: one login for the three admin pages
 import ErrorBoundary from "./components/ui/ErrorBoundary";
-import DataFeed from "./components/DataFeed";
-import DataHealthAudit from "./components/DataHealthAudit";
-import Trades from "./components/Trades";
 // ── NEW: import Market Sentiment Header ──
 import MarketSentimentHeader from "./components/MarketSentimentHeader";
 import { NavIcon, type IconName } from "./components/ui/NavIcon";
@@ -34,6 +23,21 @@ import CommandPalette, { CommandAction } from "./components/CommandPalette";
 import StockPopup from "./components/board/StockPopup";
 import type { BoardRowLite } from "./components/board/boardTypes";
 import { useStockkyRealtime, RealtimeMessage } from "./useRealtime";
+
+// E31: the heavy pages are separate chunks, fetched when their tab is first opened (the dashboard no longer carries the trading, training and
+// calibration pages). They all sit inside the per-tab ErrorBoundary + Suspense below; a failed chunk download shows the boundary's retry, not a blank page.
+const Training = lazy(() => import("./components/Training"));
+const HotStocks = lazy(() => import("./components/HotStocks"));
+const SurpriseStocks = lazy(() => import("./components/SurpriseStocks"));
+const IpoTracker = lazy(() => import("./components/IpoTracker"));
+const RealAutoTrade = lazy(() => import("./components/RealAutoTrade"));
+const PositionStocksTab = lazy(() => import("./components/PositionStocksTab"));
+const CalibrationControlTab = lazy(() => import("./components/CalibrationControlTab"));
+const DataFeed = lazy(() => import("./components/DataFeed"));
+const DataHealthAudit = lazy(() => import("./components/DataHealthAudit"));
+const loadTrades = () => import("./components/Trades");          // also called before the open-deposit event, so the page exists to hear it
+const Trades = lazy(loadTrades);
+const NotificationsPanel = lazy(() => import("./components/NotificationsPanel"));
 
 type ViewState =
   | { mode: "idle" }
@@ -192,9 +196,10 @@ export default function App() {
       try {
         const detail = (ev as CustomEvent)?.detail;
         if (detail?.openDeposit) {
-          window.setTimeout(() => {
+          const fire = () => window.setTimeout(() => {
             window.dispatchEvent(new CustomEvent("stockky:open-deposit", { detail }));
           }, 150);
+          loadTrades().then(fire, fire);          // E31: the Trades page is a lazy chunk; wait for it before asking it to open the panel
         }
       } catch {}
     };
@@ -1277,6 +1282,7 @@ export default function App() {
 
       <main id="main-content" tabIndex={-1} className="terminal-main max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8">
         <ErrorBoundary key={tab} label="This page">
+        <Suspense fallback={<div className="py-16 flex justify-center" role="status" aria-label="Loading page"><span className="inline-block w-5 h-5 rounded-full border-2 border-mist border-t-transparent animate-spin" /></div>}>
         {tab === "notifications" ? (
           <div className="page-terminal">
             <PageHeader title="Alerts" desc="Notifications from the scanners and trading services, newest first." />
@@ -1673,6 +1679,7 @@ export default function App() {
             </section>
           </>
         )}
+        </Suspense>
         </ErrorBoundary>
       </main>
 

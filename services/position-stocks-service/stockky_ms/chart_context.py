@@ -178,7 +178,7 @@ def chart_context(raw_bars: Any, dates: Any, tail: int = 300, structure_trend: O
     intraday, u, keep = bool(sp["intraday"]), sp["unit"], (16 if sp["intraday"] else 10)
     out: Dict[str, Any] = {"schema": SCHEMA, "context_only": True, "ok": False, "tf": sp["key"], "unit": u, "note": sp.get("note"), "live": None,
                            "data_lag_s": int(lag_s) if finite(lag_s) else None, "bars": [], "last_bar": None, "markers": [], "shapes": [],
-                           "levels": [], "badges": [], "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None},
+                           "levels": [], "badges": [], "events": [], "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None},
                            "errors": []}
     try:
         bars, ds = _clean(raw_bars, dates, keep)
@@ -285,6 +285,10 @@ def chart_context(raw_bars: Any, dates: Any, tail: int = 300, structure_trend: O
         regime_first = [b for b in badges if b.get("kind") == "regime"]
         rest = [b for b in badges if b.get("kind") != "regime"]
         out["badges"] = (regime_first + rest)[:MAX_BADGES]
+        # E29: the alert-worthy readings (signals and CONFIRMED chart patterns) before the badge cap, so a crowded chart can never hide one from the
+        # watchlist digest. Additive field (schema stays 1); the chart itself does not read it.
+        out["events"] = [{k: b.get(k) for k in ("key", "kind", "label", "tone", "status", "bars_ago")} for b in badges
+                         if b.get("kind") == "signal" or (b.get("kind") == "chart" and b.get("status") == "confirmed")]
     except Exception as e:  # noqa: BLE001
         out["errors"].append(f"context:{type(e).__name__}")
     return out

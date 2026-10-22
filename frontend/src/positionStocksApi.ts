@@ -348,6 +348,18 @@ export interface ScalpTradeRow {
   dhan_exit_order_id: string | null;
 }
 
+// E30: trade journal notes (backend orders/journal_notes.py)
+export interface JournalNote {
+  position_id: number; symbol: string; manual: boolean; reason: string | null; emotion: string | null;
+  status: string | null; outcome: string | null; realized_pnl: number | null; opened_at: string | null; updated_at: string | null;
+}
+export interface JournalEmotionStat { emotion: string; trades: number; wins: number; win_rate: number; pnl: number; small_sample: boolean; risky: boolean }
+export interface JournalNotesResponse {
+  enabled?: boolean;   // false = switched off on the Real Money Calibration page (JOURNAL_NOTES_ENABLED)
+  emotions: string[]; max_reason: number; min_sample: number; notes: JournalNote[]; note_count: number;
+  by_emotion: JournalEmotionStat[]; settled: number; manual_without_note: number[];
+}
+
 export interface ScalpTradeHistory {
   summary: ScalpTradeHistorySummary;
   trades: ScalpTradeRow[];
@@ -553,14 +565,23 @@ export const positionStocksApi = {
   // whether its own bracket target/stop would currently trigger. See the
   // backend's main.py POST /positions/manual/buy and
   // POST /positions/{id}/close docstrings for the full mechanism.
-  manualBuy: (symbol: string, quantity?: number) =>
+  manualBuy: (symbol: string, quantity?: number, reason?: string, emotion?: string) =>
     psRequest<{
       ok: boolean; id: number; symbol: string; quantity: number;
       entry_price: number; target_price: number; stop_price: number;
       dhan_super_order_id: string | null;
+      journal_saved: boolean | null;   // E30: null = no note was sent, false = the order is placed but the note failed to save
     }>("/positions/manual/buy", {
       method: "POST",
-      body: JSON.stringify({ symbol, quantity: quantity ?? null }),
+      body: JSON.stringify({ symbol, quantity: quantity ?? null, reason: reason || null, emotion: emotion || null }),
+    }, true),
+
+  // E30: reason + feeling for each trade (descriptive only; no gate reads it). Saving needs the admin login; reading does not.
+  journalNotes: (limit = 200) => psRequest<JournalNotesResponse>(`/journal/notes?limit=${limit}`),
+  saveJournalNote: (positionId: number, reason: string, emotion: string) =>
+    psRequest<{ ok: boolean; removed: boolean; note: JournalNote | null }>(`/journal/notes/${positionId}`, {
+      method: "PUT",
+      body: JSON.stringify({ reason: reason || null, emotion: emotion || null }),
     }, true),
 
   // group 469: approve-first mode (off unless APPROVE_FIRST_N > 0 on the server)

@@ -1,5 +1,6 @@
 """stockky_ms.patterns - C18-C20: candlestick patterns, chart patterns, Bollinger squeeze, golden / death cross, MACD + RSI confluence and the
-support / resistance flip. CONTEXT ONLY: nothing here feeds a decision, gate, score or ML feature row (that waits for the B-tools to show an edge).
+support / resistance flip. CONTEXT ONLY: nothing here feeds a decision, gate or score. C21: the output is logged (ml_features.build_pattern_features, scoring.pattern_shadow)
+as a separate log-only row; it joins a decision only after the B-tools show an edge.
 
     analyze_patterns(raw_bars, candle_lookback=3) -> dict
 

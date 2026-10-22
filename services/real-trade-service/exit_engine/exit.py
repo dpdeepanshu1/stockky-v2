@@ -262,8 +262,8 @@ def _write_exit_decision(
                 "evaluated_at": datetime.now(timezone.utc),
             }):
                 return
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("exit HOLD write-behind unavailable, writing synchronously: %s", e)
     db.add(models.TradeExitDecision(
         position_id=position.id,
         action=action,

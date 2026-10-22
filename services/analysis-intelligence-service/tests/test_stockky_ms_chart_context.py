@@ -139,3 +139,33 @@ def test_a_failing_pattern_engine_is_isolated():
         assert out["bars"] and any("context:ValueError" in e for e in out["errors"])
     finally:
         CC.analyze_patterns = orig
+
+
+# ---- E29: uncapped `events` for the watchlist digest ----
+def test_events_hold_every_signal_and_confirmed_pattern_even_when_badges_are_capped():
+    import stockky_ms.chart_context as cc
+    from _ms_bars import walk
+    seen = 0
+    for seed in range(40):
+        bars = walk(320, seed=seed, drift=(-0.2, 0.0, 0.3)[seed % 3])
+        out = cc.chart_context(bars, [f"2025-01-{1 + i % 28:02d}" for i in range(len(bars))])
+        want = [b["key"] for b in out["badges"] if b["kind"] == "signal" or (b["kind"] == "chart" and b.get("status") == "confirmed")]
+        got = [e["key"] for e in out["events"]]
+        assert all(k in got for k in want)                                           # nothing the chart shows is missing from the events
+        assert all(e["kind"] == "signal" or (e["kind"] == "chart" and e["status"] == "confirmed") for e in out["events"])
+        assert set(out["events"][0]) == {"key", "kind", "label", "tone", "status", "bars_ago"} if out["events"] else True
+        seen += len(got)
+        old = cc.MAX_BADGES
+        cc.MAX_BADGES = 1                                                            # a crowded chart: only one badge survives
+        try:
+            small = cc.chart_context(bars, [f"2025-01-{1 + i % 28:02d}" for i in range(len(bars))])
+        finally:
+            cc.MAX_BADGES = old
+        assert len(small["badges"]) <= 1 and [e["key"] for e in small["events"]] == got
+    assert seen > 0                                                                 # the synthetic series do produce signals
+    assert chart_context_empty_has_events()
+
+
+def chart_context_empty_has_events():
+    import stockky_ms.chart_context as cc
+    return cc.chart_context([], []).get("events") == []

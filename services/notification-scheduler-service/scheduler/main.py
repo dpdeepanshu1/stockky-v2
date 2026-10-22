@@ -212,6 +212,34 @@ def overnight_run(phase: str = "datafeed"):
     return start_phase_background(phase)
 
 
+# ── E29: daily watchlist chart-signal digest (breakout / golden-death cross / squeeze). Alert only - see pattern_alerts.py. ──
+@app.get("/pattern-alerts/status")
+def pattern_alerts_status():
+    from pattern_alerts import status
+    return status()
+
+
+@app.post("/pattern-alerts/run")
+def pattern_alerts_run(dry_run: bool = True):
+    """Default dry_run=true: lists what WOULD be sent and sends nothing. dry_run=false sends today's digest (already-sent signals are skipped)."""
+    from pattern_alerts import run_once
+    return run_once(dry_run=dry_run)
+
+
+# ── E28: watchlist "moved N % since added" alert with a server-side baseline. Alert only - see watchlist_moves.py. ──
+@app.get("/watchlist-moves/status")
+def watchlist_moves_status():
+    from watchlist_moves import status
+    return status()
+
+
+@app.post("/watchlist-moves/run")
+def watchlist_moves_run(dry_run: bool = True):
+    """Default dry_run=true: lists what WOULD be sent and sends nothing. dry_run=false records baselines and sends the alert."""
+    from watchlist_moves import run_once
+    return run_once(dry_run=dry_run)
+
+
 @_on_startup
 async def start_loop():
     global _task
@@ -241,3 +269,17 @@ async def start_loop():
         logger.info("scheduler: overnight orchestrator loop started")
     except Exception as e:
         logger.warning("overnight orchestrator loop start failed: %s", e)
+
+    try:
+        from watchlist_moves import loop as _watchlist_moves_loop
+        asyncio.create_task(_watchlist_moves_loop())
+        logger.info("scheduler: watchlist moves loop started")
+    except Exception as e:
+        logger.warning("watchlist moves loop start failed: %s", e)
+
+    try:
+        from pattern_alerts import loop as _pattern_alerts_loop
+        asyncio.create_task(_pattern_alerts_loop())
+        logger.info("scheduler: pattern alerts loop started")
+    except Exception as e:
+        logger.warning("pattern alerts loop start failed: %s", e)

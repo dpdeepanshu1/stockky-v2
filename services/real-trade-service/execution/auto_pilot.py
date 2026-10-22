@@ -437,8 +437,8 @@ def _is_db_call_timeout(exc: BaseException) -> bool:
         try:
             import write_behind
             write_behind.note_timeout()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("write-behind back-off could not be set: %s", e)
     return hit
 
 

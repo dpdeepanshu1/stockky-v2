@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -492,6 +492,12 @@ def attempt_entry(
     _so_reject = stopout_guard.entry_reason(db, candidate.symbol)
     if _so_reject:
         _log_candidate(db, candidate, "SKIPPED", _so_reject, quality=quality)
+        return None
+
+    # E39: real daily cap on new automatic entries (orders/entry_cap.py; counted from scalp_positions, fails open, 0 = off).
+    _cap_reject = entry_cap.entry_reason(db)
+    if _cap_reject:
+        _log_candidate(db, candidate, "SKIPPED", _cap_reject, quality=quality)
         return None
 
     # Max concurrent positions

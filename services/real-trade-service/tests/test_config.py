@@ -138,7 +138,7 @@ class TestStartupConfigErrors:
         monkeypatch.setattr(config, "DHAN_TOTP_ENABLED", False)
 
         errors = config.startup_config_errors()
-        assert any("SESSION_SECRET is not set" in e for e in errors)
+        assert any("SESSION_SECRET_REAL_TRADE (or the legacy SESSION_SECRET) is not set" in e for e in errors)
         assert len(errors) == 1
 
     def test_missing_dhan_credential_enc_key_is_reported(self, monkeypatch):

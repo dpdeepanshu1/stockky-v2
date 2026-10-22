@@ -120,3 +120,57 @@ def score_block(trend, bos, choch, sweep, ob, fvg, location, rr, quality: str, p
     out["independent_groups_strict"] = strict_groups(raw)
     out["groups"] = groups
     return out
+
+
+# ---------------------------------------------------------------- C21: pattern shadow evidence (LOG-ONLY)
+def pattern_shadow(patterns: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """C21 - what the pattern signals WOULD add, recorded next to the score but never part of it. `score_block` and the technical quality score
+    are untouched; nothing reads this to allow, block or size a trade. It exists so rows can be stored now and the B-tools can test whether the
+    signals carry any edge later.
+
+    Five separate evidence groups (a candle and a chart pattern share one group, so one move is not counted twice), each +1 (bullish), -1
+    (bearish), 0 (seen, no direction) or None (not computable - never read as 0):
+        pattern     confirmed bullish / bearish chart pattern or a bullish / bearish candle pattern (opposite kinds cancel to 0)
+        squeeze     Bollinger squeeze released upward (+1) / downward (-1)
+        trend       SMA50/200 above / below (SMA20/50 when there is not enough history)
+        momentum    MACD + RSI confluence bullish / bearish
+        sr_flip     support flip (+1) / resistance flip (-1); both at once = 0
+    Never raises.
+    """
+    out: Dict[str, Any] = {"log_only": True, "in_tqs": False, "groups": None, "bull_groups": None, "bear_groups": None, "net": None}
+    try:
+        pat = patterns if isinstance(patterns, dict) else {}
+        g: Dict[str, Optional[int]] = {"pattern": None, "squeeze": None, "trend": None, "momentum": None, "sr_flip": None}
+        cd, ch = pat.get("candles"), pat.get("chart")
+        if isinstance(cd, list) or isinstance(ch, list):
+            bull = bear = 0
+            for it in list(cd or []) + [c for c in (ch or []) if isinstance(c, dict) and c.get("status") == "confirmed"]:
+                b = it.get("bias") if isinstance(it, dict) else None
+                bull += 1 if b == "bullish" else 0
+                bear += 1 if b == "bearish" else 0
+            g["pattern"] = 1 if bull and not bear else -1 if bear and not bull else 0
+        bb = pat.get("bollinger")
+        if isinstance(bb, dict):
+            g["squeeze"] = {"bullish": 1, "bearish": -1}.get(bb.get("release"), 0)
+        cr = pat.get("crosses")
+        if isinstance(cr, dict):
+            c = cr.get("ma50_200") if isinstance(cr.get("ma50_200"), dict) else cr.get("ma20_50")
+            if isinstance(c, dict) and c.get("fast_above_slow") is not None:
+                g["trend"] = 1 if c.get("fast_above_slow") else -1
+        cf = pat.get("confluence")
+        if isinstance(cf, dict):
+            g["momentum"] = {"bullish": 1, "bearish": -1}.get(cf.get("state"), 0)
+        sr = pat.get("sr_flip")
+        if isinstance(sr, list):
+            kinds = {x.get("type") for x in sr if isinstance(x, dict)}
+            up, dn = "support_flip" in kinds, "resistance_flip" in kinds
+            g["sr_flip"] = 1 if up and not dn else -1 if dn and not up else 0
+        known = [v for v in g.values() if v is not None]
+        if known:
+            out["groups"] = g
+            out["bull_groups"] = sum(1 for v in known if v > 0)
+            out["bear_groups"] = sum(1 for v in known if v < 0)
+            out["net"] = out["bull_groups"] - out["bear_groups"]
+    except Exception:  # noqa: BLE001
+        pass
+    return out

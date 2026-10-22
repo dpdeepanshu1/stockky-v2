@@ -2206,7 +2206,7 @@ async def closed_position_records(
 
 
 @app.get("/write-behind/status")
-async def write_behind_status(admin: Optional[str] = Depends(require_admin_if_real)):
+async def write_behind_status(admin: str = Depends(require_admin)):
     """A3: queue depth, rows written / dropped, back-off remaining for the evidence-row write-behind queue (read-only)."""
     import write_behind
     return write_behind.status()

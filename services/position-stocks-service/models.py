@@ -642,3 +642,29 @@ class ScalpStructureObservation(Base):
         Index("ix_scalp_struct_obs_day", "mode", "symbol", "obs_day"),
         Index("ix_scalp_struct_obs_pending", "is_complete", "obs_ts"),
     )
+
+
+class ScalpTradeJournal(Base):
+    """E30: the trader's own reason and feeling for one trade (mostly manual ones). One row per position.
+
+    A NEW table, so create_all() makes it (no ALTER). It keeps a small SNAPSHOT of the trade (symbol, opened_at, status, outcome, pnl) because
+    orders/reconcile.py::run_retention_cleanup() deletes old closed positions: the note and its numbers must outlive the position row, or
+    "win rate by feeling" would lose its history every few days. position_id has no foreign key for the same reason.
+    Written only by the admin routes in main.py (PUT /journal/notes/{id}, or `reason` / `emotion` on POST /positions/manual/buy). Nothing here
+    is read by a gate, a score or the entry path.
+    """
+    __tablename__ = "scalp_trade_journal"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position_id = Column(Integer, nullable=False, unique=True, index=True)
+    symbol = Column(String(32), nullable=False)
+    window_source = Column(String(8), nullable=True)      # "MANUAL" for a manual BUY
+    reason = Column(String(300), nullable=True)
+    emotion = Column(String(24), nullable=True)
+    opened_at = Column(DateTime, nullable=True)
+    status = Column(String(24), nullable=True)
+    outcome = Column(String(16), nullable=True)           # win | loss | breakeven | pending | None (still open / unknown), from trade_stats.classify
+    realized_pnl = Column(Float, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+

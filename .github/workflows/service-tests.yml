@@ -41,6 +41,10 @@ on:
       - "scripts/test_ml_v2_walkforward.py"
       - "scripts/test_retire_legacy_board.py"
       - "scripts/test_control_kit.py"
+      - "scripts/test_backup_state.py"
+      - "scripts/test_check_requirements_drift.py"
+      - "scripts/check_requirements_drift.py"
+      - "scripts/backup_state.sh"
       - "scripts/check_control_catalog.py"
       - "scripts/test_daily_trade_report.py"
       - "scripts/daily_trade_report.py"
@@ -120,6 +124,10 @@ on:
       - "scripts/test_ml_v2_walkforward.py"
       - "scripts/test_retire_legacy_board.py"
       - "scripts/test_control_kit.py"
+      - "scripts/test_backup_state.py"
+      - "scripts/test_check_requirements_drift.py"
+      - "scripts/check_requirements_drift.py"
+      - "scripts/backup_state.sh"
       - "scripts/check_control_catalog.py"
       - "scripts/test_daily_trade_report.py"
       - "scripts/daily_trade_report.py"
@@ -196,7 +204,8 @@ jobs:
           pip install pytest
           (cd services/kronos-forecast-service && pip install numpy pandas && python -m pytest tests -q)   # group425: pure stats + engine tests, no torch needed
           (cd services/timesfm-forecast-service && pip install fastapi httpx pydantic numpy && python -m pytest tests -q)   # group434: pure features / engine / fake-backend API tests, no model needed
-          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_robustness.py scripts/test_ma_baseline.py scripts/test_live_vs_backtest.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_charges_split.py scripts/test_vm_review_evidence.py scripts/test_export_records.py scripts/test_tsfm_probe.py scripts/test_tsfm_nightly.py scripts/test_calibration_status.py scripts/test_analyze_latency_check.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py scripts/test_p8_retest_evidence.py scripts/test_intraday_gate_backtest.py scripts/test_ml_v2_walkforward.py scripts/test_retire_legacy_board.py scripts/test_control_kit.py scripts/test_daily_trade_report.py scripts/test_service_onoff_advice.py scripts/test_control_snapshot.py scripts/test_env_review_check.py -q
+          python -m pytest scripts/test_repo_scripts.py scripts/test_ms_ab_report.py scripts/test_robustness.py scripts/test_ma_baseline.py scripts/test_live_vs_backtest.py scripts/test_legacy_gate_backtest.py scripts/test_entry_rules_backtest.py scripts/test_robust_backtest.py scripts/test_records_report.py scripts/test_charges_split.py scripts/test_vm_review_evidence.py scripts/test_export_records.py scripts/test_tsfm_probe.py scripts/test_tsfm_nightly.py scripts/test_calibration_status.py scripts/test_analyze_latency_check.py scripts/test_opening_replay.py scripts/test_hold_bucket_check.py scripts/test_structure_gate_check.py scripts/test_ms_g1_check.py scripts/test_board_parity_check.py scripts/test_calibration_pack.py scripts/test_vm_calibrate.py scripts/test_policy_replay.py scripts/test_p8_retest_evidence.py scripts/test_intraday_gate_backtest.py scripts/test_ml_v2_walkforward.py scripts/test_retire_legacy_board.py scripts/test_control_kit.py scripts/test_backup_state.py scripts/test_check_requirements_drift.py scripts/test_daily_trade_report.py scripts/test_service_onoff_advice.py scripts/test_control_snapshot.py scripts/test_env_review_check.py -q
+          python scripts/check_requirements_drift.py   # F33 part 2: sub-service requirements vs parent
           python scripts/check_control_catalog.py   # group442: every switch marked LIVE is read at call time by all its consumers
           python scripts/check_compose_gateway_url.py && python scripts/check_compose_ports_loopback.py && python scripts/check_market_data_url_default.py
           (cd services/calibration-runner-service && python tests/test_runner_engine.py)   # group442: runner engine, catalog flags vs the real scripts, scheduler (stdlib only)

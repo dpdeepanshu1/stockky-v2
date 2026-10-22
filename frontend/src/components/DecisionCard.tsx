@@ -3,6 +3,7 @@ import { setVisibleInterval } from "../visibleInterval";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
 import StockChart from "./StockChart";
+import PatternStrip from "./PatternStrip";
 import BottomSheet from "./BottomSheet";
 import { useStockkyRealtime } from "../useRealtime";
 import { toActionablePick } from "./ScanPanel";
@@ -557,6 +558,8 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
           </div>
         </div>
       </BottomSheet>
+
+      <PatternStrip symbol={data.symbol} />
 
       <StockChart symbol={data.symbol} />
 

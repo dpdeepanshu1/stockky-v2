@@ -51,6 +51,8 @@ from market_structure.replay import replay  # noqa: E402
 BENCH_NAMES = ("^NSEI", "NIFTY", "NSEI", "NIFTY50")
 RULES = ("chase", "stretch", "room", "rr", "stop_wide", "bearish")
 MIN_BARS = 120
+SUMMARY_KEYS = ("ms_chase_atr", "ms_stretch_atr", "ms_room_atr", "ms_rr", "ms_rr_flags", "ms_trend", "ms_bos_dir", "ms_bos_failed", "ms_bos_bars")
+HARD_MIN_N = 15   # B15: absolute minimum signals (candidate and baseline) before any verdict; --min-n may only raise it
 
 
 def load_bars(path: Path) -> List[Tuple[float, ...]]:
@@ -123,6 +125,8 @@ def _rows(bars: Sequence[Sequence[float]], sym: str, step: int, th: Dict[str, An
             "sym": sym, "ts": bars[i][T], "month": ist_date(bars[i][T])[:7], "rej": [k for k, v in flags.items() if v],
             "stop_first": oc["first_touch"] == "stop", "target_first": oc["first_touch"] == "target", "mae": oc["mae_pct"],
             "bull": None, "hv": None}
+        if th.get("_keep_summary"):                # B14: scripts/robustness.py re-applies the rules at nudged thresholds, so it needs their inputs
+            row["s"] = {k: s.get(k) for k in SUMMARY_KEYS}
         for h in HORIZONS:
             v = oc[f"ret_{h}d"]
             row[f"r{h}"] = round(v - cost, 3) if v is not None else None
@@ -204,7 +208,8 @@ def verdict(cand_n: int, base_n: int, edge: Optional[float], ci: Optional[List[f
             cand_mean: Optional[float], min_n: int) -> str:
     if base_n == 0:
         return "no_data"
-    if cand_n < min_n or base_n < min_n or edge is None:
+    # B15 (2026-10-22): a hard floor that --min-n cannot lower. Fewer than HARD_MIN_N signals never earns a verdict, whatever the CLI says.
+    if cand_n < max(min_n, HARD_MIN_N) or base_n < max(min_n, HARD_MIN_N) or edge is None:
         return "insufficient_sample"
     if ci is not None and ci[1] < 0:
         return "hurts"

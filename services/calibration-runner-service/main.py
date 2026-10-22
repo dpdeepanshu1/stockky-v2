@@ -15,8 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
+import auth
 import config
 import jobs as J
+import session_keys
 from auth import mint_service_token, require_admin
 from runner import Runner
 from scheduler import Scheduler
@@ -24,6 +26,11 @@ from scheduler import Scheduler
 app = FastAPI(title="calibration-runner-service", version="1.0.0")
 _origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+def _all_secrets() -> list:
+    """Every session secret this process holds, so job logs / notifications can redact them."""
+    return [v for v in (session_keys.own_secret(k) for k in session_keys.SERVICE_ENV) if v]
+
 
 _tok: Dict[str, Any] = {"v": "", "exp": 0.0}
 
@@ -61,10 +68,10 @@ def _startup() -> None:
     from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
     ob = Outbox(str(config.DATA_DIR / "outbox"), config.OUTBOX_MAX_AGE_S)      # group 466: an undelivered Telegram message is kept and retried
-    notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET]), outbox=ob)
+    notifier = make_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, config.NOTIFY_MANUAL, Redactor(lambda: [_safe_token(), config.SESSION_SECRET, *_all_secrets()]), outbox=ob)
     import autocalib as AC
-    redact = Redactor(lambda: [_safe_token(), config.SESSION_SECRET])
-    runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET],
+    redact = Redactor(lambda: [_safe_token(), config.SESSION_SECRET, *_all_secrets()])
+    runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET, *_all_secrets()],
                     max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
                     notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S,
                     after_fn=lambda run: auto.on_run_finished(run, J.PACK_MAP) if auto else None)
@@ -83,7 +90,7 @@ def _startup() -> None:
     runner.start()
     start_outbox_flusher(ob, config.NOTIFICATION_URL, config.OUTBOX_RETRY_S)
     skip_notifier = make_skip_notifier(config.NOTIFICATION_URL, config.NOTIFY_ENABLED, lambda p: (J.PACK_MAP.get(p) or {}).get("title", p or ""),
-                                       Redactor(lambda: [_safe_token(), config.SESSION_SECRET]), outbox=ob)
+                                       Redactor(lambda: [_safe_token(), config.SESSION_SECRET, *_all_secrets()]), outbox=ob)
     sched = Scheduler(str(config.DATA_DIR / "state" / "schedule.json"), J.SCHEDULE_DEFAULT, runner.submit, list(J.PACK_MAP), enabled_default=config.SCHEDULER_ENABLED,
                       on_skip=skip_notifier)
     sched.start()
@@ -106,8 +113,8 @@ def _r() -> Runner:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     ok_scripts = config.SCRIPTS_DIR.is_dir()
-    return {"status": "ok" if ok_scripts and config.SESSION_SECRET else "degraded", "service": "calibration-runner-service", "scripts_dir": ok_scripts,
-            "session_secret_set": bool(config.SESSION_SECRET), "data_dir_writable": os.access(config.DATA_DIR, os.W_OK) if config.DATA_DIR.exists() else False}
+    return {"status": "ok" if ok_scripts and auth._any_key_configured() and session_keys.can_sign("calibration-runner", config.SESSION_SECRET) else "degraded", "service": "calibration-runner-service", "scripts_dir": ok_scripts,
+            "session_secret_set": bool(config.SESSION_SECRET), "session_signing_mode": session_keys.diagnostics("calibration-runner", auth._ACCEPT, config.SESSION_SECRET)["signing_mode"], "data_dir_writable": os.access(config.DATA_DIR, os.W_OK) if config.DATA_DIR.exists() else False}
 
 
 @app.get("/auth/session")

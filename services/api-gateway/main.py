@@ -5893,6 +5893,40 @@ async def stock_structure(symbol: str, force: bool = False):
         return empty
 
 
+_CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "1d")
+
+
+@app.get("/stock/{symbol}/chart-context")
+async def stock_chart_context(symbol: str, force: bool = False, tail: Optional[int] = None, tf: str = "1d"):
+    """E25 / E26 / E27: candlestick bars (1m, 5m, 15m, 30m, 1h or 1d) + pattern markers / shapes + plain-English badges + regime chips (proxy to the
+    technical service). Context only. Always 200: when the engine / upstream is down it returns {ok: False, ...empty} so the card falls back to the plain chart.
+    Intraday uses its own circuit-breaker name, so a slow 1-minute history can never open the breaker the analysis features share."""
+    base = (symbol or "").strip().upper().replace(".NS", "").replace(".BO", "")
+    tf_key = (tf or "1d").strip().lower()
+    tf_key = {"60m": "1h", "d": "1d", "daily": "1d"}.get(tf_key, tf_key)
+    empty = {"symbol": base, "ok": False, "tf": tf_key if tf_key in _CHART_TFS else "1d", "bars": [], "markers": [], "shapes": [], "levels": [], "badges": [],
+             "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None}}
+    if not base or tf_key not in _CHART_TFS:
+        return empty
+    try:
+        intraday = tf_key != "1d"
+        cap = 1500 if intraday else 500
+        qs = f"tf={tf_key}" + (f"&tail={max(30, min(int(tail), cap))}" if tail is not None else "") + ("&force=true" if force else "")
+        async with httpx.AsyncClient() as client:
+            resp = await _cb_get(client, "technical_chart" if intraday else "technical", f"{TECHNICAL_URL}/chart-context/{base}?{qs}", timeout=30 if intraday else 25)
+        if resp.status_code != 200:
+            return empty
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("schema") != 1 or not data.get("ok"):
+            if isinstance(data, dict) and data.get("reason"):
+                empty["reason"] = str(data["reason"])[:40]
+            return empty
+        return data
+    except Exception as e:  # noqa: BLE001
+        logger.debug("chart-context proxy %s %s: %s", base, tf_key, e)
+        return empty
+
+
 @app.get("/stock/{symbol}")
 async def get_stock_decision(symbol: str, already_owned: bool = False):
     """

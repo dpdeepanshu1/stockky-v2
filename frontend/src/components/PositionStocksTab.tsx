@@ -35,6 +35,8 @@ import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
+import StockCandleBlock from "./StockCandleBlock";   // E25 / E26: candles + pattern badges per stock
+import type { PriceLevel } from "../chartContext";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
 
 type Window = "1m" | "5m" | "15m" | "60m";
@@ -2335,6 +2337,14 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
             ? ` Dhan: ${p.error_message.slice(p.error_message.indexOf(": ") + 2)}`
             : ""}
         </p>
+      )}
+      {p.status !== "ERROR" && (
+        <StockCandleBlock symbol={p.symbol} defaultOpen={p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED"}
+          levels={[
+            { label: "Entry", price: p.entry_price, tone: "mute" as PriceLevel["tone"] },
+            ...(p.stop_price > 0 && !p.overnight_converted_to_cnc ? [{ label: "Stop", price: p.stop_price, tone: "bad" as PriceLevel["tone"] }] : []),
+            ...(p.target_price > 0 && !p.overnight_converted_to_cnc ? [{ label: "Target", price: p.target_price, tone: "good" as PriceLevel["tone"] }] : []),
+          ].filter((l) => Number.isFinite(l.price) && l.price > 0)} />
       )}
       <p className="font-display tabular-nums text-[9px] text-mist mt-1">
         Opened {fmtDateTimeIst(p.opened_at)}

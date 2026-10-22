@@ -13,13 +13,13 @@ _CAND = "candidate_engine.candidates"
 
 CATALOG = (
     # ---------------- structure gate at entry (G2 / G4 decide whether these stay) ----------------
-    Flag("STRUCTURE_GATE_MODE", "Structure gate (REAL)", "Structure gate at entry", "enum", choices=("enforce", "off"),
-         help="enforce = a bad daily structure makes the entry WAIT; off = kill switch. The gate only ever waits, it never creates an entry.",
+    Flag("STRUCTURE_GATE_MODE", "Structure gate (REAL)", "Structure gate at entry", "enum", choices=("enforce", "log", "off"),
+         help="enforce = a bad daily structure makes the entry WAIT; log = evaluate and record only (default); off = kill switch. The gate only ever waits, it never creates an entry.",
          targets=((_C, "STRUCTURE_GATE_MODE"),), derived=((_C, "STRUCTURE_GATE_DEMO_MODE", "STRUCTURE_GATE_DEMO_MODE"),), import_time_ok_files=("config.py",),
-         live=True, shipped="enforce", recommended="enforce", looser="neutral", evidence="G2 benefit / G4 live (structure_gate_check.py)"),
-    Flag("STRUCTURE_GATE_DEMO_MODE", "Structure gate (DEMO)", "Structure gate at entry", "enum", choices=("enforce", "off"),
+         live=True, shipped="log", recommended="log", looser="neutral", evidence="G2 benefit / G4 live (structure_gate_check.py)"),
+    Flag("STRUCTURE_GATE_DEMO_MODE", "Structure gate (DEMO)", "Structure gate at entry", "enum", choices=("enforce", "log", "off"),
          help="Same switch for DEMO mode; when unset it follows the REAL value.", targets=((_C, "STRUCTURE_GATE_DEMO_MODE"),), live=True,
-         shipped="enforce", looser="neutral"),
+         shipped="log", looser="neutral"),
     Flag("STRUCTURE_REQUIRE_DATA", "Refuse when no structure data", "Structure gate at entry", "bool", looser="off",
          help="true = an entry with no usable daily structure is refused (STRUCTURE_NODATA); false = no data means no opinion and the entry goes ahead.",
          targets=((_C, "STRUCTURE_REQUIRE_DATA"),), live=True, shipped="true", recommended="true", evidence="group377 live-money default"),

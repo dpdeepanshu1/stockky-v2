@@ -228,6 +228,27 @@ def today_loss_streak(db: Session, mode: str, now: Optional[datetime] = None):
         return 0, None
 
 
+def today_entry_count(db: Session, mode: str, now: Optional[datetime] = None) -> int:
+    """Number of positions this system opened today (IST), open or already closed.
+
+    A12 (2026-10-22), feeds risk_engine's max_entries_per_day (overtrading cap). Positions imported from the
+    broker's holdings are skipped (not entries made today). Any error returns 0, i.e. no cap applied: the cap is
+    an extra brake on NEW entries and must never be the reason an exit or the cycle fails.
+    """
+    try:
+        n = (now or datetime.now(timezone.utc)).astimezone(IST)
+        day_start = n.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).replace(tzinfo=None)
+        rows = (
+            db.query(models.TradePosition)
+            .filter(models.TradePosition.mode == mode, models.TradePosition.opened_at >= day_start)
+            .all()
+        )
+        return sum(1 for r in rows if not getattr(r, "broker_imported", False))
+    except Exception:  # noqa: BLE001
+        logger.warning("today_entry_count failed (no cap applied)", exc_info=True)
+        return 0
+
+
 def held_exposure_positions(db: Session, mode: str) -> list[models.TradePosition]:
     """
     BUG FIX (2026-09-07): risk_engine's no-pyramiding check and portfolio-risk

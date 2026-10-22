@@ -39,7 +39,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, orb_shadow, stopout_guard, structure_gate, structure_observation, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -613,6 +613,13 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _stop_reject, quality=quality)
         return None
 
+    # 2026-10-22: reward:risk 1:2 on the FINAL levels (after the target cap and stop floors). ENTRY_MIN_REWARD_RISK, 0 = off.
+    _rr_reject = rr_floor.reject_reason(levels)
+    if _rr_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _rr_reject, quality=quality)
+        return None
+
     # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.
     _depth_reject = depth_gate.reject_reason(candidate.symbol)
     if _depth_reject:
@@ -899,6 +906,15 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", "SHARED_ORDER_BUDGET_EXHAUSTED", quality=quality)
         return None
 
+    # 2026-10-22: the stop / target were built from the scan price; the MARKET order fills at the price NOW. Move both legs to the freshest tick
+    # (same stop % / target %) so a fall since the signal is not a hidden tight stop (IONEXCHANG: stop 0.15 % under the fill, out in 21 s).
+    _anchor_live = live_anchor.live_price(candidate.symbol)
+    levels, _anchor_drift = live_anchor.reanchor(levels, candidate.current_ltp, _anchor_live)
+    _ref_price = _anchor_live if _anchor_drift is not None else candidate.current_ltp
+    if _anchor_drift is not None:
+        logger.info("entry: %s legs anchored to live ₹%.2f (signal ₹%.2f, %+.2f%%): stop ₹%.2f target ₹%.2f",
+                    candidate.symbol, _anchor_live, candidate.current_ltp, _anchor_drift, levels.stop_price, levels.target_price)
+
     # Place the order
     dhan_super_order_id = None
     plain_order_id = None
@@ -913,7 +929,7 @@ def attempt_entry(
                 transaction_type="BUY",
                 quantity=quantity,
                 order_type="MARKET",
-                price=candidate.current_ltp,   # entry reference price
+                price=_ref_price,   # entry reference price (live tick when the legs were re-anchored)
                 target_price=levels.target_price,
                 stop_loss_price=levels.stop_price,
                 trailing_jump=0.0,
@@ -1039,7 +1055,7 @@ def attempt_entry(
         dhan_security_id=security_id,
         window_source=candidate.window_label,
         status="OPEN",
-        entry_price=candidate.current_ltp,
+        entry_price=_ref_price,                              # live tick when re-anchored (reconcile still corrects it to the real fill)
         signal_price=candidate.current_ltp,                  # group280: slippage = fill vs this
         structure_json=_struct_snap,                          # group354
         flow_json=_flow_snap,                                  # group427

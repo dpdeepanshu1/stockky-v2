@@ -252,6 +252,18 @@ def _write_exit_decision(
             if len(_HOLD_AUDIT_LAST) > 2000:
                 for k in list(_HOLD_AUDIT_LAST)[:1000]:
                     _HOLD_AUDIT_LAST.pop(k, None)
+    if action == "HOLD":
+        # A3: a HOLD row is evidence only; write it behind the tick so a slow / saturated DB can never delay or fail a stop check.
+        # False (queue off / unavailable) falls through to the old synchronous add.
+        try:
+            import write_behind
+            if write_behind.submit("exit_hold", {
+                "position_id": position.id, "action": action, "reasoning": reasoning, "ltp_at_decision": ltp,
+                "evaluated_at": datetime.now(timezone.utc),
+            }):
+                return
+        except Exception:  # noqa: BLE001
+            pass
     db.add(models.TradeExitDecision(
         position_id=position.id,
         action=action,
@@ -649,16 +661,38 @@ def _send_real_sell(
         effective_price = 0
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
-        result = dhan_client.place_order(
-            db, is_armed=True,   # exits always allowed — never blocked by armed state
-            security_id=security_id,
-            exchange_segment=dhan_client.NSE_EQ_SEGMENT,
-            transaction_type="SELL",
-            quantity=qty,
-            order_type=effective_order_type,
-            price=effective_price,
-            product_type=sell_product_type,
-        )
+        # A1c (2026-10-22): same protection as the BUY side (A1b). A SELL that raised may still be live at Dhan (timeout after
+        # acceptance); retrying it next cycle would send a SECOND sell, which for an INTRADAY position opens a short. A unique tag
+        # lets us ask Dhan's order book what actually happened before treating the call as failed.
+        import uuid as _uuid
+        _exit_tag = f"x{position.id}{_uuid.uuid4().hex[:8]}"
+        try:
+            result = dhan_client.place_order(
+                db, is_armed=True,   # exits always allowed — never blocked by armed state
+                security_id=security_id,
+                exchange_segment=dhan_client.NSE_EQ_SEGMENT,
+                transaction_type="SELL",
+                quantity=qty,
+                order_type=effective_order_type,
+                price=effective_price,
+                product_type=sell_product_type,
+                tag=_exit_tag,
+            )
+        except Exception as _place_err:  # noqa: BLE001
+            if dhan_client.is_clear_broker_rejection(str(_place_err)):
+                raise                                   # Dhan answered and refused: not live, normal failure handling
+            _row, _checked_ok = dhan_client.find_order_by_tag(db, _exit_tag)
+            if _row is not None:
+                logger.critical("exit SELL %s x%s raised (%s) but Dhan HAS the order (tag %s) - booking it as sent, no second SELL",
+                                position.symbol, qty, _place_err, _exit_tag)
+                result = {"orderId": _row.get("orderId") or _row.get("order_id")}
+                notify_sync(f"⚠️ *SELL recovered* - {position.symbol} x{qty}\nThe call errored but Dhan holds the order; booked as sent, no second SELL.")
+            elif not _checked_ok:
+                notify_sync(f"🚨 *SELL status UNKNOWN* - {position.symbol} x{qty} ({reason})\nThe call errored and Dhan's order book could not be read. "
+                            "Check Dhan before assuming the position is still open. The normal retry backoff applies.")
+                raise
+            else:
+                raise
         dhan_order_id = str(result.get("orderId") or result.get("order_id") or "")
         if not dhan_order_id:
             raise RuntimeError(

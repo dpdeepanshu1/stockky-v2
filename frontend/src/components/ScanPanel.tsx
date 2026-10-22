@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
+import { PRESETS, applyPreset, getPreset, missingFundamentals } from "../screenerPresets";
 import { ScanResult, Decision, api, ActionablePick, streamMarketScan } from "../api";
 // streamMarketScan available for progressive NDJSON consumption (see upsertScanResultItem below)
 import { sendStockUniverseForTraining, buildUniversePayloadFromScan } from "../api_universe";
@@ -102,6 +103,7 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
   const [committing, setCommitting] = useState<"training" | "trade_top5" | "trade_all" | "universe" | null>(null);
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [filterChip, setFilterChip] = useState<"all" | "buy" | "prepare" | "avoid">("all");
+  const [presetId, setPresetId] = useState<string | null>(null); // E29: fundamentals preset, narrows the table view only
   const [balanceLow, setBalanceLow] = useState<{ needed: number; available: number } | null>(null);
   // Step 4 — Buy Sniper
   const [sniperOpen, setSniperOpen] = useState(false);
@@ -166,12 +168,12 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
       if (px > 5000) return false;
       return true;
     });
-    const rows = uniqueBySymbol(raw);
+    const rows = applyPreset(uniqueBySymbol(raw), presetId);
     if (filterChip === "buy") return rows.filter((d) => d.decision === "BUY NOW");
     if (filterChip === "prepare") return rows.filter((d) => d.decision === "PREPARE TO BUY");
     if (filterChip === "avoid") return rows.filter((d) => d.decision === "DO NOT BUY" || d.decision === "WAIT" || d.decision === "SELL");
     return rows;
-  }, [result.all_results, filterChip]);
+  }, [result.all_results, filterChip, presetId]);
 
   const allSorted = useMemo(
     () => [...filteredResults].sort((a, b) => (b.combined_score ?? 0) - (a.combined_score ?? 0)),
@@ -598,6 +600,35 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="scan-bento-card scan-bento-presets">
+          <p className="dash-section-title mb-2">Fundamentals preset</p>
+          <div className="chip scanner-chips" role="group" aria-label="Fundamentals preset">
+            {PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                title={p.hint}
+                aria-pressed={presetId === p.id}
+                className={`scanner-chip${presetId === p.id ? " is-active" : ""}`}
+                data-active={presetId === p.id ? "true" : "false"}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setPresetId(presetId === p.id ? null : p.id);
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {presetId && (
+            <p className="mono text-[10px] text-mist/60 mt-2 mb-0">
+              {getPreset(presetId)?.hint}. Showing {filteredResults.length} stocks. Stocks missing a needed number are left out
+              {missingFundamentals(result.all_results || []) > 0 ? ` (${missingFundamentals(result.all_results || [])} scanned rows have no fundamentals)` : ""}.
+            </p>
+          )}
         </div>
 
         <div className="scan-bento-card scan-bento-actions">

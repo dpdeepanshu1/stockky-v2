@@ -146,6 +146,7 @@ def _group479_guards_off_by_default(monkeypatch):
     import config as _config
     monkeypatch.setattr(_config, "STOPOUT_GUARD_ENABLED", False, raising=False)
     monkeypatch.setattr(_config, "ENTRY_MIN_QTY", 0, raising=False)
+    monkeypatch.setattr(_config, "ENTRY_MIN_REWARD_RISK", 0.0, raising=False)   # 2026-10-22 RR_FLOOR is tested in test_rr_floor_1_2.py
     monkeypatch.setattr(_config, "ORB_MODE", "off", raising=False)
     from orders import orb_shadow as _orb
     _orb._reset_for_tests()

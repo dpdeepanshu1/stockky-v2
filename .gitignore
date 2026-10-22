@@ -14,3 +14,15 @@ stockky_test_report_*/
 htmlcov/
 # `coverage annotate` output (one <file>.py,cover next to every source file)
 *,cover
+
+# Secrets and saved run output (A4/A5, 2026-10-22): never commit real env files
+# or captured command output that may contain tokens/JWTs.
+.env.*
+!.env.example
+!.env.oracle.example
+!.env.oracle.recommended
+*.token
+*.jwt
+run_output*/
+*_run_output*
+*.run.log

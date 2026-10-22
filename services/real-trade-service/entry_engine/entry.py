@@ -24,6 +24,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
+import write_behind as _write_behind   # A3
 from typing import Optional
 
 import httpx
@@ -34,10 +35,10 @@ import cost_model
 import entry_product
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
-from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent, today_loss_streak, working_buy_symbols
+from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent, today_entry_count, today_loss_streak, working_buy_symbols
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 import pipeline_status as pstat
@@ -384,6 +385,24 @@ def _composite_quality_score(
     )
 
 
+# A1b: symbols whose BUY errored AND could not be verified in Dhan's order book. (mode, symbol) -> IST date. In-memory on purpose:
+# the entry cycle is one process, and the order itself is reconciled from the broker the next time it can be read.
+_UNCERTAIN_BUYS: dict = {}
+
+
+def _mark_uncertain_buy(mode: str, symbol: str) -> None:
+    from tz_utils import ist_today_str
+    _UNCERTAIN_BUYS[(mode, symbol)] = ist_today_str()
+
+
+def _uncertain_buy_active(mode: str, symbol: str) -> bool:
+    try:
+        from tz_utils import ist_today_str
+        return _UNCERTAIN_BUYS.get((mode, symbol)) == ist_today_str()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: float = 0.0) -> AccountState:
     if mode == "REAL":
         from execution.equity_sync import sync_real_equity
@@ -404,6 +423,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
     _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
     # GROUP 289: today's consecutive realized losses, for risk_engine's loss_streak_pause.
     _streak, _streak_at = today_loss_streak(db, mode)
+    _entries_today = today_entry_count(db, mode)   # A12: overtrading cap
     return AccountState(
         equity=account.current_equity,
         risk_per_trade_pct=risk.risk_per_trade_pct,
@@ -466,6 +486,12 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
         other_service_exposure_age_s=_peer_age,
         loss_streak=_streak,
+        entries_today=_entries_today,
+        # A11: combined loss of both engines today (REAL only; DEMO has no peer).
+        account_wide_daily_loss_pct=(
+            shared_daily_pnl.account_wide_loss_pct(db, account.realized_pnl_today, account.current_equity)
+            if mode == "REAL" else 0.0
+        ),
         loss_streak_last_close_at=_streak_at,
         # 2026-09-21 (session79): flat max-trade-value cap — DB override
         # first, config.py default second, same resolution order as every
@@ -751,6 +777,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             nonlocal waited
             decision.action    = "WAIT"
             decision.reasoning = reason
+            decision._wb_divertable = True      # A3: a plain WAIT row is evidence only; write_behind.divert_pending_waits moves it off this cycle's commit
             waited += 1
 
         # ── Gate 1: actionable decision label ─────────────────────────────────
@@ -1006,7 +1033,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # ALWAYS LIVE (group370): a rejection is a WAIT (gate_tag "structure"); the verdict is stored on decision.structure_json.
         # No / stale / insufficient structure data is "no opinion" (never blocks) unless STRUCTURE_REQUIRE_DATA. Never raises.
         # An optional structural stop (STRUCTURE_STOP_MODE=on) replaces the ATR stop only when sane. See entry_engine/structure_gate.py.
-        _sg_mode = structure_gate.mode_for(mode)
+        _sg_mode = structure_gate.mode_for(mode, db)      # B15: db lets the gate downgrade enforce -> log until enough outcomes exist
         if _sg_mode != "off":
             try:
                 _sg_sum, _sg_src = await structure_gate.get_summary(cand.symbol, getattr(cand, "raw_payload", None))
@@ -1578,6 +1605,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # purpose even within this cycle, since the loop that reads it is
         # already finished.
         db.add(decision)
+        _write_behind.divert_pending_waits(db)   # A3: earlier plain WAIT rows must not ride this flush
         db.flush()
 
         order = models.TradeOrder(
@@ -1641,7 +1669,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── REAL: place at Dhan ────────────────────────────────────────────────
         if mode == "REAL":
+            _order_tag = f"stk{order.id}"                       # A1b: correlation tag sent to Dhan, used to find the order again after an error
+            _broker_call_started = False
+            _blocked_uncertain = _uncertain_buy_active(mode, cand.symbol)
+            _uncertain = False
             try:
+                if _blocked_uncertain:
+                    raise RuntimeError(f"{cand.symbol}: an earlier BUY today could not be verified at Dhan - not buying it again until checked.")
                 security_id   = dhan_client.get_security_id(db, cand.symbol)
                 # AUDIT FIX (this session): the shared cross-service Dhan
                 # account-wide order-rate guard (execution/shared_order_budget.py)
@@ -1686,8 +1720,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         "shared Dhan account — buying it here too would create a "
                         "duplicate broker position."
                     )
+                _broker_call_started = True
                 broker_result = dhan_client.place_order(
                     db, is_armed=gate_armed,
+                    tag=_order_tag,
                     security_id=security_id,
                     exchange_segment=dhan_client.NSE_EQ_SEGMENT,
                     transaction_type="BUY",
@@ -1717,80 +1753,103 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 )
             except Exception as ex:
                 logger.error("REAL order placement failed for %s: %s", cand.symbol, ex)
-                # group335: a failure about THIS symbol frees its slot for the next shortlisted pick; an account-wide one (shared order
-                # budget used up) does not - every other pick would hit the same wall.
-                _slot_failed = "order budget exhausted" not in str(ex).lower()
-                order.status = "REJECTED"
-                # AUDIT FIX (session60): release the symbol claim taken
-                # above on ANY placement failure (including our own
-                # "already held by the other service" RuntimeError above,
-                # which is a harmless no-op release since try_claim never
-                # actually gave us that row) — otherwise a rejected order
-                # permanently locks this symbol out for this service.
-                shared_symbol_lock.release(db, cand.symbol)
-                db.add(models.TradeOrderEvent(
-                    order_id=order.id, event_type="REJECTED",
-                    detail=f"Dhan placement failed: {ex}",
-                ))
-                decision.action = "WAIT"
-                if dhan_client.is_invalid_ip_error(str(ex)):
-                    decision.reasoning = (
-                        "Risk-approved but blocked: Dhan rejected — outbound IP not whitelisted. "
-                        "Auto-paused REAL. See GET /dhan/network-check."
-                    )
-                    entered       -= 1
-                    waited        += 1
-                    reserved_cash -= decision.proposed_qty * entry_price
-                    entry_details.append({
-                        "symbol": cand.symbol, "action": decision.action,
-                        "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
-                    })
-                    db.commit()
-                    from auth.dhan_credentials import disarm_on_invalid_ip
-                    just_disarmed = disarm_on_invalid_ip(db, mode, str(ex))
-                    if just_disarmed:
-                        await notify_async(
-                            "🚨 *REAL trading auto-paused* — Dhan rejecting orders (IP not whitelisted). "
-                            "Check GET /dhan/network-check for the IP to whitelist."
-                        )
-                    return {
-                        "evaluated": len(candidates), "entered": entered,
-                        "waited": waited, "rejected": rejected,
-                        "auto_disarmed": "invalid_ip", "entry_details": entry_details,
-                    }
-                elif dhan_client.is_circuit_limit_error(str(ex)):
-                    # 2026-09-15 fix (session41b): BUY rejected because the
-                    # stock is at or beyond its upper circuit price band.
-                    # Retrying at the same price will always fail.  Skip this
-                    # candidate for the rest of today — it has no intraday
-                    # exit room even if the BUY did somehow fill.
-                    decision.reasoning = (
-                        f"Risk-approved but Dhan rejected — stock at circuit limit "
-                        f"(price outside NSE band). Skipping for today: {ex}"
-                    )
-                    entered       -= 1
-                    waited        += 1
-                    reserved_cash -= decision.proposed_qty * entry_price
-                    db.commit()
-                    logger.warning(
-                        "real-trade entry: %s BUY rejected — circuit limit. "
-                        "Skipping this candidate (no intraday upside/exit room). Error: %s",
-                        cand.symbol, ex,
-                    )
-                    await notify_async(
-                        f"⚠️ *BUY skipped (circuit limit)* — {cand.symbol}\n"
-                        f"Stock is at/beyond its NSE price band — no intraday exit room.\n"
-                        f"{str(ex)[:200]}"
-                    )
+                # A1b (2026-10-22): the BUY may be LIVE at Dhan even though this call raised (read timeout, dropped connection, an SDK
+                # envelope built from a network error). Before calling it REJECTED - which frees the symbol and lets the next cycle buy it
+                # AGAIN - look the order up by the tag we sent. Found = book it as sent. Order book unreadable = UNKNOWN: keep the symbol
+                # locked for today and ask the operator to check Dhan. Clean broker rejections are not found there and fall through as before.
+                _recovered_row, _checked_ok = (None, True)
+                if _broker_call_started and not dhan_client.is_clear_broker_rejection(str(ex)):
+                    _recovered_row, _checked_ok = dhan_client.find_order_by_tag(db, _order_tag)
+                if _recovered_row is not None:
+                    _rid = str(_recovered_row.get("orderId") or _recovered_row.get("order_id") or "")
+                    logger.critical("entry_engine: BUY %s raised (%s) but Dhan HAS the order %s (tag %s) - booking it as sent, not rejected",
+                                    cand.symbol, ex, _rid, _order_tag)
+                    record_real_order_sent(db, order, _rid)
+                    approve_first.mark_entered(db, mode, cand.symbol, {"qty": decision.proposed_qty, "price": entry_price})
+                    await notify_async(f"⚠️ *BUY recovered* - {cand.symbol}\nThe call errored ({str(ex)[:120]}) but Dhan holds the order {_rid}; booked as sent, no second order placed.")
                 else:
-                    decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
-                    entered       -= 1
-                    waited        += 1
-                    reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
-                    db.commit()
-                    await notify_async(
-                        f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"
-                    )
+                    _uncertain = _broker_call_started and not _checked_ok
+                    if _uncertain:
+                        _mark_uncertain_buy(mode, cand.symbol)
+                        await notify_async(f"🚨 *BUY status UNKNOWN* - {cand.symbol}\nThe order call errored and Dhan's order book could not be read. "
+                                           "Check Dhan for this symbol. No new BUY for it today.")
+
+                if _recovered_row is None:
+                    # group335: a failure about THIS symbol frees its slot for the next shortlisted pick; an account-wide one (shared order
+                    # budget used up) does not - every other pick would hit the same wall.
+                    _slot_failed = "order budget exhausted" not in str(ex).lower()
+                    order.status = "REJECTED"
+                    # AUDIT FIX (session60): release the symbol claim taken
+                    # above on ANY placement failure (including our own
+                    # "already held by the other service" RuntimeError above,
+                    # which is a harmless no-op release since try_claim never
+                    # actually gave us that row) — otherwise a rejected order
+                    # permanently locks this symbol out for this service.
+                    if not (_uncertain or _blocked_uncertain):
+                        shared_symbol_lock.release(db, cand.symbol)
+                    db.add(models.TradeOrderEvent(
+                        order_id=order.id, event_type="REJECTED",
+                        detail=f"Dhan placement failed: {ex}",
+                    ))
+                    decision.action = "WAIT"
+                    if dhan_client.is_invalid_ip_error(str(ex)):
+                        decision.reasoning = (
+                            "Risk-approved but blocked: Dhan rejected — outbound IP not whitelisted. "
+                            "Auto-paused REAL. See GET /dhan/network-check."
+                        )
+                        entered       -= 1
+                        waited        += 1
+                        reserved_cash -= decision.proposed_qty * entry_price
+                        entry_details.append({
+                            "symbol": cand.symbol, "action": decision.action,
+                            "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
+                        })
+                        db.commit()
+                        from auth.dhan_credentials import disarm_on_invalid_ip
+                        just_disarmed = disarm_on_invalid_ip(db, mode, str(ex))
+                        if just_disarmed:
+                            await notify_async(
+                                "🚨 *REAL trading auto-paused* — Dhan rejecting orders (IP not whitelisted). "
+                                "Check GET /dhan/network-check for the IP to whitelist."
+                            )
+                        return {
+                            "evaluated": len(candidates), "entered": entered,
+                            "waited": waited, "rejected": rejected,
+                            "auto_disarmed": "invalid_ip", "entry_details": entry_details,
+                        }
+                    elif dhan_client.is_circuit_limit_error(str(ex)):
+                        # 2026-09-15 fix (session41b): BUY rejected because the
+                        # stock is at or beyond its upper circuit price band.
+                        # Retrying at the same price will always fail.  Skip this
+                        # candidate for the rest of today — it has no intraday
+                        # exit room even if the BUY did somehow fill.
+                        decision.reasoning = (
+                            f"Risk-approved but Dhan rejected — stock at circuit limit "
+                            f"(price outside NSE band). Skipping for today: {ex}"
+                        )
+                        entered       -= 1
+                        waited        += 1
+                        reserved_cash -= decision.proposed_qty * entry_price
+                        db.commit()
+                        logger.warning(
+                            "real-trade entry: %s BUY rejected — circuit limit. "
+                            "Skipping this candidate (no intraday upside/exit room). Error: %s",
+                            cand.symbol, ex,
+                        )
+                        await notify_async(
+                            f"⚠️ *BUY skipped (circuit limit)* — {cand.symbol}\n"
+                            f"Stock is at/beyond its NSE price band — no intraday exit room.\n"
+                            f"{str(ex)[:200]}"
+                        )
+                    else:
+                        decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
+                        entered       -= 1
+                        waited        += 1
+                        reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
+                        db.commit()
+                        await notify_async(
+                            f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"
+                        )
 
         db.add(decision)
         entry_details.append({
@@ -1810,6 +1869,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     _mark_skipped_wait(reserve)
     _shortlist.finalize(mode)                                  # group337: reserve picks never needed -> NOT_NEEDED
 
+    _write_behind.divert_pending_waits(db)                     # A3: WAIT rows go behind the cycle; the commit below carries orders / ENTER rows only
     db.commit()
     log_action(db, actor="system", action="ENTRY_CYCLE", mode=mode,
                detail=(

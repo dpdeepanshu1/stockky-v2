@@ -41,6 +41,15 @@ import httpx
 from circuit_breaker import get_breaker, all_snapshots
 import gc
 MAX_HISTORY_ROWS = int(((os.environ.get("MAX_HISTORY_ROWS") or "").strip() or "260"))  # ~1y daily, 512MB-safe
+# E27: the 260-row cap is right for daily bars (~1y) but cut a 1-minute chart to 260 minutes: an intraday interval gets its own cap
+# (5 sessions of 1-minute bars = 1875 rows; 5m / 15m over a month and 1h over 3 months are smaller). Blank / non-numeric -> 2600.
+_raw_intraday_rows = (os.environ.get("MAX_HISTORY_ROWS_INTRADAY") or "").strip() or "2600"
+MAX_HISTORY_ROWS_INTRADAY = max(MAX_HISTORY_ROWS, int(_raw_intraday_rows) if _raw_intraday_rows.isdigit() else 2600)
+
+
+def _history_row_cap(interval) -> int:
+    """Most rows kept for one /history answer: the daily cap for 1d / 1wk / 1mo, the intraday cap for 1m ... 1h."""
+    return MAX_HISTORY_ROWS if str(interval or "1d").lower() in ("1d", "1wk", "1mo") else MAX_HISTORY_ROWS_INTRADAY
 MAX_HISTORY_PERIOD = os.environ.get('MAX_HISTORY_PERIOD', '1y')
 
 def _report_rate_limit(status: int, path: str = "", detail: str = "", symbol: str = "") -> None:
@@ -3017,7 +3026,7 @@ def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, day
                 candles = _dh.fetch_candles(base, "1d", today - timedelta(days=372), end)
                 if candles:
                     full = {"symbol": sym, "requested": (symbol or "").strip(), "period": "1y", "interval": interval,
-                            "candles": candles[-MAX_HISTORY_ROWS:], "source": "dhan"}
+                            "candles": candles[-_history_row_cap(interval):], "source": "dhan"}
                     _history_store(f"history:{sym}:1y:{interval}:", full, _history_ttl(interval))
                     dhan_data.client.note_success()
                     _sl = _history_slice(full, period, "1y")
@@ -3043,8 +3052,8 @@ def _dhan_history_attempt(symbol: str, sym: str, period: str, interval: str, day
             return None
         if start_date is None:
             candles = _history_trim_latest_session(candles, period, iv)
-        if len(candles) > MAX_HISTORY_ROWS:
-            candles = candles[-MAX_HISTORY_ROWS:]
+        if len(candles) > _history_row_cap(iv):
+            candles = candles[-_history_row_cap(iv):]
         result = {"symbol": sym, "requested": (symbol or "").strip(), "period": period, "interval": interval,
                   "candles": candles, "source": "dhan"}
         _history_store(cache_key, result, _history_ttl(interval))
@@ -4692,8 +4701,8 @@ def _history_widen_from_angelone(symbol: str, sym: str, period: str, interval: s
             candles = _angelone_history_candles(sym, "1y", interval, None, None, None)
             if not candles:
                 return None, _history_angel_available(sym)
-            if len(candles) > MAX_HISTORY_ROWS:
-                candles = candles[-MAX_HISTORY_ROWS:]
+            if len(candles) > _history_row_cap(interval):
+                candles = candles[-_history_row_cap(interval):]
             full = {
                 "symbol": sym,
                 "requested": (symbol or "").strip(),
@@ -4912,8 +4921,8 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
     # a failed 1y call is not repeated for the short period (the yfinance loop below still runs)
     angel_candles = None if _widen_tried else _angelone_history_candles(sym, period, interval, days, start_date, end_date)
     if angel_candles:
-        if len(angel_candles) > MAX_HISTORY_ROWS:
-            angel_candles = angel_candles[-MAX_HISTORY_ROWS:]
+        if len(angel_candles) > _history_row_cap(interval):
+            angel_candles = angel_candles[-_history_row_cap(interval):]
         result = {
             "symbol": sym,
             "requested": (symbol or "").strip(),
@@ -4981,8 +4990,8 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
                 gc.collect()
                 continue
 
-            if len(candles) > MAX_HISTORY_ROWS:
-                candles = candles[-MAX_HISTORY_ROWS:]
+            if len(candles) > _history_row_cap(interval):
+                candles = candles[-_history_row_cap(interval):]
             del df
             gc.collect()
 
@@ -5014,8 +5023,8 @@ def _get_history_impl(symbol: str, period: str, interval: str, force: bool, days
     # (round 2 of "AngelOne everywhere": Angel -> yfinance -> NSE tier).
     nse_candles = _nse_history_candles(sym, period, interval, days, start_date, end_date)
     if nse_candles:
-        if len(nse_candles) > MAX_HISTORY_ROWS:
-            nse_candles = nse_candles[-MAX_HISTORY_ROWS:]
+        if len(nse_candles) > _history_row_cap(interval):
+            nse_candles = nse_candles[-_history_row_cap(interval):]
         result = {
             "symbol": sym,
             "requested": (symbol or "").strip(),

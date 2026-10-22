@@ -59,7 +59,7 @@ def main() -> None:
     admin_hash = PasswordHasher().hash(pw1)
     del pw1, pw2  # don't let it linger in memory longer than necessary
 
-    # 2. SESSION_SECRET — 32 random bytes, base64. Just needs to be
+    # 2. SESSION_SECRET (+ the three per-service ones below) — 32 random bytes, base64. Just needs to be
     #    unguessable; it only signs short-lived session JWTs.
     session_secret = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
 
@@ -78,7 +78,10 @@ def main() -> None:
     print("COPY THESE INTO RENDER (real-trade-service → Environment):")
     print("=" * 70)
     print(f"ADMIN_PASSWORD_HASH={admin_hash}")
-    print(f"SESSION_SECRET={session_secret}")
+    print(f"SESSION_SECRET={session_secret}   # legacy shared secret: only keep it while old sessions must still work (A4b), then delete it")
+    # A4b: one independent secret per service (never reuse one value for two services)
+    for name in ("SESSION_SECRET_REAL_TRADE", "SESSION_SECRET_POSITION_STOCKS", "SESSION_SECRET_CALIBRATION_RUNNER"):
+        print(f"{name}={base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}")
     print(f"DHAN_CREDENTIAL_ENC_KEY={enc_key}")
     print("=" * 70)
     print("\nADMIN_USERNAME defaults to 'admin' — set ADMIN_USERNAME too if you")

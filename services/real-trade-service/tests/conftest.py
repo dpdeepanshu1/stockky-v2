@@ -138,6 +138,8 @@ def _structure_gate_no_network_by_default(monkeypatch):
     monkeypatch.setattr(_cfg, "STRUCTURE_FETCH_ENABLED", False, raising=False)
     # group377: production default is REQUIRE_DATA=true (no structure = WAIT). Pre-existing entry tests have no summary and expect no behaviour change.
     monkeypatch.setattr(_cfg, "STRUCTURE_REQUIRE_DATA", False, raising=False)
+    # B15: pre-existing tests exercise enforce directly with an empty observations table; the evidence guard is tested in test_b15_enforce_guard.py
+    monkeypatch.setattr(_cfg, "STRUCTURE_ENFORCE_MIN_OOS", 0, raising=False)
     # group377: BROKER_STOP_ENABLED is ON by default; pre-existing exit tests must not run the broker-stop sync. test_group322 / test_group377 turn it on.
     monkeypatch.setattr(_cfg, "BROKER_STOP_ENABLED", False, raising=False)
     mod = _sys_g172.modules.get("entry_engine.structure_gate")
@@ -214,3 +216,28 @@ def _min_qty_off_for_older_tests(monkeypatch):
     """group 472: older REAL entry tests use 1-2 share positions; the minimum is checked in tests/test_group472_min_qty.py."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "ENTRY_MIN_QTY", 0, raising=False)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _order_book_lookup_is_a_clean_miss_by_default(monkeypatch):
+    """A1b/A1c: after a failed order call the entry / exit paths ask Dhan's order book whether the order is live anyway.
+    Pre-existing tests must not hit the broker: by default the lookup answers "checked, not there" (= a plain rejection, the old
+    behaviour). tests/test_a1b_order_recovery.py overrides it to test the found / unreadable branches."""
+    from execution import dhan_client as _dc
+    monkeypatch.setattr(_dc, "find_order_by_tag", lambda db, tag: (None, True), raising=False)
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _write_behind_off_by_default(monkeypatch):
+    """A3: write_behind.py moves HOLD exit rows and plain WAIT entry rows to a background queue. Every pre-existing test reads those
+    rows straight after the call, so the queue is off unless a test turns it on (tests/test_a3_write_behind.py does)."""
+    monkeypatch.setenv("WRITE_BEHIND_ENABLED", "0")
+    mod = _sys_g172.modules.get("write_behind")
+    if mod is not None:
+        mod.reset_for_tests()
+    yield
+    mod = _sys_g172.modules.get("write_behind")
+    if mod is not None:
+        mod.stop()
+        mod.reset_for_tests()

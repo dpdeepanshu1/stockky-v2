@@ -502,6 +502,24 @@ class SharedServiceExposure(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class SharedDailyPnl(Base):
+    """A11 (2026-10-22) - account-wide daily loss cap. Each service publishes ITS OWN realized P&L for the current
+    IST day plus its own capital base (the half of the shared Dhan account it sizes against). Either service can
+    then sum both rows and block new BUYs once the combined net loss reaches ACCOUNT_MAX_DAILY_LOSS_PCT of the
+    combined base. `trade_date` (IST, YYYY-MM-DD) is stored so a row left over from an earlier day is ignored
+    rather than counted. Separate NEW table (not extra columns on stockky_shared_service_exposure) so create_all()
+    adds it on a live DB with no ALTER. Same shape in both services; either may boot first. Fail-open on any DB
+    error - see execution/shared_daily_pnl.py (real-trade-service) / capital/shared_daily_pnl.py (position-stocks)."""
+    __tablename__ = "stockky_shared_daily_pnl"
+
+    service_name = Column(String(32), primary_key=True)  # "real-trade-service" | "position-stocks-service"
+    trade_date = Column(String(10), nullable=False)       # IST date the figures below belong to
+    realized_pnl_today = Column(Float, nullable=False, default=0.0)
+    capital_base = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+
 class ScalpIntradayRestrictedSecurity(Base):
     """Learned list of NSE securities Dhan has rejected as 'not allowed to
     be traded in Intraday' (T2T / ASM / GSM surveillance stocks).

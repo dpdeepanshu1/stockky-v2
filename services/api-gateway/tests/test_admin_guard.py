@@ -120,3 +120,34 @@ def test_every_protected_route_is_registered_on_the_app():
         guarded[route.path] = admin_guard.require_admin in deps
     for path in admin_guard.PROTECTED:
         assert guarded.get(path) is True, f"{path} is not behind the admin guard"
+
+
+# ---- A4b: per-service secrets -------------------------------------------------------------------------------------------------
+RT_SECRET, PS_SECRET, CR_SECRET = "r" * 40, "p" * 40, "c" * 40
+
+
+def _kid_token(secret, kid):
+    return jwt.encode({"sub": "admin", "iat": time.time(), "exp": time.time() + 600}, secret, algorithm="HS256", headers={"kid": kid})
+
+
+@pytest.fixture
+def per_service(client, monkeypatch):
+    monkeypatch.delenv("SESSION_SECRET", raising=False)  # legacy secret gone: only kid tokens can pass
+    monkeypatch.setenv("SESSION_SECRET_REAL_TRADE", RT_SECRET)
+    monkeypatch.setenv("SESSION_SECRET_POSITION_STOCKS", PS_SECRET)
+    monkeypatch.setenv("SESSION_SECRET_CALIBRATION_RUNNER", CR_SECRET)  # as if env_file leaked it into the gateway
+    return client
+
+
+def test_a4b_tokens_from_both_login_services_pass(per_service):
+    assert per_service.post("/protected", headers=_bearer(_kid_token(RT_SECRET, "real-trade"))).status_code == 200
+    assert per_service.post("/protected", headers=_bearer(_kid_token(PS_SECRET, "position-stocks"))).status_code == 200
+
+
+def test_a4b_runner_token_is_refused_even_if_its_secret_leaks_here(per_service):
+    assert per_service.post("/protected", headers=_bearer(_kid_token(CR_SECRET, "calibration-runner"))).status_code == 401
+
+
+def test_a4b_wrong_key_for_kid_and_legacy_token_are_refused(per_service):
+    assert per_service.post("/protected", headers=_bearer(_kid_token(PS_SECRET, "real-trade"))).status_code == 401
+    assert per_service.post("/protected", headers=_bearer(_token())).status_code == 401  # legacy token, legacy secret removed

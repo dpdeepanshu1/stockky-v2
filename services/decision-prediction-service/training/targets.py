@@ -13,7 +13,8 @@ class TargetGenerator:
         target_type: str = 'Log_Return',
         forecast_horizon: int = 5,
         classification_thresholds: Optional[dict] = None,
-        price_col: str = 'close'
+        price_col: str = 'close',
+        barrier_params: Optional[dict] = None
     ):
         self.target_type = target_type
         self.forecast_horizon = forecast_horizon
@@ -21,6 +22,8 @@ class TargetGenerator:
         if classification_thresholds is None:
             classification_thresholds = {'buy': 0.015, 'sell': -0.015}
         self.classification_thresholds = classification_thresholds
+        # D22: only used by target_type 'TripleBarrier_Net' / 'TripleBarrier_Class' (see triple_barrier.py); horizon defaults to forecast_horizon
+        self.barrier_params = dict(barrier_params or {})
 
     def generate(self, data: pd.DataFrame, inplace: bool = False):
         """Generate targets from price data."""
@@ -37,7 +40,15 @@ class TargetGenerator:
         df.loc[df['pct_return'] > self.classification_thresholds['buy'], 'directional'] = 1
         df.loc[df['pct_return'] < self.classification_thresholds['sell'], 'directional'] = -1
 
-        if self.target_type == 'Log_Return':
+        if self.target_type in ('TripleBarrier_Net', 'TripleBarrier_Class'):
+            from triple_barrier import triple_barrier_labels, TB_COLUMNS
+            kw = {'horizon': self.forecast_horizon, **self.barrier_params}
+            tb = triple_barrier_labels(df.reset_index(drop=True), **kw)
+            tb.index = df.index
+            for col in TB_COLUMNS:
+                df[col] = tb[col]
+            target = df['tb_net_return'] if self.target_type == 'TripleBarrier_Net' else df['tb_y']
+        elif self.target_type == 'Log_Return':
             target = df['log_return']
         elif self.target_type == 'Percentage_Return':
             target = df['pct_return']

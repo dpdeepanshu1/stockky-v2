@@ -1722,6 +1722,11 @@ export const api = {
   getWeeklyTradeReport: (weeks = 12) =>
     request<TradeReportBucket[]>(`/training/api/trades/report/weekly?weeks=${weeks}`, undefined, 2, 30000),
 
+  // E25 / E26 / E27: candles (tf = 1m | 5m | 15m | 30m | 1h | 1d) + pattern markers / shapes + plain-English badges + regime chips
+  // (context only; always 200, ok=false (+ reason) when unavailable). Intraday gets a longer timeout: the gateway waits up to 30 s for the history.
+  getChartContext: (symbol: string, tail: number = 300, tf: string = "1d", force: boolean = false) =>
+    request<unknown>(`/stock/${encodeURIComponent(symbol)}/chart-context?tail=${tail}&tf=${encodeURIComponent(tf)}${force ? "&force=true" : ""}`, undefined, 1, tf === "1d" ? 30000 : 38000),
+
   getStockHistory: async (symbol: string, period: string = "1mo") => {
     try {
       return await request<StockHistory>(`/market/history/${symbol}?period=${period}`, undefined, 1, 45000);

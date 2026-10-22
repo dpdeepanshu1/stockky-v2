@@ -431,7 +431,15 @@ FAST_EXIT_TIMEOUT_ALERT_AFTER = 3     # consecutive Oracle call timeouts before 
 def _is_db_call_timeout(exc: BaseException) -> bool:
     """True for an Oracle call timeout (python-oracledb DPY-4024) - transient DB saturation, not a logic error."""
     txt = f"{type(exc).__name__} {exc}"
-    return "DPY-4024" in txt or "call timeout" in txt.lower()
+    hit = "DPY-4024" in txt or "call timeout" in txt.lower()
+    if hit:
+        # A3: any tick that hits a DB timeout also pauses the evidence-row write-behind queue (group 347's back-off, whole cycle).
+        try:
+            import write_behind
+            write_behind.note_timeout()
+        except Exception:  # noqa: BLE001
+            pass
+    return hit
 
 
 async def _exit_only_tick(mode: str) -> None:
@@ -531,6 +539,15 @@ async def _exit_only_tick_body(mode: str) -> None:
                 logger.warning("auto_pilot: charges ledger sync failed", exc_info=True)
         _note_exit_tick_timing(mode, _exit_s, _reconcile_s)
 
+        # A13: hourly read-only broker-vs-book drift report (REAL only; never raises, changes nothing in the book).
+        if mode == "REAL":
+            try:
+                from execution import hourly_reconcile as _hr
+                if _hr.due():
+                    await _hr.run_hourly_reconcile(db)
+            except Exception:
+                logger.warning("auto_pilot: hourly reconcile failed", exc_info=True)
+
         # Alert if gate is off while positions are open — keeps the operator
         # informed without blocking the protective exit above.
         armed = gate is not None and gate.armed and getattr(gate, "auto_pilot_enabled", False)
@@ -595,6 +612,30 @@ def _run_full_tick_sync(mode: str) -> None:
         _run_coro_in_new_loop(_full_tick_body, mode)
 
 
+# Full-cycle DB-timeout handling (2026-10-22, plan item A1). Before this, ANY
+# exception - including a one-off Oracle call timeout (DPY-4024) - sent a raw
+# Telegram error on every occurrence. A DB timeout is now treated as transient:
+# rolled back, logged, and alerted on the 1st failure, the 3rd in a row, then at
+# most once per FULL_TICK_TIMEOUT_ALERT_EVERY_S, with a "recovered" message when
+# a cycle completes again. Deliberately NO in-tick retry of the whole cycle: a
+# timeout can land after a broker order was placed but before the local commit,
+# and re-running run_cycle_core immediately could double-enter. The next tick
+# (seconds away) is the retry, and it goes through the normal duplicate guards.
+_full_tick_db_timeouts: dict = {}        # mode -> consecutive timeout count
+_full_tick_timeout_alert_last: dict = {}  # mode -> time.monotonic() of last alert
+FULL_TICK_TIMEOUT_ALERT_EVERY_S = 15 * 60
+
+
+def _full_tick_timeout_should_alert(mode: str, n: int, now_m: Optional[float] = None) -> bool:
+    """Alert on the 1st and 3rd consecutive timeout, then every 15 min."""
+    import time as _time
+    now_m = _time.monotonic() if now_m is None else now_m
+    if n in (1, 3):
+        return True
+    last = _full_tick_timeout_alert_last.get(mode)
+    return last is not None and (now_m - last) >= FULL_TICK_TIMEOUT_ALERT_EVERY_S
+
+
 async def _full_tick_body(mode: str) -> None:
     """The actual full cycle tick. Caller (_run_full_tick_sync) already
     holds the per-mode lock — this function does no locking itself."""
@@ -624,12 +665,33 @@ async def _full_tick_body(mode: str) -> None:
                 "Re-authenticate with a fresh Dhan token to resume."
             )
             return
+        # A cycle ran to completion: the DB is answering again.
+        prior = _full_tick_db_timeouts.pop(mode, 0)
+        if prior and _full_tick_timeout_alert_last.pop(mode, None) is not None:
+            await notify_async(f"✅ *Auto-Pilot recovered — {mode}*\nDB responding again after {prior} timed-out tick(s).")
         message, activity = _summarize(mode, result)
         if activity or config.AUTO_PILOT_NOTIFY_HEARTBEAT:
             await notify_async(message)
     except Exception as e:
-        logger.exception("auto-pilot full tick failed for %s", mode)
-        await notify_async(f"⚠️ *Auto-Pilot error — {mode}*\n{str(e)[:300]}")
+        if _is_db_call_timeout(e):
+            try:
+                db.rollback()
+            except Exception:
+                logger.debug("full tick: rollback after Oracle call timeout failed", exc_info=True)
+            n = _full_tick_db_timeouts.get(mode, 0) + 1
+            _full_tick_db_timeouts[mode] = n
+            logger.warning("auto-pilot full tick for %s: Oracle call timeout (%d in a row), next tick retries: %s", mode, n, str(e)[:160])
+            if _full_tick_timeout_should_alert(mode, n):
+                import time as _time
+                _full_tick_timeout_alert_last[mode] = _time.monotonic()
+                await notify_async(
+                    f"⚠️ *Auto-Pilot DB timeout — {mode}*\n"
+                    f"Oracle call timed out ({n} in a row). Stops still run on the fast exit tick; "
+                    f"this cycle is retried on the next tick. Further alerts at most every 15 min.\n{str(e)[:160]}"
+                )
+        else:
+            logger.exception("auto-pilot full tick failed for %s", mode)
+            await notify_async(f"⚠️ *Auto-Pilot error — {mode}*\n{str(e)[:300]}")
     finally:
         db.close()
 

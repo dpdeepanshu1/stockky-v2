@@ -112,7 +112,14 @@ def _blank_safe_int(name: str, default: int) -> int:
         return default
 
 
+# A12 (2026-10-22): overtrading cap - max NEW entries per IST day per mode (0 disables). Counts entries that were
+# already stopped out too, so it cannot be dodged by closing positions early. Manual orders are not capped.
+MAX_ENTRIES_PER_DAY = _blank_safe_int("RISK_MAX_ENTRIES_PER_DAY", 6)
 LOSS_STREAK_MAX = _blank_safe_int("RISK_LOSS_STREAK_MAX", 3)
+# A11 (2026-10-22): account-wide daily loss cap. Net realized loss today of BOTH engines (real-trade + position-stocks)
+# as a % of their combined capital; at or above this, new BUYs are blocked in both. 0 disables. This is an extra layer on
+# top of each service's own daily cap, not a replacement. See execution/shared_daily_pnl.py.
+ACCOUNT_MAX_DAILY_LOSS_PCT = _blank_safe_float("ACCOUNT_MAX_DAILY_LOSS_PCT", 3.0)
 LOSS_STREAK_PAUSE_MINUTES = _blank_safe_int("RISK_LOSS_STREAK_PAUSE_MINUTES", 45)
 # Conservative representative stop distance for the "can at least 1 share
 # still be sized" math below — deliberately entry_engine's WIDEST possible
@@ -233,6 +240,11 @@ class AccountState:
     # construction site that does not populate them behaves exactly as before.
     loss_streak: int = 0
     loss_streak_last_close_at: Optional[datetime] = None
+    # ADDED (A12): entries opened today (IST). Default 0 = cap never triggers for a site that does not populate it.
+    entries_today: int = 0
+    # ADDED (A11): combined net loss today of both engines, % of their combined capital (0.0 = unknown/none).
+    # Default 0.0 means the account-wide cap never triggers for a site that does not populate it.
+    account_wide_daily_loss_pct: float = 0.0
 
 
 @dataclass
@@ -338,6 +350,15 @@ def evaluate(
                 "No new trades for the rest of this trading day.",
             )
 
+    # ── 3a. Account-wide daily loss cap (BUY only, A11) - both engines' combined loss, see shared_daily_pnl.py ──
+    if (intent.side == "BUY" and ACCOUNT_MAX_DAILY_LOSS_PCT > 0
+            and account.account_wide_daily_loss_pct >= ACCOUNT_MAX_DAILY_LOSS_PCT):
+        return RiskResult(
+            RiskVerdict.BLOCKED_GLOBAL, "account_daily_loss_limit",
+            f"Account-wide daily loss {account.account_wide_daily_loss_pct:.2f}% (both engines combined) has "
+            f"reached the {ACCOUNT_MAX_DAILY_LOSS_PCT:.2f}% cap. No new trades for the rest of this trading day.",
+        )
+
     # ── 3b. Loss-streak pause (BUY only, group 289) ───────────────────────────
     if intent.side == "BUY" and LOSS_STREAK_MAX > 0 and account.loss_streak >= LOSS_STREAK_MAX:
         last = account.loss_streak_last_close_at
@@ -360,6 +381,14 @@ def evaluate(
             f"{account.open_position_count} positions already open "
             f"(cap {account.max_concurrent_positions}). "
             "Wait for an existing position to close before adding a new one.",
+        )
+
+    # ── 4-day. Max entries per day (BUY only, A12) ────────────────────────────
+    if intent.side == "BUY" and MAX_ENTRIES_PER_DAY > 0 and account.entries_today >= MAX_ENTRIES_PER_DAY:
+        return RiskResult(
+            RiskVerdict.REJECTED, "max_entries_per_day",
+            f"{account.entries_today} entries already opened today (cap {MAX_ENTRIES_PER_DAY}). "
+            "No more new entries until the next trading day (overtrading guard).",
         )
 
     # ── 4a. Minimum price floor (BUY only) ────────────────────────────────────

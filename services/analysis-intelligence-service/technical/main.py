@@ -605,6 +605,15 @@ try:   # group390 (WS-14): optional weekly / volume-profile / Wyckoff / V2-featu
 except Exception:  # noqa: BLE001
     _ms_extras = None
 
+try:   # E25 / E26: candlestick chart + pattern / regime badges (context only; never in a decision)
+    from stockky_ms.chart_context import chart_context as _ms_chart_context
+except Exception:  # noqa: BLE001
+    _ms_chart_context = None
+try:   # E27: candles on 1m / 5m / 15m / 30m / 1h as well as daily (session-aligned bars, closed vs forming)
+    from stockky_ms import timeframes as _ms_tf
+except Exception:  # noqa: BLE001
+    _ms_tf = None
+
 _STRUCTURE_STALE_DAYS = 5   # group415: was 7. Not 3 (the plan): Friday's bar is already ~3.2-3.4 days old at Monday 09:15 IST. 5 clears every 2026 trading day (worst 4.65, Mon 28 Dec)
 
 # -- group 352 (F7): structure sees the FULL daily history and CLOSED bars only ------------------------------------------------
@@ -706,6 +715,106 @@ def _structure_params():
         return from_dict(d) if isinstance(d, dict) else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _bars_and_dates(frame):
+    """(bars, dates) built together so a skipped row can never shift the dates: bars = [(epoch_s, o, h, l, c, v)], dates = 'YYYY-MM-DD'
+    taken from the index itself (the bar's own session date, no time-zone conversion)."""
+    bars, dates = [], []
+    if frame is None:
+        return bars, dates
+    has_open = "Open" in frame.columns
+    has_vol = "Volume" in frame.columns
+    for ts, row in frame.iterrows():
+        try:
+            t = pd.Timestamp(ts)
+            c = float(row["Close"])
+            bars.append((float(t.timestamp()), float(row["Open"]) if has_open else c, float(row["High"]), float(row["Low"]), c,
+                         float(row["Volume"]) if has_vol and not pd.isna(row["Volume"]) else 0.0))
+            dates.append(str(t.date()))
+        except Exception:  # noqa: BLE001
+            continue
+    return bars, dates
+
+
+def _chart_context_enabled() -> bool:
+    return (os.getenv("CHART_CONTEXT_ENABLED") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _chart_context_payload(sym, frame, block, tail=300):
+    """E25 / E26: chart_context for one symbol's closed daily bars. Never raises; None when the engine is absent or the frame is empty."""
+    if _ms_chart_context is None or frame is None or len(frame) < 5:
+        return None
+    try:
+        bars, dates = _bars_and_dates(frame)
+        trend = block.get("trend") if isinstance(block, dict) else None
+        out = _ms_chart_context(bars, dates, tail=tail, structure_trend=trend)
+        out["symbol"] = sym
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Technical: chart context failed for %s (%s)", sym, e)
+        return None
+
+
+# E27: intraday candles. The cache is short while the market is open (a 1-minute chart must not show a 5-minute-old bar) and long once it is closed.
+_INTRADAY_CTX_TTL_OPEN = {"1m": 20, "5m": 45, "15m": 90, "30m": 90, "1h": 180}
+_INTRADAY_CTX_TTL_CLOSED = 600
+
+
+def _intraday_ctx_ttl(tf: str) -> int:
+    return _INTRADAY_CTX_TTL_OPEN.get(tf, 90) if is_market_open() else _INTRADAY_CTX_TTL_CLOSED
+
+
+def _fetch_intraday_rows(sym: str, interval: str, period: str, force: bool = True):
+    """Candle rows for one intraday interval from market-data /history, as (rows, source) or (None, reason). force=true so a chart never reads the
+    15-minute intraday cache; market-data still reuses anything fetched in the last HISTORY_FORCE_REUSE_S (60 s), so this is bounded per symbol."""
+    try:
+        resp = _md_get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": period, "interval": interval, "force": "true" if force else "false"}, timeout=25)
+    except httpx.HTTPError as e:
+        logger.warning("Technical: intraday history %s %s failed: %s", sym, interval, _exc_detail(e))
+        return None, "transient"
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            return None, "bad_json"
+        rows = data.get("candles") if isinstance(data, dict) else None
+        return (rows, data.get("source") if isinstance(data, dict) else None) if rows else (None, "thin")
+    return None, "no_data" if resp.status_code == 404 else f"http_{resp.status_code}"
+
+
+def _intraday_unavailable(sym: str, tf: str, reason: str) -> dict:
+    """The 200 answer for an intraday chart that cannot be drawn. NOT an HTTP 5xx: the gateway counts a 5xx against the technical circuit breaker,
+    and a thin 1-minute history must never be able to trip it for the analysis features."""
+    return {"schema": 1, "context_only": True, "ok": False, "symbol": sym, "tf": tf, "reason": reason, "bars": [], "markers": [], "shapes": [], "levels": [],
+            "badges": [], "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None}, "live": None}
+
+
+def _intraday_chart_payload(sym: str, tf: str, tail: int, daily_trend=None, rows=None, now=None):
+    """E27: chart_context for 1m / 5m / 15m / 30m / 1h candles of one symbol. `rows` / `now` are injectable for tests. Never raises; always a dict
+    (ok=False + reason when the candles cannot be drawn: engine_off, bad_tf, transient, no_data, thin, ...)."""
+    if _ms_chart_context is None or _ms_tf is None:
+        return _intraday_unavailable(sym, tf, "engine_off")
+    try:
+        spec = _ms_tf.spec(tf)
+        if spec is None or not spec["intraday"]:
+            return _intraday_unavailable(sym, tf, "bad_tf")
+        why = "thin"
+        if rows is None:
+            rows, why = _fetch_intraday_rows(sym, spec["fetch"], spec["period"])
+        if not rows:
+            return _intraday_unavailable(sym, tf, why or "thin")
+        now_s = time.time() if now is None else now
+        sb = _ms_tf.session_bars(rows, tf, now_s)
+        if len(sb["closed"]) < 5:
+            return _intraday_unavailable(sym, tf, "thin")
+        out = _ms_chart_context(sb["closed"], sb["labels"], tail=tail, structure_trend=daily_trend, tf=tf, live=sb["live"], live_date=sb["live_label"],
+                                lag_s=sb["lag_s"] if is_market_open() else None)
+        out["symbol"] = sym
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Technical: intraday chart context failed for %s %s (%s)", sym, tf, e)
+        return _intraday_unavailable(sym, tf, "error")
 
 
 def _structure_enabled() -> bool:
@@ -1355,6 +1464,51 @@ def structure_only(symbol: str, force: bool = False, extras: bool = False):
         raise HTTPException(status_code=503, detail="structure unavailable (history thin or engine error)")
     result = {"symbol": sym}
     _attach_structure(result, block, summary)
+    _cache_set(key, result)
+    return result
+
+
+@app.get("/chart-context/{symbol}")
+def chart_context_only(symbol: str, force: bool = False, tail: int = None, tf: str = "1d"):
+    """E25 / E26 / E27: candles + pattern markers / shapes + plain-English badges + regime chips for one symbol. Context only: no score, gate
+    or decision reads it. tf = 1m | 5m | 15m | 30m | 1h | 1d (default 1d, closed daily bars only; intraday adds the forming bar as `live`).
+    CHART_CONTEXT_ENABLED=0 -> 503; an unknown tf -> 400; intraday that cannot be drawn -> 200 with ok=false + reason."""
+    sym = normalize_symbol(symbol)
+    if not _chart_context_enabled() or _ms_chart_context is None:
+        raise HTTPException(status_code=503, detail="chart context not available")
+    spec = _ms_tf.spec(tf) if _ms_tf is not None else (None if str(tf or "1d").lower() != "1d" else {"key": "1d", "intraday": False})
+    if spec is None:
+        raise HTTPException(status_code=400, detail="tf must be one of 1m, 5m, 15m, 30m, 1h, 1d")
+    tf = spec["key"]
+    tail = _ms_tf.clamp_tail(tf, tail) if _ms_tf is not None else max(30, min(int(tail or 300), 500))
+    key = f"tech_chart_ctx:{sym}:{tail}" if tf == "1d" else f"tech_chart_ctx:{sym}:{tf}:{tail}"      # the daily key is unchanged
+    if not force:
+        hit = _cache_get(key)
+        if hit:
+            return hit
+    if spec["intraday"]:
+        trend = None
+        try:
+            if _structure_enabled() and _ms_analyze is not None:     # the DAILY structure read (cached), shown as "Daily structure" next to intraday candles
+                dfd = _fetch_history(sym, force=False)
+                block, _summary = _structure_cached(sym, dfd, None, force=False)
+                trend = block.get("trend") if isinstance(block, dict) else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Technical: daily structure for intraday chart %s failed (%s)", sym, e)
+        result = _intraday_chart_payload(sym, tf, tail, trend)
+        if not result.get("ok"):
+            _cache_set(key, result, ttl=30)          # a miss is remembered briefly so a stuck chart cannot hammer market-data
+            return result
+        _cache_set(key, result, ttl=_intraday_ctx_ttl(tf))
+        return result
+    df = _fetch_history(sym, force=force)
+    frame, _meta = _structure_frame(sym, df)
+    block = None
+    if _structure_enabled() and _ms_analyze is not None:
+        block, _summary = _structure_cached(sym, df, None, force=force)
+    result = _chart_context_payload(sym, frame, block, tail)
+    if not result or not result.get("ok"):
+        raise HTTPException(status_code=503, detail="chart context unavailable (history thin or engine error)")
     _cache_set(key, result)
     return result
 

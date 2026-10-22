@@ -1161,6 +1161,43 @@ def get_order_list(db: Session) -> list:
     return []
 
 
+def is_clear_broker_rejection(text: str) -> bool:
+    """A1b/A1c: True when an order error is plainly a broker-side rejection (RMS / EXCH codes, IP whitelist, circuit band,
+    CDSL / eDIS). Those mean Dhan answered and refused, so the order is not live and no order-book lookup is needed.
+    Timeouts and network errors are NOT clear: the order may have been accepted."""
+    t = str(text or "")
+    low = t.lower()
+    return bool(
+        "RMS:" in t or "EXCH:" in t or "DH-" in t
+        or is_invalid_ip_error(t) or is_circuit_limit_error(t) or is_cdsl_edis_error(t)
+        or "insufficient funds" in low or "not allowed to trade" in low
+    )
+
+
+_DEAD_ORDER_STATUSES = {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}
+
+
+def find_order_by_tag(db: Session, tag: str) -> tuple:
+    """A1b (2026-10-22): look a just-attempted order up in Dhan's order book by the correlation tag we sent with it.
+
+    Returns (row_or_None, checked_ok). checked_ok is False when the order book could not be read: the caller must
+    then treat the order as UNKNOWN (it may be live at the broker), never as "not placed". Never raises.
+    """
+    try:
+        for r in get_order_list(db):
+            if isinstance(r, dict) and str(r.get("correlationId") or r.get("correlation_id") or "") == str(tag):
+                # Dhan also lists REJECTED / CANCELLED / EXPIRED orders under their tag. Those are not live, so they do not
+                # count as "the order exists" - the caller may treat the attempt as failed.
+                status = str(r.get("orderStatus") or r.get("order_status") or "").upper()
+                if status in _DEAD_ORDER_STATUSES:
+                    continue
+                return r, True
+        return None, True
+    except Exception:  # noqa: BLE001
+        logger.warning("find_order_by_tag(%s): order book unreadable", tag, exc_info=True)
+        return None, False
+
+
 _VALID_ORDER_TYPES = {"MARKET", "LIMIT", "STOP_LOSS", "STOP_LOSS_MARKET"}
 
 

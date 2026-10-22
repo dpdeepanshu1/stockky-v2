@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PASS, FAIL, NED, NOINPUT = "PASS", "FAIL", "NOT_ENOUGH_DATA", "NO_INPUT"
+HARD_MIN_N = 15       # B15: G2 never passes on fewer than this many candidate or baseline signals, even if the report was built with a lower --min-n
 MIN_KEPT_PCT = 30.0   # plan G2(e): the candidate must keep at least 30% of the baseline signals
 
 
@@ -48,6 +49,12 @@ def check_ab(rep: Dict[str, Any], name: str = "report") -> Dict[str, Any]:
     ci = (rep.get("bootstrap") or {}).get("ci90")
     if verdict in ("no_data", "insufficient_sample"):
         return {"name": name, "status": NED, "reasons": [f"A/B verdict is {verdict}"], "edge_pp": edge, "kept_pct": kept}
+    sig = rep.get("signals") or {}
+    cn, bn = _num(sig.get("candidate")), _num(sig.get("baseline"))
+    if (cn is not None and cn < HARD_MIN_N) or (bn is not None and bn < HARD_MIN_N):
+        return {"name": name, "status": NED, "reasons": [f"only {cn:g} candidate / {bn:g} baseline signals (hard floor {HARD_MIN_N}): nothing may be concluded"
+                                                         if cn is not None and bn is not None else f"signal counts below the hard floor of {HARD_MIN_N}"],
+                "edge_pp": edge, "kept_pct": kept}
     status = PASS
     if verdict != "pass":
         status = FAIL

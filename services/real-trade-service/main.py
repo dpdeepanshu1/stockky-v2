@@ -46,7 +46,7 @@ from portfolio.portfolio import (
 # already import these same three names from the same place for the same
 # purpose; mirrored here.
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
-from execution import dhan_client, shared_exposure, shared_symbol_lock
+from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_symbol_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("real-trade-service")
@@ -166,6 +166,18 @@ async def _boot_forensics_shutdown():
         pass
 
 
+@_on_shutdown
+async def _write_behind_shutdown():
+    """A3: drain the evidence-row queue before exit (time-boxed; a DB that is timing out leaves the rows, which is acceptable)."""
+    try:
+        import asyncio as _aio
+        import write_behind
+        await _aio.to_thread(write_behind.flush, 4.0)
+        write_behind.stop()
+    except Exception:
+        pass
+
+
 @_on_startup
 async def startup() -> None:
     # Auto-Pilot (2026-08-27): a single asyncio background task IS started
@@ -268,6 +280,17 @@ async def startup() -> None:
         if not getattr(_cfg, "BROKER_STOP_ENABLED", False):
             logger.warning("SAFETY: BROKER_STOP_ENABLED is off - REAL positions have NO broker-side stop-loss, only this service's software exit loop. "
                            "Set BROKER_STOP_ENABLED=true in .env once you have confirmed it on a small position.")
+        # A2: say it on Telegram too (a log line is easy to miss), and flag a non-persistent override store.
+        try:
+            from control.kit import Store as _CtlStore
+            _persistent = bool(_CtlStore().persistent)
+        except Exception:  # noqa: BLE001
+            _persistent = None
+        from execution.broker_stop import boot_safety_message as _bsm
+        _msg = _bsm(bool(getattr(_cfg, "BROKER_STOP_ENABLED", False)), _persistent)
+        if _msg:
+            from notifier import notify_fire_and_forget as _nff
+            _nff(_msg)
     except Exception as _e:  # noqa: BLE001
         logger.debug("broker-stop startup check failed (non-fatal): %s", _e)
     logger.info("real-trade-service ready (adaptive thresholds + all improvements active)")
@@ -1266,6 +1289,11 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
         # and the age of the peer figure (shown in the reject message).
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
+        # A11: same account-wide loss input as the live paths, so this preview matches a real BUY.
+        account_wide_daily_loss_pct=(
+            shared_daily_pnl.account_wide_loss_pct(db, account_row.realized_pnl_today, account_row.current_equity)
+            if mode == "REAL" else 0.0
+        ),
         other_service_exposure_age_s=_peer_age,
         loss_streak=_streak,
         loss_streak_last_close_at=_streak_at,
@@ -2177,6 +2205,28 @@ async def closed_position_records(
             "returned": min(len(recs), limit), "records": recs[:limit]}
 
 
+@app.get("/write-behind/status")
+async def write_behind_status(admin: Optional[str] = Depends(require_admin_if_real)):
+    """A3: queue depth, rows written / dropped, back-off remaining for the evidence-row write-behind queue (read-only)."""
+    import write_behind
+    return write_behind.status()
+
+
+@app.get("/reconcile-report/{mode}")
+async def hourly_reconcile_report(
+    mode: str, run: bool = False,
+    admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
+):
+    """A13: the last hourly broker-vs-book drift report (read-only; REAL only). `run=true` runs one pass now instead of
+    waiting for the hourly tick. Changes nothing in the book."""
+    from execution import hourly_reconcile
+    if str(mode).upper() != "REAL":
+        raise HTTPException(status_code=400, detail="Hourly reconcile applies to REAL mode only.")
+    if run or hourly_reconcile.last_report() is None:
+        return await hourly_reconcile.run_hourly_reconcile(db)
+    return hourly_reconcile.last_report()
+
+
 @app.get("/positions/{mode}/report")
 async def closed_positions_expectancy_report(
     mode: str, days: int = 7,
@@ -2713,7 +2763,7 @@ async def structure_status(
         _exit_stats = _structure_exit.stats()      # group365: what the daily structure did to OPEN positions (read-only)
     except Exception as e:  # noqa: BLE001
         _exit_stats = {"error": str(e)[:120]}
-    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
+    return {"mode": mode, "gate_mode": _sg.mode_for(mode), "gate_mode_effective": _sg.mode_for(mode, db), "oos_observations": _sg.oos_count(db, mode), "oos_needed": config.STRUCTURE_ENFORCE_MIN_OOS, "hours": hours, "process": _sg.stats(), "stored": _sg.tally_decisions(rows, prices),
             "exit": _exit_stats}
 
 

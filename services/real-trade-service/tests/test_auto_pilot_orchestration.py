@@ -1909,3 +1909,84 @@ class _FakeTask:
 
     def done(self):
         return self._done
+
+
+# ---------------------------------------------------------------------------
+# _full_tick_body: DB-timeout handling (plan item A1)
+# ---------------------------------------------------------------------------
+
+_TIMEOUT = RuntimeError("(oracledb.exceptions.DatabaseError) DPY-4024: call timeout of 8000 ms exceeded")
+
+
+class TestFullTickDbTimeout:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        ap._full_tick_db_timeouts.clear()
+        ap._full_tick_timeout_alert_last.clear()
+        yield
+        ap._full_tick_db_timeouts.clear()
+        ap._full_tick_timeout_alert_last.clear()
+
+    def _setup(self, db, monkeypatch, cycle):
+        db.add(_gate())
+        db.commit()
+        monkeypatch.setattr(ap, "is_market_open_ist", lambda *a, **k: True)
+        monkeypatch.setattr("cycle_runner.run_cycle_core", cycle)
+        notes = []
+        monkeypatch.setattr(ap, "notify_async", _async_recorder(notes))
+        return notes
+
+    def test_first_timeout_alerts_once_then_goes_quiet(self, db, monkeypatch):
+        notes = self._setup(db, monkeypatch, _async_raise(_TIMEOUT))
+        run(ap._full_tick_body("REAL"))
+        assert len(notes) == 1 and "DB timeout" in notes[0][0][0]
+        run(ap._full_tick_body("REAL"))          # 2nd: quiet
+        assert len(notes) == 1
+        run(ap._full_tick_body("REAL"))          # 3rd: alerts
+        assert len(notes) == 2
+        run(ap._full_tick_body("REAL"))          # 4th: quiet (15 min not elapsed)
+        assert len(notes) == 2
+        assert ap._full_tick_db_timeouts["REAL"] == 4
+
+    def test_alert_repeats_after_throttle_window(self, db, monkeypatch):
+        notes = self._setup(db, monkeypatch, _async_raise(_TIMEOUT))
+        for _ in range(4):
+            run(ap._full_tick_body("REAL"))
+        assert len(notes) == 2
+        ap._full_tick_timeout_alert_last["REAL"] -= ap.FULL_TICK_TIMEOUT_ALERT_EVERY_S + 1
+        run(ap._full_tick_body("REAL"))
+        assert len(notes) == 3
+
+    def test_recovery_message_after_alerted_streak(self, db, monkeypatch):
+        notes = self._setup(db, monkeypatch, _async_raise(_TIMEOUT))
+        run(ap._full_tick_body("REAL"))
+        assert len(notes) == 1
+        monkeypatch.setattr("cycle_runner.run_cycle_core", _async_return({}))
+        run(ap._full_tick_body("REAL"))
+        assert any("recovered" in n[0][0] for n in notes)
+        assert "REAL" not in ap._full_tick_db_timeouts
+
+    def test_no_recovery_message_when_no_alert_was_sent(self, db, monkeypatch):
+        notes = self._setup(db, monkeypatch, _async_return({}))
+        ap._full_tick_db_timeouts["REAL"] = 2     # streak but never alerted
+        run(ap._full_tick_body("REAL"))
+        assert not any("recovered" in n[0][0] for n in notes)
+
+    def test_non_timeout_error_still_alerts_every_time(self, db, monkeypatch):
+        notes = self._setup(db, monkeypatch, _async_raise(RuntimeError("boom")))
+        run(ap._full_tick_body("REAL"))
+        run(ap._full_tick_body("REAL"))
+        assert len(notes) == 2 and all("Auto-Pilot error" in n[0][0] for n in notes)
+        assert "REAL" not in ap._full_tick_db_timeouts
+
+    def test_cycle_is_not_retried_inside_the_tick(self, db, monkeypatch):
+        calls = []
+        notes = self._setup(db, monkeypatch, _async_raise(_TIMEOUT))
+        monkeypatch.setattr("cycle_runner.run_cycle_core", _async_recorder(calls, None))
+        # recorder returns None -> would break _summarize; use a raising wrapper instead
+        async def _boom(*a, **k):
+            calls.append(1)
+            raise _TIMEOUT
+        monkeypatch.setattr("cycle_runner.run_cycle_core", _boom)
+        run(ap._full_tick_body("REAL"))
+        assert len(calls) == 1

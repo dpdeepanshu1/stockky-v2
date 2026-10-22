@@ -1,6 +1,6 @@
 """Admin session check + a short-lived service token (group 442).
 
-The page sends the same admin bearer token the other pages use (HS256, SESSION_SECRET shared by all services), so verifying it here needs no new login.
+The page sends the same admin bearer token the other pages use (HS256; per-service secrets, A4b: this service verifies the real-trade / position-stocks kids and signs its own), so verifying it here needs no new login.
 Jobs that call real-trade / position-stocks are given a token this service MINTS itself (same secret, role admin, short TTL, marked `svc: calibration-runner`),
 because the browser token must never be written into a job file or a log.
 """
@@ -13,19 +13,23 @@ import jwt
 from fastapi import Header, HTTPException
 
 import config
+import session_keys
 
 
-def _secret() -> str:
-    if not config.SESSION_SECRET:
-        raise HTTPException(status_code=503, detail="SESSION_SECRET is not set on calibration-runner-service")
-    return config.SESSION_SECRET
+_ME = "calibration-runner"
+# the page sends the token it got from real-trade or position-stocks; this service never needs to accept its own token
+_ACCEPT = ("real-trade", "position-stocks")
+
+
+def _any_key_configured() -> bool:
+    return bool(config.SESSION_SECRET) or any(session_keys.own_secret(k) for k in _ACCEPT)
 
 
 def verify(token: str) -> Dict[str, Any]:
+    if not _any_key_configured():
+        raise HTTPException(status_code=503, detail="no session secret is set on calibration-runner-service (SESSION_SECRET_REAL_TRADE / SESSION_SECRET_POSITION_STOCKS)")
     try:
-        claims = jwt.decode(token, _secret(), algorithms=["HS256"])
-    except HTTPException:
-        raise
+        claims = session_keys.decode(token, _ACCEPT, legacy=config.SESSION_SECRET)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=401, detail=f"invalid or expired session ({type(e).__name__})")
     return claims
@@ -48,4 +52,7 @@ def mint_service_token(sub: str = "calibration-runner", ttl_s: Optional[int] = N
     """Token for the jobs. Copies the claim names of the page's admin token so the other services accept it."""
     now = int(time.time())
     claims = {"sub": sub, "role": "admin", "admin": True, "svc": "calibration-runner", "iat": now, "exp": now + int(ttl_s or config.TOKEN_TTL_S)}
-    return jwt.encode(claims, _secret(), algorithm="HS256")
+    try:
+        return session_keys.sign(_ME, claims, legacy=config.SESSION_SECRET)  # own SESSION_SECRET_CALIBRATION_RUNNER (kid), else legacy
+    except session_keys.MissingSecret as e:
+        raise HTTPException(status_code=503, detail=str(e))

@@ -21,7 +21,11 @@ from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from fastapi import HTTPException, Header
 
 import config
+import session_keys
 
+_ME = "real-trade"
+# kids this service accepts: its own, the other trading service (the page sends either token to either service), the calibration runner's service token
+_ACCEPT = ("real-trade", "position-stocks", "calibration-runner")
 logger = logging.getLogger("real-trade-auth")
 _hasher = PasswordHasher()
 
@@ -60,22 +64,20 @@ def verify_admin_password(username: str, password: str) -> bool:
 
 
 def issue_session_token(username: str) -> tuple[str, datetime]:
-    if not config.SESSION_SECRET:
-        raise AdminAuthError("SESSION_SECRET not configured on this deploy.")
+    if not session_keys.can_sign(_ME, config.SESSION_SECRET):
+        raise AdminAuthError("%s (or the legacy SESSION_SECRET) not configured on this deploy." % session_keys.SERVICE_ENV[_ME])
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=config.SESSION_IDLE_TIMEOUT_MINUTES)
     payload = {"sub": username, "iat": now.timestamp(), "exp": expires_at.timestamp()}
-    token = jwt.encode(payload, config.SESSION_SECRET, algorithm="HS256")
+    token = session_keys.sign(_ME, payload, legacy=config.SESSION_SECRET)  # A4b: own per-service secret (kid header), else legacy
     return token, expires_at
 
 
 def decode_session_token(token: str) -> Optional[str]:
     """Returns the admin username if the token is valid and unexpired, else
     None. jwt.decode already enforces `exp` for us."""
-    if not config.SESSION_SECRET:
-        return None
     try:
-        payload = jwt.decode(token, config.SESSION_SECRET, algorithms=["HS256"])
+        payload = session_keys.decode(token, _ACCEPT, legacy=config.SESSION_SECRET)  # A4b: kid picks the key; no kid = legacy secret
         return payload.get("sub")
     except jwt.ExpiredSignatureError:
         return None
@@ -131,14 +133,23 @@ def auth_config_diagnostics() -> dict:
         "admin_password_hash_configured": bool(h),
         "admin_password_hash_looks_argon2": h.startswith("$argon2"),
         "session_idle_timeout_minutes": config.SESSION_IDLE_TIMEOUT_MINUTES,
+        # A4b: per-service secrets (fingerprints only). session_secret_* above is the LEGACY shared secret.
+        "session_keys": session_keys.diagnostics(_ME, _ACCEPT, legacy=config.SESSION_SECRET),
     }
 
 
 def log_auth_config(service: str) -> None:
     d = auth_config_diagnostics()
     logger.info("AUTH CONFIG [%s]: %s", service, d)
-    if not d["session_secret_configured"]:
-        logger.error("AUTH CONFIG [%s]: SESSION_SECRET is empty — every admin route will 401.", service)
+    sk = d["session_keys"]
+    if sk["signing_mode"] == "none":
+        logger.error("AUTH CONFIG [%s]: neither %s nor the legacy SESSION_SECRET is set — every admin route will 401.", service, session_keys.SERVICE_ENV[_ME])
+    elif sk["signing_mode"] == "legacy-shared":
+        logger.warning("AUTH CONFIG [%s]: signing with the legacy shared SESSION_SECRET — set %s (A4b).", service, session_keys.SERVICE_ENV[_ME])
+    if sk["weak_secret"]:
+        logger.error("AUTH CONFIG [%s]: a session secret is shorter than %d characters.", service, session_keys.MIN_SECRET_LEN)
+    if sk["duplicate_secrets"]:
+        logger.warning("AUTH CONFIG [%s]: two session secrets have the same value — per-service secrets must differ.", service)
     if not d["admin_password_hash_configured"]:
         logger.error("AUTH CONFIG [%s]: no ADMIN_PASSWORD_HASH(_B64) — login is impossible.", service)
     elif not d["admin_password_hash_looks_argon2"]:

@@ -54,6 +54,22 @@ def enabled() -> bool:
     return bool(getattr(config, "BROKER_STOP_ENABLED", False))
 
 
+def boot_safety_message(enabled: bool, store_persistent: Optional[bool]) -> Optional[str]:
+    """A2: text for the boot-time Telegram alert, or None when there is nothing to say. Pure (no I/O) so it can be tested.
+    `enabled` is the running BROKER_STOP_ENABLED; `store_persistent` is whether switch overrides are saved to disk (None = unknown).
+    A non-persistent store matters because a switch changed on the calibration page would silently revert on the next restart."""
+    lines = []
+    if not enabled:
+        lines.append("BROKER_STOP_ENABLED is OFF: REAL positions have no resting broker stop, only this service's software exit loop. "
+                     "If the container dies or loses network, nothing stops a loss. Set it back to true (calibration page or .env).")
+    if store_persistent is False:
+        lines.append("Switch overrides are NOT saved to disk (the control volume is missing or read-only): any switch changed on the "
+                     "calibration page will revert to .env after a restart.")
+    if not lines:
+        return None
+    return "\u26a0\ufe0f *Safety check at boot - real-trade*\n" + "\n".join(lines)
+
+
 def reset_state() -> None:
     global _slm_rejected
     _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear()

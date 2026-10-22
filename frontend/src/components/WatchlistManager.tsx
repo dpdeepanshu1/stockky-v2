@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";   // group 463
+import { api } from "../api";
+import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline } from "../watchlistGain";   // E28
 
 interface Props {
   symbols: string[];
@@ -10,6 +12,46 @@ interface Props {
 
 export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanWatchlist }: Props) {
   const [input, setInput] = useState("");
+  // E28: "% since added" - baseline price kept in this browser (see watchlistGain.ts); live price from /quote, refreshed every 60 s.
+  const [added, setAdded] = useState<AddedMap>(() => {
+    try { return parseAdded(window.localStorage.getItem(STORAGE_KEY)); } catch { return {}; }
+  });
+  const [prices, setPrices] = useState<Record<string, number>>({});
+  const symbolsRef = useRef<string[]>(symbols);
+  symbolsRef.current = symbols;
+
+  function saveAdded(next: AddedMap) {
+    try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* storage unavailable: the figure just is not remembered */ }
+  }
+  function quotePrice(q: { price?: number; close?: number } | null | undefined): number | undefined {
+    const p = q ? (q.price ?? q.close) : undefined;
+    return typeof p === "number" && Number.isFinite(p) && p > 0 ? p : undefined;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const list = symbolsRef.current.slice(0, 40);
+      const results = await Promise.allSettled(list.map((sym) => api.getQuote(sym)));
+      if (cancelled) return;
+      const nextPrices: Record<string, number> = {};
+      results.forEach((r, i) => {
+        const px = r.status === "fulfilled" ? quotePrice(r.value) : undefined;
+        if (px !== undefined) nextPrices[list[i]] = px;
+      });
+      const now = Date.now();
+      setAdded((prev) => {
+        let m = prune(prev, symbolsRef.current);
+        for (const [sym, px] of Object.entries(nextPrices)) m = withBaseline(m, sym, px, "first_seen", now);
+        saveAdded(m);
+        return m;
+      });
+      setPrices((old) => ({ ...old, ...nextPrices }));
+    }
+    refresh();
+    const id = window.setInterval(refresh, 60000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [symbols.join(",")]);
 
   function add() {
     const sym = input.trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
@@ -19,6 +61,14 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
     }
     onChange([...symbols, sym]);
     setInput("");
+    // E28: remember the price at the moment of adding (best effort; a failed quote just means no baseline yet).
+    api.getQuote(sym).then((q) => {
+      const px = quotePrice(q);
+      if (px !== undefined) {
+        setPrices((old) => ({ ...old, [sym]: px }));
+        setAdded((prev) => { const m = withBaseline(prev, sym, px, "added", Date.now()); saveAdded(m); return m; });
+      }
+    }).catch(() => { /* no baseline; the 60 s refresh will set a first-seen one */ });
   }
 
   function remove(sym: string) {
@@ -74,13 +124,29 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
                 key={s}
                 className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
               >
-                <button
-                  type="button"
-                  onClick={() => onAnalyse(s)}
-                  className="font-mono text-sm text-paper hover:text-signal-prepare transition"
-                >
-                  {s}
-                </button>
+                <div className="flex flex-col items-start min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => onAnalyse(s)}
+                    className="font-mono text-sm text-paper hover:text-signal-prepare transition"
+                  >
+                    {s}
+                  </button>
+                  {(() => {
+                    const pct = pctSince(added[s], prices[s]);
+                    const t = tone(pct);
+                    const cls = t === "up" ? "text-signal-buy" : t === "down" ? "text-signal-sell" : "text-mist/50";
+                    return (
+                      <span
+                        className={`mono text-[10px] ${cls}${isBigMove(pct) ? " font-semibold" : ""}`}
+                        title={added[s] ? `${label(added[s])}: baseline Rs ${added[s].price.toFixed(2)}` : "no price yet"}
+                        data-testid={`since-added-${s}`}
+                      >
+                        {pct === null ? "—" : `${formatPct(pct)} ${label(added[s])}`}{isBigMove(pct) ? " ●" : ""}
+                      </span>
+                    );
+                  })()}
+                </div>
                 <button
                   type="button"
                   onClick={() => remove(s)}

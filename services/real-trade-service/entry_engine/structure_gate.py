@@ -45,11 +45,46 @@ def _pos(v) -> Optional[float]:
     return x if x is not None and x > 0 else None
 
 
-def mode_for(trade_mode: str) -> str:
-    """enforce | off for REAL / DEMO. Anything that is not exactly "off" is live."""
+_OOS_CACHE: Dict[str, Any] = {}      # mode -> (monotonic ts, count)
+_OOS_TTL_S = 600.0
+
+
+def oos_count(db: Any, trade_mode: str) -> Optional[int]:
+    """B15: structure observations for this mode whose outcome has been measured (ret_5d filled in). Cached 10 min. None = unreadable."""
+    import time as _time
+    key = str(trade_mode).upper()
+    hit = _OOS_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < _OOS_TTL_S:
+        return hit[1]
+    try:
+        import models as _models
+        n = int(db.query(_models.StructureObservation).filter(
+            _models.StructureObservation.mode == key, _models.StructureObservation.ret_5d.isnot(None)).count())
+    except Exception:  # noqa: BLE001
+        logger.warning("structure_gate: could not count out-of-sample observations", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    _OOS_CACHE[key] = (_time.monotonic(), n)
+    return n
+
+
+def mode_for(trade_mode: str, db: Any = None) -> str:
+    """enforce | log | off for REAL / DEMO. log = evaluate and record only (A9); anything else is enforce."""
     try:
         m = config.STRUCTURE_GATE_MODE if str(trade_mode).upper() == "REAL" else config.STRUCTURE_GATE_DEMO_MODE
-        return "off" if m == "off" else "enforce"
+        m = m if m in ("off", "log") else "enforce"
+        # B15: enforce only with evidence. Callers that pass a db get the guard; without one the configured mode is returned unchanged.
+        floor = int(getattr(config, "STRUCTURE_ENFORCE_MIN_OOS", 15) or 0)
+        if m == "enforce" and db is not None and floor > 0:
+            n = oos_count(db, trade_mode)
+            if n is None or n < floor:
+                logger.info("structure gate: enforce downgraded to log for %s (%s out-of-sample observations, need %d)", trade_mode,
+                            "unreadable" if n is None else n, floor)
+                return "log"
+        return m
     except Exception:  # noqa: BLE001
         return "enforce"
 

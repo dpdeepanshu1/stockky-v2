@@ -240,9 +240,10 @@ async def lifespan(app: FastAPI):
             config.RISK_PER_TRADE_PCT,
         )
 
-    if not config.ADMIN_PASSWORD_HASH or not config.SESSION_SECRET:
+    import session_keys as _sk
+    if not config.ADMIN_PASSWORD_HASH or not _sk.can_sign("position-stocks", config.SESSION_SECRET):
         logger.warning(
-            "⚠️  ADMIN_PASSWORD_HASH and/or SESSION_SECRET is not set — every "
+            "⚠️  ADMIN_PASSWORD_HASH and/or SESSION_SECRET_POSITION_STOCKS (or legacy SESSION_SECRET) is not set — every "
             "arm/disarm/enable/kill/etc. request will 401 until the SAME "
             "ADMIN_PASSWORD_HASH (or _B64) / SESSION_SECRET already used by "
             "real-trade-service's .env is present for this service too."
@@ -2215,6 +2216,7 @@ def review_fixes_status(db: Session = Depends(get_db)):
     return {
         "entry_cutoff_ist": config.SCALP_ENTRY_CUTOFF_IST,
         "entry_min_qty": config.ENTRY_MIN_QTY,
+        "entry_min_reward_risk": config.ENTRY_MIN_REWARD_RISK,
         "stopout_guard": stopout_guard.status(db),
         "orb_mode": config.ORB_MODE,
         "orb_counters": orb_shadow.stats(),

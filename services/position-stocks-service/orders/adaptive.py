@@ -283,8 +283,8 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, bas
         target_pct *= 0.8
     elif range_pos_val is not None and range_pos_val <= _NEAR_LOW_THRESHOLD:
         range_regime = "near_low"
-    # never let tightening drop reward:risk below 1.2 (a coin-flip needs >1)
-    target_pct = max(target_pct, stop_pct * 1.2)
+    # never let tightening drop reward:risk below the entry floor (2026-10-22: 1:2; was a fixed 1.2 - a coin-flip needs >1)
+    target_pct = max(target_pct, stop_pct * max(1.2, float(getattr(config, "ENTRY_MIN_REWARD_RISK", 0.0) or 0.0)))
 
     from execution.dhan_client import tick_size_for_price as _tsz
     target_price = round_to_tick(current_ltp * (1 + target_pct / 100))

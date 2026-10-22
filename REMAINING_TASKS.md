@@ -1,4 +1,8 @@
-# Remaining tasks (group 470 status, 2026-10-20)
+# Remaining tasks
+
+> E27 (this zip): candles on 1m / 5m / 15m / 30m / 1h / daily, backend + frontend (docs/E27_CANDLE_TIMEFRAMES.md). Check on the VM after rebuilding api-gateway, analysis-intelligence-service, market-data-service and frontend: open a position's Candles block, pick 1m / 5m / 15m / 30m / 1h and confirm candles appear with a time axis (outside market hours they show the last session). Not run in the sandbox: pytest, `npm ci`, full tsc / vite build.
+
+> E32 (this zip): E25 candlestick chart and E26 pattern / regime badges are built, plus a candles block under every position in Real Trade and Position Stocks (docs/E32_CANDLES_AND_PATTERNS.md). F32 is done (secrets scan in CI, see docs/F32_SECRETS_SCAN.md; the full pytest already ran in CI via the service-tests matrix). Still open: F33 (backups), C21 (wire patterns into scoring, log-only), C/E29 alerts, E28, E30, E31. (group 470 status, 2026-10-20)
 
 ## Built in group 470 (from reading the 19-20 Oct runner outputs; details `docs/GROUP470_RUN_OUTPUT_FIXES.md`)
 Token redaction (JWT / `--token`), `gate_check` + `calibration_pack` `--ab` repetition, snapshot / checkpoint "input missing" on first run, `monday_check` closed-market skip,
@@ -28,6 +32,7 @@ Details: `docs/GROUP468_PERFORMANCE_EVIDENCE_APPROVE_FIRST.md`.
 
 ## Do on the VM (no code)
 1. `BROKER_STOP_ENABLED=true` was seen live in the 19 Oct switch snapshot (admin override); confirm it survives a restart (`.env`).
+   (E30: overrides are saved in the `control-state-rt` volume and re-applied at boot; real-trade now also sends a Telegram alert at boot if the stop is OFF or the override store is not persistent. After the next restart, check that no such alert arrives.)
 2. Confirm the VM's static IPv4 is registered with Dhan and `/outbound-ip` returns it.
 3. One live check that market exits and the `STOP_LOSS_MARKET` broker stop behave under Market Price Protection; grep the logs for MPP rejections.
 4. Confirm no AMO orders are sent; one live pass of the token-expiry and auto-disarm path.

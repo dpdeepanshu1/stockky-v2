@@ -1,4 +1,4 @@
-"""stockky_ms.extras - the optional WS-14 context in one call: weekly structure, volume profile, Wyckoff phase and the V2 feature row.
+"""stockky_ms.extras - the optional WS-14 context in one call: weekly structure, volume profile, Wyckoff phase, candlestick / chart patterns (C18-C20) and the V2 feature row.
 
     analyze_extras(raw_bars, params=None, ctx=None, block=None) -> dict
 
@@ -14,6 +14,7 @@ from .engine import analyze
 from .ml_features import FEATURE_COLUMNS_V2, build_features_v2, columns_hash
 from .ms_types import MS_ENGINE_VERSION
 from .params import MSParams
+from .patterns import analyze_patterns
 from .summary import flatten_summary
 from .volume_profile import volume_profile
 from .weekly import alignment, weekly_context
@@ -23,12 +24,12 @@ from .wyckoff import wyckoff_context
 def analyze_extras(raw_bars: Sequence[Sequence[float]], params: Optional[MSParams] = None, ctx: Optional[Dict[str, Any]] = None,
                    block: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {"engine_version": MS_ENGINE_VERSION, "context_only": True, "weekly": None, "alignment": None, "volume_profile": None,
-                           "wyckoff": None, "features_v2": None, "errors": []}
+                           "wyckoff": None, "patterns": None, "features_v2": None, "errors": []}
     try:
         blk = block if isinstance(block, dict) else analyze(raw_bars, params=params, ctx=ctx)
         daily_trend = blk.get("trend")
         for key, fn in (("weekly", lambda: weekly_context(raw_bars, params)), ("volume_profile", lambda: volume_profile(raw_bars)),
-                        ("wyckoff", lambda: wyckoff_context(raw_bars, params))):
+                        ("wyckoff", lambda: wyckoff_context(raw_bars, params)), ("patterns", lambda: analyze_patterns(raw_bars))):
             try:
                 out[key] = fn()
             except Exception as e:  # noqa: BLE001

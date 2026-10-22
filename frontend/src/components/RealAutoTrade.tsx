@@ -20,6 +20,8 @@ import { positionStocksApi, getPositionStocksApiUrl } from "../positionStocksApi
 import CapitalSplitCard from "./CapitalSplitCard";
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
+import StockCandleBlock from "./StockCandleBlock";   // E25 / E26: candles + pattern badges per stock
+import type { PriceLevel } from "../chartContext";
 import { coveragePct, gateStatus, tally as structureTally } from "../structureView";
 import MarketBoard from "./board/MarketBoard";
 import ShortlistPanel from "./board/ShortlistPanel";
@@ -167,6 +169,14 @@ function pickNum(obj: any, ...keys: string[]): number | null {
   return null;
 }
 
+/** Entry / stop / target as price lines on the candle chart; values that are missing or not numbers are left out. */
+function positionLevels(entry: unknown, stop: unknown, target: unknown): PriceLevel[] {
+  const out: PriceLevel[] = [];
+  const add = (label: string, v: unknown, tone: PriceLevel["tone"]) => { const n = Number(v); if (v != null && Number.isFinite(n) && n > 0) out.push({ label, price: n, tone }); };
+  add("Entry", entry, "mute"); add("Stop", stop, "bad"); add("Target", target, "good");
+  return out;
+}
+
 function pnlColor(n: number | null | undefined): string {
   if (n == null) return "text-mist";
   return n >= 0 ? "text-signal-buy" : "text-signal-sell";
@@ -267,7 +277,8 @@ function PositionCard({
           )}
         </div>
       )}
-      <div className="flex items-center justify-between">
+      <StockCandleBlock symbol={p.symbol} levels={positionLevels(p.avg_entry_price, p.current_stop, p.current_target)} />
+      <div className="flex items-center justify-between mt-2">
         <span className="font-display tabular-nums text-[10px] text-mist">{fmtDate(p.opened_at)} {fmtTime(p.opened_at)}</span>
         {p.status === "PENDING_EXIT" ? (
           <span className="font-display tabular-nums text-[10px] text-signal-hold">pending exit…</span>
@@ -2166,6 +2177,7 @@ export default function RealAutoTrade() {
                                 <span>LTP <span className="text-paper"><PriceRoll value={ltp} text={ltp != null ? `₹${ltp.toFixed(2)}` : "—"} /></span></span>
                                 <span>Val <span className="text-paper">{p.cost_value != null ? fmtInr(p.cost_value, 0) : "—"}</span></span>
                               </div>
+                              {sym !== "—" && <StockCandleBlock symbol={sym} defaultOpen={false} levels={positionLevels(avg, null, null)} />}
                             </GlintBox>
                           );
                         })}

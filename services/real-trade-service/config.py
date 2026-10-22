@@ -207,6 +207,12 @@ ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate ne
 # next cycle instead of being force-closed on its very first pass.
 HOLDINGS_SYNC_GUARD_MINUTES = int(((os.getenv("HOLDINGS_SYNC_GUARD_MINUTES") or "").strip() or "30"))
 
+# A13: hourly read-only broker-vs-book drift check (execution/hourly_reconcile.py). 0 = off. It never changes the book;
+# it reports drift (GET /reconcile-report/REAL) and sends one Telegram message when the drift set changes.
+HOURLY_RECONCILE_INTERVAL_MINUTES = max(0, int(((os.getenv("HOURLY_RECONCILE_INTERVAL_MINUTES") or "").strip() or "60")))
+# A REAL order still PLACED / PARTIAL after this many minutes is reported as a stale order.
+HOURLY_RECONCILE_STALE_ORDER_MINUTES = max(10, int(((os.getenv("HOURLY_RECONCILE_STALE_ORDER_MINUTES") or "").strip() or "90")))
+
 # ── 2026-09-08 — cycle-level entry quality filter (user-requested calibration
 # improvement, SyncContext STOCKKY decision #30) ────────────────────────────
 # Gates 1-5 in entry_engine/entry.py (actionable label / live price / regime /
@@ -495,14 +501,24 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 # the backtest/observation data (scripts/structure_backtest.py) calibrates it. ALWAYS LIVE (group370: shadow mode removed) - the gate can
 # only ever WAIT (it never creates an entry), a missing / stale structure is "no opinion", and every verdict is stored on the decision, so a
 # wrong threshold costs a skipped trade, never a bad one (which is why the backtest still has to be run: skips are silent).
-#   STRUCTURE_GATE_MODE       REAL mode:  enforce (default: WAIT with gate_tag=structure) | off (kill switch). Any other value (incl. a stale "shadow") = enforce.
+#   STRUCTURE_GATE_MODE       REAL mode:  log (default since A9: evaluate + record, never blocks) | enforce (WAIT with gate_tag=structure) | off (kill switch). Any other non-empty value (incl. a stale "shadow") = enforce.
 #   STRUCTURE_GATE_DEMO_MODE  DEMO mode:  same values; defaults to STRUCTURE_GATE_MODE
 # Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true (the default since group377).
+# A9 (2026-10-22): "log" added and made the shipped default. log = the gate is evaluated and the verdict stored on the decision
+# (structure_json + observation rows keep accumulating evidence) but it never makes an entry WAIT. Raise to "enforce" once the
+# gate has proven benefit out-of-sample (gate_check G2); autocalib still moves it to enforce on a G2 PASS.
 def _sg_mode(name, default):
     v = (os.getenv(name) or "").strip().lower()
-    return "off" if v == "off" else "enforce"   # a stale "shadow" in an old .env is live
-STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
+    if v in ("off", "log", "enforce"):
+        return v
+    if not v:
+        return default if default in ("off", "log", "enforce") else "enforce"
+    return "enforce"   # a stale "shadow" in an old .env stays live
+STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "log")
 STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
+# B15 (2026-10-22): enforce needs evidence. While fewer than this many structure_observations rows with a measured outcome (ret_5d) exist for
+# the mode, an "enforce" setting runs as "log" (evaluate + record, never blocks) until the evidence is there. 0 disables the guard.
+STRUCTURE_ENFORCE_MIN_OOS = int(_og_float("STRUCTURE_ENFORCE_MIN_OOS", 15.0))
 # group377: default TRUE (was false): no usable daily structure = WAIT (structure_nodata), never a silent pass. STRUCTURE_REQUIRE_DATA=false restores "no opinion".
 STRUCTURE_REQUIRE_DATA = ((os.getenv("STRUCTURE_REQUIRE_DATA") or "").strip() or "true").lower() == "true"
 STRUCTURE_MAX_CHASE_ATR = _og_float("STRUCTURE_MAX_CHASE_ATR", 1.5)       # live price above the nearest zone top, in ATR (0 disables)
@@ -937,8 +953,8 @@ def startup_config_errors() -> list[str]:
     errors = []
     if not ADMIN_PASSWORD_HASH:
         errors.append("ADMIN_PASSWORD_HASH is not set — service cannot authenticate an admin.")
-    if not SESSION_SECRET:
-        errors.append("SESSION_SECRET is not set — admin sessions cannot be signed.")
+    if not (SESSION_SECRET or (os.getenv("SESSION_SECRET_REAL_TRADE") or "").strip()):
+        errors.append("SESSION_SECRET_REAL_TRADE (or the legacy SESSION_SECRET) is not set — admin sessions cannot be signed.")
     if not DHAN_CREDENTIAL_ENC_KEY:
         errors.append("DHAN_CREDENTIAL_ENC_KEY is not set — Dhan credentials cannot be stored safely.")
     if DHAN_TOTP_ENABLED and not DHAN_TOTP_SECRET:

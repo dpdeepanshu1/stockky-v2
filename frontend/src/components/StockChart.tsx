@@ -23,6 +23,7 @@ import {
   ReferenceDot,
 } from "recharts";
 import { api, StockHistory } from "../api";
+import StockCandleBlock from "./StockCandleBlock";
 
 interface Props {
   symbol: string;
@@ -63,6 +64,7 @@ export default function StockChart({ symbol, compact = false }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [scrub, setScrub] = useState<{ label: string; close: number } | null>(null);
+  const [view, setView] = useState<"line" | "candles">("line");   // E25: candlesticks + pattern badges (full-size chart only)
 
   const colors = useThemeChartColors();
 
@@ -125,8 +127,18 @@ export default function StockChart({ symbol, compact = false }: Props) {
             {symbol}
           </span>
         )}
+        {!compact && (
+          <div className="flex gap-0.5 bg-ink border border-slate rounded-full p-0.5 ml-2" role="group" aria-label="Chart type">
+            {(["line", "candles"] as const).map((v) => (
+              <button key={v} type="button" onClick={() => setView(v)} aria-pressed={view === v}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-full transition-colors ${view === v ? "bg-signal-prepare text-white" : "text-mist hover:text-paper"}`}>
+                {v === "line" ? "Line" : "Candles"}
+              </button>
+            ))}
+          </div>
+        )}
         {/* Groww-style pill segmented control */}
-        <div className="flex gap-0.5 bg-ink border border-slate rounded-full p-0.5 ml-auto">
+        <div className={`flex gap-0.5 bg-ink border border-slate rounded-full p-0.5 ml-auto ${!compact && view === "candles" ? "hidden" : ""}`}>
           {PERIODS.map((p) => (
             <button
               key={p.key}
@@ -143,8 +155,10 @@ export default function StockChart({ symbol, compact = false }: Props) {
         </div>
       </div>
 
+      {!compact && view === "candles" && <StockCandleBlock symbol={symbol} bare height={260} />}
+
       {/* Big price header — updates live while scrubbing, Groww's signature interaction */}
-      {!compact && data && (
+      {!compact && view === "line" && data && (
         <div className="flex items-baseline gap-2 mb-3">
           <span className="font-display text-2xl sm:text-3xl font-extrabold text-paper tabular-nums">
             ₹{displayClose != null ? displayClose.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : "—"}
@@ -156,7 +170,7 @@ export default function StockChart({ symbol, compact = false }: Props) {
         </div>
       )}
 
-      {loading ? (
+      {!compact && view === "candles" ? null : loading ? (
         <div className={`flex items-center justify-center ${compact ? "h-20" : "h-52"}`}>
           <span
             className="inline-block w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin"

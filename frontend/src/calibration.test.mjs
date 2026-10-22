@@ -73,7 +73,7 @@ assert.equal(jobAppliesTo("control_snapshot", "rt"), true);
 assert.equal(GATE_GLOSSARY.filter((g) => !g.exists).length, 1);
 // group 466: Resume. The runner marks the jobs whose scripts save each finished symbol; the page offers Resume only for those and sends resume=true.
 const resumable = [...jobsPy.matchAll(/_job\("([a-z0-9_]+)"[\s\S]*?(?=\n    _job\("|\n\]\nJOBS)/g)].filter((m) => /resumable=True/.test(m[0])).map((m) => m[1]).sort();
-assert.deepEqual(resumable, ["ab_report", "calibration_full", "entry_rules", "legacy_gate", "ml_v2", "p8_retest"]);
+assert.deepEqual(resumable, ["ab_report", "calibration_full", "entry_rules", "legacy_gate", "ml_v2", "p8_retest", "structure_backtest"]);
 const api = readFileSync(new URL("./calibrationApi.ts", import.meta.url), "utf8");
 assert.match(api, /resume = false\) =>\s+R<RunRec>\("\/runs", \{ method: "POST", body: JSON\.stringify\(\{ kind, target, params, confirm, resume \}\) \}\)/);
 assert.match(api, /resumable\?: boolean/);

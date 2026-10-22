@@ -251,6 +251,10 @@ DAILY_ORDER_BUDGET = _get_int("POSITION_STOCKS_DAILY_ORDER_BUDGET", 300)
 
 # ── Daily loss kill switch (tighter than real-trade-service's, by design) ──
 MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
+# A11 (2026-10-22): account-wide daily loss cap. Net realized loss today of BOTH engines (this pool + real-trade-service)
+# as a % of their combined capital; at or above this, reserve_capital() refuses new entries. 0 disables. An extra layer on
+# top of MAX_DAILY_LOSS_PCT_OF_POOL, not a replacement. Same env name as real-trade-service so one value governs both.
+ACCOUNT_MAX_DAILY_LOSS_PCT = _get_float("ACCOUNT_MAX_DAILY_LOSS_PCT", 3.0)
 
 # ── Trade gates (2026-10-02 loss-day fix) ───────────────────────────────────
 # Added after a day where ~19 scalp trades netted about -₹370 (avg loss -1.3%,
@@ -321,7 +325,7 @@ ADAPTIVE_BAR_MIN_BARS = _get_int("ADAPTIVE_BAR_MIN_BARS", 3)
 ADAPTIVE_BAR_STOP_MULT = _get_float("ADAPTIVE_BAR_STOP_MULT", 1.3)
 ADAPTIVE_BAR_STOP_MIN_PCT = _get_float("ADAPTIVE_BAR_STOP_MIN_PCT", 0.8)
 ADAPTIVE_BAR_STOP_MAX_PCT = _get_float("ADAPTIVE_BAR_STOP_MAX_PCT", 2.0)
-ADAPTIVE_BAR_TARGET_RR = _get_float("ADAPTIVE_BAR_TARGET_RR", 1.8)
+ADAPTIVE_BAR_TARGET_RR = _get_float("ADAPTIVE_BAR_TARGET_RR", 2.0)   # 2026-10-22: 1.8 -> 2.0 (reward:risk 1:2)
 ADAPTIVE_BAR_TARGET_MAX_PCT = _get_float("ADAPTIVE_BAR_TARGET_MAX_PCT", 3.5)
 
 # ── Quality gate — fundamental/technical/news pre-check (session 6) ────────
@@ -747,7 +751,7 @@ ADAPTIVE_HISTORY_MISS_CACHE_S = _get_float("ADAPTIVE_HISTORY_MISS_CACHE_S", 120.
 # it; if reward:risk then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to target/MIN_RR (never under SCALP_TARGET_CAP_MIN_STOP_PCT).
 # Risk-based sizing makes a tighter stop a larger position for the SAME rupee risk. 0 = no cap.
 SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 2.5)
-SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 1.5)
+SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 2.0)   # 2026-10-22: 1.5 -> 2.0 (reward:risk 1:2)
 SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 0.8)
 SCALP_TARGET_CAP_MIN_STOP_ATR_MULT = _get_float("SCALP_TARGET_CAP_MIN_STOP_ATR_MULT", 1.0)   # 2026-10-19: stop floor after a target cap = this x the symbol ATR proxy %; 0 = off
 
@@ -1213,3 +1217,12 @@ ORB_LIMIT_BUFFER_PCT = max(0.0, _get_float("ORB_LIMIT_BUFFER_PCT", 0.10))
 ORB_MAX_SPREAD_PCT = max(0.0, _get_float("ORB_MAX_SPREAD_PCT", 0.30))
 ORB_MIN_RANGE_PCT = max(0.0, _get_float("ORB_MIN_RANGE_PCT", 0.30))
 ORB_MAX_RANGE_PCT = max(0.0, _get_float("ORB_MAX_RANGE_PCT", 3.0))
+
+# 2026-10-22 (reward:risk 1:2): hard floor on the stop / target distances of an AUTOMATIC entry, judged on the FINAL levels (after the target cap and
+# the stop floors, which could leave 1.5:1). Below it the candidate is SKIPPED (RR_FLOOR). Same name and default as real-trade-service (2.0); 0 = off.
+ENTRY_MIN_REWARD_RISK = max(0.0, _get_float("ENTRY_MIN_REWARD_RISK", 2.0))
+
+# 2026-10-22: at order time move the stop / target legs to the freshest live tick (same stop % / target %) instead of the scan price, so a price move
+# between the signal and the MARKET fill is not a hidden tight (or wide) stop. IONEXCHANG: signal 354.60, fill 352.30, stop 0.15 % under the fill, out in
+# 21 s. Fails open (no fresh tick -> unchanged). 0 = old behaviour. orders/live_anchor.py.
+ENTRY_ANCHOR_TO_LIVE = _get_bool("ENTRY_ANCHOR_TO_LIVE", True)

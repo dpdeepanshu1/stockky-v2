@@ -37,7 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
-from capital import shared_exposure
+from capital import shared_daily_pnl, shared_exposure
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -228,6 +228,17 @@ def _own_committed_capital_total(db: Session) -> float:
     ).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).scalar() or 0.0)
 
 
+def publish_daily_pnl(db: Session) -> None:
+    """A11: publish this pool's realized P&L for today + its capital base so real-trade-service can apply the
+    account-wide daily loss cap. Goes through _get_or_create() so the lazy IST-day reset has already run (never
+    publishes yesterday's P&L stamped as today). Fail-open, never raises."""
+    try:
+        row = _get_or_create(db)
+        shared_daily_pnl.publish_own(db, row.realized_pnl_today, row.total_allocated_capital)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ledger.publish_daily_pnl failed (non-fatal): %s", e)
+
+
 def publish_exposure(db: Session, force: bool = False) -> None:
     """Publish this pool's open-position value to the shared exposure table without touching Dhan.
     Writes when the figure changed or at most every _EXPOSURE_PUBLISH_MIN_INTERVAL_S (a heartbeat so
@@ -240,6 +251,7 @@ def publish_exposure(db: Session, force: bool = False) -> None:
                 and now - last["ts"] < _EXPOSURE_PUBLISH_MIN_INTERVAL_S):
             return
         shared_exposure.publish_own_exposure(db, value)
+        publish_daily_pnl(db)   # A11: same heartbeat cadence
         last["value"] = value
         last["ts"] = now
     except Exception as e:  # noqa: BLE001
@@ -481,6 +493,18 @@ def reserve_capital(
         logger.warning("ledger.reserve_capital: total_allocated_capital=0 — run sync_from_broker first")
         return None
 
+    # A11 (2026-10-22): ACCOUNT-WIDE daily loss cap. Own figures are live (this row); only the peer's row is read
+    # from the shared table. Independent of the per-service kill switch above, which stays exactly as it was.
+    if config.ACCOUNT_MAX_DAILY_LOSS_PCT > 0:
+        _acct_loss = shared_daily_pnl.account_wide_loss_pct(
+            db, row.realized_pnl_today, row.total_allocated_capital)
+        if _acct_loss >= config.ACCOUNT_MAX_DAILY_LOSS_PCT:
+            logger.warning(
+                "ledger.reserve_capital: ACCOUNT-WIDE daily loss %.2f%% (both engines) has reached the %.2f%% cap "
+                "— refusing entry", _acct_loss, config.ACCOUNT_MAX_DAILY_LOSS_PCT,
+            )
+            return None
+
     # BUG FIX (#1 — position sizing formula ate 100% of pool per trade):
     # The original formula was:
     #   risk_rupees    = total_allocated_capital * RISK_PER_TRADE_PCT%
@@ -613,6 +637,7 @@ def release_capital(
                 gate.daily_loss_kill_switch_tripped_date = row.daily_loss_kill_switch_tripped_date
 
     db.commit()
+    publish_daily_pnl(db)   # A11: peer sees this P&L change now, not at the next heartbeat
     logger.info(
         "ledger.release_capital: returned ₹%.2f + P&L ₹%.2f, available=₹%.2f, "
         "pnl_today=₹%.2f",

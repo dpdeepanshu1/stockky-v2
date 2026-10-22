@@ -279,6 +279,50 @@ def _exit_trigger(pos, reason, exit_decisions, exit_price) -> dict:
     return out
 
 
+_ATTR_FIELDS = ("source_tab", "decision_label", "stop_basis", "imbalance_5")
+
+
+def _attribution(pos, entry_order, cand, decision) -> dict:
+    """A13: source_tab / decision_label / conviction with a fallback chain, plus where each value came from. The position's own
+    column is set only when the fill creates the row; a position first created by the broker-import path (the group-438 race) or
+    opened before group 396 has it NULL even though the entry ORDER and CANDIDATE recorded it. Order: position -> entry order ->
+    candidate; a manual entry with nothing recorded is labelled 'manual'. Pure, never raises; unknown stays None (never invented)."""
+    def first(*pairs):
+        for val, src in pairs:
+            if val not in (None, ""):
+                return val, src
+        return None, None
+    try:
+        tab, tab_src = first((getattr(pos, "source_tab", None), "position"),
+                             (getattr(entry_order, "source_tab", None), "order"),
+                             (getattr(cand, "source_tab", None), "candidate"))
+        if tab is None and entry_order is not None and str(getattr(entry_order, "execution_source", "") or "").upper() == "MANUAL":
+            tab, tab_src = "manual", "manual_order"
+        label, label_src = first((getattr(pos, "entry_decision_label", None), "position"),
+                                 (getattr(entry_order, "entry_decision_label", None), "order"),
+                                 (getattr(cand, "decision_label", None), "candidate"))
+        conv, _ = first((getattr(pos, "entry_conviction_score", None), "position"),
+                        (getattr(entry_order, "entry_conviction_score", None), "order"),
+                        (getattr(cand, "conviction_score", None), "candidate"))
+        return {"source_tab": tab, "decision_label": label, "conviction": _num(conv),
+                "attribution_source": {"source_tab": tab_src, "decision_label": label_src}}
+    except Exception:  # noqa: BLE001
+        return {"source_tab": None, "decision_label": None, "conviction": None, "attribution_source": {}}
+
+
+def attribution_coverage(records: list) -> dict:
+    """A13: how many records carry each attribution field, overall and for system-entered trades only. Pure."""
+    def cov(rows):
+        n = len(rows)
+        return {f: {"filled": sum(1 for r in rows if r.get(f) not in (None, "")), "total": n,
+                    "pct": (round(100.0 * sum(1 for r in rows if r.get(f) not in (None, "")) / n, 1) if n else None)}
+                for f in _ATTR_FIELDS + ("tier_name",)}
+    sysrows = [r for r in records if r.get("origin") == "system"]
+    return {"all": cov(records), "system_entered": cov(sysrows),
+            "note": "tier_name is empty by design for trades that did not come from a watchlist entry; stop_basis and imbalance_5 are "
+                    "written at the entry decision, so trades entered before groups 396 / 427 stay empty."}
+
+
 def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisions: Iterable, candidates: Iterable,
                   watchlist: Iterable, ledger: Iterable, events: Iterable = (), include_imported: bool = False,
                   exit_decisions: Iterable = ()) -> list:
@@ -319,7 +363,9 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             closing_sell = sells[-1] if sells else None
             decision = decisions_by_id.get(getattr(entry_order, "decision_id", None)) if entry_order else None
             cand = cand_by_id.get(getattr(decision, "candidate_id", None)) if decision else None
-            w_id = getattr(p, "watchlist_entry_id", None) or (getattr(entry_order, "watchlist_entry_id", None) if entry_order else None)
+            w_id = (getattr(p, "watchlist_entry_id", None) or (getattr(entry_order, "watchlist_entry_id", None) if entry_order else None)
+                    or getattr(cand, "watchlist_entry_id", None))   # A13: candidate as the last fallback
+            attr = _attribution(p, entry_order, cand, decision)
             w = watch_by_id.get(w_id) if w_id else None
 
             entry = _num(p.avg_entry_price)
@@ -375,9 +421,10 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "position_id": p.id, "mode": p.mode, "symbol": p.symbol,
                 "origin": "imported" if (getattr(p, "broker_imported", False) and not _bot_entry_behind_import(p, entry_order, fills_by_order)) else "system",   # group433; group438: bot entries recorded as imports count as system
                 "import_race": bool(_bot_entry_behind_import(p, entry_order, fills_by_order)),   # group438: True = the bot's own BUY, booked through the broker-import path
-                "source_tab": getattr(p, "source_tab", None),
-                "decision_label": getattr(p, "entry_decision_label", None),
-                "conviction": _num(getattr(p, "entry_conviction_score", None)),
+                "source_tab": attr["source_tab"],                    # A13: position -> entry order -> candidate (was position only)
+                "decision_label": attr["decision_label"],
+                "conviction": attr["conviction"],
+                "attribution_source": attr["attribution_source"],
                 "regime_override": bool(getattr(p, "is_regime_override", False)),
                 "tier": tier, "tier_name": _TIER_NAMES.get(tier) if tier is not None else None,
                 "catalyst_type": getattr(w, "catalyst_type", None),
@@ -613,7 +660,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
         "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "by_imbalance_5": {}, "by_imbalance_20": {}, "by_spread": {},
         "by_mansfield_rs": {}, "by_breadth": {},
-        "stop_diagnostics": None,
+        "stop_diagnostics": None, "attribution_coverage": attribution_coverage(records),
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
                  "entry_slippage_pct > 0 means the entry was paid above the signal price"),

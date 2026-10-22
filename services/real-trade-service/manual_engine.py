@@ -48,7 +48,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_exposure, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
@@ -146,6 +146,11 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         # GROUP 193: BUYs Dhan is still working (not yet booked as positions)
         # and the age of the peer figure (shown in the reject message).
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
+        # A11: combined loss of both engines today (REAL only). Applies to manual BUYs too.
+        account_wide_daily_loss_pct=(
+            shared_daily_pnl.account_wide_loss_pct(db, account.realized_pnl_today, account.current_equity)
+            if mode == "REAL" else 0.0
+        ),
         other_service_exposure_age_s=_peer_age,
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
         # as entry_engine/entry.py's _account_state — DB override first,

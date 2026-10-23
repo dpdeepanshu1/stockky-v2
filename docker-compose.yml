@@ -208,6 +208,10 @@ services:
       # 2026-09-11: overnight orchestrator's enabled/schedule toggle
       # persists here -- see overnight_orchestrator.py's module docstring.
       SCHEDULER_STATE_DIR: /data
+      # E51: alert switches on the calibration page. Same value as the api-gateway's SCHEDULER_CONTROL_KEY (16+ chars, set in .env);
+      # blank = the scheduler's /control routes answer 503 (fail closed). Overrides persist in /data/control on the volume below.
+      SCHEDULER_CONTROL_KEY: ${SCHEDULER_CONTROL_KEY:-}
+      CONTROL_DIR: /data/control
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       - ./data/scheduler-state:/data
@@ -263,6 +267,9 @@ services:
       # instead of the local Oracle container.
       NOTIFICATION_SCHEDULER_URL: http://notification-scheduler-service:8000/notification
       SCHEDULER_URL: http://notification-scheduler-service:8000/scheduler
+      # E51: gateway proxy /scheduler-control/* -> scheduler /control/* (admin session checked first). Key must equal the scheduler's.
+      SCHEDULER_CONTROL_KEY: ${SCHEDULER_CONTROL_KEY:-}
+      SCHEDULER_CONTROL_URL: http://notification-scheduler-service:8000/control
       # AUDIT FIX: position-stocks-service runs on port 8006 in the compose
       # network but was never wired into api-gateway's environment block.
       # Any gateway route proxying to it (or admin UI calling it via the

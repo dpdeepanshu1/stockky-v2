@@ -56,6 +56,19 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# E51: alert switches for the Real Money Calibration page. Overrides are put into os.environ first; the routes answer only the gateway (control/auth.py).
+# A bug here must never stop the scheduler from booting.
+try:
+    import control.boot  # noqa: F401  (applies stored overrides to os.environ)
+    from control import kit as _control_kit
+    from control.auth import require_gateway as _require_gateway
+    from control.catalog import CATALOG as _CONTROL_CATALOG
+
+    _control = _control_kit.Controller("notification-scheduler-service", _CONTROL_CATALOG, restart_hint="docker compose restart notification-scheduler-service")
+    _control_kit.mount(app, _control, _require_gateway)
+except Exception as _control_err:  # noqa: BLE001
+    logger.error("E51: scheduler control routes NOT mounted (%s: %s) - the scheduler keeps running", type(_control_err).__name__, _control_err)
+
 try:
     from notification.main import app as notif_app
     app.mount("/notification", notif_app)

@@ -855,12 +855,14 @@ class TestSuggestionsFromPayload:
 
 class TestDrift:
     def test_main_imports_names_that_exist(self):
-        with open(os.path.join(_SERVICE, "main.py"), encoding="utf-8") as fh:
-            tree = ast.parse(fh.read())
         wanted = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "buy_sniper":
-                wanted |= {a.name for a in node.names}
+        # E54: find-buys moved from main.py to gateway_routers/sniper.py, so read both
+        for _f in (os.path.join(_SERVICE, "main.py"), os.path.join(_SERVICE, "gateway_routers", "sniper.py")):
+            with open(_f, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "buy_sniper":
+                    wanted |= {a.name for a in node.names}
         assert "suggestions_from_scan_payload" in wanted
         with open(_MOD_PATH, encoding="utf-8") as fh:
             defined = {n.name for n in ast.parse(fh.read()).body if isinstance(n, ast.FunctionDef)}

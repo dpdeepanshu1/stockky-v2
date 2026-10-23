@@ -166,7 +166,10 @@ def b_latency_compare(ctx, p):
 
 
 def _fetch(ctx, seed, p):
-    args = ["--base", ctx["gw"], "--universe-url", ctx["gw"] + "/api/universe", "--period", p.get("period", "5y"), "--sample", p.get("limit", 400), "--seed", seed,
+    # group E54: --base is the MARKET-DATA service (it serves /history/<SYM>); the gateway has no such path (only /market/history/<SYM>), so with the
+    # gateway as base every symbol that was not already on disk got an instant 404 (23 Oct fetch_history: saved=0, failed 289 of 400). The symbol
+    # list still comes from the gateway's /api/universe.
+    args = ["--base", ctx["md"], "--universe-url", ctx["gw"] + "/api/universe", "--period", p.get("period", "5y"), "--sample", p.get("limit", 400), "--seed", seed,
             "--manifest", os.path.join(ctx["cal"], f"sample_manifest_{seed}.json"), "--sleep", "0.3", "--retries", "4"]
     return _py(ctx, "fetch_history_for_backtest.py", *args, _hist(ctx, seed), title=f"Download daily history, seed {seed} ({p.get('limit', 400)} symbols)")
 

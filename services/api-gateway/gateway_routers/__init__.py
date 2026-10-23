@@ -6,4 +6,6 @@ Rules for a group to move (so thousands of existing tests keep working):
   3. main.py keeps `from gateway_routers.<group> import <handler names>` so `gw.<handler>()` calls and `main.<handler>` lookups still resolve;
   4. the router is included at the SAME place in main.py the routes used to be, so registration order is unchanged.
 `scripts/` + `tests/test_gateway_routers_split.py` check 1-4.
+
+Handlers that DO use main.py helpers move to gateway_support/ instead (E55: they read those helpers through a MainRef at call time, so the patches still apply).
 """

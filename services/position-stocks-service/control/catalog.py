@@ -204,4 +204,14 @@ CATALOG = (
     Flag("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "Entry cut-off before a holiday (IST)", "Entry time limits", "time", looser="later",
          help="E41: on the session before an exchange holiday no NEW entry from this time (HH:MM IST). Later = looser.",
          targets=(("config", "CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST"),), live=True, shipped="14:30"),
+    # ---------------- operations (E56: switches that were readable in config.py but missing from this page) ----------------
+    Flag("SHORTLIST_ENABLED", "Best-3-to-5 shortlist ranking", "Operations", "bool", looser="neutral",
+         help="E56: rank the quality-checked names on scan score + Market Board conviction + quality + zone score and try the best first. Never adds a candidate and never lowers a gate. false = the old scan-order behaviour.",
+         targets=(("config", "SHORTLIST_ENABLED"),), live=True, shipped="true"),
+    Flag("ADAPTIVE_HISTORY_ENABLED", "Candle history for the volatility stop", "Operations", "bool", looser="neutral",
+         help="E56: when a symbol has too few tick-buffer bars, fetch one short cached /history call for the volatility stop instead of falling back to the 2% / 4% floor. false = tick proxy only.",
+         targets=(("config", "ADAPTIVE_HISTORY_ENABLED"),), live=True, shipped="true"),
+    Flag("DHAN_ORDER_WS_ENABLED", "Dhan order-update WebSocket (read-only)", "Operations", "bool", looser="neutral",
+         help="E56: start the read-only Dhan order-update listener (GET /orders/ws-status). Nothing in the trading path depends on it. The listener is started at boot, so a change needs a restart.",
+         shipped="false"),
 )

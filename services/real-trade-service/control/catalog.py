@@ -201,4 +201,11 @@ CATALOG = (
     Flag("CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST", "Entry cut-off before a holiday (IST)", "Entry time limits", "time", looser="later",
          help="E41: on the session before an exchange holiday no NEW entry from this time (HH:MM IST). Later = looser.",
          targets=(("config", "CALENDAR_PRE_HOLIDAY_ENTRY_CUTOFF_IST"),), live=True, shipped="14:30"),
+    # ---------------- operations (E56: switches that were readable in config.py but missing from this page) ----------------
+    Flag("DAILY_REPORT_ENABLED", "Daily trade report (15:45 IST)", "Operations", "bool", looser="neutral",
+         help="E56: build and store the end-of-day report and push it to Telegram. false = no report is built (GET /reports/daily then answers 404). Does not touch any trade.",
+         targets=(("config", "DAILY_REPORT_ENABLED"),), live=True, shipped="true"),
+    Flag("EDIS_MORNING_CHECK_ENABLED", "Morning EDIS check (overnight positions)", "Operations", "bool", looser="neutral",
+         help="E56: once a day before the open, remind you if an overnight-held symbol's EDIS / stop-loss authorisation is not verified yet. A reminder only; it never blocks or places an order. Turning it off removes that safety nudge.",
+         targets=(("config", "EDIS_MORNING_CHECK_ENABLED"),), live=True, shipped="true", recommended="true"),
 )

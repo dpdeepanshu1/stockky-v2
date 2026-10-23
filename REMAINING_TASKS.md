@@ -1,5 +1,23 @@
 # Remaining tasks
 
+> E64 (this zip): E31 step 8 - the Activity tab moved to `components/realAuto/tabs/LogTab.tsx` (docs/E64_REAL_AUTO_TRADE_LOG_TAB.md). Still open for E31: board and overview tabs of `RealAutoTrade` (1429 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here).
+
+> E63 (this zip): E31 step 7 - the Charges tab moved to `components/realAuto/tabs/ChargesTab.tsx` (docs/E63_REAL_AUTO_TRADE_CHARGES_TAB.md). Still open for E31: board, overview and log tabs of `RealAutoTrade` (1460 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here); open Charges once and compare the totals with the previous build.
+
+> E62 (this zip): E31 step 6 - the Pipeline tab moved to `components/realAuto/tabs/PipelineTab.tsx` (docs/E62_REAL_AUTO_TRADE_PIPELINE_TAB.md). Still open for E31: board, overview, charges and log tabs of `RealAutoTrade` (1769 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here).
+
+> E61 (this zip): E31 step 5 - the Live Dhan tab moved to `components/realAuto/tabs/LiveTab.tsx` (docs/E61_REAL_AUTO_TRADE_LIVE_TAB.md). Still open for E31: board, overview, pipeline, charges and log tabs of `RealAutoTrade` (2038 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here).
+
+> E60 (this zip): E31 step 4 - the Watchlist tab moved to `components/realAuto/tabs/WatchlistTab.tsx` (docs/E60_REAL_AUTO_TRADE_WATCHLIST_TAB.md). Still open for E31: board, overview, live, pipeline, charges and log tabs of `RealAutoTrade` (2,313 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here).
+
+> E59 (this zip): E31 step 3 - the Positions tab moved to `components/realAuto/tabs/PositionsTab.tsx` (docs/E59_REAL_AUTO_TRADE_POSITIONS_TAB.md). Still open for E31: board, overview, live, watchlist, pipeline, charges and log tabs of `RealAutoTrade` (2,459 lines left in the file) and `App.tsx` (2,147 lines). Run `npm ci && npx tsc && npx vite build` on the VM (not run here).
+
+> E58 (this zip): E31 step 2 - the Orders tab of `RealAutoTrade.tsx` moved to `components/realAuto/tabs/OrdersTab.tsx` (docs/E58_REAL_AUTO_TRADE_ORDERS_TAB.md). Still open for E31: the other 8 tabs of `RealAutoTrade` (~2,500 lines left in the file) and `App.tsx` (2,147 lines). Gateway: `main.py` still has 106 route functions (151 route decorators; E55 doc said 109). On the VM run `npm ci && npx tsc && npx vite build` (not run here) plus the backend test suites.
+
+> E57 (this zip): E31 step 1 - `RealAutoTrade.tsx` helpers and leaf panels moved to `components/realAuto/` (docs/E57_REAL_AUTO_TRADE_SPLIT.md). Still open for E31: the `RealAutoTrade` component by tab (~2,100 lines) and `App.tsx` by route. On the VM run `npm ci && npx tsc && npx vite build` (not run here) plus the backend test suites.
+
+> E56 (this zip): five small switches added to the calibration page (docs/E56_CATALOG_OPERATIONS_SWITCHES.md). Correction to older notes: the Position Stocks entries/day cap (E39, 10) and the Real Trade general entry cutoff (`ENTRY_LAST_TIME_IST`, 14:00) already exist, so neither is open. Still open: pattern-alert switches (scheduler service) on the page, E26 badges, E28 server-side baseline, E31 route splitting, F33, C21 going live. Run `cd services/api-gateway && bash run_tests.sh` and the two services' tests on the VM - nothing here was run under pytest.
+
 > E55 (this zip, includes E54): `gateway_support/` with `MainRef` (docs/E55_GATEWAY_SUPPORT.md) - 6 more routes moved; 109 handlers remain in `main.py`, 98 of them can move in batches now. NOT run here: the 110 existing gateway test files (no pytest/fastapi in the sandbox) - run `cd services/api-gateway && bash run_tests.sh` on the VM before deploying. E54: fix for `fetch_history` (re-run it, then `g1_check`). Still open: `SCHEDULER_CONTROL_KEY`, your VM items, C21 live (blocked on B-tools evidence), candle work (backend + frontend, every timeframe).
 
 > E54 sniper split (merged into this zip): `find_actionable_buys` + `_sniper_attach_structure` + `_sniper_observe` now in `gateway_routers/sniper.py`; its `bind()` hooks live in `gateway_support/__init__.py` (docs/E54_GATEWAY_SUPPORT_AND_SNIPER.md). Run `cd services/api-gateway && bash run_tests.sh` on the VM - the merged tree was NOT run under pytest/fastapi here.

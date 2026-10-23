@@ -5011,27 +5011,17 @@ def proxy_quote(symbol: str):
         raise HTTPException(status_code=502, detail=f"quote unavailable: {e}")
 
 
-@app.get("/circuits")
-def circuits_status():
-    """Circuit breaker states for downstream dependencies."""
-    snaps = all_snapshots()
-    open_n = sum(1 for v in snaps.values() if v.get("state") == "open")
-    metrics.set_gauge("stockky_circuits_open", float(open_n))
-    return {"circuits": snaps}
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+from gateway_support import MainRef as _MainRef  # noqa: E402
+from gateway_support.bound_routes import build_bound_routes as _build_bound_routes  # noqa: E402
+_bound_routes = _build_bound_routes(_MainRef(globals()))
+circuits_status = _bound_routes.circuits_status
+app.include_router(_bound_routes.circuits_router)
 
 
-@app.get("/ops/rate-limits")
-@app.get("/api/rate-limits")
-@app.get("/api/ops/rate-limits")
-async def ops_rate_limits():
-    """Dashboard payload: rate-limit events + circuit breakers (last 1h)."""
-    # snapshot() does blocking I/O: a Neon/Oracle kv_get for the durable aggregate and, when Redis is
-    # enabled, an lrange. Called inline from this async handler it stalled the whole event loop for a
-    # DB round trip on every dashboard poll (same bug class as record(), which already hands its I/O to a
-    # pool), so every other request waited behind it. all_snapshots() is in-memory and cheap, so it
-    # stays here; only the monitor read goes to a worker thread.
-    circuits = all_snapshots()
-    return await asyncio.to_thread(rate_limit_monitor.snapshot, circuits=circuits)
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_rate_limits = _bound_routes.ops_rate_limits
+app.include_router(_bound_routes.rate_limits_router)
 
 
 @app.post("/ops/rate-limits/event")
@@ -5065,13 +5055,9 @@ async def ops_rate_limits_event(payload: dict):
         return JSONResponse({"ok": False, "error": str(e)[:120]}, status_code=400)
 
 
-@app.get("/metrics")
-def metrics_endpoint(request: Request):
-    """JSON metrics by default; ?format=prom for Prometheus text."""
-    fmt = (request.query_params.get("format") or "json").lower()
-    if fmt in ("prom", "prometheus", "text"):
-        return Response(content=metrics.prometheus_text(), media_type="text/plain; version=0.0.4")
-    return metrics.snapshot()
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+metrics_endpoint = _bound_routes.metrics_endpoint
+app.include_router(_bound_routes.metrics_router)
 
 
 # Alert cool-down (best-effort, per process): the same set of problems is notified at most once
@@ -5556,23 +5542,9 @@ async def ops_qstash_tick(request: Request):
     return results
 
 
-@app.post("/ops/qstash/publish")
-async def ops_qstash_publish(request: Request):
-    """Manually publish a delayed callback (admin / scheduler)."""
-    if qstash_client is None or not qstash_client.enabled():
-        return {"ok": False, "error": "QStash not configured (set QSTASH_TOKEN)"}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    dest = body.get("url") or body.get("destination")
-    try:
-        delay = int(body.get("delay_seconds") or 0)
-    except (TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "delay_seconds must be an integer"}, status_code=400)
-    if not dest:
-        return qstash_client.schedule_gateway_tick(delay_seconds=delay, body=body)
-    return qstash_client.publish(dest, body.get("payload") or {}, delay_seconds=delay)
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_qstash_publish = _bound_routes.ops_qstash_publish
+app.include_router(_bound_routes.qstash_publish_router)
 
 
 @app.get("/wake-all")
@@ -5635,12 +5607,9 @@ def health(warm: bool = False):
         "ready": True
     }
 
-@app.get("/ready")
-def ready():
-    is_ready = _durable_cache_configured()
-    if not is_ready:
-        return JSONResponse({"ready": False}, status_code=503)
-    return {"ready": True}
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ready = _bound_routes.ready
+app.include_router(_bound_routes.ready_router)
 
 @app.get("/system/health")
 async def system_health():
@@ -7043,74 +7012,21 @@ def _structure_metric(name: str, value: float = 1.0, **labels: Any) -> None:
         pass
 
 
-async def _sniper_attach_structure(payload: Dict[str, Any]) -> int:
-    """group357 (WS-4): the UI posts trimmed rows with no structure summary, so fetch GET {TECHNICAL_URL}/structure/{sym} for the best-conviction
-    candidates that have none (at most SNIPER_STRUCTURE_FETCH_LIMIT, 4 at a time, inside a SNIPER_STRUCTURE_FETCH_TIMEOUT_S budget) and attach the
-    flat summary in place. Fail-open: any error / bad schema / timeout leaves the row without a summary = no opinion = card unchanged.
-    Returns how many rows got a summary. Honors STRUCTURE_PASSTHROUGH=0 and SNIPER_STRUCTURE_MODE=off (nothing fetched)."""
-    try:
-        if not ms_passthrough.enabled():
-            return 0
-        import buy_sniper as _bs
-        try:
-            limit = max(0, int(((os.getenv("SNIPER_STRUCTURE_FETCH_LIMIT") or "").strip() or "12")))
-        except ValueError:
-            limit = 12
-        try:
-            budget = max(1.0, float(((os.getenv("SNIPER_STRUCTURE_FETCH_TIMEOUT_S") or "").strip() or "10")))
-        except ValueError:
-            budget = 10.0
-        syms = _bs.symbols_needing_structure(payload, limit)
-        if not syms:
-            return 0
-        sums: Dict[str, Dict[str, Any]] = {}
-        sem = asyncio.Semaphore(4)
-
-        async def _one(client, sym: str) -> None:
-            async with sem:
-                try:
-                    resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{sym}", timeout=5.0)
-                    if resp.status_code != 200:
-                        _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="http_error")
-                        return
-                    data = resp.json()
-                    if ms_passthrough.safe_block(data) is None:
-                        _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="no_block")
-                        return
-                    sums[sym] = ms_passthrough.safe_summary(data)
-                    _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="ok")
-                except Exception:  # noqa: BLE001
-                    _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="error")
-
-        async with httpx.AsyncClient() as client:
-            tasks = [asyncio.ensure_future(_one(client, sym)) for sym in syms]
-            try:
-                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
-            except asyncio.TimeoutError:
-                for t in tasks:
-                    t.cancel()
-                _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="timeout")
-        n = 0
-        for row in _bs._payload_rows(payload):
-            if isinstance(row, dict) and not row.get("structure_summary") and _bs._sg_symbol(row) in sums:
-                row["structure_summary"] = sums[_bs._sg_symbol(row)]
-                n += 1
-        return n
-    except Exception as e:  # noqa: BLE001
-        logger.debug("sniper structure attach failed (no opinion): %s", e)
-        return 0
+# E54: main-owned helpers the sniper module needs, bound at call time (see gateway_routers/sniper.py).
+import gateway_support  # noqa: E402
 
 
-def _sniper_observe(payload: Dict[str, Any], out: Dict[str, Any]) -> None:
-    """group361: hand one find-buys answer to the observation recorder on a worker thread. Fire-and-forget: the response never waits for the
-    kv store and any failure (module missing, no running loop, executor shut down) is swallowed. SNIPER_OBS_ENABLED=0 stores nothing."""
-    try:
-        import sniper_observation as _so
-        if not _so.enabled():
-            return
-        asyncio.get_running_loop().run_in_executor(None, _so.record, payload, out)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("sniper observation hand-off failed (ignored): %s", e)
+async def _cb_get_hook(*args, **kwargs):
+    return await _cb_get(*args, **kwargs)  # looked up in main at call time: patching main._cb_get still works
+
+
+def _structure_metric_hook(*args, **kwargs):
+    return _structure_metric(*args, **kwargs)
+
+
+gateway_support.bind(cb_get=_cb_get_hook, structure_metric=_structure_metric_hook, technical_url=TECHNICAL_URL)
+# E54: moved to gateway_routers/sniper.py (code unchanged)
+from gateway_routers.sniper import _sniper_attach_structure, _sniper_observe  # noqa: E402,F401
 
 
 # E53: moved to gateway_routers/scan_extras.py (code unchanged); included here so route order is unchanged.
@@ -7118,42 +7034,9 @@ from gateway_routers.scan_extras import buys_edge_router as _buys_edge_router, f
 app.include_router(_buys_edge_router)
 
 
-@app.post("/api/scan/find-buys")
-@app.post("/scan/find-buys")
-async def find_actionable_buys(request: Request):
-    """
-    Buy Sniper — return 1–4 high-conviction setups from a scan result list.
-    Always HTTP 200: empty suggestions is a valid outcome (not 400).
-    Body: { "stocks": [...], "target_count": 4, "min_conviction": 58 }
-    """
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {"stocks": payload if isinstance(payload, list) else []}
-    try:
-        from buy_sniper import suggestions_from_scan_payload
-        await _sniper_attach_structure(payload)   # group357: fail-open; adds ms_* summaries so the structure gate can judge the rows
-        out = suggestions_from_scan_payload(payload)
-        if not isinstance(out, dict):
-            return {"ok": True, "count": 0, "suggestions": []}
-        out.setdefault("ok", True)
-        # An explicit None used to survive setdefault (suggestions: null, count: 0).
-        if not isinstance(out.get("suggestions"), list):
-            out["suggestions"] = []
-        out.setdefault("count", len(out["suggestions"]))
-        _sniper_observe(payload, out)   # group361: store what the structure gate saw (worker thread, fail-open, never changes the answer)
-        return out
-    except Exception as e:
-        logger.exception("find-buys failed")
-        return {
-            "ok": False,
-            "count": 0,
-            "suggestions": [],
-            "error": str(e)[:300],
-            "message": "Sniper could not evaluate candidates",
-        }
+# E54: moved to gateway_routers/sniper.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.sniper import sniper_router as _sniper_router, find_actionable_buys  # noqa: E402,F401
+app.include_router(_sniper_router)
 
 
 @app.post("/scan/cancel/{task_id}")
@@ -12291,33 +12174,9 @@ def _audit_cache_put(key: str, payload):
     return payload
 
 
-@app.get("/api/feed/audit-missing")
-@app.get("/data-feed/audit-missing")
-@app.get("/api/data-feed/audit-missing")
-async def audit_missing_feed_data(limit: int = 500, cache: bool = True):
-    """
-    Audits data-feed records to calculate the exact DB Health Score.
-    MUST be registered BEFORE /api/feed/{symbol} so 'audit-missing' is not
-    captured as a symbol path (silent 404 / null → UI 0% and dashes).
-
-    Memoised for AUDIT_TTL_SEC (pass cache=false to force a recount) — this walks
-    every tracked symbol checking five fields each, and the DB Health tab
-    refetches it on every mount, which was most of that tab's load time.
-
-    BUG FIX (2026-09-12): on a cache miss (first call after AUDIT_TTL_SEC
-    expiry, cache=false, or a cold start) the full per-symbol walk below used
-    to run synchronously inline in this async route — same class of bug as
-    /surprise/ipo/list earlier this session, except this one can iterate up
-    to `limit` symbols (callers pass up to 5000) each doing their own
-    store/DB lookup, making it the single heaviest blocking call in this
-    file. Now offloaded to a worker thread via run_in_threadpool so a slow
-    cache-miss audit can't stall every other route on the shared event loop.
-    """
-    if cache:
-        hit = _audit_cache_get(f"feed_audit:{limit}")
-        if hit is not None:
-            return hit
-    return await run_in_threadpool(_compute_feed_audit, limit)
+# E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+audit_missing_feed_data = _bound_routes.audit_missing_feed_data
+app.include_router(_bound_routes.audit_missing_router)
 
 
 def _compute_feed_audit(limit: int) -> dict:

@@ -88,20 +88,29 @@ def write_manifest(path: str, universe: int, drawn: List[str], sample: int, seed
     Path(path).write_text(json.dumps(doc, indent=1))
 
 
-def fetch_one(base: str, sym: str, period: str, retries: int, sleep: float, timeout: float) -> Optional[list]:
+def fetch_one_ex(base: str, sym: str, period: str, retries: int, sleep: float, timeout: float) -> tuple:
+    """(candles or None, reason). reason is "" on success, else "http_404" / "http_400" / "http_5xx" / "empty" / "network" - the LAST thing
+    that went wrong, so a run that fails can say WHY (group E54: a wrong --base made every new symbol a silent instant 404)."""
     url = f"{base}/history/{urllib.parse.quote(sym, safe='^')}?period={period}&interval=1d"
+    reason = "empty"
     for k in range(max(1, retries)):
         try:
             c = candles_of(_get_json(url, timeout))
             if c:
-                return c
+                return c, ""
+            reason = "empty"
         except urllib.error.HTTPError as e:
             if e.code in (400, 404):  # delisted / unknown: retrying will not help
-                return None
+                return None, f"http_{e.code}"
+            reason = "http_5xx" if e.code >= 500 else f"http_{e.code}"
         except Exception:  # noqa: BLE001 - network noise; back off and retry
-            pass
+            reason = "network"
         time.sleep(sleep * (k + 1) * 2)
-    return None
+    return None, reason
+
+
+def fetch_one(base: str, sym: str, period: str, retries: int, sleep: float, timeout: float) -> Optional[list]:
+    return fetch_one_ex(base, sym, period, retries, sleep, timeout)[0]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -188,24 +197,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         bpath.write_text(json.dumps({"symbol": bm, "candles": c}))
     ok = skipped = 0
     failed: List[str] = []
+    reasons: dict = {}
     for n, sym in enumerate(syms, 1):
         p = out / f"{sym}.json"
         if keep(p):
             skipped += 1
             continue
-        c = fetch_one(base, sym, a.period, a.retries, a.sleep, a.timeout)
+        c, why = fetch_one_ex(base, sym, a.period, a.retries, a.sleep, a.timeout)
         if c and len(c) >= a.min_bars:
             p.write_text(json.dumps({"symbol": sym, "candles": c}))
             ok += 1
         else:
             failed.append(sym)
+            key = why or "short_history"          # candles came back but fewer than --min-bars (a recent listing)
+            reasons[key] = reasons.get(key, 0) + 1
         if n % 25 == 0:
             print(f"{n}/{len(syms)} saved={ok} kept={skipped} failed={len(failed)}", flush=True)
         time.sleep(a.sleep)
     total = len(syms)
     pct = 100.0 * len(failed) / total
     print(json.dumps({"requested": total, "saved": ok, "kept": skipped, "failed": len(failed), "failed_pct": round(pct, 1),
-                      "failed_sample": failed[:20]}))
+                      "failed_reasons": reasons, "failed_sample": failed[:20]}))
+    if ok == 0 and failed and reasons.get("http_404", 0) == len(failed):
+        print(f"HINT: nothing new was saved and every failure was HTTP 404 from {base}/history/<SYM>. --base must be the MARKET-DATA service "
+              f"(it serves /history/<SYM>); the api-gateway only has /market/history/<SYM>. Check --base / MARKET_DATA_URL.", file=sys.stderr)
     return 0 if (ok + skipped) > 0 and pct <= a.max_failures_pct else 1
 
 

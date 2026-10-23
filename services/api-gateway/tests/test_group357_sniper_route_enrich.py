@@ -64,12 +64,13 @@ BLOCK = {"schema_version": 1, "quality": "ok", "engine_version": "t", "params_ha
 
 
 def _helper_source() -> str:
-    src = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
+    # E54: the helper moved from main.py to gateway_routers/sniper.py (code unchanged)
+    src = open(os.path.join(_SERVICE, "gateway_routers", "sniper.py"), encoding="utf-8").read()
     tree = ast.parse(src)
     for n in tree.body:
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_sniper_attach_structure":
             return ast.get_source_segment(src, n)
-    raise AssertionError("_sniper_attach_structure not found in main.py")
+    raise AssertionError("_sniper_attach_structure not found in gateway_routers/sniper.py")
 
 
 class _Resp:
@@ -187,7 +188,7 @@ def test_slow_upstream_is_cut_off_by_the_budget():
 
 
 def test_route_calls_the_helper_before_the_filter():
-    src = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
+    src = open(os.path.join(_SERVICE, "gateway_routers", "sniper.py"), encoding="utf-8").read()
     i = src.index("async def find_actionable_buys")
     body = src[i:i + 2500]
     assert body.index("_sniper_attach_structure(payload)") < body.index("suggestions_from_scan_payload(payload)")

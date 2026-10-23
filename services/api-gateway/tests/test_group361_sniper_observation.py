@@ -375,6 +375,10 @@ MAIN_SRC = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
 MAIN_TREE = ast.parse(MAIN_SRC)
 
 
+_SNIPER_SRC = open(os.path.join(_SERVICE, "gateway_routers", "sniper.py"), encoding="utf-8").read()  # E54: find-buys + its helpers live here now
+_SNIPER_TREE = ast.parse(_SNIPER_SRC)
+
+
 def _fn(name):
     return next(n for n in ast.walk(MAIN_TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
 
@@ -395,12 +399,12 @@ class TestWiring:
             assert routes.get((m, p)) == fn, (m, p)
 
     def test_route_records_after_the_response_is_final_and_before_return(self):
-        src = ast.get_source_segment(MAIN_SRC, _fn("find_actionable_buys"))
+        src = ast.get_source_segment(_SNIPER_SRC, next(n for n in ast.walk(_SNIPER_TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "find_actionable_buys"))
         i_set, i_obs, i_ret = src.index('out.setdefault("count"'), src.index("_sniper_observe(payload, out)"), src.index("        return out\n")
         assert i_set < i_obs < i_ret
 
     def test_observe_helper_is_fire_and_forget_and_fail_open(self):
-        src = ast.get_source_segment(MAIN_SRC, _fn("_sniper_observe"))
+        src = ast.get_source_segment(_SNIPER_SRC, next(n for n in ast.walk(_SNIPER_TREE) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_sniper_observe"))
         assert "run_in_executor" in src and "except Exception" in src and "enabled()" in src
         assert "await" not in src
 

@@ -1,5 +1,9 @@
 # Remaining tasks
 
+> E55 (this zip, includes E54): `gateway_support/` with `MainRef` (docs/E55_GATEWAY_SUPPORT.md) - 6 more routes moved; 109 handlers remain in `main.py`, 98 of them can move in batches now. NOT run here: the 110 existing gateway test files (no pytest/fastapi in the sandbox) - run `cd services/api-gateway && bash run_tests.sh` on the VM before deploying. E54: fix for `fetch_history` (re-run it, then `g1_check`). Still open: `SCHEDULER_CONTROL_KEY`, your VM items, C21 live (blocked on B-tools evidence), candle work (backend + frontend, every timeframe).
+
+> E54 sniper split (merged into this zip): `find_actionable_buys` + `_sniper_attach_structure` + `_sniper_observe` now in `gateway_routers/sniper.py`; its `bind()` hooks live in `gateway_support/__init__.py` (docs/E54_GATEWAY_SUPPORT_AND_SNIPER.md). Run `cd services/api-gateway && bash run_tests.sh` on the VM - the merged tree was NOT run under pytest/fastapi here.
+
 > E53 (this zip): gateway router split group 4 - Buy Sniper edge report/evaluate and the Surprise static peek moved to `gateway_routers/scan_extras.py` (docs/E53_GATEWAY_SCAN_EXTRAS.md). The simple moves are now used up: every remaining handler needs a helper that lives in `main.py`, so the next step is a `gateway_support/` module (its own release). Everything open from E51/E52 is unchanged.
 
 > E52 (this zip): gateway router split group 3 - the six IPO routes + `IpoAddRequest` now live in `gateway_routers/ipo_routes.py` (docs/E52_GATEWAY_IPO_ROUTES.md). On the VM: `cd services/api-gateway && bash run_tests.sh`, rebuild api-gateway, `curl /ipo/list`. Everything from E51 below is unchanged and still open: add `SCHEDULER_CONTROL_KEY`, your VM items, C21 live (needs B-tools evidence), Docker images on `pip install ./shared` (own release), the remaining helper-dependent gateway groups.

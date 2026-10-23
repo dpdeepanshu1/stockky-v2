@@ -544,8 +544,10 @@ class TestMainWiring:
     def test_counters_are_fail_safe(self):
         fn = next(n for n in ast.walk(MAIN_TREE) if isinstance(n, ast.FunctionDef) and n.name == "_structure_metric")
         assert "except Exception" in ast.get_source_segment(MAIN_SRC, fn)
-        for name in ("stockky_sniper_structure_fetch_total", "stockky_prepare_structure_total"):
-            assert name in MAIN_SRC
+        # E54: the sniper counter name is used in gateway_routers/sniper.py now; the prepare counter is still in main.py
+        _sniper = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_routers", "sniper.py"), encoding="utf-8").read()
+        assert "stockky_sniper_structure_fetch_total" in _sniper
+        assert "stockky_prepare_structure_total" in MAIN_SRC
 
     def test_metric_helper_behaviour(self):
         ns = {"metrics": type("M", (), {"inc": staticmethod(lambda n, v, **l: ns.setdefault("seen", []).append((n, v, l)))})}

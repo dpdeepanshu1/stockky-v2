@@ -46,7 +46,7 @@ def test_router_modules_do_not_reach_back_into_main_or_use_main_helpers():
                 assert mod != "main" and "main" not in names, f"{fname} imports main"
         for h in _handlers(tree):
             used = {x.id for x in ast.walk(h) if isinstance(x, ast.Name)}
-            leaked = (used & main_names) - top_defined - {"router", "lag_router", "circuit_router", "ipo_status_router", "ipo_stop_router", "premarket_status_router", "surprise_stop_router", "bulk_cache_router", "feed_job_router", "hot_table_router", "hot_audit_router", "ipo_scan_router", "ipo_list_router", "ipo_audit_router", "ipo_add_router", "ipo_repair_router", "ipo_purge_router", "buys_edge_router", "surprise_static_router", "asyncio", "math", "HTTPException", "Request", "APIRouter"}
+            leaked = (used & main_names) - top_defined - {"router", "lag_router", "circuit_router", "ipo_status_router", "ipo_stop_router", "premarket_status_router", "surprise_stop_router", "bulk_cache_router", "feed_job_router", "hot_table_router", "hot_audit_router", "ipo_scan_router", "ipo_list_router", "ipo_audit_router", "ipo_add_router", "ipo_repair_router", "ipo_purge_router", "buys_edge_router", "surprise_static_router", "sniper_router", "asyncio", "math", "HTTPException", "Request", "APIRouter"}
             assert not leaked, f"{fname}:{h.name} uses main.py helpers {sorted(leaked)} (tests patch those on main)"
 
 

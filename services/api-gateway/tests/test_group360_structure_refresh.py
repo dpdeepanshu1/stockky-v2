@@ -497,7 +497,10 @@ MAIN_TREE = ast.parse(MAIN_SRC)
 
 def _routes():
     out = {}
-    for n in ast.walk(MAIN_TREE):
+    # E49: some handlers moved to gateway_routers/*.py; scan those files too
+    import glob
+    trees = [MAIN_TREE] + [ast.parse(open(f, encoding="utf-8").read()) for f in sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_routers", "*.py")))]
+    for n in (x for t in trees for x in ast.walk(t)):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for d in n.decorator_list:
                 if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in ("get", "post") and d.args:

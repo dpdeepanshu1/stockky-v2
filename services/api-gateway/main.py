@@ -7113,29 +7113,9 @@ def _sniper_observe(payload: Dict[str, Any], out: Dict[str, Any]) -> None:
         logger.debug("sniper observation hand-off failed (ignored): %s", e)
 
 
-@app.get("/api/scan/find-buys/edge")
-@app.get("/scan/find-buys/edge")
-async def find_buys_edge(days: int = 60, recent: int = 40, min_n: int = 20):
-    """group361/362: does the Buy Sniper's daily-structure gate help? Per-verdict outcome stats (passed vs rejected), the gate edge, an advisory
-    threshold calibration and the newest rows. Read-only; the kv read runs off the event loop."""
-    try:
-        import sniper_observation as _so
-        return await asyncio.to_thread(_so.report, None, days, recent, min_n)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("find-buys edge report failed: %s", e)
-        return {"source": "sniper", "error": str(e)[:200]}
-
-
-@app.post("/api/scan/find-buys/edge/evaluate")
-@app.post("/scan/find-buys/edge/evaluate")
-async def find_buys_edge_evaluate():
-    """group361: run one outcome-evaluator pass now (fills T+1/5/10/20 returns on open rows). The same pass the QStash tick runs."""
-    try:
-        import sniper_observation as _so
-        return {"ok": True, **(await asyncio.to_thread(_so.evaluate_pending))}
-    except Exception as e:  # noqa: BLE001
-        logger.warning("find-buys edge evaluate failed: %s", e)
-        return {"ok": False, "error": str(e)[:200]}
+# E53: moved to gateway_routers/scan_extras.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.scan_extras import buys_edge_router as _buys_edge_router, find_buys_edge, find_buys_edge_evaluate  # noqa: E402,F401
+app.include_router(_buys_edge_router)
 
 
 @app.post("/api/scan/find-buys")
@@ -9768,22 +9748,9 @@ async def api_surprise_scan_stream(
 
 
 
-@app.get("/api/surprise/static")
-@app.get("/surprise/static")
-async def api_surprise_static(limit: int = 50):
-    """Proxy / health peek of baselines (also tries local SQL if configured)."""
-    try:
-        from surprise_scanner import surprise_engine
-        n = await asyncio.to_thread(surprise_engine.load_static_cache)  # group356: blocking SQL, off the event loop
-        rows = list(surprise_engine.static_cache.values())[: max(1, min(limit, 200))]
-        # JSON-safe
-        out = []
-        for r in rows:
-            d = {k: (str(v) if hasattr(v, "isoformat") else v) for k, v in r.items()}
-            out.append(d)
-        return {"ok": True, "count": n, "rows": out, "source": "gateway_cache"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200], "rows": []}
+# E53: moved to gateway_routers/scan_extras.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.scan_extras import surprise_static_router as _surprise_static_router, api_surprise_static  # noqa: E402,F401
+app.include_router(_surprise_static_router)
 
 
 @app.post("/surprise/notify-top-picks")
@@ -9890,217 +9857,44 @@ async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
-@app.post("/ipo/scan")
-@app.get("/ipo/scan")
-@app.post("/surprise/ipo/scan")
-@app.get("/surprise/ipo/scan")
-async def api_ipo_scan(
-    background: bool = Query(True),
-    force: bool = Query(
-        False,
-        description=(
-            "Bypass the ipo_static_feed 24h freshness cache. Defaults to "
-            "False: the 'IPO Premarket Refresh' GitHub Action "
-            "(.github/workflows/ipo-premarket.yml) runs a full discovery + "
-            "scoring pass every trading morning before the session opens, "
-            "so a normal 'Scan IPOs' click should read that already-fresh "
-            "table (near-instant) rather than re-discovering NSE + "
-            "re-pulling yfinance history for the whole universe in front "
-            "of the user. The frontend's 'Force Rescan' button passes "
-            "force=true explicitly when a real on-demand re-scan is wanted."
-        ),
-    ),
-    wipe: bool = Query(
-        False,
-        description=(
-            "Delete every existing ipo_static_feed row (and replace, not "
-            "merge, the cached list) once the fresh upstream fetch has been "
-            "confirmed healthy enough to trust — see the safety check in "
-            "ipo_scanner._run_ipo_scan_locked. Implies force=true. The "
-            "frontend's '📥 Premarket Feed' button passes this so stale/"
-            "removed IPOs and any leftover non-equity rows don't just "
-            "accumulate forever; 'Force Rescan' does NOT pass this, so it "
-            "stays a safe merge-only refresh."
-        ),
-    ),
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Recent IPO scanner — Surprise tab subsection. Scores recently-listed
-    (and listing-today) NSE IPOs for a short-term buy/sell decision using
-    ipo_scanner.analyze_ipo(). Runs in the background like the premarket
-    job; poll /surprise/ipo/status, then GET /surprise/ipo/list.
-    """
-    try:
-        from ipo_scanner import run_ipo_scan, get_ipo_scan_progress
-    except Exception as e:
-        # Same shape as the sibling IPO routes when ipo_scanner can't load.
-        return {"accepted": False, "status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
-
-    current = get_ipo_scan_progress()
-    if current.get("status") == "running":
-        return {"accepted": True, "already_running": True, **current}
-
-    if background and background_tasks is not None:
-        background_tasks.add_task(run_ipo_scan, force=force, wipe=wipe)
-        return {"accepted": True, "background": True, "force": force, "wipe": wipe, "message": "IPO scan started"}
-    try:
-        result = await asyncio.to_thread(run_ipo_scan, force=force, wipe=wipe)  # group361: off the event loop
-    except Exception as e:
-        logger.exception("ipo/scan failed: %s", e)
-        return {"accepted": False, "background": False, "status": "error", "error": str(e)[:200]}
-    if not isinstance(result, dict):
-        result = {}
-    # The envelope keys are spread LAST so a scan result carrying its own
-    # ``accepted`` / ``background`` can no longer override them.
-    return {**result, "accepted": True, "background": False}
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_scan_router as _ipo_scan_router, api_ipo_scan  # noqa: E402,F401
+app.include_router(_ipo_scan_router)
 
 
-@app.get("/ipo/status")
-@app.get("/surprise/ipo/status")
-async def api_ipo_scan_status():
-    try:
-        from ipo_scanner import get_ipo_scan_progress
-        return get_ipo_scan_progress()
-    except Exception as e:
-        return {"status": "error", "message": str(e)[:160]}
+# E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.surprise_jobs import ipo_status_router as _ipo_status_router, api_ipo_scan_status  # noqa: E402,F401
+app.include_router(_ipo_status_router)
 
 
-@app.get("/ipo/list")
-@app.get("/surprise/ipo/list")
-async def api_ipo_list(display_days: Optional[int] = Query(None)):
-    """Current analyzed IPO list — listing-today/pre-listing first, then by
-    score. Each row includes a ready-to-use `buy_suggestion` (same shape as
-    /api/scan/find-buys) for BUY NOW / PREPARE TO BUY rows so the frontend
-    can open the existing BuySniperModal directly.
-
-    display_days optionally narrows the (up to ~1 year wide) scanned universe
-    down to listings within the last N days for display, without re-scanning
-    — defaults to ~30 days (IPO_CHECKER_DEFAULT_DISPLAY_DAYS). Pass a large
-    value (e.g. 365) to see everything the scan actually found.
-
-    BUG FIX (2026-09-12): get_ipo_list() does a synchronous kv_get(), which on
-    a cache-miss falls through to a blocking Oracle/Neon round trip. Calling
-    that directly inside this `async def` route blocked api-gateway's whole
-    (single-worker) event loop for as long as the DB call took/hung — every
-    other route queued behind it. Now bounded by oracle_compat's
-    ORACLE_CALL_TIMEOUT_MS AND offloaded to a worker thread via
-    run_in_threadpool, so a slow/stuck DB round trip no longer stalls other
-    requests; the existing except below still guarantees a clean fallback
-    response either way."""
-    try:
-        from ipo_scanner import get_ipo_list
-        return await run_in_threadpool(get_ipo_list, display_days=display_days)
-    except Exception as e:
-        return {"results": [], "generated_at": None, "error": str(e)[:160]}
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_list_router as _ipo_list_router, api_ipo_list  # noqa: E402,F401
+app.include_router(_ipo_list_router)
 
 
-@app.get("/ipo/audit")
-@app.get("/surprise/ipo/audit")
-async def api_ipo_audit():
-    """
-    IPO Tracker's OWN feed-health audit (reads ipo_static_feed) — NOT the
-    general stock-universe feed. This is what the IPO Tracker tab's
-    Database health widget should call; it previously called the shared
-    /api/feed/audit-missing (general stock feed), which is why the IPO tab
-    showed unrelated stock symbols instead of IPO rows/scores.
-    """
-    try:
-        from ipo_scanner import get_ipo_feed_audit
-        # Same fix as /surprise/ipo/list — offload the blocking DB-backed call
-        # so it can't stall the shared event loop (see 2026-09-12 note there).
-        return await run_in_threadpool(get_ipo_feed_audit)
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200], "rows": []}
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_audit_router as _ipo_audit_router, api_ipo_audit  # noqa: E402,F401
+app.include_router(_ipo_audit_router)
 
 
-@app.post("/ipo/stop")
-@app.post("/surprise/ipo/stop")
-async def api_ipo_stop():
-    """Stop an in-progress IPO scan after the current symbol — IPO Checker
-    tab's Stop button. Mirrors /api/data-feed/stop's behaviour: partial
-    results already analyzed are kept, not discarded."""
-    try:
-        from ipo_scanner import request_ipo_stop
-        request_ipo_stop()
-        return {"ok": True, "message": "Stop requested — will halt after the current symbol."}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:160]}
+# E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.surprise_jobs import ipo_stop_router as _ipo_stop_router, api_ipo_stop  # noqa: E402,F401
+app.include_router(_ipo_stop_router)
 
 
-class IpoAddRequest(BaseModel):
-    company_name: str
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_add_router as _ipo_add_router, IpoAddRequest, api_ipo_add  # noqa: E402,F401
+app.include_router(_ipo_add_router)
 
 
-@app.post("/ipo/add")
-@app.post("/surprise/ipo/add")
-async def api_ipo_add(body: IpoAddRequest):
-    """Manually register an IPO by NAME ONLY — the reliable path since
-    NSE's IPO API blocks cloud-hosted IPs often enough that auto-discovery
-    alone can't be the only path. Resolves symbol/issue price/listing date
-    automatically (see ipo_scanner.add_manual_ipo_by_name) against NSE's
-    calendar and, as a fallback, ipoalerts — the user never has to look up
-    or type those themselves. A resolved entry is persisted as a manual
-    IPO and included in every subsequent scan/list the same way any other
-    manual entry is."""
-    try:
-        from ipo_scanner import add_manual_ipo_by_name
-        result = await asyncio.to_thread(add_manual_ipo_by_name, body.company_name)  # group361: off the event loop
-    except Exception as e:
-        logger.exception("ipo/add failed: %s", e)
-        return {"accepted": False, "message": f"IPO lookup failed: {str(e)[:160]}", "suggestions": []}
-    if not isinstance(result, dict):
-        result = {}
-    if not result.get("resolved"):
-        return {
-            "accepted": False,
-            "message": result.get("message"),
-            "suggestions": result.get("suggestions") or [],
-        }
-    return {"accepted": True, "entry": result.get("entry")}
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_repair_router as _ipo_repair_router, api_ipo_repair_batch  # noqa: E402,F401
+app.include_router(_ipo_repair_router)
 
 
-@app.post("/ipo/repair-batch")
-@app.post("/surprise/ipo/repair-batch")
-async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
-    """Targeted repair for ipo_static_feed rows missing price/score/decision
-    — re-runs analyze_ipo() only for the specific missing symbols (bounded
-    by `limit`), not a full-universe re-scan. Mirrors /stockky-hot/repair-batch
-    and /api/surprise/repair-batch's naming and shape; backs the IPO Tracker
-    health tab's Auto-Repair button."""
-    try:
-        from ipo_scanner import ipo_repair_batch
-    except Exception as e:
-        return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
-    # AUDIT FIX: same blocking-event-loop bug as /api/surprise/repair-batch
-    # above — ipo_repair_batch() is sync and loops up to `limit` (100 max)
-    # symbols with a time.sleep(0.3) pace-out between each; called directly
-    # from this async route it blocked every other api-gateway request for
-    # the full repair duration. Offload to a worker thread.
-    try:
-        return await asyncio.to_thread(ipo_repair_batch, limit=limit, symbol=symbol)
-    except Exception as e:
-        logger.exception("ipo/repair-batch failed: %s", e)
-        return {"status": "error", "error": str(e)[:160]}
-
-
-@app.post("/ipo/purge-non-equity")
-@app.post("/surprise/ipo/purge-non-equity")
-async def api_ipo_purge_non_equity():
-    """Delete every ipo_static_feed row flagged non_equity (NCD/bond
-    debt-series symbols like 1150VIES30 that slipped in before
-    ipo_scanner._is_ipo_non_equity existed) — these can never resolve via
-    Auto-Repair since they were never real equity IPOs to begin with.
-    Backs the IPO health tab's 'Delete Non-Equity Rows' button."""
-    try:
-        from ipo_scanner import purge_non_equity_ipos
-    except Exception as e:
-        return {"status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
-    try:
-        return await asyncio.to_thread(purge_non_equity_ipos)  # group361: off the event loop
-    except Exception as e:
-        logger.exception("ipo/purge-non-equity failed: %s", e)
-        return {"status": "error", "error": str(e)[:160]}
+# E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ipo_routes import ipo_purge_router as _ipo_purge_router, api_ipo_purge_non_equity  # noqa: E402,F401
+app.include_router(_ipo_purge_router)
 
 
 @app.post("/ipo/notify-top-picks")
@@ -10173,21 +9967,9 @@ async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
-@app.get("/surprise/premarket/status")
-@app.get("/api/surprise/premarket/status")
-async def api_surprise_premarket_status():
-    """Premarket progress from gateway-local progress file."""
-    try:
-        from surprise_premarket import get_premarket_progress
-        return get_premarket_progress()
-    except Exception as e:
-        return {
-            "is_running": False,
-            "stage": "error",
-            "percent": 0,
-            "error": str(e)[:160],
-            "message": str(e)[:160],
-        }
+# E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.surprise_jobs import premarket_status_router as _premarket_status_router, api_surprise_premarket_status  # noqa: E402,F401
+app.include_router(_premarket_status_router)
 
 
 @app.post("/surprise/premarket")
@@ -10385,19 +10167,9 @@ async def api_surprise_premarket_proxy(request: Request):
     return result
 
 
-@app.post("/surprise/stop")
-@app.post("/api/surprise/stop")
-async def api_surprise_stop():
-    """Stop button for the Surprise tab — halts the premarket baseline job
-    (between symbols) AND the live surprise scan's waterfall-fill loop, since
-    both share the same stop flag (surprise_premarket.premarket_stop_requested).
-    Whatever was already computed/fetched before Stop is kept, not discarded."""
-    try:
-        from surprise_premarket import request_premarket_stop
-        request_premarket_stop()
-        return {"ok": True, "message": "Stop requested — will halt after the current symbol/chunk."}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:160]}
+# E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.surprise_jobs import surprise_stop_router as _surprise_stop_router, api_surprise_stop  # noqa: E402,F401
+app.include_router(_surprise_stop_router)
 
 
 async def _redis_get_bounded(key: str):
@@ -11247,24 +11019,9 @@ async def _gateway_runtime_tuning():
         logger.debug("loop watchdog not started: %s", e)
 
 
-@app.get("/ops/loop-lag")
-async def ops_loop_lag():
-    """Event-loop health: current lag and the worst stall since boot, with the stack that caused the last one."""
-    try:
-        import loop_watchdog
-        return loop_watchdog.snapshot()
-    except Exception as e:  # noqa: BLE001
-        return {"enabled": False, "error": str(e)[:160]}
-
-
-@app.get("/ops/db-latency")
-async def ops_db_latency():
-    """Oracle latency: per-engine connect / execute count, avg, p50, p95, max, the last slow statement, pool state, keep-warm counters."""
-    try:
-        import oracle_compat
-        return await asyncio.to_thread(oracle_compat.latency_snapshot)
-    except Exception as e:  # noqa: BLE001
-        return {"enabled": False, "error": str(e)[:160]}
+# E49: moved to gateway_routers/ops_status.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ops_status import lag_router as _lag_router, ops_loop_lag, ops_db_latency  # noqa: E402,F401
+app.include_router(_lag_router)
 
 
 # group302: the boot warms (momentum movers -> scan universe, and the surprise scan) used to start together a few
@@ -11515,14 +11272,9 @@ async def ops_circuit_reset():
         return {"ok": False, "error": str(e)[:200]}
 
 
-@app.get("/ops/circuit-status")
-async def ops_circuit_status():
-    """Inspect current circuit breaker states."""
-    try:
-        from circuit_breaker import all_snapshots
-        return {"ok": True, "breakers": all_snapshots()}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+# E49: moved to gateway_routers/ops_status.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.ops_status import circuit_router as _circuit_router, ops_circuit_status  # noqa: E402,F401
+app.include_router(_circuit_router)
 
 
 # ── Overnight orchestrator proxy (2026-09-11) ────────────────────────────────
@@ -11700,20 +11452,9 @@ def ops_activity_status():
 
 
 
-@app.get("/api/quotes/bulk-cache")
-@app.get("/data-feed/bulk-cache")
-async def api_bulk_quote_cache():
-    """Shared bulk quote cache status + map (market-aware TTL)."""
-    from data_feed import get_bulk_quote_cache, bulk_cache_age_sec, should_refresh_bulk_cache
-    cache = get_bulk_quote_cache()
-    return {
-        "ok": True,
-        "age_sec": bulk_cache_age_sec(),
-        "should_refresh": should_refresh_bulk_cache(),
-        "meta": (cache or {}).get("_meta"),
-        "count": len((cache or {}).get("quotes") or {}),
-        "quotes": (cache or {}).get("quotes") or {},
-    }
+# E49: moved to gateway_routers/feed_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.feed_jobs import bulk_cache_router as _bulk_cache_router, api_bulk_quote_cache  # noqa: E402,F401
+app.include_router(_bulk_cache_router)
 
 
 # E48: the price-alert routes moved to gateway_routers/price_alerts.py (code unchanged). Included here, where they used to be, so route order is the
@@ -11725,6 +11466,9 @@ from gateway_routers.price_alerts import (  # noqa: E402
     api_delete_price_alert,
 )
 app.include_router(_price_alerts_router)
+# E51: scheduler alert switches for the calibration page (admin-guarded proxy, gateway_routers/scheduler_control.py).
+from gateway_routers.scheduler_control import scheduler_control_router as _scheduler_control_router, scheduler_control_proxy  # noqa: E402,F401
+app.include_router(_scheduler_control_router)
 
 
 @app.post("/api/price-alerts/evaluate")
@@ -12288,27 +12032,9 @@ async def data_feed_structure_refresh(force: bool = False, dry_run: bool = False
     return await asyncio.to_thread(_start_structure_refresh, force, dry_run, limit)
 
 
-@app.post("/data-feed/structure-refresh/stop")
-@app.post("/api/data-feed/structure-refresh/stop")
-def data_feed_structure_refresh_stop():
-    """Ask a running structure refresh to stop after the symbols in flight."""
-    try:
-        import structure_refresh as _sr
-        _sr.request_stop()
-        return {"ok": True, "stop_requested": True, **_sr.get_job()}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)[:200]}
-
-
-@app.get("/data-feed/refill-additional/status")
-@app.get("/api/data-feed/refill-additional/status")
-def data_feed_refill_status():
-    """Status of the Refill Additional Data job."""
-    try:
-        from refill_additional import get_refill_job
-        return {"ok": True, **get_refill_job()}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200], "status": "idle"}
+# E49: moved to gateway_routers/feed_jobs.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.feed_jobs import feed_job_router as _feed_job_router, data_feed_structure_refresh_stop, data_feed_refill_status  # noqa: E402,F401
+app.include_router(_feed_job_router)
 
 
 @app.post("/data-feed/refill-additional")
@@ -14493,38 +14219,9 @@ def stockky_hot_stop():
     return {"ok": True, "stopping": True, "message": "Stopping after the current symbol"}
 
 
-@app.get("/stockky-hot/table")
-def stockky_hot_table(hours: int = 24):
-    """Hot Picks from the durable table (default: last 24h).
-
-    Serves hotpicks_static_feed directly — Neon on Render, Oracle ADB on the
-    Oracle VM, identical JSON either way. This is what the tab paints instantly
-    on open, before (or instead of) triggering a scan.
-    """
-    try:
-        from hotpicks_store import hotpicks_db_payload, HOTPICKS_TABLE_HOURS
-    except Exception as e:
-        return {"ok": False, "rows": [], "count": 0, "hours": hours, "fresh": False,
-                "detail": f"hotpicks store unavailable: {str(e)[:160]}"}
-    try:
-        window = int(hours or HOTPICKS_TABLE_HOURS)
-    except Exception:
-        window = 24
-    window = max(1, min(window, 24 * 30))
-    payload = hotpicks_db_payload(window)
-    if not payload:
-        return {
-            "ok": True,
-            "rows": [],
-            "count": 0,
-            "hours": window,
-            "fresh": False,
-            "detail": "No stored Hot Picks in this window yet — run a scan.",
-        }
-    rows = []
-    for section in ("news_driven", "results_driven", "bulk_insider_driven"):
-        rows.extend(payload.get(section) or [])
-    return {**payload, "ok": True, "rows": rows}
+# E49: moved to gateway_routers/hot_picks.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.hot_picks import hot_table_router as _hot_table_router, stockky_hot_table  # noqa: E402,F401
+app.include_router(_hot_table_router)
 
 
 @app.post("/stockky-hot/notify-top-picks")
@@ -14617,14 +14314,9 @@ async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
         return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
 
 
-@app.get("/stockky-hot/audit")
-def stockky_hot_audit():
-    """Hot Picks feed health: backend in use, row counts, staleness, gaps."""
-    try:
-        from hotpicks_store import hotpicks_audit
-    except Exception as e:
-        return {"ok": False, "issues": [f"hotpicks store unavailable: {str(e)[:160]}"]}
-    return hotpicks_audit()
+# E49: moved to gateway_routers/hot_picks.py (code unchanged); included here so route order is unchanged.
+from gateway_routers.hot_picks import hot_audit_router as _hot_audit_router, stockky_hot_audit  # noqa: E402,F401
+app.include_router(_hot_audit_router)
 
 
 @app.post("/stockky-hot/repair-batch")

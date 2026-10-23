@@ -1646,7 +1646,9 @@ def _load_scanner(monkeypatch):
 
 class TestCrossModuleContracts:
     def test_every_name_main_imports_exists_and_is_callable(self, pm):
-        names = _imported_names(os.path.join(_SERVICE, "main.py"), "surprise_premarket")
+        # E49: api_surprise_stop moved to gateway_routers/surprise_jobs.py, so its import lives there now
+        names = (_imported_names(os.path.join(_SERVICE, "main.py"), "surprise_premarket")
+                 | _imported_names(os.path.join(_SERVICE, "gateway_routers", "surprise_jobs.py"), "surprise_premarket"))
         assert {"precalculate_surprise_baselines", "get_premarket_progress", "default_universe_from_env",
                 "request_premarket_stop"} <= names
         for n in names:

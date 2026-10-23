@@ -382,7 +382,9 @@ def _fn(name):
 class TestWiring:
     def test_routes_with_aliases(self):
         routes = {}
-        for n in ast.walk(MAIN_TREE):
+        # E53: the two edge routes moved to gateway_routers/scan_extras.py, so scan that file too
+        _extras = ast.parse(open(os.path.join(_SERVICE, "gateway_routers", "scan_extras.py"), encoding="utf-8").read())
+        for n in [x for t in (MAIN_TREE, _extras) for x in ast.walk(t)]:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for d in n.decorator_list:
                     if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in ("get", "post") and d.args:

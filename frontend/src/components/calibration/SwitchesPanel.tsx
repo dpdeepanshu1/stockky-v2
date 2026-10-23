@@ -2,10 +2,10 @@
 // LOOSENS a rule, the recommended value next to the current one, a one-click "move to recommended" (with a preview) and the change log.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ApiError, controlApi, serviceUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type Svc } from "../../calibrationApi";
+import { ApiError, controlApi, switchUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type SwitchSvc } from "../../calibrationApi";
 import { Btn, Card, Msg } from "./ui";
 
-const SVC_NAME: Record<Svc, string> = { rt: "real-trade-service", ps: "position-stocks-service" };
+const SVC_NAME: Record<SwitchSvc, string> = { rt: "real-trade-service", ps: "position-stocks-service", sch: "notification-scheduler-service" };
 
 interface Pending { row: FlagRow; value: string; info: any }
 
@@ -19,7 +19,7 @@ function changeTone(c: string): string {
   return c === "LOOSENS" ? "text-signal-sell" : c === "TIGHTENS" ? "text-signal-buy" : "text-mist";
 }
 
-export default function SwitchesPanel({ svc, onChanged }: { svc: Svc; onChanged?: () => void }) {
+export default function SwitchesPanel({ svc, onChanged }: { svc: SwitchSvc; onChanged?: () => void }) {
   const [doc, setDoc] = useState<FlagsDoc | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -38,7 +38,7 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: Svc; onChanged?
       const d = await controlApi.flags(svc);
       // group 445: both tabs showing the same switches means both URLs point at one service; say so instead of showing the wrong service's switches
       if (!d || !Array.isArray(d.flags) || !d.summary) throw new Error(`${SVC_NAME[svc]} answered with an unexpected shape for /control/flags.`);
-      if (d.service && d.service !== SVC_NAME[svc]) throw new Error(`This tab's URL (${serviceUrl(svc) || "same site"}) belongs to ${d.service}, not ${SVC_NAME[svc]}. Fix it under Connection below.`);
+      if (d.service && d.service !== SVC_NAME[svc]) throw new Error(`This tab's URL (${switchUrl(svc) || "same site"}) belongs to ${d.service}, not ${SVC_NAME[svc]}. Fix it under Connection below.`);
       setDoc(d);
       setErr(null);
     } catch (e: any) {

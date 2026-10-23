@@ -14,6 +14,8 @@ import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrad
 export * from "./calibrationTrades";
 
 export type Svc = "rt" | "ps";
+// E51: the scheduler's alert switches are reached through the gateway (/scheduler-control/*), never directly
+export type SwitchSvc = Svc | "sch";
 
 const RUNNER_URL_KEY = "stockky:calibration_api_url";
 
@@ -279,16 +281,25 @@ export interface FlagsDoc {
 export interface SetResult { ok: boolean; key: string; change: string; from?: string; value: string; applied_live: boolean; restart_required: boolean; message?: string }
 export interface PresetPlanRow { key: string; title: string; from: string | null; to: string; change: string; live: boolean }
 
-const C = <T,>(svc: Svc, path: string, init?: RequestInit) => call<T>(serviceUrl(svc), serviceToken(svc), `/control${path}`, init);
+function gatewayBase(): string {
+  try { return (getApiUrl() || "").replace(/\/$/, ""); } catch { return ""; }
+}
+/** URL a Switches tab talks to (for messages). */
+export function switchUrl(svc: SwitchSvc): string { return svc === "sch" ? gatewayBase() : serviceUrl(svc); }
+
+const C = <T,>(svc: SwitchSvc, path: string, init?: RequestInit) =>
+  svc === "sch"
+    ? call<T>(gatewayBase(), serviceToken("rt"), `/scheduler-control${path}`, init)
+    : call<T>(serviceUrl(svc), serviceToken(svc), `/control${path}`, init);
 
 export const controlApi = {
-  flags: (svc: Svc) => C<FlagsDoc>(svc, "/flags"),
-  set: (svc: Svc, key: string, value: string | boolean | number, confirm = false, note = "") =>
+  flags: (svc: SwitchSvc) => C<FlagsDoc>(svc, "/flags"),
+  set: (svc: SwitchSvc, key: string, value: string | boolean | number, confirm = false, note = "") =>
     C<SetResult>(svc, `/flags/${encodeURIComponent(key)}`, { method: "POST", body: JSON.stringify({ value, confirm, note }) }),
-  clear: (svc: Svc, key: string) => C<any>(svc, `/flags/${encodeURIComponent(key)}`, { method: "DELETE" }),
-  preset: (svc: Svc, dry_run: boolean, confirm = false) => C<{ ok: boolean; dry_run: boolean; changes: PresetPlanRow[]; loosening?: number; applied?: string[]; restart_required?: string[] }>(
+  clear: (svc: SwitchSvc, key: string) => C<any>(svc, `/flags/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  preset: (svc: SwitchSvc, dry_run: boolean, confirm = false) => C<{ ok: boolean; dry_run: boolean; changes: PresetPlanRow[]; loosening?: number; applied?: string[]; restart_required?: string[] }>(
     svc, "/preset/recommended", { method: "POST", body: JSON.stringify({ dry_run, confirm }) }),
-  audit: (svc: Svc, limit = 80) => C<{ service: string; rows: any[] }>(svc, `/audit?limit=${limit}`),
+  audit: (svc: SwitchSvc, limit = 80) => C<{ service: string; rows: any[] }>(svc, `/audit?limit=${limit}`),
 };
 
 // ------------------------------------------------------------------ trades (read-only GETs of the two services)

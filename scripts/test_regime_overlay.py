@@ -30,7 +30,7 @@ def _kit():
 
 kit = _kit()
 F = kit.Flag
-KEYS = ("T_MODE", "T_RISK", "T_ADD", "T_CUT", "T_MAXN", "T_GATE", "T_PLAIN")
+KEYS = ("T_MODE", "T_RISK", "T_ADD", "T_CUT", "T_MAXN", "T_GATE", "T_PLAIN", "MARKET_STATE_MODE")   # E128: the mode switch test sets MARKET_STATE_MODE in os.environ; it leaked into the next test (1 pending restart)
 
 
 def _setup(mode="live", d=None):

@@ -31,3 +31,4 @@ venv
 .coverage.*
 htmlcov
 **/*,cover
+.venv-test/

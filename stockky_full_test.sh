@@ -52,6 +52,33 @@ run() {
   fi
 }
 
+
+# E121: the real-trade and position-stocks suites import fastapi / sqlalchemy / dhanhq ..., which the VM's system Python does not have (the services run in Docker).
+# Before this, the script installed only pytest, so every test file failed at COLLECTION (163 + 90 errors) and no test ran. Each service now gets its own virtualenv
+# (.venv-test/<svc>) with its requirements.txt, so the suites run here as they do in the release workspace. No venv module: the system Python is used as before.
+prep_pytest() {   # usage: prep_pytest <service-dir-name> <extra pip packages...> ; sets PYT to the interpreter to run pytest with
+  local svc="$1"; shift
+  local req="services/$svc/requirements.txt" venv=".venv-test/$svc"
+  PYT=python3
+  if [ ! -x "$venv/bin/python" ]; then
+    python3 -m venv "$venv" > "$OUT/coverage/venv-$svc.log" 2>&1 || { echo "  (python3 -m venv failed: sudo apt install python3-venv; using the system Python)"; rm -rf "$venv"; }
+  fi
+  if [ -x "$venv/bin/python" ]; then
+    PYT="$PWD/$venv/bin/python"
+    "$PYT" -m pip install -q --upgrade pip >> "$OUT/coverage/venv-$svc.log" 2>&1
+    if ! "$PYT" -m pip install -q -r "$req" "$@" >> "$OUT/coverage/venv-$svc.log" 2>&1; then
+      echo "  requirements for $svc did not install - see $OUT/coverage/venv-$svc.log"; tail -5 "$OUT/coverage/venv-$svc.log"
+    fi
+  else
+    pip install --break-system-packages -q -r "$req" "$@" 2>&1 | tail -3
+  fi
+}
+
+why_failed() {   # usage: why_failed <log> : the first distinct import / collection causes, so a wall of ERROR lines is readable
+  echo "  first causes in $1:"
+  grep -E "ModuleNotFoundError|ImportError|No module named|SyntaxError|NameError|AttributeError" "$1" | sed -e 's/^E *//' | sort | uniq -c | sort -rn | head -6
+}
+
 note "PART 0 — static guards and pure checks (market weather, short selling, shared copies, catalogs)"
 for chk in "scripts/check_shared_copies.py" "scripts/check_control_catalog.py" "scripts/test_regime_overlay.py" "scripts/test_control_kit.py"; do
   script="${chk%% *}"
@@ -82,27 +109,29 @@ tail -15 "../../$OUT/coverage/calibration-runner-service.log"
 popd >/dev/null
 
 note "PART 1 — offline unit + coverage: real-trade-service"
+prep_pytest real-trade-service pytest pytest-cov
 pushd services/real-trade-service >/dev/null
-pip install --break-system-packages -q pytest pytest-cov 2>&1 | tail -3
-if python3 -m pytest tests -q --cov=. --cov-report=term-missing \
+if "$PYT" -m pytest tests -q --cov=. --cov-report=term-missing \
       --cov-report="html:../../$OUT/coverage/real-trade-service-html" \
       > "../../$OUT/coverage/real-trade-service.log" 2>&1; then
   ok "real-trade-service test suite"
 else
   bad "real-trade-service test suite — see $OUT/coverage/real-trade-service.log"
+  why_failed "../../$OUT/coverage/real-trade-service.log"
 fi
 tail -25 "../../$OUT/coverage/real-trade-service.log"
 popd >/dev/null
 
 note "PART 1 — offline unit + coverage: position-stocks-service"
+prep_pytest position-stocks-service pytest pytest-cov
 pushd services/position-stocks-service >/dev/null
-pip install --break-system-packages -q pytest pytest-cov 2>&1 | tail -3
-if python3 -m pytest tests -q --cov=. --cov-report=term-missing \
+if "$PYT" -m pytest tests -q --cov=. --cov-report=term-missing \
       --cov-report="html:../../$OUT/coverage/position-stocks-service-html" \
       > "../../$OUT/coverage/position-stocks-service.log" 2>&1; then
   ok "position-stocks-service test suite"
 else
   bad "position-stocks-service test suite — see $OUT/coverage/position-stocks-service.log"
+  why_failed "../../$OUT/coverage/position-stocks-service.log"
 fi
 tail -25 "../../$OUT/coverage/position-stocks-service.log"
 popd >/dev/null

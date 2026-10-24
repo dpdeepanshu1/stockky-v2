@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { ScoreRing } from "./ui/ScoreRing";          // design v5
+import { TradePlanBar } from "./ui/TradePlanBar";      // design v5
 import { setVisibleInterval } from "../visibleInterval";
 import { Decision, api, TrainingScore, FundamentalMetrics, CategorizedEvents } from "../api";
 import { decisionStyle } from "../decisionStyle";
@@ -411,6 +413,14 @@ export default function DecisionCard({ data, onBack, onSearchRelated, onAddToWat
             </div>
             <HorizonStrip data={data} />
           </div>
+        </div>
+
+        {/* design v5: score ring + trade plan bar (numbers already on the decision; BUY NOW / PREPARE only) */}
+        <div className="v5-hero-extra">
+          <ScoreRing score={data.combined_score} />
+          {(data.decision === "BUY NOW" || data.decision === "PREPARE TO BUY") && (
+            <TradePlanBar stop={data.stop_loss} entryLow={data.entry_range?.low} entryHigh={data.entry_range?.high} target={data.target} price={hasPrice ? displayClose : null} />
+          )}
         </div>
 
         {data.event_risk && (

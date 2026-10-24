@@ -6,6 +6,7 @@ import ScanPanel from "../ScanPanel";
 import MarketSentimentHeader from "../MarketSentimentHeader";
 import MarketMovers from "../MarketMovers";
 import { MarketClock } from "./clocks";
+import AiInsightDeck from "./AiInsightDeck";
 import type { ViewState } from "./appTypes";
 
 // E69 - E31 step 13: the dashboard view (search, scan buttons, market header, idle / loading / error / stock / scan states), moved out of
@@ -98,6 +99,9 @@ export function DashboardView({
                   </div>
                 </div>
               </div>
+
+              {/* design v5: AI Insights deck (reads the scan state already on this page; no new request) */}
+              <AiInsightDeck view={view} liveScanRows={liveScanRows} onSelect={handleSearch} onQuickScan={() => handleScan(true)} />
 
               {/* ── NEW: Market Sentiment Header placed above Market Movers ── */}
               <div className="mt-8">

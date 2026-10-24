@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { setVisibleInterval } from "../visibleInterval";
 import {
   realTradeApi, getRealTradeApiUrl, setRealTradeApiUrl, type CumulativeBrokerage,
@@ -714,6 +715,9 @@ export default function RealAutoTrade() {
           ))}
         </div>
       </div>
+
+      {/* design v5: plain-words money mode + safety chips (presentation only) */}
+      <MoneyModeBanner mode={mode} chips={[{ label: armed ? "Auto-orders armed" : "Auto-orders off", state: armed && mode === "REAL" ? "warn" : "ok" }]} />
 
       {/* Phase notice */}
       <p className="rt-notice font-display tabular-nums">

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";   // group 463
+import WatchlistPulse from "./WatchlistPulse";   // design v5
 import { api } from "../api";
 import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline } from "../watchlistGain";   // E28
 
@@ -53,8 +54,8 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
     return () => { cancelled = true; window.clearInterval(id); };
   }, [symbols.join(",")]);
 
-  function add() {
-    const sym = input.trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
+  function add(symOverride?: string) {
+    const sym = (symOverride ?? input).trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
     if (!sym || symbols.includes(sym)) {
       setInput("");
       return;
@@ -100,7 +101,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
               autoComplete="off"
             />
           </div>
-          <button type="button" onClick={add} className="btn-terminal">
+          <button type="button" onClick={() => add()} className="btn-terminal">
             Add
           </button>
           {onScanWatchlist && (
@@ -115,6 +116,20 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
           )}
         </div>
 
+        {/* design v5: summary of the figures below (percentages only) */}
+        {symbols.length > 0 && (
+          <WatchlistPulse items={symbols.map((sym) => ({ symbol: sym, pct: pctSince(added[sym], prices[sym]) }))} onAnalyse={onAnalyse} />
+        )}
+        {/* design v5: one-tap suggestions while the list is short; uses the same add() as the Add button */}
+        {symbols.length < 5 && (
+          <div className="v5-suggest" aria-label="Quick add">
+            <span>Quick add</span>
+            {["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN"].filter((x) => !symbols.includes(x)).slice(0, 5).map((x) => (
+              <button type="button" key={x} onClick={() => add(x)}>+ {x}</button>
+            ))}
+          </div>
+        )}
+
         {symbols.length === 0 ? (
           <EmptyState title="Your watchlist is empty" hint="Add NSE symbols above to follow them and scan them together." />
         ) : (
@@ -122,8 +137,10 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
             {symbols.map((s) => (
               <div
                 key={s}
-                className="flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
+                className="v5-wl-card flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
+                data-tone={tone(pctSince(added[s], prices[s]))}
               >
+                <span className="v5-wl-avatar" aria-hidden="true">{s.slice(0, 1)}</span>
                 <div className="flex flex-col items-start min-w-0">
                   <button
                     type="button"

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MoodGauge } from "./ui/MoodGauge";   // design v5
 import { Skeleton } from "./ui/motion";   // group 461 (phase 4)
 import { setVisibleInterval } from "../visibleInterval";
 import { api, MarketIndicesResponse } from "../api";
@@ -156,6 +157,7 @@ export default function MarketSentimentHeader() {
           </button>
         </div>
       </div>
+      <MoodGauge score={market_score} mood={market_mood} />
     </div>
   );
 }

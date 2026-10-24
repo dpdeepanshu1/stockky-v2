@@ -74,5 +74,25 @@ def test_scan_paths_walks_a_folder_skips_vendored_dirs_and_flags_forbidden_files
         assert rules == [(".env", "forbidden-file"), ("output.txt", "jwt")], rules
 
 
+def _tracked_files():
+    """E128: in a git checkout, the files git tracks (what a push would publish); None when there is no git or no .git (a zip): then the whole tree is scanned."""
+    import shutil
+    import subprocess
+    if not (S.ROOT / ".git").exists() or not shutil.which("git"):
+        return None
+    r = subprocess.run(["git", "-C", str(S.ROOT), "ls-files", "-z"], capture_output=True, timeout=60)
+    if r.returncode != 0:
+        return None
+    return [S.ROOT / n for n in r.stdout.decode("utf-8", "ignore").split("\0") if n and (S.ROOT / n).is_file()]
+
+
 def test_the_repo_itself_is_clean():
-    assert S.scan_paths([S.ROOT]) == []
+    # The VM working tree also holds git-ignored local files by design (.env, oracle_wallet, data/, downloaded run outputs), which this test used to fail on.
+    # So it checks what is TRACKED; `python3 scripts/check_secrets.py` still scans the whole folder and is the one to run before zipping or sharing a folder.
+    tracked = _tracked_files()
+    assert S.scan_paths(tracked if tracked is not None else [S.ROOT]) == []
+
+
+def test_tracked_file_list_is_used_only_inside_a_git_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "ROOT", tmp_path)
+    assert _tracked_files() is None

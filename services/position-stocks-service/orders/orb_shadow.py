@@ -7,6 +7,8 @@ A symbol first seen after the capture window has no range (reason "no_range"). T
 so the range exists even for a symbol that is only bought later.
 VERDICT: price above range_high, above VWAP, spread <= ORB_MAX_SPREAD_PCT, range width inside [ORB_MIN_RANGE_PCT, ORB_MAX_RANGE_PCT], time <= ORB_LATEST_ENTRY_IST.
 limit = range_high x (1 + ORB_LIMIT_BUFFER_PCT %), stop = range_low.
+E119: SHORT mirror (side="SHORT", used for a live short only): price BELOW range_low and below-not-above VWAP count, limit = range_low x (1 - buffer), stop = range_high, and the close-based trigger is the first completed bar
+that closes BELOW range_low. A long record is byte-for-byte what it was (no "side" key); a short record carries "side": "SHORT". Record only, nothing is ordered, blocked or resized.
 E104: bar_fields() adds a close-based trigger and the trigger bar's volume against the opening-range bars' average (record only). Every function never raises. ORB_MODE=off stops all recording.
 """
 from __future__ import annotations
@@ -69,11 +71,12 @@ def record_quote(symbol: str, quote: Any, now: Optional[datetime] = None) -> Non
         logger.debug("orb record_quote failed: %s", e)
 
 
-def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Optional[Any] = None) -> Dict[str, Any]:
+def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Optional[Any] = None, side: str = "LONG") -> Dict[str, Any]:
     """E104 (P2 item 14): two extra record-only fields from today's 1-minute bars (feed/bar_store), next to the tick-based verdict.
     CLOSE-BASED TRIGGER: the first COMPLETED bar after ORB_RANGE_END_IST whose close is above range_high ("close_trigger"; a wick through the high
     that closes back inside is not a trigger). TRIGGER-BAR VOLUME: that bar's volume against the average volume of the bars inside the opening range
     (09:15 up to ORB_RANGE_END_IST): "volume_ratio" = trigger volume / range average. Nothing here changes would_enter or any reason.
+    E119: side="SHORT" mirrors it: `rh` then carries the range LOW and the trigger is the first completed bar that closes BELOW it.
     {} when there are no bars; volume fields only when a trigger bar and at least one range bar exist. Never raises."""
     try:
         if bars is None:
@@ -87,6 +90,7 @@ def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Opt
         open_ts = n.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
         end_ts = n.replace(hour=re_t.hour, minute=re_t.minute, second=0, microsecond=0).timestamp()
         range_vols, trigger = [], None
+        short = str(side or "").upper() == "SHORT"
         rows = []
         for b in bars:                                                           # one unreadable row must not hide the rest
             try:
@@ -101,7 +105,7 @@ def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Opt
             if t < end_ts:
                 if v is not None and v >= 0:
                     range_vols.append(v)
-            elif trigger is None and c > rh:
+            elif trigger is None and ((c < rh) if short else (c > rh)):
                 trigger = (t, c, v)
         out: Dict[str, Any] = {"close_trigger": trigger is not None, "n_range_bars": len(range_vols)}
         if trigger is not None:
@@ -116,7 +120,7 @@ def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Opt
         return {}
 
 
-def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional[datetime] = None, side: str = "LONG") -> Optional[Dict[str, Any]]:
     """The ORB verdict dict, or None when off / after ORB_LATEST_ENTRY_IST / before the open / unusable. Pure apart from the range store."""
     try:
         if _off():
@@ -138,11 +142,18 @@ def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional
         rh, rl = rng["high"], rng["low"]
         width = (rh - rl) / rl * 100.0
         vwap, spread = _f(q.get("avg_price")), _f(q.get("spread_pct"))
+        short = str(side or "").upper() == "SHORT"
         reasons = []
-        if px <= rh:
-            reasons.append("below_range_high")
-        if vwap is not None and vwap > 0 and px <= vwap:
-            reasons.append("below_vwap")
+        if short:
+            if px >= rl:
+                reasons.append("above_range_low")
+            if vwap is not None and vwap > 0 and px >= vwap:
+                reasons.append("above_vwap")
+        else:
+            if px <= rh:
+                reasons.append("below_range_high")
+            if vwap is not None and vwap > 0 and px <= vwap:
+                reasons.append("below_vwap")
         max_sp = float(getattr(config, "ORB_MAX_SPREAD_PCT", 0.0) or 0.0)
         if max_sp > 0 and spread is not None and spread > max_sp:
             reasons.append("wide_spread")
@@ -152,21 +163,26 @@ def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional
         if max_w > 0 and width > max_w:
             reasons.append("range_too_wide")
         buf = float(getattr(config, "ORB_LIMIT_BUFFER_PCT", 0.0) or 0.0)
-        out.update(range_high=round(rh, 2), range_low=round(rl, 2), range_pct=round(width, 3), would_enter=not reasons, reasons=reasons,
-                   limit_price=round(rh * (1 + buf / 100.0), 2), stop_price=round(rl, 2),
-                   stop_pct=round((px - rl) / px * 100.0, 3) if px > rl else None)
-        out.update(bar_fields(symbol, rh, now))      # E104: close-based trigger + trigger-bar volume (record only)
+        out.update(range_high=round(rh, 2), range_low=round(rl, 2), range_pct=round(width, 3), would_enter=not reasons, reasons=reasons)
+        if short:
+            out.update(side="SHORT", limit_price=round(rl * (1 - buf / 100.0), 2), stop_price=round(rh, 2),
+                       stop_pct=round((rh - px) / px * 100.0, 3) if rh > px else None)
+            out.update(bar_fields(symbol, rl, now, side="SHORT"))    # E119: close BELOW the range low + trigger-bar volume (record only)
+        else:
+            out.update(limit_price=round(rh * (1 + buf / 100.0), 2), stop_price=round(rl, 2),
+                       stop_pct=round((px - rl) / px * 100.0, 3) if px > rl else None)
+            out.update(bar_fields(symbol, rh, now))      # E104: close-based trigger + trigger-bar volume (record only)
         return out
     except Exception as e:  # noqa: BLE001
         logger.debug("orb evaluate failed: %s", e)
         return None
 
 
-def attach(flow_json: Optional[str], symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional[datetime] = None) -> Optional[str]:
+def attach(flow_json: Optional[str], symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional[datetime] = None, side: str = "LONG") -> Optional[str]:
     """flow_json text with the ORB verdict merged under "orb"; the input unchanged when nothing was recorded. Never raises."""
     try:
         import json
-        v = evaluate(symbol, quote, ltp, now)
+        v = evaluate(symbol, quote, ltp, now, side)
         if v is None:
             return flow_json
         try:

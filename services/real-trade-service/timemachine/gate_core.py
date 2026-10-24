@@ -58,8 +58,10 @@ _auto: Dict[str, Any] = {"last_scan_key": None, "prefetch_day": None}
 _stats: Dict[str, int] = {}
 _threads: Dict[str, Any] = {"worker": None, "ticker": None, "stop": threading.Event()}
 _pool: Optional[ThreadPoolExecutor] = None
+_spent: Deque[Tuple[float, float]] = deque(maxlen=400)       # (monotonic, seconds an entry waited inline): the rolling-minute wait budget
+WINDOW_S = 60.0
 
-_STAT_KEYS = ("gate_checks", "rejects", "would_reject_log", "passes", "no_opinion", "cache_hits", "inline_runs", "inline_timeouts", "inline_errors",
+_STAT_KEYS = ("gate_checks", "rejects", "would_reject_log", "passes", "no_opinion", "cache_hits", "inline_runs", "inline_timeouts", "inline_errors", "inline_skipped",
               "warm_runs", "warm_errors", "noted", "auto_scans", "manual_scans", "prefetch_runs", "nudged_up", "nudged_down", "errors")
 
 
@@ -67,7 +69,7 @@ def reset() -> None:
     """Forget everything (tests, and a clean start). Does not stop running threads."""
     with _lock:
         _verdicts.clear(); _latest.clear(); _failures.clear(); _active.clear(); _inflight.clear(); _queued.clear()
-        _recent.clear(); _scans.clear()
+        _recent.clear(); _scans.clear(); _spent.clear()
         _auto.update(last_scan_key=None, prefetch_day=None)
         _stats.clear(); _stats.update({k: 0 for k in _STAT_KEYS})
         while True:
@@ -194,6 +196,20 @@ def _key(symbol: str, side: str, stop: float, target: float, slot: int, value: f
     return (symbol, side, round(float(stop), 1), round(float(target), 1), int(slot), str(_cfg("TIME_MACHINE_LOOKBACK", "1mo")), int(value // 5000))
 
 
+def _window_spent() -> float:
+    """Seconds entries have spent waiting inline for a verdict in the last minute."""
+    cut = time.monotonic() - WINDOW_S
+    with _lock:
+        return sum(s for t, s in _spent if t >= cut)
+
+
+def _window_open() -> bool:
+    """False once entries have waited TM_GATE_WINDOW_BUDGET_S in total during the last minute: further uncached checks are queued and given no opinion, so a slow
+    market-data can delay a whole cycle of candidates by at most this much, however many there are. 0 = no cap."""
+    cap = _num(_cfg("TM_GATE_WINDOW_BUDGET_S", 8.0), 8.0, 0.0, 120.0)
+    return cap <= 0 or _window_spent() < cap
+
+
 def _verdict_ttl() -> float:
     return _num(_cfg("TM_GATE_TTL_S", 300.0), 300.0, 30.0, 3600.0)
 
@@ -309,6 +325,10 @@ def evaluate(symbol: Any, side: Any, stop_pct: Any, target_pct: Any, price: Any 
             if fail and time.monotonic() - fail[0] < _num(_cfg("TM_GATE_FAIL_TTL_S", 120.0), 120.0, 10.0, 1800.0):
                 return _no_opinion(f"data unavailable ({fail[1]})")
             budget = _num(_cfg("TM_GATE_INLINE_BUDGET_S", 2.5), 2.5, 0.0, 15.0)
+            if allow_inline and budget > 0 and not _window_open():
+                _stat("inline_skipped")
+                _enqueue(sym, sd, stop, target, value, px, "gate-window", slot)
+                return _no_opinion("inline wait budget for this minute is used up (queued)")
             if not allow_inline or budget <= 0:
                 _enqueue(sym, sd, stop, target, value, px, "gate-miss", slot)
                 return _no_opinion("not computed yet (queued)")
@@ -317,18 +337,24 @@ def evaluate(symbol: Any, side: Any, stop_pct: Any, target_pct: Any, price: Any 
                 if fut is None:
                     fut = _executor().submit(_run_inline, key, sym, sd, stop, target, slot, value, px, fetch)
                     _inflight[key] = fut
+            t_wait = time.monotonic()
             try:
                 v = fut.result(timeout=budget)
                 source = "inline"
             except FutureTimeout:
+                with _lock:
+                    _spent.append((time.monotonic(), time.monotonic() - t_wait))
                 _stat("inline_timeouts")
                 return _no_opinion(f"still computing after {budget:g}s (finishes in the background)")
             except Exception as e:  # noqa: BLE001 - TimeMachineError / DataError / anything: remember, no opinion
                 code = getattr(e, "code", type(e).__name__)
                 with _lock:
                     _failures[key] = (time.monotonic(), str(code))
+                    _spent.append((time.monotonic(), time.monotonic() - t_wait))
                 _stat("inline_errors")
                 return _no_opinion(f"could not compute ({code})")
+            with _lock:
+                _spent.append((time.monotonic(), time.monotonic() - t_wait))
         would, reason = _decide(v)
         return {"opinion": "ok", "would_reject": would, "reason": reason, "tag": TAG, "v": v, "source": source, "no_data": None, "mode": m}
     except Exception as e:  # noqa: BLE001 - a gate bug must never stop an entry
@@ -669,7 +695,7 @@ def status() -> Dict[str, Any]:
             "timer": {"prefetch": str(_cfg("TM_AUTO_PREFETCH_IST", "09:05")), "first_scan": str(_cfg("TM_AUTO_FIRST_IST", "09:16")),
                       "last_scan": str(_cfg("TM_AUTO_LAST_IST", "14:30")), "every_min": int(_num(_cfg("TM_AUTO_INTERVAL_MIN", 15), 15, 5, 120)),
                       "threads_running": bool(_threads["worker"] is not None and _threads["worker"].is_alive())},
-            "settings": {"sims": int(_num(_cfg("TM_GATE_SIMS", 3000), 3000, 1000, 20000)), "inline_budget_s": _num(_cfg("TM_GATE_INLINE_BUDGET_S", 2.5), 2.5, 0.0, 15.0),
+            "settings": {"sims": int(_num(_cfg("TM_GATE_SIMS", 3000), 3000, 1000, 20000)), "inline_budget_s": _num(_cfg("TM_GATE_INLINE_BUDGET_S", 2.5), 2.5, 0.0, 15.0), "window_budget_s": _num(_cfg("TM_GATE_WINDOW_BUDGET_S", 8.0), 8.0, 0.0, 120.0), "window_spent_s": round(_window_spent(), 2),
                          "ttl_s": _verdict_ttl(), "pick_nudge_pts": _num(_cfg("TM_PICK_NUDGE_PTS", 6.0), 6.0, 0.0, 30.0)},
             "counters": st, "refusal_rate": round(st.get("rejects", 0) / checks, 3) if checks else None,
             "cached_verdicts": cached, "pending_jobs": pending, "active": active, "recent_scans": scans, "recent_checks": recent,

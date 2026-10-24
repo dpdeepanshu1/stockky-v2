@@ -641,6 +641,7 @@ if TM_GATE_BLOCK not in ("against", "against_or_near"):
     TM_GATE_BLOCK = "against"
 TM_GATE_SIMS = int(_tm_float("TM_GATE_SIMS", 3000, 1000, 20000))
 TM_GATE_INLINE_BUDGET_S = _tm_float("TM_GATE_INLINE_BUDGET_S", 2.5, 0.0, 15.0)
+TM_GATE_WINDOW_BUDGET_S = _tm_float("TM_GATE_WINDOW_BUDGET_S", 8.0, 0.0, 120.0)
 TM_GATE_TTL_S = _tm_float("TM_GATE_TTL_S", 300.0, 30.0, 3600.0)
 TM_GATE_FAIL_TTL_S = _tm_float("TM_GATE_FAIL_TTL_S", 120.0, 10.0, 1800.0)
 TM_PICK_NUDGE_PTS = _tm_float("TM_PICK_NUDGE_PTS", 6.0, 0.0, 30.0)

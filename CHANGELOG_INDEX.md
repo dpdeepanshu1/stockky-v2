@@ -1756,3 +1756,5 @@ Setup/deploy docs stay at repo root, not here: `README.md`,
 - 2026-10-24 E115: Time Machine wired into live picking (rank, gate, timed warm, calibration switches/job): CHANGES_2026-10-24_E115_time_machine_live_picking.md
 - 2026-10-24 E116: runner schedule picks up new default slots once (s_tm_open reaches existing schedule.json): CHANGES_2026-10-24_E116_schedule_new_default_slots.md
 - 2026-10-24 E117: two timing-sensitive group356 tests hardened (test-only): CHANGES_2026-10-24_E117_flaky_timing_tests.md
+- 2026-10-24 E118: Time Machine gate per-minute inline wait budget (TM_GATE_WINDOW_BUDGET_S, default 8 s): CHANGES_2026-10-24_E118_gate_window_budget.md
+- 2026-10-24 E119: ORB recorder mirrored for a live short (close below the range low, stop at the range high; record only): CHANGES_2026-10-24_E119_orb_short_mirror.md

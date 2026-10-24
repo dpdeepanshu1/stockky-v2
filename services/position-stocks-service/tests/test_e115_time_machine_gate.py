@@ -267,7 +267,7 @@ def test_real_trade_wiring_points_exist():
 def test_switches_are_on_both_calibration_pages_and_protected():
     import re
     runner = _read("services/calibration-runner-service/autocalib.py")
-    keys = ("TM_GATE_MODE", "TM_GATE_BLOCK", "TM_GATE_SIMS", "TM_GATE_INLINE_BUDGET_S", "TM_GATE_TTL_S", "TM_PICK_NUDGE_PTS", "TM_AUTO_ENABLED", "TM_AUTO_INTERVAL_MIN")
+    keys = ("TM_GATE_MODE", "TM_GATE_BLOCK", "TM_GATE_SIMS", "TM_GATE_INLINE_BUDGET_S", "TM_GATE_WINDOW_BUDGET_S", "TM_GATE_TTL_S", "TM_PICK_NUDGE_PTS", "TM_AUTO_ENABLED", "TM_AUTO_INTERVAL_MIN")
     for svc in ("position-stocks-service", "real-trade-service"):
         cat = _read(f"services/{svc}/control/catalog.py")
         for k in keys:
@@ -280,3 +280,35 @@ def test_runner_trigger_job_and_schedule():
     jobs = _read("services/calibration-runner-service/jobs.py")
     assert '_job("tm_gate_check"' in jobs and "s_tm_open" in jobs and '"time_machine_open"' in jobs
     assert "after_lock" in _read("services/calibration-runner-service/weather.py") and "time_machine_scan" in _read("services/calibration-runner-service/main.py")
+
+
+# ------------------------------------------------------------------ E118: the per-minute inline wait budget
+
+def test_window_budget_caps_the_total_wait_of_a_whole_cycle(monkeypatch):
+    monkeypatch.setattr(config, "TM_GATE_INLINE_BUDGET_S", 0.3)
+    monkeypatch.setattr(config, "TM_GATE_WINDOW_BUDGET_S", 0.5)
+    calls = []
+
+    def slow(sym, lb):
+        calls.append(sym)
+        time.sleep(0.6)
+        return RISING
+    t = time.monotonic()
+    results = [g.evaluate(f"S{i}", "SHORT", 1.0, 2.0, 100.0, now=MON_10, fetch=slow) for i in range(8)]
+    took = time.monotonic() - t
+    assert all(r["opinion"] == "no_opinion" for r in results)
+    assert took < 8 * 0.3 * 0.7, f"eight candidates waited {took:.2f}s: the cap did not hold"
+    assert g.status()["counters"]["inline_skipped"] >= 5
+    assert any("used up" in (r["no_data"] or "") for r in results)
+
+
+def test_window_budget_zero_means_no_cap_and_cache_hits_never_spend_it(monkeypatch):
+    monkeypatch.setattr(config, "TM_GATE_WINDOW_BUDGET_S", 0.0)
+    for i in range(3):
+        assert g.evaluate(f"Z{i}", "SHORT", 1.0, 2.0, 100.0, now=MON_10, fetch=fetch_of(RISING))["opinion"] == "ok"
+    assert g.status()["counters"]["inline_skipped"] == 0
+    monkeypatch.setattr(config, "TM_GATE_WINDOW_BUDGET_S", 0.01)
+    spent = g._window_spent()
+    for _ in range(3):
+        assert g.evaluate("Z0", "SHORT", 1.0, 2.0, 100.0, now=MON_10, fetch=fetch_of(RISING))["source"] == "cache"
+    assert g._window_spent() == spent

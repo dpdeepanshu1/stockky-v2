@@ -49,7 +49,7 @@ def _orb(row) -> dict:
 
 
 def orb_trigger_bucket(orb: dict) -> str:
-    """E104 field close_trigger: did the first completed bar after the range close above the range high? 'no_orb_record' when the recorder wrote nothing
+    """E104 field close_trigger: did the first completed bar after the range close above the range high (E119: for a short, BELOW the range low)? 'no_orb_record' when the recorder wrote nothing
     or had no bars (the field is absent), so old trades are never counted as 'no trigger'."""
     v = orb.get("close_trigger") if orb else None
     if v is None:

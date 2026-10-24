@@ -268,6 +268,11 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             dhan_super_order_id=None if plain else super_id, dhan_entry_order_id=(plain or {}).get("entry_order_id") or super_id,
             plain_stop_order_id=(plain or {}).get("stop_order_id"), capital_risked=position_value,
             is_first_live_order=False, opened_at=datetime.now(timezone.utc))
+        try:
+            from orders import depth_gate as _dg, orb_shadow as _orb
+            pos.flow_json = _orb.attach(pos.flow_json, sym, _dg._fresh_quote(sym), live, side="SHORT")   # E119: mirrored opening-range record (close below the range low), record only
+        except Exception:  # noqa: BLE001
+            logger.debug("short live: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
         pos.flow_json = tm_gate.stamp(pos.flow_json, plan.get("tm_ev"))      # E115: the Time Machine verdict, record only, never raises
         db.add(pos)
         db.commit()

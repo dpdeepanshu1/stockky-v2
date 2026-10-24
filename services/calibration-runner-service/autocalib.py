@@ -99,6 +99,7 @@ PROTECTED: Dict[str, str] = {
     "TM_GATE_BLOCK": "live entry gate (E115, Time Machine): decided by you, not by a report",
     "TM_GATE_SIMS": "Time Machine live gate tuning (E115): a calibrator never changes it",
     "TM_GATE_INLINE_BUDGET_S": "Time Machine live gate tuning (E115): a calibrator never changes it",
+    "TM_GATE_WINDOW_BUDGET_S": "Time Machine live gate tuning (E118): a calibrator never changes it",
     "TM_GATE_TTL_S": "Time Machine live gate tuning (E115): a calibrator never changes it",
     "TM_PICK_NUDGE_PTS": "Time Machine ranking nudge (E115): decided by you, not by a report",
     "TM_AUTO_ENABLED": "Time Machine timer (E115): a calibrator never changes it",

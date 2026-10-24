@@ -1330,6 +1330,7 @@ if TM_GATE_BLOCK not in ("against", "against_or_near"):
     TM_GATE_BLOCK = "against"
 TM_GATE_SIMS = min(20000, max(1000, _get_int("TM_GATE_SIMS", 3000)))          # made-up sessions per gate verdict (3,000 takes about a quarter of a second)
 TM_GATE_INLINE_BUDGET_S = min(15.0, max(0.0, _get_float("TM_GATE_INLINE_BUDGET_S", 2.5)))   # an uncached entry waits at most this long; 0 = cache only
+TM_GATE_WINDOW_BUDGET_S = min(120.0, max(0.0, _get_float("TM_GATE_WINDOW_BUDGET_S", 8.0)))   # total seconds entries may wait inline in any one minute (0 = no cap); beyond it checks are queued, no opinion
 TM_GATE_TTL_S = min(3600.0, max(30.0, _get_float("TM_GATE_TTL_S", 300.0)))   # how long a verdict is reused
 TM_GATE_FAIL_TTL_S = min(1800.0, max(10.0, _get_float("TM_GATE_FAIL_TTL_S", 120.0)))   # a failed fetch is not retried for this long
 TM_PICK_NUDGE_PTS = min(30.0, max(0.0, _get_float("TM_PICK_NUDGE_PTS", 6.0)))   # ranking points (0 = no ranking effect)

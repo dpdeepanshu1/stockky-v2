@@ -826,6 +826,9 @@ class Runner:
                 self._copy_artifact(path, ctx)
         if code in expect:
             return "success", ""
+        if code == 0 and st.get("optional"):
+            out.line("skipped: not running (optional service, its docker profile is off). Start it only if you use it.")
+            return "success", "skipped (not running, optional)"
         if code == 0:
             return "failed", f"no answer: {text[:160]}"
         return "failed", f"HTTP {code}"

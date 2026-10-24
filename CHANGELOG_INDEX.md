@@ -1762,3 +1762,4 @@ Setup/deploy docs stay at repo root, not here: `README.md`,
 - 2026-10-24 E121: VM test script installs each service's requirements (collection errors fixed); runner helper scripts/vm_runjob.sh: CHANGES_2026-10-24_E121_vm_test_env_and_runner_helper.md
 - 2026-10-24 E122: Python 3.14 test fixes (asyncio.run in test_angelone_session) and tolerant requirements install in the VM test script: CHANGES_2026-10-24_E122_py314_test_fixes.md
 - 2026-10-24 E122: UI v6 finance + AI redesign of Real Trade / Position Stocks / Real Money Calibration, new Real Trade Trade History tab: CHANGES_2026-10-24_E122_ui_v6_finance_ai_redesign.md
+- 2026-10-24 E125: board shadow-report reads columns only, optional services (kronos/timesfm) skipped in services_health; also E123/E124 build fixes: CHANGES_2026-10-24_E125_board_report_and_optional_health.md

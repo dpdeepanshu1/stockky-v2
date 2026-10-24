@@ -69,10 +69,10 @@ def entry_window_verdict(buckets: Dict[str, dict], cutoff: str = "10:30", min_tr
             "left_out_straddling": ambiguous, "min_trades": min_trades, "verdict": verdict}
 
 
-def _get(url: str, headers: Dict[str, str]) -> Optional[dict]:
+def _get(url: str, headers: Dict[str, str], timeout: float = 20) -> Optional[dict]:
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - operator-supplied URL, read-only GET
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - operator-supplied URL, read-only GET
             return json.loads(r.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001
         print(f"  could not read {url}: {type(e).__name__}: {e}")
@@ -98,7 +98,7 @@ def main(argv=None) -> int:
         rep = _get(f"{base}/trades/report?days={a.days}", headers)
         if rep:
             print("  entry window:", json.dumps(entry_window_verdict(rep.get("by_entry_hour_ist") or {}, a.cutoff, a.min_trades)))
-        sh = _get(f"{base}/board/shadow-report?days={max(a.days, 30)}", headers)
+        sh = _get(f"{base}/board/shadow-report?days={max(a.days, 30)}", headers, timeout=90)   # E125: the report reads up to 60,000 rows; 20 s timed out
         if sh:
             cg = (sh.get("rules") or {}).get("chase_guard") or {}
             print(f"  board chase guard: {cg.get('verdict')}  (gate_mode={sh.get('gate_mode')}, effective={sh.get('effective_gate_mode')})")

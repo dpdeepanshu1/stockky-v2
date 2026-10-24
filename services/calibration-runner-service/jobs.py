@@ -77,8 +77,10 @@ def b_services_health(ctx, p):
           ("decision/training", ctx["decision"] + "/health"), ("real-trade", ctx["rt"] + "/health"), ("position-stocks", ctx["ps"] + "/health"),
           ("notification", ctx["notify"] + "/health"), ("kronos", ctx["kronos"] + "/health"), ("timesfm", ctx["tsfm"] + "/health")]
     out = [_http(f"health: {n}", "GET", u, expect=(200,)) for n, u in hs]
-    for s in out:
+    for s, (n, _u) in zip(out, hs):
         s["soft"] = True     # a service that is switched off (kronos / timesfm profile) is a note, not a failed run
+        if n in ("kronos", "timesfm"):
+            s["optional"] = True     # E125: no answer at all (name does not resolve) = "skipped, profile off", not a red "failed" step
     return out
 
 

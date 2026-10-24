@@ -27,7 +27,7 @@ COPY shared /app/shared
 COPY services/real-trade-service/config.py /app/services/real-trade-service/config.py
 COPY services/real-trade-service/entry_engine/__init__.py services/real-trade-service/entry_engine/kronos_gate.py /app/services/real-trade-service/entry_engine/
 
-RUN python -m compileall -q -x '(^|/)(tests?|\.venv|node_modules)(/|$)' . /app/scripts /app/shared \
+RUN python -m compileall -q -x '(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)' . /app/scripts /app/shared \
     && mkdir -p /data/runner
 
 ENV PORT=8012 RUNNER_DATA_DIR=/data/runner RUNNER_SCRIPTS_DIR=/app/scripts PYTHONUNBUFFERED=1

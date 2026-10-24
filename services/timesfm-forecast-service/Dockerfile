@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && pip install --no-cache-dir "$TSFM_PIP"; \
        elif [ "$TSFM_INSTALL" = "bigquery" ]; then pip install --no-cache-dir google-cloud-bigquery; fi
 COPY . .
-RUN python -m compileall -q -x '(^|/)(tests?|\.venv)(/|$)' .
+RUN python -m compileall -q -x '(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)' .
 ENV PORT=8011 HF_HOME=/app/.hf TSFM_CACHE_PATH=/app/cache/tsfm_cache.json
 EXPOSE 8011
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"]

@@ -7,6 +7,7 @@
 // as positions close.
 
 import { useEffect, useState, useCallback } from "react";
+import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
 import { getSafePrice } from "../priceDisplay";
 import StockChart from "./StockChart";
@@ -374,6 +375,8 @@ export default function Trades() {
         </div>
       )}
 
+      {/* design v5: this page is paper only; say so in words */}
+      <MoneyModeBanner mode="PAPER" chips={dbStatus ? [{ label: dbStatus.db_connected === false ? "Database offline" : "Trades are being saved", state: dbStatus.db_connected === false ? "bad" : "ok" }] : []} />
       <DbStatusStrip status={dbStatus} />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>

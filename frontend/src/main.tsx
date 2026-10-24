@@ -6,6 +6,7 @@ import { installGatewayAuth } from "./gatewayAuth";
 import { getApiUrl } from "./api";
 import "./design-v3.css"; // fresh UI layer (2026-10-16) — loads last so it wins; delete this line to roll back
 import "./design-v4.css"; // group 460: fresh-green tokens + motion toolkit (loads after v3); delete this line to roll back
+import "./design-v5.css"; // design v5: calmer finance look, AI orb + AI Insights deck (loads after v4; delete this line to roll back)
 import "./auth-login.css"; // group 460: login page, re-login overlay, session chip
 import "./light-contrast.css"; // group 464: light-theme button/colour contrast (delete this line to roll back)
 import "./alignment.css"; // group 465: layout alignment fixes (loads last; delete this line to roll back)

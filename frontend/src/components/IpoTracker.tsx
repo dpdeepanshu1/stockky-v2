@@ -21,6 +21,7 @@ import { api, type IpoAnalysis } from "../api"; // getApiUrl() based — never r
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import IpoFeedHealth from "./IpoFeedHealth";
+import IpoLifecycle from "./IpoLifecycle";   // design v5
 
 type IpoProgress = {
   status?: string;
@@ -435,6 +436,8 @@ export default function IpoTracker({
 
   return (
     <div className="space-y-4">
+      {/* design v5: lifecycle overview + live AI scan status (reads rows and progress already held here) */}
+      <IpoLifecycle list={ipoList} scanning={ipoScanning} progress={ipoProgress} onPick={setExpandedSymbol} />
       <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
           <div>

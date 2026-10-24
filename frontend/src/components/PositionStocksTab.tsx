@@ -5,6 +5,7 @@
 // history chart labels. All data comes from position-stocks-service only.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
@@ -810,6 +811,12 @@ export default function PositionStocksTab() {
           {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
         </span>
       </div>
+
+      {/* design v5: money mode + safety chips from state this page already holds */}
+      <MoneyModeBanner mode="REAL" detail="Live Dhan scalp orders. Orders here use real money." chips={[
+        ...(status != null ? [{ label: status?.risk_confirmed ? "Risk setting confirmed" : "Risk setting not confirmed", state: (status?.risk_confirmed ? "ok" : "warn") as "ok" | "warn" }] : []),
+        ...(status != null || ledger != null ? [{ label: killSwitchTripped ? "Loss kill switch TRIPPED" : "Loss kill switch ready", state: (killSwitchTripped ? "bad" : "ok") as "ok" | "bad" }] : []),
+      ]} />
 
       {error && (
         <div className="rounded-xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-xs text-signal-sell">

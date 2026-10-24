@@ -1758,3 +1758,5 @@ Setup/deploy docs stay at repo root, not here: `README.md`,
 - 2026-10-24 E117: two timing-sensitive group356 tests hardened (test-only): CHANGES_2026-10-24_E117_flaky_timing_tests.md
 - 2026-10-24 E118: Time Machine gate per-minute inline wait budget (TM_GATE_WINDOW_BUDGET_S, default 8 s): CHANGES_2026-10-24_E118_gate_window_budget.md
 - 2026-10-24 E119: ORB recorder mirrored for a live short (close below the range low, stop at the range high; record only): CHANGES_2026-10-24_E119_orb_short_mirror.md
+- 2026-10-24 E120: UI v5 (AI insights deck, design-v5): CHANGES_2026-10-24_E120_ui_v5_ai_insights.md
+- 2026-10-24 E121: VM test script installs each service's requirements (collection errors fixed); runner helper scripts/vm_runjob.sh: CHANGES_2026-10-24_E121_vm_test_env_and_runner_helper.md

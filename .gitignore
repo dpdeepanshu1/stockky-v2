@@ -26,3 +26,4 @@ htmlcov/
 run_output*/
 *_run_output*
 *.run.log
+.venv-test/

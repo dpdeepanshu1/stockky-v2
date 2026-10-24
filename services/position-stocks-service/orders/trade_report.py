@@ -12,6 +12,7 @@ although orders/trade_stats counts it as a win on gross.
 """
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from typing import Iterable, Optional
 
@@ -34,6 +35,37 @@ def slippage_pct(row) -> Optional[float]:
 def _stamp(row, key: str) -> Optional[str]:
     v = getattr(row, key, None)
     return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def _orb(row) -> dict:
+    """flow_json["orb"] of the position, or {} (no record, bad JSON, wrong shape). Never raises."""
+    try:
+        raw = getattr(row, "flow_json", None)
+        d = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+        o = d.get("orb") if isinstance(d, dict) else None
+        return o if isinstance(o, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def orb_trigger_bucket(orb: dict) -> str:
+    """E104 field close_trigger: did the first completed bar after the range close above the range high? 'no_orb_record' when the recorder wrote nothing
+    or had no bars (the field is absent), so old trades are never counted as 'no trigger'."""
+    v = orb.get("close_trigger") if orb else None
+    if v is None:
+        return "no_orb_record"
+    return "close_trigger" if v else "no_close_trigger"
+
+
+def orb_volume_bucket(orb: dict) -> str:
+    """E104 field volume_ratio (trigger-bar volume / average opening-range bar volume), in buckets; 'none' when it was not recorded."""
+    try:
+        v = float(orb.get("volume_ratio")) if orb and orb.get("volume_ratio") is not None else None
+    except (TypeError, ValueError):
+        v = None
+    if v is None or v != v:
+        return "none"
+    return "<1.0" if v < 1.0 else "1.0-1.5" if v < 1.5 else "1.5-2.5" if v < 2.5 else ">=2.5"
 
 
 def trade_record(row) -> Optional[dict]:
@@ -62,6 +94,9 @@ def trade_record(row) -> Optional[dict]:
         "slippage_pct": slippage_pct(row),
         "market_state": _stamp(row, "market_state"),          # P5: Market Weather stamp, None when none was active
         "profile_version": _stamp(row, "profile_version"),
+        "side": "SHORT" if str(getattr(row, "side", "") or "").strip().upper() == "SHORT" else "LONG",   # legacy rows (no side) are LONG
+        "orb_trigger": orb_trigger_bucket(_orb(row)),
+        "orb_volume": orb_volume_bucket(_orb(row)),
     }
 
 
@@ -88,7 +123,7 @@ def report(rows: Iterable, *, min_trades_note: int = 5) -> dict:
     recs = [r for r in (trade_record(x) for x in rows) if r is not None]
     out: dict = {"trades": len(recs), "overall": _agg(recs) if recs else None,
                  "by_exit_reason": {}, "by_exit_hour_ist": {}, "by_entry_hour_ist": {}, "by_tier": {},
-                 "by_market_state": {}, "by_profile_version": {},
+                 "by_market_state": {}, "by_profile_version": {}, "by_side": {}, "by_orb_close_trigger": {}, "by_orb_volume_ratio": {},
                  "note": (f"win and loss are judged on NET P&L after estimated charges; groups with fewer than "
                           f"{min_trades_note} trades are noise; avg_slippage_pct is only over trades that recorded a "
                           "signal price")}
@@ -96,7 +131,8 @@ def report(rows: Iterable, *, min_trades_note: int = 5) -> dict:
         return out
     groups = {"by_exit_reason": defaultdict(list), "by_exit_hour_ist": defaultdict(list),
               "by_entry_hour_ist": defaultdict(list), "by_tier": defaultdict(list),
-              "by_market_state": defaultdict(list), "by_profile_version": defaultdict(list)}
+              "by_market_state": defaultdict(list), "by_profile_version": defaultdict(list),
+              "by_side": defaultdict(list), "by_orb_close_trigger": defaultdict(list), "by_orb_volume_ratio": defaultdict(list)}
     for r in recs:
         groups["by_exit_reason"][r["exit_reason"]].append(r)
         groups["by_exit_hour_ist"][r["exit_hour"] or "?"].append(r)
@@ -104,6 +140,9 @@ def report(rows: Iterable, *, min_trades_note: int = 5) -> dict:
         groups["by_tier"][r["tier"]].append(r)
         groups["by_market_state"][r["market_state"] or "none"].append(r)
         groups["by_profile_version"][r["profile_version"] or "none"].append(r)
+        groups["by_side"][r["side"]].append(r)
+        groups["by_orb_close_trigger"][r["orb_trigger"]].append(r)
+        groups["by_orb_volume_ratio"][r["orb_volume"]].append(r)
     for name, g in groups.items():
         out[name] = {k: _agg(v) for k, v in sorted(g.items())}
     return out

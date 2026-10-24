@@ -107,7 +107,7 @@ class ScalpPosition(Base):
     # EXIT_LEGS_REJECTED (super-order exit legs were rejected by Dhan —
     # circuit-limit / surveillance; awaiting EOD squareoff plain MARKET SELL),
     # CLOSE_ALL (group 466: the Close-all-and-disarm button, a plain MARKET SELL resolved by reconcile like EOD_SQUAREOFF),
-    # STOP_BREACH_EXIT (group 340: price sat under the stored stop, broker leg did not fire), STAGNATION_EXIT (this session: promoted from a MANUAL_EXIT-labeled
+    # TARGET_EXIT (E114: a plain-order short reached its target and was covered by hand), STOP_BREACH_EXIT (group 340: price sat under the stored stop, broker leg did not fire), STAGNATION_EXIT (this session: promoted from a MANUAL_EXIT-labeled
     # cosmetic reason to its own real terminal status — see
     # orders/eod_squareoff.py::close_position_now/run_stagnation_exit and
     # orders/reconcile.py's _FLAT_SELL_PENDING_STATUSES)
@@ -122,6 +122,7 @@ class ScalpPosition(Base):
     dhan_super_order_id = Column(String(64), nullable=True)
     dhan_entry_order_id = Column(String(64), nullable=True)
     dhan_exit_order_id = Column(String(64), nullable=True)
+    plain_stop_order_id = Column(String(64), nullable=True)      # E114: the BUY stop-loss-market order that protects a plain-order short (NULL for every Super Order position)
 
     # this session ("breakeven stop is dead code — fix it"): orders/
     # adaptive.py::compute() has ALWAYS computed breakeven_trigger_pct (the

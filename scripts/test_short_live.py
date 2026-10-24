@@ -54,6 +54,8 @@ calls = {"released": [], "lock_rel": [], "orders": [], "reserved": []}
 def reset(mode="live", cap=1, qty=200):
     calls.update(released=[], lock_rel=[], orders=[], reserved=[]); NOTES.clear()
     config.SHORT_MODE = mode; config.SHORT_LIVE_QTY_CAP = cap; config.USE_SUPER_ORDER = True
+    config.SHORT_PLAIN_FALLBACK = False; config.SHORT_PLAIN_FILL_WAIT_S = 2.0; config.SHORT_PLAIN_STOP_GRACE_S = 6.0   # E114: the older cases keep their meaning; section 11 switches the fallback on
+    import orders.plain_short as _ps; _ps.reset_state()
     config.DAILY_ORDER_BUDGET = 50; config.MAX_CONCURRENT_SCALP_POSITIONS = 5; config.SHORT_MAX_POSITIONS = 2
     config.SCALP_EXCHANGE_SEGMENT = "NSE_EQ"; config.ENTRY_MARGIN_PAUSE_MINUTES = 5; config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = 5
     af.active = lambda: False; ec.entry_reason = lambda db: None; op.pause_reason = lambda db: None
@@ -135,7 +137,7 @@ dc.is_security_intraday_restricted_error = lambda m: False; dc.is_circuit_limit_
 import orders.entry_pause as epz; epz.cooldown_symbol = lambda *a: None; epz.pause_all = lambda *a: None
 reset(); dc.place_super_order = lambda db, **k: (calls["orders"].append(k) or (_ for _ in ()).throw(RuntimeError("SELL not allowed")))
 db = DB(gate()); r = sl.attempt_short_live(db, cand)
-check("SELL refused: one attempt only (no plain-order fallback), nothing saved, capital + lock released", r is None and len(calls["orders"]) == 1 and not db.added and undo_ok() and calls["released"] == [19900.0, 100.0])
+check("SELL refused with SHORT_PLAIN_FALLBACK off: one attempt only, nothing saved, capital + lock released", r is None and len(calls["orders"]) == 1 and not db.added and undo_ok() and calls["released"] == [19900.0, 100.0])
 check("SELL refused: reason logged and alert sent", any(c[0] == "SHORT_ORDER_FAILED" for c in REF) and any("refused" in n for n in NOTES))
 # 7 ambiguous error recovered
 reset(); dc.is_ambiguous_placement_error = lambda e: True
@@ -146,6 +148,71 @@ r = sl.attempt_short_live(DB(gate()), cand); check("ambiguous SELL error: recove
 reset(); ledger.reserve_capital = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")); r = sl.attempt_short_live(DB(gate()), cand); check("crash before order: lock released, never raises", r is None and undo_ok() and not calls["orders"])
 # 9 cap reads: junk counts as 1
 reset(); config.SHORT_LIVE_QTY_CAP = "junk"; check("junk cap reads as 1", sl.qty_cap() == 1)
+# 11 E114: the plain-order short (orders/plain_short.py) as short_live drives it. Fake broker: orders recorded, order-book rows and failures set per case.
+import orders.plain_short as ps
+ps.open_plain_short.__kwdefaults__["sleep"] = lambda s_: None
+dc.round_stop_to_tick = lambda p: round(round(p / 0.05) * 0.05, 2); dc.round_to_tick = dc.round_stop_to_tick
+dc.is_security_intraday_restricted_error = lambda m: "not allowed to be traded in intraday" in (m or "").lower()
+dc.is_circuit_limit_error = lambda m: "circuit" in (m or "").lower()
+dc.is_intraday_cutoff_error = lambda m: "cannot be placed at this time" in (m or "").lower()
+dc.is_insufficient_funds_error = lambda m: "insufficient funds" in (m or "").lower()
+BK = {}
+def fb(fallback=True, use_super=True, super_error="Super order not supported", super_ambiguous=False, sell_rows=None, stop_error=None, cover_error=None, unreadable=False, sell_error=None):
+    reset(); config.SHORT_PLAIN_FALLBACK = fallback; config.USE_SUPER_ORDER = use_super; ps.reset_state()
+    BK.clear(); BK.update(orders=[], stops=[], cancelled=[], supers=[],
+                          rows={"E1": {"orderId": "E1", "orderStatus": "TRADED", "filledQty": 1, "averageTradedPrice": 99.9}} if sell_rows is None else sell_rows)
+    def place_super(db, **k):
+        BK["supers"].append(k); raise RuntimeError(super_error)
+    def place_order(db, **k):
+        BK["orders"].append(k)
+        if k["transaction_type"] == "SELL":
+            if sell_error: raise sell_error
+            return {"orderId": "E1"}
+        if cover_error: raise cover_error
+        return {"orderId": "C1"}
+    def get_row(db, oid):
+        if unreadable: raise RuntimeError("book down")
+        return BK["rows"].get(oid)
+    def stop(db, **k):
+        BK["stops"].append(k)
+        if stop_error: raise stop_error
+        return {"orderId": "S1"}
+    dc.place_super_order, dc.place_order, dc.get_order_row, dc.place_intraday_buy_stop = place_super, place_order, get_row, stop
+    dc.cancel_cnc_stop_loss_order = lambda db, order_id: BK["cancelled"].append(order_id)
+    dc.is_ambiguous_placement_error = lambda e: bool(super_ambiguous) or isinstance(e, TimeoutError)
+    dc.find_recent_buy_order = lambda db, sid, qty, **k: None
+fb(); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: Super Order refused -> a plain SELL then a BUY broker stop at the stop price", r is not None and len(BK["supers"]) == 1 and BK["orders"][0]["transaction_type"] == "SELL" and BK["orders"][0]["order_type"] == "MARKET" and BK["orders"][0]["product_type"] == "INTRADAY" and len(BK["stops"]) == 1 and abs(BK["stops"][0]["trigger_price"] - 100.9) < 0.06)
+check("plain: the position row is SHORT/OPEN with NO super order id, the entry order and the stop order", r.side == "SHORT" and r.status == "OPEN" and r.dhan_super_order_id is None and r.dhan_entry_order_id == "E1" and r.plain_stop_order_id == "S1" and r.quantity == 1)
+check("plain: the row carries the real fill (99.90) and the stop/target re-anchored on it", abs(r.entry_price - 99.9) < 1e-9 and abs(r.stop_price - 100.9) < 0.06 and r.target_price < 99.9 < r.stop_price)
+check("plain: order budget counted once, symbol lock kept, telegram says plain order", db.gate.orders_placed_today == 1 and not calls["lock_rel"] and any("Plain order" in n for n in NOTES))
+fb(fallback=False); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: switch off -> a refused Super Order means no short and no plain order", r is None and not BK["orders"] and undo_ok())
+for msg in ("not allowed to be traded in intraday", "Rate Not Within circuit limit", "insufficient funds"):
+    fb(super_error=msg); r = sl.attempt_short_live(DB(gate()), cand)
+    check("plain: '%s' never falls back" % msg, r is None and not BK["orders"] and undo_ok())
+fb(super_error="timeout", super_ambiguous=True); r = sl.attempt_short_live(DB(gate()), cand)
+check("plain: an ambiguous Super Order error never falls back (it may exist)", r is None and not BK["orders"])
+fb(use_super=False); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: USE_SUPER_ORDER off + fallback on -> straight to the plain short, no Super Order call", r is not None and not BK["supers"] and r.dhan_super_order_id is None and r.plain_stop_order_id == "S1")
+fb(use_super=False, fallback=False); r = sl.attempt_short_live(DB(gate()), cand)
+check("plain: USE_SUPER_ORDER off + fallback off -> refused by the live guard, nothing sent", r is None and not BK["orders"] and any(c[0] == "SHORT_NEEDS_SUPER_ORDER" for c in REF))
+fb(stop_error=RuntimeError("trigger rejected")); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: stop refused -> the short is covered at once, no position row, capital + lock released", r is None and not db.added and [o["transaction_type"] for o in BK["orders"]] == ["SELL", "BUY"] and undo_ok() and calls["released"] == [19900.0, 100.0])
+check("plain: ... refusal logged as the stop-not-placed code and the day breaker is tripped", any(c[0] == "SHORT_PLAIN_STOP_FAILED" for c in REF) and ps.breaker_tripped())
+dc.place_super_order = lambda db, **k: (_ for _ in ()).throw(RuntimeError("Super order not supported")); calls["orders"].clear(); BK["orders"].clear(); r = sl.attempt_short_live(DB(gate()), cand)
+check("plain: after a stop failure no further plain short is tried today (a refused Super Order stays refused)", r is None and not BK["orders"])
+config.USE_SUPER_ORDER = False; r = sl.attempt_short_live(DB(gate()), cand); check("plain: ... and with Super Orders off the live guard refuses too", r is None and not BK["orders"]); config.USE_SUPER_ORDER = True
+fb(stop_error=RuntimeError("x"), cover_error=RuntimeError("down")); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: stop AND cover fail -> the short is saved WITHOUT a stop id (the guard covers it), capital + lock kept", r is not None and r.plain_stop_order_id is None and r.dhan_super_order_id is None and not calls["lock_rel"])
+fb(sell_error=RuntimeError("RMS: margin")); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: the plain SELL itself refused -> classified like any refusal, nothing saved, capital + lock released", r is None and not db.added and not BK["stops"] and undo_ok() and any(c[0] == "SHORT_ORDER_FAILED" for c in REF))
+fb(unreadable=True); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("plain: SELL state unknown -> NO stop, NO BUY, nothing saved, SELL on the watch list", r is None and not db.added and not BK["stops"] and len(BK["orders"]) == 1 and ps.stats()["orphans_watched"] == 1)
+check("plain: ... and the capital + symbol lock stay HELD for the watch (released only when it resolves)", not calls["lock_rel"] and calls["released"] == [19900.0] and any(c[0] == "SHORT_PLAIN_UNKNOWN" for c in REF))
+fb(sell_rows={"E1": {"orderId": "E1", "orderStatus": "PART_TRADED", "filledQty": 1, "averageTradedPrice": 99.9}}); config.SHORT_LIVE_QTY_CAP = 3
+r = sl.attempt_short_live(DB(gate()), cand)
+check("plain: part fill (1 of 3) -> the row and the stop cover 1 share, capital reduced to 1 share", r is not None and r.quantity == 1 and BK["stops"][0]["quantity"] == 1 and abs(r.capital_risked - 99.9) < 0.2)
 # 10 step 12: stop width by Market Weather state
 for st, want in (("stressed", 0.8), ("panic", 0.6), ("STRESSED", 0.8), ("normal", 1.0), ("calm", 1.0), ("choppy", 1.0), (None, 1.0), ("junk", 1.0)):
     config.SHORT_STOP_MULT_STRESSED, config.SHORT_STOP_MULT_PANIC = 0.8, 0.6

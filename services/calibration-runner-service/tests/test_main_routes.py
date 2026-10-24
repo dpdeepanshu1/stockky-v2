@@ -42,7 +42,7 @@ def test_health_is_open_and_everything_else_needs_login(client):
 
 def test_catalog_summary_and_session(client):
     c = client.get("/catalog", headers=H()).json()
-    assert len(c["jobs"]) >= 30 and len(c["packs"]) == 5 and "builder" not in c["jobs"][0]
+    assert len(c["jobs"]) >= 30 and len(c["packs"]) == 6 and "builder" not in c["jobs"][0]
     assert client.get("/auth/session", headers=H()).json()["user"] == "tester"
     assert "jobs" in client.get("/summary", headers=H()).json()
 

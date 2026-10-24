@@ -146,3 +146,33 @@ export function controlLine(doc: Pick<TmRunDoc, "control" | "simulation" | "para
   if (mine <= 0 && other > 0.05) return `The ${side} mirror on the same made-up sessions earns ${rText(other)}: a drifting window, not proof that this side is bad.`;
   return `The ${side} mirror on the same made-up sessions: ${rText(other)} (this side ${rText(mine)}).`;
 }
+
+
+// E115: the live picking gate card (GET /time-machine/gate). Pure text helpers, same style as the rest of this file.
+export interface TmGateDoc {
+  service?: string; mode: string; auto_enabled: boolean; block?: string[];
+  timer: { prefetch: string; first_scan: string; last_scan: string; every_min: number; threads_running: boolean };
+  counters: Record<string, number>; refusal_rate: number | null; cached_verdicts: number; pending_jobs: number;
+  recent_checks: { at: string; symbol: string; side: string; code: string | null; would_reject: boolean; enforced: boolean; no_data: string | null }[];
+  recent_scans: { at: string; reason: string; targets: number; queued: number; ran: number }[];
+}
+
+export function gateModeView(mode: string | undefined): { tone: "good" | "bad" | "warn" | "mute"; label: string } {
+  if (mode === "live") return { tone: "good", label: "LIVE: a refusal blocks the entry" };
+  if (mode === "log") return { tone: "warn", label: "LOG: records, never blocks" };
+  return { tone: "mute", label: "OFF" };
+}
+
+export function gateTimerLine(d: TmGateDoc | null | undefined): string {
+  if (!d) return "-";
+  const t = d.timer;
+  if (!d.auto_enabled) return "Timer off: verdicts are computed only when an entry or a trigger asks.";
+  return `Timer: data pre-fetch ${t.prefetch}, first scan ${t.first_scan}, then every ${t.every_min} min to ${t.last_scan} IST${t.threads_running ? "" : " (threads not running)"}.`;
+}
+
+export function gateCountsLine(d: TmGateDoc | null | undefined): string {
+  if (!d) return "-";
+  const c = d.counters || {};
+  const rate = typeof d.refusal_rate === "number" ? `${(d.refusal_rate * 100).toFixed(0)}%` : "-";
+  return `${c.gate_checks ?? 0} checks, ${c.rejects ?? 0} refused (${rate}), ${c.passes ?? 0} passed, ${c.no_opinion ?? 0} no opinion, ${c.would_reject_log ?? 0} would-refuse in log mode; ${d.cached_verdicts} verdicts cached.`;
+}

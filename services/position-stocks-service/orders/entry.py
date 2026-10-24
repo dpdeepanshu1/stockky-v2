@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, trade_odds, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -362,7 +362,7 @@ _skip_state = _threading.local()
 _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "PENNY_STOCK", "RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "ENTRY_REJECTED_TODAY", "REENTRY_", "ALREADY_OPEN_HERE",
     "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
-    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_",
+    "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_", "TIME_MACHINE",
 )
 
 
@@ -646,6 +646,15 @@ def attempt_entry(
         _flow_snap = trade_odds.attach(_flow_snap, candidate.symbol, "LONG", levels.stop_pct, levels.target_pct)
     except Exception:  # noqa: BLE001
         logger.debug("entry: trade_odds.attach failed (record only, entry unaffected)", exc_info=True)
+
+    # E115: Time Machine gate (orders/tm_gate.py). Replays THIS trade's own stop % / target % at this time of day on the stock's recent 5-minute sessions and on
+    # made-up sessions; AGAINST (both negative after charges and slippage) refuses the entry. It can only say NO; no data / slow data = no opinion and the
+    # entry goes on. TM_GATE_MODE live | log | off. The verdict is stamped into flow_json["tm"] whatever it was. Never raises.
+    _tm_reason, _flow_snap = tm_gate.entry_check(candidate.symbol, "LONG", levels.stop_pct, levels.target_pct, candidate.current_ltp, _flow_snap)
+    if _tm_reason:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _tm_reason, quality=quality)
+        return None
 
     # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.

@@ -308,6 +308,17 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
             raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) fully sold by its overnight stop during cancel")
         overnight_stop.assign_stop_order(pos, None)  # caller commits pos shortly after
 
+    if _side.is_short(pos) and getattr(pos, "plain_stop_order_id", None):
+        # E114: a plain-order short rests a BUY stop-loss-market at the broker. Cancel it and read it back BEFORE the cover BUY, so the two never both exist
+        # (a filled stop plus a cover would open a LONG). A stop that already filled means the short is flat: no BUY; plain_short's guard books the STOP_HIT.
+        # A stop that filled in part, or one that cannot be cancelled and read back, blocks the BUY: the position stays OPEN and the caller retries / alerts.
+        from orders import plain_short
+        _state, _why = plain_short.release_stop_before_cover(db, pos)
+        if _state == "filled":
+            raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) already covered by its broker stop: {_why}")
+        if _state == "error":
+            raise RuntimeError(f"{pos.symbol} (id={pos.id}) cover BUY NOT sent: {_why}")
+
     exit_side = _side.exit_transaction_type(pos)   # SELL closes a long, BUY closes a short
     if _side.is_short(pos) and pos.overnight_converted_to_cnc:
         # A short can never be a CNC holding; a CNC BUY here would open a long on top of the short.

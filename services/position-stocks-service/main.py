@@ -166,7 +166,7 @@ from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition, ScalpTradeJournal
 from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, trailing
-from orders import adaptive, pullback_rearm
+from orders import adaptive, plain_short, pullback_rearm
 from orders import calendar_gate, charges_ledger, excursion, journal_notes, review_stats, trade_stats, window_health
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
@@ -300,7 +300,19 @@ async def lifespan(app: FastAPI):
         _order_ws_task = asyncio.create_task(_order_ws_listener.run(), name="position-stocks-order-ws")
         logger.info("position-stocks-service: Dhan order-update WebSocket listener started (read-only)")
 
+    try:  # E115: the Time Machine live picker - worker + timer threads (idle when TM_GATE_MODE=off). Never fatal.
+        from orders import tm_gate as _tm_gate_boot
+        _tm_gate_boot.start()
+    except Exception as _tmg:  # noqa: BLE001
+        logger.warning("time machine gate did not start (%s)", _tmg)
+
     yield
+
+    try:
+        from orders import tm_gate as _tm_gate_boot
+        _tm_gate_boot.stop()
+    except Exception:  # noqa: BLE001
+        pass
 
     # Graceful shutdown
     if _order_ws_task is not None:
@@ -515,6 +527,13 @@ async def _fast_reconcile_loop() -> None:
                         logger.warning("position-stocks: stop-watchdog closed %d position(s) whose stop did not fire", n_breach)
                 except Exception as e:
                     logger.error("position-stocks: stop-watchdog error: %s", e, exc_info=True)
+                try:
+                    # E114: plain-order shorts (no Super Order): book a filled broker stop, re-place a dead one, software target, breach cover, watch unconfirmed SELLs (orders/plain_short.py)
+                    n_plain = await asyncio.to_thread(plain_short.run_plain_short_guard, db)
+                    if n_plain:
+                        logger.warning("position-stocks: plain-short guard closed or resolved %d item(s)", n_plain)
+                except Exception as e:
+                    logger.error("position-stocks: plain-short guard error: %s", e, exc_info=True)
                 try:
                     # short selling (E102): live shorts are covered at SHORT_SQUAREOFF_TIME_IST (14:55), before the 15:00 sweep
                     n_short_cover = await asyncio.to_thread(eod_squareoff.run_short_squareoff, db)
@@ -1305,6 +1324,11 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                 except Exception as _e:  # noqa: BLE001 - no board = score on the remaining parts
                     logger.debug("position-stocks: shortlist board read skipped (%s)", _e)
                 _n_passed = len(quality_passers)
+                try:
+                    from orders import tm_gate as _tm_gate
+                    _tm_gate.note_picks(quality_passers, "LONG")            # E115: trigger - warm the Time Machine verdicts of the names about to be ranked (background, never waits)
+                except Exception:  # noqa: BLE001
+                    pass
                 _sl = shortlist.build(quality_passers, _bp)
                 quality_passers = [(r["cand"], r["quality"]) for r in _sl]
                 # group337: every pick starts as NOT_TRIED; the entry loop below fills in what really happened to it.
@@ -2702,6 +2726,13 @@ def short_probe_last_route():
     return sell_probe.last_result() or {"verdict": "NOT_RUN", "line": "SELL PROBE: NOT_RUN - T6 has not been run yet"}
 
 
+@app.get("/short/plain")
+def short_plain_route(db: Session = Depends(get_db)):
+    """E114: the plain-order short fallback at a glance (switch, day breaker, counters, SELLs under watch). Read-only; it places nothing."""
+    return {"fallback_switch": bool(config.SHORT_PLAIN_FALLBACK), "entry_allowed_now": plain_short.entry_allowed(), "fill_wait_s": config.SHORT_PLAIN_FILL_WAIT_S,
+            "stop_grace_s": config.SHORT_PLAIN_STOP_GRACE_S, "use_super_order": config.USE_SUPER_ORDER, **plain_short.stats()}
+
+
 # ── Time Machine (E111): "what are the odds of this trade, from this entry, by the square-off?" Read-only evidence; it places and changes nothing. ──
 class TimeMachineRequest(BaseModel):
     symbol: Optional[str] = None
@@ -2753,6 +2784,22 @@ def time_machine_compare_route(req: TimeMachineRequest):
         return tm.compare(_tm_body(req))
     except tm.TimeMachineError as e:
         raise _tm_http(e)
+
+
+@app.get("/time-machine/gate")
+def time_machine_gate_route():
+    """E115: the Time Machine in live picking - mode, timer, counters, refusal rate, the picks it is watching, the last scans and the last checks. Read-only."""
+    from orders import tm_gate
+    return tm_gate.status()
+
+
+@app.post("/time-machine/scan")
+def time_machine_scan_route(wait: bool = False, reason: str = "manual", admin: str = Depends(require_admin)):
+    """E115: trigger a scan now - queue a fresh verdict for every pick being watched (the shortlist plus anything noted in the last hour) for the current entry bar.
+    The timer, the Market Weather lock, the calibration runner and this route all do the same thing. Admin only; it places nothing."""
+    from orders import tm_gate
+    r = str(reason or "manual")[:40]
+    return tm_gate.scan(r if r.startswith(("manual", "runner", "weather", "timer")) else f"manual:{r}", wait=bool(wait))
 
 
 @app.get("/pullback-rearm")

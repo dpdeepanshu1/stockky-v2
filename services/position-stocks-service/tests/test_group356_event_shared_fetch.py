@@ -130,8 +130,9 @@ def test_stale_late_answer_is_ignored(gate, monkeypatch):
 
 def test_fail_block_off_stays_quick_and_fail_open(gate, monkeypatch):
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", False)
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 1.0)   # E117: a wide gap between "quick" (~0.05 s) and "waited out the retry" (~1.05 s), so a loaded machine cannot blur them
     calls = []
-    _fakes(monkeypatch, delay=0.3, calls=calls)
+    _fakes(monkeypatch, delay=1.5, calls=calls)
 
     async def timed():
         t0 = asyncio.get_running_loop().time()
@@ -140,7 +141,7 @@ def test_fail_block_off_stays_quick_and_fail_open(gate, monkeypatch):
 
     sig, took = asyncio.run(timed())
     assert not sig.event_unchecked and sig.passes()[0]
-    assert took < 0.2                                        # no retry wait when the gate is fail-open
+    assert took < 0.6                                        # no retry wait when the gate is fail-open
 
 
 def test_switch_off_uses_the_group344_path(gate, monkeypatch):
@@ -192,7 +193,8 @@ def test_no_cache_symbol_waits_the_retry_window_for_a_slow_fund_tech(gate, monke
 
 
 def test_cached_symbol_stays_quick_and_uses_the_cache(gate, monkeypatch):
-    _ft_fakes(monkeypatch, delay=0.4)
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 1.0)   # E117: see the fail-open test above
+    _ft_fakes(monkeypatch, delay=1.5)
     cached = qg.QualitySignal(symbol="OLDCO", fundamental_score=70.0, technical_score=65.0, market_cap_cr=900.0)
 
     async def timed():
@@ -202,7 +204,7 @@ def test_cached_symbol_stays_quick_and_uses_the_cache(gate, monkeypatch):
 
     sig, took = asyncio.run(timed())
     assert sig.fundamental_score == 70.0 and sig.technical_score == 65.0      # cache fallback
-    assert took < 0.3                                                         # did not wait out the retry window
+    assert took < 0.6                                                         # did not wait out the retry window
 
 
 def test_late_fund_tech_answer_is_kept_for_the_next_cycle(gate, monkeypatch):

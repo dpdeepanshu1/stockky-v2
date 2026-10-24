@@ -181,6 +181,25 @@ async def _write_behind_shutdown():
 
 
 @_on_startup
+async def _tm_gate_startup() -> None:
+    """E115: Time Machine live picker - worker + timer threads (idle when TM_GATE_MODE=off). Never fatal."""
+    try:
+        from entry_engine import tm_gate as _tmg
+        _tmg.start()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("time machine gate did not start (%s)", _e)
+
+
+@_on_shutdown
+def _tm_gate_shutdown() -> None:
+    try:
+        from entry_engine import tm_gate as _tmg
+        _tmg.stop()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@_on_startup
 async def startup() -> None:
     # Auto-Pilot (2026-08-27): a single asyncio background task IS started
     # here — execution/auto_pilot.py — but it is inert by default. It only
@@ -2714,6 +2733,23 @@ def _structure_view(raw):
         return v if isinstance(v, dict) else None
     except Exception:  # noqa: BLE001
         return None
+
+
+@app.get("/time-machine/gate")
+async def time_machine_gate_status(admin: Optional[str] = Depends(require_admin)):
+    """E115: the Time Machine in live picking - mode, timer, counters, refusal rate, watched picks, last scans and checks. Read-only."""
+    from entry_engine import tm_gate as _tmg
+    return _tmg.status()
+
+
+@app.post("/time-machine/scan")
+async def time_machine_scan(wait: bool = False, reason: str = "manual", admin: Optional[str] = Depends(require_admin)):
+    """E115: trigger a scan now - queue a fresh verdict for every pick being watched for the current entry bar. The timer, the Market Weather lock, the runner job
+    and this route all do the same thing. Admin only; places nothing."""
+    import asyncio as _aio
+    from entry_engine import tm_gate as _tmg
+    r = str(reason or "manual")[:40]
+    return await _aio.to_thread(_tmg.scan, r if r.startswith(("manual", "runner", "weather", "timer")) else f"manual:{r}", bool(wait))
 
 
 @app.get("/kronos/status")

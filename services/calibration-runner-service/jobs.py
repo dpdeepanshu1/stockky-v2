@@ -305,6 +305,16 @@ def b_wiring_check(ctx, p):
                 title="Market Weather wiring (real-trade + position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
 
 
+def b_tm_gate(ctx, p):
+    """E115: is the Time Machine live gate running in both trading services? Optionally triggers a scan first (the same trigger the timer and the 09:14 weather lock use). Places nothing."""
+    args = ["--rt-url", ctx["rt"], "--ps-url", ctx["ps"], "--expect-mode", p.get("expect_mode", "live"), "--min-checks", str(p.get("min_checks", 10))]
+    if p.get("scan", True):
+        args.append("--scan")
+        if p.get("wait"):
+            args.append("--wait")
+    return [_py(ctx, "time_machine_gate_check.py", *args, title="Time Machine live gate (real-trade + position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
 def b_short_shadow(ctx, p):
     """E98 P0 item 7b: the shadow shorts' numbers, judged. Read-only; never touches SHORT_MODE."""
     return [_py(ctx, "short_shadow_report.py", "--ps-url", ctx["ps"], "--min-trades", str(p.get("min_trades", 100)), "--min-days", str(p.get("min_days", 20)),
@@ -449,6 +459,12 @@ JOB_LIST = [
          "matches the switch, and the short shadow endpoint answers. Never touches an overlay that is already active.", b_wiring_check,
          [P("expect_mode", "Expected mode", "choice", "live", choices=["live", "shadow", "off", "any"])], timeout_s=180,
          after="WIRING: PASS = the layer can reach both services. FAIL: the first failing line says which service and which link is missing; fix that before trusting a quiet morning."),
+    _job("tm_gate_check", "Time Machine live gate check", "ops", "Every trading morning at 09:20 (scheduled), and any time you doubt the gate is running; the gate itself also runs on its own timer",
+         "Triggers a scan (fresh Time Machine verdicts for every pick the two services are watching, for the current entry bar), then reads each service: mode, worker + timer threads, "
+         "checks, refusals, refusal rate. FAIL if a service does not answer, is not in the expected mode, has no threads, or refuses more than half of at least 10 checks. Places nothing; never changes a switch.", b_tm_gate,
+         [P("scan", "Trigger a scan first", "bool", True), P("wait", "Wait for the verdicts", "bool", False), P("expect_mode", "Expected mode", "choice", "live", choices=["live", "log", "off", "any"]),
+          P("min_checks", "Checks needed before judging the refusal rate", "int", 10, 1, 500)], timeout_s=180,
+         after="PASS: the gate is on in both services. NOT_ENOUGH_DATA: wired, no entries yet. FAIL: the line names the service; a high refusal rate means set TM_GATE_MODE=log (one switch) and read recent_checks."),
     _job("short_shadow_report", "Short selling shadow report", "weekly", "Weekly while SHORT_MODE is shadow (and before any move to live)",
          "Reads the shadow shorts from position-stocks and judges the numbers: do the counters agree, and once there are enough closed would-be shorts over enough days, "
          "is the net P&L after charges above zero. Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing and never touches SHORT_MODE.", b_short_shadow,
@@ -484,9 +500,11 @@ JOBS: Dict[str, Dict[str, Any]] = {j["id"]: j for j in JOB_LIST}
 
 # Packs = ordered lists of job ids with fixed params. The page shows them as one button each.
 PACKS: List[Dict[str, Any]] = [
+    {"id": "time_machine_open", "title": "Time Machine morning scan", "when": "Every trading day 09:20 IST (scheduled), after the Market Weather lock",
+     "what": "Triggers a Time Machine scan in real-trade and position-stocks and checks that the live gate is running in both.", "jobs": [["tm_gate_check", {"scan": True}]], "stop_on_failure": False},
     {"id": "monday_open", "title": "Monday open pack", "when": "Monday 08:45-09:30 IST, and any day after a restart or deploy",
      "what": "Health, switch snapshot, Market Weather wiring check, then the 09:30 live check. (Run the 10:15 check from the list after 10:15.)",
-     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}], ["monday_check_0930", {}]], "stop_on_failure": False},
+     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}], ["tm_gate_check", {"scan": True}], ["monday_check_0930", {}]], "stop_on_failure": False},
     {"id": "daily_close", "title": "Daily close pack", "when": "Every trading day after 15:45 IST",
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
@@ -505,6 +523,7 @@ PACK_MAP = {p["id"]: p for p in PACKS}
 # Default timetable (IST) the optional scheduler uses once switched on. weekday: 0=Mon .. 6=Sun
 SCHEDULE_DEFAULT: List[Dict[str, Any]] = [
     {"id": "s_monday_open", "pack": "monday_open", "days": [0], "time": "08:50", "enabled": True},
+    {"id": "s_tm_open", "pack": "time_machine_open", "days": [0, 1, 2, 3, 4], "time": "09:20", "enabled": True},
     {"id": "s_daily_close", "pack": "daily_close", "days": [0, 1, 2, 3, 4], "time": "16:05", "enabled": True},
     {"id": "s_friday_review", "pack": "friday_review", "days": [4], "time": "16:40", "enabled": True},
     {"id": "s_weekly_cal", "pack": "weekly_calibration", "days": [5], "time": "08:00", "enabled": False},

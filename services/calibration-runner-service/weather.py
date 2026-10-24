@@ -115,9 +115,10 @@ class Weather:
     def __init__(self, directory: str, md_url: str, fetch: Callable[[str], Any] = http_get_json, notify: Optional[Callable[[str, str, str], Any]] = None,
                  stamp: Optional[Callable[[str, Dict[str, Any]], Any]] = None, enabled: bool = False, stamp_on: bool = False, notify_on: bool = True,
                  apply: Optional[Callable[[str, datetime], Dict[str, Any]]] = None, apply_on: bool = False,
-                 now_fn: Callable[[], datetime] = lambda: datetime.now(IST), period: str = "1y"):
+                 now_fn: Callable[[], datetime] = lambda: datetime.now(IST), period: str = "1y", after_lock: Optional[Callable[[], Any]] = None):
         self.dir, self.md, self.fetch, self.notify, self.stamp = directory, md_url.rstrip("/"), fetch, notify, stamp
         self.now_fn, self.period = now_fn, period
+        self.after_lock = after_lock    # E115: injected, called once after a successful 09:14 lock (the Time Machine scan trigger); never allowed to stop the loop
         self.apply = apply          # injected (weather_apply.Applier): this module can call it but cannot build a dial itself
         self.lock = threading.RLock()
         self.path = os.path.join(directory, "state.json")
@@ -318,6 +319,11 @@ class Weather:
                     self.notify("Market Weather: dials " + ("applied" if res.get("applied") else "NOT applied"), "\n".join(lines) + "\nTighten-only, ends 15:30 IST.", "high" if res.get("applied") else "normal")
                 except Exception:  # noqa: BLE001
                     pass
+        if self.after_lock is not None and row.get("ok") and stage == "lock":
+            try:
+                self.after_lock()
+            except Exception:  # noqa: BLE001 - a scan that cannot be sent never stops Market Weather
+                pass
         if self.stamp and self.state["stamp"] and row.get("ok") and stage in ("lock", "tick") and (stage == "lock" or row.get("changed")):
             until = profiles.expiry(datetime.fromisoformat(row["at"]))
             if until is not None:

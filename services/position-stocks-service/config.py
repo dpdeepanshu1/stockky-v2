@@ -220,6 +220,13 @@ SHORT_LIVE_QTY_CAP = max(1, min(1000, _get_int("SHORT_LIVE_QTY_CAP", 1)))
 # E108 (T6): a live short is refused until the Dhan SELL probe (orders/sell_probe.py, runner job dhan_sell_probe) has a PASS on record. Ships true: SHORT_MODE=live is then one
 # switch after the probe, and a mistaken early flip places nothing. false = no probe needed (loosens a rail, so the Switches page asks to confirm).
 SHORT_LIVE_REQUIRES_PROBE = _get_bool("SHORT_LIVE_REQUIRES_PROBE", True)
+# E114: plain-order short fallback (orders/plain_short.py). When Dhan refuses the SELL Super Order, or USE_SUPER_ORDER is off, the short is opened as a plain MARKET SELL
+# and a BUY STOP_LOSS_MARKET order (the broker stop) is placed at once; if that stop cannot be placed the short is covered immediately and no further plain short is tried
+# that day. A short never exists without a stop. Only reached when SHORT_MODE=live (the SELL probe rule above still applies). false = the old behaviour: a refused Super
+# Order = no short today. The switch gates NEW plain shorts only: the guard that manages an already open plain short keeps running whatever the switch says.
+SHORT_PLAIN_FALLBACK = _get_bool("SHORT_PLAIN_FALLBACK", True)
+SHORT_PLAIN_FILL_WAIT_S = max(2.0, min(30.0, _get_float("SHORT_PLAIN_FILL_WAIT_S", 8.0)))      # how long to wait for the SELL to show as filled before cancelling it
+SHORT_PLAIN_STOP_GRACE_S = max(1.0, min(120.0, _get_float("SHORT_PLAIN_STOP_GRACE_S", 6.0)))   # price this long past the stop with the broker stop still resting: cover by hand
 # E107 (P2 item 17): rank the bearish short candidates against each other (screening/shortlist.py build_short) and try them best-first, so the capital and the
 # SHORT_MAX_POSITIONS slots go to the strongest short, not to whichever came first in scan order. Live in shadow AND live mode. It never adds a candidate and never
 # loosens a gate: every short still walks the same fail-closed gates. SHORT_SHORTLIST_ENABLED=0 restores scan order. Pool = names quality-checked per cycle.
@@ -1310,6 +1317,29 @@ if TIME_MACHINE_LOOKBACK not in ("1mo", "2mo"):
     TIME_MACHINE_LOOKBACK = "1mo"
 TIME_MACHINE_DEFAULT_VALUE_RS = max(1000.0, _get_float("TIME_MACHINE_DEFAULT_VALUE_RS", 20000.0))   # trade value used for the charges when the request gives none
 TIME_MACHINE_FETCH_TIMEOUT_S = max(5.0, _get_float("TIME_MACHINE_FETCH_TIMEOUT_S", 25.0))
+
+# E115: the Time Machine in LIVE stock picking (timemachine/gate_core.py, orders/tm_gate.py). RANK: a stock whose own recent 5-minute sessions and a made-up-session
+# simulation both favour (or both oppose) the rule gets +/- TM_PICK_NUDGE_PTS in the shortlist. GATE: an entry whose own stop % / target % at this time of day
+# shows AGAINST (simulation and real history both negative after charges and slippage) is refused. It can only say NO. Missing or slow data = no opinion.
+# TM_GATE_MODE: live (a refusal blocks the entry) | log (compute and record, never block) | off. Rollback: TM_GATE_MODE=log (or off).
+TM_GATE_MODE = _get_str("TM_GATE_MODE", "live").lower()
+if TM_GATE_MODE not in ("live", "log", "off"):
+    TM_GATE_MODE = "off"                                                     # a typo must not switch a gate on
+TM_GATE_BLOCK = _get_str("TM_GATE_BLOCK", "against").lower()                  # against | against_or_near (also refuse a near-break-even verdict)
+if TM_GATE_BLOCK not in ("against", "against_or_near"):
+    TM_GATE_BLOCK = "against"
+TM_GATE_SIMS = min(20000, max(1000, _get_int("TM_GATE_SIMS", 3000)))          # made-up sessions per gate verdict (3,000 takes about a quarter of a second)
+TM_GATE_INLINE_BUDGET_S = min(15.0, max(0.0, _get_float("TM_GATE_INLINE_BUDGET_S", 2.5)))   # an uncached entry waits at most this long; 0 = cache only
+TM_GATE_TTL_S = min(3600.0, max(30.0, _get_float("TM_GATE_TTL_S", 300.0)))   # how long a verdict is reused
+TM_GATE_FAIL_TTL_S = min(1800.0, max(10.0, _get_float("TM_GATE_FAIL_TTL_S", 120.0)))   # a failed fetch is not retried for this long
+TM_PICK_NUDGE_PTS = min(30.0, max(0.0, _get_float("TM_PICK_NUDGE_PTS", 6.0)))   # ranking points (0 = no ranking effect)
+TM_AUTO_ENABLED = _get_bool("TM_AUTO_ENABLED", True)                          # the timer that keeps the verdicts of the current picks warm
+TM_AUTO_PREFETCH_IST = _get_str("TM_AUTO_PREFETCH_IST", "09:05")              # once a day: load the 5-minute history of the current picks before the open
+TM_AUTO_FIRST_IST = _get_str("TM_AUTO_FIRST_IST", "09:16")                    # first timed scan (the 09:15 bar is the first entry bar)
+TM_AUTO_LAST_IST = _get_str("TM_AUTO_LAST_IST", "14:30")                      # last timed scan
+TM_AUTO_INTERVAL_MIN = min(120, max(5, _get_int("TM_AUTO_INTERVAL_MIN", 15)))  # minutes between timed scans
+TM_AUTO_MAX_SYMBOLS = min(40, max(1, _get_int("TM_AUTO_MAX_SYMBOLS", 12)))    # picks re-checked per scan
+TM_AUTO_ACTIVE_MIN = min(600.0, max(5.0, _get_float("TM_AUTO_ACTIVE_MIN", 60.0)))   # a pick stays on the timer this long after it was last seen
 # Opening-range-breakout recorder (orders/orb_shadow.py): RECORD ONLY. flow_json["orb"] on every new position says what a 5-minute opening-range
 # entry (price above the 09:15-09:20 range high and above VWAP, tight spread, limit just above the high, stop = range low) would have done.
 ORB_MODE = _get_str("ORB_MODE", "shadow").lower()                   # shadow | off

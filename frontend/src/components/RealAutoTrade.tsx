@@ -9,6 +9,10 @@ import {
 } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
 import { NavIcon } from "./ui/NavIcon";
+import { PageHero } from "./ui/PageHero";   // design v6
+import { KpiStrip, type Kpi } from "./ui/KpiStrip";   // design v6
+import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
+import { signedInr } from "./realAuto/history";   // E122
 // Cross-service, read-only: position-stocks-service's own capital ledger
 // and split percentage, used only to populate the "Position Stocks" side
 // of CapitalSplitCard below (see that component's docstring for why this
@@ -25,6 +29,7 @@ import { LiveTab } from "./realAuto/tabs/LiveTab";
 import { PipelineTab } from "./realAuto/tabs/PipelineTab";
 import { ChargesTab } from "./realAuto/tabs/ChargesTab";
 import { LogTab } from "./realAuto/tabs/LogTab";
+import { HistoryTab } from "./realAuto/tabs/HistoryTab";   // E122: closed-trade records, same idea as Position Stocks' Trade History
 import { OverviewTab, type RiskForm } from "./realAuto/tabs/OverviewTab";
 import { BoardTab } from "./realAuto/tabs/BoardTab";
 import { openLivePositions, type LivePositionRow } from "./realAuto/liveParts";
@@ -685,39 +690,58 @@ export default function RealAutoTrade() {
     { id: "live", label: "Live Dhan" },
     { id: "positions", label: "Positions", count: positions.length },
     { id: "orders", label: "Orders", count: orders.length },
+    { id: "history", label: "Trade History" },
     { id: "watchlist", label: "Watchlist", count: candidates.length },
     { id: "pipeline", label: "Pipeline" },
     { id: "charges", label: "Charges" },
     { id: "log", label: "Activity" },
   ];
 
+  // design v6: summary tiles + "what the engine is doing" strip. Both only re-state state this page already holds; nothing new is fetched.
+  const openPnl = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
+  const pnlTone = (n: number): Kpi["tone"] => (Math.abs(n) < 0.5 ? "flat" : n > 0 ? "up" : "down");
+  const kpis: Kpi[] = [
+    { label: "Open positions", value: positions.length, sub: positions.length ? `${autoPilotPositions.length} by the bot · ${dematPositions.length} demat` : "nothing held", tone: "info" },
+    { label: "Open P&L", value: signedInr(openPnl), sub: "unrealised, all shown positions", tone: pnlTone(openPnl) },
+    { label: "Orders", value: orders.length, sub: orderRange === "today" ? "today" : "all time", tone: "flat" },
+    { label: "Watchlist", value: candidates.length, sub: "candidates being judged", tone: "info" },
+  ];
+  const pulseWorking = !!pipeline?.running;
+  const pulseChips: PulseChip[] = [
+    { label: armed ? "Auto-orders armed" : "Auto-orders off", state: armed && mode === "REAL" ? "warn" : "idle" },
+    { label: gate1 ? "Logged in" : "Not logged in", state: gate1 ? "ok" : "bad" },
+    ...(mode === "REAL" ? [{ label: gate2 ? "Dhan connected" : "Dhan not connected", state: (gate2 ? "ok" : "bad") as PulseChip["state"] }] : []),
+  ];
+  const pulseLine = pulseWorking
+    ? `Scanning${pipeline?.stage ? ` · ${pipeline.stage}` : ""}${pipeline?.symbols_total ? ` · ${pipeline.symbols_done ?? 0} of ${pipeline.symbols_total} symbols` : ""}`
+    : armed ? "Armed and waiting for the next cycle" : "Idle · not placing orders";
+
   return (
-    <div className="rt-page max-w-5xl mx-auto mode-frame" data-mode={mode}
+    <div className="rt-page v6-page max-w-5xl mx-auto mode-frame" data-mode={mode}
       data-frame-label={mode === "REAL" ? "REAL MONEY · live Dhan orders" : "DEMO · simulated orders, no money"}>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <div className="rt-head">
-        <div className="rt-title">
-          <span className="rt-title-icon" aria-hidden="true"><NavIcon name="bot" /></span>
-          <div className="min-w-0">
-            <h2 className="rt-title-text">
-              Real Auto Trade
-              {armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}
-            </h2>
-            <span className="rt-title-sub">{mode === "REAL" ? "Live Dhan orders" : "Simulated demo orders"}</span>
+      <PageHero icon="bot" kicker="AI-assisted · auto trading" title={<>Real Auto Trade{armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}</>}
+        subtitle={mode === "REAL" ? "Live Dhan orders" : "Simulated demo orders"}
+        right={(
+          <div className="rt-seg" role="group" aria-label="Trading mode">
+            {(["DEMO", "REAL"] as Mode[]).map(m => (
+              <button key={m} type="button" onClick={() => setMode(m)} data-mode={m} data-active={mode === m}
+                aria-pressed={mode === m} className="rt-seg-btn">
+                <Dot on={mode === m && armed} pulse /> {m}
+              </button>
+            ))}
           </div>
-        </div>
-        <div className="rt-seg" role="group" aria-label="Trading mode">
-          {(["DEMO", "REAL"] as Mode[]).map(m => (
-            <button key={m} type="button" onClick={() => setMode(m)} data-mode={m} data-active={mode === m}
-              aria-pressed={mode === m} className="rt-seg-btn">
-              <Dot on={mode === m && armed} pulse /> {m}
-            </button>
-          ))}
-        </div>
-      </div>
+        )} />
 
       {/* design v5: plain-words money mode + safety chips (presentation only) */}
       <MoneyModeBanner mode={mode} chips={[{ label: armed ? "Auto-orders armed" : "Auto-orders off", state: armed && mode === "REAL" ? "warn" : "ok" }]} />
+
+      {status != null && (
+        <>
+          <AiPulse title="Auto-trade engine" working={pulseWorking} line={pulseLine} chips={pulseChips} />
+          <KpiStrip items={kpis} label="Auto trade summary" />
+        </>
+      )}
 
       {/* Phase notice */}
       <p className="rt-notice font-display tabular-nums">
@@ -843,6 +867,10 @@ export default function RealAutoTrade() {
               This is the piece that used to be invisible between a cycle
               running and an order showing up in Orders/Positions.
           ═══════════════════════════════════════════════════════════════ */}
+          {activeTab === "history" && (
+            <HistoryTab mode={mode} loggedIn={loggedIn} />
+          )}
+
           {activeTab === "watchlist" && (
             <WatchlistTab mode={mode} loggedIn={loggedIn} candidates={candidates} candidatesLoading={candidatesLoading}
               expandedCandidateId={expandedCandidateId} setExpandedCandidateId={setExpandedCandidateId} loadCandidates={loadCandidates} />

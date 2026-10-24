@@ -6,6 +6,8 @@
 // calibration-runner-service (nginx /calibration/). Nothing here places a trade.
 import { useEffect, useState } from "react";
 import { SubTabs } from "./ui/SubTabs";
+import { PageHero } from "./ui/PageHero";   // design v6
+import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { setRealTradeApiUrl } from "../realTradeApi";
 import { setPositionStocksApiUrl } from "../positionStocksApi";
 import { AUTH_LOST_EVENT, anyToken, deriveServiceUrls, getRunnerUrl, serviceUrl, loginBoth, logoutAll, sessionSecondsLeft, setRunnerUrl, type Svc } from "../calibrationApi";
@@ -102,9 +104,20 @@ function ConnectionCard() {
 function Body() {
   const [svc, setSvc] = useState<Svc>("rt");
   const [section, setSection] = useState<Section>("switches");
-  const { start } = useRunner();
+  const { start, summary } = useRunner();
+  // design v6: what the runner is doing, read from the summary the page already polls (nothing new is fetched)
+  const cur = summary?.state?.current;
+  const waiting = summary?.state?.queued?.length ?? 0;
+  const pulseChips: PulseChip[] = summary?.state ? [
+    { label: summary.state.market_open_now ? "Market hours: heavy runs held" : "Market closed", state: summary.state.market_open_now ? "warn" : "ok" },
+    ...(waiting > 0 ? [{ label: `${waiting} waiting`, state: "idle" as const }] : []),
+  ] : [];
   return (
-    <div className="space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
+    <div className="v6-page v6-flow space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
+      <PageHero icon="sliders" title="Real Money Calibration" kicker="AI-assisted · real-money switches"
+        subtitle="Switch the rules of both trading services on or off, check the day's trades, and run tests and training from buttons." />
+      <AiPulse title="Calibration runner" working={!!cur} chips={pulseChips}
+        line={cur ? `Running: ${cur.title}` : summary?.state ? "Idle · pick a test, or change a switch below" : "Waiting for the runner to answer"} />
       <SubTabs items={SVC_ITEMS} value={svc} onChange={setSvc} label="Service" />
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />

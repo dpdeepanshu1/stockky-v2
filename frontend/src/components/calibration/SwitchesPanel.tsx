@@ -183,7 +183,7 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: SwitchSvc; onCh
                         {f.kind === "bool" ? (
                           <button type="button" role="switch" aria-checked={cur === "true"} aria-label={`${f.title}: ${valueLabel(f, cur)}`} disabled={busy === f.key}
                             onClick={() => void apply(f, cur === "true" ? "false" : "true")}
-                            className={`min-w-[64px] rounded-xl border px-3 py-1 text-[11px] font-bold ${cur === "true" ? "border-signal-buy text-signal-buy" : "border-slate text-mist"}`}>
+                            className={`v6-switch ${cur === "true" ? "on" : "off"}`}>
                             {busy === f.key ? "…" : cur === "true" ? "ON" : "OFF"}
                           </button>
                         ) : f.kind === "enum" ? (

@@ -714,7 +714,7 @@ services:
       RUNNER_DATA_DIR: /data/runner
       RUNNER_BAR_DIR: /data/bars
       # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
-      RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-false}
+      RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-true}
       # E98 Market Weather (weather.py / weather_apply.py). A value saved on the page (<data>/state/weather.json) wins over these defaults.
       # ENABLED = run the daily state engine; STAMP = post a stamp-only overlay so trades carry the state; NOTIFY = Telegram brief and change messages;
       # APPLY = send tighten-only dials, but only while the evidence gate passes AND the service itself has MARKET_STATE_MODE=live.

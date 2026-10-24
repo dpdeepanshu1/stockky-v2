@@ -42,7 +42,7 @@ def test_health_is_open_and_everything_else_needs_login(client):
 
 def test_catalog_summary_and_session(client):
     c = client.get("/catalog", headers=H()).json()
-    assert len(c["jobs"]) >= 30 and len(c["packs"]) == 6 and "builder" not in c["jobs"][0]
+    assert len(c["jobs"]) >= 30 and len(c["packs"]) == 11 and "builder" not in c["jobs"][0]
     assert client.get("/auth/session", headers=H()).json()["user"] == "tester"
     assert "jobs" in client.get("/summary", headers=H()).json()
 
@@ -72,9 +72,10 @@ def test_bad_requests(client):
 
 def test_schedule_roundtrip(client):
     s = client.get("/schedule", headers=H()).json()
-    assert s["enabled"] is False
-    s2 = client.put("/schedule", headers=H(), json={"enabled": True}).json()
-    assert s2["enabled"] is True
+    assert s["enabled"] is True        # E126: the timetable ships on (a file saved earlier with enabled=false still wins)
+    s2 = client.put("/schedule", headers=H(), json={"enabled": False}).json()
+    assert s2["enabled"] is False
+    assert client.put("/schedule", headers=H(), json={"enabled": True}).json()["enabled"] is True
     bad = client.put("/schedule", headers=H(), json={"entries": [{"id": "x", "pack": "nope", "days": [0], "time": "09:00"}]})
     assert bad.status_code == 400
-    client.put("/schedule", headers=H(), json={"enabled": False})
+    client.put("/schedule", headers=H(), json={"enabled": True})

@@ -44,7 +44,7 @@ KEEP_RUNS = _i("RUNNER_KEEP_RUNS", 120)
 KEEP_DAYS = _i("RUNNER_KEEP_DAYS", 45)
 # heavy jobs (downloads, replays, model forecasts) are refused in these IST windows unless the caller confirms
 GUARD_MARKET_HOURS = _b("RUNNER_GUARD_MARKET_HOURS", True)
-SCHEDULER_ENABLED = _b("RUNNER_SCHEDULER_ENABLED", False)   # off until you switch it on in the page
+SCHEDULER_ENABLED = _b("RUNNER_SCHEDULER_ENABLED", True)    # E126: on by default (a timetable saved earlier with enabled=false still wins; switch it on in the page)
 TOKEN_TTL_S = _i("RUNNER_TOKEN_TTL_S", 3600)
 # group 447: a Telegram message (through the notification service) when an AUTOMATIC run finishes or is blocked; manual runs only if asked
 NOTIFY_ENABLED = _b("RUNNER_NOTIFY_ENABLED", True)

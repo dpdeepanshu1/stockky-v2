@@ -51,3 +51,16 @@ runjob() {
   echo "status: $ST"
   _runget "/runs/$ID/tail?offset=0" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('text') or '(no output)')"
 }
+
+# E126: is the timetable on, and which slots will fire today? `schedon` switches it on (a schedule.json saved earlier with enabled=false overrides the new default).
+schedule() {
+  _runget /schedule | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print("timetable:", "ON" if d.get("enabled") else "OFF")
+for e in d.get("entries") or []:
+    print("  %-16s %-5s %-22s days=%s %s" % (e["id"], e["time"], e["pack"], e["days"], "on" if e.get("enabled") else "off"))
+ls = d.get("last_skipped")
+print("last skipped slot:", ls if ls else "none")'
+}
+schedon() { curl -s -X PUT "$RN/schedule" -H "$A" -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null; schedule; }

@@ -168,3 +168,57 @@ def test_events_hold_every_signal_and_confirmed_pattern_even_when_badges_are_cap
 def chart_context_empty_has_events():
     import market_structure.chart_context as cc
     return cc.chart_context([], []).get("events") == []
+
+
+# ---------------------------------------------------------------- E25b: Fibonacci levels on the chart
+def _fib_block(direction="bullish", lo=100.0, hi=200.0, **kw):
+    b = {"swing_low": lo, "swing_high": hi, "direction": direction, "retracement": 0.55, "in_golden_zone": True, "nearest_level": 0.5, "distance_pct": 1.0,
+         "confluence_count": 1, "leg_invalidated": False, "golden_low": None, "golden_high": None, "ext_1272": None, "ext_1618": None}
+    b.update(kw)
+    return b
+
+
+def _by_label(fib):
+    return {x["label"]: x for x in fib["levels"]}
+
+
+def test_fib_levels_bullish_leg_geometry():
+    f = CC.fib_levels(_fib_block("bullish", 100.0, 200.0))
+    L = _by_label(f)
+    assert (L["0%"]["price"], L["100%"]["price"]) == (200.0, 100.0)                  # a bullish leg: 0 % at the high, 100 % at the low
+    assert (L["23.6%"]["price"], L["38.2%"]["price"], L["50%"]["price"], L["61.8%"]["price"], L["78.6%"]["price"]) == (176.4, 161.8, 150.0, 138.2, 121.4)
+    assert (L["127.2%"]["price"], L["161.8%"]["price"]) == (227.2, 261.8)             # extensions run past the high
+    assert f["golden"] == {"low": 138.2, "high": 150.0} and f["in_golden_zone"] is True and f["invalidated"] is False and f["source"] == "daily"
+    assert [x["price"] for x in f["levels"]] == sorted((x["price"] for x in f["levels"]), reverse=True)
+    assert {x["kind"] for x in f["levels"] if x["label"] in ("50%", "61.8%")} == {"golden"}
+
+
+def test_fib_levels_bearish_leg_geometry():
+    f = CC.fib_levels(_fib_block("bearish", 100.0, 200.0, in_golden_zone=False, leg_invalidated=True))
+    L = _by_label(f)
+    assert (L["0%"]["price"], L["100%"]["price"]) == (100.0, 200.0)                  # a bearish leg: 0 % at the low, 100 % at the high
+    assert (L["50%"]["price"], L["61.8%"]["price"]) == (150.0, 161.8)
+    assert (L["127.2%"]["price"], L["161.8%"]["price"]) == (72.8, 38.2)               # extensions run below the low
+    assert f["golden"] == {"low": 150.0, "high": 161.8} and f["in_golden_zone"] is False and f["invalidated"] is True
+
+
+def test_fib_levels_use_the_engine_extensions_when_given():
+    f = CC.fib_levels(_fib_block("bullish", 100.0, 200.0, ext_1272=227.5, ext_1618=262.0))
+    L = _by_label(f)
+    assert (L["127.2%"]["price"], L["161.8%"]["price"]) == (227.5, 262.0)
+
+
+def test_fib_levels_empty_or_broken_blocks_give_none():
+    for bad in (None, {}, "x", _fib_block(lo=None), _fib_block(hi=None), _fib_block(lo=200.0, hi=200.0), _fib_block(lo=200.0, hi=100.0),
+                _fib_block(lo=float("nan")), _fib_block(direction=None), _fib_block(lo=0.0)):
+        assert CC.fib_levels(bad) is None
+
+
+def test_chart_context_carries_fib_and_is_none_without_it():
+    bars = walk(120)
+    ds = dates_for(bars)
+    assert chart_context(bars, ds)["fib"] is None
+    out = chart_context(bars, ds, fib=_fib_block("bullish", 100.0, 200.0))
+    assert out["fib"]["direction"] == "bullish" and len(out["fib"]["levels"]) == 9
+    assert chart_context(bars, ds, fib={"swing_low": "junk"})["fib"] is None and chart_context([], [])["fib"] is None
+    assert out["badges"] == chart_context(bars, ds)["badges"] and out["events"] == chart_context(bars, ds)["events"]   # display only

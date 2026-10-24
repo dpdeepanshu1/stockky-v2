@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 SUMMARY_KEYS = (
     "ms_quality", "ms_ver", "ms_hash", "ms_asof", "ms_trend", "ms_strength", "ms_bos_dir", "ms_bos_bars", "ms_bos_strength",
-    "ms_bos_failed", "ms_choch_dir", "ms_choch_bars", "ms_sweep_dir", "ms_sweep_bars", "ms_sweep_strength", "ms_fvg_side",
+    "ms_bos_failed", "ms_bos_vol_ratio", "ms_choch_dir", "ms_choch_bars", "ms_sweep_dir", "ms_sweep_bars", "ms_sweep_strength", "ms_fvg_side",
     "ms_fvg_status", "ms_fvg_top", "ms_fvg_bottom", "ms_fvg_dist_pct", "ms_fvg_quality", "ms_ob_side", "ms_ob_status", "ms_ob_top",
     "ms_ob_bottom", "ms_ob_quality", "ms_fib_level", "ms_fib_dist_pct", "ms_in_golden", "ms_loc_score", "ms_rr", "ms_stop",
     "ms_target", "ms_reward_pct", "ms_chase_atr", "ms_stretch_atr", "ms_room_atr", "ms_atr", "ms_tqs", "ms_groups", "ms_groups_strict",
@@ -32,6 +32,7 @@ def flatten_summary(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     bos, choch, sw = block.get("bos"), block.get("choch"), _g(block.get("liquidity"), "sweep")
     out["ms_bos_dir"], out["ms_bos_bars"] = _g(bos, "direction"), _g(bos, "bars_since")
     out["ms_bos_strength"], out["ms_bos_failed"] = _g(bos, "strength"), _g(bos, "failed")
+    out["ms_bos_vol_ratio"] = _g(bos, "vol_ratio")
     out["ms_choch_dir"], out["ms_choch_bars"] = _g(choch, "direction"), _g(choch, "bars_since")
     out["ms_sweep_dir"], out["ms_sweep_bars"], out["ms_sweep_strength"] = _g(sw, "direction"), _g(sw, "bars_since"), _g(sw, "strength")
     f = block.get("fvg")

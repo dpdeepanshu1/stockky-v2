@@ -38,6 +38,24 @@ HISTORY_KEEP = 200
 
 # Switches that no test result may ever move. Each has a reason the page shows.
 PROTECTED: Dict[str, str] = {
+    "SHORT_MODE": "money safety (short selling): whether a short can exist is your decision after the Dhan answer and the 1-share test, never a report's",
+    "SHORT_LIVE_QTY_CAP": "money safety (short selling): how many shares a live short may have is your decision, never a report's",
+    "SHORT_LIVE_REQUIRES_PROBE": "money safety (short selling): whether a live short needs the Dhan SELL probe first is your decision, never a report's",
+    "SHORT_SHORTLIST_ENABLED": "short selling (E107): which shorts are tried first decides where capital goes; it is your decision, never a report's",
+    "SHORT_SHORTLIST_MAX": "short selling (E107): how many shorts are quality-checked per cycle is your decision, never a report's",
+    "SHORT_STOP_MULT_STRESSED": "money safety (short selling): how wide a short's stop is in a stressed market is your decision, never a report's",
+    "SHORT_STOP_MULT_PANIC": "money safety (short selling): how wide a short's stop is in a panic market is your decision, never a report's",
+    "SHORT_RISK_MULT": "money safety (short selling): how much a short may risk is your decision, never a report's",
+    "SHORT_MAX_POSITIONS": "money safety (short selling): how many shorts may be open at once is your decision, never a report's",
+    "SHORT_UPPER_CIRCUIT_BUFFER_PCT": "money safety (short selling): a locked-up stock cannot be bought back, so this buffer is never loosened by a report",
+    "SHORT_ENTRY_CUTOFF_IST": "money safety (short selling): a late short is easily squeezed, so the cut-off is never loosened by a report",
+    "SHORT_SQUAREOFF_TIME_IST": "money safety (short selling): when a short must be covered is your decision, never a report's",
+    "SHORT_ENTRY_START_IST": "money safety (short selling): the earliest time for a short is your decision; the VWAP rests on too few trades before it",
+    "SHORT_GAP_UP_REFUSE_PCT": "money safety (short selling): how big a gap-up still above the open blocks a short is your decision, never a report's",
+    "SHORT_MAX_DAY_FALL_PCT": "money safety (short selling): do not short what has already fallen hard; a threshold of a gate, decided by you",
+    "SHORT_MIN_BOARD_CONVICTION": "money safety (short selling): the Market Board conviction a short needs is a threshold of a gate, decided by you",
+    "SHORT_MIN_ENTRY_RANGE_POSITION": "money safety (short selling): how near the day low blocks a short is a threshold of a gate, decided by you",
+    "SHORT_VWAP_TOLERANCE_PCT": "money safety (short selling): the VWAP tolerance of the short gate is decided by you, never a report's",
     "BROKER_STOP_ENABLED": "money safety: the resting broker stop is never switched by a report",
     "SIZE_LADDER_ENABLED": "money safety (group 481): position size is raised only by the stored net P&L rule, never switched by a report",
     "SIZE_LADDER_MAX_LEVEL": "money safety (group 481): how far size may grow is your decision, not a report's",
@@ -60,6 +78,17 @@ PROTECTED: Dict[str, str] = {
     "ENTRY_ANCHOR_TO_LIVE": "order safety rule (2026-10-22): stop / target follow the real price, never switched by a report",
     "STOP_OVERSHOOT_ALLOWANCE_PCT": "loss-review guard (group 470): decided by you, not by a report",
     "ORB_MODE": "evidence recorder (shadow verdict): always on so the report has data",
+    "VIX_CAUTION_PCTILE": "risk gate (plan P2 item 16, E107): decided by you, not by a report",
+    "PREOPEN_GAP_ATR_MULT": "risk gate (plan P2 item 16, E107): decided by you, not by a report",
+    "VIX_CAUTION_ABOVE": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "VIX_SPIKE_PCT": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "VIX_CAUTION_SIZE_MULT": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "PREOPEN_GAP_UP_BLOCK_PCT": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "PREOPEN_GAP_DOWN_BLOCK_PCT": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "PREOPEN_GAP_GATE_UNTIL_IST": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "OPENING_GATE_MIN_STOP_ATR_FRAC": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "SCALP_TARGET_CAP_MIN_STOP_ATR_MULT": "risk gate (plan P2 item 16): decided by you, not by a report",
+    "TRADE_ODDS_MODE": "evidence recorder (stop vs target odds): always on so the report has data",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_RECORD": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_DEPTH20": "evidence recorder: always on so tests have data",
@@ -67,6 +96,22 @@ PROTECTED: Dict[str, str] = {
     "STRUCTURE_GATE_DEMO_MODE": "follows the REAL value; DEMO is never calibrated separately",
     "KRONOS_GATE_DEMO_MODE": "follows the REAL value; DEMO is never calibrated separately",
     "TIMESFM_GATE_DEMO_MODE": "follows the REAL value; DEMO is never calibrated separately",
+    "STRUCTURE_BEARISH_BLOCK": "structure gate (enforce): a gate, not a dial; decided by you",
+    "PS_STRUCTURE_BEARISH_BLOCK": "structure gate (enforce): a gate, not a dial; decided by you",
+    "STRUCTURE_BREAKOUT_VOLUME_MODE": "breakout-volume gate (E73): a gate, not a dial; decided by you",
+    "PS_STRUCTURE_BREAKOUT_VOLUME_MODE": "breakout-volume gate (E73): a gate, not a dial; decided by you",
+    "STRUCTURE_BREAKOUT_MIN_VOL_RATIO": "breakout-volume gate (E73): threshold of a gate; decided by you",
+    "PS_STRUCTURE_BREAKOUT_MIN_VOL_RATIO": "breakout-volume gate (E73): threshold of a gate; decided by you",
+    "STRUCTURE_MAX_AGE_DAYS": "structure data freshness: fail-closed input of every structure rule",
+    "STRUCTURE_REJECT_STOP_WIDE": "structure stop rule: decided by you, not by a report",
+    "STRUCTURE_TRAIL_ENABLED": "structure trailing exit: decided by you, not by a report",
+    "PS_STRUCTURE_MAX_CHASE_ATR": "position-stocks structure threshold: decided by you until it has its own test",
+    "PS_STRUCTURE_MAX_STRETCH_ATR": "position-stocks structure threshold: decided by you until it has its own test",
+    "PS_STRUCTURE_MIN_ROOM_ATR": "position-stocks structure threshold: decided by you until it has its own test",
+    "MARKET_STATE_MODE": "Market Weather shadow/live: switched by you after the shadow report, never by a report",
+    "MARKET_STATE_RISK_MULT": "Market Weather dial: set only by today's overlay (tighten-only, expires 15:30), never saved by the weekly engine",
+    "MARKET_STATE_CONVICTION_ADD": "Market Weather dial: set only by today's overlay (tighten-only, expires 15:30), never saved by the weekly engine",
+    "MARKET_STATE_SHORT_MULT": "Market Weather short dial: set only by today's overlay (tighten-only, expires 15:30), never saved by the weekly engine",
 }
 
 
@@ -347,6 +392,10 @@ class ControlClient:
 
     def set(self, service: str, key: str, value: str, confirm: bool, note: str) -> Dict[str, Any]:
         return self._call(service, "POST", f"/control/flags/{key}", {"value": value, "confirm": confirm, "note": note[:200]})
+
+    def overlay(self, service: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /control/overlay (Market Weather). weather.py only ever sends a STAMP-ONLY body here (entries {}) until step 6."""
+        return self._call(service, "POST", "/control/overlay", body)
 
 
 # ----------------------------------------------------------------------------------------------------- the engine

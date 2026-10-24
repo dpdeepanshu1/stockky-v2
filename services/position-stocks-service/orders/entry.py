@@ -36,10 +36,11 @@ from sqlalchemy.orm import Session
 
 import config
 import notifier
+from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -640,6 +641,11 @@ def attempt_entry(
         _flow_snap = orb_shadow.attach(_flow_snap, candidate.symbol, depth_gate._fresh_quote(candidate.symbol), candidate.current_ltp)
     except Exception:  # noqa: BLE001
         logger.debug("entry: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
+    # E103: odds of this trade's own stop / target on today's bars (orders/trade_odds.py). Record only; never raises, never blocks.
+    try:
+        _flow_snap = trade_odds.attach(_flow_snap, candidate.symbol, "LONG", levels.stop_pct, levels.target_pct)
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: trade_odds.attach failed (record only, entry unaffected)", exc_info=True)
 
     # group329: exchange circuit band - skip a stock at / next to its upper circuit (cannot fill, no room for the target) or close to
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.
@@ -1057,6 +1063,8 @@ def attempt_entry(
 
     # DB record
     pos = ScalpPosition(
+        market_state=_ms_current_profile()["market_state"],      # Market Weather stamp
+        profile_version=_ms_current_profile()["profile_version"],
         symbol=candidate.symbol,
         dhan_security_id=security_id,
         window_source=candidate.window_label,
@@ -1376,6 +1384,8 @@ def attempt_manual_entry(
     db.commit()
 
     pos = ScalpPosition(
+        market_state=_ms_current_profile()["market_state"],      # Market Weather stamp
+        profile_version=_ms_current_profile()["profile_version"],
         symbol=symbol,
         dhan_security_id=security_id,
         window_source="MANUAL",

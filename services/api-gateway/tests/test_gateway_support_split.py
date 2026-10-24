@@ -73,8 +73,11 @@ def test_handlers_use_main_names_only_through_ref_and_every_ref_name_exists_in_m
         own |= {a.arg for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) for a in n.args.args + n.args.kwonlyargs}
         own |= {"ref", "self"}
         for h in _handlers(tree):
+            # E78: a name the handler itself imports or assigns (`from data_feed import extract_feed_payload` inside the body) is a local, not a main.py name
+            local = {(a.asname or a.name).split(".")[0] for x in ast.walk(h) if isinstance(x, (ast.Import, ast.ImportFrom)) for a in x.names}
+            local |= {x.id for x in ast.walk(h) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)}
             for x in ast.walk(h):
-                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in main_names and x.id not in own:
+                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in main_names and x.id not in own and x.id not in local:
                     raise AssertionError(f"{fname}:{h.name} uses main.py name {x.id!r} directly; write ref.{x.id}")
                 if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "ref":
                     assert x.attr in main_names, f"{fname}:{h.name} reads ref.{x.attr} but main.py defines no such name"
@@ -105,8 +108,9 @@ def test_factory_is_called_before_the_first_use_and_routers_keep_their_order():
     assert pos == sorted(pos)
     assert _MAIN_SRC.index("_bound_routes = _build_bound_routes(") < pos[0]
     # the audit-missing report must stay registered before /api/feed/{symbol}
-    sym = _MAIN_SRC.find('@app.get("/api/feed/{symbol}"')
-    assert sym == -1 or pos[-1] < sym
+    # E87: /api/feed/{symbol} moved to gateway_support/bound_routes_l.py (data_feed_symbol), so compare against its include.
+    sym = _MAIN_SRC.index("app.include_router(_bound_routes_l.data_feed_symbol_router)")
+    assert pos[-1] < sym
 
 
 # ------------------------------------------------------------------------------------------------------------- MainRef

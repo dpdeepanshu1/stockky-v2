@@ -10,6 +10,9 @@ WHAT IT DOES
   * classifies a change as LOOSENS / TIGHTENS / NEUTRAL against the current value and refuses a LOOSENING change unless the caller confirms it.
   * never accepts a key that is not in the catalog, never a free-form value (bool / enum / int / float with a range), and never writes a secret.
 
+  * (market-state layer) an OVERLAY is a same-day, in-memory TIGHTENING of a `live` switch marked `overlay=True`: it is never written to overrides.json or
+    os.environ, it expires at its `until` time, a person's set()/clear() cancels it, and it is refused unless MARKET_STATE_MODE is `live`.
+
 It is intentionally small and has no dependency except the standard library (fastapi is imported only inside `mount`).
 """
 from __future__ import annotations
@@ -21,8 +24,9 @@ import os
 import re
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("control")
@@ -36,6 +40,11 @@ KINDS = ("bool", "enum", "int", "float", "time")
 LOOSER_BOOL = ("on", "off", "neutral")           # which bool value is LOOSER ("on": ON loosens, e.g. a log-only switch; "off": OFF loosens, e.g. a gate)
 LOOSER_TIME = ("later", "earlier", "neutral")    # time of day (HH:MM IST): does a LATER value loosen (an entry cut-off) or an EARLIER one
 LOOSER_NUM = ("higher", "lower", "neutral")      # numeric: does a HIGHER value loosen (a max-chase limit) or a LOWER one (a minimum room)
+MODE_KEY = "MARKET_STATE_MODE"                   # off | shadow | live: an overlay is accepted only while this reads `live`
+STATES = ("calm", "normal", "choppy", "stressed", "panic")
+OVERLAY_MAX_HOURS = 24                           # an overlay may never last longer than this, whatever `until` says
+REAPER_SECONDS = 30
+_VERSION = re.compile(r"^[A-Za-z0-9._-]{1,24}$")
 
 
 @dataclass(frozen=True)
@@ -58,12 +67,28 @@ class Flag:
     derived: Tuple[Tuple[str, str, str], ...] = ()  # (module, attr, env_key): attrs that default to this value at import when env_key is unset (DEMO twins)
     zero_off: bool = False                     # numeric MAX-style limit where 0 means "test disabled" (so 0 is the LOOSEST value, not the strictest)
     same_rank: Tuple[str, ...] = ()            # enum values that are equally loose (e.g. "log" and "off" never block a trade)
+    overlay: bool = False                      # True = the market-state layer may TIGHTEN this switch for one day (needs live=True and a known direction)
 
 
 class ControlError(Exception):
     def __init__(self, status: int, detail: Any):
         super().__init__(str(detail))
         self.status, self.detail = status, detail
+
+
+# ---------------------------------------------------------------- market-state overlay (module level: read by trade stamping)
+ACTIVE: Dict[str, Any] = {}   # {"state", "version", "until", "until_ts"} while an overlay is in force, else empty
+
+
+def current_profile() -> Dict[str, Optional[str]]:
+    """The market state and profile version in force right now, for stamping a trade. Empty overlay (or an expired one) gives Nones."""
+    a = ACTIVE
+    try:
+        if a and float(a.get("until_ts") or 0) > time.time():
+            return {"market_state": a.get("state"), "profile_version": a.get("version")}
+    except Exception:  # noqa: BLE001 - stamping must never break a trade
+        pass
+    return {"market_state": None, "profile_version": None}
 
 
 # ---------------------------------------------------------------- values
@@ -100,6 +125,13 @@ def validate_flag(f: Flag) -> List[str]:
         p.append("live=True needs targets")
     if f.shipped is None:
         p.append("shipped (the code default) is required")
+    if f.overlay:
+        if not f.live:
+            p.append("overlay=True needs live=True (a restart-only switch cannot change for one day)")
+        if f.key == MODE_KEY:
+            p.append("the market-state mode switch can never be overlaid")
+        if f.kind != "enum" and f.looser == "neutral":
+            p.append("overlay=True needs a known direction (looser must not be neutral)")
     return p
 
 
@@ -332,6 +364,22 @@ class Store:
             return self._audit_mem[-limit:][::-1]
 
 
+def _parse_until(raw: Any) -> datetime:
+    """`until` as an aware UTC datetime. A time with no UTC offset is refused (IST vs UTC guesses are how an overlay outlives its day)."""
+    msg = "until must be an ISO-8601 time WITH a UTC offset, e.g. 2026-10-23T15:30:00+05:30"
+    if isinstance(raw, bool):
+        raise ControlError(400, msg)
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(float(raw), timezone.utc)
+    try:
+        d = datetime.fromisoformat(str(raw or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise ControlError(400, msg)
+    if d.tzinfo is None:
+        raise ControlError(400, msg)
+    return d.astimezone(timezone.utc)
+
+
 # ---------------------------------------------------------------- controller
 class Controller:
     def __init__(self, service: str, catalog: Sequence[Flag], store: Optional[Store] = None, restart_hint: str = ""):
@@ -341,6 +389,9 @@ class Controller:
         self.store = store or Store()
         self.restart_hint = restart_hint or f"docker compose restart {service}"
         self._lock = threading.RLock()
+        self._overlays: Dict[str, Dict[str, Any]] = {}     # key -> {saved, value, until, until_ts, state, version, by}; memory only, never persisted
+        self._reaper: Optional[threading.Thread] = None
+        self._stop = threading.Event()
 
     # -- reading
     def _desired(self, f: Flag, rec: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -358,6 +409,7 @@ class Controller:
             return v
 
     def describe(self) -> Dict[str, Any]:
+        self.reap()
         ov = self.store.overrides()
         rows: List[Dict[str, Any]] = []
         n_pending = n_off_rec = 0
@@ -366,8 +418,10 @@ class Controller:
             run = running_value(f)
             desired = self._desired(f, rec)
             effective = run if run is not None else desired
-            pending = bool(run is not None and desired is not None and run != desired)
-            matches = None if f.recommended is None else (canonical(f, f.recommended) == effective)
+            ovl = self._overlays.get(f.key)
+            # an overlay is a deliberate, temporary difference between the running value and the saved one: neither "pending restart" nor "off recommended"
+            pending = bool(run is not None and desired is not None and run != (ovl["value"] if ovl else desired))
+            matches = None if f.recommended is None else (canonical(f, f.recommended) == (desired if ovl else effective))
             n_pending += 1 if pending else 0
             n_off_rec += 1 if matches is False else 0
             rows.append({
@@ -380,10 +434,13 @@ class Controller:
                 "override": None if not rec else {k: rec.get(k) for k in ("value", "by", "at", "note")},
                 "pending_restart": pending, "matches_recommended": matches,
                 "restart_needed_on_change": not f.live,
+                "overlayable": f.overlay,
+                "overlay": None if not ovl else {"value": ovl["value"], "saved": ovl["saved"], "until": ovl["until"], "state": ovl["state"]},
             })
         return {"service": self.service, "persistent": self.store.persistent, "state_dir": self.store.dir, "store_error": self.store.last_error,
                 "restart_hint": self.restart_hint,
                 "summary": {"flags": len(rows), "overrides": len(ov), "pending_restart": n_pending, "off_recommended": n_off_rec},
+                "market_state": self.overlay_status(),
                 "flags": rows}
 
     # -- writing
@@ -419,13 +476,18 @@ class Controller:
             raise ControlError(400, f"{f.key}: {e}")
         with self._lock:
             rec_old = self.store.overrides().get(f.key)
-            cur = running_value(f) or self._desired(f, rec_old)
+            ov_active = f.key in self._overlays
+            # a person's change is judged against the SAVED value, never against today's overlay, and always wins over it
+            cur = (self._desired(f, rec_old) if ov_active else running_value(f)) or self._desired(f, rec_old)
             change = classify(f, cur, new)
-            if change == "SAME" and rec_old and rec_old.get("value") == new:
+            if change == "SAME" and not ov_active and rec_old and rec_old.get("value") == new:
                 return {"ok": True, "key": f.key, "change": "SAME", "value": new, "applied_live": f.live, "restart_required": False, "message": "no change"}
             if change == "LOOSENS" and not confirm:
                 raise ControlError(409, {"needs_confirm": True, "change": "LOOSENS", "key": f.key, "from": cur, "to": new,
                                          "message": f"{f.title}: {cur} -> {new} LOOSENS live trading rules. Send confirm=true to apply."})
+            if ov_active:
+                self._overlays.pop(f.key, None)
+                self.store.audit({"action": "overlay_cancel", "service": self.service, "key": f.key, "by": by, "reason": "set() by a person"})
             orig = rec_old.get("orig_env") if rec_old and "orig_env" in rec_old else (os.environ.get(f.key))
             rec = {"value": new, "orig_env": orig, "by": by, "at": _now(), "note": (note or "")[:200]}
             self.store.put(f.key, rec)
@@ -434,6 +496,8 @@ class Controller:
             restart = not (f.live and applied)
             self.store.audit({"action": "set", "service": self.service, "key": f.key, "from": cur, "to": new, "change": change, "by": by,
                               "applied_live": applied, "restart_required": restart, "note": rec["note"], "error": err})
+            if f.key == MODE_KEY and new != "live":
+                self.overlay_clear(by, f"{MODE_KEY} set to {new}", keep_profile=(new == "shadow"))
         return {"ok": True, "key": f.key, "change": change, "from": cur, "value": new, "applied_live": applied, "restart_required": restart,
                 "restart_hint": self.restart_hint if restart else None, "persistent": self.store.persistent, "error": err,
                 "message": ("applied now" if applied else f"saved; takes effect after: {self.restart_hint}") + ("" if self.store.persistent else " (WARNING: state dir not writable, this will be lost on restart)")}
@@ -441,6 +505,8 @@ class Controller:
     def clear(self, key: str, by: str) -> Dict[str, Any]:
         f = self._flag(key)
         with self._lock:
+            if f.key in self._overlays:
+                self._restore_key(f, by, "clear() by a person")
             rec = self.store.delete(f.key)
             if rec is None:
                 return {"ok": True, "key": f.key, "cleared": False, "message": "no override"}
@@ -453,9 +519,151 @@ class Controller:
             restart = not (f.live and applied)
             self.store.audit({"action": "clear", "service": self.service, "key": f.key, "was": rec.get("value"), "by": by, "applied_live": applied,
                               "restart_required": restart, "error": err})
+            if f.key == MODE_KEY and self._mode() != "live":
+                self.overlay_clear(by, f"{MODE_KEY} cleared", keep_profile=(self._mode() == "shadow"))
         return {"ok": True, "key": f.key, "cleared": True, "applied_live": applied, "restart_required": restart,
                 "restart_hint": self.restart_hint if restart else None, "error": err,
                 "message": "back to the .env / default value" + ("" if applied else f"; takes effect after: {self.restart_hint}")}
+
+    # -- market-state overlay (same-day, in memory, tighten-only)
+    def _mode(self) -> Optional[str]:
+        """The market-state mode in force (off | shadow | live); None when this service has no such switch."""
+        f = self.by_key.get(MODE_KEY)
+        if f is None:
+            return None
+        return running_value(f) or self._desired(f, self.store.overrides().get(MODE_KEY))
+
+    def _saved(self, f: Flag) -> Optional[str]:
+        return self._desired(f, self.store.overrides().get(f.key))
+
+    def _restore_key(self, f: Flag, by: str, reason: str) -> None:
+        """Put one overlaid switch back to its saved value and forget the overlay. Caller holds the lock."""
+        o = self._overlays.pop(f.key, None)
+        saved = self._saved(f)
+        applied, err = self._apply_live(f, saved)
+        self.store.audit({"action": "overlay_restore", "service": self.service, "key": f.key, "from": (o or {}).get("value"), "to": saved,
+                          "by": by, "reason": reason, "applied_live": applied, "error": err})
+
+    def overlay_status(self) -> Dict[str, Any]:
+        with self._lock:
+            mode = self._mode()
+            prof = dict(ACTIVE) if ACTIVE and float(ACTIVE.get("until_ts") or 0) > time.time() else {}
+            return {"supported": mode is not None, "mode": mode,
+                    "active": ({"state": prof.get("state"), "version": prof.get("version"), "until": prof.get("until")} if prof else None),
+                    "overlays": [{"key": k, "saved": o["saved"], "value": o["value"], "until": o["until"], "state": o["state"]} for k, o in sorted(self._overlays.items())]}
+
+    def overlay_set(self, entries: Any, until: Any, state: Any, version: Any, by: str, note: str = "") -> Dict[str, Any]:
+        """Tighten live switches for ONE day. All or nothing. Never writes overrides.json or os.environ, so a restart (or the `until` time) returns every
+        value to the saved one. Refuses: anything that is not TIGHTENS/SAME against the SAVED value, a switch not marked overlay=True, a missing/odd
+        `until`, and (unless entries is empty = stamp only, allowed in shadow) any call while MARKET_STATE_MODE is not `live`."""
+        if not isinstance(entries, dict):
+            raise ControlError(400, "entries must be an object {KEY: value}; use {} to stamp the state without changing any switch")
+        st = str(state or "").strip().lower()
+        if st not in STATES:
+            raise ControlError(400, f"state must be one of {', '.join(STATES)}")
+        ver = str(version or "").strip()
+        if not _VERSION.match(ver):
+            raise ControlError(400, "version must be 1-24 characters of letters, digits . _ -")
+        when = _parse_until(until)
+        now = datetime.now(timezone.utc)
+        if when <= now:
+            raise ControlError(400, "until is already in the past")
+        if when > now + timedelta(hours=OVERLAY_MAX_HOURS):
+            raise ControlError(400, f"until may be at most {OVERLAY_MAX_HOURS} hours ahead")
+        with self._lock:
+            mode = self._mode()
+            if mode is None:
+                raise ControlError(409, f"this service has no {MODE_KEY} switch: the market-state layer is not available here")
+            if mode == "off" or (mode != "live" and entries):
+                raise ControlError(409, {"mode": mode, "message": f"{MODE_KEY} is {mode}: overlays that change a switch are accepted only in live mode (stamp-only calls, entries {{}}, are accepted in shadow)"})
+            plan: List[Tuple[Flag, Optional[str], str, str]] = []
+            for key, raw in entries.items():
+                f = self._flag(key)
+                if not f.overlay:
+                    raise ControlError(409, f"{f.key} is not an overlay dial: the market-state layer may not touch it")
+                try:
+                    new = canonical(f, raw)
+                except ValueError as e:
+                    raise ControlError(400, f"{f.key}: {e}")
+                saved = self._saved(f)
+                change = classify(f, saved, new)
+                if change not in ("TIGHTENS", "SAME"):
+                    raise ControlError(409, {"key": f.key, "saved": saved, "to": new, "change": change,
+                                             "message": f"{f.key}: {saved} -> {new} is {change}; an overlay can only tighten the saved value"})
+                plan.append((f, saved, new, change))
+            before = {f.key: self._overlays.get(f.key) for f, _, _, _ in plan}
+            done: List[Flag] = []
+            failed: Optional[Tuple[str, Optional[str]]] = None
+            for f, saved, new, change in plan:
+                applied, err = self._apply_live(f, new)
+                if not applied:
+                    failed = (f.key, err)
+                    break
+                done.append(f)
+                if change == "SAME":
+                    self._overlays.pop(f.key, None)          # back at the saved value: nothing left to overlay
+                else:
+                    self._overlays[f.key] = {"saved": saved, "value": new, "until": when.isoformat(timespec="seconds"), "until_ts": when.timestamp(),
+                                             "state": st, "version": ver, "by": by}
+            if failed:                                       # roll everything this call touched back to how it was
+                for f in done:
+                    prev = before.get(f.key)
+                    if prev:
+                        self._apply_live(f, prev["value"])
+                        self._overlays[f.key] = prev
+                    else:
+                        self._overlays.pop(f.key, None)
+                        self._apply_live(f, self._saved(f))
+                self.store.audit({"action": "overlay_failed", "service": self.service, "key": failed[0], "error": failed[1], "by": by})
+                raise ControlError(500, f"{failed[0]}: could not apply live ({failed[1]}); nothing was changed")
+            ACTIVE.clear()
+            ACTIVE.update({"state": st, "version": ver, "until": when.isoformat(timespec="seconds"), "until_ts": when.timestamp()})
+            self._ensure_reaper()
+            self.store.audit({"action": "overlay", "service": self.service, "state": st, "version": ver, "until": ACTIVE["until"], "by": by, "mode": mode,
+                              "note": (note or "")[:200],
+                              "changes": [{"key": f.key, "saved": s_, "to": n_, "change": c_} for f, s_, n_, c_ in plan]})
+            return {"ok": True, "state": st, "version": ver, "until": ACTIVE["until"], "mode": mode,
+                    "applied": [{"key": f.key, "saved": s_, "value": n_, "change": c_} for f, s_, n_, c_ in plan]}
+
+    def overlay_clear(self, by: str, reason: str = "cleared", keep_profile: bool = False) -> Dict[str, Any]:
+        """Put every overlaid switch back to its saved value now. `keep_profile` leaves the state stamp (shadow keeps stamping trades)."""
+        with self._lock:
+            keys = sorted(self._overlays)
+            for k in keys:
+                self._restore_key(self.by_key[k], by, reason)
+            had_profile = bool(ACTIVE)
+            if not keep_profile:
+                ACTIVE.clear()
+            if keys or had_profile:
+                self.store.audit({"action": "overlay_clear", "service": self.service, "keys": keys, "by": by, "reason": reason})
+            return {"ok": True, "cleared": keys, "reason": reason}
+
+    def reap(self, now: Optional[float] = None) -> List[str]:
+        """Restore every overlay whose time has passed (called by the reaper thread and by describe()). Returns the keys restored."""
+        t = time.time() if now is None else now
+        expired: List[str] = []
+        with self._lock:
+            for k, o in list(self._overlays.items()):
+                if float(o.get("until_ts") or 0) <= t:
+                    self._restore_key(self.by_key[k], "expiry", "until reached")
+                    expired.append(k)
+            if ACTIVE and float(ACTIVE.get("until_ts") or 0) <= t:
+                ACTIVE.clear()
+        return expired
+
+    def _ensure_reaper(self) -> None:
+        if self._reaper is not None and self._reaper.is_alive():
+            return
+
+        def _loop() -> None:
+            while not self._stop.wait(REAPER_SECONDS):
+                try:
+                    self.reap()
+                except Exception as e:  # noqa: BLE001 - the reaper must never die; describe() also reaps
+                    logger.warning("control: overlay reaper error %s", type(e).__name__)
+
+        self._reaper = threading.Thread(target=_loop, name="control-overlay-reaper", daemon=True)
+        self._reaper.start()
 
     def preset_recommended(self, by: str, dry_run: bool = True, confirm: bool = False) -> Dict[str, Any]:
         """Move every switch that has a recommended value to it. dry_run lists the changes only."""
@@ -518,6 +726,13 @@ def mount(app: Any, controller: Controller, admin_dep: Callable[..., Any], prefi
         dry_run: bool = True
         confirm: bool = False
 
+    class OverlayBody(BaseModel):
+        entries: Dict[str, Any] = {}
+        until: Any
+        state: str
+        version: str
+        note: str = ""
+
     router = APIRouter(prefix=prefix, tags=["control"])
 
     def _wrap(fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
@@ -548,6 +763,21 @@ def mount(app: Any, controller: Controller, admin_dep: Callable[..., Any], prefi
 
     preset.__annotations__["body"] = PresetBody
     router.post("/preset/recommended")(preset)
+
+    def overlay_post(body: OverlayBody, admin: str = Depends(admin_dep)):
+        return _wrap(lambda: controller.overlay_set(body.entries, body.until, body.state, body.version, admin or "admin", note=body.note))
+
+    overlay_post.__annotations__["body"] = OverlayBody
+    router.post("/overlay")(overlay_post)
+
+    @router.get("/overlay")
+    def overlay_get(admin: str = Depends(admin_dep)):
+        controller.reap()
+        return controller.overlay_status()
+
+    @router.delete("/overlay")
+    def overlay_delete(admin: str = Depends(admin_dep)):
+        return _wrap(lambda: controller.overlay_clear(admin or "admin", "DELETE /control/overlay"))
 
     @router.get("/audit")
     def audit(limit: int = 100, admin: str = Depends(admin_dep)):

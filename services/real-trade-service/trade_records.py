@@ -282,6 +282,25 @@ def _exit_trigger(pos, reason, exit_decisions, exit_price) -> dict:
 _ATTR_FIELDS = ("source_tab", "decision_label", "stop_basis", "imbalance_5")
 
 
+def _market_stamp(pos, entry_order) -> dict:
+    """P5: the market state and profile version in force when the trade was opened. The position's own column first (copied from the
+    entry order at fill), then the entry order itself (a position created by the broker-import path has it NULL). Pure, never raises;
+    nothing recorded stays None (never invented, never a default state)."""
+    out = {}
+    for key in ("market_state", "profile_version"):
+        val = None
+        try:
+            for src in (pos, entry_order):
+                v = getattr(src, key, None) if src is not None else None
+                if isinstance(v, str) and v.strip():
+                    val = v.strip()
+                    break
+        except Exception:  # noqa: BLE001
+            val = None
+        out[key] = val
+    return out
+
+
 def _attribution(pos, entry_order, cand, decision) -> dict:
     """A13: source_tab / decision_label / conviction with a fallback chain, plus where each value came from. The position's own
     column is set only when the fill creates the row; a position first created by the broker-import path (the group-438 race) or
@@ -366,6 +385,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             w_id = (getattr(p, "watchlist_entry_id", None) or (getattr(entry_order, "watchlist_entry_id", None) if entry_order else None)
                     or getattr(cand, "watchlist_entry_id", None))   # A13: candidate as the last fallback
             attr = _attribution(p, entry_order, cand, decision)
+            ms = _market_stamp(p, entry_order)
             w = watch_by_id.get(w_id) if w_id else None
 
             entry = _num(p.avg_entry_price)
@@ -426,6 +446,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "conviction": attr["conviction"],
                 "attribution_source": attr["attribution_source"],
                 "regime_override": bool(getattr(p, "is_regime_override", False)),
+                "market_state": ms["market_state"], "profile_version": ms["profile_version"],   # P5: Market Weather stamp, position -> entry order; None = none was active (never 0)
                 "tier": tier, "tier_name": _TIER_NAMES.get(tier) if tier is not None else None,
                 "catalyst_type": getattr(w, "catalyst_type", None),
                 "catalyst_price": catalyst,
@@ -660,6 +681,7 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_exit_reason": {}, "by_entry_hour_ist": {}, "by_tier": {}, "by_catalyst_type": {},
         "by_source_tab": {}, "by_day": {}, "by_stop_basis": {}, "by_imbalance_5": {}, "by_imbalance_20": {}, "by_spread": {},
         "by_mansfield_rs": {}, "by_breadth": {},
+        "by_market_state": {}, "by_profile_version": {},
         "stop_diagnostics": None, "attribution_coverage": attribution_coverage(records),
         "note": (f"groups with fewer than {min_trades_note} trades are noise (low_sample); expectancy is the average P&L "
                  "per trade, net of charges where known (ledger actuals, else the position's own estimate), else gross; "
@@ -683,6 +705,9 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_orb_shadow": _orb_bucket,                                     # group474: would an opening-range entry have taken this trade?
         "by_mansfield_rs": lambda r: _rs_bucket(r.get("log_mansfield_rs")),
         "by_breadth": lambda r: _breadth_bucket(r.get("log_breadth_pct")),
+        # P5: Market Weather stamp (trades opened with no state active, or before the stamp existed, fall in "none")
+        "by_market_state": lambda r: r.get("market_state") or "none",
+        "by_profile_version": lambda r: r.get("profile_version") or "none",
     }
     for name, key in keyers.items():
         groups: dict = defaultdict(list)

@@ -593,6 +593,47 @@ def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
 # orders/entry.py, but kept correct for completeness) are unaffected by
 # this SDK bug — price > 0 is exactly what the SDK's own validation wants
 # there — and still go through place_super_order() normally.
+_SUPER_SIDES = ("BUY", "SELL")
+
+
+def clamp_super_levels(transaction_type: str, ref: float, target_price: float, stop_loss_price: float) -> tuple:
+    """Short selling step 4: side-aware one-tick clamps for a Super Order's legs, around the reference price `ref`.
+
+    BUY  (long entry):  target must be ABOVE ref, stop BELOW ref.            (unchanged behaviour)
+    SELL (short entry): target must be BELOW ref, stop ABOVE ref (mirrored).
+    Tick-rounding on a cheap stock can collapse a leg onto ref; the leg is then moved ONE tick to the correct side. Returns
+    (target, stop, notes) with notes a list of human strings for the log. ref <= 0 = nothing to anchor to, levels pass through.
+    Raises ValueError for an unknown side, or when a SELL target would have to go to zero or below (a cover price must exist).
+    Pure, no I/O; this is the one place that knows the SELL orientation.
+    """
+    side = (transaction_type or "").strip().upper()
+    if side not in _SUPER_SIDES:
+        raise ValueError(f"clamp_super_levels: unknown transaction_type {transaction_type!r} (must be BUY or SELL)")
+    t_price, s_price = float(target_price), float(stop_loss_price)
+    notes: list = []
+    if not ref or ref <= 0:
+        return t_price, s_price, notes
+    band_tick = tick_size_for_price(ref)
+    if side == "BUY":
+        if t_price <= ref:
+            t_price = round_to_tick(ref + band_tick)
+            notes.append(f"target={target_price:.2f} <= ref={ref:.2f} after rounding - bumped to {t_price:.2f} (1 tick above ref)")
+        if s_price >= ref:
+            s_price = round_to_tick(ref - band_tick)
+            notes.append(f"stop={stop_loss_price:.2f} >= ref={ref:.2f} after rounding - clamped to {s_price:.2f} (1 tick below ref)")
+        return t_price, s_price, notes
+    # SELL (short): profit when the price FALLS, so the target sits below ref and the protective stop above it.
+    if t_price >= ref:
+        t_price = round_to_tick(ref - band_tick)
+        notes.append(f"target={target_price:.2f} >= ref={ref:.2f} after rounding - moved to {t_price:.2f} (1 tick below ref)")
+    if s_price <= ref:
+        s_price = round_to_tick(ref + band_tick)
+        notes.append(f"stop={stop_loss_price:.2f} <= ref={ref:.2f} after rounding - moved to {s_price:.2f} (1 tick above ref)")
+    if t_price <= 0:
+        raise ValueError(f"clamp_super_levels: SELL target would be {t_price} at ref {ref} - refusing (no valid cover price)")
+    return t_price, s_price, notes
+
+
 def place_super_order(
     db: Session,
     *,
@@ -648,27 +689,11 @@ def place_super_order(
         # Also guard against round_to_tick collapsing target to == or < reference price
         # on very low-priced stocks — add at least 1 tick to ensure targetPrice > price
         # (Dhan compares against the actual fill price, not our reference, so this is safe).
-        t_price = float(target_price)
-        s_price = float(stop_loss_price)
         ref     = float(price) if price else 0.0
-        if ref > 0 and t_price <= ref:
-            # targetPrice collapsed to <= reference price after tick-rounding.
-            # Bump by 1 tick so Dhan server won't reject it.
-            band_tick = tick_size_for_price(ref)
-            t_price = round_to_tick(ref + band_tick)
-            logger.warning(
-                "position-stocks: place_super_order MARKET: target=%.2f <= ref=%.2f "
-                "after rounding — bumped to %.2f (1 tick above ref)",
-                target_price, ref, t_price,
-            )
-        if ref > 0 and transaction_type.upper() == "BUY" and s_price >= ref:
-            band_tick = tick_size_for_price(ref)
-            s_price = round_to_tick(ref - band_tick)
-            logger.warning(
-                "position-stocks: place_super_order MARKET: stop=%.2f >= ref=%.2f "
-                "after rounding — clamped to %.2f (1 tick below ref)",
-                stop_loss_price, ref, s_price,
-            )
+        # Short selling step 4: the clamps are side-aware (BUY: target above / stop below ref; SELL mirrored). BUY output is unchanged.
+        t_price, s_price, _clamp_notes = clamp_super_levels(transaction_type, ref, target_price, stop_loss_price)
+        for _note in _clamp_notes:
+            logger.warning("position-stocks: place_super_order MARKET (%s): %s", transaction_type.upper(), _note)
         payload = {
             "transactionType": transaction_type.upper(),
             "exchangeSegment": exchange_segment.upper(),
@@ -727,6 +752,15 @@ def place_super_order(
             f"{security_id} at ₹{ref_price} — not a valid "
             f"₹{tick_size_for_price(ref_price)} tick multiple after rounding."
         )
+
+    # Short selling step 4: fail loudly, with symbol context, on a leg that sits on the wrong side of the entry price for this direction.
+    # A LIMIT entry is not rewritten here: a wrong-way leg is a caller bug, not a rounding artefact.
+    if ref_price and order_type_upper == "LIMIT":
+        _side = transaction_type.strip().upper()
+        if _side == "SELL" and not (float(target_price) < float(ref_price) < float(stop_loss_price)):
+            raise ValueError(f"place_super_order: SELL {security_id} x{quantity} needs target < price < stop (target={target_price}, price={ref_price}, stop={stop_loss_price})")
+        if _side == "BUY" and not (float(stop_loss_price) < float(ref_price) < float(target_price)):
+            raise ValueError(f"place_super_order: BUY {security_id} x{quantity} needs stop < price < target (target={target_price}, price={ref_price}, stop={stop_loss_price})")
 
     logger.info(
         "position-stocks: Placing REAL Super Order: %s %s x%s ref=%s target=%s stop=%s (%s, %s)",
@@ -973,6 +1007,9 @@ def convert_position(
     success and skip squareoff based on this call alone without checking
     its result.
     """
+    if str(position_type or "").strip().upper() == "SHORT":
+        # Short selling: a short is intraday only. Converting it to delivery would need shares the account does not hold.
+        raise ValueError("convert_position: refusing to convert a SHORT position to CNC - shorts are never carried overnight")
     if not is_armed:
         raise DhanNotArmedError("position-stocks-service is not armed — refusing to convert position.")
     client = _get_sdk_client(db)
@@ -1401,8 +1438,8 @@ def is_ambiguous_placement_error(exc) -> bool:
     return any(m in msg for m in _AMBIGUOUS_MARKERS) or bool(_AMBIGUOUS_HTTP_RE.search(msg))
 
 
-def match_recent_buy_order(rows, security_id, quantity, now=None, within_s: float = 180.0, exclude_ids=()) -> Optional[dict]:
-    """Newest live BUY row for this security id and exact quantity created within `within_s` seconds, whose id is not already
+def match_recent_buy_order(rows, security_id, quantity, now=None, within_s: float = 180.0, exclude_ids=(), transaction_type: str = "BUY") -> Optional[dict]:
+    """Newest live BUY row (transaction_type="SELL" for a short entry) for this security id and exact quantity created within `within_s` seconds, whose id is not already
     ours. Needs a parseable createTime (IST when naive); without one nothing is matched. Pure."""
     from datetime import datetime, timedelta, timezone
     ist = timezone(timedelta(hours=5, minutes=30))
@@ -1413,7 +1450,7 @@ def match_recent_buy_order(rows, security_id, quantity, now=None, within_s: floa
     for r in rows or []:
         if not isinstance(r, dict):
             continue
-        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "BUY":
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != (transaction_type or "BUY").strip().upper():
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(security_id):
             continue
@@ -1441,7 +1478,7 @@ def match_recent_buy_order(rows, security_id, quantity, now=None, within_s: floa
     return best
 
 
-def find_recent_buy_order(db: Session, security_id, quantity, super_order: bool = True, exclude_ids=(), within_s: float = 180.0) -> Optional[dict]:
+def find_recent_buy_order(db: Session, security_id, quantity, super_order: bool = True, exclude_ids=(), within_s: float = 180.0, transaction_type: str = "BUY") -> Optional[dict]:
     """Ask Dhan (super-order list or plain order book) for a BUY that an errored placement may have created. Read-only."""
     rows = get_super_order_list(db) if super_order else get_order_list(db)
-    return match_recent_buy_order(rows, security_id, quantity, exclude_ids=exclude_ids, within_s=within_s)
+    return match_recent_buy_order(rows, security_id, quantity, exclude_ids=exclude_ids, within_s=within_s, transaction_type=transaction_type)

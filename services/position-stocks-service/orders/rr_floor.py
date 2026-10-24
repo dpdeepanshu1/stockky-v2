@@ -35,3 +35,23 @@ def reject_reason(levels: Any, minimum: Optional[float] = None) -> Optional[str]
                 f"is below the {minimum:g}:1 floor")
     except Exception:  # noqa: BLE001
         return None
+
+
+def geometry_reason(levels: Any, entry_ref: float) -> Optional[str]:
+    """Short selling step 4: reject levels whose legs sit on the wrong side of the entry price for their direction (long: stop < entry < target;
+    short: target < entry < stop). A wrong-way stop would sit on the PROFIT side and never protect the trade. Reason string, else None.
+    Missing data (no prices / no ref) returns None; a bad side value returns a reason (never guesses a direction). Never raises."""
+    try:
+        side = str(getattr(levels, "side", "LONG") or "LONG").strip().upper()
+        if side not in ("LONG", "SHORT"):
+            return f"LEVEL_GEOMETRY: unknown side {side!r}"
+        t, s_, ref = float(levels.target_price), float(levels.stop_price), float(entry_ref)
+        if not (ref > 0) or not (t > 0) or not (s_ > 0):
+            return None
+        if side == "LONG" and not (s_ < ref < t):
+            return f"LEVEL_GEOMETRY: long needs stop < entry < target (stop {s_}, entry {ref}, target {t})"
+        if side == "SHORT" and not (t < ref < s_):
+            return f"LEVEL_GEOMETRY: short needs target < entry < stop (target {t}, entry {ref}, stop {s_})"
+        return None
+    except Exception:  # noqa: BLE001
+        return None

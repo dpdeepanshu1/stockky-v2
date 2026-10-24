@@ -148,6 +148,9 @@ def _group479_guards_off_by_default(monkeypatch):
     monkeypatch.setattr(_config, "ENTRY_MIN_QTY", 0, raising=False)
     monkeypatch.setattr(_config, "ENTRY_MIN_REWARD_RISK", 0.0, raising=False)   # 2026-10-22 RR_FLOOR is tested in test_rr_floor_1_2.py
     monkeypatch.setattr(_config, "ORB_MODE", "off", raising=False)
+    monkeypatch.setattr(_config, "TRADE_ODDS_MODE", "off", raising=False)   # E103: tests that need it turn it on themselves
+    monkeypatch.setattr(_config, "PREOPEN_GAP_ATR_MULT", 0.0, raising=False)   # E107: the stock's-own-ATR gap test; tests/test_e107_gap_vix_decisions.py turns it on itself
+    monkeypatch.setattr(_config, "VIX_CAUTION_PCTILE", 0.0, raising=False)     # E107: same for the VIX 12-month percentile
     from orders import orb_shadow as _orb
     _orb._reset_for_tests()
     yield

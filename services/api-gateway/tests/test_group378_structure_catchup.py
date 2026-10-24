@@ -66,4 +66,4 @@ def test_main_wiring():
     assert any(getattr(d, "id", "") == "_on_startup" for d in hook.decorator_list)
     stop = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_stop_structure_refresh_catchup")
     assert any(getattr(d, "id", "") == "_on_shutdown" for d in stop.decorator_list)
-    assert '"catchup": _catchup' in src                            # visible on /data-feed/structure-refresh/status
+    assert '"catchup": _catchup' in open(os.path.join(_SERVICE, "gateway_support", "bound_routes_l.py"), encoding="utf-8").read()                            # visible on /data-feed/structure-refresh/status

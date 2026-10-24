@@ -65,3 +65,10 @@ AUTOCALIB_DRY_RUN = _b("AUTOCALIB_DRY_RUN", False)         # true = decide and r
 AUTOCALIB_COOLDOWN_H = max(0, _i("AUTOCALIB_COOLDOWN_H", 24))        # a switch changed by auto-calibration is left alone this long
 AUTOCALIB_MAX_AGE_DAYS = max(1, _i("AUTOCALIB_MAX_AGE_DAYS", 40))    # a test result older than this is not evidence
 AUTOCALIB_STEP_PCT = max(1, min(100, _i("AUTOCALIB_STEP_PCT", 25)))  # a number moves at most this % per evaluation
+
+# Market Weather (Part 1 step 4): morning 08:00 / refine 08:50 / lock 09:14 / tick every 5 min, SHADOW only: they log and send the brief, they never change a switch.
+WEATHER_ENABLED = _b("WEATHER_ENABLED", False)      # off until you switch it on (PUT /weather/settings, stored in <data>/state/weather.json, which then wins)
+WEATHER_STAMP = _b("WEATHER_STAMP", False)          # true = also post a STAMP-ONLY overlay (entries {}) so trades carry the state; never moves a dial
+WEATHER_APPLY = _b("WEATHER_APPLY", False)          # true = LIVE: send tighten-only dials, but only while the evidence gate passes AND the service itself has MARKET_STATE_MODE=live (weather_apply.py)
+WEATHER_GATE_MODE = (_s("WEATHER_GATE_MODE", "replay_only") or "replay_only").strip().lower()   # replay_only (default) | strict (replay USEFUL AND shadow report PASS) | off; unknown = strict
+WEATHER_NOTIFY = _b("WEATHER_NOTIFY", True)         # Telegram brief at 08:00 and a message whenever the state changes

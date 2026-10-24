@@ -1,18 +1,29 @@
-"""E25 / E26: the gateway proxies the technical service's /chart-context safely (route order, always-200 empty default, schema check)."""
+import ast
 import os
 
-SRC = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+_SERVICE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
+# E87: the route moved to gateway_support/bound_routes_l.py (main.py names are read as `ref.<name>`); main.py keeps `_CHART_TFS` and includes the router.
+FAC = open(os.path.join(_SERVICE, "gateway_support", "bound_routes_l.py"), encoding="utf-8").read()
+
+
+def _handler_node():
+    build = next(n for n in ast.parse(FAC).body if isinstance(n, ast.FunctionDef) and n.name == "build_bound_routes_l")
+    return next(n for n in build.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "stock_chart_context")
 
 
 def test_route_is_registered_before_the_catch_all_stock_route():
-    a = SRC.index('@app.get("/stock/{symbol}/chart-context")')
-    assert a < SRC.index('@app.get("/stock/{symbol}")')
+    fn = _handler_node()
+    assert [d.args[0].value for d in fn.decorator_list] == ["/stock/{symbol}/chart-context"]
+    assert "@app.get(\"/stock/{symbol}/chart-context\")" not in SRC
+    a = SRC.index("app.include_router(_bound_routes_l.stock_chart_context_router)")
+    assert a < SRC.index("app.include_router(_bound_routes_l.get_stock_decision_router)")
 
 
 def test_route_is_fail_open_and_checks_the_schema():
-    body = SRC[SRC.index("async def stock_chart_context"):SRC.index('@app.get("/stock/{symbol}")')]
+    body = ast.get_source_segment(FAC, _handler_node())
     assert '"ok": False' in body and 'data.get("schema") != 1' in body and "return empty" in body
-    assert "raise HTTPException" not in body          # context only: never turns a missing chart into an error page
+    assert "raise ref.HTTPException" not in body and "raise HTTPException" not in body          # context only: never turns a missing chart into an error page
     assert "max(30, min(int(tail), cap))" in body and "cap = 1500 if intraday else 500" in body      # E27: daily still 500, intraday 1500
 
 
@@ -22,13 +33,7 @@ from typing import Optional
 
 
 def _route():
-    a = SRC.index("_CHART_TFS = ")
-    b = SRC.index('@app.get("/stock/{symbol}")\nasync def get_stock_decision')
     calls = []
-
-    class _App:
-        def get(self, *_a, **_k):
-            return lambda f: f
 
     class _Client:
         async def __aenter__(self):
@@ -56,8 +61,14 @@ def _route():
         return state["resp"]
 
     import logging
-    ns = {"Optional": Optional, "app": _App(), "httpx": _HTTPX, "_cb_get": cb_get, "TECHNICAL_URL": "http://tech:8002", "logger": logging.getLogger("t")}
-    exec(compile(SRC[a:b], "route", "exec"), ns)
+    from types import SimpleNamespace
+    tfs = ast.literal_eval(SRC[SRC.index("_CHART_TFS = ") + len("_CHART_TFS = "):].split("\n", 1)[0])
+    ref = SimpleNamespace(Optional=Optional, httpx=_HTTPX, _cb_get=cb_get, TECHNICAL_URL="http://tech:8002", logger=logging.getLogger("t"), _CHART_TFS=tfs)
+    fn = _handler_node()
+    fn.decorator_list = []          # the router decorator needs fastapi; the handler body is what is under test
+    mod = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
+    ns = {"ref": ref}
+    exec(compile(mod, "route", "exec"), ns)
     return ns["stock_chart_context"], calls, state, _Resp
 
 
@@ -103,4 +114,4 @@ def test_every_failure_is_the_empty_answer_and_a_reason_is_passed_on():
 
 
 def test_the_intraday_breaker_is_separate_so_thin_data_cannot_open_the_analysis_one():
-    assert '"technical_chart" if intraday else "technical"' in SRC
+    assert '"technical_chart" if intraday else "technical"' in FAC   # E87: the route lives in bound_routes_l.py now

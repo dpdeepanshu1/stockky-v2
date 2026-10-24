@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
@@ -124,3 +126,36 @@ def test_non_numeric_parent_price_falls_through_to_own_fallback():
     leg = _leg()
     parent = _parent(averageTradedPrice="INVALID")
     assert _extract_leg_price(leg, parent, own_fallback_price=132.0) == 132.0
+
+
+# ---- E105 (P2 item 15): the parent row's average is the ENTRY fill ----------------------------------------------------
+def test_parent_average_equal_to_the_entry_fill_is_not_an_exit_price():
+    assert _extract_leg_price({}, {"averageTradedPrice": 100.0}, own_fallback_price=101.0, entry_price=100.0) == 101.0
+
+
+def test_parent_average_that_is_not_the_entry_fill_is_still_used():
+    assert _extract_leg_price({}, {"averageTradedPrice": 100.7}, own_fallback_price=101.0, entry_price=100.0) == 100.7
+
+
+def test_old_callers_without_entry_price_keep_the_old_order():
+    assert _extract_leg_price({}, {"averageTradedPrice": 100.0}, own_fallback_price=101.0) == 100.0
+
+
+def test_a_real_leg_fill_still_wins_over_the_entry_check():
+    assert _extract_leg_price({"averageTradedPrice": 101.4}, {"averageTradedPrice": 100.0}, own_fallback_price=101.0, entry_price=100.0) == 101.4
+
+
+def test_stop_overshoot_pct_signs_for_long_and_short():
+    from types import SimpleNamespace as NS
+    from orders.reconcile import stop_overshoot_pct
+    assert stop_overshoot_pct(NS(side="LONG", stop_price=99.0), 98.5) == pytest.approx(0.505, abs=1e-3)      # below the stop = worse
+    assert stop_overshoot_pct(NS(side="SHORT", stop_price=101.0), 101.5) == pytest.approx(0.495, abs=1e-3)   # above the stop = worse
+    assert stop_overshoot_pct(NS(side="SHORT", stop_price=101.0), 100.5) < 0
+    assert stop_overshoot_pct(NS(side="LONG", stop_price=99.0), None) is None
+
+
+def test_all_three_callers_pass_the_entry_price():
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / "orders" / "reconcile.py").read_text(encoding="utf-8")
+    assert src.count("_extract_leg_price(hit_leg, row, own_fallback_price=_trigger_price, entry_price=") == 1
+    assert src.count("own_fallback_price=trigger, entry_price=") == 2

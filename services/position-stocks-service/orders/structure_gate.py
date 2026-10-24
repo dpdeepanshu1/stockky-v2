@@ -5,7 +5,10 @@ in the DAILY structure (technical service `market_structure` summary, flat `ms_*
 GET /stock/{symbol}/structure): a bearish daily trend, a fresh bearish break of structure, almost no room under the next daily resistance, an
 extreme chase above the nearest demand/imbalance zone or an extreme stretch above the daily EMA20.
 
-LIVE: config.STRUCTURE_GATE_MODE = enforce (default, always live) | off (kill switch). It can only ever REFUSE an entry (never create one).
+LIVE: config.STRUCTURE_GATE_MODE = enforce (default, always live) | log (E72: evaluate + record + store the snapshot, never refuse; only via PS_STRUCTURE_GATE_MODE)
+| off (kill switch). It can only ever REFUSE an entry (never create one).
+E72 D-vol: a fresh bullish daily breakout on thin volume (ms_bos_vol_ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO) is an OBSERVATION only (verdict["observations"], the stored
+snapshot, the thin_volume_breakouts counter). It is never a refusal reason in any gate mode.
 NO DATA = NO OPINION: a missing / unavailable / insufficient / stale summary, an old last bar, or a live price far from the structure close
 (split / bad data) never blocks and is never bullish - unless STRUCTURE_REQUIRE_DATA=true.
 The scalper buys strength on purpose, so the default limits are looser than real-trade's swing entry gate; every limit is an env var and 0
@@ -50,8 +53,9 @@ def _cfg(name: str, dflt: float) -> float:
 
 
 def mode() -> str:
+    """off | log | enforce. Anything else (a stale "shadow", a typo) is enforce - the safe, live side."""
     m = str(getattr(config, "STRUCTURE_GATE_MODE", "enforce") or "enforce").lower()
-    return "off" if m == "off" else "enforce"
+    return m if m in ("off", "log") else "enforce"
 
 
 def _age_days(asof) -> Optional[float]:
@@ -107,9 +111,26 @@ def live_metrics(summary: Dict[str, Any], live_price) -> Dict[str, Optional[floa
     return out
 
 
+def breakout_volume_note(summary: Optional[Dict[str, Any]]) -> Optional[str]:
+    """E72 D-vol: text when the latest bullish break of structure is fresh, not failed and came on thin volume (ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO);
+    None when the test is off, there is no fresh bullish breakout, or the summary has no volume ratio (no opinion). Pure, never raises."""
+    try:
+        if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "enforce")).lower() == "off" or not isinstance(summary, dict):
+            return None
+        lim = _cfg("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2)
+        ratio, bars = _f(summary.get("ms_bos_vol_ratio")), _f(summary.get("ms_bos_bars"))
+        if lim <= 0 or ratio is None or bars is None or summary.get("ms_bos_dir") != "bullish" or summary.get("ms_bos_failed"):
+            return None
+        if bars > int(_cfg("STRUCTURE_BREAKOUT_BARS", 5)) or ratio >= lim:
+            return None
+        return f"breakout {int(bars)} bar(s) ago came on thin volume ({ratio:.2f}x the 20-day average, wants {lim:g}x)"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
-    """Pure verdict: opinion ('ok'|'no_opinion'), would_reject, reasons[], reason, metrics, no_data. Never raises."""
-    base: Dict[str, Any] = {"opinion": "no_opinion", "would_reject": False, "reasons": [], "reason": None, "metrics": {}, "no_data": None}
+    """Pure verdict: opinion ('ok'|'no_opinion'), would_reject, reasons[], observations[] (record-only notes, never a reason), reason, metrics, no_data. Never raises."""
+    base: Dict[str, Any] = {"opinion": "no_opinion", "would_reject": False, "reasons": [], "observations": [], "reason": None, "metrics": {}, "no_data": None}
     try:
         nd = no_data_reason(summary, live_price)
         if nd:
@@ -141,6 +162,12 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
                         and bars <= int(_cfg("STRUCTURE_BEARISH_BOS_BARS", 5))):
                     reasons.append(f"fresh bearish break of structure {int(bars)} bar(s) ago")
         base["reasons"] = reasons
+        vol_txt = breakout_volume_note(summary)
+        if vol_txt:
+            if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "enforce")).lower() == "enforce":
+                reasons.append(vol_txt)               # E73: live - a thin-volume breakout is a refusal reason
+            else:
+                base["observations"] = [vol_txt]      # E72 log: recorded, counted, never a reason
         if reasons:
             base["would_reject"] = True
             base["reason"] = "; ".join(reasons)
@@ -168,7 +195,7 @@ def extract_summary(payload: Any) -> Optional[Dict[str, Any]]:
 
 
 # ── group 355: observability (process-local counters + a ring of recent verdicts; read by GET /structure/status) ───────────────────
-_REASON_KEYS = (("chase", "chase"), ("stretched", "stretch"), ("of room", "room"), ("bearish break", "bos"), ("is bearish", "bearish"))
+_REASON_KEYS = (("thin volume", "volume"), ("chase", "chase"), ("stretched", "stretch"), ("of room", "room"), ("bearish break", "bos"), ("is bearish", "bearish"))
 _stats: Dict[str, Any] = {}
 _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 
@@ -176,7 +203,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, errors=0, room_past_resistance=0, thin_volume_breakouts=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -222,13 +249,16 @@ def record(symbol: str, verdict: Dict[str, Any], gate_mode: str, enforced: bool,
                 _stats["by_reason"][k] = _stats["by_reason"].get(k, 0) + 1
                 if k == "room" and "[raw -" in str(r):
                     _stats["room_past_resistance"] = _stats.get("room_past_resistance", 0) + 1     # group366: breakout-like room rejections
+        if verdict.get("observations") or any("thin volume" in str(r) for r in (verdict.get("reasons") or [])):
+            _stats["thin_volume_breakouts"] = _stats.get("thin_volume_breakouts", 0) + 1        # E72
         if enforced:
             _stats["enforced"] += 1
             if not verdict.get("would_reject"):
                 _stats["nodata_blocked"] += 1
         _recent.append({"ts": time.time(), "symbol": str(symbol or "").upper(), "gate_mode": gate_mode, "opinion": op,
                         "would_reject": bool(verdict.get("would_reject")), "enforced": bool(enforced),
-                        "reasons": list(verdict.get("reasons") or []), "no_data": verdict.get("no_data"), "price": _pos(price)})
+                        "reasons": list(verdict.get("reasons") or []), "observations": list(verdict.get("observations") or []),
+                        "no_data": verdict.get("no_data"), "price": _pos(price)})
     except Exception:  # noqa: BLE001 - counters must never break an entry
         _stats["errors"] = _stats.get("errors", 0) + 1
 
@@ -239,6 +269,7 @@ def stats() -> Dict[str, Any]:
         ev = int(_stats.get("evaluated") or 0)
         cfg = {k: getattr(config, k, None) for k in ("STRUCTURE_GATE_MODE", "STRUCTURE_REQUIRE_DATA", "STRUCTURE_MAX_CHASE_ATR",
                "STRUCTURE_MAX_STRETCH_ATR", "STRUCTURE_MIN_ROOM_ATR", "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS",
+               "STRUCTURE_BREAKOUT_VOLUME_MODE", "STRUCTURE_BREAKOUT_MIN_VOL_RATIO", "STRUCTURE_BREAKOUT_BARS",
                "STRUCTURE_MAX_AGE_DAYS", "STRUCTURE_MAX_PRICE_DEV_PCT")}
         return {**{k: v for k, v in _stats.items() if k != "since"}, "since_epoch": _stats.get("since"),
                 "coverage_pct": round(100.0 * _stats.get("ok", 0) / ev, 1) if ev else None, "config": cfg,
@@ -344,7 +375,7 @@ def fetch_summary(symbol: str) -> Optional[Dict[str, Any]]:
     return summary
 
 
-_KEEP = ("ms_quality", "ms_ver", "ms_asof", "ms_trend", "ms_bos_dir", "ms_bos_bars", "ms_bos_failed", "ms_choch_dir", "ms_fvg_side",
+_KEEP = ("ms_quality", "ms_ver", "ms_asof", "ms_trend", "ms_bos_dir", "ms_bos_bars", "ms_bos_failed", "ms_bos_vol_ratio", "ms_choch_dir", "ms_fvg_side",
          "ms_fvg_status", "ms_ob_side", "ms_ob_status", "ms_in_golden", "ms_loc_score", "ms_rr", "ms_stop", "ms_target", "ms_chase_atr",
          "ms_stretch_atr", "ms_room_atr", "ms_atr", "ms_tqs", "ms_price")
 
@@ -353,8 +384,8 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
     """Compact JSON stored on the position (scalp_positions.structure_json): what was seen and what the gate said."""
     s = summary if isinstance(summary, dict) else {}
     doc = {"v": 1, "gate_mode": gate_mode, "enforced": bool(enforced), "opinion": verdict.get("opinion"),
-           "would_reject": bool(verdict.get("would_reject")), "reasons": verdict.get("reasons") or [], "no_data": verdict.get("no_data"),
-           "live": verdict.get("metrics") or {}, "summary": {k: s.get(k) for k in _KEEP if s.get(k) is not None}}
+           "would_reject": bool(verdict.get("would_reject")), "reasons": verdict.get("reasons") or [], "observations": verdict.get("observations") or [],
+           "no_data": verdict.get("no_data"), "live": verdict.get("metrics") or {}, "summary": {k: s.get(k) for k in _KEEP if s.get(k) is not None}}
     try:
         return json.dumps(doc, separators=(",", ":"), default=str)[:6000]
     except Exception:  # noqa: BLE001
@@ -362,7 +393,8 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
 
 
 def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects (mode enforce). Never raises (fails open).
+    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects AND the mode is enforce; in `log` mode the verdict is
+    evaluated, recorded and snapshotted exactly the same but the reason is always None (never refuses). Never raises (fails open).
     `capture` (group372, optional): when a dict is passed it receives `verdict`, `summary`, `gate_mode`, `enforced` of this check so the caller can store a
     structure observation; it stays empty when the gate is off or failed."""
     m = mode()
@@ -376,6 +408,8 @@ def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None) -> 
             block = f"{PREFIX}BAD_LOCATION:{v['reason']}"
         elif v["opinion"] == "no_opinion" and getattr(config, "STRUCTURE_REQUIRE_DATA", False):
             block = f"{PREFIX}NODATA:{v.get('no_data')}"
+        if m == "log":
+            block = None                                   # E72: log mode records what the gate WOULD have said; the entry goes on
         enforced = bool(block)
         snap = snapshot(summary, v, m, enforced)
         record(symbol, v, m, enforced, ltp)   # group 355

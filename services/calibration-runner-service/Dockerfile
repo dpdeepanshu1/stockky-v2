@@ -15,7 +15,10 @@ RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.t
 COPY services/calibration-runner-service/config.py services/calibration-runner-service/auth.py services/calibration-runner-service/jobs.py \
      services/calibration-runner-service/runner.py services/calibration-runner-service/scheduler.py services/calibration-runner-service/main.py \
      services/calibration-runner-service/notify.py services/calibration-runner-service/autocalib.py \
-     services/calibration-runner-service/session_keys.py ./
+     services/calibration-runner-service/weather.py services/calibration-runner-service/weather_apply.py services/calibration-runner-service/session_keys.py ./
+
+# Market Weather (Part 1 step 3): the regime/ package the replay script imports (pure computation)
+COPY services/calibration-runner-service/regime /app/regime
 
 # what the scripts import: the shared structure engine, and for Kronos the real-trade gate (config.py + entry_engine/kronos_gate.py only)
 COPY scripts /app/scripts

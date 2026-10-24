@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 import config
 from execution import dhan_client
 from models import ScalpPosition
+from orders import side as side_mod
 
 logger = logging.getLogger("position-stocks-trailing")
 
@@ -52,9 +53,14 @@ def compute_trailing_stop(
     current_stop: float,
     target: Optional[float],
     stop_pct: float,
+    side: str = "LONG",
 ) -> Optional[float]:
-    """The stop price to move to, or None when the stop should stay where it is. Pure function."""
+    """The stop price to move to, or None when the stop should stay where it is. Pure function.
+    side="SHORT" (short selling step 4) mirrors it: `peak` is then the LOWEST price seen (the trough), the stop trails ABOVE it and only ever
+    goes DOWN, never above entry - buffer once active, always strictly above the live price, and never at/below the target."""
     try:
+        if str(side or "LONG").strip().upper() == "SHORT":
+            return _compute_trailing_stop_short(entry=entry, trough=peak, ltp=ltp, current_stop=current_stop, target=target, stop_pct=stop_pct)
         if not entry or entry <= 0 or not ltp or ltp <= 0 or not peak or peak <= entry:
             return None
         if (peak - entry) / entry * 100.0 < config.TRAIL_ACTIVATE_PCT:
@@ -84,6 +90,31 @@ def compute_trailing_stop(
         return None
 
 
+def _compute_trailing_stop_short(*, entry, trough, ltp, current_stop, target, stop_pct) -> Optional[float]:
+    try:
+        if not entry or entry <= 0 or not ltp or ltp <= 0 or not trough or trough <= 0 or trough >= entry:
+            return None
+        if (entry - trough) / entry * 100.0 < config.TRAIL_ACTIVATE_PCT:
+            return None
+        dist_pct = max(config.TRAIL_MIN_DISTANCE_PCT, float(stop_pct or 0.0) * config.TRAIL_DISTANCE_STOP_FRACTION)
+        cand = trough * (1.0 + dist_pct / 100.0)
+        ceiling = entry - dhan_client.tick_size_for_price(entry) * config.BREAKEVEN_STOP_BUFFER_TICKS   # a trailed short cannot end as a loss
+        cand = dhan_client.round_to_tick(min(cand, ceiling))
+        if cand <= ltp:                               # price already rose through the trail level: stop one tick over the market (cover now)
+            cand = dhan_client.round_to_tick(ltp + dhan_client.tick_size_for_price(ltp))
+        if cand <= 0:
+            return None
+        if target and cand <= target:
+            return None
+        min_step = max(dhan_client.tick_size_for_price(ltp), entry * config.TRAIL_MIN_STEP_PCT / 100.0)
+        if current_stop and cand > current_stop - min_step:   # the stop only ever moves DOWN, by at least one step
+            return None
+        return cand
+    except Exception as e:  # never let a maths/config problem reach the loop
+        logger.debug("trailing: short compute failed: %s", e)
+        return None
+
+
 def run_trailing_stop(db: Session) -> int:
     """Returns the number of stops raised this pass."""
     if not config.TRAILING_STOP_ENABLED or not config.USE_SUPER_ORDER:
@@ -99,6 +130,7 @@ def run_trailing_stop(db: Session) -> int:
         try:
             if pos.overnight_converted_to_cnc:
                 continue  # carried CNC positions have their own protective stop (overnight_stop.py)
+            _short = side_mod.is_short(pos)
             now = time.monotonic()
             if now < _next_attempt.get(pos.id, 0.0):
                 continue
@@ -110,10 +142,13 @@ def run_trailing_stop(db: Session) -> int:
                 ltp = None
             if ltp is None or ltp <= 0:
                 continue
-            peak = max(float(pos.max_price_seen or 0.0), float(ltp))
+            if _short:
+                peak = min(float(pos.min_price_seen or ltp), float(ltp))      # a short's best price is the LOWEST seen
+            else:
+                peak = max(float(pos.max_price_seen or 0.0), float(ltp))
             new_stop = compute_trailing_stop(
                 entry=pos.entry_price, peak=peak, ltp=ltp, current_stop=pos.stop_price,
-                target=pos.target_price, stop_pct=pos.adaptive_stop_pct,
+                target=pos.target_price, stop_pct=pos.adaptive_stop_pct, side="SHORT" if _short else "LONG",
             )
             if new_stop is None:
                 continue
@@ -148,8 +183,8 @@ def run_trailing_stop(db: Session) -> int:
             pos.stop_moved_to_breakeven = True
             db.commit()
             moved += 1
-            gain_pct = (peak - pos.entry_price) / pos.entry_price * 100.0
-            locked_pct = (new_stop - pos.entry_price) / pos.entry_price * 100.0
+            gain_pct = side_mod.pnl_pct(pos, pos.entry_price, peak)
+            locked_pct = side_mod.pnl_pct(pos, pos.entry_price, new_stop)
             logger.info(
                 "TRAILING_STOP: %s (id=%d) stop ₹%.2f -> ₹%.2f (peak ₹%.2f = +%.2f%%, locks %+.2f%%, ltp ₹%.2f)",
                 pos.symbol, pos.id, old_stop, new_stop, peak, gain_pct, locked_pct, ltp,

@@ -1,0 +1,99 @@
+{
+ "cryptography": {
+  "market-data-service": ">=42.0.0",
+  "position-stocks-service": ">=42.0.0",
+  "real-trade-service": "==41.0.7"
+ },
+ "fastapi": {
+  "analysis-intelligence-service": "==0.111.0",
+  "api-gateway": "==0.111.0",
+  "calibration-runner-service": "==0.104.1",
+  "decision-prediction-service": "==0.111.0",
+  "kronos-forecast-service": "==0.104.1",
+  "market-data-service": "==0.111.0",
+  "notification-scheduler-service": "==0.111.0",
+  "position-stocks-service": ">=0.111.0",
+  "real-trade-service": "==0.104.1",
+  "timesfm-forecast-service": "==0.104.1"
+ },
+ "httpx": {
+  "analysis-intelligence-service": "==0.27.2",
+  "api-gateway": "==0.27.0",
+  "decision-prediction-service": "==0.27.0",
+  "kronos-forecast-service": "==0.25.2",
+  "market-data-service": "==0.27.0",
+  "notification-scheduler-service": "==0.27.0",
+  "position-stocks-service": ">=0.27.0",
+  "real-trade-service": "==0.25.2",
+  "timesfm-forecast-service": "==0.25.2"
+ },
+ "numpy": {
+  "analysis-intelligence-service": "==1.26.4",
+  "api-gateway": "==1.26.4",
+  "decision-prediction-service": "==1.26.4",
+  "kronos-forecast-service": ">=1.26,<3",
+  "market-data-service": "==1.26.4",
+  "timesfm-forecast-service": ">=1.26,<3"
+ },
+ "pandas": {
+  "analysis-intelligence-service": "==2.2.2",
+  "decision-prediction-service": "==2.2.2",
+  "kronos-forecast-service": ">=2.2,<3"
+ },
+ "pydantic": {
+  "analysis-intelligence-service": "==2.11.5",
+  "api-gateway": "==2.11.5",
+  "calibration-runner-service": ">=2.5",
+  "decision-prediction-service": "==2.11.5",
+  "kronos-forecast-service": "==2.5.3",
+  "market-data-service": "==2.11.5",
+  "notification-scheduler-service": "==2.11.5",
+  "real-trade-service": "==2.5.3",
+  "timesfm-forecast-service": "==2.5.3"
+ },
+ "pyotp": {
+  "market-data-service": "==2.9.0",
+  "position-stocks-service": ">=2.9.0",
+  "real-trade-service": "==2.9.0"
+ },
+ "sqlalchemy": {
+  "analysis-intelligence-service": "==2.0.31",
+  "api-gateway": "==2.0.31",
+  "decision-prediction-service": "==2.0.31",
+  "market-data-service": "==2.0.31",
+  "notification-scheduler-service": "==2.0.31",
+  "position-stocks-service": ">=2.0.0",
+  "real-trade-service": "==2.0.23"
+ },
+ "upstash-redis": {
+  "analysis-intelligence-service": "==1.3.0",
+  "api-gateway": "==1.3.0",
+  "decision-prediction-service": ">=1.0.0",
+  "market-data-service": "==1.3.0",
+  "notification-scheduler-service": "==1.3.0"
+ },
+ "uvicorn": {
+  "analysis-intelligence-service": "==0.30.1",
+  "api-gateway": "==0.30.1",
+  "calibration-runner-service": "==0.24.0",
+  "decision-prediction-service": "==0.30.1",
+  "kronos-forecast-service": "==0.24.0",
+  "market-data-service": "==0.30.1",
+  "notification-scheduler-service": "==0.30.1",
+  "position-stocks-service": ">=0.29.0",
+  "real-trade-service": "==0.24.0",
+  "timesfm-forecast-service": "==0.24.0"
+ },
+ "websockets": {
+  "market-data-service": ">=13.0",
+  "position-stocks-service": ">=12.0",
+  "real-trade-service": ">=12.0.1"
+ },
+ "yfinance": {
+  "analysis-intelligence-service": "==0.2.40",
+  "api-gateway": "==1.5.2",
+  "decision-prediction-service": "==1.5.2",
+  "market-data-service": "==1.5.2",
+  "real-trade-service": "==1.5.2"
+ }
+}

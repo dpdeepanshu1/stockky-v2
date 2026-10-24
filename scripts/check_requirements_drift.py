@@ -13,6 +13,7 @@ longer exists (fixed - delete the line), fails the check. Stdlib only, read-only
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -70,18 +71,60 @@ def check(root: Path = ROOT) -> Tuple[List[str], List[str]]:
     return new, stale
 
 
+# E74: the same check ACROSS services (each services/<name>/requirements.txt against the others). The 22 files are deliberately NOT merged
+# into one: real-trade-service / kronos / timesfm pin an older fastapi + pydantic stack, kronos needs torch, and the repo cannot run the
+# service suites here to prove a bump safe. What is guarded instead: the differences that exist today are frozen in
+# scripts/requirements_cross_baseline.json; a NEW package that drifts, or a pin that moves, fails CI until the baseline is regenerated on
+# purpose (`--write-baseline`) in the same change that moves the pin.
+CROSS_BASELINE = ROOT / "scripts" / "requirements_cross_baseline.json"
+
+
+def cross_differences(root: Path = ROOT) -> Dict[str, Dict[str, str]]:
+    """{package: {service: spec}} for every package whose spec is not identical in all the services that list it."""
+    by: Dict[str, Dict[str, str]] = {}
+    for f in sorted((root / "services").glob("*/requirements.txt")):
+        for pkg, spec in parse(f).items():
+            by.setdefault(pkg, {})[f.parent.name] = spec
+    return {pkg: d for pkg, d in sorted(by.items()) if len(set(d.values())) > 1}
+
+
+def cross_check(root: Path = ROOT, baseline_path: Path = CROSS_BASELINE) -> List[str]:
+    """Problems: drift that is not in the frozen baseline, or a baseline entry that changed / was fixed."""
+    cur = cross_differences(root)
+    try:
+        base = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        base = {}
+    out: List[str] = []
+    for pkg in sorted(set(cur) | set(base)):
+        if cur.get(pkg) == base.get(pkg):
+            continue
+        if pkg not in base:
+            out.append(f"NEW cross-service drift: {pkg} {cur[pkg]}")
+        elif pkg not in cur:
+            out.append(f"FIXED cross-service drift, regenerate the baseline (--write-baseline): {pkg}")
+        else:
+            out.append(f"CHANGED cross-service pins for {pkg}: baseline {base[pkg]} now {cur[pkg]} (--write-baseline if intended)")
+    return out
+
+
 def main(argv: List[str]) -> int:
+    if "--write-baseline" in argv:
+        CROSS_BASELINE.write_text(json.dumps(cross_differences(), indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"wrote {CROSS_BASELINE.name}: {len(cross_differences())} packages")
+        return 0
     if "--list" in argv:
         for c in differences():
             mark = "accepted" if c[:5] in BASELINE else "NEW"
             print(f"[{mark}] {c[0]}/{c[1]}/{c[2]}: {c[3]} - {c[5]}")
         return 0
     new, stale = check()
-    for line in new + stale:
+    cross = cross_check()
+    for line in new + stale + cross:
         print(line)
-    if new or stale:
+    if new or stale or cross:
         return 1
-    print(f"requirements drift: ok ({len(BASELINE)} accepted differences, no new ones)")
+    print(f"requirements drift: ok ({len(BASELINE)} accepted differences, no new ones; cross-service baseline unchanged)")
     return 0
 
 

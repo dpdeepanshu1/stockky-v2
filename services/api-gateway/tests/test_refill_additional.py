@@ -1009,11 +1009,13 @@ def _ast(filename):
 
 class TestDrift:
     def test_names_main_imports_from_this_module_exist(self):
-        tree = _ast("main.py")
+        # E86: data_feed_refill_additional moved to gateway_support/bound_routes_k.py; its imports are checked wherever the handler lives.
+        trees = [_ast("main.py")] + [_ast(os.path.join("gateway_support", f)) for f in sorted(os.listdir(os.path.join(_SERVICE, "gateway_support"))) if f.startswith("bound_routes") and f.endswith(".py")]
         wanted = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "refill_additional":
-                wanted |= {a.name for a in node.names}
+        for tree in trees:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "refill_additional":
+                    wanted |= {a.name for a in node.names}
         assert {"get_refill_job", "run_refill_additional", "_set_job"} <= wanted
         src = _ast("refill_additional.py")
         defined = {n.name for n in src.body if isinstance(n, ast.FunctionDef)}

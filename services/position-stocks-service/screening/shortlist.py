@@ -119,3 +119,70 @@ def build(passers: Sequence[Tuple[object, object]], board_payload: Optional[dict
 def public(rows: Sequence[dict]) -> List[dict]:
     """JSON-safe copy (no candidate / quality objects) for GET /shortlist and the cycle stage."""
     return [{k: v for k, v in r.items() if k not in ("cand", "quality")} for r in rows]
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------
+# E107 (P2 item 17): the SHORT side. Ranks the bearish short candidates against each other so the capital and the SHORT_MAX_POSITIONS slots go to the
+# strongest one first. It only ORDERS (and trims to SHORT_SHORTLIST_MAX); it never adds a candidate and never loosens a gate: every name still walks the
+# fail-closed short gates in orders/short_gates.py. Any error falls back to the original scan order. SHORT_SHORTLIST_ENABLED=0 = scan order.
+#   scan      composite_score share of the best candidate (the fall scan)     0.35
+#   board     Market Board BEARISH conviction                                  0.35
+#   zone      Market Board zone score (supply zone above, room, rr)            0.15
+#   weakness  100 - technical_score (a weak chart is a better short)           0.15
+# Each part is used only when its data exists; weights are renormalised over the parts present. Adjust: -SHORT_SHORTLIST_EXTENDED_PENALTY when the board
+# marks it extended (already far below its zone: a late short chases the move). Score 0-100, ties keep scan order.
+SHORT_WEIGHTS = {"scan": 0.35, "board": 0.35, "zone": 0.15, "weakness": 0.15}
+
+
+def score_short(cand, quality, brow: Optional[dict], best_scan: float) -> dict:
+    parts: Dict[str, float] = {}
+    scan = _num(getattr(cand, "composite_score", None))
+    if scan is not None and best_scan > 0:
+        parts["scan"] = max(0.0, min(100.0, scan / best_scan * 100.0))
+    if brow and brow.get("side") == "bear":
+        conv = _num(brow.get("conviction"))
+        if conv is not None:
+            parts["board"] = max(0.0, min(100.0, conv))
+        zs = _zone_score(brow)
+        if zs is not None:
+            parts["zone"] = max(0.0, min(100.0, zs))
+    tech = _num(getattr(quality, "technical_score", None))
+    if tech is not None:
+        parts["weakness"] = max(0.0, min(100.0, 100.0 - tech))
+    tw = sum(SHORT_WEIGHTS[k] for k in parts)
+    base = sum(parts[k] * SHORT_WEIGHTS[k] for k in parts) / tw if tw > 0 else 0.0
+    adjust, extended = 0.0, False
+    if brow and (brow.get("extended") or "EXTENDED" in str(brow.get("label") or brow.get("rule") or "").upper()):
+        extended = True
+        adjust -= float(getattr(config, "SHORT_SHORTLIST_EXTENDED_PENALTY", 15.0))
+    return {"score": round(max(0.0, min(100.0, base + adjust)), 1), "parts": dict(parts, adjust=adjust), "extended": extended}
+
+
+def build_short(passers: Sequence[Tuple[object, object]], bear_index: Optional[Dict[str, dict]] = None) -> List[dict]:
+    """passers: [(candidate, quality)] in scan order (quality may be None); bear_index: symbol -> Market Board bearish row. Returns rows best-first, trimmed to
+    SHORT_SHORTLIST_MAX: {pick, symbol, score, scan_rank, board_rank, board_conviction, extended, parts, cand, quality}. With SHORT_SHORTLIST_ENABLED off, or on any
+    error, the passers come back in the original order (trimmed the same way, score None). Never raises."""
+    items = list(passers)
+    cap = max(1, int(getattr(config, "SHORT_SHORTLIST_MAX", 5)))
+    try:
+        if not getattr(config, "SHORT_SHORTLIST_ENABLED", True):
+            raise RuntimeError("short shortlist off")
+        idx = bear_index or {}
+        best_scan = max([_num(getattr(c, "composite_score", None)) or 0.0 for c, _q in items] or [0.0])
+        rows = []
+        for i, (c, q) in enumerate(items):
+            brow = idx.get(getattr(c, "symbol", ""))
+            s = score_short(c, q, brow, best_scan)
+            rows.append({"symbol": c.symbol, "score": s["score"], "scan_rank": i + 1, "board_rank": brow.get("rank") if brow else None,
+                         "board_conviction": _num(brow.get("conviction")) if brow else None, "extended": s["extended"], "parts": s["parts"],
+                         "cand": c, "quality": q})
+        rows.sort(key=lambda r: (-r["score"], r["scan_rank"]))
+        kept = rows[:cap]
+    except Exception as e:  # noqa: BLE001
+        if getattr(config, "SHORT_SHORTLIST_ENABLED", True):
+            logger.warning("short shortlist: scoring failed, keeping scan order (%s: %s)", type(e).__name__, e)
+        kept = [{"symbol": c.symbol, "score": None, "scan_rank": n, "board_rank": None, "board_conviction": None, "extended": False, "parts": {},
+                 "cand": c, "quality": q} for n, (c, q) in enumerate(items[:cap], 1)]
+    for n, r in enumerate(kept, 1):
+        r["pick"] = n
+    return kept

@@ -17,7 +17,7 @@ from .explain import explain_block
 from .fvg import ACTIVE, find_fvgs, nearest_active
 from .levels import build_levels
 from .liquidity import find_sweeps, nearest_pools
-from .ms_types import BEARISH, BULLISH, C, H, L, MS_ENGINE_VERSION, Q_LIMITED, Q_OK, Q_STALE, SCHEMA_VERSION, TRANSITION, r2, r3
+from .ms_types import BEARISH, BULLISH, C, H, L, MS_ENGINE_VERSION, Q_LIMITED, Q_OK, Q_STALE, SCHEMA_VERSION, TRANSITION, finite, r2, r3
 from .order_blocks import displacement, find_order_blocks, finalize
 from .params import MSParams, params_hash
 from .prep import prep
@@ -28,14 +28,15 @@ from .swings import raw_swings
 
 def _event(ev: Optional[Dict], n: int, max_age: int) -> Optional[Dict[str, Any]]:
     """Latest BOS/CHOCH as a block, or an all-None block when absent or older than max_age bars."""
-    empty = {"direction": None, "level": None, "bars_since": None, "strength": None, "failed": None, "gap_event": None}
+    empty = {"direction": None, "level": None, "bars_since": None, "strength": None, "failed": None, "gap_event": None, "vol_ratio": None}
     if not ev:
         return empty
     age = n - 1 - ev["break_idx"]
     if age > max_age:
         return empty
     return {"direction": ev["direction"], "level": r2(ev["level"]), "bars_since": age, "strength": ev["strength"],
-            "failed": bool(ev["failed"]), "gap_event": bool(ev["gap_event"])}
+            "failed": bool(ev["failed"]), "gap_event": bool(ev["gap_event"]),
+            "vol_ratio": r2(ev["vol_ratio"]) if finite(ev.get("vol_ratio")) else None}      # D-vol: the breakout bar's volume / its 20-bar mean (None = no usable volume)
 
 
 def _trend_strength(struct: Sequence[Dict], state: str) -> Optional[float]:

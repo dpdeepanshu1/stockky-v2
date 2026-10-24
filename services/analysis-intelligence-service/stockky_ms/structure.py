@@ -141,7 +141,7 @@ def _detect(bars, t, a, struct, consumed, state, trans_dir, gap, p: MSParams, bo
         if level_sw is not None and px_up > level_sw["price"] + p.bos_min_atr * a:
             consumed.add(("high", level_sw["idx"]))
             ev = {"dir": 1, "direction": "bullish", "level": level_sw["price"], "level_idx": level_sw["idx"], "break_price": b[C],
-                  "break_idx": t, "gap_event": gap, "disp": disp > 0,
+                  "break_idx": t, "gap_event": gap, "disp": disp > 0, "vol_ratio": _vol_ratio(bars, t, p.vol_mean_bars),
                   "strength": _strength(bars, t, level_sw["price"], 1, a, gap, p, live, disp > 0)}
             (choch if bear_side else bos).append(ev)
             return
@@ -156,6 +156,6 @@ def _detect(bars, t, a, struct, consumed, state, trans_dir, gap, p: MSParams, bo
         if level_sw is not None and px_dn < level_sw["price"] - p.bos_min_atr * a:
             consumed.add(("low", level_sw["idx"]))
             ev = {"dir": -1, "direction": "bearish", "level": level_sw["price"], "level_idx": level_sw["idx"], "break_price": b[C],
-                  "break_idx": t, "gap_event": gap, "disp": disp < 0,
+                  "break_idx": t, "gap_event": gap, "disp": disp < 0, "vol_ratio": _vol_ratio(bars, t, p.vol_mean_bars),
                   "strength": _strength(bars, t, level_sw["price"], -1, a, gap, p, live, disp < 0)}
             (choch if bull_side else bos).append(ev)

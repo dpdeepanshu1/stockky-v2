@@ -45,6 +45,17 @@ from typing import Optional
 
 logger = logging.getLogger("real-trade-risk-engine")
 
+
+def _market_state_risk_mult() -> float:
+    """Market Weather multiplier (1.0 = no change, only ever reduces). Lazy import so this module stays free of config at import time; an
+    unreadable value counts as 1.0 and is logged, never raised."""
+    try:
+        from risk_engine.effective_risk import market_state_risk_mult
+        return market_state_risk_mult()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("market-state risk multiplier unreadable (%s): using 1.0", type(e).__name__)
+        return 1.0
+
 # ── New caps from market research ─────────────────────────────────────────────
 # Single position cannot be > 25% of equity. Forces diversification and caps
 # damage if one holding gaps down in a weak market environment.
@@ -485,6 +496,9 @@ def evaluate(
         intent.adj_risk_pct if intent.adj_risk_pct is not None
         else account.risk_per_trade_pct
     )
+    # Market Weather: today's same-day tightening of the per-trade risk. Applied HERE, once, to whichever value won above (the saved row or a
+    # conviction upsize), before the daily-loss cap below. 1.0 unless the market-state layer is live and has lowered it.
+    effective_risk_pct *= _market_state_risk_mult()
     # group322: one trade may never risk more than the whole daily-loss budget (defaults were 5% per trade vs 3% per day, so a
     # single full stop-out could breach the day's limit). RISK_CAP_TRADE_RISK_AT_DAILY_LOSS=false restores the old behaviour.
     if _cap_trade_risk_at_daily_loss() and account.max_daily_loss_pct and account.max_daily_loss_pct > 0:

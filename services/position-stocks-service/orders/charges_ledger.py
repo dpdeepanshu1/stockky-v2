@@ -67,10 +67,12 @@ def charges_for_values(buy_value: float, sell_value: float) -> dict:
     }
 
 
-def charges_for_trade(entry_price: float, exit_price: float, qty: int) -> dict:
-    """Round-trip charges of one intraday buy+sell (prices x quantity)."""
+def charges_for_trade(entry_price: float, exit_price: float, qty: int, short: bool = False) -> dict:
+    """Round-trip charges of one intraday buy+sell (prices x quantity). A SHORT sells first: its sell leg is the
+    ENTRY price and its buy leg the EXIT price (STT is on the sell leg, stamp duty on the buy leg)."""
     q = int(qty or 0)
-    return charges_for_values(float(entry_price or 0) * q, float(exit_price or 0) * q)
+    e, x = float(entry_price or 0) * q, float(exit_price or 0) * q
+    return charges_for_values(x, e) if short else charges_for_values(e, x)
 
 
 def _bookable(row) -> bool:
@@ -118,7 +120,7 @@ def book_positions(db, rows: Iterable) -> int:
                 existing[row.position_id] = row
         n = changed = 0
         for r in candidates:
-            c = charges_for_trade(r.entry_price, r.exit_price, r.quantity)
+            c = charges_for_trade(r.entry_price, r.exit_price, r.quantity, short=str(getattr(r, "side", "") or "").strip().upper() == "SHORT")
             row = existing.get(r.id)
             if row is not None:
                 if (abs((row.buy_value or 0.0) - c["buy_value"]) > 0.005

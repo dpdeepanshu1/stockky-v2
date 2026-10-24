@@ -516,6 +516,13 @@ async def _fast_reconcile_loop() -> None:
                 except Exception as e:
                     logger.error("position-stocks: stop-watchdog error: %s", e, exc_info=True)
                 try:
+                    # short selling (E102): live shorts are covered at SHORT_SQUAREOFF_TIME_IST (14:55), before the 15:00 sweep
+                    n_short_cover = await asyncio.to_thread(eod_squareoff.run_short_squareoff, db)
+                    if n_short_cover:
+                        logger.warning("position-stocks: short square-off sent %d cover order(s)", n_short_cover)
+                except Exception as e:
+                    logger.error("position-stocks: short square-off error: %s", e, exc_info=True)
+                try:
                     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
                     today = ist_today_str()
                     eod_fired = gate and gate.eod_squareoff_fired_date == today
@@ -896,6 +903,12 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                 logger.info("position-stocks: overnight stop recheck %s", _ons)
         except Exception as e:
             logger.error("position-stocks: overnight stop recheck failed: %s", e, exc_info=True)
+
+    # short selling (E102): cover live shorts at SHORT_SQUAREOFF_TIME_IST (14:55), same unconditional rule as the EOD sweep below.
+    try:
+        await asyncio.to_thread(eod_squareoff.run_short_squareoff, db)
+    except Exception as e:
+        logger.error("position-stocks: short square-off error: %s", e, exc_info=True)
 
     # EOD squareoff gate — unconditional: runs regardless of
     # service_enabled/is_armed/auto_pilot_enabled, same reasoning as exit
@@ -1420,6 +1433,13 @@ async def _trading_loop() -> None:
             async with _cycle_lock:
                 with factory() as db:
                     await _run_cycle(db, trigger="AUTO")
+                    # Short selling step 5/8: the short switch in shadow records would-be shorts (no order); in live it also places capped real shorts via orders/short_live.py. Never raises
+                    # (run_short_cycle swallows its own errors). With the short switch off it only closes rows left over from an earlier switch-on.
+                    try:
+                        from orders import short_entry as _short_entry
+                        await _short_entry.run_short_cycle(db)
+                    except Exception:
+                        logger.exception("short shadow cycle failed (non-fatal)")
 
             # AUDIT FIX (this session): record_success() was previously only
             # called from inside _run_cycle when a candidate actually cleared
@@ -2054,8 +2074,9 @@ def positions(db: Session = Depends(get_db)):
             if stop_pct > 0 and r.entry_price:
                 overnight_stop_price = round(r.entry_price * (1 - stop_pct / 100.0), 2)
         if ltp is not None and r.entry_price:
-            unrealized_pnl = round((ltp - r.entry_price) * r.quantity, 2)
-            unrealized_pnl_pct = round((ltp - r.entry_price) / r.entry_price * 100.0, 2)
+            from orders import side as _side
+            unrealized_pnl = round(_side.pnl(r, r.entry_price, ltp, r.quantity), 2)
+            unrealized_pnl_pct = round(_side.pnl_pct(r, r.entry_price, ltp), 2)
             current_amount = round(ltp * r.quantity, 2)
             if r.overnight_converted_to_cnc:
                 # No live target leg anymore (bracket cancelled at
@@ -2075,6 +2096,7 @@ def positions(db: Session = Depends(get_db)):
             "symbol": r.symbol,
             "status": r.status,
             "window_source": r.window_source,
+            "side": _row_side(r),                                                     # E99: LONG | SHORT (legacy NULL reads as LONG)
             "structure": _structure_view(getattr(r, "structure_json", None)),   # group354
             "order_flow": (__import__("orders.order_flow", fromlist=["parse"]).parse(getattr(r, "flow_json", None)) or None),   # group427
             "entry_price": r.entry_price,
@@ -2214,8 +2236,11 @@ def trades_report(days: int = 1, db: Session = Depends(get_db)):
 def review_fixes_status(db: Session = Depends(get_db)):
     """group479 (read-only): the effective settings of the loss-review guards (14:00 cut-off, whole-day stop-out pause, minimum shares, ORB recorder),
     today's losing stop-outs and whether the pause is in force. Use it on the VM to confirm the new defaults really are live. No trading change."""
-    from orders import stopout_guard, orb_shadow
+    from orders import stopout_guard, orb_shadow, trade_odds, reconcile as _rc_over
     return {
+        "stop_overshoot": _rc_over.overshoot_stats(),
+        "trade_odds_mode": config.TRADE_ODDS_MODE,
+        "trade_odds_counters": trade_odds.stats(),
         "entry_cutoff_ist": config.SCALP_ENTRY_CUTOFF_IST,
         "entry_min_qty": config.ENTRY_MIN_QTY,
         "entry_min_reward_risk": config.ENTRY_MIN_REWARD_RISK,
@@ -2293,6 +2318,7 @@ def trades_history(
                 "symbol": r.symbol,
                 "status": r.status,
                 "window_source": r.window_source,
+                "side": _row_side(r),   # E99
                 "entry_price": r.entry_price,
                 "exit_price": r.exit_price,
                 "quantity": r.quantity,
@@ -2641,6 +2667,39 @@ def _board_open_symbols() -> list:
         return md_poller.open_position_symbols()
     except Exception:  # noqa: BLE001
         return []
+
+
+@app.get("/short/shadow")
+def short_shadow_route(db: Session = Depends(get_db)):
+    """Short selling step 5: the shadow shorts (what Stockky would have shorted and what happened next) and the gate counters. Read-only; no order exists."""
+    from orders import sell_probe, short_entry
+    out = short_entry.summary(db)
+    try:
+        out["sell_probe"] = sell_probe.summary()          # E108: the last T6 probe verdict (no order is placed by reading this)
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("short shadow: probe summary skipped (%s)", _e)
+    return out
+
+
+class SellProbeRequest(BaseModel):
+    symbol: Optional[str] = None
+    confirm: str = ""
+
+
+@app.post("/short/probe")
+def short_probe_route(body: SellProbeRequest, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """E108 / T6: ONE supervised 1-share SELL Super Order round trip with Dhan (place, read the legs back, cancel, cover). Admin only, needs
+    confirm=PLACE_ONE_REAL_SELL_ORDER, market hours only. Returns the verdict line and Dhan's answers. See orders/sell_probe.py for every rail."""
+    from orders import sell_probe
+    res = sell_probe.run_probe(db, symbol=body.symbol, confirm=body.confirm)
+    return res
+
+
+@app.get("/short/probe")
+def short_probe_last_route():
+    """E108 / T6: the last probe on record (verdict, rules learned about Dhan's SELL Super Order, answers). Read-only."""
+    from orders import sell_probe
+    return sell_probe.last_result() or {"verdict": "NOT_RUN", "line": "SELL PROBE: NOT_RUN - T6 has not been run yet"}
 
 
 @app.get("/pullback-rearm")
@@ -3044,6 +3103,11 @@ def manual_buy(
         "stop_price": pos.stop_price,
         "dhan_super_order_id": pos.dhan_super_order_id,
     }
+
+
+def _row_side(r) -> str:
+    """E99: LONG | SHORT for the API. A legacy or unreadable side shows as LONG here (the exit code itself fails loudly on an unknown side)."""
+    return "SHORT" if str(getattr(r, "side", "") or "").strip().upper() == "SHORT" else "LONG"
 
 
 def _structure_view(raw):

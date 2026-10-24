@@ -20,6 +20,7 @@ ALLOWED = {
     "analysis-intelligence-service/technical/main.py",     # asks market-data first, yfinance fallback
     # api-gateway
     "api-gateway/data_feed.py",
+    "api-gateway/gateway_support/bound_routes_i.py",   # E84: GET /quote/{symbol} moved out of main.py unchanged: market-data (Dhan -> AngelOne -> yfinance) first, direct yfinance only as the flagged last fallback
     "api-gateway/ipo_scanner.py",
     "api-gateway/main.py",
     "api-gateway/rate_limiter.py",

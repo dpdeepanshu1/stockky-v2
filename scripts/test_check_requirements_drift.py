@@ -45,3 +45,31 @@ def test_new_difference_fails_and_stale_baseline_fails(tmp_path):
 def test_the_repo_matches_its_baseline():
     new, stale = crd.check()
     assert new == [] and stale == []
+
+
+def _svc(tmp_path, name, txt):
+    d = tmp_path / "services" / name
+    d.mkdir(parents=True)
+    (d / "requirements.txt").write_text(txt)
+
+
+def test_cross_difference_found_and_identical_pins_ignored(tmp_path):
+    _svc(tmp_path, "a", "httpx==0.27.0\nsqlalchemy==2.0.31\n")
+    _svc(tmp_path, "b", "httpx==0.25.2\nsqlalchemy==2.0.31\n")
+    assert crd.cross_differences(tmp_path) == {"httpx": {"a": "==0.27.0", "b": "==0.25.2"}}
+
+
+def test_cross_check_new_changed_and_fixed(tmp_path):
+    import json
+    _svc(tmp_path, "a", "httpx==0.27.0\n")
+    _svc(tmp_path, "b", "httpx==0.25.2\n")
+    bp = tmp_path / "base.json"
+    bp.write_text(json.dumps(crd.cross_differences(tmp_path)))
+    assert crd.cross_check(tmp_path, bp) == []
+    (tmp_path / "services" / "b" / "requirements.txt").write_text("httpx==0.26.0\n")
+    assert any(m.startswith("CHANGED") for m in crd.cross_check(tmp_path, bp))
+    (tmp_path / "services" / "b" / "requirements.txt").write_text("httpx==0.27.0\n")
+    assert any(m.startswith("FIXED") for m in crd.cross_check(tmp_path, bp))
+    (tmp_path / "services" / "b" / "requirements.txt").write_text("httpx==0.25.2\nrequests==2.0\n")
+    (tmp_path / "services" / "a" / "requirements.txt").write_text("httpx==0.27.0\nrequests==2.1\n")
+    assert any(m.startswith("NEW") for m in crd.cross_check(tmp_path, bp))

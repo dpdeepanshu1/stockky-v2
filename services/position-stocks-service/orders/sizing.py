@@ -17,8 +17,27 @@ def legacy_quantity(position_value: float, price: float) -> int:
     return max(1, int(position_value / price))
 
 
-def compute_quantity(position_value: float, price: float) -> Optional[int]:
-    """Whole shares for `position_value` rupees at `price`, or None when the entry should be skipped."""
+def _short_quantity(position_value: float, price: float) -> Optional[int]:
+    """Short selling step 4: whole shares for a SHORT. Never rounds UP and never forces a share past the budget (a long may do both, see
+    compute_quantity): a short has no ceiling on loss, so it is sized at or under the risk budget, and None (skip) when one share does not fit.
+    Sized on the full price; the broker's short margin is only known after S0 and can only make this more conservative."""
+    try:
+        if not (price > 0) or not (position_value > 0):
+            return None
+        floor_qty = int(position_value / price)
+        return floor_qty if floor_qty >= 1 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def compute_quantity(position_value: float, price: float, side: str = "LONG") -> Optional[int]:
+    """Whole shares for `position_value` rupees at `price`, or None when the entry should be skipped. side="SHORT": see _short_quantity.
+    An unknown side raises ValueError (sizing for a direction nobody can name is a guess with money)."""
+    _s = str(side).strip().upper() if side is not None else ""
+    if _s == "SHORT":
+        return _short_quantity(position_value, price)
+    if _s not in ("", "LONG"):
+        raise ValueError(f"sizing: unknown side {side!r}")
     try:
         if price <= 0:
             return 1

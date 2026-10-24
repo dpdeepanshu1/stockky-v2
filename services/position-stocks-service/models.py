@@ -199,6 +199,15 @@ class ScalpPosition(Base):
     # so the final realized_pnl_pct uses the right cost basis.
     overnight_stop_prior_qty = Column(Integer, nullable=False, default=0)
 
+    # Market Weather (market-state layer): the market state and profile version in force (control.kit.current_profile()) when this was placed.
+    # NULL = no state was active (layer off / old row / manual). Descriptive only: no gate, size or score reads it.
+    market_state = Column(String(16), nullable=True)
+    profile_version = Column(String(24), nullable=True)
+
+    # Short selling (Part 2 step 2, 2026-10-23): "LONG" (every row that exists today) or "SHORT". NOT NULL, default LONG, so an old row, a row written by
+    # code that does not know the column, and every path today are long. NOTHING reads this yet: the shorting code is built exit-side first (plan step 3).
+    side = Column(String(5), nullable=False, default="LONG")
+
     # 2026-09-20 (audit fix — exit-placement retry storm): mirrors
     # real-trade-service's TradePosition.consecutive_exit_failures /
     # last_exit_failure_at (born from that service's session40 DATAMATICS
@@ -668,3 +677,34 @@ class ScalpTradeJournal(Base):
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
+
+
+class ScalpShortShadow(Base):
+    """Short selling step 5: one row per short Stockky WOULD have taken (short mode = shadow). NO order is ever placed for it. New table (create_all, no
+    column migration). The row is followed with live ticks to its stop, target or the short square-off time, so the shadow result is an honest one.
+    status: OPEN | TARGET | STOP | EOD | EXPIRED (a row from an earlier day that was never resolved; no result is booked for it)."""
+    __tablename__ = "scalp_short_shadow"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    day = Column(String(10), nullable=False, index=True)           # IST date YYYY-MM-DD
+    symbol = Column(String(32), nullable=False, index=True)
+    window_source = Column(String(8), nullable=True)
+    pct_change = Column(Float, nullable=True)
+    entry_price = Column(Float, nullable=False)
+    stop_price = Column(Float, nullable=False)
+    target_price = Column(Float, nullable=False)
+    stop_pct = Column(Float, nullable=True)
+    target_pct = Column(Float, nullable=True)
+    quantity = Column(Integer, nullable=False, default=0)
+    position_value = Column(Float, nullable=True)
+    status = Column(String(10), nullable=False, default="OPEN", index=True)
+    low_water = Column(Float, nullable=True)                       # lowest price seen while open (best case for a short)
+    high_water = Column(Float, nullable=True)                      # highest price seen while open (worst case)
+    exit_price = Column(Float, nullable=True)
+    gross_pnl = Column(Float, nullable=True)
+    net_pnl = Column(Float, nullable=True)                         # after estimated charges
+    net_pnl_pct = Column(Float, nullable=True)
+    board_conviction = Column(Float, nullable=True)
+    market_state = Column(String(16), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now, index=True)
+    closed_at = Column(DateTime, nullable=True)

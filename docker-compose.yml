@@ -394,6 +394,9 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       AUTO_PILOT_INTERVAL_SECONDS: ${AUTO_PILOT_INTERVAL_SECONDS:-180}
       AUTO_PILOT_NOTIFY_HEARTBEAT: ${AUTO_PILOT_NOTIFY_HEARTBEAT:-false}
+      # E98 Market Weather: live = the calibration-runner may TIGHTEN dials for one day (never loosen, never saved, gone at 15:30 or on restart).
+      # shadow or off here (or on the Switches page) clears today's overlay at once. A value saved on the page wins over this default.
+      MARKET_STATE_MODE: ${MARKET_STATE_MODE:-live}
       DATABASE_URL: ${DATABASE_URL:-}
       ORACLE_DSN: ${ORACLE_DSN:-}
       ORACLE_USER: ${ORACLE_USER:-ADMIN}
@@ -656,6 +659,10 @@ services:
       # group488: a stale snapshot is refreshed in the background this many seconds (+ up to 50 % jitter) after boot, so this service and
       # market-data-service do not download the file at the same moment after `docker compose up`. 0 = off.
       - ANGELONE_SCRIP_MASTER_BG_START_DELAY_S=${ANGELONE_SCRIP_MASTER_BG_START_DELAY_S:-30}
+      # E98 Market Weather: live = tighten-only overlays for one day (see real-trade-service). Back to shadow clears today's overlay at once.
+      - MARKET_STATE_MODE=${MARKET_STATE_MODE:-live}
+      # E98 short selling: shadow = log every short Stockky would have taken, place NO order. off = nothing. (No live choice exists yet.)
+      - SHORT_MODE=${SHORT_MODE:-shadow}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       - scrip-cache-ps:/data/scrip-cache
@@ -708,6 +715,16 @@ services:
       RUNNER_BAR_DIR: /data/bars
       # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
       RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-false}
+      # E98 Market Weather (weather.py / weather_apply.py). A value saved on the page (<data>/state/weather.json) wins over these defaults.
+      # ENABLED = run the daily state engine; STAMP = post a stamp-only overlay so trades carry the state; NOTIFY = Telegram brief and change messages;
+      # APPLY = send tighten-only dials, but only while the evidence gate passes AND the service itself has MARKET_STATE_MODE=live.
+      WEATHER_ENABLED: ${WEATHER_ENABLED:-true}
+      WEATHER_STAMP: ${WEATHER_STAMP:-true}
+      WEATHER_NOTIFY: ${WEATHER_NOTIFY:-true}
+      WEATHER_APPLY: ${WEATHER_APPLY:-true}
+      # same-day gate for APPLY: replay_only = a fresh USEFUL history replay is enough (the runner queues one at start-up when none is fresh);
+      # strict = replay USEFUL AND shadow report PASS (weeks of data); off = no evidence needed. Dials stay tighten-only in every mode.
+      WEATHER_GATE_MODE: ${WEATHER_GATE_MODE:-replay_only}
       # group 447: Telegram message (via notification-scheduler-service) when an AUTOMATIC run finishes or is blocked; RUNNER_NOTIFY_MANUAL=true also announces button runs
       RUNNER_NOTIFY_ENABLED: ${RUNNER_NOTIFY_ENABLED:-true}
       RUNNER_NOTIFY_MANUAL: ${RUNNER_NOTIFY_MANUAL:-false}

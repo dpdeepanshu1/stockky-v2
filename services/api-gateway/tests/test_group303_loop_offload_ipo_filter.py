@@ -74,7 +74,10 @@ def test_no_direct_store_calls_remain_in_async_functions():
     """AST guard: any `<x>.put_symbol(...)` / `<x>.get_symbol(...)` call inside an `async def` of main.py must be an
     argument of asyncio.to_thread (i.e. referenced, not called)."""
     import ast
-    src = open(gw.__file__, encoding="utf-8").read()
+    # E85: handlers moved out of main.py live in gateway_support/bound_routes*.py; they are scanned like main.py.
+    _sup = os.path.join(os.path.dirname(gw.__file__), "gateway_support")
+    src = open(gw.__file__, encoding="utf-8").read() + "\n" + "\n".join(
+        open(os.path.join(_sup, f), encoding="utf-8").read() for f in sorted(os.listdir(_sup)) if f.startswith("bound_routes") and f.endswith(".py"))
     tree = ast.parse(src)
     offenders = []
 

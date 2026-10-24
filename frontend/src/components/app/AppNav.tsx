@@ -226,8 +226,8 @@ export function DesktopTopBar({ setCmdOpen, wsLive, backendUp, handleWakeBackend
   );
 }
 
-export function BackendDownBanner({ isWaking, handleWakeBackend, checkBackend, setShowSettings }: {
-  isWaking: boolean; handleWakeBackend: () => void; checkBackend: () => void; setShowSettings: Setter<boolean>;
+export function BackendDownBanner({ isWaking, handleWakeBackend, checkBackend, openSettings }: {
+  isWaking: boolean; handleWakeBackend: () => void; checkBackend: () => void; openSettings: () => void;
 }) {
   return (
         <div className="border-b border-signal-sell/30 bg-signal-sell/5">
@@ -247,7 +247,7 @@ export function BackendDownBanner({ isWaking, handleWakeBackend, checkBackend, s
                 Retry
               </button>
               <button
-                onClick={() => setShowSettings(true)}
+                onClick={openSettings}
                 className="font-mono text-xs text-signal-sell hover:text-paper underline"
               >
                 Fix in Settings

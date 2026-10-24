@@ -31,6 +31,11 @@ def slippage_pct(row) -> Optional[float]:
     return (float(ent) - float(sig)) / float(sig) * 100.0
 
 
+def _stamp(row, key: str) -> Optional[str]:
+    v = getattr(row, key, None)
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
 def trade_record(row) -> Optional[dict]:
     """One measured trade, or None when the row is not a settled closed trade."""
     if getattr(row, "status", None) in _NOT_CLOSED:
@@ -43,7 +48,7 @@ def trade_record(row) -> Optional[dict]:
     entry = float(getattr(row, "entry_price", 0) or 0)
     exit_ = float(getattr(row, "exit_price", 0) or 0)
     gross = float(row.realized_pnl)
-    charges = charges_ledger.charges_for_trade(entry, exit_, qty)["total"] if qty > 0 and entry > 0 and exit_ > 0 else None
+    charges = charges_ledger.charges_for_trade(entry, exit_, qty, short=str(getattr(row, "side", "") or "").strip().upper() == "SHORT")["total"] if qty > 0 and entry > 0 and exit_ > 0 else None
     closed_at = getattr(row, "closed_at", None)
     return {
         "symbol": getattr(row, "symbol", None),
@@ -55,6 +60,8 @@ def trade_record(row) -> Optional[dict]:
         "charges": charges,
         "net_pnl": gross - charges if charges is not None else None,
         "slippage_pct": slippage_pct(row),
+        "market_state": _stamp(row, "market_state"),          # P5: Market Weather stamp, None when none was active
+        "profile_version": _stamp(row, "profile_version"),
     }
 
 
@@ -81,18 +88,22 @@ def report(rows: Iterable, *, min_trades_note: int = 5) -> dict:
     recs = [r for r in (trade_record(x) for x in rows) if r is not None]
     out: dict = {"trades": len(recs), "overall": _agg(recs) if recs else None,
                  "by_exit_reason": {}, "by_exit_hour_ist": {}, "by_entry_hour_ist": {}, "by_tier": {},
+                 "by_market_state": {}, "by_profile_version": {},
                  "note": (f"win and loss are judged on NET P&L after estimated charges; groups with fewer than "
                           f"{min_trades_note} trades are noise; avg_slippage_pct is only over trades that recorded a "
                           "signal price")}
     if not recs:
         return out
     groups = {"by_exit_reason": defaultdict(list), "by_exit_hour_ist": defaultdict(list),
-              "by_entry_hour_ist": defaultdict(list), "by_tier": defaultdict(list)}
+              "by_entry_hour_ist": defaultdict(list), "by_tier": defaultdict(list),
+              "by_market_state": defaultdict(list), "by_profile_version": defaultdict(list)}
     for r in recs:
         groups["by_exit_reason"][r["exit_reason"]].append(r)
         groups["by_exit_hour_ist"][r["exit_hour"] or "?"].append(r)
         groups["by_entry_hour_ist"][r["entry_hour"]].append(r)
         groups["by_tier"][r["tier"]].append(r)
+        groups["by_market_state"][r["market_state"] or "none"].append(r)
+        groups["by_profile_version"][r["profile_version"] or "none"].append(r)
     for name, g in groups.items():
         out[name] = {k: _agg(v) for k, v in sorted(g.items())}
     return out

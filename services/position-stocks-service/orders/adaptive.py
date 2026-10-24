@@ -110,6 +110,62 @@ class AdaptiveLevels:
     # group 395: where the stop came from - "bars" (live 5-minute bars), "opening_plan" (group 391 previous-day ATR plan) or "legacy" (tick-buffer ATR / % of the
     # signal move / flat floor). Stored on the position (stop_basis) and exported by /trades/history so a ledger can be split by it.
     basis:                 str   = "legacy"
+    # Short selling step 4: "LONG" (default, every legacy caller) or "SHORT". For a SHORT the target price sits BELOW the entry and the stop ABOVE it.
+    side:                  str   = "LONG"
+
+
+def normalize_side(side) -> str:
+    """None / "" / LONG -> "LONG", SHORT -> "SHORT" (case and spaces ignored). Anything else raises ValueError: a level set built for the
+    wrong direction would put the stop on the profit side of the trade, so an unknown side must stop the entry, never default."""
+    s_ = str(side).strip().upper() if side is not None else ""
+    if s_ in ("", "LONG"):
+        return "LONG"
+    if s_ == "SHORT":
+        return "SHORT"
+    raise ValueError(f"adaptive: unknown side {side!r}")
+
+
+def _room_position(range_pos: Optional[float], side: str) -> Optional[float]:
+    """Where the trade has used up its room, in [0, 1] (1 = no room left). Long: the day-range position itself (near the high = little room up).
+    Short: mirrored, 1 - position (near the day LOW = little room down)."""
+    if range_pos is None:
+        return None
+    return (1.0 - range_pos) if side == "SHORT" else range_pos
+
+
+def _regime_label(room_pos: Optional[float], side: str) -> str:
+    """near_high / near_low describe where PRICE sits in the day range, whichever side the trade is on: 'little room' is near_high for a long
+    and near_low for a short, so dashboards stay truthful."""
+    if room_pos is None:
+        return "neutral"
+    if room_pos >= _NEAR_HIGH_THRESHOLD:
+        return "near_low" if side == "SHORT" else "near_high"
+    if room_pos <= _NEAR_LOW_THRESHOLD:
+        return "near_high" if side == "SHORT" else "near_low"
+    return "neutral"
+
+
+def _levels_to_prices(current_ltp: float, target_pct: float, stop_pct: float, side: str) -> tuple:
+    """(target_price, stop_price) for the direction, tick-rounded, with the one-tick sanity clamps. LONG: target above / stop below the entry
+    reference (identical to the pre-short code). SHORT: target below / stop above. Dhan checks the legs against the entry price, so a leg that
+    rounds onto it is moved one tick to the correct side."""
+    from execution.dhan_client import tick_size_for_price as _tsz
+    band = _tsz(current_ltp)
+    if side == "SHORT":
+        target_price = round_to_tick(current_ltp * (1 - target_pct / 100))
+        stop_price = round_to_tick(current_ltp * (1 + stop_pct / 100))
+        if target_price >= current_ltp or target_price <= 0:
+            target_price = round_to_tick(current_ltp - band)
+        if stop_price <= current_ltp:
+            stop_price = round_to_tick(current_ltp + band)
+        return target_price, stop_price
+    target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
+    stop_price = round_to_tick(current_ltp * (1 - stop_pct / 100))
+    if target_price <= current_ltp:
+        target_price = round_to_tick(current_ltp + band)
+    if stop_price >= current_ltp:
+        stop_price = round_to_tick(current_ltp - band)
+    return target_price, stop_price
 
 
 def _atr_proxy_pct(symbol: str, current_ltp: float) -> Optional[float]:
@@ -268,7 +324,7 @@ def _intraday_range_position(symbol: str, current_ltp: float) -> Optional[float]
         return None
 
 
-def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, basis: str = "bars") -> AdaptiveLevels:
+def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, basis: str = "bars", side: str = "LONG") -> AdaptiveLevels:
     """Phase 2 levels. stop = clamp(bar_atr x STOP_MULT, STOP_MIN, STOP_MAX);
     target = stop x TARGET_RR capped at TARGET_MAX; near-day-high trades get a
     20% smaller target (less room up). Breakeven trigger stays at 40% of target."""
@@ -276,24 +332,16 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, bas
                    min(bar_atr_pct * config.ADAPTIVE_BAR_STOP_MULT, config.ADAPTIVE_BAR_STOP_MAX_PCT))
     target_pct = min(stop_pct * config.ADAPTIVE_BAR_TARGET_RR, config.ADAPTIVE_BAR_TARGET_MAX_PCT)
 
-    range_regime = "neutral"
+    side = normalize_side(side)
     range_pos_val = _intraday_range_position(symbol, current_ltp)
-    if range_pos_val is not None and range_pos_val >= _NEAR_HIGH_THRESHOLD:
-        range_regime = "near_high"
-        target_pct *= 0.8
-    elif range_pos_val is not None and range_pos_val <= _NEAR_LOW_THRESHOLD:
-        range_regime = "near_low"
+    _room = _room_position(range_pos_val, side)
+    range_regime = _regime_label(_room, side)
+    if _room is not None and _room >= _NEAR_HIGH_THRESHOLD:
+        target_pct *= 0.8                        # little room left in the trade's direction (near the high for a long, the low for a short)
     # never let tightening drop reward:risk below the entry floor (2026-10-22: 1:2; was a fixed 1.2 - a coin-flip needs >1)
     target_pct = max(target_pct, stop_pct * max(1.2, float(getattr(config, "ENTRY_MIN_REWARD_RISK", 0.0) or 0.0)))
 
-    from execution.dhan_client import tick_size_for_price as _tsz
-    target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
-    stop_price = round_to_tick(current_ltp * (1 - stop_pct / 100))
-    band = _tsz(current_ltp)
-    if target_price <= current_ltp:
-        target_price = round_to_tick(current_ltp + band)
-    if stop_price >= current_ltp:
-        stop_price = round_to_tick(current_ltp - band)
+    target_price, stop_price = _levels_to_prices(current_ltp, target_pct, stop_pct, side)
     return AdaptiveLevels(
         target_pct=round(target_pct, 4),
         stop_pct=round(stop_pct, 4),
@@ -304,6 +352,7 @@ def _compute_bar_levels(bar_atr_pct: float, current_ltp: float, symbol: str, bas
         range_position=range_pos_val,
         atr_proxy_pct=round(bar_atr_pct, 4),
         basis=basis,
+        side=side,
     )
 
 
@@ -311,14 +360,17 @@ def _compute_levels(
     pct_change: float,
     current_ltp: float,
     symbol: Optional[str] = None,
+    side: str = "LONG",
 ) -> AdaptiveLevels:
-    """Compute adaptive target/stop for a BUY scalp trade.
+    """Compute adaptive target/stop for a scalp trade (BUY / long by default; side="SHORT" mirrors the prices: target below, stop above).
 
-    pct_change:  rolling-window % that triggered the signal (positive).
+    pct_change:  rolling-window % that triggered the signal (a size; abs() is taken, so a short may pass the fall as negative or positive).
     current_ltp: live price at the moment of signal (entry reference).
     symbol:      if given, reads tick buffer for ATR proxy and range position.
                  Falls back gracefully if buffer unavailable.
     """
+    side = normalize_side(side)
+    pct_change = abs(float(pct_change))
     # ── Phase 2 (flag-gated, default OFF): candle-range stop/target ─────────
     if config.ADAPTIVE_BAR_ATR_ENABLED and symbol:
         bar_atr = _bar_atr_pct(symbol, current_ltp)
@@ -334,7 +386,7 @@ def _compute_levels(
                 logger.debug("adaptive: opening plan lookup failed for %s: %s", symbol, e)
                 bar_atr = None
         if bar_atr is not None:
-            return _compute_bar_levels(bar_atr, current_ltp, symbol, _basis)
+            return _compute_bar_levels(bar_atr, current_ltp, symbol, _basis, side)
 
     # ── Step 1: ATR-proxy based stop and target ────────────────────────────
     atr_pct = _atr_proxy_pct(symbol, current_ltp) if symbol else None
@@ -360,12 +412,12 @@ def _compute_levels(
 
     if symbol:
         range_pos_val = _intraday_range_position(symbol, current_ltp)
-        if range_pos_val is not None:
-            if range_pos_val >= _NEAR_HIGH_THRESHOLD:
-                range_regime = "near_high"
-                # Stock is near today's peak — less room to run, higher
-                # reversal risk. Tighten both target (be less greedy) and
-                # stop (exit faster on reversal).
+        _room = _room_position(range_pos_val, side)
+        if _room is not None:
+            range_regime = _regime_label(_room, side)
+            if _room >= _NEAR_HIGH_THRESHOLD:
+                # Little room left in the trade's direction (near today's peak for a long, today's trough for a short) and a higher
+                # reversal risk. Tighten both target (be less greedy) and stop (exit faster on reversal).
                 target_pct = max(
                     config.MIN_TARGET_PCT,
                     min(target_pct * _NEAR_HIGH_TARGET_MULT, config.MAX_TARGET_PCT),
@@ -375,20 +427,18 @@ def _compute_levels(
                     min(stop_pct * _NEAR_HIGH_STOP_MULT, config.MAX_STOP_PCT),
                 )
                 logger.debug(
-                    "adaptive: %s near_high (pos=%.2f) → target=%.2f%% stop=%.2f%%",
-                    symbol, range_pos_val, target_pct, stop_pct,
+                    "adaptive: %s %s little room (pos=%.2f) → target=%.2f%% stop=%.2f%%",
+                    symbol, side, range_pos_val, target_pct, stop_pct,
                 )
-            elif range_pos_val <= _NEAR_LOW_THRESHOLD:
-                range_regime = "near_low"
-                # Stock is near today's trough — momentum buy at a relative
-                # discount means more room upward. Widen target.
+            elif _room <= _NEAR_LOW_THRESHOLD:
+                # Lots of room in the trade's direction (near the trough for a long, near the peak for a short): widen the target.
                 target_pct = max(
                     config.MIN_TARGET_PCT,
                     min(target_pct * _NEAR_LOW_TARGET_MULT, config.MAX_TARGET_PCT),
                 )
                 logger.debug(
-                    "adaptive: %s near_low (pos=%.2f) → target=%.2f%% stop=%.2f%%",
-                    symbol, range_pos_val, target_pct, stop_pct,
+                    "adaptive: %s %s lots of room (pos=%.2f) → target=%.2f%% stop=%.2f%%",
+                    symbol, side, range_pos_val, target_pct, stop_pct,
                 )
 
     # ── Step 3: Enforce minimum R:R = 2.0 ─────────────────────────────────
@@ -403,31 +453,10 @@ def _compute_levels(
     # ── Step 4: Breakeven trigger at 40% of target ────────────────────────
     breakeven_trigger_pct = _breakeven_trigger(target_pct)
 
-    # ── Step 5: Convert to prices ──────────────────────────────────────────
-    target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
-    stop_price   = round_to_tick(current_ltp * (1 - stop_pct   / 100))
-
-    # ── Step 6: Sanity clamp — Dhan rejects super orders where
-    # targetPrice <= entryPrice or stopPrice >= entryPrice (even for
-    # MARKET entries). After tick-rounding on very low-priced stocks,
-    # the rounded values can collapse to equal the LTP; add/subtract
-    # exactly 1 tick to ensure the Dhan server's own leg validation
-    # (targetPrice > entryPrice, stopPrice < entryPrice for BUY) always
-    # holds, regardless of how the caller sends the entry reference price.
-    from execution.dhan_client import tick_size_for_price as _tsz
-    _band = _tsz(current_ltp)
-    if target_price <= current_ltp:
-        target_price = round_to_tick(current_ltp + _band)
-        logger.debug(
-            "adaptive: %s target_price clamped to %.4f (was <= LTP %.4f after rounding)",
-            symbol or "?", target_price, current_ltp,
-        )
-    if stop_price >= current_ltp:
-        stop_price = round_to_tick(current_ltp - _band)
-        logger.debug(
-            "adaptive: %s stop_price clamped to %.4f (was >= LTP %.4f after rounding)",
-            symbol or "?", stop_price, current_ltp,
-        )
+    # ── Step 5/6: Convert to prices, then the sanity clamp — Dhan rejects super orders whose legs sit on the wrong side of the entry price
+    # (BUY: targetPrice <= entry or stopPrice >= entry; SELL: the mirror), even for MARKET entries. After tick-rounding on very low-priced
+    # stocks the rounded values can collapse onto the LTP, so _levels_to_prices moves such a leg exactly 1 tick to the correct side.
+    target_price, stop_price = _levels_to_prices(current_ltp, target_pct, stop_pct, side)
 
     return AdaptiveLevels(
         target_pct=round(target_pct, 4),
@@ -439,13 +468,15 @@ def _compute_levels(
         range_position=range_pos_val,
         atr_proxy_pct=round(atr_pct, 4) if atr_pct is not None else None,
         basis="legacy",
+        side=side,
     )
 
 
-def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLevels:
+def apply_target_cap(levels: AdaptiveLevels, current_ltp: float, side: Optional[str] = None) -> AdaptiveLevels:
     """group 340: a target above SCALP_TARGET_CAP_PCT is cut to it; if R:R then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to
     target/MIN_RR, never under SCALP_TARGET_CAP_MIN_STOP_PCT and never wider than before. Cap 0 = off. Never raises."""
     try:
+        side = normalize_side(side if side is not None else getattr(levels, "side", "LONG"))
         cap = float(getattr(config, "SCALP_TARGET_CAP_PCT", 0.0) or 0.0)
         if cap <= 0 or levels.target_pct <= cap or current_ltp <= 0:
             return levels
@@ -462,14 +493,7 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLeve
             if _atr_mult > 0 and _atr and _atr > 0:
                 floor = max(floor, _atr_mult * float(_atr))
             stop_pct = min(stop_pct, max(target_pct / min_rr, floor))
-        from execution.dhan_client import tick_size_for_price as _tsz
-        band = _tsz(current_ltp)
-        target_price = round_to_tick(current_ltp * (1 + target_pct / 100))
-        stop_price = round_to_tick(current_ltp * (1 - stop_pct / 100))
-        if target_price <= current_ltp:
-            target_price = round_to_tick(current_ltp + band)
-        if stop_price >= current_ltp:
-            stop_price = round_to_tick(current_ltp - band)
+        target_price, stop_price = _levels_to_prices(current_ltp, target_pct, stop_pct, side)
         logger.info("adaptive: target cap %.2f%% -> %.2f%%, stop %.2f%% -> %.2f%%", levels.target_pct, target_pct, levels.stop_pct, stop_pct)
         return AdaptiveLevels(
             target_pct=round(target_pct, 4), stop_pct=round(stop_pct, 4),
@@ -478,6 +502,7 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float) -> AdaptiveLeve
             range_regime=levels.range_regime, range_position=levels.range_position,
             atr_proxy_pct=levels.atr_proxy_pct,
             basis=levels.basis,
+            side=side,
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("adaptive: target cap failed (keeping uncapped levels): %s", e)
@@ -488,6 +513,8 @@ def compute(
     pct_change: float,
     current_ltp: float,
     symbol: Optional[str] = None,
+    side: str = "LONG",
 ) -> AdaptiveLevels:
-    """Adaptive target/stop for a BUY scalp, then the group 340 target cap (see apply_target_cap)."""
-    return apply_target_cap(_compute_levels(pct_change, current_ltp, symbol), current_ltp)
+    """Adaptive target/stop for a scalp (long by default; side="SHORT" for a short), then the group 340 target cap (see apply_target_cap)."""
+    side = normalize_side(side)
+    return apply_target_cap(_compute_levels(pct_change, current_ltp, symbol, side), current_ltp, side)

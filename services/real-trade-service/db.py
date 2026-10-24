@@ -151,6 +151,7 @@ def init_schema() -> None:
     _ensure_account_columns(eng, dialect())
     _ensure_candidate_overnight_column(eng, dialect())
     _ensure_source_tab_columns(eng, dialect())
+    _ensure_market_state_columns(eng, dialect())
     _ensure_catalyst_price_source_column(eng, dialect())
     _ensure_hot_path_indexes(eng, dialect())
     _ensure_exit_retry_columns(eng, dialect())
@@ -847,6 +848,37 @@ def _ensure_watchlist_link_columns(engine, dialect_name: str) -> None:
 # cases source_tab="volume_shock" and falls back to prior behavior for
 # NULL/anything else, so this is a pure addition with no read-path change
 # for existing data.
+def _ensure_market_state_columns(engine, dialect_name: str) -> None:
+    """Market Weather stamp: nullable market_state / profile_version on trade_orders and trade_positions (additive, idempotent, never fails boot)."""
+    from sqlalchemy import inspect, text
+
+    targets = [
+        ("trade_orders",    "market_state",    16), ("trade_orders",    "profile_version", 24),
+        ("trade_positions", "market_state",    16), ("trade_positions", "profile_version", 24),
+    ]
+    for table_name, col_name, width in targets:
+        try:
+            existing = {c["name"].lower() for c in inspect(engine).get_columns(table_name)}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("real-trade-db: could not inspect %s columns: %s", table_name, e)
+            continue
+        if col_name in existing:
+            continue
+        if dialect_name == "oracle":
+            sql = f"ALTER TABLE {table_name} ADD ({col_name} VARCHAR2({width}))"
+        else:
+            sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} VARCHAR({width})"
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added %s.%s", table_name, col_name)
+        except Exception as e:  # noqa: BLE001
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add %s.%s: %s", table_name, col_name, e)
+
+
 def _ensure_source_tab_columns(engine, dialect_name: str) -> None:
     from sqlalchemy import inspect, text
 

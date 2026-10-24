@@ -158,3 +158,15 @@ def test_endpoint_wiring():
     assert 'key = f"tech_chart_ctx:{sym}:{tail}" if tf == "1d" else f"tech_chart_ctx:{sym}:{tf}:{tail}"' in body
     assert body.index("if spec[\"intraday\"]:") < body.index("df = _fetch_history(sym, force=force)")
     assert "raise HTTPException(status_code=503, detail=f\"{tf}" not in body
+
+
+def test_the_daily_fibonacci_leg_rides_along_on_intraday_charts_and_is_none_without_it():
+    ns = _load()
+    now = _ts("2026-10-22", "10:07") + 20
+    rows = [r for d in _days(12) for r in _rows(d, 25 if d != "2026-10-22" else 3, 15)]
+    fib = {"swing_low": 100.0, "swing_high": 200.0, "direction": "bullish", "retracement": 0.55, "in_golden_zone": True, "leg_invalidated": False,
+           "ext_1272": None, "ext_1618": None}
+    out = ns["_intraday_chart_payload"]("INFY", "15m", 100, "bullish", rows=rows, now=now, daily_fib=fib)
+    assert out["ok"] and out["fib"]["source"] == "daily" and out["fib"]["golden"] == {"low": 138.2, "high": 150.0}
+    assert ns["_intraday_chart_payload"]("INFY", "15m", 100, "bullish", rows=rows, now=now)["fib"] is None
+    assert ns["_intraday_unavailable"]("INFY", "5m", "thin")["fib"] is None

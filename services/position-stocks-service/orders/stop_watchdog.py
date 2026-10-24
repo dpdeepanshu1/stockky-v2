@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 import config
 from execution import dhan_client
 from models import ScalpPosition
+from orders import side as _side
 
 logger = logging.getLogger("position-stocks-stop-watchdog")
 
@@ -49,12 +50,15 @@ def _last_tick(symbol: str):
         return None, None
 
 
-def is_breached(ltp: Optional[float], stop: Optional[float]) -> bool:
-    """True when `ltp` is at least STOP_WATCHDOG_MIN_BREACH_TICKS ticks under `stop`. Pure."""
+def is_breached(ltp: Optional[float], stop: Optional[float], short: bool = False) -> bool:
+    """True when `ltp` is at least STOP_WATCHDOG_MIN_BREACH_TICKS ticks under `stop` (a SHORT's stop sits ABOVE
+    entry, so for a short: at least that many ticks OVER it). Pure."""
     try:
         if not ltp or not stop or ltp <= 0 or stop <= 0:
             return False
         ticks = max(1, int(config.STOP_WATCHDOG_MIN_BREACH_TICKS))
+        if short:
+            return ltp >= stop + dhan_client.tick_size_for_price(stop) * ticks - 1e-9
         return ltp <= stop - dhan_client.tick_size_for_price(stop) * ticks + 1e-9
     except Exception:  # noqa: BLE001
         return False
@@ -86,7 +90,7 @@ def run_stop_watchdog(db: Session) -> int:
             if ltp is None or age is None or age > max_age:
                 _breach_since.pop(pos.id, None)
                 continue
-            if not is_breached(ltp, pos.stop_price):
+            if not is_breached(ltp, pos.stop_price, short=_side.is_short(pos)):
                 _breach_since.pop(pos.id, None)
                 continue
             first = _breach_since.setdefault(pos.id, now)

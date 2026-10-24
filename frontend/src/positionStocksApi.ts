@@ -168,6 +168,7 @@ export interface ScalpPositionRow {
   symbol: string;
   status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "STOP_BREACH_EXIT" | "CLOSE_ALL" | "EXIT_LEGS_REJECTED" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
+  side?: "LONG" | "SHORT" | string | null;   // E99: absent / LONG on every long; SHORT on a live short (sell first, cover later)
   entry_price: number;
   exit_price: number | null;
   quantity: number;
@@ -336,6 +337,7 @@ export interface ScalpTradeRow {
   symbol: string;
   status: string;
   window_source: string;
+  side?: string | null;
   entry_price: number;
   exit_price: number | null;
   quantity: number;
@@ -475,6 +477,8 @@ export const positionStocksApi = {
   structureStatus: (hours = 24) => psRequest<StructureStatusDoc>(`/structure/status?hours=${encodeURIComponent(String(hours))}`),
   // group337: best-3-to-5 shortlist of the last entry cycle with what became of each pick (read-only, no admin login needed).
   shortlist: () => psRequest<any>("/shortlist"),
+  // short selling step 6: the would-be shorts (shadow only, no order exists), S2 progress and gate refusal counters. Read-only.
+  shortShadow: () => psRequest<any>("/short/shadow"),
   // group338: the best 3-to-5 pick CARDS (last entry cycle + board preview), read-only.
   topPicks: () => psRequest<any>("/top-picks"),
   // group336: scan-window health (losing-window pause), stop/target advice and today's calendar session type (read-only).

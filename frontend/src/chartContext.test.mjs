@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types chartContext.test.mjs  (Node >= 22.6)
 import assert from "node:assert/strict";
-import { normalizeCtx, windowStart, clipLine, niceTicks, priceRange, groupBadges, summaryLine, barChangePct, shortDate, toneOf, toneText } from "./chartContext.ts";
+import { normalizeFib, normalizeCtx, windowStart, clipLine, niceTicks, priceRange, groupBadges, summaryLine, barChangePct, shortDate, toneOf, toneText } from "./chartContext.ts";
 
 const bars = Array.from({ length: 40 }, (_, i) => [`2026-01-${String(i + 1).padStart(2, "0")}`, 100 + i, 102 + i, 99 + i, 101 + i, 1000]);
 const ok = { ok: true, bars, markers: [], shapes: [], levels: [], badges: [
@@ -89,3 +89,14 @@ const ist = (iso) => Date.parse(iso + "+05:30");
 assert.equal(marketHoursIST(ist("2026-10-22T10:00:00")), true); assert.equal(marketHoursIST(ist("2026-10-22T09:14:00")), false); assert.equal(marketHoursIST(ist("2026-10-22T15:35:00")), true);
 assert.equal(marketHoursIST(ist("2026-10-22T15:36:00")), false); assert.equal(marketHoursIST(ist("2026-10-24T11:00:00")), false); assert.equal(marketHoursIST(NaN), false);
 console.log("chartContext E27 ok");
+
+// E25b: Fibonacci levels from the gateway
+const fibRaw = { direction: "bullish", swing_low: 100, swing_high: 200, golden: { low: 138.2, high: 150 }, in_golden_zone: true, retracement: 0.55, invalidated: false, source: "daily",
+  levels: [{ ratio: 0, label: "0%", price: 200, kind: "end" }, { ratio: 0.5, label: "50%", price: 150, kind: "golden" }, { ratio: 1, label: "100%", price: 100, kind: "end" }, { ratio: 1.272, label: "127.2%", price: 227.2, kind: "ext" }] };
+assert.equal(normalizeFib(null), null); assert.equal(normalizeFib("x"), null); assert.equal(normalizeFib({}), null);
+assert.equal(normalizeFib({ ...fibRaw, direction: "sideways" }), null); assert.equal(normalizeFib({ ...fibRaw, golden: null }), null);
+assert.equal(normalizeFib({ ...fibRaw, levels: fibRaw.levels.slice(0, 2) }), null);                          // too few usable levels
+const nf = normalizeFib({ ...fibRaw, levels: [...fibRaw.levels, { ratio: 2, label: "x", price: NaN, kind: "ext" }, { ratio: 3, label: "y", price: 5, kind: "weird" }, null] });
+assert.equal(nf.levels.length, 4); assert.equal(nf.in_golden_zone, true); assert.equal(nf.golden.low, 138.2);
+assert.equal(normalizeCtx(ok).fib, null); assert.equal(normalizeCtx({ ...ok, fib: fibRaw }).fib.direction, "bullish"); assert.equal(normalizeCtx({ ...ok, fib: { junk: 1 } }).fib, null);
+console.log("fib ok");

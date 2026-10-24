@@ -47,6 +47,7 @@ export default function StockCandleBlock({ symbol, levels = [], defaultOpen = tr
   const [tf, setTf] = useState<Tf>(() => loadTfPref(defaultTf ?? "1d"));
   const [ctx, setCtx] = useState<ChartCtx | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showFib, setShowFib] = useState(true);
   const [win, setWin] = useState<string | undefined>(undefined);
   const info = tfInfo(tf);
 
@@ -100,8 +101,16 @@ export default function StockCandleBlock({ symbol, levels = [], defaultOpen = tr
           {info.intraday && ctx.data_lag_s != null && ctx.data_lag_s > 180 && (
             <p className="font-display text-[10px] text-signal-hold">Data is about {lagText(ctx.data_lag_s)} behind the market, so the newest candle may be missing.</p>
           )}
-          <CandleChart ctx={ctx} windowKey={wKey} height={height} levels={levels} />
+          <CandleChart ctx={ctx} windowKey={wKey} height={height} levels={levels} showFib={showFib} />
           <PatternBadges badges={ctx.badges} tf={tf} />
+          {ctx.fib && (
+            <div className="flex items-center gap-2 font-display text-[9px] text-mist">
+              <button type="button" onClick={() => setShowFib((v) => !v)} aria-pressed={showFib}
+                className={`px-2 py-0.5 text-[10px] font-semibold rounded-full border ${showFib ? "border-signal-hold/40 text-signal-hold bg-signal-hold/10" : "border-slate text-mist hover:text-paper"}`}
+                title="Fibonacci retracement of the latest daily swing. Shaded band = the 50 % - 61.8 % golden zone.">Fib</button>
+              {showFib && <span>{ctx.fib.direction === "bullish" ? "Up" : "Down"}-leg {ctx.fib.swing_low}–{ctx.fib.swing_high} (daily){ctx.fib.in_golden_zone ? " · price is in the golden zone" : ""}{ctx.fib.invalidated ? " · leg broken, treat as stale" : ""}</span>}
+            </div>
+          )}
           {ctx.shapes.length > 0 && (
             <p className="font-display text-[9px] text-mist">Lines on the chart: {ctx.shapes.map((s) => `${s.label} (${s.status ?? "forming"})`).join(", ")}. Dashed = target.</p>
           )}

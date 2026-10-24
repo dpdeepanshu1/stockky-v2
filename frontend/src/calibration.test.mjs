@@ -102,7 +102,7 @@ for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); asse
 const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
 assert.match(bar, /Run all test cases/);
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
-assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads and the scheduler Alert switches (E51)");
+assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51) and Market Weather (not per service)");
 // E51: the scheduler's alert switches go through the gateway proxy, never straight to the scheduler
 assert.match(tab, /section === \"alerts\" && <SwitchesPanel svc=\"sch\" \/>/);
 assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gateway proxy path");

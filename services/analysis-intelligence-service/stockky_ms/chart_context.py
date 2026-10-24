@@ -1,6 +1,6 @@
 """stockky_ms.chart_context - E25 / E26: everything the candlestick chart and the pattern / regime badges need, in one call.
 
-    chart_context(raw_bars, dates, tail=300, structure_trend=None, tf="1d", live=None, live_date=None, lag_s=None) -> dict
+    chart_context(raw_bars, dates, tail=300, structure_trend=None, tf="1d", live=None, live_date=None, lag_s=None, fib=None) -> dict
 
 CONTEXT ONLY, like patterns.py: nothing here feeds a decision, gate, score or ML feature. It turns `analyze_patterns` output into
 
@@ -13,6 +13,9 @@ CONTEXT ONLY, like patterns.py: nothing here feeds a decision, gate, score or ML
   levels    old-resistance-now-support / old-support-now-resistance prices
   badges    plain-English chips: {key, kind, label, tone, tip, status?, bars_ago?}  (tone: good | bad | warn | mute)
   regime    {trend, volatility, momentum, structure} - one word each, or None when it cannot be read
+  fib       E25b: the Fibonacci retracement of the latest confirmed DAILY impulse leg, ready to draw: {direction, swing_low, swing_high, levels: [{ratio,
+            label, price, kind}], golden: {low, high}, in_golden_zone, retracement, invalidated, source: "daily"}; None when the caller passed no engine
+            block or the leg is not readable. Intraday charts get the daily leg (a daily level is still a price). Display only: it adds no badge and no event.
 
 Pure function of its inputs (no clock, no I/O); each section degrades to empty / None, and the call never raises.
 Dates are passed in (not derived from epoch seconds) so a time-zone shift can never move a candle to the wrong session.
@@ -70,6 +73,51 @@ CHART_INFO: Dict[str, Any] = {
     "rectangle": ("Rectangle", "Price bounces between a flat ceiling and a flat floor. The break out of the range sets the direction."),
 }
 _TONE = {"bullish": "good", "bearish": "bad", "neutral": "mute"}
+
+# E25b: the Fibonacci levels worth drawing. 0 % / 100 % are the two ends of the leg; 23.6-78.6 % are the retracements (golden zone = 50-61.8 %);
+# 127.2 / 161.8 % are the extensions the engine already computes (targets beyond the leg).
+FIB_RETRACE = ((0.236, "23.6%"), (0.382, "38.2%"), (0.5, "50%"), (0.618, "61.8%"), (0.786, "78.6%"))
+FIB_EXT = ((1.272, "127.2%"), (1.618, "161.8%"))
+
+
+def fib_levels(fib: Any) -> Optional[Dict[str, Any]]:
+    """Drawable levels from the engine's `fibonacci` block (fibonacci.fib_block). Same geometry as the engine: a bullish leg runs low -> high and a level at
+    ratio r sits r of the way back DOWN from the high; a bearish leg runs high -> low and r of the way back UP from the low. Pure; None when the block is
+    empty, the leg is flat or any number is not finite. Never raises."""
+    try:
+        if not isinstance(fib, dict):
+            return None
+        lo, hi = fib.get("swing_low"), fib.get("swing_high")
+        if not (finite(lo) and finite(hi)) or float(hi) <= float(lo) or float(lo) <= 0:
+            return None
+        lo, hi = float(lo), float(hi)
+        leg = hi - lo
+        bear = fib.get("direction") == "bearish"
+        if fib.get("direction") not in ("bullish", "bearish"):
+            return None
+
+        def at(r: float) -> float:
+            return (lo + r * leg) if bear else (hi - r * leg)
+
+        def ext(r: float) -> float:
+            return (hi - r * leg) if bear else (lo + r * leg)
+
+        rows: List[Dict[str, Any]] = [{"ratio": 0.0, "label": "0%", "price": r2(lo if bear else hi), "kind": "end"},
+                                      {"ratio": 1.0, "label": "100%", "price": r2(hi if bear else lo), "kind": "end"}]
+        rows += [{"ratio": r, "label": lab, "price": r2(at(r)), "kind": "golden" if r in (0.5, 0.618) else "retrace"} for r, lab in FIB_RETRACE]
+        given = {1.272: fib.get("ext_1272"), 1.618: fib.get("ext_1618")}      # the engine's own numbers win over a recompute
+        for r, lab in FIB_EXT:
+            px = float(given[r]) if finite(given[r]) else ext(r)
+            if px > 0:
+                rows.append({"ratio": r, "label": lab, "price": r2(px), "kind": "ext"})
+        rows.sort(key=lambda x: -x["price"])
+        g1, g2 = at(0.5), at(0.618)
+        return {"direction": "bearish" if bear else "bullish", "swing_low": r2(lo), "swing_high": r2(hi), "levels": rows,
+                "golden": {"low": r2(min(g1, g2)), "high": r2(max(g1, g2))}, "in_golden_zone": bool(fib.get("in_golden_zone")),
+                "retracement": fib.get("retracement") if finite(fib.get("retracement")) else None,
+                "invalidated": bool(fib.get("leg_invalidated")), "source": "daily"}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _title(name: str) -> str:
@@ -173,12 +221,12 @@ def _ago_text(ago: int, intraday: bool) -> str:
 
 
 def chart_context(raw_bars: Any, dates: Any, tail: int = 300, structure_trend: Optional[str] = None, tf: str = "1d", live: Any = None,
-                  live_date: Any = None, lag_s: Any = None) -> Dict[str, Any]:
+                  live_date: Any = None, lag_s: Any = None, fib: Any = None) -> Dict[str, Any]:
     sp = spec(tf) or spec("1d")
     intraday, u, keep = bool(sp["intraday"]), sp["unit"], (16 if sp["intraday"] else 10)
     out: Dict[str, Any] = {"schema": SCHEMA, "context_only": True, "ok": False, "tf": sp["key"], "unit": u, "note": sp.get("note"), "live": None,
                            "data_lag_s": int(lag_s) if finite(lag_s) else None, "bars": [], "last_bar": None, "markers": [], "shapes": [],
-                           "levels": [], "badges": [], "events": [], "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None},
+                           "levels": [], "badges": [], "events": [], "fib": None, "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None},
                            "errors": []}
     try:
         bars, ds = _clean(raw_bars, dates, keep)
@@ -191,6 +239,7 @@ def chart_context(raw_bars: Any, dates: Any, tail: int = 300, structure_trend: O
         out["last_bar"] = ds[-1]
         out["live"] = _live_row(live, live_date, keep)
         out["ok"] = True
+        out["fib"] = fib_levels(fib)
         pat = analyze_patterns(bars)
         out["errors"].extend(pat.get("errors") or [])
         badges: List[Dict[str, Any]] = []

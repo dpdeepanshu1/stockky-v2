@@ -47,6 +47,7 @@ try:
     HAS_DB = True
 except ImportError:
     HAS_DB = False
+    Session = Any      # E73: the annotations below (run_training_pipeline) must still import without the DB layer
 
 # If you have a features.py file, import it; otherwise define a minimal feature set.
 try:
@@ -888,15 +889,35 @@ def run_training_pipeline(
         check_abort()
 
         symbols = config['data']['symbols']
-        logger.info(f"Fetching data for {len(symbols)} symbols...")
-        df = build_multi_symbol_dataset(symbols, period=config['data']['period'])
+        # E73: D22 / D23 / D24 are opt-in (config 'ml_extras' block or a TripleBarrier_* target); without them everything below is the unchanged old path.
+        ml_on = False
+        extras = None
+        wiring_report: Dict[str, Any] = {}
+        try:
+            import ml_wiring
+            ml_on = ml_wiring.active(config)
+            if ml_on:
+                extras = ml_wiring.resolve_extras(config)
+        except ImportError:
+            if (config.get('ml_extras') is not None) or str(config.get('target_type')) in ('TripleBarrier_Net', 'TripleBarrier_Class'):
+                raise
+        feature_cols = list(FEATURE_COLUMNS)
+        if ml_on:
+            feature_cols = feature_cols + [c for c in ml_wiring.extra_feature_columns(extras) if c not in feature_cols]
+            logger.info(f"ml_extras active: source={extras['source']} extra_features={len(feature_cols) - len(FEATURE_COLUMNS)}")
+            df, wiring_report = ml_wiring.build_dataset(
+                symbols, config, extras, config['data']['period'], build_multi_symbol_dataset, compute_feature_frame, FEATURE_COLUMNS)
+        else:
+            logger.info(f"Fetching data for {len(symbols)} symbols...")
+            df = build_multi_symbol_dataset(symbols, period=config['data']['period'])
         logger.info(f"Total dataset shape: {df.shape}")
 
-        feature_cols = FEATURE_COLUMNS
+        tb_run = ml_on and ml_wiring.is_triple_barrier(config['target_type'])
         target_gen = TargetGenerator(
             target_type=config['target_type'],
             forecast_horizon=config['forecast_horizon_days'],
-            price_col='close'
+            price_col='close',
+            barrier_params=(extras['barrier_params'] if ml_on else None),
         )
 
         def apply_targets(group):
@@ -904,11 +925,18 @@ def run_training_pipeline(
             group['target'] = t
             group['pct_return'] = g['pct_return']
             group['log_return'] = g['log_return']
+            if tb_run:
+                group = ml_wiring.label_group(group, g)
             return group
 
-        df = df.groupby('symbol', group_keys=False).apply(apply_targets)
+        # E73: an explicit loop instead of groupby.apply - pandas >= 2.2 warns and pandas 3 drops the grouping column ('symbol') from the result of apply
+        df = pd.concat([apply_targets(_g.copy()) for _, _g in df.groupby('symbol')])
         df = df.dropna(subset=['target'])
         logger.info(f"After target generation: {df.shape}")
+        if ml_on:
+            df, _fin = ml_wiring.finalize(df, extras)      # D23: only point-in-time universe members (after the labels, which need later bars)
+            wiring_report.update(_fin)
+            logger.info(f"After universe filter: {df.shape}")
 
         vc = config['validation_strategy']
         splitter = WalkForwardSplitter(
@@ -935,6 +963,8 @@ def run_training_pipeline(
         all_actuals = []
         all_strategy_returns = []
         fold_reports = []
+        oos_frames = []          # E73: per-fold validation rows of a triple-barrier run (calibration + the MA-cross comparison)
+        purged_total = 0
         start_time = time.time()
 
         for i, fold in enumerate(folds):
@@ -948,6 +978,16 @@ def run_training_pipeline(
             train_data = df.iloc[train_idx].copy()
             val_data = df.iloc[val_idx].copy()
 
+            is_class = tb_run and config['target_type'] == 'TripleBarrier_Class'
+            if tb_run and extras['purge']:
+                train_data, _n_purged = ml_wiring.purge_train(train_data, val_data)     # D22: no training label may reach into the validation block
+                purged_total += _n_purged
+            if tb_run and (len(train_data) == 0 or (is_class and train_data['target'].nunique() < 2)):
+                logger.warning("Fold %d: no usable training rows (empty after the purge, or one class only) - fold skipped", i + 1)
+                fold_reports.append({'fold': i + 1, 'skipped': 'no_usable_training_rows', 'train_samples': len(train_data), 'val_samples': len(val_data)})
+                write_progress(i+1, total_folds, int(time.time() - start_time))
+                continue
+
             X_train = train_data[feature_cols].values.astype(np.float32)
             y_train = train_data['target'].values.astype(np.float32)
             X_val = val_data[feature_cols].values.astype(np.float32)
@@ -958,12 +998,22 @@ def run_training_pipeline(
             X_val_scaled = scaler.transform(X_val)
 
             # Create model with the abort callback
-            model = xgb.XGBRegressor(
-                **config['model'],
-                random_state=config['random_seed'],
-                eval_metric='rmse',
-                callbacks=[AbortCallback()]   # <-- NEW: stops mid-fit
-            )
+            if is_class:
+                y_train = y_train.astype(int)
+                y_val = y_val.astype(int)
+                model = xgb.XGBClassifier(
+                    **config['model'],
+                    random_state=config['random_seed'],
+                    eval_metric='logloss',
+                    callbacks=[AbortCallback()]
+                )
+            else:
+                model = xgb.XGBRegressor(
+                    **config['model'],
+                    random_state=config['random_seed'],
+                    eval_metric='rmse',
+                    callbacks=[AbortCallback()]   # <-- NEW: stops mid-fit
+                )
             # Check abort before fit
             check_abort()
 
@@ -974,21 +1024,26 @@ def run_training_pipeline(
                 logger.warning("Training aborted during XGBoost fit.")
                 raise
 
-            pred_val = model.predict(X_val_scaled)
+            pred_val = model.predict_proba(X_val_scaled)[:, 1] if is_class else model.predict(X_val_scaled)
 
-            trade_cfg = config['trading']
+            trade_cfg = ml_wiring.trading_config(config) if ml_on else config['trading']
             trade_sim = TradingSimulator(
-                long_threshold=trade_cfg['long_threshold'],
+                long_threshold=(ml_wiring.long_threshold(config, extras) if ml_on else trade_cfg['long_threshold']),
                 short_threshold=trade_cfg['short_threshold'],
                 transaction_cost_bps=trade_cfg['transaction_cost_bps'],
                 slippage_bps=trade_cfg['slippage_bps'],
                 allow_short=trade_cfg['allow_short']
             )
-            signals, costs, strategy_ret = trade_sim.simulate(pred_val, y_val)
+            # a triple-barrier run trades on the cost-aware NET return of the label (a classifier's y_val is 0/1, not a return)
+            actual_val = val_data['tb_net_return'].values.astype(np.float64) if tb_run else y_val
+            signals, costs, strategy_ret = trade_sim.simulate(pred_val, actual_val)
 
             all_preds.extend(pred_val)
-            all_actuals.extend(y_val)
+            all_actuals.extend(actual_val)
             all_strategy_returns.extend(strategy_ret)
+            if tb_run:
+                oos_frames.append(pd.DataFrame({'pred': np.asarray(pred_val, dtype=float), 'tb_y': val_data['tb_y'].values,
+                                                'tb_net_return': val_data['tb_net_return'].values, 'ma_cross': val_data['ma_cross'].values}))
 
             fold_reports.append({
                 'fold': i+1,
@@ -1017,7 +1072,27 @@ def run_training_pipeline(
         all_actuals = np.array(all_actuals)
         all_strategy_returns = np.array(all_strategy_returns)
 
-        metrics = compute_all_metrics(all_preds, all_actuals, all_strategy_returns)
+        wiring_eval: Dict[str, Any] = {}
+        if tb_run:
+            if len(all_preds) == 0:
+                raise ValueError("no fold produced predictions (every fold was skipped) - more history or a smaller train window is needed")
+            _is_class = config['target_type'] == 'TripleBarrier_Class'
+            _thr = ml_wiring.long_threshold(config, extras)
+            # a classifier outputs a probability: centre it on the threshold so the sign tests in compute_all_metrics mean "long / not long"
+            metrics = compute_all_metrics(all_preds - _thr if _is_class else all_preds, all_actuals, all_strategy_returns)
+            wiring_eval = ml_wiring.evaluate_picks(pd.concat(oos_frames, ignore_index=True), _thr)
+            if _is_class:
+                metrics.pop('RMSE', None)      # RMSE / MAE of a probability against a net return mean nothing
+                metrics.pop('MAE', None)
+                metrics['Brier'] = wiring_eval.get('brier')
+                metrics['ECE'] = (wiring_eval.get('reliability') or {}).get('ece')
+            else:
+                wiring_eval.pop('brier', None)
+                wiring_eval.pop('reliability', None)
+            _vs = wiring_eval.get('vs_ma_cross') or {}
+            logger.info("model picks vs MA-cross: verdict=%s edge_pp=%s n_model=%s n_baseline=%s", _vs.get('verdict'), _vs.get('edge_pp'), _vs.get('n_model'), _vs.get('n_baseline'))
+        else:
+            metrics = compute_all_metrics(all_preds, all_actuals, all_strategy_returns)
 
         logger.info("\n" + "="*50)
         logger.info("WALK‑FORWARD OOS PERFORMANCE")
@@ -1033,12 +1108,21 @@ def run_training_pipeline(
         final_scaler = TimeAwareScaler(config['preprocessing']['scaler_type'])
         X_full_scaled = final_scaler.fit_transform(X_full)
 
-        final_model = xgb.XGBRegressor(
-            **config['model'],
-            random_state=config['random_seed'],
-            eval_metric='rmse',
-            callbacks=[AbortCallback()]   # <-- NEW
-        )
+        if tb_run and config['target_type'] == 'TripleBarrier_Class':
+            final_model = xgb.XGBClassifier(
+                **config['model'],
+                random_state=config['random_seed'],
+                eval_metric='logloss',
+                callbacks=[AbortCallback()]
+            )
+            y_full = y_full.astype(int)
+        else:
+            final_model = xgb.XGBRegressor(
+                **config['model'],
+                random_state=config['random_seed'],
+                eval_metric='rmse',
+                callbacks=[AbortCallback()]   # <-- NEW
+            )
         # Check abort before final fit
         check_abort()
         try:
@@ -1053,7 +1137,8 @@ def run_training_pipeline(
         model_version = None
         if HAS_MODEL_REGISTRY:
             registry = ModelRegistry()
-            model_version = registry.save_production_model(final_model, final_scaler, config, metrics)
+            _reg_cfg = dict(config, feature_columns=feature_cols) if ml_on else config       # E73: the model needs to know its own feature list
+            model_version = registry.save_production_model(final_model, final_scaler, _reg_cfg, metrics)
             logger.info(f"Production model saved with version: {model_version}")
         else:
             joblib.dump(final_model, os.path.join(model_store_path, 'model.pkl'))
@@ -1072,6 +1157,14 @@ def run_training_pipeline(
             'model_version': model_version,
             'config': convert_numpy(config)
         }
+        if ml_on:
+            report['ml_wiring'] = convert_numpy({
+                **ml_wiring.describe(extras),
+                'dataset': wiring_report,
+                'feature_columns': feature_cols,
+                'purged_training_rows': purged_total,
+                'evaluation': wiring_eval,
+            })
 
         report_path = os.path.join(model_store_path, 'training_report.joblib')
         joblib.dump(report, report_path)

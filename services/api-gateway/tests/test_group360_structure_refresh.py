@@ -493,13 +493,16 @@ class TestReplaceFieldsReal:
 # ------------------------------------------------------------------ main.py wiring (source / AST)
 MAIN_SRC = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
 MAIN_TREE = ast.parse(MAIN_SRC)
+import glob as _glob  # noqa: E402
+_SUPPORT_SRC = "\n".join(open(f, encoding="utf-8").read() for f in sorted(_glob.glob(os.path.join(_SERVICE, "gateway_support", "bound_routes*.py"))))
 
 
 def _routes():
     out = {}
     # E49: some handlers moved to gateway_routers/*.py; scan those files too
     import glob
-    trees = [MAIN_TREE] + [ast.parse(open(f, encoding="utf-8").read()) for f in sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_routers", "*.py")))]
+    trees = [MAIN_TREE] + [ast.parse(open(f, encoding="utf-8").read()) for f in sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_routers", "*.py")))
+                                      + sorted(glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_support", "bound_routes*.py")))]   # E87: batch L (gateway_support) holds the status / start routes now
     for n in (x for t in trees for x in ast.walk(t)):
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for d in n.decorator_list:
@@ -525,10 +528,10 @@ class TestMainWiring:
         assert '"refill-additional", "structure-refresh",' in MAIN_SRC
 
     def test_status_route_comes_before_symbol_catch_all(self):
-        assert MAIN_SRC.index("/data-feed/structure-refresh/status") < MAIN_SRC.index('@app.get("/data-feed/{symbol}")')
+        assert MAIN_SRC.index("app.include_router(_bound_routes_l.data_feed_structure_refresh_status_router)") < MAIN_SRC.index("app.include_router(_bound_routes_l.data_feed_symbol_router)")   # E87
 
     def test_tick_action_and_jobs_snapshot(self):
-        assert 'payload.get("action") == "structure-refresh"' in MAIN_SRC
+        assert 'payload.get("action") == "structure-refresh"' in MAIN_SRC + _SUPPORT_SRC      # E87: the tick handler moved to gateway_support/bound_routes_d.py (E78)
         assert 'out["structure_refresh"]' in MAIN_SRC
         assert '"refill_additional", "structure_refresh", "surprise_premarket"' in MAIN_SRC
 
@@ -547,7 +550,7 @@ class TestMainWiring:
         # E54: the sniper counter name is used in gateway_routers/sniper.py now; the prepare counter is still in main.py
         _sniper = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_routers", "sniper.py"), encoding="utf-8").read()
         assert "stockky_sniper_structure_fetch_total" in _sniper
-        assert "stockky_prepare_structure_total" in MAIN_SRC
+        assert "stockky_prepare_structure_total" in MAIN_SRC + _SUPPORT_SRC      # E87: moved to gateway_support/bound_routes_f.py (E80)
 
     def test_metric_helper_behaviour(self):
         ns = {"metrics": type("M", (), {"inc": staticmethod(lambda n, v, **l: ns.setdefault("seen", []).append((n, v, l)))})}

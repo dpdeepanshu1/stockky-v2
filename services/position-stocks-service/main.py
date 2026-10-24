@@ -2962,7 +2962,11 @@ def board_shadow_report(days: int = 30, db: Session = Depends(get_db)):
     from screening import board_report
     days = max(1, min(int(days), 120))
     since = (datetime.now(IST) - _td(days=days)).strftime("%Y-%m-%d")
-    rows = db.query(ScalpBoardLog).filter(ScalpBoardLog.day >= since).order_by(ScalpBoardLog.id.asc()).limit(60000).all()
+    # E125: read only the 14 columns the report uses (tuples, not 60,000 full ORM objects): strategy_readout timed out on the full-row read
+    _L = ScalpBoardLog
+    rows = (db.query(_L.kind, _L.day, _L.symbol, _L.side, _L.rank, _L.conviction, _L.note, _L.zone_status, _L.ts, _L.params_version,
+                     _L.fwd15_pct, _L.fwd30_pct, _L.fwd60_pct, _L.fwd_close_pct)
+            .filter(_L.day >= since).order_by(_L.id.asc()).limit(60000).all())
     dicts = [{"kind": r.kind, "day": r.day, "symbol": r.symbol, "side": r.side, "rank": r.rank, "conviction": r.conviction,
               "note": r.note, "zone_status": r.zone_status, "ts": str(r.ts), "params_version": r.params_version,
               "fwd15_pct": r.fwd15_pct, "fwd30_pct": r.fwd30_pct, "fwd60_pct": r.fwd60_pct, "fwd_close_pct": r.fwd_close_pct}

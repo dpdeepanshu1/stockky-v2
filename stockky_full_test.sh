@@ -58,19 +58,28 @@ run() {
 # (.venv-test/<svc>) with its requirements.txt, so the suites run here as they do in the release workspace. No venv module: the system Python is used as before.
 prep_pytest() {   # usage: prep_pytest <service-dir-name> <extra pip packages...> ; sets PYT to the interpreter to run pytest with
   local svc="$1"; shift
-  local req="services/$svc/requirements.txt" venv=".venv-test/$svc"
+  local req="services/$svc/requirements.txt" venv=".venv-test/$svc" vlog="$OUT/coverage/venv-$svc.log" line skipped=""
   PYT=python3
   if [ ! -x "$venv/bin/python" ]; then
-    python3 -m venv "$venv" > "$OUT/coverage/venv-$svc.log" 2>&1 || { echo "  (python3 -m venv failed: sudo apt install python3-venv; using the system Python)"; rm -rf "$venv"; }
+    python3 -m venv "$venv" > "$vlog" 2>&1 || { echo "  (python3 -m venv failed: sudo apt install python3-venv; using the system Python)"; rm -rf "$venv"; }
   fi
   if [ -x "$venv/bin/python" ]; then
     PYT="$PWD/$venv/bin/python"
-    "$PYT" -m pip install -q --upgrade pip >> "$OUT/coverage/venv-$svc.log" 2>&1
-    if ! "$PYT" -m pip install -q -r "$req" "$@" >> "$OUT/coverage/venv-$svc.log" 2>&1; then
-      echo "  requirements for $svc did not install - see $OUT/coverage/venv-$svc.log"; tail -5 "$OUT/coverage/venv-$svc.log"
+    "$PYT" -m pip install -q --upgrade pip >> "$vlog" 2>&1
+    "$PYT" -m pip install -q "$@" >> "$vlog" 2>&1 || echo "  pytest did not install - see $vlog"            # the test tools first: they must never depend on the requirements below
+    if ! "$PYT" -m pip install -q -r "$req" >> "$vlog" 2>&1; then
+      # E122: ONE package that does not build on this Python (psycopg2-binary has no wheel for the newest Python and needs libpq-dev) used to abort the whole install.
+      # Retry line by line, keep what installs, and say what was skipped: a suite that needs a skipped package fails with a clear 'No module named' cause below.
+      while IFS= read -r line; do
+        line="${line%%#*}"; line="$(echo "$line" | sed -e 's/[[:space:]]*$//')"
+        [ -z "$line" ] && continue
+        "$PYT" -m pip install -q "$line" >> "$vlog" 2>&1 || skipped="$skipped $line"
+      done < "$req"
+      [ -n "$skipped" ] && echo "  $svc: not installed on this Python (skipped):$skipped   (details: $vlog)"
     fi
   else
-    pip install --break-system-packages -q -r "$req" "$@" 2>&1 | tail -3
+    pip install --break-system-packages -q "$@" 2>&1 | tail -3
+    pip install --break-system-packages -q -r "$req" 2>&1 | tail -3
   fi
 }
 

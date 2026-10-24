@@ -314,6 +314,23 @@ export interface ClosedPositionsResponse {
   net_realized_pnl_total: number | null;
 }
 
+// E122: one record per CLOSED position (backend trade_records.py, GET /positions/{mode}/records).
+// Read-only history; every field except the identity ones can be null on old rows.
+export interface TradeRecord {
+  position_id: number; mode: string; symbol: string;
+  origin?: string | null; source_tab?: string | null; decision_label?: string | null; conviction?: number | null;
+  tier?: number | null; tier_name?: string | null; catalyst_type?: string | null;
+  entry_price: number | null; exit_price: number | null; quantity: number | null;
+  entry_slippage_pct?: number | null;
+  entry_time_ist?: string | null; exit_time_ist?: string | null; exit_day_ist?: string | null;
+  held_minutes?: number | null; held_days?: number | null;
+  exit_reason?: string | null; return_pct?: number | null;
+  gross_pnl?: number | null; charges?: number | null; net_pnl?: number | null;
+  stop_pct?: number | null; max_gain_pct?: number | null; max_drawdown_pct?: number | null;
+  opened_at?: string | null; closed_at?: string | null;
+}
+export interface TradeRecordsResponse { mode: string; days: number; symbol: string | null; total: number; returned: number; records: TradeRecord[] }
+
 export interface OrderRow {
   id: number; symbol: string; side: string; qty: number; order_type: string;
   limit_price: number | null; status: string; valid_until: string | null; created_at: string;
@@ -721,6 +738,9 @@ export const realTradeApi = {
 
   closedPositions: (mode: "DEMO" | "REAL", limit = 100) =>
     rtRequest<ClosedPositionsResponse>(`/positions/${mode}/history?limit=${limit}`, {}, mode === "REAL"),
+  // E122: closed-trade records (read-only), the data behind the Trade History tab. days 1-60, limit 1-1000.
+  tradeRecords: (mode: "DEMO" | "REAL", days = 7, limit = 500) =>
+    rtRequest<TradeRecordsResponse>(`/positions/${mode}/records?days=${days}&limit=${limit}`, {}, mode === "REAL"),
   journalNotes: (mode: "DEMO" | "REAL", limit = 200) =>
     rtRequest<JournalNotesResponse>(`/journal/notes/${mode}?limit=${limit}`, {}, mode === "REAL"),
   saveJournalNote: (mode: "DEMO" | "REAL", positionId: number, reason: string, emotion: string) =>

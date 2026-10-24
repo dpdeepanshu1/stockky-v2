@@ -6,6 +6,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
+import { PageHero } from "./ui/PageHero";   // design v6
+import { KpiStrip, type Kpi } from "./ui/KpiStrip";   // design v6
+import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
+import { signedInr } from "./realAuto/history";   // design v6 (shared signed-rupee text)
 import { setVisibleInterval } from "../visibleInterval";
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
@@ -798,25 +802,38 @@ export default function PositionStocksTab() {
   const killSwitchTripped = status?.daily_loss_kill_switch || ledger?.daily_loss_kill_switch_tripped;
 
   return (
-    <div className="page-terminal space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
-      <div className="rt-head ps-head">
-        <div className="rt-title">
-          <span className="rt-title-icon" aria-hidden="true"><NavIcon name="trend" /></span>
-          <div className="min-w-0">
-            <h2 className="rt-title-text">Position Stocks</h2>
-            <span className="rt-title-sub">1m / 5m / 15m / 60m scalp pool</span>
-          </div>
-        </div>
-        <span className="rt-updated font-display tabular-nums">
-          {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
-        </span>
-      </div>
+    <div className="page-terminal v6-page v6-flow space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
+      <PageHero icon="trend" title="Position Stocks" kicker="AI-assisted · live Dhan scalps" subtitle="1m / 5m / 15m / 60m scalp pool"
+        right={(
+          <span className="rt-updated font-display tabular-nums">
+            {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
+          </span>
+        )} />
 
       {/* design v5: money mode + safety chips from state this page already holds */}
       <MoneyModeBanner mode="REAL" detail="Live Dhan scalp orders. Orders here use real money." chips={[
         ...(status != null ? [{ label: status?.risk_confirmed ? "Risk setting confirmed" : "Risk setting not confirmed", state: (status?.risk_confirmed ? "ok" : "warn") as "ok" | "warn" }] : []),
         ...(status != null || ledger != null ? [{ label: killSwitchTripped ? "Loss kill switch TRIPPED" : "Loss kill switch ready", state: (killSwitchTripped ? "bad" : "ok") as "ok" | "bad" }] : []),
       ]} />
+
+      {/* design v6: engine strip + summary tiles, only from state this page already holds (shown once the service has answered) */}
+      {status != null && (
+        <>
+          <AiPulse title="Scalp engine" working={!!status.armed && !killSwitchTripped}
+            line={killSwitchTripped ? "Stopped by the daily loss kill switch" : status.armed ? "Armed · watching the 1m / 5m / 15m / 60m pool for entries" : "Not armed · no new orders will be placed"}
+            chips={[
+              { label: status.armed ? "Armed" : "Not armed", state: status.armed ? "warn" : "idle" },
+              { label: status.auto_pilot_enabled ? "Auto-pilot on" : "Auto-pilot off", state: status.auto_pilot_enabled ? "ok" : "idle" },
+              { label: status.risk_confirmed ? "Risk confirmed" : "Risk not confirmed", state: status.risk_confirmed ? "ok" : "warn" },
+            ] as PulseChip[]} />
+          <KpiStrip label="Position Stocks summary" items={[
+            { label: "Open positions", value: openPositions.length, sub: openPositions.length ? "held right now" : "nothing held", tone: "info" },
+            { label: "Closed today", value: closedToday.length, sub: "finished trades", tone: "flat" },
+            ...(ledger != null ? [{ label: "Realised today", value: signedInr(ledger.realized_pnl_today), sub: "from the capital ledger", tone: (Math.abs(ledger.realized_pnl_today) < 0.5 ? "flat" : ledger.realized_pnl_today > 0 ? "up" : "down") as Kpi["tone"] }] : []),
+            { label: "Orders today", value: status.orders_placed_today_budget ? `${status.orders_placed_today} / ${status.orders_placed_today_budget}` : status.orders_placed_today, sub: status.orders_placed_today_budget ? "used of the daily budget" : "placed so far", tone: status.orders_placed_today_budget && status.orders_placed_today >= status.orders_placed_today_budget ? "warn" : "flat" },
+          ]} />
+        </>
+      )}
 
       {error && (
         <div className="rounded-xl border border-signal-sell/40 bg-signal-sell/10 px-3 py-2 font-display tabular-nums text-xs text-signal-sell">

@@ -172,7 +172,7 @@ class TestOutboundIp:
 
 class TestLogin:
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)       # E122: asyncio.get_event_loop() raises on Python 3.14 when no loop is set; asyncio.run works on every version
 
     def test_successful_login_sets_token(self):
         sess = _make_session()
@@ -274,7 +274,7 @@ class TestLogin:
 
 class TestEnsureSession:
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)       # E122: asyncio.get_event_loop() raises on Python 3.14 when no loop is set; asyncio.run works on every version
 
     def _patch_login(self, sess, call_log):
         original_login = sess._login

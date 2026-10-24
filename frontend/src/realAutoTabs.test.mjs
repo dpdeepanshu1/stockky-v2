@@ -11,7 +11,7 @@ const read = (p) => readFileSync(join(here, p), "utf8");
 const main = read("components/RealAutoTrade.tsx");
 
 const TABS = { orders: "OrdersTab", positions: "PositionsTab", watchlist: "WatchlistTab", live: "LiveTab",
-               pipeline: "PipelineTab", charges: "ChargesTab", log: "LogTab", board: "BoardTab", overview: "OverviewTab" };
+               pipeline: "PipelineTab", charges: "ChargesTab", log: "LogTab", board: "BoardTab", overview: "OverviewTab", history: "HistoryTab" };
 for (const [id, name] of Object.entries(TABS)) {
   assert.ok(existsSync(join(here, `components/realAuto/tabs/${name}.tsx`)), `${name}.tsx exists`);
   assert.match(main, new RegExp(`import \\{ ${name}\\b[^}]*\\} from "\\./realAuto/tabs/${name}";`), `${name} imported`);

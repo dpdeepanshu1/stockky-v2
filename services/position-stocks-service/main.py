@@ -2702,6 +2702,59 @@ def short_probe_last_route():
     return sell_probe.last_result() or {"verdict": "NOT_RUN", "line": "SELL PROBE: NOT_RUN - T6 has not been run yet"}
 
 
+# ── Time Machine (E111): "what are the odds of this trade, from this entry, by the square-off?" Read-only evidence; it places and changes nothing. ──
+class TimeMachineRequest(BaseModel):
+    symbol: Optional[str] = None
+    symbols: Optional[list] = None
+    side: Optional[str] = None
+    stop_pct: Optional[float] = None
+    target_pct: Optional[float] = None
+    entry_time: Optional[str] = None
+    entry_times: Optional[list] = None
+    flat_by: Optional[str] = None
+    sims: Optional[int] = None
+    seed: Optional[int] = None
+    slippage_pct: Optional[float] = None
+    value_rs: Optional[float] = None
+    lookback: Optional[str] = None
+
+
+def _tm_body(req: TimeMachineRequest) -> dict:
+    return req.model_dump(exclude_none=True) if hasattr(req, "model_dump") else req.dict(exclude_none=True)
+
+
+def _tm_http(e) -> HTTPException:
+    return HTTPException(status_code=e.status, detail={"code": e.code, "error": e.message})
+
+
+@app.get("/time-machine/status")
+def time_machine_status_route():
+    """Time Machine: switches in force, defaults for the form, the data cache and the last runs. Read-only."""
+    from timemachine import service as tm
+    return tm.status()
+
+
+@app.post("/time-machine/run")
+def time_machine_run_route(req: TimeMachineRequest):
+    """Time Machine: one stock, one rule (side, entry time, stop %, target %). Replays the real recent 5-minute sessions and thousands of made-up sessions
+    and returns the odds, the average result in R after charges and slippage, a verdict, the entry-time table and the day-by-day history. Evidence only."""
+    from timemachine import service as tm
+    try:
+        return tm.run(_tm_body(req))
+    except tm.TimeMachineError as e:
+        raise _tm_http(e)
+
+
+@app.post("/time-machine/compare")
+def time_machine_compare_route(req: TimeMachineRequest):
+    """Time Machine: the same rule on up to 15 stocks, ranked by the simulated average net R. A stock that cannot be loaded is listed under `failed`."""
+    from timemachine import service as tm
+    try:
+        return tm.compare(_tm_body(req))
+    except tm.TimeMachineError as e:
+        raise _tm_http(e)
+
+
 @app.get("/pullback-rearm")
 def pullback_rearm_route():
     """2026-10-19: symbols armed for a pullback re-arm entry (what each is waiting on) and today's attempt counts. Read-only."""

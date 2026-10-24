@@ -18,7 +18,7 @@ def test_orb_fields_variants():
     assert tr._orb_fields(None)["orb_would_enter"] is None
     assert tr._orb_fields("x")["orb_would_enter"] is None
     a = tr._orb_fields({"would_enter": True, "reasons": [], "range_pct": 1.2})
-    assert a == {"orb_would_enter": True, "orb_reasons": None, "orb_range_pct": 1.2}
+    assert a == {"orb_would_enter": True, "orb_reasons": None, "orb_range_pct": 1.2, "orb_close_trigger": None, "orb_volume_ratio": None}   # E113 added the last two
     b = tr._orb_fields({"would_enter": False, "reasons": ["below_vwap", "wide_spread"]})
     assert b["orb_would_enter"] is False and b["orb_reasons"] == "below_vwap"
     c = tr._orb_fields({"would_enter": False, "reason": "no_range"})

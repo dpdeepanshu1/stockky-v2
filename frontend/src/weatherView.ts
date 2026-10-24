@@ -105,3 +105,55 @@ export function lastWiringLine(runs: { target?: string; status?: string; finishe
   if (m) return `Wiring check ${when} IST: ${m[1]}${m[1] === "FAIL" ? m[2] : ""}`;
   return `Wiring check ${when} IST: ${r.status}${line ? ` - ${line}` : ""}`;
 }
+
+
+// ---------------------------------------------------------------- E112: saved / today / expiry per dial, and the revert button
+export type OverlayServiceName = "real-trade" | "position-stocks";
+export const OVERLAY_SERVICES: OverlayServiceName[] = ["real-trade", "position-stocks"];
+export const SERVICE_TEXT: Record<OverlayServiceName, string> = { "real-trade": "Real Trade", "position-stocks": "Position Stocks" };
+export interface OverlayDial { key: string; saved: string | null; today: string | null; until: string | null; state: string | null; overlaid: boolean }
+export interface OverlayService { ok: boolean; mode: string | null; dials: OverlayDial[]; overlaid: number; why?: string }
+export interface OverlayView { services: Record<string, OverlayService> }
+export interface OverlayRevertResult { service: string; ok: boolean; cleared: string[]; why?: string; view: OverlayService }
+
+export interface OverlayRow { key: string; label: string; saved: string; today: string; expires: string; changed: boolean }
+const dash = (v: string | null | undefined): string => (v == null || v === "" ? "-" : v);
+
+/** One row per dial the service owns: the saved value, the value running today, and when today's value ends (HH:MM IST, or "-" when nothing is overlaid). */
+export function overlayRows(svc: OverlayService | null | undefined): OverlayRow[] {
+  if (!svc || !svc.ok) return [];
+  return svc.dials
+    .filter((d) => DIAL_LABEL[d.key])
+    .sort((a, b) => DIAL_ORDER.indexOf(a.key) - DIAL_ORDER.indexOf(b.key))
+    .map((d) => ({ key: d.key, label: DIAL_LABEL[d.key], saved: dash(d.saved), today: dash(d.today), expires: d.overlaid ? hm(d.until ?? undefined) : "-", changed: d.overlaid }));
+}
+
+/** The line above one service's table: why there is no table, or how many dials are tightened today and by which state. */
+export function overlaySummary(svc: OverlayService | null | undefined): string {
+  if (!svc) return "Not read yet.";
+  if (!svc.ok) return `Could not read this service${svc.why ? ` (${svc.why})` : ""}.`;
+  if (svc.mode !== "live") return `MARKET_STATE_MODE is ${svc.mode || "unknown"}, not live: no dial can be tightened here, so today equals saved.`;
+  if (svc.overlaid === 0) return "Live, and nothing is tightened right now: today equals saved.";
+  const st = svc.dials.find((d) => d.overlaid && d.state)?.state;
+  return `${svc.overlaid} dial${svc.overlaid === 1 ? "" : "s"} tightened${st ? ` by the ${st} profile` : ""}. The saved values come back by themselves at 15:30 IST.`;
+}
+
+/** What the confirm box says before the revert button clears one service's overlay. */
+export function revertConfirmText(name: OverlayServiceName): string {
+  return `Put ${SERVICE_TEXT[name]} back to its saved values now? This clears today's overlay and the state stamp on that service. It does NOT switch "Send dials" off, so a later lock or state change can tighten it again. Switch "Send dials" off as well to stop that for the day.`;
+}
+
+/** One line after a revert click: what happened. */
+export function revertResultLine(name: OverlayServiceName, r: OverlayRevertResult | null | undefined): string {
+  if (!r) return `${SERVICE_TEXT[name]}: no answer.`;
+  if (!r.ok) return `${SERVICE_TEXT[name]}: revert failed${r.why ? ` (${r.why})` : ""}. Nothing was changed.`;
+  return r.cleared.length ? `${SERVICE_TEXT[name]}: ${r.cleared.length} dial${r.cleared.length === 1 ? "" : "s"} back at the saved value.` : `${SERVICE_TEXT[name]}: nothing was tightened, so nothing changed.`;
+}
+
+/** The small print under the "Dials for this state" card. It follows the real gate mode instead of a fixed sentence. */
+export function dialsHelp(mode: string, gate: WeatherGate | null | undefined): string {
+  const base = "These are the profile's asks. A service still refuses any value looser than its saved one, and every overlay ends at 15:30 IST.";
+  if (mode !== "live") return `${base} Send dials is off, so nothing is sent: the runner only logs and messages.`;
+  const g = gate ? ` The evidence gate is ${gate.open ? "open" : "closed"} (${gate.mode || "unknown"} mode).` : "";
+  return `${base} Send dials is on: dials go out at the 09:14 lock and on a state change only while the gate is open and the service's own MARKET_STATE_MODE is live.${g}`;
+}

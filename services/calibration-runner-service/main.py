@@ -54,6 +54,7 @@ runner: Optional[Runner] = None
 sched: Optional[Scheduler] = None
 auto: Optional[Any] = None       # group 476: AutoCalibrator
 weather: Optional[Any] = None    # Part 1 step 4: Market Weather (shadow)
+weather_control: Optional[Any] = None   # E112: the same ControlClient, for the card's saved / today / expiry view and the revert button
 
 
 def _safe_token() -> str:
@@ -65,7 +66,7 @@ def _safe_token() -> str:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global runner, sched, auto, weather
+    global runner, sched, auto, weather, weather_control
     import notify as N
     from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
@@ -100,6 +101,7 @@ def _startup() -> None:
     import weather as W
     import weather_apply as WA
     cc = AC.ControlClient({AC.RT: config.REAL_TRADE_URL, AC.PS: config.POSITION_STOCKS_URL}, _safe_token)
+    weather_control = cc
     weather = W.Weather(str(config.DATA_DIR / "weather"), config.MARKET_DATA_URL, notify=_tell,
                         stamp=lambda svc, body: cc.overlay(AC.RT if svc == "real-trade" else AC.PS, body),
                         enabled=config.WEATHER_ENABLED, stamp_on=config.WEATHER_STAMP, notify_on=config.WEATHER_NOTIFY,
@@ -345,6 +347,31 @@ class WeatherSettings(BaseModel):
 @app.put("/weather/settings")
 def weather_settings(req: WeatherSettings, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     return _w().configure(req.enabled, req.stamp, req.notify, req.apply)
+
+
+@app.get("/weather/overlay")
+def weather_overlay(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """E112: per service, each Market Weather dial's saved value, today's running value and when the overlay ends. Read only."""
+    import weather_overlay as WO
+    if weather_control is None:
+        raise HTTPException(503, "market weather not started")
+    return WO.overlay_view(weather_control)
+
+
+class WeatherRevert(BaseModel):
+    service: str
+
+
+@app.post("/weather/overlay/revert")
+def weather_overlay_revert(req: WeatherRevert, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """E112: put one service's overlaid dials back to their saved values now (a person's click). Does not switch "Send dials" off."""
+    import weather_overlay as WO
+    if weather_control is None:
+        raise HTTPException(503, "market weather not started")
+    try:
+        return WO.revert(weather_control, req.service)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 class WeatherRun(BaseModel):

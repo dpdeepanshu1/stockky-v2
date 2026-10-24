@@ -1300,6 +1300,16 @@ ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))
 TRADE_ODDS_MODE = _get_str("TRADE_ODDS_MODE", "shadow").lower()      # shadow | off
 if TRADE_ODDS_MODE not in ("shadow", "off"):
     TRADE_ODDS_MODE = "shadow"
+# Time Machine (timemachine/, E111): EVIDENCE ONLY. Replays one stock's recent 5-minute sessions and thousands of made-up sessions with a given entry time,
+# stop % and target %, and says how often the target comes first, after charges. It places, sizes and blocks nothing; off stops the routes answering.
+TIME_MACHINE_ENABLED = _get_bool("TIME_MACHINE_ENABLED", True)
+TIME_MACHINE_SIMS = min(50000, max(1000, _get_int("TIME_MACHINE_SIMS", 10000)))       # made-up sessions per run (a request may ask for 1,000 to 50,000)
+TIME_MACHINE_SLIPPAGE_PCT = min(1.0, max(0.0, _get_float("TIME_MACHINE_SLIPPAGE_PCT", 0.05)))   # % per market leg (entry, stop exit, flat-by exit); the target leg is a limit
+TIME_MACHINE_LOOKBACK = _get_str("TIME_MACHINE_LOOKBACK", "1mo").lower()              # 1mo | 2mo (2mo asks market-data for an exact ~58-day window, falls back to 1mo)
+if TIME_MACHINE_LOOKBACK not in ("1mo", "2mo"):
+    TIME_MACHINE_LOOKBACK = "1mo"
+TIME_MACHINE_DEFAULT_VALUE_RS = max(1000.0, _get_float("TIME_MACHINE_DEFAULT_VALUE_RS", 20000.0))   # trade value used for the charges when the request gives none
+TIME_MACHINE_FETCH_TIMEOUT_S = max(5.0, _get_float("TIME_MACHINE_FETCH_TIMEOUT_S", 25.0))
 # Opening-range-breakout recorder (orders/orb_shadow.py): RECORD ONLY. flow_json["orb"] on every new position says what a 5-minute opening-range
 # entry (price above the 09:15-09:20 range high and above VWAP, tight spread, limit just above the high, stop = range low) would have done.
 ORB_MODE = _get_str("ORB_MODE", "shadow").lower()                   # shadow | off

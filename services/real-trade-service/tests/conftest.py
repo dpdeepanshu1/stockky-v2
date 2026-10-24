@@ -241,3 +241,12 @@ def _write_behind_off_by_default(monkeypatch):
     if mod is not None:
         mod.stop()
         mod.reset_for_tests()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _orb_bar_fetch_off_by_default(monkeypatch):
+    """E113: entry_engine/orb_bars.py fetches 1-minute bars on a background thread when the ORB recorder runs. Tests must not reach for the network;
+    tests/test_e113_orb_bars.py turns it on itself with a fake fetch."""
+    from entry_engine import orb_bars as _ob
+    monkeypatch.setattr(_ob, "FETCH_ON", False)
+    _ob._reset_for_tests()

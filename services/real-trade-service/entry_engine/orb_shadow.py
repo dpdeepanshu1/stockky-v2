@@ -10,6 +10,7 @@ RANGE: the first tick seen between ORB_RANGE_END_IST and ORB_CAPTURE_UNTIL_IST f
 VERDICT (orb.would_enter): price above range_high, above VWAP, spread <= ORB_MAX_SPREAD_PCT, range width inside
 [ORB_MIN_RANGE_PCT, ORB_MAX_RANGE_PCT], time <= ORB_LATEST_ENTRY_IST. limit = range_high x (1 + ORB_LIMIT_BUFFER_PCT %), stop = range_low.
 Every function never raises. ORB_MODE=off stops all recording.
+E113: flow_json["orb"] also carries close_trigger / volume_ratio fields from entry_engine/orb_bars.py when 1-minute bars are cached (record only).
 """
 from __future__ import annotations
 
@@ -88,6 +89,12 @@ def evaluate(symbol: str, tick, now: Optional[datetime] = None) -> Optional[Dict
                    would_enter=not reasons, reasons=reasons,
                    limit_price=round(rh * (1 + buf / 100.0), 2), stop_price=round(rl, 2),
                    stop_pct=round((px - rl) / px * 100.0, 3) if px > rl else None)
+        # E113: close-based trigger + trigger-bar volume from 1-minute bars (cached, never waits for the network). Record only: would_enter / reasons above are final.
+        try:
+            from entry_engine import orb_bars
+            out.update(orb_bars.fields_for(sym, rh, now))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("orb bar fields skipped: %s", e)
         return out
     except Exception as e:  # noqa: BLE001
         logger.debug("orb evaluate failed: %s", e)

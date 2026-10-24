@@ -35,6 +35,7 @@ import ShortlistPanel from "./board/ShortlistPanel";
 import ShortShadowCard from "./board/ShortShadowCard";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
+import TimeMachinePanel from "./TimeMachinePanel";   // E111: odds of one trade (evidence only)
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
 import StockCandleBlock from "./StockCandleBlock";   // E25 / E26: candles + pattern badges per stock
@@ -441,7 +442,7 @@ export default function PositionStocksTab() {
   // Sub-tabs — the page used to be one long scroll of every section at
   // once; grouped into tabs so each screen only shows what's relevant to
   // that task (arming/health/risk vs. screener vs. positions vs. history).
-  type SubTab = "overview" | "board" | "pipeline" | "screener" | "positions" | "history" | "dhanorders" | "charges" | "settings";
+  type SubTab = "overview" | "board" | "timemachine" | "pipeline" | "screener" | "positions" | "history" | "dhanorders" | "charges" | "settings";
   const [subTab, setSubTab] = useState<SubTab>("overview");
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
@@ -867,6 +868,7 @@ export default function PositionStocksTab() {
         items={[
           { id: "overview", label: "Overview" },
           { id: "board", label: "Board" },
+          { id: "timemachine", label: "Time Machine" },
           { id: "pipeline", label: "Pipeline" },
           { id: "screener", label: "Screener" },
           { id: "positions", label: "Positions", count: openPositions.length },
@@ -890,6 +892,8 @@ export default function PositionStocksTab() {
           <JournalPanel active={subTab === "board"} />
         </div>
       )}
+
+      {subTab === "timemachine" && <TimeMachinePanel active={subTab === "timemachine"} />}
 
       {subTab === "overview" && (
       <>

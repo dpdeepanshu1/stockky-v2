@@ -2,7 +2,7 @@
    delete the import in main.tsx to roll back.  Everything here is scoped to html.light.
 
    What was wrong in light mode (measured, WCAG contrast):
-   1. `text-white` on pale tinted buttons / cards (bg-signal-*/10..30) = white on pastel, ~1.1:1 (invisible).
+   1. `text-white` on pale tinted buttons / cards (bg-signal-[color] at 10 to 30 percent opacity) = white on pastel, ~1.1:1 (invisible).
       Plain `text-white` headings and `hover:text-white` links on the page background had the same problem.
    2. Coloured label on its own 20-35% tint (text-signal-buy on bg-signal-buy/20) = 3.1-4.1:1, under AA 4.5.
    3. Primary buttons: gradient end colour gave white text 4.36:1, and the hover `brightness(1.08)`

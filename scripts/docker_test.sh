@@ -12,6 +12,12 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 tag="$(grep -m1 -E '^FROM python:' "$root/services/$svc/Dockerfile" | sed -E 's/^FROM (python:[^ ]+).*/\1/')"
 [ -n "$tag" ] || { echo "no 'FROM python:' line in services/$svc/Dockerfile"; exit 2; }
 echo ">> $svc on $tag (same as its Dockerfile)"
-docker run --rm -v "$root":/repo -w "/repo/services/$svc" "$tag" sh -c '
+# pip reads from pypi.org with a 15 s default timeout and 5 retries; on the VM that timed out on /simple/pytest/ and the run died.
+# Longer timeout + more retries, and a named volume as the pip cache so a second run (or a retry) does not download everything again.
+# Override with PIP_TIMEOUT / PIP_RETRIES; PIP_INDEX_URL / PIP_EXTRA_INDEX_URL are passed through if you set them (mirror).
+docker run --rm -v "$root":/repo -v stockky-pip-cache:/root/.cache/pip -w "/repo/services/$svc" \
+  -e PIP_DEFAULT_TIMEOUT="${PIP_TIMEOUT:-120}" -e PIP_RETRIES="${PIP_RETRIES:-10}" \
+  -e PIP_INDEX_URL -e PIP_EXTRA_INDEX_URL \
+  "$tag" sh -c '
   c=""; [ -f constraints.txt ] && c="-c constraints.txt"
   pip install -q --root-user-action=ignore -r requirements.txt $c pytest pytest-cov >/dev/null && python -m pytest -q "$@"' sh "$@"

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, getApiUrl, setApiUrl } from "../../api";
+import { api, getApiUrl, setApiUrl, stopSessionKeepAlive } from "../../api";
 import RateLimitDashboard from "../RateLimitDashboard";
 import { PageHeader } from "../ui/PageHeader";
 import { OvernightAutomationPanel } from "./OvernightAutomationPanel";
@@ -14,7 +14,6 @@ async function powerOffAll() {
     const base = import.meta.env.VITE_API_URL || "";
     // Stop client-side keep-alive and any local intervals before backend
     try {
-      const { stopSessionKeepAlive } = await import("../../api");
       stopSessionKeepAlive();
     } catch {}
     try {

@@ -39,8 +39,19 @@ export default defineConfig(({ mode }) => {
       secure: false,
     };
   }
-    return {
+  return {
     plugins: [react()],
+    build: {
+      // split the big vendor libraries out of the app chunk (the single chunk was 825 kB, over Vite's 500 kB warning)
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            react: ["react", "react-dom"],
+            charts: ["recharts"],
+          },
+        },
+      },
+    },
     server: {
       host: "0.0.0.0",
       port: Number(env.VITE_DEV_PORT || 5173),

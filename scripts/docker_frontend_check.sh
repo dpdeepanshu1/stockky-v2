@@ -11,4 +11,4 @@ echo ">> frontend type-check + build on $tag (same as frontend/Dockerfile)"
 docker run --rm -v "$root/frontend":/app -w /app "$tag" sh -c 'npm ci && npx tsc --noEmit && npm run build'
 echo ">> frontend unit tests on $test_tag (needs --experimental-strip-types)"
 docker run --rm -v "$root/frontend":/app -w /app "$test_tag" sh -c \
-  'for t in riskCap treemapLayout journalStats flowGeometry; do echo "-- $t"; node --experimental-strip-types src/components/board/$t.test.mjs; done; echo "-- structureView"; node --experimental-strip-types src/structureView.test.mjs'
+  'for t in riskCap treemapLayout journalStats flowGeometry; do echo "-- $t"; node --experimental-strip-types src/components/board/$t.test.mjs; done; echo "-- npm test (all src tests)"; npm test'

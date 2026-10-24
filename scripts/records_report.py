@@ -186,6 +186,27 @@ def exit_slippage_pct(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     return {"n": len(vals), "mean": round(st.mean(vals), 3), "worst": round(min(vals), 3), "best": round(max(vals), 3)}
 
 
+def orb_trigger_bucket(v: Any) -> str:
+    """E113: orb_close_trigger as exported (True / False / None). None = the recorder had no bars: never counted as 'no trigger'."""
+    return "no_orb_record" if not isinstance(v, bool) else ("close_trigger" if v else "no_close_trigger")
+
+
+def orb_volume_bucket(v: Any) -> str:
+    """E113: orb_volume_ratio (trigger-bar volume / opening-range average) in buckets; 'none' when not recorded."""
+    x = num(v)
+    if x is None:
+        return "none"
+    return "<1.0" if x < 1.0 else "1.0-1.5" if x < 1.5 else "1.5-2.5" if x < 2.5 else ">=2.5"
+
+
+def orb_verdict_bucket(r: Dict[str, Any]) -> str:
+    """group474 field orb_would_enter, grouped here for the first time (E113)."""
+    v = r.get("orb_would_enter")
+    if not isinstance(v, bool):
+        return "no_verdict"
+    return "orb_would_enter" if v else "orb_would_skip:" + str(r.get("orb_reasons") or "?")
+
+
 GROUPS: List[tuple] = [
     ("origin (system entry vs broker-imported)", lambda r: r.get("origin")),
     ("decision_label", lambda r: r.get("decision_label")),
@@ -202,6 +223,9 @@ GROUPS: List[tuple] = [
     ("order flow: spread at entry", lambda r: spread_bucket(r.get("flow_spread_pct"))),
     ("log-only: Mansfield RS at entry", lambda r: rs_bucket(r.get("log_mansfield_rs"))),
     ("log-only: market breadth at entry", lambda r: breadth_bucket(r.get("log_breadth_pct"))),
+    ("opening range: would an ORB entry have taken it", orb_verdict_bucket),
+    ("opening range: close-based trigger", lambda r: orb_trigger_bucket(r.get("orb_close_trigger"))),
+    ("opening range: trigger-bar volume vs range average", lambda r: orb_volume_bucket(r.get("orb_volume_ratio"))),
 ]
 
 

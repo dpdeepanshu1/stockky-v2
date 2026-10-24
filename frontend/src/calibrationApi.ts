@@ -9,7 +9,7 @@
 import { getRealTradeApiUrl, setRealTradeApiUrl, getSessionToken as getRtToken, setSessionToken as setRtToken, realTradeApi } from "./realTradeApi";
 import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
 import { getApiUrl } from "./api";
-import type { WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
+import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
 export * from "./calibrationTrades";
@@ -238,6 +238,9 @@ export const runnerApi = {
   weatherStatus: () => R<WeatherStatus>("/weather/status"),
   weatherLog: (limit = 100) => R<{ rows: WeatherLogRow[] }>(`/weather/log?limit=${limit}`),
   weatherSettings: (body: WeatherSettings) => R<WeatherStatus>("/weather/settings", { method: "PUT", body: JSON.stringify(body) }),
+  // E112: saved / today / expiry per dial (read only), and the revert button (one service, a person's click; the runner calls that service's own overlay-clear)
+  weatherOverlay: () => R<OverlayView>("/weather/overlay"),
+  weatherRevert: (service: string) => R<OverlayRevertResult>("/weather/overlay/revert", { method: "POST", body: JSON.stringify({ service }) }),
   weatherRun: (stage: WeatherStage) => R<WeatherLogRow>("/weather/run", { method: "POST", body: JSON.stringify({ stage }) }),
   calibrationSummary: async (): Promise<string> => {
     const resp = await fetch(`${getRunnerUrl()}/calibration-summary`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });

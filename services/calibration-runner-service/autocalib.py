@@ -89,6 +89,10 @@ PROTECTED: Dict[str, str] = {
     "OPENING_GATE_MIN_STOP_ATR_FRAC": "risk gate (plan P2 item 16): decided by you, not by a report",
     "SCALP_TARGET_CAP_MIN_STOP_ATR_MULT": "risk gate (plan P2 item 16): decided by you, not by a report",
     "TRADE_ODDS_MODE": "evidence recorder (stop vs target odds): always on so the report has data",
+    "TIME_MACHINE_ENABLED": "evidence tool (Time Machine): changes no trade; a calibrator never switches it",
+    "TIME_MACHINE_SIMS": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
+    "TIME_MACHINE_SLIPPAGE_PCT": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
+    "TIME_MACHINE_LOOKBACK": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_RECORD": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_DEPTH20": "evidence recorder: always on so tests have data",
@@ -396,6 +400,10 @@ class ControlClient:
     def overlay(self, service: str, body: Dict[str, Any]) -> Dict[str, Any]:
         """POST /control/overlay (Market Weather). weather.py only ever sends a STAMP-ONLY body here (entries {}) until step 6."""
         return self._call(service, "POST", "/control/overlay", body)
+
+    def overlay_clear(self, service: str) -> Dict[str, Any]:
+        """DELETE /control/overlay: put every overlaid switch back to its saved value now (E112 revert button, a person's click only; never called by weather.py or weather_apply.py)."""
+        return self._call(service, "DELETE", "/control/overlay")
 
 
 # ----------------------------------------------------------------------------------------------------- the engine

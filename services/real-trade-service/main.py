@@ -2745,7 +2745,7 @@ async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db:
     """group 473: one read-only view of the 20 Oct review fixes (groups 470-472): the effective settings, whether the late-entry cut-off is
     blocking now, today's losing stop-outs and their symbols, and the opening-range shadow counters since boot. Nothing reads it to decide."""
     try:
-        from entry_engine import calendar_gate, orb_shadow, stopout_guard
+        from entry_engine import calendar_gate, orb_bars, orb_shadow, stopout_guard
         out = {
             "overnight_hold_enabled": bool(config.OVERNIGHT_HOLD_ENABLED),
             "entry_last_time_ist": config.ENTRY_LAST_TIME_IST,
@@ -2753,7 +2753,7 @@ async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db:
             "stop_overshoot_allowance_pct": config.STOP_OVERSHOOT_ALLOWANCE_PCT,
             "entry_min_qty": config.ENTRY_MIN_QTY,
             "broker_stop_enabled": bool(config.BROKER_STOP_ENABLED),
-            "orb": {"mode": config.ORB_MODE, **orb_shadow.stats()},
+            "orb": {"mode": config.ORB_MODE, **orb_shadow.stats(), "bars": orb_bars.stats()},          # E113: bars.hit / miss / stale = how many decisions carried the close-trigger fields
             "stopout_guard": {"enabled": bool(config.STOPOUT_GUARD_ENABLED), "day_pause_n": config.STOPOUT_DAY_PAUSE_N,
                               "symbol_block": bool(config.STOPOUT_SYMBOL_BLOCK)},
         }

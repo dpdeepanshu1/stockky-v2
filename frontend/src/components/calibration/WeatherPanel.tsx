@@ -1,9 +1,11 @@
 // Part 1 steps 5-6: the Market Weather card. Reads /weather/status on calibration-runner-service. In SHADOW (the default) the runner computes, logs and
 // messages and sends NO dial. LIVE shows only when the runner's apply switch is on AND it has an applier; even then a dial goes out only through the
 // three locks written on the card. The card never talks to a trading service itself. States are driven by weatherView() (weather.test.mjs).
+// E112: "Saved vs today" shows, per service, each dial's saved value, the value running today and when it ends, read through the runner (/weather/overlay).
+// Its revert button asks the runner to clear ONE service's overlay (after a confirm). It never calls a trading service directly.
 import { useCallback, useEffect, useState } from "react";
 import { runnerApi } from "../../calibrationApi";
-import { DIAL_LABEL, DIAL_ORDER, applyLines, gateLine, lastWiringLine, STATE_PLAIN, STATE_TEXT, STATE_TONE, WEATHER_STAGES, hm, weatherView, type WeatherStage, type WeatherStatus } from "../../weatherView";
+import { DIAL_LABEL, DIAL_ORDER, OVERLAY_SERVICES, SERVICE_TEXT, applyLines, dialsHelp, gateLine, lastWiringLine, overlayRows, overlaySummary, revertConfirmText, revertResultLine, STATE_PLAIN, STATE_TEXT, STATE_TONE, WEATHER_STAGES, hm, weatherView, type OverlayServiceName, type OverlayView, type WeatherStage, type WeatherStatus } from "../../weatherView";
 import { shortExposureLine } from "../../shortShadowView";
 import { Btn, Card, Chip, Msg } from "./ui";
 
@@ -16,10 +18,13 @@ export default function WeatherPanel() {
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
   const [wiring, setWiring] = useState<string>("");
+  const [ovl, setOvl] = useState<OverlayView | null>(null);
+  const [revInfo, setRevInfo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try { setSt(await runnerApi.weatherStatus()); setErr(null); } catch (e: any) { setErr(e?.message || String(e)); }
     try { setWiring(lastWiringLine((await runnerApi.runs(30, "wiring_check")).runs)); } catch { /* the line is optional */ }
+    try { setOvl(await runnerApi.weatherOverlay()); } catch { /* the saved-vs-today card is optional: it just stays empty */ }
   }, []);
   useEffect(() => { void load(); const id = setInterval(() => void load(), 30000); return () => clearInterval(id); }, [load]);
 
@@ -35,6 +40,11 @@ export default function WeatherPanel() {
   const run = (stage: WeatherStage) => {
     if (!window.confirm(`Run the ${STAGE_TEXT[stage]} stage now? It logs a row and sends its Telegram message. It changes no switch.`)) return;
     void act(async () => { const r = await runnerApi.weatherRun(stage); setInfo(r.ok ? `${stage}: ${r.state ?? "-"}${r.note ? ` (${r.note})` : ""}` : `${stage} failed: ${r.error ?? "no data"}`); });
+  };
+
+  const revert = (name: OverlayServiceName) => {
+    if (!window.confirm(revertConfirmText(name))) return;
+    void act(async () => { setRevInfo(revertResultLine(name, await runnerApi.weatherRevert(name))); });
   };
 
   return (
@@ -87,9 +97,47 @@ export default function WeatherPanel() {
                 ))}
               </div>
             )}
-          <p className="mt-2 text-[11px] text-mist">These are the profile's asks. In live mode a service would still refuse any value looser than its saved one. Going live is a later step and needs the shadow report to pass.</p>
+          <p className="mt-2 text-[11px] text-mist" data-testid="weather-dials-help">{dialsHelp(st.mode, st.gate)}</p>
         </Card>
       )}
+
+      <Card title="Saved vs today">
+        <div className="space-y-3" data-testid="weather-overlay">
+          {OVERLAY_SERVICES.map((name) => {
+            const svc = ovl?.services?.[name];
+            const rows = overlayRows(svc);
+            return (
+              <div key={name} data-testid={`weather-overlay-${name}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <b>{SERVICE_TEXT[name]}</b>
+                  <Btn small disabled={busy || !svc?.ok || svc.overlaid === 0} title={svc && svc.overlaid > 0 ? "Put this service back to its saved values now (asks first)" : "Nothing is tightened on this service"}
+                    onClick={() => revert(name)}>Revert to saved</Btn>
+                </div>
+                <p className="mt-1 text-[12px] text-mist">{overlaySummary(svc)}</p>
+                {rows.length > 0 && (
+                  <div className="mt-1 overflow-x-auto">
+                    <table className="w-full text-left text-[11px]">
+                      <thead><tr className="text-mist"><th className="pr-2">Dial</th><th className="px-1">Saved</th><th className="px-1">Today</th><th className="px-1">Ends (IST)</th></tr></thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr key={r.key} className="border-t border-slate">
+                            <td className="pr-2 py-0.5">{r.label}</td>
+                            <td className="px-1">{r.saved}</td>
+                            <td className={`px-1 ${r.changed ? "font-bold text-signal-hold" : ""}`}>{r.today}</td>
+                            <td className="px-1">{r.expires}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {revInfo && <div className="mt-2" data-testid="weather-revert-info"><Msg kind="info">{revInfo}</Msg></div>}
+        <p className="mt-2 text-[11px] text-mist">Saved = the value on the Switches page. Today = what the service is running now. An overlay only ever tightens, never changes the saved value, and ends by itself at 15:30 IST. Revert asks the service to drop its overlay now; it does not switch "Send dials" off.</p>
+      </Card>
 
       <Card title="Today's stages">
         {v.today.length === 0 ? <p className="text-mist">No stage has run yet today.</p> : (

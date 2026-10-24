@@ -502,16 +502,20 @@ def _breadth_bucket(v) -> str:
 
 def _orb_fields(orb) -> dict:
     """group 474: flat opening-range-breakout shadow fields from flow_json["orb"] (entry_engine/orb_shadow.py). Pure, never raises.
-    orb_would_enter: True / False / None (no verdict recorded: entry outside 09:15-10:30 or made before group 470)."""
+    orb_would_enter: True / False / None (no verdict recorded: entry outside 09:15-10:30 or made before group 470).
+    E113: orb_close_trigger (True / False / None = no bar fields recorded) and orb_volume_ratio (trigger-bar volume / opening-range average, None when not recorded)."""
+    empty = {"orb_would_enter": None, "orb_reasons": None, "orb_range_pct": None, "orb_close_trigger": None, "orb_volume_ratio": None}
     try:
         if not isinstance(orb, dict):
-            return {"orb_would_enter": None, "orb_reasons": None, "orb_range_pct": None}
+            return dict(empty)
         rs = orb.get("reasons")
         first = (rs[0] if isinstance(rs, list) and rs else orb.get("reason"))
+        ct = orb.get("close_trigger")
         return {"orb_would_enter": (bool(orb["would_enter"]) if "would_enter" in orb else None),
-                "orb_reasons": first, "orb_range_pct": orb.get("range_pct")}
+                "orb_reasons": first, "orb_range_pct": orb.get("range_pct"),
+                "orb_close_trigger": (ct if isinstance(ct, bool) else None), "orb_volume_ratio": orb.get("volume_ratio")}
     except Exception:  # noqa: BLE001
-        return {"orb_would_enter": None, "orb_reasons": None, "orb_range_pct": None}
+        return dict(empty)
 
 
 def _orb_bucket(r) -> str:
@@ -519,6 +523,24 @@ def _orb_bucket(r) -> str:
     if v is None:
         return "no_verdict"
     return "orb_would_enter" if v else "orb_would_skip:" + str(r.get("orb_reasons") or "?")
+
+
+def _orb_trigger_bucket(r) -> str:
+    """E113: did the first completed bar after the range close above the range high? 'no_orb_record' when no bar fields were recorded (never counted as 'no trigger')."""
+    v = r.get("orb_close_trigger")
+    return "no_orb_record" if v is None else ("close_trigger" if v else "no_close_trigger")
+
+
+def _orb_volume_bucket(r) -> str:
+    """E113: trigger-bar volume / average opening-range bar volume, in the same buckets as Position Stocks; 'none' when not recorded."""
+    raw = r.get("orb_volume_ratio")
+    try:
+        v = float(raw) if raw is not None and not isinstance(raw, bool) else None
+    except (TypeError, ValueError):
+        v = None
+    if v is None or v != v:
+        return "none"
+    return "<1.0" if v < 1.0 else "1.0-1.5" if v < 1.5 else "1.5-2.5" if v < 2.5 else ">=2.5"
 
 
 def _imb_bucket(v) -> str:
@@ -703,6 +725,8 @@ def expectancy_report(records: list, *, min_trades_note: int = 5) -> dict:
         "by_spread": lambda r: _spread_bucket(r.get("flow_spread_pct")),
         # group468: log-only evidence buckets (candidates made before the record existed fall in "unknown")
         "by_orb_shadow": _orb_bucket,                                     # group474: would an opening-range entry have taken this trade?
+        "by_orb_close_trigger": _orb_trigger_bucket,                      # E113: close-based ORB trigger (needs 1-minute bars; absent = no_orb_record)
+        "by_orb_volume_ratio": _orb_volume_bucket,                        # E113: trigger-bar volume vs the opening-range average
         "by_mansfield_rs": lambda r: _rs_bucket(r.get("log_mansfield_rs")),
         "by_breadth": lambda r: _breadth_bucket(r.get("log_breadth_pct")),
         # P5: Market Weather stamp (trades opened with no state active, or before the stamp existed, fall in "none")

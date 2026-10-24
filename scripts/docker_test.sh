@@ -20,4 +20,7 @@ docker run --rm -v "$root":/repo -v stockky-pip-cache:/root/.cache/pip -w "/repo
   -e PIP_INDEX_URL -e PIP_EXTRA_INDEX_URL \
   "$tag" sh -c '
   c=""; [ -f constraints.txt ] && c="-c constraints.txt"
-  pip install -q --root-user-action=ignore -r requirements.txt $c pytest pytest-cov >/dev/null && python -m pytest -q "$@"' sh "$@"
+  # E127: fastapi.testclient needs httpx; calibration-runner-service does not list it and died at collection ("No module named httpx").
+  # httpx < 0.28 because that service pins fastapi 0.104 (starlette 0.27), whose TestClient passes app= (removed in httpx 0.28).
+  h=""; grep -qi "^httpx" requirements.txt || h="httpx<0.28"
+  pip install -q --root-user-action=ignore -r requirements.txt $c pytest pytest-cov $h >/dev/null && python -m pytest -q "$@"' sh "$@"

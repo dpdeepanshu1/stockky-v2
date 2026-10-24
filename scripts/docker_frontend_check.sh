@@ -10,5 +10,7 @@ test_tag="${FRONTEND_TEST_NODE_IMAGE:-node:22-slim}"
 echo ">> frontend type-check + build on $tag (same as frontend/Dockerfile)"
 docker run --rm -v "$root/frontend":/app -w /app "$tag" sh -c 'npm ci && npx tsc --noEmit && npm run build'
 echo ">> frontend unit tests on $test_tag (needs --experimental-strip-types)"
-docker run --rm -v "$root/frontend":/app -w /app "$test_tag" sh -c \
+# E127: calibration.test.mjs checks the plan against ../../services/calibration-runner-service/jobs.py; only frontend/ was mounted, so it died with ENOENT
+# (/services/calibration-runner-service/jobs.py). The one file it reads is now mounted read-only at the path the test resolves.
+docker run --rm -v "$root/frontend":/app -v "$root/services/calibration-runner-service/jobs.py":/services/calibration-runner-service/jobs.py:ro -w /app "$test_tag" sh -c \
   'for t in riskCap treemapLayout journalStats flowGeometry; do echo "-- $t"; node --experimental-strip-types src/components/board/$t.test.mjs; done; echo "-- npm test (all src tests)"; npm test'

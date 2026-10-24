@@ -26,7 +26,7 @@ import pytest
 
 SERVICES = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 REPO = os.path.dirname(SERVICES)
-_PRUNE = {"node_modules", ".git", "__pycache__", ".pytest_cache", ".venv", "venv"}
+_PRUNE = {"node_modules", ".git", "__pycache__", ".pytest_cache", ".venv", "venv", ".venv-test"}
 
 
 def _contexts():
@@ -122,6 +122,9 @@ def _expendable(rel):
     parts = rel.split("/")
     name = parts[-1]
     if parts[0] in (".git", ".vscode", ".idea", "node_modules", "dist", ".vite", "oracle_wallet", ".venv", "venv"):
+        return True
+    # E127: any virtualenv folder named .venv* (the VM keeps test virtualenvs as .venv-test; the rules drop **/.venv*) or venv, at any depth
+    if any(p.startswith(".venv") or p == "venv" for p in parts[:-1]):
         return True
     if any(p in ("tests", "__pycache__", ".pytest_cache", "node_modules", "dist", "oracle_wallet", "htmlcov")
            or p.endswith(".egg-info") for p in parts[:-1]):

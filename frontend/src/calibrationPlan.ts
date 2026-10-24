@@ -8,17 +8,21 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
   {
     id: "monday", title: "Monday (and after any restart or deploy)", blurb: "Before the first trade of the week: is everything up, is every switch what you think it is, are quotes fresh.",
     rows: [
-      { when: "08:45 - 09:15 IST", what: "Health of every service, switch snapshot, 09:30 live check", pack: "monday_open", note: "Fix any PENDING RESTART line first (restart outside market hours)." },
+      { when: "08:45 - 09:15 IST", what: "Health of every service, switch snapshot, wiring check, Time Machine gate (scheduled Monday 08:50; Tuesday to Friday the Morning open pack does the same)", pack: "monday_open", note: "Fix any PENDING RESTART line first (restart outside market hours)." },
       { when: "after every deploy", what: "Market Weather wiring check: both services take the stamp, every dial is live, the multipliers match the switches", jobs: ["wiring_check"], note: "WIRING: PASS is the proof; a FAIL line names the missing link. Never touches an overlay that is already active." },
-      { when: "09:30 IST", what: "Live check: depth-20 / order feed layout, quote age", jobs: ["monday_check_0930"] },
+      { when: "09:35 IST (scheduled)", what: "Live check: depth-20 / order feed layout, quote age, then the short shadow and ORB bar counters (T5)", pack: "live_check_open", note: "Runs by itself every trading day and tells Telegram. An exchange holiday is skipped." },
       { when: "Once, 09:30 - 14:30 IST, before SHORT_MODE goes live", what: "Dhan SELL probe (T6): ONE real 1-share SELL Super Order, legs read back, covered. Tick the box to run it", jobs: ["dhan_sell_probe"], note: "PASS is what lets a live short be placed (SHORT_LIVE_REQUIRES_PROBE). FAIL: the 'dhan' lines say what Dhan refused. If the cover cannot be completed it becomes a normal short and Telegram alerts." },
-      { when: "10:15 IST", what: "Live check again: the session verdict must read `open`", jobs: ["monday_check_1015"] },
+      { when: "10:20 IST (scheduled)", what: "Live check again: the session verdict must read `open`", pack: "live_check_1015" },
+      { when: "15:05 IST (scheduled)", what: "T7: no short may be open after the 14:55 cover", pack: "shorts_flat_close", note: "FAIL names the symbol: check Dhan and cover by hand if needed." },
+      { when: "15:35 IST (scheduled)", what: "The Market Weather overlay must be gone in both services after 15:30", pack: "overlay_clear_close", note: "FAIL: use 'Revert to saved' on the Market Weather card." },
     ],
   },
   {
     id: "daily", title: "Every trading day", blurb: "Small, fast, and they feed everything else: the records and the ledger are only kept for a few days.",
     rows: [
-      { when: "09:30 IST", what: "Live check (only if you changed something, or the day looks odd)", jobs: ["monday_check_0930"] },
+      { when: "08:50 IST Tue to Fri (scheduled)", what: "Health, switch snapshot, Market Weather wiring check", pack: "morning_open" },
+      { when: "09:20 IST (scheduled)", what: "Time Machine morning scan and gate check", pack: "time_machine_open" },
+      { when: "09:30 IST", what: "Live check (also scheduled at 09:35; run it by hand only if you changed something, or the day looks odd)", jobs: ["monday_check_0930"] },
       { when: "After 15:45 IST", what: "Daily trades with entry / exit time and P&L, save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache", pack: "daily_close", note: "Retrain, outcome scoring and structure refresh also run by GitHub Actions: running them here too is harmless (the service skips what is already fresh)." },
       { when: "After any switch change", what: "Switch snapshot, then compare tomorrow's daily trades with the days before", jobs: ["control_snapshot", "daily_trades"] },
     ],

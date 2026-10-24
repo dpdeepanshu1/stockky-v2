@@ -342,6 +342,26 @@ def b_sell_probe(ctx, p):
     return [_py(ctx, "dhan_sell_probe.py", *args, title="Dhan SELL probe (T6): one 1-share SELL Super Order, read back and covered", env={"TOKEN": "{token}"}, attention=(1,))]
 
 
+def _intraday(ctx, phase: str, title: str, extra=()):
+    return [_py(ctx, "intraday_state_check.py", "--phase", phase, "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], "--md-url", ctx["md"], *extra,
+                title=title, env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_shadow_shorts_check(ctx, p):
+    """E126 (T5): the short shadow rows, gate counters and ORB bar counters, read-only. Skips an exchange holiday."""
+    return _intraday(ctx, "shadow-shorts", "Short shadow + bar counters (T5)", ["--expect-short-mode", p.get("expect_short_mode", "any")])
+
+
+def b_shorts_flat_check(ctx, p):
+    """E126 (T7): no short is open after the 14:55 cover (position rows, plain-order watch list, shadow rows). Read-only."""
+    return _intraday(ctx, "shorts-flat", "No short open after the 14:55 cover (T7)")
+
+
+def b_overlay_clear_check(ctx, p):
+    """E126: the Market Weather overlay is gone in both services after 15:30. Read-only."""
+    return _intraday(ctx, "overlay-clear", "Market Weather overlay gone after 15:30")
+
+
 def b_regime_shadow(ctx, p):
     """Part 1 step 6 gate: what would the Market Weather profile have done to the saved real-trade records? Reads the shadow log, changes nothing."""
     return [_py(ctx, "regime_shadow_report.py", "--log", os.path.join(os.path.dirname(ctx["exp"]), "weather", "log.jsonl"), "--out", os.path.join(ctx["run"], "regime"),
@@ -479,6 +499,17 @@ JOB_LIST = [
          [P("yes", "I understand this places a real 1-share order", "bool", False), P("symbol", "Symbol (blank = ITC, NTPC, ONGC, SBIN, TATASTEEL in turn)", "str", ""),
           P("status_only", "Only show the last result", "bool", False)], window="open", timeout_s=240,
          after="PASS: SHORT_MODE=live is now one switch (start with SHORT_LIVE_QTY_CAP=1). FAIL: read the 'dhan' lines, they say what Dhan refused or what did not read back; SHORT_MODE stays shadow."),
+    _job("shadow_shorts_check", "Short shadow + bar counters (T5)", "ops", "Every trading day 09:35 IST (scheduled), or any time you doubt the short shadow is running",
+         "Reads the short shadow (mode, gate counters, would-be shorts, last SELL probe verdict) and the real-trade ORB bar counters (hit / miss / stale). FAIL if a service does not answer, SHORT_MODE is not off / shadow / live "
+         "(or not the one you expect), or the gate counters are missing. Skips an exchange holiday. Places nothing.", b_shadow_shorts_check,
+         [P("expect_short_mode", "Expected SHORT_MODE", "choice", "any", choices=["any", "off", "shadow", "live"])], timeout_s=120,
+         after="PASS: the shadow is recording. WARN lines are things to look at, not failures."),
+    _job("shorts_flat_check", "No short open after the 14:55 cover (T7)", "ops", "Every trading day 15:05 IST (scheduled), and right after the first live short day",
+         "Reads position-stocks: no SHORT position is still OPEN, no plain-order SELL is still watched, no shadow short is stuck OPEN. FAIL names the symbol: check Dhan and cover by hand if needed. Skips an exchange holiday. Places nothing.",
+         b_shorts_flat_check, timeout_s=120, after="PASS: the day ended flat. FAIL: the line names what is still open."),
+    _job("overlay_clear_check", "Market Weather overlay gone after 15:30", "ops", "Every trading day 15:35 IST (scheduled)",
+         "Reads GET /control/overlay of real-trade and position-stocks: after 15:30 IST no overlay may be active, so every dial is back at its saved value. FAIL names the service. Before 15:30 an active overlay is only an INFO line. Skips an exchange holiday.",
+         b_overlay_clear_check, timeout_s=120, after="PASS: tomorrow starts from the saved values. FAIL: use 'Revert to saved' on the Market Weather card."),
     _job("short_history_replay", "Short selling bar replay", "weekly", "Any time, minutes; weekly while SHORT_MODE is shadow or live (evidence only)",
          "Pretends to SELL at fixed times of day on recent 5-minute bars of liquid NSE stocks, walks the stop and the target (stop first when both are touched) and the 14:55 cover, "
          "after flat charges, and runs the same for BUY as a control. Break-even aware: at 2:1 a short only needs to win 1 trade in 3. Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing and gates nothing.",
@@ -505,14 +536,26 @@ PACKS: List[Dict[str, Any]] = [
     {"id": "time_machine_open", "title": "Time Machine morning scan", "when": "Every trading day 09:20 IST (scheduled), after the Market Weather lock",
      "what": "Triggers a Time Machine scan in real-trade and position-stocks and checks that the live gate is running in both.", "jobs": [["tm_gate_check", {"scan": True}]], "stop_on_failure": False},
     {"id": "monday_open", "title": "Monday open pack", "when": "Monday 08:45-09:30 IST, and any day after a restart or deploy",
-     "what": "Health, switch snapshot, Market Weather wiring check, then the 09:30 live check. (Run the 10:15 check from the list after 10:15.)",
-     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}], ["tm_gate_check", {"scan": True}], ["monday_check_0930", {}]], "stop_on_failure": False},
+     "what": "Health, switch snapshot, Market Weather wiring check, Time Machine gate check. (The 09:35 and 10:20 live checks are their own scheduled packs.)",
+     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}], ["tm_gate_check", {"scan": True}]], "stop_on_failure": False},
+    {"id": "morning_open", "title": "Morning open pack", "when": "Tuesday to Friday 08:50 IST (scheduled); Monday uses the Monday open pack",
+     "what": "Health, switch snapshot and the Market Weather wiring check, every trading morning, so a mid-week deploy is caught before the 09:14 lock.",
+     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}]], "stop_on_failure": False},
+    {"id": "live_check_open", "title": "Live check 09:35 + short shadow (T5)", "when": "Every trading day 09:35 IST (scheduled)",
+     "what": "The 09:30 live check (depth-20 / order feed layout, quote age) once the market is really open, then the short shadow and ORB bar counters.",
+     "jobs": [["monday_check_0930", {}], ["shadow_shorts_check", {}]], "stop_on_failure": False},
+    {"id": "live_check_1015", "title": "Live check 10:20 (session must read open)", "when": "Every trading day 10:20 IST (scheduled)",
+     "what": "The 10:15 live check: the session verdict must read `open`.", "jobs": [["monday_check_1015", {}]], "stop_on_failure": False},
+    {"id": "shorts_flat_close", "title": "Shorts flat check (T7)", "when": "Every trading day 15:05 IST (scheduled), after the 14:55 cover",
+     "what": "No short may still be open after the 14:55 cover.", "jobs": [["shorts_flat_check", {}]], "stop_on_failure": False},
+    {"id": "overlay_clear_close", "title": "Overlay cleared check", "when": "Every trading day 15:35 IST (scheduled), after the 15:30 end of the Market Weather overlay",
+     "what": "The Market Weather overlay must be gone in both services.", "jobs": [["overlay_clear_check", {}]], "stop_on_failure": False},
     {"id": "daily_close", "title": "Daily close pack", "when": "Every trading day after 15:45 IST",
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
-     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, short shadow report, switch snapshot of changes.",
+     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["short_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},
@@ -526,6 +569,11 @@ PACK_MAP = {p["id"]: p for p in PACKS}
 SCHEDULE_DEFAULT: List[Dict[str, Any]] = [
     {"id": "s_monday_open", "pack": "monday_open", "days": [0], "time": "08:50", "enabled": True},
     {"id": "s_tm_open", "pack": "time_machine_open", "days": [0, 1, 2, 3, 4], "time": "09:20", "enabled": True},
+    {"id": "s_morning_open", "pack": "morning_open", "days": [1, 2, 3, 4], "time": "08:50", "enabled": True},
+    {"id": "s_live_open", "pack": "live_check_open", "days": [0, 1, 2, 3, 4], "time": "09:35", "enabled": True},
+    {"id": "s_live_1015", "pack": "live_check_1015", "days": [0, 1, 2, 3, 4], "time": "10:20", "enabled": True},
+    {"id": "s_shorts_flat", "pack": "shorts_flat_close", "days": [0, 1, 2, 3, 4], "time": "15:05", "enabled": True},
+    {"id": "s_overlay_clear", "pack": "overlay_clear_close", "days": [0, 1, 2, 3, 4], "time": "15:35", "enabled": True},
     {"id": "s_daily_close", "pack": "daily_close", "days": [0, 1, 2, 3, 4], "time": "16:05", "enabled": True},
     {"id": "s_friday_review", "pack": "friday_review", "days": [4], "time": "16:40", "enabled": True},
     {"id": "s_weekly_cal", "pack": "weekly_calibration", "days": [5], "time": "08:00", "enabled": False},

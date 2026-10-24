@@ -1,6 +1,6 @@
 """Short selling step 8/9: orders/short_live.py. Two parts:
  1. the behaviour script scripts/test_short_live.py, run in a clean interpreter (it fakes sys.modules, so it must not share this pytest process);
- 2. static rails read from the source: no plain-order fallback, a broker stop is mandatory, the long entry is untouched, the size cap and the mode are
+ 2. static rails read from the source: the plain-order fallback lives only in orders/plain_short.py (E114), a broker stop is mandatory, the long entry is untouched, the size cap and the mode are
     checked, SELL only, INTRADAY only. These run anywhere (no SQLAlchemy)."""
 from __future__ import annotations
 
@@ -21,18 +21,35 @@ def test_behaviour_script_passes_in_a_clean_interpreter():
     assert "FAIL" not in r.stdout
 
 
-def test_the_only_order_call_is_a_sell_super_order_with_intraday_product():
-    code = re.sub(r'""".*?"""', "", SRC, flags=re.S)
+def test_the_only_order_calls_are_a_sell_super_order_and_the_plain_short_module():
+    # E114: short_live.py itself still places exactly one order (the SELL Super Order). The plain-order fallback lives in orders/plain_short.py, the only other place.
+    code = re.sub(r'''""".*?"""''', "", SRC, flags=re.S)
     code = "\n".join(l for l in code.splitlines() if not l.strip().startswith("#"))
     assert code.count("place_super_order(") == 1
-    assert "place_order(" not in code, "no plain-order short: it would have no broker stop"
+    assert "place_order(" not in code, "plain orders are placed only by orders/plain_short.py (it also places the broker stop)"
+    assert code.count("plain_short.open_plain_short(") == 1
     assert 'transaction_type="SELL"' in code and 'product_type="INTRADAY"' in code and 'transaction_type="BUY"' not in code
     assert "convert_position" not in code and "CNC" not in code
 
 
-def test_a_stop_leg_is_always_sent_and_super_order_is_required():
+def test_a_stop_is_always_sent_and_the_fallback_is_gated():
     assert "stop_loss_price=float(levels.stop_price)" in SRC and "target_price=float(levels.target_price)" in SRC
-    assert "if not config.USE_SUPER_ORDER:" in SRC
+    assert "if not config.USE_SUPER_ORDER and not plain_short.entry_allowed():" in SRC
+    ps = (ROOT / "orders" / "plain_short.py").read_text(encoding="utf-8")
+    code = re.sub(r'''""".*?"""''', "", ps, flags=re.S)
+    assert code.count("place_intraday_buy_stop(") >= 2 and "INTRADAY" in code and "CNC" not in code.replace("cancel_cnc_stop_loss_order", "")
+    assert "plain_short.refusal_allows_fallback(error_msg, ambiguous)" in SRC and "ambiguous" in code
+    assert "if not entry_allowed() or ambiguous:" in code, "an ambiguous error, a switched-off fallback and a tripped day breaker must never reach a plain SELL"
+    assert "_tripped_day[0] = _today()" in code, "a stop that could not be placed must trip the day breaker"
+    assert "plain_short.watch_orphan(" in SRC, "a SELL whose state is unknown must be put on the watch list"
+
+
+def test_the_plain_short_guard_is_wired_and_the_cover_releases_the_stop_first():
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "plain_short.run_plain_short_guard" in main
+    eod = (ROOT / "orders" / "eod_squareoff.py").read_text(encoding="utf-8")
+    assert "plain_short.release_stop_before_cover(db, pos)" in eod
+    assert eod.index("release_stop_before_cover") < eod.index("exit_side = _side.exit_transaction_type(pos)"), "the resting stop must be released BEFORE the cover BUY is built"
 
 
 def test_size_cap_mode_and_ledger_are_enforced():

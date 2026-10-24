@@ -61,7 +61,7 @@ assert.equal(fmtDur(7200), "2.0 h");
 const jobsPy = readFileSync(new URL("../../services/calibration-runner-service/jobs.py", import.meta.url), "utf8");
 const jobIds = new Set([...jobsPy.matchAll(/_job\("([a-z0-9_]+)"/g)].map((m) => m[1]));
 const packIds = new Set([...jobsPy.matchAll(/\{"id": "([a-z_]+)", "title": "[^"]+", "when"/g)].map((m) => m[1]));
-assert.ok(jobIds.size >= 30 && packIds.size === 5, `${jobIds.size} jobs ${packIds.size} packs`);
+assert.ok(jobIds.size >= 30 && packIds.size === 6, `${jobIds.size} jobs ${packIds.size} packs`);
 for (const sec of PLAN) for (const row of sec.rows) {
   if (row.pack) assert.ok(packIds.has(row.pack), `unknown pack ${row.pack}`);
   for (const j of row.jobs || []) assert.ok(jobIds.has(j), `unknown job ${j}`);

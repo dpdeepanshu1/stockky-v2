@@ -7,8 +7,8 @@ import { positionStocksApi } from "../positionStocksApi";
 import { Card } from "./board/boardCard";
 import "./board/board.css";
 import {
-  buildBody, controlLine, defaultForm, errorText, formProblem, gapLine, histBars, pct, rText, toneOfR, verdictView,
-  type TmCompareDoc, type TmForm, type TmRunDoc, type TmStatusDoc,
+  buildBody, controlLine, defaultForm, errorText, formProblem, gapLine, gateCountsLine, gateModeView, gateTimerLine, histBars, pct, rText, toneOfR, verdictView,
+  type TmCompareDoc, type TmForm, type TmGateDoc, type TmRunDoc, type TmStatusDoc,
 } from "../timeMachineView";
 
 const TONE: Record<string, string> = { good: "text-signal-buy", bad: "text-signal-sell", warn: "text-signal-hold", mute: "text-mist" };
@@ -37,6 +37,8 @@ export default function TimeMachinePanel({ active }: { active: boolean }) {
   const [run, setRun] = useState<TmRunDoc | null>(null);
   const [cmp, setCmp] = useState<TmCompareDoc | null>(null);
   const [showDays, setShowDays] = useState(false);
+  const [gate, setGate] = useState<TmGateDoc | null>(null);
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -47,6 +49,21 @@ export default function TimeMachinePanel({ active }: { active: boolean }) {
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
+
+  // E115: the live picking gate card refreshes every 20 s while the tab is open
+  useEffect(() => {
+    if (!active) return;
+    let alive = true;
+    const load = () => positionStocksApi.timeMachineGate().then((d: TmGateDoc) => { if (alive) setGate(d); }).catch(() => { /* the card just stays as it was */ });
+    load();
+    const t = setInterval(load, 20000);
+    return () => { alive = false; clearInterval(t); };
+  }, [active]);
+  const scanNow = async () => {
+    setScanMsg(null);
+    try { const r = await positionStocksApi.timeMachineScan(); setScanMsg(r?.ok ? `Scan queued: ${r.queued} of ${r.targets} picks.` : (r?.note || "Scan not run.")); }
+    catch (e: any) { setScanMsg(errorText(e)); }
+  };
 
   const set = <K extends keyof TmForm>(k: K, v: TmForm[K]) => { setTouched(true); setForm((f) => ({ ...f, [k]: v })); };
   const disabled = status?.enabled === false;
@@ -67,6 +84,26 @@ export default function TimeMachinePanel({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-3" data-testid="time-machine">
+      <Card title="Live picking gate · Time Machine in Position Stocks" right={gate ? <span className={`text-[9px] uppercase tracking-widest ${TONE[gateModeView(gate.mode).tone]}`}>{gateModeView(gate.mode).label}</span> : null}>
+        <p className="text-[11px] text-mist mb-1">
+          Before an entry is committed, this trade&apos;s own stop % and target % at this time of day are replayed. If the simulation and the stock&apos;s real recent sessions are
+          both negative after charges the entry is refused; it can only say no, and missing or slow data never blocks. It also nudges the shortlist ranking. Real Trade runs the same gate.
+        </p>
+        <p className="text-[11px] text-paper" data-testid="tm-gate-timer">{gateTimerLine(gate)}</p>
+        <p className="text-[11px] text-paper" data-testid="tm-gate-counts">{gateCountsLine(gate)}</p>
+        {gate && gate.recent_checks.length > 0 && (
+          <ul className="mt-1 text-[10px] text-mist space-y-0.5">
+            {gate.recent_checks.slice(0, 5).map((c, i) => (
+              <li key={i}>{c.at.slice(11, 16)} {c.side} {c.symbol}: {c.code ?? c.no_data ?? "-"}{c.enforced ? " (refused)" : c.would_reject ? " (would refuse, log mode)" : ""}</li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-2 flex items-center gap-2">
+          <button type="button" onClick={scanNow} className="rounded-lg border border-slate px-2 py-1 text-[11px] text-paper">Scan now</button>
+          {scanMsg && <span className="text-[10px] text-mist">{scanMsg}</span>}
+          <span className="text-[10px] text-mist">Switches: TM_GATE_MODE, TM_PICK_NUDGE_PTS (Switches page). Way back: TM_GATE_MODE=log.</span>
+        </div>
+      </Card>
       <Card title="Time Machine · odds of one trade" right={<span className="text-[9px] uppercase tracking-widest text-signal-hold">evidence only · places no order</span>}>
         <p className="text-[11px] text-mist mb-2">
           Pick a stock and a rule. It is walked over the stock&apos;s real recent 5-minute sessions and over thousands of made-up sessions that keep this stock&apos;s

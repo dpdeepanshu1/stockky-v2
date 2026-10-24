@@ -62,13 +62,20 @@ def validate_entries(entries: Any, pack_ids: List[str]) -> List[Dict[str, Any]]:
     return clean
 
 
+# E116: default slots that existed before the "seen_defaults" record was kept. A schedule file written by an older runner is treated as having been offered exactly these,
+# so a slot added by a later release (s_tm_open, E115) is appended once, while a slot the person deleted from an old file is never put back.
+LEGACY_DEFAULT_IDS = ("s_monday_open", "s_daily_close", "s_friday_review", "s_weekly_cal", "s_monthly")
+
+
 class Scheduler:
     def __init__(self, path: str, defaults: List[Dict[str, Any]], submit: Callable[..., Any], pack_ids: List[str], enabled_default: bool = False,
                  now_fn: Callable[[], datetime] = ist_now, on_skip: Optional[Callable[[Dict[str, Any], str], Any]] = None):
         self.path, self.submit, self.pack_ids, self.now_fn = path, submit, pack_ids, now_fn
         self.on_skip = on_skip      # group 447: (slot, reason) -> told when a slot fired but could not be submitted
         self.lock = threading.Lock()
-        self.state: Dict[str, Any] = {"enabled": bool(enabled_default), "entries": [dict(e) for e in defaults], "last_fired": {}, "last_skipped": None}
+        self.state: Dict[str, Any] = {"enabled": bool(enabled_default), "entries": [dict(e) for e in defaults], "last_fired": {}, "last_skipped": None,
+                                      "seen_defaults": [e["id"] for e in defaults]}
+        loaded = False
         try:
             d = json.load(open(path, encoding="utf-8"))
             self.state["enabled"] = bool(d.get("enabled", self.state["enabled"]))
@@ -76,12 +83,40 @@ class Scheduler:
             self.state["last_fired"] = {str(k): str(v) for k, v in (d.get("last_fired") or {}).items()}
             ls = d.get("last_skipped")
             self.state["last_skipped"] = ls if isinstance(ls, dict) else None
+            seen = d.get("seen_defaults")
+            self.state["seen_defaults"] = [str(x) for x in seen] if isinstance(seen, list) else list(LEGACY_DEFAULT_IDS)
+            loaded = True
         except FileNotFoundError:
             pass
         except Exception:  # noqa: BLE001 - a damaged file falls back to the defaults, it never stops the runner
             pass
+        if loaded:
+            self._add_new_defaults(defaults)
         self.stop = threading.Event()
         self.thread: Optional[threading.Thread] = None
+
+    def _add_new_defaults(self, defaults: List[Dict[str, Any]]) -> None:
+        """E116: a default slot this file has never been offered is appended (as the release ships it, enabled or not). A slot already offered and since deleted stays deleted."""
+        seen = set(self.state["seen_defaults"])
+        before = set(seen)
+        have = {e["id"] for e in self.state["entries"]}
+        added = []
+        for e in defaults:
+            if e["id"] in seen:
+                continue
+            seen.add(e["id"])
+            if e["id"] not in have and len(self.state["entries"]) < 30:
+                try:
+                    self.state["entries"] += validate_entries([dict(e)], self.pack_ids)
+                    added.append(e["id"])
+                except ValueError:
+                    pass
+        self.state["seen_defaults"] = sorted(seen)
+        if added or seen != before:
+            try:
+                self._save()
+            except Exception:  # noqa: BLE001 - a read-only data dir must not stop the runner
+                pass
 
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)

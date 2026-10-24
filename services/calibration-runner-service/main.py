@@ -100,6 +100,13 @@ def _startup() -> None:
     # Market Weather: shadow unless WEATHER_APPLY is on AND the evidence gate passes AND the service itself is live (weather_apply.py); weather.py itself cannot build a dial
     import weather as W
     import weather_apply as WA
+
+    def _safe(fn):
+        """E115: run one best-effort call; a failure is swallowed (the Time Machine scan trigger must never disturb Market Weather)."""
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return None
     cc = AC.ControlClient({AC.RT: config.REAL_TRADE_URL, AC.PS: config.POSITION_STOCKS_URL}, _safe_token)
     weather_control = cc
     weather = W.Weather(str(config.DATA_DIR / "weather"), config.MARKET_DATA_URL, notify=_tell,
@@ -107,7 +114,8 @@ def _startup() -> None:
                         enabled=config.WEATHER_ENABLED, stamp_on=config.WEATHER_STAMP, notify_on=config.WEATHER_NOTIFY,
                         apply=WA.Applier(cc, lambda: WA.evidence_gate(lambda job, age: AC.RunnerEvidence(runner, J.PACK_MAP, age).get(job), config.WEATHER_GATE_MODE), AC.RT, AC.PS,
                                          mode_fn=lambda: config.WEATHER_GATE_MODE),
-                        apply_on=config.WEATHER_APPLY)
+                        apply_on=config.WEATHER_APPLY,
+                        after_lock=lambda: [_safe(lambda s=s: cc.time_machine_scan(s, "weather lock")) for s in (AC.RT, AC.PS)])
     weather.start()
     # same-day gate: if the gate needs a replay and none is fresh, queue it now (light job, any hour) so the gate can open today
     logging.getLogger("calibration-runner").info("weather gate %s: %s", config.WEATHER_GATE_MODE,

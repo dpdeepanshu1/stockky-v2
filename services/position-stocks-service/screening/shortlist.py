@@ -21,6 +21,17 @@ import config
 logger = logging.getLogger("position-stocks-shortlist")
 
 
+def _tm_nudge(symbol, side: str) -> float:
+    """E115: ranking points from the Time Machine's latest cached verdict for this stock (+ when the odds favour the rule, - when they are against). Never raises."""
+    try:
+        if not symbol:
+            return 0.0
+        from timemachine import gate_core
+        return float(gate_core.nudge(symbol, side))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def _board_index(payload: Optional[dict]) -> Dict[str, dict]:
     """symbol -> board row; a bullish row wins when the symbol is in both lists."""
     idx: Dict[str, dict] = {}
@@ -75,7 +86,9 @@ def score_one(cand, quality, brow: Optional[dict], best_scan: float) -> dict:
         if "EXTENDED" in str(brow.get("label") or brow.get("rule") or "").upper() or brow.get("extended"):
             extended = True
             adjust -= float(config.SHORTLIST_EXTENDED_PENALTY)
-    return {"score": round(max(0.0, min(100.0, base + adjust)), 1), "parts": dict(parts, adjust=adjust), "extended": extended}
+    tm = _tm_nudge(getattr(cand, "symbol", None), "LONG")          # E115: Time Machine odds of this stock's own recent sessions (cache only, 0 without a fresh verdict)
+    adjust += tm
+    return {"score": round(max(0.0, min(100.0, base + adjust)), 1), "parts": dict(parts, adjust=adjust, tm=tm), "extended": extended}
 
 
 def build(passers: Sequence[Tuple[object, object]], board_payload: Optional[dict] = None) -> List[dict]:
@@ -155,7 +168,9 @@ def score_short(cand, quality, brow: Optional[dict], best_scan: float) -> dict:
     if brow and (brow.get("extended") or "EXTENDED" in str(brow.get("label") or brow.get("rule") or "").upper()):
         extended = True
         adjust -= float(getattr(config, "SHORT_SHORTLIST_EXTENDED_PENALTY", 15.0))
-    return {"score": round(max(0.0, min(100.0, base + adjust)), 1), "parts": dict(parts, adjust=adjust), "extended": extended}
+    tm = _tm_nudge(getattr(cand, "symbol", None), "SHORT")         # E115: same Time Machine nudge, for the short side
+    adjust += tm
+    return {"score": round(max(0.0, min(100.0, base + adjust)), 1), "parts": dict(parts, adjust=adjust, tm=tm), "extended": extended}
 
 
 def build_short(passers: Sequence[Tuple[object, object]], bear_index: Optional[Dict[str, dict]] = None) -> List[dict]:

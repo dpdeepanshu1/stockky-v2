@@ -613,6 +613,44 @@ KRONOS_URL = (os.getenv("KRONOS_URL") or "").strip().rstrip("/") or "http://kron
 KRONOS_TIMEOUT_S = max(0.5, _og_float("KRONOS_TIMEOUT_S", 8.0))             # one forecast takes a few seconds on 1 CPU; slower than this = no opinion
 KRONOS_CACHE_TTL_S = max(0.0, _og_float("KRONOS_CACHE_TTL_S", 900.0))       # per symbol; the forecast only changes when a new daily bar arrives
 KRONOS_FAIL_TTL_S = max(0.0, _og_float("KRONOS_FAIL_TTL_S", 120.0))         # a failed fetch is not retried for this long (a dead worker is not hammered)
+
+# E115: Time Machine evidence + LIVE stock picking (timemachine/, entry_engine/tm_gate.py, Gate 4h). Same switches as position-stocks.
+#   TM_GATE_MODE live (default): an entry whose own stop % / target % at this time of day shows AGAINST (simulation and real history both negative after charges and
+#   slippage) becomes a WAIT (gate_tag time_machine); the shortlist ranking gets +/- TM_PICK_NUDGE_PTS. log = compute and record, never block. off = nothing runs.
+#   Missing or slow data is no opinion and never blocks. It can only say NO. Rollback: TM_GATE_MODE=log.
+def _tm_float(name, default, lo, hi):
+    return min(hi, max(lo, _og_float(name, default)))
+def _tm_bool(name, default):
+    v = (os.getenv(name) or "").strip().lower()
+    return default if not v else v in ("1", "true", "yes", "on")
+def _tm_str(name, default):
+    return ((os.getenv(name) or "").strip() or default)
+TIME_MACHINE_ENABLED = _tm_bool("TIME_MACHINE_ENABLED", True)
+TIME_MACHINE_SLIPPAGE_PCT = _tm_float("TIME_MACHINE_SLIPPAGE_PCT", 0.05, 0.0, 1.0)
+TIME_MACHINE_LOOKBACK = _tm_str("TIME_MACHINE_LOOKBACK", "1mo").lower()
+if TIME_MACHINE_LOOKBACK not in ("1mo", "2mo"):
+    TIME_MACHINE_LOOKBACK = "1mo"
+TIME_MACHINE_DEFAULT_VALUE_RS = max(1000.0, _og_float("TIME_MACHINE_DEFAULT_VALUE_RS", 20000.0))
+TIME_MACHINE_FETCH_TIMEOUT_S = max(5.0, _og_float("TIME_MACHINE_FETCH_TIMEOUT_S", 25.0))
+TIME_MACHINE_SIMS = int(_tm_float("TIME_MACHINE_SIMS", 10000, 1000, 50000))
+TM_GATE_MODE = _tm_str("TM_GATE_MODE", "live").lower()
+if TM_GATE_MODE not in ("live", "log", "off"):
+    TM_GATE_MODE = "off"                                                     # a typo must not switch a gate on
+TM_GATE_BLOCK = _tm_str("TM_GATE_BLOCK", "against").lower()
+if TM_GATE_BLOCK not in ("against", "against_or_near"):
+    TM_GATE_BLOCK = "against"
+TM_GATE_SIMS = int(_tm_float("TM_GATE_SIMS", 3000, 1000, 20000))
+TM_GATE_INLINE_BUDGET_S = _tm_float("TM_GATE_INLINE_BUDGET_S", 2.5, 0.0, 15.0)
+TM_GATE_TTL_S = _tm_float("TM_GATE_TTL_S", 300.0, 30.0, 3600.0)
+TM_GATE_FAIL_TTL_S = _tm_float("TM_GATE_FAIL_TTL_S", 120.0, 10.0, 1800.0)
+TM_PICK_NUDGE_PTS = _tm_float("TM_PICK_NUDGE_PTS", 6.0, 0.0, 30.0)
+TM_AUTO_ENABLED = _tm_bool("TM_AUTO_ENABLED", True)
+TM_AUTO_PREFETCH_IST = _tm_str("TM_AUTO_PREFETCH_IST", "09:05")
+TM_AUTO_FIRST_IST = _tm_str("TM_AUTO_FIRST_IST", "09:16")
+TM_AUTO_LAST_IST = _tm_str("TM_AUTO_LAST_IST", "14:30")
+TM_AUTO_INTERVAL_MIN = int(_tm_float("TM_AUTO_INTERVAL_MIN", 15, 5, 120))
+TM_AUTO_MAX_SYMBOLS = int(_tm_float("TM_AUTO_MAX_SYMBOLS", 12, 1, 40))
+TM_AUTO_ACTIVE_MIN = _tm_float("TM_AUTO_ACTIVE_MIN", 60.0, 5.0, 600.0)
 KRONOS_HORIZON_BARS = max(1, int(_og_float("KRONOS_HORIZON_BARS", 5)))
 KRONOS_PATHS = max(2, int(_og_float("KRONOS_PATHS", 10)))
 KRONOS_MIN_EDGE_X_COST = _og_float("KRONOS_MIN_EDGE_X_COST", 1.0)           # reject when forecast EV % is below this x the round-trip cost % (0 disables)

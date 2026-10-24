@@ -102,6 +102,8 @@ function statusColor(status: string): string {
   if (status === "STOP_BREACH_EXIT") return "text-signal-sell";
   // group 466: Close-all-and-disarm exit (plain MARKET SELL, reconcile resolves the fill)
   if (status === "CLOSE_ALL") return "text-signal-prepare";
+  // E114: a plain-order short reached its target and was covered by hand (software target): a win, same colour as a bracket target
+  if (status === "TARGET_EXIT") return "text-signal-buy";
   return "text-signal-avoid";
 }
 

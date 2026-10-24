@@ -5,6 +5,6 @@ list left that status stuck on the entry-price placeholder (STAGNATION_EXIT, ses
 pending-fill resolution and the retention list pick it up. The frontend type/colour in positionStocksApi.ts / PositionStocksTab.tsx still
 mirror this tuple by hand; tests/test_group340.py checks they match.
 """
-FLAT_SELL_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT", "STOP_BREACH_EXIT", "CLOSE_ALL")   # exits sent as a plain MARKET SELL, fill read later
+FLAT_SELL_STATUSES = ("EOD_SQUAREOFF", "MANUAL_EXIT", "STAGNATION_EXIT", "STOP_BREACH_EXIT", "CLOSE_ALL", "TARGET_EXIT")   # exits sent as a plain MARKET order (SELL for a long, BUY for a short), fill read later. TARGET_EXIT (E114): a plain-order short reached its target, covered by hand
 BRACKET_STATUSES = ("TARGET_HIT", "STOP_HIT")                                                    # exits by a Super Order leg
 TERMINAL_STATUSES = BRACKET_STATUSES + FLAT_SELL_STATUSES + ("ERROR",)

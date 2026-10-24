@@ -22,7 +22,7 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
-from orders import calendar_gate, cost_gate, depth_gate, entry_pause, rr_floor, short_gates, sizing, stopout_guard
+from orders import calendar_gate, cost_gate, depth_gate, entry_pause, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
 from tz_utils import ist_time_at_or_after, ist_today_str, parse_hhmm
 
@@ -241,6 +241,13 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         _refuse(db, cand, "SHORT_OPENING_STOP", why)
         return None
 
+    # E115: Time Machine gate (orders/tm_gate.py), the same check a long gets: this short's own stop % / target % at this time of day, replayed on the stock's recent
+    # 5-minute sessions and on made-up sessions. AGAINST refuses it (shadow rows too, so the shadow record mirrors what live would do). Can only say NO.
+    _tm_reason, _tm_ev = tm_gate.check_ev(sym, "SHORT", levels.stop_pct, levels.target_pct, live)
+    if _tm_reason:
+        _refuse(db, cand, "SHORT_TIME_MACHINE", _tm_reason)
+        return None
+
     value = _short_position_value(db, budget_stop_pct)
     if value is None:
         _refuse(db, cand, "SHORT_NO_CAPITAL", "the short budget does not fit the available pool")
@@ -259,7 +266,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         return None
 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
-    return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct}
+    return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev}
 
 
 def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:
@@ -382,6 +389,7 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         quals = await asyncio.gather(*(quality_gate.check(c.symbol, cached=cache.get(c.symbol)) for c in top), return_exceptions=True)
         recorded = 0
         from screening import shortlist as _shortlist
+        tm_gate.note_picks([(c, None) for c in top], "SHORT")           # E115: trigger - warm the Time Machine verdicts of the names about to be ranked (background, never waits)
         ranked = _shortlist.build_short([(c, (None if isinstance(q, BaseException) else q)) for c, q in zip(top, quals)], bear)
         _last_shortlist.update(at=time.time(), mode=cm, enabled=bool(getattr(config, "SHORT_SHORTLIST_ENABLED", True)),
                                rows=[dict(r, outcome="NOT_TRIED") for r in _shortlist.public(ranked)])

@@ -166,7 +166,7 @@ export interface DhanAccountStatus {
 export interface ScalpPositionRow {
   id: number;
   symbol: string;
-  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "STOP_BREACH_EXIT" | "CLOSE_ALL" | "EXIT_LEGS_REJECTED" | "ERROR";
+  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "STOP_BREACH_EXIT" | "CLOSE_ALL" | "TARGET_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   side?: "LONG" | "SHORT" | string | null;   // E99: absent / LONG on every long; SHORT on a live short (sell first, cover later)
   entry_price: number;
@@ -482,6 +482,8 @@ export const positionStocksApi = {
   // E111: Time Machine - the odds of one rule (side, entry time, stop %, target %) on a stock's recent 5-minute sessions and thousands of made-up sessions. Read-only evidence; places nothing.
   timeMachineStatus: () => psRequest<any>("/time-machine/status"),
   timeMachineRun: (body: Record<string, unknown>) => psRequest<any>("/time-machine/run", { method: "POST", body: JSON.stringify(body) }),
+  timeMachineGate: () => psRequest<any>("/time-machine/gate"),
+  timeMachineScan: () => psRequest<any>("/time-machine/scan?reason=manual%20panel", { method: "POST" }),
   timeMachineCompare: (body: Record<string, unknown>) => psRequest<any>("/time-machine/compare", { method: "POST", body: JSON.stringify(body) }),
   // group338: the best 3-to-5 pick CARDS (last entry cycle + board preview), read-only.
   topPicks: () => psRequest<any>("/top-picks"),

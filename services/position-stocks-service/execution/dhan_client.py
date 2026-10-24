@@ -1309,6 +1309,50 @@ def cancel_cnc_stop_loss_order(
     return _extract_data(resp) or {}
 
 
+# ── E114: plain-order short support (orders/plain_short.py) ─────────────────────────────────────────────
+def place_intraday_buy_stop(db: Session, *, is_armed: bool, security_id: str, exchange_segment: str, quantity: int, trigger_price: float,
+                            tag: Optional[str] = None) -> dict:
+    """BUY STOP_LOSS_MARKET, INTRADAY: the broker stop of a plain-order short (a short's stop sits ABOVE the price; Dhan fires the BUY when the LTP reaches the trigger).
+    Same mechanics and the same blocking read-back as place_cnc_stop_loss_market (trigger_price kwarg, price 0): raises when Dhan gives no order id, the order is not
+    in the book, the book says another order type, or its status is not live - the caller treats any raise as 'no stop exists' and covers the short."""
+    if not is_armed:
+        raise DhanNotArmedError("position-stocks-service is not armed - refusing to place a short's protective stop order.")
+    trig = round_stop_to_tick(float(trigger_price))
+    if trig <= 0:
+        raise ValueError(f"place_intraday_buy_stop: trigger_price must be > 0 (got {trigger_price!r} -> {trig!r}).")
+    client = _get_sdk_client(db)
+    logger.warning("position-stocks: placing REAL short protective stop: STOP_LOSS_MARKET BUY %s x%d trigger=\u20b9%.2f (INTRADAY)", security_id, quantity, trig)
+    resp = client.place_order(security_id=security_id, exchange_segment=exchange_segment, transaction_type="BUY", quantity=int(quantity),
+                              order_type="STOP_LOSS_MARKET", product_type="INTRADAY", price=0.0, trigger_price=trig, validity="DAY", tag=tag)
+    result = _extract_data(resp) or {}
+    oid = str(result.get("orderId") or result.get("order_id") or "")
+    if not oid:
+        raise RuntimeError(f"place_intraday_buy_stop: Dhan did not return an orderId (raw: {result!r}) - treating as placement failure.")
+    try:
+        rows = _extract_data(client.get_order_list())
+        rows = rows if isinstance(rows, list) else []
+        row = next((r for r in rows if str(r.get("orderId") or r.get("order_id") or "") == oid), None)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"place_intraday_buy_stop: placed {oid} but the order list could not be read, so the stop is not confirmed live: {e}") from e
+    if row is None:
+        raise RuntimeError(f"place_intraday_buy_stop: placed {oid} but it is not in the order list - treating as placement failure.")
+    otype = str(row.get("orderType") or row.get("order_type") or "").upper()
+    status = str(row.get("orderStatus") or row.get("status") or "").upper()
+    if otype not in ("STOP_LOSS_MARKET", "SL-M", "SLM"):
+        raise RuntimeError(f"place_intraday_buy_stop: ORDER TYPE MISMATCH for {oid}: sent STOP_LOSS_MARKET, Dhan reports {otype!r} (row: {row!r})")
+    if status and status not in ("PENDING", "TRANSIT", "OPEN"):
+        raise RuntimeError(f"place_intraday_buy_stop: order {oid} status {status!r} is not a live pending state (row: {row!r})")
+    result["orderId"] = oid
+    return result
+
+
+def get_order_row(db: Session, order_id: str) -> Optional[dict]:
+    """The order-book row of one plain order, None when it is not in the book. RAISES when the book call fails (a Dhan 'failure' answer, a network error), so callers can
+    tell 'not there' from 'could not read'. An answer that is not a list reads as an empty book, which callers must treat as 'not there', never as 'dead'."""
+    rows = get_order_list(db)
+    return next((r for r in rows if isinstance(r, dict) and str(r.get("orderId") or r.get("order_id") or "") == str(order_id)), None)
+
+
 # ── Rejection classifiers (mirrors real-trade-service/execution/dhan_client.py) ─
 # Added this session after screenshots confirmed all three rejection types fire
 # on SELL attempts from this service too — the classifiers already exist in

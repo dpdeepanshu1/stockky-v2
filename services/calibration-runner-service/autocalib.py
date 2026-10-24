@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,7 @@ HISTORY_KEEP = 200
 PROTECTED: Dict[str, str] = {
     "SHORT_MODE": "money safety (short selling): whether a short can exist is your decision after the Dhan answer and the 1-share test, never a report's",
     "SHORT_LIVE_QTY_CAP": "money safety (short selling): how many shares a live short may have is your decision, never a report's",
+    "SHORT_PLAIN_FALLBACK": "money safety (short selling): whether a short may open as a plain order with a broker stop order instead of a Super Order is your decision, never a report's",
     "SHORT_LIVE_REQUIRES_PROBE": "money safety (short selling): whether a live short needs the Dhan SELL probe first is your decision, never a report's",
     "SHORT_SHORTLIST_ENABLED": "short selling (E107): which shorts are tried first decides where capital goes; it is your decision, never a report's",
     "SHORT_SHORTLIST_MAX": "short selling (E107): how many shorts are quality-checked per cycle is your decision, never a report's",
@@ -93,6 +95,14 @@ PROTECTED: Dict[str, str] = {
     "TIME_MACHINE_SIMS": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
     "TIME_MACHINE_SLIPPAGE_PCT": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
     "TIME_MACHINE_LOOKBACK": "evidence tool (Time Machine): changes no trade; a calibrator never changes it",
+    "TM_GATE_MODE": "live entry gate (E115, Time Machine): decided by you after you read its refusal rate, not by a report",
+    "TM_GATE_BLOCK": "live entry gate (E115, Time Machine): decided by you, not by a report",
+    "TM_GATE_SIMS": "Time Machine live gate tuning (E115): a calibrator never changes it",
+    "TM_GATE_INLINE_BUDGET_S": "Time Machine live gate tuning (E115): a calibrator never changes it",
+    "TM_GATE_TTL_S": "Time Machine live gate tuning (E115): a calibrator never changes it",
+    "TM_PICK_NUDGE_PTS": "Time Machine ranking nudge (E115): decided by you, not by a report",
+    "TM_AUTO_ENABLED": "Time Machine timer (E115): a calibrator never changes it",
+    "TM_AUTO_INTERVAL_MIN": "Time Machine timer (E115): a calibrator never changes it",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_RECORD": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_DEPTH20": "evidence recorder: always on so tests have data",
@@ -400,6 +410,10 @@ class ControlClient:
     def overlay(self, service: str, body: Dict[str, Any]) -> Dict[str, Any]:
         """POST /control/overlay (Market Weather). weather.py only ever sends a STAMP-ONLY body here (entries {}) until step 6."""
         return self._call(service, "POST", "/control/overlay", body)
+
+    def time_machine_scan(self, service: str, reason: str = "weather lock") -> Dict[str, Any]:
+        """POST /time-machine/scan (E115): ask a trading service to queue fresh Time Machine verdicts for the picks it is watching. Places nothing."""
+        return self._call(service, "POST", "/time-machine/scan?reason=" + urllib.parse.quote(reason))
 
     def overlay_clear(self, service: str) -> Dict[str, Any]:
         """DELETE /control/overlay: put every overlaid switch back to its saved value now (E112 revert button, a person's click only; never called by weather.py or weather_apply.py)."""

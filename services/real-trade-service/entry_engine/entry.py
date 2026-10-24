@@ -46,7 +46,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, vix_gate, vwap_gate
+from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
@@ -1117,6 +1117,27 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             except Exception as _tg_err:  # noqa: BLE001 - a record-only gate must never stop an entry
                 logger.warning("entry_engine: timesfm gate failed for %s (ignored): %s", cand.symbol, _tg_err)
 
+        # ── Gate 4h (E115): Time Machine ("at this time of day, do this trade's own stop % / target % have the odds after charges?") ───────────
+        # Replays the stock's recent 5-minute sessions and made-up sessions. AGAINST (both negative after charges and slippage) = WAIT (gate_tag
+        # "time_machine"). It can only say NO: no data / slow data (inline budget TM_GATE_INLINE_BUDGET_S) = no opinion, the entry goes on. TM_GATE_MODE live |
+        # log | off; log records the verdict without blocking. The verdict is stamped on decision.flow_json["tm"] and feeds the shortlist ranking below. Never raises.
+        _tm_ev = None
+        if tm_gate.mode() != "off":
+            try:
+                _tm_stop_pct = (entry_price - stop_price) / entry_price * 100.0
+                _tm_tgt_pct = (target_price - entry_price) / entry_price * 100.0
+                _tm_reason, _tm_ev = await asyncio.to_thread(tm_gate.evaluate, cand.symbol, _tm_stop_pct, _tm_tgt_pct, tick.price)
+                decision.flow_json = tm_gate.stamp(getattr(decision, "flow_json", None), _tm_ev)
+                if _tm_reason:
+                    _wait_with_preview(_tm_reason)
+                    decision.gate_tag = tm_gate.TAG
+                    db.add(decision)
+                    entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _tm_reason, "risk_verdict": None, "gate_tag": tm_gate.TAG})
+                    continue
+            except Exception as _tm_err:  # noqa: BLE001 - a gate bug must never stop an entry
+                _tm_ev = None
+                logger.warning("entry_engine: time machine gate failed for %s (allowing): %s", cand.symbol, _tm_err)
+
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)
         if rr < MIN_REWARD_RISK_RATIO:
@@ -1420,6 +1441,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             news_bonus = 0.0
         if news_bonus:
             raw_composite_score = max(0.0, min(100.0, raw_composite_score + news_bonus))
+        # E115: Time Machine odds of this trade's own levels (verdict from Gate 4h, +/- TM_PICK_NUDGE_PTS), ranking only, never a gate.
+        _tm_pts = tm_gate.rank_points(_tm_ev)
+        if _tm_pts:
+            raw_composite_score = max(0.0, min(100.0, raw_composite_score + _tm_pts))
         # group332: Market Board verdict on this symbol (conviction/rank/zone/chase), capped +/- nudge, ranking only.
         board_bonus = _shortlist.board_nudge(_board_rows.get(cand.symbol))
         if board_bonus:
@@ -1505,6 +1530,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # group332: best-3-to-5 shortlist (entry_engine/shortlist.py) - same ordering/floor/UC-bypass/max-new rules as before, now
         # visible: the shortlist (up to ENTRY_SHORTLIST_MAX) is logged and the entries are its first ENTRY_MAX_NEW_PER_CYCLE.
         _sl = _shortlist.build(approved_entries)
+        tm_gate.note_shortlist(_sl["shortlist"])                    # E115: trigger - background Time Machine verdicts for the shortlist, kept on the 15-minute timer
         selected, skipped = _sl["selected"], _sl["skipped"]
         # group335: shortlist picks beyond ENTRY_MAX_NEW_PER_CYCLE are kept in reserve - if a selected pick's broker placement fails, the next
         # reserve pick is placed in its slot this same cycle instead of waiting a whole cycle. Whatever is left unused is marked WAIT below.

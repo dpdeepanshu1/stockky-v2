@@ -7,9 +7,11 @@ stop leg and target leg. The position is stored with side="SHORT"; the exit side
 
 SAFETY RAILS (all fail closed):
   * size: never more than SHORT_LIVE_QTY_CAP shares (ships 1; only you raise it; protected from the calibrator).
-  * the broker stop is mandatory: with USE_SUPER_ORDER off, or when Dhan refuses the SELL Super Order, NO short is opened. There is deliberately no plain
-    MARKET SELL fallback yet: the stop watchdog only watches Super Order positions, so a plain-order short would have no stop at all. Add it only after the
-    T6 probe shows how Dhan treats SELL Super Orders.
+  * the broker stop is mandatory. The normal way is the SELL Super Order, whose stop leg is part of the order. E114: when Dhan refuses it (or USE_SUPER_ORDER is off) and
+    SHORT_PLAIN_FALLBACK allows it, orders/plain_short.py opens the short as a plain MARKET SELL and places a BUY stop-loss-market order at the broker at once; if that stop
+    cannot be placed the short is covered immediately and no plain short is tried again today. Refusals a plain SELL would meet too (restricted stock, circuit limit,
+    intraday cut-off, no funds) and errors that may have created the Super Order anyway never fall back. A plain short has a fixed stop (no trailing) and is looked after by
+    plain_short.run_plain_short_guard (software target, breach cover, 14:55 cover).
   * capital goes through ledger.reserve_capital(side="SHORT") (refuses unless SHORT_MODE is live, applies SHORT_RISK_MULT and the Market Weather short dial).
   * a short is intraday only (INTRADAY product, never converted or carried; orders/side.can_carry_overnight is False; the cover is at SHORT_SQUAREOFF_TIME_IST).
   * every refusal releases whatever was claimed (capital, symbol lock) before returning.
@@ -30,7 +32,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from control.kit import current_profile as _current_profile
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import approve_first, entry_cap, entry_pause, opening_protect, sell_probe, short_entry, trade_odds
+from orders import approve_first, entry_cap, entry_pause, opening_protect, plain_short, sell_probe, short_entry, tm_gate, trade_odds
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-short-live")
@@ -76,8 +78,8 @@ def _live_guards(db: Session, cand: Any) -> Optional[tuple]:
         why = fn()
         if why:
             return ("SHORT_GUARD", str(why))
-    if not config.USE_SUPER_ORDER:
-        return ("SHORT_NEEDS_SUPER_ORDER", "USE_SUPER_ORDER is off: a short must have a broker stop leg, and there is no plain-order short")
+    if not config.USE_SUPER_ORDER and not plain_short.entry_allowed():
+        return ("SHORT_NEEDS_SUPER_ORDER", "USE_SUPER_ORDER is off and the plain-order short is not available (SHORT_PLAIN_FALLBACK off, or no broker stop could be placed earlier today): a short must have a broker stop")
     if getattr(config, "SHORT_LIVE_REQUIRES_PROBE", True) and not sell_probe.passed():
         return ("SHORT_PROBE_NOT_PASSED", "the Dhan SELL probe (T6) has no PASS on record yet: run the Dhan SELL probe job first (or set SHORT_LIVE_REQUIRES_PROBE=false)")
     if approve_first.active():
@@ -184,22 +186,59 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
 
     # ---- the order. From here an exception must NOT release anything blindly: the order may exist at the broker. ----
     gate = db.query(ScalpGateState).first()
-    super_id, error_msg = None, None
-    try:
-        result = dhan_client.place_super_order(
-            db, is_armed=bool(gate and gate.is_armed), security_id=security_id, exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
-            transaction_type="SELL", quantity=int(qty), order_type="MARKET", price=live,
-            target_price=float(levels.target_price), stop_loss_price=float(levels.stop_price), trailing_jump=0.0,
-            product_type="INTRADAY", tag="SCALP")
-        super_id = str((result or {}).get("orderId") or (result or {}).get("id") or "")
-        if not super_id:
-            error_msg = "Dhan answered without an order id"
-    except Exception as e:  # noqa: BLE001
-        rec = _recover_ambiguous_sell(db, e, security_id, qty, sym)
-        if rec:
-            super_id = rec
+    super_id, error_msg, ambiguous = None, None, False
+    plain: Optional[dict] = None
+    if config.USE_SUPER_ORDER:
+        try:
+            result = dhan_client.place_super_order(
+                db, is_armed=bool(gate and gate.is_armed), security_id=security_id, exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+                transaction_type="SELL", quantity=int(qty), order_type="MARKET", price=live,
+                target_price=float(levels.target_price), stop_loss_price=float(levels.stop_price), trailing_jump=0.0,
+                product_type="INTRADAY", tag="SCALP")
+            super_id = str((result or {}).get("orderId") or (result or {}).get("id") or "")
+            if not super_id:
+                error_msg = "Dhan answered without an order id"
+        except Exception as e:  # noqa: BLE001
+            rec = _recover_ambiguous_sell(db, e, security_id, qty, sym)
+            if rec:
+                super_id = rec
+            else:
+                error_msg = str(e)
+                try:
+                    ambiguous = bool(dhan_client.is_ambiguous_placement_error(e))
+                except Exception:  # noqa: BLE001
+                    ambiguous = True                         # cannot tell: the Super Order may exist, so no second order
+    # E114: a refused Super Order (or Super Orders off) may be retried as a plain SELL that gets its broker stop at once
+    if (error_msg is not None and plain_short.refusal_allows_fallback(error_msg, ambiguous)) or (not config.USE_SUPER_ORDER and plain_short.entry_allowed()):
+        logger.warning("short live: %s Super Order %s - trying the plain-order short (E114)", sym, "refused: " + str(error_msg)[:160] if error_msg else "is off")
+        plain = plain_short.open_plain_short(
+            db, is_armed=bool(gate and gate.is_armed), security_id=security_id, sym=sym, qty=int(qty), live=live,
+            stop_price=float(levels.stop_price), target_price=float(levels.target_price), stop_pct=float(levels.stop_pct), target_pct=float(levels.target_pct))
+        error_msg = None
+        if plain.get("critical") and not plain.get("ok"):
+            # the SELL may exist and its state is unknown: keep the capital and the lock, hand the SELL to the watch list (it releases them when the SELL resolves)
+            plain_short.watch_orphan(plain.get("entry_order_id"), sym, security_id, int(qty), position_value or 0.0)
+            short_entry._refuse(db, cand, "SHORT_PLAIN_UNKNOWN", str(plain.get("reason"))[:400])
+            return None                                   # nothing is released here on purpose: the order may exist at Dhan
+        if not plain.get("ok"):
+            if plain.get("covered"):
+                short_entry._refuse(db, cand, "SHORT_PLAIN_STOP_FAILED", str(plain.get("reason"))[:400])
+                _undo()
+                return None
+            error_msg = str(plain.get("reason") or "the plain SELL failed")
         else:
-            error_msg = str(e)
+            got = int(plain.get("qty") or qty)
+            if got < int(qty) and position_value:                  # part filled: give back the reservation of the shares that never filled
+                keep = position_value * got / float(qty)
+                try:
+                    ledger.release_capital(db, position_value=position_value - keep, realized_pnl=0.0)
+                    position_value = keep
+                except Exception as e:  # noqa: BLE001
+                    logger.error("short live: partial-fill capital release for %s failed (%s)", sym, e)
+            qty = got
+            live = float(plain.get("fill_price") or live)
+            levels.stop_price = float(plain.get("stop_price") or levels.stop_price)       # the levels plain_short really sent / computed from the real fill (tick-rounded)
+            levels.target_price = float(plain.get("target_price") or levels.target_price)
 
     if error_msg is not None:
         _handle_failure(db, cand, sym, error_msg)
@@ -226,30 +265,32 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             adaptive_target_pct=float(levels.target_pct), adaptive_stop_pct=float(levels.stop_pct),
             breakeven_trigger_pct=levels.breakeven_trigger_pct,
             flow_json=trade_odds.attach(None, sym, SIDE, levels.stop_pct, levels.target_pct),   # E103: record only, never raises
-            dhan_super_order_id=super_id, dhan_entry_order_id=super_id, capital_risked=position_value,
+            dhan_super_order_id=None if plain else super_id, dhan_entry_order_id=(plain or {}).get("entry_order_id") or super_id,
+            plain_stop_order_id=(plain or {}).get("stop_order_id"), capital_risked=position_value,
             is_first_live_order=False, opened_at=datetime.now(timezone.utc))
+        pos.flow_json = tm_gate.stamp(pos.flow_json, plan.get("tm_ev"))      # E115: the Time Machine verdict, record only, never raises
         db.add(pos)
         db.commit()
         db.refresh(pos)
     except Exception as e:  # noqa: BLE001
         db.rollback()
         logger.critical("short live: SELL order %s for %s x%s WAS PLACED but the position row could not be saved (%s). Capital and symbol lock are kept. "
-                        "Check Dhan and close it by hand if reconcile does not pick it up.", super_id, sym, qty, e)
+                        "Check Dhan and close it by hand if reconcile does not pick it up.", (plain or {}).get("entry_order_id") or super_id, sym, qty, e)
         try:
-            notifier.notify_fire_and_forget(f"🚨 <b>SHORT placed but NOT recorded</b> - {sym} x{qty}\nSuper Order {super_id}. Check Dhan now and cover it by hand if needed.")
+            notifier.notify_fire_and_forget(f"🚨 <b>SHORT placed but NOT recorded</b> - {sym} x{qty}\nOrder {(plain or {}).get('entry_order_id') or super_id}. Check Dhan now and cover it by hand if needed.")
         except Exception as ne:  # noqa: BLE001
             logger.warning("short live: alert failed (%s)", ne)
         return None
 
     try:
-        short_entry._log(db, cand, "SHORT_ENTERED", f"SELL {qty} @ {live:.2f} stop {levels.stop_price:.2f} target {levels.target_price:.2f} SUPER_ORDER={super_id}")
+        short_entry._log(db, cand, "SHORT_ENTERED", f"SELL {qty} @ {live:.2f} stop {levels.stop_price:.2f} target {levels.target_price:.2f} {'PLAIN_ORDER=' + str(plain.get('entry_order_id')) + ' stop_order=' + str(plain.get('stop_order_id')) if plain else 'SUPER_ORDER=' + str(super_id)}")
         short_entry._stats["entered"] = short_entry._stats.get("entered", 0) + 1
         notifier.notify_fire_and_forget(
             f"📉 <b>SHORT placed</b> - {sym} x{qty}\nEntry ~₹{live:.2f} | Target ₹{levels.target_price:.2f} ({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} "
-            f"({levels.stop_pct:.2f}%)\nBoard conviction {conv if conv is not None else 'n/a'} | Super Order {super_id}\nCovered by 14:55 at the latest. Live short cap: {qty_cap()} share(s).")
+            f"({levels.stop_pct:.2f}%)\nBoard conviction {conv if conv is not None else 'n/a'} | {'Plain order ' + str(plain.get('entry_order_id')) + ' + broker stop ' + str(plain.get('stop_order_id')) + (' (NO broker stop: guard covers by hand)' if not plain.get('protected') else '') if plain else 'Super Order ' + str(super_id)}\nCovered by 14:55 at the latest. Live short cap: {qty_cap()} share(s).")
     except Exception as e:  # noqa: BLE001
         logger.warning("short live: post-entry log/alert for %s failed (%s)", sym, e)
-    logger.info("position-stocks SHORT ENTERED %s x%d @ %.2f target=%.2f stop=%.2f super_order=%s", sym, qty, live, levels.target_price, levels.stop_price, super_id)
+    logger.info("position-stocks SHORT ENTERED %s x%d @ %.2f target=%.2f stop=%.2f order=%s", sym, qty, live, levels.target_price, levels.stop_price, (plain or {}).get("entry_order_id") or super_id)
     return pos
 
 
@@ -274,7 +315,7 @@ def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: 
 
 
 def _handle_failure(db: Session, cand: Any, sym: str, error_msg: str) -> None:
-    """Classify a refused SELL. Nothing is retried and NO fallback order is placed: a short without a broker stop leg must never exist."""
+    """Classify a refused SELL (the Super Order, or the plain SELL of the E114 fallback). Nothing is retried here; a short without a broker stop must never exist."""
     low = error_msg or ""
     try:
         if dhan_client.is_security_intraday_restricted_error(low) or dhan_client.is_circuit_limit_error(low):

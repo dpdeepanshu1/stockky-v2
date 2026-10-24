@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getApiUrl } from "../../api";
 
 // The header status strip previously rendered `new Date()` inline in the
 // App component's own JSX, so the clock only advanced whenever something
@@ -29,7 +30,6 @@ export function MarketClock() {
     let c = false;
     (async () => {
       try {
-        const { getApiUrl } = await import("../../api");
         const base = getApiUrl();
         if (!base) return;
         const res = await fetch(`${base.replace(/\/$/, "")}/market/session`);

@@ -1,5 +1,5 @@
 // group 464: guards for the light-theme contrast layer (run: node --experimental-strip-types src/lightContrast.test.mjs)
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import assert from "node:assert/strict";
 const css = readFileSync(new URL("./light-contrast.css", import.meta.url), "utf8");
 const main = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
@@ -35,5 +35,20 @@ test("disabled buttons are readable (>= 4.5:1) and not opacity-faded", () => {
 test("plain text-white can no longer land on a pale background", () => {
   assert.match(css, /\.text-white:not\(\[class\*="bg-signal-"\]\)/);
   assert.match(css, /\.hover\\:text-white:hover/);
+});
+test("no CSS file has a comment that ends early (a `*` followed by `/` inside the text closed light-contrast.css early and dropped its html.light block)", () => {
+  const dir = new URL("./", import.meta.url);
+  const files = [];
+  const walk = (u) => { for (const e of readdirSync(u, { withFileTypes: true })) { const n = new URL(e.name + (e.isDirectory() ? "/" : ""), u); if (e.isDirectory()) walk(n); else if (e.name.endsWith(".css")) files.push(n); } };
+  walk(dir);
+  assert.ok(files.length > 0);
+  for (const f of files) {
+    const t = readFileSync(f, "utf8");
+    for (const m of t.matchAll(/\*\/([^\n]*)/g)) {
+      const rest = m[1].trim();
+      // after a comment closes, the same line may only hold CSS (selector, declaration, brace) or another comment, never prose digits/words like "10..30) = white"
+      assert.ok(rest === "" || /^[{}.#:@\[\]\w*>+~,-][^=]*[{;}]?\s*(\/\*.*)?$/.test(rest) && !/^\d+\.\./.test(rest), `${f.pathname}: text after a comment end: ${rest.slice(0, 40)}`);
+    }
+  }
 });
 console.log(`${passed} light-contrast tests passed`);

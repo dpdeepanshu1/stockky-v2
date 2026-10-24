@@ -11,6 +11,7 @@ import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "..
 import { getSafePrice } from "../priceDisplay";
 import StockChart from "./StockChart";
 import BottomSheet from "./BottomSheet";
+import { paperNet, paperNetTotals } from "../paperNet";
 
 const fmtMoney = (n: number | null | undefined) =>
   n == null || !Number.isFinite(Number(n)) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -71,6 +72,7 @@ export default function Trades() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [openTrades, setOpenTrades] = useState<PaperTrade[]>([]);
   const [closedTrades, setClosedTrades] = useState<PaperTrade[]>([]);
+  const netTotals = paperNetTotals(closedTrades);   // realized P&L after estimated Dhan delivery charges
   const [dailyReport, setDailyReport] = useState<TradeReportBucket[]>([]);
   const [weeklyReport, setWeeklyReport] = useState<TradeReportBucket[]>([]);
   const [loading, setLoading] = useState(() => !readSnap());
@@ -647,7 +649,13 @@ export default function Trades() {
           <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-display tabular-nums text-mist/70">
             <div>Open: <span className="text-paper">{openTrades.length}</span></div>
             <div>Closed: <span className="text-paper">{closedTrades.length}</span></div>
-            <div>Realized: <span className={summary.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(summary.realized_pnl)}</span></div>
+            <div>Realized: <span className={summary.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(summary.realized_pnl)}</span>
+              {netTotals.n > 0 && (
+                <span title={`Estimated Dhan delivery charges on ${netTotals.n} closed trade(s): ${fmtMoney(netTotals.charges)}`}>
+                  {" · after charges "}<span className={netTotals.net >= 0 ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(netTotals.net)}</span>
+                </span>
+              )}
+            </div>
             <div>Equity: <span className="text-paper tabular-nums">{fmtMoney(summary.total_equity)}</span></div>
           </div>
         </div>
@@ -707,6 +715,7 @@ export default function Trades() {
                     <th className="text-right py-2 px-2">Entry</th>
                     <th className="text-right py-2 px-2">Exit</th>
                     <th className="text-right py-2 px-2">P&amp;L</th>
+                    <th className="text-right py-2 px-2" title="Gross P&L minus estimated Dhan delivery charges (STT both legs, stamp, exchange, SEBI, GST, DP fee)">Net</th>
                     <th className="text-right py-2 px-2">Reason</th>
                     <th className="text-right py-2 px-2">Entered</th>
                     <th className="text-right py-2 pl-2">Exited</th>
@@ -721,6 +730,7 @@ export default function Trades() {
                       <td className={`text-right py-2 px-2 ${(t.pnl_pct ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
                         {fmtPct(t.pnl_pct)}
                       </td>
+                      <NetCell trade={t} />
                       <td className="text-right py-2 px-2 text-mist/60">{t.exit_reason?.replace(/_/g, " ") ?? "—"}</td>
                       <td className="text-right py-2 px-2 text-mist/50">{fmtDate(t.entry_date)}</td>
                       <td className="text-right py-2 pl-2 text-mist/50">{fmtDate(t.exit_date)}</td>
@@ -744,12 +754,24 @@ export default function Trades() {
   );
 }
 
+/** Net-of-charges P&L cell of a closed trade ("—" when the prices needed are missing). */
+function NetCell({ trade }: { trade: PaperTrade }) {
+  const n = paperNet(trade);
+  return (
+    <td className={`text-right py-2 px-2 ${n == null ? "text-mist/40" : n.net >= 0 ? "text-signal-buy" : "text-signal-sell"}`}
+      title={n ? `Gross ${fmtMoney(n.gross)} minus about ${fmtMoney(n.charges)} of charges` : undefined}>
+      {n ? fmtMoney(n.net) : "—"}
+    </td>
+  );
+}
+
 function PositionCard({
   trade, expanded, onToggle, onClose, closing,
 }: {
   trade: PaperTrade; expanded: boolean; onToggle: () => void; onClose: () => void; closing: boolean;
 }) {
   const isUp = (trade.pnl_pct ?? 0) >= 0;
+  const net = paperNet(trade);
   const days = daysHeld(trade.entry_date);
   return (
     <div className="border border-slate/40 rounded-2xl overflow-hidden transition-all hover:border-slate/60 v4-lazy">
@@ -788,6 +810,11 @@ function PositionCard({
             <div>
               <div className="text-mist/40 text-[10px] uppercase">P&amp;L Amount</div>
               <div className={isUp ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(trade.pnl_amount)}</div>
+              {net && (
+                <div className={`text-[10px] ${net.net >= 0 ? "text-signal-buy" : "text-signal-sell"}`} title={`Gross minus about ${fmtMoney(net.charges)} of Dhan delivery charges if closed now (estimate)`}>
+                  {fmtMoney(net.net)} after charges (est.)
+                </div>
+              )}
             </div>
           </div>
           <button

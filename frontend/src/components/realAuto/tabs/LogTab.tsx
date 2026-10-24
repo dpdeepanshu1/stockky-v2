@@ -2,6 +2,7 @@ import type { AuditLogRow } from "../../../realTradeApi";
 import { fmtTime } from "../format";
 import { SectionHdr } from "../parts";
 import type { Mode } from "../types";
+import { JournalNotesCard } from "../JournalNotesCard";
 
 // E64 - E31 step 8: the "log" (Activity) tab, moved out of RealAutoTrade.tsx (JSX unchanged).
 export interface LogTabProps {
@@ -44,6 +45,7 @@ export function LogTab({ mode, auditRows, loadAudit }: LogTabProps) {
                   </div>
                 )}
               </div>
+              <JournalNotesCard mode={mode} />
             </div>
   );
 }

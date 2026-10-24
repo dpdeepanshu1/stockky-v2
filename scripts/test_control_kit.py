@@ -302,6 +302,9 @@ def test_damaged_overrides_file_is_set_aside_and_boot_never_raises():
     _clean_env()
 
 
+NOT_LIVE_ON_PURPOSE = {"DHAN_ORDER_WS_ENABLED"}      # started at boot, a change needs a restart (docs/E56_CATALOG_OPERATIONS_SWITCHES.md)
+
+
 def test_real_catalogs_are_valid_and_pass_the_static_check():
     assert chk.main([]) == 0
     for svc in chk.SERVICES:
@@ -309,7 +312,9 @@ def test_real_catalogs_are_valid_and_pass_the_static_check():
         keys = [f.key for f in cat.CATALOG]
         assert len(keys) == len(set(keys)) and len(keys) >= 25, svc
         assert all(k.validate_flag(f) == [] for f in cat.CATALOG)
-        assert all(f.live for f in cat.CATALOG), "every catalog switch is verified live; add live=False ones deliberately"
+        not_live = {f.key for f in cat.CATALOG if not f.live}
+        # P6: a switch read once at boot (the Dhan order WebSocket listener starts at boot, E56) is deliberately not live; name it here with the reason
+        assert not_live <= NOT_LIVE_ON_PURPOSE, f"every catalog switch is verified live; add live=False ones deliberately: {sorted(not_live - NOT_LIVE_ON_PURPOSE)}"
 
 
 def test_the_static_check_catches_a_switch_that_would_only_look_live():

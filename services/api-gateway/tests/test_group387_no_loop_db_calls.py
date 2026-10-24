@@ -10,7 +10,9 @@ import os
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_MODULES = ["hotpicks_store", "hotpicks_schema", "surprise_premarket", "surprise_scanner", "surprise_schema", "ipo_scanner", "ipo_schema"]
-ASYNC_SCAN = DB_MODULES + ["main", "data_feed", "batch_worker", "structure_refresh", "instant_scanner", "buy_sniper", "pick_ranking"]
+# E82: handlers moved out of main.py (E55, E76-E81) live in gateway_support/bound_routes*.py and call main-owned helpers as `ref.<name>()`; they are scanned like main.py.
+FACTORIES = ["gateway_support/" + f[:-3] for f in sorted(os.listdir(os.path.join(HERE, "gateway_support"))) if f.startswith("bound_routes") and f.endswith(".py")]
+ASYNC_SCAN = DB_MODULES + ["main", "data_feed", "batch_worker", "structure_refresh", "instant_scanner", "buy_sniper", "pick_ranking"] + FACTORIES
 THREAD_HOPS = ("to_thread", "run_in_executor", "run_sync")
 
 
@@ -108,7 +110,7 @@ def test_no_async_def_calls_sync_sql_directly():
             if not isinstance(n, ast.AsyncFunctionDef):
                 continue
             for line, nm in _calls_outside_thread_hops(n):
-                if nm in all_db or nm in local or (mod == "main" and nm in tainted):
+                if nm in all_db or nm in local or ((mod == "main" or mod in FACTORIES) and nm in tainted):
                     offenders.append(f"{mod}.py:{line} async def {n.name} calls {nm}() on the event loop")
     assert not offenders, "wrap in asyncio.to_thread:\n" + "\n".join(offenders)
 
@@ -116,5 +118,13 @@ def test_no_async_def_calls_sync_sql_directly():
 def test_detector_flags_a_direct_call_and_ignores_a_thread_hop():
     bad = ast.parse("async def h():\n    return hotpicks_db_upsert(1)\n").body[0]
     ok = ast.parse("async def h():\n    return await asyncio.to_thread(hotpicks_db_upsert, 1)\n").body[0]
+    assert [nm for _, nm in _calls_outside_thread_hops(bad)] == ["hotpicks_db_upsert"]
+    assert "hotpicks_db_upsert" not in [nm for _, nm in _calls_outside_thread_hops(ok)]
+
+
+def test_factories_are_scanned_and_a_ref_call_is_flagged():
+    assert FACTORIES and "gateway_support/bound_routes_g" in FACTORIES
+    bad = ast.parse("async def h():\n    return ref.hotpicks_db_upsert(1)\n").body[0]
+    ok = ast.parse("async def h():\n    return await ref.asyncio.to_thread(ref.hotpicks_db_upsert, 1)\n").body[0]
     assert [nm for _, nm in _calls_outside_thread_hops(bad)] == ["hotpicks_db_upsert"]
     assert "hotpicks_db_upsert" not in [nm for _, nm in _calls_outside_thread_hops(ok)]

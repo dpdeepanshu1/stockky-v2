@@ -32,6 +32,7 @@ import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
 import { EMOTION_LABEL, FALLBACK_EMOTIONS } from "./board/journalNotesView";
 import ShortlistPanel from "./board/ShortlistPanel";
+import ShortShadowCard from "./board/ShortShadowCard";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
 import StructurePanel from "./StructurePanel";
@@ -39,6 +40,7 @@ import StructureGateCard from "./StructureGateCard";
 import StockCandleBlock from "./StockCandleBlock";   // E25 / E26: candles + pattern badges per stock
 import type { PriceLevel } from "../chartContext";
 import { legCharges as calcLegCharges, type ChargeBreakdown } from "../chargesRates";
+import { isShort, legLabels, pnlPctFromPrices, sideBadge } from "../positionSide";
 
 type Window = "1m" | "5m" | "15m" | "60m";
 
@@ -882,6 +884,7 @@ export default function PositionStocksTab() {
             title="Top picks · best 3 to 5 for the scalp pool" note="Display only. The same ranking drives which stock the scalper tries first; every entry gate still decides. Board-preview cards have not been through those gates." />
           <ShortlistPanel active={subTab === "board"} kind="scalp" fetcher={() => positionStocksApi.shortlist()}
             title="Best picks · next entries (scalp pool)" note="Display only. The entry gates still decide; a pick that fails one is skipped and the next pick is tried." />
+          <ShortShadowCard active={subTab === "board"} fetcher={() => positionStocksApi.shortShadow()} />
           <SessionHealthPanel active={subTab === "board"} />
           <MarketBoard active={subTab === "board"} title="Position Stocks · Market Board" />
           <JournalPanel active={subTab === "board"} />
@@ -1818,7 +1821,7 @@ export default function PositionStocksTab() {
                   <tbody>
                     {tradeHistory.trades.map(t => (
                       <tr key={t.id} className="border-b border-slate/50">
-                        <td className="py-1 pr-3 text-paper font-bold">{t.symbol}</td>
+                        <td className="py-1 pr-3 text-paper font-bold">{t.symbol}{isShort(t) && <span className="ml-1 text-[9px] text-signal-sell" title="Short trade">{sideBadge(t)}</span>}</td>
                         <td className="py-1 pr-3 text-mist">{t.window_source}</td>
                         <td className="py-1 pr-3 text-mist">{t.quantity}</td>
                         <td className="py-1 pr-3 text-paper">₹{t.entry_price.toFixed(2)}</td>
@@ -2217,9 +2220,8 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
   busy?: string | null;
   loggedIn?: boolean;
 }) {
-  const pnlPct = p.realized_pnl_pct ?? (p.exit_price && p.entry_price
-    ? ((p.exit_price - p.entry_price) / p.entry_price) * 100
-    : null);
+  const pnlPct = p.realized_pnl_pct ?? pnlPctFromPrices(p);   // short-aware (a short books entry - exit)
+  const legs = legLabels(p);
   // ADDED (this session — "manual exit if needed"): only offer Exit Now
   // for a position that's actually still open at the broker (OPEN, or
   // EXIT_LEGS_REJECTED — a position whose bracket legs failed to place
@@ -2229,7 +2231,9 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
   return (
     <GlintBox value={p.current_price} className="border border-slate rounded-xl p-3">
       <div className="flex items-center justify-between mb-2">
-        <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}</span>
+        <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}{isShort(p) && (
+          <span className="ml-2 px-1.5 py-0.5 rounded bg-signal-sell/20 border border-signal-sell text-[9px] text-signal-sell" title="Short: sold first, covered (bought back) later. Intraday only.">{sideBadge(p)}</span>
+        )}</span>
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
           <span className={`font-display tabular-nums text-[10px] uppercase font-bold ${statusColor(p.status)}`}>{statusLabel(p)}</span>
@@ -2248,8 +2252,8 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         </div>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">
-        <div><span className="text-mist">Buy </span><span className="tabular-nums text-paper">₹{p.entry_price.toFixed(2)}</span></div>
-        <div><span className="text-mist">Sell </span><span className="tabular-nums text-paper">{p.exit_price != null ? `₹${p.exit_price.toFixed(2)}` : "—"}</span></div>
+        <div><span className="text-mist">{legs.entry} </span><span className="tabular-nums text-paper">₹{p.entry_price.toFixed(2)}</span></div>
+        <div><span className="text-mist">{legs.exit} </span><span className="tabular-nums text-paper">{p.exit_price != null ? `₹${p.exit_price.toFixed(2)}` : "—"}</span></div>
         <div><span className="text-mist">Qty </span><span className="tabular-nums text-paper">{p.quantity}</span></div>
         {/* AUDIT ADD (this session): order value (price × qty) — the actual
             rupee amount bought/sold, distinct from the per-share price

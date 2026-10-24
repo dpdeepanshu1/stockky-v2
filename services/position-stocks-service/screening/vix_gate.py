@@ -25,10 +25,69 @@ logger = logging.getLogger("position-stocks-vix-gate")
 
 FAILURE_RETRY_S = 60.0
 _state: dict = {"ts": -1e9, "snap": None}
+HISTORY_RETRY_S = 600.0
+_hist: dict = {"day": None, "ts": -1e9, "closes": None}     # E107: ~12 months of daily VIX closes, fetched once a day (a failure is retried after 10 minutes)
 
 
 def reset() -> None:
     _state.update({"ts": -1e9, "snap": None})
+    _hist.update({"day": None, "ts": -1e9, "closes": None})
+
+
+def percentile(values, q: float) -> Optional[float]:
+    """q-th percentile (0..100, linear interpolation) of the usable numbers in `values`, or None when there are fewer than 60 of them. Pure."""
+    xs = sorted(v for v in (_num(x) for x in (values or ())) if v is not None and 3.0 <= v <= 120.0)
+    if len(xs) < 60:
+        return None
+    k = (len(xs) - 1) * max(0.0, min(100.0, float(q))) / 100.0
+    lo = int(math.floor(k))
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def pctile_threshold() -> Optional[float]:
+    """The VIX level at VIX_CAUTION_PCTILE of its own cached history, or None (switch 0, or no usable history). No network. Never raises."""
+    try:
+        q = float(getattr(config, "VIX_CAUTION_PCTILE", 0.0) or 0.0)
+        if q <= 0 or not _hist.get("closes"):
+            return None
+        return percentile(_hist["closes"], q)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _fetch_history() -> list:
+    import httpx
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{config.MARKET_DATA_URL}/history/{quote('INDIAVIX', safe='&')}", params={"period": "1y", "interval": "1d"},
+                             timeout=float(getattr(config, "VIX_HISTORY_TIMEOUT_S", 5.0)))
+    if r.status_code != 200:
+        raise RuntimeError(f"history HTTP {r.status_code}")
+    body = r.json()
+    return [c.get("close") for c in ((body or {}).get("candles") or []) if isinstance(c, dict)]
+
+
+async def refresh_history() -> Optional[list]:
+    """The 12-month VIX closes, once a day. Never raises; None = unknown (the fixed caution level alone then applies)."""
+    try:
+        if not config.VIX_GATE_ENABLED or float(getattr(config, "VIX_CAUTION_PCTILE", 0.0) or 0.0) <= 0:
+            return None
+        from tz_utils import ist_today_str
+        today = ist_today_str()
+        if _hist["day"] == today and _hist["closes"]:
+            return _hist["closes"]
+        if _hist["closes"] is None and time.monotonic() - _hist["ts"] < HISTORY_RETRY_S:
+            return None
+        try:
+            closes = await _fetch_history()
+            ok = percentile(closes, 50.0) is not None
+        except Exception as e:  # noqa: BLE001
+            logger.info("vix_gate: history fetch failed (%s: %s) - fixed caution level only", type(e).__name__, e)
+            closes, ok = None, False
+        _hist.update({"ts": time.monotonic(), "day": today if ok else None, "closes": closes if ok else None})
+        return _hist["closes"]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _num(v) -> Optional[float]:
@@ -76,6 +135,7 @@ async def refresh() -> Optional[dict]:
     try:
         if not config.VIX_GATE_ENABLED:
             return None
+        await refresh_history()                                  # E107: once a day, own try/except, never raises
         now = time.monotonic()
         age = now - _state["ts"]
         if _state["snap"] is not None and age < float(config.VIX_CACHE_TTL_S):
@@ -127,6 +187,9 @@ def size_mult(snap: Optional[dict] = None) -> float:
             return 1.0
         mult = min(1.0, max(0.1, float(config.VIX_CAUTION_SIZE_MULT)))
         hi = float(config.VIX_CAUTION_ABOVE or 0)
+        pt = pctile_threshold()                                  # E107: the LOWER of the fixed level and the 12-month percentile applies (only adds caution)
+        if pt is not None and (hi <= 0 or pt < hi):
+            hi = pt
         spike = float(config.VIX_SPIKE_PCT or 0)
         if hi > 0 and snap["level"] >= hi:
             return mult

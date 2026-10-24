@@ -57,8 +57,15 @@ def test_feed_keys_only_non_none_and_flag_off():
 def test_main_wiring_present():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
     assert src.count("import ms_passthrough") == 1
-    assert "ms_passthrough.merge_into(result, td)" in src and "ms_passthrough.feed_keys(t)" in src
-    assert '"/stock/{symbol}/structure"' in src and src.index('"/stock/{symbol}/structure"') < src.index('@app.get("/stock/{symbol}")')
+    # E87: get_stock_decision moved to gateway_support/bound_routes_l.py, where main.py names are read as `ref.<name>`.
+    _l = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_support", "bound_routes_l.py"), encoding="utf-8").read().replace("ref.", "")
+    assert "ms_passthrough.merge_into(result, td)" in _l and "ms_passthrough.feed_keys(t)" in src
+    # E77: the structure route moved to gateway_support/bound_routes_c.py; main.py includes its router at the place the route used to be.
+    fac = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway_support", "bound_routes_c.py"), encoding="utf-8").read()
+    assert '"/stock/{symbol}/structure"' in fac and '@app.get("/stock/{symbol}/structure")' not in src
+    inc = "app.include_router(_bound_routes_c.stock_structure_router)"
+    # E87: the catch-all `/stock/{symbol}` moved to bound_routes_l.py too; its router must still be included after the structure router.
+    assert src.count(inc) == 1 and src.index(inc) < src.index('app.include_router(_bound_routes_l.get_stock_decision_router)')
 
 
 if __name__ == "__main__":

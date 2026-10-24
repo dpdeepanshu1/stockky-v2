@@ -223,9 +223,12 @@ class _Resp:
 
 
 def _route(quotes, feeds, candidates, patched):
-    src = open(os.path.join(_SERVICE, "main.py"), encoding="utf-8").read()
-    node = next(n for n in ast.parse(src).body if isinstance(n, ast.AsyncFunctionDef) and n.name == "refresh_prepare_to_buy")
-    code = ast.get_source_segment(src, node)
+    # the route moved out of main.py into gateway_support/bound_routes_f.py (router split): a closure over `ref` (the main module), so find it anywhere in the
+    # file, dedent it, and hand it a stand-in `ref` that carries the names it reads
+    src = open(os.path.join(_SERVICE, "gateway_support", "bound_routes_f.py"), encoding="utf-8").read()
+    node = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.AsyncFunctionDef) and n.name == "refresh_prepare_to_buy")
+    import textwrap
+    code = textwrap.dedent("\n".join(src.splitlines()[node.lineno - 1:node.end_lineno]))
 
     class _Client:
         async def __aenter__(self):
@@ -261,9 +264,9 @@ def _route(quotes, feeds, candidates, patched):
         def __init__(self, status_code=500, detail=""):
             self.status_code, self.detail = status_code, detail
 
-    g = {"httpx": types.SimpleNamespace(AsyncClient=_Client), "HTTPException": _HTTPException, "MARKET_DATA_URL": "http://md", "logger": logging.getLogger("t358"),
-         "Dict": dict, "Any": object,
-         "_structure_metric": lambda *a, **k: None}  # group360: counter helper, a no-op here
+    ref = types.SimpleNamespace(httpx=types.SimpleNamespace(AsyncClient=_Client), HTTPException=_HTTPException, MARKET_DATA_URL="http://md", logger=logging.getLogger("t358"),
+                                Dict=dict, Any=object, _structure_metric=lambda *a, **k: None)  # group360: counter helper, a no-op here
+    g = {"ref": ref}
     exec("from __future__ import annotations\n" + code, g)
     return g["refresh_prepare_to_buy"]
 

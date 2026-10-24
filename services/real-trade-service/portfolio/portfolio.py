@@ -1238,6 +1238,8 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
             # exit_engine._load_profile can recognize a volume_shock-origin
             # position even with no watchlist_entry_id. NULL for manual orders.
             source_tab=getattr(order, "source_tab", None),
+            market_state=getattr(order, "market_state", None),          # Market Weather stamp, copied from the order
+            profile_version=getattr(order, "profile_version", None),
             # 2026-09-18 fix (selective overnight hold): thread the
             # candidate's decision_label/conviction_score through too, so
             # auto_pilot._select_overnight_holds can decide eligibility
@@ -1404,6 +1406,8 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
             # exit_engine._load_profile can recognize a volume_shock-origin
             # position even with no watchlist_entry_id. NULL for manual orders.
             source_tab=getattr(order, "source_tab", None),
+            market_state=getattr(order, "market_state", None),          # Market Weather stamp, copied from the order
+            profile_version=getattr(order, "profile_version", None),
             # 2026-09-18 fix (selective overnight hold): thread the
             # candidate's decision_label/conviction_score through too, so
             # auto_pilot._select_overnight_holds can decide eligibility

@@ -7,7 +7,8 @@
    "failed": true,
    "gap_event": false,
    "level": 82.82,
-   "strength": 0.228
+   "strength": 0.228,
+   "vol_ratio": 1.05
   },
   "choch": {
    "bars_since": 5,
@@ -15,7 +16,8 @@
    "failed": true,
    "gap_event": false,
    "level": 84.55,
-   "strength": 0.273
+   "strength": 0.273,
+   "vol_ratio": 0.75
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -281,7 +283,8 @@
    "failed": false,
    "gap_event": false,
    "level": 142.86,
-   "strength": 0.787
+   "strength": 0.787,
+   "vol_ratio": 1.21
   },
   "choch": {
    "bars_since": null,
@@ -289,7 +292,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -552,7 +556,8 @@
    "failed": false,
    "gap_event": false,
    "level": 16.95,
-   "strength": 0.416
+   "strength": 0.416,
+   "vol_ratio": 0.92
   },
   "choch": {
    "bars_since": null,
@@ -560,7 +565,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -794,7 +800,8 @@
    "failed": false,
    "gap_event": false,
    "level": 50.81,
-   "strength": 0.431
+   "strength": 0.431,
+   "vol_ratio": 0.78
   },
   "choch": {
    "bars_since": null,
@@ -802,7 +809,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -1033,7 +1041,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "choch": {
    "bars_since": null,
@@ -1041,7 +1050,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -1343,7 +1353,8 @@
    "failed": false,
    "gap_event": false,
    "level": 97.87,
-   "strength": 0.443
+   "strength": 0.443,
+   "vol_ratio": 0.8
   },
   "choch": {
    "bars_since": null,
@@ -1351,7 +1362,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -1598,7 +1610,8 @@
    "failed": true,
    "gap_event": false,
    "level": 113.17,
-   "strength": 0.509
+   "strength": 0.509,
+   "vol_ratio": 1.29
   },
   "choch": {
    "bars_since": 4,
@@ -1606,7 +1619,8 @@
    "failed": false,
    "gap_event": false,
    "level": 111.59,
-   "strength": 0.429
+   "strength": 0.429,
+   "vol_ratio": 1.18
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -1909,7 +1923,8 @@
    "failed": false,
    "gap_event": false,
    "level": 109.16,
-   "strength": 0.66
+   "strength": 0.66,
+   "vol_ratio": 1.21
   },
   "choch": {
    "bars_since": null,
@@ -1917,7 +1932,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -2218,7 +2234,8 @@
    "failed": false,
    "gap_event": false,
    "level": 169.48,
-   "strength": 0.47
+   "strength": 0.47,
+   "vol_ratio": 1.14
   },
   "choch": {
    "bars_since": null,
@@ -2226,7 +2243,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,
@@ -2495,7 +2513,8 @@
    "failed": true,
    "gap_event": false,
    "level": 190.06,
-   "strength": 0.31
+   "strength": 0.31,
+   "vol_ratio": 0.83
   },
   "choch": {
    "bars_since": null,
@@ -2503,7 +2522,8 @@
    "failed": null,
    "gap_event": null,
    "level": null,
-   "strength": null
+   "strength": null,
+   "vol_ratio": null
   },
   "data_quality": {
    "bars_dropped": 0,

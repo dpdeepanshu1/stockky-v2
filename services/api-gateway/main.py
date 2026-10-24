@@ -351,23 +351,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def add_cors_header(request, call_next):
-    response = await call_next(request)
-    # wildcard mode only: stamp the "*" headers (they also cover responses the CORS middleware does not see). With an allowlist the
-    # CORSMiddleware above sets the headers for the allowed origins and this must NOT widen them.
-    if _cors_policy.is_wildcard():
-        response.headers.update(_cors_policy.WILDCARD_HEADERS)
-    return response
+# E88: batch M (gateway_support/bound_routes_m.py); built once here, before its first use below.
+from starlette.middleware.base import BaseHTTPMiddleware as _BaseHTTPMiddleware  # noqa: E402
+from gateway_support import MainRef as _MainRef  # noqa: E402
+from gateway_support.bound_routes_m import build_bound_routes_m as _build_bound_routes_m  # noqa: E402
+_bound_routes_m = _build_bound_routes_m(_MainRef(globals()))
+# E88: moved to gateway_support/bound_routes_m.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+add_cors_header = _bound_routes_m.add_cors_header
+app.add_middleware(_BaseHTTPMiddleware, dispatch=add_cors_header)   # same registration the middleware decorator makes
 
-@app.exception_handler(Exception)
-async def universal_exception_handler(request, exc):
-    logger.error(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal server error: {str(exc)}"},
-        headers=_cors_policy.response_headers(request),
-    )
+# E88: moved to gateway_support/bound_routes_m.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+universal_exception_handler = _bound_routes_m.universal_exception_handler
+app.add_exception_handler(Exception, universal_exception_handler)   # same registration the exception-handler decorator makes
 
 # ── Redis (OFF by default — USE_REDIS=1 to enable Upstash) ─────────────────────
 # CRITICAL: Never import or ping Upstash unless USE_REDIS=1.
@@ -4913,102 +4908,22 @@ class NotificationChannelUpdate(BaseModel):
     enabled: dict | None = None
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-@app.get("/")
-def root():
-    return {
-        "service": "Stockky API Gateway",
-        "version": "2.5.16",
-        "status": "running",
-        "parallel_workers": MAX_PARALLEL_WORKERS,
-        "endpoints": {
-            "/health": "GET – health check",
-            "/ready": "GET – lightweight readiness check",
-            "/system/health": "GET – health of all downstream services",
-            "/wake/all": "POST – wake all services",
-            "/watchlist": "GET/POST – manage watchlist",
-            "/watchlist/add": "POST – add symbols",
-            "/watchlist/{symbol}": "DELETE – remove symbol",
-            "/stock/{symbol}": "GET – get decision for a symbol",
-            "/scan": "GET – synchronous scan (legacy)",
-            "/scan/start": "POST – start async parallel scan, returns task_id",
-            "/scan/status/{task_id}": "GET – get progress/result of async scan",
-            "/scan/stream": "GET – NDJSON stream of scan results (incremental UI, avoids 100s timeout)",
-            "/scan/watchlist": "GET – scan only your watchlist",
-            "/scan/universe": "GET – preview current scan universe",
-            "/scan/universe/cache": "DELETE – clear universe cache",
-
-            "/searched": "GET – list searched symbols",
-            "/market/top-gainers": "GET – top 10 gainers",
-            "/market/top-losers": "GET – top 10 losers",
-            "/market/most-active": "GET – top 10 most active by volume",
-            "/market/trending": "GET – trending stocks (momentum + news)",
-            "/market/indices": "GET – live NIFTY 50 & SENSEX (IST time, Cache-Control)",
-            "/notifications/health": "GET – notification service health",
-            "/notifications/config": "GET/POST – get/update notification config",
-            "/notifications/config/{channel}": "DELETE – clear a channel",
-            "/notifications/test": "POST – test notifications",
-            "/notifications/send-picks": "POST – manually send picks to Telegram (splits long messages)",
-            "/training/status": "GET – get training model status",
-            "/training/train": "POST – trigger a new training run",
-            "/training/score/{symbol}": "GET – get training intelligence score for a symbol",
-            "/api/surprise/scan": "GET – lightweight surprise momentum scan",
-            "/api/surprise/scan/stream": "GET – NDJSON stream of surprise hits",
-            "/api/surprise/static": "GET – surprise_static_feed baselines",
-            "/surprise/premarket": "POST/GET – premarket baselines (injects scan universe)",
-
-            "/quote/{symbol}": "GET – near-realtime quote proxy",
-            "/circuits": "GET – circuit-breaker snapshots",
-            "/metrics": "GET – JSON metrics (?format=prom for Prometheus text)",
-            "/ops/check-alert": "POST – alert if a circuit is open or error rate is high (cron)",
-            "/docs": "Swagger UI documentation",
-        },
-    }
+# E83: batch H (gateway_support/bound_routes_h.py); built once here, before its first include below.
+from gateway_support import MainRef as _MainRef  # noqa: E402
+from gateway_support.bound_routes_h import build_bound_routes_h as _build_bound_routes_h  # noqa: E402
+_bound_routes_h = _build_bound_routes_h(_MainRef(globals()))
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+root = _bound_routes_h.root
+app.include_router(_bound_routes_h.root_router)
 
 
 
-@app.get("/quote/{symbol}")
-def proxy_quote(symbol: str):
-    """Near-realtime quote proxy (market-data). Used by stock detail 30s refresh."""
-    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    try:
-        metrics.inc("stockky_quote_proxy_total")
-    except Exception:
-        pass
-    try:
-        resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
-            if price:
-                return {
-                    "symbol": sym,
-                    "price": price,
-                    "close": data.get("close") or price,
-                    "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
-                    "source": data.get("source") or "market-data",
-                    "raw": {k: data.get(k) for k in ("volume", "delivery_pct", "change_pct") if k in data},
-                }
-            # A 200 with no usable price used to be returned as price=None; fall through to yfinance instead.
-            logger.warning("quote proxy %s: market-data returned no price, trying yfinance", sym)
-    except Exception as e:
-        logger.warning("quote proxy %s: %s", sym, e)
-    # fallback yfinance light
-    try:
-        if not _direct_yf_ok():
-            raise ValueError("direct yfinance fallback is off (GATEWAY_DIRECT_YFINANCE_FALLBACK=0)")
-        yf_ticker = resolve_ns_ticker(sym)
-        if not yf_ticker:
-            raise ValueError(f"{sym} not resolvable on NSE")
-        t = yf.Ticker(yf_ticker)
-        info = t.fast_info if hasattr(t, "fast_info") else {}
-        price = None
-        try:
-            price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
-        except Exception:
-            price = None
-        return {"symbol": sym, "price": price, "close": price, "as_of": datetime.now(IST).isoformat(), "source": "yfinance_fast"}
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"quote unavailable: {e}")
+# E84: batch I (gateway_support/bound_routes_i.py): GET /quote/{symbol}, its own factory because the handler's last fallback calls yf.Ticker (listed in the yfinance guard).
+from gateway_support.bound_routes_i import build_bound_routes_i as _build_bound_routes_i  # noqa: E402
+_bound_routes_i = _build_bound_routes_i(_MainRef(globals()))
+# E84: moved to gateway_support/bound_routes_i.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+proxy_quote = _bound_routes_i.proxy_quote
+app.include_router(_bound_routes_i.proxy_quote_router)
 
 
 # E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
@@ -5024,35 +4939,9 @@ ops_rate_limits = _bound_routes.ops_rate_limits
 app.include_router(_bound_routes.rate_limits_router)
 
 
-@app.post("/ops/rate-limits/event")
-async def ops_rate_limits_event(payload: dict):
-    """Services may POST {source, status, path?, detail?, symbol?} when they hit 429/503."""
-    try:
-        _src = str(payload.get("source") or "unknown")
-        _status = int(payload.get("status") or 0)
-        rate_limit_monitor.record(
-            source=_src,
-            status=_status,
-            path=str(payload.get("path") or ""),
-            detail=str(payload.get("detail") or ""),
-            symbol=str(payload.get("symbol") or ""),
-        )
-        try:
-            # Both labels come from the request body, and every distinct value is a new series kept
-            # for the life of the process: bound them (see metrics.LabelLimiter). The monitor above
-            # keeps the raw values; only the counter's labels are collapsed.
-            _status_label = str(_status) if (_status == 0 or 100 <= _status <= 599) else "other"
-            metrics.inc(
-                "rate_limit_events",
-                source=label_limiter.clean("rate_limit_events.source", _src),
-                status=label_limiter.clean("rate_limit_events.status", _status_label, max_distinct=24),
-            )
-        except Exception as me:
-            # the event is already recorded — a counter failure must not report 400
-            logger.warning("rate_limit_events metric failed: %s", me)
-        return {"ok": True}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)[:120]}, status_code=400)
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_rate_limits_event = _bound_routes_h.ops_rate_limits_event
+app.include_router(_bound_routes_h.ops_rate_limits_event_router)
 
 
 # E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
@@ -5075,241 +4964,27 @@ def _ops_alert_cooldown_sec() -> float:
         return 900.0
 
 
-@app.post("/ops/check-alert")
-async def ops_check_alert():
-    """Evaluate simple thresholds and notify if unhealthy (for cron).
-
-    Alerts when any circuit is open or recent dependency error rate is high.
-    Repeats of the same problem set are suppressed for OPS_ALERT_COOLDOWN_SEC.
-    """
-    snaps = all_snapshots()
-    open_circuits = [k for k, v in snaps.items() if v.get("state") == "open"]
-    snap = metrics.snapshot()
-    counters = snap.get("counters") or {}
-    errors = sum(v for k, v in counters.items() if "dependency_errors" in k)
-    oks = sum(v for k, v in counters.items() if "dependency_ok" in k)
-    total = errors + oks
-    err_rate = (errors / total) if total else 0.0
-
-    problems = []
-    if open_circuits:
-        problems.append(f"Open circuits: {', '.join(open_circuits)}")
-    if total >= 20 and err_rate >= 0.4:
-        problems.append(f"Dependency error rate {err_rate:.0%} ({int(errors)}/{int(total)})")
-
-    if not problems:
-        _OPS_ALERT_STATE.clear()
-        return {"alerted": False, "ok": True, "open_circuits": [], "error_rate": err_rate}
-
-    # Signature is stable across calls (the error-rate text changes every minute, so it is
-    # keyed on the condition, not the message).
-    signature = (tuple(sorted(open_circuits)), bool(total >= 20 and err_rate >= 0.4))
-    cooldown = _ops_alert_cooldown_sec()
-    last = _OPS_ALERT_STATE.get("last")
-    if cooldown > 0 and last and last["signature"] == signature:
-        elapsed = _ops_alert_clock() - last["at"]
-        if elapsed < cooldown:
-            return {
-                "alerted": False,
-                "suppressed": True,
-                "cooldown_remaining_sec": int(cooldown - elapsed),
-                "problems": problems,
-                "open_circuits": open_circuits,
-                "error_rate": err_rate,
-            }
-
-    title = "⚠️ Stockky ops alert"
-    message = " | ".join(problems)
-    delivered = False
-    try:
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            r = await client.post(
-                f"{NOTIFICATION_URL.rstrip('/')}/notify",
-                json={
-                    "title": title,
-                    "message": message[:1500],
-                    "channel": "all",
-                    "urgency": "high",
-                },
-            )
-            delivered = r.status_code == 200 and bool((r.json() or {}).get("delivered"))
-    except Exception as e:
-        logger.warning("ops alert notify failed: %s", e)
-    metrics.inc("stockky_ops_alerts_total")
-    if delivered:
-        _OPS_ALERT_STATE["last"] = {"signature": signature, "at": _ops_alert_clock()}
-    return {
-        "alerted": True,
-        "delivered": delivered,
-        "problems": problems,
-        "open_circuits": open_circuits,
-        "error_rate": err_rate,
-    }
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_check_alert = _bound_routes_h.ops_check_alert
+app.include_router(_bound_routes_h.ops_check_alert_router)
 
 
-@app.post("/ops/refresh-static-params")
-async def ops_refresh_static_params(limit: int = 60):
-    """Nightly job: re-fetch fundamentals / events / news for scan universe into Redis (24h TTL).
-
-    Live quotes & decisions still refresh during market hours; this only warms
-    slow-changing layers so daytime traffic hits cache and stays under rate limits.
-    """
-    universe = (await asyncio.to_thread(_build_scan_universe))[: max(10, min(limit, 80))]
-    refreshed = {"fundamental": 0, "event": 0, "news": 0, "errors": 0}
-    client = _get_http_client()  # shared keepalive pool
-    if True:
-        for sym in universe:
-            base = (sym or "").upper().replace(".NS", "").replace(".BO", "").strip()
-            if not base:
-                continue
-            try:
-                # Force refresh: clear cache keys then re-fetch into 24h TTL
-                try:
-                    if _redis:
-                        _redis.delete(f"{FUNDAMENTAL_CACHE_PREFIX}{base}")
-                        _redis.delete(f"{EVENT_CACHE_PREFIX}{base}")
-                        _redis.delete(f"{NEWS_CACHE_PREFIX}{base}")
-                except Exception:
-                    pass
-                metrics_data, _fb = await _fetch_fundamental_cached(base, client)
-                if metrics_data is not None:
-                    refreshed["fundamental"] += 1
-                ev = await _fetch_events_cached(base, client)
-                if ev is not None:
-                    refreshed["event"] += 1
-                news = await _fetch_news_cached(base, client)
-                if news is not None:
-                    refreshed["news"] += 1
-            except Exception as e:
-                refreshed["errors"] += 1
-                logger.warning("refresh-static-params %s: %s", base, e)
-            await asyncio.sleep(0.25)
-
-    # Also refresh hot-stocks cache so next UI load is cheap
-    try:
-        if _redis:
-            _redis.delete(HOT_STOCKS_CACHE_KEY)
-    except Exception:
-        pass
-
-    return {
-        "status": "ok",
-        "universe_size": len(universe),
-        "refreshed": refreshed,
-        "ttl_seconds": STATIC_PARAM_TTL,
-        "at": datetime.now(IST).isoformat(),
-    }
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_refresh_static_params = _bound_routes_h.ops_refresh_static_params
+app.include_router(_bound_routes_h.ops_refresh_static_params_router)
 
 
 
 
 
-@app.get("/market/history/{symbol}")
-async def market_history(symbol: str, period: str = "1mo"):
-    """Chart candles — market-data first, training history fallback."""
-    sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "")
-    md_period = {"1d": "1mo", "5d": "1mo", "1mo": "1mo", "1y": "1y", "5y": "5y", "3mo": "3mo", "6mo": "6mo"}.get(period, "1mo")
-    last_err = None
-    client = _get_http_client()  # shared keepalive pool
-    _hist_timeout = httpx.Timeout(10.0, connect=5.0)  # fast-fail; both sources 404 on current deploy
-    if True:
-        try:
-            if _wake_pings_enabled():
-                try:
-                    await client.get(f"{MARKET_DATA_URL}/health", params={"warm": "true"}, timeout=_hist_timeout)
-                except Exception:
-                    pass
-            r = await client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"}, timeout=_hist_timeout)
-            if r.status_code == 200:
-                data = r.json()
-                candles = data.get("candles") or []
-                points = []
-                for c in candles:
-                    if c.get("close") is None:
-                        continue
-                    points.append({
-                        "date": c.get("date"),
-                        "open": c.get("open"),
-                        "high": c.get("high"),
-                        "low": c.get("low"),
-                        "close": c.get("close"),
-                        "volume": c.get("volume") or 0,
-                    })
-                if points:
-                    # Daily candles only: trim the 1-month window to the span asked for so change_pct
-                    # covers the day / week requested (1d = last two sessions, 5d = last five).
-                    _keep = {"1d": 2, "5d": 5}.get(period)
-                    if _keep:
-                        points = points[-_keep:]
-                    first = points[0]["close"] or 0
-                    last = points[-1]["close"] or 0
-                    chg = round((last - first) / first * 100, 2) if first else None
-                    return {"symbol": sym, "period": period, "points": points, "change_pct": chg, "source": "market-data"}
-            last_err = f"market-data HTTP {r.status_code}"
-        except Exception as e:
-            # AUDIT FIX: httpx's own timeout exceptions (ConnectTimeout,
-            # ReadTimeout, PoolTimeout, etc.) stringify to "" when no
-            # message was attached, so str(e) alone silently swallowed the
-            # real failure — every timeout-caused 503 here rendered as a
-            # blank, undiagnosable "Chart unavailable for X: ; training "
-            # with no indication anything had even timed out. Always
-            # include the exception's class name so the cause survives
-            # into the response even when its message is empty.
-            last_err = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-        # training service history
-        try:
-            r2 = await client.get(f"{TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"}, timeout=_hist_timeout)
-            if r2.status_code == 200:
-                data = r2.json()
-                data["source"] = data.get("source") or "training"
-                return data
-            last_err = f"{last_err}; training HTTP {r2.status_code}"
-        except Exception as e:
-            last_err = f"{last_err}; training {type(e).__name__}: {e}" if str(e) else f"{last_err}; training {type(e).__name__}"
-    raise HTTPException(status_code=503, detail=f"Chart unavailable for {sym}: {last_err}")
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_history = _bound_routes_h.market_history
+app.include_router(_bound_routes_h.market_history_router)
 
 
-@app.get("/ops/db-status")
-async def ops_db_status():
-    """Frontend banner: is Supabase/Postgres connected on decision-prediction/training?"""
-    try:
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            r = await client.get(f"{TRAINING_URL.rstrip('/')}/health")
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                except ValueError:
-                    return {
-                        "ok": False,
-                        "db_connected": False,
-                        "db_message": "Training service answered 200 but not with JSON",
-                        "db_error": "invalid JSON from training /health",
-                    }
-                return {
-                    "ok": True,
-                    "source": "training",
-                    **{k: data.get(k) for k in (
-                        "db_backend", "db_durable", "db_connected", "db_provider",
-                        "db_message", "db_error", "status",
-                    ) if k in data or True},
-                }
-            return {
-                "ok": False,
-                "db_connected": False,
-                "db_message": f"Training service health HTTP {r.status_code}",
-                "db_error": f"Training service health HTTP {r.status_code}",
-            }
-    except Exception as e:
-        return {
-            "ok": False,
-            "db_connected": False,
-            "db_backend": "unknown",
-            "db_durable": False,
-            "db_message": f"Cannot reach training service: {e}",
-            "db_error": str(e)[:200],
-        }
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_db_status = _bound_routes_h.ops_db_status
+app.include_router(_bound_routes_h.ops_db_status_router)
 
 
 
@@ -5342,204 +5017,48 @@ def _neon_keepalive_ping() -> dict:
     return out
 
 
-@app.get("/ops/neon-keepalive")
-@app.post("/ops/neon-keepalive")
-async def ops_neon_keepalive():
-    """
-    Cron-friendly Neon keep-alive (every ~4 minutes recommended).
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+from gateway_support.bound_routes_b import build_bound_routes_b as _build_bound_routes_b  # noqa: E402
+_bound_routes_b = _build_bound_routes_b(_MainRef(globals()))
+ops_neon_keepalive = _bound_routes_b.ops_neon_keepalive
+app.include_router(_bound_routes_b.ops_neon_keepalive_router)
 
-    Prevents Neon free-tier compute auto-suspend so the next user scan
-    does not pay 0.5–2.5s cold-start latency.
-
-    Example (GitHub Actions / external cron):
-      curl -X POST https://<api-gateway>/ops/neon-keepalive
-    """
-    result = _neon_keepalive_ping()
-    return {
-        **result,
-        "at": datetime.now(IST).isoformat(),
-        "hint": "Schedule every 4 minutes while you need warm Neon",
-    }
-
-
-@app.get("/ops/wake-db-all")
-@app.post("/ops/wake-db-all")
-async def ops_wake_db_all():
-    """
-    One button/one call to wake every Neon-backed database this app talks to:
-      - gateway's own Neon connection (kv_cache / feed store)
-      - training service's DB (TRAINING_DATABASE_URL / DATABASE_URL — via its
-        own /health, which pings the DB on the way through)
-      - training service's separate cache DB, if CACHE_DATABASE_URL is set
-        (kv_cache.py on the training side falls back through
-        TRAINING_DATABASE_URL -> DATABASE_URL -> CACHE_DATABASE_URL -> KV_DATABASE_URL,
-        so hitting /training/health also warms whichever one is actually wired up)
-
-    Called automatically on frontend page load, and available as a manual
-    "Wake DB" button in the Dashboard header and Settings tab so a cold Neon
-    compute doesn't make the first click of the day wait 1-3s per query.
-    """
-    out: dict = {"ok": True, "at": datetime.now(IST).isoformat(), "targets": {}}
-
-    # group302: the old body ran the gateway's blocking DB ping (a pool checkout + SELECT) directly on the event
-    # loop, so a busy pool froze every other request, and any slow target turned the whole pill red even though the
-    # Oracle database was fine. Now: the ping runs in a worker thread under a budget, a failed target is retried once,
-    # and `ok` means "the durable database answered" (any target), with per-target detail kept for the UI.
-    # DB_WAKE_TIMEOUT_S (default 20) is the per-target budget.
-    try:
-        _budget = max(3.0, float(((os.getenv("DB_WAKE_TIMEOUT_S") or "").strip() or "20")))
-    except ValueError:
-        _budget = 20.0
-
-    async def _gateway_target() -> dict:
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(_neon_keepalive_ping), timeout=_budget)
-        except asyncio.TimeoutError:
-            return {"ok": False, "error": f"no answer within {_budget:.0f}s (gateway busy, not necessarily down)"}
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e)[:200]}
-
-    async def _training_target() -> dict:
-        try:
-            client = _get_http_client()
-            url = (TRAINING_URL or "").rstrip("/")
-            if not url:
-                return {"ok": False, "error": "TRAINING_URL not configured"}
-            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=_budget)
-            training_ok = r.status_code == 200
-            data = {}
-            try:
-                data = r.json() if training_ok else {}
-            except Exception:
-                data = {}
-            return {
-                "ok": training_ok and data.get("db_connected") is not False,
-                "db_connected": data.get("db_connected"),
-                "db_backend": data.get("db_backend"),
-            }
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e)[:200] or type(e).__name__}
-
-    async def _with_one_retry(fn) -> dict:
-        res = await fn()
-        if not res.get("ok"):
-            await asyncio.sleep(1.5)
-            res2 = await fn()
-            if res2.get("ok"):
-                res2["retried"] = True
-                return res2
-        return res
-
-    gw, tr = await asyncio.gather(_with_one_retry(_gateway_target), _with_one_retry(_training_target))
-    out["targets"]["gateway_neon"] = gw
-    out["targets"]["training_db"] = tr
-    flags = [bool(t.get("ok")) for t in out["targets"].values()]
-    out["all_ok"] = all(flags)
-    out["ok"] = any(flags)
-    out["partial"] = out["ok"] and not out["all_ok"]
-    return out
+# E77: third batch (gateway_support/bound_routes_c.py); built once here, before its first include below.
+from gateway_support.bound_routes_c import build_bound_routes_c as _build_bound_routes_c  # noqa: E402
+_bound_routes_c = _build_bound_routes_c(_MainRef(globals()))
+# E78: batch D (gateway_support/bound_routes_d.py); built once here, before its first include below.
+from gateway_support.bound_routes_d import build_bound_routes_d as _build_bound_routes_d  # noqa: E402
+_bound_routes_d = _build_bound_routes_d(_MainRef(globals()))
+# E79: batch E (gateway_support/bound_routes_e.py); built once here, before its first include below.
+from gateway_support.bound_routes_e import build_bound_routes_e as _build_bound_routes_e  # noqa: E402
+_bound_routes_e = _build_bound_routes_e(_MainRef(globals()))
+# E80: batch F (gateway_support/bound_routes_f.py); built once here, before its first include below.
+from gateway_support.bound_routes_f import build_bound_routes_f as _build_bound_routes_f  # noqa: E402
+_bound_routes_f = _build_bound_routes_f(_MainRef(globals()))
+# E81: batch G (gateway_support/bound_routes_g.py); built once here, before its first include below.
+from gateway_support.bound_routes_g import build_bound_routes_g as _build_bound_routes_g  # noqa: E402
+_bound_routes_g = _build_bound_routes_g(_MainRef(globals()))
 
 
-@app.post("/ops/idle-tick")
-async def ops_idle_tick():
-    """Called by frontend after ~5 min idle during market hours only.
+# E85: batch J (gateway_support/bound_routes_j.py); built once here, before its first include below.
+from gateway_support import MainRef as _MainRef  # noqa: E402
+from gateway_support.bound_routes_j import build_bound_routes_j as _build_bound_routes_j  # noqa: E402
+_bound_routes_j = _build_bound_routes_j(_MainRef(globals()))
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_wake_db_all = _bound_routes_j.ops_wake_db_all
+app.include_router(_bound_routes_j.ops_wake_db_all_router)
 
-    Light background work: refresh indices cache if stale, optionally warm
-    hot-stocks if cache missing. Never runs heavy scans. Off-hours: no-op.
-    """
-    phase = _market_session_phase_ist()
-    if phase not in ("preopen", "open", "post"):
-        return {
-            "ran": False,
-            "reason": "off_market",
-            "phase": phase,
-            "note": "Background idle work only during market window; use manual Wake otherwise.",
-        }
-    did = []
-    try:
-        nk = _neon_keepalive_ping()
-        did.append("neon_keepalive_ok" if nk.get("ok") else "neon_keepalive_error")
-    except Exception as e:
-        logger.debug("idle-tick neon keepalive: %s", e)
-        did.append("neon_keepalive_error")
-    try:
-        # Indices: cheap, 5 min cache already
-        (await asyncio.to_thread(get_market_indices, force_refresh=False))
-        did.append("indices")
-    except Exception as e:
-        logger.debug("idle-tick indices: %s", e)
-    try:
-        cached = _redis_get(HOT_STOCKS_CACHE_KEY)
-        if not cached:
-            # Only rebuild if empty — respects short market TTL
-            await stockky_hot_stocks(force=False)
-            did.append("hot_stocks_miss")
-        else:
-            did.append("hot_stocks_cached")
-    except Exception as e:
-        logger.debug("idle-tick hot: %s", e)
-    return {
-        "ran": True,
-        "phase": phase,
-        "actions": did,
-        "at": datetime.now(IST).isoformat(),
-    }
+
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_idle_tick = _bound_routes_f.ops_idle_tick
+app.include_router(_bound_routes_f.ops_idle_tick_router)
 
 
 
 
-@app.post("/ops/qstash/tick")
-@app.get("/ops/qstash/tick")
-async def ops_qstash_tick(request: Request):
-    """QStash callback: light keepalive + optional evaluate. No Redis required."""
-    try:
-        sig = request.headers.get("Upstash-Signature") or request.headers.get("upstash-signature") or ""
-        body = await request.body()
-        if qstash_client is not None:
-            _gw_base = (os.environ.get("API_GATEWAY_URL") or "").strip().rstrip("/")
-            _expected_url = f"{_gw_base}{request.url.path}" if _gw_base else None
-            if not qstash_client.verify_signature(sig, body, expected_url=_expected_url):
-                raise HTTPException(status_code=401, detail="Invalid QStash signature")
-    except HTTPException:
-        raise
-    except Exception:
-        # Fail CLOSED: if the signature check itself crashes we cannot tell a real
-        # QStash callback from a forged one, so refuse rather than run the tick
-        # unauthenticated. (Missing keys / PyJWT are handled inside
-        # qstash_client.verify_signature, which still accepts by design.)
-        logger.exception("QStash signature verification crashed — rejecting tick")
-        raise HTTPException(status_code=503, detail="QStash signature verification unavailable")
-    # Light warm only
-    # The callback itself is what wakes this instance; the response no longer claims
-    # to have "warmed" /health and /ops/keepalive (it only ever listed their names).
-    results = {"ok": True, "source": "qstash"}
-    try:
-        # Fan-out wake is expensive — only if body asks
-        try:
-            import json as _json
-            payload = _json.loads(body.decode() or "{}") if body else {}
-        except Exception:
-            payload = {}
-        if payload.get("action") == "structure-refresh":   # group360: schedule in QStash daily after the close (the daily bar is usable ~20 min after 15:30 IST)
-            try:
-                results["structure_refresh"] = await asyncio.to_thread(_start_structure_refresh, bool(payload.get("force")), False, None)
-            except Exception as e:  # noqa: BLE001
-                results["structure_refresh_error"] = str(e)[:120]
-        if payload.get("action") == "sniper-observe-eval":   # group361: schedule this in QStash (daily, after the close) to fill sniper outcomes
-            try:
-                import sniper_observation as _so
-                results["sniper_observe"] = await asyncio.to_thread(_so.evaluate_pending)
-            except Exception as e:  # noqa: BLE001
-                results["sniper_observe_error"] = str(e)[:120]
-        if payload.get("action") in ("wake", "wake-all", "scan"):
-            try:
-                await ops_keepalive(deep=False)
-                results["keepalive"] = True
-            except Exception as e:
-                results["keepalive_error"] = str(e)[:120]
-    except Exception as e:
-        results["error"] = str(e)[:200]
-    return results
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_qstash_tick = _bound_routes_d.ops_qstash_tick
+app.include_router(_bound_routes_d.ops_qstash_tick_router)
 
 
 # E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
@@ -5547,38 +5066,14 @@ ops_qstash_publish = _bound_routes.ops_qstash_publish
 app.include_router(_bound_routes.qstash_publish_router)
 
 
-@app.get("/wake-all")
-@app.post("/wake-all")
-async def wake_all_services():
-    """Hit health?warm=1 on all upstream services (free-tier anti-sleep)."""
-    results = await _wake_required_services()
-    ok = sum(1 for v in results.values() if v.get("ok"))
-    return {
-        "status": "ok" if ok else "degraded",
-        "warmed_ok": ok,
-        "total": len(results),
-        "services": results,
-    }
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+wake_all_services = _bound_routes_e.wake_all_services
+app.include_router(_bound_routes_e.wake_all_services_router)
 
 
-@app.get("/market/momentum-movers")
-def momentum_movers_route():
-    """
-    2026-09-03 — exposes the existing full-market NSE gainers/losers/
-    volume-gainers scan (_get_momentum_movers, already used internally by
-    the hot-picks/scan endpoints) as its own lightweight endpoint, so
-    real-trade-service's dynamic_universe.py can widen its auto-tracked
-    watchlist using this broader, catalyst-agnostic momentum source in
-    addition to the volume-shock scanner it already uses — not a new
-    detection mechanism, just a new way to reach an existing one.
-    Read-only, cheap: returns symbols only, no scoring/pillar work.
-    """
-    try:
-        symbols = _get_momentum_movers()
-    except Exception as e:
-        logger.warning("momentum_movers_route failed: %s", e)
-        symbols = []
-    return {"symbols": symbols, "count": len(symbols)}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+momentum_movers_route = _bound_routes_e.momentum_movers_route
+app.include_router(_bound_routes_e.momentum_movers_route_router)
 
 
 def _durable_cache_configured() -> bool:
@@ -5597,90 +5092,27 @@ def _durable_cache_configured() -> bool:
         return False
 
 
-@app.get("/health")
-def health(warm: bool = False):
-    return {
-        "status": "ok",
-        "service": "api-gateway",
-        "redis": bool(_redis),
-        "durable_cache": _durable_cache_configured(),
-        "ready": True
-    }
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+health = _bound_routes_f.health
+app.include_router(_bound_routes_f.health_router)
 
 # E55: moved to gateway_support/bound_routes.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
 ready = _bound_routes.ready
 app.include_router(_bound_routes.ready_router)
 
-@app.get("/system/health")
-async def system_health():
-    async def check(name: str, url: str, required: bool):
-        if not url:
-            return name, {"ok": False, "required": required, "status": "not_configured", "url": None}
-        timeout = 15 if name == "market-data" else 10
-        try:
-            client = _get_http_client()  # shared keepalive pool
-            if True:
-                resp = await client.get(f"{url.rstrip('/')}/health", timeout=timeout)
-            if resp.status_code == 200:
-                body = {}
-                try:
-                    body = resp.json() if resp.content else {}
-                except Exception:
-                    body = {}
-                failed = body.get("failed") or []
-                mounts = body.get("mounts") or {}
-                # Sub-services that expose MOUNT_STATUS: degraded if any mount failed
-                mount_ok = not failed
-                ok = mount_ok
-                status = "up" if ok else "degraded"
-                entry = {
-                    "ok": ok,
-                    "required": required,
-                    "status": status,
-                    "url": url,
-                }
-                if failed:
-                    entry["failed_mounts"] = failed
-                if mounts:
-                    entry["mounts"] = mounts
-                if body.get("status"):
-                    entry["upstream_status"] = body.get("status")
-                return name, entry
-            return name, {"ok": False, "required": required, "status": f"http_{resp.status_code}", "url": url}
-        except Exception as e:
-            return name, {"ok": False, "required": required, "status": "unreachable", "error": str(e)[:100], "url": url}
-
-    results = await asyncio.gather(
-        *(check(name, cfg["url"], cfg["required"]) for name, cfg in SYSTEM_SERVICES.items())
-    )
-    services = {"api-gateway": {"ok": True, "required": True, "status": "up", "url": None}}
-    services.update(dict(results))
-    required_ok = all(v["ok"] for v in services.values() if v["required"])
-    all_ok = all(v["ok"] for v in services.values())
-    return {"required_ok": required_ok, "all_ok": all_ok, "services": services}
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+system_health = _bound_routes_j.system_health
+app.include_router(_bound_routes_j.system_health_router)
 
 # ── Wake all services ──────────────────────────────────────────────────
-@app.post("/wake/all")
-async def wake_all_services_probe():   # session72: was a 2nd `wake_all_services` shadowing the /wake-all handler
-    results = {}
-    client = _get_http_client()  # shared keepalive pool
-    if True:
-        for name, svc in SYSTEM_SERVICES.items():
-            url = svc["url"]
-            if not url:
-                results[name] = {"ok": False, "error": "no url"}
-                continue
-            try:
-                resp = await client.get(f"{url.rstrip('/')}/health")
-                results[name] = {"ok": resp.status_code == 200, "status": resp.status_code}
-            except Exception as e:
-                results[name] = {"ok": False, "error": str(e)}
-    return {"results": results}
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+wake_all_services_probe = _bound_routes_f.wake_all_services_probe
+app.include_router(_bound_routes_f.wake_all_services_probe_router)
 
 # ── Watchlist endpoints ──────────────────────────────────────────────────────
-@app.get("/watchlist")
-def get_watchlist():
-    return {"symbols": _load_watchlist()}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_watchlist = _bound_routes_e.get_watchlist
+app.include_router(_bound_routes_e.get_watchlist_router)
 
 def _drop_cache_keys(*keys) -> None:
     """Best-effort delete of cache keys from EVERY layer (kv/Neon, in-process,
@@ -5705,66 +5137,27 @@ def _drop_cache_keys(*keys) -> None:
                 pass
 
 
-@app.post("/watchlist")
-def set_watchlist(update: WatchlistUpdate):
-    symbols = [c for c in (s.strip().upper().replace(".NS", "").replace(".BO", "") for s in update.symbols) if c]
-    _save_watchlist(symbols)
-    _drop_cache_keys(SCAN_UNIVERSE_KEY)
-    return {"symbols": symbols}
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+set_watchlist = _bound_routes_h.set_watchlist
+app.include_router(_bound_routes_h.set_watchlist_router)
 
-@app.post("/watchlist/add")
-def add_to_watchlist(update: WatchlistUpdate):
-    current = set(_load_watchlist())
-    added, already = [], []
-    for s in update.symbols:
-        su = s.strip().upper().replace(".NS", "").replace(".BO", "")
-        if not su:
-            continue
-        if su in current:
-            already.append(su)
-        else:
-            current.add(su)
-            added.append(su)
-    symbols = sorted(current)
-    _save_watchlist(symbols)
-    _drop_cache_keys(SCAN_UNIVERSE_KEY)
-    msg = None
-    if already and not added:
-        msg = "Already in watchlist"
-    elif already:
-        msg = f"Already in watchlist: {', '.join(already)}"
-    return {"symbols": symbols, "added": added, "already": already, "message": msg}
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+add_to_watchlist = _bound_routes_h.add_to_watchlist
+app.include_router(_bound_routes_h.add_to_watchlist_router)
 
-@app.delete("/watchlist/{symbol}")
-def remove_from_watchlist(symbol: str):
-    current = _load_watchlist()
-    target = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
-    updated = [s for s in current if s != target]
-    _save_watchlist(updated)
-    _drop_cache_keys(SCAN_UNIVERSE_KEY)   # a removed symbol must stop being scanned now, not at cache expiry
-    return {"symbols": updated}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+remove_from_watchlist = _bound_routes_e.remove_from_watchlist
+app.include_router(_bound_routes_e.remove_from_watchlist_router)
 
 # ── Added from first version: /events/{symbol} endpoint ─────────────────
-@app.get("/events/{symbol}")
-def get_symbol_events(symbol: str):
-    """Frontend-facing proxy for the Analysis page's event section —
-    previously the only event data reaching the frontend was whatever
-    decision-engine happened to pass through on the Decision object
-    (next_earnings_date only); this exposes event-tracker-service's
-    full categorized (upcoming/recent/recent_changes) view directly."""
-    try:
-        _sym = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
-        resp = httpx.get(f"{EVENT_URL}/events/{_sym}/categorized", timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.warning(f"Failed to fetch categorized events for {symbol}: {e}")
-        raise HTTPException(status_code=502, detail=f"event-tracker-service unreachable: {e}")
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_symbol_events = _bound_routes_e.get_symbol_events
+app.include_router(_bound_routes_e.get_symbol_events_router)
 
 # ── Searched symbols ────────────────────────────────────────────────────────
-@app.get("/searched")
-def get_searched_symbols():
-    return {"symbols": _load_searched()}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_searched_symbols = _bound_routes_e.get_searched_symbols
+app.include_router(_bound_routes_e.get_searched_symbols_router)
 
 # ── Stock decision ──────────────────────────────────────────────────────────
 def _stock_budget_sec(name: str, default: float, lo: float, hi: float) -> float:
@@ -5839,455 +5232,25 @@ def _mark_thin_technical(result: dict) -> dict:
     return result
 
 
-@app.get("/stock/{symbol}/structure")
-async def stock_structure(symbol: str, force: bool = False):
-    """Group 349: market-structure block + flat summary for one symbol (proxy to the technical service). Always 200 with a safe
-    'unavailable' default when the engine/upstream is down, so the UI panel can render its empty state instead of an error."""
-    base = (symbol or "").strip().upper().replace(".NS", "").replace(".BO", "")
-    empty = {"symbol": base, "market_structure": None, "structure_summary": ms_passthrough.safe_summary(None)}
-    if not ms_passthrough.enabled() or not base:
-        return empty
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{base}" + ("?force=true" if force else ""), timeout=20)
-        if resp.status_code != 200:
-            return empty
-        data = resp.json()
-        blk = ms_passthrough.safe_block(data)
-        if blk is None:
-            return empty
-        return {"symbol": base, "market_structure": blk, "structure_summary": ms_passthrough.safe_summary(data)}
-    except Exception as e:  # noqa: BLE001
-        logger.debug("structure proxy %s: %s", base, e)
-        return empty
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stock_structure = _bound_routes_c.stock_structure
+app.include_router(_bound_routes_c.stock_structure_router)
 
 
 _CHART_TFS = ("1m", "5m", "15m", "30m", "1h", "1d")
 
 
-@app.get("/stock/{symbol}/chart-context")
-async def stock_chart_context(symbol: str, force: bool = False, tail: Optional[int] = None, tf: str = "1d"):
-    """E25 / E26 / E27: candlestick bars (1m, 5m, 15m, 30m, 1h or 1d) + pattern markers / shapes + plain-English badges + regime chips (proxy to the
-    technical service). Context only. Always 200: when the engine / upstream is down it returns {ok: False, ...empty} so the card falls back to the plain chart.
-    Intraday uses its own circuit-breaker name, so a slow 1-minute history can never open the breaker the analysis features share."""
-    base = (symbol or "").strip().upper().replace(".NS", "").replace(".BO", "")
-    tf_key = (tf or "1d").strip().lower()
-    tf_key = {"60m": "1h", "d": "1d", "daily": "1d"}.get(tf_key, tf_key)
-    empty = {"symbol": base, "ok": False, "tf": tf_key if tf_key in _CHART_TFS else "1d", "bars": [], "markers": [], "shapes": [], "levels": [], "badges": [],
-             "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None}}
-    if not base or tf_key not in _CHART_TFS:
-        return empty
-    try:
-        intraday = tf_key != "1d"
-        cap = 1500 if intraday else 500
-        qs = f"tf={tf_key}" + (f"&tail={max(30, min(int(tail), cap))}" if tail is not None else "") + ("&force=true" if force else "")
-        async with httpx.AsyncClient() as client:
-            resp = await _cb_get(client, "technical_chart" if intraday else "technical", f"{TECHNICAL_URL}/chart-context/{base}?{qs}", timeout=30 if intraday else 25)
-        if resp.status_code != 200:
-            return empty
-        data = resp.json()
-        if not isinstance(data, dict) or data.get("schema") != 1 or not data.get("ok"):
-            if isinstance(data, dict) and data.get("reason"):
-                empty["reason"] = str(data["reason"])[:40]
-            return empty
-        return data
-    except Exception as e:  # noqa: BLE001
-        logger.debug("chart-context proxy %s %s: %s", base, tf_key, e)
-        return empty
+# E87: batch L (gateway_support/bound_routes_l.py); built once here, before its first include below.
+from gateway_support.bound_routes_l import build_bound_routes_l as _build_bound_routes_l  # noqa: E402
+_bound_routes_l = _build_bound_routes_l(_MainRef(globals()))
+# E87: moved to gateway_support/bound_routes_l.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stock_chart_context = _bound_routes_l.stock_chart_context
+app.include_router(_bound_routes_l.stock_chart_context_router)
 
 
-@app.get("/stock/{symbol}")
-async def get_stock_decision(symbol: str, already_owned: bool = False):
-    """
-    Single-stock Analyse.
-
-    1) One live decide/{symbol}?force=true (decision service already parallel-gathers
-       technical/fundamental/news/events/prediction).
-    2) Optional enrichment only when decide clearly lacked a pillar — all conditional
-       re-fetches run concurrently via asyncio.gather (no serial waterfall).
-    """
-    original = symbol.strip()
-    typed = _squash_symbol(original)
-    resolved = (await asyncio.to_thread(_resolve_symbol, original))
-    if resolved is None:
-        symbol_to_use = typed
-        corrected_from = None
-    elif resolved != typed:
-        # An alias (HEROMOTORS -> HEROMOTOCO) is a curated, deliberate mapping. A fuzzy match is
-        # only a guess: below the confidence bar, ask instead of analysing a different company.
-        if typed not in SYMBOL_ALIASES:
-            _known = await asyncio.to_thread(_get_all_known_symbols)
-            if typed not in _known and not _fuzzy_correction_is_confident(typed, resolved, _known):
-                _hints = _symbol_suggestions(typed, _known, first=resolved)
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Symbol '{typed}' not found. Did you mean: {', '.join(_hints)}?",
-                )
-        symbol_to_use = resolved
-        corrected_from = typed
-    else:
-        symbol_to_use = typed
-        corrected_from = None
-
-    async def _remember_searched() -> None:
-        """Record the symbol only after a real analysis came back. It used to be recorded up front,
-        so every typo (and every unknown name) became a 'known' symbol and then won the next fuzzy
-        match: that is how a mistyped Hero Motors kept resolving to the non-symbol HEROMOTORS."""
-        try:
-            await asyncio.to_thread(_add_searched, symbol_to_use)
-            await asyncio.to_thread(_drop_cache_keys, SCAN_UNIVERSE_KEY)
-        except Exception as e:
-            logger.debug("stock: recording searched symbol %s failed: %s", symbol_to_use, e)
-
-    def _reason_blob(reasons: dict, key: str) -> str:
-        return " ".join(str(x) for x in (reasons.get(key) or [])).lower()
-
-    def _pillar_failed(blob: str) -> bool:
-        """True only when decide explicitly reported failure — not merely a neutral score."""
-        needles = (
-            "temporarily unavailable",
-            "error processing",
-            "recovering",
-            "unavailable",
-            "timed out",
-            "timeout",
-            "failed to",
-            "not available",
-            "data insufficient",
-            "could not",
-        )
-        return any(n in blob for n in needles)
-
-    _t0 = time.monotonic()
-
-    def _remaining() -> float:
-        return STOCK_OVERALL_DEADLINE_SEC - (time.monotonic() - _t0)
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(STOCK_DECIDE_TIMEOUT_SEC, connect=5.0)) as client:
-            # ── 1) Live decide (already fans out in parallel downstream) ──
-            try:
-                resp = await client.get(
-                    f"{DECISION_URL}/decide/{symbol_to_use}",
-                    params={"already_owned": str(already_owned).lower(), "force": "true"},
-                    timeout=httpx.Timeout(max(1.0, min(STOCK_DECIDE_TIMEOUT_SEC, _remaining())), connect=5.0),
-                )
-            except httpx.ReadTimeout as _slow:
-                # The decision service was reachable but still working (cold caches). A second forced
-                # run would redo everything, so ask WITHOUT force: the downstream analysis caches the
-                # first attempt warmed are now usable, and a finished decision may already be cached.
-                _left = _remaining()
-                if _left < STOCK_DECIDE_RETRY_MIN_SEC:
-                    raise
-                logger.warning(
-                    "decide/%s read-timeout after %.0fs; retrying once without force (%.0fs of budget left)",
-                    symbol_to_use, STOCK_DECIDE_TIMEOUT_SEC, _left,
-                )
-                resp = await client.get(
-                    f"{DECISION_URL}/decide/{symbol_to_use}",
-                    params={"already_owned": str(already_owned).lower(), "force": "false"},
-                    timeout=httpx.Timeout(max(1.0, min(STOCK_DECIDE_TIMEOUT_SEC, _left)), connect=5.0),
-                )
-            resp.raise_for_status()
-            try:
-                raw = resp.json()
-            except ValueError as e:
-                # A 200 whose body is not JSON used to escape as a bare 500.
-                logger.warning("decision engine returned non-JSON for %s: %s", symbol_to_use, e)
-                return _degraded_hold(
-                    symbol_to_use,
-                    "decision engine returned a non-JSON response",
-                    f"{symbol_to_use}: decision engine returned an unreadable response — "
-                    f"showing a neutral HOLD until it recovers.",
-                    "Decision engine error",
-                    "Upstream decision-prediction-service returned a non-JSON body — scores unavailable.",
-                )
-            result = _normalize_decision_response(raw, symbol_to_use)
-
-            reasons = result.get("reasons") if isinstance(result.get("reasons"), dict) else {}
-            if not isinstance(reasons, dict):
-                reasons = {}
-                result["reasons"] = reasons
-
-            # Price fill if decide returned no close
-            if result.get("close") is None:
-                try:
-                    price = await asyncio.to_thread(_fetch_price_from_quote, symbol_to_use)
-                    if price is not None:
-                        result["close"] = price
-                except Exception:
-                    pass
-            if result.get("close") is not None:
-                result["data_insufficient"] = False
-                try:
-                    c = float(result["close"])
-                    if result.get("support") is None:
-                        result["support"] = round(c * 0.97, 2)
-                    if result.get("resistance") is None:
-                        result["resistance"] = round(c * 1.03, 2)
-                except (TypeError, ValueError):
-                    pass
-
-            tech_blob = _reason_blob(reasons, "technical")
-            fund_blob = _reason_blob(reasons, "fundamental")
-            news_blob = _reason_blob(reasons, "news")
-
-            # Tighten: neutral score 50 alone is NOT a re-fetch trigger
-            need_tech = _pillar_failed(tech_blob) or (
-                result.get("technical_score") is None and result.get("data_insufficient")
-            )
-            need_fund = _pillar_failed(fund_blob) or (
-                result.get("fundamental_score") is None
-                and not result.get("fundamental_metrics")
-            )
-            need_news = result.get("news_score") is None and (
-                _pillar_failed(news_blob) or not (reasons.get("news") or [])
-            )
-            need_events = (
-                not result.get("event_data")
-                and not reasons.get("event")
-                and not result.get("event_risk")  # None or False both mean "no event risk known yet"
-            )
-            need_pred = result.get("prediction_score") is None and result.get("prediction_note") is None
-
-            async def _get(url: str, timeout: float = 45.0):
-                try:
-                    r = await client.get(url, timeout=max(1.0, min(timeout, _remaining())))
-                    if r.status_code == 200 and r.content:
-                        data = r.json()
-                        return data if isinstance(data, dict) else None
-                except Exception as e:
-                    logger.debug("enrich %s: %s", url, e)
-                return None
-
-            tasks = {}
-            if need_tech:
-                tasks["tech"] = asyncio.create_task(
-                    _get(f"{TECHNICAL_URL}/analyze/{symbol_to_use}?force=true", 45.0)
-                )
-            if need_fund:
-                tasks["fund"] = asyncio.create_task(
-                    _get(f"{FUNDAMENTAL_URL}/analyze/{symbol_to_use}?force=true", 60.0)
-                )
-            if need_news:
-                tasks["news"] = asyncio.create_task(
-                    _get(f"{NEWS_URL}/analyze/{symbol_to_use}", 30.0)
-                )
-            if need_events:
-                tasks["events"] = asyncio.create_task(
-                    _get(f"{EVENT_URL}/events/{symbol_to_use}?force=true", 45.0)
-                )
-            if need_pred:
-                tasks["pred"] = asyncio.create_task(
-                    _get(f"{PREDICTION_URL}/predict/{symbol_to_use}", 30.0)
-                )
-
-            fetched = {}
-            if tasks:
-                # Overall deadline: keep whatever finished in time, cancel the rest. (A plain
-                # gather() could outlive the budget by the slowest per-call timeout.)
-                keys = list(tasks.keys())
-                _done, _pending = await asyncio.wait(
-                    [tasks[k] for k in keys], timeout=max(0.0, _remaining())
-                )
-                for _t in _pending:
-                    _t.cancel()
-                if _pending:
-                    await asyncio.gather(*_pending, return_exceptions=True)
-                    logger.warning(
-                        "stock %s: overall %.0fs deadline hit; dropped enrichment %s",
-                        symbol_to_use, STOCK_OVERALL_DEADLINE_SEC,
-                        [k for k in keys if tasks[k] in _pending],
-                    )
-                for k in keys:
-                    t = tasks[k]
-                    if t in _pending or t.cancelled():
-                        fetched[k] = None
-                    elif t.exception() is not None:
-                        logger.debug("enrich task %s failed: %s", k, t.exception())
-                        fetched[k] = None
-                    else:
-                        fetched[k] = t.result()
-
-            # Apply enrichment
-            td = fetched.get("tech")
-            if isinstance(td, dict):
-                if td.get("technical_score") is not None:
-                    result["technical_score"] = td["technical_score"]
-                for k in ("support", "resistance", "trend_strength", "volume_surge", "rsi", "close"):
-                    if td.get(k) is not None and result.get(k) is None:
-                        result[k] = td[k]
-                if td.get("reasons"):
-                    reasons["technical"] = td["reasons"] if isinstance(td["reasons"], list) else [str(td["reasons"])]
-                ms_passthrough.merge_into(result, td)  # Group 349: additive market_structure + structure_summary
-
-            fd = fetched.get("fund")
-            if isinstance(fd, dict):
-                if fd.get("fundamental_score") is not None:
-                    result["fundamental_score"] = fd["fundamental_score"]
-                metrics = fd.get("metrics")
-                if metrics:
-                    result["fundamental_metrics"] = metrics
-                result["fundamental_fallback"] = bool(fd.get("fallback_used"))
-                if fd.get("reasons"):
-                    reasons["fundamental"] = fd["reasons"] if isinstance(fd["reasons"], list) else [str(fd["reasons"])]
-                # Write real fundamentals back to Neon data-feed (merge, never wipe)
-                try:
-                    from data_feed import save_stock_feed, extract_feed_payload
-                    row = extract_feed_payload(symbol_to_use, fundamental=fd, extra={
-                        "fundamental_score": fd.get("fundamental_score"),
-                        "source": "stock_enrich_fundamental",
-                    })
-                    if row:
-                        save_stock_feed(symbol_to_use, row)
-                except Exception as _fe:
-                    logger.debug("fund writeback %s: %s", symbol_to_use, _fe)
-
-            nd = fetched.get("news")
-            if isinstance(nd, dict) and nd.get("news_score") is not None:
-                result["news_score"] = nd.get("news_score")
-                if nd.get("reasons"):
-                    reasons["news"] = nd["reasons"] if isinstance(nd["reasons"], list) else [str(nd["reasons"])]
-
-            ed = fetched.get("events")
-            if isinstance(ed, dict):
-                result["event_data"] = ed
-                if ed.get("next_earnings_date"):
-                    result["event_risk"] = True
-                    reasons.setdefault("event", [])
-                    if isinstance(reasons["event"], list):
-                        reasons["event"] = list(reasons["event"]) + [f"Earnings due: {ed['next_earnings_date']}"]
-
-            pd = fetched.get("pred")
-            if isinstance(pd, dict) and pd.get("model_loaded"):
-                if pd.get("prediction_score") is not None:
-                    result["prediction_score"] = pd.get("prediction_score")
-                if pd.get("note"):
-                    result["prediction_note"] = pd.get("note")
-
-            result["reasons"] = reasons
-            result["enrichment"] = {
-                "need_tech": need_tech,
-                "need_fund": need_fund,
-                "need_news": need_news,
-                "need_events": need_events,
-                "need_pred": need_pred,
-                "fetched": [k for k, v in fetched.items() if v],
-            }
-
-        if corrected_from:
-            result["corrected_from"] = corrected_from
-            result["symbol"] = symbol_to_use
-
-        # Single-stock Analyse is the ONLY place Gemini is allowed to run (per
-        # product decision: Gemini is too slow/rate-limited to fire once per
-        # symbol across a 300-500 name Run Market Scan, but firing it once for
-        # a single stock the user is actively looking at is fine). Falls back
-        # to the Hinglish template automatically if GEMINI_API_KEY is unset or
-        # the call fails/times out — see _generate_ai_summary.
-        try:
-            _left = _remaining()
-            if _left < _STOCK_SUMMARY_RESERVE_SEC:
-                result["natural_language_summary"] = _generate_summary(result)
-            else:
-                result["natural_language_summary"] = await asyncio.wait_for(
-                    _generate_ai_summary(result, client), timeout=_left
-                )
-        except Exception:      # includes asyncio.TimeoutError from the budget
-            result["natural_language_summary"] = _generate_summary(result)
-
-        flags = []
-        level = "high"
-        if result.get("fundamental_fallback") or result.get("data_insufficient"):
-            flags.append("Fundamentals partial/fallback")
-            level = "medium"
-        if result.get("news_score") is None:
-            flags.append("News unavailable")
-            level = "low" if level != "high" else "medium"
-        if result.get("prediction_score") is None:
-            flags.append("Model score missing")
-        tech_reasons = (result.get("reasons") or {}).get("technical") or []
-        if any("delivery" in str(r).lower() and "unavailable" in str(r).lower() for r in tech_reasons):
-            flags.append("Delivery % not official")
-            level = "medium"
-        if result.get("training_score") in (None, 0, 50):
-            flags.append("Training signal thin")
-        if _thin_technical_history(result, tech_reasons):
-            # First in the list: the UI shows only the first three flags, and this one changes how far
-            # the technical score can be trusted.
-            flags.insert(0, THIN_TECHNICAL_FLAG)
-            level = "medium" if level == "high" else level
-        result["data_quality"] = {
-            "level": level if flags else "high",
-            "flags": flags,
-            "note": (
-                "Scores may be soft — limited free data"
-                if flags
-                else "Core inputs present"
-            ),
-        }
-        if result.get("close") is not None:
-            await _remember_searched()
-        return result
-
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            suggestions = difflib.get_close_matches(symbol_to_use, (await asyncio.to_thread(_get_all_known_symbols)), n=3, cutoff=0.5)
-            suggestion_text = (
-                f"Symbol '{symbol_to_use}' not found. Did you mean: {', '.join(suggestions)}?"
-                if suggestions
-                else f"Symbol '{symbol_to_use}' not found."
-            )
-            raise HTTPException(status_code=404, detail=suggestion_text)
-        else:
-            # Upstream (decision-prediction-service) returned a real error
-            # response (commonly 500 when it OOMs / crashes on Render's free
-            # tier). Previously this re-raised the same status code, which
-            # the platform edge often surfaces to the user as a raw
-            # "502 Bad Gateway" with no explanation. Degrade gracefully
-            # instead — same pattern as /api/scan/find-buys: a decision
-            # result the UI can render, flagged as low-confidence, beats an
-            # error page.
-            logger.warning(
-                "decision engine HTTP %s for %s: %s",
-                e.response.status_code, symbol_to_use, str(e.response.text)[:200],
-            )
-            return _degraded_hold(
-                symbol_to_use,
-                f"decision engine returned HTTP {e.response.status_code}",
-                f"{symbol_to_use}: decision engine is temporarily unavailable "
-                f"(HTTP {e.response.status_code}) — showing a neutral HOLD until it recovers.",
-                "Decision engine error",
-                "Upstream decision-prediction-service returned an error — scores unavailable.",
-            )
-    except httpx.TimeoutException as e:
-        # Reachable but too slow even after the retry (cold caches / heavy load). Say so, instead of
-        # claiming an outage: a second try a minute later normally succeeds.
-        logger.warning(
-            "decision engine timed out for %s after %.0fs: %s: %s",
-            symbol_to_use, time.monotonic() - _t0, type(e).__name__, e,
-        )
-        return _degraded_hold(
-            symbol_to_use,
-            f"decision engine timed out after {time.monotonic() - _t0:.0f}s ({type(e).__name__})",
-            f"{symbol_to_use}: the decision engine is taking longer than usual to respond "
-            f"(caches warming up) — showing a neutral HOLD. Please try again in a minute.",
-            "Decision engine slow",
-            "decision-prediction-service did not answer in time — scores unavailable.",
-        )
-    except httpx.HTTPError as e:
-        # Connection refused / DNS failure — service is down or
-        # asleep (Render free-tier cold start), not a client error. Same
-        # graceful-degrade as above instead of bubbling a raw 502.
-        logger.warning("decision engine unreachable for %s: %s", symbol_to_use, e)
-        return _degraded_hold(
-            symbol_to_use,
-            f"decision engine unreachable: {e}",
-            f"{symbol_to_use}: decision engine is unreachable right now "
-            f"(cold start or outage) — showing a neutral HOLD until it recovers.",
-            "Decision engine unreachable",
-            "Could not reach decision-prediction-service — scores unavailable.",
-        )
+# E87: moved to gateway_support/bound_routes_l.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_stock_decision = _bound_routes_l.get_stock_decision
+app.include_router(_bound_routes_l.get_stock_decision_router)
 
 
 # ── Legacy sync fallback helpers ──────────────────────────────────────────
@@ -6348,334 +5311,34 @@ def _fetch_events(symbol: str) -> Optional[dict]:
     return None
 
 # ── Legacy synchronous scan ──────────────────────────────────────────────────
-@app.post("/scan")
-async def run_scan_post(
-    force_refresh: bool = True,
-    lite: Optional[bool] = None,
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Compatibility alias: overnight cron and external tools used POST /scan and got 405
-    because only GET /scan existed. Delegate to the async parallel scan starter.
-    """
-    # FastAPI injects BackgroundTasks when annotated. When called directly without one, pass None
-    # through: start_scan() then runs the scan on a daemon thread instead of queueing it on a
-    # throwaway BackgroundTasks that nothing would ever execute.
-    return (await asyncio.to_thread(start_scan, force_refresh=force_refresh, lite=lite, background_tasks=background_tasks))
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+run_scan_post = _bound_routes_h.run_scan_post
+app.include_router(_bound_routes_h.run_scan_post_router)
 
 
-@app.get("/scan")
-async def run_scan(force_refresh: bool = False, lite: bool = False):
-    """
-    Legacy synchronous scan entrypoint.
-
-    Previously: sequential httpx loop over the full universe hitting decide/{symbol}
-    live with no Neon prefetch (slow + rate-limit heavy).
-
-    Now: thin wrapper around the same parallel DB-prefetch pipeline used by
-    POST /scan/start and GET /api/scan/stream. Starts run_scan_parallel, waits for
-    completion, returns the final result payload (or task status if still running
-    past the wait budget).
-    """
-    if force_refresh:
-        _drop_cache_keys(SCAN_UNIVERSE_KEY, LAST_FULL_SCAN_KEY)
-
-    # Serve recent complete scan from cache when not forcing
-    if not force_refresh:
-        cached = _redis_get(LAST_FULL_SCAN_KEY)
-        if cached and isinstance(cached, dict) and cached.get("result"):
-            res = cached.get("result") or {}
-            processed = int(cached.get("processed") or res.get("scanned") or 0)
-            total = int(cached.get("total") or res.get("universe_size") or processed or 0)
-            is_partial = bool(
-                cached.get("partial")
-                or cached.get("cancelled")
-                or res.get("partial")
-                or (total > 0 and processed < int(total * 0.9))
-            )
-            if not is_partial and total > 0 and processed >= int(total * 0.9):
-                return res
-
-    universe = (await asyncio.to_thread(_build_scan_universe_forced if force_refresh else _build_scan_universe))
-    if not universe:
-        return {
-            "scanned_at": datetime.now(IST).isoformat(),
-            "scanned": 0,
-            "universe_size": 0,
-            "recommendations": [],
-            "all_results": [],
-            "errors": ["empty_universe"],
-            "verdict": "NO_DATA",
-        }
-
-    use_lite = bool(lite) if lite else (SCAN_LITE_DEFAULT or _should_force_lite_scan())
-    task_id = str(uuid.uuid4())
-    # Run the real parallel pipeline in-process (Neon bulk + semaphore workers)
-    try:
-        await run_scan_parallel(task_id, universe, use_lite)
-    except Exception as e:
-        logger.exception("legacy /scan parallel wrapper failed: %s", e)
-        data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
-        if data.get("result"):
-            return data["result"]
-        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)[:200]}")
-
-    data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
-    result = data.get("result")
-    if isinstance(result, dict) and result:
-        return result
-
-    # Fallback shape if parallel task stored status without nested result
-    return {
-        "scanned_at": datetime.now(IST).isoformat(),
-        "scanned": data.get("processed") or 0,
-        "universe_size": data.get("total") or len(universe),
-        "recommendations": (data.get("result") or {}).get("recommendations", []) if isinstance(data.get("result"), dict) else [],
-        "all_results": (data.get("result") or {}).get("all_results", []) if isinstance(data.get("result"), dict) else [],
-        "errors": [data.get("error")] if data.get("error") else [],
-        "verdict": (data.get("result") or {}).get("verdict", "UNKNOWN") if isinstance(data.get("result"), dict) else "UNKNOWN",
-        "task_id": task_id,
-        "status": data.get("status"),
-        "parallel": True,
-        "deprecated_note": "GET /scan now uses parallel DB-prefetch pipeline (same as /scan/start)",
-    }
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+run_scan = _bound_routes_f.run_scan
+app.include_router(_bound_routes_f.run_scan_router)
 
 
 
-@app.post("/scan/batch")
-async def scan_batch(request: Request):
-    """
-    Analyse a batch of symbols (max 15) and return results quickly.
-    Already uses Neon bulk prefetch + asyncio.Semaphore parallel workers
-    (same family as /scan/start and /api/scan/stream). Kept for GHA runners.
-    """
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Request body must be JSON")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
-    raw_symbols = data.get("symbols", [])
-    if isinstance(raw_symbols, str):
-        # {"symbols": "TCS"} used to be iterated character by character (T, C, S).
-        raw_symbols = [p for p in raw_symbols.replace(";", ",").split(",")]
-    if not isinstance(raw_symbols, list):
-        raise HTTPException(status_code=400, detail="symbols must be a list of symbol strings")
-    # Blank entries do not count toward the cap (they are dropped below).
-    raw_symbols = [s for s in raw_symbols if str(s).strip()]
-    if len(raw_symbols) > 15:
-        raise HTTPException(status_code=400, detail="Maximum 15 symbols per batch")
-
-    # Normalize once so feed keys and analyze() symbol always match (RELIANCE.NS → RELIANCE)
-    symbols = [
-        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-        for s in raw_symbols
-        if str(s).strip()
-    ]
-
-    # Use a semaphore to limit concurrent downstream calls inside this batch
-    # Aligned with MAX_PARALLEL_WORKERS=8 so analysis service is never overloaded
-    sem = asyncio.Semaphore(8)
-    client = _get_http_client()  # shared keepalive pool
-    if True:
-        # One Neon bulk for this batch
-        try:
-            batch_feeds = await asyncio.to_thread(_feed_store().get_symbols_bulk, symbols) or {}  # group361: off the event loop
-        except Exception:
-            batch_feeds = {}
-        tasks = [
-            _analyze_one_symbol_ultra(
-                sym,
-                client,
-                sem,
-                feed_row=batch_feeds.get(sym),
-                prefetched_feeds=batch_feeds,
-                # Multi-symbol batch — Gemini reserved for single-stock Analyse.
-                skip_gemini=True,
-            )
-            for sym in symbols
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        final_results = []
-        for sym, result in zip(symbols, results):
-            if isinstance(result, Exception):
-                final_results.append({"symbol": sym, "decision": "ERROR", "error": str(result)})
-            else:
-                if isinstance(result, dict):
-                    result["symbol"] = sym  # enforce normalized symbol
-                final_results.append(result)
-        return {"results": final_results}
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+scan_batch = _bound_routes_d.scan_batch
+app.include_router(_bound_routes_d.scan_batch_router)
 
 # ── Async scan endpoints ──────────────────────────────────────────────────
-@app.post("/scan/start")
-def start_scan(
-    force_refresh: bool = False,
-    lite: bool = None,
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Start async parallel market scan.
-    - force_refresh: rebuild universe + ignore last-scan cache
-    - lite: skip Gemini + redundant enrichment when Decision already has data (faster on free tier)
-    If a recent full scan exists (LAST_FULL_SCAN_TTL) and force_refresh is false, returns cached task.
-    """
-    try:
-        if lite is None:
-            use_lite = SCAN_LITE_DEFAULT or _should_force_lite_scan()
-        else:
-            use_lite = bool(lite)
-        # When circuits open, always prefer lite unless caller forced full (lite=False explicitly is respected)
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+start_scan = _bound_routes_j.start_scan
+app.include_router(_bound_routes_j.start_scan_router)
 
-        if force_refresh:
-            _drop_cache_keys(SCAN_UNIVERSE_KEY, LAST_FULL_SCAN_KEY)
-
-        # Serve recent COMPLETE scan from cache unless force_refresh.
-        # Partial scans (e.g. 60/300 after Stop) must CONTINUE: cache-hit the done
-        # symbols via batch_result/Neon, then process the remaining universe upstream.
-        if not force_refresh:
-            cached = _redis_get(LAST_FULL_SCAN_KEY)
-            if cached and isinstance(cached, dict) and cached.get("result"):
-                res = cached.get("result") or {}
-                processed = int(
-                    cached.get("processed")
-                    or res.get("scanned")
-                    or 0
-                )
-                total = int(
-                    cached.get("total")
-                    or res.get("universe_size")
-                    or processed
-                    or 0
-                )
-                is_partial = bool(
-                    cached.get("partial")
-                    or cached.get("cancelled")
-                    or res.get("partial")
-                    or res.get("stopped_early")
-                    or res.get("cancelled")
-                    or (total > 0 and processed < int(total * 0.9))
-                )
-                if not is_partial and total > 0 and processed >= int(total * 0.9):
-                    task_id = cached.get("task_id") or str(uuid.uuid4())
-                    _redis_set(SCAN_TASK_PREFIX + task_id, {
-                        "status": "done",
-                        "total": total,
-                        "processed": processed,
-                        "elapsed": res.get("elapsed_seconds", 0),
-                        "result": res,
-                        "error": None,
-                        "from_cache": True,
-                        "scanned_at": cached.get("scanned_at"),
-                    }, ttl=3600)
-                    return {
-                        "task_id": task_id,
-                        "from_cache": True,
-                        "scanned_at": cached.get("scanned_at"),
-                        "universe_size": total,
-                        "message": "Returning recent complete scan (within cache TTL). Use force_refresh=true for a new run.",
-                    }
-                else:
-                    logger.info(
-                        "Last scan was partial (%s/%s) — continuing full universe "
-                        "(batch_result/DB cache hits for already scored symbols)",
-                        processed, total,
-                    )
-
-        if force_refresh:
-            _drop_cache_keys(SCAN_UNIVERSE_KEY)
-
-        universe = _build_scan_universe_forced() if force_refresh else _build_scan_universe()
-        task_id = str(uuid.uuid4())
-        if background_tasks is not None:
-            background_tasks.add_task(run_scan_parallel, task_id, universe, use_lite)
-        else:
-            # Called directly (FastAPI always injects one over HTTP): run the scan on a daemon thread
-            # with its own event loop, same fallback idiom as /data-feed/start-bulk-feed. Previously
-            # this was an AttributeError reported as a 500.
-            import threading
-
-            def _scan_thread():
-                try:
-                    asyncio.run(run_scan_parallel(task_id, universe, use_lite))
-                except Exception as _e:  # run_scan_parallel records its own failures; this is a last resort
-                    logger.error("Scan thread %s crashed: %s", task_id, _e)
-
-            threading.Thread(target=_scan_thread, name=f"scan-{task_id[:8]}", daemon=True).start()
-        return {
-            "task_id": task_id,
-            "from_cache": False,
-            "lite": use_lite,
-            "universe_size": len(universe),
-            "message": f"Scanning {len(universe)} symbols (dynamic universe; DB/batch cache for hits, upstream for rest)",
-        }
-    except Exception as e:
-        logger.error(f"Scan start failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
-
-@app.get("/scan/last")
-def get_last_scan():
-    """Last full or partial market scan (Redis). Used on dashboard refresh."""
-    cached = _redis_get(LAST_FULL_SCAN_KEY)
-    if not cached or not isinstance(cached, dict):
-        return {"ok": False, "detail": "No scan cached yet", "result": None}
-    res = cached.get("result") if isinstance(cached.get("result"), dict) else {}
-    total = cached.get("total") or cached.get("universe_size")
-    # Same partial rule as GET /scan and POST /scan/start: the flags on the entry
-    # AND on its result block, plus the 90% completion rule.
-    try:
-        _p = int(cached.get("processed") or res.get("scanned") or 0)
-        _t = int(total or res.get("universe_size") or _p or 0)
-        below_90 = _t > 0 and _p < int(_t * 0.9)
-    except (TypeError, ValueError):
-        below_90 = False
-    return {
-        "ok": True,
-        "task_id": cached.get("task_id"),
-        "scanned_at": cached.get("scanned_at"),
-        "partial": bool(
-            cached.get("partial")
-            or cached.get("cancelled")
-            or res.get("partial")
-            or res.get("stopped_early")
-            or res.get("cancelled")
-            or below_90
-        ),
-        "processed": cached.get("processed"),
-        "total": total,
-        "result": cached.get("result"),
-    }
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_last_scan = _bound_routes_e.get_last_scan
+app.include_router(_bound_routes_e.get_last_scan_router)
 
 
-@app.get("/scan/status/{task_id}")
-def get_scan_status(task_id: str):
-    """Return scan progress. Missing task → soft response (not hard 404) so UI can stop cleanly."""
-
-    data = _redis_get(SCAN_TASK_PREFIX + task_id)
-    if not data:
-        return {
-            "task_id": task_id,
-            "status": "unknown",
-            "processed": 0,
-            "total": 0,
-            "cancelled": True,
-            "partial": True,
-            "message": "Scan task not found (expired or power-off). Safe to start a new scan.",
-            "ok": False,
-        }
-        # was: raise HTTPException
-    if data.get("status") == "running":
-        processed = data.get("processed", 0)
-        total = data.get("total", 0)
-        elapsed = data.get("elapsed", 0)
-        if processed > 0 and elapsed > 0:
-            avg_time_per_stock = elapsed / processed
-            remaining_stocks = max(0, total - processed)
-            estimated_remaining = round(remaining_stocks * avg_time_per_stock, 1)
-            data["estimated_remaining"] = estimated_remaining
-        else:
-            data["estimated_remaining"] = None
-    return data
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_scan_status = _bound_routes_e.get_scan_status
+app.include_router(_bound_routes_e.get_scan_status_router)
 
 
 
@@ -6712,293 +5375,9 @@ def _lite_evaluate_from_feed(symbol: str, feed: dict, live_price: float = 0.0) -
         except Exception:
             return {"symbol": base, "decision": "HOLD", "combined_score": 50, "technical_score": 50, "fundamental_score": 50, "price": px, "lite_fastpath": True}
 
-@app.get("/api/scan/stream")
-@app.get("/scan/stream")
-async def stream_market_scan(
-    lite: bool = None,
-    force_refresh: bool = False,
-):
-    """
-    Stream market-scan results as application/x-ndjson.
-    Each line is one completed symbol JSON object so the UI can update
-    incrementally instead of waiting for the full 300-stock response
-    (avoids Render 100s gateway timeout and perceived freezes).
-
-    Flow:
-      1. Bulk Neon get_many for all static feeds (1 query)
-      2. Bounded concurrent workers (Semaphore)
-      3. Yield each result as soon as its batch chunk finishes
-    """
-    if lite is None:
-        use_lite = SCAN_LITE_DEFAULT or _should_force_lite_scan()
-    else:
-        use_lite = bool(lite)
-
-    universe = (await asyncio.to_thread(_build_scan_universe))
-    if force_refresh:
-        try:
-            _redis_set(SCAN_UNIVERSE_KEY, None, ttl=1)
-        except Exception:
-            pass
-        universe = (await asyncio.to_thread(_build_scan_universe_forced))
-    universe = await asyncio.to_thread(_prioritize_universe, universe)  # group361: off the event loop
-    total = len(universe)
-
-    async def event_generator():
-        client = _get_http_client()
-        sem = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
-        start = time.time()
-        # Never inherit a stale Power-Off / cancel from a previous session
-        try:
-            _SCAN_CANCEL_FLAGS.discard("__ALL__")
-        except Exception:
-            pass
-        # Critical: clear activity_paused so a prior Power-Off does not abort
-        # the stream after the first chunk (was causing 10–25 symbol "full" scans).
-        try:
-            set_activity_paused(False)
-        except Exception:
-            pass
-
-        if total <= 0:
-            yield json.dumps({
-                "_meta": True,
-                "event": "error",
-                "error": "empty_universe",
-                "total": 0,
-            }) + "\n"
-            yield json.dumps({
-                "_meta": True,
-                "event": "done",
-                "processed": 0,
-                "total": 0,
-                "elapsed": 0,
-            }) + "\n"
-            return
-
-        # 1) Single bulk Neon load (canonical stockky:data_feed:sym: + alias feed:)
-        prefetched = {}
-        try:
-            from data_feed import get_all_stock_feeds
-            bases = [
-                s.upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in universe
-            ]
-            prefetched = await asyncio.to_thread(get_all_stock_feeds, bases) or {}  # group361: off the event loop
-            # Also warm process-local store for any later get_symbol
-            try:
-                store = _feed_store()
-                for b, row in prefetched.items():
-                    if isinstance(row, dict):
-                        store.put_symbol  # attribute check
-                # lightweight local warm without re-write to Neon
-                from data_feed import DATA_FEED_PREFIX, FEED_ALIAS_PREFIX, _LOCAL_SYMBOLS, _LOCAL_INDEX
-                for b, row in prefetched.items():
-                    if not isinstance(row, dict):
-                        continue
-                    _LOCAL_SYMBOLS[DATA_FEED_PREFIX + b] = dict(row)
-                    _LOCAL_SYMBOLS[FEED_ALIAS_PREFIX + b] = dict(row)
-                    _LOCAL_INDEX.add(b)
-            except Exception:
-                pass
-            yield json.dumps({
-                "_meta": True,
-                "event": "feed_bulk_loaded",
-                "total": total,
-                "feed_hits": len(prefetched),
-                "lite": use_lite,
-                "workers": MAX_PARALLEL_WORKERS,
-            }) + "\n"
-        except Exception as e:
-            logger.warning("scan stream feed bulk: %s", e)
-            yield json.dumps({
-                "_meta": True,
-                "event": "feed_bulk_error",
-                "error": str(e)[:200],
-                "total": total,
-            }) + "\n"
-
-        # 2) Process in chunks so results stream early
-        chunk_size = max(10, min(25 if use_lite else SCAN_BATCH_SIZE, 25 if use_lite else 15))
-        processed = 0
-        for i in range(0, total, chunk_size):
-            if "__ALL__" in _SCAN_CANCEL_FLAGS:
-                yield json.dumps({
-                    "_meta": True,
-                    "event": "cancelled",
-                    "processed": processed,
-                    "total": total,
-                }) + "\n"
-                break
-            # Explicit cancel only — residual activity_paused must not stop the stream.
-            chunk = universe[i : i + chunk_size]
-            # Keepalive meta so proxies/clients don't idle-timeout mid-universe
-            try:
-                yield json.dumps({
-                    "_meta": True,
-                    "event": "heartbeat",
-                    "processed": processed,
-                    "total": total,
-                    "chunk": i // max(chunk_size, 1) + 1,
-                    "elapsed": round(time.time() - start, 1),
-                }) + "\n"
-            except Exception:
-                pass
-            # Live prices for this chunk in parallel
-            try:
-                chunk_prices = await _fetch_prices_bulk_async(chunk, client)
-            except Exception:
-                chunk_prices = {}
-            for sym in chunk:
-                base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                px = chunk_prices.get(base)
-                if px is None:
-                    continue
-                if not isinstance(prefetched, dict):
-                    prefetched = {}
-                row = dict(prefetched.get(base) or {})
-                row.setdefault("close", px)
-                row.setdefault("price", px)
-                prefetched[base] = row
-
-            # Sticky Fix Step 3: lite = pure gateway eval (no decision HTTP)
-            if use_lite:
-                batch = []
-                for sym in chunk:
-                    base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                    fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                    px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
-                    try:
-                        batch.append(_lite_evaluate_from_feed(sym, fed or {}, px))
-                    except Exception as e:
-                        batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
-            else:
-                # Full mode: bounded wait per symbol; cold microservices must not stall the stream
-                STREAM_SYM_TIMEOUT = float(((os.getenv("SCAN_STREAM_SYMBOL_TIMEOUT") or "").strip() or "12"))
-
-                async def _ultra_or_instant(sym: str):
-                    base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                    fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                    px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
-                    try:
-                        return await asyncio.wait_for(
-                            _analyze_one_symbol_ultra(
-                                sym,
-                                client,
-                                sem,
-                                lite=False,
-                                # Gemini is reserved for single-stock Analyse
-                                # (/stock/{symbol}) — a 300-500 symbol Run Market
-                                # Scan calling Gemini once per stock would blow
-                                # through its RPM limit and slow the whole scan
-                                # down for a summary nobody reads mid-scan. Every
-                                # other pillar still runs at full depth (lite stays
-                                # False) — only the Gemini call is skipped.
-                                skip_gemini=True,
-                                feed_row=fed,
-                                prefetched_feeds=prefetched,
-                            ),
-                            timeout=STREAM_SYM_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.debug("stream ultra fallback %s: %s", base, e)
-                        try:
-                            from instant_scanner import compute_instant_scores
-                            out = compute_instant_scores(
-                                base, fed or {}, {"price": px} if px > 0 else {}
-                            )
-                            out["fallback_instant"] = True
-                            out["fallback_reason"] = str(e)[:120]
-                            return out
-                        except Exception as e2:
-                            return {
-                                "symbol": base,
-                                "decision": "ERROR",
-                                "error": str(e2)[:200],
-                            }
-
-                try:
-                    batch = await asyncio.gather(
-                        *[_ultra_or_instant(sym) for sym in chunk],
-                        return_exceptions=True,
-                    )
-                except Exception as e:
-                    logger.exception("scan stream chunk failed: %s", e)
-                    for sym in chunk:
-                        processed += 1
-                        yield json.dumps({
-                            "symbol": sym,
-                            "decision": "ERROR",
-                            "error": str(e)[:200],
-                            "_progress": {
-                                "processed": processed,
-                                "total": total,
-                                "elapsed": round(time.time() - start, 1),
-                            },
-                        }, default=str) + "\n"
-                    continue
-            for sym, res in zip(chunk, batch):
-                processed += 1
-                if isinstance(res, Exception):
-                    try:
-                        base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                        fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                        px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
-                        from instant_scanner import compute_instant_scores
-                        out = compute_instant_scores(base, fed or {}, {"price": px} if px > 0 else {})
-                        out["fallback_instant"] = True
-                        out["fallback_reason"] = str(res)[:120]
-                    except Exception:
-                        out = {
-                            "symbol": sym,
-                            "decision": "ERROR",
-                            "error": str(res)[:200],
-                        }
-                elif isinstance(res, dict):
-                    out = res
-                else:
-                    out = {"symbol": sym, "decision": "ERROR", "error": "invalid"}
-                # Sticky Fix Step 1: unified price resolution + all frontend aliases
-                if isinstance(out, dict):
-                    try:
-                        from price_resolver import ensure_row_price, extract_safe_price, apply_price_aliases
-                        base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-                        fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else None
-                        tick = {"price": None}
-                        # Prefer bulk-injected feed close already in prefetched
-                        out = ensure_row_price(out, feed=fed if isinstance(fed, dict) else None)
-                        if extract_safe_price(decision=out) <= 0:
-                            try:
-                                px = _fetch_price_from_quote(sym)
-                                if px is not None:
-                                    out = apply_price_aliases(out, float(px))
-                            except Exception:
-                                pass
-                    except Exception as _pe:
-                        logger.debug("price_resolver stream: %s", _pe)
-                out["_progress"] = {
-                    "processed": processed,
-                    "total": total,
-                    "elapsed": round(time.time() - start, 1),
-                }
-                yield json.dumps(out, default=str) + "\n"
-
-        yield json.dumps({
-            "_meta": True,
-            "event": "done",
-            "processed": processed,
-            "total": total,
-            "elapsed": round(time.time() - start, 1),
-        }) + "\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stream_market_scan = _bound_routes_j.stream_market_scan
+app.include_router(_bound_routes_j.stream_market_scan_router)
 
 
 
@@ -7039,450 +5418,25 @@ from gateway_routers.sniper import sniper_router as _sniper_router, find_actiona
 app.include_router(_sniper_router)
 
 
-@app.post("/scan/cancel/{task_id}")
-def cancel_scan(task_id: str):
-    """Request cancel — process-local flag + durable key; commit partial; stops ASAP."""
-    _SCAN_CANCEL_FLAGS.add(task_id)
-    _redis_set(SCAN_TASK_PREFIX + task_id + ":cancel", True, ttl=3600)
-    data = _redis_get(SCAN_TASK_PREFIX + task_id)
-    if not isinstance(data, dict):
-        data = {}
-    try:
-
-        data = dict(data)
-        data["cancel_requested"] = True
-        data["status"] = "cancelled" if data.get("status") in (None, "running") else data.get("status")
-        data["partial"] = True
-        data["message"] = data.get("message") or "Stop requested — partial results committed"
-        _redis_set(SCAN_TASK_PREFIX + task_id, data, ttl=3600)
-    except Exception:
-        pass
-    return {
-        "ok": True,
-        "status": "cancel_requested",
-        "processed_so_far": data.get("processed", 0),
-        "total": data.get("total", 0),
-        "message": "Scan stop signalled — worker will commit partial and exit",
-    }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+cancel_scan = _bound_routes_c.cancel_scan
+app.include_router(_bound_routes_c.cancel_scan_router)
 
 
-@app.post("/scan/stop-all")
-def scan_stop_all():
-    """Force-stop every running scan task (commit partial)."""
-    _SCAN_CANCEL_FLAGS.add("__ALL__")
-    n = 0
-    failed = 0
-    try:
-        for k in list(_mem_kv.keys()):
-            if str(k).startswith(SCAN_TASK_PREFIX) and not str(k).endswith(":cancel"):
-                data = _mem_kv.get(k)
-                if isinstance(data, dict) and data.get("status") == "running":
-                    data = dict(data)
-                    data["cancel_requested"] = True
-                    data["status"] = "cancelled"
-                    data["partial"] = True
-                    _mem_kv[k] = data
-                    # One failing durable write must not end the sweep: the
-                    # remaining running tasks still need to be stopped.
-                    try:
-                        _redis_set(k, data, ttl=3600)
-                        _redis_set(str(k) + ":cancel", True, ttl=3600)
-                    except Exception as _we:
-                        failed += 1
-                        logger.warning("scan/stop-all durable write failed for %s: %s", k, _we)
-                        continue
-                    n += 1
-    except Exception:
-        pass
-    out = {"ok": True, "stopped": n, "message": "All scans stop-signalled"}
-    if failed:
-        out["durable_write_failures"] = failed
-    return out
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+scan_stop_all = _bound_routes_c.scan_stop_all
+app.include_router(_bound_routes_c.scan_stop_all_router)
 
 
 # ── Watchlist-only scan ──────────────────────────────────────────────────
-@app.get("/scan/watchlist")
-def scan_watchlist():
-    watchlist = _load_watchlist()
-    if not watchlist:
-        return {
-            "scanned": 0,
-            "universe_size": 0,
-            "watchlist_size": 0,
-            "recommendations": [],
-            "watchlist_candidates": [],
-            "verdict": "Watchlist is empty. Add some symbols first.",
-            "market_mood": "Neutral",
-            "market_stats": {
-                "buy_signals": 0,
-                "sell_signals": 0,
-                "hold_signals": 0,
-                "cautious": 0,
-            },
-            "all_results": [],
-            "errors": [],
-        }
-
-    results = []
-    errors = []
-
-    # Fix: this used to loop over the watchlist sequentially, and each
-    # symbol already does its own chain of upstream calls (decide, quote
-    # fallback, fundamentals merge, news, events, prediction) — several
-    # seconds each in the warm case, tens of seconds in the cold case (see
-    # the decision/decide/RELIANCE timeout in the same test run). Serialized
-    # across even a handful of watchlist symbols, that easily blows past any
-    # normal client/proxy timeout. Bounded concurrency turns
-    # O(N × per-symbol time) into O(N / concurrency × per-symbol time)
-    # instead, without changing per-symbol behavior at all.
-    #
-    # Fix (30 Aug 2026, round 2 — REVERTED, see round 3): raising
-    # WATCHLIST_SCAN_CONCURRENCY 4 -> 8 here made things *worse*:
-    # test_20260830_134442.log shows /scan/watchlist still timing out, and
-    # now market/top-gainers and market/top-losers (completely unrelated
-    # endpoints) started timing out too. Cause: this function's per-symbol
-    # concurrency is a *second* layer on top of each symbol's own 5-way
-    # inner job concurrency (price/fundamentals/news/events/prediction), so
-    # outer=8 meant up to 8 x 5 = 40 simultaneous outbound calls hitting
-    # analysis-intelligence-service and market-data-service at once. This
-    # codebase already has an established, deliberately conservative cap for
-    # exactly this reason — see MAX_PARALLEL_WORKERS above and its comment:
-    # "Higher values (12-20) spawn 4-5 internal HTTP calls per stock ->
-    # 50-100+ concurrent requests ... causing PoolTimeout / ReadTimeout and
-    # circuit-breaker opens". 40 concurrent calls from watchlist scan alone
-    # blew straight through that ceiling and starved every other endpoint
-    # sharing the same free-tier backends, which is exactly what the second
-    # test run showed.
-    #
-    # Fix (30 Aug 2026, round 3): one shared semaphore
-    # (_SCAN_HTTP_CONCURRENCY, aligned with MAX_PARALLEL_WORKERS, default 8)
-    # now caps TOTAL concurrent outbound calls across every symbol and every
-    # inner job in this request, regardless of outer fan-out — matching the
-    # pattern already used by /scan's own asyncio.Semaphore(8). Outer
-    # concurrency is back down to a modest default; it no longer needs to
-    # carry the load-limiting responsibility, the semaphore does.
-    _SCAN_CONCURRENCY = int(((os.getenv("WATCHLIST_SCAN_CONCURRENCY") or "").strip() or "4"))
-    _SCAN_HTTP_CONCURRENCY = int(((os.getenv("WATCHLIST_SCAN_HTTP_CONCURRENCY") or "").strip() or str(MAX_PARALLEL_WORKERS)))
-    _SCAN_DEADLINE_SECONDS = float(((os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS") or "").strip() or "18"))
-    _http_sem = threading.BoundedSemaphore(max(1, _SCAN_HTTP_CONCURRENCY))
-
-    def _scan_one_symbol(client: httpx.Client, symbol: str):
-        with _http_sem:
-            resp = client.get(f"{DECISION_URL}/decide/{symbol}")
-        resp.raise_for_status()
-        raw = resp.json()
-        normalized = _normalize_decision_response(raw, symbol)
-
-        # Fix (30 Aug 2026): these four enrichment lookups (price fallback,
-        # fundamentals merge, news, events, prediction) are independent of
-        # one another — each only reads/writes its own keys on `normalized`
-        # — but used to run one after another. On a cache miss each can
-        # cost several seconds (fundamentals in particular; see
-        # peer_multi_quarter.py's module docstring in
-        # analysis-intelligence-service for why that one was especially
-        # slow), so sequentially they could push a single symbol's scan
-        # time past any reasonable client timeout — this is what made
-        # /scan/watchlist time out in testing even after the per-symbol
-        # decide/predict calls themselves were fast. Running them
-        # concurrently bounds one symbol's wall time to the slowest single
-        # lookup instead of the sum of all of them, on top of the
-        # outer per-symbol concurrency already in place above.
-        # Each job below acquires the *shared* _http_sem (not a per-symbol
-        # one) before its actual network call — that's what keeps total
-        # concurrent outbound calls across the whole watchlist scan capped
-        # at _SCAN_HTTP_CONCURRENCY regardless of how many symbols/jobs are
-        # queued. Acquiring only around the call itself (not the whole job
-        # function) keeps cheap no-op jobs (e.g. price/news/events when
-        # already cached on `normalized`) from taking a slot they don't
-        # need.
-        def _job_price():
-            if normalized.get("close") is None:
-                with _http_sem:
-                    return _fetch_price_from_quote(symbol)
-            return None
-
-        def _job_fundamentals():
-            with _http_sem:
-                _merge_fundamentals(normalized, symbol)
-            return None
-
-        def _job_news():
-            if normalized.get("news_score") is None:
-                with _http_sem:
-                    return _fetch_news(symbol)
-            return None
-
-        def _job_events():
-            if normalized.get("event_risk") is False and not normalized.get("reasons", {}).get("event"):
-                with _http_sem:
-                    return _fetch_events(symbol)
-            return None
-
-        def _job_prediction():
-            if normalized.get("prediction_score") is None:
-                try:
-                    with _http_sem:
-                        pred_resp = client.get(f"{PREDICTION_URL}/predict/{symbol}", timeout=30)
-                    if pred_resp.status_code == 200:
-                        return pred_resp.json()
-                except Exception as e:
-                    logger.warning(f"Prediction service lookup failed during watchlist scan for {symbol}: {e}")
-            return None
-
-        jobs = {
-            "price": _job_price,
-            "fundamentals": _job_fundamentals,
-            "news": _job_news,
-            "events": _job_events,
-            "prediction": _job_prediction,
-        }
-        job_results = {}
-        with ThreadPoolExecutor(max_workers=len(jobs)) as inner_pool:
-            futures = {inner_pool.submit(fn): name for name, fn in jobs.items()}
-            for fut in as_completed(futures):
-                name = futures[fut]
-                try:
-                    job_results[name] = fut.result()
-                except Exception as e:
-                    logger.warning(f"Watchlist scan enrichment '{name}' failed for {symbol}: {str(e) or type(e).__name__}")
-                    job_results[name] = None
-
-        price = job_results.get("price")
-        if price is not None:
-            normalized["close"] = price
-            if normalized.get("support") is None:
-                normalized["support"] = round(price * 0.95, 2)
-            if normalized.get("resistance") is None:
-                normalized["resistance"] = round(price * 1.05, 2)
-
-        news = job_results.get("news")
-        if news:
-            normalized["news_score"] = news.get("news_score")
-            reasons = normalized.get("reasons", {})
-            if news.get("reasons"):
-                reasons["news"] = news["reasons"]
-                normalized["reasons"] = reasons
-
-        events = job_results.get("events")
-        if events:
-            # See the async analyzer's equivalent block for why
-            # the full dict is passed through, not just
-            # next_earnings_date.
-            normalized["event_data"] = events
-            if events.get("next_earnings_date"):
-                normalized["event_risk"] = True
-                reasons = normalized.get("reasons", {})
-                reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
-                normalized["reasons"] = reasons
-
-        pred_data = job_results.get("prediction")
-        if pred_data and pred_data.get("model_loaded"):
-            normalized["prediction_score"] = pred_data.get("prediction_score")
-            normalized["prediction_note"] = pred_data.get("note")
-
-        # Adds a concrete calendar-date holding period estimate
-        # alongside whatever decision-engine's own holding_period
-        # string is (often a static "2-6 weeks" or "N/A") — kept as
-        # a separate field so nothing that already reads
-        # holding_period breaks.
-        entry = normalized.get("entry_range") or {}
-        entry_price = entry.get("low") or normalized.get("close")
-        normalized["holding_period_estimate"] = _estimate_holding_period(
-            entry_price, normalized.get("target"), normalized.get("decision")
-        )
-        normalized["natural_language_summary"] = _generate_summary(normalized)
-        return normalized
-
-    # timeout=30 (was 180): 180s per HTTP call was never the intent, it was
-    # just "big enough to not be the thing that times out" from before the
-    # deadline below existed. Now that the endpoint has its own explicit
-    # wall-clock budget, a single upstream call hanging for 180s is exactly
-    # the failure mode we need to bound, not paper over.
-    limits = httpx.Limits(max_connections=_SCAN_HTTP_CONCURRENCY * 2, max_keepalive_connections=_SCAN_HTTP_CONCURRENCY)
-    client = httpx.Client(timeout=30, limits=limits)
-    pool = ThreadPoolExecutor(max_workers=max(1, _SCAN_CONCURRENCY))
-    not_done = set()
-    try:
-        futures = {pool.submit(_scan_one_symbol, client, symbol): symbol for symbol in watchlist}
-        done, not_done = wait(futures.keys(), timeout=_SCAN_DEADLINE_SECONDS)
-        for fut in done:
-            symbol = futures[fut]
-            try:
-                results.append(fut.result())
-            except httpx.HTTPError as e:
-                logger.warning("Watchlist scan skipped %s: %s", symbol, e)
-                errors.append({"symbol": symbol, "error": str(e)})
-            except Exception as e:
-                logger.warning("Watchlist scan failed for %s: %s", symbol, e)
-                errors.append({"symbol": symbol, "error": str(e)})
-        for fut in not_done:
-            symbol = futures[fut]
-            logger.warning(
-                "Watchlist scan deadline (%gs) hit before %s completed — "
-                "returning partial results instead of blocking the response.",
-                _SCAN_DEADLINE_SECONDS, symbol,
-            )
-            errors.append({
-                "symbol": symbol,
-                "error": f"scan deadline ({_SCAN_DEADLINE_SECONDS:g}s) exceeded, skipped this run",
-            })
-    finally:
-        # Fix (30 Aug 2026, round 3): round 2's `pool.shutdown(wait=False,
-        # cancel_futures=True)` here never closed `client` at all — every
-        # /scan/watchlist call that hit the deadline leaked an
-        # httpx.Client (and its open connection pool) for good, which on
-        # repeated calls compounds into exactly the kind of connection/
-        # resource exhaustion that starves unrelated endpoints. cancel_
-        # futures only drops jobs that hadn't started yet — anything mid-
-        # flight keeps running and still needs the client until it's done.
-        # Fix: hand the still-running stragglers, the pool, and the client
-        # to a background daemon thread that waits for them (bounded by its
-        # own grace period) and only then shuts down / closes — so
-        # resources always get released, just not on the response's clock.
-        if not_done:
-            threading.Thread(
-                target=_cleanup_scan_resources,
-                args=(pool, client, list(not_done), _SCAN_DEADLINE_SECONDS),
-                daemon=True,
-                name="watchlist-scan-cleanup",
-            ).start()
-        else:
-            pool.shutdown(wait=False)
-            client.close()
-
-    results.sort(key=_score_sort_key, reverse=True)
-    actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
-    top_picks = _select_top_picks(actionable, limit=5)
-    # horizon picks for watchlist scan
-    def _horizon_picks_wl(results_list, horizon_key, limit=5):
-        scored = []
-        for r in results_list:
-            if r.get("decision") == "ERROR":
-                continue
-            hz = (r.get("horizons") or {}).get(horizon_key) or {}
-            sc = hz.get("score")
-            if sc is None:
-                sc = r.get("combined_score", 0) or 0
-                if horizon_key == "mid":
-                    sc = sc * 0.95
-                elif horizon_key == "long":
-                    sc = (r.get("fundamental_score") or sc) * 0.9 + (r.get("combined_score") or 0) * 0.1
-            decision = hz.get("decision") or r.get("decision")
-            min_sc = {"short": 54, "mid": 56, "long": 58}.get(horizon_key, 54)
-            # A DO NOT BUY row is never promoted to PREPARE TO BUY on score alone
-            # (it used to be, which put "Top N Picks" under a "DO NOT BUY ANY
-            # STOCK TODAY" verdict). An empty board still falls back to the
-            # overall ranking below, with each row's true decision.
-            if decision in ("DO NOT BUY", "SELL"):
-                continue
-            if decision in ("BUY NOW", "PREPARE TO BUY") or (sc or 0) >= min_sc:
-                scored.append({**r, "_hz_score": sc, "horizon_focus": horizon_key})
-        scored.sort(key=_board_rank_key, reverse=True)
-        return scored[:limit]
-    top_picks_short = _horizon_picks_wl(results, "short")
-    top_picks_mid = _horizon_picks_wl(results, "mid")
-    top_picks_long = _horizon_picks_wl(results, "long")
-    # Guarantee Top-5 boards never empty (watchlist scan path)
-    sorted_all = sorted(
-        [r for r in results if r.get("decision") != "ERROR"],
-        key=lambda x: x.get("combined_score", 0) or 0,
-        reverse=True,
-    )
-    if not top_picks_short:
-        top_picks_short = top_picks or sorted_all[:5]
-    if not top_picks_mid:
-        top_picks_mid = sorted_all[5:10] if len(sorted_all) >= 10 else sorted_all[:min(5, len(sorted_all))]
-    if not top_picks_long:
-        top_picks_long = sorted_all[10:15] if len(sorted_all) >= 15 else sorted_all[:min(5, len(sorted_all))]
-    final_verdict_scan = {
-        "preferred_horizon": "short",
-        "short_count": len(top_picks_short),
-        "mid_count": len(top_picks_mid),
-        "long_count": len(top_picks_long),
-        "headline": f"Short: {len(top_picks_short)} pick(s). Mid: {len(top_picks_mid)}, Long: {len(top_picks_long)}.",
-        "best_short": top_picks_short[0].get("symbol") if top_picks_short else None,
-    }
-    _record_symbol_outcomes(results)  # feeds universe self-pruning — see _build_scan_universe
-
-    buy_count = len([r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")])
-    sell_count = len([r for r in results if r.get("decision") == "SELL"])
-    hold_count = len([r for r in results if r.get("decision") == "HOLD"])
-
-    if buy_count >= 5:
-        market_mood = "Bullish"
-    elif sell_count > buy_count:
-        market_mood = "Bearish"
-    elif buy_count > 0:
-        market_mood = "Selective"
-    else:
-        market_mood = "Cautious"
-
-    verdict = f"{len(top_picks)} opportunity(ies) found" if top_picks else "No strong signals in your watchlist"
-
-    result = {
-        "scanned": len(results),
-        "universe_size": len(watchlist),
-        "watchlist_size": len(watchlist),
-        "recommendations": top_picks_short,
-        "recommendations_short": top_picks_short,
-        "recommendations_mid": top_picks_mid,
-        "recommendations_long": top_picks_long,
-        "final_verdict": final_verdict_scan,
-        "watchlist_candidates": [],
-        "verdict": verdict,
-        "market_mood": market_mood,
-        "market_stats": {
-            "buy_signals": buy_count,
-            "sell_signals": sell_count,
-            "hold_signals": hold_count,
-            "cautious": len(results) - buy_count - sell_count - hold_count,
-        },
-        "all_results": results,
-        "errors": errors,
-        # True whenever the deadline above cut the run short (fewer results
-        # than watchlist entries and at least one "deadline exceeded" error)
-        # — lets callers/UI show "partial results, retry for the rest"
-        # instead of silently looking like a smaller watchlist.
-        "partial": len(results) < len(watchlist) and any("deadline" in e.get("error", "") for e in errors),
-    }
-
-    # Fix (30 Aug 2026, round 3): this was a synchronous call on the
-    # response path — _send_scan_notification does a real outbound POST
-    # (timeout=15) plus a possible second CallMeBot POST (timeout=20), so
-    # on top of the scan deadline above it could add another 15-20s+ before
-    # the response went out, which is what pushed this endpoint from ~18s
-    # to over the client's 25s cutoff. Notifications are best-effort side
-    # effects, not something the caller is waiting on — send it from a
-    # background thread so it can take as long as it needs without holding
-    # up the /scan/watchlist response.
-    threading.Thread(
-        target=_send_scan_notification,
-        args=(result.get("recommendations", []), result["verdict"], result["scanned"], result["universe_size"]),
-        daemon=True,
-        name="watchlist-scan-notify",
-    ).start()
-    return result
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+scan_watchlist = _bound_routes_j.scan_watchlist
+app.include_router(_bound_routes_j.scan_watchlist_router)
 
 # ── Market routes ────────────────────────────────────────────────────────────
-@app.get("/market/session")
-def market_session():
-    """Current NSE session phase for UI / keep-warm / quote policy."""
-    now = datetime.now(IST)
-    phase = _market_session_phase_ist()
-    return {
-        "phase": phase,
-        "is_open": phase == "open",
-        # The phase helper is authoritative for "holiday": the two sources used to be
-        # unreconciled, so a holiday phase on a calendar-clean weekday reported both
-        # is_holiday and is_market_day as True.
-        "is_market_day": phase != "holiday" and (
-            phase not in ("closed",) or (now.weekday() < 5 and not is_nse_holiday(now.date()))
-        ),
-        "is_holiday": phase == "holiday",
-        "now_ist": now.isoformat(),
-        "session_window": "09:15–15:30 IST Mon–Fri (ex holidays)",
-        "quote_polling": phase in ("preopen", "open", "post"),
-    }
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_session = _bound_routes_b.market_session
+app.include_router(_bound_routes_b.market_session_router)
 
 
 def _safe_pct(change, base) -> float:
@@ -7538,102 +5492,47 @@ def _movers_response(sorted_data: list) -> dict:
     return out
 
 
-@app.get("/market/top-gainers")
-def market_top_gainers():
-    return _movers_response(_rank_market_rows(_get_nifty50_data(), "change_pct", True))
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_top_gainers = _bound_routes_e.market_top_gainers
+app.include_router(_bound_routes_e.market_top_gainers_router)
 
-@app.get("/market/top-losers")
-def market_top_losers():
-    return _movers_response(_rank_market_rows(_get_nifty50_data(), "change_pct", False))
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_top_losers = _bound_routes_e.market_top_losers
+app.include_router(_bound_routes_e.market_top_losers_router)
 
-@app.get("/market/most-active")
-def market_most_active():
-    return _movers_response(_rank_market_rows(_get_nifty50_data(), "volume", True))
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_most_active = _bound_routes_e.market_most_active
+app.include_router(_bound_routes_e.market_most_active_router)
 
-@app.get("/market/trending")
-async def market_trending():
-    """Trending stocks — runs blocking work in a thread with a hard 20 s budget."""
+def _trending_yf_row(sym):
+    """E86: the last-resort direct-yfinance price for one trending symbol (moved unchanged out of market_trending's nested helper).
+    Returns (price, change, change_pct), or None where the handler used to `continue` (fallback off, symbol not resolvable, empty history).
+    Exceptions propagate to the caller's per-symbol try/except, exactly as before."""
+    if not _direct_yf_ok():
+        return None
+    yf_ticker = resolve_ns_ticker(sym)
+    if not yf_ticker:
+        return None
+    ticker = yf.Ticker(yf_ticker)
+    hist = ticker.history(period="1d")
+    if hist.empty:
+        return None
+    price = round(hist["Close"].iloc[-1], 2)
+    change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
+    _open = float(hist["Open"].iloc[-1])
+    # A zero/invalid Open used to give inf, which FastAPI cannot
+    # JSON-encode: one bad bar turned the whole route into a 500.
+    change_pct = round(change / _open * 100, 2) if (math.isfinite(_open) and _open > 0) else None
+    return price, change, change_pct
 
-    def _blocking():
-        movers = _get_momentum_movers()
-        news = _get_news_mentioned_symbols()
-        trending = list(set(movers + news))
-        trending_data = []
-        # group233: price the (at most 10) names with ONE POST /quotes/bulk instead of one GET /quote each.
-        _bulk_rows: dict = {}
-        try:
-            _tsyms = [str(x).upper().replace(".NS", "").replace(".BO", "").strip() for x in trending[:10] if x]
-            if _tsyms:
-                _br = httpx.post(f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk", json={"symbols": _tsyms}, timeout=8)
-                if _br.status_code == 200:
-                    for _q in ((_br.json() or {}).get("quotes") or []):
-                        if isinstance(_q, dict):
-                            _k = str(_q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
-                            if _k:
-                                _bulk_rows[_k] = _q
-        except Exception as e:
-            logger.debug("trending bulk quotes: %s", e)
-        for sym in trending[:10]:
-            try:
-                price = change = change_pct = None
-                try:
-                    data = _bulk_rows.get(str(sym).upper().replace(".NS", "").replace(".BO", "").strip())
-                    if data:
-                        p = data.get("price") or data.get("cmp")
-                        prev = data.get("previous_close")
-                        if p is not None and float(p) > 0:
-                            price = round(float(p), 2)
-                            if prev and float(prev) > 0:
-                                change = round(float(p) - float(prev), 2)
-                                change_pct = round((change / float(prev)) * 100, 2)
-                            elif data.get("day_change_pct") is not None:
-                                change_pct = data.get("day_change_pct")
-                                change = round(price * change_pct / 100, 2) if change_pct is not None else None
-                except Exception as e:
-                    logger.debug("trending market-data quote %s: %s", sym, e)
 
-                if price is None:
-                    if not _direct_yf_ok():
-                        continue
-                    yf_ticker = resolve_ns_ticker(sym)
-                    if not yf_ticker:
-                        continue
-                    ticker = yf.Ticker(yf_ticker)
-                    hist = ticker.history(period="1d")
-                    if hist.empty:
-                        continue
-                    price = round(hist["Close"].iloc[-1], 2)
-                    change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
-                    _open = float(hist["Open"].iloc[-1])
-                    # A zero/invalid Open used to give inf, which FastAPI cannot
-                    # JSON-encode: one bad bar turned the whole route into a 500.
-                    change_pct = round(change / _open * 100, 2) if (math.isfinite(_open) and _open > 0) else None
-
-                trending_data.append({
-                    "symbol": sym,
-                    "price": price,
-                    "change": change,
-                    "change_pct": change_pct,
-                })
-            except Exception as e:
-                logger.debug("trending-stocks: skipping %s after fetch failure: %s", sym, e)
-        return {"data": trending_data, "count": len(trending_data)}
-
-    try:
-        return await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, _blocking),
-            timeout=20.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("market/trending hit 20 s budget — returning empty")
-        return {"data": [], "count": 0}
-    except Exception as e:
-        # Anything other than the 20s budget (e.g. a bad response from
-        # _get_momentum_movers()/_get_news_mentioned_symbols()) used to
-        # propagate out of run_in_executor as an unhandled 500 — degrade
-        # to empty data instead, same shape as the timeout branch above.
-        logger.warning("market/trending failed: %s — returning empty", e)
-        return {"data": [], "count": 0}
+# E86: batch K (gateway_support/bound_routes_k.py); built once here, before its first include below.
+from gateway_support import MainRef as _MainRef  # noqa: E402
+from gateway_support.bound_routes_k import build_bound_routes_k as _build_bound_routes_k  # noqa: E402
+_bound_routes_k = _build_bound_routes_k(_MainRef(globals()))
+# E86: moved to gateway_support/bound_routes_k.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+market_trending = _bound_routes_k.market_trending
+app.include_router(_bound_routes_k.market_trending_router)
 
 def _direct_yf_ok() -> bool:
     """group278: may this service call yfinance itself as a LAST resort when market-data-service has nothing?
@@ -7731,145 +5630,9 @@ def _prev_session_change(ticker, last_price) -> Optional[dict]:
 
 
 # ── IMPROVED /market/indices with IST time ──────────────────────────────
-@app.get("/market/indices")
-def get_market_indices(force_refresh: bool = False):
-    """
-    Fetch real-time NIFTY 50 and SENSEX index values with a moderated market score.
-    - Uses mapping: -0.3 percentage points -> 0, 0% -> 50, +0.3 percentage points -> 100.
-    - Uses IST (Asia/Kolkata) for the fetched_at timestamp, formatted as hh:mm:ss AM/PM.
-    - Adds Cache-Control headers to prevent browser caching.
-    """
-    now_ist = datetime.now(IST)
-    fetched_at_str = now_ist.strftime("%I:%M:%S %p")
-
-    if not force_refresh:
-        cached = _redis_get(INDICES_CACHE_KEY)
-        # A cache entry holding inf/NaN (written by an older build) is ignored
-        # and rebuilt rather than served: it cannot be JSON-encoded.
-        if cached and isinstance(cached, dict) and _json_finite(cached):
-            cached["fetched_at"] = fetched_at_str
-            return JSONResponse(
-                content=cached,
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache",
-                    "Expires": "0",
-                }
-            )
-
-    try:
-        nifty = _IndexTicker("^NSEI")
-        sensex = _IndexTicker("^BSESN")
-        nifty_hist = nifty.history(period="1d")
-        sensex_hist = sensex.history(period="1d")
-        if nifty_hist.empty or sensex_hist.empty:
-            # Handled by the degrade path below (last-known copy / zero fallback, HTTP 200).
-            raise ValueError("Index data temporarily unavailable")
-
-        nifty_close = nifty_hist['Close'].iloc[-1]
-        nifty_open = nifty_hist['Open'].iloc[0]
-        nifty_prev_close = nifty_hist['Close'].iloc[0] if len(nifty_hist) > 1 else nifty_open
-        nifty_change = nifty_close - nifty_prev_close
-        nifty_change_pct = _safe_pct(nifty_change, nifty_prev_close)
-
-        sensex_close = sensex_hist['Close'].iloc[-1]
-        sensex_open = sensex_hist['Open'].iloc[0]
-        sensex_prev_close = sensex_hist['Close'].iloc[0] if len(sensex_hist) > 1 else sensex_open
-        sensex_change = sensex_close - sensex_prev_close
-        sensex_change_pct = _safe_pct(sensex_change, sensex_prev_close)
-
-        avg_change = (nifty_change_pct + sensex_change_pct) / 2
-        # Group 221: real previous-session change, reported beside (not instead of) the open-based one.
-        nifty_vs_prev = _prev_session_change(nifty, nifty_close)
-        sensex_vs_prev = _prev_session_change(sensex, sensex_close)
-        # 2026-09-03 fix: sensitivity raised 0.3 → 1.5.
-        # Old formula mapped ±0.3% Nifty move to full 0-100 range, so a
-        # routine -0.26% flat/slightly-down day scored 7 — "disaster" level.
-        # Real crashes are -2% to -3%. At sensitivity=1.5:
-        #   -1.5% → score 0 (genuine bad day), 0% → 50, +1.5% → 100
-        #   today's -0.26% → score ~41 (correctly: slightly weak, not catastrophic)
-        # This stops the regime gate from blocking individual volume-shock
-        # movers on routine flat-Nifty days.
-        sensitivity = 1.5
-        raw_score = 50 + (avg_change / sensitivity) * 50
-        market_score = max(0, min(100, raw_score))
-
-        if market_score >= 60:
-            mood = "BULLISH"
-        elif market_score <= 40:
-            mood = "BEARISH"
-        else:
-            mood = "NEUTRAL"
-
-        result = {
-            "nifty": {
-                "price": round(nifty_close, 2),
-                "change": round(nifty_change, 2),
-                "change_pct": round(nifty_change_pct, 2)
-            },
-            "sensex": {
-                "price": round(sensex_close, 2),
-                "change": round(sensex_change, 2),
-                "change_pct": round(sensex_change_pct, 2)
-            },
-            "market_mood": mood,
-            "market_score": round(market_score),
-            "fetched_at": fetched_at_str,
-        }
-        if nifty_vs_prev:
-            result["nifty_vs_prev_close"] = nifty_vs_prev
-        if sensex_vs_prev:
-            result["sensex_vs_prev_close"] = sensex_vs_prev
-        if not _json_finite(result):
-            raise ValueError("non-finite index values")
-        _redis_set(INDICES_CACHE_KEY, result, ttl=300)
-        _redis_set(INDICES_LAST_KNOWN, result, ttl=86400)
-        return JSONResponse(
-            content=result,
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error fetching indices: {e}")
-        last_known = _redis_get(INDICES_LAST_KNOWN)
-        if last_known and isinstance(last_known, dict) and _json_finite(last_known):
-            last_known = dict(last_known)   # never mutate the stored copy in place
-            last_known["fetched_at"] = fetched_at_str
-            last_known["stale"] = True
-            _redis_set(INDICES_CACHE_KEY, last_known, ttl=60)
-            return JSONResponse(
-                content=last_known,
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache",
-                    "Expires": "0",
-                }
-            )
-        else:
-            fallback = {
-                "nifty": {"price": 0, "change": 0, "change_pct": 0},
-                "sensex": {"price": 0, "change": 0, "change_pct": 0},
-                "market_mood": "NEUTRAL",
-                "market_score": 50,
-                "fetched_at": fetched_at_str,
-                "stale": True,
-                "fallback": True
-            }
-            # Short-lived only: writing the zero fallback to the 24 h last-known
-            # key meant the NEXT outage served zeros as if they were a real copy.
-            _redis_set(INDICES_CACHE_KEY, fallback, ttl=60)
-            return JSONResponse(
-                content=fallback,
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache",
-                    "Expires": "0",
-                }
-            )
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_market_indices = _bound_routes_f.get_market_indices
+app.include_router(_bound_routes_f.get_market_indices_router)
 
 # ── Universe preview + ≤ ₹5000 pre-filter ─────────────────────────────────
 # Session 72 (open-issue #3): /scan/universe must never run past its callers'
@@ -7921,602 +5684,68 @@ async def _movers_with_deadline() -> tuple[List[str], bool]:
         return [], True
 
 
-@app.get("/scan/universe")
-async def get_scan_universe(cached: bool = False):
-    # 2026-09-18 fix: added `cached` query param (mirrors /surprise/scan).
-    # When cached=true, real-trade-service gets a sub-second response on any
-    # warm or stale hit — it only pays the full rebuild cost when both the
-    # live Neon key AND the stale-fallback key are completely absent (i.e. the
-    # very first ever build on a brand-new deployment, not a routine restart).
-    # Callers: candidate_engine/candidates.py already passes ?cached=true for
-    # its /surprise/scan call; same pattern applied here so the same client
-    # timeout (25s) is safe even right after a restart.
-    if cached:
-        # Try live cache first (may already be warm from pre-warm task)
-        live = _redis_get(SCAN_UNIVERSE_KEY)
-        if live and isinstance(live, list) and len(live) > 0:
-            live = _filter_equities(live)
-            live = await asyncio.to_thread(_filter_symbols_under_max_price, live)  # group361: off the event loop
-            if len(live) >= 50:
-                searched = await _load_searched_safe()
-                movers, _partial = await _movers_with_deadline()
-                return {
-                    "total": len(live),
-                    "symbols": live,
-                    "searched_symbols_included": [s for s in searched if s in live],
-                    "momentum_movers": movers,
-                    "momentum_movers_partial": _partial,
-                    "max_price": MAX_UNIVERSE_PRICE,
-                    "cached": True,
-                }
-        # Live cache cold — try stale Neon fallback
-        if _kv_cache is not None:
-            try:
-                stale = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
-                if stale and isinstance(stale, list) and len(stale) >= 50:
-                    stale = _filter_equities(stale)
-                    stale = await asyncio.to_thread(_filter_symbols_under_max_price, stale)  # group361: off the event loop
-                    if len(stale) >= 50:
-                        # Repopulate live key (short TTL) so next caller is fast
-                        _redis_set(SCAN_UNIVERSE_KEY, stale, ttl=300)
-                        # Kick off background rebuild so data freshens soon
-                        try:
-                            asyncio.create_task(asyncio.to_thread(_build_scan_universe_fresh))
-                        except Exception:
-                            pass
-                        searched = await _load_searched_safe()
-                        movers, _partial = await _movers_with_deadline()
-                        logger.info(
-                            "scan/universe: served %d-symbol stale fallback (background rebuild scheduled)",
-                            len(stale),
-                        )
-                        return {
-                            "total": len(stale),
-                            "symbols": stale,
-                            "searched_symbols_included": [s for s in searched if s in stale],
-                            "momentum_movers": movers,
-                            "momentum_movers_partial": _partial,
-                            "max_price": MAX_UNIVERSE_PRICE,
-                            "cached": True,
-                            "stale": True,
-                        }
-            except Exception as _se:
-                logger.debug("scan/universe cached stale-read failed: %s", _se)
-        # Both caches cold — fall through to full build (first-ever deployment)
-        logger.info("scan/universe: both caches cold, running full synchronous build")
-
-    build_task = asyncio.ensure_future(asyncio.to_thread(_build_scan_universe))  # already ≤₹5000 filtered
-    try:
-        universe = await asyncio.wait_for(asyncio.shield(build_task), timeout=SCAN_UNIVERSE_BUILD_DEADLINE_S)
-    except asyncio.TimeoutError:
-        # Serve ANY cached universe rather than blow the caller's 25s timeout;
-        # the build keeps running in its thread and refreshes the caches itself.
-        fallback = None
-        try:
-            fallback = _redis_get(SCAN_UNIVERSE_KEY)
-            if not (isinstance(fallback, list) and len(fallback) >= 50) and _kv_cache is not None:
-                fallback = _kv_cache.get_stale(SCAN_UNIVERSE_STALE_KEY)
-        except Exception:
-            fallback = None
-        # The >=50 check must hold AFTER the equity/price filters, otherwise a
-        # fallback that shrinks to a handful of symbols would be served.
-        fb = []
-        if isinstance(fallback, list) and len(fallback) >= 50:
-            try:
-                fb = await asyncio.to_thread(_filter_symbols_under_max_price, _filter_equities(fallback))  # group361: off the event loop
-            except Exception as _fe:
-                logger.warning("scan/universe: fallback filter failed: %s", _fe)
-                fb = []
-        if len(fb) >= 50:
-            logger.warning("scan/universe: full build exceeded %.0fs — served %d-symbol cached fallback, build continues in background",
-                           SCAN_UNIVERSE_BUILD_DEADLINE_S, len(fb))
-            movers, _partial = await _movers_with_deadline()
-            return {"total": len(fb), "symbols": fb, "searched_symbols_included": [], "momentum_movers": movers,
-                    "momentum_movers_partial": _partial, "max_price": MAX_UNIVERSE_PRICE,
-                    "cached": True, "stale": True, "deadline_exceeded": True}
-        logger.warning("scan/universe: full build exceeded %.0fs and no cached universe exists — waiting for the build", SCAN_UNIVERSE_BUILD_DEADLINE_S)
-        universe = await build_task
-    searched = await _load_searched_safe()
-    movers, _partial = await _movers_with_deadline()
-    return {
-        "total": len(universe),
-        "symbols": universe,
-        "searched_symbols_included": [s for s in searched if s in universe],
-        "momentum_movers": movers,
-        "momentum_movers_partial": _partial,
-        "max_price": MAX_UNIVERSE_PRICE,
-    }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_scan_universe = _bound_routes_c.get_scan_universe
+app.include_router(_bound_routes_c.get_scan_universe_router)
 
 
-@app.get("/api/universe")
-@app.get("/universe")
-async def get_universe():
-    """
-    Stateless ≤ ₹5000 universe — prefers Neon data-feed (survives container sleep).
-    Order:
-      1) Neon feed symbols with price unknown or ≤ 5000 (durable, no RAM dependency)
-      2) Decision-service training universe (if available)
-      3) Local scan-universe builder
-    Always re-applies the price gate.
-    """
-    symbols: List[str] = []
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_universe = _bound_routes_c.get_universe
+app.include_router(_bound_routes_c.get_universe_router)
 
-    # 1) Neon / data-feed (anti-amnesia primary source)
-    try:
-        from data_feed import list_feed_symbols_from_neon_under_max_price
-        symbols = await asyncio.to_thread(list_feed_symbols_from_neon_under_max_price, MAX_UNIVERSE_PRICE) or []  # group361: off the event loop
-    except Exception as e:
-        logger.debug("api/universe neon feed: %s", e)
-        symbols = []
-
-    # 2) Training universe fallback
-    if not symbols:
-        try:
-            decision_base = _env_url("DECISION_URL", DECISION_URL, rstrip=False)
-            root = decision_base.rstrip("/")
-            if root.endswith("/decision"):
-                root = root[: -len("/decision")]
-            training_url = f"{root}/training/universe"
-            async with httpx.AsyncClient() as client:
-                res = await client.get(training_url, timeout=10.0)
-                if res.status_code == 200:
-                    body = res.json()
-                    if isinstance(body, list):
-                        symbols = [str(s) for s in body]
-                    elif isinstance(body, dict):
-                        symbols = [str(s) for s in (body.get("symbols") or body.get("universe") or [])]
-        except Exception as e:
-            logger.debug("api/universe training fetch: %s", e)
-            symbols = []
-
-    # 3) Dynamic scan universe last resort
-    if not symbols:
-        try:
-            symbols = (await asyncio.to_thread(_build_scan_universe))
-        except Exception:
-            symbols = []
-
-    filtered = await asyncio.to_thread(_filter_symbols_under_max_price, symbols)  # group361: off the event loop
-    return filtered
-
-@app.delete("/scan/universe/cache")
-def clear_universe_cache():
-    """Clear every cache layer holding the scan universe.
-
-    Used to do nothing (yet report success) unless the legacy Redis client
-    was configured; the real stores are the Neon/kv layer and the in-process
-    fallback, so those are cleared too and the response says what happened.
-    """
-    cleared = []
-    errors = []
-    if _kv_cache is not None:
-        try:
-            _kv_cache.delete(SCAN_UNIVERSE_KEY)
-            cleared.append("kv")
-        except Exception as e:
-            errors.append(f"kv: {e}")
-    try:
-        _mem_kv.pop(SCAN_UNIVERSE_KEY, None)
-        _mem_kv_exp.pop(SCAN_UNIVERSE_KEY, None)
-        cleared.append("memory")
-    except Exception as e:
-        errors.append(f"memory: {e}")
-    if _redis:
-        try:
-            _redis.delete(SCAN_UNIVERSE_KEY)
-            cleared.append("redis")
-        except Exception as e:
-            errors.append(f"redis: {e}")
-    if not cleared:
-        return {
-            "ok": False,
-            "cleared": [],
-            "errors": errors,
-            "message": "Scan universe cache could not be cleared",
-        }
-    out = {"message": "Scan universe cache cleared — will rebuild on next scan", "cleared": cleared}
-    if errors:
-        out["errors"] = errors
-    return out
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+clear_universe_cache = _bound_routes_f.clear_universe_cache
+app.include_router(_bound_routes_f.clear_universe_cache_router)
 
 # ── Notification endpoints ──────────────────────────────────────────────────
-@app.get("/notifications/health")
-def notifications_health():
-    try:
-        resp = httpx.get(f"{NOTIFICATION_URL}/health", timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
-    except ValueError as e:
-        # 200 with a non-JSON body: same upstream-failure class as the rest.
-        raise HTTPException(status_code=502, detail=f"Notification service returned a non-JSON health body: {e}")
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+notifications_health = _bound_routes_b.notifications_health
+app.include_router(_bound_routes_b.notifications_health_router)
 
-@app.get("/notifications/config")
-def get_notification_config():
-    try:
-        resp = httpx.get(f"{NOTIFICATION_URL}/config", timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_notification_config = _bound_routes_b.get_notification_config
+app.include_router(_bound_routes_b.get_notification_config_router)
 
-@app.post("/notifications/config", dependencies=[Depends(_require_admin)])
-def set_notification_config(update: NotificationChannelUpdate):
-    try:
-        payload = update.model_dump(exclude_none=True)
-        # Wake notification service (free-tier cold start)
-        try:
-            httpx.get(f"{NOTIFICATION_URL}/health", timeout=8)
-        except Exception:
-            pass
-        resp = httpx.post(
-            f"{NOTIFICATION_URL}/config",
-            json=payload,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+set_notification_config = _bound_routes_g.set_notification_config
+app.include_router(_bound_routes_g.set_notification_config_router)
 
-@app.delete("/notifications/config/{channel}", dependencies=[Depends(_require_admin)])
-def delete_notification_channel(channel: str):
-    try:
-        resp = httpx.delete(f"{NOTIFICATION_URL}/config/{channel}", timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+delete_notification_channel = _bound_routes_g.delete_notification_channel
+app.include_router(_bound_routes_g.delete_notification_channel_router)
 
 
-@app.api_route("/notifications/call/me", dependencies=[Depends(_require_admin)], methods=["GET", "POST"])
-def notifications_call_me(request: Request, message: str = "Stockky test call alert"):
-    """Proxy CallMeBot test / manual call. CallMeBot can be slow — use long timeout."""
-    try:
-        msg = message or "Stockky test call alert"
-        try:
-            httpx.get(f"{NOTIFICATION_URL}/health", timeout=10)
-        except Exception:
-            pass
-        resp = httpx.post(
-            f"{NOTIFICATION_URL}/call/me",
-            params={"message": msg},
-            timeout=70,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="CallMeBot timed out (slow network or free-tier cold start). Config may still be OK — try Test again in 20s.",
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"CallMeBot unreachable: {e}")
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+notifications_call_me = _bound_routes_g.notifications_call_me
+app.include_router(_bound_routes_g.notifications_call_me_router)
 
-@app.post("/notifications/test", dependencies=[Depends(_require_admin)])
-def test_notification_channels():
-    """Proxy a real test send to every enabled channel.
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+test_notification_channels = _bound_routes_g.test_notification_channels
+app.include_router(_bound_routes_g.test_notification_channels_router)
 
-    Fix: this used a flat 15s timeout, but the downstream /test dispatch can
-    fan out to CallMeBot, which tries a voice call then a text fallback per
-    recipient at up to 35s each (see notifications_call_me above, which
-    already uses timeout=70 for the same reason) — so a config with
-    CallMeBot enabled routinely took well past 15s and came back as a
-    misleading "Notification service unreachable" 502 even though nothing
-    was actually unreachable. Match the longer timeout and the wake-first +
-    distinct-timeout-message pattern already used by call/me and config.
-    """
-    try:
-        httpx.get(f"{NOTIFICATION_URL}/health", timeout=10)
-    except Exception:
-        pass
-    try:
-        resp = httpx.post(f"{NOTIFICATION_URL}/test", timeout=75)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail=(
-                "Notification test timed out (CallMeBot voice+text fallback and/or "
-                "free-tier cold start can take a while). Channels may still have "
-                "fired — check each app, or try Test again in 20s."
-            ),
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
-
-@app.post("/notifications/send-picks", dependencies=[Depends(_require_admin)])
-def send_picks_to_telegram(payload: dict):
-    recs = payload.get("recommendations", [])
-    if not recs:
-        raise HTTPException(status_code=400, detail="No recommendations provided")
-    if not isinstance(recs, list):
-        # A string used to be sliced per character into "(invalid pick)" lines.
-        raise HTTPException(status_code=400, detail="recommendations must be a list")
-
-    _wake_notification_service()
-
-    msg_type = payload.get("type", "top5")
-    if msg_type == "top5":
-        title = "📊 *Top 5 Picks from Market Scan*"
-        picks = recs[:5]
-    else:
-        title = "📊 *All Actionable Stocks (BUY NOW / PREPARE TO BUY)*"
-        picks = recs
-
-    def _num(v):
-        try:
-            return float(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    def _fmt_holding(h):
-        # scan_watchlist attaches holding_period_estimate as a dict; print it
-        # as a readable range rather than a Python repr.
-        if isinstance(h, dict):
-            lo, hi = h.get("min_days"), h.get("max_days")
-            if lo is not None and hi is not None:
-                return f"{lo}–{hi} days" if lo != hi else f"{lo} days"
-            if hi is not None:
-                return f"up to {hi} days"
-            if lo is not None:
-                return f"{lo}+ days"
-            return "N/A"
-        return h
-
-    def format_pick(r, index):
-        if not isinstance(r, dict):
-            return f"{index}. *(invalid pick)*"
-        symbol = r.get("symbol") or "?"
-        decision = r.get("decision") or "UNKNOWN"
-        score = r.get("combined_score")
-        if score is None:
-            score = r.get("score") or 0
-        close = _num(r.get("close"))
-        target = _num(r.get("target"))
-        stop = _num(r.get("stop_loss"))
-        entry = r.get("entry_range")
-        if not isinstance(entry, dict):
-            entry = {}
-        entry_low = _num(entry.get("low"))
-        entry_high = _num(entry.get("high"))
-        holding = _fmt_holding(r.get("holding_period") or r.get("holding_period_estimate") or "N/A")
-        lines = [f"{index}. *{symbol}* – {decision} (Score: {score})"]
-        if close is not None:
-            lines.append(f"   Current: ₹{close:.2f}")
-        if entry_low is not None and entry_high is not None:
-            lines.append(f"   Entry: ₹{entry_low:.2f} – ₹{entry_high:.2f}")
-        if target is not None:
-            upside = ((target - close) / close * 100) if close else 0
-            # ``:+`` keeps the sign right for a target below the close.
-            lines.append(f"   Target: ₹{target:.2f} ({upside:+.1f}%)")
-        if stop is not None:
-            lines.append(f"   Stop: ₹{stop:.2f}")
-        if holding and holding != "N/A":
-            lines.append(f"   Hold: {holding}")
-        return "\n".join(lines)
-
-    def _delivered(resp, what: str) -> bool:
-        """Parse the notify reply; any malformed reply is a 502, not a 500."""
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise HTTPException(status_code=502, detail=f"{what}: notification service returned a non-JSON reply: {e}")
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=502, detail=f"{what}: notification service returned an unexpected reply")
-        if data.get("delivered"):
-            return True
-        error_note = data.get("note", "Delivery failed")
-        raise HTTPException(status_code=502, detail=f"{what}: {error_note}")
-
-    if msg_type == "top5":
-        lines = [title, ""]
-        for i, r in enumerate(picks, 1):
-            lines.append(format_pick(r, i))
-            lines.append("")
-        message = "\n".join(lines)
-        try:
-            resp = httpx.post(
-                f"{NOTIFICATION_URL}/notify",
-                json={"title": "Market Scan Picks", "message": message, "channel": "telegram"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            _delivered(resp, "Notification service failed to deliver")
-            return {"success": True, "sent": len(picks), "message": "Notification sent"}
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Notification service failed: {e}")
-
-    pick_strings = []
-    for i, r in enumerate(picks, 1):
-        pick_strings.append(format_pick(r, i))
-
-    base_header = title + "\n\n"
-    MAX_CHARS = 4000
-    # Room for the longest header ("(Part NN/NN)") plus the trailing newline;
-    # a single oversized pick is truncated to fit instead of being sent
-    # after an empty header-only part.
-    _max_pick = max(100, MAX_CHARS - len(base_header) - 40)
-    chunks = []
-    current_chunk = []
-    current_len = len(base_header)
-    for pick_str in pick_strings:
-        if len(pick_str) > _max_pick:
-            pick_str = pick_str[: _max_pick - 1] + "…"
-        pick_len = len(pick_str) + 1
-        if current_chunk and current_len + pick_len + 10 > MAX_CHARS:
-            chunks.append(current_chunk)
-            current_chunk = []
-            current_len = len(base_header)
-        current_chunk.append(pick_str)
-        current_len += pick_len + 1
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    total_chunks = len(chunks)
-    sent_count = 0
-
-    def _partial_note() -> str:
-        # Telegram has no rollback: tell the caller what was already delivered.
-        if sent_count:
-            return f" ({sent_count} of {total_chunks} part(s) were already delivered and cannot be recalled)"
-        return ""
-
-    for idx, chunk in enumerate(chunks, 1):
-        if total_chunks > 1:
-            header = f"{title} (Part {idx}/{total_chunks})\n\n"
-        else:
-            header = f"{title}\n\n"
-        message = header + "\n".join(chunk) + "\n"
-        try:
-            resp = httpx.post(
-                f"{NOTIFICATION_URL}/notify",
-                json={"title": "Market Scan Picks", "message": message, "channel": "telegram"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            _delivered(resp, f"Part {idx} failed")
-            sent_count += 1
-        except HTTPException as he:
-            if sent_count:
-                raise HTTPException(status_code=502, detail=f"{he.detail}{_partial_note()}")
-            raise
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Notification service failed for part {idx}: {e}{_partial_note()}")
-
-    return {"success": True, "sent": len(picks), "parts": total_chunks, "message": f"Notification sent in {total_chunks} parts"}
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+send_picks_to_telegram = _bound_routes_j.send_picks_to_telegram
+app.include_router(_bound_routes_j.send_picks_to_telegram_router)
 
 # ============================================================================
 # Training Service Proxy Routes
 # ============================================================================
 
-@app.get("/training/status")
-async def training_status():
-    try:
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            resp = await client.get(f"{TRAINING_URL.rstrip('/')}/model-status")
-            # Also try /api/status if model-status 404s
-            if resp.status_code == 404:
-                resp = await client.get(f"{TRAINING_URL.rstrip('/')}/api/status")
-            resp.raise_for_status()
-            return resp.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+training_status = _bound_routes_b.training_status
+app.include_router(_bound_routes_b.training_status_router)
 
-@app.post("/training/train", dependencies=[Depends(_require_admin)])
-async def trigger_training():
-    try:
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            base = TRAINING_URL.rstrip("/")
-            resp = await client.post(f"{base}/api/train")
-            if resp.status_code == 404:
-                resp = await client.post(f"{base}/train")
-            if resp.status_code >= 400:
-                detail = resp.text[:300]
-                try:
-                    detail = resp.json()
-                except Exception:
-                    pass
-                raise HTTPException(status_code=resp.status_code, detail=detail)
-            return resp.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+trigger_training = _bound_routes_g.trigger_training
+app.include_router(_bound_routes_g.trigger_training_router)
 
-@app.get("/training/score/{symbol}")
-async def get_training_score(symbol: str):
-    try:
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            resp = await client.get(f"{TRAINING_URL.rstrip('/')}/training-score/{symbol}")
-            if resp.status_code == 404:
-                return {
-                    "symbol": symbol.upper(),
-                    "score": None,
-                    "available": False,
-                    "message": "No training score for this symbol yet",
-                }
-            resp.raise_for_status()
-            return resp.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Training service unreachable: {str(e)}")
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+get_training_score = _bound_routes_b.get_training_score
+app.include_router(_bound_routes_b.get_training_score_router)
 
-@app.api_route("/training/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def training_other_proxy(path: str, request: Request):
-    """Proxy /training/* to the training sub-app.
-
-    Never forward Accept-Encoding. Always return decoded JSON via JSONResponse
-    so the browser never sees gzip/br binary (which causes
-    "Unexpected token ... is not valid JSON").
-    """
-    heavy = any(
-        x in path
-        for x in (
-            "actionable/commit",
-            "train",
-            "evaluate",
-            "mark-to-market",
-            "walk",
-            "history",
-            "clear-backup",
-            "universe/ingest",
-            "universe/train",
-            "api/universe",
-            "portfolio/deposit",
-        )
-    )
-    # Shared client default was too short → 504 on ingest; always pass explicit timeout
-    timeout = 180.0 if heavy else 90.0
-    try:
-        body = await request.body()
-        fwd_headers = {"Accept": "application/json"}
-        ct = request.headers.get("content-type")
-        if ct:
-            fwd_headers["Content-Type"] = ct
-
-        target_url = f"{TRAINING_URL.rstrip('/')}/{path.lstrip('/')}"
-        client = _get_http_client()  # shared keepalive pool
-        if True:
-            response = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=fwd_headers,
-                content=body if body else None,
-                params=request.query_params,
-                timeout=timeout,
-            )
-
-        # Always try JSON first — portfolio/deposit/trades all return JSON
-        try:
-            data = response.json()
-            return JSONResponse(content=data, status_code=response.status_code)
-        except Exception:
-            pass
-
-        # Non-JSON upstream (HTML error page, empty, etc.)
-        text_body = response.text or ""
-        # Strip control chars that break JSON.parse on the client
-        safe = "".join(ch for ch in text_body[:800] if ch == "\n" or ch == "\t" or ord(ch) >= 32)
-        return JSONResponse(
-            content={"detail": safe or f"Upstream HTTP {response.status_code}"},
-            status_code=response.status_code if response.status_code >= 400 else 502,
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail=f"Training service timeout for /{path}")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Training service unreachable: {e}")
-    except Exception as e:
-        logger.exception("training proxy error for path=%s", path)
-        raise HTTPException(status_code=502, detail=f"Training proxy error: {e}")
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+training_other_proxy = _bound_routes_h.training_other_proxy
+app.include_router(_bound_routes_h.training_other_proxy_router)
 
 
 
@@ -9232,95 +6461,20 @@ def _clean_symbol_list(raw, cap: int = SYMBOL_LIST_CAP) -> Optional[List[str]]:
     return out or None
 
 
-@app.post("/api/surprise/run-premarket-feed")
-@app.post("/surprise/run-premarket-feed")
-@app.get("/api/surprise/run-premarket-feed")
-async def api_run_premarket_feed(force: bool = False, request: Request = None):
-    """
-    Market-aware surprise quote feed:
-      - OPEN: cache ≤ 2h
-      - CLOSED: durable cache (no Yahoo storm)
-      - force=true: always refresh sequentially with 0.5s gaps
-    """
-    symbols = None
-    try:
-        if request is not None:
-            body = await request.body()
-            if body:
-                import json as _json
-                payload = _json.loads(body.decode("utf-8") or "{}")
-                if isinstance(payload, dict) and payload.get("symbols"):
-                    symbols = _clean_symbol_list(payload["symbols"])
-    except Exception:
-        symbols = None
-    if not symbols:
-        try:
-            symbols = (await asyncio.to_thread(_build_scan_universe))[:200]
-        except Exception:
-            symbols = None
-    try:
-        from surprise_scanner import run_market_aware_surprise_feed
-        return await run_market_aware_surprise_feed(
-            symbols=symbols,
-            market_data_url=MARKET_DATA_URL,
-            force=force,
-        )
-    except Exception as e:
-        logger.exception("run-premarket-feed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)[:240])
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_run_premarket_feed = _bound_routes_d.api_run_premarket_feed
+app.include_router(_bound_routes_d.api_run_premarket_feed_router)
 
 
 
-@app.post("/api/surprise/repair-batch")
-@app.post("/surprise/repair-batch")
-async def api_surprise_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
-    """Fill missing surprise quotes via market-data waterfall (0.5s pacing).
-    Optional symbol= targets a single ticker (UI Repair button).
-    """
-    try:
-        from surprise_scanner import repair_surprise_batch
-        # AUDIT FIX: repair_surprise_batch() is a sync function that loops
-        # up to `limit` (100 max) symbols with a time.sleep() pace-out
-        # between each — called directly from this async route it ran
-        # straight on the event loop, stalling every other api-gateway
-        # request for the full repair duration. Offload to a worker
-        # thread, same fix pattern as circuit_breaker.py/rate_limit_monitor.py.
-        return await asyncio.to_thread(
-            repair_surprise_batch,
-            limit=limit,
-            market_data_url=MARKET_DATA_URL,
-            symbol=symbol,
-        )
-    except Exception as e:
-        logger.exception("surprise repair-batch: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)[:240])
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_repair_batch = _bound_routes_d.api_surprise_repair_batch
+app.include_router(_bound_routes_d.api_surprise_repair_batch_router)
 
 
-@app.get("/api/surprise/audit")
-@app.get("/surprise/audit")
-async def api_surprise_audit():
-    """Premarket / surprise feed health for the Surprise dashboard.
-
-    Memoised for AUDIT_TTL_SEC — the panel refetches on every tab mount and this
-    walks the whole tracked set, which is the bulk of the tab's load time. See
-    _audit_cache_get for why a short TTL is safe here."""
-    cached = _audit_cache_get("surprise_audit")
-    if cached is not None:
-        return cached
-    try:
-        from surprise_scanner import audit_surprise_feed
-        return _audit_cache_put("surprise_audit", audit_surprise_feed())
-    except Exception as e:
-        logger.exception("surprise audit: %s", e)
-        return {
-            "ok": False,
-            "total_tracked": 0,
-            "fully_populated": 0,
-            "missing_data": 0,
-            "health_score": 0,
-            "incomplete_stocks": [],
-            "message": str(e)[:200],
-        }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_audit = _bound_routes_c.api_surprise_audit
+app.include_router(_bound_routes_c.api_surprise_audit_router)
 
 
 SURPRISE_SCAN_DEADLINE_S = float(((os.getenv("SURPRISE_SCAN_DEADLINE_S") or "").strip() or "20"))
@@ -9411,223 +6565,14 @@ async def _surprise_closed_market_result(engine, limit):
         return None
 
 
-@app.get("/api/surprise/scan")
-@app.get("/surprise/scan")
-async def api_surprise_scan(
-    force_reload: bool = False,
-    symbols: str = None,
-    cached: bool = False,
-    limit: int = None,
-    refresh: bool = False,
-):
-    """
-    Lightweight surprise scan:
-      1) bulk-load surprise_static_feed from Neon
-      2) concurrent live quotes (bounded)
-      3) score filter — see surprise_scanner.MIN_SCORE / MIN_CHANGE_PCT for the
-         live thresholds (this docstring previously said ">=60, change >1%",
-         which drifted out of sync with the actual values; read from the
-         module constants instead of hardcoding a number here again).
-
-    `cached=true` (default False): serve the last computed full-universe
-    result if it's still fresh (see SurpriseStockEngine.scan's
-    cached_max_age_sec) instead of running a new scan. Callers like
-    candidate_engine that just want a cheap read of "what does the surprise
-    tab currently show" should pass this — see the 2026-09-01 incident fix
-    in surprise_scanner.py for why this used to be silently ignored.
-    `limit` (optional): truncate the returned `stocks` list to the top N
-    by score — candidate_engine's own use of this endpoint always passed
-    limit=20 but nothing here ever honored it.
-    """
-    try:
-        from surprise_scanner import surprise_engine
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
-
-    sym_list = None
-    if symbols:
-        sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
-
-    if not sym_list and not force_reload and not refresh:
-        _closed = await _surprise_closed_market_result(surprise_engine, limit)
-        if _closed is not None:
-            return _closed
-
-    client = _get_http_client()
-    # Session 72 (#3): never run past the callers' 25s client timeout. The scan
-    # runs as a shielded task; if it exceeds SURPRISE_SCAN_DEADLINE_S we return
-    # the last computed result (flagged stale) while the scan finishes and
-    # refreshes the cache in the background. With no prior result at all we
-    # simply keep waiting (first-ever scan) — never worse than before.
-    _scan_task = _start_surprise_scan(
-        surprise_engine, client=client, sym_list=sym_list,
-        force_reload=bool(force_reload), cached=bool(cached),
-    )
-    try:
-        result = await asyncio.wait_for(asyncio.shield(_scan_task), timeout=SURPRISE_SCAN_DEADLINE_S)
-    except asyncio.TimeoutError:
-        _last = getattr(surprise_engine, "_last_result", None)
-        if _last is not None and not sym_list:
-            logger.warning("surprise/scan: exceeded %.0fs — served last computed result (age %.0fs); scan continues in background",
-                           SURPRISE_SCAN_DEADLINE_S, time.time() - getattr(surprise_engine, "_last_scan_ts", time.time()))
-            result = dict(_last)
-            result["from_cache"] = True
-            result["stale"] = True
-            result["deadline_exceeded"] = True
-            result["cache_age_sec"] = round(time.time() - getattr(surprise_engine, "_last_scan_ts", time.time()), 1)
-        else:
-            logger.warning("surprise/scan: exceeded %.0fs and no prior result to serve — waiting for the scan", SURPRISE_SCAN_DEADLINE_S)
-            try:
-                result = await _scan_task
-            except Exception as e:
-                logger.exception("surprise/scan failed: %s", e)
-                raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
-    except Exception as e:
-        # Same mapping as the sibling surprise routes (a clear 500 detail
-        # instead of an unhandled error).
-        logger.exception("surprise/scan failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
-    # ``limit`` is applied whenever it is given: 0 (like a negative value)
-    # means "no rows", it no longer silently means "unlimited".
-    if limit is not None and isinstance(result.get("stocks"), list):
-        result = dict(result)
-        result["stocks"] = result["stocks"][: max(0, int(limit))]
-    return result
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_scan = _bound_routes_c.api_surprise_scan
+app.include_router(_bound_routes_c.api_surprise_scan_router)
 
 
-@app.get("/api/surprise/scan/stream")
-@app.get("/surprise/scan/stream")
-async def api_surprise_scan_stream(
-    force_reload: bool = False,
-    symbols: str = None,
-):
-    """
-    NDJSON stream of surprise hits with progress (like /scan/stream).
-    Lines: meta static_loaded → progress batches → scored stocks → done.
-    """
-    try:
-        from surprise_scanner import surprise_engine
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
-
-    sym_list = None
-    if symbols:
-        sym_list = [x.strip() for x in symbols.replace(";", ",").split(",") if x.strip()]
-
-    async def event_generator():
-        t0 = time.time()
-        client = _get_http_client()
-        n_static = await asyncio.to_thread(surprise_engine.load_static_cache, bool(force_reload))  # group302: blocking SQL, off the loop
-        yield json.dumps({
-            "_meta": True,
-            "event": "static_loaded",
-            "static_loaded": n_static,
-            "total": n_static,
-        }) + "\n"
-        if n_static == 0:
-            yield json.dumps({
-                "_meta": True,
-                "event": "error",
-                "error": "surprise_static_feed empty — run premarket first",
-            }) + "\n"
-            yield json.dumps({"_meta": True, "event": "done", "hits": 0, "universe": 0, "elapsed": 0}) + "\n"
-            return
-
-        if sym_list:
-            keys = [
-                s.upper().replace(".NS", "").replace(".BO", "").strip()
-                for s in sym_list if s
-            ]
-            keys = [k for k in keys if k in surprise_engine.static_cache]
-        else:
-            keys = [
-                k for k, v in surprise_engine.static_cache.items()
-                if v.get("is_liquid", True)
-            ] or list(surprise_engine.static_cache.keys())
-
-        total = len(keys)
-        hits = 0
-        quotes_ok = 0
-        quotes_failed = 0
-        chunk = 20
-        yield json.dumps({
-            "_meta": True,
-            "event": "scan_start",
-            "total": total,
-            "static_loaded": n_static,
-        }) + "\n"
-
-        # group242: price the whole key list with chunked POST /quotes/bulk first; the per-symbol _fetch_quote calls
-        # below then find their tick already in hand and only the symbols bulk missed still go out one by one.
-        _prime = getattr(surprise_engine, "prime_bulk_ticks", None)
-        if _prime is not None:
-            try:
-                await _prime(client, MARKET_DATA_URL, keys)
-            except Exception as e:  # never let the prefetch break the stream: fall back to per-symbol quotes
-                logger.warning("surprise stream: bulk prefetch failed (%s) - quoting symbol by symbol", e)
-
-        for i in range(0, total, chunk):
-            batch = keys[i : i + chunk]
-            try:
-                ticks = await asyncio.gather(
-                    *[surprise_engine._fetch_quote(client, MARKET_DATA_URL, s) for s in batch],
-                    return_exceptions=True,
-                )
-            except Exception as e:
-                logger.warning("surprise stream chunk: %s", e)
-                ticks = [None] * len(batch)
-
-            for sym, tick in zip(batch, ticks):
-                if isinstance(tick, Exception) or not tick:
-                    # No quote: nothing real to score. Scoring an empty tick
-                    # could still return a "hit" built from the baseline alone.
-                    quotes_failed += 1
-                    continue
-                quotes_ok += 1
-                scored = surprise_engine.score_stock(sym, tick)
-                if scored:
-                    hits += 1
-                    scored["_progress"] = {
-                        "processed": min(i + chunk, total),
-                        "total": total,
-                        "hits": hits,
-                        "quotes_ok": quotes_ok,
-                        "elapsed": round(time.time() - t0, 1),
-                    }
-                    yield json.dumps(scored, default=str) + "\n"
-
-            processed = min(i + chunk, total)
-            elapsed = round(time.time() - t0, 1)
-            eta = None
-            if processed > 0 and processed < total and elapsed > 0:
-                eta = round((total - processed) * (elapsed / processed), 1)
-            yield json.dumps({
-                "_meta": True,
-                "event": "progress",
-                "processed": processed,
-                "total": total,
-                "hits": hits,
-                "quotes_ok": quotes_ok,
-                "elapsed": elapsed,
-                "eta_sec": eta,
-                "percent": int(100 * processed / max(total, 1)),
-            }) + "\n"
-
-        yield json.dumps({
-            "_meta": True,
-            "event": "done",
-            "hits": hits,
-            "universe": total,
-            "quotes_ok": quotes_ok,
-            "quotes_failed": quotes_failed,
-            "elapsed": round(time.time() - t0, 1),
-        }) + "\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_scan_stream = _bound_routes_j.api_surprise_scan_stream
+app.include_router(_bound_routes_j.api_surprise_scan_stream_router)
 
 
 
@@ -9636,108 +6581,9 @@ from gateway_routers.scan_extras import surprise_static_router as _surprise_stat
 app.include_router(_surprise_static_router)
 
 
-@app.post("/surprise/notify-top-picks")
-async def api_surprise_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
-    """
-    Manual "send to Telegram" button for the Surprise Momentum tab.
-    Re-uses the exact same surprise_engine.scan() the tab's live scan uses
-    (already sorted by score, high to low), takes the top N, and forwards a
-    formatted message to notification-scheduler-service's /notify with
-    channel="telegram" (falls back to the outbox if Telegram isn't
-    configured — see /notify's own behaviour for that).
-    """
-    try:
-        from surprise_scanner import surprise_engine
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"surprise_scanner import failed: {e}")
-
-    client = _get_http_client()
-    try:
-        result = await surprise_engine.scan(
-            client=client,
-            market_data_url=MARKET_DATA_URL,
-            symbols=None,
-            force_reload_static=False,
-        )
-    except Exception as e:
-        # Mapped like the sibling surprise routes instead of a bare 500.
-        logger.exception("surprise notify-top-picks scan failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"surprise scan failed: {str(e)[:240]}")
-    if not isinstance(result, dict):
-        result = {}
-    stocks = result.get("stocks") or []
-    if not stocks:
-        return {
-            "ok": False,
-            "sent": False,
-            "count": 0,
-            "message": result.get("error") or "No Surprise Momentum picks available right now.",
-        }
-
-    top = stocks[: max(1, min(int(top_n), 20))]
-    lines = [f"🎯 *Surprise Momentum — Top {len(top)} Picks*"]
-    for i, s in enumerate(top, 1):
-        sym = s.get("symbol")
-        score = s.get("score")
-        tier = str(s.get("tier") or "").upper()
-        price = s.get("price")
-        chg = s.get("change_pct")
-        target = s.get("target_1")
-        stop = s.get("trailing_stop")
-        trig = s.get("trigger_type") or ""
-        try:
-            chg_str = f"{float(chg):+.2f}%"
-        except (TypeError, ValueError):
-            chg_str = "—"
-
-        def _val(v, money=False):
-            # A missing field prints a dash, never "None" / "₹None".
-            if v is None or v == "":
-                return "—"
-            return f"₹{v}" if money else str(v)
-
-        lines.append(
-            f"{i}. {_val(sym)} — {tier or '—'} (score {_val(score)}/100)\n"
-            f"   {_val(price, True)} ({chg_str}) · Target {_val(target, True)} · Stop {_val(stop, True)}\n"
-            f"   {trig}"
-        )
-    message = "\n".join(lines)
-
-    try:
-        # Moved off the event loop via asyncio.to_thread (session55 sweep,
-        # same pattern as evaluate_price_alerts()/_quote_broadcast_loop
-        # below) — httpx.post here is the blocking (sync-client) call.
-        resp = await asyncio.to_thread(
-            httpx.post,
-            f"{NOTIFICATION_URL}/notify",
-            json={
-                "title": "Surprise Momentum — Top Picks",
-                "message": message,
-                "channel": "telegram",
-            },
-            timeout=15,
-        )
-        try:
-            detail = resp.json()
-        except Exception:
-            detail = {"status_code": resp.status_code}
-        _status = getattr(resp, "status_code", 200)
-        http_ok = not (isinstance(_status, int) and _status >= 400)
-        delivered = bool(http_ok and isinstance(detail, dict) and detail.get("delivered"))
-        out = {
-            # A 4xx/5xx reply from the notification service is a failure the
-            # caller should see in `ok`, not only inside notification_result.
-            "ok": http_ok,
-            "sent": delivered,
-            "count": len(top),
-            "symbols": [s.get("symbol") for s in top],
-            "notification_result": detail,
-        }
-        if not http_ok:
-            out["error"] = f"notification service returned HTTP {_status}"
-        return out
-    except Exception as e:
-        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_notify_top_picks = _bound_routes_j.api_surprise_notify_top_picks
+app.include_router(_bound_routes_j.api_surprise_notify_top_picks_router)
 
 
 # E52: moved to gateway_routers/ipo_routes.py (code unchanged); included here so route order is unchanged.
@@ -9780,74 +6626,9 @@ from gateway_routers.ipo_routes import ipo_purge_router as _ipo_purge_router, ap
 app.include_router(_ipo_purge_router)
 
 
-@app.post("/ipo/notify-top-picks")
-@app.post("/surprise/ipo/notify-top-picks")
-async def api_ipo_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
-    """Manual 'send to Telegram' button for the IPO Tracker tab — mirrors
-    /surprise/notify-top-picks and /stockky-hot/notify-top-picks exactly
-    (same notification-scheduler-service /notify call, channel='telegram'),
-    just sourced from the IPO list (best score first, pre-listing/listing-
-    day/upcoming stages first — same ordering run_ipo_scan already sorts
-    the stored list into) instead of Surprise Momentum's or Hot Picks' own
-    scan results."""
-    try:
-        from ipo_scanner import get_ipo_list
-        listing = get_ipo_list(display_days=None)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"ipo_scanner import failed: {e}")
-
-    results = listing.get("results") or []
-    if not results:
-        return {"ok": False, "sent": False, "count": 0, "message": "No IPO Tracker results available right now — run Scan IPOs first."}
-
-    top = results[: max(1, min(int(top_n), 20))]
-    lines = [f"🆕 *IPO Tracker — Top {len(top)}*"]
-    for i, r in enumerate(top, 1):
-        sym = r.get("symbol")
-        decision = r.get("decision") or "—"
-        # A real IPO score of 0 is a score, not "missing": only fall back to
-        # the advisory score when ipo_score is actually absent.
-        score = r.get("ipo_score")
-        if score is None:
-            score = r.get("pre_listing_advisory_score")
-        stage = str(r.get("stage") or "").replace("_", " ")
-        issue_px = r.get("issue_price")
-        cur_px = r.get("current_price")
-        chg = r.get("current_vs_issue_pct")
-        try:
-            chg_str = f"{float(chg):+.2f}%" if chg is not None else "—"
-        except (TypeError, ValueError):
-            chg_str = "—"
-        lines.append(
-            f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100, {stage})\n"
-            f"   Issue ₹{issue_px if issue_px is not None else '—'} → "
-            f"Current ₹{cur_px if cur_px is not None else '—'} ({chg_str})"
-        )
-    message = "\n".join(lines)
-
-    try:
-        # asyncio.to_thread — see the note on the equivalent httpx.post in
-        # api_surprise_notify_top_picks above.
-        resp = await asyncio.to_thread(
-            httpx.post,
-            f"{NOTIFICATION_URL}/notify",
-            json={"title": "IPO Tracker — Top Picks", "message": message, "channel": "telegram"},
-            timeout=15,
-        )
-        try:
-            detail = resp.json()
-        except Exception:
-            detail = {"status_code": resp.status_code}
-        delivered = bool(isinstance(detail, dict) and detail.get("delivered"))
-        return {
-            "ok": True,
-            "sent": delivered,
-            "count": len(top),
-            "symbols": [r.get("symbol") for r in top],
-            "notification_result": detail,
-        }
-    except Exception as e:
-        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_ipo_notify_top_picks = _bound_routes_d.api_ipo_notify_top_picks
+app.include_router(_bound_routes_d.api_ipo_notify_top_picks_router)
 
 
 # E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
@@ -9855,199 +6636,11 @@ from gateway_routers.surprise_jobs import premarket_status_router as _premarket_
 app.include_router(_premarket_status_router)
 
 
-@app.post("/surprise/premarket")
-@app.get("/surprise/premarket")
-async def api_surprise_premarket_proxy(request: Request):
-    """
-    Premarket baselines → Neon surprise_static_feed.
-
-    Prefer RUNNING ON THE GATEWAY (has DATABASE_URL / Neon).
-    market-data often lacks DATABASE_URL → schema_failed; gateway always ensures schema
-    and computes baselines with yfinance, then writes Neon.
-
-    Body optional: {"symbols": [...]} — else injects scan universe.
-    Query background=true (default) returns immediately; poll /surprise/premarket/status.
-    """
-    import threading
-    import json as _json
-
-    # Cache "schema already confirmed ready" for this process so a second
-    # premarket click (or the frontend's own retry after a timeout) doesn't
-    # re-run ensure_surprise_schema() synchronously on the request path.
-    # ensure_surprise_schema() opens a fresh DB connection (cold Oracle
-    # wallet handshake can take several seconds) BEFORE the background
-    # thread is even spawned — on a slow/cold connection that alone can
-    # exceed Render's/nginx's default proxy timeout and return 504, even
-    # though background=true was requested and would have returned
-    # instantly otherwise. Once schema is confirmed ready once, skip the
-    # live check on every subsequent call (schema doesn't disappear).
-    global _SURPRISE_SCHEMA_CONFIRMED
-    try:
-        _SURPRISE_SCHEMA_CONFIRMED
-    except NameError:
-        _SURPRISE_SCHEMA_CONFIRMED = False
-
-    if _SURPRISE_SCHEMA_CONFIRMED:
-        schema = {"ok": True, "table": "surprise_static_feed", "cached": True}
-    else:
-        try:
-            from surprise_schema import ensure_surprise_schema
-            schema = await asyncio.to_thread(ensure_surprise_schema)  # group356: DDL round trips, off the event loop
-            if schema.get("ok"):
-                _SURPRISE_SCHEMA_CONFIRMED = True
-        except Exception as e:
-            schema = {"ok": False, "error": str(e)[:200]}
-            logger.warning("gateway ensure_surprise_schema: %s", e)
-
-    if not schema.get("ok"):
-        _sb = schema.get("backend") or "postgres"
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "error": "schema_failed",
-                "message": (
-                    "Set ORACLE_DSN + wallet env on api-gateway (Oracle deployment)"
-                    if _sb == "oracle"
-                    else "Set DATABASE_URL or CACHE_DATABASE_URL on api-gateway to Neon pooler URL"
-                ),
-                "schema": schema,
-            },
-        )
-
-    # Parse symbols
-    raw = await request.body()
-    payload = {}
-    if raw:
-        try:
-            payload = _json.loads(raw.decode("utf-8") or "{}")
-        except Exception:
-            payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-
-    symbols = payload.get("symbols") if isinstance(payload.get("symbols"), list) else None
-    q = request.query_params.get("symbols")
-    if not symbols and q:
-        symbols = [x.strip() for x in q.split(",") if x.strip()]
-
-    # 2026-08-25 fix: when no explicit symbol list is given, this used to
-    # call _build_scan_universe() RIGHT HERE — synchronously, on the
-    # request path, before the background thread below even exists. That
-    # function hits the live NSE securities-list API (the same one this
-    # session's NSE-403 fix already had to retry/refresh sessions for),
-    # so on a slow or currently-blocked NSE response this alone can run
-    # past Render's/nginx's proxy timeout and return 504 — even though
-    # background=true was requested and the docstring promises an
-    # immediate return. Universe resolution now happens INSIDE the
-    # background thread (see _job() below) when background=true; it only
-    # stays synchronous here for the non-background call, where blocking
-    # is already an accepted part of that code path's contract.
-    background = str(request.query_params.get("background", "true")).lower() in (
-        "1", "true", "yes", ""
-    )
-    force = str(request.query_params.get("force", "false")).lower() in ("1", "true", "yes")
-
-    try:
-        from surprise_premarket import (
-            precalculate_surprise_baselines,
-            get_premarket_progress,
-            default_universe_from_env,
-        )
-    except Exception as e:
-        logger.warning("surprise_premarket import failed: %s", e)
-        return {
-            "ok": False,
-            "accepted": False,
-            "error": f"surprise_premarket unavailable: {str(e)[:160]}",
-            "schema": schema,
-        }
-
-    def _normalise_universe(uni) -> list:
-        # Normalise FIRST, then drop empties: filtering the raw entries first
-        # let a bare ".NS" through, turning into "" and defeating the
-        # default-universe fallback.
-        out = []
-        for _s in (uni or []):
-            _b = _hot_base(_s)
-            if _b:
-                out.append(_b)
-        return out
-
-    # Already-running check BEFORE any (slow, NSE-backed) universe build.
-    prog = get_premarket_progress()
-    if prog.get("is_running"):
-        return {
-            "ok": True,
-            "accepted": False,
-            "already_running": True,
-            "message": "Premarket already running — poll /surprise/premarket/status",
-            "progress": prog,
-            "schema": schema,
-        }
-
-    explicit_symbols = bool(symbols)
-    if not symbols and not background:
-        # Synchronous path only: resolve the universe now, same as before.
-        try:
-            uni = (await asyncio.to_thread(_build_scan_universe))
-            symbols = _normalise_universe(uni)
-        except Exception as e:
-            logger.warning("universe inject failed: %s", e)
-            symbols = []
-        if not symbols:
-            symbols = default_universe_from_env()
-
-    if background:
-        def _job(explicit_syms=(list(symbols) if explicit_symbols else None), force=force):
-            try:
-                syms = explicit_syms
-                if not syms:
-                    # Universe resolution deferred to here (see fix note
-                    # above) — this thread can take as long as it needs;
-                    # it no longer holds the HTTP response open.
-                    try:
-                        uni = _build_scan_universe()
-                        syms = _normalise_universe(uni)
-                    except Exception as e:
-                        logger.warning("gateway premarket job: universe inject failed: %s", e)
-                        syms = []
-                    if not syms:
-                        syms = default_universe_from_env()
-                precalculate_surprise_baselines(syms, force=force)
-            except Exception as e:
-                logger.exception("gateway premarket job: %s", e)
-
-        threading.Thread(target=_job, daemon=True, name="gw-surprise-premarket").start()
-        return {
-            "ok": True,
-            "accepted": True,
-            "background": True,
-            "symbols": len(symbols) if explicit_symbols else None,
-            "universe_injected": "resolving in background" if not explicit_symbols else len(symbols),
-            "runner": "api-gateway",
-            "backend": schema.get("backend"),
-            "message": (
-                "Premarket started on gateway (%s) — poll /surprise/premarket/status"
-                % ("Oracle ADB" if schema.get("backend") == "oracle" else "Neon")
-            ),
-            "progress": get_premarket_progress(),
-            "schema": schema,
-        }
-
-    try:
-        result = await asyncio.to_thread(precalculate_surprise_baselines, symbols, force=force)  # group361: off the event loop
-    except Exception as e:
-        # The background job logs and swallows a baseline error; the
-        # synchronous path now reports it as a structured error instead of an
-        # unhandled 500.
-        logger.exception("gateway premarket (sync): %s", e)
-        return {"ok": False, "error": str(e)[:200], "runner": "api-gateway", "schema": schema}
-    if not isinstance(result, dict):
-        result = {"ok": True, "result": result}
-    result["runner"] = "api-gateway"
-    result["schema"] = schema
-    return result
+# E86: the handler used to create this with `global`; it now reads/writes it as ref._SURPRISE_SCHEMA_CONFIRMED, so it is defined here (False = schema not yet confirmed this process).
+_SURPRISE_SCHEMA_CONFIRMED = False
+# E86: moved to gateway_support/bound_routes_k.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_surprise_premarket_proxy = _bound_routes_k.api_surprise_premarket_proxy
+app.include_router(_bound_routes_k.api_surprise_premarket_proxy_router)
 
 
 # E49: moved to gateway_routers/surprise_jobs.py (code unchanged); included here so route order is unchanged.
@@ -10078,313 +6671,19 @@ async def _redis_get_bounded(key: str):
         return None
 
 
-@app.get("/stockky-hot")
-async def stockky_hot_endpoint(force: bool = False, background_tasks: BackgroundTasks = None):
-    """HTTP entry for Stockky 🔥 Stocks tab — full universe, batched internally.
-
-    Fix: on a cache miss this used to run the full-universe scan inline on
-    the request (stockky_hot_stocks), which for a few hundred symbols can
-    easily run well past any client/proxy timeout — curl gave up at 25s
-    with http_code=000 in testing even though the scan was still running
-    server-side (same class of bug as the old /scheduler/hydrate/weekend
-    blocking call). /stockky-hot/run + /stockky-hot/status already solve
-    this correctly with a background job + poll pattern, so a cold cache
-    now reuses that instead of duplicating a second, blocking code path.
-    force=true still runs synchronously inline (unchanged) for callers
-    with a suitably long client-side timeout (manual/GHA use).
-    """
-    if force:
-        return await stockky_hot_stocks(force=True, max_symbols=None, progress_cb=None)
-
-    # 2026-10-21: _redis_get can fall through to the Oracle-backed kv_cache; called straight from this
-    # async endpoint it froze the event loop (3.2 s = two bounded 1.5 s reads). Off the loop AND bounded.
-    cached = await _redis_get_bounded(HOT_STOCKS_CACHE_KEY)
-    if cached:
-        return {**cached, "cached": True}
-
-    # Cache is cold: kick off the same background job /stockky-hot/run uses
-    # (no-op if one is already running) and return immediately instead of
-    # blocking the request on a full universe scan.
-    if background_tasks is not None:
-        try:
-            await stockky_hot_run(background_tasks, force=True)
-        except Exception as e:
-            logger.warning("stockky-hot background warm-up failed to start: %s", e)
-
-    stale = await _redis_get_bounded(HOT_RESULT_KEY)
-    if stale:
-        return {**stale, "cached": True, "stale": True, "warming": True}
-
-    return {
-        "ok": True,
-        "warming": True,
-        "message": "Hot Picks is warming up (first run or cache expired) — poll /stockky-hot/status, or retry in a few seconds.",
-        "news_driven": [],
-        "results_driven": [],
-        "bulk_insider_driven": [],
-    }
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_endpoint = _bound_routes_d.stockky_hot_endpoint
+app.include_router(_bound_routes_d.stockky_hot_endpoint_router)
 
 
-@app.get("/catalysts/alert/status")
-def catalyst_alert_status():
-    """Status of last catalyst job. Auto-heal if stuck after free-tier sleep."""
-    job_key = "stockky:catalyst_job"
-    st = _redis_get(job_key) or {}
-    if not isinstance(st, dict):
-        st = {"status": "idle"}
-    try:
-        if st.get("status") == "running":
-            updated = st.get("updated_at") or st.get("started_at")
-            age = None
-            if updated:
-                try:
-                    ts = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=IST)
-                    age = int((datetime.now(IST) - ts).total_seconds())
-                except Exception:
-                    age = None
-            # No heartbeat for 5 minutes → worker likely dead
-            if age is not None and age > 300:
-                st = {
-                    **st,
-                    "status": "error",
-                    "error": f"stale_running age={age}s (worker likely slept)",
-                    "message": f"Auto-failed: no progress for {age}s — re-run will continue batches",
-                    "updated_at": datetime.now(IST).isoformat(),
-                }
-                try:
-                    _redis_set(job_key, st, ttl=86400)
-                except Exception as _we:
-                    # Reported as error, but the stored job still says
-                    # "running" — say so instead of implying it was healed.
-                    logger.warning("catalyst status heal write failed: %s", _we)
-                    st = {**st, "heal_persisted": False}
-    except Exception as e:
-        logger.debug("catalyst status heal: %s", e)
-    return {"ok": True, **st}
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+catalyst_alert_status = _bound_routes_f.catalyst_alert_status
+app.include_router(_bound_routes_f.catalyst_alert_status_router)
 
 
-@app.get("/catalysts/alert")
-@app.post("/catalysts/alert")
-async def catalyst_alert_scan(
-    background_tasks: BackgroundTasks,
-    force: bool = True,
-    notify: bool = True,
-    sync: bool = False,
-    batch_size: int = 0,
-    restart: bool = False,
-):
-    """Pre-market / intraday catalyst sweep — FULL universe in batches.
-
-    Does not reduce stock count. Processes HOT_BATCH_SIZE (default 25) symbols
-    per batch, warms upstream services between batches, then continues until
-    every candidate is scored. Poll GET /catalysts/alert/status.
-    """
-    job_key = "stockky:catalyst_job"
-    # A non-numeric CATALYST_BATCH_SIZE falls back to 25 instead of a 500.
-    batch_size = int(batch_size or _env_int("CATALYST_BATCH_SIZE", 25))
-    batch_size = max(8, min(batch_size, 40))
-
-    def _set_job(**kw):
-        cur = _redis_get(job_key) or {}
-        if not isinstance(cur, dict):
-            cur = {}
-        cur.update(kw)
-        cur["updated_at"] = datetime.now(IST).isoformat()
-        _redis_set(job_key, cur, ttl=86400)
-        return cur
-
-    existing = _redis_get(job_key) or {}
-    # ``force`` only bypasses the hot-stocks cache. It used to also bypass this
-    # already-running guard, and it defaults to True, so a plain call always
-    # started a second sweep. Only an explicit ``restart=true`` overrides it.
-    if isinstance(existing, dict) and existing.get("status") == "running" and not restart:
-        try:
-            upd = existing.get("updated_at") or existing.get("started_at")
-            ts = datetime.fromisoformat(str(upd).replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=IST)
-            if (datetime.now(IST) - ts).total_seconds() < 180:
-                return {"ok": True, "already_running": True, **existing}
-        except Exception:
-            pass
-
-    _set_job(
-        status="running",
-        started_at=datetime.now(IST).isoformat(),
-        message="Catalyst sweep started (full universe, batched)",
-        force=force,
-        notify=notify,
-        actionable_count=0,
-        processed=0,
-        total=0,
-        batch_size=batch_size,
-        batch_index=0,
-        error=None,
-    )
-
-    async def _work():
-        ka_task = None
-        stop_evt = asyncio.Event()
-        try:
-
-            async def _keepalive_loop():
-                while not stop_evt.is_set():
-                    try:
-                        await _warm_upstream_services()
-                    except Exception:
-                        pass
-                    try:
-                        await asyncio.wait_for(stop_evt.wait(), timeout=75.0)
-                    except asyncio.TimeoutError:
-                        pass
-
-            ka_task = asyncio.create_task(_keepalive_loop())
-
-            def _progress(i, total, sym, batch=0):
-                _set_job(
-                    status="running",
-                    message=f"Batch {batch + 1}: scoring {i + 1}/{total} ({sym})",
-                    processed=i + 1,
-                    total=total,
-                    batch_index=batch,
-                    batch_size=batch_size,
-                )
-
-            _set_job(message="Building full catalyst universe…")
-            # max_symbols=None → ALL candidates; internal loop warms every batch_size
-            # Temporarily set env for this process batch size
-            os.environ["HOT_BATCH_SIZE"] = str(batch_size)
-
-            hot = await stockky_hot_stocks(
-                force=force,
-                max_symbols=None,  # full universe — no reduction
-                progress_cb=_progress,
-            )
-
-            picks = []
-            for section in ("bulk_insider_driven", "results_driven", "news_driven"):
-                for item in (hot or {}).get(section) or []:
-                    dec = (item.get("decision") or "").upper()
-                    # A "high" signal must not list a DO NOT BUY / SELL row.
-                    if dec in ("BUY NOW", "PREPARE TO BUY") or (
-                        item.get("signal_strength") == "high" and dec not in ("DO NOT BUY", "SELL")
-                    ):
-                        picks.append({**item, "section": section})
-
-            rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
-            picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(x.get("score") or 0)))
-            seen = set()
-            unique = []
-            for p in picks:
-                s = (p.get("symbol") or "").upper()
-                if not s or s in seen:
-                    continue
-                seen.add(s)
-                unique.append(p)
-
-            _universe_n = (hot or {}).get("universe_size")
-            _universe_n = _universe_n if _universe_n is not None else 0
-            lines = [
-                "🔥 *Stockky Catalyst Alert*",
-                f"IST {datetime.now(IST).strftime('%Y-%m-%d %H:%M')}",
-                f"Universe screened: {_universe_n} · Actionable: {len(unique)}",
-                "",
-            ]
-            if not unique:
-                lines.append("No strong catalyst names right now.")
-            else:
-                for i, p in enumerate(unique[:15], 1):
-                    sym = p.get("symbol")
-                    dec = p.get("decision")
-                    sc = p.get("score")
-                    sec = (p.get("section") or "").replace("_driven", "")
-                    why = ""
-                    rs = p.get("reasons") or []
-                    if isinstance(rs, list) and rs:
-                        why = str(rs[0])[:80]
-                    elif p.get("summary"):
-                        why = str(p.get("summary"))[:80]
-                    lines.append(f"{i}. *{sym}* — {dec} (score {sc}) [{sec}]")
-                    if why:
-                        lines.append(f"   _{why}_")
-
-            message = "\n".join(lines)
-            notified = False
-            if notify and unique:
-                try:
-                    client = _get_http_client()  # shared keepalive pool
-                    if True:
-                        _nresp = await client.post(
-                            f"{NOTIFICATION_URL.rstrip('/')}/notify",
-                            json={"title": "Catalyst Alert", "message": message, "channel": "telegram"},
-                        )
-                    # A non-2xx reply is a failed delivery: take the fallback
-                    # path below instead of reporting notified=True.
-                    _nstatus = getattr(_nresp, "status_code", 200)
-                    if isinstance(_nstatus, int) and not (200 <= _nstatus < 300):
-                        raise RuntimeError(f"notify returned HTTP {_nstatus}")
-                    notified = True
-                except Exception as e:
-                    logger.warning("catalyst telegram failed: %s", e)
-                    # BUG FIX (2026-09-01): `"send_picks_to_telegram" in dir()`
-                    # checks the CURRENT LOCAL SCOPE, not module globals —
-                    # send_picks_to_telegram is a module-level function (never
-                    # a local variable here), so this guard was always False
-                    # and this fallback notify path never actually ran when
-                    # the primary /notify POST above failed. Call it directly;
-                    # the surrounding try/except already covers a real failure.
-                    try:
-                        send_picks_to_telegram({"recommendations": unique[:10]})
-                        notified = True
-                    except Exception as e2:
-                        logger.warning("catalyst telegram fallback: %s", e2)
-
-            total_u = int((hot or {}).get("universe_size") or 0)
-            result = {
-                "ok": True,
-                "status": "done",
-                "actionable_count": len(unique),
-                "picks": unique[:20],
-                "hot_universe_size": total_u,
-                "notified": notified,
-                "message_preview": message[:500],
-                "generated_at": datetime.now(IST).isoformat(),
-                "message": f"Done — screened {total_u} · {len(unique)} actionable (batched {batch_size})",
-                "processed": total_u,
-                "total": total_u,
-                "batch_size": batch_size,
-            }
-            _set_job(**result)
-            return result
-        except Exception as e:
-            logger.exception("catalyst alert failed")
-            _set_job(status="error", error=str(e)[:300], message=f"Error: {e}")
-            return {"ok": False, "status": "error", "error": str(e)[:300]}
-        finally:
-            # Stop the keep-alive loop on EVERY exit path (it used to leak
-            # when the scan failed — only the success path stopped it).
-            stop_evt.set()
-            if ka_task is not None:
-                # wait_for itself cancels ka_task if this coroutine is cancelled.
-                try:
-                    await asyncio.wait_for(ka_task, timeout=2)
-                except Exception:
-                    ka_task.cancel()
-
-    if sync:
-        return await _work()
-
-    background_tasks.add_task(_work)
-    return {
-        "ok": True,
-        "status": "running",
-        "accepted": True,
-        "batch_size": batch_size,
-        "message": "Catalyst alert started — full universe in batches; poll /catalysts/alert/status",
-        "poll": "/catalysts/alert/status",
-    }
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+catalyst_alert_scan = _bound_routes_j.catalyst_alert_scan
+app.include_router(_bound_routes_j.catalyst_alert_scan_router)
 
 
 # ── WebSocket real-time hub (scan progress + market ticks + training) ─────────
@@ -10614,142 +6913,9 @@ def _ws_symbol_list(raw) -> List[str]:
     return []
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """Realtime: scan progress, live quotes, market, training.
-
-    Client messages (JSON):
-      {"action":"subscribe","channel":"scan:<id>"|"quote:TCS"|"market"|"jobs"|"all"}
-      {"action":"subscribe_quotes","symbols":["TCS","INFY"]}
-      {"action":"unsubscribe_quotes","symbols":["TCS"]}  # or omit symbols to clear
-      {"action":"unsubscribe","channel":"..."}
-      {"action":"ping"}
-    Server:
-      {"channel":"quote:TCS","type":"quote","price":...,"as_of":...}
-      {"channel":"scan:...","type":"scan_status",...}
-      {"channel":"jobs","type":"jobs_snapshot","data_feed":{...},"refill_additional":{...},
-       "surprise_premarket":{...},"rate_limits":{"yfinance":{...},"analysis":{...}}}
-    """
-    # group 454: CORS does not cover websockets, so an allowlist is enforced here (a browser always sends Origin; non-browser clients may omit it)
-    _ws_hdrs = getattr(websocket, "headers", None)
-    _ws_origin = _ws_hdrs.get("origin") if _ws_hdrs is not None else None
-    if _ws_origin and not _cors_policy.origin_allowed(_ws_origin):
-        await websocket.close(code=1008)
-        return
-    await ws_manager.connect(websocket)
-    _ensure_quote_loop()
-    _ensure_jobs_loop()
-    try:
-        await websocket.send_text(json.dumps({
-            "channel": "system",
-            "type": "connected",
-            "ts": datetime.now(IST).isoformat(),
-            "features": ["scan", "quotes", "jobs", "ping"],
-        }))
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw) if raw else {}
-            except Exception:
-                msg = {}
-            # A frame that isn't a JSON object, or has a non-string action /
-            # channel, is ignored — it used to raise and drop the connection.
-            if not isinstance(msg, dict):
-                msg = {}
-            _act = msg.get("action")
-            action = _act.lower() if isinstance(_act, str) else ""
-            _chan = msg.get("channel")
-            channel = _chan.strip() if isinstance(_chan, str) else ""
-            # Quote channels are canonicalised ("quote:tcs.ns" -> "quote:TCS")
-            # so the subscription, the watch set and the snapshot all agree.
-            if channel.lower().startswith("quote:"):
-                _qsym = _hot_base(channel.split(":", 1)[1])
-                channel = f"quote:{_qsym}" if _qsym else ""
-
-            if action == "ping":
-                await websocket.send_text(json.dumps({"channel": "system", "type": "pong"}))
-
-            elif action == "subscribe_quotes":
-                syms = _ws_symbol_list(msg.get("symbols"))
-                ws_manager.watch_quotes(websocket, syms)
-                await websocket.send_text(json.dumps({
-                    "channel": "system",
-                    "type": "quotes_subscribed",
-                    "symbols": sorted(ws_manager.quote_syms.get(id(websocket), set())),
-                }, default=str))
-                # Immediate snapshot
-                for sym in list(ws_manager.quote_syms.get(id(websocket), set()))[:10]:
-                    q = await asyncio.to_thread(_resolve_quote_price, sym)
-                    if q:
-                        await websocket.send_text(json.dumps({
-                            "channel": f"quote:{sym}",
-                            "type": "quote",
-                            **q,
-                        }, default=str))
-
-            elif action == "unsubscribe_quotes":
-                syms = msg.get("symbols")
-                if syms is None:
-                    ws_manager.unwatch_quotes(websocket, None)
-                else:
-                    ws_manager.unwatch_quotes(websocket, _ws_symbol_list(syms))
-                await websocket.send_text(json.dumps({
-                    "channel": "system",
-                    "type": "quotes_unsubscribed",
-                }))
-
-            elif action == "subscribe" and channel:
-                ws_manager.subscribe(websocket, channel)
-                if channel.startswith("quote:"):
-                    sym = channel.split(":", 1)[1]
-                    ws_manager.watch_quotes(websocket, [sym])
-                await websocket.send_text(json.dumps({
-                    "channel": channel, "type": "subscribed"
-                }))
-                if channel.startswith("scan:"):
-                    task_id = channel.split(":", 1)[1]
-                    data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
-                    await websocket.send_text(json.dumps({
-                        "channel": channel,
-                        "type": "scan_status",
-                        "task_id": task_id,
-                        "status": data.get("status"),
-                        "processed": data.get("processed", 0),
-                        "total": data.get("total", 0),
-                        "elapsed": data.get("elapsed"),
-                        "result": data.get("result") if data.get("status") == "done" else None,
-                    }, default=str))
-                elif channel.startswith("quote:"):
-                    sym = channel.split(":", 1)[1]
-                    q = await asyncio.to_thread(_resolve_quote_price, sym)
-                    if q:
-                        await websocket.send_text(json.dumps({
-                            "channel": channel, "type": "quote", **q
-                        }, default=str))
-
-            elif action == "unsubscribe" and channel:
-                ws_manager.unsubscribe(websocket, channel)
-                if channel.startswith("quote:"):
-                    ws_manager.unwatch_quotes(websocket, [channel.split(":", 1)[1]])
-
-            elif action == "poll_scan" and isinstance(msg.get("task_id"), str) and msg.get("task_id"):
-                task_id = msg["task_id"]
-                data = _redis_get(SCAN_TASK_PREFIX + task_id) or {}
-                await websocket.send_text(json.dumps({
-                    "channel": f"scan:{task_id}",
-                    "type": "scan_status",
-                    "task_id": task_id,
-                    "status": data.get("status"),
-                    "processed": data.get("processed", 0),
-                    "total": data.get("total", 0),
-                    "elapsed": data.get("elapsed"),
-                    "result": data.get("result") if data.get("status") == "done" else None,
-                }, default=str))
-    except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
-    except Exception as e:
-        logger.warning("websocket closed: %s", e)
-        ws_manager.disconnect(websocket)
+# E88: moved to gateway_support/bound_routes_m.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+websocket_endpoint = _bound_routes_m.websocket_endpoint
+app.include_router(_bound_routes_m.websocket_endpoint_router)
 
 
 async def _ws_push_scan(task_id: str, data: dict):
@@ -11131,28 +7297,9 @@ async def _warm_momentum_movers_cache():
         logger.debug("momentum-movers/scan-universe warm task not scheduled: %s", e)
 
 
-@app.post("/ops/circuit-reset", dependencies=[Depends(_require_admin)])
-@app.get("/ops/circuit-reset")
-async def ops_circuit_reset():
-    """Force-close all circuit breakers after intentional warm-up / cold-start recovery.
-
-    Use before a full market scan when services were sleeping and breakers opened
-    on ReadTimeout. Safe to call any time.
-    """
-    try:
-        from circuit_breaker import reset_all_breakers, all_snapshots
-        names = reset_all_breakers()
-        snaps = all_snapshots()
-        return {
-            "ok": True,
-            "reset": names,
-            "count": len(names),
-            "snapshots": snaps,
-            "message": f"Reset {len(names)} circuit breaker(s). Ready for scan.",
-        }
-    except Exception as e:
-        logger.warning("circuit-reset: %s", e)
-        return {"ok": False, "error": str(e)[:200]}
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_circuit_reset = _bound_routes_g.ops_circuit_reset
+app.include_router(_bound_routes_g.ops_circuit_reset_router)
 
 
 # E49: moved to gateway_routers/ops_status.py (code unchanged); included here so route order is unchanged.
@@ -11180,90 +7327,29 @@ def _overnight_proxy_body(r):
     return body
 
 
-@app.get("/ops/overnight/status")
-async def ops_overnight_status():
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{SCHEDULER_URL}/overnight/status")
-            return _overnight_proxy_body(r)
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_overnight_status = _bound_routes_b.ops_overnight_status
+app.include_router(_bound_routes_b.ops_overnight_status_router)
 
 
-@app.get("/ops/overnight/config")
-async def ops_overnight_get_config():
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{SCHEDULER_URL}/overnight/config")
-            return _overnight_proxy_body(r)
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_overnight_get_config = _bound_routes_b.ops_overnight_get_config
+app.include_router(_bound_routes_b.ops_overnight_get_config_router)
 
 
-@app.post("/ops/overnight/config", dependencies=[Depends(_require_admin)])
-async def ops_overnight_set_config(
-    enabled: Optional[bool] = None,
-    datafeed_time: Optional[str] = None,
-    premarket_time: Optional[str] = None,
-    rest_between_steps_sec: Optional[int] = None,
-):
-    try:
-        params = {}
-        if enabled is not None:
-            params["enabled"] = enabled
-        if datafeed_time is not None:
-            params["datafeed_time"] = datafeed_time
-        if premarket_time is not None:
-            params["premarket_time"] = premarket_time
-        if rest_between_steps_sec is not None:
-            params["rest_between_steps_sec"] = rest_between_steps_sec
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(f"{SCHEDULER_URL}/overnight/config", params=params)
-            return _overnight_proxy_body(r)
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_overnight_set_config = _bound_routes_g.ops_overnight_set_config
+app.include_router(_bound_routes_g.ops_overnight_set_config_router)
 
 
-@app.post("/ops/overnight/run", dependencies=[Depends(_require_admin)])
-async def ops_overnight_run(phase: str = "datafeed"):
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(f"{SCHEDULER_URL}/overnight/run", params={"phase": phase})
-            return _overnight_proxy_body(r)
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_overnight_run = _bound_routes_g.ops_overnight_run
+app.include_router(_bound_routes_g.ops_overnight_run_router)
 
 
-@app.get("/ops/keepalive")
-@app.post("/ops/keepalive")
-async def ops_keepalive(deep: bool = False):
-    """
-    Lightweight keep-alive for free-tier.
-    - Always: gateway health (cheap)
-    - deep=true: sequential soft-ping of required services (used sparingly by UI while active)
-    Avoids parallel storms; safe during scans.
-    """
-    out = {"ok": True, "gateway": True, "services": {}, "ts": datetime.now(IST).isoformat()}
-    if not deep:
-        return out
-    if not _wake_pings_enabled():
-        # Always-on host: nothing sleeps, so the browser's keep-alive ping has nothing to wake.
-        out["skipped"] = True
-        return out
-    # Soft sequential pings — never block more than ~12s total
-    client = _get_http_client()
-    for name, cfg in list(SYSTEM_SERVICES.items())[:6]:
-        url = (cfg.get("url") or "").rstrip("/")
-        if not url:
-            continue
-        try:
-            r = await client.get(f"{url}/health", params={"warm": "true"}, timeout=4.0)
-            out["services"][name] = r.status_code == 200
-        except Exception:
-            out["services"][name] = False
-            await asyncio.sleep(0.15)
-    out["ok"] = True
-    return out
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_keepalive = _bound_routes_f.ops_keepalive
+app.include_router(_bound_routes_f.ops_keepalive_router)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Data Feed — slow fields (12–24h) for free-tier rate-limit relief
@@ -11271,67 +7357,19 @@ async def ops_keepalive(deep: bool = False):
 
 
 
-@app.post("/ops/power-off", dependencies=[Depends(_require_admin)])
-async def ops_power_off(background_tasks: BackgroundTasks):
-    """Force-stop ALL user-initiated activity (same path as process shutdown).
-
-    1) Commit / checkpoint in-progress scan + data-feed + hot-picks
-    2) Signal cancel everywhere (process-local + durable)
-    3) Pause activity gate so quote loop / workers idle
-    4) Frontend should reload and only hit health/keepalive afterwards
-    """
-    phases = _graceful_shutdown_commit(reason="power_off")
-
-    # Best-effort stop training lock on decision-prediction service
-    try:
-        client = _get_http_client()
-        urls = [
-            f"{TRAINING_URL.rstrip('/')}/api/train/stop",
-            f"{TRAINING_URL.rstrip('/')}/training/stop",
-            f"{DECISION_URL.rstrip('/')}/training/clear-lock",
-        ]
-        stopped_tr = False
-        for u in urls:
-            try:
-                r = await client.post(u, timeout=8)
-                if r.status_code < 500:
-                    stopped_tr = True
-                    break
-            except Exception:
-                continue
-        phases.append({"phase": "training", "ok": True, "detail": "stop signalled" if stopped_tr else "best-effort"})
-    except Exception as e:
-        phases.append({"phase": "training", "ok": False, "detail": str(e)[:120]})
-
-    phases.append({"phase": "ready", "ok": True, "detail": "All stoppable jobs force-stopped. Only health/keepalive allowed until resume."})
-    return {
-        "ok": True,
-        "message": "Power Off complete — all activity stopped; checkpoints committed",
-        "phases": phases,
-        "activity_paused": True,
-        "hint": "UI should reload. Background quote fan-out and jobs are paused. GitHub workflows remain independent.",
-    }
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_power_off = _bound_routes_g.ops_power_off
+app.include_router(_bound_routes_g.ops_power_off_router)
 
 
-@app.post("/ops/resume-activity", dependencies=[Depends(_require_admin)])
-def ops_resume_activity():
-    """Clear Power-Off pause so scans / feeds / quotes can run again."""
-    set_activity_paused(False)
-    try:
-        _SCAN_CANCEL_FLAGS.discard("__ALL__")
-    except Exception:
-        pass
-    return {"ok": True, "activity_paused": False, "message": "Activity resumed"}
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_resume_activity = _bound_routes_g.ops_resume_activity
+app.include_router(_bound_routes_g.ops_resume_activity_router)
 
 
-@app.get("/ops/activity")
-def ops_activity_status():
-    return {
-        "ok": True,
-        "activity_paused": activity_paused(),
-        "quote_loop_enabled": bool(_QUOTE_LOOP_ENABLED),
-        "scan_cancel_flags": len(_SCAN_CANCEL_FLAGS),
-    }
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+ops_activity_status = _bound_routes_b.ops_activity_status
+app.include_router(_bound_routes_b.ops_activity_status_router)
 
 
 
@@ -11354,169 +7392,14 @@ from gateway_routers.scheduler_control import scheduler_control_router as _sched
 app.include_router(_scheduler_control_router)
 
 
-@app.post("/api/price-alerts/evaluate")
-@app.post("/price-alerts/evaluate")
-async def api_evaluate_price_alerts():
-    """Evaluate alerts vs bulk cache / feed; notify on triggers."""
-    from data_feed import evaluate_price_alerts
-    # asyncio.to_thread (session55 sweep, part 2): evaluate_price_alerts()
-    # is a blocking kv_get/kv_set call, and each iteration below can add a
-    # blocking _wake_notification_service() (~httpx.get, up to 5s) plus a
-    # blocking httpx.post — this is a manually-triggered endpoint, but on a
-    # multi-alert trigger it's the same "loop of blocking calls inline on
-    # the event loop" pattern already fixed for /api/feed/batch and
-    # _quote_broadcast_loop, so it gets the same treatment rather than being
-    # left as a single-call exception.
-    try:
-        triggered = await asyncio.to_thread(evaluate_price_alerts)
-    except Exception as e:
-        logger.warning("price alert evaluation failed: %s", e)
-        return {"ok": False, "error": str(e)[:200], "triggered": [], "triggered_count": 0, "notified": 0}
-    notified = 0
-    for t in triggered:
-        try:
-            await asyncio.to_thread(_wake_notification_service)
-            msg = (
-                f"Price alert: {t.get('symbol')} is ₹{t.get('current_price')} "
-                f"({t.get('direction')} ₹{t.get('target_price')})"
-            )
-            if t.get("note"):
-                msg += f" — {t.get('note')}"
-            resp = await asyncio.to_thread(
-                httpx.post,
-                f"{NOTIFICATION_URL}/notify",
-                json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
-                timeout=12,
-            )
-            if resp.status_code == 200:
-                notified += 1
-        except Exception as e:
-            logger.debug("price alert notify: %s", e)
-    return {
-        "ok": True,
-        "triggered": triggered,
-        "triggered_count": len(triggered),
-        "notified": notified,
-    }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_evaluate_price_alerts = _bound_routes_c.api_evaluate_price_alerts
+app.include_router(_bound_routes_c.api_evaluate_price_alerts_router)
 
 
-@app.post("/data-feed/hard-reset", dependencies=[Depends(_require_admin)])
-@app.post("/api/data-feed/hard-reset", dependencies=[Depends(_require_admin)])
-@app.post("/api/feed/hard-reset", dependencies=[Depends(_require_admin)])
-async def hard_reset_database(preserve_days: int = 7):
-    """
-    Wipes VOLATILE stockky_kv fields (price/volume) and re-asserts unique
-    constraint + index on k. Called by the frontend "Feed Fresh Data" button
-    *before* /data-feed/run so a corrupted / over-₹5000 universe is nuked
-    on autopilot.
-
-    Durable/slow per-symbol fields (PE ratio, ROCE, sector, technical &
-    fundamental scores, model prediction outputs, etc.) updated within the
-    last `preserve_days` days are snapshotted and restored automatically —
-    only stale (older than preserve_days) or price/volume fields are lost.
-    Pass preserve_days=0 to force the old full-wipe behavior.
-    """
-    try:
-        from kv_cache import hard_reset_stockky_kv
-        from data_feed import clear_local_data_feed_caches, request_data_feed_stop, clear_data_feed_stop
-
-        # Stop any in-flight feed first
-        try:
-            request_data_feed_stop()
-        except Exception:
-            pass
-
-        # asyncio.to_thread (session55 sweep, part 2): hard_reset_stockky_kv
-        # is a blocking Neon write touching every kv row outside
-        # preserve_days — this is a manual admin action, but the write can
-        # run long on a large table, so it still shouldn't stall every other
-        # request for its duration.
-        result = await asyncio.to_thread(hard_reset_stockky_kv, preserve_days=preserve_days)
-        try:
-            clear_local_data_feed_caches()
-        except Exception:
-            pass
-        try:
-            clear_data_feed_stop()
-        except Exception:
-            pass
-
-        # Destroy Split-Brain ghosts: scan-universe cache, last-scan, known-symbols
-        ghost_keys = [
-            SCAN_UNIVERSE_KEY,
-            "stockky:last_full_scan",
-            "stockky:known_symbols",
-            "stockky:data_feed:index",
-            "stockky:data_feed:meta",
-            "stockky:data_feed:job",
-            "stockky:hot_result",
-            "stockky:hot_result_db",
-            "stockky:hot_job",
-        ]
-        for gk in ghost_keys:
-            # BUG FIX (2026-09-03, pyflakes audit): this used to be
-            # `_redis_delete(gk) if "_redis_delete" in dir() else None` —
-            # the exact same `dir()`-with-no-arguments anti-pattern already
-            # fixed once in this file for `_get_nifty50_data` (see the
-            # 2026-09-01 note on _get_momentum_movers above): dir() with no
-            # arguments returns names in the CURRENT LOCAL SCOPE, not module
-            # globals, and `_redis_delete` was never a local variable here —
-            # so the condition was always False and this line silently did
-            # nothing on every call, for a function that (like
-            # _fetch_nse_fundamentals above) was never actually defined
-            # anywhere in the codebase either. Removed rather than
-            # reimplemented: the two blocks below (_kv_cache.kv_delete and
-            # _redis.delete) already cover both real ghost-key cleanup paths
-            # this service uses, so this was dead weight, not a gap.
-            # asyncio.to_thread: kv_delete is a blocking Neon call, per key
-            # (9 keys) — small/fixed count so this was flagged low-priority,
-            # but it's still a manual admin action worth keeping off the
-            # event loop rather than an exception to the rule swept above.
-            try:
-                if _kv_cache is not None:
-                    await asyncio.to_thread(_kv_cache.kv_delete, gk)
-            except Exception:
-                pass
-            try:
-                if _redis:
-                    await asyncio.to_thread(_redis.delete, gk)
-            except Exception:
-                pass
-
-        # Reset job/meta so UI shows 0 stocks immediately
-        try:
-            store = _feed_store()
-            store.set_job(
-                status="idle",
-                message="Hard-reset complete — ready for fresh feed",
-                stop_requested=False,
-                processed=0,
-                total=0,
-                ok_count=0,
-            )
-            store.set_meta(
-                last_success_at=None,
-                last_count=0,
-                last_message="Hard-reset — memory + DB wiped",
-                stock_count=0,
-            )
-        except Exception as e:
-            logger.debug("hard-reset job/meta clear: %s", e)
-
-        if not isinstance(result, dict):
-            # No status contract from the wipe (e.g. None): the wipe ran, so report success
-            # with the default message instead of crashing on `.get` after the work is done.
-            result = {}
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("message", "hard-reset failed"))
-        result["message"] = result.get("message") or "Database wiped, locked, and memory cleared. Ready for feed."
-        result["ghosts_cleared"] = ghost_keys
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("hard_reset_database: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)[:240])
+# E81: moved to gateway_support/bound_routes_g.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+hard_reset_database = _bound_routes_g.hard_reset_database
+app.include_router(_bound_routes_g.hard_reset_database_router)
 
 
 
@@ -11526,264 +7409,14 @@ def _bulk_feed_include_index() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
-@app.post("/data-feed/start-bulk-feed")
-@app.post("/api/data-feed/start-bulk-feed")
-@app.post("/api/feed/start-bulk-feed")
-async def start_bulk_feed(
-    force: bool = True,
-    use_universe: bool = True,
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Yahoo bulk price feeder — NON-BLOCKING.
-
-    Returns 200 in <100 ms. Heavy yfinance download runs in BackgroundTasks
-    so Render/Vercel gateway never hits the 98-second timeout.
-
-    1) Build symbol list from scan universe (or existing feed index)
-    2) Mark job=running for UI polling
-    3) Schedule background worker that does chunked yf.download + Neon upsert
-    """
-    from data_feed import run_bulk_yahoo_price_feed, clear_data_feed_stop
-
-    try:
-        clear_data_feed_stop()
-    except Exception:
-        pass
-
-    symbols: list = []
-    if use_universe:
-        try:
-            symbols = (await asyncio.to_thread(_build_scan_universe)) or []
-        except Exception as e:
-            logger.warning("bulk-feed universe: %s", e)
-            symbols = []
-        # group426: the scan universe (~500 symbols, sometimes a stale copy) is smaller than the feed index (587), so ~48 indexed
-        # symbols (MARUTI, ONGC, HAL ...) were never priced by this job. Append the indexed ones (duplicates are dropped below).
-        # BULK_FEED_INCLUDE_INDEX=0 restores the old list.
-        if symbols and _bulk_feed_include_index():
-            try:
-                _indexed = [x for x in (_feed_store().list_symbols() or []) if x]
-            except Exception:
-                _indexed = []
-            if _indexed:
-                logger.info("bulk-feed: scan universe %d + feed index %d (duplicates are dropped next)", len(symbols), len(_indexed))
-                symbols = list(symbols) + _indexed
-    if not symbols:
-        try:
-            symbols = _feed_store().list_symbols() or []
-        except Exception:
-            symbols = []
-    if not symbols:
-        try:
-            symbols = list(_get_nifty_indices() or [])[:150]
-        except Exception:
-            symbols = []
-
-    symbols = [
-        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-        for s in symbols
-        if s
-    ]
-    # de-dupe preserve order
-    seen = set()
-    clean = []
-    for s in symbols:
-        if s and s not in seen:
-            seen.add(s)
-            clean.append(s)
-    symbols = clean
-
-    if not symbols:
-        raise HTTPException(status_code=400, detail="No symbols available for bulk feed")
-
-    # Mark job running for UI (instant)
-    try:
-        store = _feed_store()
-        store.set_job(
-            status="running",
-            message=f"Bulk Yahoo feed started for {len(symbols)} symbols (background)…",
-            processed=0,
-            total=len(symbols),
-            ok_count=0,
-            error_count=0,
-            stop_requested=False,
-            started_at=__import__("datetime").datetime.now(
-                __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-            ).isoformat(),
-        )
-    except Exception:
-        pass
-
-    def _bulk_worker(syms: list):
-        """Runs entirely outside the HTTP request — no gateway timeout risk."""
-        try:
-            result = run_bulk_yahoo_price_feed(syms, merge_existing=True)
-            n = int((result or {}).get("tracked_stocks") or 0)
-            store = _feed_store()
-            store.set_job(
-                status="done",
-                message=(result or {}).get("message") or f"Bulk feed done: {n}",
-                processed=n,
-                total=len(syms),
-                ok_count=n,
-                error_count=0,
-                finished_at=__import__("datetime").datetime.now(
-                    __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-                ).isoformat(),
-            )
-            store.set_meta(
-                last_success_at=__import__("datetime").datetime.now(
-                    __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-                ).isoformat(),
-                last_count=n,
-                last_message=(result or {}).get("message"),
-                source="yfinance_bulk_bg",
-            )
-            logger.info("background bulk feed finished: %s", result)
-        except Exception as e:
-            logger.exception("background bulk feed failed: %s", e)
-            try:
-                _feed_store().set_job(
-                    status="error",
-                    message=str(e)[:200],
-                    finished_at=__import__("datetime").datetime.now(
-                        __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-                    ).isoformat(),
-                )
-            except Exception:
-                pass
-
-    if background_tasks is not None:
-        background_tasks.add_task(_bulk_worker, symbols)
-    else:
-        # Fallback if FastAPI somehow omits BackgroundTasks (should not happen)
-        import threading
-        threading.Thread(target=_bulk_worker, args=(symbols,), daemon=True).start()
-
-    return {
-        "ok": True,
-        "status": "started",
-        "started": True,
-        "total": len(symbols),
-        "message": (
-            f"Data feed background worker initiated for {len(symbols)} symbols. "
-            "Ingesting into Cache DB. Poll /data-feed/status."
-        ),
-    }
+# E86: moved to gateway_support/bound_routes_k.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+start_bulk_feed = _bound_routes_k.start_bulk_feed
+app.include_router(_bound_routes_k.start_bulk_feed_router)
 
 
-@app.post("/data-feed/refresh-prepare-to-buy")
-@app.post("/api/data-feed/refresh-prepare-to-buy")
-@app.post("/api/feed/refresh-prepare-to-buy")
-async def refresh_prepare_to_buy(
-    min_score: float = 58.0,
-    max_score: float = 68.0,
-):
-    """
-    Surgical live-quote refresh for high-conviction "Prepare to Buy" setups only.
-    Completely bypasses the 300-stock API storm — only candidates in the
-    [min_score, max_score) band (default 58–68) are quoted, with a 0.3s gap.
-    """
-    import asyncio
-    from data_feed import (
-        find_prepare_to_buy_candidates,
-        patch_feed_price,
-    )
-
-    try:
-        candidates = await asyncio.to_thread(find_prepare_to_buy_candidates, min_score=min_score, max_score=max_score)  # group361: off the event loop
-    except Exception as e:
-        logger.exception("refresh_prepare_to_buy candidates: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)[:200])
-
-    if not candidates:
-        return {
-            "status": "success",
-            "refreshed_count": 0,
-            "symbols": [],
-            "message": "No Prepare-to-Buy candidates in score band",
-            "min_score": min_score,
-            "max_score": max_score,
-        }
-
-    md_base = (MARKET_DATA_URL or "").rstrip("/")
-    updated: list = []
-    errors: list = []
-
-    # group358 (LOG-ONLY): snapshot each row and its stored price BEFORE the patch (an in-memory store may hand out the same dict the patch then
-    # mutates), so the notes can say "structure now blocks entry at the fresh price, it passed at the last stored one". Fail-open: no notes, same refresh.
-    feed_rows: Dict[str, Any] = {}
-    old_prices: Dict[str, Any] = {}
-    live_prices: Dict[str, float] = {}
-    _bs = None
-    try:
-        import buy_sniper as _bs
-        if _bs._prep_mode() != "off":
-            from data_feed import get_all_stock_feeds
-            _got = await asyncio.to_thread(get_all_stock_feeds, list(candidates))
-            for _k, _r in (_got.items() if isinstance(_got, dict) else []):
-                if isinstance(_r, dict):
-                    feed_rows[_k] = dict(_r)
-                    old_prices[_k] = _r.get("price")
-    except Exception as e:  # noqa: BLE001
-        logger.debug("refresh_prepare_to_buy structure snapshot failed (no notes): %s", e)
-        feed_rows, old_prices = {}, {}
-
-    async with httpx.AsyncClient() as client:
-        for symbol in candidates:
-            try:
-                q_res = await client.get(f"{md_base}/quote/{symbol}", timeout=3.0)
-                if q_res.status_code == 200:
-                    body = q_res.json() if q_res.content else {}
-                    live_price = None
-                    if isinstance(body, dict):
-                        for k in ("cmp", "price", "ltp", "close", "last_price", "regularMarketPrice"):
-                            try:
-                                v = float(body.get(k) or 0)
-                                if v > 0:
-                                    live_price = v
-                                    break
-                            except (TypeError, ValueError):
-                                pass
-                    if live_price:
-                        live_prices[symbol] = live_price
-                    if live_price and patch_feed_price(symbol, live_price):
-                        updated.append(symbol)
-                else:
-                    errors.append({"symbol": symbol, "status": q_res.status_code})
-            except Exception as e:
-                errors.append({"symbol": symbol, "error": str(e)[:120]})
-            await asyncio.sleep(0.3)
-
-    reply: Dict[str, Any] = {
-        "status": "success",
-        "refreshed_count": len(updated),
-        "symbols": candidates,
-        "updated": updated,
-        "errors": errors[:20],
-        "min_score": min_score,
-        "max_score": max_score,
-        "message": f"Refreshed {len(updated)}/{len(candidates)} Prepare-to-Buy quotes",
-    }
-    if feed_rows and _bs is not None:  # group358: structure notes ride along in the reply and the log; the refresh above never depends on them
-        try:
-            rep = _bs.prepare_refresh_report(feed_rows, live_prices, old_prices)
-            if rep.get("mode") != "off":
-                counts = {k: int(rep.get(k) or 0) for k in ("checked", "no_opinion", "turned_bad", "flipped", "with_triggers")}
-                for _sym, _note in (rep.get("notes") or {}).items():
-                    if _note.get("headline"):
-                        logger.info("prepare refresh structure %s: %s", _sym, _note["headline"])
-                logger.info("prepare refresh structure: checked=%d no_opinion=%d turned_bad=%d flipped=%d with_triggers=%d",
-                            counts["checked"], counts["no_opinion"], counts["turned_bad"], counts["flipped"], counts["with_triggers"])
-                for _outcome in ("checked", "no_opinion", "turned_bad", "flipped", "with_triggers"):
-                    _structure_metric("stockky_prepare_structure_total", counts[_outcome], outcome=_outcome)
-                reply["structure_mode"] = rep.get("mode")
-                reply["structure_notes"] = rep.get("notes") or {}
-                reply["structure_counts"] = counts
-        except Exception as e:  # noqa: BLE001
-            logger.debug("refresh_prepare_to_buy structure notes failed (ignored): %s", e)
-    return reply
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+refresh_prepare_to_buy = _bound_routes_f.refresh_prepare_to_buy
+app.include_router(_bound_routes_f.refresh_prepare_to_buy_router)
 
 
 
@@ -11892,27 +7525,14 @@ async def _stop_structure_refresh_catchup():
         t.cancel()
 
 
-@app.get("/data-feed/structure-refresh/status")
-@app.get("/api/data-feed/structure-refresh/status")
-def data_feed_structure_refresh_status():
-    """Status of the post-close structure refresh job (+ lifetime counters of this process)."""
-    try:
-        import structure_refresh as _sr
-        _t = _STRUCTURE_CATCHUP_TASK
-        _catchup = {"enabled": _sr.catchup_enabled(), "interval_s": _sr.catchup_interval_s(),
-                    "loop_running": bool(_t is not None and not _t.done()), "market_phase": _market_session_phase_ist()}   # group378
-        return {"ok": True, **_sr.get_job(), "catchup": _catchup}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)[:200], "status": "idle"}
+# E87: moved to gateway_support/bound_routes_l.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_structure_refresh_status = _bound_routes_l.data_feed_structure_refresh_status
+app.include_router(_bound_routes_l.data_feed_structure_refresh_status_router)
 
 
-@app.post("/data-feed/structure-refresh")
-@app.post("/api/data-feed/structure-refresh")
-async def data_feed_structure_refresh(force: bool = False, dry_run: bool = False, limit: Optional[int] = None):
-    """Re-read ONLY the daily market-structure block (technical /structure/{symbol}) for feed rows that have none or an old one, and replace
-    their ms_* keys. Run it after the daily bar closes (QStash tick action "structure-refresh"). Returns at once; poll .../status.
-    force=true also re-checks rows that look current; dry_run=true only reports the selection; limit caps the symbols."""
-    return await asyncio.to_thread(_start_structure_refresh, force, dry_run, limit)
+# E87: moved to gateway_support/bound_routes_l.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_structure_refresh = _bound_routes_l.data_feed_structure_refresh
+app.include_router(_bound_routes_l.data_feed_structure_refresh_router)
 
 
 # E49: moved to gateway_routers/feed_jobs.py (code unchanged); included here so route order is unchanged.
@@ -11920,160 +7540,19 @@ from gateway_routers.feed_jobs import feed_job_router as _feed_job_router, data_
 app.include_router(_feed_job_router)
 
 
-@app.post("/data-feed/refill-additional")
-@app.post("/api/data-feed/refill-additional")
-async def data_feed_refill_additional(
-    background_tasks: BackgroundTasks,
-    force: bool = True,
-):
-    """
-    Manual / API trigger: Refill Additional Data (fundamentals + technical + events)
-    into the data-feed store with force=true upstream calls.
-
-    Returns immediately; work runs in BackgroundTasks. Poll
-    GET /data-feed/status or /data-feed/refill-additional/status.
-    """
-    try:
-        from refill_additional import get_refill_job, run_refill_additional, _set_job
-        job = get_refill_job()
-        if job.get("status") == "running" and not force:
-            return {"ok": True, "already_running": True, **job}
-
-        # Resolve universe before returning so UI shows total quickly
-        store = _feed_store()
-        symbols = []
-        try:
-            symbols = list(store.list_symbols() or [])
-        except Exception:
-            symbols = []
-        if not symbols:
-            try:
-                symbols = (await asyncio.to_thread(_build_scan_universe))
-            except Exception:
-                symbols = []
-        symbols = [str(s).upper().replace(".NS", "").replace(".BO", "") for s in (symbols or []) if s]
-        _set_job(
-            status="running",
-            message=f"Starting Refill Additional Data for {len(symbols)} symbols…",
-            processed=0,
-            total=len(symbols),
-            ok_count=0,
-            error_count=0,
-        )
-
-        def _worker(syms=symbols):
-            try:
-                run_refill_additional(syms)
-            except Exception as e:
-                logger.exception("refill_additional worker: %s", e)
-                try:
-                    _set_job(status="error", message=str(e)[:240])
-                except Exception:
-                    pass
-
-        background_tasks.add_task(_worker)
-        return {
-            "ok": True,
-            "status": "running",
-            "message": f"Refill Additional Data started for {len(symbols)} symbols",
-            "total": len(symbols),
-        }
-    except Exception as e:
-        logger.exception("data_feed_refill_additional: %s", e)
-        raise HTTPException(status_code=500, detail=str(e)[:240])
+# E86: moved to gateway_support/bound_routes_k.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_refill_additional = _bound_routes_k.data_feed_refill_additional
+app.include_router(_bound_routes_k.data_feed_refill_additional_router)
 
 
-@app.get("/data-feed/meta")
-@app.get("/api/data-feed/meta")
-def data_feed_meta():
-    """Last successful feed timestamp, stock count, job status."""
-    store = _feed_store()
-    meta = store.meta()
-    job = store.job()
-    return {"ok": True, "meta": meta, "job": job}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_meta = _bound_routes_e.data_feed_meta
+app.include_router(_bound_routes_e.data_feed_meta_router)
 
 
-@app.get("/data-feed/status")
-@app.get("/api/data-feed/status")
-def data_feed_status():
-    """Return job+meta. Auto-heal stale 'running' jobs (worker died after free-tier sleep)."""
-    store = _feed_store()
-    job = store.job()
-    meta = store.meta()
-    try:
-        if job.get("status") == "running":
-            stale_sec = int(((os.getenv("DATA_FEED_STALE_SEC") or "").strip() or "900"))  # 15 min — free-tier sleep is not a restart signal
-            updated = None
-            # Prefer checkpoint/elapsed; fall back to started_at
-            for key in ("updated_at", "resumed_at", "started_at"):
-                raw = job.get(key)
-                if not raw:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=IST)
-                    updated = ts
-                    break
-                except Exception:
-                    pass
-            # Also treat long elapsed without stop as ok only if stop_requested
-            elapsed = int(job.get("elapsed_sec") or 0)
-            stop_req = bool(job.get("stop_requested"))
-            age = None
-            if updated is not None:
-                age = int((datetime.now(IST) - updated).total_seconds())
-            # If stop was requested OR last activity is old, force-commit stopped
-            if stop_req or (age is not None and age > stale_sec) or (elapsed > 0 and age is None and stop_req):
-                # Force commit checkpoint as stopped so Resume can work
-                cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-                cursor = int(cp.get("cursor") or job.get("processed") or 0)
-                total = int(job.get("total") or 0)
-                ok_n = int(job.get("ok_count") or meta.get("last_count") or 0)
-                err_n = int(job.get("error_count") or job.get("errors") or 0)
-                ts = datetime.now(IST).isoformat()
-                msg = (
-                    f"Auto-stopped (stale/sleep) at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
-                    if not stop_req
-                    else f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
-                )
-                store.set_meta(
-                    last_success_at=ts,
-                    last_count=ok_n,
-                    last_errors=err_n,
-                    last_message=msg,
-                    source="stop_or_stale",
-                    universe_size=total,
-                    partial=bool(total and cursor < total),
-                )
-                job = store.set_job(
-                    status="stopped",
-                    processed=cursor,
-                    total=total,
-                    message=msg,
-                    errors=err_n,
-                    ok_count=ok_n,
-                    error_count=err_n,
-                    finished_at=ts,
-                    stop_requested=False,
-                    checkpoint={
-                        "cursor": cursor,
-                        "done": list(cp.get("done") or []),
-                        "universe": cp.get("universe") or [],
-                    },
-                )
-                meta = store.meta()
-    except Exception as e:
-        logger.warning("data-feed status heal: %s", e)
-    # Prefer durable index count so UI survives cold start after a successful feed
-    try:
-        fed_count = int(store.count_symbols())
-    except Exception:
-        fed_count = 0
-    if fed_count <= 0:
-        fed_count = int((meta or {}).get("last_count") or (job or {}).get("ok_count") or 0)
-    last_ok = (meta or {}).get("last_success_at") or (job or {}).get("finished_at")
-    return _normalize_data_feed_status(store, job, meta, fed_count, last_ok)
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_status = _bound_routes_f.data_feed_status
+app.include_router(_bound_routes_f.data_feed_status_router)
 
 
 def _data_feed_normalize_enabled() -> bool:
@@ -12273,49 +7752,9 @@ def _compute_feed_audit(limit: int) -> dict:
     })
 
 
-@app.post("/api/feed/purge-over-cap")
-@app.post("/data-feed/purge-over-cap")
-async def purge_over_cap_feed_symbols():
-    """
-    Delete every feed row whose stored price is above MAX_UNIVERSE_PRICE.
-    These are stale writes from before the price-cap was enforced at every
-    write path (see _row_price_over_cap) — Repair cannot legitimately "fix"
-    them since a real price fetch would also be over cap, so the only
-    correct action is to remove them from the feed store.
-    """
-    store = _feed_store()
-    try:
-        symbols = list(store.list_symbols() or [])
-    except Exception:
-        symbols = []
-    purged = []
-    skipped = []
-    for sym in symbols:
-        try:
-            row = await asyncio.to_thread(store.get_symbol, sym) or {}  # group303
-        except Exception as e:
-            # A failed read is not evidence the row is over cap (it used to be judged as an empty row,
-            # so the by-name denylist could delete a row we never managed to read). Leave it alone.
-            logger.warning("purge_over_cap: could not read %s, skipping: %s", sym, e)
-            skipped.append(sym)
-            continue
-        if isinstance(row, dict) and _row_price_over_cap(row, symbol=sym):
-            try:
-                await asyncio.to_thread(store.delete_symbol, sym)  # group361: off the event loop
-                purged.append(sym)
-            except Exception as e:
-                logger.warning("purge_over_cap: failed to delete %s: %s", sym, e)
-    return {
-        "ok": True,
-        "purged_count": len(purged),
-        "purged_symbols": purged,
-        "skipped_count": len(skipped),
-        "skipped_symbols": skipped,
-        "message": (
-            f"Removed {len(purged)} symbol(s) above ₹{MAX_UNIVERSE_PRICE:.0f} from the feed."
-            + (f" Skipped {len(skipped)} symbol(s) that could not be read; run Purge again." if skipped else "")
-        ),
-    }
+# E80: moved to gateway_support/bound_routes_f.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+purge_over_cap_feed_symbols = _bound_routes_f.purge_over_cap_feed_symbols
+app.include_router(_bound_routes_f.purge_over_cap_feed_symbols_router)
 
 
 # Single-segment data-feed ACTION names that are registered POST-only above. A GET on one of them
@@ -12330,220 +7769,24 @@ _FEED_POST_ONLY_ACTIONS = frozenset({
 })
 
 
-@app.get("/data-feed/{symbol}")
-@app.get("/api/data-feed/{symbol}")
-@app.get("/api/feed/{symbol}")
-def data_feed_symbol(symbol: str):
-    if symbol in _FEED_POST_ONLY_ACTIONS:
-        raise HTTPException(status_code=405, detail="Method Not Allowed", headers={"Allow": "POST"})
-    fed = _feed_store().get_symbol(symbol)
-    if not fed:
-        return {"ok": False, "symbol": symbol.upper(), "detail": "No data feed entry"}
-    return {"ok": True, "data": fed}
+# E87: moved to gateway_support/bound_routes_l.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_symbol = _bound_routes_l.data_feed_symbol
+app.include_router(_bound_routes_l.data_feed_symbol_router)
 
 
-@app.post("/api/feed/update")
-@app.post("/data-feed/update")
-async def data_feed_update_single(request: Request):
-    """Persist one symbol feed payload into Neon (canonical + alias keys)."""
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        return {"ok": False, "error": "JSON object required"}
-    symbol = payload.get("symbol")
-    if not symbol:
-        return {"ok": False, "error": "symbol required"}
-    try:
-        from data_feed import save_stock_feed, extract_feed_payload
-        base = str(symbol).upper().replace(".NS", "").replace(".BO", "").strip()
-        # Accept either full payload or nested fields
-        body = dict(payload)
-        body.pop("symbol", None)
-        if body.get("fundamental") or body.get("events"):
-            row = extract_feed_payload(
-                base,
-                fundamental=body.get("fundamental") if isinstance(body.get("fundamental"), dict) else body,
-                events=body.get("events") if isinstance(body.get("events"), dict) else None,
-                extra={k: v for k, v in body.items() if k not in ("fundamental", "events")},
-            )
-        else:
-            row = dict(body)
-            row["symbol"] = base
-        # Universal ≤ ₹5000 gate — reject at the write boundary, not just at
-        # the bulk-Yahoo seed. Previously this endpoint would happily persist
-        # any price, which is how over-cap symbols entered the feed store.
-        if _row_price_over_cap(row):
-            return {
-                "ok": False,
-                "status": "REJECTED",
-                "symbol": base,
-                "error": f"price above ₹{MAX_UNIVERSE_PRICE:.0f} cap — not saved",
-            }
-        save_stock_feed(base, row)
-        return {"ok": True, "status": "SUCCESS", "symbol": base}
-    except Exception as e:
-        logger.exception("data_feed update failed")
-        return {"ok": False, "error": str(e)[:300]}
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_update_single = _bound_routes_d.data_feed_update_single
+app.include_router(_bound_routes_d.data_feed_update_single_router)
 
 
-@app.post("/api/feed/batch")
-@app.post("/data-feed/batch")
-async def data_feed_update_batch(request: Request):
-    """Bulk upsert: { "feeds": { "RELIANCE": {...}, ... } } or list of payloads."""
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    feeds = {}
-    if isinstance(payload, dict):
-        raw = payload.get("feeds") or payload.get("items") or payload.get("data")
-        if isinstance(raw, dict):
-            feeds = raw
-        elif isinstance(raw, list):
-            for item in raw:
-                if isinstance(item, dict) and item.get("symbol"):
-                    feeds[str(item["symbol"])] = item
-        else:
-            # treat entire dict as symbol->payload if values are dicts
-            if payload and all(isinstance(v, dict) for v in payload.values()):
-                feeds = payload
-    if not feeds:
-        return {"ok": False, "error": "No feeds provided", "count": 0}
-    try:
-        from data_feed import save_stock_feed
-        n = 0
-        rejected = 0
-        # BUG FIX (session 55, event-loop-blocking-I/O audit): this loop used
-        # to call save_stock_feed() — a blocking Neon/durable-KV write —
-        # inline, once per symbol, directly on the event loop with no cap on
-        # `feeds` size. Same bug class already found/fixed in
-        # circuit_breaker.py, rate_limit_monitor.py, and batch_worker.py: a
-        # large POST body (this route, unlike /api/feed/update-batch, has no
-        # DATA_FEED_UPDATE_BATCH_MAX cap) could serialize dozens+ blocking DB
-        # round-trips ahead of every other request this process is handling.
-        # Fix: filter/validate inline (cheap, in-memory), then run all the
-        # actual writes concurrently off the event loop via asyncio.to_thread.
-        to_write: list = []
-        for sym, row in feeds.items():
-            if not isinstance(row, dict):
-                continue
-            base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
-            body = dict(row)
-            body["symbol"] = base
-            # Universal ≤ ₹5000 gate (see _row_price_over_cap) — bulk upsert
-            # previously bypassed the cap entirely.
-            if _row_price_over_cap(body):
-                rejected += 1
-                continue
-            to_write.append((base, body))
-
-        if to_write:
-            results = await asyncio.gather(
-                *[asyncio.to_thread(save_stock_feed, base, body) for base, body in to_write],
-                return_exceptions=True,
-            )
-            for (base, _body), res in zip(to_write, results):
-                if isinstance(res, Exception):
-                    logger.warning("data_feed batch write failed for %s: %s", base, res)
-                else:
-                    n += 1
-        return {"ok": True, "status": "SUCCESS", "count": n, "rejected_over_cap": rejected}
-    except Exception as e:
-        logger.exception("data_feed batch failed")
-        return {"ok": False, "error": str(e)[:300], "count": 0}
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_update_batch = _bound_routes_d.data_feed_update_batch
+app.include_router(_bound_routes_d.data_feed_update_batch_router)
 
 
-@app.post("/api/feed/update-batch")
-@app.post("/data-feed/update-batch")
-async def data_feed_update_batch_refresh(request: Request):
-    """
-    Process a small symbol list in ONE short HTTP request (GitHub Action driver).
-
-    Body: { "symbols": ["RELIANCE", "TCS", ...] }  — max 15 recommended.
-    Fetches fundamental + events for each, writes Neon feed, returns counts.
-    Designed so each call finishes in <1–2 min (well under Render's ~100m hard cap).
-    """
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    symbols = payload.get("symbols") if isinstance(payload, dict) else None
-    if not isinstance(symbols, list) or not symbols:
-        return {"ok": False, "error": "symbols list required", "ok_count": 0, "error_count": 0}
-    # Hard cap protects free-tier CPU / upstream rate limits
-    max_n = int(((os.getenv("DATA_FEED_UPDATE_BATCH_MAX") or "").strip() or "15"))
-    symbols = [
-        str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-        for s in symbols
-        if s
-    ][:max_n]
-    if not symbols:
-        return {"ok": False, "error": "no valid symbols", "ok_count": 0, "error_count": 0}
-
-    from data_feed import extract_feed_payload
-    store = _feed_store()
-    ok_n = 0
-    err_n = 0
-    results = []
-    client = _get_http_client()
-    for base in symbols:
-        try:
-            fund = None
-            events = None
-            try:
-                r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=35)
-                if r.status_code == 200:
-                    fund = r.json()
-                elif r.status_code in (429, 503):
-                    try:
-                        rate_limit_monitor.record(
-                            source="analysis",
-                            status=r.status_code,
-                            path=f"/fundamental/{base}",
-                            detail="update-batch",
-                            symbol=base,
-                        )
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug("update-batch fund %s: %s", base, e)
-            try:
-                r = await client.get(f"{EVENT_URL}/events/{base}", timeout=20)
-                if r.status_code == 200:
-                    events = r.json()
-            except Exception as e:
-                logger.debug("update-batch events %s: %s", base, e)
-            if fund or events:
-                row = extract_feed_payload(base, fund, events)
-                # Universal ≤ ₹5000 gate (see _row_price_over_cap) — the
-                # GitHub Action driver previously wrote every price it fetched.
-                if _row_price_over_cap(row):
-                    err_n += 1
-                    results.append({"symbol": base, "ok": False, "error": "price above cap"})
-                    # Same pacing as every other outcome: this branch used to `continue` straight past the
-                    # sleep, so a run of over-cap symbols hammered the upstream at full speed.
-                    await asyncio.sleep(0.15)
-                    continue
-                await asyncio.to_thread(store.put_symbol, base, row, DATA_FEED_TTL)  # group303
-                ok_n += 1
-                results.append({"symbol": base, "ok": True})
-            else:
-                err_n += 1
-                results.append({"symbol": base, "ok": False, "error": "no fund/events"})
-        except Exception as e:
-            err_n += 1
-            results.append({"symbol": base, "ok": False, "error": str(e)[:120]})
-        await asyncio.sleep(0.15)
-
-    return {
-        "ok": True,
-        "ok_count": ok_n,
-        "error_count": err_n,
-        "processed": len(symbols),
-        "results": results,
-    }
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_update_batch_refresh = _bound_routes_d.data_feed_update_batch_refresh
+app.include_router(_bound_routes_d.data_feed_update_batch_refresh_router)
 
 
 # ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
@@ -13063,79 +8306,14 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
 
 
 
-@app.post("/api/feed/repair-single/{symbol}")
-@app.post("/data-feed/repair-single/{symbol}")
-@app.post("/api/data-feed/repair-single/{symbol}")
-@app.post("/feed/repair-single/{symbol}")
-async def repair_single_stock(symbol: str):
-    """Repair one symbol — fetch only missing fields, merge into Cache DB.
-
-    Always returns 200 with status + patched_fields so the UI Repair button
-    never sees a 422/timeout ghost. High-price names (e.g. MRF) keep their
-    live price; missing RSI/PE/ROCE/sentiment are filled from upstreams or
-    safe baselines so audit health recovers immediately.
-    """
-    import urllib.parse
-    sym = urllib.parse.unquote(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
-    if not sym:
-        return {"status": "error", "symbol": symbol, "message": "empty symbol", "complete": False}
-    try:
-        client = _get_http_client()
-        result = await _patch_single_stock_feed(sym, client)
-        return {"status": "success", "ok": True, **result}
-    except Exception as e:
-        logger.exception("repair_single_stock %s: %s", sym, e)
-        # Never 500 the UI — report failure payload so button can show message
-        return {
-            "status": "error",
-            "ok": False,
-            "symbol": sym,
-            "patched_fields": [],
-            "still_missing": ["unknown"],
-            "complete": False,
-            "message": str(e)[:200],
-        }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+repair_single_stock = _bound_routes_c.repair_single_stock
+app.include_router(_bound_routes_c.repair_single_stock_router)
 
 
-@app.post("/api/feed/repair-batch")
-@app.post("/data-feed/repair-batch")
-async def repair_batch_missing(limit: int = 10):
-    """
-    Rate-safe batch repair (default 10). 500ms spacing between symbols.
-    """
-    limit = max(1, min(int(limit or 10), 25))
-    try:
-        audit = await audit_missing_feed_data(limit=limit)
-    except Exception as e:
-        # Same "never 500 the UI" contract as repair-single: report the failure as an envelope.
-        logger.exception("repair_batch_missing audit: %s", e)
-        return {
-            "status": "error",
-            "ok": False,
-            "repaired_count": 0,
-            "successish_count": 0,
-            "repaired": [],
-            "repaired_symbols": [],
-            "message": str(e)[:200],
-        }
-    targets = [item["symbol"] for item in (audit.get("incomplete_stocks") or [])[:limit]]
-    client = _get_http_client()
-    repaired = []
-    for sym in targets:
-        try:
-            res = await _patch_single_stock_feed(sym, client)
-            repaired.append(res)
-        except Exception as e:
-            repaired.append({"symbol": sym, "error": str(e)[:160], "complete": False})
-        await asyncio.sleep(0.5)
-    ok_n = sum(1 for r in repaired if r.get("complete") or r.get("patched_fields"))
-    return {
-        "status": "completed",
-        "repaired_count": len(repaired),
-        "successish_count": ok_n,
-        "repaired": repaired,
-        "repaired_symbols": [r.get("symbol") for r in repaired],
-    }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+repair_batch_missing = _bound_routes_c.repair_batch_missing
+app.include_router(_bound_routes_c.repair_batch_missing_router)
 
 
 # ── Refill All: one-shot background repair of every incomplete feed record ──
@@ -13232,850 +8410,66 @@ async def _run_refill_all_job(limit: int):
         })
 
 
-@app.post("/api/feed/repair-all")
-@app.post("/data-feed/repair-all")
-async def repair_all_missing(background_tasks: BackgroundTasks, limit: int = 5000):
-    """Kick off a background job that repairs EVERY incomplete feed record,
-    not just the next 15. Poll /api/feed/repair-all/status for progress."""
-    if _REFILL_ALL_JOB.get("status") == "running":
-        return {"ok": True, "already_running": True, **_REFILL_ALL_JOB}
-    limit = max(1, min(int(limit or 5000), 5000))
-    background_tasks.add_task(_run_refill_all_job, limit)
-    return {"ok": True, "started": True, "message": "Refill All started in the background."}
+# E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+repair_all_missing = _bound_routes_h.repair_all_missing
+app.include_router(_bound_routes_h.repair_all_missing_router)
 
 
-@app.get("/api/feed/repair-all/status")
-@app.get("/data-feed/repair-all/status")
-async def repair_all_status():
-    return dict(_REFILL_ALL_JOB)
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+repair_all_status = _bound_routes_b.repair_all_status
+app.include_router(_bound_routes_b.repair_all_status_router)
 
 
-@app.post("/api/feed/repair-all/stop")
-@app.post("/data-feed/repair-all/stop")
-async def repair_all_stop():
-    if _REFILL_ALL_JOB.get("status") != "running":
-        # Nothing to stop: don't leave a stale cancel flag behind for the next run to trip over.
-        return {"ok": True, "stopped": False, "message": "No Refill All job is running."}
-    _REFILL_ALL_JOB["cancel_requested"] = True
-    return {"ok": True, "message": "Stop requested — will halt after the current batch."}
+# E76: moved to gateway_support/bound_routes_b.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+repair_all_stop = _bound_routes_b.repair_all_stop
+app.include_router(_bound_routes_b.repair_all_stop_router)
 
 
-@app.post("/data-feed/run")
-@app.post("/api/data-feed/run")
-async def data_feed_run(
-    background_tasks: BackgroundTasks,
-    force: bool = False,
-    resume: bool = False,
-    only_new: bool = False,
-):
-    """Feed slow fields for scan universe.
-
-    - force=true  → full refresh from index 0
-    - resume=true → continue from checkpoint cursor (Resume)
-    - only_new=true → only symbols not already in feed store (new universe members)
-    - default     → start fresh only if not running
-    Never auto-starts from status polling — UI/scheduler must POST explicitly.
-    """
-    store = _feed_store()
-    job = store.job()
-    if job.get("status") == "running" and not force and not resume:
-        return {"ok": True, "already_running": True, **job}
-
-    universe = (await asyncio.to_thread(_build_scan_universe))
-    if not universe:
-        universe = list(_get_nifty_indices() or [])[:150]
-    _df_max = int(os.getenv("DATA_FEED_MAX_SYMBOLS", "0") or 0)
-    if _df_max > 0:
-        universe = universe[:_df_max]
-    universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
-    # Full universe by default. Only DATA_FEED_MAX_SYMBOLS>0 truncates (explicit opt-in).
-
-    if not universe:
-        # Same guard as /data-feed/start-bulk-feed. Without it an empty universe reported `started: true`,
-        # wrote a "running" job with total 0 and queued a worker that had nothing to do.
-        raise HTTPException(status_code=400, detail="No symbols available for data feed")
-
-    if only_new:
-        store = _feed_store()
-        fresh = []
-        for s in universe:
-            try:
-                entry = await asyncio.to_thread(store.get_symbol, s)  # group303
-                if not entry:
-                    fresh.append(s)
-            except Exception:
-                fresh.append(s)
-        if not fresh:
-            return {
-                "ok": True,
-                "started": False,
-                "mode": "only_new",
-                "total": 0,
-                "message": "No new symbols — all universe members already have feed data. Use full feed only if you need a refresh.",
-            }
-        universe = fresh
-        logger.info("data-feed only_new: %s symbols without feed entry", len(universe))
+# E86: moved to gateway_support/bound_routes_k.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_run = _bound_routes_k.data_feed_run
+app.include_router(_bound_routes_k.data_feed_run_router)
 
 
-    # Checkpoint: list of already-fed symbols + cursor
-    checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-    done_set = set(checkpoint.get("done") or [])
-    start_idx = 0
-    ok_n = int(job.get("ok_count") or 0)
-    err_n = int(job.get("error_count") or 0)
-
-    if resume and not force:
-        # Prefer explicit cursor; else skip symbols already in done
-        start_idx = int(checkpoint.get("cursor") or job.get("processed") or 0)
-        start_idx = max(0, min(start_idx, len(universe)))
-        # If job was stopped mid-way, resume from there
-        if job.get("status") in ("stopped", "error", "idle", "done") and start_idx >= len(universe):
-            start_idx = 0
-            done_set = set()
-            ok_n = 0
-            err_n = 0
-        store.set_job(
-            status="running",
-            processed=start_idx,
-            total=len(universe),
-            started_at=job.get("started_at") or datetime.now(IST).isoformat(),
-            resumed_at=datetime.now(IST).isoformat(),
-            message=f"Resuming from {start_idx}/{len(universe)}…",
-            errors=err_n,
-            ok_count=ok_n,
-            error_count=err_n,
-            stop_requested=False,
-            checkpoint={"cursor": start_idx, "done": list(done_set), "universe": universe},
-        )
-        mode = "resume"
-    else:
-        # Full refresh / new run
-        done_set = set()
-        start_idx = 0
-        ok_n = 0
-        err_n = 0
-        store.set_job(
-            status="running",
-            processed=0,
-            total=len(universe),
-            started_at=datetime.now(IST).isoformat(),
-            elapsed_sec=0,
-            estimated_remaining_sec=None,
-            message=f"Feeding {len(universe)} symbols…",
-            errors=0,
-            ok_count=0,
-            error_count=0,
-            stop_requested=False,
-            checkpoint={"cursor": 0, "done": [], "universe": universe},
-        )
-        mode = "refresh" if force else "start"
-
-    async def _run(start_at: int, ok0: int, err0: int, done0: set):
-        clear_data_feed_stop()
-        ok_n = ok0
-        err_n = err0
-        done_set = set(done0)
-        client = _get_http_client()  # shared keepalive pool
-        bulk_ran = False  # True only when THIS run did the bulk seed (a resume that skips it did not)
-
-        # ── PHASE 0: Chunked Yahoo bulk quotes (50/chunk, threads=True) ──
-        # Replaces sequential /quote calls that took ~15 min with ~20s total.
-        if start_at == 0 and not done_set:
-            try:
-                from data_feed import run_bulk_yahoo_price_feed_cached as run_bulk_yahoo_price_feed
-                store.set_job(
-                    status="running",
-                    message=f"Bulk Yahoo quotes for {len(universe)} symbols (chunks of 50)…",
-                    processed=0,
-                    total=len(universe),
-                    updated_at=datetime.now(IST).isoformat(),
-                )
-                # run_bulk is sync (yfinance) — offload to thread so event loop stays responsive
-                bulk_result = await asyncio.to_thread(
-                    run_bulk_yahoo_price_feed, universe, True
-                )
-                bulk_ran = True
-                saved = int((bulk_result or {}).get("tracked_stocks") or 0)
-                for sym in (bulk_result or {}).get("symbols") or []:
-                    done_set.add(str(sym).upper().replace(".NS", "").replace(".BO", ""))
-                ok_n = max(ok_n, saved)
-                store.set_job(
-                    status="running",
-                    message=(
-                        f"Bulk 5-field seed done: {saved}/{len(universe)} "
-                        f"(price+RSI local; PE/ROCE/sentiment baseline)"
-                    ),
-                    processed=saved,
-                    total=len(universe),
-                    ok_count=ok_n,
-                    updated_at=datetime.now(IST).isoformat(),
-                    checkpoint={"cursor": 0, "done": list(done_set), "universe": universe},
-                )
-                logger.info("data-feed bulk phase: %s", bulk_result)
-                # Skip sequential /analyze peer storms when bulk covered ≥80% of universe
-                skip_fund = ((os.getenv("DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK") or "").strip() or "1").lower() in (
-                    "1", "true", "yes", "on",
-                )
-                if skip_fund and saved >= max(1, int(0.35 * len(universe))):
-                    ts = datetime.now(IST).isoformat()
-                    msg = (
-                        f"Data feed bulk-complete for {saved} stocks at {ts} "
-                        f"(local RSI + baseline PE/ROCE/sentiment; use Repair for real fundamentals)"
-                    )
-                    store.set_meta(
-                        last_success_at=ts,
-                        last_count=saved,
-                        last_errors=0,
-                        last_message=msg,
-                        source="bulk_5field",
-                        universe_size=len(universe),
-                        partial=saved < len(universe),
-                    )
-                    store.set_job(
-                        status="done",
-                        processed=len(universe),
-                        total=len(universe),
-                        message=msg,
-                        ok_count=saved,
-                        error_count=0,
-                        finished_at=ts,
-                        checkpoint={"cursor": len(universe), "done": list(done_set), "universe": universe},
-                    )
-                    logger.info(msg)
-                    return
-            except Exception as e:
-                logger.warning("data-feed bulk phase failed (continuing sequential fund fill): %s", e)
-
-        # PHASE 1: optional concurrent fund fill (rate-safe). Skip when bulk already
-        # covered enough OR DATA_FEED_SKIP_FUNDAMENTALS_AFTER_BULK=1 and any seed exists.
-        # Default ON: after bulk seed, do not sequential /fundamental/analyze (rate-limit storm).
-        # Set DATA_FEED_SKIP_SEQUENTIAL_FUND=0 to force slow fund fill.
-        _skip_seq = ((os.getenv("DATA_FEED_SKIP_SEQUENTIAL_FUND") or "").strip() or "1").lower() in (
-            "1", "true", "yes", "on",
-        )
-        # Only when this run actually did the bulk seed. A resumed run carries `ok_count` from the earlier
-        # run but skipped the bulk phase, and used to hit this branch immediately and declare the job done
-        # with the remaining symbols never fed; it now continues into the sequential fill below.
-        if _skip_seq and ok_n > 0 and bulk_ran:
-            ts = datetime.now(IST).isoformat()
-            msg = f"Data feed stopped after bulk seed ({ok_n} rows) — sequential fund skipped"
-            store.set_job(status="done", processed=len(universe), total=len(universe),
-                          message=msg, ok_count=ok_n, finished_at=ts)
-            store.set_meta(last_success_at=ts, last_count=ok_n, last_message=msg,
-                           universe_size=len(universe), partial=True)
-            logger.info(msg)
-            return
-
-        if True:
-            # Concurrent fund-only fill (no news storm) — max 3 in-flight
-            fund_sem = asyncio.Semaphore(int(((os.getenv("DATA_FEED_FUND_CONCURRENCY") or "").strip() or "3")))
-
-            async def _feed_one(base: str):
-                async with fund_sem:
-                    fund = None
-                    events = None
-                    try:
-                        r = await client.get(f"{FUNDAMENTAL_URL}/analyze/{base}", timeout=25)
-                        if r.status_code == 200:
-                            fund = r.json()
-                    except Exception:
-                        pass
-                    try:
-                        r = await client.get(f"{EVENT_URL}/events/{base}", timeout=12)
-                        if r.status_code == 200:
-                            events = r.json()
-                    except Exception:
-                        pass
-                    return base, fund, events
-
-            for i in range(start_at, len(universe)):
-                # Cooperative stop (process flag OR job flag) — ASAP
-                jnow = store.job()
-                if data_feed_stop_requested() or jnow.get("stop_requested") or jnow.get("status") in ("stopped", "stopping"):
-                    ts = datetime.now(IST).isoformat()
-                    msg = f"Stopped at {i}/{len(universe)} — committed {ok_n} fed stocks at {ts}"
-                    store.set_meta(
-                        last_success_at=ts,
-                        last_count=ok_n,
-                        last_errors=err_n,
-                        last_message=msg,
-                        source="stop",
-                        universe_size=len(universe),
-                        partial=True,
-                    )
-                    store.set_job(
-                        status="stopped",
-                        processed=i,
-                        total=len(universe),
-                        message=msg,
-                        errors=err_n,
-                        ok_count=ok_n,
-                        error_count=err_n,
-                        finished_at=ts,
-                        stop_requested=False,
-                        checkpoint={"cursor": i, "done": list(done_set), "universe": universe},
-                    )
-                    logger.info(msg)
-                    return
-
-                base = universe[i]
-                if base in done_set:
-                    store.set_job(
-                        status="running",
-                        processed=i + 1,
-                        total=len(universe),
-                        message=f"Skip cached {base} ({i+1}/{len(universe)})",
-                        errors=err_n,
-                        ok_count=ok_n,
-                        error_count=err_n,
-                        updated_at=datetime.now(IST).isoformat(),
-                        checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
-                    )
-                    continue
-                try:
-                    base, fund, events = await _feed_one(base)
-                    if fund or events:
-                        payload = extract_feed_payload(base, fund, events)
-                        await asyncio.to_thread(store.put_symbol, base, payload, DATA_FEED_TTL)  # group303
-                        done_set.add(base)
-                        ok_n += 1
-                    else:
-                        err_n += 1
-                except Exception as e:
-                    err_n += 1
-                    logger.debug("data-feed %s: %s", base, e)
-
-                store.set_job(
-                    status="running",
-                    processed=i + 1,
-                    total=len(universe),
-                    message=f"Fed {ok_n}/{len(universe)} ({base})",
-                    errors=err_n,
-                    ok_count=ok_n,
-                    error_count=err_n,
-                    updated_at=datetime.now(IST).isoformat(),
-                    checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
-                )
-                feed_batch = max(5, int(((os.getenv("DATA_FEED_BATCH_SIZE") or "").strip() or "20")))
-                if (i + 1) % feed_batch == 0:
-                    # Complete batch → warm all upstreams, then continue
-                    store.set_job(
-                        message=f"Batch done {i + 1}/{len(universe)} — warming services…",
-                        updated_at=datetime.now(IST).isoformat(),
-                    )
-                    try:
-                        await _warm_upstream_services(client)
-                    except Exception as e:
-                        logger.debug("data-feed batch warm: %s", e)
-                    await asyncio.sleep(0.5)
-                elif (i + 1) % 5 == 0:
-                    await asyncio.sleep(0.25)
-
-        ts = datetime.now(IST).isoformat()
-        msg = f"Data feed successfully for {ok_n} stocks at {ts}"
-        store.set_meta(
-            last_success_at=ts,
-            last_count=ok_n,
-            last_errors=err_n,
-            last_message=msg,
-            source="manual_or_api_or_scheduler",
-            universe_size=len(universe),
-            partial=False,
-        )
-        store.set_job(
-            status="done",
-            processed=len(universe),
-            total=len(universe),
-            message=msg,
-            errors=err_n,
-            ok_count=ok_n,
-            error_count=err_n,
-            finished_at=ts,
-            stop_requested=False,
-            checkpoint={"cursor": len(universe), "done": list(done_set), "universe": universe},
-        )
-        logger.info(msg)
-
-    background_tasks.add_task(_run, start_idx, ok_n, err_n, done_set)
-    return {
-        "ok": True,
-        "started": True,
-        "mode": mode,
-        "resume_from": start_idx,
-        "total": len(universe),
-        "message": (
-            f"Data feed resumed from {start_idx}/{len(universe)}"
-            if mode == "resume"
-            else f"Data feed started for {len(universe)} scan-universe stocks"
-        ),
-    }
+# E77: moved to gateway_support/bound_routes_c.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_stop = _bound_routes_c.data_feed_stop
+app.include_router(_bound_routes_c.data_feed_stop_router)
 
 
-@app.post("/data-feed/stop")
-@app.post("/api/data-feed/stop")
-async def data_feed_stop(force: bool = True):
-    """Stop data feed and commit checkpoint immediately.
-
-    Free-tier workers often die after sleep, so cooperative stop alone leaves
-    status=running forever. We always force-commit from the last checkpoint.
-
-    The job is read BEFORE anything is written: the "stopping" marker used to
-    be written first, so the "not running" guard always saw "stopping"
-    (force=false could never stop anything, and a no-op call flipped an idle
-    job to stopping with stop_requested=True and nothing undid it).
-    """
-    store = _feed_store()
-    job = store.job()
-    status = job.get("status")
-    if status not in ("running", "stopping", "stopped") and not force:
-        return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
-
-    # Hard stop first — worker sees this on next symbol (no Neon round-trip)
-    try:
-        request_data_feed_stop()
-    except Exception:
-        pass
-    # Mark stopping so in-flight loop exits even if Event was cleared
-    try:
-        store.set_job(stop_requested=True, status="stopping", message="Stop requested — finishing current symbol…")
-    except Exception:
-        pass
-    # Re-read: the stopping write may have merged fields we want to keep.
-    try:
-        job = store.job() or job
-    except Exception:
-        pass
-
-    try:
-        cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-        cursor = int(cp.get("cursor") or job.get("processed") or 0)
-        total = int(job.get("total") or 0)
-        ok_n = int(job.get("ok_count") or 0)
-        err_n = int(job.get("error_count") or job.get("errors") or 0)
-        # Prefer counting done list if present
-        done = list(cp.get("done") or [])
-        if done:
-            ok_n = max(ok_n, len(done))
-        ts = datetime.now(IST).isoformat()
-        msg = f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
-        store.set_meta(
-            last_success_at=ts,
-            last_count=ok_n,
-            last_errors=err_n,
-            last_message=msg,
-            source="stop",
-            universe_size=total,
-            partial=bool(total and cursor < total),
-        )
-        job = store.set_job(
-            status="stopped",
-            processed=cursor,
-            total=total,
-            message=msg,
-            errors=err_n,
-            ok_count=ok_n,
-            error_count=err_n,
-            finished_at=ts,
-            stop_requested=False,
-            checkpoint={
-                "cursor": cursor,
-                "done": done,
-                "universe": cp.get("universe") or [],
-            },
-        )
-    except Exception as e:
-        # The stop signal is already out; only the checkpoint commit failed.
-        logger.exception("data-feed/stop commit failed: %s", e)
-        return {
-            "ok": False,
-            "stopped": False,
-            "stop_signalled": True,
-            "error": f"stop signalled but checkpoint commit failed: {str(e)[:200]}",
-        }
-    return {"ok": True, "stopped": True, "message": msg, **job}
-
-
-@app.post("/data-feed/resume")
-@app.post("/api/data-feed/resume")
-async def data_feed_resume(background_tasks: BackgroundTasks):
-    """Resume from last checkpoint.
-
-    If a previous run is stuck as 'running' (worker died), force-stop/commit first
-    so resume can start a new background task from the cursor.
-    """
-    store = _feed_store()
-    job = store.job()
-    if job.get("status") == "running":
-        # Force-commit current checkpoint so a new worker can continue
-        await data_feed_stop(force=True)
-    return await data_feed_run(background_tasks, force=False, resume=True)
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+data_feed_resume = _bound_routes_d.data_feed_resume
+app.include_router(_bound_routes_d.data_feed_resume_router)
 
 
 # ── Hot Picks on-demand job (no auto-load spam) ─────────────────────────────
 
-@app.get("/stockky-hot/status")
-def stockky_hot_status():
-    job = hot_job_get(_redis_get)
-    cached = _redis_get(HOT_RESULT_KEY) or _redis_get(HOT_STOCKS_CACHE_KEY)
-    return {
-        **job,
-        "ok": True,   # after the job spread: the route itself succeeded, job state lives in `status`
-        "has_result": bool(cached),
-        "result_generated_at": (cached or {}).get("generated_at") if isinstance(cached, dict) else None,
-    }
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_status = _bound_routes_e.stockky_hot_status
+app.include_router(_bound_routes_e.stockky_hot_status_router)
 
 
-@app.get("/stockky-hot/result")
-def stockky_hot_result():
-    """Last persisted Hot Picks result (DB/Redis) — does not trigger a new run."""
-    cached = _redis_get(HOT_RESULT_KEY) or _redis_get(HOT_STOCKS_CACHE_KEY)
-    if not cached or not isinstance(cached, dict):
-        # a truthy non-dict value in the cache is as unusable as no result at all
-        return {"ok": False, "detail": "No Hot Picks result yet — run Search Hot Picks Stocks"}
-    return {**cached, "ok": True, "cached": True}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_result = _bound_routes_e.stockky_hot_result
+app.include_router(_bound_routes_e.stockky_hot_result_router)
 
 
-@app.get("/stockky-hot/premarket/status")
-def stockky_hot_premarket_status():
-    """Progress of the Hot Picks 'Premarket' bulk price pre-feed job."""
-    job = hot_premarket_job_get(_redis_get)
-    return {**job, "ok": True}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_premarket_status = _bound_routes_e.stockky_hot_premarket_status
+app.include_router(_bound_routes_e.stockky_hot_premarket_status_router)
 
 
-@app.post("/stockky-hot/premarket")
-async def stockky_hot_premarket(background_tasks: BackgroundTasks):
-    """Pre-feed prices for EVERY eligible stock in ONE bulk call, before
-    running Search Hot Picks Stocks.
-
-    Today, Hot Picks' own price-enrichment step (see stockky_hot_stocks's
-    "Price enrichment" block) only ever READS from the shared data-feed
-    store — it never fetches over the network — so any symbol whose feed
-    row is stale/missing shows "₹—" on its card. This endpoint is the fix:
-    it builds the full eligible universe the same way the main market scan
-    does (_build_scan_universe — every eligible stock, not just Hot Picks'
-    ~285-symbol catalyst-seeded shortlist) and pre-feeds it via the SAME
-    bulk pipeline the Data Feed tab uses (run_bulk_yahoo_price_feed —
-    bhavcopy first, then ONE POST /quotes/bulk call for whatever's left,
-    never one symbol at a time), writing into the same store (Neon on
-    Render, Oracle ADB on the Oracle deployment — store dialect-detects
-    automatically). Once this finishes, click 'Search Hot Picks Stocks' —
-    its price lookups will already be warm.
-    """
-    job = hot_premarket_job_get(_redis_get)
-    if job.get("status") == "running":
-        return {"ok": True, "already_running": True, **job}
-
-    try:
-        universe = (await asyncio.to_thread(_build_scan_universe))
-    except Exception as e:
-        return {"ok": False, "error": f"could not build universe: {str(e)[:160]}"}
-
-    if not universe:
-        return {"ok": False, "error": "scan universe is empty — nothing to pre-feed"}
-
-    hot_premarket_job_set(
-        _redis_set,
-        _redis_get,
-        status="running",
-        processed=0,
-        total=len(universe),
-        started_at=datetime.now(IST).isoformat(),
-        message=f"Pre-feeding {len(universe)} eligible stocks (bulk)…",
-        finished_at=None,
-    )
-
-    def _run_premarket(syms: list):
-        """Runs entirely outside the HTTP request — a full-universe bulk
-        feed can take a while; background=true semantics match every
-        other premarket job in this app (IPO, Surprise).
-        
-        Price source priority (2026-09-06):
-          Market OPEN  → AngelOne LTP sweep first (POST /quotes/bulk on
-                          market-data-service which waterfalls Angel→yf),
-                          then bhavcopy for any remaining misses.
-          Market CLOSED → bhavcopy (yesterday's close) only — same as before.
-        """
-        try:
-            from data_feed import run_bulk_yahoo_price_feed
-            phase = _market_session_phase_ist()
-            market_open = phase in ("preopen", "open", "post")
-
-            # Bug G fix (2026-09-06): original order was AngelOne THEN bhavcopy.
-            # bhavcopy's put_symbols_bulk() calls merge_feed_payload() which
-            # unconditionally overwrites volatile price fields (price/ltp/close)
-            # from the incoming payload — bhavcopy's T-1 close silently won over
-            # AngelOne's fresh LTP every time, making the sweep a no-op.
-            # Fix: run bhavcopy FIRST (T-1 close baseline for all symbols),
-            # then AngelOne sweep SECOND (live LTP overwrites for open market),
-            # so live prices always win. merge_feed_payload's "incoming wins for
-            # volatile fields" rule now works in our favour.
-            angelone_hits = 0
-
-            # Step 1: bhavcopy baseline (always — market open or closed)
-            result = run_bulk_yahoo_price_feed(syms, merge_existing=True) or {}
-
-            # Step 2: AngelOne live LTP sweep — only during market session.
-            # Runs AFTER bhavcopy so live prices overwrite the T-1 baseline.
-            if market_open:
-                try:
-                    import time as _time
-                    import httpx as _httpx
-                    chunk_sz = 50  # AngelOne's documented per-request cap
-                    total_syms = len(syms)
-                    hot_premarket_job_set(
-                        _redis_set, _redis_get,
-                        message=f"AngelOne LTP sweep: overlaying live prices on {total_syms} bhavcopy-seeded symbols…",
-                    )
-                    _pm_store = _feed_store()
-                    for _ci, _chunk_start in enumerate(range(0, total_syms, chunk_sz)):
-                        _chunk = syms[_chunk_start: _chunk_start + chunk_sz]
-                        try:
-                            _r = _httpx.post(
-                                f"{MARKET_DATA_URL.rstrip('/')}/quotes/bulk",
-                                json={"symbols": _chunk},
-                                timeout=12.0,
-                            )
-                            if _r.status_code == 200:
-                                _body = _r.json()
-                                _quotes = _body.get("quotes") or []
-                                for _q in _quotes:
-                                    _sym_q = str(_q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
-                                    if not _sym_q:
-                                        continue
-                                    _px = None
-                                    for _k in ("price", "ltp", "close", "cmp", "last_price"):
-                                        try:
-                                            _v = float(_q.get(_k) or 0)
-                                            if _v > 0:
-                                                _px = _v
-                                                break
-                                        except (TypeError, ValueError):
-                                            pass
-                                    if _px:
-                                        try:
-                                            _existing = _pm_store.get_symbol(_sym_q) or {}
-                                            _existing.update({
-                                                "symbol": _sym_q,
-                                                "price": _px,
-                                                "ltp": _px,
-                                                "close": _px,
-                                                "source": _q.get("source", "angelone_rest"),
-                                                "fetched_at": _q.get("fetched_at", ""),
-                                                "price_refreshed_at": _q.get("fetched_at", ""),
-                                            })
-                                            _pm_store.put_symbol(_sym_q, _existing, ttl=DATA_FEED_TTL)
-                                            angelone_hits += 1   # count only prices actually written
-                                        except Exception as _we:
-                                            logger.debug("hot premarket store-write failed for %s: %s", _sym_q, _we)
-                        except Exception as _ce:
-                            logger.debug("hot premarket AngelOne chunk %s failed (non-fatal): %s", _ci, _ce)
-                        _time.sleep(0.3)  # stay well under AngelOne rate limit
-                    logger.info(
-                        "hot premarket AngelOne sweep: %s/%s symbols had live LTP (written after bhavcopy)",
-                        angelone_hits, total_syms,
-                    )
-                    hot_premarket_job_set(
-                        _redis_set, _redis_get,
-                        message=f"AngelOne overlay done ({angelone_hits}/{total_syms} live prices written over bhavcopy baseline).",
-                    )
-                except Exception as _ae:
-                    logger.warning("hot premarket AngelOne sweep failed (non-fatal): %s", _ae)
-            n = int(result.get("tracked_stocks") or 0)
-            ts = datetime.now(IST).isoformat()
-            base_msg = result.get("message") or f"Pre-fed {n}/{len(syms)} stocks"
-            # angelone_hits is updated during the sweep (Step 2) which runs after
-            # run_bulk_yahoo_price_feed (Step 1), so the count here is final.
-            if market_open and angelone_hits > 0:
-                final_msg = f"{base_msg} · {angelone_hits} live LTPs overlaid from AngelOne"
-            else:
-                final_msg = base_msg
-            hot_premarket_job_set(
-                _redis_set,
-                _redis_get,
-                status="done",
-                processed=n,
-                total=len(syms),
-                message=final_msg,
-                finished_at=ts,
-            )
-        except Exception as e:
-            logger.exception("hot premarket bulk-feed failed")
-            hot_premarket_job_set(
-                _redis_set,
-                _redis_get,
-                status="error",
-                message=str(e)[:200],
-                finished_at=datetime.now(IST).isoformat(),
-            )
-
-    background_tasks.add_task(_run_premarket, universe)
-    return {
-        "ok": True,
-        "started": True,
-        "total": len(universe),
-        "message": f"Premarket bulk pre-feed started for {len(universe)} eligible stocks",
-    }
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_premarket = _bound_routes_j.stockky_hot_premarket
+app.include_router(_bound_routes_j.stockky_hot_premarket_router)
 
 
-@app.post("/stockky-hot/run")
-async def stockky_hot_run(background_tasks: BackgroundTasks, force: bool = True):
-    """Start Hot Picks search with REAL progress (pipeline UI polls /stockky-hot/status).
-
-    Progress used to be faked — total was hard-coded to 100 and processed jumped
-    0 → 10 → 30 → (long silent await) → 90 → 100. Since the ETA is derived from
-    elapsed/processed, a fabricated processed=10 two seconds in projected "a few
-    seconds remaining" for a scan that takes minutes, and then nothing moved at
-    all while stockky_hot_stocks() ran. Now total is the real universe size and
-    processed is the real symbol index, reported from stockky_hot_stocks's
-    existing progress_cb hook, so the countdown means something.
-    """
-    job = hot_job_get(_redis_get)
-    if job.get("status") == "running":
-        return {"ok": True, "already_running": True, **job}
-
-    # Fresh run: drop any stop request left over from a previous scan, and make
-    # sure the durable table exists before we have rows to write into it.
-    try:
-        from hotpicks_store import clear_hotpicks_stop, ensure_hotpicks_schema
-
-        await asyncio.to_thread(clear_hotpicks_stop)      # group356: durable-key write + schema DDL, off the event loop
-        await asyncio.to_thread(ensure_hotpicks_schema)
-    except Exception as e:
-        logger.debug("hotpicks pre-run setup skipped: %s", e)
-
-    hot_job_set(
-        _redis_set,
-        _redis_get,
-        status="running",
-        processed=0,
-        total=0,
-        started_at=datetime.now(IST).isoformat(),
-        message="Building catalyst universe…",
-        estimated_remaining_sec=None,
-        finished_at=None,
-        current_symbol=None,
-        stopped=False,
-    )
-
-    async def _run_hot():
-        # Throttle: the scan can call back hundreds of times and each write is a
-        # durable kv write. One write per symbol is fine for a ~50-symbol
-        # universe, but cap it so a large universe cannot hammer the DB.
-        state = {"last_write": 0.0, "last_processed": -1}
-        try:
-            min_interval = float(((os.getenv("HOT_PROGRESS_MIN_INTERVAL_SEC") or "").strip() or "1.0"))
-        except (TypeError, ValueError):
-            # A bad env value must not kill the worker before the try block below
-            # (job stuck "running", stop flag never cleared) — use the default.
-            min_interval = 1.0
-
-        def _on_symbol(processed: int, total: int, symbol: str, batch: int = 0):
-            """Called by stockky_hot_stocks before each symbol."""
-            try:
-                now = time.time()
-                is_first = state["last_processed"] < 0
-                is_last = total and processed >= total - 1
-                if not is_first and not is_last and (now - state["last_write"]) < min_interval:
-                    return
-                state["last_write"] = now
-                state["last_processed"] = processed
-                hot_job_set(
-                    _redis_set,
-                    _redis_get,
-                    processed=int(processed),
-                    total=int(total or 0),
-                    current_symbol=str(symbol),
-                    message=f"Scanning {symbol} ({processed + 1}/{total})",
-                )
-            except Exception:
-                pass
-
-        try:
-            # Clear short cache so a forced run really re-scans
-            if force:
-                try:
-                    if _redis:
-                        _redis.delete(HOT_STOCKS_CACHE_KEY)
-                except Exception:
-                    pass
-            result = await stockky_hot_stocks(force=force, progress_cb=_on_symbol)
-            if result is not None and not isinstance(result, dict):
-                raise TypeError(f"unexpected scan result type: {type(result).__name__}")
-            ts = datetime.now(IST).isoformat()
-            was_stopped = bool(isinstance(result, dict) and result.get("stopped_early"))
-            total = int((result or {}).get("universe_size") or 0)
-            done = int((result or {}).get("processed_symbols") or total)
-            if isinstance(result, dict):
-                result = {**result, "generated_at": result.get("generated_at") or ts, "persisted_at": ts}
-                _redis_set(HOT_RESULT_KEY, result, ttl=20 * 3600)
-            picks = sum(
-                len((result or {}).get(k) or [])
-                for k in ("news_driven", "results_driven", "bulk_insider_driven")
-            )
-            hot_job_set(
-                _redis_set,
-                _redis_get,
-                status="stopped" if was_stopped else "done",
-                processed=done,
-                total=total or done,
-                current_symbol=None,
-                stopped=was_stopped,
-                message=(
-                    f"Stopped after {done}/{total or done} symbols — {picks} pick(s) kept"
-                    if was_stopped
-                    else f"Hot Picks ready at {ts} — {picks} pick(s)"
-                ),
-                finished_at=ts,
-                estimated_remaining_sec=0,
-            )
-        except Exception as e:
-            logger.exception("hot run failed")
-            hot_job_set(
-                _redis_set,
-                _redis_get,
-                status="error",
-                current_symbol=None,
-                estimated_remaining_sec=None,
-                message=str(e)[:200],
-            )
-        finally:
-            # Never leave the flag set — the next run must not stop instantly.
-            try:
-                from hotpicks_store import clear_hotpicks_stop
-
-                clear_hotpicks_stop()
-            except Exception:
-                pass
-
-    background_tasks.add_task(_run_hot)
-    return {"ok": True, "started": True, "message": "Hot Picks search started"}
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_run = _bound_routes_j.stockky_hot_run
+app.include_router(_bound_routes_j.stockky_hot_run_router)
 
 
-@app.post("/stockky-hot/stop")
-def stockky_hot_stop():
-    """Halt the running Hot Picks scan after the current symbol.
-
-    Symbols already scored are ranked, cached and written to
-    hotpicks_static_feed, so a stop is a "keep what you have", not a discard —
-    same semantics as /surprise/ipo/stop and the data-feed repair stop.
-    """
-    try:
-        from hotpicks_store import request_hotpicks_stop
-
-        request_hotpicks_stop()
-    except Exception as e:
-        return {"ok": False, "detail": f"stop unavailable: {str(e)[:160]}"}
-    job = hot_job_get(_redis_get)
-    if job.get("status") != "running":
-        # `message` last: the finished job's own message must not replace it.
-        return {**job, "ok": True, "stopping": False, "message": "No Hot Picks scan is running"}
-    hot_job_set(
-        _redis_set,
-        _redis_get,
-        message="Stop requested — finishing current symbol…",
-        stop_requested=True,
-    )
-    return {"ok": True, "stopping": True, "message": "Stopping after the current symbol"}
+# E79: moved to gateway_support/bound_routes_e.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_stop = _bound_routes_e.stockky_hot_stop
+app.include_router(_bound_routes_e.stockky_hot_stop_router)
 
 
 # E49: moved to gateway_routers/hot_picks.py (code unchanged); included here so route order is unchanged.
@@ -14083,94 +8477,9 @@ from gateway_routers.hot_picks import hot_table_router as _hot_table_router, sto
 app.include_router(_hot_table_router)
 
 
-@app.post("/stockky-hot/notify-top-picks")
-async def api_hotpicks_notify_top_picks(top_n: int = Query(5, ge=1, le=20)):
-    """
-    Manual "Send Top 5 to Telegram" button for the Hot Picks tab — same
-    pattern as /surprise/notify-top-picks (Surprise Momentum tab already
-    had this; Hot Picks did not). Reuses whatever is currently cached
-    (live scan result or the durable hotpicks_static_feed fallback) rather
-    than triggering a fresh scan, so this responds instantly.
-    """
-    def _has_picks(p) -> bool:
-        if not isinstance(p, dict):
-            return False
-        return bool(
-            (p.get("news_driven") or [])
-            or (p.get("results_driven") or [])
-            or (p.get("bulk_insider_driven") or [])
-        )
-
-    cached = _redis_get(HOT_STOCKS_CACHE_KEY)
-    if not _has_picks(cached):
-        # Falls through on an empty/stale cache dict too, not only a missing one,
-        # so picks sitting in the durable table are not hidden.
-        try:
-            from hotpicks_store import hotpicks_db_payload
-            cached = await asyncio.to_thread(hotpicks_db_payload)  # group361: off the event loop
-        except Exception:
-            cached = None
-
-    if not _has_picks(cached):
-        return {
-            "ok": False,
-            "sent": False,
-            "count": 0,
-            "message": "No Hot Picks available right now — run a scan first.",
-        }
-
-    merged = (
-        list(cached.get("bulk_insider_driven") or [])
-        + list(cached.get("results_driven") or [])
-        + list(cached.get("news_driven") or [])
-    )
-    order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
-    merged.sort(key=lambda x: (order.get((x.get("decision") or "").upper(), 9), -(x.get("score") or 0)))
-    # `merged` is never empty here: _has_picks() above already returned early
-    # when all three lists were empty, so `top` always has at least one item.
-    top = merged[: max(1, min(int(top_n), 20))]
-
-    lines = [f"🔥 *Stockky Hot Picks — Top {len(top)}*"]
-    for i, s in enumerate(top, 1):
-        sym = s.get("symbol")
-        decision = s.get("decision") or "—"
-        score = s.get("score")
-        price = s.get("price") or s.get("close")
-        section = (s.get("section") or "").replace("_", " ")
-        price_str = f"₹{price}" if price else "price n/a"
-        lines.append(f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100)\n   {price_str} · {section}")
-    message = "\n".join(lines)
-
-    try:
-        # asyncio.to_thread — see the note on the equivalent httpx.post in
-        # api_surprise_notify_top_picks above.
-        resp = await asyncio.to_thread(
-            httpx.post,
-            f"{NOTIFICATION_URL}/notify",
-            json={"title": "Stockky Hot Picks — Top Picks", "message": message, "channel": "telegram"},
-            timeout=15,
-        )
-        try:
-            detail = resp.json()
-        except Exception:
-            detail = {"status_code": resp.status_code}
-        _status = getattr(resp, "status_code", 200)
-        http_ok = not (isinstance(_status, int) and _status >= 400)
-        delivered = bool(http_ok and isinstance(detail, dict) and detail.get("delivered"))
-        out = {
-            # Same contract as /surprise/notify-top-picks: a 4xx/5xx from the
-            # notification service is a failure the caller sees in `ok`.
-            "ok": http_ok,
-            "sent": delivered,
-            "count": len(top),
-            "symbols": [s.get("symbol") for s in top],
-            "notification_result": detail,
-        }
-        if not http_ok:
-            out["error"] = f"notification service returned HTTP {_status}"
-        return out
-    except Exception as e:
-        return {"ok": False, "sent": False, "count": len(top), "error": str(e)[:300]}
+# E85: moved to gateway_support/bound_routes_j.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+api_hotpicks_notify_top_picks = _bound_routes_j.api_hotpicks_notify_top_picks
+app.include_router(_bound_routes_j.api_hotpicks_notify_top_picks_router)
 
 
 # E49: moved to gateway_routers/hot_picks.py (code unchanged); included here so route order is unchanged.
@@ -14178,49 +8487,9 @@ from gateway_routers.hot_picks import hot_audit_router as _hot_audit_router, sto
 app.include_router(_hot_audit_router)
 
 
-@app.post("/stockky-hot/repair-batch")
-def stockky_hot_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Optional[str] = Query(None)):
-    """Repair stored Hot Picks rows: first fill any missing PRICE via the
-    market-data waterfall, then run a real SCORE repair (decision/pillar
-    scores/trade levels) via the decision service for rows still missing them.
-    Nothing is fabricated — the score pass copies exactly what the decision
-    service returns. This is what makes the UI "Repair" button actually clear
-    the blank Entry/Target/Stop/Tech/Fund/… dashes, not just price."""
-    try:
-        from hotpicks_store import hotpicks_repair_batch, hotpicks_repair_scores
-    except Exception as e:
-        return {"status": "error", "error": f"hotpicks store unavailable: {str(e)[:160]}"}
-    market_url = _env_url("MARKET_DATA_URL", "", rstrip=False)
-    decision_url = _env_url("DECISION_URL", DECISION_URL, rstrip=False)
-    try:
-        price_res = hotpicks_repair_batch(limit=limit, symbol=symbol, market_data_url=market_url)
-    except Exception as e:
-        # Isolated like the score pass below, so a price failure no longer
-        # becomes a bare 500 that also skips the score repair.
-        price_res = {"status": "error", "error": str(e)[:160]}
-    score_res = {}
-    try:
-        score_res = hotpicks_repair_scores(limit=limit, symbol=symbol, decision_url=decision_url)
-    except Exception as e:
-        score_res = {"status": "error", "error": str(e)[:160]}
-    price_repaired = list(price_res.get("repaired") or [])
-    score_repaired = list(score_res.get("repaired") or [])
-    combined = list(dict.fromkeys(price_repaired + score_repaired))
-    # Overall status: completed if either pass did (or would do) real work.
-    status = "completed"
-    if price_res.get("status") == "error" and score_res.get("status") == "error":
-        status = "error"
-    elif price_res.get("status") in ("not_found",) and not score_repaired and score_res.get("status") in ("not_found", "no_data"):
-        status = price_res.get("status")
-    return {
-        "status": status,
-        "repaired": combined,
-        "price_repaired": price_repaired,
-        "score_repaired": score_repaired,
-        "attempted": (price_res.get("attempted") or 0) + (score_res.get("attempted") or 0),
-        "price_detail": price_res,
-        "score_detail": score_res,
-    }
+# E78: moved to gateway_support/bound_routes_d.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
+stockky_hot_repair_batch = _bound_routes_d.stockky_hot_repair_batch
+app.include_router(_bound_routes_d.stockky_hot_repair_batch_router)
 
 
 

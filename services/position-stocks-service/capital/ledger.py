@@ -44,6 +44,47 @@ from tz_utils import ist_today_str, iso_utc
 
 logger = logging.getLogger("position-stocks-ledger")
 
+
+def _market_state_risk_mult() -> float:
+    """Market Weather multiplier on the risk per trade (config.MARKET_STATE_RISK_MULT, read at call time). 1.0 = no change; clamped to 0.1 .. 1.0
+    so it can only reduce risk; unreadable counts as 1.0."""
+    try:
+        v = float(getattr(config, "MARKET_STATE_RISK_MULT", 1.0))
+    except Exception:  # noqa: BLE001
+        return 1.0
+    if v != v:
+        return 1.0
+    return min(1.0, max(0.1, v))
+
+def _market_state_short_mult() -> float:
+    """Short selling step 6: the Market Weather short dial (config.MARKET_STATE_SHORT_MULT, read at call time). 1.0 = no change, 0.0 = no short today.
+    Clamped to 0 .. 1 so it can only reduce a short's risk. FAILS CLOSED: unreadable counts as 0.0 (a short is the riskier side, so a doubt means none)."""
+    try:
+        v = float(getattr(config, "MARKET_STATE_SHORT_MULT", 1.0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+    if v != v:
+        return 0.0
+    return min(1.0, max(0.0, v))
+
+
+def _short_risk_mult(side) -> float:
+    """Short selling step 4: 1.0 for a long (and for any legacy/blank side); config.SHORT_RISK_MULT (0.1 .. 1.0, ships 0.5) for a SHORT, so a short
+    never risks more than a long. An unknown side raises ValueError: sizing a trade for a direction nobody can name would be a guess with money."""
+    s_ = str(side).strip().upper() if side is not None else ""
+    if s_ in ("", "LONG"):
+        return 1.0
+    if s_ != "SHORT":
+        raise ValueError(f"ledger.reserve_capital: unknown side {side!r}")
+    try:
+        v = float(getattr(config, "SHORT_RISK_MULT", 0.5))
+    except Exception:  # noqa: BLE001
+        v = 0.5
+    if v != v:
+        v = 0.5
+    return min(1.0, max(0.1, v)) * _market_state_short_mult()     # step 6: x the Market Weather short dial (0 = no short today)
+
+
 # BUG FIX (session53 — live-diagnosed, 2026-09-16): sync_from_broker() used to
 # check only 2 of Dhan's known available-balance field names ("availabelBalance"
 # — Dhan's own historical typo in the live API, not a typo introduced here —
@@ -460,9 +501,19 @@ def reserve_capital(
     db: Session,
     *,
     adaptive_stop_pct: float,
+    side: str = "LONG",
 ) -> Optional[float]:
     """Gate check + decrement. Returns position_value (₹) if OK, None if
-    insufficient capital or kill-switch tripped."""
+    insufficient capital or kill-switch tripped. side="SHORT" (short selling step 4) risks config.SHORT_RISK_MULT of a long's risk and is
+    refused unless config.SHORT_MODE is "live" (read at call time; accepted since step 8, orders/short_live.py is the only caller); the daily-loss kill switch and the
+    account-wide cap below count longs and shorts together."""
+    _side_mult = _short_risk_mult(side)       # raises on an unknown side, before anything is reserved
+    if str(side or "").strip().upper() == "SHORT" and getattr(config, "SHORT_MODE", "off") != "live":
+        logger.warning("ledger.reserve_capital: SHORT refused - SHORT_MODE is %r, not live", getattr(config, "SHORT_MODE", "off"))
+        return None
+    if str(side or "").strip().upper() == "SHORT" and _side_mult <= 0:
+        logger.warning("ledger.reserve_capital: SHORT refused - the Market Weather short dial is 0 today")
+        return None
     row = _get_or_create(db)
 
     if row.daily_loss_kill_switch_tripped:
@@ -521,6 +572,8 @@ def reserve_capital(
     risk_rupees = (
         row.total_allocated_capital
         * (config.RISK_PER_TRADE_PCT / 100.0)
+        * _market_state_risk_mult()     # Market Weather: 1.0 unless the layer is live and has lowered it (only ever reduces)
+        * _side_mult                    # short selling: 1.0 for a long, SHORT_RISK_MULT (<= 1.0) for a short
         / config.MAX_CONCURRENT_SCALP_POSITIONS
     )
     position_value = risk_rupees / (adaptive_stop_pct / 100.0)
@@ -768,6 +821,9 @@ def get_state(db: Session) -> dict:
         # +5:30 (IST) in any frontend consuming it.
         "last_synced_from_broker_at": iso_utc(row.last_synced_from_broker_at),
         "daily_loss_kill_switch_tripped": row.daily_loss_kill_switch_tripped,
+        # Market Weather (display): the layer's mode and the risk multiplier actually in force right now.
+        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "shadow"),
+        "market_state_risk_mult": _market_state_risk_mult(),
     }
 
 

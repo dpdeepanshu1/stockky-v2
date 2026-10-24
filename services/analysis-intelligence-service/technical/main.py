@@ -748,7 +748,8 @@ def _chart_context_payload(sym, frame, block, tail=300):
     try:
         bars, dates = _bars_and_dates(frame)
         trend = block.get("trend") if isinstance(block, dict) else None
-        out = _ms_chart_context(bars, dates, tail=tail, structure_trend=trend)
+        fib = block.get("fibonacci") if isinstance(block, dict) else None
+        out = _ms_chart_context(bars, dates, tail=tail, structure_trend=trend, fib=fib)
         out["symbol"] = sym
         return out
     except Exception as e:  # noqa: BLE001
@@ -787,10 +788,10 @@ def _intraday_unavailable(sym: str, tf: str, reason: str) -> dict:
     """The 200 answer for an intraday chart that cannot be drawn. NOT an HTTP 5xx: the gateway counts a 5xx against the technical circuit breaker,
     and a thin 1-minute history must never be able to trip it for the analysis features."""
     return {"schema": 1, "context_only": True, "ok": False, "symbol": sym, "tf": tf, "reason": reason, "bars": [], "markers": [], "shapes": [], "levels": [],
-            "badges": [], "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None}, "live": None}
+            "badges": [], "fib": None, "regime": {"trend": None, "volatility": None, "momentum": None, "structure": None}, "live": None}
 
 
-def _intraday_chart_payload(sym: str, tf: str, tail: int, daily_trend=None, rows=None, now=None):
+def _intraday_chart_payload(sym: str, tf: str, tail: int, daily_trend=None, rows=None, now=None, daily_fib=None):
     """E27: chart_context for 1m / 5m / 15m / 30m / 1h candles of one symbol. `rows` / `now` are injectable for tests. Never raises; always a dict
     (ok=False + reason when the candles cannot be drawn: engine_off, bad_tf, transient, no_data, thin, ...)."""
     if _ms_chart_context is None or _ms_tf is None:
@@ -809,7 +810,7 @@ def _intraday_chart_payload(sym: str, tf: str, tail: int, daily_trend=None, rows
         if len(sb["closed"]) < 5:
             return _intraday_unavailable(sym, tf, "thin")
         out = _ms_chart_context(sb["closed"], sb["labels"], tail=tail, structure_trend=daily_trend, tf=tf, live=sb["live"], live_date=sb["live_label"],
-                                lag_s=sb["lag_s"] if is_market_open() else None)
+                                lag_s=sb["lag_s"] if is_market_open() else None, fib=daily_fib)
         out["symbol"] = sym
         return out
     except Exception as e:  # noqa: BLE001
@@ -1487,15 +1488,16 @@ def chart_context_only(symbol: str, force: bool = False, tail: int = None, tf: s
         if hit:
             return hit
     if spec["intraday"]:
-        trend = None
+        trend = dfib = None
         try:
             if _structure_enabled() and _ms_analyze is not None:     # the DAILY structure read (cached), shown as "Daily structure" next to intraday candles
                 dfd = _fetch_history(sym, force=False)
                 block, _summary = _structure_cached(sym, dfd, None, force=False)
                 trend = block.get("trend") if isinstance(block, dict) else None
+                dfib = block.get("fibonacci") if isinstance(block, dict) else None
         except Exception as e:  # noqa: BLE001
             logger.debug("Technical: daily structure for intraday chart %s failed (%s)", sym, e)
-        result = _intraday_chart_payload(sym, tf, tail, trend)
+        result = _intraday_chart_payload(sym, tf, tail, trend, daily_fib=dfib)
         if not result.get("ok"):
             _cache_set(key, result, ttl=30)          # a miss is remembered briefly so a stuck chart cannot hammer market-data
             return result

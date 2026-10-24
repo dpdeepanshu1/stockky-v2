@@ -343,6 +343,30 @@ ENTRY_OVERNIGHT_PRIORITY_BONUS = float(((os.getenv("ENTRY_OVERNIGHT_PRIORITY_BON
 # MAX_TRADE_VALUE cap decides the real size. 2.0 matches position-stocks and still leaves room (Rs ~219 at ~Rs 11k equity, where 1.0 starved
 # entries). Rows still at 5.0 that no admin edited are moved once by _migrate_risk_default_e46().
 DEFAULT_RISK_PER_TRADE_PCT = float(((os.getenv("DEFAULT_RISK_PER_TRADE_PCT") or "").strip() or "2.0"))
+# ── Market Weather (market-state layer, 2026-10-23) ──────────────────────────────────────────────────────────────────────────────────
+# MARKET_STATE_MODE: off | shadow | live (ships shadow). The calibration-runner may only TIGHTEN, for one day, through control/kit.py overlays,
+# and only while the mode is `live`. The two multipliers below are 1.0 / 0 by default, so with no overlay trading is byte-for-byte as before.
+#   MARKET_STATE_RISK_MULT      0.1 .. 1.0  multiplies the per-trade risk % (risk_engine/engine.py); 1.0 = no change
+#   MARKET_STATE_CONVICTION_ADD 0 .. 20     added to the minimum conviction score (candidate_engine/candidates.py _min_conviction()); 0 = no change
+# Read at call time everywhere (scripts/check_control_catalog.py proves it).
+def _ms_float(name, default, lo, hi):
+    try:
+        v = float(((os.getenv(name) or "").strip() or str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    if v != v:                       # NaN
+        return float(default)
+    return min(hi, max(lo, v))
+
+
+def _ms_mode(name="MARKET_STATE_MODE", default="shadow"):
+    v = ((os.getenv(name) or "").strip().lower()) or default
+    return v if v in ("off", "shadow", "live") else default
+
+
+MARKET_STATE_MODE = _ms_mode()
+MARKET_STATE_RISK_MULT = _ms_float("MARKET_STATE_RISK_MULT", 1.0, 0.1, 1.0)
+MARKET_STATE_CONVICTION_ADD = _ms_float("MARKET_STATE_CONVICTION_ADD", 0.0, 0.0, 20.0)
 DEFAULT_MAX_DAILY_LOSS_PCT = float(((os.getenv("DEFAULT_MAX_DAILY_LOSS_PCT") or "").strip() or "3.0"))
 DEFAULT_MAX_CONCURRENT_POSITIONS = int(((os.getenv("DEFAULT_MAX_CONCURRENT_POSITIONS") or "").strip() or "3"))
 DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(((os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_PCT") or "").strip() or "5.0"))
@@ -504,10 +528,10 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 # the backtest/observation data (scripts/structure_backtest.py) calibrates it. ALWAYS LIVE (group370: shadow mode removed) - the gate can
 # only ever WAIT (it never creates an entry), a missing / stale structure is "no opinion", and every verdict is stored on the decision, so a
 # wrong threshold costs a skipped trade, never a bad one (which is why the backtest still has to be run: skips are silent).
-#   STRUCTURE_GATE_MODE       REAL mode:  log (default since A9: evaluate + record, never blocks) | enforce (WAIT with gate_tag=structure) | off (kill switch). Any other non-empty value (incl. a stale "shadow") = enforce.
+#   STRUCTURE_GATE_MODE       REAL mode:  enforce (default since E73: WAIT with gate_tag=structure) | log (evaluate + record, never blocks) | off (kill switch). Any other non-empty value (incl. a stale "shadow") = enforce.
 #   STRUCTURE_GATE_DEMO_MODE  DEMO mode:  same values; defaults to STRUCTURE_GATE_MODE
 # Missing / stale / insufficient structure data is NEVER bullish and NEVER a reason to block (no opinion), unless STRUCTURE_REQUIRE_DATA=true (the default since group377).
-# A9 (2026-10-22): "log" added and made the shipped default. log = the gate is evaluated and the verdict stored on the decision
+# A9 (2026-10-22): "log" added and was the shipped default until E73 (2026-10-23), which ships `enforce` again (everything live). log = the gate is evaluated and the verdict stored on the decision
 # (structure_json + observation rows keep accumulating evidence) but it never makes an entry WAIT. Raise to "enforce" once the
 # gate has proven benefit out-of-sample (gate_check G2); autocalib still moves it to enforce on a G2 PASS.
 def _sg_mode(name, default):
@@ -517,7 +541,7 @@ def _sg_mode(name, default):
     if not v:
         return default if default in ("off", "log", "enforce") else "enforce"
     return "enforce"   # a stale "shadow" in an old .env stays live
-STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "log")
+STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
 STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
 # B15 (2026-10-22): enforce needs evidence. While fewer than this many structure_observations rows with a measured outcome (ret_5d) exist for
 # the mode, an "enforce" setting runs as "log" (evaluate + record, never blocks) until the evidence is there. 0 disables the guard.
@@ -530,6 +554,13 @@ STRUCTURE_MIN_ROOM_ATR = _og_float("STRUCTURE_MIN_ROOM_ATR", 0.5)         # live
 STRUCTURE_MIN_RR = _og_float("STRUCTURE_MIN_RR", 0.0)                      # structure R:R floor at the live entry (0 disables). group424: OFF by default - the replay edge of this rule flipped sign between seeds (+0.39 / -0.19), so it is not proven to help; 1.2 restores the old floor
 STRUCTURE_REJECT_STOP_WIDE = ((os.getenv("STRUCTURE_REJECT_STOP_WIDE") or "").strip() or "true").lower() == "true"
 STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() or "true").lower() == "true"   # bearish daily trend / fresh bearish BOS
+# D-vol (2026-10-23): a breakout (a bullish daily break of structure, not failed, within STRUCTURE_BREAKOUT_BARS bars) should come on volume. The engine records
+# the breakout bar's volume / its 20-bar mean as ms_bos_vol_ratio; below STRUCTURE_BREAKOUT_MIN_VOL_RATIO it is a "breakout without volume".
+#   STRUCTURE_BREAKOUT_VOLUME_MODE  enforce (default since E73: counts as a gate reason, so the entry WAITs) | log (record it as an observation on the decision, never blocks) | off.
+# 0 for the ratio switches the test off. A summary without ms_bos_vol_ratio (older engine copy / no volume) is no opinion on this test, never a block.
+STRUCTURE_BREAKOUT_VOLUME_MODE = (lambda v: v if v in ("off", "log", "enforce") else "enforce")((os.getenv("STRUCTURE_BREAKOUT_VOLUME_MODE") or "enforce").strip().lower())
+STRUCTURE_BREAKOUT_MIN_VOL_RATIO = _og_float("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2)    # same 1.2 x average as the candle `volume_confirmed` flag
+STRUCTURE_BREAKOUT_BARS = int(_og_float("STRUCTURE_BREAKOUT_BARS", 5.0))
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts
 STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 5.0)         # last structure bar older than this = stale = no opinion (group415: was 7)
 STRUCTURE_MAX_PRICE_DEV_PCT = _og_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)  # live entry vs structure close further apart = split/bad data = no opinion
@@ -1032,6 +1063,11 @@ ENTRY_REGIME_MIN_SCORE              = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") 
 # down-sizes any entry; stock-level checks (R:R, drift, VWAP, risk engine, cash) still apply. The regime score is still recorded
 # for the dashboard. ENTRY_REGIME_GATE_ENABLED=true restores the old gate (with the override below).
 ENTRY_REGIME_GATE_ENABLED           = ((os.getenv("ENTRY_REGIME_GATE_ENABLED") or "").strip() or "false").lower() == "true"
+# 2026-10-23: rules that switch by market regime, LOG ONLY (entry_engine/regime_rules.py). off | log (default). There is NO enforce mode: each candidate gets a hypothetical
+# verdict ("would a weak-market rule set have turned it away?") in the log and on GET /regime-rules/status; nothing it says changes an entry, a size, a stop or a target.
+REGIME_RULES_MODE = (lambda v: "off" if v == "off" else "log")((os.getenv("REGIME_RULES_MODE") or "log").strip().lower())
+REGIME_RULES_STRONG_SCORE = float(((os.getenv("REGIME_RULES_STRONG_SCORE") or "").strip() or "60"))   # market score at / above which the regime reads "strong"
+REGIME_RULES_TABLE_JSON = (os.getenv("REGIME_RULES_TABLE_JSON") or "").strip()                       # optional override, e.g. {"weak":{"min_rr":3,"min_conviction":70}}
 ENTRY_REGIME_OVERRIDE_TOP_N         = int(((os.getenv("ENTRY_REGIME_OVERRIDE_TOP_N") or "").strip() or "1"))
 ENTRY_REGIME_OVERRIDE_RISK_SCALE    = float(((os.getenv("ENTRY_REGIME_OVERRIDE_RISK_SCALE") or "").strip() or "0.5"))
 ENTRY_MIN_REWARD_RISK               = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))  # LAST_REVIEWED: 2026-10-04
@@ -1511,3 +1547,6 @@ REARM_MAX_AGE_MIN = _og_float("REARM_MAX_AGE_MIN", 90.0)                # an arm
 REARM_MAX_ATTEMPTS = int(_og_float("REARM_MAX_ATTEMPTS", 2.0))          # per symbol per day
 REARM_MAX_ARMED = int(_og_float("REARM_MAX_ARMED", 25.0))
 REARM_WAIVER_S = _og_float("REARM_WAIVER_S", 420.0)                     # chase checks are waived this long after a re-queue (about two cycles)
+
+# E75: trade journal notes (reason + feeling, journal_notes.py). OFF = PUT /journal/notes/{mode}/{id} is refused (409). Descriptive only: no gate, score or size reads a note.
+JOURNAL_NOTES_ENABLED = _bs_bool("JOURNAL_NOTES_ENABLED", "true")

@@ -13,12 +13,13 @@ interface Props {
   height?: number;
   levels?: PriceLevel[];     // entry / stop / target lines
   showPatterns?: boolean;
+  showFib?: boolean;         // E25b: Fibonacci levels of the latest daily leg (default on; a no-op when the backend sent none)
 }
 
 const PAD = { l: 6, r: 46, t: 8, b: 18 };
 const fmt = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: v >= 1000 ? 0 : 2 });
 
-export default function CandleChart({ ctx, windowKey, height = 240, levels = [], showPatterns = true }: Props) {
+export default function CandleChart({ ctx, windowKey, height = 240, levels = [], showPatterns = true, showFib = true }: Props) {
   const boxRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(320);
   const [hover, setHover] = useState<number | null>(null);
@@ -48,11 +49,12 @@ export default function CandleChart({ ctx, windowKey, height = 240, levels = [],
     const lines = showPatterns
       ? ctx.shapes.flatMap((s) => s.lines.map((l) => ({ s, l, c: clipLine(l, dates, lo) }))).filter((x) => x.c)
       : [];
-    const extras = [...lines.flatMap((x) => [x.c!.y1, x.c!.y2]), ...levels.map((v) => v.price), ...ctx.levels.map((v) => v.price)];
+    const fib = showFib ? ctx.fib ?? null : null;
+    const extras = [...lines.flatMap((x) => [x.c!.y1, x.c!.y2]), ...levels.map((v) => v.price), ...ctx.levels.map((v) => v.price), ...(fib ? fib.levels.map((v) => v.price) : [])];
     const range = priceRange(vis, extras);
     const breaks = dayBreaks(dates, lo, all.length - 1);
-    return { all, lo, vis, dates, lines, range, liveIdx, breaks };
-  }, [ctx, tf, windowKey, levels, showPatterns]);
+    return { all, lo, vis, dates, lines, range, liveIdx, breaks, fib };
+  }, [ctx, tf, windowKey, levels, showPatterns, showFib]);
 
   const { vis, lo, range } = g;
   if (!range || vis.length < 2) return null;
@@ -128,6 +130,23 @@ export default function CandleChart({ ctx, windowKey, height = 240, levels = [],
           <line key={`${l.kind}${l.price}`} x1={PAD.l} x2={width - PAD.r} y1={y(l.price)} y2={y(l.price)} stroke={toneColor(l.kind === "support_flip" ? "good" : "bad")}
             strokeWidth={0.8} strokeDasharray="1 3" opacity={0.7} />
         ))}
+
+        {/* E25b: Fibonacci - golden zone band + one thin line per level that is inside the visible price range (extensions only when near) */}
+        {g.fib && (() => {
+          const f = g.fib, gTop = Math.min(f.golden.high, range.max), gBot = Math.max(f.golden.low, range.min), dim = f.invalidated ? 0.45 : 1;
+          return (
+            <g aria-label="Fibonacci levels" opacity={dim}>
+              {gTop > gBot && <rect x={PAD.l} width={plotW} y={y(gTop)} height={Math.max(1, y(gBot) - y(gTop))} fill={toneColor("warn")} opacity={0.12} />}
+              {f.levels.filter((v) => inScale(v.price)).map((v) => (
+                <g key={`fib${v.label}`}>
+                  <line x1={PAD.l} x2={width - PAD.r} y1={y(v.price)} y2={y(v.price)} stroke={toneColor(v.kind === "golden" ? "warn" : "mute")}
+                    strokeWidth={v.kind === "golden" ? 0.9 : 0.6} strokeDasharray={v.kind === "ext" ? "2 3" : "4 2"} opacity={0.85} />
+                  <text x={PAD.l + 2} y={y(v.price) - 2} fontSize={8} fill={toneColor(v.kind === "golden" ? "warn" : "mute")}>{v.label}</text>
+                </g>
+              ))}
+            </g>
+          );
+        })()}
 
         {/* candles */}
         {vis.map((b, k) => {

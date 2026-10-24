@@ -23,6 +23,31 @@ def is_system_owned(risk_row: Any) -> bool:
     return str(getattr(risk_row, "updated_by", None) or "") in SYSTEM_TAGS
 
 
+def market_state_risk_mult() -> float:
+    """Market Weather multiplier on the per-trade risk % (config.MARKET_STATE_RISK_MULT, read at call time). 1.0 = no change; the value is clamped to
+    0.1 .. 1.0 so it can only ever REDUCE risk; anything unreadable counts as 1.0."""
+    try:
+        v = float(getattr(config, "MARKET_STATE_RISK_MULT", 1.0))
+    except Exception:  # noqa: BLE001
+        return 1.0
+    if v != v:
+        return 1.0
+    return min(1.0, max(0.1, v))
+
+
+def effective_risk_pct_in_force(risk_row: Any):
+    """effective_risk_pct() x today's market-state multiplier: the number the engine really caps one trade at. DISPLAY ONLY (/risk-config, the
+    portfolio summary). The engine feeds effective_risk_pct() (NOT this) into AccountState and applies the multiplier itself, once, in
+    risk_engine/engine.py, so the multiplier is never applied twice."""
+    base = effective_risk_pct(risk_row)
+    if base is None:
+        return None
+    try:
+        return float(base) * market_state_risk_mult()
+    except (TypeError, ValueError):
+        return base
+
+
 def effective_risk_pct(risk_row: Any):
     stored = getattr(risk_row, "risk_per_trade_pct", None)
     if not is_system_owned(risk_row):

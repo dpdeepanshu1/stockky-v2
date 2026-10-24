@@ -163,9 +163,26 @@ def live_metrics(summary: Dict[str, Any], live_price) -> Dict[str, Optional[floa
     return out
 
 
+def breakout_volume_note(summary: Optional[Dict[str, Any]]) -> Optional[str]:
+    """D-vol: text when the latest bullish break of structure is fresh, not failed and came on thin volume (ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO);
+    None when the test is off, there is no fresh bullish breakout, or the summary has no volume ratio (no opinion). Pure, never raises."""
+    try:
+        if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "log")) == "off" or not isinstance(summary, dict):
+            return None
+        lim = float(getattr(config, "STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 0.0) or 0.0)
+        ratio, bars = _f(summary.get("ms_bos_vol_ratio")), _f(summary.get("ms_bos_bars"))
+        if lim <= 0 or ratio is None or bars is None or summary.get("ms_bos_dir") != "bullish" or summary.get("ms_bos_failed"):
+            return None
+        if bars > int(getattr(config, "STRUCTURE_BREAKOUT_BARS", 5)) or ratio >= lim:
+            return None
+        return f"breakout {int(bars)} bar(s) ago came on thin volume ({ratio:.2f}x the 20-day average, wants {lim:g}x)"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
     """Pure verdict. Keys: opinion ('ok'|'no_opinion'), would_reject, reasons[], tag, reason, metrics, no_data. Never raises."""
-    base: Dict[str, Any] = {"opinion": "no_opinion", "would_reject": False, "reasons": [], "tag": None, "reason": None, "metrics": {},
+    base: Dict[str, Any] = {"opinion": "no_opinion", "would_reject": False, "reasons": [], "observations": [], "tag": None, "reason": None, "metrics": {},
                             "no_data": None, "quality": (summary or {}).get("ms_quality") if isinstance(summary, dict) else None,
                             "ver": (summary or {}).get("ms_ver") if isinstance(summary, dict) else None}
     try:
@@ -204,6 +221,12 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
                 if (summary.get("ms_bos_dir") == "bearish" and not summary.get("ms_bos_failed") and bars is not None
                         and bars <= int(config.STRUCTURE_BEARISH_BOS_BARS)):
                     reasons.append(f"fresh bearish break of structure {int(bars)} bar(s) ago")
+        vol_txt = breakout_volume_note(summary)
+        if vol_txt:
+            if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "log")) == "enforce":
+                reasons.append(vol_txt)
+            else:
+                base["observations"] = [vol_txt]          # log: recorded on the decision, never a reason, never a WAIT
         base["reasons"] = reasons
         if reasons:
             base["would_reject"] = True
@@ -257,12 +280,12 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
              levels: Optional[Dict[str, Any]] = None, source: Optional[str] = None) -> str:
     """Compact JSON stored on the decision (trade_decisions.structure_json): what was seen and what the gate said."""
     s = summary if isinstance(summary, dict) else {}
-    keep = ("ms_quality", "ms_ver", "ms_hash", "ms_asof", "ms_trend", "ms_bos_dir", "ms_bos_bars", "ms_bos_failed", "ms_choch_dir",
+    keep = ("ms_quality", "ms_ver", "ms_hash", "ms_asof", "ms_trend", "ms_bos_dir", "ms_bos_bars", "ms_bos_failed", "ms_bos_vol_ratio", "ms_choch_dir",
             "ms_choch_bars", "ms_fvg_side", "ms_fvg_status", "ms_ob_side", "ms_ob_status", "ms_in_golden", "ms_loc_score", "ms_rr",
             "ms_stop", "ms_target", "ms_chase_atr", "ms_stretch_atr", "ms_room_atr", "ms_atr", "ms_tqs", "ms_groups", "ms_rr_flags",
             "ms_price")
     doc = {"v": 1, "gate_mode": gate_mode, "enforced": bool(enforced), "source": source,
-           "opinion": verdict.get("opinion"), "would_reject": bool(verdict.get("would_reject")), "reasons": verdict.get("reasons") or [],
+           "opinion": verdict.get("opinion"), "would_reject": bool(verdict.get("would_reject")), "reasons": verdict.get("reasons") or [], "observations": verdict.get("observations") or [],
            "no_data": verdict.get("no_data"), "live": verdict.get("metrics") or {}, "levels": levels or None,
            "summary": {k: s.get(k) for k in keep if s.get(k) is not None}}
     try:
@@ -273,7 +296,7 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
 
 # ── group 355: observability (process-local counters + a short ring of recent verdicts; read by GET /structure/status/{mode}) ───────────
 _REASON_KEYS = (("chase", "chase"), ("stretched", "stretch"), ("of room", "room"), ("r:r", "rr"), ("stop is too wide", "stop_wide"),
-                ("bearish break", "bos"), ("is bearish", "bearish"))
+                ("bearish break", "bos"), ("is bearish", "bearish"), ("thin volume", "breakout_volume"))
 _stats: Dict[str, Any] = {}
 _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 
@@ -281,7 +304,7 @@ _recent: "deque[Dict[str, Any]]" = deque(maxlen=100)
 def reset_stats() -> None:
     _stats.clear()
     _stats.update(evaluated=0, ok=0, no_opinion=0, would_reject=0, enforced=0, nodata_blocked=0, fetch_cache_hit=0, fetch_ok=0,
-                  fetch_fail=0, fetch_disabled=0, errors=0, room_past_resistance=0, by_reason={}, by_nodata={}, since=time.time())
+                  fetch_fail=0, fetch_disabled=0, errors=0, room_past_resistance=0, thin_volume_breakouts=0, by_reason={}, by_nodata={}, since=time.time())
     _recent.clear()
 
 
@@ -321,6 +344,8 @@ def record(symbol: str, trade_mode: str, verdict: Dict[str, Any], gate_mode: str
             _stats["no_opinion"] += 1
             k = nodata_key(verdict.get("no_data"))
             _stats["by_nodata"][k] = _stats["by_nodata"].get(k, 0) + 1
+        if verdict.get("observations") or any("thin volume" in str(r) for r in (verdict.get("reasons") or [])):
+            _stats["thin_volume_breakouts"] = _stats.get("thin_volume_breakouts", 0) + 1       # D-vol: counted whether log or enforce
         if verdict.get("would_reject"):
             _stats["would_reject"] += 1
             for r in verdict.get("reasons") or []:
@@ -346,7 +371,7 @@ def stats() -> Dict[str, Any]:
         ev = int(_stats.get("evaluated") or 0)
         cfg = {k: getattr(config, k, None) for k in ("STRUCTURE_GATE_MODE", "STRUCTURE_GATE_DEMO_MODE", "STRUCTURE_STOP_MODE", "STRUCTURE_REQUIRE_DATA",
                "STRUCTURE_MAX_CHASE_ATR", "STRUCTURE_MAX_STRETCH_ATR", "STRUCTURE_MIN_ROOM_ATR", "STRUCTURE_MIN_RR", "STRUCTURE_REJECT_STOP_WIDE",
-               "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS", "STRUCTURE_MAX_AGE_DAYS", "STRUCTURE_MAX_PRICE_DEV_PCT",
+               "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS", "STRUCTURE_BREAKOUT_VOLUME_MODE", "STRUCTURE_BREAKOUT_MIN_VOL_RATIO", "STRUCTURE_MAX_AGE_DAYS", "STRUCTURE_MAX_PRICE_DEV_PCT",
                "STRUCTURE_FETCH_ENABLED")}
         return {**{k: v for k, v in _stats.items() if k != "since"}, "since_epoch": _stats.get("since"),
                 "coverage_pct": round(100.0 * _stats.get("ok", 0) / ev, 1) if ev else None, "config": cfg,

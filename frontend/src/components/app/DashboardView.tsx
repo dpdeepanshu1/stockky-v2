@@ -34,13 +34,13 @@ export interface DashboardViewProps {
   isRetrying: boolean; cancelRequested: boolean; stoppingScan: boolean;
   wsLive: boolean;
   signalFilter: "ALL" | "BUY" | "PREPARE" | "HOLD"; setSignalFilter: Setter<"ALL" | "BUY" | "PREPARE" | "HOLD">;
-  setShowSettings: Setter<boolean>;
+  openSettings: () => void;
 }
 
 export function DashboardView({
   view, setView, query, setQuery, watchlist,
   handleSearch, handleScan, handleStopScan, handleRetry, handleAddToWatchlist, handleAddManyToWatchlist, handleSendTopPicks, handleSendAllActionable,
-  liveScanRows, scanTransport, scanTaskId, isRetrying, cancelRequested, stoppingScan, wsLive, signalFilter, setSignalFilter, setShowSettings,
+  liveScanRows, scanTransport, scanTaskId, isRetrying, cancelRequested, stoppingScan, wsLive, signalFilter, setSignalFilter, openSettings,
 }: DashboardViewProps) {
   return (
           <>
@@ -291,7 +291,7 @@ export function DashboardView({
                       {isRetrying ? "⏳ Restarting..." : (scanTaskId ? "Resume Scan" : "Try again")}
                     </button>
                     <button
-                      onClick={() => setShowSettings(true)}
+                      onClick={openSettings}
                       className="font-mono text-xs text-mist hover:text-paper underline"
                     >
                       Check backend settings

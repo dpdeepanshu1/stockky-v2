@@ -31,6 +31,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 import config
+from control.kit import current_profile as _ms_current_profile
 import cost_model
 import entry_product
 import models
@@ -45,7 +46,7 @@ from tz_utils import is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, stopout_guard, structure_gate, timesfm_gate, vix_gate, vwap_gate
+from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, vix_gate, vwap_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
@@ -1128,6 +1129,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": decision.reasoning, "risk_verdict": None})
             continue
 
+        # ── Regime rules (2026-10-23): LOG ONLY. A hypothetical verdict of "would a stricter weak-market rule set have turned this away?" for the evidence
+        # tools; it never blocks, resizes or changes a stop / target (no enforce mode exists). Never raises. See entry_engine/regime_rules.py.
+        if regime_rules.mode_for(mode) == "log":
+            try:
+                regime_rules.record(cand.symbol, mode, regime_rules.evaluate(market_score, threshold, cand.conviction_score, rr), tick.price)
+            except Exception as _rr_err:  # noqa: BLE001 - a record-only check must never stop an entry
+                logger.debug("entry_engine: regime rules failed for %s (ignored): %s", cand.symbol, _rr_err)
+
         # ── Conviction-adjusted sizing ─────────────────────────────────────────
         account_state  = _account_state(db, mode, gate_armed, reserved_cash)
         adj_risk_pct   = _conviction_adjusted_risk_pct(
@@ -1625,6 +1634,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # the watchlist engine — see candidate_engine's
             # _refresh_volume_shock_candidates).
             source_tab=getattr(cand, "source_tab", None),
+            # Market Weather: the state in force when this order was placed (None when no state is active).
+            market_state=_ms_current_profile()["market_state"],
+            profile_version=_ms_current_profile()["profile_version"],
             # 2026-09-18 fix (selective overnight hold): carry the candidate's
             # decision_label/conviction_score forward too, so portfolio.py can
             # stamp the resulting TradePosition and EOD square-off can decide

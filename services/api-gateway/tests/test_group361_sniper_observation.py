@@ -409,7 +409,9 @@ class TestWiring:
         assert "await" not in src
 
     def test_tick_action(self):
-        assert 'payload.get("action") == "sniper-observe-eval"' in MAIN_SRC
+        # the QStash tick handler moved out of main.py into gateway_support/bound_routes_d.py (router split)
+        moved = open(os.path.join(_SERVICE, "gateway_support", "bound_routes_d.py"), encoding="utf-8").read()
+        assert 'payload.get("action") == "sniper-observe-eval"' in MAIN_SRC + moved
 
     def test_durable_prefix_registered(self):
         kv = open(os.path.join(_SERVICE, "kv_cache.py"), encoding="utf-8").read()

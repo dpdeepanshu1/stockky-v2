@@ -52,4 +52,15 @@ for (const n of ["mode", "status", "loggedIn", "armed", "positions", "doArm", "d
   assert.ok(names.includes(n), `prop ${n} declared`);
 }
 for (const n of new Set(names)) assert.ok(new RegExp(`\\b${n}=\\{`).test(call), `RealAutoTrade passes ${n}`);
+
+// E75: Real Trade journal notes (reason + feeling) are mounted on the Activity tab and call the mode-scoped routes.
+const logTab = read("components/realAuto/tabs/LogTab.tsx");
+assert.match(logTab, /<JournalNotesCard mode=\{mode\} \/>/, "LogTab mounts the notes card");
+const rtApi = read("realTradeApi.ts");
+for (const piece of ["`/journal/notes/${mode}?limit=${limit}`", "`/journal/notes/${mode}/${positionId}`", "closedPositions:", "export interface JournalNotesResponse"]) {
+  assert.ok(rtApi.includes(piece), `realTradeApi keeps ${piece}`);
+}
+const card = read("components/realAuto/JournalNotesCard.tsx");
+assert.ok(card.includes("realTradeApi.saveJournalNote(mode, editId"), "the card saves through the mode-scoped route");
+
 console.log("realAutoTabs.test.mjs: ok");

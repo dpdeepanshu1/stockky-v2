@@ -195,6 +195,8 @@ GROUPS: List[tuple] = [
     ("exit_reason", lambda r: r.get("exit_reason")),
     ("hold_bucket", lambda r: r.get("hold_bucket")),
     ("stop_basis", lambda r: r.get("stop_basis")),
+    ("market state at entry", lambda r: r.get("market_state") or "none"),
+    ("profile version at entry", lambda r: r.get("profile_version") or "none"),
     ("order flow: best-5 imbalance", lambda r: imb_bucket(r.get("imbalance_5"))),
     ("order flow: 20-level imbalance", lambda r: imb_bucket(r.get("imbalance_20"))),
     ("order flow: spread at entry", lambda r: spread_bucket(r.get("flow_spread_pct"))),

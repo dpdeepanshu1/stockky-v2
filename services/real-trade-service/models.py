@@ -419,6 +419,11 @@ class TradeOrder(Base):
     # NULL for manual orders (manual_engine never sets this).
     source_tab = Column(String(32), nullable=True)
 
+    # Market Weather (market-state layer): the market state and profile version in force (control.kit.current_profile()) when this was placed.
+    # NULL = no state was active (layer off / old row / manual). Descriptive only: no gate, size or score reads it.
+    market_state = Column(String(16), nullable=True)
+    profile_version = Column(String(24), nullable=True)
+
     # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
     # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied
     # from the originating TradeCandidate.decision_label / conviction_score at
@@ -555,6 +560,11 @@ class TradePosition(Base):
     # trades, broker-imported holdings, and pre-migration rows — all of
     # which keep falling back to the existing global-default behavior.
     source_tab = Column(String(32), nullable=True)
+
+    # Market Weather (market-state layer): the market state and profile version in force (control.kit.current_profile()) when this was placed.
+    # NULL = no state was active (layer off / old row / manual). Descriptive only: no gate, size or score reads it.
+    market_state = Column(String(16), nullable=True)
+    profile_version = Column(String(24), nullable=True)
 
     # 2026-09-18 fix (selective overnight hold — see execution/auto_pilot.py's
     # _select_overnight_holds and config.py's OVERNIGHT_HOLD_* block): copied
@@ -1056,3 +1066,27 @@ class StructureObservation(Base):
         Index("ix_struct_obs_day", "mode", "symbol", "obs_day"),
         Index("ix_struct_obs_pending", "is_complete", "obs_ts"),
     )
+
+
+class TradeJournalNote(Base):
+    """E75: the trader's own reason and feeling for one Real Trade position (Position Stocks has the same, E30). One row per position.
+
+    A NEW table, so create_all() makes it (no ALTER). It keeps a SNAPSHOT of the trade (symbol, opened_at, status, outcome, pnl) because old
+    closed positions are cleaned up and "win rate by feeling" must keep its history. position_id has no foreign key for that reason.
+    Written only by the admin routes PUT /journal/notes/{mode}/{position_id}. Nothing here is read by a gate, a score or the entry path.
+    """
+    __tablename__ = "trade_journal_notes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position_id = Column(Integer, nullable=False, unique=True, index=True)
+    mode = Column(String(8), nullable=True, index=True)      # DEMO | REAL, copied from the position
+    symbol = Column(String(32), nullable=False)
+    manual = Column(Boolean, nullable=False, default=False)
+    reason = Column(String(300), nullable=True)
+    emotion = Column(String(24), nullable=True)
+    opened_at = Column(DateTime, nullable=True)
+    status = Column(String(16), nullable=True)
+    outcome = Column(String(16), nullable=True)               # win | loss | breakeven | None (still open)
+    realized_pnl = Column(Float, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)

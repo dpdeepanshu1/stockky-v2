@@ -1020,6 +1020,8 @@ class TestGetState:
             "peer_pnl_last_synced_at": None,
             "last_synced_from_broker_at": None,
             "daily_loss_kill_switch_tripped": False,
+            "market_state_mode": "shadow",
+            "market_state_risk_mult": 1.0,
         }
 
     def test_populated_state_reports_values_and_utc_timestamps(self, env):

@@ -15,6 +15,13 @@ export interface ChartCtx {
   symbol?: string; schema?: number; ok: boolean; bars: Bar[]; last_bar?: string | null;
   tf?: Tf; unit?: "day" | "candle"; note?: string | null; live?: Bar | null; data_lag_s?: number | null; reason?: string;   // E27
   markers: ChartMarker[]; shapes: ChartShape[]; levels: { kind: string; price: number }[]; badges: ChartBadge[]; regime: ChartRegime;
+  fib?: ChartFib | null;   // E25b
+}
+/** E25b: Fibonacci retracement of the latest confirmed daily leg (display only). kind: end = 0 % / 100 %, retrace, golden = 50 / 61.8 %, ext = 127.2 / 161.8 %. */
+export interface FibLevel { ratio: number; label: string; price: number; kind: "end" | "retrace" | "golden" | "ext" }
+export interface ChartFib {
+  direction: "bullish" | "bearish"; swing_low: number; swing_high: number; levels: FibLevel[]; golden: { low: number; high: number };
+  in_golden_zone: boolean; retracement: number | null; invalidated: boolean; source: string;
 }
 export interface PriceLevel { label: string; price: number; tone: Tone }
 
@@ -51,6 +58,21 @@ export const windowKeyFor = (tf: unknown, key: string | undefined): string => (w
 
 const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
+/** Safe ChartFib from anything the gateway returned, or null when it cannot be drawn. Never throws. */
+export function normalizeFib(raw: unknown): ChartFib | null {
+  try {
+    const r = raw as any;
+    if (!r || typeof r !== "object" || (r.direction !== "bullish" && r.direction !== "bearish") || !Array.isArray(r.levels)) return null;
+    const kinds = ["end", "retrace", "golden", "ext"];
+    const levels = (r.levels as any[]).filter((l) => l && fin(l.price) && l.price > 0 && fin(l.ratio) && typeof l.label === "string" && kinds.includes(l.kind))
+      .map((l) => ({ ratio: l.ratio, label: l.label, price: l.price, kind: l.kind } as FibLevel));
+    const g = r.golden;
+    if (levels.length < 3 || !g || !fin(g.low) || !fin(g.high) || !fin(r.swing_low) || !fin(r.swing_high)) return null;
+    return { direction: r.direction, swing_low: r.swing_low, swing_high: r.swing_high, levels, golden: { low: g.low, high: g.high },
+      in_golden_zone: !!r.in_golden_zone, retracement: fin(r.retracement) ? r.retracement : null, invalidated: !!r.invalidated, source: typeof r.source === "string" ? r.source : "daily" };
+  } catch { return null; }
+}
+
 /** Safe ChartCtx from anything the gateway returned; ok=false (and empty arrays) when it is not usable. */
 export function normalizeCtx(raw: unknown): ChartCtx {
   const empty: ChartCtx = { ok: false, bars: [], markers: [], shapes: [], levels: [], badges: [], regime: { trend: null, volatility: null, momentum: null, structure: null } };
@@ -69,7 +91,7 @@ export function normalizeCtx(raw: unknown): ChartCtx {
       data_lag_s: fin(r.data_lag_s) ? Math.max(0, Math.round(r.data_lag_s)) : null,
       markers: arr<ChartMarker>(r.markers), shapes: arr<ChartShape>(r.shapes).filter((s) => s && Array.isArray(s.lines)),
       levels: arr<{ kind: string; price: number }>(r.levels).filter((l) => l && fin(l.price)), badges: arr<ChartBadge>(r.badges),
-      regime: { ...empty.regime, ...(r.regime && typeof r.regime === "object" ? r.regime : {}) },
+      regime: { ...empty.regime, ...(r.regime && typeof r.regime === "object" ? r.regime : {}) }, fib: normalizeFib(r.fib),
     };
   } catch { return empty; }
 }

@@ -9,6 +9,7 @@
 import { getRealTradeApiUrl, setRealTradeApiUrl, getSessionToken as getRtToken, setSessionToken as setRtToken, realTradeApi } from "./realTradeApi";
 import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
 import { getApiUrl } from "./api";
+import type { WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
 export * from "./calibrationTrades";
@@ -233,6 +234,11 @@ export const runnerApi = {
   autoStatus: () => R<AutoStatus>("/autocalib/status"),
   autoSettings: (body: { enabled?: boolean; dry_run?: boolean; pinned?: string[] }) => R<AutoSettings>("/autocalib/settings", { method: "PUT", body: JSON.stringify(body) }),
   autoRun: (dry_run?: boolean) => R<AutoReport>("/autocalib/run", { method: "POST", body: JSON.stringify(dry_run === undefined ? {} : { dry_run }) }),
+  // Part 1 step 5: Market Weather (shadow). /weather/* on calibration-runner-service; none of these changes a trading switch.
+  weatherStatus: () => R<WeatherStatus>("/weather/status"),
+  weatherLog: (limit = 100) => R<{ rows: WeatherLogRow[] }>(`/weather/log?limit=${limit}`),
+  weatherSettings: (body: WeatherSettings) => R<WeatherStatus>("/weather/settings", { method: "PUT", body: JSON.stringify(body) }),
+  weatherRun: (stage: WeatherStage) => R<WeatherLogRow>("/weather/run", { method: "POST", body: JSON.stringify({ stage }) }),
   calibrationSummary: async (): Promise<string> => {
     const resp = await fetch(`${getRunnerUrl()}/calibration-summary`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
     if (!resp.ok) throw new ApiError(resp.status, resp.status === 404 ? "No calibration summary yet: run the full calibration first." : resp.statusText);

@@ -186,6 +186,72 @@ MIN_PREFERRED_EXTRA_TOP_N = _get_int("MIN_PREFERRED_EXTRA_TOP_N", 2)
 RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 2.0)
 RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", True)
 
+# ── Market Weather (market-state layer, 2026-10-23) ──────────────────────────────────────────────────────────────────────────────────
+# MARKET_STATE_MODE: off | shadow | live (ships shadow). The calibration-runner may only TIGHTEN, for one day, through control/kit.py overlays,
+# and only while the mode is `live`. MARKET_STATE_RISK_MULT (0.1 .. 1.0, ships 1.0) multiplies RISK_PER_TRADE_PCT in capital/ledger.py at call time.
+def _ms_float(name: str, default: float, lo: float, hi: float) -> float:
+    v = _get_float(name, default)
+    if v != v:                       # NaN
+        return float(default)
+    return min(hi, max(lo, v))
+
+
+def _ms_mode(name: str = "MARKET_STATE_MODE", default: str = "shadow") -> str:
+    v = _get_str(name, default).lower()
+    return v if v in ("off", "shadow", "live") else default
+
+
+MARKET_STATE_MODE = _ms_mode()
+MARKET_STATE_RISK_MULT = _ms_float("MARKET_STATE_RISK_MULT", 1.0, 0.1, 1.0)
+
+# ── Short selling (Part 2 step 2, 2026-10-23) ──────────────────────────────────────────────────────────────────────────────────────────
+# SHORT_MODE: off | shadow | live (ships off). shadow = orders/short_entry.py records would-be shorts, no order. live (short selling step 8) = orders/short_live.py places
+# a real SELL Super Order WITH its broker stop leg, sized to at most SHORT_LIVE_QTY_CAP shares. Read by the short cycle, capital/ledger.py and the live entry.
+# Anything else reads as `off`. A short that cannot be closed cleanly must never exist, so the exit side (orders/side.py, eod_squareoff, reconcile) came first.
+def _short_mode(name: str = "SHORT_MODE", default: str = "off") -> str:
+    v = _get_str(name, default).strip().lower()
+    return v if v in ("off", "shadow", "live") else default
+
+
+SHORT_MODE = _short_mode()
+# Short selling step 9: the most shares ONE live short may have, whatever the budget says. Ships 1 (day one of live shorts is one share). Only you raise it:
+# it is on the calibrator's PROTECTED list. 1 .. 1000.
+SHORT_LIVE_QTY_CAP = max(1, min(1000, _get_int("SHORT_LIVE_QTY_CAP", 1)))
+# E108 (T6): a live short is refused until the Dhan SELL probe (orders/sell_probe.py, runner job dhan_sell_probe) has a PASS on record. Ships true: SHORT_MODE=live is then one
+# switch after the probe, and a mistaken early flip places nothing. false = no probe needed (loosens a rail, so the Switches page asks to confirm).
+SHORT_LIVE_REQUIRES_PROBE = _get_bool("SHORT_LIVE_REQUIRES_PROBE", True)
+# E107 (P2 item 17): rank the bearish short candidates against each other (screening/shortlist.py build_short) and try them best-first, so the capital and the
+# SHORT_MAX_POSITIONS slots go to the strongest short, not to whichever came first in scan order. Live in shadow AND live mode. It never adds a candidate and never
+# loosens a gate: every short still walks the same fail-closed gates. SHORT_SHORTLIST_ENABLED=0 restores scan order. Pool = names quality-checked per cycle.
+SHORT_SHORTLIST_ENABLED = _get_bool("SHORT_SHORTLIST_ENABLED", True)
+SHORT_SHORTLIST_MAX = max(1, min(10, _get_int("SHORT_SHORTLIST_MAX", 5)))
+SHORT_SHORTLIST_EXTENDED_PENALTY = _get_float("SHORT_SHORTLIST_EXTENDED_PENALTY", 15.0)   # already far below its zone: a late short chases the move
+# Short selling step 4: a short risks this fraction of what a long risks per trade (capital/ledger.py reserve_capital(side="SHORT")). 0.1 .. 1.0, ships 0.5.
+# Only ever lowers risk: 1.0 = same as a long, never above it.
+SHORT_RISK_MULT = _ms_float("SHORT_RISK_MULT", 0.5, 0.1, 1.0)
+# Short selling step 6 (2026-10-24): the Market Weather short dial. Multiplies a short's risk on top of SHORT_RISK_MULT, read at call time by
+# capital/ledger.py and orders/short_entry.py. 0.0 .. 1.0, ships 1.0 (no change); 0 = no short at all today. Only the market-state overlay (tighten-only,
+# gone at 15:30 IST or on restart) or a person lowers it. It never touches a long.
+MARKET_STATE_SHORT_MULT = _ms_float("MARKET_STATE_SHORT_MULT", 1.0, 0.0, 1.0)
+
+# Short selling step 12 (2026-10-24): a short's stop is tightened to this fraction of its normal distance when Market Weather says stressed / panic (the plan's
+# "tighter stop" rows). 0.3 .. 1.0, 1.0 = off. Position size is still worked out from the NORMAL stop, so a tighter stop lowers the rupee risk, never raises the size.
+SHORT_STOP_MULT_STRESSED = _ms_float("SHORT_STOP_MULT_STRESSED", 0.8, 0.3, 1.0)
+SHORT_STOP_MULT_PANIC = _ms_float("SHORT_STOP_MULT_PANIC", 0.6, 0.3, 1.0)
+
+# Short selling step 5 (shadow entry, 2026-10-23): the mirrored entry rules, read at call time by orders/short_gates.py and orders/short_entry.py.
+# None touches a long rule, and with the short mode off none is read at all.
+SHORT_MAX_POSITIONS = max(1, min(5, _get_int("SHORT_MAX_POSITIONS", 2)))               # would-be shorts unresolved at once (later: real shorts)
+SHORT_ENTRY_START_IST = _get_str("SHORT_ENTRY_START_IST", "09:45")                      # the day's VWAP rests on too few trades before this
+SHORT_ENTRY_CUTOFF_IST = _get_str("SHORT_ENTRY_CUTOFF_IST", "13:30")                    # a late short has little time to work and a lot of time to be squeezed
+SHORT_SQUAREOFF_TIME_IST = _get_str("SHORT_SQUAREOFF_TIME_IST", "14:55")                # shadow shorts are closed and live shorts covered here (orders/eod_squareoff.run_short_squareoff; 5 min before the long square-off)
+SHORT_VWAP_TOLERANCE_PCT = _ms_float("SHORT_VWAP_TOLERANCE_PCT", 0.15, 0.0, 2.0)        # refuse when price is MORE than this % above the day's VWAP
+SHORT_MIN_ENTRY_RANGE_POSITION = _ms_float("SHORT_MIN_ENTRY_RANGE_POSITION", 0.08, 0.0, 0.5)  # refuse at / below this place in the day range (0 = the low)
+SHORT_MAX_DAY_FALL_PCT = _ms_float("SHORT_MAX_DAY_FALL_PCT", 5.0, 0.0, 20.0)            # mirror of MAX_DAY_GAIN_PCT; 0 = off
+SHORT_UPPER_CIRCUIT_BUFFER_PCT = _ms_float("SHORT_UPPER_CIRCUIT_BUFFER_PCT", 3.0, 0.5, 20.0)  # a locked-up stock cannot be bought back
+SHORT_MIN_BOARD_CONVICTION = _ms_float("SHORT_MIN_BOARD_CONVICTION", 50.0, 0.0, 100.0)  # Market Board bearish conviction needed
+SHORT_GAP_UP_REFUSE_PCT = _ms_float("SHORT_GAP_UP_REFUSE_PCT", 1.0, 0.0, 10.0)          # gapped up this much and still above the open: no short; 0 = off
+
 # ── Capital split with real-trade-service ───────────────────────────────────
 SCALP_POOL_CAPITAL_SHARE_PCT = _get_float("SCALP_POOL_CAPITAL_SHARE_PCT", 50.0)
 
@@ -631,6 +697,13 @@ VIX_BLOCK_ABOVE = _get_float("VIX_BLOCK_ABOVE", 0.0)   # group 332: 0 = no VIX b
 VIX_CAUTION_ABOVE = _get_float("VIX_CAUTION_ABOVE", 18.0)
 VIX_CAUTION_SIZE_MULT = _get_float("VIX_CAUTION_SIZE_MULT", 0.7)
 VIX_SPIKE_PCT = _get_float("VIX_SPIKE_PCT", 10.0)
+# E107 (P2 item 16, the two decisions): (1) VIX_CAUTION_PCTILE - caution also starts at this percentile of India VIX's own last ~12 months of daily closes (75 = the
+# top quarter of its own year), not only at the fixed VIX_CAUTION_ABOVE; whichever is LOWER wins, so it can only add caution. 0 = off (fixed level only). Needs the
+# VIX history from market-data; without it the fixed level alone applies. (2) PREOPEN_GAP_ATR_MULT - a stock's indicated pre-open gap is also judged against its OWN
+# daily ATR %: a gap of at least this many ATRs (never under PREOPEN_GAP_ATR_FLOOR_PCT) is blocked until the gap gate time, so a calm stock's 2% gap counts and a wild
+# stock's does not; whichever is LOWER (fixed % or ATR multiple) wins, so it can only block more. 0 = off. Both fail open when the data is missing.
+VIX_CAUTION_PCTILE = max(0.0, min(99.0, _get_float("VIX_CAUTION_PCTILE", 75.0)))
+VIX_HISTORY_TIMEOUT_S = _get_float("VIX_HISTORY_TIMEOUT_S", 5.0)
 VIX_CACHE_TTL_S = _get_float("VIX_CACHE_TTL_S", 120.0)
 VIX_FETCH_TIMEOUT_S = _get_float("VIX_FETCH_TIMEOUT_S", 3.0)
 NEWS_NEGATIVE_BLOCK_ENABLED = _get_bool("NEWS_NEGATIVE_BLOCK_ENABLED", True)
@@ -639,6 +712,8 @@ PREOPEN_SNAPSHOT_ENABLED = _get_bool("PREOPEN_SNAPSHOT_ENABLED", True)
 PREOPEN_SNAPSHOT_TIME_IST = _get_str("PREOPEN_SNAPSHOT_TIME_IST", "09:10")   # group 399: was 09:08
 PREOPEN_GAP_GATE_UNTIL_IST = _get_str("PREOPEN_GAP_GATE_UNTIL_IST", "10:00")
 PREOPEN_GAP_UP_BLOCK_PCT = _get_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
+PREOPEN_GAP_ATR_MULT = max(0.0, min(5.0, _get_float("PREOPEN_GAP_ATR_MULT", 1.5)))
+PREOPEN_GAP_ATR_FLOOR_PCT = max(0.0, _get_float("PREOPEN_GAP_ATR_FLOOR_PCT", 1.5))
 PREOPEN_GAP_DOWN_BLOCK_PCT = _get_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _get_float("PREOPEN_MAX_PRICE_AGE_S", 420.0)   # group 399: was 180 (no order updates in the 09:08-09:15 buffer)
 PREOPEN_MAX_SYMBOLS = _get_int("PREOPEN_MAX_SYMBOLS", 150)
@@ -1096,19 +1171,27 @@ if BOARD_GATE_MODE != "off":
 # insufficient structure = no opinion, never a block). LIVE by default; the scalper buys strength on purpose, so the defaults block only the
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
-#   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | off (kill switch); a stale "shadow" = enforce
+#   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | log (E72: evaluate + record, never refuses; ONLY via PS_STRUCTURE_GATE_MODE) | off (kill switch); a stale "shadow" = enforce
 def _ps(name: str) -> str:
     """group365/372: the scalper may stay looser than real-trade on the SHARED structure names. `PS_<name>` wins when it is set (a blank one is ignored),
     otherwise the shared `<name>` is read as before."""
     return "PS_" + name if (os.getenv("PS_" + name) or "").strip() else name
 
 
-STRUCTURE_GATE_MODE = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
-if STRUCTURE_GATE_MODE != "off":
-    STRUCTURE_GATE_MODE = "enforce"
+# E72: a third value, `log` (evaluate + record + store the snapshot, NEVER refuse), selectable ONLY through the explicit PS_STRUCTURE_GATE_MODE. The shared
+# name `STRUCTURE_GATE_MODE` is Real Trade's switch (shipped `log`), so a shared `STRUCTURE_GATE_MODE=log` must NOT quietly loosen the scalper: through
+# the shared name anything but "off" still means enforce, exactly as before. Default stays enforce.
+_gate_mode_raw = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
+STRUCTURE_GATE_MODE = "off" if _gate_mode_raw == "off" else ("log" if _gate_mode_raw == "log" and _ps("STRUCTURE_GATE_MODE").startswith("PS_") else "enforce")
 STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), True)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
 STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
+# E72/E73 (D-vol, Real Trade parity): a fresh bullish daily breakout on thin volume. enforce (default since E73) = a refusal reason (STRUCTURE_* skip); log = only an OBSERVATION on the verdict / snapshot / counters; off. Needs ms_bos_vol_ratio in the structure summary; without it = no opinion.
+_bv_raw = _get_str(_ps("STRUCTURE_BREAKOUT_VOLUME_MODE"), "enforce").lower()
+# E73: enforce is the shipped default (everything live). Same rule as the gate itself: `log` only through the explicit PS_ name, so Real Trade's shared name cannot loosen the scalper.
+STRUCTURE_BREAKOUT_VOLUME_MODE = "off" if _bv_raw == "off" else ("log" if _bv_raw == "log" and _ps("STRUCTURE_BREAKOUT_VOLUME_MODE").startswith("PS_") else "enforce")
+STRUCTURE_BREAKOUT_MIN_VOL_RATIO = max(0.0, _get_float(_ps("STRUCTURE_BREAKOUT_MIN_VOL_RATIO"), 1.2))   # same 1.2 x average as the candle volume_confirmed flag; 0 = off
+STRUCTURE_BREAKOUT_BARS = max(1, _get_int("STRUCTURE_BREAKOUT_BARS", 5))                                # "fresh" = the breakout was at most this many daily bars ago
 STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
 STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_STRETCH_ATR"), 5.0))      # live price above the daily EMA20, in daily ATR
 STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float(_ps("STRUCTURE_MIN_ROOM_ATR"), 0.3))            # room to the next daily resistance, in daily ATR
@@ -1212,6 +1295,11 @@ STOPOUT_SYMBOL_BLOCK = _get_bool("STOPOUT_SYMBOL_BLOCK", True)
 # Minimum whole shares per automatic entry, checked after every sizing step (VIX / calendar / opening half-size). Below it = SKIPPED (MIN_QTY).
 # 1-2 share trades cannot scale out or trail and pay the same fixed costs. 0 = off. The forced 1-share first live order is never gated.
 ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))
+# Trade-odds recorder (orders/trade_odds.py, E103): RECORD ONLY. flow_json["odds"] on every new long and short says how often this trade's own
+# stop % / target % pair had the target come first when replayed on the stock's 1-minute bars so far today. Nothing is blocked, sized or ordered.
+TRADE_ODDS_MODE = _get_str("TRADE_ODDS_MODE", "shadow").lower()      # shadow | off
+if TRADE_ODDS_MODE not in ("shadow", "off"):
+    TRADE_ODDS_MODE = "shadow"
 # Opening-range-breakout recorder (orders/orb_shadow.py): RECORD ONLY. flow_json["orb"] on every new position says what a 5-minute opening-range
 # entry (price above the 09:15-09:20 range high and above VWAP, tight spread, limit just above the high, stop = range low) would have done.
 ORB_MODE = _get_str("ORB_MODE", "shadow").lower()                   # shadow | off

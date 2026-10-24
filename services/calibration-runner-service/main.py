@@ -6,6 +6,7 @@ runs read-only reports, the history downloads, the backtests, and the few POSTs 
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from typing import Any, Dict, Optional
@@ -52,6 +53,7 @@ def _ctx_base() -> Dict[str, Any]:
 runner: Optional[Runner] = None
 sched: Optional[Scheduler] = None
 auto: Optional[Any] = None       # group 476: AutoCalibrator
+weather: Optional[Any] = None    # Part 1 step 4: Market Weather (shadow)
 
 
 def _safe_token() -> str:
@@ -63,7 +65,7 @@ def _safe_token() -> str:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global runner, sched, auto
+    global runner, sched, auto, weather
     import notify as N
     from notify import make_notifier, make_skip_notifier, Outbox, start_outbox_flusher
     from runner import Redactor
@@ -94,6 +96,20 @@ def _startup() -> None:
     sched = Scheduler(str(config.DATA_DIR / "state" / "schedule.json"), J.SCHEDULE_DEFAULT, runner.submit, list(J.PACK_MAP), enabled_default=config.SCHEDULER_ENABLED,
                       on_skip=skip_notifier)
     sched.start()
+    # Market Weather: shadow unless WEATHER_APPLY is on AND the evidence gate passes AND the service itself is live (weather_apply.py); weather.py itself cannot build a dial
+    import weather as W
+    import weather_apply as WA
+    cc = AC.ControlClient({AC.RT: config.REAL_TRADE_URL, AC.PS: config.POSITION_STOCKS_URL}, _safe_token)
+    weather = W.Weather(str(config.DATA_DIR / "weather"), config.MARKET_DATA_URL, notify=_tell,
+                        stamp=lambda svc, body: cc.overlay(AC.RT if svc == "real-trade" else AC.PS, body),
+                        enabled=config.WEATHER_ENABLED, stamp_on=config.WEATHER_STAMP, notify_on=config.WEATHER_NOTIFY,
+                        apply=WA.Applier(cc, lambda: WA.evidence_gate(lambda job, age: AC.RunnerEvidence(runner, J.PACK_MAP, age).get(job), config.WEATHER_GATE_MODE), AC.RT, AC.PS,
+                                         mode_fn=lambda: config.WEATHER_GATE_MODE),
+                        apply_on=config.WEATHER_APPLY)
+    weather.start()
+    # same-day gate: if the gate needs a replay and none is fresh, queue it now (light job, any hour) so the gate can open today
+    logging.getLogger("calibration-runner").info("weather gate %s: %s", config.WEATHER_GATE_MODE,
+                                                 WA.ensure_replay(lambda job, age: AC.RunnerEvidence(runner, J.PACK_MAP, age).get(job), runner.submit, config.WEATHER_GATE_MODE))
 
 
 @app.on_event("shutdown")
@@ -102,6 +118,8 @@ def _shutdown() -> None:
         runner.shutdown()
     if sched:
         sched.stop.set()
+    if weather:
+        weather.stop.set()
 
 
 def _r() -> Runner:
@@ -297,3 +315,46 @@ class AutoRun(BaseModel):
 def autocalib_run(req: AutoRun, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Evaluate every rule now. dry_run=true shows what would change and applies nothing (also the only mode while auto-calibration is switched off)."""
     return _a().evaluate(trigger=f"manual by {claims.get('sub') or '-'}", force=True, dry_run=req.dry_run)
+
+
+# ----------------------------------------------------------------------------------------------- Part 1 step 4: Market Weather (shadow)
+def _w() -> Any:
+    if weather is None:
+        raise HTTPException(503, "market weather not started")
+    return weather
+
+
+@app.get("/weather/status")
+def weather_status(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Shadow mode, settings, today's current state, the profile table and the last log rows."""
+    return _w().status()
+
+
+@app.get("/weather/log")
+def weather_log(limit: int = Query(100, ge=1, le=1000), _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return {"rows": _w().read_log(limit)}
+
+
+class WeatherSettings(BaseModel):
+    enabled: Optional[bool] = None
+    stamp: Optional[bool] = None
+    notify: Optional[bool] = None
+    apply: Optional[bool] = None
+
+
+@app.put("/weather/settings")
+def weather_settings(req: WeatherSettings, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return _w().configure(req.enabled, req.stamp, req.notify, req.apply)
+
+
+class WeatherRun(BaseModel):
+    stage: str
+
+
+@app.post("/weather/run")
+def weather_run(req: WeatherRun, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """Run one stage now (morning / refine / lock / tick) and send its message. Shadow: changes no switch."""
+    try:
+        return _w().run_stage(req.stage, force=True)
+    except ValueError as e:
+        raise HTTPException(400, str(e))

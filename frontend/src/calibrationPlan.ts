@@ -9,7 +9,9 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
     id: "monday", title: "Monday (and after any restart or deploy)", blurb: "Before the first trade of the week: is everything up, is every switch what you think it is, are quotes fresh.",
     rows: [
       { when: "08:45 - 09:15 IST", what: "Health of every service, switch snapshot, 09:30 live check", pack: "monday_open", note: "Fix any PENDING RESTART line first (restart outside market hours)." },
+      { when: "after every deploy", what: "Market Weather wiring check: both services take the stamp, every dial is live, the multipliers match the switches", jobs: ["wiring_check"], note: "WIRING: PASS is the proof; a FAIL line names the missing link. Never touches an overlay that is already active." },
       { when: "09:30 IST", what: "Live check: depth-20 / order feed layout, quote age", jobs: ["monday_check_0930"] },
+      { when: "Once, 09:30 - 14:30 IST, before SHORT_MODE goes live", what: "Dhan SELL probe (T6): ONE real 1-share SELL Super Order, legs read back, covered. Tick the box to run it", jobs: ["dhan_sell_probe"], note: "PASS is what lets a live short be placed (SHORT_LIVE_REQUIRES_PROBE). FAIL: the 'dhan' lines say what Dhan refused. If the cover cannot be completed it becomes a normal short and Telegram alerts." },
       { when: "10:15 IST", what: "Live check again: the session verdict must read `open`", jobs: ["monday_check_1015"] },
     ],
   },
@@ -25,6 +27,8 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
     id: "friday", title: "Friday after the close", blurb: "The weekly review of what the real money actually did.",
     rows: [
       { when: "16:40 IST", what: "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, changed switches", pack: "friday_review", note: "board parity GO two Fridays in a row = the legacy board maths may be retired (scripts/retire_legacy_board.py, dry run first)." },
+      { when: "Friday, after the pack", what: "Short selling shadow report (counters agree; net after charges once there is enough data)", jobs: ["short_shadow_report"], note: "NOT_ENOUGH_DATA is normal for the first weeks. It never touches SHORT_MODE." },
+      { when: "Friday, after the pack", what: "Short selling bar replay (mirrored short rule on recent 5-minute bars, with a long control)", jobs: ["short_history_replay"], note: "NOT_ENOUGH_DATA means market-data did not serve enough 5-minute history. Evidence only; it gates nothing." },
     ],
   },
   {
@@ -54,7 +58,7 @@ export const AUTOMATIC_ELSEWHERE = [
 export const JOB_SERVICES: Record<string, Svc[]> = {
   daily_trades: ["rt", "ps"], export_records: ["rt"], records_report: ["rt"], entry_slippage: ["rt"], hold_bucket: ["rt"], strategy_readout: ["rt", "ps"], legacy_gate: ["rt"], entry_rules: ["rt"],
   kronos_backtest: ["rt"], tsfm_nightly: ["rt"], tsfm_probe: ["rt"], tsfm_combine: ["rt"], latency_save: ["rt", "ps"], latency_compare: ["rt", "ps"],
-  opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
+  wiring_check: ["rt", "ps"], dhan_sell_probe: ["ps"], short_shadow_report: ["ps"], short_history_replay: ["ps"], opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
 };
 
 export function jobAppliesTo(id: string, svc: Svc): boolean {

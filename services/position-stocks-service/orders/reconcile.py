@@ -50,7 +50,7 @@ import notifier
 from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
-from orders import entry_pause, overnight_stop
+from orders import entry_pause, overnight_stop, side as _side
 from screening import intraday_eligibility
 from tz_utils import IST, as_aware, ist_today_str
 
@@ -145,8 +145,12 @@ def _learn_from_entry_rejection(db: Session, pos: ScalpPosition, entry_status: s
 from orders.statuses import FLAT_SELL_STATUSES as _FLAT_SELL_PENDING_STATUSES, TERMINAL_STATUSES as _TERMINAL_STATUSES   # group340: single source
 
 
-def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0) -> float:
-    """own_fallback_price: this position's OWN target_price or stop_price
+def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 0.0, entry_price: float = 0.0) -> float:
+    """E105 (P2 item 15): entry_price is this position's own entry fill. The PARENT row's averageTradedPrice of a Super Order IS that entry fill, so
+    when it equals entry_price it is NOT an exit price: it is skipped and the trigger price (own_fallback_price) is used instead, instead of
+    booking exit = entry (P&L 0, the real loss or gain hidden). entry_price=0 (old callers) keeps the old order exactly.
+
+    own_fallback_price: this position's OWN target_price or stop_price
     (whichever leg actually fired — passed in by the caller, which already
     knows hit_kind). A Dhan Super Order's TARGET_LEG/STOP_LOSS_LEG fills
     at (or essentially at) that pre-set trigger price by construction, so
@@ -205,9 +209,15 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
     parent_price = parent_row.get("averageTradedPrice")
     if parent_price:
         try:
-            return float(parent_price)
+            _pp = float(parent_price)
         except (TypeError, ValueError):
-            pass
+            _pp = None
+        if _pp is not None:
+            if entry_price and own_fallback_price and abs(_pp - float(entry_price)) < 0.005:
+                logger.warning("reconcile: parent averageTradedPrice ₹%.2f is this position's ENTRY fill, not an exit - not used as the exit price "
+                               "(trigger price ₹%.2f used instead)", _pp, float(own_fallback_price))
+            else:
+                return _pp
     # Last resort: this position's own target/stop trigger price rather
     # than a hard 0.0 — see docstring above. Both columns are NOT NULL on
     # ScalpPosition, so own_fallback_price is only 0.0 here if the caller
@@ -221,6 +231,49 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
         )
         return float(own_fallback_price)
     return 0.0
+
+
+# E105 (P2 item 15): MEASURE stop overshoot. A stop hit is booked at its fill; how far past the stop that fill was (slippage on the stop-market
+# leg) is the number the plan needs before any stop-width work. Process-lifetime counters (/review-fixes/status) + one log line per stop hit.
+# Only a CONFIRMED fill (a real price on the leg, or the unique order-book match) counts as a measurement; a booked trigger price is "estimated".
+_overshoot: dict = {"stop_hits": 0, "confirmed": 0, "estimated": 0, "beyond": 0, "sum_pct": 0.0, "max_pct": 0.0}
+
+
+def stop_overshoot_pct(pos, exit_price) -> Optional[float]:
+    """Percent the exit was beyond the stop that fired, as a share of that stop (positive = worse than the stop; a long exits below it, a
+    short above it). None when the stop or the exit is unusable. Pure."""
+    try:
+        stop, ex = float(pos.stop_price), float(exit_price)
+        if stop <= 0 or ex <= 0:
+            return None
+        return round(((ex - stop) if _side.is_short(pos) else (stop - ex)) / stop * 100.0, 3)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def note_stop_hit(pos, exit_price, confirmed: bool) -> None:
+    """Count one STOP_HIT and log its overshoot. Never raises, never changes a booking."""
+    try:
+        _overshoot["stop_hits"] += 1
+        if not confirmed:
+            _overshoot["estimated"] += 1
+            return
+        _overshoot["confirmed"] += 1
+        pct = stop_overshoot_pct(pos, exit_price)
+        if pct is not None and pct > 0:
+            _overshoot["beyond"] += 1
+            _overshoot["sum_pct"] = round(_overshoot["sum_pct"] + pct, 3)
+            _overshoot["max_pct"] = max(_overshoot["max_pct"], pct)
+            logger.warning("reconcile: %s (id=%s) STOP_HIT filled %.3f%% BEYOND its stop (stop ₹%.2f, exit ₹%.2f)", pos.symbol,
+                           getattr(pos, "id", "?"), pct, float(pos.stop_price), float(exit_price))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("stop overshoot note failed: %s", e)
+
+
+def overshoot_stats() -> dict:
+    d = dict(_overshoot)
+    d["mean_pct_of_beyond"] = round(d["sum_pct"] / d["beyond"], 3) if d["beyond"] else None
+    return d
 
 
 _DEAD_EXIT_STATUSES = {"REJECTED", "CANCELLED"}
@@ -285,7 +338,7 @@ def _backfill_legacy_eod_exit_order_ids(db: Session, eod_pending: list[ScalpPosi
     for pos in legacy:
         matches = [
             row for row in plain_orders
-            if str(row.get("transactionType") or row.get("transaction_type") or "").upper() == "SELL"
+            if str(row.get("transactionType") or row.get("transaction_type") or "").upper() == _side.exit_transaction_type(pos)
             and str(row.get("securityId") or row.get("security_id") or "") == str(pos.dhan_security_id)
             and int(row.get("quantity") or 0) == int(pos.quantity)
             and str(row.get("orderId") or row.get("order_id") or "") not in already_claimed
@@ -370,7 +423,7 @@ def _alt_exit_for_dead_sell(db: Session, pos: ScalpPosition, dead_oid: str, plai
         oid = str(r.get("orderId") or r.get("order_id") or "")
         if not oid or oid == str(dead_oid) or oid in claimed:
             continue
-        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.exit_transaction_type(pos):
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
             continue
@@ -556,7 +609,7 @@ def _resolve_pending_with_price(db: Session, pos: ScalpPosition, real_exit_price
     lifetime total only, never to today's daily-loss counter."""
     booked_qty = int(pos.overnight_stop_prior_qty or 0) + int(pos.overnight_stop_filled_qty_so_far or 0)
     prior_pnl = (pos.realized_pnl or 0.0) if booked_qty > 0 else 0.0
-    sell_pnl = (real_exit_price - pos.entry_price) * pos.quantity
+    sell_pnl = _side.pnl(pos, pos.entry_price, real_exit_price, pos.quantity)
     total_pnl = prior_pnl + sell_pnl
     basis = pos.entry_price * (pos.quantity + booked_qty)
     total_pct = (total_pnl / basis * 100.0) if basis else 0.0
@@ -687,7 +740,7 @@ def resolve_stuck_pending(db: Session, *, force: bool = False) -> dict:
             if not oid:
                 per_order: dict[str, int] = {}
                 for t in trades:
-                    if str(t.get("transactionType") or "").upper() != "SELL":
+                    if str(t.get("transactionType") or "").upper() != _side.exit_transaction_type(pos):
                         continue
                     if str(t.get("securityId") or "") != str(pos.dhan_security_id):
                         continue
@@ -930,7 +983,7 @@ def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
     found: list[tuple[float, Optional[float]]] = []   # (avg price, seconds from opened_at)
     opened = as_aware(pos.opened_at) if pos.opened_at else None
     for r in orders:
-        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "BUY":
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.entry_transaction_type(pos):
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
             continue
@@ -1048,10 +1101,11 @@ def _rearm_legs(db: Session, pos: ScalpPosition) -> bool:
     st["tries"] += 1
     try:
         # group340: store the tick-rounded price modify_super_order() really sends (DWARKESH: card 47.13 vs trigger 47.21)
-        new_target = dhan_client.round_to_tick(round(pos.entry_price * (1 + pos.adaptive_target_pct / 100.0), 2))
-        new_stop = dhan_client.round_to_tick(round(pos.entry_price * (1 - pos.adaptive_stop_pct / 100.0), 2))
-        # group 217: a stop already ratcheted up (breakeven / trailing) must never be pulled back down by a late fill-price correction.
-        if pos.stop_moved_to_breakeven and pos.stop_price and new_stop < pos.stop_price:
+        _sgn = -1.0 if _side.is_short(pos) else 1.0   # a short's target is BELOW entry and its stop ABOVE
+        new_target = dhan_client.round_to_tick(round(pos.entry_price * (1 + _sgn * pos.adaptive_target_pct / 100.0), 2))
+        new_stop = dhan_client.round_to_tick(round(pos.entry_price * (1 - _sgn * pos.adaptive_stop_pct / 100.0), 2))
+        # group 217: a stop already ratcheted toward profit (breakeven / trailing) must never be pulled back by a late fill-price correction.
+        if pos.stop_moved_to_breakeven and pos.stop_price and (new_stop > pos.stop_price if _sgn < 0 else new_stop < pos.stop_price):
             new_stop = pos.stop_price
         if not st["target"]:
             try:
@@ -1136,7 +1190,7 @@ def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
             return None
     found: list[float] = []
     for r in orders or []:
-        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.exit_transaction_type(pos):
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
             continue
@@ -1269,8 +1323,8 @@ def repair_closed_entry_prices(db: Session, *, apply: bool = False) -> dict:
             out["unchanged"] += 1
             continue
         old_pnl = float(pos.realized_pnl or 0.0)
-        new_pnl = (new_exit - new_entry) * pos.quantity
-        new_pct = (new_exit - new_entry) / new_entry * 100.0
+        new_pnl = _side.pnl(pos, new_entry, new_exit, pos.quantity)
+        new_pct = _side.pnl_pct(pos, new_entry, new_exit)
         delta = new_pnl - old_pnl
         out["changes"].append({**label, "old_entry": pos.entry_price, "real_entry": new_entry,
                                "old_exit": pos.exit_price, "real_exit": new_exit,
@@ -1432,15 +1486,15 @@ def repair_dead_sell_errors(db: Session, *, apply: bool = False) -> dict:
             continue
         if alt["kind"] == "leg":
             trigger = pos.target_price if alt["status"] == "TARGET_HIT" else pos.stop_price
-            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger)
+            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger, entry_price=float(pos.entry_price or 0.0))
             new_status = alt["status"]
             exit_oid = str(alt["leg"].get("orderId") or pos.dhan_super_order_id)
         else:
             price = alt["price"]
             new_status = prefix if prefix in _FLAT_SELL_PENDING_STATUSES else "EOD_SQUAREOFF"
             exit_oid = alt["order_id"]
-        pnl = (price - pos.entry_price) * pos.quantity
-        pct = (price - pos.entry_price) / pos.entry_price * 100.0 if pos.entry_price else 0.0
+        pnl = _side.pnl(pos, pos.entry_price, price, pos.quantity)
+        pct = _side.pnl_pct(pos, pos.entry_price, price)
         out["recovered"].append({**label, "new_status": new_status, "exit_price": price,
                                  "quantity": pos.quantity, "pnl": round(pnl, 2)})
         if apply:
@@ -1507,12 +1561,12 @@ def _filled_entry_behind_dead_parent(db: Session, pos: ScalpPosition, row: dict,
         if alt["kind"] == "leg":
             kind = alt["status"]
             trigger = pos.target_price if kind == "TARGET_HIT" else pos.stop_price
-            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger)
+            price = _extract_leg_price(alt["leg"], alt["row"], own_fallback_price=trigger, entry_price=float(pos.entry_price or 0.0))
             oid = str(alt["leg"].get("orderId") or pos.dhan_super_order_id)
         else:
             price = alt["price"]
             oid = alt["order_id"]
-            kind = "TARGET_HIT" if (pos.target_price and price >= pos.target_price * 0.998) else "STOP_HIT"
+            kind = "TARGET_HIT" if _side.target_hit_at(pos, price, pos.target_price) else "STOP_HIT"
         return {"entry": entry, "exit": {"price": price, "order_id": oid, "kind": kind}}
     except Exception as e:  # noqa: BLE001
         logger.warning("reconcile: dead-parent fill check failed for %s (id=%s): %s",
@@ -1550,8 +1604,8 @@ def repair_dead_entry_errors(db: Session, *, apply: bool = False) -> dict:
             out["skipped"].append({**label, "reason": "no filled BUY+SELL pair found at Dhan"})
             continue
         ex = found["exit"]
-        pnl = (ex["price"] - found["entry"]) * pos.quantity
-        pct = (ex["price"] - found["entry"]) / found["entry"] * 100.0 if found["entry"] else 0.0
+        pnl = _side.pnl(pos, found["entry"], ex["price"], pos.quantity)
+        pct = _side.pnl_pct(pos, found["entry"], ex["price"])
         out["recovered"].append({**label, "new_status": ex["kind"], "entry_price": found["entry"],
                                  "exit_price": ex["price"], "quantity": pos.quantity, "pnl": round(pnl, 2)})
         if apply:
@@ -1924,8 +1978,8 @@ def run_exit_reconciliation(db: Session) -> int:
                             "proven yet - keeping the position OPEN (not ERROR) so EOD squareoff still covers it.",
                             pos.symbol, pos.id, entry_status, _alive["entry"])
                         continue
-                    _pnl = (_ex["price"] - _alive["entry"]) * pos.quantity
-                    _pct = (_ex["price"] - _alive["entry"]) / _alive["entry"] * 100.0 if _alive["entry"] else 0.0
+                    _pnl = _side.pnl(pos, _alive["entry"], _ex["price"], pos.quantity)
+                    _pct = _side.pnl_pct(pos, _alive["entry"], _ex["price"])
                     pos.status = _ex["kind"]
                     pos.entry_price = _alive["entry"]
                     pos.exit_price = _ex["price"]
@@ -1984,22 +2038,26 @@ def run_exit_reconciliation(db: Session) -> int:
 
         _trigger_price = pos.target_price if hit_kind == "TARGET_HIT" else pos.stop_price
         exit_price = None
-        if not _leg_has_fill_price(hit_leg):
+        _confirmed = _leg_has_fill_price(hit_leg)
+        if not _confirmed:
             # 2026-10-05: the leg dict has no traded-price key, so the old chain
             # would book the leg's static trigger price as the "fill". Try the
             # real SELL fill in today's order book first (unique-match guarded).
             exit_price = _exit_fill_from_orderbook(db, pos, _trigger_price)
+            _confirmed = exit_price is not None
         if exit_price is None:
-            exit_price = _extract_leg_price(hit_leg, row, own_fallback_price=_trigger_price)
+            exit_price = _extract_leg_price(hit_leg, row, own_fallback_price=_trigger_price, entry_price=float(pos.entry_price or 0.0))
             if not _leg_has_fill_price(hit_leg):
                 # group344: no fill price on the leg and no unique order-book match: the booked exit may be the trigger price. The
                 # 5-minute repair keeps looking (GET/POST /reconcile/repair-closed lists it under exit_audit).
                 logger.warning("reconcile: %s (id=%d) %s booked at ₹%.2f - no fill price on the leg and no single matching SELL in the "
                                "order book, so this may be the trigger price, not the fill; check Dhan's trade book",
                                pos.symbol, pos.id, hit_kind, exit_price)
-        realized_pnl = (exit_price - pos.entry_price) * pos.quantity
+        if hit_kind == "STOP_HIT":
+            note_stop_hit(pos, exit_price, _confirmed)      # E105: measure only
+        realized_pnl = _side.pnl(pos, pos.entry_price, exit_price, pos.quantity)
         realized_pnl_pct = (
-            (exit_price - pos.entry_price) / pos.entry_price * 100.0
+            _side.pnl_pct(pos, pos.entry_price, exit_price)
             if pos.entry_price else 0.0
         )
 

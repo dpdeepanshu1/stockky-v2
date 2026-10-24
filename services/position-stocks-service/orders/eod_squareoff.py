@@ -24,9 +24,9 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import exit_retry, overnight_stop
+from orders import exit_retry, overnight_stop, side as _side
 from screening import intraday_eligibility
-from tz_utils import as_aware, ist_today_str
+from tz_utils import as_aware, ist_time_at_or_after, ist_today_str, parse_hhmm
 
 logger = logging.getLogger("position-stocks-eod")
 
@@ -53,6 +53,9 @@ def _place_overnight_stop(
     Dhan-call failures are caught and returned as None so the caller can
     decide between squaring off or notifying and proceeding.
     """
+    if _side.is_short(pos):
+        logger.error("_place_overnight_stop: %s (id=%s) is a SHORT - shorts are never carried overnight; not placing a stop.", pos.symbol, pos.id)
+        return None
     try:
         trigger = pos.entry_price * (1.0 - stop_pct / 100.0)
         if trigger <= 0:
@@ -206,7 +209,7 @@ def _existing_flat_sell(db: Session, pos: ScalpPosition) -> Optional[dict]:
         logger.warning("flat SELL guard: %s (id=%s) order-book lookup failed (%s) - duplicate check skipped, proceeding.", pos.symbol, pos.id, e)
         return None
     for r in orders or []:
-        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.exit_transaction_type(pos):
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
             continue
@@ -305,6 +308,10 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
             raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) fully sold by its overnight stop during cancel")
         overnight_stop.assign_stop_order(pos, None)  # caller commits pos shortly after
 
+    exit_side = _side.exit_transaction_type(pos)   # SELL closes a long, BUY closes a short
+    if _side.is_short(pos) and pos.overnight_converted_to_cnc:
+        # A short can never be a CNC holding; a CNC BUY here would open a long on top of the short.
+        raise RuntimeError(f"{pos.symbol} (id={pos.id}) is a SHORT flagged overnight_converted_to_cnc - refusing to close it as CNC")
     sell_product_type = "CNC" if pos.overnight_converted_to_cnc else config.SCALP_PRODUCT_TYPE
 
     last_exc: Exception | None = None
@@ -328,7 +335,7 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
                 is_armed=True,
                 security_id=pos.dhan_security_id,
                 exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
-                transaction_type="SELL",
+                transaction_type=exit_side,
                 quantity=pos.quantity,
                 order_type="MARKET",
                 price=0.0,
@@ -467,6 +474,9 @@ def run_eod_squareoff(db: Session) -> int:
             # CNC-aware _fire_flat_sell() below.
             if pos.overnight_converted_to_cnc:
                 squareoff_only.append(pos)
+                continue
+            if not _side.can_carry_overnight(pos):
+                squareoff_only.append(pos)   # shorts are intraday only: always squared off
                 continue
             # Get live price for unrealized P&L check
             try:
@@ -1065,6 +1075,57 @@ def close_position_now(db: Session, pos: ScalpPosition, exit_reason: str = "MANU
     return {"id": pos.id, "symbol": pos.symbol, "status": "pending_broker_confirmation"}
 
 
+_short_cover_logged: set = set()   # (position id, reason) pairs already logged, so a refused cover is not logged every ~10 s tick
+
+
+def run_short_squareoff(db: Session, now: Optional[datetime] = None) -> int:
+    """Short selling, E102 (P1 item 10). Covers every OPEN short at SHORT_SQUAREOFF_TIME_IST (14:55), five minutes before the 15:00 sweep.
+
+    Before this, SHORT_SQUAREOFF_TIME_IST was read only by the shadow shorts (short_entry.resolve_open). A LIVE short was left to the
+    15:00 long sweep, although short_live.py's alert says "Covered by 14:55 at the latest" and the T7 pass rule is "the position never
+    exists after 14:55". This closes that gap.
+
+    Uses close_position_now() (cancel the legs, wait, plain MARKET BUY, PENDING_RECONCILE) with the EOD_SQUAREOFF status, so reconcile books the
+    real cover price like any other flat close and the retry cooldown, the bracket-already-filled guard and the CNC refusal all apply.
+    Longs are never touched here. Before the time it does nothing and never queries. Safe to call every tick: a covered short leaves
+    OPEN, a refused one is retried (backed off by exit_retry) and the 15:00 sweep is still the second chance. Never raises."""
+    try:
+        sq = parse_hhmm(str(getattr(config, "SHORT_SQUAREOFF_TIME_IST", "14:55")), 14, 55)
+        if not ist_time_at_or_after(sq, now):
+            return 0
+        open_positions = (
+            db.query(ScalpPosition)
+            .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
+            .all()
+        )
+    except Exception as e:  # noqa: BLE001 - this runs inside the trading loop and must never stop it
+        logger.error("short square-off: could not list open positions: %s", e, exc_info=True)
+        return 0
+    covered = 0
+    for pos in open_positions:
+        try:
+            if not _side.is_short(pos):
+                continue
+        except ValueError:      # unknown side value: leave it to the 15:00 sweep, which fails loudly
+            continue
+        try:
+            close_position_now(db, pos, exit_reason="EOD_SQUAREOFF")
+            covered += 1
+            logger.warning("short square-off: %s (id=%s) cover sent at %s", pos.symbol, pos.id, config.SHORT_SQUAREOFF_TIME_IST)
+        except ManualCloseRejected as e:
+            key = (pos.id, str(e)[:60])
+            if key not in _short_cover_logged:
+                _short_cover_logged.add(key)
+                logger.warning("short square-off: %s (id=%s) cover refused: %s (the 15:00 sweep tries again)", pos.symbol, pos.id, e)
+        except Exception as e:  # noqa: BLE001 - one bad position must not stop the rest
+            logger.error("short square-off: cover of %s (id=%s) failed: %s", pos.symbol, pos.id, e, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("short square-off: rollback after failed cover also failed", exc_info=True)
+    return covered
+
+
 def run_stagnation_exit(db: Session) -> int:
     """session68/69. Toggle is DB-backed (ScalpGateState.stagnation_exit_
     enabled — POST /stagnation-exit/enable|disable, frontend button on the
@@ -1145,8 +1206,11 @@ def run_stagnation_exit(db: Session) -> int:
             reason = f"{age_min:.0f}m flat within ±{config.STAGNATION_EXIT_BAND_PCT:.2f}%"
         elif nft_age_ok:
             # best price seen so far (excursion tracker), never below the live price
-            best = max(ltp, pos.max_price_seen or 0.0)
-            best_gain = (best - pos.entry_price) / pos.entry_price * 100.0
+            if _side.is_short(pos):
+                best = min(ltp, pos.min_price_seen or ltp)   # a short's best price is the LOWEST seen
+            else:
+                best = max(ltp, pos.max_price_seen or 0.0)
+            best_gain = _side.pnl_pct(pos, pos.entry_price, best)
             if best_gain < nft_gain:
                 reason = (
                     f"NO_FOLLOWTHROUGH {age_min:.0f}m, best gain {best_gain:.2f}% "

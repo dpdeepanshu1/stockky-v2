@@ -10,9 +10,6 @@ ROOT = Path(__file__).resolve().parent.parent
 # Not on the calibration page on purpose. A secret, a login or an infrastructure link must never be a one-click switch there.
 EXEMPT = {
     "ADMIN_PASSWORD_CHANGE_ENABLED": "login security: never a one-click switch",
-    "SHORTLIST_ENABLED": "display only: the shortlist panel, never a gate",
-    "ADAPTIVE_HISTORY_ENABLED": "history cache for the adaptive stop, data only",
-    "DHAN_ORDER_WS_ENABLED": "broker websocket link, infrastructure; needs a restart",
 }
 
 

@@ -11,9 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EXEMPT = {
     "ADMIN_PASSWORD_CHANGE_ENABLED": "login security: never a one-click switch",
     "DHAN_TOTP_ENABLED": "broker login credential flow, set in .env only",
-    "DAILY_REPORT_ENABLED": "report delivery, never touches a trade",
     "ENTRY_PRODUCT_MODE": "order product type (CNC / MIS) needs a restart and a broker check",
-    "EDIS_MORNING_CHECK_ENABLED": "morning broker authorisation check, an alert not a gate",
 }
 
 

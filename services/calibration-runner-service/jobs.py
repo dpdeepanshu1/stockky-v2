@@ -292,6 +292,57 @@ def b_live_structure_report(ctx, p):
     return [_http("Live structure report (G4 input)", "GET", ctx["decision"] + "/training/api/structure/report?days=60", save="live_structure.json")]
 
 
+def b_regime_replay(ctx, p):
+    """Part 1 step 3: does the Market Weather state see wide days coming? Reads index + VIX history, changes nothing."""
+    return [_py(ctx, "regime_history_replay.py", "--base", ctx["md"], "--period", p.get("period", "5y"), "--out", os.path.join(ctx["run"], "regime"),
+                title="Market Weather: history replay (index + VIX)", attention=(1,))]
+
+
+def b_wiring_check(ctx, p):
+    """E98 P0 item 3: is Market Weather wired into both trading services right now? Reads flags and the in-force multiplier; its only write is a stamp-only
+    overlay that it removes again (and it never touches a real overlay). Prints WIRING: PASS or the first failing line."""
+    return [_py(ctx, "wiring_check.py", "--rt-url", ctx["rt"], "--ps-url", ctx["ps"], "--expect-mode", p.get("expect_mode", "live"),
+                title="Market Weather wiring (real-trade + position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_short_shadow(ctx, p):
+    """E98 P0 item 7b: the shadow shorts' numbers, judged. Read-only; never touches SHORT_MODE."""
+    return [_py(ctx, "short_shadow_report.py", "--ps-url", ctx["ps"], "--min-trades", str(p.get("min_trades", 100)), "--min-days", str(p.get("min_days", 20)),
+                title="Short selling: shadow report (position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_short_replay(ctx, p):
+    """E107 P2 item 18: the mirrored short rule replayed on recent 5-minute bars (SELL, with a BUY control). Read-only; gates nothing."""
+    return [_py(ctx, "short_history_replay.py", "--base", ctx["md"], "--stop-pct", str(p.get("stop_pct", 1.0)), "--target-pct", str(p.get("target_pct", 2.0)),
+                "--charges-pct", str(p.get("charges_pct", 0.08)), "--min-trades", str(p.get("min_trades", 200)), "--min-sessions", str(p.get("min_sessions", 10)),
+                title="Short selling: replay on recent 5-minute bars (market-data)", attention=(1,))]
+
+
+def b_sell_probe(ctx, p):
+    """E108 T6: the ONLY job that places a real order. One 1-share SELL Super Order on a liquid stock, read back, cancelled, covered. Needs the explicit tick."""
+    args = ["--ps-url", ctx["ps"]]
+    if p.get("status_only"):
+        args.append("--status")
+    elif p.get("yes"):
+        args.append("--yes")
+        if p.get("symbol"):
+            args += ["--symbol", str(p["symbol"]).strip().upper()]
+    return [_py(ctx, "dhan_sell_probe.py", *args, title="Dhan SELL probe (T6): one 1-share SELL Super Order, read back and covered", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_regime_shadow(ctx, p):
+    """Part 1 step 6 gate: what would the Market Weather profile have done to the saved real-trade records? Reads the shadow log, changes nothing."""
+    return [_py(ctx, "regime_shadow_report.py", "--log", os.path.join(os.path.dirname(ctx["exp"]), "weather", "log.jsonl"), "--out", os.path.join(ctx["run"], "regime"),
+                os.path.join(ctx["exp"], "rt_latest.json"), title="Market Weather: shadow report (log + closed trades)", attention=(1,))]
+
+
+def b_regime_learner(ctx, p):
+    """Part 1 step 7: the slow weekly learner. PROPOSES at most one dial change from your own stamped trades; applies nothing."""
+    wd = os.path.join(os.path.dirname(ctx["exp"]), "weather")
+    return [_py(ctx, "regime_learner.py", "--log", os.path.join(wd, "log.jsonl"), "--history", os.path.join(wd, "learner_history.jsonl"), "--out", os.path.join(ctx["run"], "regime"),
+                os.path.join(ctx["exp"], "rt_latest.json"), title="Market Weather: weekly learner (proposal only)", attention=(1,))]
+
+
 def _job(id, title, group, when, what, builder, params=None, heavy=False, window="any", timeout_s=900, needs=None, after=None, auto=False, cadence=None, resumable=False):
     return {"id": id, "title": title, "group": group, "when": when, "what": what, "builder": builder, "params": params or [], "heavy": heavy,
             "window": window, "timeout_s": timeout_s, "needs": needs or [], "after": after or "", "auto_elsewhere": auto, "cadence": cadence,
@@ -388,6 +439,45 @@ JOB_LIST = [
     _job("evaluate_outcomes", "Score pending outcomes (T+1 / T+5 / structure)", "model", "Every day after close (also runs by GitHub Actions)", "Scores yesterday's predictions so the model has fresh labels.", b_evaluate, [P("max_batch", "Max batch", "int", 80, 10, 400)],
          timeout_s=900, auto=True),
     _job("structure_refresh", "Structure refresh", "model", "Every day after close (also runs by GitHub Actions)", "Re-reads daily structure rows for the universe.", b_structure_refresh, [P("force", "Force re-read", "bool", False)], window="closed", heavy=True, timeout_s=2400, auto=True),
+    _job("regime_history_replay", "Market Weather history replay", "weekly", "Once after the regime package is deployed, then monthly",
+         "Replays the state classifier over 5 years of index + VIX history: is the state worse on days that turned out wider, and does it beat yesterday's ATR alone? "
+         "Verdict USEFUL / USEFUL_NOT_BEYOND_ATR / NO_EDGE / NOT_ENOUGH_DATA. Tests the index only, not your trades. Changes nothing.", b_regime_replay,
+         [P("period", "History", "choice", "5y", choices=["2y", "5y", "10y"])], timeout_s=900,
+         after="USEFUL: carry on to the shadow run. NO_EDGE or NOT_ENOUGH_DATA: do not switch Market Weather to live; the classifier needs rework first."),
+    _job("wiring_check", "Market Weather wiring check", "ops", "After every deploy, and any time you doubt the layer is on (market hours show the live multipliers best)",
+         "For real-trade and position-stocks: the mode switch, every overlay dial exists and is live, a stamp-only overlay is accepted, read back and removed, the in-force multiplier "
+         "matches the switch, and the short shadow endpoint answers. Never touches an overlay that is already active.", b_wiring_check,
+         [P("expect_mode", "Expected mode", "choice", "live", choices=["live", "shadow", "off", "any"])], timeout_s=180,
+         after="WIRING: PASS = the layer can reach both services. FAIL: the first failing line says which service and which link is missing; fix that before trusting a quiet morning."),
+    _job("short_shadow_report", "Short selling shadow report", "weekly", "Weekly while SHORT_MODE is shadow (and before any move to live)",
+         "Reads the shadow shorts from position-stocks and judges the numbers: do the counters agree, and once there are enough closed would-be shorts over enough days, "
+         "is the net P&L after charges above zero. Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing and never touches SHORT_MODE.", b_short_shadow,
+         [P("min_trades", "Closed would-be shorts needed", "int", 100, 1, 1000), P("min_days", "Days with results needed", "int", 20, 1, 120)], timeout_s=120,
+         after="NOT_ENOUGH_DATA: keep collecting, nothing to do. PASS: the shadow shorts earn after charges; SHORT_MODE stays your decision. FAIL: do not move to live; read the gate counters and the recent rows first."),
+    _job("dhan_sell_probe", "Dhan SELL probe (T6) - places 1 real share", "ops", "Once, in market hours 09:30-14:30 IST, before SHORT_MODE goes live (and again after any Dhan change)",
+         "PLACES ONE REAL 1-share INTRADAY SELL Super Order on a liquid stock, reads Dhan's stop and target legs back, cancels the legs, covers with a 1-share BUY and reads the cover back. "
+         "Records Dhan's answers and a verdict PASS / FAIL. A live short is refused until this has a PASS (SHORT_LIVE_REQUIRES_PROBE). Nothing is sent unless you tick the box. "
+         "If the cover cannot be completed the short is adopted as a normal short position and Telegram shouts.", b_sell_probe,
+         [P("yes", "I understand this places a real 1-share order", "bool", False), P("symbol", "Symbol (blank = ITC, NTPC, ONGC, SBIN, TATASTEEL in turn)", "str", ""),
+          P("status_only", "Only show the last result", "bool", False)], window="open", timeout_s=240,
+         after="PASS: SHORT_MODE=live is now one switch (start with SHORT_LIVE_QTY_CAP=1). FAIL: read the 'dhan' lines, they say what Dhan refused or what did not read back; SHORT_MODE stays shadow."),
+    _job("short_history_replay", "Short selling bar replay", "weekly", "Any time, minutes; weekly while SHORT_MODE is shadow or live (evidence only)",
+         "Pretends to SELL at fixed times of day on recent 5-minute bars of liquid NSE stocks, walks the stop and the target (stop first when both are touched) and the 14:55 cover, "
+         "after flat charges, and runs the same for BUY as a control. Break-even aware: at 2:1 a short only needs to win 1 trade in 3. Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing and gates nothing.",
+         b_short_replay, [P("stop_pct", "Stop %", "float", 1.0, 0.2, 5.0), P("target_pct", "Target %", "float", 2.0, 0.2, 10.0), P("charges_pct", "Charges % (round trip)", "float", 0.08, 0.0, 1.0),
+                          P("min_trades", "Replays needed", "int", 200, 20, 5000), P("min_sessions", "Stock-sessions needed", "int", 10, 1, 120)], timeout_s=600,
+         after="NOT_ENOUGH_DATA: market-data did not serve enough 5-minute history; nothing to act on. PASS: the mirrored short rule earns on recent bars. FAIL: read the BUY control line first; if the long mirror earned, the window was a rising market."),
+    _job("regime_shadow_report", "Market Weather shadow report", "weekly", "Weekly, after the shadow weeks have run (needs the saved real-trade records)",
+         "Replays the Market Weather profile on your closed real-trade records, using the state the shadow log says was in force at each entry: which trades it would have skipped, "
+         "and whether the skipped ones were WORSE than the average trade of those days (not merely fewer trades). Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing.", b_regime_shadow,
+         timeout_s=300, needs=["export_records"],
+         after="PASS is the gate for step 6 (live in DEMO), not an automatic switch. FAIL or NOT_ENOUGH_DATA: keep MARKET_STATE_MODE=shadow."),
+    _job("regime_learner", "Market Weather weekly learner", "weekly", "Weekly, only after the shadow report has PASSed and 90+ trades carry a state",
+         "Groups your closed real-trade records by market state and time of day, forgets old trades gradually, shrinks each group toward your all-trade average, and applies a confidence bar "
+         "that rises with the number of groups tested. Proposes AT MOST ONE dial change per run; a loosening is only confirmed when the previous run proposed the identical change. "
+         "Verdict PROPOSE_TIGHTEN / PROPOSE_LOOSEN / NO_CHANGE / NOT_ENOUGH_DATA. Changes nothing.", b_regime_learner,
+         timeout_s=300, needs=["export_records"],
+         after="A CONFIRMED proposal is for you to read, then change by hand. Nothing here is applied, and none of these dials is in the calibrator's rules."),
     _job("live_structure_report", "Live structure report (G4)", "ops", "Any time", "Saves GET /api/structure/report?days=60: the live observations G4 uses.", b_live_structure_report, timeout_s=120),
 ]
 JOBS: Dict[str, Dict[str, Any]] = {j["id"]: j for j in JOB_LIST}
@@ -395,8 +485,8 @@ JOBS: Dict[str, Dict[str, Any]] = {j["id"]: j for j in JOB_LIST}
 # Packs = ordered lists of job ids with fixed params. The page shows them as one button each.
 PACKS: List[Dict[str, Any]] = [
     {"id": "monday_open", "title": "Monday open pack", "when": "Monday 08:45-09:30 IST, and any day after a restart or deploy",
-     "what": "Health, switch snapshot, then the 09:30 live check. (Run the 10:15 check from the list after 10:15.)",
-     "jobs": [["services_health", {}], ["control_snapshot", {}], ["monday_check_0930", {}]], "stop_on_failure": False},
+     "what": "Health, switch snapshot, Market Weather wiring check, then the 09:30 live check. (Run the 10:15 check from the list after 10:15.)",
+     "jobs": [["services_health", {}], ["control_snapshot", {}], ["wiring_check", {}], ["monday_check_0930", {}]], "stop_on_failure": False},
     {"id": "daily_close", "title": "Daily close pack", "when": "Every trading day after 15:45 IST",
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},

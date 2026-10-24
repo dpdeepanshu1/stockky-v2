@@ -92,7 +92,7 @@ def test_entry_anchors_after_all_gates_and_before_the_order():
     i_anchor = s.index("live_anchor.reanchor(levels, candidate.current_ltp")
     i_rr = s.index("_rr_reject = rr_floor.reject_reason(levels)")
     i_order = s.index("    # Place the order\n    dhan_super_order_id = None")
-    i_row = s.index("pos = ScalpPosition(\n        symbol=candidate.symbol")
+    i_row = s.index("pos = ScalpPosition(\n        market_state=_ms_current_profile()[\"market_state\"],      # Market Weather stamp\n        profile_version=_ms_current_profile()[\"profile_version\"],\n        symbol=candidate.symbol")
     assert i_rr < i_anchor < i_order < i_row
     assert "price=_ref_price," in s and "entry_price=_ref_price," in s
     assert "signal_price=candidate.current_ltp," in s                          # slippage vs the SIGNAL is still recorded

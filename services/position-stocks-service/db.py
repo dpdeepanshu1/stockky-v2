@@ -229,6 +229,11 @@ _COLUMN_MIGRATIONS = [
     # 2026-09-19 (session 72): see models.py — per-order notional + lifetime prior qty.
     ("scalp_positions", "overnight_stop_filled_notional_so_far", "BINARY_DOUBLE", "DOUBLE PRECISION", "0", "0"),
     ("scalp_positions", "overnight_stop_prior_qty", "NUMBER(10)", "INTEGER", "0", "0"),
+    # Market Weather stamp (market-state layer): nullable, NULL = no state was active. Descriptive only.
+    ("scalp_positions", "market_state", "VARCHAR2(16)", "VARCHAR(16)", None, None),
+    ("scalp_positions", "profile_version", "VARCHAR2(24)", "VARCHAR(24)", None, None),
+    # Short selling (Part 2 step 2): LONG for every existing row. NOT NULL with a default, same idempotent ALTER TABLE pattern as the other defaulted columns.
+    ("scalp_positions", "side", "VARCHAR2(5)", "VARCHAR(5)", "'LONG'", "'LONG'"),
     # 2026-09-20 (audit fix — exit-placement retry storm, mirrors
     # real-trade-service's consecutive_exit_failures/last_exit_failure_at).
     # See models.py and orders/exit_retry.py.

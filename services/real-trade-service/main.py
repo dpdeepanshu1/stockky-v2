@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 
 import config
 import models
-from risk_engine.effective_risk import effective_risk_pct
+import journal_notes
+from risk_engine.effective_risk import effective_risk_pct, effective_risk_pct_in_force, market_state_risk_mult
 from auth.admin_auth import (
     require_admin, require_admin_if_real, verify_admin_password, issue_session_token, AdminAuthError,
 )
@@ -728,7 +729,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             "realized_pnl_total": account.realized_pnl_total if account else None,
         },
         "risk_config": {
-            "risk_per_trade_pct": effective_risk_pct(risk) if risk else None,
+            "risk_per_trade_pct": effective_risk_pct_in_force(risk) if risk else None,
             "max_daily_loss_pct": risk.max_daily_loss_pct if risk else None,
             "max_concurrent_positions": risk.max_concurrent_positions if risk else None,
             "max_portfolio_risk_pct": risk.max_portfolio_risk_pct if risk else None,
@@ -1034,7 +1035,10 @@ async def get_risk_config(mode: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"No risk config row for mode={mode}")
     return {
         "mode": mode,
-        "risk_per_trade_pct": effective_risk_pct(risk),
+        # Market Weather (display): the layer's mode and the multiplier folded into the number below.
+        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "shadow"),
+        "market_state_risk_mult": market_state_risk_mult(),
+        "risk_per_trade_pct": effective_risk_pct_in_force(risk),
         "max_daily_loss_pct": risk.max_daily_loss_pct,
         "max_concurrent_positions": risk.max_concurrent_positions,
         "max_portfolio_risk_pct": risk.max_portfolio_risk_pct,
@@ -2771,6 +2775,13 @@ async def timesfm_status(admin: Optional[str] = Depends(require_admin)):
     return _tg.stats()
 
 
+@app.get("/regime-rules/status")
+async def regime_rules_status(admin: Optional[str] = Depends(require_admin)):
+    """2026-10-23: rules that switch by market regime (log only) - config, the rule table, counters since boot and the last verdicts. Read-only; nothing in the entry path reads it."""
+    from entry_engine import regime_rules as _rr
+    return _rr.stats()
+
+
 @app.get("/structure/status/{mode}")
 async def structure_status(
     mode: str, hours: int = 24, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db),
@@ -3043,6 +3054,49 @@ async def manual_cancel_order(
     finally:
         exit_lock.release()
         entry_lock.release()
+
+
+# ── E75: trade journal notes (reason + feeling), the Real Trade twin of Position Stocks E30 ─────────────────────────────────────────────────
+class JournalNoteRequest(BaseModel):
+    reason: Optional[str] = None
+    emotion: Optional[str] = None
+
+
+@app.put("/journal/notes/{mode}/{position_id}")
+def journal_put_note(mode: str, position_id: int, body: JournalNoteRequest,
+                     admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Save (or, with both fields blank, remove) the reason and feeling of one position. Descriptive only: nothing reads a note to allow, block or size a trade."""
+    if not config.JOURNAL_NOTES_ENABLED:
+        raise HTTPException(status_code=409, detail="Journal notes are switched off (JOURNAL_NOTES_ENABLED, Real Money Calibration page)")
+    try:
+        reason, emotion = journal_notes.clean_reason(body.reason), journal_notes.clean_emotion(body.emotion)
+    except journal_notes.JournalInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    pos = db.query(models.TradePosition).filter_by(id=position_id, mode=mode.upper()).first()
+    if pos is None:
+        raise HTTPException(status_code=404, detail="Position not found for this mode (it may have been cleaned up)")
+    row = journal_notes.upsert(db, models.TradeJournalNote, pos, reason, emotion)
+    return {"ok": True, "removed": row is None, "note": journal_notes.note_dict(row, iso_utc) if row is not None else None}
+
+
+@app.get("/journal/notes/{mode}")
+def journal_list_notes(mode: str, limit: int = 200, admin: Optional[str] = Depends(require_admin_if_real), db: Session = Depends(get_db)):
+    """Newest-first notes of this mode, win rate / P&L by feeling over closed trades, and the recent manual positions that have no note yet."""
+    m = mode.upper()
+    lim = max(1, min(int(limit), 1000))
+    notes = (db.query(models.TradeJournalNote).filter_by(mode=m)
+             .order_by(models.TradeJournalNote.updated_at.desc()).limit(lim).all())
+    journal_notes.refresh_snapshots(db, models.TradeJournalNote, models.TradePosition, notes)
+    recent = (db.query(models.TradePosition).filter_by(mode=m)
+              .order_by(models.TradePosition.opened_at.desc()).limit(lim).all())
+    return {
+        "enabled": bool(config.JOURNAL_NOTES_ENABLED),
+        "emotions": list(journal_notes.EMOTIONS),
+        "max_reason": journal_notes.MAX_REASON,
+        "notes": [journal_notes.note_dict(n, iso_utc) for n in notes],
+        **journal_notes.summarize(notes),
+        "manual_without_note": journal_notes.untagged_manual(recent, [n.position_id for n in notes]),
+    }
 
 
 @app.post("/reconcile/{mode}")

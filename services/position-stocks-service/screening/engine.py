@@ -472,6 +472,109 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
     return candidates
 
 
+# ── Short selling step 5: the mirrored scan ─────────────────────────────────────────────────────────────────────────────────────────────
+# Mirror multipliers (the long constants above are not touched): a short near the day LOW has little room left, a short far BELOW the session
+# average is already stretched, a steady fall scores higher than a drop-and-bounce.
+_SHORT_RPOS_HEAVY_PENALTY = (0.15, 0.50)    # <= 0.15 of the day range (near the low) -> 0.50x
+_SHORT_RPOS_SOFT_PENALTY = (0.30, 0.75)     # <= 0.30 -> 0.75x
+_SHORT_RPOS_NEAR_HIGH_BONUS = (0.80, 1.20)  # >= 0.80 (fell from near the high, lots of room down) -> 1.20x
+_SHORT_VWAP_EXTENDED_PCT = 2.0              # 2% BELOW the session average -> penalise
+_SHORT_VWAP_EXTENDED_MULT = 0.80
+
+
+def _momentum_consistency_down(buf, window_minutes: int) -> float:
+    """Fraction of ticks in the window at or BELOW the window midpoint price (open+close)/2. High = steady fall, low = drop-and-bounce."""
+    if len(buf) < 4:
+        return 0.5
+    cutoff = buf[-1][0] - (window_minutes * 60)
+    prices = [ltp for ts, ltp in buf if ts >= cutoff and ltp > 0]
+    if len(prices) < 2:
+        return 0.5
+    mid = (prices[0] + prices[-1]) / 2.0
+    return sum(1 for p in prices if p <= mid) / len(prices)
+
+
+def scan_shorts(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
+    """The mirror of scan(): stocks whose rolling move over 1m/5m/15m/60m is a FALL of at least the same threshold as the long scan's. Same real-volume floor,
+    spread cap and (caller-side) price floors. Candidate.pct_change is NEGATIVE; composite_score is positive, best first. Never raises on one bad symbol.
+    The long scan() is not edited and does not call this."""
+    open_symbols = {_bare_symbol(x) for x in (open_symbols or set())}
+    out: List[Candidate] = []
+    thresholds = _WINDOW_THRESHOLDS
+    subscribed = list(ws_client._token_to_symbol.values()) or list(ws_client._tick_buffers.keys())
+    for symbol in subscribed:
+        try:
+            if _bare_symbol(symbol) in open_symbols:
+                continue
+            buf = ws_client.get_tick_buffer(symbol)
+            if len(buf) < 2:
+                continue
+            current_ltp = buf[-1][1]
+            if current_ltp <= 0:
+                continue
+            real_volume = ws_client.get_last_volume(symbol)
+            if config.MIN_AVG_VOLUME > 0 and real_volume < config.MIN_AVG_VOLUME:
+                continue
+            spread_pct = _spread_pct(symbol, current_ltp)
+            if config.MAX_SPREAD_PCT > 0 and spread_pct is not None and spread_pct > config.MAX_SPREAD_PCT:
+                continue
+            _prices = [p for _t, p in buf if p > 0]
+            _rng = ws_client.get_day_range(symbol) if hasattr(ws_client, "get_day_range") else None
+            _lo = _hi = None
+            if _rng:
+                _lo, _hi = _rng
+            elif len(_prices) >= 2:
+                _lo, _hi = min(_prices), max(_prices)
+            range_mult = 1.0
+            if _lo is not None and _hi - _lo > 1e-6:
+                rpos = max(0.0, min(1.0, (current_ltp - _lo) / (_hi - _lo)))
+                if rpos <= _SHORT_RPOS_HEAVY_PENALTY[0]:
+                    range_mult = _SHORT_RPOS_HEAVY_PENALTY[1]
+                elif rpos <= _SHORT_RPOS_SOFT_PENALTY[0]:
+                    range_mult = _SHORT_RPOS_SOFT_PENALTY[1]
+                elif rpos >= _SHORT_RPOS_NEAR_HIGH_BONUS[0]:
+                    range_mult = _SHORT_RPOS_NEAR_HIGH_BONUS[1]
+            vwap = _vwap_estimate(buf)
+            vwap_mult = 1.0
+            if vwap and vwap > 0 and (current_ltp - vwap) / vwap * 100.0 <= -_SHORT_VWAP_EXTENDED_PCT:
+                vwap_mult = _SHORT_VWAP_EXTENDED_MULT
+            tick_count = _volume_accum.get(symbol, 0)
+            for win_minutes, threshold in thresholds.items():
+                if win_minutes in getattr(config, "DISABLED_SCAN_WINDOWS", ()):
+                    continue
+                pct = _rolling_pct_change(symbol, win_minutes)
+                if pct is None or -pct < threshold:
+                    continue
+                fall = -pct
+                cons = _momentum_consistency_down(buf, win_minutes)
+                cons_mult = (_CONSISTENCY_STRONG_MULT if cons >= _CONSISTENCY_STRONG
+                             else _CONSISTENCY_WEAK_MULT if cons < _CONSISTENCY_WEAK else 1.0)
+                vol_floor = max(config.MIN_AVG_VOLUME, 1)
+                vol_cap = _VOLUME_WEIGHT_CAP.get(win_minutes, 3.0)
+                volume_weight = min(max(real_volume, 1) / vol_floor, vol_cap)
+                win_mult = _WINDOW_CONVICTION_MULT.get(win_minutes, 1.0)
+                rvol = None
+                if config.SCAN_RANKING_V2_ENABLED:
+                    fall_eff = fall
+                    if config.SCAN_PCT_CAP_MULT > 0 and threshold > 0:
+                        fall_eff = min(fall, threshold * config.SCAN_PCT_CAP_MULT)
+                    liquidity = volume_weight / vol_cap if vol_cap > 0 else 1.0
+                    rvol = _relative_volume(symbol, win_minutes)
+                    pace_w = 1.0 if rvol is None else max(config.SCAN_RVOL_MIN_WEIGHT, min(rvol, config.SCAN_RVOL_MAX_WEIGHT))
+                    score = fall_eff * liquidity * pace_w * range_mult * vwap_mult * cons_mult * win_mult
+                else:
+                    score = fall * volume_weight * range_mult * vwap_mult * cons_mult * win_mult
+                if score <= 0:
+                    continue
+                out.append(Candidate(symbol=symbol, window_minutes=win_minutes, pct_change=round(pct, 4), current_ltp=current_ltp,
+                                     tick_activity=tick_count, composite_score=round(score, 4),
+                                     rvol=(round(rvol, 2) if rvol is not None else None)))
+        except Exception as e:  # noqa: BLE001 - one bad symbol must not stop the scan
+            logger.debug("scan_shorts: %s skipped (%s)", symbol, e)
+    out.sort(key=lambda c: c.composite_score, reverse=True)
+    return out
+
+
 def on_tick_hook(symbol: str, ltp: float, volume: int, ts: float) -> None:
     """Called by ws_client on every incoming tick. Updates volume proxy."""
     _update_volume(symbol, ts)

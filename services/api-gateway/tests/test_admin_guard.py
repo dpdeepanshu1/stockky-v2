@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 import admin_guard
 
 SECRET = "x" * 40
-MAIN_SRC = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+_SERVICE = Path(__file__).resolve().parent.parent
+MAIN_SRC = (_SERVICE / "main.py").read_text(encoding="utf-8")
+# E81: guarded handlers moved out of main.py into gateway_support/bound_routes_*.py (decorated on their own `<handler>_router`), so the sweep reads those files too.
+SUPPORT_SRC = "\n".join(p.read_text(encoding="utf-8") for p in sorted((_SERVICE / "gateway_support").glob("bound_routes*.py")))
 
 
 def _token(secret=SECRET, sub="admin", exp_in=600, **extra):
@@ -100,11 +103,13 @@ def test_open_routes_stay_open(client):
 
 
 def _main_protected_paths():
-    """Paths whose decorator in main.py carries dependencies=[Depends(_require_admin)]."""
+    """Paths whose decorator (in main.py, or in a gateway_support/bound_routes_*.py factory since E81) carries dependencies=[Depends(_require_admin)]."""
     found = set()
-    for m in re.finditer(r'^@app\.(?:post|delete|api_route)\("([^"]+)"([^\n]*)\)$', MAIN_SRC, re.M):
-        if "_require_admin" in m.group(2):
-            found.add(m.group(1))
+    pattern = r'^\s*@(?:app|[a-z0-9_]+_router)\.(?:post|delete|api_route)\("([^"]+)"([^\n]*)\)$'
+    for src in (MAIN_SRC, SUPPORT_SRC):
+        for m in re.finditer(pattern, src, re.M):
+            if "_require_admin" in m.group(2):
+                found.add(m.group(1))
     return found
 
 

@@ -61,6 +61,7 @@ from sqlalchemy.orm import Session
 import config
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
+from orders import side as side_mod
 
 logger = logging.getLogger("position-stocks-breakeven")
 
@@ -126,6 +127,7 @@ def run_breakeven_stop(db: Session) -> int:
         try:
             if not pos.entry_price or pos.entry_price <= 0:
                 continue
+            _short = side_mod.is_short(pos)
             if time.monotonic() < _next_attempt.get(pos.id, 0.0):
                 continue  # group345: backing off after a rejected modify
 
@@ -143,7 +145,7 @@ def run_breakeven_stop(db: Session) -> int:
             if tick_ts and tick_ts > 1e9 and time.time() - tick_ts > _TICK_MAX_AGE_S:
                 continue
 
-            unrealized_gain_pct = (ltp - pos.entry_price) / pos.entry_price * 100.0
+            unrealized_gain_pct = side_mod.pnl_pct(pos, pos.entry_price, ltp)      # short: positive when the price has FALLEN
             if unrealized_gain_pct < pos.breakeven_trigger_pct:
                 continue  # not there yet
 
@@ -157,7 +159,8 @@ def run_breakeven_stop(db: Session) -> int:
             # guaranteed small loss. Set BREAKEVEN_STOP_BUFFER_TICKS=0 to
             # restore the original exact-entry behaviour.
             entry_tick = dhan_client.tick_size_for_price(pos.entry_price)
-            buffered_entry = pos.entry_price + (entry_tick * config.BREAKEVEN_STOP_BUFFER_TICKS)
+            # short selling step 4: a short's breakeven buffer sits BELOW entry (its stop is a BUY above the market), a long's above it
+            buffered_entry = pos.entry_price + (entry_tick * config.BREAKEVEN_STOP_BUFFER_TICKS) * (-1 if _short else 1)
             new_stop = dhan_client.round_to_tick(buffered_entry)
 
             # Same clamp orders/adaptive.py's compute() applies at entry
@@ -168,7 +171,14 @@ def run_breakeven_stop(db: Session) -> int:
             # still strictly below ltp — this only guards the rare case
             # where the buffer or tick-rounding pushes the two back
             # together on a very low-priced / low-trigger stock.
-            if new_stop >= ltp:
+            if _short:
+                # mirrored: Dhan rejects a short's stop at or BELOW the market; if the price has bounced up to the buffered entry, a clamped
+                # stop one tick over the market is an exit-now order, not a breakeven - leave the original stop and look again later.
+                if new_stop <= ltp:
+                    new_stop = dhan_client.round_to_tick(ltp + dhan_client.tick_size_for_price(ltp))
+                    if new_stop >= pos.entry_price:
+                        continue
+            elif new_stop >= ltp:
                 band = dhan_client.tick_size_for_price(ltp)
                 new_stop = dhan_client.round_to_tick(ltp - band)
                 # group345/354: the price has fallen back to / under the buffered entry. A stop pushed down to "one tick under the market" is

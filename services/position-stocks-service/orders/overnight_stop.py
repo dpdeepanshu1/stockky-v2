@@ -41,6 +41,7 @@ import notifier
 from capital import ledger, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpPosition
+from orders import side as _side
 from tz_utils import ist_now
 
 logger = logging.getLogger("position-stocks-overnight-stop")
@@ -117,7 +118,7 @@ def book_delta(db: Session, pos: ScalpPosition, fill_price: float, delta_qty: in
     Returns (realized_pnl_delta, capital_released)."""
     per_share_capital = (pos.capital_risked / pos.quantity) if pos.quantity else 0.0
     capital_released = per_share_capital * delta_qty
-    realized_pnl_delta = (fill_price - pos.entry_price) * delta_qty
+    realized_pnl_delta = _side.pnl(pos, pos.entry_price, fill_price, delta_qty)
 
     pos.quantity = max(0, pos.quantity - delta_qty)
     pos.capital_risked = max(0.0, pos.capital_risked - capital_released)

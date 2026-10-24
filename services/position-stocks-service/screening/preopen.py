@@ -89,6 +89,23 @@ def status() -> dict:
             "warmed": _snap["warmed"], "gaps": dict(sorted(_snap["gaps"].items(), key=lambda kv: -abs(kv[1]))[:15])}
 
 
+def atr_gap_threshold(symbol: str) -> Optional[float]:
+    """E107: PREOPEN_GAP_ATR_MULT x the stock's own daily ATR % (never under PREOPEN_GAP_ATR_FLOOR_PCT), or None when the switch is 0 or the ATR is unknown
+    (fail open: the fixed % switches still apply). Never raises."""
+    try:
+        mult = float(getattr(config, "PREOPEN_GAP_ATR_MULT", 0.0) or 0.0)
+        if mult <= 0:
+            return None
+        from screening import prev_day
+        pdv = prev_day.get(str(symbol or "").upper().replace(".NS", "").strip())
+        atr = getattr(pdv, "atr_pct", None) if pdv is not None else None
+        if atr is None or not (atr > 0) or atr != atr:
+            return None
+        return max(float(getattr(config, "PREOPEN_GAP_ATR_FLOOR_PCT", 0.0) or 0.0), mult * float(atr))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
     """A "PREOPEN_GAP_UP/DOWN:..." reason while the gate window is open, else None. Never raises."""
     try:
@@ -100,6 +117,12 @@ def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
         if ist_time_at_or_after(parse_hhmm(config.PREOPEN_GAP_GATE_UNTIL_IST, 10, 0), now):
             return None
         up, dn = float(config.PREOPEN_GAP_UP_BLOCK_PCT or 0), float(config.PREOPEN_GAP_DOWN_BLOCK_PCT or 0)
+        atr_thr = atr_gap_threshold(symbol)                  # E107: the stock's own ATR test; the LOWER of it and the fixed % blocks (it can only block more)
+        if atr_thr is not None:
+            if g >= atr_thr and (up <= 0 or atr_thr < up):
+                return f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= {atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not chasing a big gap-up"
+            if g <= -atr_thr and (dn <= 0 or atr_thr < dn):
+                return f"PREOPEN_GAP_DOWN:indicative open {g:+.1f}% vs previous close <= -{atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not catching a gap-down"
         if up > 0 and g >= up:
             return f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= +{up:.1f}% - not chasing a big gap-up"
         if dn > 0 and g <= -dn:

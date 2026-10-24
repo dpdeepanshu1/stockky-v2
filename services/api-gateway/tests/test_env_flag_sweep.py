@@ -16,7 +16,8 @@ import pytest
 
 SERVICES = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 _TRUTHY = {"1", "true", "yes", "on", "y"}
-_ENV_CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get"}
+# E86: handlers moved to api-gateway/gateway_support/bound_routes*.py read main.py's `os` as `ref.os`; they stay in the sweep.
+_ENV_CALLS = {"os.getenv", "os.environ.get", "_os.getenv", "_os.environ.get", "ref.os.getenv", "ref.os.environ.get"}
 # Reads whose default is truthy but whose handling is already blank-safe or that are not boolean flags.
 _ALLOWED = {
     "RL_RENAME_DISCOVERY",          # `not in ("0","false",...)`: a blank value is not in the off-list -> stays on
@@ -81,6 +82,10 @@ def test_no_default_on_env_flag_reads_a_blank_value_as_off():
 ])
 def test_known_flags_use_the_strip_first_form(rel, name):
     src = open(os.path.join(SERVICES, rel), encoding="utf-8").read()
+    if rel == "api-gateway/main.py":
+        # E86: handlers moved out of main.py (gateway_support/bound_routes*.py) read `os` as `ref.os`; the flag may live there now.
+        _sup = os.path.join(SERVICES, "api-gateway", "gateway_support")
+        src += "\n".join(open(os.path.join(_sup, f), encoding="utf-8").read().replace("ref.os.", "os.") for f in sorted(os.listdir(_sup)) if f.startswith("bound_routes") and f.endswith(".py"))
     assert f'((os.getenv("{name}") or "").strip() or' in src or f'(os.environ.get("{name}") or "").strip() or' in src \
         or f'((_os.environ.get("{name}") or "").strip() or' in src or f'((os.environ.get("{name}") or "").strip() or' in src, name
 

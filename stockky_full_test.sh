@@ -52,6 +52,35 @@ run() {
   fi
 }
 
+note "PART 0 — static guards and pure checks (market weather, short selling, shared copies, catalogs)"
+for chk in "scripts/check_shared_copies.py" "scripts/check_control_catalog.py" "scripts/test_regime_overlay.py" "scripts/test_control_kit.py"; do
+  script="${chk%% *}"
+  if [ ! -f "$script" ]; then skip "$script (not in this checkout)"; continue; fi
+  # shellcheck disable=SC2086
+  if python3 $chk > "$OUT/coverage/$(basename "$script").log" 2>&1; then ok "$chk"; else bad "$chk — see $OUT/coverage/$(basename "$script").log"; fi
+done
+
+# short selling step 8/9: behaviour test of the live short entry (fakes the DB and broker, runs from the service folder, own interpreter)
+if [ -f scripts/test_short_live.py ]; then
+  if (cd services/position-stocks-service && python3 -I ../../scripts/test_short_live.py) > "$OUT/coverage/test_short_live.log" 2>&1; then ok "scripts/test_short_live.py"; else bad "scripts/test_short_live.py — see $OUT/coverage/test_short_live.log"; fi
+else skip "scripts/test_short_live.py (not in this checkout)"; fi
+
+# short selling P1 item 10 (E102): the real exit code (EOD/14:55 cover, reconcile, close-all, watchdog, retry) against shorts, with the database and broker faked
+if [ -f scripts/test_short_exit_paths.py ]; then
+  if (cd services/position-stocks-service && python3 -I ../../scripts/test_short_exit_paths.py) > "$OUT/coverage/test_short_exit_paths.log" 2>&1; then ok "scripts/test_short_exit_paths.py"; else bad "scripts/test_short_exit_paths.py — see $OUT/coverage/test_short_exit_paths.log"; fi
+else skip "scripts/test_short_exit_paths.py (not in this checkout)"; fi
+
+note "PART 1 — offline unit + coverage: calibration-runner-service"
+pushd services/calibration-runner-service >/dev/null
+pip install --break-system-packages -q pytest 2>&1 | tail -3
+if python3 -m pytest tests -q > "../../$OUT/coverage/calibration-runner-service.log" 2>&1; then
+  ok "calibration-runner-service test suite (includes test_dial_readers)"
+else
+  bad "calibration-runner-service test suite — see $OUT/coverage/calibration-runner-service.log"
+fi
+tail -15 "../../$OUT/coverage/calibration-runner-service.log"
+popd >/dev/null
+
 note "PART 1 — offline unit + coverage: real-trade-service"
 pushd services/real-trade-service >/dev/null
 pip install --break-system-packages -q pytest pytest-cov 2>&1 | tail -3

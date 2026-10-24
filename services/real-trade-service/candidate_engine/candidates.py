@@ -108,6 +108,19 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 # lose more often. Only take high-conviction setups.
 MIN_CONVICTION = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55"))
 
+
+def _min_conviction() -> float:
+    """The conviction floor in force now: MIN_CONVICTION plus today's Market Weather add (config.MARKET_STATE_CONVICTION_ADD, 0 by default, read at
+    call time, clamped 0..20 so it can only RAISE the bar). Used at every `score < floor` comparison below. Not used where a score is ASSIGNED
+    (volume_shock's max(MIN_CONVICTION, 85/75/60), the nominal conviction_score): a raised floor must not inflate a candidate's score."""
+    try:
+        add = float(getattr(config, "MARKET_STATE_CONVICTION_ADD", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        add = 0.0
+    if add != add:
+        add = 0.0
+    return MIN_CONVICTION + min(20.0, max(0.0, add))
+
 # Raised from 3 → 4: need stronger multi-TF alignment when the index itself
 # is in a correction. A single-day event alone is not enough.
 MIN_BULLISH_TIMEFRAMES = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))
@@ -1755,7 +1768,7 @@ def _rows_from_hot_picks(payload: dict) -> list[dict]:
             decision = (item.get("decision") or "").upper()
             score = float(item.get("score") or 0)
             # Apply score floor here to avoid even fetching MTF data for weak signals
-            if decision not in _ACTIONABLE_DECISIONS or score < MIN_CONVICTION:
+            if decision not in _ACTIONABLE_DECISIONS or score < _min_conviction():
                 continue
             out.append({
                 "symbol":           item["symbol"].upper(),
@@ -1797,7 +1810,7 @@ def _rows_from_ipo(payload: Any) -> list[dict]:
         # them, but ipo_score/current_price are checked first since they're
         # what the service actually emits today.
         score = float(item.get("ipo_score") if item.get("ipo_score") is not None else (item.get("score") or 0))
-        if decision not in _ACTIONABLE_DECISIONS or score < MIN_CONVICTION:
+        if decision not in _ACTIONABLE_DECISIONS or score < _min_conviction():
             continue
         out.append({
             "symbol":           item["symbol"].upper(),
@@ -2253,7 +2266,7 @@ def _rows_from_surprise(payload: Any) -> list[dict]:
         # the score check alone.
         decision = (item.get("decision") or "").upper()
         score = float(item.get("score") or item.get("surprise_score") or 0)
-        if (decision and decision not in _ACTIONABLE_DECISIONS) or score < MIN_CONVICTION:
+        if (decision and decision not in _ACTIONABLE_DECISIONS) or score < _min_conviction():
             continue
         out.append({
             "symbol":           item["symbol"].upper(),

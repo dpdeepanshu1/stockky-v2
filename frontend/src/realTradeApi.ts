@@ -295,6 +295,17 @@ export interface ClosedPosition {
   overnight_hold_reason: string | null;
 }
 
+// E75: trade journal notes (backend journal_notes.py, GET/PUT /journal/notes/{mode}); descriptive only, no gate reads a note.
+export interface JournalNote {
+  position_id: number; symbol: string; mode: string | null; manual: boolean; reason: string | null; emotion: string | null;
+  status: string | null; outcome: string | null; realized_pnl: number | null; opened_at: string | null; updated_at: string | null;
+}
+export interface JournalEmotionStat { emotion: string; trades: number; wins: number; win_rate: number; pnl: number; small_sample: boolean; risky: boolean }
+export interface JournalNotesResponse {
+  enabled?: boolean; emotions: string[]; max_reason: number; min_sample: number; notes: JournalNote[]; note_count: number;
+  by_emotion: JournalEmotionStat[]; settled: number; manual_without_note: number[];
+}
+
 export interface ClosedPositionsResponse {
   positions: ClosedPosition[];
   total: number;
@@ -708,6 +719,15 @@ export const realTradeApi = {
   cumulativeBrokerage: (mode: "DEMO" | "REAL", days = 14) =>
     rtRequest<CumulativeBrokerage>(`/charges/${mode}/cumulative?days=${days}`),
 
+  closedPositions: (mode: "DEMO" | "REAL", limit = 100) =>
+    rtRequest<ClosedPositionsResponse>(`/positions/${mode}/history?limit=${limit}`, {}, mode === "REAL"),
+  journalNotes: (mode: "DEMO" | "REAL", limit = 200) =>
+    rtRequest<JournalNotesResponse>(`/journal/notes/${mode}?limit=${limit}`, {}, mode === "REAL"),
+  saveJournalNote: (mode: "DEMO" | "REAL", positionId: number, reason: string, emotion: string) =>
+    rtRequest<{ ok: boolean; removed: boolean; note: JournalNote | null }>(`/journal/notes/${mode}/${positionId}`, {
+      method: "PUT",
+      body: JSON.stringify({ reason: reason || null, emotion: emotion || null }),
+    }, mode === "REAL"),
   positions: (mode: "DEMO" | "REAL") =>
     rtRequest<Position[]>(`/positions/${mode}`, {}, mode === "REAL"),
 

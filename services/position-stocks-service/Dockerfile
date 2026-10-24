@@ -9,6 +9,6 @@ RUN if [ -f constraints.txt ]; then pip install --no-cache-dir -r requirements.t
 COPY . .
 
 # group341c: a syntax error (e.g. a leftover merge marker) fails the image build instead of crash-looping the container
-RUN python -m compileall -q -x '(^|/)(tests?|\.venv|node_modules)(/|$)' .
+RUN python -m compileall -q -x '(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)' .
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8006"]

@@ -131,3 +131,17 @@ def test_every_service_dockerfile_compiles_code_at_build_time():
         assert "compileall" in text, f"{df.parent.name}: no compileall step"
         # group442: calibration-runner-service builds from the repo root, so it copies named files / folders instead of `COPY . .`; compileall must still come after all COPY lines
         assert "COPY" in text and text.rindex("\nCOPY ") < text.index("compileall"), f"{df.parent.name}: compileall must run after the last COPY"
+
+
+def test_compileall_skips_any_virtualenv_folder_and_dockerignore_drops_them():
+    """A VM test venv named .venv-test (Python 3.14) was copied into the image by `COPY . .`; compileall then died on 3.14-only syntax in numpy and the build failed."""
+    import re
+    rx = re.compile(r"(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)")
+    assert rx.search("./.venv-test/lib/python3.14/site-packages/numpy/_typing/_shape.py")
+    assert not rx.search("./orders/reconcile.py")
+    for df in sorted((ROOT / "services").glob("*/Dockerfile")):
+        assert r"\.venv[^/]*" in df.read_text(), f"{df.parent.name}: compileall does not skip .venv-* folders"
+        di = df.parent / ".dockerignore"
+        if di.exists():
+            assert "**/.venv*" in di.read_text(), f"{df.parent.name}: .dockerignore does not drop .venv-* folders"
+    assert "**/.venv*" in (ROOT / ".dockerignore").read_text()

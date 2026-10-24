@@ -27,6 +27,8 @@
 **/*.pyo
 .venv
 venv
+**/.venv*
+**/venv
 **/*.egg-info
 
 # Tests + coverage output (never imported by the app)

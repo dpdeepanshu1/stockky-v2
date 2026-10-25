@@ -219,6 +219,18 @@ def test_the_crafted_good_case_is_useful_so_the_two_tests_above_isolate_one_cond
     assert p["verdict"] == "USEFUL", (p["verdict"], p["reasons"], p["net"])
 
 
+def test_hold_20_runs_and_the_report_says_20_sessions():
+    """E140: the long-hold research run (--hold 20) completes on the same universe and labels itself with the hold."""
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        _write_universe(folder, [0.0045 * (k / 29.0) - 0.0005 for k in range(30)])
+        out = folder / "o"
+        rc = sb.main([str(folder), "--out", str(out), "--step", "5", "--hold", "20", "--min-n", "60", "--boot", "200", "--sizes", "20000", "--primary-size", "20000"])
+        rep = json.loads((out / "swing_backtest_report.json").read_text())
+        md = (out / "swing_backtest_report.md").read_text()
+    assert rc == 0 and rep["primary"]["hold"] == 20 and "held up to 20 sessions" in md
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -233,9 +233,12 @@ def b_entry_rules(ctx, p):
 
 
 def b_swing_backtest(ctx, p):
-    return [_py(ctx, "swing_backtest.py", "--out", os.path.join(ctx["run"], "swing"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 0),
-                "--primary-size", p.get("primary_size", 20000), *_ck(ctx, "swing", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
-                title="Swing momentum replay (up to 5 sessions, delivery costs)", attention=())]
+    # E140: --hold is a parameter now (5 = the lane's own limit). Every other hold gets its own checkpoint folder, so a 20-session run never overwrites the 5-session rows.
+    hold = int(p.get("hold", 5) or 5)
+    ck = "swing" if hold == 5 else f"swing_h{hold}"
+    return [_py(ctx, "swing_backtest.py", "--out", os.path.join(ctx["run"], "swing"), "--step", p.get("step", 3), "--hold", hold, "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 0),
+                "--primary-size", p.get("primary_size", 20000), *_ck(ctx, ck, int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
+                title=f"Swing momentum replay (up to {hold} sessions, delivery costs)", attention=())]
 
 
 def b_swing_shadow_report(ctx, p):
@@ -482,8 +485,9 @@ JOB_LIST = [
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("entry_rules", "Entry-path rules and stop width", "monthly", "Monthly, after fetch_history", "Did the entry rules and the stop / target width help after costs?", b_entry_rules, [SEED, JOBS_P, P("step", "Step", "int", 3, 1, 10)],
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
-    _job("swing_backtest", "Swing momentum replay (E131)", "monthly", "On demand, after fetch_history", "Would holding top-momentum stocks for up to 5 sessions have paid after delivery costs, at your trade size? Evidence only: nothing is traded or switched.", b_swing_backtest,
-         [SEED, JOBS_P, P("sample", "Symbols (0 = all)", "int", 0, 0, 800), P("step", "Step", "int", 3, 1, 10), P("primary_size", "Trade size for the verdict (Rs)", "int", 20000, 1000, 500000)],
+    _job("swing_backtest", "Swing momentum replay (E131)", "monthly", "On demand, after fetch_history", "Would holding top-momentum stocks for up to 5 sessions (or 10-60 with the Hold parameter) have paid after delivery costs, at your trade size? Evidence only: nothing is traded or switched.", b_swing_backtest,
+         [SEED, JOBS_P, P("sample", "Symbols (0 = all)", "int", 0, 0, 800), P("step", "Step", "int", 3, 1, 10), P("primary_size", "Trade size for the verdict (Rs)", "int", 20000, 1000, 500000),
+          P("hold", "Hold (sessions)", "choice", "5", choices=["5", "10", "20", "40", "60"], help="5 = the swing lane's own limit. 20-60 is the research question (E140): momentum is a monthly signal, so does a longer hold beat the cost? Replay only; the lane keeps SWING_MAX_HOLD_DAYS.")],
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"],
          after="USEFUL = worth building the shadow lane (plan step S3). NO_EDGE = do not build it. INSUFFICIENT = the history folder is too small. A gross edge eaten by costs says which trade size to retest."),
     _job("swing_shadow_report", "Swing shadow report (E132)", "weekly", "Weekly while SWING_MODE is shadow or live", "Reads the service's saved evening rankings: did the screened stocks beat the rest after the screening day, net of delivery cost? Verdict USEFUL / NO_EDGE / NOT_ENOUGH_DATA. Changes nothing and never touches SWING_MODE.", b_swing_shadow_report,

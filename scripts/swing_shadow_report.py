@@ -5,8 +5,8 @@
   TOKEN=<admin token> python3 scripts/swing_shadow_report.py --service http://127.0.0.1:8005 [...]        (reads GET /swing/snapshots instead of files)
 
 Input: the daily files of scripts/swing_snapshot.py, or the service's own saved evening rankings. For each saved day D and each stock on its `screen` (top 20% by momentum AND
-above its 200-day average) the return is close(D) -> close of the h-th LATER saved day (h = 1, 3, 5), when that day is close enough in the calendar (1 -> 4 days, 3 -> 6,
-5 -> 9: a weekend and a holiday, not a week of missed runs). The control is every other ranked stock of the same days. Costs: the real delivery round trip at --size plus
+above its 200-day average) the return is close(D) -> close of the h-th LATER saved day (h = 1, 3, 5, 10, 20), when that day is close enough in the calendar (1 -> 4 days, 3 -> 6,
+5 -> 9, 10 -> 18, 20 -> 34: a weekend and a holiday, not a week of missed runs). E141: 10 and 20 are the forward, survivorship-free check of the longer-hold replay. The control is every other ranked stock of the same days. Costs: the real delivery round trip at --size plus
 --slip-pct on the entry.
 VERDICT (the --hold horizon): NOT_ENOUGH_DATA under --min-n screened entries or --min-days saved days with an outcome; USEFUL when the net mean has its 5th percentile above zero
 (resampling whole days) AND the screened-minus-rest edge also does; NO_EDGE otherwise. The ledger of the service (GET /swing/report) judges the exact lane trades (stop, ratchet);
@@ -30,8 +30,8 @@ sys.path.insert(0, str(ROOT / "services" / "real-trade-service"))
 import swing_backtest as sb  # noqa: E402
 from swing import stats  # noqa: E402
 
-MAX_GAP_DAYS = {1: 4, 3: 6, 5: 9}
-HORIZONS = (1, 3, 5)
+MAX_GAP_DAYS = {1: 4, 3: 6, 5: 9, 10: 18, 20: 34}      # E141: 10 and 20 sessions (about 2 and 4 calendar weeks, plus a holiday or two)
+HORIZONS = (1, 3, 5, 10, 20)
 
 
 def load_snapshots(folder: Path) -> List[Dict[str, Any]]:

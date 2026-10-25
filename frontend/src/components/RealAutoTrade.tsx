@@ -720,7 +720,7 @@ export default function RealAutoTrade() {
     <div className="rt-page v6-page max-w-5xl mx-auto mode-frame" data-mode={mode}
       data-frame-label={mode === "REAL" ? "REAL MONEY · live Dhan orders" : "DEMO · simulated orders, no money"}>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <PageHero icon="bot" kicker="AI-assisted · auto trading" title={<>Real Auto Trade{armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}</>}
+      <PageHero glow={mode === "REAL" && armed ? "armed" : undefined} icon="bot" kicker="AI-assisted · auto trading" title={<>Real Auto Trade{armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}</>}
         subtitle={mode === "REAL" ? "Live Dhan orders" : "Simulated demo orders"}
         right={(
           <div className="rt-seg" role="group" aria-label="Trading mode">

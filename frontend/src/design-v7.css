@@ -1,0 +1,180 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — DESIGN LAYER v7: money-aware visuals for Real Trade, Position Stocks and Real Money Calibration  (loads AFTER design-v6.css)
+   New drawings: Risk rail (stop/entry/target to scale, long AND short), Exposure strip (where the open money sits), Capital ring (the shared Dhan balance),
+   Mode ladder (OFF > SHADOW > LIVE), Evidence meter (shadow test progress), Drift beat (reconciliation heartbeat), a glowing ring on the hero while armed.
+   Roll back by deleting the design-v7.css import in main.tsx (the pages keep working, minus these visuals' styling).
+     · Presentation only. RGB tokens only, so dark and light both work.
+     · Money rule (same as v5/v6): no price or money number animates. Only shapes move (a marker glides, a bar grows, a ring turns).
+     · Direction/state is always in text too (arrows ▲ ▼, words, hatching for shorts), never colour only.
+     · Motion is transform / opacity only. Every loop and entrance is OFF under reduced-motion, TV mode, the existing "Animations: Off" switch (html.v6-calm),
+       and loops pause while the tab is hidden. design-v7.test.mjs checks every `animation:` in this file against those lists.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* -- 1. hero glow ring (only while the service is armed / halted) ------------------------------------------- */
+.v7-glow {
+  position: absolute; inset: 0; z-index: -1; border-radius: inherit; padding: 1.5px; overflow: hidden; pointer-events: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.v7-glow::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: max(150%, 720px); aspect-ratio: 1; transform: translate(-50%, -50%) rotate(0deg);
+  background: conic-gradient(from 0deg, transparent 0 55%, rgb(var(--accent-rgb) / 0.9) 78%, rgb(var(--info-rgb)) 90%, transparent 100%);
+  animation: v7-spin 9s linear infinite;
+}
+.v7-glow.halt::before { background: conic-gradient(from 0deg, rgb(var(--sell-rgb) / 0.85), rgb(var(--sell-rgb) / 0.35) 50%, rgb(var(--sell-rgb) / 0.85)); animation: none; }
+
+/* -- 2. risk rail ------------------------------------------------------------------------------------------- */
+.v7-rail { margin: 0.55rem 0 0.35rem; }
+.v7-rail-track { position: relative; height: 8px; border-radius: 999px; background: rgb(var(--border-rgb)); }
+.v7-rail-zone { position: absolute; top: 0; bottom: 0; transform-origin: var(--origin, 50%) 50%; animation: v7-reveal 600ms var(--ease-out) backwards; }
+.v7-rail-zone.loss { left: 0; width: calc(var(--e) * 1%); border-radius: 999px 0 0 999px; background: rgb(var(--sell-rgb) / 0.42); --origin: 100%; }
+.v7-rail-zone.gain { left: calc(var(--e) * 1%); right: 0; border-radius: 0 999px 999px 0; background: rgb(var(--buy-rgb) / 0.42); --origin: 0%; }
+.v7-rail.short .v7-rail-zone { background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.2) 0 3px, transparent 3px 7px); }
+.v7-rail-tick { position: absolute; top: -4px; bottom: -4px; left: calc(var(--e) * 1%); width: 2px; margin-left: -1px; border-radius: 2px; background: rgb(var(--fg-rgb) / 0.75); }
+/* the marker: a full-width box slid by a percentage of ITS OWN width, so transform alone places it (no left/top animation) */
+.v7-rail-mark { position: absolute; inset: 0; pointer-events: none; transform: translateX(calc(var(--p) * 1% - 100%)); transition: transform var(--dur-slow) var(--ease-out); }
+.v7-rail-mark i { position: absolute; right: 0; top: 50%; width: 16px; height: 16px; margin: -8px -8px 0 0; border-radius: 50%; background: rgb(var(--fg-rgb)); border: 3px solid rgb(var(--panel-rgb)); box-shadow: 0 0 0 1px rgb(var(--border-strong-rgb)); }
+.v7-rail-mark i::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid currentColor; opacity: 0; animation: v7-ping 2.6s ease-out infinite; }
+.v7-rail.ahead .v7-rail-mark i, .v7-rail.at_target .v7-rail-mark i { background: rgb(var(--buy-rgb)); color: rgb(var(--buy-rgb)); }
+.v7-rail.under .v7-rail-mark i { background: rgb(var(--warn-rgb)); color: rgb(var(--warn-rgb)); }
+.v7-rail.near_stop .v7-rail-mark i, .v7-rail.at_stop .v7-rail-mark i { background: rgb(var(--sell-rgb)); color: rgb(var(--sell-rgb)); }
+.v7-rail.flat .v7-rail-mark i { color: rgb(var(--muted-rgb)); }
+.v7-rail.at_target .v7-rail-mark i, .v7-rail.at_stop .v7-rail-mark i { box-shadow: 0 0 12px currentColor; }
+.v7-rail-legend { display: flex; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem; font-size: 0.68rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.v7-rail-legend .s { color: rgb(var(--sell-rgb)); } .v7-rail-legend .t { color: rgb(var(--buy-rgb)); } .v7-rail-legend .e { color: rgb(var(--muted-rgb)); }
+.v7-rail-words { margin: 0.25rem 0 0; font-size: 0.72rem; color: rgb(var(--muted-rgb)); }
+.v7-rail.near_stop .v7-rail-words, .v7-rail.at_stop .v7-rail-words { color: rgb(var(--sell-rgb)); font-weight: 700; }
+.v7-rail.ahead .v7-rail-words, .v7-rail.at_target .v7-rail-words { color: rgb(var(--buy-rgb)); font-weight: 700; }
+.v7-rail.compact { margin: 0.4rem 0 0.2rem; } .v7-rail.compact .v7-rail-legend { font-size: 0.64rem; }
+
+/* -- 3. exposure strip -------------------------------------------------------------------------------------- */
+.v7-expo { padding: 0.75rem 0.95rem 0.8rem; border-radius: var(--v6-r, 18px); border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-rgb)); box-shadow: var(--card-shadow); animation: v7-rise var(--dur-slow) var(--ease-out) backwards; }
+.v7-expo-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 0.9rem; flex-wrap: wrap; }
+.v7-expo-head > b { font-size: 0.85rem; font-weight: 800; color: rgb(var(--fg-rgb)); }
+.v7-expo-chips { list-style: none; margin: 0; padding: 0; display: flex; gap: 0.35rem; flex-wrap: wrap; }
+.v7-chip { padding: 0.12rem 0.55rem; border-radius: 999px; font-size: 0.7rem; font-weight: 700; border: 1px solid rgb(var(--border-strong-rgb)); color: rgb(var(--muted-rgb)); background: rgb(var(--panel-2-rgb)); font-variant-numeric: tabular-nums; }
+.v7-chip.pnl.up { color: rgb(var(--buy-rgb)); border-color: rgb(var(--buy-rgb) / 0.4); background: rgb(var(--buy-rgb) / 0.1); }
+.v7-chip.pnl.down { color: rgb(var(--sell-rgb)); border-color: rgb(var(--sell-rgb) / 0.45); background: rgb(var(--sell-rgb) / 0.1); }
+.v7-chip.warn { color: rgb(var(--warn-rgb)); border-color: rgb(var(--warn-rgb) / 0.45); background: rgb(var(--warn-rgb) / 0.1); }
+.v7-expo-bar { list-style: none; margin: 0.6rem 0 0.35rem; padding: 0; display: flex; gap: 3px; height: 36px; }
+.v7-expo-bar .seg {
+  flex: 0 1 auto; min-width: 26px; display: flex; align-items: center; justify-content: space-between; gap: 0.3rem; padding: 0 0.5rem; overflow: hidden;
+  border-radius: 9px; border: 1px solid rgb(var(--border-strong-rgb)); background-color: rgb(var(--muted-2-rgb) / 0.18); color: rgb(var(--muted-rgb));
+  font-size: 0.7rem; font-weight: 800; transform-origin: 50% 100%; animation: v7-grow 520ms var(--ease-out) calc(var(--i, 0) * 60ms) backwards;
+}
+.v7-expo-bar .seg.up { background-color: rgb(var(--buy-rgb) / 0.17); border-color: rgb(var(--buy-rgb) / 0.55); color: rgb(var(--buy-rgb)); }
+.v7-expo-bar .seg.down { background-color: rgb(var(--sell-rgb) / 0.17); border-color: rgb(var(--sell-rgb) / 0.55); color: rgb(var(--sell-rgb)); }
+.v7-expo-bar .seg.short { background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.17) 0 3px, transparent 3px 7px); }
+.v7-expo-bar .seg-sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v7-expo-note { margin: 0; font-size: 0.68rem; color: rgb(var(--muted-2-rgb)); }
+
+/* -- 4. mode ladder ------------------------------------------------------------------------------------------ */
+.v7-ladder { margin: 0.2rem 0 0.5rem; }
+.v7-ladder-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); }
+.v7-ladder .step { position: relative; display: flex; flex-direction: column; align-items: center; gap: 0.1rem; text-align: center; animation: v7-rise var(--dur-med) var(--ease-out) backwards; }
+.v7-ladder .step:nth-child(2) { animation-delay: 80ms; } .v7-ladder .step:nth-child(3) { animation-delay: 160ms; }
+.v7-ladder .step + .step::before { content: ""; position: absolute; top: 15px; right: 50%; width: 100%; height: 2px; background: rgb(var(--border-strong-rgb)); z-index: 0; }
+.v7-ladder .step.past + .step::before, .v7-ladder .step.current::before { background: rgb(var(--buy-rgb) / 0.7); }
+.v7-ladder.v7m-shadow .step.current::before { background: rgb(var(--warn-rgb) / 0.8); }
+.v7-ladder.v7m-live .step.past + .step::before, .v7-ladder.v7m-live .step.current::before { background: rgb(var(--sell-rgb) / 0.8); }
+.v7-ladder .dot { position: relative; z-index: 1; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; font-size: 0.8rem; font-weight: 800; background: rgb(var(--panel-2-rgb)); border: 2px solid rgb(var(--border-strong-rgb)); color: rgb(var(--muted-2-rgb)); }
+.v7-ladder .step.past .dot { border-color: rgb(var(--buy-rgb) / 0.6); color: rgb(var(--buy-rgb)); }
+.v7-ladder .step.current.v7m-off .dot { border-color: rgb(var(--buy-rgb)); color: rgb(var(--buy-rgb)); background: rgb(var(--buy-rgb) / 0.12); }
+.v7-ladder .step.current.v7m-shadow .dot { border-color: rgb(var(--warn-rgb)); color: rgb(var(--warn-rgb)); background: rgb(var(--warn-rgb) / 0.12); }
+.v7-ladder .step.current.v7m-live .dot { border-color: rgb(var(--sell-rgb)); color: rgb(var(--sell-rgb)); background: rgb(var(--sell-rgb) / 0.14); }
+.v7-ladder .step.current.v7m-live .dot::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2px solid rgb(var(--sell-rgb) / 0.65); animation: v7-ping 2.2s ease-out infinite; }
+.v7-ladder .step b { font-size: 0.72rem; letter-spacing: 0.06em; color: rgb(var(--muted-rgb)); }
+.v7-ladder .step.current b { color: rgb(var(--fg-rgb)); }
+.v7-ladder .step small { font-size: 0.66rem; color: rgb(var(--muted-2-rgb)); }
+.v7-ladder-words { margin: 0.45rem 0 0; font-size: 0.76rem; font-weight: 700; color: rgb(var(--fg-rgb)); text-align: center; }
+.v7-ladder.v7m-live .v7-ladder-words { color: rgb(var(--sell-rgb)); }
+
+/* -- 5. evidence meter --------------------------------------------------------------------------------------- */
+.v7-evidence { margin: 0.4rem 0 0.2rem; display: grid; gap: 0.4rem; }
+.v7-meter-row { display: grid; grid-template-columns: 6.2rem 1fr 4.2rem; align-items: center; gap: 0.6rem; font-size: 0.72rem; }
+.v7-meter-label { font-weight: 700; color: rgb(var(--muted-rgb)); }
+.v7-meter { position: relative; height: 9px; border-radius: 999px; background: rgb(var(--border-rgb)); overflow: hidden; }
+.v7-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: linear-gradient(90deg, rgb(var(--accent-rgb)), rgb(var(--info-rgb))); transform-origin: 0 50%; animation: v7-reveal 800ms var(--ease-out) backwards; }
+.v7-evidence.ready .v7-meter-fill { background: rgb(var(--buy-rgb)); }
+.v7-meter-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: rgb(var(--panel-rgb) / 0.8); }
+.v7-meter-num { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; color: rgb(var(--fg-rgb)); }
+.v7-evidence-words { margin: 0.1rem 0 0; font-size: 0.72rem; color: rgb(var(--muted-rgb)); }
+@media (max-width: 520px) { .v7-meter-row { grid-template-columns: 1fr 4.2rem; } .v7-meter-label { grid-column: 1 / -1; } }
+
+/* -- 6. capital ring ------------------------------------------------------------------------------------------ */
+.v7-ring { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin: 0 0 0.75rem; padding: 0.6rem 0.8rem; border-radius: 14px; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-2-rgb)); }
+.v7-ring-svg { width: 118px; height: 118px; flex: none; }
+.v7-ring-pop { transform-box: fill-box; transform-origin: center; animation: v7-pop 700ms var(--ease-out) backwards; }
+.v7-ring-svg circle { fill: none; }
+.v7-ring-base { stroke: rgb(var(--border-rgb)); stroke-width: 14; } .v7-ring-base.thin { stroke-width: 6; }
+.v7-ring-ps { stroke: rgb(var(--accent-rgb)); stroke-width: 14; }
+.v7-ring-rt { stroke: rgb(var(--info-rgb) / 0.55); stroke-width: 14; }
+.v7-ring-free { stroke: rgb(var(--buy-rgb)); stroke-width: 6; }
+.v7-ring-big { font-size: 20px; font-weight: 800; fill: rgb(var(--fg-rgb)); font-variant-numeric: tabular-nums; }
+.v7-ring-small { font-size: 7.4px; font-weight: 700; fill: rgb(var(--muted-rgb)); }
+.v7-ring-legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; font-size: 0.74rem; color: rgb(var(--muted-rgb)); flex: 1 1 220px; }
+.v7-ring-legend b { color: rgb(var(--fg-rgb)); font-variant-numeric: tabular-nums; }
+.v7-ring-legend .k { display: inline-block; width: 10px; height: 10px; margin-right: 0.4rem; border-radius: 3px; vertical-align: -1px; }
+.v7-ring-legend .k.ps { background: rgb(var(--accent-rgb)); } .v7-ring-legend .k.rt { background: rgb(var(--info-rgb) / 0.55); } .v7-ring-legend .k.free { background: rgb(var(--buy-rgb)); }
+
+/* -- 7. drift beat ---------------------------------------------------------------------------------------------- */
+.v7-beat { display: flex; align-items: center; gap: 0.7rem; margin: 0 0 0.5rem; animation: v7-rise var(--dur-med) var(--ease-out) backwards; }
+.v7-beat-svg { width: 170px; height: 32px; flex: none; border-radius: 8px; background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb)); }
+.v7-beat-line, .v7-beat-flat { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.v7-beat.steady .v7-beat-line { stroke: rgb(var(--buy-rgb)); } .v7-beat.warn .v7-beat-line { stroke: rgb(var(--warn-rgb)); }
+.v7-beat-flat { stroke: rgb(var(--muted-2-rgb)); stroke-dasharray: 4 5; } .v7-beat.alarm .v7-beat-flat { stroke: rgb(var(--sell-rgb)); stroke-dasharray: none; }
+.v7-beat-run { animation: v7-slide 2.6s linear infinite; } .v7-beat.warn .v7-beat-run { animation-duration: 1.8s; }
+.v7-beat-word { font-size: 0.78rem; font-weight: 800; color: rgb(var(--fg-rgb)); }
+.v7-beat.warn .v7-beat-word { color: rgb(var(--warn-rgb)); } .v7-beat.alarm .v7-beat-word { color: rgb(var(--sell-rgb)); } .v7-beat.steady .v7-beat-word { color: rgb(var(--buy-rgb)); }
+
+/* -- 8. side chip, position accent, KPI sheen ------------------------------------------------------------------- */
+.v7-side { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.64rem; font-weight: 800; letter-spacing: 0.06em; border: 1px solid transparent; vertical-align: middle; }
+.v7-side.short { color: rgb(var(--sell-rgb)); border-color: rgb(var(--sell-rgb) / 0.55); background: rgb(var(--sell-rgb) / 0.12); background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.14) 0 3px, transparent 3px 7px); }
+.v7-pos { position: relative; border-left-width: 3px; border-left-color: rgb(var(--buy-rgb) / 0.7); transition: border-color var(--dur-med) var(--ease-out), transform var(--dur-med) var(--ease-out); }
+.v7-pos.short { border-left-color: rgb(var(--sell-rgb) / 0.85); }
+.v7-pos:hover { transform: translateY(-1px); }
+.v6-kpi::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / 0.1) 50%, transparent 65%); transform: translateX(-120%); transition: transform 700ms var(--ease-out); }
+.v6-kpi:hover::after { transform: translateX(120%); }
+
+/* -- keyframes (transform / opacity only) ---------------------------------------------------------------------------- */
+@keyframes v7-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes v7-grow { from { opacity: 0; transform: scaleY(0.35); } to { opacity: 1; transform: scaleY(1); } }
+@keyframes v7-reveal { from { transform: scaleX(0); opacity: 0.2; } to { transform: scaleX(1); opacity: 1; } }
+@keyframes v7-pop { from { opacity: 0; transform: scale(0.86); } to { opacity: 1; transform: scale(1); } }
+@keyframes v7-spin { from { transform: translate(-50%, -50%) rotate(0deg); } to { transform: translate(-50%, -50%) rotate(360deg); } }
+@keyframes v7-ping { 0% { transform: scale(0.7); opacity: 0.85; } 100% { transform: scale(1.7); opacity: 0; } }
+@keyframes v7-slide { from { transform: translateX(0); } to { transform: translateX(-80px); } }
+
+/* -- off switches: ONE list, repeated for reduced-motion, TV mode, "Animations: Off" (html.v6-calm) and the hidden tab ------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .v7-glow::before, .v7-rail-mark i::after, .v7-ladder .step.current.v7m-live .dot::after, .v7-beat-run,
+  .v7-rail-zone, .v7-expo, .v7-expo-bar .seg, .v7-ladder .step, .v7-meter-fill, .v7-ring-pop, .v7-beat { animation: none !important; }
+  .v7-rail-mark, .v7-pos, .v6-kpi::after { transition: none !important; }
+}
+html.tv .v7-glow::before,
+html.tv .v7-rail-mark i::after,
+html.tv .v7-ladder .step.current.v7m-live .dot::after,
+html.tv .v7-beat-run,
+html.tv .v7-rail-zone,
+html.tv .v7-expo,
+html.tv .v7-expo-bar .seg,
+html.tv .v7-ladder .step,
+html.tv .v7-meter-fill,
+html.tv .v7-ring-pop,
+html.tv .v7-beat { animation: none !important; }
+html.v6-calm .v7-glow::before,
+html.v6-calm .v7-rail-mark i::after,
+html.v6-calm .v7-ladder .step.current.v7m-live .dot::after,
+html.v6-calm .v7-beat-run,
+html.v6-calm .v7-rail-zone,
+html.v6-calm .v7-expo,
+html.v6-calm .v7-expo-bar .seg,
+html.v6-calm .v7-ladder .step,
+html.v6-calm .v7-meter-fill,
+html.v6-calm .v7-ring-pop,
+html.v6-calm .v7-beat { animation: none !important; }
+html.v6-calm .v7-rail-mark, html.v6-calm .v7-pos, html.v6-calm .v6-kpi::after, html.tv .v7-rail-mark, html.tv .v7-pos, html.tv .v6-kpi::after { transition: none !important; }
+html[data-hidden="true"] .v7-glow::before,
+html[data-hidden="true"] .v7-rail-mark i::after,
+html[data-hidden="true"] .v7-ladder .step.current.v7m-live .dot::after,
+html[data-hidden="true"] .v7-beat-run { animation-play-state: paused; }

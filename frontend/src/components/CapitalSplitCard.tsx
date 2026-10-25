@@ -24,6 +24,8 @@
 // itself enforces yet. Making that asymmetry visible on the card is the
 // whole point — silently presenting a computed number as if it were a
 // real, enforced pool would be misleading.
+import { CapitalRing } from "./ui/CapitalRing";   // design v7
+
 function fmtInr(n: number | null | undefined, decimals = 0): string {
   if (n == null || Number.isNaN(n)) return "—";
   const abs = Math.abs(n);
@@ -103,6 +105,9 @@ export default function CapitalSplitCard({
       <p className="font-display tabular-nums text-[10px] text-mist mb-3">
         Total live balance (Dhan): <span className="text-paper font-bold">{fmtInr(totalBalance)}</span>
       </p>
+
+      {/* design v7: the same split as a ring (from the figures above; Real Trade's share is still only a computed reference) */}
+      <CapitalRing total={totalBalance} psAllocated={psAllocated} psAvailable={positionStocksAvailable} splitPct={splitPct} />
 
       <div className="grid grid-cols-2 gap-2">
         {/* Position Stocks pool */}

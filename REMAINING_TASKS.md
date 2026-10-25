@@ -1,5 +1,7 @@
 # Remaining tasks
 
+> E144 (this zip, includes E143): the audit's "no screen" gaps are closed on the Real Money Calibration page - Swing lane, Reconciliation (hourly drift report + stuck pending fills) and Status probes, all read-only (CHANGES_2026-10-25_E144_audit_screens.md). `tsc`, `vite build` and all 23 frontend suites pass here. NOT run: the live-field checker against your services, a click-through in the browser. Still API-only on purpose: the write actions and the parameterised look-ups listed in the E144 note.
+
 > E137 (this zip, includes E136): the swing scan no longer picks a stock whose own last bar is stale (CHANGES_2026-10-25_E137_swing_stale_bar_pick.md).
 
 > E136 (previous zip, includes E135): S4 probe fixed - a failed open no longer blocks every later open, a failed BUY releases the symbol lock, a held share is reported (CHANGES_2026-10-25_E136_swing_probe_deadlock_and_lock_leak.md).

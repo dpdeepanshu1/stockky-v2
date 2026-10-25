@@ -37,10 +37,12 @@ const WAVE = Array.from({ length: 125 }, (_, i) => {
   return `${i ? "L" : "M"}${x} ${y.toFixed(1)}`;
 }).join(" ");
 
-export function PageHero({ icon, title, kicker, subtitle, right }: { icon: IconName; title: ReactNode; kicker: string; subtitle?: string; right?: ReactNode }) {
+// design v7: `glow` draws a slowly turning ring round the hero while the service is armed ("armed") or a still red ring when it is halted ("halt"). Decoration only.
+export function PageHero({ icon, title, kicker, subtitle, right, glow }: { icon: IconName; title: ReactNode; kicker: string; subtitle?: string; right?: ReactNode; glow?: "armed" | "halt" }) {
   const [calm, toggleCalm] = useCalm();
   return (
     <header className="v6-hero">
+      {glow && <span className={`v7-glow${glow === "halt" ? " halt" : ""}`} aria-hidden="true" />}
       <svg className="v6-art" viewBox="0 0 880 150" preserveAspectRatio="xMaxYMid slice" aria-hidden="true" focusable="false">
         <defs>
           <linearGradient id="v6g-wave" gradientUnits="userSpaceOnUse" x1="0" x2="880" y1="0" y2="0"><stop offset="0" stopColor="currentColor" stopOpacity="0" /><stop offset="0.6" stopColor="currentColor" stopOpacity="0.55" /><stop offset="1" stopColor="currentColor" stopOpacity="0.9" /></linearGradient>

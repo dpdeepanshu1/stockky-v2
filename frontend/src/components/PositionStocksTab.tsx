@@ -7,6 +7,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { PageHero } from "./ui/PageHero";   // design v6
+import { RiskRail } from "./ui/RiskRail";   // design v7
+import { ExposureStrip } from "./ui/ExposureStrip";   // design v7
+import { railView } from "../v7View";   // design v7
 import { KpiStrip, type Kpi } from "./ui/KpiStrip";   // design v6
 import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { signedInr } from "./realAuto/history";   // design v6 (shared signed-rupee text)
@@ -803,7 +806,7 @@ export default function PositionStocksTab() {
 
   return (
     <div className="page-terminal v6-page v6-flow space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
-      <PageHero icon="trend" title="Position Stocks" kicker="AI-assisted · live Dhan scalps" subtitle="1m / 5m / 15m / 60m scalp pool"
+      <PageHero glow={killSwitchTripped ? "halt" : status?.armed ? "armed" : undefined} icon="trend" title="Position Stocks" kicker="AI-assisted · live Dhan scalps" subtitle="1m / 5m / 15m / 60m scalp pool"
         right={(
           <span className="rt-updated font-display tabular-nums">
             {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
@@ -1709,7 +1712,14 @@ export default function PositionStocksTab() {
         {openPositions.length === 0 ? (
           <p className="font-display tabular-nums text-xs text-mist">No open scalp positions.</p>
         ) : (
-          <div className="space-y-2">{openPositions.map(p => <PositionRow key={p.id} p={p} onClose={doClosePosition} busy={busy} loggedIn={loggedIn} />)}</div>
+          <div className="space-y-2">
+            {/* design v7: where the open money sits, long vs short, from the open rows this tab already holds */}
+            <ExposureStrip rows={openPositions.map(p => ({
+              symbol: p.symbol, side: p.side, qty: p.quantity, entry: p.entry_price, pnl: p.unrealized_pnl,
+              riskUsedPct: p.overnight_converted_to_cnc ? undefined : railView({ side: p.side, entry: p.entry_price, stop: p.stop_price, target: p.target_price, price: p.current_price }).riskUsedPct,
+            }))} />
+            {openPositions.map(p => <PositionRow key={p.id} p={p} onClose={doClosePosition} busy={busy} loggedIn={loggedIn} />)}
+          </div>
         )}
       </div>
 
@@ -2259,10 +2269,10 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
   // a manual way out).
   const canClose = onClose && (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED");
   return (
-    <GlintBox value={p.current_price} className="border border-slate rounded-xl p-3">
+    <GlintBox value={p.current_price} className={`v7-pos${isShort(p) ? " short" : ""} border border-slate rounded-xl p-3`}>
       <div className="flex items-center justify-between mb-2">
         <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}{isShort(p) && (
-          <span className="ml-2 px-1.5 py-0.5 rounded bg-signal-sell/20 border border-signal-sell text-[9px] text-signal-sell" title="Short: sold first, covered (bought back) later. Intraday only.">{sideBadge(p)}</span>
+          <span className="v7-side short ml-2" title="Short: sold first, covered (bought back) later. Intraday only."><i aria-hidden="true">↘</i>{sideBadge(p)}</span>
         )}</span>
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
@@ -2329,6 +2339,10 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
           )}
         </div>
       </div>
+      {/* design v7: stop / entry / target to scale for a live position (long or short); not drawn once the bracket is gone (CNC carry) */}
+      {(p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED") && !p.overnight_converted_to_cnc && p.stop_price > 0 && p.target_price > 0 && (
+        <RiskRail side={p.side} entry={p.entry_price} stop={p.stop_price} target={p.target_price} price={p.current_price} />
+      )}
       {/* group354: how the daily-structure gate saw this entry (collapsed one-liner; renders nothing when there is no snapshot) */}
       {p.structure && <StructurePanel snapshot={p.structure} atrStop={p.stop_price} />}
       {/* AUDIT ADD (session60): live current price / unrealized P&L for an

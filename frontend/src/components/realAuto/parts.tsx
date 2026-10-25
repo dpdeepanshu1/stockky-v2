@@ -2,6 +2,7 @@
 import { GlintBox, PriceRoll } from "../ui/motion";
 import { type Position } from "../../realTradeApi";
 import StockCandleBlock from "../StockCandleBlock";
+import { RiskRail } from "../ui/RiskRail";   // design v7
 import { fmtDate, fmtInr, fmtTime, pnlColor, positionLevels } from "./format";
 
 // AUDIT FIX (session64, issue #8 follow-up — "show demat-imported holdings
@@ -19,7 +20,7 @@ export function PositionCard({
   closing: boolean;
 }) {
   return (
-    <GlintBox value={p.current_price} className="bg-graphite border border-slate rounded-2xl p-4">
+    <GlintBox value={p.current_price} className="v7-pos bg-graphite border border-slate rounded-2xl p-4">
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
@@ -84,20 +85,9 @@ export function PositionCard({
           <br/><span className="text-signal-buy font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
         </div>
       </div>
-      {/* Risk:reward bar with a live marker for where current price sits between stop and target */}
+      {/* design v7: stop / entry / target drawn TO SCALE with the live price marker (the old bar split stop and target 50/50 whatever the entry was) */}
       {p.current_stop && p.current_target && (
-        <div className="relative h-1.5 rounded-full bg-ink flex overflow-hidden mb-2">
-          <div className="bg-signal-sell/50" style={{ width: "50%" }} />
-          <div className="bg-signal-buy/50" style={{ width: "50%" }} />
-          {p.current_price != null && p.current_target > p.current_stop && (
-            <div
-              className="absolute top-[-2px] w-[3px] h-[9px] bg-white rounded-full"
-              style={{
-                left: `${Math.min(100, Math.max(0, ((p.current_price - p.current_stop) / (p.current_target - p.current_stop)) * 100))}%`,
-              }}
-            />
-          )}
-        </div>
+        <RiskRail side="LONG" entry={p.avg_entry_price} stop={p.current_stop} target={p.current_target} price={p.current_price} />
       )}
       <StockCandleBlock symbol={p.symbol} levels={positionLevels(p.avg_entry_price, p.current_stop, p.current_target)} />
       <div className="flex items-center justify-between mt-2">

@@ -465,6 +465,13 @@ export interface ScalpIntradayRestrictedRow {
   last_detail: string | null;
 }
 
+// E144: rows still carrying a *_PENDING_RECONCILE sentinel (GET /reconcile/pending, orders/reconcile.py list_pending_reconcile). Read-only. An empty list means nothing is stuck.
+export interface PendingReconcileRow {
+  id: number; symbol: string; status: string; closed_day_ist: string | null; age_days: number | null; dhan_exit_order_id: string | null;
+  entry_price: number | null; exit_price: number | null; realized_pnl: number | null; resolvable_via: string; error_message: string | null;
+}
+export interface PendingReconcileDoc { count: number; rows: PendingReconcileRow[] }
+
 export const positionStocksApi = {
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
@@ -567,6 +574,10 @@ export const positionStocksApi = {
   dhanAccount: () => psRequest<DhanAccountStatus>("/dhan/account", {}, true),
 
   reconcile: () => psRequest<{ status: string; positions_closed: number }>("/reconcile", { method: "POST" }, true),
+  // E144: one read-only status probe by path (only paths from statusProbes.ts; a test checks each is a GET route).
+  probe: (path: string) => psRequest<any>(path, undefined, true),
+  // E144: read-only list of exits still waiting for their real fill (the Resolve-now sweep, POST /reconcile/pending/resolve, stays API-only).
+  reconcilePending: () => psRequest<PendingReconcileDoc>("/reconcile/pending"),
 
   // ADDED (this session — "manual control to buy... and manual exit if
   // needed"): neither existed before. manualBuy sizes automatically when

@@ -3,6 +3,8 @@ import { realTradeApi } from "../../../realTradeApi";
 import ApprovalsPanel from "../../ApprovalsPanel";
 import { PipelineLiveStatus } from "../panels";
 import { PositionCard, SectionHdr } from "../parts";
+import { ExposureStrip } from "../../ui/ExposureStrip";   // design v7
+import { railView } from "../../../v7View";
 import type { Mode } from "../types";
 
 // E59 - E31 step 3: the "positions" tab, moved out of RealAutoTrade.tsx (JSX unchanged).
@@ -86,6 +88,11 @@ export function PositionsTab({ mode, loggedIn, pipeline, positions, autoPilotPos
                 </div>
               ) : (
                 <>
+                  {/* design v7: where the open money sits, from the positions this tab already holds */}
+                  <ExposureStrip rows={positions.map(p => ({
+                    symbol: p.symbol, qty: p.qty_open, entry: p.avg_entry_price, pnl: p.unrealized_pnl,
+                    riskUsedPct: railView({ side: "LONG", entry: p.avg_entry_price, stop: p.current_stop, target: p.current_target, price: p.current_price }).riskUsedPct,
+                  }))} />
                   {/* AUDIT FIX (session64, issue #8 follow-up): split into
                       "Auto-Pilot Positions" (this service's own BUYs) and
                       "Demat Positions" (pre-existing Dhan holdings imported

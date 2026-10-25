@@ -117,7 +117,7 @@ export function PipelineTab({ mode, loggedIn, status, armed, gate1, pipeline, po
                         { key: "enter_at_open" as const, icon: "🚀", title: "Enter at open",
                           desc: "Run one full entry cycle just after the open so pre-picked names get entered at the early price." },
                         { key: "eod_squareoff" as const, icon: "🌆", title: "EOD square-off",
-                          desc: "Close open positions before the close. When Selective overnight hold (below) is ON, a narrow, capped subset with a real backtested Day+1 edge is kept open instead of flattened." },
+                          desc: "Close open positions before the close. When Selective overnight hold (below) is ON, a narrow, capped subset with a real backtested Day+1 edge is kept open instead of flattened. The swing lane also needs this ON: it runs the 15:00 hold-or-sell decision for swing positions, and live swing entries are refused while it is OFF (Calibration → Swing lane shows this under Wiring)." },
                         { key: "eod_signal_scan" as const, icon: "🌙", title: "EOD signal scan",
                           desc: "Right after square-off, re-scan for strong positive signals (news/results/events/momentum) and queue the best few as an overnight-priority pick — bought first thing at tomorrow's open, not today." },
                       ]).map(f => {

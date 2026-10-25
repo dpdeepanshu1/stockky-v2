@@ -73,7 +73,10 @@ assert.equal(jobAppliesTo("control_snapshot", "rt"), true);
 assert.equal(GATE_GLOSSARY.filter((g) => !g.exists).length, 1);
 // group 466: Resume. The runner marks the jobs whose scripts save each finished symbol; the page offers Resume only for those and sends resume=true.
 const resumable = [...jobsPy.matchAll(/_job\("([a-z0-9_]+)"[\s\S]*?(?=\n    _job\("|\n\]\nJOBS)/g)].filter((m) => /resumable=True/.test(m[0])).map((m) => m[1]).sort();
-assert.deepEqual(resumable, ["ab_report", "calibration_full", "entry_rules", "legacy_gate", "ml_v2", "p8_retest", "structure_backtest"]);
+assert.deepEqual(resumable, ["ab_report", "calibration_full", "entry_rules", "legacy_gate", "ml_v2", "p8_retest", "structure_backtest", "swing_backtest"]);   // E142: swing_backtest saves each finished symbol (E131)
+assert.equal(jobAppliesTo("swing_backtest", "ps"), false);
+assert.equal(jobAppliesTo("swing_shadow_report", "ps"), false);
+assert.equal(jobAppliesTo("swing_universe", "rt"), true);
 const api = readFileSync(new URL("./calibrationApi.ts", import.meta.url), "utf8");
 assert.match(api, /resume = false\) =>\s+R<RunRec>\("\/runs", \{ method: "POST", body: JSON\.stringify\(\{ kind, target, params, confirm, resume \}\) \}\)/);
 assert.match(api, /resumable\?: boolean/);
@@ -102,7 +105,7 @@ for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); asse
 const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
 assert.match(bar, /Run all test cases/);
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
-assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51) and Market Weather (not per service)");
+assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the three read-only status sections added in E144 (Swing lane, Reconciliation, Status probes: they start no test)");
 // E51: the scheduler's alert switches go through the gateway proxy, never straight to the scheduler
 assert.match(tab, /section === \"alerts\" && <SwitchesPanel svc=\"sch\" \/>/);
 assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gateway proxy path");

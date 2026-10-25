@@ -19,11 +19,14 @@ import RunAllBar from "./calibration/RunAllBar";
 import AutoCalibPanel from "./calibration/AutoCalibPanel";
 import WeatherPanel from "./calibration/WeatherPanel";
 import ShortSellingPanel from "./calibration/ShortSellingPanel";
+import SwingPanel from "./calibration/SwingPanel";
+import ReconcilePanel from "./calibration/ReconcilePanel";
+import StatusProbesPanel from "./calibration/StatusProbesPanel";
 import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
-type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "trades" | "plan" | "tests" | "runs";
+type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
 
 const SVC_ITEMS: { id: Svc; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }];
 const SECTIONS: { id: Section; label: string }[] = [
@@ -32,6 +35,9 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "auto", label: "Auto-calibration" },
   { id: "weather", label: "Market Weather" },
   { id: "short", label: "Short selling" },
+  { id: "swing", label: "Swing lane" },
+  { id: "reconcile", label: "Reconciliation" },
+  { id: "probes", label: "Status probes" },
   { id: "trades", label: "Daily trades" },
   { id: "plan", label: "Run plan" },
   { id: "tests", label: "Tests & training" },
@@ -122,12 +128,15 @@ function Body() {
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
       <SessionNotice />
-      {section !== "runs" && section !== "alerts" && section !== "weather" && <RunAllBar svc={svc} />}
+      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "swing" && section !== "reconcile" && section !== "probes" && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "alerts" && <SwitchesPanel svc="sch" />}
       {section === "auto" && <AutoCalibPanel />}
       {section === "weather" && <WeatherPanel />}
       {section === "short" && <ShortSellingPanel />}
+      {section === "swing" && <SwingPanel />}
+      {section === "reconcile" && <ReconcilePanel svc={svc} />}
+      {section === "probes" && <StatusProbesPanel svc={svc} />}
       {section === "trades" && <TradesPanel svc={svc} onRunReport={() => void start("job", "daily_trades", { days: 10, origin: "all" })} />}
       {section === "plan" && <RunPlanPanel svc={svc} />}
       {section === "tests" && <TestsPanel svc={svc} />}

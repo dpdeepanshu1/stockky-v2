@@ -8,6 +8,7 @@ import { canSwitchShortOff, rupees, sellProbeView, shortShadowView, shortSwitchR
 import { shortModeView } from "../../positionSide";
 import { useRunner } from "./RunnerContext";
 import { Btn, Card, Chip, Msg } from "./ui";
+import { ModeLadder } from "../ui/ModeLadder";   // design v7
 
 export default function ShortSellingPanel() {
   const { start } = useRunner();
@@ -39,6 +40,7 @@ export default function ShortSellingPanel() {
     <div className="space-y-3" data-testid="short-selling">
       {err && <Msg kind="err">{err}</Msg>}
       <Card title={mv.title} tone={mv.tone === "bad" ? "bad" : "warn"} right={<Chip tone={mv.tone === "bad" ? "bad" : "warn"} title={mv.orders ? "Real short orders can be placed, capped by SHORT_LIVE_QTY_CAP. The rows below are older shadow records." : "Every row is a short Stockky WOULD have taken. No order is placed."}>{mv.orders ? "real orders" : "no order is placed"}</Chip>}>
+        <ModeLadder mode={mv.mode} lane="Short selling" />
         <p className="text-[13px]" data-testid="short-headline">{v.headline}</p>
         {doc && (
           <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="short-counters">

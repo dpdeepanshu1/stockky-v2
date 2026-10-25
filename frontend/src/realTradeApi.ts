@@ -568,6 +568,44 @@ export interface CumulativeBrokerage {
   note: string;
 }
 
+// E144: the swing lane's read-only status screen (Real Money Calibration -> Swing lane). Shapes of GET /swing/status and GET /swing/ledger on real-trade-service
+// (main.py swing_status / swing_ledger). Declared here so scripts/audit_live_fields.py checks the live JSON against them. Every field below is always present in
+// a normal answer; on a failure the route sends {"error": "..."} instead, hence `error?`.
+export interface SwingStats { n: number; days: number; mean: number | null; median: number | null; win_pct: number | null; ci90: number[] | null }
+export interface SwingReportDoc {
+  verdict: "NOT_ENOUGH_DATA" | "USEFUL" | "NO_EDGE" | string; n: number; days: number; net: SwingStats; gross: SwingStats; reasons: string[];
+  stopped_pct: number | null; gap_through: number; since: string | null; by_status: Record<string, number>; kind: string; note: string; error?: string;
+}
+export interface SwingWiringMode { gate_row: boolean; armed: boolean; eod_squareoff_on: boolean; edis_check_on: boolean; live_entries_allowed: boolean; open_swing_positions: number }
+export interface SwingWiring {
+  problems: string[]; modes: Record<string, SwingWiringMode>; swing_mode?: string; schedule_loop_running?: boolean; newest_scan?: string | null;
+  broker_stop?: { all_positions_switch: boolean; swing_switch: boolean };
+}
+export interface SwingLedgerRow {
+  id: number; kind: string; mode: string | null; symbol: string; status: string; signal_day: string | null; rank: number | null; signal_close: number | null;
+  atr_pct: number | null; stop_pct: number | null; entry_day: string | null; entry_price: number | null; stop_px: number | null; sessions: number | null;
+  last_day: string | null; last_close: number | null; exit_day: string | null; exit_price: number | null; exit_reason: string | null;
+  gross_pct: number | null; cost_pct: number | null; net_pct: number | null; skip_reason: string | null; note: string | null;
+}
+export interface SwingOpenPosition { mode: string; symbol: string; qty: number; entry: number | null; stop: number | null; opened_at: string }
+export interface SwingStatusDoc {
+  mode: string; live_real_enabled: boolean; max_trade_value: number | null; max_positions: number | null; max_hold_days: number | null;
+  universe_size: number; universe_source: string; scan: { day: string | null; ok: boolean | null; summary: string | null };
+  scan_universe: string | null; runtime: { running: boolean; last_result: unknown };
+  shadow: SwingReportDoc; pause: Record<string, { paused: boolean; why: string }>; open_positions: SwingOpenPosition[]; planned: SwingLedgerRow[];
+  wiring: SwingWiring; error?: string;
+}
+export interface SwingLedgerDoc { count: number; rows: SwingLedgerRow[]; error?: string }
+
+// E144: the hourly broker-vs-book drift report (GET /reconcile-report/REAL, execution/hourly_reconcile.py). Read-only; changes nothing in the book. `error` is null on a
+// normal pass; the per-row fields depend on `kind` (missing_at_broker / book_over_broker / broker_over_book: symbol + book_qty + broker_qty; stale_order: symbol +
+// order_id + side + status + age_minutes; broker_only: symbols + count).
+export interface ReconcileDriftRow {
+  kind: string; severity: "warn" | "info" | string; symbol?: string; symbols?: string[]; count?: number; book_qty?: number; broker_qty?: number;
+  order_id?: number; side?: string; status?: string; age_minutes?: number;
+}
+export interface ReconcileReportDoc { ran_at: string; mode: string; drift: ReconcileDriftRow[]; warn_count: number; error: string | null; book_positions?: number; alerted?: boolean }
+
 export const realTradeApi = {
   health: () => rtRequest<{ ok: boolean; service: string; phase: string }>("/health", {}, false),
 
@@ -611,6 +649,15 @@ export const realTradeApi = {
   dhanAccount: () => rtRequest<DhanStatus & { funds: any | null; funds_error: string | null }>("/dhan/account"),
   dhanNetworkCheck: () =>
     rtRequest<{ outbound_ip: string | null; checked_at: string; note: string }>("/dhan/network-check"),
+
+  // E144: swing lane (read-only; both need the admin session). The ledger call is a fixed page of the newest 40 shadow rows.
+  swingStatus: () => rtRequest<SwingStatusDoc>("/swing/status", undefined, true),
+  swingLedger: () => rtRequest<SwingLedgerDoc>("/swing/ledger?kind=SHADOW&limit=40", undefined, true),
+
+  // E144: one read-only status probe by path. The panel only passes paths from statusProbes.ts (a test checks each is a GET route).
+  probe: (path: string) => rtRequest<any>(path, undefined, true),
+  // E144: hourly broker-vs-book drift report (REAL only; read-only). The page never passes run=true: it reads the stored report.
+  reconcileReport: () => rtRequest<ReconcileReportDoc>("/reconcile-report/REAL", undefined, true),
 
   dhanEdisSummary: () => rtRequest<DhanEdisSummary>("/dhan/edis/summary"),
   dhanEdisRequestTpin: () =>

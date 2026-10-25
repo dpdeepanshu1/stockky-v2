@@ -33,6 +33,7 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
       { when: "16:40 IST", what: "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, changed switches", pack: "friday_review", note: "board parity GO two Fridays in a row = the legacy board maths may be retired (scripts/retire_legacy_board.py, dry run first)." },
       { when: "Friday, after the pack", what: "Short selling shadow report (counters agree; net after charges once there is enough data)", jobs: ["short_shadow_report"], note: "NOT_ENOUGH_DATA is normal for the first weeks. It never touches SHORT_MODE." },
       { when: "Friday, after the pack", what: "Short selling bar replay (mirrored short rule on recent 5-minute bars, with a long control)", jobs: ["short_history_replay"], note: "NOT_ENOUGH_DATA means market-data did not serve enough 5-minute history. Evidence only; it gates nothing." },
+      { when: "Friday, after the pack", what: "Swing lane shadow report (the screened stocks after the screening day, net of delivery cost, against all the others; 5, 10 or 20 sessions)", jobs: ["swing_shadow_report"], note: "Also part of the Friday review pack. NOT_ENOUGH_DATA is normal: about 30 saved trading days for 5 sessions, 40+ for the 20-session answer (late December 2026). It never touches SWING_MODE." },
     ],
   },
   {
@@ -48,6 +49,7 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
     rows: [
       { when: "13:00 IST", what: "Legacy gates, entry rules, P8 retest, ML V2, intraday gates, TimesFM probe, Kronos backtest", pack: "monthly_evidence", note: "Needs the weekly calibration's history on disk and, for Kronos / TimesFM, those containers running." },
       { when: "when you re-test G1", what: "Save the /analyze latency baseline with STRUCTURE_ENABLED=0, switch it back on, then compare (p95 within 15%)", jobs: ["latency_save", "latency_compare"] },
+      { when: "on demand, after fetch_history (not scheduled)", what: "Swing momentum replay: top-ranked stocks held up to 5 / 20 / 40 sessions, net of delivery cost. 25 Oct 2026 result: NO_EDGE at all three, so SWING_MODE stays shadow", jobs: ["swing_universe", "swing_backtest"], note: "swing_universe prints the SWING_UNIVERSE_SYMBOLS and SWING_UNIVERSE_MAX lines for .env. Do not rebuild the runner while a run is active." },
     ],
   },
 ];
@@ -63,6 +65,7 @@ export const JOB_SERVICES: Record<string, Svc[]> = {
   daily_trades: ["rt", "ps"], export_records: ["rt"], records_report: ["rt"], entry_slippage: ["rt"], hold_bucket: ["rt"], strategy_readout: ["rt", "ps"], legacy_gate: ["rt"], entry_rules: ["rt"],
   kronos_backtest: ["rt"], tsfm_nightly: ["rt"], tsfm_probe: ["rt"], tsfm_combine: ["rt"], latency_save: ["rt", "ps"], latency_compare: ["rt", "ps"],
   wiring_check: ["rt", "ps"], dhan_sell_probe: ["ps"], short_shadow_report: ["ps"], short_history_replay: ["ps"], opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
+  swing_backtest: ["rt"], swing_shadow_report: ["rt"], swing_universe: ["rt"],   // E142: the swing lane lives in real-trade-service only
 };
 
 export function jobAppliesTo(id: string, svc: Svc): boolean {

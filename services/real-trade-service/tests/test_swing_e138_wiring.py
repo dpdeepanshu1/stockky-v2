@@ -1,7 +1,7 @@
 """E138: swing lane wiring - the exit-engine backstop, the EOD-switch entry gate, the /swing/status wiring block, the Oracle-safe boolean filters.
 
-Part 1 (pure rules, stdlib only) runs anywhere. Part 2 needs SQLAlchemy (in-memory SQLite + the real models) and runs under pytest on the VM:
-    cd services/real-trade-service && python3 -m pytest -q tests/test_swing_e138_wiring.py
+Part 1 (pure rules, stdlib only) runs anywhere. Part 2 needs SQLAlchemy (in-memory SQLite + the real models) and runs under pytest on the VM, inside Docker (the host Python has no SQLAlchemy):
+    scripts/docker_test.sh real-trade-service tests/test_swing_e138_wiring.py
 """
 from __future__ import annotations
 

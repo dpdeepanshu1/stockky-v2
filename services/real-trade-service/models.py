@@ -1090,3 +1090,67 @@ class TradeJournalNote(Base):
     realized_pnl = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+# ── E132: swing momentum lane (swing/ package) ─────────────────────────────────────────────────────────────────────────────────
+class SwingTrade(Base):
+    """E132: one row per swing pick. kind=SHADOW rows are what the lane WOULD have bought (nothing was ordered; the exit is simulated on the daily bars with the
+    same rules scripts/swing_backtest.py replayed); kind=LIVE rows follow a real DEMO / REAL order and are reconciled from its TradePosition. NEW table, so
+    create_all() makes it (no ALTER). The entry path does not read it (only the swing lane's own pause check and the /swing routes do)."""
+    __tablename__ = "trade_swing_ledger"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(8), nullable=False)                  # SHADOW | LIVE
+    mode = Column(String(8), nullable=True)                   # DEMO | REAL for LIVE rows, NULL for SHADOW
+    symbol = Column(String(32), nullable=False)
+    status = Column(String(10), nullable=False)               # PLANNED | OPEN | CLOSED | SKIPPED | VOID
+    signal_day = Column(String(10), nullable=False)           # the bar date of the evening scan that picked it (IST)
+    rank = Column(Integer, nullable=True)
+    pct_rank = Column(Float, nullable=True)
+    signal_close = Column(Float, nullable=True)
+    atr_pct = Column(Float, nullable=True)
+    stop_pct = Column(Float, nullable=True)
+    entry_day = Column(String(10), nullable=True)
+    entry_price = Column(Float, nullable=True)
+    stop_px = Column(Float, nullable=True)                    # the stop as it stands (ratcheted up after every close)
+    sessions = Column(Integer, nullable=False, default=0)
+    last_day = Column(String(10), nullable=True)              # the last bar date applied
+    last_close = Column(Float, nullable=True)
+    exit_day = Column(String(10), nullable=True)
+    exit_price = Column(Float, nullable=True)
+    exit_reason = Column(String(24), nullable=True)           # stop | time | (LIVE: the position's own exit reason)
+    gap_through = Column(Boolean, nullable=False, default=False)
+    gross_pct = Column(Float, nullable=True)
+    cost_pct = Column(Float, nullable=True)
+    net_pct = Column(Float, nullable=True)
+    qty = Column(Integer, nullable=True)
+    size_value = Column(Float, nullable=True)                 # Rs the cost % was worked out at (SHADOW) / the Rs bought (LIVE)
+    position_id = Column(Integer, nullable=True)              # LIVE
+    order_id = Column(Integer, nullable=True)                 # LIVE
+    closed_at = Column(String(32), nullable=True)             # ISO text, LIVE: when the position closed (the pause rule orders by it)
+    skip_reason = Column(String(160), nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("ix_swing_ledger_kind_status", "kind", "status"),
+        Index("ix_swing_ledger_signal", "signal_day", "symbol"),
+    )
+
+
+class SwingRun(Base):
+    """E132: one row per scan / entry pass / resume. kind=scan keeps the day's compact ranking in `detail` (JSON) so the 15:00 re-check, the shadow settle and
+    the shadow report can read it back. A NEW table (create_all). Pruned by SWING_LEDGER_KEEP_DAYS."""
+    __tablename__ = "trade_swing_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(12), nullable=False)                 # scan | entry | resume
+    day = Column(String(10), nullable=False)                  # scan: the bar date; entry / resume: the IST date it ran
+    mode = Column(String(8), nullable=True)
+    ok = Column(Boolean, nullable=False, default=True)
+    summary = Column(String(300), nullable=True)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    __table_args__ = (Index("ix_swing_runs_kind_day", "kind", "day"),)

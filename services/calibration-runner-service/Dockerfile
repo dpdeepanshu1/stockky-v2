@@ -25,6 +25,8 @@ COPY services/calibration-runner-service/regime /app/regime
 COPY scripts /app/scripts
 COPY shared /app/shared
 COPY services/real-trade-service/config.py /app/services/real-trade-service/config.py
+# E131: scripts/swing_backtest.py scores with the SAME pure module the live /swing/rank uses (stdlib only)
+COPY services/real-trade-service/swing/__init__.py services/real-trade-service/swing/momentum.py services/real-trade-service/swing/stats.py /app/services/real-trade-service/swing/
 COPY services/real-trade-service/entry_engine/__init__.py services/real-trade-service/entry_engine/kronos_gate.py /app/services/real-trade-service/entry_engine/
 
 RUN python -m compileall -q -x '(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)' . /app/scripts /app/shared \

@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _repo_walk import walk_py  # noqa: E402  (prunes .venv* / venv / site-packages by name and by pyvenv.cfg; a plain rglob walked a whole VM virtualenv)
+
 ROOT = Path(__file__).resolve().parent.parent
 SERVICES = ("real-trade-service", "position-stocks-service")
 SKIP_DIRS = {"tests", "test", "__pycache__", "stockky_ms", "scripts", ".venv", "node_modules", "control"}
@@ -30,7 +33,7 @@ SKIP_DIRS = {"tests", "test", "__pycache__", "stockky_ms", "scripts", ".venv", "
 
 def _py_files(svc: Path) -> List[Path]:
     out = []
-    for p in sorted(svc.rglob("*.py")):
+    for p in walk_py(svc, extra_skip=SKIP_DIRS):
         rel = p.relative_to(svc).parts
         if any(part in SKIP_DIRS for part in rel[:-1]) or p.name.startswith("test_"):
             continue

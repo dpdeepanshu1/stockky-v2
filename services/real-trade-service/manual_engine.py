@@ -176,8 +176,10 @@ def _resolve_position(db: Session, mode: str, symbol: str, position_id: Optional
 
 
 async def evaluate_manual_order(
-    db: Session, mode: str, gate_armed: bool, req, *, confirm: bool, admin: Optional[str] = None,
+    db: Session, mode: str, gate_armed: bool, req, *, confirm: bool, admin: Optional[str] = None, swing: Optional[dict] = None,
 ) -> dict:
+    # E132: `swing` (only swing/live.py passes it) = {max_trade_value}: the order is labelled SWING_MOMENTUM / source_tab swing (AUTO), the risk engine's value cap is the
+    # swing cap, and no target is stored (the swing lane exits on its stop / last session, never on a target). None = unchanged manual behaviour.
     symbol = (req.symbol or "").upper().strip().replace(".NS", "").replace(".BO", "")
     side = (req.side or "").upper()
     order_type = (req.order_type or "LIMIT").upper()
@@ -233,6 +235,9 @@ async def evaluate_manual_order(
             return {"ok": False, "reason": "invalid_stop", "detail": "Stop price must be below entry price."}
 
         account_state = _account_state(db, mode, gate_armed)
+        if swing and swing.get('max_trade_value'):
+            import dataclasses
+            account_state = dataclasses.replace(account_state, max_trade_value=float(swing['max_trade_value']))
         intent = OrderIntent(
             mode=mode, symbol=symbol, side="BUY", qty=req.qty,
             entry_price=reference_price, stop_price=stop_price, target_price=target_price,
@@ -264,9 +269,9 @@ async def evaluate_manual_order(
 
         decision = models.TradeDecision(
             mode=mode, symbol=symbol, decision_type="ENTRY", action="ENTER",
-            reasoning="Manual order (Stockky Trade ticket)",
+            reasoning=("Swing momentum lane entry (E132)" if swing else "Manual order (Stockky Trade ticket)"),
             proposed_qty=approved_qty, proposed_price=reference_price,
-            proposed_stop=stop_price, proposed_target=target_price,
+            proposed_stop=stop_price, proposed_target=(None if swing else target_price),
             risk_verdict=result.verdict.value, risk_verdict_reason=result.reason,
         )
         db.add(decision)
@@ -276,7 +281,8 @@ async def evaluate_manual_order(
             mode=mode, decision_id=decision.id, symbol=symbol, side="BUY",
             order_type=order_type, qty=approved_qty, limit_price=reference_price,
             valid_until=datetime.now(timezone.utc) + timedelta(minutes=config.ENTRY_VALIDITY_MINUTES),
-            status="PLACED", execution_source="MANUAL",
+            status="PLACED", execution_source=("AUTO" if swing else "MANUAL"),
+            entry_decision_label=("SWING_MOMENTUM" if swing else None), source_tab=("swing" if swing else None),
             confirmed_by=admin, confirmed_at=datetime.now(timezone.utc) if admin else None,
             # 2026-09-15 fix (session38): record what this manual ticket
             # actually chose (CNC by default, or explicit INTRADAY/MIS) so
@@ -302,7 +308,7 @@ async def evaluate_manual_order(
             # above for a MARKET order, so this is a plain reuse of the
             # exact same fill path the automatic entry cycle uses, not a
             # parallel implementation.
-            filled = try_fill_entry(db, order, tick, stop_price, target_price)
+            filled = try_fill_entry(db, order, tick, stop_price, (None if swing else target_price))
             preview["status"] = "FILLED" if filled else "PLACED"
             preview["filled"] = filled
         else:

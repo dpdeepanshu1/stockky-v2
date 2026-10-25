@@ -1,5 +1,15 @@
 # Remaining tasks
 
+> E137 (this zip, includes E136): the swing scan no longer picks a stock whose own last bar is stale (CHANGES_2026-10-25_E137_swing_stale_bar_pick.md).
+
+> E136 (previous zip, includes E135): S4 probe fixed - a failed open no longer blocks every later open, a failed BUY releases the symbol lock, a held share is reported (CHANGES_2026-10-25_E136_swing_probe_deadlock_and_lock_leak.md).
+
+> E135 (previous zip, includes E134): `/swing/report?since=YYYY-MM-DD` reads the shadow verdict for one stock list only (CHANGES_2026-10-25_E135_swing_report_since.md).
+
+> E134 (previous zip, includes E133): each swing scan now records which stock list it ranked (`scan_universe` on `/swing/status`); see CHANGES_2026-10-25_E134_swing_scan_universe_tag.md.
+
+> E133 (previous zip, includes E132): swing lane now has a built-in default universe (118 names) so shadow mode records from the first evening; set `SWING_UNIVERSE_SYMBOLS` (runner job `swing_universe`) to rank the S2 replay's stocks (CHANGES_2026-10-25_E133_swing_default_universe.md). NOT run: SqlRepo / live.py / probe / `/swing/*` routes / auto_pilot and exit-engine edits under pytest (no SQLAlchemy / FastAPI / PyPI in the sandbox) - run the real-trade suite on the VM. Still needed from you: plan S0 answers, S4 probe, weeks of shadow data.
+
 > E88 (this zip, includes E87): gateway router split finished - E87 moved the 5 test-pinned handlers to `gateway_support/bound_routes_l.py` (docs/E87_GATEWAY_ROUTER_BATCH_L.md) and E88 moved the 3 framework hooks (CORS stamp middleware, exception handler, `/ws`) to `bound_routes_m.py` (docs/E88_GATEWAY_ROUTER_BATCH_M.md). `main.py` declares no route or hook any more. Docker `pip install ./shared` is deliberately not done: Render builds each service from its own folder (see the E88 doc). NOT run: gateway suites that import main.py (no pytest / fastapi in the sandbox) - run `cd services/api-gateway && bash run_tests.sh` on the VM and compare `/openapi.json`; also check the `/ws` handshake and the CORS headers on a normal response and a 500.
 
 > E86 (this zip, includes E83-E85): gateway router split batch K - the 5 handlers the earlier batches had to leave (`market_trending`, `/surprise/premarket`, `start_bulk_feed`, `data_feed_refill_additional`, `data_feed_run`) moved to `gateway_support/bound_routes_k.py` (docs/E86_GATEWAY_ROUTER_BATCH_K.md); every pin was resolved, no new yfinance allowlist entry. 8 remain in `main.py`: 5 handlers whose tests read their source (`stock_chart_context`, `get_stock_decision`, `data_feed_structure_refresh`, `data_feed_structure_refresh_status`, `data_feed_symbol`) and 3 framework hooks (middleware, exception handler, websocket). NOT run: gateway suites (no pytest / fastapi) - run `cd services/api-gateway && bash run_tests.sh` on the VM and compare `/openapi.json`. Still open: Docker `pip install ./shared`.

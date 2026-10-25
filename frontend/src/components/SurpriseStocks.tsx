@@ -5,6 +5,8 @@ import { formatInrPrice, getSafePrice, resolveDisplayPrice } from "../priceDispl
 import { PriceRoll } from "./ui/motion";   // group 462 (phase 4)
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
+import { KpiStrip } from "./ui/KpiStrip";
+import { surpriseKpis } from "./surpriseView";
 
 export interface SurpriseStock {
   symbol: string;
@@ -873,6 +875,8 @@ export default function SurpriseStocks({
         )}
       </div>
 
+      <KpiStrip items={surpriseKpis(stocks, meta)} label="Surprise Momentum summary" />
+
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
@@ -890,9 +894,9 @@ export default function SurpriseStocks({
           </thead>
           <tbody>
             {stocks.map((s) => {
-              const isBuilding = s.tier === "building";
+              const v = surpriseRowView(s);   // E161: formatted text, dashes for missing values
               return (
-              <tr key={s.symbol} className="border-b border-slate/40 hover:bg-ink/40 text-sm transition">
+              <tr key={s.symbol} className={`v7-srow ${v.change.dir ?? "flat"} border-b border-slate/40 hover:bg-ink/40 text-sm transition`}>
                 <td className="py-2.5 px-3">
                   <button
                     type="button"
@@ -903,46 +907,32 @@ export default function SurpriseStocks({
                   </button>
                 </td>
                 <td className="py-2.5 px-3">
-                  <span
-                    className={
-                      "font-display tabular-nums text-[10px] px-2 py-0.5 rounded border " +
-                      (isBuilding
-                        ? "bg-signal-hold/60 text-signal-hold border-signal-hold/40"
-                        : "bg-signal-buy/60 text-signal-buy border-signal-buy/40")
-                    }
-                  >
-                    {isBuilding ? "Building" : "Breakout"}
-                  </span>
+                  <span className={`v7-tier ${v.tier.tone}`}><i aria-hidden="true">{v.tier.glyph}</i>{v.tier.label}</span>
                 </td>
                 <td className="py-2.5 px-3">
-                  <span className="font-display tabular-nums text-[11px] px-2 py-0.5 rounded bg-signal-buy/80 text-signal-buy border border-signal-buy/50">
-                    {s.score}/100
-                  </span>
+                  {v.score ? (
+                    <span className={`v7-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
+                  ) : "—"}
                 </td>
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-paper">
                   <PriceRoll value={resolveDisplayPrice(s as any, null)} text={formatInrPrice(s as any, null, "—")} />
                 </td>
-                <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${Number(s.change_pct) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-                  {Number(s.change_pct) >= 0 ? "+" : ""}
-                  {Number(s.change_pct).toFixed(2)}%
+                <td className={`py-2.5 px-3 font-display tabular-nums text-xs font-semibold ${v.change.dir === "down" ? "text-signal-sell" : v.change.dir === "up" ? "text-signal-buy" : "text-paper"}`}>
+                  {v.change.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
+                  {v.change.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                  {v.change.text}
                 </td>
                 <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-hold font-bold">
-                  {Number(s.rvol).toFixed(2)}x
-                  {typeof s.rvol_slope === "number" && s.rvol_slope > 0 && (
-                    <span className="text-signal-buy ml-1">↑{s.rvol_slope.toFixed(2)}</span>
-                  )}
+                  {v.rvol}
+                  {v.slope && <span className="text-signal-buy ml-1">{v.slope}</span>}
                 </td>
                 <td className="py-2.5 px-3">
                   <span className="font-display tabular-nums text-[10px] px-2 py-0.5 rounded bg-signal-prepare/60 text-signal-prepare border border-signal-prepare/40">
-                    {s.trigger_type}
+                    {s.trigger_type || "—"}
                   </span>
                 </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-buy/90">
-                  ₹{Number(s.target_1).toFixed(2)}
-                </td>
-                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-sell/90">
-                  ₹{Number(s.trailing_stop).toFixed(2)}
-                </td>
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-buy/90">{v.target}</td>
+                <td className="py-2.5 px-3 font-display tabular-nums text-xs text-signal-sell/90">{v.stop}</td>
               </tr>
               );
             })}

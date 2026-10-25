@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useRef } from "react";
 import TrainingProgressPanel from "./TrainingProgressPanel";
+import { KpiStrip } from "./ui/KpiStrip";
+import { trainingKpis } from "./trainingView";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
 export default function Training() {
@@ -1115,11 +1117,7 @@ export default function Training() {
           </div>
 
           {/* Overall Stats */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <StatCard label="Last Training" value={formatDate(status?.last_training)} />
-            <StatCard label="Dataset Size" value={status?.dataset_size ?? 0} />
-            <StatCard label="Symbols" value={status?.num_symbols ?? 0} />
-          </div>
+          <KpiStrip items={trainingKpis({ status, progress: trainProgress, training }, Date.now())} label="Training Lab summary" />
 
           {/* Walk‑Forward Metrics */}
           <div className="bg-graphite border border-slate/60 rounded-2xl p-5">

@@ -5,9 +5,11 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+
+from admin_guard import require_admin  # E150
 
 logger = logging.getLogger("api-gateway")
 
@@ -199,8 +201,8 @@ async def api_ipo_repair_batch(limit: int = Query(15, ge=1, le=100), symbol: Opt
 ipo_purge_router = APIRouter()
 
 
-@ipo_purge_router.post("/ipo/purge-non-equity")
-@ipo_purge_router.post("/surprise/ipo/purge-non-equity")
+@ipo_purge_router.post("/ipo/purge-non-equity", dependencies=[Depends(require_admin)])
+@ipo_purge_router.post("/surprise/ipo/purge-non-equity", dependencies=[Depends(require_admin)])
 async def api_ipo_purge_non_equity():
     """Delete every ipo_static_feed row flagged non_equity (NCD/bond
     debt-series symbols like 1150VIES30 that slipped in before

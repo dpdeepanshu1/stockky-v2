@@ -1,5 +1,7 @@
 import { decisionStyle } from "../decisionStyle";
 import { resolveDisplayPrice, formatInrPrice } from "../priceDisplay";
+import { ScoreRing } from "./ui/ScoreRing";          // E160: v5/v7 pieces, presentation only
+import { TradePlanBar } from "./ui/TradePlanBar";
 
 /** Minimal decision-like shape so card works from scan, hot stocks, or full Decision */
 export type ConvictionData = {
@@ -128,6 +130,12 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
   const up = upsidePct(resolveDisplayPrice(data, data.live_price), data.target);
   const horizon = data.holding_period_estimate?.label || data.holding_period || "—";
   const reasons = collectReasons(data);
+  // E160: a real 0 is a score (F-11), so test for a finite number, not for truthiness.
+  const scoreNum = score != null && Number.isFinite(Number(score)) ? Number(score) : null;
+  const showRing = !compact && scoreNum != null;
+  const shownPx = resolveDisplayPrice(data, data.live_price);
+  // Same rule as DecisionCard: the buy zone is only drawn for a buy-side call, never for HOLD / DO NOT BUY.
+  const showPlan = !compact && (decision === "BUY NOW" || decision === "PREPARE TO BUY");
   const blurb =
     shortText(
       data.natural_language_summary ||
@@ -164,14 +172,25 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
         </div>
       )}
 
-      <div className="cc-metrics">
-        <div className="cc-metric">
-          <span className="cc-label">Score</span>
-          <span className="cc-value">
-            {score != null ? Math.round(Number(score)) : "—"}
-            <span className="cc-muted">/100</span>
-          </span>
+      {(showRing || showPlan) && (
+        <div className="cc-v7-hero">
+          {showRing && <ScoreRing score={scoreNum as number} size={76} />}
+          {showPlan && (
+            <TradePlanBar stop={data.stop_loss} entryLow={entryLow} entryHigh={entryHigh} target={data.target} price={shownPx > 0 ? shownPx : null} />
+          )}
         </div>
+      )}
+
+      <div className="cc-metrics">
+        {!showRing && (
+          <div className="cc-metric">
+            <span className="cc-label">Score</span>
+            <span className="cc-value">
+              {score != null ? Math.round(Number(score)) : "—"}
+              <span className="cc-muted">/100</span>
+            </span>
+          </div>
+        )}
         <div className="cc-metric">
           <span className="cc-label">Price</span>
           <span className="cc-value">
@@ -210,7 +229,7 @@ export default function ConvictionCard({ data, rank, compact, onSelect, footer }
           </span>
         </div>
         <div>
-          <span className="cc-label">Stop</span>
+          <span className="cc-label">Stop loss</span>
           <span className="cc-value text-signal-sell">₹{fmt(data.stop_loss)}</span>
         </div>
         <div>

@@ -118,7 +118,7 @@ export default function SignalStream({
                   </b>
                 </div>
                 <div>
-                  <label>Stop</label>
+                  <label>Stop loss</label>
                   <b style={{ color: "var(--sell)" }}>
                     {r.stop_loss != null ? `₹${r.stop_loss.toLocaleString("en-IN")}` : "—"}
                   </b>

@@ -1,4 +1,4 @@
-"""E142: tab-vs-backend audit (READ-ONLY, stdlib). For Auto Trade, Position Stocks, Real Money Calibration and Paper Trades: every API path the tab code uses must exist as a route of its service
+"""E142 (+E148: also IPO Tracker, Hot Picks, Data Feed, Surprise Momentum, Training Lab): tab-vs-backend audit (READ-ONLY, stdlib). For Auto Trade, Position Stocks, Real Money Calibration and Paper Trades: every API path the tab code uses must exist as a route of its service
 (prefix-built paths such as /control/*, /scheduler-control/*, /api/universe/* are reported as NO ROUTE and must be confirmed by hand), and every backend route that no frontend file uses is listed.
   python3 scripts/audit_tabs.py [--json]
 """
@@ -6,6 +6,9 @@ import re, sys, json
 from pathlib import Path
 R = Path(__file__).resolve().parent.parent; FE = R/"frontend/src"; SV = R/"services"
 ROUTE = re.compile(r'@\s*(?:\w+)\.(get|post|put|delete|patch)\(\s*[rf]?["\']([^"\']*)["\']')
+# E148: also `@router.api_route("/x", methods=[...])` and a file's single `APIRouter(prefix="/api/universe")`, so those are no longer reported as NO ROUTE
+ROUTE_ANY = re.compile(r'@\s*(?:\w+)\.api_route\(\s*[rf]?["\']([^"\']*)["\']')
+ROUTER_PREFIX = re.compile(r'APIRouter\([^)]*prefix\s*=\s*["\']([^"\']+)["\']')
 
 def norm(p):
     p = p.split("?")[0]
@@ -20,8 +23,9 @@ def routes(paths, extra_prefix=None):
             s = str(f)
             if "/tests/" in s or "/test_" in f.name or "venv" in s: continue
             txt = f.read_text(encoding="utf-8", errors="ignore")
-            for m in ROUTE.finditer(txt):
-                p = m.group(2)
+            _pre = set(ROUTER_PREFIX.findall(txt)); _pre = _pre.pop() if len(_pre) == 1 else ""
+            for m in list(ROUTE.finditer(txt)) + list(ROUTE_ANY.finditer(txt)):
+                p = _pre + m.group(m.lastindex)
                 if f.parent.name == "control" and f.name == "kit.py": p = "/control" + p
                 out.setdefault(norm(p), set()).add(f"{f.relative_to(R)}")
     return out
@@ -76,6 +80,39 @@ for name, t in TABS.items():
     fp = fe_paths(t["files"]); allfe.update(fp)
     unmatched = {p: sorted(v) for p, v in fp.items() if not any(match(p, tb) for tb in t["tables"])}
     res[name] = dict(files=[str(f.relative_to(FE)) for f in t["files"]], n_paths=len(fp), unmatched=unmatched)
+# E148: the five discover / system screens (IPO Tracker, Hot Picks, Data Feed, Surprise Momentum, Training Lab). Their calls mostly go through the
+# `api` object in api.ts, so for each screen we take (a) literal paths in its own files and (b) the paths inside every `api.<member>` it uses.
+_api_src = (FE/"api.ts").read_text(encoding="utf-8", errors="ignore")
+_start = _api_src.find("export const api = {")
+_members = {}
+if _start >= 0:
+    _body = _api_src[_start:]
+    _hits = list(re.finditer(r"^  ([A-Za-z0-9_]+):\s*(?:async\s*)?\(", _body, re.M))
+    for i, m in enumerate(_hits):
+        _members[m.group(1)] = _body[m.start(): _hits[i+1].start() if i+1 < len(_hits) else len(_body)]
+SCREENS = {
+ "IPO Tracker": ["components/IpoTracker.tsx", "components/IpoLifecycle.tsx", "components/IpoFeedHealth.tsx"],
+ "Hot Picks": ["components/HotStocks.tsx"],
+ "Data Feed": ["components/DataFeed.tsx", "components/DataHealthAudit.tsx"],
+ "Surprise Momentum": ["components/SurpriseStocks.tsx"],
+ "Training Lab": ["components/Training.tsx", "components/TrainingProgressPanel.tsx"],
+}
+for name, rel in SCREENS.items():
+    files = [FE/r for r in rel if (FE/r).is_file()]
+    fp = fe_paths(files)
+    used = set()
+    for f in files:
+        used |= set(re.findall(r"\bapi\.([A-Za-z0-9_]+)", f.read_text(encoding="utf-8", errors="ignore")))
+    via_api = {}
+    for u in sorted(used):
+        for m in LIT.finditer(_members.get(u, "")):
+            q = m.group(1)
+            if len(q) >= 3 and q.count("/") >= 1: via_api.setdefault(norm(q), set()).add("api." + u)
+    for q, v in via_api.items(): fp.setdefault(q, set()).update(v)
+    tables = [GW, DPT_pref, DP]
+    unmatched = {q: sorted(v) for q, v in fp.items() if not any(match(q, tb) for tb in tables)}
+    res[name] = dict(files=[str(f.relative_to(FE)) for f in files], n_paths=len(fp), unmatched=unmatched, api_members_used=sorted(used))
+    allfe.update(fp)
 # every frontend path in the whole app (for backend->frontend reverse check)
 whole = fe_paths([f for f in FE.rglob("*") if f.is_file() and f.suffix in (".ts",".tsx") and ".test." not in f.name])
 def unused(tbl):

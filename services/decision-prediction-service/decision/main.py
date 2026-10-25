@@ -1052,7 +1052,9 @@ def _apply_data_quality_gate(
     quality_label = quality.get("quality") or "low"
 
     tech_dict = technical if isinstance(technical, dict) else {}
-    tech_score = int(tech_dict.get("technical_score") or 50)
+    # E148: a technical score of 0 is a real value; only a missing one becomes the neutral 50.
+    _ts_raw = tech_dict.get("technical_score")
+    tech_score = int(_ts_raw) if _ts_raw is not None else 50
     vol_surge = bool(tech_dict.get("volume_surge", False))
 
     # Provisional block with momentum override for exceptional technical setups

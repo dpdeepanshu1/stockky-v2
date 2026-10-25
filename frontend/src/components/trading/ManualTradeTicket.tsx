@@ -180,7 +180,7 @@ export default function ManualTradeTicket({
       {side === "BUY" && (
         <div className="grid grid-cols-2 gap-2 mb-2">
           <div>
-            <label className="font-display tabular-nums text-[10px] text-paper/40">Stop Loss (₹, optional)</label>
+            <label className="font-display tabular-nums text-[10px] text-paper/40">Stop loss (₹, optional)</label>
             <input
               type="number" value={stopPrice}
               onChange={(e) => { setStopPrice(e.target.value); setShowConfirmStep(false); }}
@@ -222,7 +222,7 @@ export default function ManualTradeTicket({
           {side === "BUY" ? (
             <>
               <div className="flex justify-between"><span className="text-paper/50">Entry</span><span>{fmtInr(preview.entry_price)}</span></div>
-              <div className="flex justify-between"><span className="text-paper/50">Stop</span><span>{fmtInr(preview.stop_price)}</span></div>
+              <div className="flex justify-between"><span className="text-paper/50">Stop loss</span><span>{fmtInr(preview.stop_price)}</span></div>
               <div className="flex justify-between"><span className="text-paper/50">Target</span><span>{fmtInr(preview.target_price)}</span></div>
               <div className="flex justify-between"><span className="text-paper/50">Qty (requested → approved)</span><span>{preview.qty_requested} → {preview.approved_qty}</span></div>
               <div className="flex justify-between"><span className="text-paper/50">Estimated Value</span><span>{fmtInr(preview.estimated_value)}</span></div>

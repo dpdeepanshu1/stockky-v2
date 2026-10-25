@@ -7,6 +7,8 @@
 // as positions close.
 
 import { useEffect, useState, useCallback } from "react";
+import { KpiStrip } from "./ui/KpiStrip";
+import { tradesKpis } from "./tradesView";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
 import { getSafePrice } from "../priceDisplay";
@@ -620,35 +622,7 @@ export default function Trades() {
           <div className="font-display text-4xl text-paper mb-4 tabular-nums">
             {fmtMoney(summary.total_equity)}
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <StatCard label="Cash Balance" value={fmtMoney(summary.cash_balance)} />
-            <StatCard label="In Positions" value={fmtMoney(summary.open_positions_value)} />
-            <StatCard
-              label="Open P&L"
-              value={fmtMoney(summary.open_positions_pnl)}
-              highlight={summary.open_positions_pnl >= 0 ? "up" : "down"}
-            />
-            <StatCard label="Win Rate" value={summary.win_rate == null ? "—" : `${summary.win_rate}%`} />
-            <StatCard
-              label="Avg R"
-              value={
-                (summary as any).avg_r_multiple != null
-                  ? `${Number((summary as any).avg_r_multiple).toFixed(2)}R`
-                  : (summary as any).avg_pnl_pct != null
-                  ? fmtPct((summary as any).avg_pnl_pct)
-                  : "—"
-              }
-            />
-            <StatCard
-              label="Max DD"
-              value={
-                (summary as any).max_drawdown_pct != null
-                  ? `${Number((summary as any).max_drawdown_pct).toFixed(1)}%`
-                  : "—"
-              }
-              highlight="down"
-            />
-          </div>
+          <KpiStrip items={tradesKpis(summary)} label="Paper Trades summary" />
           <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-display tabular-nums text-mist/70">
             <div>Open: <span className="text-paper">{openTrades.length}</span></div>
             <div>Closed: <span className="text-paper">{closedTrades.length}</span></div>
@@ -807,7 +781,7 @@ function PositionCard({
               <div className="text-signal-buy">{trade.target ? `₹${trade.target}` : "—"}</div>
             </div>
             <div>
-              <div className="text-mist/40 text-[10px] uppercase">Stop Loss</div>
+              <div className="text-mist/40 text-[10px] uppercase">Stop loss</div>
               <div className="text-signal-sell">{trade.stop_loss ? `₹${trade.stop_loss}` : "—"}</div>
             </div>
             <div>
@@ -874,15 +848,6 @@ function Spinner({ size = "sm" }: { size?: "sm" | "lg" }) {
   return <div className={`${dimension} border-2 border-current border-t-transparent rounded-full animate-spin`} />;
 }
 
-function StatCard({ label, value, highlight }: { label: string; value: string | number; highlight?: "up" | "down" }) {
-  const color = highlight === "up" ? "text-signal-buy" : highlight === "down" ? "text-signal-sell" : "text-paper";
-  return (
-    <div className="bg-ink/40 border border-slate/40 rounded-2xl px-4 py-3">
-      <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
-      <div className={`font-display tabular-nums text-lg mt-1 ${color}`}>{value}</div>
-    </div>
-  );
-}
 
 function DbStatusStrip({ status }: { status: any }) {
   if (!status) {

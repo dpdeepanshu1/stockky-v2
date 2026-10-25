@@ -31,6 +31,20 @@ SERVICES = ("real-trade-service", "position-stocks-service")
 SKIP_DIRS = {"tests", "test", "__pycache__", "stockky_ms", "scripts", ".venv", "node_modules", "control"}
 
 
+_TREES: Dict[str, Any] = {}   # E147: every switch probed every file again (switches x files parses: >5 min for real-trade); parse each file once
+
+
+def _tree(p: Path) -> Optional[ast.Module]:
+    """Parsed tree of one file, cached for the run; None when the file does not parse (the caller skips it, as before)."""
+    k = str(p)
+    if k not in _TREES:
+        try:
+            _TREES[k] = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            _TREES[k] = None
+    return _TREES[k]
+
+
 def _py_files(svc: Path) -> List[Path]:
     out = []
     for p in walk_py(svc, extra_skip=SKIP_DIRS):
@@ -113,9 +127,16 @@ class _Scope(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+_ALIASES: Dict[Tuple[int, str], Set[str]] = {}
+
+
 def _aliases_for(tree: ast.Module, target_mod: str) -> Set[str]:
-    """Names this file binds to the target module (`import config`, `import a.b as x`, `from a import b`)."""
+    """Names this file binds to the target module (`import config`, `import a.b as x`, `from a import b`). Cached per (tree, module): the walk is the hot spot."""
+    key = (id(tree), target_mod)
+    if key in _ALIASES:
+        return _ALIASES[key]
     out: Set[str] = set()
+    _ALIASES[key] = out
     last = target_mod.split(".")[-1]
     pkg = ".".join(target_mod.split(".")[:-1])
     for n in ast.walk(tree):
@@ -160,11 +181,10 @@ def probe(svc: Path, module: str, attr: str, allow_import_time_files: Tuple[str,
     if mf is None:
         res["error"] = f"module {module} not found in {svc.name}"
         return res
-    res["defined"] = _assigns(ast.parse(mf.read_text(encoding="utf-8")), attr)
+    res["defined"] = _assigns(_tree(mf) or ast.parse(mf.read_text(encoding="utf-8")), attr)
     for p in _py_files(svc):
-        try:
-            tree = ast.parse(p.read_text(encoding="utf-8"))
-        except SyntaxError:
+        tree = _tree(p)
+        if tree is None:
             continue
         mod = _modname(svc, p)
         sc = _Scope(mod, module, attr, _aliases_for(tree, module))

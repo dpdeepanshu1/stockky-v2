@@ -700,7 +700,10 @@ async function request<T>(path: string, init?: RequestInit, retries = 3, timeout
         await new Promise((r) => setTimeout(r, 2500 * (4 - retries)));
         return request<T>(path, init, retries - 1, Math.min(timeoutMs + 15000, 180000));
       }
-      throw new Error(`${response.status}: ${typeof detail === "string" ? detail.slice(0, 300) : JSON.stringify(detail).slice(0, 300)}`);
+      const detailText = typeof detail === "string" ? detail.slice(0, 300) : JSON.stringify(detail).slice(0, 300);
+      // E150: the guarded buttons answer 401 "admin session" when nobody is logged in; say what to do instead of a bare code
+      const loginHint = response.status === 401 && /admin session/i.test(detailText) ? " - log in once on Auto Trade, Position Stocks or Calibration, then press the button again." : "";
+      throw new Error(`${response.status}: ${detailText}${loginHint}`);
     }
 
     return data as T;

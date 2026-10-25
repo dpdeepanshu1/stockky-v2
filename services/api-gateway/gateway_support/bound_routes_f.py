@@ -309,7 +309,7 @@ def build_bound_routes_f(ref):
                     }
                 )
 
-    @clear_universe_cache_router.delete("/scan/universe/cache")
+    @clear_universe_cache_router.delete("/scan/universe/cache", dependencies=[ref.Depends(ref._require_admin)])
     def clear_universe_cache():
         """Clear every cache layer holding the scan universe.
 
@@ -613,8 +613,8 @@ def build_bound_routes_f(ref):
         last_ok = (meta or {}).get("last_success_at") or (job or {}).get("finished_at")
         return ref._normalize_data_feed_status(store, job, meta, fed_count, last_ok)
 
-    @purge_over_cap_feed_symbols_router.post("/api/feed/purge-over-cap")
-    @purge_over_cap_feed_symbols_router.post("/data-feed/purge-over-cap")
+    @purge_over_cap_feed_symbols_router.post("/api/feed/purge-over-cap", dependencies=[ref.Depends(ref._require_admin)])
+    @purge_over_cap_feed_symbols_router.post("/data-feed/purge-over-cap", dependencies=[ref.Depends(ref._require_admin)])
     async def purge_over_cap_feed_symbols():
         """
     Delete every feed row whose stored price is above MAX_UNIVERSE_PRICE.

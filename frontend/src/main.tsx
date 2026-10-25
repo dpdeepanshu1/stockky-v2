@@ -31,6 +31,9 @@ try {
   markHidden();
 } catch { /* no document */ }
 
+// E148 (F-09): apply the saved "Animations: Off" choice at start-up, so it holds on every tab (the Dashboard has no hero with the switch)
+try { if (window.localStorage.getItem("stockky:v6_calm") === "1") document.documentElement.classList.add("v6-calm"); } catch { /* storage blocked: animations stay on */ }
+
 installGatewayAuth(getApiUrl); // group 453: adds the admin session token to the gateway's protected routes
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

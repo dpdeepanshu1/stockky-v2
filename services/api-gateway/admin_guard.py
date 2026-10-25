@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Optional
 
 import jwt
@@ -40,7 +41,39 @@ PROTECTED = (
     "/data-feed/hard-reset",
     "/api/data-feed/hard-reset",
     "/api/feed/hard-reset",
+    # E149 (route-auth matrix): open before, no caller in the repo (UI, scripts, workflows, other services)
+    "/ops/qstash/publish",
+    "/api/feed/purge-over-cap",
+    "/data-feed/purge-over-cap",
+    # E150: Telegram senders, the IPO row delete and the universe-cache clear (the buttons show the login hint on a 401)
+    "/ipo/notify-top-picks",
+    "/surprise/ipo/notify-top-picks",
+    "/surprise/notify-top-picks",
+    "/stockky-hot/notify-top-picks",
+    "/ipo/purge-non-equity",
+    "/surprise/ipo/purge-non-equity",
+    "/scan/universe/cache",
 )
+
+# E148 (F-12): GET/POST /training/{path} is a generic proxy to the training service, so POST /training/api/train, /training/train/run,
+# /training/api/models/promote/<v>, the lock clears, /training/api/admin/* and /training/debug/abort reached the same actions as the guarded
+# POST /training/train with no login. Those system-level actions now need the same admin token (the training proxy in
+# gateway_support/bound_routes_h.py calls training_path_needs_admin() before it forwards). Reads and the paper-trade / scan-ingest routes
+# the UI uses without a login stay open.
+_TRAINING_ADMIN = re.compile(r"^(?:api/(?:train|lock/clear|models/promote/[^/]+|admin(?:/.*)?)|train(?:/(?:run|clear-lock))?|lock|debug/abort)$")
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def training_path_needs_admin(method: str, path: str) -> bool:
+    """True when this method + sub-path of /training/ is a system-level training action. Case, `//`, `/./` and a trailing `/` do not hide it;
+    a `..` segment is always treated as protected."""
+    if (method or "").upper() in _SAFE_METHODS:
+        return False
+    segs = [s for s in str(path or "").lower().split("/") if s and s != "."]
+    if ".." in segs:
+        return True
+    return bool(_TRAINING_ADMIN.match("/".join(segs)))
+
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 

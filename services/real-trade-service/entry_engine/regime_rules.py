@@ -63,6 +63,9 @@ def regime_of(score: Any, gate: Any) -> Optional[str]:
     return "strong" if strong is not None and s >= strong else "neutral"
 
 
+_warned_override: set = set()
+
+
 def table() -> Dict[str, Dict[str, Optional[float]]]:
     """DEFAULT_TABLE with REGIME_RULES_TABLE_JSON merged over it (a malformed override is ignored, field by field)."""
     out = {k: dict(v) for k, v in DEFAULT_TABLE.items()}
@@ -74,8 +77,12 @@ def table() -> Dict[str, Dict[str, Optional[float]]]:
                 for k in ("min_rr", "min_conviction", "risk_scale"):
                     if k in vals and (vals[k] is None or _f(vals[k]) is not None):
                         out[reg][k] = None if vals[k] is None else float(vals[k])
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # E148 (F-17): still ignored (the default table stays in force), but no longer silent; one warning per distinct bad value.
+        key = str(getattr(config, "REGIME_RULES_TABLE_JSON", ""))[:200]
+        if key not in _warned_override:
+            _warned_override.add(key)
+            logger.warning("regime_rules: REGIME_RULES_TABLE_JSON is not usable (%s: %s) - the default table is in force", type(e).__name__, e)
     return out
 
 

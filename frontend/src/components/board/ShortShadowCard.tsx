@@ -49,7 +49,7 @@ export default function ShortShadowCard({ active, fetcher }: { active: boolean; 
 
         {doc && v.kind === "active" && (
           <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-            {[["Target", doc.target], ["Stop", doc.stop], ["Square-off", doc.eod], ["Win rate", doc.win_rate_pct == null ? "-" : `${doc.win_rate_pct}%`]].map(([k, val]) => (
+            {[["Target", doc.target], ["Stop loss", doc.stop], ["Square-off", doc.eod], ["Win rate", doc.win_rate_pct == null ? "-" : `${doc.win_rate_pct}%`]].map(([k, val]) => (
               <div key={String(k)} className="rounded-lg border border-slate bg-ink px-2 py-1">
                 <div className="text-[9px] uppercase tracking-widest text-mist">{k}</div>
                 <div className="font-display font-bold tabular-nums text-paper">{val}</div>

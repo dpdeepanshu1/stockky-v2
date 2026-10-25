@@ -54,6 +54,11 @@ def enabled() -> bool:
     return bool(getattr(config, "BROKER_STOP_ENABLED", False))
 
 
+def swing_only() -> bool:
+    """E132: SWING_BROKER_STOP_ENABLED while BROKER_STOP_ENABLED is off = a resting stop for swing positions ONLY."""
+    return bool(getattr(config, "SWING_BROKER_STOP_ENABLED", False)) and not enabled()
+
+
 def boot_safety_message(enabled: bool, store_persistent: Optional[bool]) -> Optional[str]:
     """A2: text for the boot-time Telegram alert, or None when there is nothing to say. Pure (no I/O) so it can be tested.
     `enabled` is the running BROKER_STOP_ENABLED; `store_persistent` is whether switch overrides are saved to disk (None = unknown).
@@ -315,7 +320,7 @@ async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: O
     BROKER_STOP_SYNC_SECONDS. Never raises."""
     tally = {"checked": 0, "placed": 0, "replaced": 0, "kept": 0, "skipped": 0, "failed": 0, "backoff": 0}
     try:
-        if mode != "REAL" or not enabled():
+        if mode != "REAL" or not (enabled() or swing_only()):
             return tally
         now = time.monotonic() if now_mono is None else now_mono
         if now - _last_sync.get("REAL", -1e12) < float(config.BROKER_STOP_SYNC_SECONDS):
@@ -327,6 +332,9 @@ async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: O
             _edis_until.pop(sym, None)       # position gone: forget its backoff
         for pos in positions:
             tally["checked"] += 1
+            if swing_only() and (getattr(pos, "entry_decision_label", None) or "").upper() != "SWING_MOMENTUM":
+                tally["skipped"] += 1
+                continue
             if skip_reason(pos, today) is not None:
                 tally["skipped"] += 1
                 continue

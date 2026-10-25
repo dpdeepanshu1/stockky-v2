@@ -2776,6 +2776,140 @@ async def range52w_status(admin: Optional[str] = Depends(require_admin)):
         return {"error": str(e)[:200]}
 
 
+@app.get("/swing/rank")
+async def swing_rank(symbols: str = "", benchmark: str = "", limit: int = 30, screen_only: bool = False,
+                     admin: Optional[str] = Depends(require_admin)):
+    """E130 (swing-hold plan S1): READ-ONLY momentum ranking of the symbols given (or SWING_RANK_DEFAULT_SYMBOLS). 12-1 / 6-1 returns adjusted for volatility,
+    200-day trend, distance from the 52-week high, ADX. Orders nothing, blocks nothing, writes nothing; nothing reads `screen` to decide."""
+    try:
+        import asyncio as _aio
+        from swing import ranker
+        snap = await _aio.to_thread(
+            ranker.build_snapshot, [x for x in (symbols or "").split(",") if x.strip()], None, (benchmark or "").strip() or None)
+        rows = snap.get("rows") or []
+        if screen_only:
+            rows = [r for r in rows if r.get("screen")]
+        snap["rows"] = rows[: max(1, min(int(limit or 30), 200))]
+        return snap
+    except Exception as e:  # noqa: BLE001 - a read-only route must never 500
+        return {"error": str(e)[:200], "read_only": True}
+
+
+def _swing_jsonable(rows):
+    from tz_utils import iso_utc
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("created_at", "updated_at"):
+            if d.get(k) is not None and hasattr(d[k], "isoformat"):
+                d[k] = iso_utc(d[k])
+        out.append(d)
+    return out
+
+
+@app.get("/swing/status")
+async def swing_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132 (swing plan S3-S5): the swing lane at a glance. Read-only."""
+    try:
+        from swing import engine as _se, live as _sl
+        from swing.repo import SqlRepo
+        repo = SqlRepo(db)
+        scan = repo.latest_run("scan", ok_only=False)
+        out = {"mode": config.SWING_MODE, "live_real_enabled": bool(config.SWING_LIVE_REAL_ENABLED), "max_trade_value": config.SWING_MAX_TRADE_VALUE,
+               "max_positions": config.SWING_MAX_POSITIONS, "max_hold_days": config.SWING_MAX_HOLD_DAYS,
+               "universe_size": len(_se.universe_symbols()), "universe_source": _se.universe_source(), "scan": {k: (scan or {}).get(k) for k in ("day", "ok", "summary")}, "scan_universe": ((_se.latest_scan(repo) or {}).get("universe")), "runtime": _se.runtime_state(),
+               "shadow": _se.report(repo, "SHADOW"), "pause": {}, "open_positions": []}
+        for m in ("DEMO", "REAL"):
+            p, why = _sl.pause_for(repo, m)
+            out["pause"][m] = {"paused": p, "why": why}
+            out["open_positions"] += [{"mode": m, "symbol": x.symbol, "qty": x.qty_open, "entry": x.avg_entry_price, "stop": x.current_stop, "opened_at": str(x.opened_at)}
+                                      for x in _sl.swing_positions(db, m)]
+        out["planned"] = _swing_jsonable(repo.trades(kind="SHADOW", status="PLANNED"))
+        out["wiring"] = _sl.wiring(db, repo)      # E138: schedule loop / gate switches / eDIS / newest scan; wiring.problems is empty when nothing would stop the lane
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
+
+@app.get("/swing/ledger")
+async def swing_ledger(kind: str = "", status: str = "", limit: int = 300, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132: the swing ledger rows (SHADOW = what the lane would have done, LIVE = real DEMO / REAL orders), newest first. Read-only."""
+    try:
+        from swing.repo import SqlRepo
+        rows = SqlRepo(db).trades(kind=(kind.upper() or None), status=(status.upper() or None), limit=max(1, min(int(limit), 2000)), newest_first=True)
+        return {"count": len(rows), "rows": _swing_jsonable(rows)}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
+
+@app.get("/swing/snapshots")
+async def swing_snapshots(days: int = 60, admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132: the saved daily rankings (compact rows) for scripts/swing_shadow_report.py. Read-only."""
+    try:
+        import json as _json
+        from models import SwingRun
+        runs = db.query(SwingRun).filter(SwingRun.kind == "scan", SwingRun.ok == True).order_by(SwingRun.day.desc()).limit(max(1, min(int(days), 400))).all()  # noqa: E712  Oracle-safe `= 1` (see swing/repo.py)
+        return {"snapshots": [{"asof_bar_date": r.day, **{k: v for k, v in _json.loads(r.detail or "{}").items() if k in ("rows", "n_ranked", "n_screen")}} for r in reversed(runs)]}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
+
+@app.get("/swing/report")
+async def swing_report(kind: str = "SHADOW", mode: str = "", since: str = "", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132: verdict (NOT_ENOUGH_DATA / USEFUL / NO_EDGE) of the CLOSED swing ledger trades after costs. Read-only. E135: `since=YYYY-MM-DD` counts only picks signalled on or after that day (use the day the stock list changed)."""
+    try:
+        from swing import engine as _se
+        from swing.repo import SqlRepo
+        k = (kind or "SHADOW").upper()
+        return _se.report(SqlRepo(db), k if k in ("SHADOW", "LIVE") else "SHADOW", (mode or "").upper() or None, since=(since or "").strip() or None)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
+
+@app.post("/swing/scan")
+async def swing_scan_now(admin: Optional[str] = Depends(require_admin)):
+    """E132: start the evening scan now on a background thread (it records shadow rows; it orders nothing). Refused while SWING_MODE=off."""
+    from swing import engine as _se, live as _sl
+    if str(config.SWING_MODE).lower() == "off":
+        return {"started": False, "reason": "SWING_MODE is off"}
+    from db import get_session_factory
+    return {"started": bool(_se.scan_in_thread(get_session_factory(), _sl.held_symbols)), "runtime": _se.runtime_state()}
+
+
+@app.post("/swing/resume")
+async def swing_resume(mode: str = "DEMO", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132 (plan S5): clear the swing auto-pause for a mode. Only trades closed AFTER this count towards the next pause."""
+    m = (mode or "").upper()
+    if m not in ("DEMO", "REAL"):
+        raise HTTPException(status_code=400, detail="mode must be DEMO or REAL")
+    from swing.repo import SqlRepo
+    from tz_utils import ist_today_str
+    SqlRepo(db).add_run("resume", ist_today_str(), m, True, f"resumed by {admin or 'admin'}")
+    return {"ok": True, "mode": m}
+
+
+@app.post("/swing/probe")
+async def swing_probe(phase: str = "status", yes: bool = False, symbol: str = "", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E132 (swing plan S4): does a resting Dhan stop on a CNC holding survive the night? phase=open places a REAL 1-share CNC BUY + stop (needs yes=true, REAL armed,
+    09:30-14:30 IST); phase=check (a LATER trading morning) reads the stop back and cleans up; phase=status only shows the last result."""
+    import asyncio as _aio
+    from swing import probe
+    from swing.repo import SqlRepo
+    repo = SqlRepo(db)
+    ph = (phase or "status").lower()
+    if ph == "status":
+        last = probe.last_probe(repo)
+        return {"verdict": (last or {}).get("verdict", "NOT_RUN"), "line": f"SWING PROBE (last): {(last or {}).get('verdict', 'NOT_RUN')} - {(last or {}).get('check_reason') or (last or {}).get('summary') or 'never run'}", "last": last}
+    if ph not in ("open", "check"):
+        raise HTTPException(status_code=400, detail="phase must be open, check or status")
+    if not yes:
+        return {"verdict": "NOT_RUN", "line": "SWING PROBE: SKIPPED - tick the confirmation: this places a real 1-share order", "steps": []}
+    gate = db.query(models.TradeGateState).filter_by(mode="REAL").first()
+    armed = bool(gate is not None and gate.armed)
+    fn = (lambda: probe.open_phase(db, repo, armed, symbol)) if ph == "open" else (lambda: probe.check_phase(db, repo, armed))
+    return await _aio.to_thread(fn)
+
+
 @app.get("/review-fixes/status")
 async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """group 473: one read-only view of the 20 Oct review fixes (groups 470-472): the effective settings, whether the late-entry cut-off is

@@ -1474,6 +1474,35 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         held += 1
                 continue
 
+            # ── 1b. E132 swing lane: its positions are exited by the stop above (ratcheted up every evening by swing/live.after_scan), the 15:00 session
+            # check (swing/live.eod_holds via _eod_squareoff) and the emergency check above. NO target, partial exit, breakeven, ATR trail, structure step
+            # or calendar time-stop applies: the replay (scripts/swing_backtest.py) tested exactly stop + last-session exit, and extra rules would run something else.
+            if (getattr(position, "entry_decision_label", None) or "").upper() == "SWING_MOMENTUM":
+                if position.current_target is not None:
+                    position.current_target = None
+                    db.commit()
+                # E138 backstop: the 15:00 square-off is the only normal exit besides the stop and it runs once a day. A position it failed to sell (refused order,
+                # EOD switch off, process down at 15:00) is sold here, on any later tick, once it is past its last session. Any doubt = no sale (see lane.backstop_verdict).
+                try:
+                    from swing import live as _swing_live
+                    _sw_sell = _swing_live.overdue(position)
+                except Exception:  # noqa: BLE001
+                    _sw_sell = None
+                if _sw_sell:
+                    _write_exit_decision(db, position, "FULL_EXIT", f"Swing backstop: {_sw_sell}. Closing full position ({position.qty_open} shares).", ltp)
+                    if mode == "DEMO":
+                        close_position(db, position, tick, position.qty_open, "swing_max_hold")
+                        full_exits += 1
+                    else:
+                        if _send_real_sell(db, position, position.qty_open, "swing_max_hold"):
+                            full_exits += 1
+                        else:
+                            held += 1
+                    continue
+                _write_exit_decision(db, position, "HOLD", f"Swing position: stop ₹{position.current_stop} watched; target / trail / time-stop are not used.", ltp)
+                held += 1
+                continue
+
             # ── 2. First target hit — partial exit (60%) ──────────────────────────
             if (
                 position.current_target is not None

@@ -1,0 +1,8 @@
+# E136 - S4 probe: two bugs found reading `swing/probe.py` (2026-10-25)
+
+1. **A failed open phase blocked the probe forever.** `open_phase` refused to run while the last probe row was "an open phase without `checked`". A FAILED open (BUY not filled, or Dhan refused the order or the stop) is saved without a `checked` flag and without a stop id, so every later `open` said "waiting for its check phase", while `check` said "no open phase is waiting". No way out except editing the database. Now `probe.waiting_for_check(prev)` is true only for an open phase that placed a stop (has `stop_id`) and is not checked; both phases use it.
+2. **A failed BUY leaked the symbol lock.** `shared_symbol_lock.try_claim` was taken before the order; only the "not filled" path released it. If `place_order` raised (eDIS, rejection, network), the claim stayed and position-stocks was blocked from that symbol (the lock has no expiry). The error path now releases it.
+3. **A filled BUY followed by a failed stop was reported as a plain refusal.** The 1 share was held with nobody told. The result and the saved row now say so (`held_share: true`, "sell it in the Dhan app").
+
+Checked here: `tests/test_swing_lane.py` 29 pass (1 new: the helper on every case, a failed row not blocking, a stop-placed row blocking, and the shape of the error path); putting the old condition back is caught. Momentum tests and guards pass.
+**Not run:** the broker half of the probe (needs SQLAlchemy, httpx and Dhan). The lock release and the held-share wording are checked by reading the source only. Run the probe once on DEMO-equivalent conditions only when you are ready; it still places a real 1-share order.

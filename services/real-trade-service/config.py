@@ -1589,3 +1589,48 @@ REARM_WAIVER_S = _og_float("REARM_WAIVER_S", 420.0)                     # chase 
 
 # E75: trade journal notes (reason + feeling, journal_notes.py). OFF = PUT /journal/notes/{mode}/{id} is refused (409). Descriptive only: no gate, score or size reads a note.
 JOURNAL_NOTES_ENABLED = _bs_bool("JOURNAL_NOTES_ENABLED", "true")
+
+# ── E132 (2026-10-25): swing momentum lane (swing/ package; plan Stockky_Swing_Momentum_Plan.md, steps S3-S5) ─────────────────────────
+# A SEPARATE lane next to the intraday logic: buy a top-momentum stock above its 200-day average (the S2 replay's declared primary setup) at the next
+# session's open, always CNC, keep it up to SWING_MAX_HOLD_DAYS sessions with the ATR stop ratcheted up after every close, sell on the stop or on the last
+# session's 15:00 square-off. Nothing here loosens OVERNIGHT_HOLD_*: swing positions are decided by swing/lane.py only.
+#   off     = no scan, no record, no order. A swing position that is still open is flattened by the next 15:00 square-off.
+#   shadow  = (default) the evening scan ranks the universe and writes what the lane WOULD have bought and how each pick would have ended (ledger
+#             rows kind=SHADOW). NOTHING is ordered and no position is carried.
+#   live    = the same picks are bought for real in DEMO (and in REAL only when SWING_LIVE_REAL_ENABLED=true), as CNC, with SWING_MAX_TRADE_VALUE.
+# Live is a deliberate decision after S2 / S3 evidence and the S4 Dhan probe; the auto-calibrator never touches these (autocalib.PROTECTED).
+def _sw_mode(name: str, default: str) -> str:
+    v = ((os.getenv(name) or "").strip().lower() or default)
+    return v if v in ("off", "shadow", "live") else default
+
+
+SWING_MODE = _sw_mode("SWING_MODE", "shadow")
+SWING_LIVE_REAL_ENABLED = _bs_bool("SWING_LIVE_REAL_ENABLED", "false")      # live = DEMO only until this is true
+SWING_MAX_TRADE_VALUE = max(0.0, _bs_float("SWING_MAX_TRADE_VALUE", 20000.0))   # Rs per swing position (the S2 replay's default size; costs fall with size)
+SWING_MAX_POSITIONS = max(0, _bs_int("SWING_MAX_POSITIONS", 2))
+SWING_MAX_EXPOSURE_PCT = max(0.0, _bs_float("SWING_MAX_EXPOSURE_PCT", 40.0))   # all swing positions together, % of equity
+SWING_MAX_PER_SECTOR = max(1, _bs_int("SWING_MAX_PER_SECTOR", 1))
+SWING_MAX_HOLD_DAYS = max(1, _bs_int("SWING_MAX_HOLD_DAYS", 5))                # sessions, the entry session counts as 1; the last one is sold at 15:00
+SWING_TOP_PCT = min(99.0, max(50.0, _bs_float("SWING_TOP_PCT", 80.0)))          # the screen: percentile rank at or above this AND above the 200-day average
+SWING_STOP_ATR_MULT = max(0.5, _bs_float("SWING_STOP_ATR_MULT", 1.5))           # stop = ATR14 x this, clamped SWING_STOP_MIN_PCT..SWING_STOP_MAX_PCT (same as the replay)
+SWING_STOP_MIN_PCT = max(0.5, _bs_float("SWING_STOP_MIN_PCT", 2.0))
+SWING_STOP_MAX_PCT = max(SWING_STOP_MIN_PCT, _bs_float("SWING_STOP_MAX_PCT", 6.0))
+SWING_SLIPPAGE_PCT = max(0.0, _bs_float("SWING_SLIPPAGE_PCT", 0.10))            # limit = open price + this %, and the cost the shadow ledger charges
+SWING_MAX_GAP_UP_PCT = max(0.0, _bs_float("SWING_MAX_GAP_UP_PCT", 5.0))         # not tested by the replay: skip an entry whose open is this far above the signal close (0 = off)
+SWING_PICKS_PER_DAY = max(1, _bs_int("SWING_PICKS_PER_DAY", 2))                  # live: at most this many new swing entries per morning
+SWING_SHADOW_PICKS_PER_DAY = max(1, _bs_int("SWING_SHADOW_PICKS_PER_DAY", 3))    # shadow: how many of the day's best screened picks are recorded (evidence needs volume)
+SWING_SCAN_TIME_IST = (os.getenv("SWING_SCAN_TIME_IST") or "").strip() or "16:00"    # evening scan starts after this (daily bars are complete); retried until it works
+SWING_ENTRY_TIME_IST = (os.getenv("SWING_ENTRY_TIME_IST") or "").strip() or "09:25"  # live entries from this time (after the opening guard)
+SWING_ENTRY_LAST_TIME_IST = (os.getenv("SWING_ENTRY_LAST_TIME_IST") or "").strip() or "10:30"   # a pick not bought by then is dropped for the day
+SWING_KEEP_MIN_PCT_RANK = max(0.0, _bs_float("SWING_KEEP_MIN_PCT_RANK", 50.0))  # 15:00 re-check: sell when last night's percentile rank fell below this (0 = off). Not in the replay: it only shortens holds
+SWING_KEEP_ABOVE_SMA10 = _bs_bool("SWING_KEEP_ABOVE_SMA10", "true")              # 15:00 re-check: sell when the price is below its 10-day average. Not in the replay: it only shortens holds
+SWING_BLOCK_STRESSED = _bs_bool("SWING_BLOCK_STRESSED", "true")                  # no new swing entry while Market Weather says stressed / panic
+SWING_PAUSE_AFTER_LOSSES = max(0, _bs_int("SWING_PAUSE_AFTER_LOSSES", 3))        # pause new swing entries after this many losing swing trades in a row (0 = off); POST /swing/resume clears it
+SWING_PAUSE_ON_GAP_STOP = _bs_bool("SWING_PAUSE_ON_GAP_STOP", "true")            # pause after a swing exit that lost more than SWING_GAP_STOP_MULT x its planned stop
+SWING_GAP_STOP_MULT = max(1.0, _bs_float("SWING_GAP_STOP_MULT", 1.3))
+SWING_EARNINGS_WINDOW_DAYS = max(0, _bs_int("SWING_EARNINGS_WINDOW_DAYS", 7))   # no entry when results are due within this many calendar days (0 = off)
+SWING_BROKER_STOP_ENABLED = _bs_bool("SWING_BROKER_STOP_ENABLED", "false")       # resting Dhan stop for SWING positions only (BROKER_STOP_ENABLED stays the all-positions switch). Run the S4 probe first
+SWING_UNIVERSE_SYMBOLS = (os.getenv("SWING_UNIVERSE_SYMBOLS") or "").strip()     # comma list: the stocks the evening scan ranks (see scripts/swing_universe.py). Empty = SWING_RANK_DEFAULT_SYMBOLS
+SWING_UNIVERSE_MAX = max(20, _bs_int("SWING_UNIVERSE_MAX", 450))
+SWING_SCAN_RETRY_MIN = max(5, _bs_int("SWING_SCAN_RETRY_MIN", 20))               # minutes between scan attempts when the bars are not yet new or a scan failed
+SWING_LEDGER_KEEP_DAYS = max(30, _bs_int("SWING_LEDGER_KEEP_DAYS", 400))

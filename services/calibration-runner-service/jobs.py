@@ -232,6 +232,34 @@ def b_entry_rules(ctx, p):
                 *_ck(ctx, "entry", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="Entry-path rules and stop / target width", attention=())]
 
 
+def b_swing_backtest(ctx, p):
+    return [_py(ctx, "swing_backtest.py", "--out", os.path.join(ctx["run"], "swing"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 0),
+                "--primary-size", p.get("primary_size", 20000), *_ck(ctx, "swing", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
+                title="Swing momentum replay (up to 5 sessions, delivery costs)", attention=())]
+
+
+def b_swing_shadow_report(ctx, p):
+    """E132 (plan S3): the screened stocks' forward returns from the service's own saved evening rankings, net of cost, against all the others. Read-only."""
+    return [_py(ctx, "swing_shadow_report.py", "--service", ctx["rt"], "--out", os.path.join(ctx["run"], "swing_shadow"), "--hold", p.get("hold", 5), "--size", p.get("size", 20000),
+                "--min-n", p.get("min_n", 30), "--min-days", p.get("min_days", 20), title="Swing shadow report (screened vs the rest, net of cost)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
+def b_swing_universe(ctx, p):
+    """E132: print SWING_UNIVERSE_SYMBOLS from the history folder the replay used (so the lane ranks the same stocks). Read-only."""
+    return [_py(ctx, "swing_universe.py", _hist(ctx, int(p.get("seed", 7))), title="Swing lane universe (the replayed stocks)", attention=())]
+
+
+def b_swing_probe(ctx, p):
+    """E132 (plan S4): the swing probe. Places a REAL 1-share CNC order in phase open (and sells it in phase check). Needs the explicit tick; never in a pack."""
+    ph = str(p.get("phase", "status"))
+    args = ["--rt-url", ctx["rt"], "--phase", ph if ph in ("open", "check", "status") else "status"]
+    if p.get("yes") and ph in ("open", "check"):
+        args.append("--yes")
+        if ph == "open" and p.get("symbol"):
+            args += ["--symbol", str(p["symbol"]).strip().upper()]
+    return [_py(ctx, "dhan_swing_probe.py", *args, title="Dhan swing probe (S4): 1-share CNC buy with a resting stop, read back the next morning", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
 def b_p8(ctx, p):
     return [_py(ctx, "p8_retest_evidence.py", "--out", os.path.join(ctx["run"], "p8"), "--jobs", p.get("jobs", 2), *_ck(ctx, "p8", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title="P8 retest / CHOCH branch evidence", attention=())]
@@ -454,6 +482,18 @@ JOB_LIST = [
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("entry_rules", "Entry-path rules and stop width", "monthly", "Monthly, after fetch_history", "Did the entry rules and the stop / target width help after costs?", b_entry_rules, [SEED, JOBS_P, P("step", "Step", "int", 3, 1, 10)],
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
+    _job("swing_backtest", "Swing momentum replay (E131)", "monthly", "On demand, after fetch_history", "Would holding top-momentum stocks for up to 5 sessions have paid after delivery costs, at your trade size? Evidence only: nothing is traded or switched.", b_swing_backtest,
+         [SEED, JOBS_P, P("sample", "Symbols (0 = all)", "int", 0, 0, 800), P("step", "Step", "int", 3, 1, 10), P("primary_size", "Trade size for the verdict (Rs)", "int", 20000, 1000, 500000)],
+         heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"],
+         after="USEFUL = worth building the shadow lane (plan step S3). NO_EDGE = do not build it. INSUFFICIENT = the history folder is too small. A gross edge eaten by costs says which trade size to retest."),
+    _job("swing_shadow_report", "Swing shadow report (E132)", "weekly", "Weekly while SWING_MODE is shadow or live", "Reads the service's saved evening rankings: did the screened stocks beat the rest after the screening day, net of delivery cost? Verdict USEFUL / NO_EDGE / NOT_ENOUGH_DATA. Changes nothing and never touches SWING_MODE.", b_swing_shadow_report,
+         [P("hold", "Hold (sessions)", "choice", "5", choices=["1", "3", "5"]), P("size", "Trade size (Rs)", "int", 20000, 1000, 500000), P("min_n", "Screened entries needed", "int", 30, 1, 1000), P("min_days", "Days needed", "int", 20, 1, 120)], timeout_s=180,
+         after="NOT_ENOUGH_DATA: keep collecting. USEFUL: 30+ net-positive shadow trades is the gate to run the S4 probe; SWING_MODE=live stays your decision. NO_EDGE: do not go live. The exact lane trades (stop, ratchet) are at GET /swing/report."),
+    _job("swing_universe", "Swing lane universe (E132)", "ops", "Once, before SWING_MODE is shadow (and after fetch_history grows the folder)", "Prints the SWING_UNIVERSE_SYMBOLS line from the history folder the replay used, so the lane ranks the same stocks the replay tested. Paste it into .env.", b_swing_universe, [SEED], timeout_s=60,
+         after="Copy the SWING_UNIVERSE_SYMBOLS line into .env and restart real-trade-service."),
+    _job("dhan_swing_probe", "Dhan swing probe (S4) - places 1 real share", "ops", "Open phase 09:30-14:30 IST on one trading day, check phase on the NEXT trading morning, before SWING_BROKER_STOP_ENABLED or live REAL swing", "PLACES ONE REAL 1-share CNC BUY with a resting stop in phase open; phase check reads the stop back the next morning (PASS only if it survived the night), cancels it and sells the share. Nothing is sent unless you tick the box. Selling needs the CDSL TPIN that morning.", b_swing_probe,
+         [P("phase", "Phase", "choice", "status", choices=["status", "open", "check"]), P("yes", "I understand this places a real 1-share order", "bool", False), P("symbol", "Symbol (open only; blank = ITC, NTPC, ONGC, SBIN, TATASTEEL in turn)", "str", "")], window="open", timeout_s=300,
+         after="PASS: a resting stop on a CNC holding survives the night: SWING_BROKER_STOP_ENABLED is now a safe switch. FAIL: read the step lines; keep it off and rely on the software stop."),
     _job("p8_retest", "P8 retest / CHOCH evidence", "monthly", "Monthly", "Is the retest branch worth switching on (STRUCTURE_POLICY retest_entry=1)?", b_p8, [SEED, JOBS_P], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("ml_v2", "ML V2 walk-forward", "monthly", "Monthly", "Does a model on the V2 structure features beat chance out of sample? Evidence only: nothing is trained into production.", b_ml_v2, [SEED, JOBS_P, P("sample", "Symbols", "int", 200, 50, 800)],
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
@@ -554,8 +594,8 @@ PACKS: List[Dict[str, Any]] = [
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
-     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, short shadow report, switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["short_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, short shadow report, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
+     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["short_shadow_report", {}], ["swing_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},

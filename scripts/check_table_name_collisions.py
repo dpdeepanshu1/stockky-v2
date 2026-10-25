@@ -13,6 +13,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _repo_walk import walk_py  # noqa: E402  (never look inside a virtualenv / site-packages)
+
 ROOT = Path(__file__).resolve().parent.parent / "services"
 TABLE = re.compile(r'__tablename__\s*=\s*["\'](\w+)["\']')
 COL = re.compile(r"\n\s+(\w+)\s*=\s*(?:Column|mapped_column)\(")
@@ -20,7 +23,7 @@ COL = re.compile(r"\n\s+(\w+)\s*=\s*(?:Column|mapped_column)\(")
 
 def find() -> dict:
     found: dict = {}
-    for f in sorted(ROOT.rglob("*.py")):
+    for f in walk_py(ROOT):
         parts = f.relative_to(ROOT).parts
         if "tests" in parts or f.name.startswith("test_") or "node_modules" in parts or "venv" in parts or ".venv" in parts:
             continue

@@ -1362,7 +1362,16 @@ async def _eod_squareoff(db, mode: str) -> None:
         logger.info("[schedule] EOD square-off %s: no open positions", mode)
         return
 
-    hold_ids, hold_reasons = await _select_overnight_holds(db, mode, positions)
+    hold_ids, hold_reasons = await _select_overnight_holds(db, mode, [p for p in positions if (getattr(p, "entry_decision_label", None) or "").upper() != "SWING_MOMENTUM"])
+    # E132: the swing lane decides its own positions (never the overnight selector). Not live = nothing kept; any failure = nothing kept (sold).
+    try:
+        from swing import live as _swing_live
+        from swing.repo import SqlRepo as _SwingRepo
+        _sw_keep, _sw_why = await _swing_live.eod_holds(db, _SwingRepo(db), mode, positions)
+        hold_ids = set(hold_ids) | set(_sw_keep)
+        hold_reasons = {**hold_reasons, **_sw_why}
+    except Exception:
+        logger.exception("[schedule] swing hold decision failed for %s - swing positions are not carried", mode)
     if hold_ids:
         # 2026-09-18 fix (follow-on item #6): this reason used to only ever
         # be logged (logger.info) — never persisted anywhere queryable, so
@@ -1653,6 +1662,23 @@ def _is_nse_holiday_today() -> bool:
         return False
 
 
+async def _swing_step(db, mode: str, armed: bool) -> None:
+    """E132 swing lane tick. The evening scan (shadow ledger, record only) starts once a day on a background thread from the DEMO tick; live entries run only when
+    SWING_MODE=live (swing/live.entries checks that, the mode, the arming, the window and once-per-day itself). Never raises."""
+    try:
+        if str(getattr(config, "SWING_MODE", "shadow")).lower() == "off":
+            return
+        from swing import engine as _se, live as _sl
+        from swing.repo import SqlRepo
+        repo = SqlRepo(db)
+        if mode == "DEMO" and _se.scan_due(ist_now(), repo):
+            _se.scan_in_thread(get_session_factory(), _sl.held_symbols)
+        if str(getattr(config, "SWING_MODE", "shadow")).lower() == "live":
+            await _sl.entries(db, repo, mode, armed)
+    except Exception:
+        logger.exception("[schedule] swing step failed for %s (non-fatal)", mode)
+
+
 async def _schedule_tick(mode: str) -> None:
     """One pass of the time-trigger loop for a mode. Each feature is gated by
     its per-mode toggle + armed, fires once/day, and is time-of-day bound.
@@ -1696,6 +1722,7 @@ async def _schedule_tick_body(mode: str) -> None:
     try:
         await _daily_report_step(db, mode)   # group292: independent of arming (and of a gate row) - it only reads closed trades
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
+        await _swing_step(db, mode, bool(gate is not None and gate.armed))   # E132: evening scan + (live only) morning entries; never raises
         if gate is None or not gate.armed:
             return
         today = ist_today_str()

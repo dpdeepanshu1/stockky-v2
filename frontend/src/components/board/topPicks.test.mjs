@@ -1,6 +1,6 @@
-// Run: node --experimental-strip-types components/board/topPicks.test.mjs  (Node >= 22.6)
+// Run: node --experimental-strip-types src/components/board/topPicks.test.mjs  (Node >= 22.6)
 import assert from "node:assert/strict";
-import { normalizePicks, pickBadge, sparkPath, levelPosition } from "./topPicks.ts";
+import { normalizePicks, pickBadge, sparkPath, levelPosition } from "./topPicksView.ts";
 
 const v = normalizePicks({
   as_of: 1000, market_open: true, engine_fresh: true, engine_picks: 1, preview_picks: 1,

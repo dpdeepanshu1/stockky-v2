@@ -5,7 +5,11 @@
 // No imports on purpose: this file is tested by plain node (src/gatewayAuth.test.mjs).
 const TOKEN_KEY = "stockky:real_trade_session_token";
 const ADMIN_PATH =
-  /^\/(?:notifications\/(?:config|call\/me|test|send-picks)|training\/train|ops\/(?:power-off|circuit-reset|overnight\/(?:config|run)|resume-activity)|(?:data-)?feed\/hard-reset)(?:[/?#]|$)/;
+  /^\/(?:notifications\/(?:config|call\/me|test|send-picks)|training\/train|ops\/(?:power-off|circuit-reset|overnight\/(?:config|run)|resume-activity|qstash\/publish)|(?:data-)?feed\/(?:hard-reset|purge-over-cap)|(?:surprise\/)?ipo\/(?:notify-top-picks|purge-non-equity)|(?:surprise|stockky-hot)\/notify-top-picks|scan\/universe\/cache)(?:[/?#]|$)/;
+// E148 (F-12): the training service's own system-level actions, reached through the gateway's /training/* proxy. Mirrors admin_guard._TRAINING_ADMIN
+// (exact paths only, so the progress poll /training/api/train/progress goes out unchanged).
+const ADMIN_TRAINING_PATH =
+  /^\/training\/(?:api\/(?:train|lock\/clear|models\/promote\/[^/?#]+|admin(?:\/[^?#]*)?)|train\/(?:run|clear-lock)|lock|debug\/abort)\/?(?:[?#]|$)/;
 
 /** True when `url` is a gateway call to one of the protected paths. `gatewayBase` is "/api", "https://host" or "" (page origin). */
 export function isGatewayAdminUrl(url: string, gatewayBase: string): boolean {
@@ -13,7 +17,7 @@ export function isGatewayAdminUrl(url: string, gatewayBase: string): boolean {
   if (!url.startsWith(base + "/")) return false;
   let path = url.slice(base.length);
   if (path.startsWith("/api/")) path = path.slice(4); // the gateway also answers under /api/... (aliases)
-  return ADMIN_PATH.test(path);
+  return ADMIN_PATH.test(path) || ADMIN_TRAINING_PATH.test(path);
 }
 
 let installed = false;

@@ -48,7 +48,7 @@ def build_bound_routes(ref):
             return Response(content=ref.metrics.prometheus_text(), media_type="text/plain; version=0.0.4")
         return ref.metrics.snapshot()
 
-    @qstash_publish_router.post("/ops/qstash/publish")
+    @qstash_publish_router.post("/ops/qstash/publish", dependencies=[ref.Depends(ref._require_admin)])
     async def ops_qstash_publish(request: Request):
         """Manually publish a delayed callback (admin / scheduler)."""
         if ref.qstash_client is None or not ref.qstash_client.enabled():

@@ -1196,7 +1196,7 @@ def build_bound_routes_j(ref):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @api_surprise_notify_top_picks_router.post("/surprise/notify-top-picks")
+    @api_surprise_notify_top_picks_router.post("/surprise/notify-top-picks", dependencies=[ref.Depends(ref._require_admin)])
     async def api_surprise_notify_top_picks(top_n: int = ref.Query(5, ge=1, le=20)):
         """
     Manual "send to Telegram" button for the Surprise Momentum tab.
@@ -1827,7 +1827,7 @@ def build_bound_routes_j(ref):
         background_tasks.add_task(_run_hot)
         return {"ok": True, "started": True, "message": "Hot Picks search started"}
 
-    @api_hotpicks_notify_top_picks_router.post("/stockky-hot/notify-top-picks")
+    @api_hotpicks_notify_top_picks_router.post("/stockky-hot/notify-top-picks", dependencies=[ref.Depends(ref._require_admin)])
     async def api_hotpicks_notify_top_picks(top_n: int = ref.Query(5, ge=1, le=20)):
         """
     Manual "Send Top 5 to Telegram" button for the Hot Picks tab — same

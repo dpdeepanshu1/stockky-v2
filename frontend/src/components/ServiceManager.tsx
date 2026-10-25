@@ -3,6 +3,8 @@ import { setVisibleInterval } from "../visibleInterval";
 import { api, wakeService, SystemServiceStatus, apiUrl } from "../api";
 import { getRealTradeApiUrl } from "../realTradeApi";
 import BottomSheet from "./BottomSheet";
+import { KpiStrip } from "./ui/KpiStrip";
+import { serviceKpis } from "./serviceView";
 
 interface ServiceManagerProps {
   onClose: () => void;
@@ -55,12 +57,18 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
   const [isResetting, setIsResetting] = useState(false);
   const [resetResult, setResetResult] = useState<{ ok: boolean; detail: string } | null>(null);
 
+  const [failed, setFailed] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+
   const fetchServices = async () => {
     setLoading(true);
     try {
       const health = await api.systemHealth();
       setServices(health.services || {});
+      setFailed(false);
+      setCheckedAt(Date.now());
     } catch (e) {
+      setFailed(true);
       console.error(e);
     } finally {
       setLoading(false);
@@ -205,27 +213,10 @@ export default function ServiceManager({ onClose }: ServiceManagerProps) {
         </p>
 
         <div className={`topo-status-pill ${allOk ? "" : "topo-offline"}`} style={!allOk ? { borderColor: "rgba(246,70,93,0.35)", color: "var(--sell)", background: "rgba(246,70,93,0.08)" } : undefined}>
-          <span>●</span> Cluster Status: {loading ? "Checking…" : allOk ? "Operational" : `${okCount}/${total} healthy`}
+          <span>●</span> Cluster Status: {loading ? "Checking…" : entries.length === 0 ? "No answer from the health check" : allOk ? "Operational" : `${okCount}/${total} healthy`}
         </div>
 
-        <div className="topo-grid">
-          <div className="topo-metric">
-            <label>Render microservices</label>
-            <strong>{okCount} / {Math.max(total, 5)} Healthy</strong>
-          </div>
-          <div className="topo-metric">
-            <label>Upstash Redis cache</label>
-            <strong>Connected</strong>
-          </div>
-          <div className="topo-metric">
-            <label>Supabase Postgres</label>
-            <strong>Online (Free Tier)</strong>
-          </div>
-          <div className="topo-metric">
-            <label>GitHub Actions cron</label>
-            <strong>09:00 – 15:30 IST</strong>
-          </div>
-        </div>
+        <KpiStrip items={serviceKpis({ services, loading, failed, checkedAt }, Date.now())} label="Service health summary" />
 
         <div className="flex gap-2 mb-3 flex-wrap">
           <button type="button" className="btn-terminal text-xs" onClick={fetchServices} disabled={loading}>

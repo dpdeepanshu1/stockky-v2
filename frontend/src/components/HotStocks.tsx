@@ -6,6 +6,8 @@ import Pipeline from "./Pipeline";
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { getSafePrice } from "../priceDisplay";
 import FeedHealthPanel, { type FeedHealthData } from "./FeedHealthPanel";
+import { KpiStrip } from "./ui/KpiStrip";
+import { hotKpis } from "./hotView";
 
 type HotItem = {
   symbol: string;
@@ -845,6 +847,7 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
       {data && (
         <>
+          <KpiStrip items={hotKpis(data)} label="Hot Picks summary" />
           <div className="hot-meta-bar mono text-[10px] text-mist/50">
             Universe {data.universe_size ?? "—"}
             {" · "}scan seeds {data.scan_seed_count ?? "—"}

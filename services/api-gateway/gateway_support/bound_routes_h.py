@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter
 
+from admin_guard import training_path_needs_admin  # E148 (F-12): system-level training actions need the admin session
+
 
 def build_bound_routes_h(ref):
     root_router = APIRouter()
@@ -383,6 +385,10 @@ def build_bound_routes_h(ref):
     so the browser never sees gzip/br binary (which causes
     "Unexpected token ... is not valid JSON").
     """
+        # E148 (F-12): train / promote / lock clears / admin / debug-abort are system-level actions: same admin login as POST /training/train.
+        # Raises 401 / 503 exactly like the guarded routes; reads and the routes the UI uses without a login are not affected.
+        if training_path_needs_admin(request.method, path):
+            ref._require_admin(authorization=request.headers.get("authorization", ""))
         heavy = any(
             x in path
             for x in (

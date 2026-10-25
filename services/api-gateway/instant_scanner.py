@@ -538,7 +538,9 @@ async def process_single_stock(
         rsi = float(feed_item.get("rsi") or DEFAULT_STATIC_INDICATORS["rsi"])
         pe = float(feed_item.get("pe_ratio") or feed_item.get("pe") or DEFAULT_STATIC_INDICATORS["pe_ratio"])
         roce = float(feed_item.get("roce") or DEFAULT_STATIC_INDICATORS["roce"])
-        sentiment = float(feed_item.get("sentiment_score") or 50.0)
+        # E148: a real sentiment score of 0 (most negative) is falsy; only a missing score becomes the neutral 50.
+        _sent_raw = feed_item.get("sentiment_score")
+        sentiment = float(_sent_raw) if _sent_raw is not None else 50.0
 
         payload = {
             "symbol": sym_clean,

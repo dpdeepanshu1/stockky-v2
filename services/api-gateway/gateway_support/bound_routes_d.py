@@ -199,8 +199,8 @@ def build_bound_routes_d(ref):
             ref.logger.exception("surprise repair-batch: %s", e)
             raise ref.HTTPException(status_code=500, detail=str(e)[:240])
 
-    @api_ipo_notify_top_picks_router.post("/ipo/notify-top-picks")
-    @api_ipo_notify_top_picks_router.post("/surprise/ipo/notify-top-picks")
+    @api_ipo_notify_top_picks_router.post("/ipo/notify-top-picks", dependencies=[ref.Depends(ref._require_admin)])
+    @api_ipo_notify_top_picks_router.post("/surprise/ipo/notify-top-picks", dependencies=[ref.Depends(ref._require_admin)])
     async def api_ipo_notify_top_picks(top_n: int = ref.Query(5, ge=1, le=20)):
         """Manual 'send to Telegram' button for the IPO Tracker tab — mirrors
         /surprise/notify-top-picks and /stockky-hot/notify-top-picks exactly

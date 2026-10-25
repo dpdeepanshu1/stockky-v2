@@ -17,6 +17,7 @@ NOT stored here (always live when needed):
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -186,7 +187,9 @@ def normalize_feed_payload(data: dict) -> dict:
         if isinstance(v, bool):
             normalized[standard] = v
         elif isinstance(v, (int, float)):
-            normalized[standard] = float(v)
+            # E148: NaN / inf are "missing", not a value: stored as-is they poison the merge (NaN never compares equal, json.dumps writes the
+            # invalid token NaN). None is dropped by strip_none_fields() so the existing stored metric is kept.
+            normalized[standard] = float(v) if math.isfinite(float(v)) else None
         elif isinstance(v, str):
             s = v.strip().replace(",", "")
             try:

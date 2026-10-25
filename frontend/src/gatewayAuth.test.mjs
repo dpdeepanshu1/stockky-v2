@@ -8,7 +8,10 @@ const no = (u, b = "") => assert.equal(isGatewayAdminUrl(u, b), false, `${u} (ba
 // protected paths, every base shape
 for (const p of ["/notifications/config", "/notifications/config/telegram", "/notifications/call/me?message=hi", "/notifications/test", "/notifications/send-picks",
   "/training/train", "/ops/power-off", "/ops/circuit-reset", "/ops/overnight/config?enabled=false", "/ops/overnight/run", "/ops/resume-activity",
-  "/data-feed/hard-reset", "/api/data-feed/hard-reset", "/api/feed/hard-reset"]) {
+  "/data-feed/hard-reset", "/api/data-feed/hard-reset", "/api/feed/hard-reset",
+  "/ops/qstash/publish", "/data-feed/purge-over-cap", "/api/feed/purge-over-cap",
+  "/ipo/notify-top-picks?top_n=5", "/surprise/ipo/notify-top-picks", "/surprise/notify-top-picks?top_n=5", "/stockky-hot/notify-top-picks?top_n=5",
+  "/ipo/purge-non-equity", "/surprise/ipo/purge-non-equity", "/scan/universe/cache"]) {
   yes(p, "");
   yes("/api" + p.replace(/^\/api/, ""), "/api");
   yes("https://gw.example.com" + p, "https://gw.example.com");
@@ -16,9 +19,19 @@ for (const p of ["/notifications/config", "/notifications/config/telegram", "/no
 }
 // everything else on the gateway goes out untouched
 for (const p of ["/notifications/config/", "/notifications/configx", "/ops/keepalive", "/ops/circuit-status", "/ops/overnight/status", "/watchlist", "/scan/start",
-  "/training/status", "/data-feed/run", "/data-feed/hard-resets", "/health"]) {
+  "/training/status", "/data-feed/run", "/data-feed/hard-resets", "/ops/qstash/tick", "/ops/qstash/publisher", "/ipo/scan", "/ipo/notify-top-picksx", "/scan/universe", "/stockky-hot/run", "/health"]) {
   if (p === "/notifications/config/") continue; // trailing slash form is a (404) route variant; not worth special-casing
   no(p, ""); no(p, "https://gw.example.com"); no("https://gw.example.com" + p, "https://gw.example.com");
+}
+// E148 (F-12): the training service's system-level actions reached through /training/* also get the token ...
+for (const p of ["/training/api/train", "/training/api/train?label_source=live", "/training/train/run", "/training/train/clear-lock", "/training/api/lock/clear",
+  "/training/lock", "/training/api/models/promote/v12", "/training/api/admin/init-schema", "/training/debug/abort"]) {
+  yes(p, ""); yes("/api" + p, "/api"); yes("https://gw.example.com" + p, "https://gw.example.com");
+}
+// ... but the Training Lab's polling and the routes it uses without a login go out untouched
+for (const p of ["/training/api/train/progress", "/training/api/models", "/training/api/universe/ingest", "/training/api/trades/manual", "/training/api/portfolio/deposit",
+  "/training/api/predictions", "/training/api/lock", "/training/locks", "/training/api/models/promote"]) {
+  no(p, ""); no("/api" + p, "/api"); no("https://gw.example.com" + p, "https://gw.example.com");
 }
 // other hosts never get the token
 no("https://evil.example.com/ops/power-off", "https://gw.example.com");

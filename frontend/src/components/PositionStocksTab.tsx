@@ -2314,7 +2314,7 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
             <span className="tabular-nums text-signal-buy">₹{p.target_price.toFixed(2)} <span className="text-[9px]">({p.adaptive_target_pct.toFixed(1)}%)</span></span>
           )}
         </div>
-        <div><span className="text-mist">Stop </span>
+        <div><span className="text-mist">Stop loss </span>
           {p.overnight_converted_to_cnc ? (
             // AUDIT FIX (2026-09-19): same as Target above — the real
             // protection now is the plain STOP_LOSS_MARKET order at
@@ -2407,7 +2407,7 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <StockCandleBlock symbol={p.symbol} defaultOpen={p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED"}
           levels={[
             { label: "Entry", price: p.entry_price, tone: "mute" as PriceLevel["tone"] },
-            ...(p.stop_price > 0 && !p.overnight_converted_to_cnc ? [{ label: "Stop", price: p.stop_price, tone: "bad" as PriceLevel["tone"] }] : []),
+            ...(p.stop_price > 0 && !p.overnight_converted_to_cnc ? [{ label: "Stop loss", price: p.stop_price, tone: "bad" as PriceLevel["tone"] }] : []),
             ...(p.target_price > 0 && !p.overnight_converted_to_cnc ? [{ label: "Target", price: p.target_price, tone: "good" as PriceLevel["tone"] }] : []),
           ].filter((l) => Number.isFinite(l.price) && l.price > 0)} />
       )}

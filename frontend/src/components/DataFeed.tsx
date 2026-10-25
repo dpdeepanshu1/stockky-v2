@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
+import { KpiStrip } from "./ui/KpiStrip";
+import { feedKpis } from "./feedView";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
 type Job = {
@@ -388,29 +390,8 @@ export default function DataFeed() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
-          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Stocks in feed</div>
-            <div className="font-display tabular-nums text-lg text-paper mt-1">{stocksInFeed || "—"}</div>
-          </div>
-          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Last success</div>
-            <div className="font-display tabular-nums text-[11px] text-paper mt-1 break-all">
-              {meta?.last_success_at
-                ? new Date(meta.last_success_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-                : "Never"}
-            </div>
-          </div>
-          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Job</div>
-            <div className="font-display tabular-nums text-sm text-paper mt-1 capitalize">{status}</div>
-          </div>
-          <div className="rounded-2xl border border-slate/40 bg-ink/40 p-3">
-            <div className="font-display tabular-nums text-[10px] text-mist uppercase tracking-wider">Progress</div>
-            <div className="font-display tabular-nums text-sm text-paper mt-1">
-              {processed}/{total} ({pct}%)
-            </div>
-          </div>
+        <div className="mt-5">
+          <KpiStrip items={feedKpis({ job, meta, wsFeed, status, processed, total, pct, partial }, Date.now())} label="Data Feed summary" />
         </div>
 
         {(status === "running" || status === "stopped" || (total > 0 && processed > 0)) && (

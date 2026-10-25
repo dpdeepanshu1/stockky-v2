@@ -143,7 +143,7 @@ export function pickNum(obj: any, ...keys: string[]): number | null {
 export function positionLevels(entry: unknown, stop: unknown, target: unknown): PriceLevel[] {
   const out: PriceLevel[] = [];
   const add = (label: string, v: unknown, tone: PriceLevel["tone"]) => { const n = Number(v); if (v != null && Number.isFinite(n) && n > 0) out.push({ label, price: n, tone }); };
-  add("Entry", entry, "mute"); add("Stop", stop, "bad"); add("Target", target, "good");
+  add("Entry", entry, "mute"); add("Stop loss", stop, "bad"); add("Target", target, "good");
   return out;
 }
 

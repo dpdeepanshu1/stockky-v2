@@ -31,6 +31,10 @@
 .v7-rail-zone.gain { left: calc(var(--e) * 1%); right: 0; border-radius: 0 999px 999px 0; background: rgb(var(--buy-rgb) / 0.42); --origin: 0%; }
 .v7-rail.short .v7-rail-zone { background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.2) 0 3px, transparent 3px 7px); }
 .v7-rail-tick { position: absolute; top: -4px; bottom: -4px; left: calc(var(--e) * 1%); width: 2px; margin-left: -1px; border-radius: 2px; background: rgb(var(--fg-rgb) / 0.75); }
+.v7-rail-tick.stop { left: calc(var(--s) * 1%); background: rgb(var(--sell-rgb)); }
+/* locked: the stop was moved to / past the entry, so the rail starts at the entry; the stretch entry..stop is profit that is already locked in */
+.v7-rail.locked .v7-rail-zone.loss { width: 0; }
+.v7-rail.locked .v7-rail-zone.gain { left: 0; }
 /* the marker: a full-width box slid by a percentage of ITS OWN width, so transform alone places it (no left/top animation) */
 .v7-rail-mark { position: absolute; inset: 0; pointer-events: none; transform: translateX(calc(var(--p) * 1% - 100%)); transition: transform var(--dur-slow) var(--ease-out); }
 .v7-rail-mark i { position: absolute; right: 0; top: 50%; width: 16px; height: 16px; margin: -8px -8px 0 0; border-radius: 50%; background: rgb(var(--fg-rgb)); border: 3px solid rgb(var(--panel-rgb)); box-shadow: 0 0 0 1px rgb(var(--border-strong-rgb)); }
@@ -178,3 +182,27 @@ html[data-hidden="true"] .v7-glow::before,
 html[data-hidden="true"] .v7-rail-mark i::after,
 html[data-hidden="true"] .v7-ladder .step.current.v7m-live .dot::after,
 html[data-hidden="true"] .v7-beat-run { animation-play-state: paused; }
+
+/* ---- E160: Hot Picks card body (ConvictionCard): score ring beside the stop / buy zone / target bar. Static layout only, tokens only, no animation of its own. */
+.cc-v7-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; margin: 0.35rem 0 0.6rem; }
+.cc-v7-hero .v5-plan { flex: 1 1 180px; }
+.cc-v7-hero .v5-plan-head { margin-bottom: 0.75rem; }
+
+/* ---- E161: Surprise Momentum rows: score chip (number + word), tier badge with a glyph, direction arrow. Static, tokens only, no animation. */
+.v7-sc { display: inline-flex; align-items: baseline; gap: 0.4rem; padding: 0.15rem 0.5rem; border-radius: 999px; border: 1px solid rgb(var(--sc, var(--accent-rgb)) / 0.45); background: rgb(var(--sc, var(--accent-rgb)) / 0.12); white-space: nowrap; }
+.v7-sc.buy { --sc: var(--buy-rgb); } .v7-sc.acc { --sc: var(--accent-rgb); } .v7-sc.warn { --sc: var(--warn-rgb); } .v7-sc.sell { --sc: var(--sell-rgb); }
+.v7-sc b { font-size: 0.72rem; font-weight: 800; color: rgb(var(--fg-rgb)); }
+.v7-sc small { font-size: 0.6rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: rgb(var(--sc, var(--accent-rgb))); }
+.v7-tier { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.65rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; color: rgb(var(--tc) ); background: rgb(var(--tc) / 0.12); border: 1px solid rgb(var(--tc) / 0.4); }
+.v7-tier.buy { --tc: var(--buy-rgb); } .v7-tier.warn { --tc: var(--warn-rgb); }
+.v7-tier i { font-style: normal; font-size: 0.6rem; }
+.v7-arrow { font-style: normal; font-size: 0.6rem; margin-right: 0.2rem; }
+.v7-srow > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
+.v7-srow.up > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
+.v7-srow.down > td:first-child { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
+
+/* ---- E162: IPO Tracker rows: state edge bar (up = listing live, warn = pre-open / awaiting data, down = data error). Static, tokens only, no animation. */
+.v7-ipo-row { box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
+.v7-ipo-row.up { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
+.v7-ipo-row.warn { box-shadow: inset 3px 0 0 rgb(var(--warn-rgb)); }
+.v7-ipo-row.down { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }

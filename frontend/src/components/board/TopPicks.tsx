@@ -9,7 +9,7 @@ import { Card } from "./boardCard";
 import StockPopup from "./StockPopup";
 import { usePrefersReducedMotion } from "./useBoardData";
 import type { BoardRowLite } from "./boardTypes";
-import { levelPosition, normalizePicks, pickBadge, sparkPath, type PickCard, type PicksView } from "./topPicks";
+import { levelPosition, normalizePicks, pickBadge, sparkPath, type PickCard, type PicksView } from "./topPicksView";
 
 const px = (v: number | null, d = 2) => (v == null ? "-" : v.toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d }));
 
@@ -81,7 +81,7 @@ function PickCardView({ p, onOpen }: { p: PickCard; onOpen: (p: PickCard) => voi
       )}
       <dl className="tp-lv">
         <div><dt>Entry</dt><dd>{px(p.entry)}</dd></div>
-        <div><dt>Stop</dt><dd className="r">{px(p.stop)}</dd></div>
+        <div><dt>Stop loss</dt><dd className="r">{px(p.stop)}</dd></div>
         <div><dt>Target</dt><dd className="g">{px(p.target)}</dd></div>
         <div><dt>R:R</dt><dd>{p.rr == null ? "-" : p.rr.toFixed(1)}</dd></div>
         <div><dt>Zone</dt><dd>{p.zoneScore == null ? "-" : p.zoneScore.toFixed(0)}</dd></div>

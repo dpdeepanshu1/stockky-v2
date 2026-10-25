@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { KpiStrip } from "./ui/KpiStrip";
+import { alertsKpis } from "./alertsView";
 import { api, NotificationConfig } from "../api";
 
 type Channel = "telegram" | "discord" | "slack" | "callmebot";
@@ -248,6 +250,8 @@ export default function NotificationsPanel() {
           {testResult}
         </div>
       )}
+
+      <KpiStrip items={alertsKpis(config)} label="Alerts summary" />
 
       <ChannelCard
         channel="telegram"

@@ -21,6 +21,17 @@ from entry_engine.opening_protect import STOP_REASONS
 from tz_utils import as_aware, ist_now
 
 logger = logging.getLogger("stopout-guard")
+
+_warned: Set[str] = set()
+
+
+def _warn_once(what: str, err: Exception) -> None:
+    """E148 (F-16): these two checks stay fail-open (an error must never block an entry), but a broken setting is no longer silent:
+    one warning per kind per process, so the log shows the guard is off without flooding it once per candidate."""
+    if what not in _warned:
+        _warned.add(what)
+        logger.warning("stopout_guard: %s check failed (%s: %s) - the guard is OFF until this is fixed (check STOPOUT_DAY_PAUSE_N / STOPOUT_SYMBOL_BLOCK)",
+                       what, type(err).__name__, err)
 _LOOKBACK_ROWS = 400
 
 
@@ -70,8 +81,8 @@ def pause_reason_from(n: int) -> Optional[str]:
         limit = int(config.STOPOUT_DAY_PAUSE_N or 0)
         if limit > 0 and n >= limit:
             return f"STOPOUT_GUARD:PAUSED:{n} losing stop-outs today (limit {limit}) - no new entries until the next session"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        _warn_once("day-pause", e)
     return None
 
 
@@ -79,6 +90,6 @@ def symbol_reason(symbol: str, stopped: Set[str]) -> Optional[str]:
     try:
         if config.STOPOUT_SYMBOL_BLOCK and str(symbol or "").strip().upper() in stopped:
             return f"STOPOUT_GUARD:SYMBOL:{symbol} was stopped out today - not re-bought the same session"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        _warn_once("symbol-block", e)
     return None

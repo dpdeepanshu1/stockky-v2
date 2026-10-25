@@ -1,0 +1,573 @@
+{
+ "/api/data-feed/refill-additional": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/refresh-prepare-to-buy": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/repair-single/{symbol}": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/resume": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/run": {
+  "callers": {
+   "frontend": 1,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/start-bulk-feed": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/stop": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/api/data-feed/structure-refresh": {
+  "callers": {
+   "script/workflow": 2,
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/data-feed/structure-refresh/stop": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "stops a running job"
+ },
+ "/api/feed/batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/refresh-prepare-to-buy": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/repair-all": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/repair-all/stop": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/api/feed/repair-batch": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/repair-single/{symbol}": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/start-bulk-feed": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/update": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/feed/update-batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/price-alerts": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/api/price-alerts/evaluate": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/price-alerts/{alert_id}": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "deletes data"
+ },
+ "/api/scan/find-buys": {
+  "callers": {
+   "frontend": 3,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/scan/find-buys/edge/evaluate": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/surprise/repair-batch": {
+  "callers": {
+   "frontend": 1,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/surprise/run-premarket-feed": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/api/surprise/stop": {
+  "callers": {
+   "frontend": 2
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/catalysts/alert": {
+  "callers": {
+   "script/workflow": 1,
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "sends a Telegram message"
+ },
+ "/data-feed/batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/refill-additional": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/refresh-prepare-to-buy": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/repair-all": {
+  "callers": {
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/repair-all/stop": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "stops a running job"
+ },
+ "/data-feed/repair-batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/repair-single/{symbol}": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/resume": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/run": {
+  "callers": {
+   "frontend": 1,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/start-bulk-feed": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/stop": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/data-feed/structure-refresh": {
+  "callers": {
+   "script/workflow": 2,
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/structure-refresh/stop": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "stops a running job"
+ },
+ "/data-feed/update": {
+  "callers": {
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/data-feed/update-batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/feed/repair-single/{symbol}": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/ipo/add": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/ipo/repair-batch": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/ipo/scan": {
+  "callers": {
+   "frontend": 2,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/ipo/stop": {
+  "callers": {
+   "frontend": 2
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/ops/check-alert": {
+  "callers": {
+   "script/workflow": 2
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/ops/idle-tick": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/ops/keepalive": {
+  "callers": {
+   "frontend": 2,
+   "script/workflow": 1
+  },
+  "class": "ui-open",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/ops/neon-keepalive": {
+  "callers": {
+   "frontend": 1,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/ops/qstash/tick": {
+  "callers": {
+   "service": 1
+  },
+  "class": "machine-signed",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/ops/rate-limits/event": {
+  "callers": {
+   "service": 5
+  },
+  "class": "machine",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/ops/refresh-static-params": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/ops/wake-db-all": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/price-alerts": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/price-alerts/evaluate": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/price-alerts/{alert_id}": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "deletes data"
+ },
+ "/scan": {
+  "callers": {
+   "frontend": 7,
+   "script/workflow": 5,
+   "service": 22
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/scan/batch": {
+  "callers": {
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/scan/cancel/{task_id}": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/scan/find-buys": {
+  "callers": {
+   "frontend": 3,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/scan/find-buys/edge/evaluate": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/scan/start": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/scan/stop-all": {
+  "callers": {
+   "frontend": 2
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/stockky-hot/premarket": {
+  "callers": {
+   "frontend": 2,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/stockky-hot/repair-batch": {
+  "callers": {
+   "frontend": 2,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/stockky-hot/run": {
+  "callers": {
+   "frontend": 2,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/stockky-hot/stop": {
+  "callers": {
+   "frontend": 1,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/surprise/ipo/add": {
+  "callers": {
+   "frontend": 1,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/surprise/ipo/repair-batch": {
+  "callers": {},
+  "class": "uncalled",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/surprise/ipo/scan": {
+  "callers": {
+   "frontend": 1,
+   "service": 2
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/surprise/ipo/stop": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/surprise/premarket": {
+  "callers": {
+   "frontend": 1,
+   "service": 3
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/surprise/repair-batch": {
+  "callers": {
+   "frontend": 1,
+   "service": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/surprise/run-premarket-feed": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "starts a background job (load on the services and the data providers)"
+ },
+ "/surprise/stop": {
+  "callers": {
+   "frontend": 2
+  },
+  "class": "ui-open",
+  "risk": "stops a running job"
+ },
+ "/wake-all": {
+  "callers": {
+   "frontend": 1,
+   "script/workflow": 1
+  },
+  "class": "ui-open",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/wake/all": {
+  "callers": {
+   "service": 1
+  },
+  "class": "machine",
+  "risk": "heartbeat / wake-up (cheap)"
+ },
+ "/watchlist": {
+  "callers": {
+   "frontend": 2,
+   "service": 9
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/watchlist/add": {
+  "callers": {
+   "frontend": 1
+  },
+  "class": "ui-open",
+  "risk": "writes user data (watchlist / alerts / IPO row)"
+ },
+ "/watchlist/{symbol}": {
+  "callers": {
+   "frontend": 2,
+   "service": 9
+  },
+  "class": "ui-open",
+  "risk": "deletes data"
+ }
+}

@@ -43,28 +43,28 @@ export function TabContent({
     <>
     {tab === "notifications" ? (
       <div className="page-terminal">
-        <PageHeader title="Alerts" desc="Notifications from the scanners and trading services, newest first." />
+        <PageHeader title="Alerts" desc="Notifications from the scanners and trading services, newest first." icon="bell" kicker="System" />
         <NotificationsPanel />
       </div>
     ) : tab === "training" ? (
       <div className="page-terminal">
-        <PageHeader title="Training Lab" desc="Train, evaluate and monitor the prediction models behind the signals." />
+        <PageHeader title="Training Lab" desc="Train, evaluate and monitor the prediction models behind the signals." icon="flask" kicker="System" />
         <Training />
       </div>
     ) : tab === "trades" ? (
       <div className="page-terminal">
-        <PageHeader title="Paper Trades" desc="Practice trades with a simulated wallet. No real money is used here." />
+        <PageHeader title="Paper Trades" desc="Practice trades with a simulated wallet. No real money is used here." icon="swap" kicker="Trading" />
         <Trades />
       </div>
     ) : tab === "datafeed" ? (
       <div className="page-terminal">
-        <PageHeader title="Data Feed" desc="Market data coverage and freshness across the stocks Stockky tracks." />
+        <PageHeader title="Data Feed" desc="Market data coverage and freshness across the stocks Stockky tracks." icon="database" kicker="System" />
         <DataFeed />
         <DataHealthAudit />
       </div>
     ) : tab === "hot" ? (
       <div className="page-terminal">
-        <PageHeader title="Hot Picks" desc="Stocks currently ranked highest by the combined technical, fundamental and news score." />
+        <PageHeader title="Hot Picks" desc="Stocks currently ranked highest by the combined technical, fundamental and news score." icon="flame" kicker="Discover" />
         <HotStocks
           onAnalyze={(s) => {
             setTab("dashboard");
@@ -74,7 +74,7 @@ export function TabContent({
       </div>
     ) : tab === "surprise" ? (
       <div className="page-terminal">
-        <PageHeader title="Surprise Momentum" desc="Stocks making unusual moves on volume, news or price right now." />
+        <PageHeader title="Surprise Momentum" desc="Stocks making unusual moves on volume, news or price right now." icon="zap" kicker="Discover" />
         <SurpriseStocks
           onSelect={(s) => {
             setTab("dashboard");
@@ -84,7 +84,7 @@ export function TabContent({
       </div>
     ) : tab === "ipo" ? (
       <div className="page-terminal">
-        <PageHeader title="IPO Tracker" desc="Upcoming, open and recently listed IPOs." />
+        <PageHeader title="IPO Tracker" desc="Upcoming, open and recently listed IPOs." icon="tag" kicker="Discover" />
         <IpoTracker
           onSelect={(s) => {
             setTab("dashboard");
@@ -123,7 +123,7 @@ export function TabContent({
       />
     ) : tab === "watchlist" ? (
       <div className="page-terminal">
-        <PageHeader title="Watchlist" desc="The stocks you follow. Scan them together or open one for a full analysis." />
+        <PageHeader title="Watchlist" desc="The stocks you follow. Scan them together or open one for a full analysis." icon="star" kicker="Discover" />
         <WatchlistManager
           symbols={watchlist}
           onChange={handleWatchlistUpdate}

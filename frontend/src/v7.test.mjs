@@ -27,9 +27,28 @@ t("rail edge states: at stop, at target, flat, no price", () => {
 });
 t("rail refuses levels it cannot draw honestly (missing, zero, wrong order for the direction)", () => {
   for (const p of [{}, { entry: 100 }, { entry: 100, stop: 98 }, { entry: 100, stop: 0, target: 106 }, { entry: NaN, stop: 98, target: 106 }, { entry: 100, stop: 100, target: 100 }]) assert.equal(railView(p).ok, false);
-  assert.equal(railView({ side: "LONG", entry: 100, stop: 102, target: 106 }).ok, false);   // a long with its stop above entry
-  assert.equal(railView({ side: "SHORT", entry: 100, stop: 98, target: 94 }).ok, false);    // a short with its stop below entry
+  assert.equal(railView({ side: "LONG", entry: 100, stop: 107, target: 106 }).ok, false);   // a long with its stop past the target
+  assert.equal(railView({ side: "SHORT", entry: 100, stop: 93, target: 94 }).ok, false);    // a short with its stop past the target
+  assert.equal(railView({ side: "LONG", entry: 100, stop: 98, target: 99 }).ok, false);     // a long whose target is below its entry
+  assert.equal(railView({ side: "SHORT", entry: 100, stop: 102, target: 101 }).ok, false);  // a short whose target is above its entry
   assert.equal(sideFrom(" short "), "SHORT"); assert.equal(sideFrom(undefined), "LONG"); assert.equal(sideFrom("weird"), "LONG");
+});
+t("trailed stop (breakeven or profit locked) still draws: rail starts at the entry, stop gets its own tick, long and short", () => {
+  const a = railView({ side: "LONG", entry: 100, stop: 102, target: 106, price: 104 });   // stop trailed above entry
+  assert.equal(a.ok, true); assert.equal(a.locked, true); assert.equal(a.entryPct, 0); assert.equal(a.stopPct, 33.3); assert.equal(a.pricePct, 66.7);
+  assert.equal(a.state, "ahead"); assert.equal(a.riskUsedPct, 0); assert.match(a.words, /profit is locked in/);
+  const b = railView({ side: "LONG", entry: 100, stop: 100, target: 106, price: 101 });   // exactly breakeven
+  assert.equal(b.ok, true); assert.equal(b.locked, true); assert.equal(b.stopPct, 0); assert.equal(b.state, "ahead");
+  const c = railView({ side: "SHORT", entry: 100, stop: 98, target: 94, price: 96 });     // short, stop trailed below entry
+  assert.equal(c.ok, true); assert.equal(c.locked, true); assert.equal(c.entryPct, 0); assert.equal(c.stopPct, 33.3); assert.equal(c.pricePct, 66.7); assert.equal(c.state, "ahead");
+  // price at or through a trailed stop = the stop is being hit, never "under water" and never a near-stop warning
+  const d = railView({ side: "LONG", entry: 100, stop: 102, target: 106, price: 101 }); assert.equal(d.state, "at_stop"); assert.equal(d.riskUsedPct, 0);
+  const e = railView({ side: "LONG", entry: 100, stop: 102, target: 106, price: 99 }); assert.equal(e.state, "at_stop"); assert.equal(e.riskUsedPct, 0); assert.equal(e.pricePct, 0);
+  const f = railView({ side: "SHORT", entry: 100, stop: 98, target: 94, price: 99 }); assert.equal(f.state, "at_stop");
+  assert.equal(railView({ side: "LONG", entry: 100, stop: 102, target: 106, price: 107 }).state, "at_target");
+  const g = railView({ side: "LONG", entry: 100, stop: 102, target: 106 }); assert.equal(g.ok, true); assert.equal(g.state, "unknown"); assert.equal(g.locked, true);
+  // a normal (untrailed) rail is untouched
+  const h = railView({ side: "LONG", entry: 100, stop: 98, target: 106, price: 103 }); assert.equal(h.locked, false); assert.equal(h.stopPct, 0); assert.equal(h.entryPct, 25);
 });
 t("exposure: money in = entry x qty, long vs short split, near-stop list, biggest first", () => {
   const v = exposureView([

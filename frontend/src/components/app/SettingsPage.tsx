@@ -2,6 +2,8 @@ import { useState } from "react";
 import { api, getApiUrl, setApiUrl, stopSessionKeepAlive } from "../../api";
 import RateLimitDashboard from "../RateLimitDashboard";
 import { PageHeader } from "../ui/PageHeader";
+import { KpiStrip } from "../ui/KpiStrip";
+import { settingsKpis } from "../settingsView";
 import { OvernightAutomationPanel } from "./OvernightAutomationPanel";
 
 async function powerOffAll() {
@@ -93,8 +95,9 @@ export function SettingsPage({
 
   return (
     <div className="page-terminal settings-page space-y-4">
-      <PageHeader title="Settings" desc="Backend address, appearance and system tools." />
+      <PageHeader title="Settings" desc="Backend address, appearance and system tools." icon="sliders" kicker="System" />
       <p className="text-xs text-mist/60 mb-2">API connection · theme · services · deploy checklist</p>
+      <KpiStrip items={settingsKpis({ backendUp, url, savedUrl: getApiUrl(), theme, dbWake: dbWakeState, dbDetail: dbWakeDetail })} label="Settings summary" />
       <section className="terminal-panel">
         <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Backend connection</h3>
         <p className="text-mist/70 text-xs mb-3 max-w-lg">

@@ -846,7 +846,10 @@ class SurpriseStockEngine:
         # ── 3. 52W proximity (15) — TIGHTENED thresholds ─────────────────────
         # In a falling index, near-52W-high stocks = genuine relative strength.
         # Tightened: ≤8% from high (was ≤5%) = top score; ≤15% (was ≤12%) = partial.
-        dist = float(static.get("dist_52w_pct") or 100.0)
+        # E148: a stock exactly AT its 52-week high has dist 0.0, which is falsy; `or 100.0` made it look far away and it lost the
+        # "Near 52W High" points. Only a missing value (None) falls back to 100.
+        _dist_raw = static.get("dist_52w_pct")
+        dist = float(_dist_raw) if _dist_raw is not None else 100.0
         if dist <= DIST_52W_BREAKOUT_PCT:
             score += 15
             if score >= 50:

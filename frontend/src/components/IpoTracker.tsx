@@ -22,6 +22,8 @@ import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import IpoFeedHealth from "./IpoFeedHealth";
 import IpoLifecycle from "./IpoLifecycle";   // design v5
+import { KpiStrip } from "./ui/KpiStrip";
+import { ipoKpis, ipoRowView } from "./ipoView";
 
 type IpoProgress = {
   status?: string;
@@ -50,18 +52,6 @@ function decisionBadgeClass(decision?: string): string {
   if (d === "SELL") return "bg-signal-sell/20 text-signal-sell border-signal-sell/40";
   if (d === "DO NOT BUY") return "bg-mist/10 text-mist/70 border-slate/50";
   return "bg-signal-hold/10 text-signal-hold border-signal-hold/30"; // HOLD
-}
-
-function stageLabel(ipo: IpoAnalysis): { text: string; tone: string } {
-  if (ipo.stage === "upcoming") return { text: `Lists ${ipo.listing_date}`, tone: "text-mist/60" };
-  if (ipo.stage === "pre_listing") return { text: "Lists today · pre-open", tone: "text-signal-hold" };
-  if (ipo.stage === "listing_day") return { text: "Listing day · live", tone: "text-signal-buy" };
-  if (ipo.stage === "listed") return { text: `Day ${ipo.days_since_listing}`, tone: "text-mist/60" };
-  // no_data_yet: Yahoo hasn't indexed this ticker yet — common for fresh NSE SME listings.
-  // Show a human-readable label instead of the raw internal stage name.
-  if (ipo.stage === "no_data_yet") return { text: "⏳ Awaiting Yahoo data", tone: "text-signal-hold/70" };
-  if (ipo.stage === "error") return { text: "⚠ Data error", tone: "text-signal-sell/70" };
-  return { text: ipo.stage || "—", tone: "text-mist/50" };
 }
 
 // Same small spinner pattern used everywhere else in the app (ScanPanel,
@@ -438,6 +428,7 @@ export default function IpoTracker({
     <div className="space-y-4">
       {/* design v5: lifecycle overview + live AI scan status (reads rows and progress already held here) */}
       <IpoLifecycle list={ipoList} scanning={ipoScanning} progress={ipoProgress} onPick={setExpandedSymbol} />
+      <KpiStrip items={ipoKpis(ipoList, totalScanned)} label="IPO Tracker summary" />
       <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
           <div>
@@ -685,12 +676,12 @@ export default function IpoTracker({
         ) : (
           <div className="space-y-2">
             {ipoList.map((ipo) => {
-              const stage = stageLabel(ipo);
-              const gainPct = ipo.current_vs_issue_pct;
+              const v = ipoRowView(ipo);   // E162: formatted text, dashes for missing values
+              const stage = { text: v.stage.text, tone: v.stage.tone === "up" ? "text-signal-buy" : v.stage.tone === "warn" ? "text-signal-hold" : v.stage.tone === "down" ? "text-signal-sell/70" : "text-mist/60" };
               return (
                 <div
                   key={ipo.symbol}
-                  className="rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5"
+                  className={`v7-ipo-row ${v.stage.tone} rounded-xl border border-slate/50 bg-ink/50 px-3 py-2.5`}
                 >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="min-w-[140px]">
@@ -705,35 +696,36 @@ export default function IpoTracker({
                   </div>
 
                   <div className="font-display tabular-nums text-[10px] text-mist/60 min-w-[110px]">
-                    <p>Issue ₹{ipo.issue_price}</p>
-                    {ipo.current_price != null && <p>CMP ₹{ipo.current_price}</p>}
+                    <p>Issue {v.issue}</p>
+                    {v.cmp && <p>CMP {v.cmp}</p>}
                   </div>
 
-                  {gainPct != null && (
+                  {v.gain && (
                     <p
                       className={`font-display tabular-nums text-xs min-w-[70px] ${
-                        gainPct >= 0 ? "text-signal-buy" : "text-signal-sell"
+                        v.gain.dir === "down" ? "text-signal-sell" : v.gain.dir === "up" ? "text-signal-buy" : "text-paper"
                       }`}
                     >
-                      {gainPct >= 0 ? "+" : ""}
-                      {gainPct.toFixed(1)}%
+                      {v.gain.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
+                      {v.gain.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                      {v.gain.text}
                     </p>
                   )}
 
-                  {ipo.ipo_score != null && (
-                    <p className="font-display tabular-nums text-[10px] text-mist/50 min-w-[70px]">
-                      Score {Math.round(ipo.ipo_score)}/100
-                    </p>
+                  {v.score && (
+                    <span className={`v7-sc ${v.score.tone}`} aria-label={`Score ${v.score.text}, ${v.score.word}`}><b className="num">{v.score.text}</b><small>{v.score.word}</small></span>
                   )}
 
                   {/* GMP shown on card face — most relevant for pre/upcoming IPOs.
-                      For already-listed stocks (days_since_listing > 1) the stock
-                      is already trading and GMP is stale/irrelevant; skip it there. */}
-                  {ipo.gmp != null && (ipo.stage === "upcoming" || ipo.stage === "pre_listing" || ipo.stage === "listing_day" || ipo.stage === "no_data_yet") && (
+                      For already-listed stocks the stock is already trading and GMP is
+                      stale/irrelevant; ipoRowView leaves it out there. */}
+                  {v.gmp && (
                     <p className={`font-display tabular-nums text-[10px] min-w-[90px] font-semibold ${
-                      ipo.gmp > 0 ? "text-signal-buy" : ipo.gmp < 0 ? "text-signal-sell" : "text-mist/60"
+                      v.gmp.dir === "up" ? "text-signal-buy" : v.gmp.dir === "down" ? "text-signal-sell" : "text-mist/60"
                     }`}>
-                      GMP ₹{ipo.gmp}{ipo.gmp_pct_of_issue != null ? ` (${ipo.gmp_pct_of_issue > 0 ? "+" : ""}${ipo.gmp_pct_of_issue.toFixed(0)}%)` : ""}
+                      {v.gmp.dir === "up" && <i className="v7-arrow" aria-hidden="true">▲</i>}
+                      {v.gmp.dir === "down" && <i className="v7-arrow" aria-hidden="true">▼</i>}
+                      {v.gmp.text}
                     </p>
                   )}
 

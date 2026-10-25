@@ -18,6 +18,8 @@ export interface RailView {
   side: Side;
   entryPct: number;      // where the entry tick sits on the rail, 0..100 (stop = 0, target = 100)
   pricePct: number;      // where the live price sits, 0..100 (clamped; the text still shows the real price)
+  locked: boolean;       // the stop has been trailed to / past the entry (breakeven or profit locked): the rail then starts at the entry, not at the stop
+  stopPct: number;       // where the stop tick sits when locked (entry = 0); equals 0 when not locked (the stop is the left edge)
   state: RailState;
   arrow: "▲" | "▼" | "•" | "";
   words: string;         // plain sentence, also used as the accessible name
@@ -26,38 +28,48 @@ export interface RailView {
 }
 
 /**
- * One formula for both directions: position = (x - stop) / (target - stop). A long has stop < entry < target, a short has stop > entry > target,
+ * One formula for both directions: position = (x - base) / (target - base), base = the stop. A long has stop < entry < target, a short has stop > entry > target,
  * and the same formula puts "stop" on the left and "target" on the right of the rail either way. Profit therefore always moves to the right.
+ * When the trail / breakeven logic has moved the stop to the entry or into profit (`locked`), base = the entry instead and the stop gets its own tick.
  */
 export function railView(p: { side?: unknown; entry?: unknown; stop?: unknown; target?: unknown; price?: unknown }): RailView {
   const side = sideFrom(p.side);
-  const bad: RailView = { ok: false, side, entryPct: 50, pricePct: 50, state: "unknown", arrow: "", words: "Stop and target are not both known, so there is no rail to draw.", riskUsedPct: 0, rewardDonePct: 0 };
+  const bad: RailView = { ok: false, side, entryPct: 50, pricePct: 50, locked: false, stopPct: 0, state: "unknown", arrow: "", words: "Stop and target are not both known, so there is no rail to draw.", riskUsedPct: 0, rewardDonePct: 0 };
   const { entry, stop, target } = p as { entry: unknown; stop: unknown; target: unknown };
   if (!isNum(entry) || !isNum(stop) || !isNum(target) || entry <= 0 || stop <= 0 || target <= 0) return bad;
   const span = target - stop;
   if (span === 0) return bad;
-  // a long needs stop < entry < target, a short needs target < entry < stop; anything else is a bad level set, not something to draw
+  // a long needs stop < entry < target, a short needs target < entry < stop (the stop is still guarding the original risk)
   const sane = side === "LONG" ? stop < entry && entry < target : target < entry && entry < stop;
-  if (!sane) return { ...bad, words: "The stop, entry and target are not in a sensible order for this direction, so the rail is not drawn." };
-  const at = (x: number): number => ((x - stop) / span) * 100;
-  const entryPct = clamp(at(entry), 0, 100);
+  // TRAILED stop: the trail / breakeven logic (both services, on by default) moves the stop to the entry or into profit. A long then has
+  // entry <= stop < target (a short: target < stop <= entry). That is a real, healthy state, not a bad level set: the rail starts at the ENTRY
+  // and a stop tick shows where profit is locked. A stop beyond the target, or a target on the wrong side of the entry, is still refused.
+  const locked = !sane && (side === "LONG" ? entry <= stop && stop < target && entry < target : target < stop && stop <= entry && target < entry);
+  if (!sane && !locked) return { ...bad, words: "The stop, entry and target are not in a sensible order for this direction, so the rail is not drawn." };
+  const base = locked ? entry : stop;             // left edge of the rail
+  const lspan = target - base;                    // never 0: locked needs stop < target (long) / target < stop (short) and entry < target (long)
+  const at = (x: number): number => ((x - base) / lspan) * 100;
+  const entryPct = locked ? 0 : clamp(at(entry), 0, 100);
+  const stopPct = locked ? clamp(at(stop), 0, 100) : 0;
   if (!isNum(p.price) || p.price <= 0) {
-    return { ok: true, side, entryPct: r1(entryPct), pricePct: r1(entryPct), state: "unknown", arrow: "", words: "No live price yet; the rail shows the stop, entry and target only.", riskUsedPct: 0, rewardDonePct: 0 };
+    return { ok: true, side, entryPct: r1(entryPct), pricePct: r1(entryPct), locked, stopPct: r1(stopPct), state: "unknown", arrow: "", words: locked ? "No live price yet; the stop has been moved up to lock in profit." : "No live price yet; the rail shows the stop, entry and target only.", riskUsedPct: 0, rewardDonePct: 0 };
   }
   const raw = at(p.price);
   const pricePct = clamp(raw, 0, 100);
   const profit = (side === "LONG" ? p.price - entry : entry - p.price);
   const toStop = Math.abs(entry - stop), toTarget = Math.abs(target - entry);
-  const riskUsedPct = profit < 0 && toStop > 0 ? clamp((-profit / toStop) * 100, 0, 100) : 0;
+  // locked: no money is at risk of the ORIGINAL loss any more, so the near-stop warning (70% of the way to the stop) never fires for it
+  const riskUsedPct = !locked && profit < 0 && toStop > 0 ? clamp((-profit / toStop) * 100, 0, 100) : 0;
   const rewardDonePct = profit > 0 && toTarget > 0 ? clamp((profit / toTarget) * 100, 0, 100) : 0;
+  const stopHit = locked ? (side === "LONG" ? p.price <= stop : p.price >= stop) : raw <= 0;
   let state: RailState; let arrow: RailView["arrow"]; let words: string;
-  if (raw <= 0) { state = "at_stop"; arrow = "▼"; words = "Price is at or through the stop."; }
+  if (stopHit) { state = "at_stop"; arrow = "▼"; words = locked ? "Price is at or through the moved-up stop: the trade is closing with its profit locked." : "Price is at or through the stop."; }
   else if (raw >= 100) { state = "at_target"; arrow = "▲"; words = "Price is at or past the target."; }
   else if (profit === 0) { state = "flat"; arrow = "•"; words = "Price is at the entry."; }
-  else if (profit > 0) { state = "ahead"; arrow = "▲"; words = `In profit: ${Math.round(rewardDonePct)}% of the way from entry to target.`; }
+  else if (profit > 0) { state = "ahead"; arrow = "▲"; words = `In profit: ${Math.round(rewardDonePct)}% of the way from entry to target.${locked ? " The stop is moved up, so profit is locked in." : ""}`; }
   else if (riskUsedPct >= 70) { state = "near_stop"; arrow = "▼"; words = `Under water: ${Math.round(riskUsedPct)}% of the way from entry to stop.`; }
   else { state = "under"; arrow = "▼"; words = `Under water: ${Math.round(riskUsedPct)}% of the way from entry to stop.`; }
-  return { ok: true, side, entryPct: r1(entryPct), pricePct: r1(pricePct), state, arrow, words, riskUsedPct: r1(riskUsedPct), rewardDonePct: r1(rewardDonePct) };
+  return { ok: true, side, entryPct: r1(entryPct), pricePct: r1(pricePct), locked, stopPct: r1(stopPct), state, arrow, words, riskUsedPct: r1(riskUsedPct), rewardDonePct: r1(rewardDonePct) };
 }
 
 /* ── 2. exposure strip: how the open money is spread, long vs short ─────────────────────────────────────────── */

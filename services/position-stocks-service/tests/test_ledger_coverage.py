@@ -74,6 +74,9 @@ def _reset_balance_key(monkeypatch):
     """ledger._last_balance_key is module-level state that leaks between
     tests; monkeypatch restores whatever it was afterwards."""
     monkeypatch.setattr(ledger, "_last_balance_key", None)
+    # E216: sync_from_broker's exposure publish is throttled by this module-level dict (unchanged figure inside
+    # _EXPOSURE_PUBLISH_MIN_INTERVAL_S is skipped), so a figure published by an earlier test made these tests see no publish.
+    monkeypatch.setattr(ledger, "_last_exposure_publish", {"value": None, "ts": 0.0})
 
 
 @pytest.fixture()

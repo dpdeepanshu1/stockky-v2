@@ -247,4 +247,22 @@ l = se.tighten_short_levels(lv(), 100.0, 0.8); check("stressed 1% stop -> 0.8% (
 l = se.tighten_short_levels(lv(), 100.0, 1.0); check("mult 1 leaves the levels alone", l.stop_price == 101.0 and l.stop_pct == 1.0)
 l = se.tighten_short_levels(lv(100.02, 0.02), 100.0, 0.5); check("a tightened stop that rounds onto price is not used", l.stop_price == 100.02 and l.stop_pct == 0.02)
 l = se.tighten_short_levels(lv(), 0.0, 0.6); check("no live price: untouched", l.stop_price == 101.0)
+# 12 E221: a 2xx answer with no order id is ambiguous (the Super Order may exist): never a plain SELL on top of it; and no phantom position when no SELL was sent
+fb(); dc.place_super_order = lambda db, **k: (BK["supers"].append(k) or {}); REF.clear(); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("no-id answer, nothing at Dhan: no plain SELL on top, nothing saved, one Super Order only", r is None and not BK["orders"] and not db.added and len(BK["supers"]) == 1 and undo_ok())
+check("no-id answer: logged as an ordinary failed order", [c[0] for c in REF] == ["SHORT_ORDER_FAILED"])
+fb(); dc.place_super_order = lambda db, **k: (BK["supers"].append(k) or {})
+dc.find_recent_buy_order = lambda db, sid, qty, super_order, exclude_ids, transaction_type: {"orderId": "REC7"} if transaction_type == "SELL" else None
+db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("no-id answer, the SELL is at Dhan: tracked, claim kept, no plain SELL", r is not None and r.dhan_super_order_id == "REC7" and not BK["orders"] and not calls["lock_rel"])
+CD.clear(); REF.clear(); epz.cooldown_symbol = lambda *a: CD.append(a)
+fb(); dc.place_super_order = lambda db, **k: (BK["supers"].append(k) or {})
+dc.find_recent_buy_order = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("order book unreadable"))
+db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("no-id answer, order book unreadable: UNKNOWN path (claim kept, rested, operator told), no plain SELL", r is None and not BK["orders"] and not db.added and not calls["lock_rel"] and len(CD) == 1 and [c[0] for c in REF] == ["SHORT_SELL_STATUS_UNKNOWN"])
+epz.cooldown_symbol = _cd_before
+fb(use_super=False); _ea = ps.entry_allowed; _n = [0]
+def _flip(): _n[0] += 1; return _n[0] == 1
+ps.entry_allowed = _flip; REF.clear(); db = DB(gate()); r = sl.attempt_short_live(db, cand); ps.entry_allowed = _ea
+check("plain short unavailable between the guard and the order: no phantom position, nothing sent, capital + lock released", r is None and not db.added and not BK["orders"] and not BK["supers"] and undo_ok() and [c[0] for c in REF] == ["SHORT_ORDER_FAILED"])
 print("ALL", ok, "OK")

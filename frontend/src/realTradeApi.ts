@@ -591,7 +591,7 @@ export interface SwingOpenPosition { mode: string; symbol: string; qty: number; 
 export interface SwingStatusDoc {
   mode: string; live_real_enabled: boolean; max_trade_value: number | null; max_positions: number | null; max_hold_days: number | null;
   universe_size: number; universe_source: string; scan: { day: string | null; ok: boolean | null; summary: string | null };
-  scan_universe: string | null; runtime: { running: boolean; last_result: unknown };
+  scan_universe: string | { source?: string | null; size?: number | null } | null; runtime: { running: boolean; last_result: unknown };
   shadow: SwingReportDoc; pause: Record<string, { paused: boolean; why: string }>; open_positions: SwingOpenPosition[]; planned: SwingLedgerRow[];
   wiring: SwingWiring; error?: string;
 }

@@ -201,7 +201,14 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
                 product_type="INTRADAY", tag="SCALP")
             super_id = str((result or {}).get("orderId") or (result or {}).get("id") or "")
             if not super_id:
+                # E221: Dhan ANSWERED but gave no id, so the SELL Super Order may well exist. That is an ambiguous outcome, never a plain refusal: look for it
+                # at Dhan (found -> track it; lookup failed -> UNKNOWN path below), and in every case never retry it as a plain SELL (a second short).
                 error_msg = "Dhan answered without an order id"
+                rec = _recover_ambiguous_sell(db, RuntimeError(error_msg), security_id, qty, sym, unknown=sell_unknown, force=True)
+                if rec:
+                    super_id, error_msg = rec, None
+                else:
+                    ambiguous = True
         except Exception as e:  # noqa: BLE001
             rec = _recover_ambiguous_sell(db, e, security_id, qty, sym, unknown=sell_unknown)
             if rec:
@@ -243,6 +250,11 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             live = float(plain.get("fill_price") or live)
             levels.stop_price = float(plain.get("stop_price") or levels.stop_price)       # the levels plain_short really sent / computed from the real fill (tick-rounded)
             levels.target_price = float(plain.get("target_price") or levels.target_price)
+
+    if error_msg is None and not super_id and plain is None:
+        # E221: no SELL was sent at all (Super Orders off and the plain short became unavailable after the guard check). Recording a position now would be a
+        # phantom short that the exit side would "cover" with a real BUY, i.e. open a long. Nothing was sent, so this is an ordinary refusal.
+        error_msg = "NO_ORDER_SENT: the plain-order short was no longer available when the order was due"
 
     if error_msg is not None and sell_unknown:
         # E180: the SELL call errored AND Dhan's order book could not be read, so a live short (a Super Order carries its own legs at the broker)
@@ -321,13 +333,13 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
     return pos
 
 
-def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: int, sym: str, unknown: Optional[list] = None) -> Optional[str]:
+def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: int, sym: str, unknown: Optional[list] = None, force: bool = False) -> Optional[str]:
     """A SELL placement that errored on OUR side (timeout / dropped connection / 5xx) may still exist at Dhan. Look for a young matching SELL before calling
     the entry failed, so a live short never goes untracked. Never raises. Returns the order id or None.
     `unknown` (E180, optional): when given, a True is appended if the Dhan lookup itself FAILED (whether the SELL is live is unknown, which is not the same as
     "looked, nothing there"). The return value is unchanged either way."""
     try:
-        if not dhan_client.is_ambiguous_placement_error(exc):
+        if not force and not dhan_client.is_ambiguous_placement_error(exc):   # E221 force: a 2xx answer with no order id is ambiguous by nature
             return None
         known = set()
         for a, b in db.query(ScalpPosition.dhan_super_order_id, ScalpPosition.dhan_entry_order_id).filter(ScalpPosition.dhan_security_id == str(security_id)).all():

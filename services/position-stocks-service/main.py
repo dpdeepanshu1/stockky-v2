@@ -2314,6 +2314,19 @@ def review_fixes_status(db: Session = Depends(get_db)):
     }
 
 
+def _row_charges(r):
+    """E215: estimated round-trip charges of one settled trade, from the same formula the charges ledger books
+    (charges_ledger.charges_for_trade), so the Trades CSV column matches /charges/trades. None when the row is not
+    settled or has no usable prices/quantity; never raises."""
+    try:
+        if not charges_ledger._bookable(r):
+            return None
+        short = str(getattr(r, "side", "") or "").strip().upper() == "SHORT"
+        return round(charges_ledger.charges_for_trade(r.entry_price, r.exit_price, r.quantity, short=short)["total"], 2)
+    except Exception:
+        return None
+
+
 @app.get("/trades/history")
 def trades_history(
     db: Session = Depends(get_db),
@@ -2383,6 +2396,7 @@ def trades_history(
                 "exit_price": r.exit_price,
                 "quantity": r.quantity,
                 "realized_pnl": r.realized_pnl,
+                "charges": _row_charges(r),   # E215: round-trip charges of a settled trade (same formula as the charges ledger), else null
                 "realized_pnl_pct": r.realized_pnl_pct,
                 "max_price_seen": r.max_price_seen,
                 "min_price_seen": r.min_price_seen,

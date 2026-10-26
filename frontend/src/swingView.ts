@@ -45,7 +45,16 @@ export function verdictView(code: unknown, reasons: unknown): { code: string; to
 
 function scanLine(doc: SwingStatusDoc): { tone: Tone; text: string } {
   const s = doc.scan;
-  const list = doc.scan_universe ? `, stock list: ${doc.scan_universe}` : "";
+  // E220: the backend stores {source, size} for the list the scan used (older rows may hold a plain string); an object used to print "[object Object]".
+  const su = doc.scan_universe;
+  let list = "";
+  if (typeof su === "string" && su) list = `, stock list: ${su}`;
+  else if (su && typeof su === "object") {
+    const n = isNum(su.size) ? su.size : null;
+    const src = typeof su.source === "string" && su.source ? su.source : null;
+    const same = n === doc.universe_size && (src === null || src === doc.universe_source);
+    if (!same && (n !== null || src)) list = `, stock list used: ${n !== null ? `${n} stocks` : "?"}${src ? ` (${src})` : ""}`;
+  }
   const uni = `${isNum(doc.universe_size) ? doc.universe_size : "?"} stocks (${doc.universe_source || "unknown source"})`;
   if (!s || !s.day) return { tone: "warn", text: `No evening scan stored yet. It runs after the scan time on a trading day. Universe: ${uni}.` };
   const text = `Newest scan for the ${s.day} session${s.summary ? `: ${s.summary}` : ""}${list}. Universe: ${uni}.`;

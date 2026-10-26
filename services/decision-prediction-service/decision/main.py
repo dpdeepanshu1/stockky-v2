@@ -45,6 +45,14 @@ def _safe_int(val, default=50):
     except (TypeError, ValueError):
         return default
 
+def _first_present(*vals):
+    """E219: first argument that is not None. `a or b` read a real 0 (a live win rate of 0.0 = every evaluated outcome lost) as missing."""
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _safe_float(val, default=None):
     try:
         if val is None:
@@ -1524,7 +1532,7 @@ async def _decide_impl(
             "extended_short": bool(technical.get("extended_short")),
             "thin_history": bool(technical.get("data_insufficient") or technical.get("thin_history")),
             "low_liquidity": bool(technical.get("low_liquidity")),
-            "live_win_rate": (training or {}).get("live_win_rate") or (training or {}).get("win_rate"),
+            "live_win_rate": _first_present((training or {}).get("live_win_rate"), (training or {}).get("win_rate")),   # E219: a real 0.0 is not missing
             "live_win_rate_n": int((training or {}).get("live_win_rate_n") or 0),
             "news_as_of": (news or {}).get("as_of") or (news or {}).get("fetched_at") or (news or {}).get("updated_at"),
             "sentiment_as_of": ((sentiment or {}).get("as_of") or (sentiment or {}).get("fetched_at")) if isinstance(sentiment, dict) else None,
@@ -1561,7 +1569,7 @@ async def _decide_impl(
             market_adjustment,
         )
 
-        live_wr = (training or {}).get("live_win_rate") or (training or {}).get("win_rate")
+        live_wr = _first_present((training or {}).get("live_win_rate"), (training or {}).get("win_rate"))   # E219: a real 0.0 is not missing (strongest "raise the bar" signal)
         live_n = int((training or {}).get("live_win_rate_n") or 0)
         # Prefer similarity-based success rate (0–100) when available
         if live_wr is None and (training or {}).get("t1_success_probability") is not None:

@@ -202,7 +202,17 @@ class TestAngelOneRestRows:
         row = out["quotes"][0]
         assert row["previous_close"] is None and row["day_change_pct"] is None
 
-    def test_zero_ltp_falls_back_to_close_and_shows_no_move(self, harness):
+    def test_zero_ltp_is_not_served_as_a_live_price(self, harness, monkeypatch):
+        # E218: this used to assert the close fallback (a previous close published as a fresh live price). Now such a row is left
+        # unpriced by this stage; QUOTE_BULK_ANGELONE_CLOSE_FALLBACK=1 brings the old behaviour back (next test).
+        monkeypatch.delenv("QUOTE_BULK_ANGELONE_CLOSE_FALLBACK", raising=False)
+        cache, st = harness
+        st.ao_rows = [{"symbolToken": "TBBB", "ltp": 0, "close": 95.0}]
+        out, _ = _bulk(["BBB"])
+        assert out["quotes"] == []
+
+    def test_zero_ltp_close_fallback_switch_restores_old_row(self, harness, monkeypatch):
+        monkeypatch.setenv("QUOTE_BULK_ANGELONE_CLOSE_FALLBACK", "1")
         cache, st = harness
         st.ao_rows = [{"symbolToken": "TBBB", "ltp": 0, "close": 95.0}]
         out, _ = _bulk(["BBB"])

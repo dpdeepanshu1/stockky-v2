@@ -1299,6 +1299,9 @@ EXIT_FILL_CONFIRM_ONCE = _get_bool("EXIT_FILL_CONFIRM_ONCE", True)
 STOPOUT_GUARD_ENABLED = _get_bool("STOPOUT_GUARD_ENABLED", True)
 STOPOUT_DAY_PAUSE_N = _get_int("STOPOUT_DAY_PAUSE_N", 3)            # 0 = no day pause
 STOPOUT_SYMBOL_BLOCK = _get_bool("STOPOUT_SYMBOL_BLOCK", True)
+# E220: a manual BUY is refused while the market is closed and after today's one-shot EOD sweep has run (orders/manual_buy_window.py). false = the old
+# behaviour (the manual route checked neither). A money-safety rule: not part of any report-driven auto-calibration.
+MANUAL_BUY_WINDOW_GUARD = _get_bool("MANUAL_BUY_WINDOW_GUARD", True)
 # Minimum whole shares per automatic entry, checked after every sizing step (VIX / calendar / opening half-size). Below it = SKIPPED (MIN_QTY).
 # 1-2 share trades cannot scale out or trail and pay the same fixed costs. 0 = off. The forced 1-share first live order is never gated.
 ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))

@@ -1659,7 +1659,9 @@ async def training_score(symbol: str):
     live_wr = None
     try:
         st = get_training_status()
-        live_wr = st.get("live_win_rate") or st.get("win_rate") or st.get("overall_win_rate")
+        # E219: first value that is present; `or` read a real 0.0 (every evaluated outcome lost) as missing and returned None, so the closed loop
+        # stopped raising the bar exactly when the live edge was worst.
+        live_wr = next((v for v in (st.get("live_win_rate"), st.get("win_rate"), st.get("overall_win_rate")) if v is not None), None)
         live_n = st.get("live_win_rate_n") or 0
     except Exception:
         pass

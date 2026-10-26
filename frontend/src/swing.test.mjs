@@ -80,6 +80,13 @@ assert.deepEqual(prob.problems, ["DEMO: the gate is not armed"], "non-string pro
 assert.deepEqual(prob.pauses, [{ mode: "DEMO", why: "3 losses in a row" }]);
 
 // scan: none stored yet / failed scan
+// E220: scan_universe is {source, size} from the backend: never "[object Object]"
+const objSame = swingView(doc({ scan_universe: { source: "env", size: 744 }, universe_size: 744, universe_source: "env" }));
+assert.doesNotMatch(objSame.scan.text, /object Object/);
+assert.doesNotMatch(objSame.scan.text, /stock list/);
+const objDiff = swingView(doc({ scan_universe: { source: "builtin", size: 118 }, universe_size: 744, universe_source: "env" }));
+assert.match(objDiff.scan.text, /stock list used: 118 stocks \(builtin\)/);
+assert.doesNotMatch(objDiff.scan.text, /object Object/);
 const noscan = swingView(doc({ scan: { day: null, ok: null, summary: null }, scan_universe: null }));
 assert.equal(noscan.scan.tone, "warn");
 assert.match(noscan.scan.text, /No evening scan stored yet/);

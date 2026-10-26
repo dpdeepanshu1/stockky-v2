@@ -397,6 +397,26 @@ def _mark_uncertain_buy(mode: str, symbol: str) -> None:
     _UNCERTAIN_BUYS[(mode, symbol)] = ist_today_str()
 
 
+# E217: symbols whose BUY Dhan rejected today for being outside the exchange price band. The reject branch of evaluate_mode always said
+# "skipping this candidate for the rest of today" but nothing enforced it: the next candidate row for the symbol was evaluated again, sent again
+# and rejected again (each try also spends the shared Dhan order budget). Process memory, like _UNCERTAIN_BUYS; a restart forgets it (Dhan then
+# simply rejects once more). {(mode, symbol): IST date}
+_CIRCUIT_REJECTED: dict = {}
+
+
+def _mark_circuit_rejected(mode: str, symbol: str) -> None:
+    from tz_utils import ist_today_str
+    _CIRCUIT_REJECTED[(mode, symbol)] = ist_today_str()
+
+
+def _circuit_rejected_today(mode: str, symbol: str) -> bool:
+    try:
+        from tz_utils import ist_today_str
+        return _CIRCUIT_REJECTED.get((mode, symbol)) == ist_today_str()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _uncertain_buy_active(mode: str, symbol: str) -> bool:
     try:
         from tz_utils import ist_today_str
@@ -804,6 +824,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT",
                                    "reasoning": decision.reasoning, "risk_verdict": None})
+            continue
+
+        # ── Gate 1c (E217): Dhan already rejected this symbol today as outside its price band ─────────────────
+        if _circuit_rejected_today(mode, cand.symbol):
+            _wait(f"{cand.symbol}: Dhan rejected a BUY today as outside the exchange price band - not tried again until tomorrow.")
+            decision.gate_tag = "circuit_rejected_today"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": decision.reasoning,
+                                   "risk_verdict": None, "gate_tag": "circuit_rejected_today"})
             continue
 
         # ── Gate 2: price available ───────────────────────────────────────────
@@ -1883,6 +1912,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         entered       -= 1
                         waited        += 1
                         reserved_cash -= decision.proposed_qty * entry_price
+                        _mark_circuit_rejected(mode, cand.symbol)   # E217: the "skipping for today" above is now real
                         db.commit()
                         logger.warning(
                             "real-trade entry: %s BUY rejected — circuit limit. "

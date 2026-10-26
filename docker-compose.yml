@@ -661,8 +661,9 @@ services:
       - ANGELONE_SCRIP_MASTER_BG_START_DELAY_S=${ANGELONE_SCRIP_MASTER_BG_START_DELAY_S:-30}
       # E98 Market Weather: live = tighten-only overlays for one day (see real-trade-service). Back to shadow clears today's overlay at once.
       - MARKET_STATE_MODE=${MARKET_STATE_MODE:-live}
-      # E98 short selling: shadow = log every short Stockky would have taken, place NO order. off = nothing. (No live choice exists yet.)
-      - SHORT_MODE=${SHORT_MODE:-shadow}
+      # E224 short selling: live = real SELL Super Orders (1 share max: SHORT_LIVE_QTY_CAP=1) BUT only after the Dhan SELL probe (job dhan_sell_probe) has a PASS on record
+      # (SHORT_LIVE_REQUIRES_PROBE=true), only with the armed / module / auto-pilot switches on, and always with a broker stop. shadow = log only. off = nothing.
+      - SHORT_MODE=${SHORT_MODE:-live}
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       - scrip-cache-ps:/data/scrip-cache

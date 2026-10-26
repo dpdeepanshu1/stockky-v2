@@ -370,6 +370,13 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         from tz_utils import is_market_open_ist
         if not is_market_open_ist(now, honor_session_proof=False) or short_gates.time_window({}, now):
             return out
+        if cm == "live":
+            # E222: live shorts are automatic entries - while the module is off, auto-pilot is off or the service is not armed, skip the scan and the quality-gate calls too.
+            from orders import short_live as _sl_off
+            _off = await asyncio.to_thread(_sl_off.automatic_entry_off, db)
+            if _off:
+                out["skipped"] = _off[0]
+                return out
         _stats["cycles"] = _stats.get("cycles", 0) + 1
         from screening import quality_gate
         from screening.engine import scan_shorts

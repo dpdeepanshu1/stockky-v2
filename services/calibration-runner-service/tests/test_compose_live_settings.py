@@ -40,9 +40,9 @@ def test_both_trading_services_market_state_live():
         assert _default_of(_env(svc)["MARKET_STATE_MODE"], "MARKET_STATE_MODE") == "live", svc
 
 
-def test_position_stocks_short_mode_shadow_only():
-    # shadow (no order) is the most the compose file may ship; live shorts must stay a deliberate, separate decision
-    assert _default_of(_env("position-stocks-service")["SHORT_MODE"], "SHORT_MODE") == "shadow"
+def test_position_stocks_short_mode_live_behind_the_probe():
+    # E224: compose ships live; the real rails stay in code (SELL probe PASS required, 1-share cap, broker stop) and the compose file must not loosen them
+    assert _default_of(_env("position-stocks-service")["SHORT_MODE"], "SHORT_MODE") == "live"
     assert "SHORT_MODE" not in _env("real-trade-service"), "Real Trade is long-only"
 
 
@@ -61,7 +61,7 @@ def test_catalog_recommended_matches_compose():
         m = re.search(r'Flag\("MARKET_STATE_MODE".*?recommended="(\w+)"', txt, re.S)
         assert m and m.group(1) == "live", s
     m = re.search(r'Flag\("SHORT_MODE".*?recommended="(\w+)"', cat["position-stocks-service"], re.S)
-    assert m and m.group(1) == "shadow"
+    assert m and m.group(1) == "live"
 
 
 if __name__ == "__main__":

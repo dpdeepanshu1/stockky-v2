@@ -354,6 +354,7 @@ def _handle_failure(db: Session, cand: Any, sym: str, error_msg: str) -> None:
             intraday_eligibility.record_restriction(db, sym, detail=f"SELL rejection: {low[:200]}")
             code = "SHORT_ORDER_FAILED_RESTRICTED"
         elif dhan_client.is_intraday_cutoff_error(low):
+            entry_pause.pause_all("INTRADAY_CUTOFF", entry_pause.minutes_left_in_ist_day())   # E196: closed for the rest of today
             code = "SHORT_ORDER_FAILED_INTRADAY_CUTOFF"
         elif dhan_client.is_insufficient_funds_error(low):
             entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)

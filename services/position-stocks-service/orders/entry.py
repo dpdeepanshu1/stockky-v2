@@ -1019,6 +1019,9 @@ def attempt_entry(
                     "closed for today. Will retry tomorrow. Error: %s", error_msg,
                 )
                 ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                # E196: the exchange's intraday window is closed for the rest of today (is_intraday_cutoff_error's own docstring says to stop
+                # hammering Dhan). Nothing did: every ~15 s cycle sent another doomed BUY (each one also spends the shared order budget).
+                entry_pause.pause_all("INTRADAY_CUTOFF", entry_pause.minutes_left_in_ist_day())
                 _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}", quality=quality)
             elif dhan_client.is_insufficient_funds_error(error_msg):
                 logger.error(

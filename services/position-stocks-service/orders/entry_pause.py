@@ -30,6 +30,18 @@ def _now() -> float:
     return time.time()
 
 
+def minutes_left_in_ist_day(now=None) -> float:
+    """E196: minutes from now to the next IST midnight (at least 1). Never raises (falls back to 6 h)."""
+    try:
+        from datetime import datetime, timedelta, timezone
+        from tz_utils import IST
+        n = (now or datetime.now(timezone.utc)).astimezone(IST)
+        midnight = (n + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return max(1.0, (midnight - n).total_seconds() / 60.0)
+    except Exception:  # noqa: BLE001
+        return 360.0
+
+
 def pause_all(reason: str, minutes: float) -> None:
     """Pause every new entry for `minutes` (extends, never shortens, an active pause)."""
     global _all_until, _all_reason

@@ -1548,7 +1548,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     else:
         selected, skipped = approved_entries, []
 
-    def _mark_skipped_wait(entries) -> None:
+    def _mark_skipped_wait(entries, note: str = "") -> None:
         """Mark risk-approved entries that lose out this cycle as WAIT (unchanged text; group335 made it callable twice)."""
         nonlocal waited
         for e in entries:
@@ -1579,6 +1579,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 "the strongest setups this cycle rather than every setup that merely cleared the "
                 "individual gates — re-evaluated fresh next cycle."
             )
+            if note:
+                decision.reasoning += f" {note}"
             waited += 1
             db.add(decision)
             entry_details.append({
@@ -1844,6 +1846,18 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                             "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
                         })
                         db.commit()
+                        # E197: this early return used to skip the end-of-cycle bookkeeping. The picks still waiting (the
+                        # reserve and any selected pick not yet reached) had already been consumed, so they vanished with no
+                        # decision row, and the Board's shortlist panel kept their outcome blank. Record them as WAIT (the
+                        # engine re-evaluates fresh once REAL is re-armed) and close the shortlist, same as a normal cycle end.
+                        try:
+                            _shortlist.mark(mode, cand.symbol, f"PLACEMENT_FAILED:{str(decision.reasoning or '')[:90]}")
+                            _mark_skipped_wait(list(reserve) + list(_queue[_qi:]), note="REAL was auto-paused this cycle (Dhan IP not whitelisted), so no further BUY was tried.")
+                            _shortlist.finalize(mode)
+                            _write_behind.divert_pending_waits(db)
+                            db.commit()
+                        except Exception:  # noqa: BLE001 - bookkeeping must never block the auto-disarm below
+                            logger.exception("entry_engine: %s invalid-IP bookkeeping failed", mode)
                         from auth.dhan_credentials import disarm_on_invalid_ip
                         just_disarmed = disarm_on_invalid_ip(db, mode, str(ex))
                         if just_disarmed:

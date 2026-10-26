@@ -44,3 +44,41 @@ export function alertsKpis(c: AlertsConfig | null | undefined): AlertsKpi[] {
 
   return [channels, sending, voice, saved];
 }
+
+// E167: what the Save buttons accept (pure). The old Telegram / Discord / Slack Save sent whatever was typed, or nothing, then said
+// "saved successfully" and switched the channel on even when the backend still reported it as not connected. These checks look at the
+// SHAPE only and never echo a token or URL back in a message. An empty field on an already-connected channel just re-enables it.
+export type ChannelFields = { telegramToken?: string; telegramChatId?: string; discordUrl?: string; slackUrl?: string };
+export type ChannelConnected = { telegram?: boolean; discord?: boolean; slack?: boolean };
+export type ChannelCheck = { ok: true } | { ok: false; message: string };
+const bad = (message: string): ChannelCheck => ({ ok: false, message });
+function hostPath(url: string): { host: string; path: string } | null {
+  try { const u = new URL(url); return u.protocol === "https:" && !u.username && !u.password ? { host: u.hostname.toLowerCase(), path: u.pathname } : null; } catch { return null; }
+}
+export function checkChannelInput(channel: string, f: ChannelFields, connected: ChannelConnected): ChannelCheck {
+  if (channel === "telegram") {
+    const token = (f.telegramToken ?? "").trim(), chat = (f.telegramChatId ?? "").trim();
+    if (!token && !connected.telegram) return bad("Paste the Telegram bot token first (from @BotFather).");
+    if (token && !/^\d{5,15}:[A-Za-z0-9_-]{30,}$/.test(token)) return bad("That does not look like a Telegram bot token (it is digits, a colon, then letters and digits).");
+    if (!chat && !connected.telegram) return bad("Enter the Telegram chat id first.");
+    if (chat && !/^(-?\d{5,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/.test(chat)) return bad("The Telegram chat id is a number (it may start with -) or a @channelname.");
+    return { ok: true };
+  }
+  if (channel === "discord" || channel === "slack") {
+    const raw = ((channel === "discord" ? f.discordUrl : f.slackUrl) ?? "").trim();
+    const name = channel === "discord" ? "Discord" : "Slack";
+    if (!raw) return connected[channel] ? { ok: true } : bad(`Paste the ${name} webhook URL first.`);
+    const hp = hostPath(raw);
+    if (!hp) return bad(`The ${name} webhook must be a full https:// address.`);
+    const hostOk = channel === "discord" ? /^((ptb|canary)\.)?(discord|discordapp)\.com$/.test(hp.host) && hp.path.startsWith("/api/webhooks/") : hp.host === "hooks.slack.com" && hp.path.startsWith("/services/");
+    return hostOk ? { ok: true } : bad(`That is not a ${name} webhook address (${channel === "discord" ? "discord.com/api/webhooks/..." : "hooks.slack.com/services/..."}).`);
+  }
+  return { ok: true };
+}
+export function saveOutcome(channel: string, cfg: { [k: string]: { configured?: boolean } | undefined } | null | undefined): { text: string; connected: boolean } {
+  const name = channel === "telegram" ? "Telegram" : channel === "discord" ? "Discord" : channel === "slack" ? "Slack" : channel;
+  const connected = cfg?.[channel]?.configured === true;
+  return connected
+    ? { text: `${name} saved and connected.`, connected: true }
+    : { text: `${name} saved, but the backend still reports it as not connected. Check the values and that the notification service is up.`, connected: false };
+}

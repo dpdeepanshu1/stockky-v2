@@ -1,6 +1,7 @@
 // Run: node --experimental-strip-types src/settingsView.test.mjs
 import assert from "node:assert/strict";
-import { settingsKpis, apiHost } from "./components/settingsView.ts";
+import { settingsKpis, apiHost, checkApiUrl, powerOffReport } from "./components/settingsView.ts";
+import { readFileSync as readSrc } from "node:fs";
 
 assert.deepEqual(settingsKpis(null), []);
 assert.deepEqual(settingsKpis(undefined), []);
@@ -54,4 +55,19 @@ assert.equal(settingsKpis({ ...base, dbWake: "error" })[3].sub, "no detail from 
 const leak = JSON.stringify(settingsKpis({ ...base, url: "https://gw.example.com/secret?token=abc", savedUrl: "https://gw.example.com/secret?token=abc" }));
 assert.ok(!leak.includes("secret") && !leak.includes("token"));
 for (const k of ok) assert.equal(typeof k.value, "string");
+
+// E168: Save URL and Power Off
+for (const good of ["https://gw.example.com", "http://localhost:8000", "https://my-vm.duckdns.org:8443", ""]) assert.deepEqual(checkApiUrl(good), { ok: true }, `accept ${good}`);
+for (const bad of ["hello world", "https://hello world", "ftp://x.example.com", "javascript:alert(1)", "https://", "://x"]) { const r = checkApiUrl(bad); assert.equal(r.ok, false, `refuse ${bad}`); assert.ok(r.message.length > 20); }
+assert.deepEqual(checkApiUrl(null), { ok: true }); assert.deepEqual(checkApiUrl(undefined), { ok: true });
+const okRep = powerOffReport({ ok: true, message: "All off.", phases: [{ phase: "scan", detail: "stopped" }, { phase: "feed" }, null, { detail: "x" }] });
+assert.equal(okRep.ok, true); assert.equal(okRep.text, "All off.\n\nscan: stopped\nfeed: —\n\nReady for fresh start. Refreshing…");
+assert.equal(powerOffReport({ ok: true }).text, "Processes stopped.\n\nReady for fresh start. Refreshing…");
+const failRep = powerOffReport({ ok: false, error: "403: admin login required" });
+assert.equal(failRep.ok, false); assert.ok(/403: admin login required/.test(failRep.text) && /Nothing was confirmed stopped/.test(failRep.text) && !/Ready for fresh start/.test(failRep.text));
+assert.ok(/no answer from the backend/.test(powerOffReport({ ok: false }).text)); assert.ok(/no answer from the backend/.test(powerOffReport({ ok: false, error: "  " }).text));
+const sp = readSrc(new URL("./components/app/SettingsPage.tsx", import.meta.url), "utf8");
+assert.ok(/\n  if \(!window\.confirm\(/.test(sp) && /api\.powerOff\(\)/.test(sp) && !/fetch\(`\$\{base\}\/ops\/power-off`/.test(sp) && !/import\.meta\.env\.VITE_API_URL \|\| ""/.test(sp), "Power Off asks first and uses the api wrappers (saved address)");
+assert.ok(/if \(!report\.ok\) return;/.test(sp) && /checkApiUrl\(normalizeGatewayUrl\(url\)\)/.test(sp) && /url: normalizeGatewayUrl\(url\)/.test(sp), "failed power-off keeps the page; Save URL checks; the strip reads the normalised address");
+assert.ok(/Open Service Manager/.test(sp) && /Wake DB/.test(sp) && /Deploy checklist/.test(sp), "sections kept");
 console.log("settingsView ok");

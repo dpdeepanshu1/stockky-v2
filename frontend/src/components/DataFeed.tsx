@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
 import { KpiStrip } from "./ui/KpiStrip";
-import { feedKpis } from "./feedView";
+import { feedKpis, checkAlertTarget, alertRowView } from "./feedView";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
 type Job = {
@@ -484,11 +484,13 @@ export default function DataFeed() {
             disabled={alertBusy || !alertSym || !alertTarget}
             className="font-display tabular-nums text-xs px-3 py-1.5 rounded bg-signal-buy/30 text-white border border-signal-buy/40 disabled:opacity-50"
             onClick={async () => {
+              const chk = checkAlertTarget(alertSym, alertTarget);   // E163: refuse a non-number target before it is sent
+              if (!chk.ok) { setErr(chk.reason); return; }
               setAlertBusy(true);
               try {
                 await api.addPriceAlert({
-                  symbol: alertSym,
-                  target_price: Number(alertTarget),
+                  symbol: chk.symbol,
+                  target_price: chk.target,
                   direction: alertDir,
                 });
                 setAlertSym("");
@@ -527,14 +529,18 @@ export default function DataFeed() {
           {(alerts || []).length === 0 ? (
             <li className="font-display tabular-nums text-[11px] text-mist/50">No alerts yet</li>
           ) : (
-            alerts.map((a) => (
+            alerts.map((a) => {
+              const v = alertRowView(a);   // E163: formatted text, dash for a bad target
+              return (
               <li
                 key={a.id}
-                className="flex justify-between items-center font-display tabular-nums text-[11px] text-mist border-b border-slate/40 py-1"
+                className={`v7-alert-row ${v.word || "flat"} flex justify-between items-center font-display tabular-nums text-[11px] text-mist border-b border-slate/40 py-1 pl-2`}
               >
                 <span>
-                  {a.symbol} {a.direction} ₹{a.target_price}
-                  {a.trigger_count ? ` · fired ${a.trigger_count}×` : ""}
+                  {v.symbol}{" "}
+                  <span className="v7-alert-dir">{v.glyph && <i aria-hidden="true">{v.glyph}</i>}{v.word || "—"}</span>{" "}
+                  {v.target}
+                  {v.fired ? ` · ${v.fired}` : ""}
                 </span>
                 <button
                   type="button"
@@ -548,7 +554,8 @@ export default function DataFeed() {
                   Remove
                 </button>
               </li>
-            ))
+              );
+            })
           )}
         </ul>
       </div>

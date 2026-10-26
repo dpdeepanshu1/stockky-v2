@@ -206,3 +206,19 @@ html[data-hidden="true"] .v7-beat-run { animation-play-state: paused; }
 .v7-ipo-row.up { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
 .v7-ipo-row.warn { box-shadow: inset 3px 0 0 rgb(var(--warn-rgb)); }
 .v7-ipo-row.down { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
+
+/* ---- E163: Data Feed price-alert rows: direction glyph + word, state edge. Static, tokens only, no animation. */
+.v7-alert-row { box-shadow: inset 3px 0 0 rgb(var(--muted-2-rgb) / 0.5); }
+.v7-alert-row.above { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
+.v7-alert-row.below { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
+.v7-alert-dir { font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.65rem; }
+.v7-alert-dir i { font-style: normal; margin-right: 0.2rem; font-size: 0.6rem; }
+
+/* ---- E164: Training Lab prediction outcome marks: glyph + word so a hit / miss / pending / not-evaluated cell never relies on colour. Static, tokens only, no animation. */
+.v7-mark { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+.v7-mark i { font-style: normal; }
+.v7-mark small { font-size: 0.6rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
+.v7-mark.up small { color: rgb(var(--buy-rgb)); } .v7-mark.down small { color: rgb(var(--sell-rgb)); } .v7-mark.flat small { color: rgb(var(--muted-2-rgb)); }
+
+/* ---- E166: Watchlist Add box message. Static, tokens only, no animation. */
+.v7-wl-note { margin: -0.5rem 0 0.75rem; font-size: 0.75rem; font-weight: 700; color: rgb(var(--warn-rgb)); }

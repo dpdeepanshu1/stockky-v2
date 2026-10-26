@@ -65,3 +65,27 @@ export function feedKpis(i: FeedInput | null | undefined, nowMs: number): FeedKp
   }
   return out;
 }
+
+// E163: Price Alerts card (pure). A target that is not a positive number is refused before it is sent (Number("abc") is NaN and
+// went to the backend as null); a row with a missing or non-numeric target shows a dash, never "₹undefined" / "₹NaN".
+export type AlertTargetCheck = { ok: true; symbol: string; target: number } | { ok: false; reason: string };
+export function checkAlertTarget(symbol: unknown, target: unknown): AlertTargetCheck {
+  const sym = typeof symbol === "string" ? symbol.trim().toUpperCase() : "";
+  if (!sym) return { ok: false, reason: "Enter a symbol." };
+  const raw = typeof target === "string" ? target.replace(/[₹,\s]/g, "") : target;
+  const n = typeof raw === "number" ? raw : raw === "" || raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "Target price must be a number above 0." };
+  return { ok: true, symbol: sym, target: n };
+}
+export type AlertRowView = { symbol: string; glyph: "▲" | "▼" | ""; word: "above" | "below" | ""; target: string; fired: string | null };
+export function alertRowView(a: { symbol?: unknown; direction?: unknown; target_price?: unknown; trigger_count?: unknown } | null | undefined): AlertRowView {
+  const dir = a?.direction === "above" ? "above" : a?.direction === "below" ? "below" : "";
+  const t = num(a?.target_price), f = num(a?.trigger_count);
+  return {
+    symbol: typeof a?.symbol === "string" && a.symbol ? a.symbol : "—",
+    glyph: dir === "above" ? "▲" : dir === "below" ? "▼" : "",
+    word: dir,
+    target: t == null ? "—" : `₹${t}`,
+    fired: f != null && f > 0 ? `fired ${f}×` : null,
+  };
+}

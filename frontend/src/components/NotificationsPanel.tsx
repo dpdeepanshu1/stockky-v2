@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { KpiStrip } from "./ui/KpiStrip";
-import { alertsKpis } from "./alertsView";
+import { alertsKpis, checkChannelInput, saveOutcome } from "./alertsView";
 import { api, NotificationConfig } from "../api";
 
 type Channel = "telegram" | "discord" | "slack" | "callmebot";
@@ -80,6 +80,10 @@ export default function NotificationsPanel() {
     try {
       let update: Parameters<typeof api.saveNotificationConfig>[0] = {};
       let extras: string[] = [];
+      // E167: look at the shape of what was typed before anything is sent (never echoed back)
+      const chk = checkChannelInput(channel, { telegramToken, telegramChatId, discordUrl, slackUrl },
+        { telegram: config?.telegram?.configured === true, discord: config?.discord?.configured === true, slack: config?.slack?.configured === true });
+      if (!chk.ok) { setTestResult(chk.message); return; }
       if (channel === "telegram") {
         update = {
           telegram_bot_token: telegramToken || undefined,
@@ -141,7 +145,7 @@ export default function NotificationsPanel() {
             : "Saved, but backend still reports not connected. Check the username format (@dpdeep29) and that notification service is up."
         );
       } else {
-        setTestResult(`${channel} saved successfully.`);
+        setTestResult(saveOutcome(channel, cfg as any).text);   // E167: say so when the backend still reports it as not connected
       }
     } catch (e) {
       const msg = (e as Error).message || "Save failed";

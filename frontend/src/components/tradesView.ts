@@ -37,3 +37,30 @@ export function tradesKpis(s: PortfolioLike | null | undefined): TradesKpi[] {
     { label: "Max drawdown", value: dd != null ? `${dd.toFixed(1)}%` : "—", sub: dd != null ? "as reported, not re-computed" : "not reported yet", tone: "flat" },
   ];
 }
+
+// E165: Paper Trades card bodies (pure). Missing or non-numeric values are a dash and are NOT coloured as a gain (the old cells used
+// `(pnl ?? 0) >= 0`, so a position with no P&L yet was drawn green with an up edge). A real 0 is flat. Long decimals are rounded to 2.
+const toNum = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") { const n = Number(v); return Number.isFinite(n) ? n : null; }
+  return null;
+};
+export type PnlView = { text: string; dir: "up" | "down" | "flat" | null };
+export function pnlView(v: unknown): PnlView {
+  const n = toNum(v);
+  if (n == null) return { text: "—", dir: null };
+  const r = Math.round(n * 100) / 100;
+  return { text: `${r > 0 ? "+" : ""}${r}%`, dir: r > 0 ? "up" : r < 0 ? "down" : "flat" };
+}
+export function dirOf(v: unknown): "up" | "down" | "flat" | null {
+  const n = toNum(v);
+  return n == null ? null : n > 0 ? "up" : n < 0 ? "down" : "flat";
+}
+export function levelText(v: unknown): string {
+  const n = toNum(v);
+  return n == null || n <= 0 ? "—" : `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+export function countText(v: unknown): string {
+  const n = toNum(v);
+  return n == null || n < 0 ? "—" : String(Math.round(n));
+}

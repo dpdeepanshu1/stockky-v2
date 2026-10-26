@@ -73,3 +73,16 @@ export function label(rec: AddedRecord | undefined | null): string {
   if (!rec) return "";
   return rec.source === "added" ? "since added" : "since first seen";
 }
+
+// E166: what the Add box accepts (pure). The old box added ANY text (spaces, punctuation, a pasted company name) to the saved
+// watchlist and silently cleared a duplicate. NSE codes are letters, digits, "&" and "-" (M&M, BAJAJ-AUTO), up to 20 characters.
+export type SymbolCheck =
+  | { ok: true; symbol: string }
+  | { ok: false; reason: "empty" | "duplicate" | "invalid"; symbol: string; message: string };
+export function checkSymbol(raw: unknown, existing: string[]): SymbolCheck {
+  const sym = (typeof raw === "string" ? raw : "").trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
+  if (!sym) return { ok: false, reason: "empty", symbol: "", message: "" };
+  if (!/^[A-Z0-9][A-Z0-9&-]{0,19}$/.test(sym)) return { ok: false, reason: "invalid", symbol: sym, message: "Use the NSE code (letters and digits, for example TCS or M&M), not a name." };
+  if (existing.includes(sym)) return { ok: false, reason: "duplicate", symbol: sym, message: `${sym} is already on your watchlist.` };
+  return { ok: true, symbol: sym };
+}

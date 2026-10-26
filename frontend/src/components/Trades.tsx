@@ -8,7 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { KpiStrip } from "./ui/KpiStrip";
-import { tradesKpis } from "./tradesView";
+import { tradesKpis, pnlView, dirOf, levelText, countText } from "./tradesView";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
 import { getSafePrice } from "../priceDisplay";
@@ -18,8 +18,10 @@ import { paperNet, paperNetTotals } from "../paperNet";
 
 const fmtMoney = (n: number | null | undefined) =>
   n == null || !Number.isFinite(Number(n)) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const fmtPct = (n: number | null | undefined) =>
-  n == null || !Number.isFinite(Number(n)) ? "—" : `${Number(n) > 0 ? "+" : ""}${n}%`;
+const fmtPct = (n: number | null | undefined) => pnlView(n).text;   // E165: rounded to 2 decimals, dash when missing
+// E165: colour + arrow only when the value is a real number; missing is neutral, never "up"
+const dirCls = (d: "up" | "down" | "flat" | null) => (d === "up" ? "text-signal-buy" : d === "down" ? "text-signal-sell" : "text-mist/60");
+const dirArrow = (d: "up" | "down" | "flat" | null) => (d === "up" ? <i className="v7-arrow" aria-hidden="true">▲</i> : d === "down" ? <i className="v7-arrow" aria-hidden="true">▼</i> : null);
 
 /** Resolve entry/exit/last from trade row without ₹NaN / ₹0 ghosts. */
 function safeTradePrice(t: any, preferred?: "entry" | "exit" | "last"): number {
@@ -523,9 +525,9 @@ export default function Trades() {
                       {t.quantity ?? "—"}
                       {" @ "}
                       {fmtPriceCell(safeTradePrice(t, "entry"))}
-                      {t.pnl_pct != null && (
-                        <span className={Number(t.pnl_pct) >= 0 ? " text-signal-buy" : " text-signal-sell"}>
-                          {" · PnL "}{Number(t.pnl_pct)}%
+                      {pnlView(t.pnl_pct).dir != null && (
+                        <span className={` ${dirCls(pnlView(t.pnl_pct).dir)}`}>
+                          {" · PnL "}{dirArrow(pnlView(t.pnl_pct).dir)}{pnlView(t.pnl_pct).text}
                         </span>
                       )}
                     </li>
@@ -704,8 +706,8 @@ export default function Trades() {
                       <td className="py-2 pr-3">{t.symbol}</td>
                       <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "entry"))}</td>
                       <td className="text-right py-2 px-2">{fmtPriceCell(safeTradePrice(t, "exit"))}</td>
-                      <td className={`text-right py-2 px-2 ${(t.pnl_pct ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-                        {fmtPct(t.pnl_pct)}
+                      <td className={`text-right py-2 px-2 ${dirCls(dirOf(t.pnl_pct))}`}>
+                        {dirArrow(dirOf(t.pnl_pct))}{fmtPct(t.pnl_pct)}
                       </td>
                       <NetCell trade={t} />
                       <td className="text-right py-2 px-2 text-mist/60">{t.exit_reason?.replace(/_/g, " ") ?? "—"}</td>
@@ -747,7 +749,7 @@ function PositionCard({
 }: {
   trade: PaperTrade; expanded: boolean; onToggle: () => void; onClose: () => void; closing: boolean;
 }) {
-  const isUp = (trade.pnl_pct ?? 0) >= 0;
+  const dir = dirOf(trade.pnl_pct);   // E165: null (no P&L yet) is neutral, not green
   const net = paperNet(trade);
   const days = daysHeld(trade.entry_date);
   return (
@@ -756,18 +758,18 @@ function PositionCard({
         onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onToggle(); } }}
         className="p-4 cursor-pointer flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
-          <div className={`w-1.5 h-10 rounded-full shrink-0 ${isUp ? "bg-signal-buy" : "bg-signal-sell"}`} />
+          <div className={`w-1.5 h-10 rounded-full shrink-0 ${dir === "up" ? "bg-signal-buy" : dir === "down" ? "bg-signal-sell" : "bg-slate"}`} />
           <div className="min-w-0">
             <div className="font-display text-lg text-paper truncate">{trade.symbol}</div>
             <div className="font-display tabular-nums text-[10px] text-mist/50">
-              {trade.quantity} sh @ {fmtPriceCell(safeTradePrice(trade, "entry"))} · {days}d held
+              {countText(trade.quantity)} sh @ {fmtPriceCell(safeTradePrice(trade, "entry"))} · {days}d held
             </div>
           </div>
         </div>
         <div className="text-right shrink-0">
           <div className="font-display tabular-nums text-sm text-paper">{fmtPriceCell(safeTradePrice(trade, "last") || Number(trade.current_price))}</div>
-          <div className={`font-display tabular-nums text-xs ${isUp ? "text-signal-buy" : "text-signal-sell"}`}>
-            {fmtPct(trade.pnl_pct)}
+          <div className={`font-display tabular-nums text-xs ${dirCls(dir)}`}>
+            {dirArrow(dir)}{fmtPct(trade.pnl_pct)}
           </div>
         </div>
         <span className={`font-display tabular-nums text-mist/40 text-xs transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}>▾</span>
@@ -778,15 +780,15 @@ function PositionCard({
           <div className="grid grid-cols-3 gap-3 mt-3 font-display tabular-nums text-xs">
             <div>
               <div className="text-mist/40 text-[10px] uppercase">Target</div>
-              <div className="text-signal-buy">{trade.target ? `₹${trade.target}` : "—"}</div>
+              <div className="text-signal-buy">{levelText(trade.target)}</div>
             </div>
             <div>
               <div className="text-mist/40 text-[10px] uppercase">Stop loss</div>
-              <div className="text-signal-sell">{trade.stop_loss ? `₹${trade.stop_loss}` : "—"}</div>
+              <div className="text-signal-sell">{levelText(trade.stop_loss)}</div>
             </div>
             <div>
               <div className="text-mist/40 text-[10px] uppercase">P&amp;L Amount</div>
-              <div className={isUp ? "text-signal-buy" : "text-signal-sell"}>{fmtMoney(trade.pnl_amount)}</div>
+              <div className={dirCls(dirOf(trade.pnl_amount))}>{fmtMoney(trade.pnl_amount)}</div>
               {net && (
                 <div className={`text-[10px] ${net.net >= 0 ? "text-signal-buy" : "text-signal-sell"}`} title={`Gross minus about ${fmtMoney(net.charges)} of Dhan delivery charges if closed now (estimate)`}>
                   {fmtMoney(net.net)} after charges (est.)
@@ -828,7 +830,7 @@ function ReportTable({ rows, periodLabel }: { rows: TradeReportBucket[]; periodL
               <td className="text-right py-2 px-2 text-mist/70">{r.trades_opened}</td>
               <td className="text-right py-2 px-2 text-mist/70">{r.trades_closed}</td>
               <td className="text-right py-2 px-2 text-mist/70">{r.win_rate == null ? "—" : `${r.win_rate}%`}</td>
-              <td className={`text-right py-2 pl-2 ${r.realized_pnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+              <td className={`text-right py-2 pl-2 ${dirCls(dirOf(r.realized_pnl))}`}>
                 {fmtMoney(r.realized_pnl)}
               </td>
             </tr>

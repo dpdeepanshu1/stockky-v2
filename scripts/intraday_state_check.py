@@ -106,7 +106,13 @@ def phase_shadow_shorts(call: Call, rt: str, ps: str, expect_mode: str, rep: Rep
         else:
             rep.add("INFO", f"last SELL probe verdict: {verdict}")
     st, js = call(rt + "/health")
-    bars = ((js.get("orb") or {}).get("bars") if isinstance(js, dict) and isinstance(js.get("orb"), dict) else None)
+    bars = _orb_bars(js)
+    if st == 200 and bars is None:
+        # E223: real-trade's public /health never carried the ORB counters; they live on the admin-only GET /review-fixes/status
+        # (main.py: "orb": {..., "bars": ...}). The check warned "no orb.bars counters" on every run whatever E113 was doing.
+        st2, js2 = call(rt + "/review-fixes/status")
+        if st2 == 200:
+            bars = _orb_bars(js2)
     if st != 200:
         rep.add("FAIL", f"real-trade GET /health answered {st or 'no response'}")
     elif isinstance(bars, dict):
@@ -115,7 +121,14 @@ def phase_shadow_shorts(call: Call, rt: str, ps: str, expect_mode: str, rep: Rep
         if isinstance(hit, (int, float)) and hit == 0 and (miss or stale) and (miss + stale) >= 10:
             rep.add("WARN", f"every bar lookup missed or was stale so far (miss {miss}, stale {stale}): the close-trigger fields will be empty today")
     else:
-        rep.add("WARN", "real-trade /health carries no orb.bars counters (E113 not running?)")
+        rep.add("WARN", "real-trade carries no orb.bars counters on /health or /review-fixes/status (admin token missing or expired? E113 not running?)")
+
+
+def _orb_bars(js: Any) -> Optional[dict]:
+    """The orb.bars counter dict from a /health or /review-fixes/status body, or None."""
+    orb = js.get("orb") if isinstance(js, dict) else None
+    bars = orb.get("bars") if isinstance(orb, dict) else None
+    return bars if isinstance(bars, dict) else None
 
 
 def phase_shorts_flat(call: Call, ps: str, rep: Report) -> None:

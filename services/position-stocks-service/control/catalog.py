@@ -309,7 +309,7 @@ CATALOG = (
     # ---------------- Short selling (Part 2): mode switch, risk multiplier and the step-5 shadow entry rules ----------------
     Flag("SHORT_MODE", "Short selling mode", "Short selling", "enum", choices=("off", "shadow", "live"),
          help="off = no short is ever considered. shadow (default) = log every short Stockky would have taken (and what happened next); NO order is placed. live = REAL short orders: a SELL Super Order with its broker stop leg, at most SHORT_LIVE_QTY_CAP shares each (ships 1). Only you set live; a calibrator never can. If the SELL Super Order is refused no short is opened. Position Stocks only; Real Trade stays long-only.",
-         targets=(("config", "SHORT_MODE"),), live=True, shipped="off", recommended="shadow", looser="neutral", evidence="S0/T6: Dhan's answer on SELL Super Orders + a clean 1-share round trip; then T7 with SHORT_LIVE_QTY_CAP=1"),
+         targets=(("config", "SHORT_MODE"),), live=True, shipped="off", recommended="live", looser="neutral", evidence="S0/T6: Dhan's answer on SELL Super Orders + a clean 1-share round trip; then T7 with SHORT_LIVE_QTY_CAP=1"),
     Flag("SHORT_LIVE_QTY_CAP", "Live short size cap (shares)", "Short selling", "int", lo=1, hi=1000, looser="higher",
          help="The most shares one live short may have, whatever the budget says. 1 = day one of live shorts is a single share. Raise it only after clean days (every cover filled, no stop missed). Only used when Short selling mode is live. Position Stocks only; changes no long trade.",
          targets=(("config", "SHORT_LIVE_QTY_CAP"),), live=True, shipped="1", recommended="1"),

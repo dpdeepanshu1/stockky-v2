@@ -67,7 +67,7 @@ def test_catalog_switch_has_a_live_choice_that_counts_as_loosening_and_is_off_by
     assert m and m.group(1) == "off"
     assert re.search(r'Flag\("SHORT_MODE"[^)]*choices=\("off", "shadow", "live"\)', src, re.S)
     blk = src[src.index('Flag("SHORT_MODE"'):src.index('Flag("SHORT_LIVE_QTY_CAP"')]
-    assert 'recommended="shadow"' in blk                                    # the preset never recommends live
+    assert 'recommended="live"' in blk                                      # E224: the preset recommends live (the probe / cap rails stay)
     # enums are classified by the order of `choices` (strictest -> loosest): live is last, so shadow -> live and off -> live LOOSEN and need the confirm
     ch = re.search(r'Flag\("SHORT_MODE".*?choices=\(([^)]*)\)', src, re.S).group(1)
     order = [x.strip().strip('"') for x in ch.split(",")]

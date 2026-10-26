@@ -291,7 +291,7 @@ def test_manual_engine_default_behaviour_is_unchanged_without_swing():
 
 
 def test_switches_ship_in_shadow_and_live_is_demo_only_by_default():
-    assert config.SWING_MODE == "shadow" and config.SWING_LIVE_REAL_ENABLED is False and config.SWING_BROKER_STOP_ENABLED is False
+    assert config.SWING_MODE == "live" and config.SWING_LIVE_REAL_ENABLED is False and config.SWING_BROKER_STOP_ENABLED is False
     assert config.SWING_MAX_HOLD_DAYS == 5 and config.SWING_MAX_POSITIONS == 2 and config.SWING_PAUSE_AFTER_LOSSES == 3
 
 

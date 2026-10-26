@@ -77,6 +77,7 @@ class DB:
         outer = self
         class Q:
             def filter(s, *x): return s
+            def filter_by(s, **x): return s    # E222: the gate is read as filter_by(mode="REAL")
             def first(s): return outer.gate
             def all(s): return outer.opens if a and a[0] is models.ScalpPosition else []
         return Q()
@@ -265,4 +266,24 @@ fb(use_super=False); _ea = ps.entry_allowed; _n = [0]
 def _flip(): _n[0] += 1; return _n[0] == 1
 ps.entry_allowed = _flip; REF.clear(); db = DB(gate()); r = sl.attempt_short_live(db, cand); ps.entry_allowed = _ea
 check("plain short unavailable between the guard and the order: no phantom position, nothing sent, capital + lock released", r is None and not db.added and not BK["orders"] and not BK["supers"] and undo_ok() and [c[0] for c in REF] == ["SHORT_ORDER_FAILED"])
+# 13 E222: the three operator switches. A live short is an automatic entry: service_enabled=false or auto_pilot_enabled=false must stop it, like they stop a long
+for name, g in [("module disabled (service_enabled false)", gate(service_enabled=False)), ("auto-pilot off", gate(auto_pilot_enabled=False)),
+                ("service_enabled NULL", gate(service_enabled=None)), ("auto_pilot_enabled NULL", gate(auto_pilot_enabled=None))]:
+    reset(); REF.clear(); db = DB(g); r = sl.attempt_short_live(db, cand)
+    check(f"E222 refused: {name}: no order, no capital, no claim, nothing saved", r is None and not calls["orders"] and not calls["reserved"] and not calls["lock_rel"] and not db.added)
+    check(f"E222 refused: {name}: logged under its own code", [c[0] for c in REF] in (["SHORT_SERVICE_DISABLED"], ["SHORT_AUTO_PILOT_OFF"]))
+reset(); db = DB(gate(service_enabled=True, auto_pilot_enabled=True)); r = sl.attempt_short_live(db, cand)
+check("E222 both switches on: the short still goes through", r is not None and len(calls["orders"]) == 1)
+check("E222 helper: off cases", sl.automatic_entry_off(DB(gate(auto_pilot_enabled=False)))[0] == "SHORT_AUTO_PILOT_OFF" and sl.automatic_entry_off(DB(gate(service_enabled=False)))[0] == "SHORT_SERVICE_DISABLED"
+      and sl.automatic_entry_off(DB(gate(is_armed=False)))[0] == "SHORT_NOT_ARMED" and sl.automatic_entry_off(DB(None))[0] == "SHORT_NOT_ARMED" and sl.automatic_entry_off(DB(gate())) is None)
+# the short cycle skips its scan (no quality-gate calls) while the switches say no, and still resolves leftover shadow rows
+import asyncio, tz_utils
+se.resolve_open = lambda db, now=None: 0; sg.time_window = lambda c, n: None; tz_utils.is_market_open_ist = lambda *a, **k: True
+for name, g in [("auto-pilot off", gate(auto_pilot_enabled=False)), ("module disabled", gate(service_enabled=False)), ("not armed", gate(is_armed=False))]:
+    reset(); o = asyncio.run(se.run_short_cycle(DB(g)))
+    check(f"E222 short cycle, {name}: skipped before any scan", o.get("skipped") in ("SHORT_AUTO_PILOT_OFF", "SHORT_SERVICE_DISABLED", "SHORT_NOT_ARMED") and o["recorded"] is None)
+reset(); o = asyncio.run(se.run_short_cycle(DB(gate())))
+check("E222 short cycle, switches on: not skipped (goes on to scan)", "skipped" not in o)
+reset("shadow"); o = asyncio.run(se.run_short_cycle(DB(gate(auto_pilot_enabled=False))))
+check("E222 shadow mode is not affected (it places nothing)", "skipped" not in o)
 print("ALL", ok, "OK")

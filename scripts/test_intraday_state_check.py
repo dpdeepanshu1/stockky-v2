@@ -105,3 +105,13 @@ def test_main_exit_codes(capsys):
     assert C.main(["--phase", "overlay-clear"], call=call, now=TUE(15, 40)) == 0
     assert "OVERLAY CLEAR: PASS" in capsys.readouterr().out
     assert C.main(["--phase", "nonsense"]) == 2
+
+
+def test_t5_orb_bars_read_from_review_fixes_status_when_health_has_none():
+    """E223: the counters live on the admin-only /review-fixes/status; /health carries none."""
+    st = {"orb": {"bars": {"hit": 5, "miss": 1, "stale": 0}}}
+    code, out = go("shadow-shorts", {"/short/shadow": (200, SHADOW), "/health": (200, {"ok": True}), "/review-fixes/status": (200, st)}, TUE(9, 35))
+    assert code == 0 and any(x.startswith("OK") and "ORB bar counters: hit 5" in x for x in out)
+    assert not any(x.startswith("WARN") and "orb.bars" in x for x in out)
+    code, out = go("shadow-shorts", {"/short/shadow": (200, SHADOW), "/health": (200, {"ok": True}), "/review-fixes/status": (401, "no")}, TUE(9, 35))
+    assert code == 0 and any(x.startswith("WARN") and "admin token" in x for x in out)

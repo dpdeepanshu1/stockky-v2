@@ -101,3 +101,12 @@ def test_e221_no_order_id_is_ambiguous_and_no_phantom_position():
     assert "ambiguous = True" in SRC[i:i + 700]
     assert "if error_msg is None and not super_id and plain is None:" in SRC
     assert SRC.index("if error_msg is None and not super_id and plain is None:") < SRC.index("# the order is out: count it, then record the position")
+
+
+def test_e222_live_short_obeys_service_and_autopilot_switches():
+    # E222: a live short is an automatic entry; it must read the same REAL gate row and the same three switches as main._run_cycle.
+    assert 'filter_by(mode="REAL")' in SRC and "db.query(ScalpGateState).first()" not in SRC
+    assert 'getattr(gate, "service_enabled", True)' in SRC and 'getattr(gate, "auto_pilot_enabled", True)' in SRC
+    assert "off = _switches_off(gate)" in SRC, "_live_guards must call the switch check"
+    se = (ROOT / "orders" / "short_entry.py").read_text(encoding="utf-8")
+    assert "short_live as _sl_off" in se and "automatic_entry_off" in se, "the short cycle must skip its scan while the switches say no"

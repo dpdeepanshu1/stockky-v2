@@ -67,11 +67,41 @@ def _open_counts(db: Session) -> tuple:
     return len(rows), len(shorts)
 
 
-def _live_guards(db: Session, cand: Any) -> Optional[tuple]:
-    """(code, reason) of the first live-only guard that says no, else None. Reads only; claims nothing."""
-    gate = db.query(ScalpGateState).first()
+def _real_gate(db: Session) -> Any:
+    """The REAL gate row, the one the long cycle (main._run_cycle) and every switch on the dashboard use. None when it does not exist."""
+    return db.query(ScalpGateState).filter_by(mode="REAL").first()
+
+
+def _switches_off(gate: Any) -> Optional[tuple]:
+    """E222: (code, reason) when an operator switch says no automatic entries, else None. A live short is always an AUTOMATIC entry (only the trading loop hands candidates
+    here), so it must obey the same three switches the long entry obeys in main._run_cycle: armed, module enabled (service_enabled), auto-pilot on. Before E222 only
+    `is_armed` was read: POST /autopilot/disable ("stop automatic entries") and POST /service/disable ("screening + entries stop") left real shorts opening. A NULL
+    switch reads as off, exactly as `not gate.service_enabled` does in _run_cycle; an attribute the row does not have at all reads as on (old fakes)."""
     if gate is None or not getattr(gate, "is_armed", False):
         return ("SHORT_NOT_ARMED", "SERVICE_NOT_ARMED")
+    if not getattr(gate, "service_enabled", True):
+        return ("SHORT_SERVICE_DISABLED", "SERVICE_DISABLED: the module is switched off (service_enabled=false)")
+    if not getattr(gate, "auto_pilot_enabled", True):
+        return ("SHORT_AUTO_PILOT_OFF", "AUTO_PILOT_OFF: automatic entries are switched off (auto_pilot_enabled=false)")
+    return None
+
+
+def automatic_entry_off(db: Session) -> Optional[tuple]:
+    """E222: the same check for the short cycle, so it can skip its scan and quality-gate calls while the operator has switched automatic entries off.
+    (code, reason) or None. A gate row that cannot be read counts as off (fail closed)."""
+    try:
+        return _switches_off(_real_gate(db))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("short live: gate read failed (%s) - treated as switched off", e)
+        return ("SHORT_NOT_ARMED", "GATE_UNREADABLE")
+
+
+def _live_guards(db: Session, cand: Any) -> Optional[tuple]:
+    """(code, reason) of the first live-only guard that says no, else None. Reads only; claims nothing."""
+    gate = _real_gate(db)
+    off = _switches_off(gate)
+    if off:
+        return off
     if gate.daily_loss_kill_switch_tripped:
         return ("SHORT_KILL_SWITCH", "DAILY_LOSS_KILL_SWITCH")
     today = ist_today_str()
@@ -188,7 +218,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
         raise
 
     # ---- the order. From here an exception must NOT release anything blindly: the order may exist at the broker. ----
-    gate = db.query(ScalpGateState).first()
+    gate = _real_gate(db)
     super_id, error_msg, ambiguous = None, None, False
     sell_unknown: list = []                          # E180: set when the SELL errored AND Dhan's order book could not be read
     plain: Optional[dict] = None

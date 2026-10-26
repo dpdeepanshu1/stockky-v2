@@ -178,7 +178,7 @@ CATALOG = (
     # ---------------- E132: swing momentum lane (swing/ package; plan steps S3-S5). Every one is protected from the auto-calibrator ----------------
     Flag("SWING_MODE", "Swing momentum lane", "Swing lane", "enum", choices=("off", "shadow", "live"), same_rank=("off", "shadow"),
          help="shadow = the evening scan ranks the universe and records what the lane WOULD have bought and how each pick ended (no order, nothing carried). live = buy those picks as CNC in DEMO (REAL only with SWING_LIVE_REAL_ENABLED) and hold them up to SWING_MAX_HOLD_DAYS sessions. off = nothing; an open swing position is sold at the next 15:00 square-off.",
-         targets=((_C, "SWING_MODE"),), live=True, shipped="shadow", recommended="shadow", looser="neutral",
+         targets=((_C, "SWING_MODE"),), live=True, shipped="live", recommended="live", looser="neutral",
          evidence="swing_backtest (S2) USEFUL, then swing_shadow_report (S3) 30+ net-positive shadow trades, then the S4 probe"),
     Flag("SWING_LIVE_REAL_ENABLED", "Swing lane may trade REAL money", "Swing lane", "bool", looser="on",
          help="false = SWING_MODE=live buys in DEMO only. true = REAL too. Turn it on only after a clean DEMO week and with the service NOT on the TURN OFF advice.",

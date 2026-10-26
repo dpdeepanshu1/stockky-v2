@@ -92,3 +92,12 @@ def test_step12_size_comes_from_the_normal_stop_and_the_catalog_has_the_two_swit
     for k, v in (("SHORT_STOP_MULT_STRESSED", "0.8"), ("SHORT_STOP_MULT_PANIC", "0.6")):
         assert re.search(r'Flag\("%s".*?lo=0.3, hi=1.0, looser="higher".*?shipped="%s"' % (k, v), cat, re.S), k
         assert f'"{k}":' in auto, k
+
+
+def test_e221_no_order_id_is_ambiguous_and_no_phantom_position():
+    # E221: a 2xx Super Order answer without an id is looked up at Dhan (force=True) and never retried as a plain SELL; no SELL sent = refusal, not a saved position.
+    assert "force=True" in SRC and "force: bool = False" in SRC and "if not force and not dhan_client.is_ambiguous_placement_error(exc):" in SRC
+    i = SRC.index('error_msg = "Dhan answered without an order id"')
+    assert "ambiguous = True" in SRC[i:i + 700]
+    assert "if error_msg is None and not super_id and plain is None:" in SRC
+    assert SRC.index("if error_msg is None and not super_id and plain is None:") < SRC.index("# the order is out: count it, then record the position")

@@ -145,6 +145,7 @@ def _group479_guards_off_by_default(monkeypatch):
     expect no behaviour change. tests/test_group479_*.py turn them on explicitly."""
     import config as _config
     monkeypatch.setattr(_config, "STOPOUT_GUARD_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "MANUAL_BUY_WINDOW_GUARD", False, raising=False)   # E220: older manual-BUY tests use fixed dates; test_e220 turns it on itself
     monkeypatch.setattr(_config, "ENTRY_MIN_QTY", 0, raising=False)
     monkeypatch.setattr(_config, "ENTRY_MIN_REWARD_RISK", 0.0, raising=False)   # 2026-10-22 RR_FLOOR is tested in test_rr_floor_1_2.py
     monkeypatch.setattr(_config, "ORB_MODE", "off", raising=False)

@@ -351,7 +351,9 @@ def sync_from_broker(db: Session) -> float:
     store in DB. Returns new total_allocated_capital."""
     # GROUP 193: publish first, from this service's own DB, so a failed/zero funds read below
     # (which returns early) can no longer leave real-trade-service with a stale or missing figure.
-    publish_exposure(db, force=True)
+    # E216: no longer force=True. The cycle already publishes (main.py), and the non-forced path writes on change and at least every
+    # _EXPOSURE_PUBLISH_MIN_INTERVAL_S, still BEFORE the early returns below, so a failed funds read cannot leave a stale figure.
+    publish_exposure(db)
     try:
         funds = dhan_client.get_funds(db)
     except Exception as e:

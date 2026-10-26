@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -1241,6 +1241,11 @@ def attempt_manual_entry(
         raise ManualEntryRejected("Daily loss kill switch is tripped — no new entries today.")
 
     today = ist_today_str()
+    # E220: no manual BUY while the market is closed or after today's one-shot EOD sweep (orders/manual_buy_window.py).
+    _window = manual_buy_window.check(gate, today)
+    if _window:
+        raise ManualEntryRejected(_window)
+
     if gate.orders_placed_today_date == today and gate.orders_placed_today >= config.DAILY_ORDER_BUDGET:
         raise ManualEntryRejected(f"Daily order budget exhausted ({gate.orders_placed_today}).")
 

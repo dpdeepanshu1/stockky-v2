@@ -75,6 +75,7 @@ PROTECTED: Dict[str, str] = {
     "STOPOUT_GUARD_ENABLED": "loss-review guard (group 471): decided by you, not by a report",
     "STOPOUT_DAY_PAUSE_N": "loss-review guard (group 471): decided by you, not by a report",
     "STOPOUT_SYMBOL_BLOCK": "loss-review guard (group 471): decided by you, not by a report",
+    "MANUAL_BUY_WINDOW_GUARD": "money safety (E220): a manual BUY outside the session is never allowed by a report",
     "ENTRY_MIN_QTY": "loss-review guard (group 472): decided by you, not by a report",
     "ENTRY_MIN_REWARD_RISK": "risk rule (1:2 reward:risk, 2026-10-22): decided by you, not by a report",
     "ENTRY_ANCHOR_TO_LIVE": "order safety rule (2026-10-22): stop / target follow the real price, never switched by a report",

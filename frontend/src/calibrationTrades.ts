@@ -91,6 +91,7 @@ export function tradesFromPositionStocks(doc: any): TradeRow[] {
       maxGainPct: side === "SHORT" ? (lo == null ? null : -lo) : hi, maxDrawdownPct: side === "SHORT" ? (hi == null ? null : -hi) : lo,
       entrySlipPct: directionalPct(side, sig, ep),   // + = filled worse than the signal (a long paying above it, a short selling below it)
       exitSlipPct: stopExit ? directionalPct(side, sp, xp) : null,   // vs the last stored stop (may have been trailed); + = better
+      charges: num(r.charges),   // E215: from /trades/history
       stopBasis: typeof r.stop_basis === "string" ? r.stop_basis : null });
     if (x) out.push(x);
   }

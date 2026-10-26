@@ -3785,6 +3785,26 @@ def _live_tick_fetched_at(live) -> str:
         return now.isoformat()
 
 
+def _angelone_live_price(fq) -> Optional[float]:
+    """E218: the live price of one AngelOne REST quote row = its `ltp` only, or None when `ltp` is missing / 0 / not a number.
+    /quotes/bulk used to fall back to the row's `close` (the PREVIOUS close) and then `open` when `ltp` was 0 and published that as the live
+    price with fetched_at = now, so a stock that had not traded yet (or a pre-open row) looked like a fresh live tick and passed every
+    caller's quote-age check. With None the symbol continues to the later stages (last-close row with its real age, Dhan, yfinance).
+    QUOTE_BULK_ANGELONE_CLOSE_FALLBACK=1 restores the old fallback. Never raises."""
+    try:
+        keys = ("ltp", "close", "open") if ((os.getenv("QUOTE_BULK_ANGELONE_CLOSE_FALLBACK") or "").strip().lower() in ("1", "true", "yes", "on")) else ("ltp",)
+        for k in keys:
+            try:
+                v = float(fq.get(k) or 0)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(v) and v > 0:
+                return v
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _prev_close_fields(prev_close, price, given_change_pct=None) -> dict:
     """E188: {previous_close, day_change_pct} for a bulk row, only when `prev_close` is a positive number (never invented,
     never 0). day_change_pct is `given_change_pct` when that is a number, else computed from `price`. Returns {} otherwise.
@@ -4083,15 +4103,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                     _base = _full_tok_map.get(_tok)
                     if not _base:
                         continue
-                    _ltp = None
-                    for _k in ("ltp", "close", "open"):
-                        try:
-                            _v = float(_fq.get(_k) or 0)
-                            if _v > 0:
-                                _ltp = _v
-                                break
-                        except (TypeError, ValueError):
-                            pass
+                    _ltp = _angelone_live_price(_fq)     # E218: ltp only - a previous close is not a live price
                     if _ltp is None:
                         continue
                     _mapped_key = _full_ticker_map.get(_base)

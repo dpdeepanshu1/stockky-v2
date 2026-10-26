@@ -81,6 +81,12 @@ assert.ok(csv.every((l) => !l.includes("undefined")));
   assert.equal(Math.round(p[0].entrySlipPct * 100) / 100, 0.1); assert.equal(Math.round(p[1].entrySlipPct * 100) / 100, 0.1, "worse fill = positive for both sides");
   assert.ok(p[0].exitSlipPct < 0 && p[1].exitSlipPct < 0, "both stops filled through the stop price");
   assert.equal(directionalPct("LONG", 0, 5), null);
+  // E215: position-stocks charges come from /trades/history; a row without the field stays blank, never NaN
+  const pc = tradesFromPositionStocks({ trades: [
+    { id: 3, symbol: "C", status: "STOP_HIT", exit_reason: "stop_hit", side: "BUY", entry_price: 100, exit_price: 99, realized_pnl: -5, quantity: 5, opened_at: "2026-10-26T04:50:00Z", closed_at: "2026-10-26T04:55:00Z", charges: 3.42 },
+    { id: 4, symbol: "D", status: "STOP_HIT", exit_reason: "stop_hit", side: "BUY", entry_price: 100, exit_price: 99, realized_pnl: -5, quantity: 5, opened_at: "2026-10-26T04:50:00Z", closed_at: "2026-10-26T04:55:00Z" } ] });
+  assert.equal(pc[0].charges, 3.42); assert.equal(pc[1].charges, null);
+  assert.ok(tradesCsv(pc).split("\n")[1].includes(",3.42,"));
   assert.ok(tradesCsv(p).split("\n").every((l) => !l.includes("undefined") && !l.includes("NaN")));
 }
 assert.equal(relTime(null), "never");

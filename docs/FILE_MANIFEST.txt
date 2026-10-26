@@ -106,6 +106,10 @@ CHANGES_2026-10-26_E174_stale_files_ci.md
 CHANGES_2026-10-26_E175_structure_exit_tally.md
 CHANGES_2026-10-26_E176_manual_buy_lost_reply.md
 CHANGES_2026-10-26_E177_ps_buy_status_unknown.md
+CHANGES_2026-10-26_E178_ps_manual_buy_status_unknown.md
+CHANGES_2026-10-26_E179_ci_preopen_clock.md
+CHANGES_2026-10-26_E180_ps_short_sell_status_unknown.md
+CHANGES_2026-10-26_E181_ps_flat_sell_may_exist.md
 DEPLOY_GUIDE.md
 Dockerfile
 ORACLE_SETUP_GUIDE.md

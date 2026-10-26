@@ -31,6 +31,7 @@ Run from services/position-stocks-service:
 from __future__ import annotations
 
 import itertools
+from datetime import time as _dtime
 import logging
 import os
 import sys
@@ -187,6 +188,10 @@ def env(monkeypatch):
     # ── time, date ──
     monkeypatch.setattr(eod, "time", types.SimpleNamespace(sleep=lambda s: b.calls.append(("sleep", {"s": s}))))
     monkeypatch.setattr(eod, "ist_today_str", lambda: TODAY)
+    # E182: by default the retry window is already over (as at the end of the day), so a failed pass marks the day done exactly as before;
+    # TestEodRetryWindow opens the window explicitly.
+    monkeypatch.setattr(eod, "_eod_retry_until", lambda: _dtime(0, 0))
+    eod._EOD_RETRY_STATE.clear()
 
     # ── pin every knob these paths read, independent of the VM's env vars ──
     pins = dict(
@@ -782,7 +787,7 @@ class TestRunEodFailureHandling:
         assert available(db) == pytest.approx(LEDGER_AVAILABLE)   # nothing released
         assert lock_held(db, "FAILCO")                            # still protected from re-entry
         assert p.consecutive_exit_failures == 1
-        assert fired_date(db) == TODAY                            # once-per-day guard: no auto-retry
+        assert fired_date(db) == TODAY                            # retry window over (pinned in env): the day is done, no further retry
 
     def test_restricted_symbol_is_recorded_for_future_screening(self, env):
         db, b, _ = env
@@ -844,6 +849,156 @@ class TestRunEodFailureHandling:
         db.commit()
         eod.run_eod_squareoff(db)
         assert p.consecutive_exit_failures == 2            # streak keeps growing until a placement succeeds
+
+
+# ── E182: retry window, one sweep at a time, never re-sell today's carry ─────
+UTC = timezone.utc
+
+
+def open_retry_window(monkeypatch):
+    monkeypatch.setattr(eod, "_eod_retry_until", lambda: _dtime(23, 59, 59))
+
+
+def age_cooldown(*positions):
+    for q in positions:
+        q.last_exit_failure_at = datetime.now(UTC) - timedelta(hours=1)
+
+
+class TestEodRetryWindow:
+    def test_transient_failure_inside_the_window_does_not_end_the_day_then_a_later_pass_sells(self, env, monkeypatch):
+        db, b, sent = env
+        open_retry_window(monkeypatch)
+        p = mkpos(db, "RETRYCO")
+        b.place_by_sec[p.dhan_security_id] = RuntimeError(GENERIC_MSG)
+        assert eod.run_eod_squareoff(db) == 0
+        assert p.status == "OPEN" and fired_date(db) is None
+        assert eod._EOD_RETRY_STATE == {"date": TODAY, "ids": {p.id}}
+        b.place_by_sec.pop(p.dhan_security_id)            # Dhan recovers
+        age_cooldown(p)
+        assert eod.run_eod_squareoff(db) == 1
+        assert p.status == "EOD_SQUAREOFF" and p.dhan_exit_order_id
+        assert fired_date(db) == TODAY and eod._EOD_RETRY_STATE == {}
+
+    def test_backoff_pass_is_quiet_and_sends_nothing(self, env, monkeypatch):
+        db, b, sent = env
+        open_retry_window(monkeypatch)
+        p = mkpos(db, "BACKOFF")
+        b.place_by_sec[p.dhan_security_id] = RuntimeError(GENERIC_MSG)
+        eod.run_eod_squareoff(db)
+        n_orders, n_alerts = len(b.of("place_order")), len(sent["critical"])
+        for _ in range(3):                                # the loops call again every few seconds: still inside the 60 s backoff
+            assert eod.run_eod_squareoff(db) == 0
+        assert len(b.of("place_order")) == n_orders and len(sent["critical"]) == n_alerts
+        assert fired_date(db) is None and eod._EOD_RETRY_STATE["ids"] == {p.id}
+
+    def test_window_over_gives_up_alerts_and_ends_the_day(self, env, monkeypatch):
+        db, b, sent = env
+        open_retry_window(monkeypatch)
+        p = mkpos(db, "GIVEUP")
+        b.place_by_sec[p.dhan_security_id] = RuntimeError(GENERIC_MSG)
+        eod.run_eod_squareoff(db)
+        assert fired_date(db) is None
+        monkeypatch.setattr(eod, "_eod_retry_until", lambda: _dtime(0, 0))      # the window closes
+        age_cooldown(p)
+        assert eod.run_eod_squareoff(db) == 0
+        assert fired_date(db) == TODAY and eod._EOD_RETRY_STATE == {}
+        assert any("GAVE UP" in m and "GIVEUP" in m for m in sent["critical"])
+
+    @pytest.mark.parametrize("msg", [CUTOFF_MSG, RESTRICTED_MSG, FUNDS_MSG, CIRCUIT_MSG])
+    def test_permanent_rejection_ends_the_day_at_once(self, env, monkeypatch, msg):
+        db, b, _ = env
+        open_retry_window(monkeypatch)
+        p = mkpos(db)
+        b.place_by_sec[p.dhan_security_id] = RuntimeError(msg)
+        eod.run_eod_squareoff(db)
+        assert fired_date(db) == TODAY and eod._EOD_RETRY_STATE == {}
+
+    def test_retry_pass_touches_only_the_failed_position(self, env, monkeypatch):
+        db, b, _ = env
+        open_retry_window(monkeypatch)
+        bad, good = mkpos(db, "BAD"), mkpos(db, "GOOD")
+        b.place_by_sec[bad.dhan_security_id] = RuntimeError(GENERIC_MSG)
+        eod.run_eod_squareoff(db)
+        late = mkpos(db, "LATE")                           # opened after the first pass: not this sweep's business
+        b.place_by_sec.pop(bad.dhan_security_id)
+        age_cooldown(bad)
+        eod.run_eod_squareoff(db)
+        sold = [c["security_id"] for c in b.of("place_order")]
+        assert sold.count(good.dhan_security_id) == 1      # sold once, in the first pass only
+        assert late.dhan_security_id not in sold and late.status == "OPEN"
+
+    def test_retry_pass_skips_the_edis_check_and_the_carry_evaluation(self, env, monkeypatch):
+        db, b, _ = env
+        open_retry_window(monkeypatch)
+        monkeypatch.setattr(config, "OVERNIGHT_HOLD_ENABLED", True)
+        p = qualifying(db, b, ltp=105.0)                   # would qualify for a carry
+        b.place_by_sec[p.dhan_security_id] = RuntimeError(GENERIC_MSG)
+        b.convert_fail.add(p.dhan_security_id)             # first pass: conversion fails -> squared off -> SELL fails
+        eod.run_eod_squareoff(db)
+        b.convert_fail.discard(p.dhan_security_id)
+        b.place_by_sec.pop(p.dhan_security_id)
+        age_cooldown(p)
+        n_edis, n_conv = len(b.of("edis_verification_summary")), len(b.of("convert_position"))
+        eod.run_eod_squareoff(db)
+        assert len(b.of("edis_verification_summary")) == n_edis and len(b.of("convert_position")) == n_conv
+        assert p.status == "EOD_SQUAREOFF" and not p.overnight_converted_to_cnc
+
+    def test_a_second_sweep_while_one_runs_does_nothing(self, env):
+        db, b, _ = env
+        mkpos(db)
+        assert eod._EOD_SWEEP_LOCK.acquire(blocking=False)
+        try:
+            assert eod.run_eod_squareoff(db) == 0
+        finally:
+            eod._EOD_SWEEP_LOCK.release()
+        assert b.of("place_order") == [] and fired_date(db) is None
+        assert eod.run_eod_squareoff(db) == 1              # the lock is free again
+
+    def test_the_lock_is_released_after_an_error(self, env, monkeypatch):
+        db, _, _ = env
+        monkeypatch.setattr(eod, "_run_eod_squareoff_pass", lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError):
+            eod.run_eod_squareoff(db)
+        assert eod._EOD_SWEEP_LOCK.acquire(blocking=False)
+        eod._EOD_SWEEP_LOCK.release()
+
+
+class TestCarriedTodayIsNeverSold:
+    OPENED_TODAY = datetime(2026, 9, 21, 4, 0, tzinfo=UTC)         # 09:30 IST on TODAY
+
+    def _carried(self, db, **kw):
+        opened = kw.pop("opened_at", None) or self.OPENED_TODAY
+        p = mkpos(db, cnc=True, stop_id=kw.pop("stop_id", "S1"), **kw)
+        p.opened_at = opened
+        db.commit()
+        return p
+
+    def test_a_pass_with_no_retry_state_leaves_todays_carried_position_alone(self, env):
+        # the process restarted inside the retry window: no memory of the first pass, the day is not marked done
+        db, b, _ = env
+        carried = self._carried(db)
+        plain = mkpos(db, "PLAINCO")
+        assert eod.run_eod_squareoff(db) == 1
+        assert carried.status == "OPEN" and plain.status == "EOD_SQUAREOFF"
+        assert [c["security_id"] for c in b.of("place_order")] == [plain.dhan_security_id]
+
+    def test_opt_out_carry_without_a_stop_is_also_left_alone(self, env, monkeypatch):
+        db, b, _ = env
+        monkeypatch.setattr(config, "OVERNIGHT_STOP_LOSS_PCT", 0.0)
+        carried = self._carried(db, stop_id=None)
+        assert eod.run_eod_squareoff(db) == 0
+        assert carried.status == "OPEN" and b.of("place_order") == []
+
+    def test_a_failed_carry_with_no_stop_is_still_squared_off(self, env):
+        db, b, _ = env
+        failed = self._carried(db, stop_id=None)           # converted, stop required (4 %), none placed
+        assert eod.run_eod_squareoff(db) == 1
+        assert failed.status == "EOD_SQUAREOFF" and b.of("place_order")[0]["product_type"] == "CNC"
+
+    def test_a_carry_from_an_earlier_day_is_still_squared_off(self, env):
+        db, b, _ = env
+        old = self._carried(db, opened_at=datetime(2026, 9, 18, 4, 0, tzinfo=UTC))
+        assert eod.run_eod_squareoff(db) == 1 and old.status == "EOD_SQUAREOFF"
 
 
 # ── Overnight carry ──────────────────────────────────────────────────────────

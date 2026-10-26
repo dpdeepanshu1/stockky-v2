@@ -877,6 +877,73 @@ def _entry_fill_from_row(row: dict) -> Optional[float]:
     return None
 
 
+_QTY_KEYS = ("filledQty", "filled_qty", "tradedQuantity")
+
+
+def _int_qty(v) -> int:
+    n = _num(v)
+    return int(n) if n else 0
+
+
+def _entry_filled_qty(row: dict) -> int:
+    """E184: shares the ENTRY leg has really filled on a /v2/super/orders row: the parent's filledQty, else the ENTRY_LEG detail's.
+    0 when the row shows none."""
+    q = next((_int_qty(row.get(k)) for k in _QTY_KEYS if _int_qty(row.get(k))), 0)
+    if q:
+        return q
+    for leg in row.get("legDetails") or []:
+        if str(leg.get("legName", "")).upper() == "ENTRY_LEG":
+            q = next((_int_qty(leg.get(k)) for k in _QTY_KEYS if _int_qty(leg.get(k))), 0)
+            if q:
+                return q
+    return 0
+
+
+_partial_entry_alerted: set = set()      # E184: (position id, quantity) pairs already announced
+_dead_parent_part_logged: set = set()    # E184: position ids whose cancelled-but-part-filled entry was already announced
+
+
+def _sync_entry_quantity(db: Session, pos: ScalpPosition, row: dict) -> bool:
+    """E184: a MARKET entry on a thin stock can fill only PART of the order. The position kept the ORDERED quantity, so P&L, the ledger
+    and the flat SELL all used shares that were never bought (a flat SELL of the full size on a part-filled long opens an unintended
+    short). Set the position to what the entry has really filled, scale capital_risked to match and return/charge the difference in
+    the ledger. It follows later fills too, but never above the order's own size; with no ordered size on the row it only ever
+    shrinks. Only a still-OPEN (or EXIT_LEGS_REJECTED) position; idempotent. Returns True when the quantity changed."""
+    if pos.status not in ("OPEN", "EXIT_LEGS_REJECTED"):
+        return False
+    filled = _entry_filled_qty(row)
+    old_qty = int(pos.quantity or 0)
+    if filled <= 0 or old_qty <= 0:
+        return False
+    ordered = _int_qty(row.get("quantity"))
+    new_qty = min(filled, ordered if ordered > 0 else old_qty)
+    if new_qty <= 0 or new_qty == old_qty:
+        return False
+
+    old_capital = float(pos.capital_risked or 0.0)
+    new_capital = old_capital * new_qty / old_qty
+    pos.quantity = new_qty
+    pos.capital_risked = new_capital
+    db.commit()
+    if new_capital != old_capital:
+        ledger.reconcile_position_cost(db, delta=new_capital - old_capital)
+    logger.warning(
+        "reconcile: %s (id=%d) PARTIAL ENTRY FILL - Dhan filled %d of the %d ordered; quantity %d -> %d, capital_risked Rs%.2f -> Rs%.2f",
+        pos.symbol, pos.id, filled, ordered or old_qty, old_qty, new_qty, old_capital, new_capital,
+    )
+    _key = (pos.id, new_qty)
+    if _key not in _partial_entry_alerted:
+        _partial_entry_alerted.add(_key)
+        try:
+            notifier.notify_fire_and_forget(
+                f"⚠️ <b>Partial entry fill</b> - {pos.symbol}: {new_qty} of {ordered or old_qty} shares bought. "
+                f"Position resized to {new_qty}; the unused Rs{old_capital - new_capital:,.2f} went back to the pool."
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reconcile: partial-entry alert failed for %s: %s", pos.symbol, e)
+    return True
+
+
 _ORDER_LIST_TTL_S = 20.0
 _order_list_cache: tuple[float, list] = (0.0, [])
 
@@ -1823,6 +1890,11 @@ def run_exit_reconciliation(db: Session) -> int:
         # estimate). Does NOT touch capital_risked/the ledger — that's a
         # separate, already-reserved software allocation and out of this
         # fix's scope.
+        try:
+            _sync_entry_quantity(db, pos, row)   # E184: before the price correction, so capital is corrected off the real quantity
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("reconcile: partial-entry quantity sync failed for %s (id=%s): %s", pos.symbol, pos.id, e, exc_info=True)
         _apply_entry_correction(db, pos, row)
         _retry_rearm_pending(db, pos)   # group341: a leg move that failed on an earlier pass
 
@@ -1994,6 +2066,24 @@ def run_exit_reconciliation(db: Session) -> int:
                     closed += 1
                     logger.info("reconcile: %s (id=%d) parent row %s but BUY+SELL traded - booked %s %.2f->%.2f P&L Rs%.2f",
                                 pos.symbol, pos.id, entry_status, _ex["kind"], _alive["entry"], _ex["price"], _pnl)
+                    continue
+                # E184: the parent is dead (cancelled/rejected) but Dhan's row shows shares actually bought (a part fill whose
+                # remainder was cancelled). Booking ERROR here released the capital and the symbol lock while those shares were
+                # still held at Dhan, with nothing tracking or selling them. Keep the position OPEN at the filled quantity (set
+                # above by _sync_entry_quantity) so the exit watchdogs and EOD squareoff cover it, and say so once.
+                _held = _entry_filled_qty(row)
+                if _held > 0:
+                    if pos.id not in _dead_parent_part_logged:
+                        _dead_parent_part_logged.add(pos.id)
+                        logger.warning(
+                            "reconcile: %s (id=%d) parent row %s but %d share(s) filled - keeping the position OPEN (not ERROR); "
+                            "its bracket may be gone, EOD squareoff will sell it.", pos.symbol, pos.id, entry_status, _held)
+                        try:
+                            notifier.notify_critical(
+                                f"⚠️ PARTIAL ENTRY, REMAINDER {entry_status}: {pos.symbol} holds {_held} share(s) at Dhan. "
+                                f"Kept OPEN so it is still sold; its stop/target bracket may no longer exist - check Dhan.")
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("reconcile: part-fill alert failed for %s: %s", pos.symbol, e)
                     continue
                 # group287: the order book proved nothing. Ask the order-update WebSocket (in-memory). It always LOGS a
                 # disagreement; it only changes the outcome with RECONCILE_USE_ORDER_EVENTS=1 (default 0 until the

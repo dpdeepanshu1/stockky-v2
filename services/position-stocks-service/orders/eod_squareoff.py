@@ -2,9 +2,10 @@
 orders/eod_squareoff.py — 3:00 PM IST hard flat sweep.
 
 Force-closes ALL open scalp positions at market price, no exceptions.
-Called once per trading day by the main loop at EOD_SQUAREOFF_TIME_IST.
-Uses a once-per-day guard (ScalpGateState.eod_squareoff_fired_date) so
-accidental repeated calls do nothing.
+Called by the main loops from EOD_SQUAREOFF_TIME_IST. Uses a once-per-day
+guard (ScalpGateState.eod_squareoff_fired_date) so repeated calls do nothing.
+E182: the guard is set at the end of the pass that has nothing left to retry. A position whose SELL failed for a possibly-transient reason is
+retried by later calls (only that position) until 12 minutes after the sweep time; one sweep runs at a time.
 
 Mirrors real-trade-service's own EOD squareoff convention (15:00 IST,
 same shape) but is completely independent — if real-trade-service's EOD
@@ -13,8 +14,10 @@ sweep hangs, this one still runs, and vice versa.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from datetime import time as _dtime
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -26,7 +29,7 @@ from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
 from orders import exit_retry, overnight_stop, side as _side
 from screening import intraday_eligibility
-from tz_utils import as_aware, ist_time_at_or_after, ist_today_str, parse_hhmm
+from tz_utils import IST, as_aware, ist_time_at_or_after, ist_today_str, parse_hhmm
 
 logger = logging.getLogger("position-stocks-eod")
 
@@ -472,14 +475,68 @@ def _get_gate_state(db: Session) -> ScalpGateState:
     return row
 
 
+# E182: how long after EOD_SQUAREOFF_TIME_IST the sweep keeps retrying a position whose SELL failed for a possibly-transient reason (an unclassified error,
+# an unreadable order book after a timeout, an exit-placement backoff). Dhan squares intraday positions off itself from about 15:15, so the window closes
+# before that. Retries are paced by exit_retry's backoff and guarded by the duplicate-SELL checks, so a retry cannot double-sell.
+_EOD_RETRY_WINDOW_MIN = 12
+_EOD_SWEEP_LOCK = threading.Lock()                 # one sweep at a time (the scan loop and the fast-reconcile loop both call it)
+_EOD_RETRY_STATE: dict = {}                        # {"date": "YYYY-MM-DD", "ids": {position ids still to retry}} - process memory
+
+
+def _eod_retry_until() -> _dtime:
+    """The clock time (IST) after which a failed flat SELL is no longer retried by the sweep."""
+    t = parse_hhmm(getattr(config, "EOD_SQUAREOFF_TIME_IST", "15:00"), 15, 0)
+    total = min(23 * 60 + 59, t.hour * 60 + t.minute + _EOD_RETRY_WINDOW_MIN)
+    return _dtime(total // 60, total % 60)
+
+
+def _eod_retry_ids(today: str) -> Optional[set]:
+    """The position ids an earlier pass of today's sweep left for a retry, or None when this process has no retry state for today."""
+    if _EOD_RETRY_STATE.get("date") == today:
+        return set(_EOD_RETRY_STATE.get("ids") or ())
+    return None
+
+
+def _carried_overnight_today(pos: ScalpPosition, today: str) -> bool:
+    """True for a position that THIS day's sweep converted to CNC and protected (or deliberately left unprotected, OVERNIGHT_STOP_LOSS_PCT=0). Such a position
+    opened today and was converted today, so a second pass of the sweep (a retry, or a restart in the retry window) must not square it off. A position
+    converted but with no stop while a stop is required is a FAILED carry and is not excluded. A carry from an earlier day is not excluded either."""
+    if not pos.overnight_converted_to_cnc or not pos.opened_at:
+        return False
+    try:
+        if as_aware(pos.opened_at).astimezone(IST).strftime("%Y-%m-%d") != today:
+            return False
+    except Exception:  # noqa: BLE001 - an unreadable date cannot prove a carry
+        return False
+    return not (float(getattr(config, "OVERNIGHT_STOP_LOSS_PCT", 4.0) or 0.0) > 0 and not pos.overnight_stop_order_id)
+
+
 def run_eod_squareoff(db: Session) -> int:
-    """Close all OPEN scalp positions. Returns number of positions closed."""
+    """Close all OPEN scalp positions. Returns number of positions closed.
+    E182: one sweep at a time; a position whose SELL failed for a possibly-transient reason is retried by later calls until _eod_retry_until()."""
+    if not _EOD_SWEEP_LOCK.acquire(blocking=False):
+        logger.info("EOD squareoff: another sweep is already running - skipping this call")
+        return 0
+    try:
+        return _run_eod_squareoff_pass(db)
+    finally:
+        _EOD_SWEEP_LOCK.release()
+
+
+def _mark_eod_done(db: Session, gate: ScalpGateState, today: str) -> None:
+    _EOD_RETRY_STATE.clear()
+    gate.eod_squareoff_fired_date = today
+    db.commit()
+
+
+def _run_eod_squareoff_pass(db: Session) -> int:
     gate = _get_gate_state(db)
     today = ist_today_str()
 
     if gate.eod_squareoff_fired_date == today:
         logger.info("EOD squareoff already fired today (%s) — skipping", today)
         return 0
+    retry_ids = _eod_retry_ids(today)          # None on the first pass of the day
 
     # 2026-09-15 fix (session41b): also pick up EXIT_LEGS_REJECTED positions
     # (super-order exit legs were rejected — circuit-limit / surveillance).
@@ -492,10 +549,14 @@ def run_eod_squareoff(db: Session) -> int:
         .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")))
         .all()
     )
+    if retry_ids is not None:
+        # E182: a later pass of today's sweep touches only the positions the earlier pass left for a retry
+        open_positions = [p for p in open_positions if p.id in retry_ids]
+    else:
+        open_positions = [p for p in open_positions if not _carried_overnight_today(p, today)]   # E182: never sell what today's sweep just carried
     if not open_positions:
         logger.info("EOD squareoff: no open scalp positions to close")
-        gate.eod_squareoff_fired_date = today
-        db.commit()
+        _mark_eod_done(db, gate, today)
         return 0
 
     logger.warning(
@@ -517,7 +578,7 @@ def run_eod_squareoff(db: Session) -> int:
     # EXIT_LEGS_REJECTED positions are always squaredoff regardless (their
     # bracket is dead and cannot protect them overnight).
     carry_positions: list = []
-    if config.OVERNIGHT_HOLD_ENABLED:
+    if config.OVERNIGHT_HOLD_ENABLED and retry_ids is None:        # E182: no carry evaluation on a retry pass
         from models import ScalpCandidateLog
         from feed import ws_client as _ws
         squareoff_only: list = []
@@ -748,9 +809,11 @@ def run_eod_squareoff(db: Session) -> int:
     # emit a critical alert so the operator can approve TPIN in time. We still
     # attempt the SELL either way — the broker may accept it if eDIS was
     # already pre-approved (or if it's already past T+1 settlement on a re-run).
-    _run_edis_precheck(db, open_positions)
+    if retry_ids is None:
+        _run_edis_precheck(db, open_positions)
 
     closed = 0
+    retry_next: list = []          # E182: ids of positions left OPEN by a possibly-transient failure
     for pos in open_positions:
         try:
             if config.USE_SUPER_ORDER and pos.dhan_super_order_id:
@@ -861,8 +924,9 @@ def run_eod_squareoff(db: Session) -> int:
             # exit_retry.py). resolve_stuck_pending / the fast-reconcile
             # loop will keep this visible; the next EOD sweep (or a manual
             # exit, itself gated the same way) retries once the cooldown
-            # elapses.
-            logger.warning("EOD squareoff: %s — left OPEN this pass.", _eic)
+            # elapses. (E182: later passes of today's sweep retry it until the retry window closes.)
+            (logger.warning if retry_ids is None else logger.debug)("EOD squareoff: %s — left OPEN this pass.", _eic)
+            retry_next.append(pos.id)
             continue
         except Exception as e:
             err_str = str(e)
@@ -982,6 +1046,7 @@ def run_eod_squareoff(db: Session) -> int:
                     pos.symbol, pos.id, err_str,
                 )
                 pos.error_message = f"EOD_SQUAREOFF_FAILED: {err_str}"
+                retry_next.append(pos.id)
                 try:
                     notifier.notify_critical(
                         f"❌ <b>EOD SQUAREOFF FAILED</b>\n"
@@ -993,8 +1058,21 @@ def run_eod_squareoff(db: Session) -> int:
                     logger.warning("EOD squareoff: notify_critical failed for %s: %s", pos.symbol, _ne)
             db.commit()
 
-    gate.eod_squareoff_fired_date = today
-    db.commit()
+    if retry_next and not ist_time_at_or_after(_eod_retry_until()):
+        # E182: do NOT mark the day done: the next call retries just these positions (exit_retry's backoff paces it, the duplicate-SELL guards protect it)
+        _EOD_RETRY_STATE.update(date=today, ids=set(retry_next))
+        logger.warning("EOD squareoff: %d position(s) left OPEN by a possibly-transient failure - retrying until %s IST: ids=%s",
+                       len(retry_next), _eod_retry_until().strftime("%H:%M"), sorted(retry_next))
+        return closed
+    if retry_next:
+        left = [p for p in open_positions if p.id in set(retry_next)]
+        try:
+            notifier.notify_critical(
+                f"🚨 <b>EOD SQUAREOFF GAVE UP</b> — {len(left)} position(s) still OPEN after the retry window ({_eod_retry_until().strftime('%H:%M')} IST): "
+                + ", ".join(f"{p.symbol} x{p.quantity}" for p in left) + "\nFlatten them by hand in Dhan now (the exchange squares off intraday soon).")
+        except Exception as _ne:  # noqa: BLE001
+            logger.warning("EOD squareoff: give-up alert failed: %s", _ne)
+    _mark_eod_done(db, gate, today)
     logger.info("EOD squareoff: done — %d/%d closed", closed, len(open_positions))
     return closed
 

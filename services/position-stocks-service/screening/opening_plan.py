@@ -97,7 +97,11 @@ def build(symbols, now: Optional[datetime] = None) -> dict:
                 bars[s] = b
         _plan.update({"day": ist_today_str(now), "bars": bars, "universe": len(syms),
                       "built_at": ist_now(now).isoformat()})
-        logger.info("[opening-plan] built: %d of %d symbols have a previous-day volatility", len(bars), len(syms))
+        # E211: "0 of 150 have a previous-day volatility" read as "no plan, no gating", but the rest are not lost: prev_day.get() above started their
+        # background fetch and bar_atr_pct() falls back to the previous-day cache (peek) on every lookup in the window, so they fill in as it warms.
+        _missing = len(syms) - len(bars)
+        logger.info("[opening-plan] built: %d of %d symbols planned from the previous-day cache%s", len(bars), len(syms),
+                    f"; {_missing} not cached yet (fetching in the background, read from the cache per lookup as they arrive)" if _missing else "")
     except Exception as e:  # noqa: BLE001
         logger.warning("[opening-plan] build failed (ignored): %s", e)
         _plan["day"] = ist_today_str(now)

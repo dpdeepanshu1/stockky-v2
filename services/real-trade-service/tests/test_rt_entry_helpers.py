@@ -571,6 +571,7 @@ class TestExpireStaleOrders:
     @pytest.fixture(autouse=True)
     def rig(self, db, monkeypatch):
         self.cancels, self.sent, self.cancel_error = [], [], None
+        entry._cancel_fail_alerted.clear()      # E205: the once-per-window alert memory is module state; ids repeat across tests
 
         def cancel(db_, *, is_armed, dhan_order_id):
             self.cancels.append((is_armed, dhan_order_id))
@@ -582,6 +583,16 @@ class TestExpireStaleOrders:
             self.sent.append(t)
         monkeypatch.setattr(dhan_client, "cancel_order", cancel)
         monkeypatch.setattr(entry, "notify_async", notify)
+        # E199: the post-cancel fill check now has to SUCCEED for an order to be marked EXPIRED, so these tests must not rely on the
+        # unpatched SDK call raising (it used to be swallowed). E201: the order must also be PRESENT in the book (an absent order is
+        # "cannot tell", not "nothing filled"), so the fake book lists every order in the DB as CANCELLED with its already-booked qty.
+        # E202: an order with no dhan id is looked up by its tag first; default = Dhan readable and has no such order.
+        self.tag_lookup = (None, True)
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda d, tag: self.tag_lookup)
+        monkeypatch.setattr(dhan_client, "get_order_list", lambda d: [
+            {"orderId": o.dhan_order_id, "orderStatus": "CANCELLED", "filledQty": o.filled_qty_so_far or 0,
+             "averageTradedPrice": 0.0}
+            for o in db.query(models.TradeOrder).all() if o.dhan_order_id])
 
     def stale(self, db, mode="REAL", status="PLACED", dhan_id="D1", symbol="ABC", minutes=5, filled=0, **kw):
         o = models.TradeOrder(mode=mode, symbol=symbol, side="BUY", qty=10, order_type="LIMIT", status=status,

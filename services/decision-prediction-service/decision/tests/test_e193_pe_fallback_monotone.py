@@ -27,7 +27,7 @@ def _score(m, pe):
 
 @pytest.mark.parametrize("pe, expected", [
     (10, 62), (28, 62), (28.5, 48), (35, 48), (40, 48), (41, 48), (45, 48), (50, 48), (50.5, 35), (80, 35),
-    (5, 55), (-3, 50),
+    (5, 55), (-3, 40),   # E208: negative PE is 40 now (was 50)
 ])
 def test_pe_buckets(m, pe, expected):
     assert _score(m, pe) == expected

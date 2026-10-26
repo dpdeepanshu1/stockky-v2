@@ -155,3 +155,13 @@ def _group479_guards_off_by_default(monkeypatch):
     _orb._reset_for_tests()
     yield
     _orb._reset_for_tests()
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _reset_reservation_marker():
+    """E212: capital/ledger.py remembers (process-wide) when capital was last reserved; never let one test's reservation block the next test's
+    'no open positions -> reset available_capital' step."""
+    from capital import ledger as _ledger
+    _ledger.reset_reservation_marker()
+    yield
+    _ledger.reset_reservation_marker()

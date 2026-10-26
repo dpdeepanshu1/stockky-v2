@@ -3214,7 +3214,7 @@ def _get_quote_inner(symbol: str):
             result = _pad_quote_response(sym, {
                 **live,
                 "name": sym,
-                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "fetched_at": _live_tick_fetched_at(live),      # E210: the tick's own time, not the read time (as /quotes/bulk, E188)
             })
             result = _sanitize_for_json(result)
             result["source"] = "angelone_ws"
@@ -3232,7 +3232,7 @@ def _get_quote_inner(symbol: str):
             result = _pad_quote_response(sym, {
                 **live,
                 "name": sym,
-                "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "fetched_at": _live_tick_fetched_at(live),      # E210: the tick's own time, not the read time (as /quotes/bulk, E188)
             })
             result = _sanitize_for_json(result)
             result["source"] = "yahoo_ws"

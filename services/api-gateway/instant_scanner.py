@@ -495,6 +495,19 @@ def compute_instant_scores(
     return out
 
 
+def _decision_evaluate_url(decision_url) -> str:
+    """E209: full URL of the decision app's POST /decide/evaluate. Accepts DECISION_URL (.../decision), a bare service root, or a URL that
+    already ends in /decide or /decide/evaluate."""
+    base = str(decision_url).rstrip("/")
+    if base.endswith("/decide/evaluate"):
+        return base
+    if base.endswith("/decide"):
+        return f"{base}/evaluate"
+    if base.endswith("/decision"):
+        return f"{base}/decide/evaluate"
+    return f"{base}/decision/decide/evaluate"
+
+
 async def process_single_stock(
     symbol: str,
     feed_data: dict,
@@ -549,14 +562,18 @@ async def process_single_stock(
             "pe_ratio": pe,
             "roce": roce,
             "sentiment_score": sentiment,
+            # E209: `close` is what /decide/evaluate reads first; skip_http makes it score strictly off this payload (missing pillars neutral)
+            # instead of fanning out to live news / event / prediction fetches inside a 3 s budget - the same flag the gateway scan path sets.
+            "close": cached_price,
+            "skip_http": True,
         }
 
         # 3. Optional decision-engine evaluate (bounded timeout) — never hits market-data
         if client is not None and decision_url:
             try:
-                base = str(decision_url).rstrip("/")
-                # Accept either .../decision or service root
-                evaluate_url = f"{base}/evaluate" if base.endswith("/decision") else f"{base}/decision/evaluate"
+                # E209: the route is POST /decide/evaluate on the decision app, which the combined service mounts under /decision
+                # (DECISION_URL normally ends in /decision). The old ".../decision/evaluate" never existed, so every call was a 404.
+                evaluate_url = _decision_evaluate_url(decision_url)
                 d_resp = await client.post(evaluate_url, json=payload, timeout=3.0)
                 if d_resp.status_code == 200:
                     result = d_resp.json()

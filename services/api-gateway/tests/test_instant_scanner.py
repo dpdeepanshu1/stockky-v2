@@ -946,14 +946,14 @@ class TestProcessSingleStockDecisionEngine:
         run_worker(ins, "tcs.ns", FEED, client=client)
         (call,) = client.calls
         assert call["json"] == {"symbol": "TCS", "price": 100.0, "rsi": 61.0, "pe_ratio": 18.0, "roce": 21.0,
-                                "sentiment_score": 70.0}
+                                "sentiment_score": 70.0, "close": 100.0, "skip_http": True}      # E209
         assert call["timeout"] == 3.0
 
     def test_payload_defaults_for_missing_indicators(self, ins):
         client = FakeClient(FakeResp(200, {}))
         run_worker(ins, "TCS", {"TCS": {"price": 100.0}}, client=client)
         assert client.calls[0]["json"] == {"symbol": "TCS", "price": 100.0, "rsi": 52.0, "pe_ratio": 22.0,
-                                           "roce": 15.0, "sentiment_score": 50.0}
+                                           "roce": 15.0, "sentiment_score": 50.0, "close": 100.0, "skip_http": True}   # E209
 
     def test_pe_alias_is_used(self, ins):
         client = FakeClient(FakeResp(200, {}))
@@ -961,11 +961,14 @@ class TestProcessSingleStockDecisionEngine:
         assert client.calls[0]["json"]["pe_ratio"] == 14.0
 
     @pytest.mark.parametrize("url, expected", [
-        ("http://d/decision", "http://d/decision/evaluate"),
-        ("http://d/decision/", "http://d/decision/evaluate"),
-        ("http://d", "http://d/decision/evaluate"),
-        ("http://d/", "http://d/decision/evaluate"),
-        ("http://d/api", "http://d/api/decision/evaluate"),
+        # E209: the decision app's route is /decide/evaluate (mounted under /decision); ".../decision/evaluate" never existed
+        ("http://d/decision", "http://d/decision/decide/evaluate"),
+        ("http://d/decision/", "http://d/decision/decide/evaluate"),
+        ("http://d", "http://d/decision/decide/evaluate"),
+        ("http://d/", "http://d/decision/decide/evaluate"),
+        ("http://d/api", "http://d/api/decision/decide/evaluate"),
+        ("http://d/decision/decide", "http://d/decision/decide/evaluate"),
+        ("http://d/decision/decide/evaluate", "http://d/decision/decide/evaluate"),
     ])
     def test_evaluate_url(self, ins, url, expected):
         client = FakeClient(FakeResp(200, {}))

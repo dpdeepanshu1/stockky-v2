@@ -459,6 +459,33 @@ def _bump_exit_failure(
         )
 
 
+def _norm_trading_symbol(sym) -> str:
+    """Upper-case, no spaces, no trailing -EQ: the form used to compare our symbol with Dhan's tradingSymbol."""
+    out = str(sym or "").upper().replace(" ", "")
+    return out[:-3] if out.endswith("-EQ") else out
+
+
+def _broker_qty_for_symbol(symbol: str, holdings, positions) -> int:
+    """Shares of `symbol` the broker really holds: settled holdings plus today's open long positions.
+
+    E171: the old loop matched with startswith(), so a position in ABB could read the quantity of ABBOTINDIA (first match won),
+    and it looked at holdings only (see the caller). The match is now exact (after normalising), every matching row counts, and
+    a short or flat position row (netQty <= 0) adds nothing. A row with an unreadable quantity raises, so the caller's sync-failed
+    alert runs instead of treating it as zero.
+    """
+    ours = _norm_trading_symbol(symbol)
+    total = 0
+    for h in holdings or []:
+        if _norm_trading_symbol(h.get("tradingSymbol")) == ours:
+            total += int(float(h.get("availableQty") or h.get("totalQty") or 0))
+    for p in positions or []:
+        if _norm_trading_symbol(p.get("tradingSymbol")) == ours:
+            net = int(float(p.get("netQty") or 0))
+            if net > 0:
+                total += net
+    return total
+
+
 def _send_real_sell(
     db: Session,
     position: models.TradePosition,
@@ -874,13 +901,11 @@ def _send_real_sell(
                 # `dhan_client.is_oversell_error` right above) returns the
                 # holdings list directly — no `.get("data")` unwrap needed.
                 holdings = dhan_client.get_holdings(db) or []
-                broker_qty = 0
-                for h in holdings:
-                    sym = (h.get("tradingSymbol") or "").upper().replace(" ", "")
-                    our_sym = position.symbol.upper().replace(" ", "")
-                    if sym == our_sym or sym.startswith(our_sym):
-                        broker_qty = int(h.get("availableQty") or h.get("totalQty") or 0)
-                        break
+                # E171: holdings only list shares already settled in the demat account (T+1). A share bought today is in the day's
+                # POSITIONS, not in holdings, so "holdings = 0" used to ghost-close a same-day position that was still held. The
+                # positions read is part of the same sync: if it fails, the except below alerts and retries; it never guesses 0.
+                positions = dhan_client.get_positions(db) or []
+                broker_qty = _broker_qty_for_symbol(position.symbol, holdings, positions)
                 if broker_qty <= 0:
                     logger.warning(
                         "exit SELL %s: broker holds 0 — ghost-closing (id=%s)",

@@ -6,7 +6,7 @@ import { PriceRoll } from "./ui/motion";   // group 462 (phase 4)
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import { KpiStrip } from "./ui/KpiStrip";
-import { surpriseKpis } from "./surpriseView";
+import { surpriseKpis, surpriseRowView } from "./surpriseView";
 
 export interface SurpriseStock {
   symbol: string;

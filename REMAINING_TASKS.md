@@ -1,3 +1,4 @@
+> E171 (includes E170): build import fixed; `git rm` the two stale frontend files (see CHANGES E171); oversell sync fixed in `_send_real_sell`. Still unread line by line: the other five long real-trade money functions, `attempt_entry` and three others in position-stocks, `_decide_impl`, `_get_quotes_bulk_core`. F-29 (open paper-ledger writes) still needs your decision. NOT run here: a browser, other services' suites.
 # Remaining tasks
 
 > E159 (this zip, includes E158): Service Manager strip and removal of fixed-text health tiles; login / admin gate / system-check need no strip. Summary strips are finished. Next: card bodies tab by tab (Hot Picks first; a screenshot from you after each), Dashboard hero decision, F-08 stop / target drawings. Sheet title still says Render / Supabase (your call). NOT run here: `tsc` (whole app), `vite build`, a browser, backend pytest.

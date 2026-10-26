@@ -676,6 +676,27 @@ class TestAttemptEntryOrderFailures:
         if records_restriction:
             assert db.query(models.ScalpIntradayRestrictedSecurity).one().symbol == "T2TCO"
 
+    def test_intraday_cutoff_rejection_pauses_every_new_entry_for_the_rest_of_the_day(self, env):
+        """E196: Dhan's intraday window is closed for today; the next cycle must not send another doomed BUY (it did, every ~15 s)."""
+        from orders import entry_pause
+        db, b, _ = env
+        b.super_script = [RuntimeError(CUTOFF_MSG)]
+        assert entry.attempt_entry(db, cand("t2tco")) is None
+        n_calls = len(b.of("place_super_order"))
+        left = entry_pause._all_until - entry_pause._now()
+        assert 60 <= left <= 24 * 3600                                  # until IST midnight, not the usual few minutes
+        assert "INTRADAY_CUTOFF" in (entry_pause.all_paused() or "")
+        assert entry.attempt_entry(db, cand("other")) is None
+        assert last_log(db).reason.startswith("ENTRY_MARGIN_PAUSE:")
+        assert len(b.of("place_super_order")) == n_calls                # nothing more was sent to Dhan
+
+    def test_other_rejections_do_not_pause_the_whole_day(self, env):
+        from orders import entry_pause
+        db, b, _ = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+        entry.attempt_entry(db, cand("t2tco"))
+        assert entry_pause.all_paused() is None
+
     def test_ambiguous_timeout_but_order_exists_at_dhan_is_tracked_not_released(self, env, monkeypatch):
         """group313: a timeout after the request left may still have placed the BUY - it must become a tracked position."""
         db, b, sent = env

@@ -147,3 +147,17 @@ class TestReconcileMarginRejectionPausesEntries:
         p = self._pos(db)
         reconcile._learn_from_entry_rejection(db, p, "REJECTED", MARGIN_TEXT)
         assert entry_pause.all_paused() is None
+
+
+class TestMinutesLeftInIstDay:
+    """E196: the pause used after an exchange intraday-cutoff rejection lasts to the next IST midnight."""
+
+    def test_midday_and_just_before_midnight(self):
+        from datetime import datetime, timezone
+        # 2026-10-26 07:30 UTC = 13:00 IST -> 11 h to IST midnight
+        assert entry_pause.minutes_left_in_ist_day(datetime(2026, 10, 26, 7, 30, tzinfo=timezone.utc)) == pytest.approx(11 * 60)
+        # 18:29:30 UTC = 23:59:30 IST -> floor of 1 minute
+        assert entry_pause.minutes_left_in_ist_day(datetime(2026, 10, 26, 18, 29, 30, tzinfo=timezone.utc)) == 1.0
+
+    def test_never_raises(self):
+        assert entry_pause.minutes_left_in_ist_day(object()) == 360.0

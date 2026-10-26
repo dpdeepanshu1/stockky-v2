@@ -269,7 +269,9 @@ def available(db) -> float:
 
 
 def fired_date(db):
-    return db.query(models.ScalpGateState).filter_by(mode="REAL").first().eod_squareoff_fired_date
+    # E196: a sweep that is refused before it reads the gate row (another sweep holds the lock) has not created the row yet = not fired.
+    row = db.query(models.ScalpGateState).filter_by(mode="REAL").first()
+    return row.eod_squareoff_fired_date if row is not None else None
 
 
 def enable_carry(monkeypatch):
@@ -826,8 +828,9 @@ class TestRunEodFailureHandling:
         assert eod.run_eod_squareoff(db) == 1
         assert bad.status == "OPEN" and good.status == "EOD_SQUAREOFF"
 
-    def test_position_in_cooldown_is_skipped_quietly(self, env):
+    def test_position_in_cooldown_is_skipped_quietly(self, env, monkeypatch):
         db, b, sent = env
+        open_retry_window(monkeypatch)   # E196: inside the retry window (it used the wall clock, so it only passed in the first minutes after the EOD time)
         cool = mkpos(db, consecutive_exit_failures=3,
                      last_exit_failure_at=datetime.now(timezone.utc) - timedelta(seconds=5))
         good = mkpos(db)

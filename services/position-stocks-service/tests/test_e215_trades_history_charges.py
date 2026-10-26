@@ -27,4 +27,6 @@ def test_short_uses_the_short_legs():
 def test_unsettled_or_unpriced_row_is_none():
     assert main._row_charges(_row(exit_price=None)) is None
     assert main._row_charges(_row(quantity=0)) is None
-    assert main._row_charges(_row(status="PENDING_RECONCILE")) is None
+    # A real unresolved exit keeps its status and carries the *_PENDING_RECONCILE marker in error_message (exit_price is
+    # still the entry placeholder), which trade_stats.classify treats as "pending", not settled.
+    assert main._row_charges(_row(error_message="STOP_HIT_PENDING_RECONCILE: exit_price=entry_price placeholder")) is None

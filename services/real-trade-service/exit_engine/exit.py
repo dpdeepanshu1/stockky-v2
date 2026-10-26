@@ -333,6 +333,14 @@ def _has_pending_real_sell(db: Session, symbol: str) -> bool:
     )
 
 
+def _is_manual_sell_order(order) -> bool:
+    """E195: a SELL placed from the Trade ticket (manual_engine passes execution_source="MANUAL", exit_reason="manual_sell")."""
+    try:
+        return (str(order.execution_source or "").upper() == "MANUAL") or (order.exit_reason == "manual_sell")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def expire_stale_exit_orders(db: Session, mode: str) -> int:
     """2026-09-18 audit fix #1 — the exit-side counterpart of entry_engine's
     expire_stale_orders(). Only ever finds anything for mode=="REAL": DEMO
@@ -396,6 +404,9 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
 
         remaining_qty = max(0, order.qty - (order.filled_qty_so_far or 0))
         was_partial   = order.status == "PARTIAL"
+        # E195: a LIMIT SELL the user typed in the Trade ticket is a price instruction, not a target exit whose target is already gone. Turning
+        # it into a MARKET sell after the window sold the shares at whatever the market paid, below the limit the user chose.
+        manual_limit  = _is_manual_sell_order(order)
         order.status     = "EXPIRED"
         order.updated_at = now
         db.add(models.TradeOrderEvent(
@@ -403,11 +414,21 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
             detail=(
                 f"Exit LIMIT window ({config.EXIT_LIMIT_VALIDITY_MINUTES}m) closed "
                 f"{'partially filled' if was_partial else 'unfilled'} — cancelled at Dhan, "
-                f"resending remaining {remaining_qty} as MARKET."
+                + ("manual order: NOT resent as MARKET, the position goes back under its stop / target watch."
+                   if manual_limit else f"resending remaining {remaining_qty} as MARKET.")
             ),
         ))
         db.commit()
         expired += 1
+
+        if manual_limit:
+            if remaining_qty > 0:
+                notify_sync(
+                    f"\u2139\ufe0f *Manual LIMIT sell expired* - {order.symbol} x{remaining_qty}\n"
+                    f"Not filled within {config.EXIT_LIMIT_VALIDITY_MINUTES} min, cancelled at Dhan and NOT sent as a market order. "
+                    "The position is back under its stop / target watch; place the sell again if you still want it."
+                )
+            continue
 
         if remaining_qty > 0:
             position = (

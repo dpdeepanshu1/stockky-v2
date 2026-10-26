@@ -833,6 +833,11 @@ def hotpicks_repair_scores(
                     if not body:
                         time.sleep(0.4)
                         continue
+                    if body.get("error_detail") or (body.get("data_insufficient") and body.get("close") is None):
+                        # E192: the decision service's error fallback / no-data answer is HTTP 200 with neutral scores (DO NOT BUY, 45, 50 / 50);
+                        # writing it would stamp a fake decision on the row and, being non-blank, stop it from ever being repaired.
+                        time.sleep(0.4)
+                        continue
                     changed = False
                     dec = body.get("decision")
                     if dec:
@@ -849,8 +854,8 @@ def hotpicks_repair_scores(
                             blob[k] = v
                             changed = True
                     rs = body.get("reasons")
-                    if rs:
-                        blob["reasons"] = rs if isinstance(rs, list) else blob.get("reasons")
+                    if rs and isinstance(rs, list):   # E192: the engine sends a dict; the old else-branch just wrote reasons=None into a row without one
+                        blob["reasons"] = rs
                     if changed:
                         conn.execute(
                             text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "

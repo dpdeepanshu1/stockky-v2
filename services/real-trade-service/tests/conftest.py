@@ -179,6 +179,8 @@ def _exit_hold_audit_every_cycle(monkeypatch):
     mod = _sys_g172.modules.get("exit_engine.exit")
     if mod is not None and hasattr(mod, "_HOLD_AUDIT_LAST"):
         mod._HOLD_AUDIT_LAST.clear()
+    if mod is not None and hasattr(mod, "_BLOCKED_EXIT_AUDIT_LAST"):   # E194
+        mod._BLOCKED_EXIT_AUDIT_LAST.clear()
 
 
 @_pytest_g172.fixture(autouse=True)

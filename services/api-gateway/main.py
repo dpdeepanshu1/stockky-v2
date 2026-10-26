@@ -3834,20 +3834,25 @@ async def _analyze_one_symbol_ultra(
                 # ── Decide-level cache (same symbol within TTL → instant) ──
                 cache_key = f"{DECIDE_CACHE_PREFIX}{base_sym}"
                 cached_decide = _redis_get(cache_key)
-                if cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision"):
+                # E191: this call sends a skip_http request itself whenever the feed row has data (below), so a partial-input (skip_http) entry is a
+                # fair answer for it; E190 had made such entries unusable here, which turned every feed-based scan call into a decision-service hop.
+                _feed_has_data = isinstance(feed_row, dict) and any(
+                    feed_row.get(k) is not None
+                    for k in (
+                        "rsi", "pe_ratio", "pe", "technical_score",
+                        "fundamental_score", "news_score", "close", "price", "ltp",
+                    )
+                )
+                if (cached_decide and isinstance(cached_decide, dict) and cached_decide.get("decision")
+                        and not cached_decide.get("already_owned")
+                        and (not cached_decide.get("partial_inputs") or _feed_has_data)):   # E190/E191: a partial-input decision only answers a call that is itself skip_http. E189: this path asks as "not owned"; an owned-mode decision (SELL/HOLD) is not its answer
                     normalized = _normalize_decision_response(cached_decide, symbol)
                     normalized["from_decide_cache"] = True
                 else:
                     # Prefer POST /decide/evaluate when Neon feed already has RSI/PE/scores.
                     # This short-circuits internal HTTP fan-out inside the decision service
                     # and prevents free-tier PoolTimeout / circuit opens.
-                    feed_has_data = isinstance(feed_row, dict) and any(
-                        feed_row.get(k) is not None
-                        for k in (
-                            "rsi", "pe_ratio", "pe", "technical_score",
-                            "fundamental_score", "news_score", "close", "price", "ltp",
-                        )
-                    )
+                    feed_has_data = _feed_has_data   # E191: computed above, before the cache read
                     if feed_has_data:
                         eval_payload = {
                             "symbol": base_sym or symbol,
@@ -3856,7 +3861,8 @@ async def _analyze_one_symbol_ultra(
                             "technical_score": feed_row.get("technical_score"),
                             "fundamental_score": feed_row.get("fundamental_score"),
                             "news_score": feed_row.get("news_score"),
-                            "sentiment_score": feed_row.get("sentiment_score") or feed_row.get("market_score"),
+                            # E191: first value that is present (a real 0 is the most negative score, not a missing one)
+                            "sentiment_score": feed_row.get("sentiment_score") if feed_row.get("sentiment_score") is not None else feed_row.get("market_score"),
                             "close": feed_row.get("close") or feed_row.get("price") or feed_row.get("ltp") or feed_row.get("cmp"),
                             "support": feed_row.get("support"),
                             "resistance": feed_row.get("resistance"),
@@ -3900,7 +3906,8 @@ async def _analyze_one_symbol_ultra(
                     # Only cache a real engine answer. A non-dict / empty body is
                     # replaced by the placeholder default row, which must not be
                     # served from cache for the whole TTL.
-                    if isinstance(raw, dict) and raw:
+                    # E192: not the decision service's error fallback either (HTTP 200 with neutral scores and `error_detail`).
+                    if isinstance(raw, dict) and raw and not raw.get("error_detail"):
                         _redis_set(cache_key, normalized, ttl=_decide_cache_ttl())
 
                 # Overlay durable Neon feed onto decision (do not call fund/news upstream if present)

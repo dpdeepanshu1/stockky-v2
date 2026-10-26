@@ -193,6 +193,8 @@ def _cache_get_decide(symbol: str):
 def _is_weak_decide_payload(payload: dict) -> bool:
     if not isinstance(payload, dict):
         return True
+    if payload.get("error_detail"):
+        return True   # E192: the error fallback (HTTP 200, neutral scores) is never a decision to cache or serve, whoever wrote it to the cache
     reasons = payload.get("reasons") or {}
     blob = " ".join(
         str(x)
@@ -206,6 +208,26 @@ def _is_weak_decide_payload(payload: dict) -> bool:
     if payload.get("data_insufficient") and payload.get("close") is None:
         return True
     return False
+
+
+def _decide_cache_matches(cached, already_owned: bool, skip_http: bool = False) -> bool:
+    """E189: a cached decision is only valid for the same `already_owned` mode it was computed in. The cache is keyed by symbol alone, and
+    `already_owned` changes the answer itself (owned: SELL below 35, HOLD 35-60, no data-quality gate, no P9 upgrade; not owned: BUY NOW /
+    PREPARE / DO NOT BUY), so a SELL / HOLD computed for a held stock was served to a candidate scan of the same symbol (and a BUY NOW to an
+    owned-stock check) for up to DECIDE_CACHE_TTL_OPEN s (12 h when closed). Entries written before E189 carry no marker and count as not owned."""
+    if not (isinstance(cached, dict) and bool(cached.get("already_owned", False)) == bool(already_owned)):
+        return False
+    # E190: a decision computed from a `skip_http` payload (events, prediction and training pillars skipped -> neutral 50 / empty) is a
+    # partial-input decision; it is served only to another skip_http request, never to a full one. A full decision may serve either.
+    if cached.get("partial_inputs") and not skip_http:
+        return False
+    return True
+
+
+def _train_record_on_final_decision() -> bool:
+    """E189: DECIDE_RECORD_ON_FINAL_DECISION (default on; 0/false/off/no = old behaviour: only a pick the legacy scorer called BUY NOW /
+    PREPARE TO BUY was queued for training). The record itself is still made only for the FINAL decision (see _queue_training_record)."""
+    return ((os.getenv("DECIDE_RECORD_ON_FINAL_DECISION") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
 
 
 def _cache_set_decide(symbol: str, payload: dict):
@@ -1194,7 +1216,7 @@ def _derive_fundamental_from_payload(payload: dict) -> dict:
     else:
         if 8 <= pe <= 28:
             fund_score = 62
-        elif 28 < pe <= 40:
+        elif 28 < pe <= 50:   # E193: was <= 40, so 40 < PE <= 50 fell through to 50 and scored higher than PE 28-40 (48); 50+ is 35
             fund_score = 48
         elif 0 < pe < 8:
             fund_score = 55
@@ -1304,7 +1326,8 @@ async def _decide_impl(
     # Speed: serve from decide cache unless force=true
     if not force:
         cached = _cache_get_decide(symbol)
-        if cached and isinstance(cached, dict) and cached.get("decision") and not _is_weak_decide_payload(cached):
+        if (cached and isinstance(cached, dict) and cached.get("decision") and not _is_weak_decide_payload(cached)
+                and _decide_cache_matches(cached, already_owned, bool(prefetched and prefetched.get("skip_http")))):   # E189 / E190
             cached = dict(cached)
             cached["from_cache"] = True
             if _so_hook is not None:
@@ -1398,7 +1421,10 @@ async def _decide_impl(
         prediction = fetched.get("prediction") if need_prediction else None
 
         if not need_sentiment:
-            ms = prefetched.get("market_score") or prefetched.get("sentiment_score") if prefetched else None
+            ms = None
+            if prefetched:
+                # E190: first value that is present; `or` read a real market_score of 0 as missing (and used sentiment_score / 50)
+                ms = prefetched.get("market_score") if prefetched.get("market_score") is not None else prefetched.get("sentiment_score")
             sentiment = {"market_score": _safe_int(ms, 50), "classification": "NEUTRAL", "from_payload": True}
             logger.info("%s sentiment SHORT-CIRCUIT (from payload)", symbol)
         else:
@@ -1594,7 +1620,9 @@ async def _decide_impl(
 
         entry_low = entry_high = target = stop_loss = None
         if close:
-            support_val = support if support else close * 0.95
+            # E190: a support at or above the close is not a support (stale / wrong level): it put entry_low above entry_high and the stop above
+            # the price. Treat it like a missing one.
+            support_val = support if (support and support < close) else close * 0.95
             entry_low = round(support_val * 1.01, 2)
             entry_high = round(close * 1.005, 2)
             target_pct = 0.08
@@ -1672,6 +1700,8 @@ async def _decide_impl(
             "data_quality": data_quality,
             "provisional": bool(data_quality.get("provisional")),
             "block_buy_now": bool(data_quality.get("block_buy_now")),
+            "already_owned": bool(already_owned),   # E189: the decide cache only serves a payload computed in the same mode
+            "partial_inputs": bool(skip_all_http),   # E190: events / prediction / training pillars were skipped (skip_http); not served to a full request
         }
 
 
@@ -1694,7 +1724,11 @@ async def _decide_impl(
             response["fundamental_metrics"] = fundamental["metrics"]
 
         _train_args = None   # group368
-        if decision in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY) and close:
+        # E189: the FINAL decision (multi-horizon is the primary decision, then the quality gate and the structure policy) is what gets recorded,
+        # but this block only ran when the LEGACY scorer above had said BUY NOW / PREPARE TO BUY, so a final BUY the legacy scorer had not
+        # flagged was never queued - the closed loop (live win rate, its n, the classifier) never saw those picks. _queue_training_record
+        # still records only a final BUY NOW / PREPARE TO BUY.
+        if (decision in (Decision.BUY_NOW, Decision.PREPARE_TO_BUY) or _train_record_on_final_decision()) and close:
             # ema alignment as a descriptive label — technical-analysis-service
             # exposes ema20/ema50/ema200 as three separate numbers, not a
             # single "ema" value, so this derives the closest honest

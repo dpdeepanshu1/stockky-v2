@@ -222,6 +222,9 @@ def _dp_guard_blocks_target_sale(position, ltp: float, qty_to_close: int) -> Opt
 
 # position id -> (monotonic time, normalised reasoning) of the last HOLD audit row written (group368)
 _HOLD_AUDIT_LAST: dict = {}
+# E194: (position id, action) -> (monotonic time, normalised wording) of the last audit row written for an exit whose SELL was blocked.
+_BLOCKED_EXIT_AUDIT_LAST: dict = {}
+_BLOCKED_EXIT_ACTIONS = ("FULL_EXIT", "EMERGENCY_EXIT", "PARTIAL_EXIT")
 
 
 def _write_exit_decision(
@@ -252,6 +255,25 @@ def _write_exit_decision(
             if len(_HOLD_AUDIT_LAST) > 2000:
                 for k in list(_HOLD_AUDIT_LAST)[:1000]:
                     _HOLD_AUDIT_LAST.pop(k, None)
+    if action in _BLOCKED_EXIT_ACTIONS and _exit_send_is_blocked(db, position):
+        # E194: the SELL for this decision cannot go out this cycle (rejection backoff or today's intraday cutoff), so the same decision
+        # would otherwise be written again every cycle (~8 s) - one Oracle INSERT per blocked position per pass, hundreds an hour, all
+        # saying FULL_EXIT although nothing was sent. Same throttle as the HOLD rows above; a different action or wording is written at once,
+        # and the cycle that actually sends the SELL (backoff over) is never blocked here, so it always has its row.
+        try:
+            interval = float(getattr(config, "EXIT_HOLD_AUDIT_SECONDS", 60) or 0)
+        except Exception:
+            interval = 0.0
+        if interval > 0:
+            key = re.sub(r"[\d.,\u20b9-]+", "#", str(reasoning))[:80]
+            now = time.monotonic()
+            last = _BLOCKED_EXIT_AUDIT_LAST.get((position.id, action))
+            if last is not None and last[1] == key and (now - last[0]) < interval:
+                return
+            _BLOCKED_EXIT_AUDIT_LAST[(position.id, action)] = (now, key)
+            if len(_BLOCKED_EXIT_AUDIT_LAST) > 2000:
+                for k in list(_BLOCKED_EXIT_AUDIT_LAST)[:1000]:
+                    _BLOCKED_EXIT_AUDIT_LAST.pop(k, None)
     if action == "HOLD":
         # A3: a HOLD row is evidence only; write it behind the tick so a slow / saturated DB can never delay or fail a stop check.
         # False (queue off / unavailable) falls through to the old synchronous add.
@@ -270,6 +292,20 @@ def _write_exit_decision(
         reasoning=reasoning,
         ltp_at_decision=ltp,
     ))
+
+
+def _exit_send_is_blocked(db: Session, position: models.TradePosition) -> bool:
+    """E194: True when `_send_real_sell` is certain to return False for this REAL position this cycle without calling Dhan: it is inside its
+    rejection backoff, or it already hit today's intraday cutoff (the two checks at the top of `_send_real_sell`, same predicates). Any doubt or
+    error is False, so the audit row is written exactly as before."""
+    try:
+        if getattr(position, "mode", None) != "REAL":
+            return False
+        if _should_skip_exit_this_cycle(position):
+            return True
+        return bool(load_snapshot(db, f"intraday_cutoff_hit_{position.id}_{ist_today_str()}"))
+    except Exception:  # noqa: BLE001 - audit throttling must never get in the way of an exit
+        return False
 
 
 def _has_pending_real_sell(db: Session, symbol: str) -> bool:

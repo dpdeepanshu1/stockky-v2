@@ -38,6 +38,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import models
+from tests._tdays import opened_at_trading_days_ago
 import exit_engine.exit as ex
 from market_feed.feed import Tick
 
@@ -67,7 +68,7 @@ def make_position(db, *, symbol="TESTCO", qty=10, entry=100.0, stop=95.0, target
         mode=mode, symbol=symbol, status="OPEN", qty_open=qty,
         avg_entry_price=entry, current_stop=stop, current_target=target,
         initial_stop_distance=(entry - stop) if stop else None,
-        opened_at=datetime.now(timezone.utc) - timedelta(days=opened_days_ago),
+        opened_at=opened_at_trading_days_ago(opened_days_ago),      # E207
         watchlist_entry_id=watchlist_entry_id, source_tab=source_tab,
     )
     db.add(pos)

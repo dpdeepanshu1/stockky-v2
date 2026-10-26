@@ -75,7 +75,7 @@ from portfolio.portfolio import (
     close_position, force_close_real_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )
 from resilience.local_cache import load_snapshot, save_snapshot
-from tz_utils import as_aware, ist_today_str
+from tz_utils import IST, as_aware, ist_today_str, is_nse_holiday
 
 # §6 — corporate-action clamp for ATR trailing stop inputs
 try:
@@ -133,6 +133,31 @@ CDSL_ALERT_COOLDOWN_MIN = int(((os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN") or "")
 # rejection branch in _send_real_sell) instead of sending an identical
 # "rejected" message every single cycle forever.
 EXIT_REJECT_STREAK_ESCALATE_AT = int(((os.getenv("EXIT_REJECT_STREAK_ESCALATE_AT") or "").strip() or "3"))
+
+
+def _held_trading_days(opened_at, now) -> int:
+    """E207: sessions elapsed since the entry date (IST): weekdays that are not NSE holidays, counted after the entry day through today.
+    Same-day = 0, Friday entry -> Monday = 1 (the old `(now - opened_at).days` counted the weekend, so a Friday entry had 3 'held days'
+    by Monday and the time stop / early warning / trail schedule ran ahead of the market). Never raises: on any error, or for a hold
+    longer than 400 calendar days, it falls back to calendar days."""
+    try:
+        o = as_aware(opened_at).astimezone(IST).date()
+        n = now.astimezone(IST).date()
+        if n <= o:
+            return 0
+        if (n - o).days > 400:
+            return (n - o).days
+        count, d = 0, o
+        while d < n:
+            d += timedelta(days=1)
+            if d.weekday() < 5 and not is_nse_holiday(datetime(d.year, d.month, d.day, 12, 0, tzinfo=IST)):
+                count += 1
+        return count
+    except Exception:  # noqa: BLE001
+        try:
+            return max(0, (now - as_aware(opened_at)).days)
+        except Exception:  # noqa: BLE001
+            return 0
 
 
 def _trail_atr_mult(held_days: int, schedule=None) -> float:
@@ -217,6 +242,23 @@ def _dp_guard_blocks_target_sale(position, ltp: float, qty_to_close: int) -> Opt
         return (f"target sale would gain ₹{gain:,.0f} but costs ₹{cost:,.0f} to sell (DP + STT + charges); "
                 f"needs ≥ {config.EXIT_DP_MIN_GAIN_RATIO:.1f}x - holding, stop moved to breakeven")
     except Exception:
+        return None
+
+
+def _stale_tick_blocks_target_sale(tick, now: datetime) -> Optional[str]:
+    """E214: reason string when `tick` is too old to fire a profit-target PARTIAL sale, else None. Old = served from the last-good fallback
+    (source "stale_last_good(...)" / "stale_cooldown(...)") or, when its age is known, older than EXIT_TARGET_MAX_TICK_AGE_S. Never raises."""
+    try:
+        if not config.EXIT_TARGET_STALE_GUARD_ENABLED:
+            return None
+        if str(getattr(tick, "source", "") or "").startswith(("stale_last_good", "stale_cooldown")):
+            return f"the price is a served last-good tick ({tick.source})"
+        if getattr(tick, "age_known", True) and getattr(tick, "as_of", None) is not None:
+            age = (now - as_aware(tick.as_of)).total_seconds()
+            if age > config.EXIT_TARGET_MAX_TICK_AGE_S:
+                return f"the price is {age:.0f}s old (limit {config.EXIT_TARGET_MAX_TICK_AGE_S:.0f}s)"
+        return None
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -1472,7 +1514,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         # the skip so it's visible in the audit trail, and let every other
         # position in the cycle continue to be evaluated normally.
         try:
-            held_days = (now - as_aware(position.opened_at)).days
+            held_days = _held_trading_days(position.opened_at, now)       # E207: trading days, not calendar days
 
             # Short-Term Trading Upgrade (2026-09-02): load per-position exit
             # profile. For watchlist-sourced positions this uses the catalyst's
@@ -1591,6 +1633,17 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 and ltp >= position.current_target
                 and position.status == "OPEN"
             ):
+                # E214: never sell a target partial on an old price; the next cycle with a fresh tick decides. The stop and emergency checks
+                # above already ran on this tick; only the optional partial (and the trail / time checks after it) wait one cycle.
+                _stale_skip = _stale_tick_blocks_target_sale(tick, now)
+                if _stale_skip:
+                    _write_exit_decision(
+                        db, position, "HOLD",
+                        f"Target ₹{position.current_target:.2f} reached at LTP ₹{ltp:.2f} but {_stale_skip}; the partial sale waits for a fresh price.", ltp,
+                    )
+                    logger.info("exit E214: %s target partial deferred: %s", position.symbol, _stale_skip)
+                    held += 1
+                    continue
                 qty_to_close = max(1, int(position.qty_open * _partial_frac))
                 pct_locked   = qty_to_close / position.qty_open * 100
                 # group 264: don't pay the DP fee to book a tiny target gain on a carried CNC holding - hold it and

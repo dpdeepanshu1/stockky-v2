@@ -1222,6 +1222,8 @@ def _derive_fundamental_from_payload(payload: dict) -> dict:
             fund_score = 55
         elif pe > 50:
             fund_score = 35
+        elif pe < 0:
+            fund_score = 40   # E208: loss-making (negative PE) was neutral 50, better than a PE of 28-50 (48); now below that, above the PE 50+ bucket (35)
         else:
             fund_score = 50
     metrics = payload.get("metrics") or payload.get("fundamental_metrics") or {}

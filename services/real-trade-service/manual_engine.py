@@ -233,6 +233,10 @@ async def evaluate_manual_order(
         target_price = req.target_price or round(reference_price * (1 + _FALLBACK_TARGET_PCT / 100.0), 2)
         if stop_price >= reference_price:
             return {"ok": False, "reason": "invalid_stop", "detail": "Stop price must be below entry price."}
+        # E206: a typed target at or below the entry is a ticket that can only lose (risk-reward <= 0, and a target-hit exit would sell
+        # at a loss). Same class as the stop check above. Only a target the caller supplied is checked; the fallback target is above entry.
+        if req.target_price and not swing and target_price <= reference_price:
+            return {"ok": False, "reason": "invalid_target", "detail": "Target price must be above entry price."}
 
         account_state = _account_state(db, mode, gate_armed)
         if swing and swing.get('max_trade_value'):

@@ -1,7 +1,7 @@
 // Run: node --experimental-strip-types calibration.test.mjs  (Node >= 22.6). group 442: pure helpers of the Real Money Calibration page.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { tradesFromRealTrade, tradesFromPositionStocks, dayTotals, bucketBy, tradesCsv, istDay, istHm, relTime, fmtDur } from "./calibrationTrades.ts";
+import { tradesFromRealTrade, tradesFromPositionStocks, dayTotals, bucketBy, tradesCsv, istDay, istHm, relTime, fmtDur, isUnbooked, rMultiple, directionalPct, CSV_HEAD } from "./calibrationTrades.ts";
 import { PLAN, JOB_SERVICES, jobAppliesTo, GATE_GLOSSARY, planRunAll } from "./calibrationPlan.ts";
 
 // real-trade records: UTC timestamps -> IST day / time, net P&L preferred, bad rows dropped
@@ -52,6 +52,37 @@ assert.equal(csv.length, 4);
 assert.match(csv[0], /^day_ist,service,symbol,entry_ist,exit_ist/);
 assert.ok(csv.every((l) => !l.includes("undefined")));
 
+// E213: the CSV carries what a loss analysis needs; the first 10 columns are unchanged
+{
+  assert.equal(CSV_HEAD.slice(0, 10).join(","), "day_ist,service,symbol,entry_ist,exit_ist,held_min,pnl,return_pct,reason,qty");
+  assert.equal(CSV_HEAD.length, 22);
+  assert.equal(isUnbooked({ net_pnl: 0, return_pct: null }), true);
+  assert.equal(isUnbooked({ net_pnl: 0, return_pct: 0 }), false);
+  assert.equal(isUnbooked({ net_pnl: -3.2 }), false);
+  const g = tradesFromRealTrade({ records: [
+    { position_id: 7, symbol: "HDFCLIFE", opened_at: "2026-10-19T07:40:00Z", closed_at: "2026-10-20T03:27:00Z", net_pnl: 0, gross_pnl: 0, return_pct: null, exit_reason: "eod_squareoff", quantity: 5 },
+    { position_id: 8, symbol: "NYKAA", opened_at: "2026-10-21T03:46:00Z", closed_at: "2026-10-21T06:11:00Z", net_pnl: -71.72, return_pct: -3.514, exit_reason: "stop_hit", quantity: 6,
+      entry_price: 340.1, exit_price: 328.2, stop_pct: 2.5, max_gain_pct: 0.4, max_drawdown_pct: -3.6, entry_slippage_pct: 0.12, exit_slippage_pct: -0.9, charges: 3.1, stop_basis: "atr" } ] });
+  assert.equal(g.length, 1);
+  assert.equal(Math.round(rMultiple(g[0]) * 100) / 100, -1.41);
+  const cols = tradesCsv(g).trim().split("\n")[1].split(",");
+  assert.equal(cols.length, 22);
+  assert.equal(cols[15], "-1.41");
+  // position-stocks: long and short, same raw numbers
+  const p = tradesFromPositionStocks({ trades: [
+    { id: 1, symbol: "L", status: "STOP_HIT", exit_reason: "stop_hit", side: "BUY", entry_price: 100, exit_price: 98.8, realized_pnl: -6, quantity: 5, opened_at: "2026-10-26T04:50:00Z", closed_at: "2026-10-26T04:55:00Z",
+      adaptive_stop_pct: 1, adaptive_target_pct: 2, max_gain_pct: 0.3, max_drawdown_pct: -1.2, signal_price: 99.9, stop_price: 99 },
+    { id: 2, symbol: "S", status: "STOP_HIT", exit_reason: "stop_hit", side: "SHORT", entry_price: 100, exit_price: 101.2, realized_pnl: -6, quantity: 5, opened_at: "2026-10-26T04:50:00Z", closed_at: "2026-10-26T04:55:00Z",
+      adaptive_stop_pct: 1, max_gain_pct: 1.2, max_drawdown_pct: -0.3, signal_price: 100.1, stop_price: 101 } ] });
+  const r6 = (x) => Math.round(x * 1e6) / 1e6;
+  assert.equal(r6(p[0].retPct), -1.2); assert.equal(r6(p[1].retPct), -1.2, "a short that rose 1.2 % lost 1.2 %");
+  assert.equal(r6(rMultiple(p[0])), -1.2);
+  assert.equal(r6(p[1].maxGainPct), 0.3); assert.equal(r6(p[1].maxDrawdownPct), -1.2, "short: best = the low, worst = the high");
+  assert.equal(Math.round(p[0].entrySlipPct * 100) / 100, 0.1); assert.equal(Math.round(p[1].entrySlipPct * 100) / 100, 0.1, "worse fill = positive for both sides");
+  assert.ok(p[0].exitSlipPct < 0 && p[1].exitSlipPct < 0, "both stops filled through the stop price");
+  assert.equal(directionalPct("LONG", 0, 5), null);
+  assert.ok(tradesCsv(p).split("\n").every((l) => !l.includes("undefined") && !l.includes("NaN")));
+}
 assert.equal(relTime(null), "never");
 assert.equal(relTime("2026-10-19T00:00:00Z", Date.parse("2026-10-19T00:00:30Z")), "30s ago");
 assert.equal(fmtDur(30), "30 s");

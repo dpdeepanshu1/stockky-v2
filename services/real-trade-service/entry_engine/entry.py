@@ -1945,21 +1945,89 @@ async def check_pending_fills(db: Session, mode: str) -> int:
         return 0
     from portfolio.portfolio import try_fill_entry
     pending = db.query(models.TradeOrder).filter_by(mode=mode, status="PLACED", side="BUY").all()
+    # E199b: an order whose ENTRY_VALIDITY_MINUTES window has closed must not fill any more. try_fill_entry's contract says the caller
+    # checks expiry, but this loop never did, and cycle_runner / the main.py self-heal call this BEFORE expire_stale_orders, so a
+    # stale DEMO limit (cycle outage, restart, slow cycle) still filled the moment price dipped into the zone - a late chase that the
+    # no-chase rule exists to prevent, and one REAL can never do (its order is cancelled at Dhan). Leave it for expire_stale_orders.
+    _now = datetime.now(timezone.utc)
+    _live = []
+    for o in pending:
+        vu = o.valid_until
+        if vu is not None:
+            if vu.tzinfo is None:
+                vu = vu.replace(tzinfo=timezone.utc)
+            if vu < _now:
+                continue
+        _live.append(o)
+    pending = _live
     if not pending:
         return 0
     symbols = list({o.symbol for o in pending})
-    ticks   = await get_quotes(symbols)
+    try:
+        ticks = await get_quotes(symbols)
+    except Exception:  # noqa: BLE001 - a quote-feed hiccup must not abort the cycle before exits run; orders stay PLACED
+        logger.exception("check_pending_fills: quote fetch failed - no simulated fills this pass")
+        return 0
     filled  = 0
     for order in pending:
-        tick = ticks.get(order.symbol)
-        if tick is None:
-            continue
-        dec    = db.query(models.TradeDecision).filter_by(id=order.decision_id).first()
-        stop_p = dec.proposed_stop   if dec else order.limit_price * (1 - FLAT_STOP_PCT   / 100.0)
-        tgt_p  = dec.proposed_target if dec else order.limit_price * (1 + FLAT_TARGET_PCT / 100.0)
-        if try_fill_entry(db, order, tick, stop_p, tgt_p):
-            filled += 1
+        _oid, _sym = order.id, order.symbol          # read before any rollback expires the instance
+        # E203: one bad order (missing decision AND limit price, a failed account / position write inside try_fill_entry) used to raise
+        # out of this loop: no other pending order was filled, expire_stale_orders and the exit stage after it never ran in that
+        # cycle, and the half-written FILLED state stayed on the session. Roll back that one order and carry on.
+        try:
+            tick = ticks.get(order.symbol)
+            if tick is None:
+                continue
+            # E204: the entry gate (group290 / group388) refuses to build an order on an old or unknown-age price, but this simulated
+            # fill took any tick as is. A DEMO limit therefore "filled" on a stale feed reading (feed stalled, market-data cache served
+            # an old value) that the live market never offered, flattering DEMO results. Same gate and same switches
+            # (ENTRY_MAX_QUOTE_AGE_S, 0 = off; ENTRY_QUOTE_AGE_UNKNOWN). The order stays PLACED and is re-checked next pass, or expires.
+            _why = _entry_quote_age_reason(tick)
+            if _why:
+                logger.info("check_pending_fills: %s not filled this pass - %s", _sym, _why)
+                continue
+            dec    = db.query(models.TradeDecision).filter_by(id=order.decision_id).first()
+            stop_p = dec.proposed_stop   if dec else order.limit_price * (1 - FLAT_STOP_PCT   / 100.0)
+            tgt_p  = dec.proposed_target if dec else order.limit_price * (1 + FLAT_TARGET_PCT / 100.0)
+            if try_fill_entry(db, order, tick, stop_p, tgt_p):
+                filled += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("check_pending_fills: order %s (%s) failed - skipped this pass", _oid, _sym)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
     return filled
+
+
+# E205: one "cancel failed" alert per order per window (EXPIRE_CANCEL_FAIL_ALERT_S, default 900 s, 0 = alert every pass as before).
+_cancel_fail_alerted: dict = {}
+
+
+def _cancel_fail_alert_due(dhan_order_id, *, now=None) -> bool:
+    """True when a cancel-failed alert for this Dhan order should be sent now, and records it. Never raises (a bug here must not
+    swallow the cancel-failed handling): on any error the alert is sent."""
+    try:
+        import time as _t
+        window = _wl_env_float("EXPIRE_CANCEL_FAIL_ALERT_S", 900.0)
+        if window <= 0:
+            return True
+        t = _t.monotonic() if now is None else now
+        key = str(dhan_order_id)
+        last = _cancel_fail_alerted.get(key)
+        if last is not None and 0 <= t - last < window:
+            return False
+        if len(_cancel_fail_alerted) > 500:
+            for k in [k for k, v in _cancel_fail_alerted.items() if t - v >= window]:
+                _cancel_fail_alerted.pop(k, None)
+        _cancel_fail_alerted[key] = t
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+# E200: Dhan order statuses after which nothing more can fill. Anything else seen right after a cancel means the cancel is still propagating.
+_CANCEL_TERMINAL_STATUSES = frozenset({"REJECTED", "CANCELLED", "CANCELED", "EXPIRED", "TRADED"})
 
 
 async def expire_stale_orders(db: Session, mode: str) -> int:
@@ -2005,7 +2073,35 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         .all()
     )
     expired = 0
-    for order in stale:
+    async def _expire_one(order) -> bool:
+        """E203: one order's whole expire step, so a failure in it cannot abort the other orders or the cycle. True = expired."""
+        # E202: a REAL order with no dhan_order_id is not proof that nothing was sent. The row is committed before the Dhan call
+        # (evaluate_mode claims the symbol first), so a crash / lost reply / failed commit between the call and record_real_order_sent
+        # leaves exactly this shape while the BUY may be live at Dhan. The correlation tag (stk<order.id>) is derivable, so ask Dhan
+        # before declaring the order dead and freeing the symbol - the same lookup evaluate_mode runs after a placement error.
+        if mode == "REAL" and not order.dhan_order_id:
+            try:
+                _row, _book_ok = dhan_client.find_order_by_tag(db, f"stk{order.id}")
+            except Exception:  # noqa: BLE001 - find_order_by_tag never raises; belt and braces
+                _row, _book_ok = None, False
+            _rid = str((_row or {}).get("orderId") or (_row or {}).get("order_id") or "") if _row is not None else ""
+            if _row is not None and _rid:
+                logger.critical(
+                    "expire_stale_orders: %s order %s had no Dhan id but Dhan HAS it (%s) - adopting it, then cancelling as usual",
+                    order.symbol, order.id, _rid,
+                )
+                record_real_order_sent(db, order, _rid)
+                await notify_async(
+                    f"⚠️ *Unrecorded BUY found at Dhan* - {order.symbol}\n"
+                    f"Order {_rid} was live but never recorded here. Adopted it; cancelling it now (entry window closed)."
+                )
+            elif _row is not None or not _book_ok:
+                logger.warning(
+                    "expire_stale_orders: %s order %s has no Dhan id and Dhan could not confirm it is absent - leaving it open",
+                    order.symbol, order.id,
+                )
+                return False
+
         if mode == "REAL" and order.dhan_order_id:
             try:
                 dhan_client.cancel_order(db, is_armed=True, dhan_order_id=order.dhan_order_id)
@@ -2015,12 +2111,16 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                     "leaving PLACED so reconcile can resolve it against Dhan: %s",
                     order.symbol, order.dhan_order_id, e,
                 )
-                await notify_async(
-                    f"⚠️ *Entry window closed but Dhan cancel failed* — {order.symbol}\n"
-                    f"{str(e)[:300]}\n"
-                    "Order left PLACED — reconcile will check next cycle in case it already filled."
-                )
-                continue
+                # E205: the order stays PLACED and stays stale, so this branch runs again every cycle (and every self-heal read) until
+                # reconcile or the operator settles it - one Telegram per pass for the same order. Alert once per window; the
+                # warning above still logs every pass.
+                if _cancel_fail_alert_due(order.dhan_order_id):
+                    await notify_async(
+                        f"⚠️ *Entry window closed but Dhan cancel failed* — {order.symbol}\n"
+                        f"{str(e)[:300]}\n"
+                        "Order left PLACED — reconcile will check next cycle in case it already filled."
+                    )
+                return False
 
             # BUG FIX (item 10): shares that fill between the last reconcile pass and
             # this cancel call are never seen by reconcile_real_orders — it only queries
@@ -2030,6 +2130,16 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
             # book state for this order and book any fills that snuck in before the cancel
             # landed. This is the same "reconcile once after cancel" path the function's
             # own docstring describes as the missing piece.
+            # E199: if this read or the booking fails, or Dhan shows fills but no price yet,
+            # the order must NOT be marked EXPIRED below. reconcile_real_orders() only queries
+            # PLACED/PARTIAL orders, so an EXPIRED label here hides a possible real fill from it
+            # for good (and the symbol lock would be released under real shares). Leave the order
+            # open instead and let reconcile resolve it against Dhan's book.
+            fill_check_unresolved = None
+            _quiet_unresolved = False
+            # Commit this pass's pending changes first: record_real_fill() commits on success and
+            # the rollback below on failure must only discard THIS order's half-done booking.
+            db.commit()
             try:
                 from execution.reconcile import _book_fill_delta  # lazy import avoids circular
                 broker_rows = dhan_client.get_order_list(db) or []
@@ -2045,6 +2155,10 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                     fill_price       = float(fill_price_raw or 0.0)
                     already_booked   = int(order.filled_qty_so_far or 0)
                     delta            = filled_at_broker - already_booked
+                    # E200: Dhan accepting the cancel request does not mean the order is dead yet - the exchange can still
+                    # fill it for a moment. Any non-terminal status in the book right after the cancel means "not resolved".
+                    broker_status = str(_get(broker_row, "orderStatus", "order_status", default="") or "").upper()
+                    still_live = bool(broker_status) and broker_status not in _CANCEL_TERMINAL_STATUSES
                     if delta > 0 and fill_price > 0:
                         logger.info(
                             "expire_stale_orders: %d shares of %s filled before cancel landed "                            "(total filled %d, previously booked %d) — booking now at ₹%.2f",
@@ -2053,25 +2167,69 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                         # session110: pass the cumulative qty so a late fill that follows an
                         # earlier partial is booked at the increment's own price, not at the
                         # order's cumulative average (see reconcile._increment_price).
-                        await _book_fill_delta(db, order, fill_price, delta, is_partial=False,
+                        # is_partial=still_live keeps the order PARTIAL (visible to reconcile) while the broker still
+                        # shows it live; record_real_fill would otherwise mark it FILLED and hide the rest of the fill.
+                        await _book_fill_delta(db, order, fill_price, delta, is_partial=still_live,
                                                cumulative_qty=filled_at_broker)
                         await notify_async(
                             f"🟡 *Late fill on expired entry* — {order.symbol}\n"
                             f"{delta} shares @ ₹{fill_price:.2f} filled before stale-order cancel landed.\n"
                             "Position opened. Watching for exit signals."
                         )
+                    elif delta > 0:
+                        fill_check_unresolved = (
+                            f"Dhan shows {filled_at_broker} filled but no average price yet"
+                        )
+                    if still_live and fill_check_unresolved is None:
+                        # Expected and transient (cancel still propagating): log only, no alert; the next cycle / reconcile resolves it.
+                        fill_check_unresolved = f"Dhan still shows the order as {broker_status} right after the cancel"
+                        _quiet_unresolved = True
+                else:
+                    # E201: our order is not in the book that was just read (or the read returned an empty list, which get_order_list
+                    # also returns for a success envelope with no data). That is "cannot tell", not "nothing filled" - the same rule
+                    # reconcile_real_orders applies ("not visible yet - check again next cycle, never assume").
+                    fill_check_unresolved = "order not visible in Dhan's order book right after the cancel"
+                    _quiet_unresolved = True
             except Exception as _bfe:
+                # Discard a half-done booking (filled_qty_so_far is bumped before the position
+                # write) so reconcile still sees the full delta.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                fill_check_unresolved = str(_bfe)[:200]
+            if fill_check_unresolved and _quiet_unresolved:
+                logger.warning("expire_stale_orders: %s order left open for reconcile (no alert, transient): %s", order.symbol, fill_check_unresolved)
+                return False
+            if fill_check_unresolved:
                 logger.warning(
-                    "expire_stale_orders: post-cancel fill-check for %s failed (non-fatal, "                    "reconcile will retry next cycle): %s",
-                    order.symbol, _bfe,
+                    "expire_stale_orders: post-cancel fill-check for %s unresolved — leaving the "
+                    "order open for reconcile (not marking EXPIRED, lock kept): %s",
+                    order.symbol, fill_check_unresolved,
                 )
+                await notify_async(
+                    f"⚠️ *Entry window closed, fill check unresolved* — {order.symbol}\n"
+                    f"{fill_check_unresolved}\n"
+                    "Order left open — reconcile will book any shares that filled."
+                )
+                return False
 
         # A PARTIAL order still gets the SAME terminal "EXPIRED" order
         # status here — the order itself is done (no more shares coming,
         # remainder cancelled at Dhan above), and how many shares DID fill
         # already lives independently in order.filled_qty_so_far and the
         # TradePosition reconcile opened for them, not in this label.
-        was_partial = order.status == "PARTIAL"
+        # E198: shares held are what decide this, not the status label. record_real_fill(is_partial=False) - used when the late fill is
+        # seen with a terminal broker status - had set FILLED, which the old `status == "PARTIAL"` test read as "nothing filled": the
+        # order was then overwritten with EXPIRED and the symbol lock released under real shares. Same for any order with
+        # filled_qty_so_far > 0 whose status is still PLACED.
+        _filled_so_far = int(order.filled_qty_so_far or 0)
+        if order.status == "FILLED" and _filled_so_far >= int(order.qty or 0) > 0:
+            # Completely filled (late, before the cancel landed): it is a FILLED order with a live position, not an expired one.
+            # Keep the status and the lock (exit_engine releases it on close); nothing to retire.
+            db.commit()
+            return False
+        was_partial = order.status == "PARTIAL" or _filled_so_far > 0
         order.status     = "EXPIRED"
         order.updated_at = now
         # AUDIT FIX (session60): only release the symbol claim if NOTHING
@@ -2090,7 +2248,20 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 " Dhan order cancelled." if mode == "REAL" and order.dhan_order_id else ""
             ),
         ))
-        expired += 1
+        return True
+
+    for order in stale:
+        _oid, _sym = order.id, order.symbol          # read before any rollback expires the instance
+        try:
+            if await _expire_one(order):
+                expired += 1
+                db.commit()      # E203: keep each finished order, so a later order's rollback cannot discard it
+        except Exception:  # noqa: BLE001 - one bad order must not stop the rest (or abort the cycle before exits run)
+            logger.exception("expire_stale_orders: %s order %s failed - skipped, will retry next cycle", _sym, _oid)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
     if expired:
         db.commit()
         log_action(db, actor="system", action="ORDERS_EXPIRED", mode=mode,

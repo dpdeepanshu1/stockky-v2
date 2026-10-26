@@ -1364,6 +1364,12 @@ ENTRY_MIS_LAST_TIME_IST  = ((os.getenv("ENTRY_MIS_LAST_TIME_IST") or "").strip()
 # The stop is raised to breakeven instead so the winner is still protected. Stops / emergency / time exits are never held back.
 EXIT_DP_GUARD_ENABLED    = ((os.getenv("EXIT_DP_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
 EXIT_DP_MIN_GAIN_RATIO   = float(((os.getenv("EXIT_DP_MIN_GAIN_RATIO") or "").strip() or "3.0"))
+# E214: a profit-TARGET partial sale is not sent on an old price. When the priority price lane cannot price a held symbol it serves the
+# last good tick up to FEED_PRIORITY_STALE_FALLBACK_S (90 s) old, tagged source "stale_last_good(...)". Stops, emergency exits and the time
+# stop still act on such a tick (a late stop beats none); only the optional target partial waits for a tick at most EXIT_TARGET_MAX_TICK_AGE_S
+# old. false = old behaviour (any tick can fire the partial).
+EXIT_TARGET_STALE_GUARD_ENABLED = ((os.getenv("EXIT_TARGET_STALE_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
+EXIT_TARGET_MAX_TICK_AGE_S      = float(((os.getenv("EXIT_TARGET_MAX_TICK_AGE_S") or "").strip() or "30"))
 REENTRY_SAME_DAY_BLOCK   = ((os.getenv("REENTRY_SAME_DAY_BLOCK") or "").strip() or "true").lower() == "true"
 MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() or "3000.0"))
 

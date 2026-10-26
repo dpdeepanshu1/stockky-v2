@@ -208,6 +208,32 @@ def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
 # that has never recorded a sync time (None: an older row, or one built by hand) is not blocked.
 _MAX_SYNC_AGE_S = 900.0
 
+# E212: a reservation exists in available_capital before its position row is written (a few seconds on the entry path). sync_from_broker's
+# "no open positions -> available = total" hard reset, run by a concurrent manual POST /ledger/sync in that gap, handed the reservation back to
+# the pool. A reservation made within this many seconds blocks that hard reset (available is only clamped down to the new total); the next sync
+# after the grace, or once the position row exists, resets as before. Process memory: the cycle is sequential, only the manual route can race.
+_RESERVE_GRACE_S = 120.0
+_last_reserve_mono: float = 0.0
+
+
+def _note_reservation() -> None:
+    global _last_reserve_mono
+    _last_reserve_mono = time.monotonic()
+
+
+def _reserved_recently(now=None) -> bool:
+    try:
+        t = time.monotonic() if now is None else now
+        return _last_reserve_mono > 0 and 0 <= t - _last_reserve_mono < _RESERVE_GRACE_S
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def reset_reservation_marker() -> None:
+    """Forget the in-flight reservation marker (tests; never needed in production)."""
+    global _last_reserve_mono
+    _last_reserve_mono = 0.0
+
 
 def _sync_age_s(row: ScalpCapitalLedger) -> Optional[float]:
     """Seconds since the last successful broker sync, or None when none was ever recorded or it cannot be read. Never raises."""
@@ -449,7 +475,12 @@ def sync_from_broker(db: Session) -> float:
         # capital == scalp_alloc here anyway — safe to hard-reset
         # available_capital to match the freshly synced allocation (keeps
         # the two in sync after a fund balance change).
-        row.available_capital = row.total_allocated_capital
+        if _reserved_recently():
+            # E212: a reservation was made moments ago and its position row may not be written yet - do not hand it back to the pool.
+            if row.available_capital > row.total_allocated_capital:
+                row.available_capital = row.total_allocated_capital
+        else:
+            row.available_capital = row.total_allocated_capital
     elif row.available_capital <= 0:
         # Open positions exist but available_capital hit zero — at minimum
         # reset to the freshly synced free-cash slice (own_committed_capital
@@ -626,6 +657,7 @@ def reserve_capital(
 
     row.available_capital -= position_value
     db.commit()
+    _note_reservation()      # E212
     logger.info(
         "ledger.reserve_capital: reserved ₹%.2f (risk ₹%.2f / %d slots, stop %.2f%%), remaining ₹%.2f",
         position_value, risk_rupees, config.MAX_CONCURRENT_SCALP_POSITIONS,
@@ -663,6 +695,7 @@ def reserve_additional(db: Session, additional_amount: float) -> bool:
         return False
     row.available_capital -= additional_amount
     db.commit()
+    _note_reservation()      # E212
     logger.info(
         "ledger.reserve_additional: topped up reservation by ₹%.2f "
         "(min-quantity-floor shortfall), remaining ₹%.2f",

@@ -48,6 +48,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import models
+from tests._tdays import opened_at_trading_days_ago
 import exit_engine.exit as ex
 from execution import dhan_client, shared_order_budget
 from market_feed.feed import Tick
@@ -571,7 +572,7 @@ class TestEvaluateModeRealRouting:
         pos = _mkpos(db, mode="REAL", broker_imported=True,
                      avg_entry_price=100.0, current_stop=95.0, current_target=110.0,
                      qty_open=10, initial_stop_distance=5.0,
-                     opened_at=datetime.now(timezone.utc) - timedelta(days=15))
+                     opened_at=opened_at_trading_days_ago(11))      # E207: past the 10-session max hold
         ticks = {"TESTCO": _tick(102.0, atr=1.0)}
         with mock.patch.object(ex, "_send_real_sell", return_value=True), \
              mock.patch.object(ex, "_has_pending_real_sell", return_value=False):
@@ -583,7 +584,7 @@ class TestEvaluateModeRealRouting:
         pos = _mkpos(db, mode="REAL", broker_imported=True,
                      avg_entry_price=100.0, current_stop=95.0, current_target=110.0,
                      qty_open=10, initial_stop_distance=5.0,
-                     opened_at=datetime.now(timezone.utc) - timedelta(days=15))
+                     opened_at=opened_at_trading_days_ago(11))      # E207: past the 10-session max hold
         ticks = {"TESTCO": _tick(102.0, atr=1.0)}
         with mock.patch.object(ex, "_send_real_sell", return_value=False), \
              mock.patch.object(ex, "_has_pending_real_sell", return_value=False):

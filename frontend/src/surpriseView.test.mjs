@@ -43,6 +43,7 @@ assert.equal(surpriseRowView({ score: 150 }).score.text, "100/100"); assert.equa
 const tsx = readFileSync(new URL("./components/SurpriseStocks.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
 assert.ok(/surpriseRowView\(s\)/.test(tsx) && !/Number\(s\.(change_pct|rvol|target_1|trailing_stop)\)/.test(tsx), "cells read the row view, no raw Number(x).toFixed");
+assert.ok(/import \{[^}]*\bsurpriseRowView\b[^}]*\} from "\.\/surpriseView"/.test(tsx), "SurpriseStocks.tsx imports surpriseRowView (E171: the import was missing and only tsc/build caught it)");
 assert.ok(/v7-tier/.test(tsx) && /v\.tier\.glyph/.test(tsx) && /aria-label=\{`Score /.test(tsx), "tier has a glyph, score has a spoken label");
 assert.ok(/Target \+5%/.test(tsx) && /Trail \(VWAP\)/.test(tsx), "column headings unchanged");
 assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("E161"))), "E161 CSS adds no animation");

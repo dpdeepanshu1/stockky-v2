@@ -50,6 +50,7 @@ def env(monkeypatch):
     db = sessionmaker(bind=_engine)()
     monkeypatch.setattr(dhan_client, "get_security_id", lambda db_, sym: "1234")
     monkeypatch.setattr(dhan_client, "round_to_tick", lambda p: round(p, 2))
+    monkeypatch.setattr(dhan_client, "get_positions", lambda db_: [])   # E171: the oversell sync reads positions too
     return db
 
 
@@ -460,3 +461,69 @@ def test_generic_rejection_bumps_exponential_backoff_counter(env, monkeypatch):
     assert _sell(db, pos) is False
     db.refresh(pos)
     assert pos.consecutive_exit_failures == 1
+
+
+# ── E171: oversell sync counts today's positions and matches the symbol exactly ──────────────────────
+
+def test_oversell_does_not_ghost_close_a_same_day_position_held_at_the_broker(env, monkeypatch):
+    """Bought today: not in holdings yet (T+1) but open in the day's positions. Holdings=0 must NOT close it."""
+    db = env
+    pos = _mkposition(db, qty_open=10)
+    monkeypatch.setattr(dhan_client, "place_order", _boom("trying to sell more than the quantity you currently hold"))
+    monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: [])
+    monkeypatch.setattr(dhan_client, "get_positions", lambda db_: [{"tradingSymbol": pos.symbol, "netQty": 10}])
+    closed = {"called": False}
+    monkeypatch.setattr(ex, "force_close_real_position", lambda *a, **k: closed.update(called=True))
+    monkeypatch.setattr(ex, "notify_sync", lambda *a, **k: None)
+
+    assert _sell(db, pos) is False
+    db.refresh(pos)
+    assert closed["called"] is False
+    assert pos.qty_open == 10
+
+
+def test_oversell_caps_to_holdings_plus_positions(env, monkeypatch):
+    db = env
+    pos = _mkposition(db, qty_open=10)
+    monkeypatch.setattr(dhan_client, "place_order", _boom("sell more than the quantity you currently hold"))
+    monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: [{"tradingSymbol": pos.symbol, "availableQty": 3}])
+    monkeypatch.setattr(dhan_client, "get_positions", lambda db_: [{"tradingSymbol": pos.symbol, "netQty": 2}])
+    monkeypatch.setattr(ex, "notify_sync", lambda *a, **k: None)
+
+    assert _sell(db, pos) is False
+    db.refresh(pos)
+    assert pos.qty_open == 5
+
+
+def test_oversell_positions_read_failure_alerts_and_never_ghost_closes(env, monkeypatch):
+    db = env
+    pos = _mkposition(db, qty_open=10)
+    monkeypatch.setattr(dhan_client, "place_order", _boom("sell more than the quantity you currently hold"))
+    monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: [])
+
+    def _pos_boom(db_):
+        raise RuntimeError("positions API down")
+    monkeypatch.setattr(dhan_client, "get_positions", _pos_boom)
+    closed = {"called": False}
+    monkeypatch.setattr(ex, "force_close_real_position", lambda *a, **k: closed.update(called=True))
+    alerts = []
+    monkeypatch.setattr(ex, "notify_sync", lambda *a, **k: alerts.append(a[0] if a else None))
+
+    assert _sell(db, pos) is False
+    assert closed["called"] is False
+    assert len(alerts) == 1 and "sync failed" in alerts[0].lower()
+
+
+def test_broker_qty_matches_the_symbol_exactly_not_by_prefix():
+    # ABB must not read ABBOTINDIA's quantity (the old startswith() match took the first prefix hit)
+    holdings = [{"tradingSymbol": "ABBOTINDIA", "availableQty": 50}, {"tradingSymbol": "ABB", "availableQty": 7}]
+    assert ex._broker_qty_for_symbol("ABB", holdings, []) == 7
+    assert ex._broker_qty_for_symbol("ABBOT", holdings, []) == 0
+    assert ex._broker_qty_for_symbol("abb ", [{"tradingSymbol": "ABB-EQ", "totalQty": 4}], []) == 4
+
+
+def test_broker_qty_ignores_short_or_flat_position_rows_and_sums_the_rest():
+    pos_rows = [{"tradingSymbol": "XYZ", "netQty": -5}, {"tradingSymbol": "XYZ", "netQty": 0},
+                {"tradingSymbol": "XYZ", "netQty": "6"}, {"tradingSymbol": "OTHER", "netQty": 99}]
+    assert ex._broker_qty_for_symbol("XYZ", [], pos_rows) == 6
+    assert ex._broker_qty_for_symbol("XYZ", None, None) == 0

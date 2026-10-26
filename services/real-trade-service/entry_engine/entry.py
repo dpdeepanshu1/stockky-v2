@@ -1089,7 +1089,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     from entry_engine import structure_observation as _so
                     _so.record(db, cand.symbol, mode, tick.price, _sg_ver, _sg_sum, _sg_mode, _sg_enforced)
                 except Exception:  # noqa: BLE001 - evidence only, never changes an entry
-                    pass
+                    logger.warning("structure_observation.record failed for %s[%s] (evidence only, entry unaffected)",
+                                   cand.symbol, mode, exc_info=True)
                 if _sg_enforced:
                     if _sg_chase_only:
                         _rearm.arm(mode, cand.symbol, _sg_block, float(tick.price), _tick_day_change_pct(tick) or 0.0,
@@ -2026,7 +2027,7 @@ async def check_pending_fills(db: Session, mode: str) -> int:
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("check_pending_fills: rollback after the failure above also failed", exc_info=True)
     return filled
 
 
@@ -2291,7 +2292,7 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("expire_stale_orders: rollback after the failure above also failed", exc_info=True)
     if expired:
         db.commit()
         log_action(db, actor="system", action="ORDERS_EXPIRED", mode=mode,

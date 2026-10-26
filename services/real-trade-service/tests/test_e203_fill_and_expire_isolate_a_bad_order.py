@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import models
+from tests.account_seed import seed_account
 from entry_engine import entry
 from execution import dhan_client
 from tests.test_entry_evaluate_mode_remaining_coverage_2 import db, run  # noqa: F401
@@ -14,9 +15,7 @@ from tests.test_rt_entry_helpers import Tick, demo_order
 
 
 def _demo_account(db):
-    db.add(models.TradeAccount(mode="DEMO", starting_capital=100_000.0, current_equity=100_000.0,
-                               cash_available=100_000.0, broker_cash_available=0.0,
-                               realized_pnl_today=0.0, realized_pnl_total=0.0))
+    seed_account(db, "DEMO", starting_capital=100_000.0, current_equity=100_000.0, cash_available=100_000.0, broker_cash_available=0.0, realized_pnl_today=0.0, realized_pnl_total=0.0)
     db.commit()
 
 

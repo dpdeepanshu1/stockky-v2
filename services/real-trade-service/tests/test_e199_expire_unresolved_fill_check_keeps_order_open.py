@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import models
+from tests.account_seed import seed_account
 from entry_engine import entry
 from execution import dhan_client, shared_symbol_lock
 from tests.test_entry_evaluate_mode_remaining_coverage_2 import db, run  # noqa: F401
@@ -25,9 +26,7 @@ def rig(db, monkeypatch):
 
 
 def _order(db, status="PLACED", filled=0):
-    db.add(models.TradeAccount(mode="REAL", starting_capital=100_000.0, current_equity=100_000.0,
-                               cash_available=100_000.0, broker_cash_available=100_000.0,
-                               realized_pnl_today=0.0, realized_pnl_total=0.0))
+    seed_account(db, "REAL", starting_capital=100_000.0, current_equity=100_000.0, cash_available=100_000.0, broker_cash_available=100_000.0, realized_pnl_today=0.0, realized_pnl_total=0.0)
     dec = models.TradeDecision(mode="REAL", symbol="ABC", decision_type="ENTRY", action="BUY",
                                proposed_stop=97.0, proposed_target=106.0)
     db.add(dec)

@@ -670,13 +670,16 @@ class TestPlaceOrder:
                 transaction_type="BUY", quantity=1, order_type="LIMIT", price=847.43,
             )
 
-    def test_no_order_id_in_result_skips_verification(self, monkeypatch):
+    def test_no_order_id_in_result_raises_ambiguous_and_skips_verification(self, monkeypatch):
+        # E182: a success with no order id used to return {} and let the caller record a position with no order id.
         client, calls = _order_client(place_result={"status": "success", "data": {}})
         _wire_client(monkeypatch, client)
-        dc.place_order(
-            DB, is_armed=True, security_id="1", exchange_segment=dc.NSE_EQ_SEGMENT,
-            transaction_type="BUY", quantity=1, order_type="MARKET", price=0,
-        )
+        with pytest.raises(dc.DhanNoOrderIdError) as ei:
+            dc.place_order(
+                DB, is_armed=True, security_id="1", exchange_segment=dc.NSE_EQ_SEGMENT,
+                transaction_type="BUY", quantity=1, order_type="MARKET", price=0,
+            )
+        assert dc.is_ambiguous_placement_error(ei.value) is True
         assert calls["get_order_list"] == 0
 
     def test_market_echoed_as_limit_is_not_flagged(self, monkeypatch):
@@ -774,7 +777,7 @@ class TestPlaceSuperOrderMarket:
     def test_target_bumped_above_ref_when_collapsed_by_rounding(self, monkeypatch):
         posts = []
         dhan_http = SimpleNamespace(post=lambda path, payload: (
-            posts.append(payload), {"status": "success", "data": {}}
+            posts.append(payload), {"status": "success", "data": {"orderId": "SO9"}}
         )[1])
         _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
         dc.place_super_order(**self._kwargs(price=100.0, target_price=100.0, stop_loss_price=98.0))
@@ -783,13 +786,92 @@ class TestPlaceSuperOrderMarket:
     def test_stop_clamped_below_ref_for_buy_when_collapsed_by_rounding(self, monkeypatch):
         posts = []
         dhan_http = SimpleNamespace(post=lambda path, payload: (
-            posts.append(payload), {"status": "success", "data": {}}
+            posts.append(payload), {"status": "success", "data": {"orderId": "SO9"}}
         )[1])
         _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
         dc.place_super_order(
             **self._kwargs(transaction_type="BUY", price=100.0, target_price=105.0, stop_loss_price=100.0)
         )
         assert posts[0]["stopLossPrice"] < 100.0
+
+
+class TestPlacementWithoutOrderId:
+    """E182: Dhan answering success with no order id is AMBIGUOUS (the order may exist), never a quiet empty result."""
+
+    def _kw(self, **o):
+        base = dict(db=DB, is_armed=True, security_id="1", exchange_segment=dc.NSE_EQ_SEGMENT, transaction_type="BUY", quantity=1,
+                    order_type="MARKET", price=100.0, target_price=105.0, stop_loss_price=98.0)
+        base.update(o)
+        return base
+
+    @pytest.mark.parametrize("data", [{}, None, [], {"orderId": ""}, {"orderId": "  "}, {"status": "TRANSIT"}])
+    def test_market_super_order_without_id_raises_ambiguous(self, monkeypatch, data):
+        dhan_http = SimpleNamespace(post=lambda path, payload: {"status": "success", "data": data})
+        _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
+        with pytest.raises(dc.DhanNoOrderIdError) as ei:
+            dc.place_super_order(**self._kw())
+        assert dc.is_ambiguous_placement_error(ei.value) is True
+
+    def test_limit_super_order_without_id_raises_ambiguous(self, monkeypatch):
+        _wire_client(monkeypatch, SimpleNamespace(place_super_order=lambda **kw: {"status": "success", "data": {}}))
+        with pytest.raises(dc.DhanNoOrderIdError):
+            dc.place_super_order(**self._kw(order_type="LIMIT", price=100.0))
+
+    def test_sell_super_order_without_id_raises_ambiguous(self, monkeypatch):
+        dhan_http = SimpleNamespace(post=lambda path, payload: {"status": "success", "data": {}})
+        _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
+        with pytest.raises(dc.DhanNoOrderIdError):
+            dc.place_super_order(**self._kw(transaction_type="SELL", target_price=95.0, stop_loss_price=102.0))
+
+    def test_alternate_id_keys_still_accepted(self, monkeypatch):
+        for key in ("order_id", "id"):
+            dhan_http = SimpleNamespace(post=lambda path, payload, k=key: {"status": "success", "data": {k: "X1"}})
+            _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
+            assert dc.place_super_order(**self._kw())[key] == "X1"
+
+    def test_a_clean_dhan_failure_is_still_not_ambiguous(self, monkeypatch):
+        dhan_http = SimpleNamespace(post=lambda path, payload: {"status": "failure", "remarks": {"error_message": "Insufficient funds"}})
+        _wire_client(monkeypatch, SimpleNamespace(dhan_http=dhan_http))
+        with pytest.raises(RuntimeError) as ei:
+            dc.place_super_order(**self._kw())
+        assert not isinstance(ei.value, dc.DhanNoOrderIdError)
+        assert dc.is_ambiguous_placement_error(ei.value) is False
+
+
+class TestNoOrderIdIsRecovered:
+    """E182: the callers' existing ambiguous-placement recovery now runs for a no-id success (long entry + short)."""
+
+    def test_buy_recovery_adopts_the_order_found_at_dhan(self, monkeypatch):
+        from orders import entry
+        exc = dc.DhanNoOrderIdError("place_super_order BUY 1 x1: Dhan answered success but returned no order id")
+        monkeypatch.setattr(entry.dhan_client, "find_recent_buy_order", lambda *a, **k: {"orderId": "REC1", "orderStatus": "TRANSIT"})
+        monkeypatch.setattr(entry.config, "USE_SUPER_ORDER", True, raising=False)
+
+        class _Q:
+            def filter(self, *a): return self
+            def all(self): return []
+
+        class _DB:
+            def query(self, *a): return _Q()
+        assert entry._recover_ambiguous_buy(_DB(), exc, "1", 1, "ABC") == ("REC1", None)
+
+    def test_buy_recovery_flags_unknown_when_book_unreadable(self, monkeypatch):
+        from orders import entry
+        exc = dc.DhanNoOrderIdError("no id")
+
+        def boom(*a, **k):
+            raise RuntimeError("book down")
+        monkeypatch.setattr(entry.dhan_client, "find_recent_buy_order", boom)
+
+        class _Q:
+            def filter(self, *a): return self
+            def all(self): return []
+
+        class _DB:
+            def query(self, *a): return _Q()
+        unknown = []
+        assert entry._recover_ambiguous_buy(_DB(), exc, "1", 1, "ABC", unknown=unknown) is None
+        assert unknown == [True]
 
 
 class TestPlaceSuperOrderLimit:

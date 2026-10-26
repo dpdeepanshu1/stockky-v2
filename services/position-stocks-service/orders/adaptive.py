@@ -472,6 +472,27 @@ def _compute_levels(
     )
 
 
+# E185: this runs for every candidate on every scan cycle, so the identical "target cap" line (same numbers) was logged dozens of times in minutes. The same
+# numbers are logged at INFO once per _CAP_LOG_REPEAT_S, otherwise at DEBUG. The levels returned are unchanged.
+_CAP_LOG_REPEAT_S = 300.0
+_cap_logged: dict = {}     # (numbers) -> monotonic time of the last INFO line
+
+
+def _cap_line_is_new(key: tuple, now: Optional[float] = None) -> bool:
+    try:
+        import time as _t
+        now = _t.monotonic() if now is None else now
+        last = _cap_logged.get(key)
+        if last is not None and now - last < _CAP_LOG_REPEAT_S:
+            return False
+        if len(_cap_logged) > 500:
+            _cap_logged.clear()
+        _cap_logged[key] = now
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def apply_target_cap(levels: AdaptiveLevels, current_ltp: float, side: Optional[str] = None) -> AdaptiveLevels:
     """group 340: a target above SCALP_TARGET_CAP_PCT is cut to it; if R:R then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to
     target/MIN_RR, never under SCALP_TARGET_CAP_MIN_STOP_PCT and never wider than before. Cap 0 = off. Never raises."""
@@ -494,7 +515,8 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float, side: Optional[
                 floor = max(floor, _atr_mult * float(_atr))
             stop_pct = min(stop_pct, max(target_pct / min_rr, floor))
         target_price, stop_price = _levels_to_prices(current_ltp, target_pct, stop_pct, side)
-        logger.info("adaptive: target cap %.2f%% -> %.2f%%, stop %.2f%% -> %.2f%%", levels.target_pct, target_pct, levels.stop_pct, stop_pct)
+        logger.log(logging.INFO if _cap_line_is_new((round(levels.target_pct, 2), round(target_pct, 2), round(levels.stop_pct, 2), round(stop_pct, 2))) else logging.DEBUG,
+                   "adaptive: target cap %.2f%% -> %.2f%%, stop %.2f%% -> %.2f%%", levels.target_pct, target_pct, levels.stop_pct, stop_pct)
         return AdaptiveLevels(
             target_pct=round(target_pct, 4), stop_pct=round(stop_pct, 4),
             target_price=target_price, stop_price=stop_price,

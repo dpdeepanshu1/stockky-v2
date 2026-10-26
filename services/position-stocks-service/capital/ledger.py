@@ -201,6 +201,27 @@ def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
     return None, None
 
 
+# E186: nothing used last_synced_from_broker_at. When Dhan's funds call failed (token expired, rate limit, outage) or the balance read <= 0, sync_from_broker()
+# returned early and left the LAST pool in place, and reserve_capital() kept sizing and approving new entries from it for hours - a pool that may be larger than
+# the cash the account really has now (the shortfall comes out of real-trade-service's half). New entries are now refused while the last successful sync is older
+# than this (the same 15-minute "stale" mark real-trade-service uses for the shared exposure table; the loop syncs every ~13 s). Exits are not affected. A ledger
+# that has never recorded a sync time (None: an older row, or one built by hand) is not blocked.
+_MAX_SYNC_AGE_S = 900.0
+
+
+def _sync_age_s(row: ScalpCapitalLedger) -> Optional[float]:
+    """Seconds since the last successful broker sync, or None when none was ever recorded or it cannot be read. Never raises."""
+    try:
+        ts = row.last_synced_from_broker_at
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)          # SQLite hands back naive UTC
+        return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _get_or_create(db: Session) -> ScalpCapitalLedger:
     row = db.query(ScalpCapitalLedger).filter_by(mode="REAL").first()
     if row is None:
@@ -542,6 +563,15 @@ def reserve_capital(
     # doing" readout — they no longer feed into this trip decision.
     if row.total_allocated_capital <= 0:
         logger.warning("ledger.reserve_capital: total_allocated_capital=0 — run sync_from_broker first")
+        return None
+
+    _age = _sync_age_s(row)
+    if _age is not None and _age > _MAX_SYNC_AGE_S:
+        if _should_log_sync("stale_pool", int(_age // 300)):
+            logger.warning(
+                "ledger.reserve_capital: the scalp pool was last synced from Dhan %.0f s ago (limit %.0f s) - the funds read is failing or "
+                "returning <= 0, so the pool may be larger than the cash the account has. Refusing new entries until a sync succeeds.",
+                _age, _MAX_SYNC_AGE_S)
         return None
 
     # A11 (2026-10-22): ACCOUNT-WIDE daily loss cap. Own figures are live (this row); only the peer's row is read

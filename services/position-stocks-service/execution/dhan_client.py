@@ -158,6 +158,21 @@ class DhanNotArmedError(Exception):
     pass
 
 
+class DhanNoOrderIdError(RuntimeError):
+    """E182: Dhan answered an order placement with success but no order id. The order may or may not exist at the broker, so this
+    is classed as AMBIGUOUS (is_ambiguous_placement_error): every caller then looks Dhan's order book up before calling the order
+    failed, instead of recording a position with no order id (which no reconcile path can follow)."""
+
+
+def _require_order_id(result, what: str) -> dict:
+    """E182: the placement result when it carries an order id, else DhanNoOrderIdError. Pure."""
+    if isinstance(result, dict):
+        oid = result.get("orderId") or result.get("order_id") or result.get("id")
+        if oid and str(oid).strip():
+            return result
+    raise DhanNoOrderIdError(f"{what}: Dhan answered success but returned no order id (response data: {str(result)[:160]}) - the order may or may not exist")
+
+
 def _get_sdk_client(db: Session):
     """Build a fresh dhanhq SDK client from real-trade-service's stored (and
     owned) credentials, read via dhan_credentials_ro.
@@ -466,7 +481,7 @@ def place_order(
         validity=validity,
         tag=tag,
     )
-    result = _extract_data(resp) or {}
+    result = _require_order_id(_extract_data(resp), f"place_order {transaction_type} {security_id} x{quantity}")   # E182
 
     # Best-effort, non-blocking post-placement verification — same
     # rationale as real-trade-service's dhan_client.place_order(). Never
@@ -717,7 +732,7 @@ def place_super_order(
             product_type,
         )
         resp = dhan_http.post("/super/orders", payload)
-        return _extract_data(resp) or {}
+        return _require_order_id(_extract_data(resp), f"place_super_order {transaction_type} {security_id} x{quantity}")   # E182
 
     # LIMIT (or any other) entry — the SDK's own client-side validation
     # (price > 0, targetPrice > price for BUY, etc.) is exactly what we
@@ -804,7 +819,7 @@ def place_super_order(
             stopLossPrice=stop_loss_price,
             trailingJump=trailing_jump,
         )
-    return _extract_data(resp) or {}
+    return _require_order_id(_extract_data(resp), f"place_super_order {transaction_type} {security_id} x{quantity}")   # E182
 
 
 def get_super_order_list(db: Session, release_db: bool = False) -> list:
@@ -1458,7 +1473,7 @@ def is_circuit_limit_error(message: str) -> bool:
 # a young createTime instead of an id. Fails open: any doubt -> None -> the caller keeps its old "failed" handling.
 _AMBIGUOUS_TYPE_NAMES = frozenset({
     "ReadTimeout", "ReadError", "WriteError", "RemoteProtocolError", "ChunkedEncodingError", "ConnectionResetError",
-    "ConnectionAbortedError", "IncompleteRead", "ServerDisconnectedError",
+    "ConnectionAbortedError", "IncompleteRead", "ServerDisconnectedError", "DhanNoOrderIdError",
 })
 _NOT_SENT_TYPE_NAMES = frozenset({"ConnectTimeout", "ConnectError", "PoolTimeout", "NameResolutionError", "ConnectionRefusedError"})
 _AMBIGUOUS_MARKERS = (

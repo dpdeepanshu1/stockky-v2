@@ -655,6 +655,27 @@ def _gate_cooldown_filter(candidates: list) -> tuple[list, list]:
     return kept, skipped
 
 
+# E185: the pick loop runs every ~15 s and a stock that fails the same entry gate fails it again each cycle, so the same "skipped" line (13 times for one
+# symbol in 10 minutes) and the same "no shortlisted pick" summary buried everything else in the log. A skip is logged at INFO when the symbol's gate
+# CHANGES or the line is older than this many seconds; otherwise at DEBUG. The skip itself (summary["shortlist_skips"], _mark_pick, the dashboard) is unchanged.
+_SKIP_LOG_REPEAT_S = 300.0
+_skip_logged: dict = {}      # symbol -> (gate code, monotonic time of the last INFO line)
+
+
+def _skip_is_new(symbol: str, skip, now: Optional[float] = None) -> bool:
+    """True when this symbol's skip should be logged at INFO: first time, a different gate than last time, or the last INFO line is old. Records it. Never raises."""
+    try:
+        now = time.monotonic() if now is None else now
+        code = str(skip).split(":", 1)[0]
+        last = _skip_logged.get(symbol)
+        if last is not None and last[0] == code and now - last[1] < _SKIP_LOG_REPEAT_S:
+            return False
+        _skip_logged[symbol] = (code, now)
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _attempt_entry_with_skip_reason(db, candidate, quality=None):
     """group335: attempt_entry plus the reason of its last SKIPPED row, read on the SAME thread (the reason is thread-local).
     Looks attempt_entry up at call time, so a patched one still works. Returns (position_or_None, skip_reason_or_None)."""
@@ -1027,8 +1048,13 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     _t = time.perf_counter()
     try:
         new_total = await asyncio.to_thread(ledger.sync_from_broker, db)
-        _stage("ledger_sync", "Capital Sync", _t,
-               detail=f"scalp pool synced from Dhan — total_allocated_capital=₹{new_total:.2f}")
+        if new_total > 0:
+            _stage("ledger_sync", "Capital Sync", _t,
+                   detail=f"scalp pool synced from Dhan — scalp pool=₹{new_total:.2f}")
+        else:
+            # E186: sync_from_broker returns 0.0 when Dhan's funds read failed or came back <= 0; the ledger keeps its last values.
+            _stage("ledger_sync", "Capital Sync", _t,
+                   detail="NOT synced - Dhan's funds read failed or returned <= 0; using the last-known ledger (new entries are refused once it is 15 min old)")
     except Exception as e:
         logger.error("position-stocks: ledger sync error: %s", e, exc_info=True)
         _stage("ledger_sync", "Capital Sync", _t, detail=f"Error: {e} — using last-known ledger values")
@@ -1338,6 +1364,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                        detail="; ".join(f"#{r['pick']} {r['symbol']} {r['score']}" for r in _sl),
                        picks=shortlist.public(_sl))
             _pick_skips: list[str] = []
+            _skip_news = False          # E185: True when at least one skip was logged at INFO this cycle
             for _c, _q in quality_passers:
                 try:
                     result, _skip = await asyncio.to_thread(_attempt_entry_with_skip_reason, db, _c, _q)
@@ -1348,7 +1375,10 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                         # group335: this symbol failed a gate that only concerns it (VWAP / liquidity / depth / circuit / ...) -
                         # the next shortlisted pick may still be fine; global skips (not armed, kill switch, budget, max positions) still stop.
                         _pick_skips.append(f"{_c.symbol}:{str(_skip).split(':', 1)[0]}")
-                        logger.info("position-stocks: %s skipped (%s) - trying next shortlisted pick", _c.symbol, str(_skip)[:120])
+                        _new = _skip_is_new(_c.symbol, _skip)
+                        _skip_news = _skip_news or _new
+                        logger.log(logging.INFO if _new else logging.DEBUG,
+                                   "position-stocks: %s skipped (%s) - trying next shortlisted pick", _c.symbol, str(_skip)[:120])
                         continue
                     break  # success or non-capital skip — stop here
                 except InsufficientCapitalSkip as _ics:
@@ -1362,7 +1392,8 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                     continue  # try the next quality-passing candidate
             if _pick_skips and not result:
                 summary["shortlist_skips"] = _pick_skips
-                logger.info("position-stocks: no shortlisted pick cleared its entry gates this cycle (%s)", ", ".join(_pick_skips))
+                logger.log(logging.INFO if _skip_news else logging.DEBUG,
+                           "position-stocks: no shortlisted pick cleared its entry gates this cycle (%s)", ", ".join(_pick_skips))
             if capital_skipped and not result:
                 logger.info(
                     "position-stocks: all %d quality-passing candidate(s) hit INSUFFICIENT_CAPITAL "
@@ -1638,9 +1669,9 @@ def status(db: Session = Depends(get_db)):
     # notify_async, which posts a "closed=X sent=Y failed=Z — check
     # manually" message after its own EOD square-off). orders/eod_squareoff.py
     # marks eod_squareoff_fired_date as done for the day even when one or
-    # more positions failed to flatten (same once-per-day, no-auto-retry
-    # design as real-trade-service's _eod_squareoff — confirmed intentional,
-    # not changing it) — but with zero notification infra here, a failed
+    # more positions failed to flatten (E182: a possibly-transient failure
+    # is first retried for 12 minutes after the sweep time; a permanent
+    # rejection is not) — but with zero notification infra here, a failed
     # flatten had NO operator-facing signal beyond a server log line nobody
     # is watching. This computes the one fact the dashboard needs to make
     # that visible on its own: real, open, real-money positions still sitting
@@ -2604,6 +2635,10 @@ def get_ledger(db: Session = Depends(get_db)):
 @app.post("/ledger/sync")
 def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     total = ledger.sync_from_broker(db)
+    if total <= 0:
+        # E186: 0.0 means the funds read failed or returned <= 0 and nothing was updated - this used to answer "synced".
+        return {"status": "not_synced", "total_allocated_capital": total,
+                "detail": "Dhan funds read failed or returned <= 0; the ledger was left as it was"}
     return {"status": "synced", "total_allocated_capital": total}
 
 

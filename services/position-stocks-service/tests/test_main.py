@@ -1695,3 +1695,10 @@ def test_fast_reconcile_loop_runs_excursion_tracking_and_survives_its_failure(db
     _gate(db)
     _run_one_fast_reconcile_pass()
     assert ran == {"exc": 1, "be": 1}
+
+
+def test_ledger_sync_says_not_synced_when_nothing_was_synced(client, monkeypatch):
+    # E186: sync_from_broker returns 0.0 when Dhan's funds read failed / <= 0 and nothing was updated
+    monkeypatch.setattr(m.ledger, "sync_from_broker", lambda db: 0.0)
+    r = client.post("/ledger/sync")
+    assert r.json()["status"] == "not_synced" and r.json()["total_allocated_capital"] == 0.0

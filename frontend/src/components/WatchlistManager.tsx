@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";   // group 463
 import WatchlistPulse from "./WatchlistPulse";   // design v5
 import { api } from "../api";
-import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline } from "../watchlistGain";   // E28
+import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline, checkSymbol } from "../watchlistGain";   // E28
 
 interface Props {
   symbols: string[];
@@ -13,6 +13,7 @@ interface Props {
 
 export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanWatchlist }: Props) {
   const [input, setInput] = useState("");
+  const [note, setNote] = useState("");   // E166: why an Add was refused
   // E28: "% since added" - baseline price kept in this browser (see watchlistGain.ts); live price from /quote, refreshed every 60 s.
   const [added, setAdded] = useState<AddedMap>(() => {
     try { return parseAdded(window.localStorage.getItem(STORAGE_KEY)); } catch { return {}; }
@@ -55,11 +56,14 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
   }, [symbols.join(",")]);
 
   function add(symOverride?: string) {
-    const sym = (symOverride ?? input).trim().toUpperCase().replace(/\.NS$/i, "").replace(/\.BO$/i, "");
-    if (!sym || symbols.includes(sym)) {
-      setInput("");
+    const chk = checkSymbol(symOverride ?? input, symbols);   // E166: refuse a name / punctuation / duplicate with a reason
+    if (!chk.ok) {
+      setNote(chk.message);
+      if (chk.reason !== "invalid") setInput("");   // an invalid entry stays in the box so it can be fixed
       return;
     }
+    const sym = chk.symbol;
+    setNote("");
     onChange([...symbols, sym]);
     setInput("");
     // E28: remember the price at the moment of adding (best effort; a failed quote just means no baseline yet).
@@ -93,7 +97,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
             <span className="font-mono text-mist text-xs">NSE:</span>
             <input
               value={input}
-              onChange={(e) => setInput(e.target.value.toUpperCase())}
+              onChange={(e) => { setInput(e.target.value.toUpperCase()); setNote(""); }}
               onKeyDown={(e) => e.key === "Enter" && add()}
               placeholder="Add symbol…"
               className="bg-transparent outline-none flex-1 font-mono text-xs placeholder:text-mist/30"
@@ -115,6 +119,8 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
             </button>
           )}
         </div>
+
+        {note && <p className="v7-wl-note" role="status">{note}</p>}
 
         {/* design v5: summary of the figures below (percentages only) */}
         {symbols.length > 0 && (
@@ -159,7 +165,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
                         title={added[s] ? `${label(added[s])}: baseline Rs ${added[s].price.toFixed(2)}` : "no price yet"}
                         data-testid={`since-added-${s}`}
                       >
-                        {pct === null ? "—" : `${formatPct(pct)} ${label(added[s])}`}{isBigMove(pct) ? " ●" : ""}
+                        {pct === null ? "no price yet" : <>{t === "up" ? <i className="v7-arrow" aria-hidden="true">▲</i> : t === "down" ? <i className="v7-arrow" aria-hidden="true">▼</i> : null}{`${formatPct(pct)} ${label(added[s])}`}</>}{isBigMove(pct) ? " ●" : ""}
                       </span>
                     );
                   })()}

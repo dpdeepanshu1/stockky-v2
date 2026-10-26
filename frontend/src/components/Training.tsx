@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import TrainingProgressPanel from "./TrainingProgressPanel";
 import { KpiStrip } from "./ui/KpiStrip";
-import { trainingKpis } from "./trainingView";
+import { trainingKpis, fmtMetric, fmtFixed, predictionRowView } from "./trainingView";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
 export default function Training() {
@@ -581,25 +581,15 @@ export default function Training() {
       MAE: "MAE",
     };
 
-    const formatValue = (key: string, value: number) => {
-      if (key === "MaximumDrawdown" || key === "CumulativeReturn" || key === "WinRate" || key === "DirectionalAccuracy") {
-        return (value * 100).toFixed(2) + "%";
-      }
-      if (key === "ProfitFactor" || key === "SharpeRatio" || key === "SortinoRatio") {
-        return value.toFixed(3);
-      }
-      return value.toFixed(4);
-    };
-
     return (
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-2">
         {Object.entries(metricLabels).map(([key, label]) => {
-          const val = metrics[key];
-          if (val === undefined || val === null) return null;
+          const shown = fmtMetric(key, metrics[key]);   // E164: a missing / non-numeric value hides the tile instead of throwing in render
+          if (shown == null) return null;
           return (
             <div key={key} className="bg-ink/40 border border-slate/40 rounded-2xl px-3 py-2">
               <div className="font-display tabular-nums text-[10px] text-mist/50 uppercase tracking-wider">{label}</div>
-              <div className="font-display tabular-nums text-sm text-paper mt-0.5">{formatValue(key, val)}</div>
+              <div className="font-display tabular-nums text-sm text-paper mt-0.5">{shown}</div>
             </div>
           );
         })}
@@ -676,31 +666,25 @@ export default function Training() {
             </tr>
           </thead>
           <tbody>
-            {predictions.map((p) => (
+            {predictions.map((p) => {
+              const v = predictionRowView(p);   // E164: formatted text; null is "not evaluated", not a miss
+              return (
               <tr key={p.prediction_id} className="border-b border-slate/30">
                 <td className="py-1 pr-4 text-paper">{p.symbol}</td>
                 <td className="py-1 pr-4 text-mist/80">{p.decision}</td>
-                <td className="py-1 pr-4 text-mist/80">₹{p.price?.toFixed(2) || "—"}</td>
+                <td className="py-1 pr-4 text-mist/80">{v.price}</td>
                 <td className="py-1 pr-4 text-mist/60">{formatDate(p.timestamp)}</td>
-                <td className="py-1 pr-4">
-                  <span className={p.t1_success === 1 ? "text-signal-buy" : p.t1_success === 0 ? "text-mist/40" : "text-signal-sell"}>
-                    {p.t1_success === 1 ? "✅" : p.t1_success === 0 ? "⏳" : "❌"}
-                  </span>
-                </td>
-                <td className="py-1 pr-4">
-                  <span className={p.t5_success === 1 ? "text-signal-buy" : p.t5_success === 0 ? "text-mist/40" : "text-signal-sell"}>
-                    {p.t5_success === 1 ? "✅" : p.t5_success === 0 ? "⏳" : "❌"}
-                  </span>
-                </td>
+                {[v.t1, v.t5].map((m, i) => (
+                  <td key={i} className="py-1 pr-4">
+                    <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>
+                  </td>
+                ))}
                 <td className="py-1">
-                  {p.outcomes?.length ? (
-                    <span className="text-mist/60">
-                      {p.outcomes.map((o: any) => `${o.period}: ${o.return_pct?.toFixed(2) || "—"}%`).join(" | ")}
-                    </span>
-                  ) : "—"}
+                  <span className="text-mist/60">{v.outcomes}</span>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1211,7 +1195,7 @@ export default function Training() {
                 <StatCard label="Run Date" value={formatDate(summaryMetrics.timestamp)} />
                 <StatCard label="Dataset Size" value={summaryMetrics.dataset_size || 0} />
                 <StatCard label="Symbols" value={summaryMetrics.num_symbols || 0} />
-                <StatCard label="Sharpe" value={summaryMetrics.metrics?.SharpeRatio?.toFixed(3) || "—"} />
+                <StatCard label="Sharpe" value={fmtFixed(summaryMetrics.metrics?.SharpeRatio, 3)} />
               </div>
             </div>
           )}

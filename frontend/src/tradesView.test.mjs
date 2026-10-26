@@ -1,6 +1,7 @@
 // Run: node --experimental-strip-types src/tradesView.test.mjs
 import assert from "node:assert/strict";
-import { tradesKpis, signedRupee } from "./components/tradesView.ts";
+import { tradesKpis, signedRupee, pnlView, dirOf, levelText, countText } from "./components/tradesView.ts";
+import { readFileSync } from "node:fs";
 
 assert.deepEqual(tradesKpis(null), []);
 assert.deepEqual(tradesKpis(undefined), []);
@@ -41,4 +42,18 @@ assert.equal(tradesKpis({ avg_pnl_pct: -1.5 })[4].value, "-1.5%");
 assert.equal(tradesKpis({ avg_r_multiple: 0 })[4].value, "0.00R");
 assert.equal(tradesKpis({ max_drawdown_pct: 0 })[5].value, "0.0%");
 for (const k of s) assert.equal(typeof k.value, "string");
+// E165: card bodies - missing is neutral and a dash, never green; a real 0 is flat; long decimals rounded
+assert.deepEqual(pnlView(3.4567), { text: "+3.46%", dir: "up" }); assert.deepEqual(pnlView(-1.2), { text: "-1.2%", dir: "down" });
+assert.deepEqual(pnlView(0), { text: "0%", dir: "flat" }); assert.deepEqual(pnlView("2.5"), { text: "+2.5%", dir: "up" });
+assert.deepEqual(pnlView(-0.001), { text: "0%", dir: "flat" });
+for (const bad of [null, undefined, NaN, "", "abc", Infinity, {}]) assert.deepEqual(pnlView(bad), { text: "—", dir: null }, `pnl ${String(bad)}`);
+assert.equal(dirOf(undefined), null); assert.equal(dirOf(0), "flat"); assert.equal(dirOf(5), "up"); assert.equal(dirOf(-5), "down"); assert.equal(dirOf("x"), null);
+assert.equal(levelText(1234.5), "₹1,234.5"); assert.equal(levelText(0), "—"); assert.equal(levelText(-3), "—"); assert.equal(levelText(null), "—"); assert.equal(levelText("x"), "—"); assert.equal(levelText("99.5"), "₹99.5");
+assert.equal(countText(12), "12"); assert.equal(countText(0), "0"); assert.equal(countText(undefined), "—"); assert.equal(countText(-1), "—"); assert.equal(countText("7"), "7");
+const tsx = readFileSync(new URL("./components/Trades.tsx", import.meta.url), "utf8");
+const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+assert.ok(!/\(trade\.pnl_pct \?\? 0\) >= 0/.test(tsx) && !/\(t\.pnl_pct \?\? 0\) >= 0/.test(tsx), "a missing P&L is no longer treated as 0 (green)");
+assert.ok(!/\{Number\(t\.pnl_pct\)\}%/.test(tsx) && !/\$\{trade\.target\}/.test(tsx) && /levelText\(trade\.stop_loss\)/.test(tsx) && /countText\(trade\.quantity\)/.test(tsx), "backup list, target, stop and quantity read the helpers");
+assert.ok(/Close Position at Market/.test(tsx) && /Realized P&amp;L/.test(tsx) && /P&amp;L Amount/.test(tsx), "buttons and headings kept");
+assert.ok(/\.v7-arrow/.test(css), "arrow class exists");
 console.log("tradesView ok");

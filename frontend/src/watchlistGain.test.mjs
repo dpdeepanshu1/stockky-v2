@@ -1,6 +1,7 @@
 // Run: node --experimental-strip-types watchlistGain.test.mjs  (Node >= 22.6)
 import assert from "node:assert/strict";
-import { parseAdded, prune, withBaseline, pctSince, formatPct, tone, isBigMove, label } from "./watchlistGain.ts";
+import { readFileSync } from "node:fs";
+import { parseAdded, prune, withBaseline, pctSince, formatPct, tone, isBigMove, label, checkSymbol } from "./watchlistGain.ts";
 
 const rec = { price: 100, ts: 1, source: "added" };
 assert.ok(Math.abs(pctSince(rec, 131.74) - 31.74) < 1e-9);
@@ -29,4 +30,17 @@ const parsed = parseAdded(JSON.stringify({ tcs: rec, BAD: { price: -1, ts: 1, so
 assert.deepEqual(Object.keys(parsed), ["TCS"]);
 
 assert.equal(label(rec), "since added"); assert.equal(label({ ...rec, source: "first_seen" }), "since first seen"); assert.equal(label(null), "");
+// E166: Add box
+assert.deepEqual(checkSymbol(" tcs ", []), { ok: true, symbol: "TCS" }); assert.deepEqual(checkSymbol("infy.ns", []), { ok: true, symbol: "INFY" });
+assert.deepEqual(checkSymbol("reliance.BO", []), { ok: true, symbol: "RELIANCE" }); assert.deepEqual(checkSymbol("m&m", []), { ok: true, symbol: "M&M" });
+assert.deepEqual(checkSymbol("bajaj-auto", []), { ok: true, symbol: "BAJAJ-AUTO" }); assert.deepEqual(checkSymbol("3MINDIA", []), { ok: true, symbol: "3MINDIA" });
+for (const e of ["", "   ", null, undefined, 5]) assert.equal(checkSymbol(e, []).reason, "empty", `empty ${String(e)}`);
+for (const bad of ["tata motors", "TCS!", "^NSEI", "-X", "&X", "A".repeat(21), "<b>", "TCS,INFY", "R\u00c9"]) { const r = checkSymbol(bad, []); assert.equal(r.ok, false, `refuse ${bad}`); assert.equal(r.reason, "invalid"); assert.ok(r.message.length > 0); }
+const dup = checkSymbol("tcs", ["TCS"]); assert.equal(dup.ok, false); assert.equal(dup.reason, "duplicate"); assert.equal(dup.message, "TCS is already on your watchlist.");
+assert.equal(checkSymbol("A".repeat(20), []).ok, true);
+const wl = readFileSync(new URL("./components/WatchlistManager.tsx", import.meta.url), "utf8");
+const wcss = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+assert.ok(/checkSymbol\(symOverride \?\? input, symbols\)/.test(wl) && /role="status"/.test(wl) && !/\.replace\(\/\\\.NS\$\/i, ""\)\.replace\(\/\\\.BO\$\/i, ""\);\n    if \(!sym \|\| symbols\.includes/.test(wl), "Add goes through checkSymbol");
+assert.ok(/no price yet/.test(wl) && /Scan watchlist/.test(wl) && /Quick add/.test(wl) && /Remove/.test(wl), "no-price words, buttons and quick add kept");
+assert.ok(!/animation\s*:/.test(wcss.slice(wcss.indexOf("E166"))), "E166 CSS adds no animation");
 console.log("watchlistGain: ok");

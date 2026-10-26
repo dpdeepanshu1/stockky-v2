@@ -1,20 +1,29 @@
 import { useState } from "react";
-import { api, getApiUrl, setApiUrl, stopSessionKeepAlive } from "../../api";
+import { api, getApiUrl, setApiUrl, normalizeGatewayUrl, stopSessionKeepAlive } from "../../api";
 import RateLimitDashboard from "../RateLimitDashboard";
 import { PageHeader } from "../ui/PageHeader";
 import { KpiStrip } from "../ui/KpiStrip";
-import { settingsKpis } from "../settingsView";
+import { settingsKpis, checkApiUrl, powerOffReport } from "../settingsView";
 import { OvernightAutomationPanel } from "./OvernightAutomationPanel";
 
 async function powerOffAll() {
+  // E168: one tap used to stop everything with no way back; ask first
+  if (!window.confirm(
+    "Switch OFF all processes?\n\n" +
+      "This force-stops scan, data feed, hot picks and training, then reloads the page.\n" +
+      "Only health checks will remain."
+  )) return;
   try {
-    window.alert(
-      "Switching OFF all processes…\n" +
-        "Committing in-progress work, then force-stopping scan / data-feed / hot-picks / training.\n" +
-        "Only health checks will remain."
+    // E168: go through the api wrappers so the saved API address (Settings) is used, not only VITE_API_URL
+    const [po] = await Promise.allSettled([api.powerOff(), api.stopAllScans(), api.stopDataFeed()]);
+    const report = powerOffReport(
+      po.status === "fulfilled"
+        ? { ok: true, message: po.value?.message, phases: po.value?.phases }
+        : { ok: false, error: (po.reason as Error)?.message }
     );
-    const base = import.meta.env.VITE_API_URL || "";
-    // Stop client-side keep-alive and any local intervals before backend
+    window.alert(report.text);
+    if (!report.ok) return;   // nothing was confirmed stopped: keep the page and the local task state as they are
+    // Stop client-side keep-alive and any local intervals now that the backend has gone quiet
     try {
       stopSessionKeepAlive();
     } catch {}
@@ -23,29 +32,6 @@ async function powerOffAll() {
       localStorage.removeItem("stockky_scan_task");
       sessionStorage.removeItem("stockky_ws_quotes");
     } catch {}
-    // Parallel force-stops so backend workers die even if power-off is slow
-    const stops = [
-      fetch(`${base}/ops/power-off`, { method: "POST" }),
-      fetch(`${base}/scan/stop-all`, { method: "POST" }).catch(() => null),
-      fetch(`${base}/data-feed/stop?force=true`, { method: "POST" }).catch(() => null),
-    ];
-    const results = await Promise.allSettled(stops);
-    let j: any = {};
-    if (results[0].status === "fulfilled") {
-      try {
-        j = await (results[0] as PromiseFulfilledResult<Response>).value.json();
-      } catch {
-        j = {};
-      }
-    }
-    window.alert(
-      (j?.message || "Processes stopped.") +
-        "\n\n" +
-        (Array.isArray(j?.phases)
-          ? j.phases.map((p: any) => `${p.phase}: ${p.detail}`).join("\n")
-          : "") +
-        "\n\nReady for fresh start. Refreshing…"
-    );
     window.location.reload();
   } catch (e: any) {
     window.alert("Power-off failed: " + (e?.message || e));
@@ -87,6 +73,12 @@ export function SettingsPage({
   }
 
   function save() {
+    const chk = checkApiUrl(normalizeGatewayUrl(url));   // E168: refuse junk before it is stored
+    if (!chk.ok) {
+      setSavedMsg(chk.message);
+      setTimeout(() => setSavedMsg(null), 6000);
+      return;
+    }
     setApiUrl(url);
     onSaved();
     setSavedMsg("API URL saved on this device.");
@@ -97,7 +89,7 @@ export function SettingsPage({
     <div className="page-terminal settings-page space-y-4">
       <PageHeader title="Settings" desc="Backend address, appearance and system tools." icon="sliders" kicker="System" />
       <p className="text-xs text-mist/60 mb-2">API connection · theme · services · deploy checklist</p>
-      <KpiStrip items={settingsKpis({ backendUp, url, savedUrl: getApiUrl(), theme, dbWake: dbWakeState, dbDetail: dbWakeDetail })} label="Settings summary" />
+      <KpiStrip items={settingsKpis({ backendUp, url: normalizeGatewayUrl(url), savedUrl: getApiUrl(), theme, dbWake: dbWakeState, dbDetail: dbWakeDetail })} label="Settings summary" />
       <section className="terminal-panel">
         <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Backend connection</h3>
         <p className="text-mist/70 text-xs mb-3 max-w-lg">
@@ -121,7 +113,7 @@ export function SettingsPage({
             Save URL
           </button>
         </div>
-        {savedMsg && <p className="mono text-xs text-signal-buy mt-2 mb-0">{savedMsg}</p>}
+        {savedMsg && <p role="status" className={`mono text-xs mt-2 mb-0 ${savedMsg.startsWith("API URL saved") ? "text-signal-buy" : "text-signal-sell"}`}>{savedMsg}</p>}
       </section>
 
       <section className="terminal-panel">

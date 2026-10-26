@@ -1,6 +1,7 @@
 // Run: node --experimental-strip-types src/trainingView.test.mjs
 import assert from "node:assert/strict";
-import { trainingKpis, trainingAge } from "./components/trainingView.ts";
+import { trainingKpis, trainingAge, fmtMetric, fmtFixed, outcomeMark, predictionRowView } from "./components/trainingView.ts";
+import { readFileSync } from "node:fs";
 
 const NOW = Date.parse("2026-10-25T10:00:00Z");
 assert.deepEqual(trainingKpis(null, NOW), []);
@@ -42,4 +43,24 @@ assert.equal(trainingKpis({ status: {}, training: true, progress: { stage: "idle
 const err = trainingKpis({ status: {}, training: true, progress: { stage: "error", error: "boom" } }, NOW)[4];
 assert.equal(err.value, "Error"); assert.equal(err.tone, "warn"); assert.equal(err.sub, "boom");
 for (const x of ok) assert.equal(typeof x.value, "string");
+// E164: card bodies
+assert.equal(fmtMetric("WinRate", 0.5234), "52.34%"); assert.equal(fmtMetric("MaximumDrawdown", -0.12), "-12.00%");
+assert.equal(fmtMetric("SharpeRatio", 1.23456), "1.235"); assert.equal(fmtMetric("RMSE", 0.12345678), "0.1235");
+assert.equal(fmtMetric("WinRate", 0), "0.00%"); assert.equal(fmtMetric("SharpeRatio", 0), "0.000");
+assert.equal(fmtMetric("ProfitFactor", Infinity), "∞"); assert.equal(fmtMetric("RMSE", Infinity), null);
+for (const bad of [undefined, null, NaN, "1.2", {}, -Infinity]) assert.equal(fmtMetric("WinRate", bad), null, `metric ${String(bad)} hides the tile`);
+assert.equal(fmtFixed(0, 3), "0.000"); assert.equal(fmtFixed(undefined, 3), "—"); assert.equal(fmtFixed("x", 3), "—"); assert.equal(fmtFixed(NaN, 3), "—");
+assert.deepEqual(outcomeMark(1), { glyph: "✅", word: "Hit", tone: "up" }); assert.deepEqual(outcomeMark(2), { glyph: "❌", word: "Miss", tone: "down" });
+assert.deepEqual(outcomeMark(0), { glyph: "⏳", word: "Pending", tone: "flat" });
+for (const unk of [null, undefined, 3, "1", NaN]) assert.deepEqual(outcomeMark(unk), { glyph: "—", word: "Not evaluated", tone: "flat" }, `${String(unk)} is not a miss`);
+const row = predictionRowView({ price: 1234.5, t1_success: 1, t5_success: 0, outcomes: [{ period: "T+1", return_pct: 0.5 }, { period: "T+5", return_pct: 0 }, { period: "T+10" }] });
+assert.equal(row.price, "₹1234.50"); assert.equal(row.t1.word, "Hit"); assert.equal(row.t5.word, "Pending"); assert.equal(row.outcomes, "T+1: 0.50% | T+5: 0.00% | T+10: —");
+const rb = predictionRowView({ price: "x", outcomes: "no" }); assert.equal(rb.price, "—"); assert.equal(rb.outcomes, "—"); assert.equal(rb.t1.word, "Not evaluated");
+assert.equal(predictionRowView({ price: 0 }).price, "—"); assert.equal(predictionRowView(null).price, "—");
+for (const txt of [rb.price, rb.outcomes, row.outcomes]) assert.ok(!/undefined|NaN|null|₹—|—%/.test(txt));
+const tsx = readFileSync(new URL("./components/Training.tsx", import.meta.url), "utf8");
+const css = readFileSync(new URL("./design-v7.css", import.meta.url), "utf8");
+assert.ok(/predictionRowView\(p\)/.test(tsx) && /fmtMetric\(key, metrics\[key\]\)/.test(tsx) && !/p\.price\?\.toFixed/.test(tsx) && !/formatValue\(/.test(tsx), "cells read the helpers, no raw toFixed on API values");
+assert.ok(!/p\.t1_success === 1 \? "✅"/.test(tsx) && /T\+1 Success/.test(tsx) && /T\+5 Success/.test(tsx), "old glyph chain gone, headings kept");
+assert.ok(!/animation\s*:/.test(css.slice(css.indexOf("E164"))), "E164 CSS adds no animation");
 console.log("trainingView ok");

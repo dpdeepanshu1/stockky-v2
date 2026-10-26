@@ -47,3 +47,25 @@ export function settingsKpis(i: SettingsInput | null | undefined): SettingsKpi[]
 
   return [backend, address, theme, db];
 }
+
+// E168: Save URL and Power Off (pure). Save URL stored any text (setApiUrl normalises a missing scheme but nothing refused junk such as
+// "hello world" or "ftp://x"), which then broke every request until fixed. The strip now reads the same normalised address Save would
+// store, so "my-vm.duckdns.org" is no longer called "Not valid" while Save accepts it. Power Off used to say "Processes stopped. Ready for
+// fresh start" and reload even when the request had failed (or went to the wrong host); the report now follows the real answer.
+export type UrlCheck = { ok: true } | { ok: false; message: string };
+export function checkApiUrl(normalized: string | null | undefined): UrlCheck {
+  return apiHost(normalized) === null
+    ? { ok: false, message: "That is not a usable address. Use the full gateway address, for example https://my-gateway.example.com." }
+    : { ok: true };
+}
+export function powerOffReport(r: { ok: boolean; message?: unknown; phases?: unknown; error?: unknown }): { ok: boolean; text: string } {
+  if (!r.ok) {
+    const why = typeof r.error === "string" && r.error.trim() ? r.error.trim() : "no answer from the backend";
+    return { ok: false, text: `Power-off did not go through: ${why}.\nNothing was confirmed stopped. Check the Backend status and try again.` };
+  }
+  const head = typeof r.message === "string" && r.message.trim() ? r.message.trim() : "Processes stopped.";
+  const lines = Array.isArray(r.phases)
+    ? (r.phases as any[]).filter((p) => p && typeof p.phase === "string").map((p) => `${p.phase}: ${typeof p.detail === "string" ? p.detail : "—"}`)
+    : [];
+  return { ok: true, text: `${head}${lines.length ? `\n\n${lines.join("\n")}` : ""}\n\nReady for fresh start. Refreshing…` };
+}

@@ -57,3 +57,34 @@ export function trainingKpis(i: TrainingInput | null | undefined, nowMs: number)
   }
   return out;
 }
+
+// E164: Training Lab card bodies (pure). The old cells called .toFixed on whatever the API sent: a string or NaN threw inside render,
+// a missing price showed "₹—", a missing return showed "—%", and a prediction with no evaluation yet (null) was drawn as a failed one (❌).
+// backend meaning (decision-prediction-service evaluate.py): t1/t5_success 0 = pending, 1 = hit, 2 = miss; anything else = not evaluated.
+const PCT_KEYS = ["MaximumDrawdown", "CumulativeReturn", "WinRate", "DirectionalAccuracy"];
+const RATIO_KEYS = ["ProfitFactor", "SharpeRatio", "SortinoRatio"];
+export function fmtMetric(key: string, value: unknown): string | null {
+  if (value === Infinity) return key === "ProfitFactor" ? "∞" : null;
+  const n = num(value);
+  if (n == null) return null;
+  if (PCT_KEYS.includes(key)) return `${(n * 100).toFixed(2)}%`;
+  if (RATIO_KEYS.includes(key)) return n.toFixed(3);
+  return n.toFixed(4);
+}
+export function fmtFixed(value: unknown, digits: number): string { const n = num(value); return n == null ? "—" : n.toFixed(digits); }
+export type OutcomeMark = { glyph: string; word: string; tone: "up" | "down" | "flat" };
+export function outcomeMark(v: unknown): OutcomeMark {
+  if (v === 1) return { glyph: "✅", word: "Hit", tone: "up" };
+  if (v === 2) return { glyph: "❌", word: "Miss", tone: "down" };
+  if (v === 0) return { glyph: "⏳", word: "Pending", tone: "flat" };
+  return { glyph: "—", word: "Not evaluated", tone: "flat" };
+}
+export function predictionRowView(p: { price?: unknown; t1_success?: unknown; t5_success?: unknown; outcomes?: unknown } | null | undefined) {
+  const price = num(p?.price);
+  const outs = Array.isArray(p?.outcomes) ? (p!.outcomes as any[]) : [];
+  return {
+    price: price == null || price <= 0 ? "—" : `₹${price.toFixed(2)}`,
+    t1: outcomeMark(p?.t1_success), t5: outcomeMark(p?.t5_success),
+    outcomes: outs.length ? outs.map((o) => `${typeof o?.period === "string" && o.period ? o.period : "—"}: ${num(o?.return_pct) == null ? "—" : `${num(o?.return_pct)!.toFixed(2)}%`}`).join(" | ") : "—",
+  };
+}

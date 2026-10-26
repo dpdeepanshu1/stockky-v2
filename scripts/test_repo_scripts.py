@@ -145,3 +145,35 @@ def test_compileall_skips_any_virtualenv_folder_and_dockerignore_drops_them():
         if di.exists():
             assert "**/.venv*" in di.read_text(), f"{df.parent.name}: .dockerignore does not drop .venv-* folders"
     assert "**/.venv*" in (ROOT / ".dockerignore").read_text()
+
+
+def test_env_reference_reads_wrapper_and_indirect_calls(tmp_path):
+    """E170: names read through `__import__("os").getenv`, `ref.os.getenv` and small wrappers such as `_env_int("X_Y", 5)` are listed."""
+    repo = _mini_repo(tmp_path)
+    (repo / "services" / "demo-service" / "more.py").write_text(
+        'X1 = int(__import__("os").getenv("DIRECT_INDIRECT_ONE", "7"))\n'
+        'X2 = ref.os.getenv("ATTR_PATH_TWO")\n'
+        'X3 = _env_int("WRAPPED_THREE", 5)\n'
+        'X4 = _bs_bool("WRAPPED_FOUR", "true")\n'
+        'X5 = logger.info("NOT_A_VARIABLE")\n'
+        'X6 = _env_int("lowercase_name", 1)\n'
+    )
+    r = subprocess.run([sys.executable, str(repo / "scripts" / "gen_env_reference.py")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    text = (repo / "docs" / "ENV_REFERENCE.md").read_text()
+    for name in ("DIRECT_INDIRECT_ONE", "ATTR_PATH_TWO", "WRAPPED_THREE", "WRAPPED_FOUR", "REAL_FLAG"):
+        assert f"`{name}`" in text, name
+    assert "`WRAPPED_THREE` (helper)" in text and "`DIRECT_INDIRECT_ONE` (helper)" not in text
+    assert "NOT_A_VARIABLE" not in text and "lowercase_name" not in text
+
+
+def test_service_sheet_tool_covers_every_area_and_every_sheet_exists():
+    """E170: the sheet tool measures every area, and docs/SERVICE_SHEET_<area>.md exists for each."""
+    import audit_service_sheet as t
+    assert len(t.AREAS) == 12
+    for area in t.AREAS:
+        assert (ROOT / "docs" / f"SERVICE_SHEET_{area}.md").exists(), area
+    m = t.measure("kronos-forecast-service")
+    assert m["files"] > 0 and m["funcs"] > 0 and m["test_files"] > 0
+    row = t.md(m)
+    assert row.count("\n") >= 6 and "| 6 | Security |" in row

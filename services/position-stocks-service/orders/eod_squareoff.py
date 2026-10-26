@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -198,17 +198,59 @@ def _filled_bracket_exit_leg(db: Session, pos: ScalpPosition) -> Optional[str]:
     return None
 
 
-def _existing_flat_sell(db: Session, pos: ScalpPosition) -> Optional[dict]:
+class FlatSellUnverified(Exception):
+    """E181: an earlier flat-SELL attempt for this position errored in a way that does not prove Dhan never received it (timeout, dropped
+    connection, gateway 5xx), and Dhan's order book could not be read to check. The SELL is NOT sent again: a second one could be a duplicate
+    that opens an unintended short. The position stays OPEN; the exit-placement backoff retries once the book can be read."""
+
+
+# E181: positions (by id) whose last flat-SELL placement errored AMBIGUOUSLY in this process. Process memory only (a restart clears it, and the
+# check then falls back to the old fail-open behaviour). Cleared when the SELL is adopted or placed.
+_AMBIGUOUS_EXIT_POS: set = set()
+
+
+def _is_ambiguous(exc: Exception) -> bool:
+    try:
+        return bool(dhan_client.is_ambiguous_placement_error(exc))
+    except Exception:  # noqa: BLE001
+        return True                      # cannot tell: the SELL may exist, so treat it as ambiguous
+
+
+def _created_before(row: dict, since: Optional[datetime]) -> bool:
+    """True only when the order row has a parseable createTime that is earlier than `since` (an order from before this position opened is not its
+    SELL). Dhan stamps naive IST. Anything unparseable returns False, so the row is kept (the old behaviour)."""
+    if since is None:
+        return False
+    try:
+        raw = row.get("createTime") or row.get("create_time")
+        t = datetime.fromisoformat(str(raw).replace("Z", "+00:00").replace(" ", "T")[:19])
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        return t < as_aware(since)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _existing_flat_sell(db: Session, pos: ScalpPosition, strict: bool = False) -> Optional[dict]:
     """Group 205 (item 11). Today's live-or-filled plain SELL for this security and quantity
     (rejected/cancelled ones ignored), or None. Checked before a RETRY of a flat SELL: an earlier
     attempt that errored on our side (timeout) may still have been accepted by Dhan, and sending
-    again would be a duplicate. Fails open."""
+    again would be a duplicate. Fails open, unless `strict` (E181: the earlier error was ambiguous),
+    where an unreadable order book raises FlatSellUnverified instead. Rows created before this
+    position opened are not its SELL (E181)."""
     try:
         orders = dhan_client.get_order_list(db)
     except Exception as e:  # noqa: BLE001
+        if strict:
+            raise FlatSellUnverified(
+                f"{pos.symbol} (id={pos.id}) exit SELL NOT sent again: an earlier attempt errored ({e.__class__.__name__}) so it may already exist at Dhan, "
+                f"and Dhan's order book could not be read to check: {e}"
+            ) from e
         logger.warning("flat SELL guard: %s (id=%s) order-book lookup failed (%s) - duplicate check skipped, proceeding.", pos.symbol, pos.id, e)
         return None
     for r in orders or []:
+        if _created_before(r, getattr(pos, "opened_at", None)):
+            continue
         if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.exit_transaction_type(pos):
             continue
         if str(r.get("securityId") or r.get("security_id") or "") != str(pos.dhan_security_id):
@@ -328,11 +370,20 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
     last_exc: Exception | None = None
     attempts = max(1, config.EOD_SELL_RETRY_ATTEMPTS)
     for attempt in range(1, attempts + 1):
-        if attempt > 1:
+        # E181: look before sending after an attempt that may have been accepted: a retry in this call, OR the first attempt of a later call
+        # (next cycle / a manual click) when this process saw an ambiguous error for this position. `strict` = that error was ambiguous, so an
+        # unreadable order book blocks the SELL instead of letting a possible duplicate through.
+        _prior_ambiguous = pos.id in _AMBIGUOUS_EXIT_POS or (last_exc is not None and _is_ambiguous(last_exc))
+        if attempt > 1 or pos.id in _AMBIGUOUS_EXIT_POS:
             # Group 205 (item 11): the failed attempt may have been accepted anyway — adopt it
             # instead of sending a duplicate SELL.
-            _dup = _existing_flat_sell(db, pos)
+            try:
+                _dup = _existing_flat_sell(db, pos, strict=_prior_ambiguous)
+            except FlatSellUnverified as _fu:
+                exit_retry.record_failure(db, pos, reason=str(_fu))
+                raise
             if _dup is not None:
+                _AMBIGUOUS_EXIT_POS.discard(pos.id)
                 _oid = str(_dup.get("orderId") or _dup.get("order_id") or "")
                 logger.warning(
                     "flat SELL retry: %s (id=%d) already has Dhan SELL order %s (%s) — adopting it, not resending.",
@@ -363,10 +414,13 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
             # to ERROR, outside the OPEN pool this function's callers
             # scan) — no cooldown needed for that case.
             exit_retry.reset(pos)
+            _AMBIGUOUS_EXIT_POS.discard(pos.id)
             return result
         except Exception as e:  # noqa: BLE001 — classified by the caller
             last_exc = e
             err_str = str(e)
+            if _is_ambiguous(e):
+                _AMBIGUOUS_EXIT_POS.add(pos.id)
             if (
                 dhan_client.is_intraday_cutoff_error(err_str)
                 or dhan_client.is_security_intraday_restricted_error(err_str)

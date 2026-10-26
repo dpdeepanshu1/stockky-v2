@@ -516,6 +516,81 @@ class TestDuplicateSellGuards:
         monkeypatch.setattr(dhan_client, "get_super_order_list", boom)
         assert eod._fire_flat_sell(db, mkpos(db, super_id="SO1")) == {"orderId": "F1"}
 
+    # ── E181: a SELL that errored ambiguously may exist at Dhan; never send a second one blind ──
+    @pytest.fixture(autouse=True)
+    def _clean_ambiguous_memory(self):
+        eod._AMBIGUOUS_EXIT_POS.clear()
+        yield
+        eod._AMBIGUOUS_EXIT_POS.clear()
+
+    def _book_down(self, b, monkeypatch):
+        def boom(db_):
+            b.calls.append(("get_order_list", {}))
+            raise RuntimeError("order book unreadable")
+        monkeypatch.setattr(dhan_client, "get_order_list", boom)
+
+    def test_timeout_then_unreadable_order_book_does_not_send_a_second_sell(self, env, monkeypatch):
+        db, b, _ = env
+        b.place_script = [RuntimeError(GENERIC_MSG)]                 # attempt 1: timeout (may have been accepted)
+        self._book_down(b, monkeypatch)
+        p = mkpos(db)
+        with pytest.raises(eod.FlatSellUnverified, match="may already exist"):
+            eod._fire_flat_sell(db, p)
+        assert len(b.of("place_order")) == 1                         # the retry never reached the broker
+        assert p.consecutive_exit_failures == 1                      # backoff applies
+
+    def test_clean_rejection_then_unreadable_order_book_still_retries(self, env, monkeypatch):
+        db, b, _ = env
+        b.place_script = [RuntimeError("RMS: some other clean rejection"), {"orderId": "OK"}]
+        self._book_down(b, monkeypatch)
+        assert eod._fire_flat_sell(db, mkpos(db)) == {"orderId": "OK"}   # not ambiguous: unchanged fail-open
+
+    def test_next_call_looks_at_the_order_book_first_and_adopts_the_accepted_sell(self, env):
+        db, b, _ = env
+        b.place_script = [RuntimeError(GENERIC_MSG)] * 3                # call 1: every attempt times out
+        p = mkpos(db, qty=10)
+        with pytest.raises(RuntimeError):
+            eod._fire_flat_sell(db, p)
+        assert len(b.of("place_order")) == 3
+        p.last_exit_failure_at = datetime.now(timezone.utc) - timedelta(hours=1)    # backoff over
+        b.orders = [{"orderId": "ACCEPTED1", "transactionType": "SELL", "securityId": p.dhan_security_id,
+                     "quantity": 10, "orderStatus": "PENDING", "tag": "EOD_SQUAREOFF"}]
+        assert eod._fire_flat_sell(db, p) == {"orderId": "ACCEPTED1"}   # adopted on the FIRST attempt of the later call
+        assert len(b.of("place_order")) == 3                           # no fourth SELL
+        assert p.id not in eod._AMBIGUOUS_EXIT_POS
+
+    def test_next_call_with_nothing_at_dhan_sends_normally_and_forgets(self, env):
+        db, b, _ = env
+        b.place_script = [RuntimeError(GENERIC_MSG)] * 3
+        p = mkpos(db)
+        with pytest.raises(RuntimeError):
+            eod._fire_flat_sell(db, p)
+        p.last_exit_failure_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        assert eod._fire_flat_sell(db, p) == {"orderId": "F4"}
+        assert p.id not in eod._AMBIGUOUS_EXIT_POS
+
+    def test_next_call_with_unreadable_book_after_a_timeout_is_blocked(self, env, monkeypatch):
+        db, b, _ = env
+        b.place_script = [RuntimeError(GENERIC_MSG)] * 3
+        p = mkpos(db)
+        with pytest.raises(RuntimeError):
+            eod._fire_flat_sell(db, p)
+        p.last_exit_failure_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        self._book_down(b, monkeypatch)
+        with pytest.raises(eod.FlatSellUnverified):
+            eod._fire_flat_sell(db, p)
+        assert len(b.of("place_order")) == 3
+
+    def test_an_older_sell_of_the_same_size_is_not_adopted(self, env):
+        db, b, _ = env
+        p = mkpos(db, qty=10)
+        b.place_script = [RuntimeError(GENERIC_MSG), {"orderId": "NEW"}]
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d %H:%M:%S")
+        b.orders = [{"orderId": "OLD1", "transactionType": "SELL", "securityId": p.dhan_security_id, "quantity": 10,
+                     "orderStatus": "TRADED", "tag": "EOD_SQUAREOFF", "createTime": old}]
+        p.opened_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+        assert eod._fire_flat_sell(db, p) == {"orderId": "NEW"}      # the 3-hour-old fill belongs to an earlier position
+
     def test_close_now_reports_already_closed_without_changing_the_row(self, env, monkeypatch):
         db, b, _ = env
         monkeypatch.setattr(dhan_client, "get_super_order_list", lambda db_: self.super_with("TRADED"))

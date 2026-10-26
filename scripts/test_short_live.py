@@ -144,6 +144,25 @@ reset(); dc.is_ambiguous_placement_error = lambda e: True
 dc.find_recent_buy_order = lambda db, sid, qty, super_order, exclude_ids, transaction_type: {"orderId": "REC9"} if transaction_type == "SELL" else None
 dc.place_super_order = lambda db, **k: (_ for _ in ()).throw(TimeoutError("timeout"))
 r = sl.attempt_short_live(DB(gate()), cand); check("ambiguous SELL error: recovered order tracked, not released", r is not None and r.dhan_super_order_id == "REC9" and not calls["lock_rel"])
+# 7b E180: the SELL call errored AND Dhan's order book could not be read -> the short may be live: capital back, claim KEPT, symbol rested for the session, alert
+CD = []; _cd_before = epz.cooldown_symbol
+reset(); dc.is_ambiguous_placement_error = lambda e: True
+dc.find_recent_buy_order = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("order book unreadable"))
+dc.place_super_order = lambda db, **k: (calls["orders"].append(k) or (_ for _ in ()).throw(TimeoutError("timeout")))
+epz.cooldown_symbol = lambda *a: CD.append(a); REF.clear()
+db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("unknown SELL: nothing saved, one order only (never a second one)", r is None and not db.added and len(calls["orders"]) == 1)
+check("unknown SELL: capital returned but the symbol claim is NOT released", calls["released"] == [19900.0, 100.0] and not calls["lock_rel"])
+check("unknown SELL: symbol rested for the session with the UNKNOWN reason", len(CD) == 1 and CD[0][0] == "X" and CD[0][1] >= 480 and str(CD[0][2]).startswith("SELL_STATUS_UNKNOWN"))
+check("unknown SELL: skip row coded and the operator told", [c[0] for c in REF] == ["SHORT_SELL_STATUS_UNKNOWN"] and any("SELL status UNKNOWN" in n for n in NOTES))
+check("unknown SELL: order counter not incremented", db.gate.orders_placed_today == 0)
+# the lookup worked and found nothing: an ordinary failure, claim released as before, no UNKNOWN rest
+CD.clear(); REF.clear(); reset(); dc.is_ambiguous_placement_error = lambda e: True
+dc.find_recent_buy_order = lambda *a, **k: None
+dc.place_super_order = lambda db, **k: (calls["orders"].append(k) or (_ for _ in ()).throw(TimeoutError("timeout")))
+r = sl.attempt_short_live(DB(gate()), cand)
+check("ambiguous SELL, nothing at Dhan: still an ordinary failure (claim released, no UNKNOWN rest)", r is None and undo_ok() and not any(str(c[2]).startswith("SELL_STATUS_UNKNOWN") for c in CD) and [c[0] for c in REF] == ["SHORT_ORDER_FAILED"])
+epz.cooldown_symbol = _cd_before
 # 8 an unexpected crash before the order never leaves a claim behind
 reset(); ledger.reserve_capital = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")); r = sl.attempt_short_live(DB(gate()), cand); check("crash before order: lock released, never raises", r is None and undo_ok() and not calls["orders"])
 # 9 cap reads: junk counts as 1

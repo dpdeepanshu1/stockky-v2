@@ -897,6 +897,70 @@ class TestManualEntry:
         assert log.decision == "SKIPPED" and log.reason.startswith("MANUAL_ORDER_FAILED:")
         assert gate_of(db).orders_placed_today == 0 and sent["info"] == []
 
+    def test_ambiguous_timeout_and_dhan_lookup_fails_keeps_symbol_claimed_and_rested(self, env, monkeypatch):
+        """E178: the manual twin of the E177 auto-entry case. The BUY errored AND Dhan's order book could not be read, so it may be
+        live. The claim stays, the symbol rests for the session, the operator is told, capital is returned, no position is recorded."""
+        from orders import entry_pause
+        db, b, sent = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+
+        def boom(*a, **k):
+            raise RuntimeError("dhan order book unreadable")
+        monkeypatch.setattr(dhan_client, "find_recent_buy_order", boom)
+        try:
+            with pytest.raises(entry.ManualEntryRejected, match="may be LIVE"):
+                entry.attempt_manual_entry(db, "ABC", 500.0)
+            assert n_positions(db) == 0 and available(db) == pytest.approx(LEDGER_AVAILABLE)
+            assert lock_held(db, "ABC")                                       # NOT released
+            assert last_log(db).reason.startswith("MANUAL_ORDER_FAILED:")
+            assert gate_of(db).orders_placed_today == 0
+            assert any("status UNKNOWN" in str(m) for m in sent["info"])
+            assert "BUY_STATUS_UNKNOWN" in (entry_pause.symbol_blocked("ABC") or "")
+            until = entry_pause._symbol_until["ABC"][0]
+            assert until - entry_pause._now() > 60 * 60                         # rested for hours, not minutes
+        finally:
+            entry_pause.reset()
+
+    def test_second_manual_buy_is_refused_while_the_first_is_unknown(self, env, monkeypatch):
+        from orders import entry_pause
+        db, b, _ = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+
+        def boom(*a, **k):
+            raise RuntimeError("dhan order book unreadable")
+        monkeypatch.setattr(dhan_client, "find_recent_buy_order", boom)
+        try:
+            with pytest.raises(entry.ManualEntryRejected, match="may be LIVE"):
+                entry.attempt_manual_entry(db, "ABC", 500.0)
+            with pytest.raises(entry.ManualEntryRejected, match="Check Dhan"):
+                entry.attempt_manual_entry(db, "abc", 500.0)
+            assert len(b.of("place_super_order")) == 1                          # the second click never reached the broker
+            assert available(db) == pytest.approx(LEDGER_AVAILABLE) and lock_held(db, "ABC")
+        finally:
+            entry_pause.reset()
+
+    def test_ambiguous_timeout_and_nothing_at_dhan_still_releases_the_claim(self, env):
+        from orders import entry_pause
+        db, b, sent = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+        try:
+            with pytest.raises(entry.ManualEntryRejected, match="Dhan rejected the manual BUY"):
+                entry.attempt_manual_entry(db, "ABC", 500.0)
+            assert not lock_held(db, "ABC") and available(db) == pytest.approx(LEDGER_AVAILABLE)
+            assert not any("status UNKNOWN" in str(m) for m in sent["info"])
+            assert entry_pause.symbol_blocked("ABC") is None
+        finally:
+            entry_pause.reset()
+
+    def test_an_ordinary_failed_placement_rest_does_not_block_a_manual_buy(self, env):
+        from orders import entry_pause
+        db, _, _ = env
+        entry_pause.cooldown_symbol("ABC", 5, "RMS: Insufficient funds")
+        try:
+            assert entry.attempt_manual_entry(db, "ABC", 500.0).status == "OPEN"   # unchanged: only the UNKNOWN rest blocks
+        finally:
+            entry_pause.reset()
+
     def test_plain_order_fallback(self, env, monkeypatch):
         db, b, _ = env
         monkeypatch.setattr(config, "USE_SUPER_ORDER", False)

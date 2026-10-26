@@ -39,6 +39,9 @@ logger = logging.getLogger("position-stocks-short-live")
 
 SIDE = "SHORT"
 
+# E180: how long a symbol rests, and stays claimed, after a SELL whose status could not be verified at Dhan (minutes; covers the session).
+_UNKNOWN_SELL_COOLDOWN_MIN = 480
+
 
 def live_mode() -> bool:
     """True only when SHORT_MODE is exactly "live" (read at call time)."""
@@ -187,6 +190,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
     # ---- the order. From here an exception must NOT release anything blindly: the order may exist at the broker. ----
     gate = db.query(ScalpGateState).first()
     super_id, error_msg, ambiguous = None, None, False
+    sell_unknown: list = []                          # E180: set when the SELL errored AND Dhan's order book could not be read
     plain: Optional[dict] = None
     if config.USE_SUPER_ORDER:
         try:
@@ -199,7 +203,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             if not super_id:
                 error_msg = "Dhan answered without an order id"
         except Exception as e:  # noqa: BLE001
-            rec = _recover_ambiguous_sell(db, e, security_id, qty, sym)
+            rec = _recover_ambiguous_sell(db, e, security_id, qty, sym, unknown=sell_unknown)
             if rec:
                 super_id = rec
             else:
@@ -239,6 +243,24 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             live = float(plain.get("fill_price") or live)
             levels.stop_price = float(plain.get("stop_price") or levels.stop_price)       # the levels plain_short really sent / computed from the real fill (tick-rounded)
             levels.target_price = float(plain.get("target_price") or levels.target_price)
+
+    if error_msg is not None and sell_unknown:
+        # E180: the SELL call errored AND Dhan's order book could not be read, so a live short (a Super Order carries its own legs at the broker)
+        # may exist with no local position. Releasing the symbol claim and resting it 5 minutes would let the next cycle sell it a second time.
+        # Capital is returned as before; the claim stays and the symbol rests for the session; the operator is told. Same rule as the long entry (E177).
+        claimed = False                                  # _undo() below returns the capital only
+        _undo()
+        entry_pause.cooldown_symbol(sym, _UNKNOWN_SELL_COOLDOWN_MIN, f"SELL_STATUS_UNKNOWN:{error_msg}")
+        short_entry._refuse(db, cand, "SHORT_SELL_STATUS_UNKNOWN", str(error_msg)[:400])
+        logger.critical("short live: %s SELL status UNKNOWN (call errored: %s; Dhan order book unreadable) - symbol stays claimed and rested for the "
+                        "session; check Dhan", sym, error_msg)
+        try:
+            notifier.notify_fire_and_forget(
+                f"🚨 <b>SELL status UNKNOWN</b> - {sym} x{qty}\nThe short order call errored and Dhan's order book could not be read, so it may be live at "
+                "the broker. Check Dhan for this symbol and cover it by hand if it is there. No new order for it today.")
+        except Exception as ne:  # noqa: BLE001
+            logger.warning("short live: alert failed (%s)", ne)
+        return None
 
     if error_msg is not None:
         _handle_failure(db, cand, sym, error_msg)
@@ -299,9 +321,11 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
     return pos
 
 
-def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: int, sym: str) -> Optional[str]:
+def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: int, sym: str, unknown: Optional[list] = None) -> Optional[str]:
     """A SELL placement that errored on OUR side (timeout / dropped connection / 5xx) may still exist at Dhan. Look for a young matching SELL before calling
-    the entry failed, so a live short never goes untracked. Never raises. Returns the order id or None."""
+    the entry failed, so a live short never goes untracked. Never raises. Returns the order id or None.
+    `unknown` (E180, optional): when given, a True is appended if the Dhan lookup itself FAILED (whether the SELL is live is unknown, which is not the same as
+    "looked, nothing there"). The return value is unchanged either way."""
     try:
         if not dhan_client.is_ambiguous_placement_error(exc):
             return None
@@ -311,6 +335,8 @@ def _recover_ambiguous_sell(db: Session, exc: Exception, security_id: str, qty: 
         row = dhan_client.find_recent_buy_order(db, security_id, qty, super_order=True, exclude_ids=known, transaction_type="SELL")
     except Exception as e:  # noqa: BLE001
         logger.warning("short live: %s SELL errored (%s) and the Dhan lookup failed too (%s) - treating as failed", sym, exc, e)
+        if unknown is not None:
+            unknown.append(True)
         return None
     if not row:
         return None

@@ -61,6 +61,18 @@ def _g233_market_open_by_default(monkeypatch):
 
 
 @_pytest_g188.fixture(autouse=True)
+def _g244_preopen_off_by_default(monkeypatch):
+    """E179: group244 answers a symbol AngelOne could not price from the last close during the pre-open (09:05-09:15 IST on a trading
+    day). Like the closed-market check above, that depends on the wall clock: a CI run at 09:09 IST made the group193 stale-row tests see
+    a stale row served as a last close (2 failures, every other hour green). Pinned to False for every test; the group244 tests set it
+    to True themselves, and its flag tests call monkeypatch.undo() to reach the real function."""
+    _m = sys.modules.get("main")
+    if _m is not None and hasattr(_m, "_quote_preopen"):
+        monkeypatch.setattr(_m, "_quote_preopen", lambda: False)
+    yield
+
+
+@_pytest_g188.fixture(autouse=True)
 def _g270_dhan_off_by_default(monkeypatch):
     """group270: the Dhan Data API stage is ON by default in production. Existing tests were written for the
     AngelOne/yfinance paths and must not start Dhan threads or touch the network, so it is switched off for every

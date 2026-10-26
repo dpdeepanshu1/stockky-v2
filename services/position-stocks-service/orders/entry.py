@@ -1258,6 +1258,16 @@ def attempt_manual_entry(
     if _stale:
         raise ManualEntryRejected(f"{symbol}: {_stale}. Wait for a fresh tick (is the market open?) and try again.")
 
+    # E178: an earlier BUY of this symbol errored and Dhan's order book could not be read, so it may be LIVE at the broker. The symbol
+    # claim stays ours in that case, and try_claim() treats an already-ours claim as no conflict, so without this check a second
+    # click would send a second BUY. Only these reasons block; an ordinary failed-placement rest is still the admin's call to retry.
+    _unk = entry_pause.symbol_blocked(symbol)
+    if _unk and "_STATUS_UNKNOWN" in _unk:          # BUY_STATUS_UNKNOWN (E177/E178) or SELL_STATUS_UNKNOWN (E180: a live short may exist)
+        raise ManualEntryRejected(
+            f"{symbol}: an earlier order of it errored and Dhan's order book could not be read, so it may be live at the broker. "
+            "Check Dhan for this symbol before placing another BUY (this block clears at the next restart or after the session)."
+        )
+
     # AUDIT FIX (2026-09-18): shared_symbol_lock.try_claim() below returns
     # True whenever the lock is already held by THIS service (an
     # already-ours claim is treated as "not a conflict" — see its own
@@ -1392,18 +1402,35 @@ def attempt_manual_entry(
             )
             plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
-        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, symbol)
+        _buy_unknown: list = []
+        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, symbol, unknown=_buy_unknown)
         if _rec is not None:
             dhan_super_order_id, plain_order_id = _rec
         else:
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, symbol)
+            if not _buy_unknown:
+                shared_symbol_lock.release(db, symbol)
             db.add(ScalpCandidateLog(
                 symbol=symbol, window_source="MANUAL", pct_change=0.0,
                 composite_score=None, decision="SKIPPED",
                 reason=f"MANUAL_ORDER_FAILED:{e}",
             ))
             db.commit()
+            if _buy_unknown:
+                # E178: same state as attempt_entry (E177). The BUY errored AND Dhan's order book could not be read, so it may be live
+                # with no local position. Keep the symbol claimed, rest it for the session, tell the operator, and say so to the admin.
+                entry_pause.cooldown_symbol(symbol, _UNKNOWN_BUY_COOLDOWN_MIN, f"BUY_STATUS_UNKNOWN:{e}")
+                logger.critical("position-stocks MANUAL BUY %s status UNKNOWN (call errored: %s; Dhan order book unreadable) - symbol stays "
+                                "claimed and rested for the session; check Dhan", symbol, e)
+                notifier.notify_fire_and_forget(
+                    f"🚨 <b>Manual BUY status UNKNOWN</b> — {symbol} x{quantity}\n"
+                    "The order call errored and Dhan's order book could not be read, so it may be live at the broker. "
+                    "Check Dhan for this symbol. No new BUY for it today."
+                )
+                raise ManualEntryRejected(
+                    f"The manual BUY of {symbol} errored ({e}) and Dhan's order book could not be read, so the order may be LIVE. "
+                    "Check Dhan before doing anything else with this symbol; no new BUY for it is allowed until then."
+                )
             raise ManualEntryRejected(f"Dhan rejected the manual BUY: {e}")
 
     if is_first:

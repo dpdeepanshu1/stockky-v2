@@ -207,6 +207,11 @@ ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate ne
 # next cycle instead of being force-closed on its very first pass.
 HOLDINGS_SYNC_GUARD_MINUTES = int(((os.getenv("HOLDINGS_SYNC_GUARD_MINUTES") or "").strip() or "30"))
 
+# E172: when Dhan's holdings AND positions both come back empty while this book has open REAL positions, the empty answer must be
+# seen again after this many seconds before anything is force-closed (an empty reply during an outage would otherwise close every
+# position older than the guard above). 0 = old behaviour (close on the first empty read).
+HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS = int(((os.getenv("HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS") or "").strip() or "120"))
+
 # A13: hourly read-only broker-vs-book drift check (execution/hourly_reconcile.py). 0 = off. It never changes the book;
 # it reports drift (GET /reconcile-report/REAL) and sends one Telegram message when the drift set changes.
 HOURLY_RECONCILE_INTERVAL_MINUTES = max(0, int(((os.getenv("HOURLY_RECONCILE_INTERVAL_MINUTES") or "").strip() or "60")))

@@ -1715,7 +1715,10 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                                                  + "; ".join(_sx_v.get("reasons") or [])[:200], ltp)
                             if mode == "DEMO":
                                 close_position(db, position, tick, position.qty_open, "structure_exit")
-                            elif not _send_real_sell(db, position, position.qty_open, "structure_exit"):
+                                full_exits += 1
+                            elif _send_real_sell(db, position, position.qty_open, "structure_exit"):
+                                full_exits += 1   # E175: a structure exit was sold but never counted in the cycle tally
+                            else:
                                 held += 1
                             continue
                         if _sx_applied:

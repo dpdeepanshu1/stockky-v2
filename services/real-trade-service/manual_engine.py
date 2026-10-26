@@ -312,7 +312,21 @@ async def evaluate_manual_order(
             preview["status"] = "FILLED" if filled else "PLACED"
             preview["filled"] = filled
         else:
+            # E176: same lost-reply protection as entry_engine's auto BUY (A1b). The order carries a correlation tag; if the call raises
+            # AFTER Dhan may have accepted it (timeout, dropped connection), the order book is searched for that tag before the order is
+            # called REJECTED, because REJECTED frees the symbol and invites a second BUY of the same shares.
+            _order_tag = f"stk{order.id}"
+            _broker_call_started = False
+            _uncertain = False
+            _blocked_uncertain = False
             try:
+                try:
+                    from entry_engine.entry import _uncertain_buy_active
+                    _blocked_uncertain = bool(_uncertain_buy_active(mode, symbol))
+                except Exception:  # noqa: BLE001 - the shared flag is a safety net, never a reason to fail the ticket
+                    _blocked_uncertain = False
+                if _blocked_uncertain:
+                    raise RuntimeError(f"{symbol}: an earlier BUY today could not be verified at Dhan - not buying it again until checked.")
                 security_id = dhan_client.get_security_id(db, symbol)
                 # BUG FIX (2026-09-10, session21c real-trade-service audit):
                 # this used to send price=reference_price (tick.price)
@@ -358,8 +372,9 @@ async def evaluate_manual_order(
                         "shared Dhan account — buying it here too would create a "
                         "duplicate broker position."
                     )
+                _broker_call_started = True
                 broker_result = dhan_client.place_order(
-                    db, is_armed=gate_armed, security_id=security_id,
+                    db, is_armed=gate_armed, tag=_order_tag, security_id=security_id,
                     exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="BUY",
                     quantity=approved_qty, order_type=order_type, price=order_price,
                     product_type=product_type,
@@ -374,11 +389,34 @@ async def evaluate_manual_order(
                 preview["dhan_order_id"] = dhan_order_id
             except Exception as e:  # noqa: BLE001 — must surface as a clean rejection, never a 500
                 logger.error("Manual REAL BUY failed for %s: %s", symbol, e)
+                _recovered_row, _checked_ok = (None, True)
+                if _broker_call_started and not dhan_client.is_clear_broker_rejection(str(e)):
+                    _recovered_row, _checked_ok = dhan_client.find_order_by_tag(db, _order_tag)
+                if _recovered_row is not None:
+                    _rid = str(_recovered_row.get("orderId") or _recovered_row.get("order_id") or "")
+                    logger.critical("manual BUY %s raised (%s) but Dhan HAS the order %s (tag %s) - booking it as sent, not rejected",
+                                    symbol, e, _rid, _order_tag)
+                    record_real_order_sent(db, order, _rid)
+                    log_action(db, actor=admin or "admin", action="MANUAL_BUY_SENT", mode=mode,
+                               detail=f"{symbol} x{approved_qty} -> Dhan order {_rid} (recovered after an error: {str(e)[:120]})")
+                    preview["status"] = "SENT_TO_BROKER"
+                    preview["dhan_order_id"] = _rid
+                    preview["recovered"] = True
+                    return preview
+                _uncertain = _broker_call_started and not _checked_ok
+                if _uncertain:
+                    try:
+                        from entry_engine.entry import _mark_uncertain_buy
+                        _mark_uncertain_buy(mode, symbol)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("manual BUY %s: could not flag the unverified BUY", symbol, exc_info=True)
+                    logger.critical("manual BUY %s status UNKNOWN: the call raised (%s) and Dhan's order book could not be read", symbol, e)
                 order.status = "REJECTED"
                 # AUDIT FIX (session60): release the symbol claim taken
                 # above on ANY placement failure, same as entry_engine's
                 # equivalent except block.
-                shared_symbol_lock.release(db, symbol)
+                if not (_uncertain or _blocked_uncertain):
+                    shared_symbol_lock.release(db, symbol)   # E176: an unverified BUY may be live, so its symbol stays claimed
                 db.add(models.TradeOrderEvent(order_id=order.id, event_type="REJECTED",
                                                detail=f"Dhan placement failed: {e}"))
                 db.commit()
@@ -387,6 +425,10 @@ async def evaluate_manual_order(
                 preview["ok"] = False
                 preview["status"] = "REJECTED"
                 preview["detail"] = str(e)
+                if _uncertain:
+                    preview["uncertain"] = True
+                    preview["detail"] = (str(e) + " | Dhan's order book could not be read, so this BUY may be LIVE. "
+                                         "Check Dhan before trying again; no new BUY for this symbol today.")
                 if dhan_client.is_invalid_ip_error(str(e)):
                     # Same persistent infra-config failure as the auto
                     # entry/exit paths — auto-disarm so a manual retry

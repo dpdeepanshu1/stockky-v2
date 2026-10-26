@@ -125,7 +125,16 @@ def main() -> int:
     if "--check" in sys.argv:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if current != text:
+            import difflib
             print("docs/ENV_REFERENCE.md is out of date - run: python3 scripts/gen_env_reference.py")
+            # E174: say WHICH rows differ, so a CI failure shows the cause (usually a variable read by a file that is still tracked
+            # in git but is no longer in the release, see scripts/check_stale_files.py) instead of just "out of date".
+            diff = [l for l in difflib.unified_diff(current.splitlines(), text.splitlines(), "committed", "generated", lineterm="", n=0)
+                    if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+            for l in diff[:30]:
+                print("  " + l[:200])
+            if len(diff) > 30:
+                print(f"  ... and {len(diff) - 30} more differing rows")
             return 1
         print("docs/ENV_REFERENCE.md is up to date")
         return 0

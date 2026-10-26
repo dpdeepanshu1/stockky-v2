@@ -587,11 +587,23 @@ async def reconcile_real_orders(db: Session) -> dict:
                 # be booked before the order is marked dead, or they'd
                 # silently disappear from this system's own books while still
                 # sitting in the actual Dhan account/position.
+                if delta_qty and delta_qty > 0 and fill_price is None:
+                    # E171: shares did trade but the broker row carries no price yet. Marking the order dead here would treat it as
+                    # a zero-fill (restore the position, count a failure) and lose the fill. Leave it PLACED/PARTIAL; next cycle retries.
+                    logger.critical(
+                        "reconcile: order %s (%s %s) is %s with %s new filled share(s) but no average price - leaving it open to retry",
+                        order.dhan_order_id, order.side, order.symbol, status, delta_qty,
+                    )
+                    continue
                 if delta_qty and delta_qty > 0 and fill_price is not None:
                     await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True,
                                            cumulative_qty=int(fill_qty_cumulative))
                     tally["partial_fills"] += 1
-                elif order.side == "SELL" and order.exit_reason != "broker_stop":
+                elif (order.side == "SELL" and order.exit_reason != "broker_stop"
+                      and not (order.filled_qty_so_far or 0)):
+                    # E171: "not filled_qty_so_far" - a SELL that already booked a partial fill in an earlier cycle and is now
+                    # cancelled for the rest is NOT a zero-fill rejection. Counting it bumped the exit-failure streak and its
+                    # backoff, delaying the sale of the remaining shares, and logged a false "zero fill" note.
                     # group322: a dead broker-side stop (cancelled by us, rejected, expired) is not a failed exit - no
                     # position restore, no failure streak / backoff, no alert; it only gets its status below.
                     # BUG FIX (2026-09-04, see _repair_orphaned_pending_exits'

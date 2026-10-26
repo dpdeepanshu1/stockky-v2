@@ -250,3 +250,11 @@ def _orb_bar_fetch_off_by_default(monkeypatch):
     from entry_engine import orb_bars as _ob
     monkeypatch.setattr(_ob, "FETCH_ON", False)
     _ob._reset_for_tests()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _holdings_sync_empty_confirm_off_by_default(monkeypatch):
+    """E172: holdings_sync_reconcile waits for a second empty broker read before closing anything when Dhan returns no holdings and
+    no positions. Pre-existing tests expect the first empty read to close a ghost; tests/test_e172_holdings_sync_guards.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS", 0, raising=False)

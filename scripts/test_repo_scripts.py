@@ -177,3 +177,39 @@ def test_service_sheet_tool_covers_every_area_and_every_sheet_exists():
     assert m["files"] > 0 and m["funcs"] > 0 and m["test_files"] > 0
     row = t.md(m)
     assert row.count("\n") >= 6 and "| 6 | Security |" in row
+
+
+# ── E174: stale tracked files and the env-reference diff ─────────────────────────────────────────────────────────────
+
+def test_stale_files_lists_tracked_files_missing_from_the_manifest(tmp_path):
+    import check_stale_files as csf
+    assert csf.stale(["a.py", "old/TabButton.tsx", "b.md"], {"a.py", "b.md"}) == ["old/TabButton.tsx"]
+    assert csf.stale(["a.py"], {"a.py", "new.py"}) == []
+
+
+def test_stale_files_script_in_a_real_git_repo(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    shutil.copy(SCRIPTS / "check_stale_files.py", repo / "scripts" / "check_stale_files.py")
+    (repo / "keep.txt").write_text("k")
+    (repo / "gone.txt").write_text("g")
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True)
+    run("git", "init", "-q")
+    (repo / "gone.txt").unlink()                       # the release no longer has it, git still tracks it below
+    run("git", "add", "-A")
+    (repo / "gone.txt").write_text("g")
+    run("git", "add", "gone.txt")
+    assert run(sys.executable, "scripts/check_stale_files.py", "--write").returncode == 0   # manifest = files now on disk
+    (repo / "gone.txt").unlink()
+    (repo / "docs" / "FILE_MANIFEST.txt").write_text("keep.txt\ndocs/FILE_MANIFEST.txt\nscripts/check_stale_files.py\n")
+    r = run(sys.executable, "scripts/check_stale_files.py")
+    assert r.returncode == 1 and "git rm -f -- 'gone.txt'" in r.stdout and "keep.txt'" not in r.stdout
+
+
+def test_env_reference_check_names_the_differing_rows(tmp_path):
+    repo = _mini_repo(tmp_path)
+    subprocess.run([sys.executable, "scripts/gen_env_reference.py"], cwd=repo, check=True, capture_output=True)
+    (repo / "services" / "demo-service" / "extra.py").write_text('import os\nos.getenv("STALE_LEFTOVER_VAR", "1")\n')
+    r = subprocess.run([sys.executable, "scripts/gen_env_reference.py", "--check"], cwd=repo, capture_output=True, text=True)
+    assert r.returncode == 1 and "out of date" in r.stdout and "STALE_LEFTOVER_VAR" in r.stdout

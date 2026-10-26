@@ -923,9 +923,14 @@ def holdings_sync_reconcile(db: Session) -> dict:
     def _qty(row: dict, *keys) -> int:
         raw = _get(row, *keys, default=0)
         try:
-            return int(raw)
+            return int(float(raw))   # E172: "4.0" / 4.0 used to read as 0 (int("4.0") raises) = "not held" = ghost-close
         except (TypeError, ValueError):
             return 0
+
+    def _sym_key(sym) -> str:
+        # E172: Dhan may report an equity as "ABC-EQ"; our rows use the bare symbol. Compare without a trailing -EQ.
+        k = str(sym).upper().strip()
+        return k[:-3] if k.endswith("-EQ") else k
 
     # 2026-09-09 fix (this session): this used to be a bare `set()` of
     # symbols Dhan reports, which only ever let this function answer
@@ -960,7 +965,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
         sym = _get(row, "tradingSymbol", "trading_symbol", "symbol")
         qty = _qty(row, "totalQty", "total_qty", "quantity")
         if sym and qty > 0:
-            key = str(sym).upper().strip()
+            key = _sym_key(sym)
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
             holdings_qty_by_symbol[key] = max(holdings_qty_by_symbol.get(key, 0), qty)
     for row in live_positions or []:
@@ -977,13 +982,13 @@ def holdings_sync_reconcile(db: Session) -> dict:
             _qty(row, "positiveQty", "positive_qty", "buyQty", "buy_qty"),
         )
         if sym and qty > 0:
-            key = str(sym).upper().strip()
+            key = _sym_key(sym)
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
         if sym:
             _net_raw = _get(row, "netQty", "net_qty")
             if _net_raw is not None:
                 try:
-                    _k = str(sym).upper().strip()
+                    _k = _sym_key(sym)
                     pos_net_by_symbol[_k] = pos_net_by_symbol.get(_k, 0) + int(_net_raw)
                     _sa = _get(row, "sellAvg", "sell_avg")
                     if _sa is not None and float(_sa) > 0:
@@ -991,6 +996,38 @@ def holdings_sync_reconcile(db: Session) -> dict:
                 except (TypeError, ValueError) as _row_err:
                     logger.warning("portfolio: unreadable broker position row for %s (net=%r) skipped: %s", sym, _net_raw, _row_err)
     broker_symbols: set[str] = set(broker_qty_by_symbol.keys())
+
+    # E172: an entirely empty broker answer (no holdings, no positions) is the one case where a bad read would close every
+    # position at once. Real emptiness (everything sold outside this app) still gets closed, but only when the empty answer is
+    # seen again HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS later; any non-empty read clears the mark.
+    _confirm_s = getattr(config, "HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS", 0) or 0
+    if _confirm_s > 0:
+        from resilience.local_cache import load_snapshot, save_snapshot
+        _mark_key = "holdings_sync_empty_seen"
+        if broker_symbols:
+            if (load_snapshot(db, _mark_key) or {}).get("at"):
+                save_snapshot(db, _mark_key, {"at": None})
+        elif db.query(models.TradePosition).filter(
+            models.TradePosition.mode == "REAL", models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED")),
+        ).first() is not None:
+            _seen = (load_snapshot(db, _mark_key) or {}).get("at")
+            _first = None
+            if _seen:
+                try:
+                    _first = datetime.fromisoformat(_seen)
+                    if _first.tzinfo is None:
+                        _first = _first.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    _first = None
+            if _first is None or (datetime.now(timezone.utc) - _first).total_seconds() < _confirm_s:
+                if _first is None:
+                    save_snapshot(db, _mark_key, {"at": datetime.now(timezone.utc).isoformat()})
+                logger.warning(
+                    "holdings_sync_reconcile: Dhan holdings and positions are both empty while REAL positions are open - "
+                    "waiting for a second empty read %ss apart before closing anything", _confirm_s,
+                )
+                return {"closed": 0, "symbols": []}
+            save_snapshot(db, _mark_key, {"at": None})
 
     now = datetime.now(timezone.utc)
     guard_cutoff = now - timedelta(minutes=config.HOLDINGS_SYNC_GUARD_MINUTES)
@@ -1012,7 +1049,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
     # top-level import here would be circular).
     from exit_engine.exit import _has_pending_real_sell
     for position in candidates:
-        symbol = (position.symbol or "").upper().strip()
+        symbol = _sym_key(position.symbol or "")
 
         # BUG FIX (2026-09-10, session21c audit): the PENDING_EXIT exclusion
         # on the candidates query above (see this function's own docstring)

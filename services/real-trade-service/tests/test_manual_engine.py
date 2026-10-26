@@ -307,6 +307,7 @@ class TestBuyConfirmReal:
         _approve(monkeypatch, qty=5)
         monkeypatch.setattr(dhan_client, "get_security_id", lambda db_, sym: "999")
         monkeypatch.setattr(dhan_client, "place_order", lambda db_, **kw: {"status": "ok"})
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda db_, tag: (None, True))   # E176: order book readable, order absent
         from execution import shared_order_budget, shared_symbol_lock
         monkeypatch.setattr(shared_order_budget, "check_and_reserve", lambda db_: True)
         monkeypatch.setattr(shared_symbol_lock, "try_claim", lambda db_, sym, mode="REAL": True)
@@ -334,6 +335,78 @@ class TestBuyConfirmReal:
         assert r["reason"] == "invalid_ip"
         assert disarmed["called"] is True
         assert "IP" in r["detail"]
+
+
+class TestBuyConfirmRealLostReply:
+    """E176: a manual REAL BUY whose call raises after Dhan may have accepted it must not be called REJECTED blindly
+    (same protection as entry_engine's A1b)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_uncertain_flags(self):
+        from entry_engine import entry as _entry
+        _entry._UNCERTAIN_BUYS.clear()
+        yield
+        _entry._UNCERTAIN_BUYS.clear()   # the flag is process-wide; never let it leak into another test
+
+    def _setup(self, monkeypatch, place):
+        _quotes(monkeypatch, price=100.0)
+        _approve(monkeypatch, qty=5)
+        monkeypatch.setattr(dhan_client, "get_security_id", lambda db_, sym: "999")
+        monkeypatch.setattr(dhan_client, "place_order", place)
+        from execution import shared_order_budget, shared_symbol_lock
+        monkeypatch.setattr(shared_order_budget, "check_and_reserve", lambda db_: True)
+        monkeypatch.setattr(shared_symbol_lock, "try_claim", lambda db_, sym, mode="REAL": True)
+        released = {"called": False}
+        monkeypatch.setattr(shared_symbol_lock, "release", lambda db_, sym: released.update(called=True))
+        from entry_engine import entry as _entry
+        _entry._UNCERTAIN_BUYS.clear()
+        return released
+
+    def test_tag_is_sent_with_the_order(self, db, monkeypatch):
+        seen = {}
+
+        def _place(db_, **kw):
+            seen.update(kw)
+            return {"orderId": "ORD1"}
+        self._setup(monkeypatch, _place)
+        r = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r["status"] == "SENT_TO_BROKER"
+        order = db.query(models.TradeOrder).first()
+        assert seen["tag"] == f"stk{order.id}"
+
+    def test_timeout_but_dhan_has_the_order_is_booked_as_sent(self, db, monkeypatch):
+        released = self._setup(monkeypatch, lambda db_, **kw: (_ for _ in ()).throw(RuntimeError("read timed out")))
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda db_, tag: ({"orderId": "ORD9", "orderStatus": "PENDING"}, True))
+        r = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r["ok"] is True and r["status"] == "SENT_TO_BROKER" and r["dhan_order_id"] == "ORD9" and r["recovered"] is True
+        order = db.query(models.TradeOrder).first()
+        assert order.status == "PLACED" and order.dhan_order_id == "ORD9"
+        assert released["called"] is False
+
+    def test_timeout_and_order_book_unreadable_keeps_symbol_locked_and_warns(self, db, monkeypatch):
+        released = self._setup(monkeypatch, lambda db_, **kw: (_ for _ in ()).throw(RuntimeError("read timed out")))
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda db_, tag: (None, False))
+        r = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r["ok"] is False and r["status"] == "REJECTED" and r["uncertain"] is True
+        assert "LIVE" in r["detail"]
+        assert released["called"] is False
+        # and a second ticket for the same symbol is refused until it is checked
+        r2 = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r2["ok"] is False and "not buying it again" in r2["detail"]
+
+    def test_timeout_and_dhan_does_not_have_it_is_a_plain_rejection(self, db, monkeypatch):
+        released = self._setup(monkeypatch, lambda db_, **kw: (_ for _ in ()).throw(RuntimeError("read timed out")))
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda db_, tag: (None, True))
+        r = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r["ok"] is False and r["status"] == "REJECTED" and not r.get("uncertain")
+        assert released["called"] is True
+
+    def test_clear_broker_rejection_does_not_search_the_order_book(self, db, monkeypatch):
+        released = self._setup(monkeypatch, lambda db_, **kw: (_ for _ in ()).throw(RuntimeError("RMS: Margin shortfall")))
+        looked = {"n": 0}
+        monkeypatch.setattr(dhan_client, "find_order_by_tag", lambda db_, tag: (looked.update(n=looked["n"] + 1), (None, True))[1])
+        r = run(me.evaluate_manual_order(db, "REAL", True, Req(), confirm=True, admin="tester"))
+        assert r["status"] == "REJECTED" and looked["n"] == 0 and released["called"] is True
 
 
 # ── SELL ─────────────────────────────────────────────────────────────────────

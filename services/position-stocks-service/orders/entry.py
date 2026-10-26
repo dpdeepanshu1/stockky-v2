@@ -325,11 +325,17 @@ def _count_open_positions(db: Session) -> int:
     )
 
 
-def _recover_ambiguous_buy(db: Session, exc: Exception, security_id: str, quantity: int, symbol: str):
+# E177: how long a symbol rests, and stays claimed, after a BUY whose status could not be verified at Dhan (minutes; covers the session).
+_UNKNOWN_BUY_COOLDOWN_MIN = 480
+
+
+def _recover_ambiguous_buy(db: Session, exc: Exception, security_id: str, quantity: int, symbol: str, unknown: Optional[list] = None):
     """group313: a BUY placement that errored on our side (timeout / dropped connection / gateway 5xx) may still have been
     accepted by Dhan. Look for it before calling the entry failed: releasing the capital and the symbol claim while a live
     position exists at the broker leaves it with no tracked stop. Returns (super_order_id, plain_order_id) when a matching
-    young BUY is found, else None (caller keeps its normal failure handling). Never raises."""
+    young BUY is found, else None (caller keeps its normal failure handling). Never raises.
+    `unknown` (E177, optional): when given, a True is appended if the Dhan lookup itself FAILED, i.e. whether the BUY is live is
+    unknown. That is different from "looked, nothing there" (nothing appended). The return value is unchanged either way."""
     try:
         if not dhan_client.is_ambiguous_placement_error(exc):
             return None
@@ -341,6 +347,8 @@ def _recover_ambiguous_buy(db: Session, exc: Exception, security_id: str, quanti
     except Exception as lookup_e:  # noqa: BLE001
         logger.warning("position-stocks entry: %s BUY errored (%s) and the Dhan lookup failed too (%s) - treating as failed",
                        symbol, exc, lookup_e)
+        if unknown is not None:
+            unknown.append(True)
         return None
     if not row:
         logger.warning("position-stocks entry: %s BUY errored (%s); no matching young BUY at Dhan - treating as failed", symbol, exc)
@@ -974,7 +982,8 @@ def attempt_entry(
             )
             plain_order_id = str((result or {}).get("orderId") or (result or {}).get("id") or "") or None
     except Exception as e:
-        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, candidate.symbol)
+        _buy_unknown: list = []
+        _rec = _recover_ambiguous_buy(db, e, security_id, quantity, candidate.symbol, unknown=_buy_unknown)
         if _rec is not None:
             dhan_super_order_id, plain_order_id = _rec
             error_msg = None
@@ -1056,6 +1065,19 @@ def attempt_entry(
             # failed order permanently locks this symbol out for this service
             # (real-trade-service is unaffected either way, since it never
             # held the lock).
+            if _buy_unknown:
+                # E177: the BUY errored AND Dhan's order book could not be read, so it may be LIVE (a super order carries its own legs at the
+                # broker). Releasing the claim and resting the symbol 5 minutes would let the next cycle buy it a second time. Keep it claimed
+                # and rested for the session, and tell the operator.
+                entry_pause.cooldown_symbol(candidate.symbol, _UNKNOWN_BUY_COOLDOWN_MIN, f"BUY_STATUS_UNKNOWN:{error_msg}")
+                logger.critical("position-stocks entry: %s BUY status UNKNOWN (call errored: %s; Dhan order book unreadable) - symbol stays "
+                                "claimed and rested for the session; check Dhan", candidate.symbol, error_msg)
+                notifier.notify_fire_and_forget(
+                    f"🚨 <b>BUY status UNKNOWN</b> — {candidate.symbol} x{quantity}\n"
+                    "The order call errored and Dhan's order book could not be read, so it may be live at the broker. "
+                    "Check Dhan for this symbol. No new BUY for it today."
+                )
+                return None
             shared_symbol_lock.release(db, candidate.symbol)
             return None
 

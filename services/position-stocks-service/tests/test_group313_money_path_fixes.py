@@ -121,3 +121,16 @@ def test_board_runner_backfill_failure_no_longer_blocks_snapshot_and_fill(monkey
     st = board_runner.state()
     assert st["errors"] == 1 and st["last_error"].startswith("backfill:") and "market-data down" in st["last_error"]
     board_runner.reset()
+
+
+def test_recover_reports_unknown_only_when_the_lookup_itself_fails(monkeypatch):
+    """E177: 'looked, nothing there' and 'could not look' are different; only the second is flagged. Return value unchanged."""
+    monkeypatch.setattr(dhan_client, "find_recent_buy_order", lambda *a, **k: None)
+    u = []
+    assert entry._recover_ambiguous_buy(_Db(), _ReadTimeout("t"), "1333", 10, "X", unknown=u) is None and u == []
+    def boom(*a, **k): raise RuntimeError("dhan down")
+    monkeypatch.setattr(dhan_client, "find_recent_buy_order", boom)
+    u = []
+    assert entry._recover_ambiguous_buy(_Db(), _ReadTimeout("t"), "1333", 10, "X", unknown=u) is None and u == [True]
+    u = []   # a clean rejection never asks Dhan, so nothing is unknown
+    assert entry._recover_ambiguous_buy(_Db(), RuntimeError("Insufficient Funds"), "1333", 10, "X", unknown=u) is None and u == []

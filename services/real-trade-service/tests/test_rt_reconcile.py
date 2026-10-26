@@ -674,6 +674,32 @@ class TestReconcileFlow:
         assert t["partial_fills"] == 1 and t["positions_unstuck"] == 0
         assert pos.status == "PARTIALLY_CLOSED" and pos.qty_open == 6
 
+    def test_sell_partly_filled_earlier_then_cancelled_is_not_counted_as_zero_fill(self, env):
+        # E171: the partial was booked on an earlier cycle (position already PARTIALLY_CLOSED, order PARTIAL); the broker now
+        # cancels the rest. No new shares, but this is not a zero-fill rejection: no failure streak, no backoff, no "unstuck".
+        db, rig = env
+        pos = mk_pos(db, status="PARTIALLY_CLOSED", qty=6, realized=8.0)
+        o = mk_order(db, side="SELL", dhan_id="S1", status="PARTIAL", filled_so_far=4)
+        rig.book = [row("S1", status="CANCELLED", avg=102.0, filled=4)]
+        t = self.go(db)
+        assert o.status == "CANCELLED" and t["dead_orders"] == 1
+        assert t["positions_unstuck"] == 0
+        assert not pos.consecutive_exit_failures and pos.last_exit_failure_at is None
+        assert pos.status == "PARTIALLY_CLOSED" and pos.qty_open == 6
+
+    def test_dead_sell_with_new_fill_but_no_price_is_left_open_not_treated_as_zero_fill(self, env):
+        # E171: 4 shares traded but the row has no average price yet. Do not mark the order dead or restore the position.
+        db, rig = env
+        pos = mk_pos(db, status="PENDING_EXIT", qty=10)
+        o = mk_order(db, side="SELL", dhan_id="S1")
+        rig.book = [row("S1", status="CANCELLED", avg=None, filled=4)]
+        t = self.go(db)
+        assert o.status == "PLACED" and t["dead_orders"] == 0 and t["positions_unstuck"] == 0
+        assert pos.status == "PENDING_EXIT" and not pos.consecutive_exit_failures
+        rig.book = [row("S1", status="CANCELLED", avg=102.0, filled=4)]   # price arrives next cycle: booked normally
+        t = self.go(db)
+        assert o.status == "CANCELLED" and pos.status == "PARTIALLY_CLOSED" and pos.qty_open == 6
+
     def test_repeated_dead_sells_raise_the_alert_at_the_threshold(self, env):
         db, rig = env
         mk_pos(db, status="OPEN", consecutive_exit_failures=4)

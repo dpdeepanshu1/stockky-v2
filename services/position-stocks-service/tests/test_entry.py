@@ -691,6 +691,39 @@ class TestAttemptEntryOrderFailures:
         assert entry.attempt_entry(db, cand("t2tco")) is None
         assert last_log(db).reason.startswith("ORDER_FAILED:") and n_positions(db) == 0
 
+    def test_ambiguous_timeout_and_dhan_lookup_fails_keeps_symbol_claimed_and_rested(self, env, monkeypatch):
+        """E177: the BUY errored AND Dhan's order book could not be read -> it may be live. The claim stays, the symbol rests for the
+        session (not the usual few minutes), and the operator is told. Capital is still returned and nothing is recorded as a position."""
+        from orders import entry_pause
+        db, b, sent = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+
+        def boom(*a, **k):
+            raise RuntimeError("dhan order book unreadable")
+        monkeypatch.setattr(dhan_client, "find_recent_buy_order", boom)
+        try:
+            assert entry.attempt_entry(db, cand("t2tco")) is None
+            assert last_log(db).reason.startswith("ORDER_FAILED:") and n_positions(db) == 0
+            assert available(db) == pytest.approx(LEDGER_AVAILABLE)
+            assert lock_held(db, "t2tco")                                     # NOT released
+            assert entry_pause.symbol_blocked("T2TCO") or entry_pause.symbol_blocked("t2tco")
+            assert any("status UNKNOWN" in str(m) or "BUY status UNKNOWN" in str(m) for m in sent["info"])
+            until = max((v[0] for k, v in entry_pause._symbol_until.items() if k.upper() == "T2TCO"), default=0)
+            assert until - entry_pause._now() > 60 * 60                         # rested for hours, not minutes
+        finally:
+            entry_pause.reset()
+
+    def test_ambiguous_timeout_and_nothing_at_dhan_still_releases_the_claim(self, env):
+        from orders import entry_pause
+        db, b, sent = env
+        b.super_script = [RuntimeError(GENERIC_MSG)]
+        try:
+            assert entry.attempt_entry(db, cand("t2tco")) is None
+            assert not lock_held(db, "t2tco")
+            assert not any("status UNKNOWN" in str(m) for m in sent["info"])
+        finally:
+            entry_pause.reset()
+
     @pytest.mark.parametrize("msg", [RESTRICTED_MSG, CIRCUIT_MSG])
     def test_restriction_recording_failure_is_swallowed(self, env, monkeypatch, msg):
         db, b, _ = env

@@ -44,3 +44,16 @@ class TestCapLogDedupe:
     def test_different_numbers_are_new(self):
         adaptive._cap_line_is_new((3.91, 2.5, 1.95, 1.5), now=1000.0)
         assert adaptive._cap_line_is_new((4.0, 2.5, 2.0, 1.7), now=1001.0) is True
+
+
+class TestQualityRejectDedupe:
+    """E187: the quality-gate reject line and its audit row use the same change-or-5-minutes rule, keyed apart from the entry-gate skips."""
+    def test_quality_and_entry_skips_do_not_share_state(self):
+        main._skip_is_new("ABC", "RANGE_GATE:X", now=1000.0)
+        assert main._skip_is_new("Q:ABC", "fundamental_score 12 < floor 25", now=1001.0) is True
+
+    def test_same_quality_reason_is_not_new_until_stale(self):
+        r = "EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer"
+        assert main._skip_is_new("Q:MRPL", r, now=1000.0) is True
+        assert main._skip_is_new("Q:MRPL", r, now=1015.0) is False
+        assert main._skip_is_new("Q:MRPL", r, now=1000.0 + main._SKIP_LOG_REPEAT_S + 1) is True

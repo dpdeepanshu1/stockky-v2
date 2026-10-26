@@ -1274,9 +1274,14 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             "market_cap_cr": quality.market_cap_cr,
         })
         if not ok:
-            logger.info("position-stocks: quality gate skipped %s — %s", candidate.symbol, reason)
+            # E187: the same top-N names are quality-gated every ~15 s cycle and a rejected one is rejected again with the same reason. The INFO line AND the
+            # ScalpCandidateLog audit row (an Oracle commit each) were written every time - CENTRUM "fundamental_score 12 < floor 25" twice in 15 s. Both now happen
+            # when the symbol's reason first appears, changes, or is older than _SKIP_LOG_REPEAT_S; the "checked" list in the stage detail is unchanged.
+            _qnew = _skip_is_new("Q:" + candidate.symbol, reason)
+            logger.log(logging.INFO if _qnew else logging.DEBUG, "position-stocks: quality gate skipped %s — %s", candidate.symbol, reason)
             try:
-                log_quality_reject(db, candidate, quality, reason)
+                if _qnew:
+                    log_quality_reject(db, candidate, quality, reason)
             except Exception:   # audit-trail write is best-effort; never abort the cycle
                 logger.warning("position-stocks: could not log quality reject for %s", candidate.symbol, exc_info=True)
                 try:

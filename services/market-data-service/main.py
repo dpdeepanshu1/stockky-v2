@@ -3761,6 +3761,82 @@ def _quote_row_age_s(row) -> Optional[float]:
         return None
 
 
+def _bulk_live_tick_ts_enabled() -> bool:
+    """E188: QUOTE_BULK_LIVE_TICK_TS (default on; 0/false/off/no = old behaviour, stamp every live-feed row 'now')."""
+    return ((os.getenv("QUOTE_BULK_LIVE_TICK_TS") or "").strip() or "1").lower() not in ("0", "false", "off", "no")
+
+
+def _live_tick_fetched_at(live) -> str:
+    """E188: `fetched_at` (naive UTC isoformat) for a quote row built from a live-feed tick.
+
+    /quotes/bulk accepts a feed tick up to 15 s old and used to stamp the row with the time of the READ, so a 14 s old
+    price was reported as 0 s old, then cached for another 15 s with that stamp (a true age of ~30 s answered as fresh;
+    real-trade-service's 20 s freshness check could not catch it). The feeds carry the tick's own epoch time in `ts`;
+    the row now carries it. Never in the future; falls back to now when `ts` is missing or unusable. Never raises."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    try:
+        if not _bulk_live_tick_ts_enabled():
+            return now.isoformat()
+        ts = float(live.get("ts"))
+        if not math.isfinite(ts) or ts <= 0:
+            return now.isoformat()
+        return min(datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None), now).isoformat()
+    except Exception:  # noqa: BLE001
+        return now.isoformat()
+
+
+def _prev_close_fields(prev_close, price, given_change_pct=None) -> dict:
+    """E188: {previous_close, day_change_pct} for a bulk row, only when `prev_close` is a positive number (never invented,
+    never 0). day_change_pct is `given_change_pct` when that is a number, else computed from `price`. Returns {} otherwise.
+    /quotes/bulk rows from the live feeds and from AngelOne REST carried neither field (the single /quote path always did),
+    so every caller reading them from bulk saw 'no previous close'. Never raises."""
+    try:
+        prev = _safe(prev_close)
+        if prev is None or prev <= 0:
+            return {}
+        out = {"previous_close": prev}
+        chg = _safe(given_change_pct)
+        if chg is None:
+            try:
+                px = float(price)
+            except (TypeError, ValueError):
+                px = 0.0
+            if math.isfinite(px) and px > 0:
+                chg = round((px - prev) / prev * 100.0, 2)
+        if chg is not None:
+            out["day_change_pct"] = chg
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _live_prev_close_fields(live, price) -> dict:
+    """E188: _prev_close_fields() for a live-feed tick. Yahoo's feed carries previous_close / day_change_pct; AngelOne's
+    carries `close`, which in its quote answers is the PREVIOUS session's close (the single-quote path reads it the same way)."""
+    try:
+        prev = live.get("previous_close")
+        if _safe(prev) is None or _safe(prev) <= 0:
+            prev = live.get("close") if str(live.get("source") or "").startswith("angelone") else None
+        return _prev_close_fields(prev, price, live.get("day_change_pct"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _bulk_angelone_deadline_s() -> float:
+    """E188: QUOTE_BULK_ANGELONE_DEADLINE_S - wall-clock budget of ONE /quotes/bulk call's AngelOne REST stage (default 10;
+    0 or negative = off; blank/invalid = 10). Each 50-token chunk may wait up to ANGELONE_LANE_MAX_WAIT_S (20 s) for a rate
+    token, so a 100-symbol call could keep a worker thread for ~40 s while its caller (FEED_BULK_TIMEOUT_S = 12 s) had given
+    up after 12."""
+    raw = (os.getenv("QUOTE_BULK_ANGELONE_DEADLINE_S") or "").strip()
+    try:
+        v = float(raw) if raw else 10.0
+    except ValueError:
+        return 10.0
+    if v != v:
+        return 10.0
+    return v if v > 0 else 0.0
+
+
 @app.post("/quotes/bulk")
 def get_quotes_bulk(req: BulkQuoteRequest):
     """group193 wrapper. /quotes/bulk used to hand back any cached row as-is, with its ORIGINAL fetched_at, for
@@ -3911,8 +3987,9 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                     "day_high": live.get("high") or live.get("day_high"),
                     "day_low": live.get("low") or live.get("day_low"),
                     "volume": live.get("volume"),
+                    **_live_prev_close_fields(live, live.get("price")),   # E188
                     "source": live.get("source") or "live_feed",
-                    "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                    "fetched_at": _live_tick_fetched_at(live),            # E188: the tick's own time, not the read time
                 })
                 try:
                     _cache_set(f"quote:{mapped}", quote, ttl=15)
@@ -3971,19 +4048,32 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
 
             _all_tokens = list(_full_tok_map.keys())
             _ao_resolved: set = set()
+            _ao_deadline = _bulk_angelone_deadline_s()   # E188: one wall-clock budget for the whole stage
+            _ao_t0 = time.monotonic()
+            _ao_cut = False
 
             # Step 2: chunked REST calls — one event loop per chunk, not one per call
             for _chunk_start in range(0, len(_all_tokens), _ao_chunk_size):
+                _ao_left = None
+                if _ao_deadline > 0:
+                    _ao_left = _ao_deadline - (time.monotonic() - _ao_t0)
+                    if _ao_left <= 0:
+                        _ao_cut = True
+                        break
                 _tok_chunk = _all_tokens[_chunk_start: _chunk_start + _ao_chunk_size]
                 try:
-                    _fetched = _aio.run(
-                        _ao_client.get_session().get_quotes_batch(
-                            "NSE", _tok_chunk,
-                            lane=_ao_lane([_full_tok_map.get(_t, "") for _t in _tok_chunk]),   # group211
-                        )
+                    _ao_call = _ao_client.get_session().get_quotes_batch(
+                        "NSE", _tok_chunk,
+                        lane=_ao_lane([_full_tok_map.get(_t, "") for _t in _tok_chunk]),   # group211
                     )
+                    if _ao_left is not None:
+                        _ao_call = _aio.wait_for(_ao_call, timeout=_ao_left)
+                    _fetched = _aio.run(_ao_call)
                 except RuntimeError:
                     _fetched = []
+                except _aio.TimeoutError:
+                    _fetched = []
+                    _ao_cut = True
                 except Exception as _be:
                     logger.debug("quotes/bulk: AngelOne REST chunk failed: %s", _be)
                     _fetched = []
@@ -4014,6 +4104,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                         "day_high": float(_fq.get("high") or 0) or None,
                         "day_low": float(_fq.get("low") or 0) or None,
                         "volume": _fq.get("tradeVolume"),
+                        **_prev_close_fields(_fq.get("close"), _ltp),   # E188: AngelOne's `close` is the previous close
                         "source": "angelone_rest",
                         "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                     })
@@ -4024,10 +4115,19 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                     results.append(quote)
                     _ao_resolved.add(_mapped_key)
 
+                if _ao_cut:
+                    break
+
             # Anything not resolved by AngelOne falls through to yfinance
             for _base, _ticker in _full_ticker_map.items():
                 if _ticker not in _ao_resolved:
                     _ao_still.append(_ticker)
+            if _ao_cut:
+                logger.info(
+                    "quotes/bulk: AngelOne REST stage stopped at its %.0fs request deadline (QUOTE_BULK_ANGELONE_DEADLINE_S) "
+                    "- %d of %d token symbol(s) unpriced, continuing with the remaining stages",
+                    _ao_deadline, len(_full_ticker_map) - len(_ao_resolved), len(_full_ticker_map),
+                )
 
             yf_tickers = _ao_still
             if len(yf_tickers) < len(remaining or []):

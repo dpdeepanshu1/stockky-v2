@@ -1785,6 +1785,24 @@ class TestRepairScoresFetch:
         m.hotpicks_repair_scores(decision_url=DEC)
         assert self._saved(env)[2]["reasons"] == ["old"]
 
+    def test_error_fallback_body_is_not_written_e192(self, m, env):
+        self._one(env, _needs(reasons=["old"]))
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "DO NOT BUY", "combined_score": 45, "technical_score": 50,
+                                                              "fundamental_score": 50, "close": 100.0, "error_detail": "boom"})
+        out = m.hotpicks_repair_scores(decision_url=DEC)
+        assert out["repaired"] == [] and env.hp.shared.find("UPDATE") == []
+
+    def test_no_data_body_is_not_written_e192(self, m, env):
+        self._one(env)
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "DO NOT BUY", "combined_score": 45, "data_insufficient": True, "close": None})
+        assert m.hotpicks_repair_scores(decision_url=DEC)["repaired"] == [] and env.hp.shared.find("UPDATE") == []
+
+    def test_dict_reasons_do_not_create_a_none_key_e192(self, m, env):
+        self._one(env, _needs())
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY", "reasons": {"technical": ["x"]}})
+        m.hotpicks_repair_scores(decision_url=DEC)
+        assert "reasons" not in self._saved(env)[2]
+
     def test_empty_reasons_list_is_ignored(self, m, env):
         self._one(env, _needs(reasons=["old"]))
         env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY", "reasons": []})

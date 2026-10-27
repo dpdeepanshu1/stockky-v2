@@ -758,7 +758,7 @@ services:
     logging: *default-logging
     # trading containers come first: a replay here must never starve them (jobs are also nice'd 10 and run one at a time)
     cpus: "0.50"
-    mem_limit: 1500m  # E229: was 900m - the 26 Oct full calibration's walk-forward (structure_backtest, 2 workers, resumed 625 of 838 symbols) was SIGKILLed ("290 Killed"); the cap only bites when a replay needs it, the VM had ~8.5 GB free
+    mem_limit: 2200m  # E229: was 900m. Kernel log (VM, 26 Oct 17:33 and 27 Oct 00:04 IST): "Memory cgroup out of memory: Killed process ... python3 anon-rss ~780 MB" x3 (the replay parent and its 2 workers) = the walk-forward / A-B on the 838-symbol seed. A cap only bites when a replay needs it; the VM had ~9 GB available. Prefer jobs=1 for heavy jobs, after the close.
     mem_reservation: 128m
 
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)

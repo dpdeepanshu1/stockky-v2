@@ -791,6 +791,29 @@ def _open_slots_full(db: Session) -> int | None:
     return n if n >= config.MAX_CONCURRENT_SCALP_POSITIONS else None
 
 
+def _release_db_connection(db: Session, where: str) -> None:
+    """E229: hand the pooled connection back before a slow network wait. A Session that has read anything keeps its connection checked out until
+    commit/rollback, so awaiting news / VIX / Nifty calls with it open held one of the 4+4 pool slots for seconds while Oracle was slow
+    ('QueuePool limit of size 4 overflow 4 reached'). Commit is the same call the cycle makes later; a failure is logged and rolled back, never raised."""
+    try:
+        db.commit()
+    except Exception:
+        logger.warning("position-stocks: connection release before %s failed", where, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _pool_status_text() -> str:
+    """One line of pool numbers for the log when the pool runs dry. Never raises."""
+    try:
+        pool = _db.get_engine().pool
+        return f"pool size={pool.size()} checked_out={pool.checkedout()} overflow={pool.overflow()}"
+    except Exception:
+        return "pool status unavailable"
+
+
 async def _run_cycle(db: Session, trigger: str) -> dict:
     """One full cycle: reconcile → EOD check → screen → quality-gate the
     top candidates → attempt entry on the first that passes. Shared by the
@@ -1159,6 +1182,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             summary["skipped_reason"] = _brake.split(":", 1)[0]
             _stage("trade_gates", "Loss Brake", _t, detail=_brake)
             return _finalize()
+        _release_db_connection(db, "market gate")      # E229: the VIX / Nifty fetch below is a network wait
         _mkt = await trade_gates.market_gate_reject()
         if _mkt:
             summary["skipped_reason"] = "VIX_HIGH" if _mkt.startswith("VIX_HIGH") else "MARKET_WEAK"   # group330
@@ -1224,6 +1248,13 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                     summary["skipped_reason"] = "ALL_CANDIDATES_BELOW_PRICE_FLOOR"
                     return _finalize()
     top_n = candidates[: max(1, _effective_top_n)]
+    # E229: warm the news / earnings check of the NEXT-ranked names in the background, so a fall-through to them does not start cold.
+    _pw = int(getattr(config, "QUALITY_GATE_EVENT_PREWARM_EXTRA", 0) or 0)
+    if _pw > 0:
+        try:
+            quality_gate.prewarm_events([c.symbol for c in candidates[len(top_n): len(top_n) + _pw]])
+        except Exception:  # noqa: BLE001 - a warm-up must never stop the cycle
+            logger.debug("position-stocks: event pre-warm skipped", exc_info=True)
     # AUDIT FIX (session 30): quality_gate.check() was awaited one candidate
     # at a time inside a plain `for` loop. Each individual check is now
     # internally concurrent (session 29's fund/tech gather fix), but across
@@ -1248,6 +1279,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # a live timeout this cycle can fall back to real data instead of
     # blind None. See screening/quality_gate.py's get_cache_batch/check.
     _quality_cache = quality_gate.get_cache_batch(db, [c.symbol for c in top_n])
+    _release_db_connection(db, "quality gate")     # E229: the gather below waits seconds on news / fundamentals services
     quality_results = await asyncio.gather(
         *(quality_gate.check(c.symbol, cached=_quality_cache.get(c.symbol)) for c in top_n)
     )
@@ -1527,6 +1559,7 @@ async def _trading_loop() -> None:
             # DB pool/timeout trouble is infrastructure, not a broker failure — don't trip the
             # trading circuit breaker on it, and back off briefly so the pool can drain.
             if "QueuePool" in repr(e) or "DPY-4024" in str(e) or "TimeoutError" in type(e).__name__:
+                logger.error("position-stocks: DB pool exhausted: %s", _pool_status_text())      # E229
                 await asyncio.sleep(5)
             else:
                 circuit_breaker.record_failure()

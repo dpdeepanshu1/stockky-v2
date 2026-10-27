@@ -241,7 +241,12 @@ def test_zero_range_prev_day_skips_only_the_close_position_check(w):
 def test_stop_reject(w):
     assert og.stop_reject("AAA", 0.5, at(9, 40)).startswith("OPENING_GATE:STOP_TOO_TIGHT")   # floor 0.3 x 2.96% = 0.89%
     assert og.stop_reject("AAA", 0.9, at(9, 40)) is None
-    assert og.stop_reject("AAA", 0.5, at(10, 30)) is None                                      # gate not active
+    assert og.stop_reject("AAA", 0.5, at(10, 30)).startswith("STOP_ATR_FLOOR:STOP_TOO_TIGHT")   # E229: the floor now also applies after the window
+    config.STOP_ATR_FLOOR_AFTER_WINDOW = False
+    try:
+        assert og.stop_reject("AAA", 0.5, at(10, 30)) is None                                  # old behaviour with the switch off
+    finally:
+        config.STOP_ATR_FLOOR_AFTER_WINDOW = True
     w.pd = None
     assert og.stop_reject("AAA", 2.0, at(9, 40)) == "OPENING_GATE:NO_ATR_DATA"
     w.pd = prev_day.PrevDay(high=102.0, low=99.0, close=101.5, atr=None, date="2026-10-08")

@@ -272,7 +272,8 @@ def build_bound_routes_c(ref):
             return cached
         try:
             from surprise_scanner import audit_surprise_feed
-            return ref._audit_cache_put("surprise_audit", audit_surprise_feed())
+            # E229: audit_surprise_feed() is sync and reads the KV cache (network): off the event loop (3.1 s gateway stall was logged)
+            return ref._audit_cache_put("surprise_audit", await ref.asyncio.to_thread(audit_surprise_feed))
         except Exception as e:
             ref.logger.exception("surprise audit: %s", e)
             return {

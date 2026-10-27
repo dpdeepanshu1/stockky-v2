@@ -394,6 +394,32 @@ async def _event_shared_wait(symbol: str, wait_s: float) -> Optional[tuple]:
         return None
 
 
+def prewarm_events(symbols) -> int:
+    """E229: start the shared event request for `symbols` in the background (no waiting) so a later check() finds the answer in _event_late
+    instead of paying the 223 s-class cold news fetch inside the entry cycle. Skips symbols already in flight or answered within the late TTL.
+    Needs a running loop; never raises. Returns how many requests it started."""
+    started = 0
+    try:
+        if not _shared_fetch_enabled():
+            return 0
+        loop = asyncio.get_running_loop()
+        ttl = float(getattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 0.0) or 0.0)
+        for symbol in symbols:
+            task = _event_inflight.get(symbol)
+            if task is not None and not task.done() and task.get_loop() is loop:
+                continue
+            kept = _event_late.get(symbol)
+            if kept is not None and _time.monotonic() - kept[0] <= ttl:
+                continue
+            task = loop.create_task(_event_worker(symbol))
+            _event_inflight[symbol] = task
+            task.add_done_callback(lambda t, _s=symbol: _event_task_done(_s, t))
+            started += 1
+    except Exception:  # noqa: BLE001
+        logger.debug("quality_gate: event pre-warm skipped", exc_info=True)
+    return started
+
+
 # group356b: the same one-request-per-symbol + keep-the-late-answer treatment for the fundamental / technical calls (they stay fail-open:
 # a field that never arrives is still just "unknown"; but a slow answer is no longer thrown away, and a symbol with no cached scores
 # gets the retry window before it passes through unfiltered). symbol -> (monotonic ts, fundamental, technical, market_cap_cr).

@@ -1142,6 +1142,7 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 OPENING_GATE_PREVDAY_TIMEOUT_S = _get_float("OPENING_GATE_PREVDAY_TIMEOUT_S", 8.0)
 OPENING_GATE_MIN_PREVDAY_CLOSE_POS = _get_float("OPENING_GATE_MIN_PREVDAY_CLOSE_POS", 0.5)   # previous day closed in the upper half of its range; 0 disables
 OPENING_GATE_MIN_STOP_ATR_FRAC = _get_float("OPENING_GATE_MIN_STOP_ATR_FRAC", 0.3)           # stop % must be >= this x daily ATR %; 0 disables
+STOP_ATR_FLOOR_AFTER_WINDOW = _get_bool("STOP_ATR_FLOOR_AFTER_WINDOW", True)   # E229: keep the stop >= OPENING_GATE_MIN_STOP_ATR_FRAC x daily ATR % after the opening window too (set false to restore the old behaviour)
 OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_get_float("OPENING_GATE_PREVDAY_MAX_AGE_DAYS", 6.0))   # group 273: a last daily candle older than this is treated as no data (stale history); 6 covers a long weekend + holiday
 
 
@@ -1285,6 +1286,7 @@ QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S = _get_float("QUALITY_GATE_EVENT_FAIL_OPEN_
 QUALITY_GATE_EVENT_SHARED_FETCH = _get_bool("QUALITY_GATE_EVENT_SHARED_FETCH", True)
 QUALITY_GATE_EVENT_BG_TIMEOUT_S = max(5.0, _get_float("QUALITY_GATE_EVENT_BG_TIMEOUT_S", 45.0))
 QUALITY_GATE_EVENT_LATE_TTL_S = max(0.0, _get_float("QUALITY_GATE_EVENT_LATE_TTL_S", 300.0))
+QUALITY_GATE_EVENT_PREWARM_EXTRA = max(0, _get_int("QUALITY_GATE_EVENT_PREWARM_EXTRA", 3))   # E229: also start the event check of this many names ranked just below the quality-gate batch (0 = off)
 # Price floor applied BEFORE the quality gate (HATHWAY at Rs10.6 used the gate's three calls although entry.py would reject it as PENNY_STOCK).
 # Uses MIN_STOCK_PRICE and ENTRY_MIN_PRICE; PRICE_FLOOR_BEFORE_GATE=0 turns this pre-filter off (entry.py still enforces the floor).
 PRICE_FLOOR_BEFORE_GATE = _get_bool("PRICE_FLOOR_BEFORE_GATE", True)

@@ -162,14 +162,18 @@ def stop_reject(symbol: str, stop_pct: float, now: Optional[datetime] = None) ->
     """Group 270: inside the gate window an entry whose stop is tighter than OPENING_GATE_MIN_STOP_ATR_FRAC x the daily ATR %
     is noise-sized at the open and is skipped. Fails closed without ATR data. None when the gate is not active."""
     try:
-        if not is_active(now) or config.OPENING_GATE_MIN_STOP_ATR_FRAC <= 0:
+        if config.OPENING_GATE_MIN_STOP_ATR_FRAC <= 0:
+            return None
+        in_window = is_active(now)
+        if not in_window and not config.STOP_ATR_FLOOR_AFTER_WINDOW:
             return None
         pdv = prev_day.get(symbol)
         if pdv is None or pdv.atr_pct is None:
-            return "OPENING_GATE:NO_ATR_DATA"
+            # E229: inside the window fail closed (as before); after it fail open - never newly block a trade on missing history.
+            return "OPENING_GATE:NO_ATR_DATA" if in_window else None
         floor = config.OPENING_GATE_MIN_STOP_ATR_FRAC * pdv.atr_pct
         if stop_pct < floor:
-            return (f"OPENING_GATE:STOP_TOO_TIGHT:stop {stop_pct:.2f}% < {config.OPENING_GATE_MIN_STOP_ATR_FRAC:.2f} x "
+            return (f"{'OPENING_GATE' if in_window else 'STOP_ATR_FLOOR'}:STOP_TOO_TIGHT:stop {stop_pct:.2f}% < {config.OPENING_GATE_MIN_STOP_ATR_FRAC:.2f} x "
                     f"daily ATR {pdv.atr_pct:.2f}% = {floor:.2f}%")
         return None
     except Exception as e:

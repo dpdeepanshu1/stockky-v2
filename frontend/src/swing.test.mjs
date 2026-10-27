@@ -40,7 +40,7 @@ assert.match(off.headline, /SWING_MODE is off/);
 // live: says what it may do, and that REAL is blocked until enabled
 const live = swingView(doc({ mode: "live" }));
 assert.equal(live.kind, "live");
-assert.match(live.headline, /DEMO \(REAL stays blocked/);
+assert.match(live.headline, /DEMO \(REAL is blocked/);
 assert.match(live.headline, /2 positions of ₹20,000 each, held up to 5 sessions/);
 assert.match(swingView(doc({ mode: "live", live_real_enabled: true })).headline, /DEMO and REAL,/);
 

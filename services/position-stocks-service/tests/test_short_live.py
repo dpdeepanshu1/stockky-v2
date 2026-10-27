@@ -78,7 +78,7 @@ def test_shadow_mode_view_still_reads_live_as_off():
 
 def test_the_cap_switch_is_in_the_catalog_and_protected_from_the_calibrator():
     cat = (ROOT / "control" / "catalog.py").read_text(encoding="utf-8")
-    assert re.search(r'Flag\("SHORT_LIVE_QTY_CAP".*?shipped="1"', cat, re.S)
+    assert re.search(r'Flag\("SHORT_LIVE_QTY_CAP".*?shipped="1000"', cat, re.S)
     auto = (REPO / "services" / "calibration-runner-service" / "autocalib.py").read_text(encoding="utf-8")
     assert '"SHORT_LIVE_QTY_CAP":' in auto
 

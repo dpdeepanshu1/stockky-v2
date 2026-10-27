@@ -279,7 +279,28 @@ class Candidate:
     window_label: str = field(init=False)
 
     def __post_init__(self):
-        self.window_label = f"{self.window_minutes}m"
+        # E232: window_minutes 1440 is the day-mover path (move since the previous close), labelled "day".
+        self.window_label = "day" if self.window_minutes == DAY_WINDOW_MINUTES else f"{self.window_minutes}m"
+
+
+DAY_WINDOW_MINUTES = 1440
+
+
+def _day_change_pct(symbol: str, ltp: float) -> Optional[float]:
+    """E232: move since the previous close in % (positive = up), from the exchange's own day stats; None when the previous close is unknown."""
+    try:
+        ds = ws_client.get_day_stats(symbol)
+    except Exception:  # noqa: BLE001
+        return None
+    if not ds or len(ds) < 4 or not ds[3] or ds[3] <= 0 or not ltp or ltp <= 0:
+        return None
+    return (ltp - ds[3]) / ds[3] * 100.0
+
+
+def _day_mover_score(move_pct: float, real_volume: float, range_mult: float, vwap_mult: float) -> float:
+    vol_floor = max(config.MIN_AVG_VOLUME, 1)
+    liquidity = min(max(real_volume, 1) / vol_floor, 3.0) / 3.0
+    return min(move_pct, 2.0 * config.DAY_MOVER_MIN_PCT) * config.DAY_MOVER_SCORE_WEIGHT * liquidity * range_mult * vwap_mult
 
 
 def _bare_symbol(sym) -> str:
@@ -397,6 +418,7 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
             if _vwap_dev_pct >= _VWAP_EXTENDED_PCT:
                 _vwap_mult = _VWAP_EXTENDED_MULT   # extended vs session avg
 
+        _n_before = len(candidates)
         for win_minutes, threshold in thresholds.items():
             # 2026-10-05: windows paused via config.DISABLED_SCAN_WINDOWS
             if win_minutes in getattr(config, "DISABLED_SCAN_WINDOWS", ()):
@@ -467,6 +489,17 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
                 composite_score=round(score, 4),
                 rvol=(round(rvol, 2) if rvol is not None else None),
             ))
+
+        # E232: a steady climber / gap-up no rolling window listed is listed once, as window "day" (see DAY_MOVER in config.py).
+        if config.DAY_MOVER_ENABLED and len(candidates) == _n_before:
+            _dm = _day_change_pct(symbol, current_ltp)
+            if _dm is not None and config.DAY_MOVER_MIN_PCT <= _dm <= config.DAY_MOVER_MAX_PCT:
+                _dm_score = _day_mover_score(_dm, real_volume, _range_mult, _vwap_mult)
+                if _dm_score > 0:
+                    candidates.append(Candidate(
+                        symbol=symbol, window_minutes=DAY_WINDOW_MINUTES, pct_change=round(_dm, 4), current_ltp=current_ltp,
+                        tick_activity=tick_count, composite_score=round(_dm_score, 4), rvol=None,
+                    ))
 
     candidates.sort(key=lambda c: c.composite_score, reverse=True)
     return candidates
@@ -539,6 +572,7 @@ def scan_shorts(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
             if vwap and vwap > 0 and (current_ltp - vwap) / vwap * 100.0 <= -_SHORT_VWAP_EXTENDED_PCT:
                 vwap_mult = _SHORT_VWAP_EXTENDED_MULT
             tick_count = _volume_accum.get(symbol, 0)
+            _n_before = len(out)
             for win_minutes, threshold in thresholds.items():
                 if win_minutes in getattr(config, "DISABLED_SCAN_WINDOWS", ()):
                     continue
@@ -569,6 +603,14 @@ def scan_shorts(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
                 out.append(Candidate(symbol=symbol, window_minutes=win_minutes, pct_change=round(pct, 4), current_ltp=current_ltp,
                                      tick_activity=tick_count, composite_score=round(score, 4),
                                      rvol=(round(rvol, 2) if rvol is not None else None)))
+            # E232: the mirror of the long day mover - a steady faller / gap-down no rolling window listed (Candidate.pct_change is NEGATIVE).
+            if config.DAY_MOVER_ENABLED and config.DAY_MOVER_SHORT_ENABLED and len(out) == _n_before:
+                _dm = _day_change_pct(symbol, current_ltp)
+                if _dm is not None and config.DAY_MOVER_MIN_PCT <= -_dm <= config.DAY_MOVER_MAX_PCT:
+                    _dm_score = _day_mover_score(-_dm, real_volume, range_mult, vwap_mult)
+                    if _dm_score > 0:
+                        out.append(Candidate(symbol=symbol, window_minutes=DAY_WINDOW_MINUTES, pct_change=round(_dm, 4), current_ltp=current_ltp,
+                                             tick_activity=tick_count, composite_score=round(_dm_score, 4), rvol=None))
         except Exception as e:  # noqa: BLE001 - one bad symbol must not stop the scan
             logger.debug("scan_shorts: %s skipped (%s)", symbol, e)
     out.sort(key=lambda c: c.composite_score, reverse=True)

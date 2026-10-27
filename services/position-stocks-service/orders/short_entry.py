@@ -382,6 +382,8 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         from screening.engine import scan_shorts
         held = {p.symbol for p in db.query(ScalpPosition).filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).all()}
         cands = await asyncio.to_thread(scan_shorts, held)
+        from screening import scan_hits as _scan_hits
+        _scan_hits.record_scan(cands, side="short")       # E232: every faller the short scan listed (record only)
         bear = await asyncio.to_thread(_bear_rows)
         best: Dict[str, Any] = {}
         for c in cands:
@@ -391,6 +393,7 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         if getattr(config, "SHORT_SHORTLIST_ENABLED", True):
             pool = max(pool, int(config.SHORT_SHORTLIST_MAX))      # E107: look at up to SHORT_SHORTLIST_MAX names so the best can be picked
         top = list(best.values())[:pool]
+        _scan_hits.mark_checked([c.symbol for c in top], side="short")
         _stats["scanned"] = _stats.get("scanned", 0) + len(cands)
         cache = quality_gate.get_cache_batch(db, [c.symbol for c in top]) if top else {}
         quals = await asyncio.gather(*(quality_gate.check(c.symbol, cached=cache.get(c.symbol)) for c in top), return_exceptions=True)

@@ -240,6 +240,7 @@ def _problems(db, now):
 
 def test_wiring_is_clean_apart_from_scan_and_loop_when_everything_is_on(db, monkeypatch):
     monkeypatch.setattr(config, "SWING_MODE", "live")
+    monkeypatch.setattr(config, "SWING_LIVE_REAL_ENABLED", False)      # E233: REAL ships on; this test is about a lane that is DEMO-only, so REAL is silent
     gate(db, "DEMO", armed=True, eod=True)
     gate(db, "REAL", armed=False, eod=False)
     rest = [p for p in _problems(db, ist(2026, 10, 26)) if "schedule loop" not in p and "evening scan" not in p]
@@ -288,3 +289,14 @@ def test_run_filters_use_the_oracle_safe_boolean_form_and_still_filter(db):
     for rel in ("swing/repo.py", "main.py"):
         src = open(os.path.join(SVC, rel), encoding="utf-8").read()
         assert "SwingRun.ok.is_(" not in src and "R.ok.is_(" not in src, rel
+
+
+def test_wiring_flags_an_unarmed_real_gate_now_that_real_ships_on(db, monkeypatch):
+    """E233: SWING_LIVE_REAL_ENABLED ships true, so a REAL gate that is not armed / has no EOD square-off is a wiring problem."""
+    monkeypatch.setattr(config, "SWING_MODE", "live")
+    monkeypatch.setattr(config, "SWING_LIVE_REAL_ENABLED", True)
+    gate(db, "DEMO", armed=True, eod=True)
+    gate(db, "REAL", armed=False, eod=False)
+    rest = [p for p in _problems(db, ist(2026, 10, 26)) if "schedule loop" not in p and "evening scan" not in p]
+    assert any(p.startswith("REAL: the gate is not armed") for p in rest)
+    assert any("REAL" in p and "EOD square-off" in p for p in rest)

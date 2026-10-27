@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+- E234 (CHANGES_2026-10-27_E234_catalog_flags_for_e232_switches.md): the three E232 switches (SCAN_HITS_ENABLED, DAY_MOVER_ENABLED, DAY_MOVER_SHORT_ENABLED) are now Calibration-page switches, fixing the one failing position-stocks test from the VM run. Tests: 34 + 17 run here.
+>>>>>>> main
 - E233 (CHANGES_2026-10-27_E233_short_and_swing_fully_live.md): swing lane ships live in DEMO and REAL (SWING_LIVE_REAL_ENABLED true) and live shorts are sized by the normal rules (SHORT_LIVE_QTY_CAP 1000); the Dhan SELL probe requirement stays. Tests: swing 49, short 20 + 93 script checks run.
 - E219 (CHANGES_2026-10-26_E219_live_win_rate_zero.md): a live win rate of 0.0 is no longer read as missing in decision `_decide_impl` (twice) and training `/training-score`, so the closed loop raises the bar when every outcome lost. Tests: 12 new (stand-in runner, pytest not run).
 - E218 (CHANGES_2026-10-26_E218_angelone_rest_ltp_only.md): market-data /quotes/bulk: an AngelOne row with ltp 0 is no longer published as a fresh live price from the previous close; switch QUOTE_BULK_ANGELONE_CLOSE_FALLBACK=1 restores it; `_get_quotes_bulk_core` fully read. Tests: 3 new + 1 E188 test replaced (pytest not run).

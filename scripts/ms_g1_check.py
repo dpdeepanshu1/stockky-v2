@@ -13,7 +13,7 @@ Three checks (plan section 9, G1):
   2. corporate actions - symbols whose series has a >corp_action_jump_pct close-to-close jump (unadjusted split / bonus, or a data splice) are
      found; for each, the engine must report `ca_discontinuity`, and no structural swing it returns may lie before the jump. G1 asks for >= 10
      such real cases; with fewer the verdict is NOT_ENOUGH_DATA (download more symbols), never PASS.
-  3. latency - wall time of analyze() on the last 250 bars (p50 / p95 over all symbols). <= budget PASS, <= 3x budget WARN, else FAIL. The
+  3. latency - CPU time (thread_time; wall time is reported as wall_p95_ms, E229) of analyze() on the last 250 bars (p50 / p95 over all symbols). <= budget PASS, <= 3x budget WARN, else FAIL. The
      "/analyze p95 within 15% of before" half of G1 needs the live service: compare `curl -w %{time_total}` for /analyze/SYM before and after
      (that part cannot be computed offline and is listed under `manual`).
 
@@ -133,19 +133,26 @@ def percentile(vals: Sequence[float], q: float) -> Optional[float]:
     return s[min(len(s) - 1, int(round(q * (len(s) - 1))))]
 
 
-def check_latency(bars: Sequence[Sequence[float]], p: MSParams, reps: int = 3) -> List[float]:
+def check_latency(bars: Sequence[Sequence[float]], p: MSParams, reps: int = 3, wall_out: Optional[List[float]] = None) -> List[float]:
+    """CPU milliseconds of analyze() on the last 250 bars, one per rep. E229: CPU time (thread_time), not wall time - the calibration-runner container is
+    capped at cpus 0.50, so the kernel pauses it ~50 ms every 100 ms and a 7 ms call that straddles a pause measured ~57 ms (p95 = p50 + 50 ms on the
+    19-20 and 26 Oct runs, on 355 and 838 symbols alike). CPU time is what the engine itself costs; wall time (what the live service sees) is appended
+    to `wall_out` when given, and reported as wall_p95_ms."""
     window = list(bars)[-250:]
     out = []
     for _ in range(max(1, reps)):
-        t0 = time.perf_counter()
+        w0, c0 = time.perf_counter(), time.thread_time()
         analyze(window, params=p)
-        out.append((time.perf_counter() - t0) * 1000.0)
+        c1, w1 = time.thread_time(), time.perf_counter()
+        out.append((c1 - c0) * 1000.0)
+        if wall_out is not None:
+            wall_out.append((w1 - w0) * 1000.0)
     return out
 
 
 def run(dir_: Path, cuts: int = 6, min_ca: int = 10, min_symbols: int = 20, budget_ms: float = 15.0, sample: int = 0, seed: int = 7) -> Dict[str, Any]:
     p = MSParams()
-    n_sym, viol, ca_cases, lat = 0, [], [], []
+    n_sym, viol, ca_cases, lat, wall = 0, [], [], [], []
     for sym, bars in load(dir_, sample, seed):
         n_sym += 1
         for v in check_invariance(bars, p, cuts):
@@ -153,8 +160,9 @@ def run(dir_: Path, cuts: int = 6, min_ca: int = 10, min_symbols: int = 20, budg
         ca = check_corporate_action(bars, p)
         if ca is not None:
             ca_cases.append(dict(ca, symbol=sym))
-        lat.extend(check_latency(bars, p))
+        lat.extend(check_latency(bars, p, wall_out=wall))
     p50, p95 = percentile(lat, 0.5), percentile(lat, 0.95)
+    wall_p95 = percentile(wall, 0.95)
     lat_v = None if p95 is None else (PASS if p95 <= budget_ms else WARN if p95 <= 3 * budget_ms else FAIL)
     ca_ok = [c for c in ca_cases if c["ok"]]
     ca_bad = [c for c in ca_cases if not c["ok"]]
@@ -164,7 +172,8 @@ def run(dir_: Path, cuts: int = 6, min_ca: int = 10, min_symbols: int = 20, budg
         "corporate_actions": {"verdict": (FAIL if ca_bad else PASS if len(ca_ok) >= min_ca else NED), "cases": len(ca_cases), "verified": len(ca_ok),
                               "broken": ca_bad[:20], "needs_cases": min_ca, "examples": ca_ok[:10]},
         "latency": {"verdict": lat_v or NED, "p50_ms": None if p50 is None else round(p50, 2), "p95_ms": None if p95 is None else round(p95, 2),
-                    "budget_ms": budget_ms, "calls": len(lat)},
+                    "budget_ms": budget_ms, "calls": len(lat), "basis": "cpu_time",
+                    "wall_p95_ms": None if wall_p95 is None else round(wall_p95, 2)},
     }
     vs = [c["verdict"] for c in checks.values()]
     overall = FAIL if FAIL in vs else NED if NED in vs else PASS
@@ -178,7 +187,7 @@ def to_md(r: Dict[str, Any]) -> str:
              f"| Truncation invariance | {c['truncation_invariance']['verdict']} | {c['truncation_invariance']['violation_count']} violation(s), needs >= {c['truncation_invariance']['needs_symbols']} symbols |",
              f"| Corporate actions | {c['corporate_actions']['verdict']} | {c['corporate_actions']['verified']} verified of {c['corporate_actions']['cases']} found, "
              f"{len(c['corporate_actions']['broken'])} broken, needs >= {c['corporate_actions']['needs_cases']} |",
-             f"| Latency | {c['latency']['verdict']} | p50 {c['latency']['p50_ms']} ms, p95 {c['latency']['p95_ms']} ms, budget {c['latency']['budget_ms']} ms |", ""]
+             f"| Latency | {c['latency']['verdict']} | p50 {c['latency']['p50_ms']} ms, p95 {c['latency']['p95_ms']} ms CPU (wall p95 {c['latency'].get('wall_p95_ms')} ms), budget {c['latency']['budget_ms']} ms |", ""]
     for v in c["truncation_invariance"].get("violations", [])[:10]:
         lines.append(f"- violations: {json.dumps(v, default=str)}")
     for v in c["corporate_actions"].get("broken", [])[:10]:

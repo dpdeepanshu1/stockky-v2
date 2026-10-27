@@ -1,6 +1,6 @@
 # E229 (2026-10-27) - DB connection released before network waits, stop-vs-ATR floor all day, event pre-warm, /surprise/audit off the event loop
 
-From the 27 Oct log review. Five small fixes.
+From the 27 Oct log review. Six small fixes.
 
 1. **api-gateway `/surprise/audit`**: `audit_surprise_feed()` (sync, reads the KV cache over the network) now runs through `asyncio.to_thread`. Fixes the logged `event loop blocked for 3.1s`. Test: `services/api-gateway/tests/test_e229_surprise_audit_off_event_loop.py`.
 2. **position-stocks DB pool**: `_run_cycle` calls `_release_db_connection()` (commit, never raises) before the market-gate fetch and before the quality-gate gather, so the Session no longer holds one of the 4+4 pool slots through multi-second network waits (`QueuePool limit of size 4 overflow 4 reached` at the open). When the pool runs dry the loop now logs `pool size / checked_out / overflow`.
@@ -8,6 +8,8 @@ From the 27 Oct log review. Five small fixes.
 4. **Event check pre-warm**: `quality_gate.prewarm_events()` starts the shared one-per-symbol event request in the background for the `QUALITY_GATE_EVENT_PREWARM_EXTRA` (default 3, 0 = off) names ranked just below the quality-gate batch, so a shortlist fall-through finds the answer in the late-answer cache. Never waits, never raises.
 
 5. **G1 latency check measures CPU time** (`scripts/ms_g1_check.py`): the calibration-runner container is capped at `cpus: "0.50"`, so the kernel pauses it ~50 ms every 100 ms; a 7 ms `analyze()` call that straddled a pause read ~57 ms. Both VM runs (19-20 Oct, 355 symbols, and 26 Oct, 838 symbols) showed p95 = p50 + ~50 ms (57.68 / 57.7 ms vs p50 6.88 / 7.1) while the engine itself is ~5 ms. The check now uses `time.thread_time()` for the verdict and reports the wall p95 as `wall_p95_ms`. Test: `scripts/test_ms_g1_check.py::test_latency_is_cpu_time_so_a_cpu_limit_pause_is_not_counted`. The real /analyze latency on the live service is still a manual check.
+
+6. **calibration-runner `mem_limit` 900m -> 1500m** (`docker-compose.yml`): the 26 Oct `calibration_full` ended with `structure_backtest` SIGKILLed (`vm_calibrate.sh: line 72: 290 Killed`, 625 of 838 symbols done, 2 workers) and then the 6 h job limit. A cap raise only: the memory caps summed to ~5.1 GB on a 12 GB VM. The walk-forward is resumable (checkpoint), so re-running `calibration_full` with RESUME continues the last 213 symbols. Not confirmed as an OOM-kill from the kernel log: check `dmesg | grep -i "out of memory"` on the VM.
 
 Tests: `services/position-stocks-service/tests/test_e229_release_connection_and_stop_floor.py`, `test_e229_event_prewarm.py`; `test_group268_opening_gate.py::test_stop_reject` updated for the new after-window behaviour.
 

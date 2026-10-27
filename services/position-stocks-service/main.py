@@ -2347,6 +2347,17 @@ def review_fixes_status(db: Session = Depends(get_db)):
     }
 
 
+def _row_exit_rule(r):
+    """E231: flow_json["exit_rule"] stamped by run_stagnation_exit, or None (other exits, rows closed before E231, unreadable JSON)."""
+    try:
+        import json as _json
+        d = _json.loads(getattr(r, "flow_json", None) or "{}")
+        v = d.get("exit_rule") if isinstance(d, dict) else None
+        return v if v in ("flat_band", "no_followthrough") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _row_charges(r):
     """E215: estimated round-trip charges of one settled trade, from the same formula the charges ledger books
     (charges_ledger.charges_for_trade), so the Trades CSV column matches /charges/trades. None when the row is not
@@ -2446,6 +2457,7 @@ def trades_history(
                 "stop_moved_to_breakeven": r.stop_moved_to_breakeven,
                 "signal_price": r.signal_price,
                 "stop_basis": r.stop_basis,
+                "exit_rule": _row_exit_rule(r),   # E231: which stagnation rule closed it (flat_band | no_followthrough), else null
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,

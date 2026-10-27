@@ -1269,6 +1269,20 @@ def run_short_squareoff(db: Session, now: Optional[datetime] = None) -> int:
     return covered
 
 
+def _stamp_exit_rule(pos, rule: str) -> None:
+    """E231: merge {"exit_rule": rule} into pos.flow_json. Record only; never raises, never touches an unreadable value."""
+    try:
+        import json as _json
+        raw = getattr(pos, "flow_json", None)
+        base = _json.loads(raw) if raw else {}
+        if not isinstance(base, dict):
+            return
+        base["exit_rule"] = rule
+        pos.flow_json = _json.dumps(base, separators=(",", ":"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("exit_rule stamp skipped for %s: %s", getattr(pos, "symbol", "?"), e)
+
+
 def run_stagnation_exit(db: Session) -> int:
     """session68/69. Toggle is DB-backed (ScalpGateState.stagnation_exit_
     enabled — POST /stagnation-exit/enable|disable, frontend button on the
@@ -1362,6 +1376,8 @@ def run_stagnation_exit(db: Session) -> int:
         if reason is None:
             continue  # moved meaningfully — target/stop logic already owns this case
 
+        # E231: both rules close as STAGNATION_EXIT; record which one fired (flow_json["exit_rule"]) so the reports can tell them apart.
+        _stamp_exit_rule(pos, "flat_band" if (stag_age_ok and pct_move < config.STAGNATION_EXIT_BAND_PCT) else "no_followthrough")
         try:
             close_position_now(db, pos, exit_reason="STAGNATION_EXIT")
             closed += 1

@@ -8,7 +8,7 @@
 Sources (read-only GETs):
   real-trade-service      GET /positions/REAL/records?days=N&limit=1000&include_imported=true   (admin bearer token; the same record as records_report.py)
   position-stocks-service GET /trades/history?limit=1000                                       (settled trades only: a real exit price and P&L)
-Rows: one per closed trade -> day (IST close date), service, symbol, entry HH:MM, exit HH:MM, held, P&L (net of charges for real-trade, realized for position-stocks),
+Rows: one per closed trade -> day (IST close date), service, symbol, entry HH:MM, exit HH:MM, held, P&L (NET of charges for both services; E231: position-stocks' realized P&L is before charges, so its row's own charges are subtracted),
 return %, exit reason. Then totals per day and, over the whole period, by entry hour, exit hour, hold length and exit reason, with the best and worst trades.
 A bucket under --min-n trades is marked "(few)": a negative hour with 3 trades is not a finding. Nothing here changes a setting or a trade.
 Exit 0 = report written; 1 = no trades found. Stdlib only.
@@ -101,8 +101,18 @@ def rows_from_ps(doc: Any) -> List[Dict[str, Any]]:
             continue
         ep, xp = num(r.get("entry_price")), num(r.get("exit_price"))
         ret = ((xp - ep) / ep * 100.0) if ep and xp is not None else None
-        x = _row("position-stocks", r.get("id"), r.get("symbol"), r.get("opened_at"), r.get("closed_at"), r.get("realized_pnl"), ret,
-                 r.get("exit_reason") or st.lower(), r.get("quantity"))
+        # E231: position-stocks' realized_pnl is GROSS (before charges) while real-trade's net_pnl is net; the two were summed as if alike. Subtract the row's
+        # own round-trip charges (null on an unbookable row -> left as is). Win / loss is counted on this net figure.
+        ch = num(r.get("charges"))
+        pnl = num(r.get("realized_pnl"))
+        if pnl is not None and ch is not None:
+            pnl = round(pnl - ch, 2)
+        reason = r.get("exit_reason") or st.lower()
+        rule = str(r.get("exit_rule") or "").strip().lower()
+        if st == "STAGNATION_EXIT" and rule:
+            reason = f"{reason}:{rule}"   # E231: stagnation_exit:flat_band | stagnation_exit:no_followthrough (older rows carry no rule)
+        x = _row("position-stocks", r.get("id"), r.get("symbol"), r.get("opened_at"), r.get("closed_at"), pnl, ret,
+                 reason, r.get("quantity"))
         if x:
             out.append(x)
     return out

@@ -86,7 +86,13 @@ export function tradesFromPositionStocks(doc: any): TradeRow[] {
     const hi = num(r.max_gain_pct), lo = num(r.max_drawdown_pct);
     const sig = num(r.signal_price), sp = num(r.stop_price);
     const stopExit = /stop/i.test(String(r.exit_reason || st));
-    const x = mkRow("position-stocks", r.id, r.symbol, r.opened_at, r.closed_at, r.realized_pnl, ret, r.exit_reason || st.toLowerCase(), r.quantity, {
+    // E231: position-stocks' realized_pnl is before charges while real-trade's net_pnl is after them; subtract the row's own charges so both services are on one basis
+    const chg = num(r.charges), gross = num(r.realized_pnl);
+    const netPnl = gross != null && chg != null ? Math.round((gross - chg) * 100) / 100 : r.realized_pnl;
+    const rule = typeof r.exit_rule === "string" ? r.exit_rule : "";
+    const baseReason = r.exit_reason || st.toLowerCase();
+    const reason = st === "STAGNATION_EXIT" && rule ? `${baseReason}:${rule}` : baseReason;   // E231: which stagnation rule fired
+    const x = mkRow("position-stocks", r.id, r.symbol, r.opened_at, r.closed_at, netPnl, ret, reason, r.quantity, {
       side, entryPrice: ep, exitPrice: xp, stopPct: num(r.adaptive_stop_pct), targetPct: num(r.adaptive_target_pct),
       maxGainPct: side === "SHORT" ? (lo == null ? null : -lo) : hi, maxDrawdownPct: side === "SHORT" ? (hi == null ? null : -hi) : lo,
       entrySlipPct: directionalPct(side, sig, ep),   // + = filled worse than the signal (a long paying above it, a short selling below it)

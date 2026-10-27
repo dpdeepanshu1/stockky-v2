@@ -84,3 +84,24 @@ def test_a_split_just_before_a_cut_is_not_a_violation():
     for jump_at in (30, 45, 100, 300):
         b = walk(500, seed=3)
         assert g.check_invariance(b[:jump_at] + scale(b[jump_at:], 0.5), p, 6) == [], jump_at
+
+
+def test_latency_is_cpu_time_so_a_cpu_limit_pause_is_not_counted():
+    """E229: a container CPU cap pauses the process mid-call; wall time then reads ~50 ms too long, CPU time does not."""
+    import time as _t
+    real_analyze = g.analyze
+
+    def paused(bars, params=None, **k):
+        out = real_analyze(bars, params=params, **k)
+        _t.sleep(0.05)          # what a cpus 0.50 throttle looks like: wall time passes, no CPU is used
+        return out
+
+    g.analyze = paused
+    try:
+        wall = []
+        cpu = g.check_latency(walk(300, seed=1), MSParams(), reps=2, wall_out=wall)
+    finally:
+        g.analyze = real_analyze
+    assert len(cpu) == 2 and len(wall) == 2
+    assert all(w >= 50 for w in wall)          # the pause is visible in wall time
+    assert all(c < 40 for c in cpu)            # and not in CPU time

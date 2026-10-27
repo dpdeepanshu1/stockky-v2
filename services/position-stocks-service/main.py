@@ -175,7 +175,7 @@ from orders.entry import (
 )
 from orders.eod_squareoff import close_position_now, ManualCloseRejected
 from resilience import circuit_breaker
-from screening import intraday_eligibility, quality_gate, shortlist, trade_gates
+from screening import intraday_eligibility, quality_gate, scan_hits, scan_why, shortlist, trade_gates
 from screening.engine import scan, on_tick_hook as _engine_tick_hook
 from tz_utils import (
     ist_today_str, ist_time_at_or_after, is_market_open_ist, parse_hhmm, iso_utc,
@@ -1106,6 +1106,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
 
     _t = time.perf_counter()
     candidates = scan(open_symbols=open_syms, under_preferred=under_preferred)
+    scan_hits.record_scan(candidates)      # E232: every symbol the scan listed, not only the top-N that reach the quality gate (record only, never raises)
     summary["candidates_seen"] = len(candidates)
     summary["under_preferred_positions"] = under_preferred
     # Top 10 by composite score, just for visibility on the Run Cycle
@@ -1248,6 +1249,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                     summary["skipped_reason"] = "ALL_CANDIDATES_BELOW_PRICE_FLOOR"
                     return _finalize()
     top_n = candidates[: max(1, _effective_top_n)]
+    scan_hits.mark_checked([c.symbol for c in top_n])      # E232
     # E229: warm the news / earnings check of the NEXT-ranked names in the background, so a fall-through to them does not start cold.
     _pw = int(getattr(config, "QUALITY_GATE_EVENT_PREWARM_EXTRA", 0) or 0)
     if _pw > 0:
@@ -2580,6 +2582,21 @@ def reconcile_repair_closed(apply: bool = False, admin: str = Depends(require_ad
     """Group 164: fix today's already-closed rows whose entry price is the stale signal
     price. Dry run unless `?apply=true`; the response lists every change and every skip."""
     return reconcile.repair_closed_entry_prices(db, apply=apply)
+
+
+@app.get("/scan/hits")
+def scan_hits_today(limit: int = 500, side: Optional[str] = None, never_checked: bool = False):
+    """E232: every symbol the scan listed today (long and short), most-seen first. `never_checked=true` = listed but never reached the quality gate
+    (ranked below the shortlist every time). Record only; nothing trades from it."""
+    out = scan_hits.snapshot(limit=limit, side=side, never_checked_only=never_checked)
+    out["recorder"] = scan_hits.stats()
+    return out
+
+
+@app.get("/scan/why/{symbol}")
+def scan_why_symbol(symbol: str):
+    """E232: why was SYMBOL not picked - every scan check in order against the live feed, plus today's scan-hit record. Read only."""
+    return scan_why.explain(symbol)
 
 
 @app.get("/candidates")

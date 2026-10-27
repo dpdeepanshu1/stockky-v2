@@ -290,8 +290,8 @@ def test_manual_engine_default_behaviour_is_unchanged_without_swing():
     assert 'execution_source=("AUTO" if swing else "MANUAL")' in s and "swing: Optional[dict] = None" in s and "(None if swing else target_price)" in s
 
 
-def test_switches_ship_in_shadow_and_live_is_demo_only_by_default():
-    assert config.SWING_MODE == "live" and config.SWING_LIVE_REAL_ENABLED is False and config.SWING_BROKER_STOP_ENABLED is False
+def test_switches_ship_live_in_demo_and_real_by_default():
+    assert config.SWING_MODE == "live" and config.SWING_LIVE_REAL_ENABLED is True and config.SWING_BROKER_STOP_ENABLED is False   # E233: REAL is on by default
     assert config.SWING_MAX_HOLD_DAYS == 5 and config.SWING_MAX_POSITIONS == 2 and config.SWING_PAUSE_AFTER_LOSSES == 3
 
 

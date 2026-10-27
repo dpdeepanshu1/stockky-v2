@@ -1608,15 +1608,15 @@ JOURNAL_NOTES_ENABLED = _bs_bool("JOURNAL_NOTES_ENABLED", "true")
 #   off     = no scan, no record, no order. A swing position that is still open is flattened by the next 15:00 square-off.
 #   shadow  = the evening scan ranks the universe and writes what the lane WOULD have bought and how each pick would have ended (ledger
 #             rows kind=SHADOW). NOTHING is ordered and no position is carried.
-#   live    = (default since E224) the same picks are bought for real in DEMO (and in REAL only when SWING_LIVE_REAL_ENABLED=true), as CNC, with SWING_MAX_TRADE_VALUE.
+#   live    = (default since E224) the same picks are bought as CNC with SWING_MAX_TRADE_VALUE in DEMO and, since E233, in REAL too (SWING_LIVE_REAL_ENABLED=false keeps REAL out).
 # Live is a deliberate decision after S2 / S3 evidence and the S4 Dhan probe; the auto-calibrator never touches these (autocalib.PROTECTED).
 def _sw_mode(name: str, default: str) -> str:
     v = ((os.getenv(name) or "").strip().lower() or default)
     return v if v in ("off", "shadow", "live") else default
 
 
-SWING_MODE = _sw_mode("SWING_MODE", "live")      # E224: ships live (DEMO only: SWING_LIVE_REAL_ENABLED stays false). A junk value still falls back to the default; set SWING_MODE=shadow/off to stop buying
-SWING_LIVE_REAL_ENABLED = _bs_bool("SWING_LIVE_REAL_ENABLED", "false")      # live = DEMO only until this is true
+SWING_MODE = _sw_mode("SWING_MODE", "live")      # E224: ships live. A junk value still falls back to the default; set SWING_MODE=shadow/off to stop buying
+SWING_LIVE_REAL_ENABLED = _bs_bool("SWING_LIVE_REAL_ENABLED", "true")      # E233: ships true = live trades DEMO and REAL (set false for DEMO only). Wiring problems still refuse entries
 SWING_MAX_TRADE_VALUE = max(0.0, _bs_float("SWING_MAX_TRADE_VALUE", 20000.0))   # Rs per swing position (the S2 replay's default size; costs fall with size)
 SWING_MAX_POSITIONS = max(0, _bs_int("SWING_MAX_POSITIONS", 2))
 SWING_MAX_EXPOSURE_PCT = max(0.0, _bs_float("SWING_MAX_EXPOSURE_PCT", 40.0))   # all swing positions together, % of equity

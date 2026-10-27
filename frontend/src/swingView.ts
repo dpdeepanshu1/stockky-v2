@@ -82,7 +82,7 @@ export function swingView(doc: SwingStatusDoc | null | undefined): SwingView {
   const headline = kind === "off"
     ? "Off. SWING_MODE is off: no scan runs and nothing is recorded. Switch it to shadow on the Switches page to start recording."
     : kind === "live"
-      ? `LIVE. Real CNC swing orders are allowed in DEMO${doc.live_real_enabled ? " and REAL" : " (REAL stays blocked until SWING_LIVE_REAL_ENABLED is true)"}, at most ${isNum(doc.max_positions) ? doc.max_positions : "?"} positions of ${inr(doc.max_trade_value)} each, held up to ${isNum(doc.max_hold_days) ? doc.max_hold_days : "?"} sessions.`
+      ? `LIVE. Real CNC swing orders are allowed in DEMO${doc.live_real_enabled ? " and REAL" : " (REAL is blocked while SWING_LIVE_REAL_ENABLED is false)"}, at most ${isNum(doc.max_positions) ? doc.max_positions : "?"} positions of ${inr(doc.max_trade_value)} each, held up to ${isNum(doc.max_hold_days) ? doc.max_hold_days : "?"} sessions.`
       : "Shadow. The lane records the picks it WOULD have taken. No order is placed.";
 
   const pauses = Object.entries(doc.pause || {}).filter(([, v]) => v && v.paused).map(([m, v]) => ({ mode: m, why: String(v.why || "paused") }));

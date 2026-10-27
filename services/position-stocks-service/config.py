@@ -214,9 +214,9 @@ def _short_mode(name: str = "SHORT_MODE", default: str = "off") -> str:
 
 
 SHORT_MODE = _short_mode()
-# Short selling step 9: the most shares ONE live short may have, whatever the budget says. Ships 1 (day one of live shorts is one share). Only you raise it:
-# it is on the calibrator's PROTECTED list. 1 .. 1000.
-SHORT_LIVE_QTY_CAP = max(1, min(1000, _get_int("SHORT_LIVE_QTY_CAP", 1)))
+# Short selling step 9: the most shares ONE live short may have, whatever the budget says. Ships 1000 since E233 (was 1), so the normal sizing (risk budget, cost gate,
+# depth, SHORT_MAX_POSITIONS) decides the size; set 1 for single-share shorts. On the calibrator's PROTECTED list. 1 .. 1000. A junk value reads as 1.
+SHORT_LIVE_QTY_CAP = max(1, min(1000, _get_int("SHORT_LIVE_QTY_CAP", 1000)))
 # E108 (T6): a live short is refused until the Dhan SELL probe (orders/sell_probe.py, runner job dhan_sell_probe) has a PASS on record. Ships true: SHORT_MODE=live is then one
 # switch after the probe, and a mistaken early flip places nothing. false = no probe needed (loosens a rail, so the Switches page asks to confirm).
 SHORT_LIVE_REQUIRES_PROBE = _get_bool("SHORT_LIVE_REQUIRES_PROBE", True)
@@ -1246,6 +1246,26 @@ BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
 BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
 BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
 BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
+
+# ---- E232 (2026-10-27): why a mover was not picked -------------------------------------------------------------------------------
+# The scan ranks every symbol that clears a rolling 5m / 60m move, but only the top SHORTLIST_MAX names per cycle reach the quality gate and
+# the candidate log; the rest left no trace. SCAN_HITS records every scan hit (symbol, window, move, rank, whether it was quality-checked) in
+# memory and to SCAN_HITS_DIR (JSON, one file per IST day), read by GET /scan/hits and GET /scan/why/{symbol}. RECORD ONLY: nothing reads it to trade.
+SCAN_HITS_ENABLED = _get_bool("SCAN_HITS_ENABLED", True)
+SCAN_HITS_DIR = _get_str("SCAN_HITS_DIR", "/data/bars/_scan_hits")
+SCAN_HITS_DUMP_S = max(10, _get_int("SCAN_HITS_DUMP_S", 30))
+SCAN_HITS_KEEP_DAYS = max(2, _get_int("SCAN_HITS_KEEP_DAYS", 30))
+# DAY_MOVER: a stock that climbs (or slides) steadily all day, or gaps at the open, never shows +1% in 5 minutes or +2.5% in an hour, so the rolling
+# windows never see it (2026-10-27: Zetwerk +12.5%, Mahindra Logistics +11.3%, Data Patterns +9.2%). With DAY_MOVER_ENABLED the scan also lists a stock whose
+# move since the previous close is between DAY_MOVER_MIN_PCT and DAY_MOVER_MAX_PCT and that no rolling window listed, as window "day". It passes the same
+# volume floor, spread cap, quality gate, range gate, stop-size floor and sizing as any candidate; nothing is relaxed. Score = min(move, 2 x MIN) x
+# DAY_MOVER_SCORE_WEIGHT x liquidity x range x VWAP multipliers (a day mover ranks beside a rolling hit, not above it). DAY_MOVER_SHORT_ENABLED mirrors it
+# for the short scan (shadow / live as SHORT_MODE says). DAY_MOVER_ENABLED=0 restores the old scan exactly.
+DAY_MOVER_ENABLED = _get_bool("DAY_MOVER_ENABLED", True)
+DAY_MOVER_SHORT_ENABLED = _get_bool("DAY_MOVER_SHORT_ENABLED", True)
+DAY_MOVER_MIN_PCT = max(1.0, _get_float("DAY_MOVER_MIN_PCT", 4.0))
+DAY_MOVER_MAX_PCT = max(DAY_MOVER_MIN_PCT, _get_float("DAY_MOVER_MAX_PCT", 20.0))
+DAY_MOVER_SCORE_WEIGHT = max(0.05, _get_float("DAY_MOVER_SCORE_WEIGHT", 0.5))
 
 # ---- group341 (log review 2026-10-13) -------------------------------------------------------------------------------------------
 # Pool baseline: sync_from_broker() adds back this pool's committed capital to Dhan's FREE cash. Free cash only falls by the MARGIN an

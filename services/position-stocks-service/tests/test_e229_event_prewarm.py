@@ -3,10 +3,14 @@ import asyncio
 import time
 from unittest import mock
 
+import config
 from screening import quality_gate as qg
 
 
-def test_prewarm_starts_skips_and_never_raises():
+def test_prewarm_starts_skips_and_never_raises(monkeypatch):
+    # conftest turns the shared event fetch off for every test; prewarm only works on the shared path, so switch it on here
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_SHARED_FETCH", True)
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_LATE_TTL_S", 300.0)
     calls = []
 
     async def fake_worker(sym):

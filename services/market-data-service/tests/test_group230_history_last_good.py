@@ -92,9 +92,12 @@ def kv(monkeypatch):
 
 
 def _res(n=30):
+    # dates end today (IST) so the result always sits inside the 1mo window that _history_slice cuts against the real clock
+    # (hard-coded 2026-09 dates stopped working once fewer than 5 of them fell inside the last 30 days)
+    _today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     return {"symbol": "ZZ.NS", "requested": "ZZ", "period": "1mo", "interval": "1d",
-            "candles": [{"date": f"2026-09-{i + 1:02d} 00:00", "open": 1.0, "high": 2.0, "low": 0.5,
-                         "close": 1.5, "volume": 10} for i in range(n)]}
+            "candles": [{"date": f"{(_today - timedelta(days=n - 1 - i)).isoformat()} 00:00", "open": 1.0, "high": 2.0,
+                         "low": 0.5, "close": 1.5, "volume": 10} for i in range(n)]}
 
 
 KEY = "history:ZZ.NS:1mo:1d:"

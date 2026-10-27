@@ -1623,3 +1623,55 @@ class TestNoFollowThrough:
         p = mkpos(db, entry=100.0, opened_min_ago=60)
         b.ticks[p.symbol] = 100.1
         assert eod.run_stagnation_exit(db) == 1
+
+
+# ── E231: which stagnation rule fired is recorded ────────────────────────────
+class TestExitRuleStamp:
+    @pytest.fixture(autouse=True)
+    def _on(self, env, monkeypatch):
+        db, _, _ = env
+        g = eod._get_gate_state(db)
+        g.stagnation_exit_enabled = True
+        db.commit()
+        for k, v in dict(NO_FOLLOWTHROUGH_EXIT_ENABLED=True, NO_FOLLOWTHROUGH_EXIT_MINUTES=20.0,
+                         NO_FOLLOWTHROUGH_MIN_GAIN_PCT=0.5).items():
+            monkeypatch.setattr(config, k, v)
+
+    @staticmethod
+    def _rule(p):
+        import json
+        return json.loads(p.flow_json).get("exit_rule")
+
+    def test_flat_band_rule_is_stamped(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=60)
+        b.ticks[p.symbol] = 100.1                      # inside the band, old enough for the flat-band rule
+        assert eod.run_stagnation_exit(db) == 1
+        assert self._rule(p) == "flat_band"
+
+    def test_no_followthrough_rule_is_stamped(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)  # 25m: only the 20m rule is eligible
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 1
+        assert self._rule(p) == "no_followthrough"
+
+    def test_existing_flow_json_keys_are_kept(self, env):
+        import json
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        p.flow_json = json.dumps({"orb": {"mode": "shadow"}})
+        db.commit()
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 1
+        d = json.loads(p.flow_json)
+        assert d["orb"] == {"mode": "shadow"} and d["exit_rule"] == "no_followthrough"
+
+    def test_unreadable_flow_json_is_left_alone_and_the_exit_still_happens(self, env):
+        db, b, _ = env
+        p = mkpos(db, entry=100.0, opened_min_ago=25)
+        p.flow_json = "not json"
+        db.commit()
+        b.ticks[p.symbol] = 99.0
+        assert eod.run_stagnation_exit(db) == 1
+        assert p.flow_json == "not json" and p.status == "STAGNATION_EXIT"

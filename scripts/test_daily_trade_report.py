@@ -122,3 +122,25 @@ if __name__ == "__main__":
             n += 1
             print("ok", name)
     print(f"{n} passed")
+
+
+def test_position_stocks_pnl_is_net_of_its_own_charges():
+    """E231: realized_pnl is before charges for position-stocks; the report subtracts the row's charges so both services are on one basis."""
+    doc = {"trades": [
+        {"id": 21, "symbol": "EEE", "status": "STAGNATION_EXIT", "entry_price": 100.0, "exit_price": 100.1, "realized_pnl": 2.52, "charges": 2.74, "quantity": 21,
+         "opened_at": "2026-10-26T06:20:00Z", "closed_at": "2026-10-26T06:51:00Z", "exit_rule": "no_followthrough"},
+        {"id": 22, "symbol": "FFF", "status": "TARGET_HIT", "entry_price": 100.0, "exit_price": 101.0, "realized_pnl": 10.0, "charges": None, "quantity": 10,
+         "opened_at": "2026-10-26T06:20:00Z", "closed_at": "2026-10-26T06:51:00Z"},
+    ]}
+    rows = {r["symbol"]: r for r in d.rows_from_ps(doc)}
+    assert rows["EEE"]["pnl"] == -0.22                      # a "win" before charges is a small loss after them
+    assert rows["EEE"]["reason"] == "stagnation_exit:no_followthrough"
+    assert rows["FFF"]["pnl"] == 10.0                       # no charges known -> left as is
+    assert d.stats(list(rows.values()))["wins"] == 1
+
+
+def test_stagnation_row_without_a_rule_keeps_the_plain_reason():
+    doc = {"trades": [{"id": 31, "symbol": "GGG", "status": "STAGNATION_EXIT", "entry_price": 100.0, "exit_price": 100.0, "realized_pnl": 0.0, "charges": 2.0,
+                       "quantity": 10, "opened_at": "2026-10-26T06:20:00Z", "closed_at": "2026-10-26T06:51:00Z"}]}
+    r = d.rows_from_ps(doc)[0]
+    assert r["reason"] == "stagnation_exit" and r["pnl"] == -2.0

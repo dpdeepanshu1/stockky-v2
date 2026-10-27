@@ -150,4 +150,17 @@ assert.match(api, /export type SwitchSvc = Svc \| "sch"/);
 assert.match(panel, /Download all latest results/);
 assert.match(api, /\/results\/latest\.zip/);
 assert.match(ctxSrc, /for \(let i = 0; i < ids\.length && !stopAll\.current/, "tests are started one after the other");
+// E231: position-stocks' realized_pnl is before charges; the Trades CSV / totals subtract the row's own charges, and a stagnation exit carries which rule fired
+{
+  const n = tradesFromPositionStocks({ trades: [
+    { id: 1, symbol: "AAA", status: "STAGNATION_EXIT", entry_price: 100, exit_price: 100.1, realized_pnl: 2.52, charges: 2.74, quantity: 21, exit_rule: "no_followthrough", opened_at: "2026-10-26T06:20:00Z", closed_at: "2026-10-26T06:51:00Z" },
+    { id: 2, symbol: "BBB", status: "TARGET_HIT", entry_price: 100, exit_price: 101, realized_pnl: 10, charges: null, quantity: 10, opened_at: "2026-10-26T06:20:00Z", closed_at: "2026-10-26T06:51:00Z" },
+    { id: 3, symbol: "CCC", status: "STAGNATION_EXIT", entry_price: 100, exit_price: 100, realized_pnl: 0, charges: 2, quantity: 10, opened_at: "2026-10-26T06:20:00Z", closed_at: "2026-10-26T06:51:00Z" },
+  ] });
+  const by = Object.fromEntries(n.map((r) => [r.symbol, r]));
+  assert.equal(by.AAA.pnl, -0.22, "a gross win smaller than its charges is a small loss");
+  assert.equal(by.AAA.reason, "stagnation_exit:no_followthrough");
+  assert.equal(by.BBB.pnl, 10, "no charges known: left as is");
+  assert.equal(by.CCC.reason, "stagnation_exit", "an older row without a rule keeps the plain reason");
+}
 console.log("calibration.test.mjs: ok");

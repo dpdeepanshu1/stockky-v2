@@ -66,6 +66,7 @@ def reset(mode="live", cap=1, qty=200):
     sob.check_and_reserve = lambda db: True
     dc.get_security_id = lambda db, s: "1234"
     dc.is_ambiguous_placement_error = lambda e: False
+    dc.short_entry_order = lambda live, t, st: ("LIMIT", round(round(live * 0.997 / 0.05) * 0.05, 2)) if t < live * 0.997 < st else ("MARKET", live)   # E243: the real helper is tested in tests/test_short_entry_order.py
     dc.place_super_order = lambda db, **k: (calls["orders"].append(k) or {"orderId": "S1"})
     lv = types.SimpleNamespace(stop_price=101.0, target_price=98.0, stop_pct=1.0, target_pct=2.0, breakeven_trigger_pct=0.5)
     se.plan_short = lambda db, c, q, b, n, extra=None: {"live": 100.0, "levels": lv, "qty": qty, "conv": 70}
@@ -101,7 +102,7 @@ for m in ("off", "shadow"):
 # 2 happy path, cap 1 shrinks the 200 share plan to 1
 reset(); db = DB(gate()); r = sl.attempt_short_live(db, cand)
 o = calls["orders"][0]
-check("live: one SELL Super Order", len(calls["orders"]) == 1 and o["transaction_type"] == "SELL" and o["product_type"] == "INTRADAY" and o["order_type"] == "MARKET")
+check("live: one SELL Super Order", len(calls["orders"]) == 1 and o["transaction_type"] == "SELL" and o["product_type"] == "INTRADAY" and o["order_type"] == "LIMIT" and o["price"] < 100.0)   # E243: a marketable limit under the last price
 check("live: quantity capped to 1", o["quantity"] == 1)
 check("live: broker stop and target sent", o["stop_loss_price"] == 101.0 and o["target_price"] == 98.0)
 check("live: capital reserved as SHORT, unused part released", calls["reserved"] == ["SHORT"] and calls["released"] == [20000.0 - 100.0])

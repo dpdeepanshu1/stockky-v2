@@ -486,6 +486,8 @@ export const positionStocksApi = {
   shortlist: () => psRequest<any>("/shortlist"),
   // short selling step 6: the would-be shorts (shadow only, no order exists), S2 progress and gate refusal counters. Read-only.
   shortShadow: () => psRequest<any>("/short/shadow"),
+  // E243: every SELL order sent to Dhan (live shorts + SELL probe runs) with Dhan's own status for each. Read-only.
+  shortOrders: () => psRequest<any>("/short/orders"),
   // E111: Time Machine - the odds of one rule (side, entry time, stop %, target %) on a stock's recent 5-minute sessions and thousands of made-up sessions. Read-only evidence; places nothing.
   timeMachineStatus: () => psRequest<any>("/time-machine/status"),
   timeMachineRun: (body: Record<string, unknown>) => psRequest<any>("/time-machine/run", { method: "POST", body: JSON.stringify(body) }),

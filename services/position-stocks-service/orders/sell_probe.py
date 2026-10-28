@@ -69,9 +69,40 @@ def last_result() -> Dict[str, Any]:
     return dict(_mem)
 
 
+def _history_path() -> str:
+    return os.path.join((os.environ.get("CONTROL_DIR") or "").strip() or "/data/control", "sell_probe_history_ps.json")
+
+
+def history() -> List[Dict[str, Any]]:
+    """E243: every probe that reached Dhan, oldest first (compact rows, at most 50). Feeds the SELL orders panel on the Positions tab. Never raises."""
+    try:
+        with open(_history_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _remember(res: Dict[str, Any]) -> None:
+    row = {k: res.get(k) for k in ("at", "finished_at", "symbol", "qty", "verdict", "reason", "order_id", "cover_order_id", "entry_order_type", "entry_price_sent",
+                                   "ref_price", "entry_fill", "cover_fill", "security_id", "short_seen", "stop_price", "target_price")}
+    try:
+        rows = history()
+        rows.append(row)
+        p = _history_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".sh", dir=os.path.dirname(p))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(rows[-50:], fh, default=str)
+        os.replace(tmp, p)
+    except Exception as e:  # noqa: BLE001
+        logger.error("sell probe: history not persisted (%s: %s)", type(e).__name__, e)
+
+
 def _save(res: Dict[str, Any]) -> None:
     _mem.clear()
     _mem.update(res)
+    _remember(res)
     p = _path()
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -373,14 +404,17 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         # ---- 2. levels, side-aware and tick-clamped by the same function the live short uses
         tick = broker.round_to_tick
         t_px, s_px, notes = broker.clamp_super_levels("SELL", live, tick(live * (1 - TARGET_PCT / 100.0)), tick(live * (1 + STOP_PCT / 100.0)))
-        run.res.update(ref_price=live, target_price=t_px, stop_price=s_px, security_id=str(security_id))
-        run.step(f"SELL {PROBE_QTY} {sym} ref {live:.2f}: target {t_px:.2f} (below), stop {s_px:.2f} (above)" + (f" [{'; '.join(notes)}]" if notes else ""))
+        # E243: the SAME entry the live short sends (a marketable limit under the last price, or MARKET when that switch is off). The first real run sent MARKET and Dhan's
+        # row read back as LIMIT at the last price, which rested unfilled.
+        e_type, e_px = broker.short_entry_order(live, float(t_px), float(s_px))
+        run.res.update(ref_price=live, target_price=t_px, stop_price=s_px, security_id=str(security_id), entry_order_type=e_type, entry_price_sent=e_px)
+        run.step(f"SELL {PROBE_QTY} {sym} ref {live:.2f}: entry {e_type} at {float(e_px):.2f}, target {t_px:.2f} (below), stop {s_px:.2f} (above)" + (f" [{'; '.join(notes)}]" if notes else ""))
 
         # ---- 3. the SELL Super Order. A refusal here is itself the answer T6 exists to get.
         try:
             placed = broker.place_super_order(
                 db, is_armed=True, security_id=security_id, exchange_segment=config.SCALP_EXCHANGE_SEGMENT, transaction_type="SELL", quantity=PROBE_QTY,
-                order_type="MARKET", price=live, target_price=float(t_px), stop_loss_price=float(s_px), trailing_jump=0.0, product_type="INTRADAY", tag=TAG_ENTRY)
+                order_type=e_type, price=e_px, target_price=float(t_px), stop_loss_price=float(s_px), trailing_jump=0.0, product_type="INTRADAY", tag=TAG_ENTRY)
         except Exception as e:  # noqa: BLE001
             msg = str(e)
             found = None
@@ -401,7 +435,7 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
                     res = run.done("FAIL", f"the SELL placement errored on our side ({msg[:160]}) - it may exist at Dhan: CHECK DHAN for an open 1-share {sym} short")
                     _tell(notify, f"🚨 <b>SELL probe: placement unclear</b> - {sym}\n{msg[:300]}\nCheck Dhan for a 1-share short or a resting Super Order and clear it by hand.")
                 else:
-                    run.rule(f"Dhan REFUSED a 1-share INTRADAY SELL Super Order with a MARKET entry: {msg[:300]}")
+                    run.rule(f"Dhan REFUSED a 1-share INTRADAY SELL Super Order with a {e_type} entry: {msg[:300]}")
                     res = run.done("FAIL", f"Dhan refused the SELL Super Order: {msg[:240]}")
                 _save(res)
                 return res
@@ -444,7 +478,7 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         else:
             run.step(f"entry filled at {fill:.2f} (ref {live:.2f}; slippage {live - fill:+.2f} per share in our favour when positive)")
             run.res["entry_fill"] = fill
-            run.rule("Dhan accepted a MARKET-entry INTRADAY SELL Super Order and filled it (1 share).")
+            run.rule(f"Dhan accepted a {e_type}-entry INTRADAY SELL Super Order and filled it (1 share).")
         stop_leg, tgt_leg = _leg(row, "STOP_LOSS_LEG"), _leg(row, "TARGET_LEG")
         seen_stop = broker.read_stop_leg_price(row) if row else None
         seen_tgt = _leg_price(tgt_leg, ("price", "targetPrice", "triggerPrice"))

@@ -52,6 +52,7 @@ class FakeDhan:
         self.tick_size_for_price = dhan_client.tick_size_for_price
         self.read_stop_leg_price = dhan_client.read_stop_leg_price
         self.is_ambiguous_placement_error = dhan_client.is_ambiguous_placement_error
+        self.short_entry_order = dhan_client.short_entry_order
         self.recovered = None                      # what find_recent_buy_order returns after an unclear SELL
         self.calls_made_order = False
 
@@ -152,7 +153,8 @@ def test_clean_round_trip_passes_and_leaves_nothing_behind(env):
     assert r["line"].startswith("SELL PROBE: PASS")
     sells = [c[1] for c in b.calls if c[0] == "place_super_order"]
     assert len(sells) == 1 and sells[0]["transaction_type"] == "SELL" and sells[0]["quantity"] == 1
-    assert sells[0]["product_type"] == "INTRADAY" and sells[0]["order_type"] == "MARKET"
+    assert sells[0]["product_type"] == "INTRADAY" and sells[0]["order_type"] == "LIMIT"           # E243: a marketable limit, not a MARKET entry Dhan rests at the last price
+    assert sells[0]["target_price"] < sells[0]["price"] < 100.0 < sells[0]["stop_loss_price"], "the entry sits UNDER the last price so it fills at the bid"
     assert sells[0]["target_price"] < 100.0 < sells[0]["stop_loss_price"]                       # a short: target below, stop above
     buys = [c[1] for c in b.calls if c[0] == "place_order"]
     assert len(buys) == 1 and buys[0]["transaction_type"] == "BUY" and buys[0]["quantity"] == 1 and buys[0]["product_type"] == "INTRADAY"

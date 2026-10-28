@@ -41,6 +41,7 @@ import JournalPanel from "./board/JournalPanel";
 import { EMOTION_LABEL, FALLBACK_EMOTIONS } from "./board/journalNotesView";
 import ShortlistPanel from "./board/ShortlistPanel";
 import ShortShadowCard from "./board/ShortShadowCard";
+import SellOrdersCard from "./board/SellOrdersCard";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
 import TimeMachinePanel from "./TimeMachinePanel";   // E111: odds of one trade (evidence only)
@@ -1645,6 +1646,7 @@ export default function PositionStocksTab() {
 
       {subTab === "positions" && (
       <>
+      <SellOrdersCard active={subTab === "positions"} fetcher={() => positionStocksApi.shortOrders()} />
       {/* ── ADDED (this session): manual controls — Refresh / Check Exits
           Now (reconcile) / Manual Buy — directly on the Positions tab, so
           you don't have to switch to Pipeline to reconcile or wait 15s

@@ -225,6 +225,12 @@ SHORT_LIVE_REQUIRES_PROBE = _get_bool("SHORT_LIVE_REQUIRES_PROBE", True)
 # that day. A short never exists without a stop. Only reached when SHORT_MODE=live (the SELL probe rule above still applies). false = the old behaviour: a refused Super
 # Order = no short today. The switch gates NEW plain shorts only: the guard that manages an already open plain short keeps running whatever the switch says.
 SHORT_PLAIN_FALLBACK = _get_bool("SHORT_PLAIN_FALLBACK", True)
+# E243 (28 Oct 2026): the first real SELL probe on NTPC sent a MARKET entry; Dhan's row read back as orderType LIMIT at the last price (300.40), filledQty 0, and it rested
+# unfilled for 20 s (a SELL at the last price only matches a buyer at or above it, and the best bid sits below). With this on, a short's SELL entry is a LIMIT a few ticks UNDER
+# the last price (a "marketable limit": it fills at the best bid at once, never worse than the cushion). false = the old MARKET entry. Used by the live short and by the SELL
+# probe alike, so the probe tests exactly what the live short sends.
+SHORT_ENTRY_MARKETABLE_LIMIT = _get_bool("SHORT_ENTRY_MARKETABLE_LIMIT", True)
+SHORT_ENTRY_CUSHION_PCT = max(0.05, min(1.0, _get_float("SHORT_ENTRY_CUSHION_PCT", 0.3)))
 SHORT_PLAIN_FILL_WAIT_S = max(2.0, min(30.0, _get_float("SHORT_PLAIN_FILL_WAIT_S", 8.0)))      # how long to wait for the SELL to show as filled before cancelling it
 SHORT_PLAIN_STOP_GRACE_S = max(1.0, min(120.0, _get_float("SHORT_PLAIN_STOP_GRACE_S", 6.0)))   # price this long past the stop with the broker stop still resting: cover by hand
 # E107 (P2 item 17): rank the bearish short candidates against each other (screening/shortlist.py build_short) and try them best-first, so the capital and the

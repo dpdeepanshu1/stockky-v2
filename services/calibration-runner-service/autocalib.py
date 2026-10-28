@@ -41,6 +41,7 @@ HISTORY_KEEP = 200
 PROTECTED: Dict[str, str] = {
     "SHORT_MODE": "money safety (short selling): whether a short can exist is your decision after the Dhan answer and the 1-share test, never a report's",
     "SHORT_LIVE_QTY_CAP": "money safety (short selling): how many shares a live short may have is your decision, never a report's",
+    "SHORT_ENTRY_MARKETABLE_LIMIT": "money safety (short selling): how a short's SELL entry is priced is your decision, never a report's",
     "SHORT_PLAIN_FALLBACK": "money safety (short selling): whether a short may open as a plain order with a broker stop order instead of a Super Order is your decision, never a report's",
     "SHORT_LIVE_REQUIRES_PROBE": "money safety (short selling): whether a live short needs the Dhan SELL probe first is your decision, never a report's",
     "SHORT_SHORTLIST_ENABLED": "short selling (E107): which shorts are tried first decides where capital goes; it is your decision, never a report's",

@@ -850,6 +850,20 @@ def get_positions(db: Session) -> list:
     return data if isinstance(data, list) else []
 
 
+def short_entry_order(live: float, target_price: float, stop_price: float) -> tuple:
+    """E243: (order_type, price) for a SELL Super Order entry. A marketable LIMIT just under the last price when SHORT_ENTRY_MARKETABLE_LIMIT is on and the legs still sit on
+    the right sides of it (target < price < stop); otherwise the old ("MARKET", live). Never raises."""
+    try:
+        import config
+        if getattr(config, "SHORT_ENTRY_MARKETABLE_LIMIT", True) and live and live > 0:
+            px = round_to_tick(float(live) * (1.0 - float(getattr(config, "SHORT_ENTRY_CUSHION_PCT", 0.3)) / 100.0))
+            if px > 0 and is_valid_tick_price(px) and float(target_price) < px < float(stop_price):
+                return "LIMIT", px
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position-stocks: short_entry_order fell back to MARKET (%s)", e)
+    return "MARKET", live
+
+
 def get_super_order_list(db: Session, release_db: bool = False) -> list:
     """Read-only — no arm check. Used by the exit monitor to poll leg status.
     release_db=True (read-only routes): give the pooled DB connection back before the Dhan call (group 267)."""

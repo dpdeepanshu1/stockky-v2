@@ -224,9 +224,10 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
     plain: Optional[dict] = None
     if config.USE_SUPER_ORDER:
         try:
+            e_type, e_px = dhan_client.short_entry_order(live, float(levels.target_price), float(levels.stop_price))      # E243: marketable limit, so the SELL fills at once
             result = dhan_client.place_super_order(
                 db, is_armed=bool(gate and gate.is_armed), security_id=security_id, exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
-                transaction_type="SELL", quantity=int(qty), order_type="MARKET", price=live,
+                transaction_type="SELL", quantity=int(qty), order_type=e_type, price=e_px,
                 target_price=float(levels.target_price), stop_loss_price=float(levels.stop_price), trailing_jump=0.0,
                 product_type="INTRADAY", tag="SCALP")
             super_id = str((result or {}).get("orderId") or (result or {}).get("id") or "")

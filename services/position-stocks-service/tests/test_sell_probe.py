@@ -39,7 +39,7 @@ class FakeDhan:
 
     def __init__(self, **kw):
         self.kw = dict(refuse_sell=None, fill=True, legs="ok", cancel_works=True, cover_works=True, list_fails_after_cancel=False, ambiguous=False,
-                       cover_status="TRADED", lag=False, preheld=0, positions_fail=False, flat_despite_fill=False)
+                       cover_status="TRADED", lag=False, preheld=0, positions_fail=False, flat_despite_fill=False, no_avg=False)
         self.kw.update(kw)
         self.nets = {"1594": int(self.kw["preheld"])} if self.kw["preheld"] else {}      # Dhan's signed net quantity per security id (ITC is 1594)
         self.calls = []
@@ -82,8 +82,10 @@ class FakeDhan:
             legs.append({"legName": "TARGET_LEG", "orderStatus": "PENDING", "transactionType": "SELL" if k == "sell_side" else "BUY", "price": t})
         if k != "no_stop":
             legs.append({"legName": "STOP_LOSS_LEG", "orderStatus": "PENDING", "transactionType": "SELL" if k == "sell_side" else "BUY", "triggerPrice": s + (5.0 if k == "wrong_stop" else 0)})
-        self.row = {"orderId": "SO1", "orderStatus": "PENDING", "transactionType": "SELL", "legDetails": legs,
-                    "averageTradedPrice": kw["price"] if self.kw["fill"] else 0, "filledQty": kw["quantity"] if self.kw["fill"] else 0}
+        if self.kw["no_avg"]:                       # E244: the 10:35 NTPC row - TRADED, filledQty 1, averageTradedPrice 0.0, no ENTRY_LEG detail
+            legs = [lg for lg in legs if lg["legName"] != "ENTRY_LEG"]
+        self.row = {"orderId": "SO1", "orderStatus": "TRADED" if self.kw["no_avg"] else "PENDING", "transactionType": "SELL", "legDetails": legs, "price": kw["price"],
+                    "averageTradedPrice": 0.0 if self.kw["no_avg"] else (kw["price"] if self.kw["fill"] else 0), "filledQty": kw["quantity"] if self.kw["fill"] else 0}
         return {"orderId": "SO1", "orderStatus": "PENDING"}
 
     def find_recent_buy_order(self, db, security_id, qty, super_order=True, exclude_ids=(), within_s=180.0, transaction_type="BUY"):
@@ -457,3 +459,12 @@ def test_a_fail_on_record_does_not_count_as_a_pass(env):
 def test_summary_before_any_probe():
     s = sell_probe.summary()
     assert s["verdict"] in ("NOT_RUN", "PASS", "FAIL") and "line" in s
+
+
+def test_a_traded_row_with_no_average_price_is_a_fill_not_a_failure(env):
+    """E244: Dhan's row said TRADED / filledQty 1 with averageTradedPrice 0.0 and no ENTRY_LEG detail (10:35 NTPC run). The entry did fill: legs are checked, the short is covered, PASS."""
+    b = FakeDhan(no_avg=True)
+    r = _run(env, b)
+    assert r["verdict"] == "PASS", r["line"]
+    assert len([c for c in b.calls if c[0] == "place_order"]) == 1, "the filled share is covered exactly once"
+    assert r.get("entry_fill") and any("averageTradedPrice 0" in x for x in r["rules"])

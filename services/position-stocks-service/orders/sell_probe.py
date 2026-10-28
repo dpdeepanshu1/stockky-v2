@@ -169,7 +169,29 @@ def _entry_filled(row: Optional[dict]) -> Optional[float]:
     if not row:
         return None
     from orders import reconcile
-    return reconcile._entry_fill_from_row(row)
+    px = reconcile._entry_fill_from_row(row)
+    if px is None and _row_traded(row):
+        # E244: the 10:35 run on NTPC: row TRADED, filledQty 1, averageTradedPrice 0.0 and no ENTRY_LEG detail, so reconcile's price reader found nothing. The fill is real
+        # (positions showed the short). Use the limit price we sent as a placeholder; _run replaces it with the position's sellAvg when it can.
+        px = _num(row.get("price"))
+    return px
+
+
+def _row_traded(row: Optional[dict]) -> bool:
+    """True when the Super Order row itself says the entry filled (status TRADED-like, or filledQty > 0), whatever it shows for the price."""
+    if not isinstance(row, dict):
+        return False
+    try:
+        if float(row.get("filledQty") or row.get("filled_qty") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return _status(row) in _FILLED
+
+
+def _row_has_price(row: Optional[dict]) -> bool:
+    from orders import reconcile
+    return reconcile._entry_fill_from_row(row) is not None
 
 
 def _compact(row: Optional[dict]) -> Dict[str, Any]:
@@ -463,6 +485,14 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         row, fill, seen_short = _poll_row(db, broker, oid, poll_s, sleep, security_id, base)
         run.res["answers"]["row_after_fill"] = _compact(row)
         problems: List[str] = []
+        if fill is not None and row is not None and not _row_has_price(row):
+            # E244: Dhan said TRADED with no average price on the row. Not a failure (the live short reads quantity / status, and keeps its scan price): take the real
+            # price from the position, say so, and carry on checking the legs.
+            better = _sell_avg(_read_positions(db, broker) or [], security_id)
+            fill = better or fill
+            run.res["entry_fill"] = fill
+            run.rule(f"Dhan's Super Order row shows the entry TRADED with filledQty {row.get('filledQty')} but averageTradedPrice 0 and no ENTRY_LEG detail: the fill price comes from "
+                     f"{'the position (sellAvg)' if better else 'the limit price sent'}, about {fill:.2f}.")
         if fill is None and seen_short:
             # the short is open at Dhan but the Super Order list does not show the fill: the probe cannot price it from the row, so it prices it from the
             # position / order book, covers it below, and reports the mismatch, because the live short's reconcile reads the same list

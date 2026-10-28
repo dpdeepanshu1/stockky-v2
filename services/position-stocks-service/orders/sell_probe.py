@@ -245,6 +245,15 @@ def _sell_avg(positions: Any, security_id: str) -> Optional[float]:
     return None
 
 
+def _buy_avg(positions: Any, security_id: str) -> Optional[float]:
+    """E246: average price Dhan shows for today's BUYs of this security (the cover's price once the short is flat). None when no row carries one."""
+    for r in _pos_rows(positions, security_id):
+        v = _num(r.get("buyAvg") or r.get("buy_avg"))
+        if v:
+            return v
+    return None
+
+
 def _read_positions(db, broker) -> Optional[list]:
     """Dhan's positions list, or None when it cannot be read (the caller then refuses to act on a guess)."""
     try:
@@ -552,6 +561,9 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
             problems.append("the Super Order list showed the entry filled but Dhan's positions never showed a short: the two disagree, nothing was bought")
 
         # ---- 6. a cover we could not finish is adopted as a normal short so nothing is left without an owner
+        if (fill is not None or run.res.get("short_seen")) and not covered and run.res.get("cover_order_id") and _flat_after_cover(db, broker, run, security_id, base):
+            # E246: one last look at Dhan's positions before a row is made: if they are flat the cover did fill, and adopting would leave a phantom open short here
+            covered, cover_note = True, ""
         if (fill is not None or run.res.get("short_seen")) and not covered:
             adopted = _adopt(db, run, sym, security_id, float(fill or live), s_px, t_px, oid)
             problems.append(f"COVER NOT CONFIRMED ({cover_note}); {'adopted as a normal SHORT row, the 14:55 cover and the stop watchdog own it now' if adopted else 'could NOT be adopted: cover it by hand in Dhan'}")
@@ -696,10 +708,32 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
                         return False, f"the cover BUY ended {st}"
         except Exception as e:  # noqa: BLE001
             logger.warning("sell probe: order list read failed (%s)", e)
+        # E246: the order list can lag or omit the cover (ONGC, 28 Oct: the cover BUY filled but was "not confirmed within 20s", the short was adopted as a live
+        # row and stayed OPEN here while Dhan showed the position closed). Dhan's POSITIONS are the fact: flat beyond the baseline means the cover filled.
+        if int(waited) % 2 == 1 or waited >= poll_s:
+            if _flat_after_cover(db, broker, run, security_id, base):
+                return True, ""
         if waited >= poll_s:
             return False, f"the cover BUY {cover_id} was not confirmed filled within {poll_s:.0f}s"
         sleep(1.0)
         waited += 1.0
+
+
+def _flat_after_cover(db, broker, run: _Run, security_id: str, base: int) -> bool:
+    """True when Dhan's positions show no short beyond the baseline and a cover BUY has been placed. Records the cover price (position buyAvg, else the reference). Never raises."""
+    try:
+        pos_now = _read_positions(db, broker)
+        if pos_now is None or not _pos_rows(pos_now, security_id):
+            return False                                   # unreadable, or no row at all: not proof of anything
+        if max(0, base - _net_qty(pos_now, security_id)) != 0:
+            return False
+        if not run.res.get("cover_fill"):
+            run.res["cover_fill"] = _buy_avg(pos_now, security_id) or run.res.get("ref_price")
+        run.step(f"the cover BUY is not in the order list yet but Dhan's POSITIONS are flat (net {_net_qty(pos_now, security_id):+d}): the cover filled, price about {run.res.get('cover_fill')}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sell probe: flat-after-cover check failed (%s)", e)
+        return False
 
 
 def _adopt(db, run: _Run, sym: str, security_id: str, fill: float, stop: float, target: float, oid: str) -> bool:
@@ -709,7 +743,7 @@ def _adopt(db, run: _Run, sym: str, security_id: str, fill: float, stop: float, 
         pos = ScalpPosition(
             symbol=sym, dhan_security_id=str(security_id), window_source="PROBE", status="OPEN", side="SHORT", entry_price=float(fill), signal_price=float(fill),
             quantity=PROBE_QTY, target_price=float(target), stop_price=float(stop), adaptive_target_pct=TARGET_PCT, adaptive_stop_pct=STOP_PCT,
-            dhan_super_order_id=oid, dhan_entry_order_id=oid, capital_risked=float(fill) * PROBE_QTY, is_first_live_order=False, opened_at=datetime.now(timezone.utc))
+            dhan_super_order_id=oid, dhan_entry_order_id=oid, dhan_exit_order_id=(str(run.res.get("cover_order_id")) if run.res.get("cover_order_id") else None), capital_risked=float(fill) * PROBE_QTY, is_first_live_order=False, opened_at=datetime.now(timezone.utc))
         db.add(pos)
         db.commit()
         run.step(f"adopted the uncovered probe short as position row {pos.id}")

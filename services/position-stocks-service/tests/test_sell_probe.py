@@ -39,7 +39,7 @@ class FakeDhan:
 
     def __init__(self, **kw):
         self.kw = dict(refuse_sell=None, fill=True, legs="ok", cancel_works=True, cover_works=True, list_fails_after_cancel=False, ambiguous=False,
-                       cover_status="TRADED", lag=False, preheld=0, positions_fail=False, flat_despite_fill=False, no_avg=False)
+                       cover_status="TRADED", lag=False, preheld=0, positions_fail=False, flat_despite_fill=False, no_avg=False, cover_hidden=False)
         self.kw.update(kw)
         self.nets = {"1594": int(self.kw["preheld"])} if self.kw["preheld"] else {}      # Dhan's signed net quantity per security id (ITC is 1594)
         self.calls = []
@@ -55,6 +55,7 @@ class FakeDhan:
         self.short_entry_order = dhan_client.short_entry_order
         self.recovered = None                      # what find_recent_buy_order returns after an unclear SELL
         self.calls_made_order = False
+        self.covered = set()                       # E246: securities whose short was bought back today (Dhan then shows buyAvg)
 
     def get_security_id(self, db, sym):
         return "1594" if sym == "ITC" else "9999"
@@ -63,7 +64,8 @@ class FakeDhan:
         self.calls.append(("get_positions", {}))
         if self.kw["positions_fail"]:
             raise RuntimeError("dhan 502")
-        return [{"securityId": sid, "productType": "INTRADAY", "netQty": n, "sellAvg": 100.0 if n < 0 else 0.0} for sid, n in self.nets.items()]
+        return [{"securityId": sid, "productType": "INTRADAY", "netQty": n, "sellAvg": 100.0 if n < 0 or sid in self.covered else 0.0, "buyAvg": 100.4 if sid in self.covered else 0.0}
+                for sid, n in self.nets.items()]
 
     @property
     def net(self):
@@ -112,9 +114,11 @@ class FakeDhan:
         self.calls.append(("place_order", kw))
         if not self.kw["cover_works"]:
             raise RuntimeError("RMS: rejected")
-        self.orders.append({"orderId": "BUY1", "orderStatus": self.kw["cover_status"], "averageTradedPrice": 100.4})
-        if self.kw["cover_status"] == "TRADED":
+        if not self.kw["cover_hidden"]:               # E246: the ONGC case - the BUY fills at Dhan but the order list never shows it
+            self.orders.append({"orderId": "BUY1", "orderStatus": self.kw["cover_status"], "averageTradedPrice": 100.4})
+        if self.kw["cover_status"] == "TRADED" or self.kw["cover_hidden"]:
             self.nets[kw["security_id"]] = self.nets.get(kw["security_id"], 0) + kw["quantity"]
+            self.covered.add(kw["security_id"])
         return {"orderId": "BUY1"}
 
     def get_order_list(self, db):
@@ -468,3 +472,21 @@ def test_a_traded_row_with_no_average_price_is_a_fill_not_a_failure(env):
     assert r["verdict"] == "PASS", r["line"]
     assert len([c for c in b.calls if c[0] == "place_order"]) == 1, "the filled share is covered exactly once"
     assert r.get("entry_fill") and any("averageTradedPrice 0" in x for x in r["rules"])
+
+
+# ------------------------------------------------------------------ E246: ONGC, 28 Oct - the cover filled, the order list did not say so
+def test_a_cover_that_filled_but_is_missing_from_the_order_list_is_confirmed_by_the_positions_and_not_adopted(env):
+    b = FakeDhan(cover_hidden=True)
+    r = _run(env, b)
+    assert b.net == 0, "the book is flat: the cover filled"
+    assert env.db.query(models.ScalpPosition).count() == 0, "no phantom open short is left in Stockky"
+    assert "COVER NOT CONFIRMED" not in r["reason"] and r["verdict"] == "PASS" and r["cover_fill"] == 100.4
+    assert not any("cover not confirmed" in a for a in env.alerts) and _locks(env.db) == 0
+
+
+def test_a_cover_that_really_has_not_filled_is_still_adopted_with_its_cover_order_id(env):
+    b = FakeDhan(cover_status="PENDING")                     # still short at Dhan: positions do NOT show flat
+    r = _run(env, b)
+    pos = env.db.query(models.ScalpPosition).one()
+    assert "COVER NOT CONFIRMED" in r["reason"] and pos.side == "SHORT" and pos.status == "OPEN"
+    assert pos.dhan_exit_order_id == "BUY1", "the cover order id is kept so reconcile can price the exit later"

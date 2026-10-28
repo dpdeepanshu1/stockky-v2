@@ -1690,6 +1690,85 @@ def repair_dead_entry_errors(db: Session, *, apply: bool = False) -> dict:
     return out
 
 
+_last_probe_heal_ts = float("-inf")
+
+
+def heal_covered_probe_shorts(db: Session, *, force: bool = False) -> int:
+    """E246: close an adopted SELL-probe short whose cover has in fact filled at Dhan.
+
+    ONGC, 28 Oct 11:10: the probe's cover BUY was "not confirmed filled within 20s" (the order list lagged), so the short was adopted as an ordinary open SHORT row
+    (window_source PROBE). Dhan's positions then showed ONGC closed (bought 223.85, sold 223.83) while this row stayed OPEN / EXIT_LEGS_REJECTED for ever: its Super Order
+    legs had been cancelled by the probe itself, so the leg-based reconcile below can never see an exit. Rule: only a PROBE short, only when Dhan's positions are readable,
+    carry a row for the security and show NO open short beyond zero. The price is the cover order's own fill (dhan_exit_order_id, else a traded SELLPROBE_COVER BUY today),
+    else the position's buyAvg; with none of those the row is left alone and logged. A probe never reserved ledger capital, so none is released. Never raises; returns rows closed."""
+    global _last_probe_heal_ts
+    now = time.monotonic()
+    if not force and now - _last_probe_heal_ts < 15.0:
+        return 0
+    try:
+        rows = (db.query(ScalpPosition)
+                .filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED")), ScalpPosition.window_source == "PROBE", ScalpPosition.side == "SHORT")
+                .all())
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.warning("reconcile: probe-short heal query failed: %s", e)
+        return 0
+    if not rows:
+        return 0
+    _last_probe_heal_ts = now
+    from orders import sell_probe as _sp
+    positions = _sp._read_positions(db, dhan_client)
+    if positions is None:
+        return 0
+    try:
+        book = dhan_client.get_order_list(db) or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("reconcile: probe-short heal could not read the order book (%s)", e)
+        book = []
+    healed = 0
+    for pos in rows:
+        sid = str(pos.dhan_security_id or "")
+        if not sid or not _sp._pos_rows(positions, sid) or _sp._open_rows(positions, sid):
+            continue                                        # no row at Dhan for it, or something is still open there: not proven covered
+        price = None
+        cover_oid = str(pos.dhan_exit_order_id or "")
+        cands = [r for r in book if isinstance(r, dict) and str(r.get("securityId") or r.get("security_id") or "") == sid
+                 and str(r.get("transactionType") or "").upper() == "BUY" and _sp._status(r) in _sp._FILLED]
+        by_id = [r for r in cands if cover_oid and str(r.get("orderId") or r.get("order_id") or "") == cover_oid]
+        by_tag = [r for r in cands if str(r.get("correlationId") or "") == _sp.TAG_COVER]
+        for r in (by_id or by_tag):
+            price = _sp._num(r.get("averageTradedPrice") or r.get("average_traded_price")) or price
+        price = price or _sp._buy_avg(positions, sid)
+        if not price:
+            logger.warning("reconcile: probe short %s (id=%d) is flat at Dhan but no cover price is readable yet - left as is", pos.symbol, pos.id)
+            continue
+        entry = float(pos.entry_price or 0.0)
+        pnl = _side.pnl(pos, entry, price, pos.quantity)
+        pos.status = "MANUAL_EXIT"
+        pos.exit_price = float(price)
+        pos.realized_pnl = pnl
+        pos.realized_pnl_pct = _side.pnl_pct(pos, entry, price)
+        pos.error_message = None
+        if not pos.dhan_exit_order_id and (by_id or by_tag):
+            pos.dhan_exit_order_id = str((by_id or by_tag)[-1].get("orderId") or (by_id or by_tag)[-1].get("order_id") or "") or None
+        pos.closed_at = datetime.now(timezone.utc)
+        try:
+            db.commit()
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("reconcile: probe short %s (id=%d) heal commit failed: %s", pos.symbol, pos.id, e)
+            continue
+        try:
+            shared_symbol_lock.release(db, pos.symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reconcile: symbol lock release for %s failed (%s)", pos.symbol, e)
+        healed += 1
+        logger.warning("reconcile: probe short %s (id=%d) was already covered at Dhan - closed at Rs%.2f, P&L Rs%.2f (no ledger capital was ever reserved for a probe)",
+                       pos.symbol, pos.id, price, pnl)
+        notifier.notify_fire_and_forget(f"✅ <b>Probe short closed</b> - {pos.symbol} x{pos.quantity}\nDhan already shows it covered. Sell Rs{entry:.2f} -> cover Rs{price:.2f} | P&L Rs{pnl:,.2f}")
+    return healed
+
+
 def run_exit_reconciliation(db: Session) -> int:
     """Check every locally-OPEN scalp position against Dhan's live super
     order book. Closes any position whose TARGET_LEG or STOP_LOSS_LEG has
@@ -1705,6 +1784,11 @@ def run_exit_reconciliation(db: Session) -> int:
     conversion time).
     """
     overnight_closed = _reconcile_overnight_stops(db)
+    try:
+        overnight_closed += heal_covered_probe_shorts(db)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        logger.error("reconcile: probe-short heal error: %s", e, exc_info=True)
     try:
         resolve_stuck_pending(db)
     except Exception as e:

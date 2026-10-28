@@ -327,6 +327,18 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
             f"reconcile books the bracket fill"
         )
 
+    if _side.is_short(pos) and str(getattr(pos, "window_source", "") or "") == "PROBE":
+        # E246: a SELL-probe short adopted because its cover looked unconfirmed may already be covered at Dhan (ONGC, 28 Oct). A cover BUY now would open a real
+        # LONG. Let reconcile settle it from Dhan's positions first; if it closed the row, there is nothing to send.
+        from orders import reconcile as _rec
+        _rec.heal_covered_probe_shorts(db, force=True)
+        try:
+            db.refresh(pos)
+        except Exception as _re:  # noqa: BLE001
+            logger.debug("_fire_flat_sell: refresh after probe heal ignored %s", _re)
+        if pos.status not in ("OPEN", "EXIT_LEGS_REJECTED"):
+            raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) probe short is already covered at Dhan - closed by reconcile, cover BUY skipped")
+
     if pos.overnight_converted_to_cnc and pos.overnight_stop_order_id:
         # session72 (open-issue #1): book any fill of the resting stop BEFORE
         # sizing the SELL — otherwise a partially-filled stop plus a full-size

@@ -126,11 +126,9 @@ frontend/src/components/WatchlistPulse.tsx
 frontend/src/components/alertsView.ts
 frontend/src/components/app/AiInsightDeck.tsx
 frontend/src/components/app/AppNav.tsx
-frontend/src/components/app/BackendStatusDot.tsx
 frontend/src/components/app/DashboardView.tsx
 frontend/src/components/app/OvernightAutomationPanel.tsx
 frontend/src/components/app/SettingsPage.tsx
-frontend/src/components/app/TabButton.tsx
 frontend/src/components/app/TabContent.tsx
 frontend/src/components/app/appTypes.ts
 frontend/src/components/app/clocks.tsx
@@ -1039,6 +1037,7 @@ services/decision-prediction-service/training/universe_routes.py
 services/decision-prediction-service/training/walk_forward.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile
+services/kronos-forecast-service/README.md
 services/kronos-forecast-service/engine.py
 services/kronos-forecast-service/forecast_stats.py
 services/kronos-forecast-service/forecaster.py
@@ -1394,6 +1393,7 @@ services/position-stocks-service/tests/test_e229_release_connection_and_stop_flo
 services/position-stocks-service/tests/test_e231_exit_rule_field.py
 services/position-stocks-service/tests/test_e232_scan_hits_day_mover.py
 services/position-stocks-service/tests/test_e237_shadow_report_speed.py
+services/position-stocks-service/tests/test_e246_probe_short_heal.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1997,6 +1997,7 @@ services/real-trade-service/watchlist_engine/watchlist.py
 services/real-trade-service/write_behind.py
 services/timesfm-forecast-service/.dockerignore
 services/timesfm-forecast-service/Dockerfile
+services/timesfm-forecast-service/README.md
 services/timesfm-forecast-service/backends.py
 services/timesfm-forecast-service/engine.py
 services/timesfm-forecast-service/main.py

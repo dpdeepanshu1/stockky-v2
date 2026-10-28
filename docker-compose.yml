@@ -723,6 +723,7 @@ services:
       RUNNER_WORKERS: ${RUNNER_WORKERS:-4}
       RUNNER_MAX_HEAVY: ${RUNNER_MAX_HEAVY:-2}
       RUNNER_MIN_FREE_MB: ${RUNNER_MIN_FREE_MB:-1500}
+      RUNNER_HEAVY_PROC_MB: ${RUNNER_HEAVY_PROC_MB:-800}   # E240: memory one replay process is expected to use; a 2nd heavy run waits unless mem_limit - running replays - RUNNER_MIN_FREE_MB still fits it
       RUNNER_POOL_JOBS: ${RUNNER_POOL_JOBS:-3}
       # E98 Market Weather (weather.py / weather_apply.py). A value saved on the page (<data>/state/weather.json) wins over these defaults.
       # ENABLED = run the daily state engine; STAMP = post a stamp-only overlay so trades carry the state; NOTIFY = Telegram brief and change messages;

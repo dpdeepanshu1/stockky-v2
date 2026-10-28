@@ -16,6 +16,12 @@ import os
 from typing import Any, Dict, List, Optional
 
 
+try:
+    _POOL_JOBS = max(1, min(8, int(os.environ.get("RUNNER_POOL_JOBS", "3"))))
+except ValueError:
+    _POOL_JOBS = 3
+
+
 def _heavy_timeout() -> int:
     """group 466: time limit of the heavy jobs (replays, backtests, probes). The A/B replay of 355 symbols was killed at the old 2 h limit with 290 done.
     Default 6 h; RUNNER_HEAVY_TIMEOUT_S (seconds) changes it; never below 1 h; an unreadable value falls back to 6 h."""
@@ -183,7 +189,7 @@ def b_fetch_history(ctx, p):
 
 def b_calibration_full(ctx, p):
     env = {"MARKET_DATA_URL": ctx["md"], "API_GATEWAY_URL": ctx["gw"], "OUT_DIR": ctx["cal"], "SEEDS": str(p.get("seeds", "7 11 13")), "LIMIT": str(p.get("limit", 400)),
-           "JOBS": str(p.get("jobs", 2)), "RESUME": "1", "PS_STATUS_URL": ctx["ps"] + "/board/status", "PS_TOKEN": "{token}", "PERIOD": "5y",
+           "JOBS": str(p.get("jobs", _POOL_JOBS)), "RESUME": "1", "PS_STATUS_URL": ctx["ps"] + "/board/status", "PS_TOKEN": "{token}", "PERIOD": "5y",
            "LIVE_REPORT_URL": ctx["decision"] + "/training/api/structure/report?days=60"}
     return [{"kind": "cmd", "title": "Full structure calibration (history, A/B, G1, backtest, G2-G4, parity)", "argv": ["bash", os.path.join(ctx["scripts"], "vm_calibrate.sh")],
              "env": env, "ok": [0], "attention": [1], "out_file": ""}]
@@ -196,7 +202,7 @@ def b_calibration_status(ctx, p):
 def b_ab_report(ctx, p):
     s = int(p.get("seed", 7))
     extra = ["--policy"] if p.get("policy") else []
-    return [_py(ctx, "ms_ab_report.py", "--out", os.path.join(ctx["cal"], f"ab_{s}"), "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", 2),
+    return [_py(ctx, "ms_ab_report.py", "--out", os.path.join(ctx["cal"], f"ab_{s}"), "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", _POOL_JOBS),
                 *extra, *_ck(ctx, "ab", s), _hist(ctx, s), title=f"A/B replay, seed {s}", attention=())]
 
 
@@ -206,7 +212,7 @@ def b_g1_check(ctx, p):
 
 
 def b_structure_backtest(ctx, p):
-    return [_py(ctx, "structure_backtest.py", "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", 2),
+    return [_py(ctx, "structure_backtest.py", "--step", p.get("step", 3), "--horizon", p.get("horizon", 10), "--jobs", p.get("jobs", _POOL_JOBS),
                 *_ck(ctx, "structure", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title="Structure rules walk-forward (JSON also saved as backtest.json)", out_file=os.path.join(ctx["cal"], "backtest.json"), attention=())]
 
@@ -223,12 +229,12 @@ def b_calibration_pack(ctx, p):
 
 
 def b_legacy_gate(ctx, p):
-    return [_py(ctx, "legacy_gate_backtest.py", "--out", os.path.join(ctx["run"], "legacy"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 200),
+    return [_py(ctx, "legacy_gate_backtest.py", "--out", os.path.join(ctx["run"], "legacy"), "--step", p.get("step", 3), "--jobs", p.get("jobs", _POOL_JOBS), "--sample", p.get("sample", 200),
                 *_ck(ctx, "legacy", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="Legacy real-trade candidate gates after costs", attention=())]
 
 
 def b_entry_rules(ctx, p):
-    return [_py(ctx, "entry_rules_backtest.py", "--out", os.path.join(ctx["run"], "entry_rules"), "--step", p.get("step", 3), "--jobs", p.get("jobs", 2),
+    return [_py(ctx, "entry_rules_backtest.py", "--out", os.path.join(ctx["run"], "entry_rules"), "--step", p.get("step", 3), "--jobs", p.get("jobs", _POOL_JOBS),
                 *_ck(ctx, "entry", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="Entry-path rules and stop / target width", attention=())]
 
 
@@ -236,7 +242,7 @@ def b_swing_backtest(ctx, p):
     # E140: --hold is a parameter now (5 = the lane's own limit). Every other hold gets its own checkpoint folder, so a 20-session run never overwrites the 5-session rows.
     hold = int(p.get("hold", 5) or 5)
     ck = "swing" if hold == 5 else f"swing_h{hold}"
-    return [_py(ctx, "swing_backtest.py", "--out", os.path.join(ctx["run"], "swing"), "--step", p.get("step", 3), "--hold", hold, "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 0),
+    return [_py(ctx, "swing_backtest.py", "--out", os.path.join(ctx["run"], "swing"), "--step", p.get("step", 3), "--hold", hold, "--jobs", p.get("jobs", _POOL_JOBS), "--sample", p.get("sample", 0),
                 "--primary-size", p.get("primary_size", 20000), *_ck(ctx, ck, int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title=f"Swing momentum replay (up to {hold} sessions, delivery costs)", attention=())]
 
@@ -264,12 +270,12 @@ def b_swing_probe(ctx, p):
 
 
 def b_p8(ctx, p):
-    return [_py(ctx, "p8_retest_evidence.py", "--out", os.path.join(ctx["run"], "p8"), "--jobs", p.get("jobs", 2), *_ck(ctx, "p8", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
+    return [_py(ctx, "p8_retest_evidence.py", "--out", os.path.join(ctx["run"], "p8"), "--jobs", p.get("jobs", _POOL_JOBS), *_ck(ctx, "p8", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))),
                 title="P8 retest / CHOCH branch evidence", attention=())]
 
 
 def b_ml_v2(ctx, p):
-    return [_py(ctx, "ml_v2_walkforward.py", "--out", os.path.join(ctx["run"], "ml_v2"), "--jobs", p.get("jobs", 2), "--sample", p.get("sample", 200), "--no-save",
+    return [_py(ctx, "ml_v2_walkforward.py", "--out", os.path.join(ctx["run"], "ml_v2"), "--jobs", p.get("jobs", _POOL_JOBS), "--sample", p.get("sample", 200), "--no-save",
                 *_ck(ctx, "ml_v2", int(p.get("seed", 7))), _hist(ctx, int(p.get("seed", 7))), title="ML V2 walk-forward (evidence only)", attention=())]
 
 
@@ -413,7 +419,8 @@ def _job(id, title, group, when, what, builder, params=None, heavy=False, window
 
 
 SEED = P("seed", "Sample seed", "int", 7, 1, 999, help="Same seed = same random symbols. Use 7, 11, 13.")
-JOBS_P = P("jobs", "Parallel workers", "int", 2, 1, 4, help="Keep low: the trading containers share this machine.")
+JOBS_P = P("jobs", "Parallel workers", "int", _POOL_JOBS, 1, 8,
+           help="Processes inside ONE heavy replay (RUNNER_POOL_JOBS sets the default). Lower it if the trading containers slow down.")
 
 JOB_LIST = [
     _job("control_snapshot", "Switch snapshot", "daily", "Every morning before 09:00 IST and after any switch change",
@@ -469,7 +476,7 @@ JOB_LIST = [
          [SEED, P("limit", "Symbols", "int", 400, 50, 800), P("period", "Period", "choice", "5y", choices=["2y", "5y", "10y"])], heavy=True, window="closed", timeout_s=3600),
     _job("calibration_full", "FULL calibration (all seeds, G1-G4, backtest, parity)", "weekly", "Saturday 08:00 IST (about 1-3 hours)",
          "Runs scripts/vm_calibrate.sh: history per seed, A/B, G1, walk-forward, G2/G3/G4, env-line pack, parity. Resumes seeds already complete.", b_calibration_full,
-         [P("seeds", "Seeds", "str", "7 11 13"), P("limit", "Symbols per seed", "int", 400, 50, 800), P("jobs", "Parallel workers", "int", 2, 1, 4)], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True,
+         [P("seeds", "Seeds", "str", "7 11 13"), P("limit", "Symbols per seed", "int", 400, 50, 800), P("jobs", "Parallel workers", "int", _POOL_JOBS, 1, 8)], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True,
          after="Read summary.txt. A FAIL or NOT_ENOUGH_DATA is a reason to keep kill switches ready, never a tuning instruction."),
     _job("calibration_status", "Did the calibration finish?", "weekly", "After the full calibration", "Checks that every seed has enough symbols and a real A/B verdict.", b_calibration_status, [P("seeds", "Seeds", "str", "7 11 13")], timeout_s=120),
     _job("ab_report", "A/B replay (one seed)", "weekly", "After fetch_history", "Does the structure policy beat a technical-only baseline, out of sample, after costs? (G2)", b_ab_report,
@@ -655,6 +662,78 @@ def coerce_params(job: Dict[str, Any], given: Optional[Dict[str, Any]]) -> Dict[
                 raise ValueError(f"{name}: letters, digits, space and : . , - _ only (max 60)")
         out[name] = v
     return out
+
+
+# ------------------------------------------------------------------------- E235: what a run reads / writes
+# Several runs may be active at once (runner.py, RUNNER_WORKERS). Two of them never overlap when one WRITES something the other reads or writes.
+# Lock keys are derived from the steps each builder produces:
+#   cal/<first part>   files under the runner's calibration folder (hist_7, ab_7, ckpt/ab_7, backtest.json, ...)
+#   exp/<file>         files under the runner's exports folder
+#   post:<host>/<path> a POST that changes a service (two of the same endpoint serialise)
+# A path after a flag in _WRITE_FLAGS (--out, --store, --checkpoint ...), save= on an http step, an out_file, or the last argument
+# of a POSITIONAL_WRITES script = a WRITE; anything else = a read. Tests that only read never wait for each other.
+# SOLO jobs run alone (timing / real order / live state they must observe undisturbed).
+_WRITE_FLAGS = frozenset({"out", "output", "csv", "json", "save", "manifest", "checkpoint", "store"})
+_WRITE_ENV_WORDS = ("out", "csv", "json", "save", "manifest", "checkpoint", "store")
+POSITIONAL_WRITES = frozenset({"fetch_history_for_backtest.py"})
+SOLO_JOBS = frozenset({
+    "monday_check_0930", "monday_check_1015", "shadow_shorts_check", "shorts_flat_check",
+    "overlay_clear_check", "tm_gate_check",
+    "latency_save", "latency_compare", "g1_check",
+    "dhan_sell_probe", "dhan_swing_probe",
+})
+
+
+def _under(path: str, roots: Dict[str, str]) -> str:
+    """'cal/hist_7' for a path inside one of the shared roots ('' = not shared: the run's own folder, scripts, bars ...)."""
+    if not path:
+        return ""
+    p = os.path.normpath(path)
+    for name, root in roots.items():
+        r = os.path.normpath(root)
+        if p == r:
+            return name
+        if p.startswith(r + os.sep):
+            parts = os.path.relpath(p, r).replace(os.sep, "/").split("/")
+            return name + "/" + "/".join(parts[:2] if parts[0] == "ckpt" else parts[:1])
+    return ""
+
+
+def derive_locks(job: Dict[str, Any], steps: List[Dict[str, Any]], roots: Dict[str, str]) -> Dict[str, Any]:
+    """{'shared': [...], 'excl': [...], 'solo': bool}. A path after --out / --store / --checkpoint ... is a WRITE, any other path a read."""
+    shared: set = set()
+    excl: set = set()
+    for st in steps:
+        if st.get("kind") == "cmd":
+            argv = [str(a) for a in st.get("argv", [])]
+            script = os.path.basename(argv[1]) if len(argv) > 1 else ""
+            for i, a in enumerate(argv):
+                tok = a
+                flag = argv[i - 1].lower() if i and argv[i - 1].startswith("-") else ""
+                if a.startswith("globflag:"):
+                    _, flag_name, tok = a.split(":", 2)
+                    flag = flag_name.lower()
+                elif a.startswith("glob:"):
+                    tok = a[5:]
+                key = _under(tok, roots)
+                if key:
+                    writes = flag.lstrip("-") in _WRITE_FLAGS or (script in POSITIONAL_WRITES and i == len(argv) - 1)
+                    (excl if writes else shared).add(key)
+            key = _under(str(st.get("out_file") or ""), roots)
+            if key:
+                excl.add(key)
+            for ek, ev in (st.get("env") or {}).items():
+                key = _under(str(ev), roots)
+                if key and any(w in ek.lower() for w in _WRITE_ENV_WORDS):
+                    excl.add(key)
+        elif st.get("kind") == "http":
+            if str(st.get("method", "GET")).upper() != "GET":
+                u = str(st.get("url", "")).split("://", 1)[-1]
+                excl.add("post:" + u.split("?", 1)[0])
+            key = _under(str(st.get("save") or ""), roots)
+            if key:
+                excl.add(key)
+    return {"shared": sorted(shared - excl), "excl": sorted(excl), "solo": job.get("id") in SOLO_JOBS}
 
 
 def public_catalog() -> Dict[str, Any]:

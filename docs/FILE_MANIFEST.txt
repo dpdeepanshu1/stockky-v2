@@ -377,6 +377,7 @@ scripts/ms_g1_check.py
 scripts/opening_replay.py
 scripts/oracle-vm-tune.sh
 scripts/p8_retest_evidence.py
+scripts/preopen_momentum_study.py
 scripts/price_source_allowlist.txt
 scripts/records_report.py
 scripts/regime_history_replay.py
@@ -439,6 +440,7 @@ scripts/test_p8_retest_evidence.py
 scripts/test_plain_short.py
 scripts/test_policy_replay.py
 scripts/test_position_stocks_pipeline_offline.py
+scripts/test_preopen_momentum_study.py
 scripts/test_provider_order_shipped.py
 scripts/test_records_report.py
 scripts/test_regime_overlay.py

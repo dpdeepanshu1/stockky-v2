@@ -73,7 +73,7 @@ def check(env: Dict[str, str]) -> Tuple[List[str], List[str]]:
         findings.append(f"{kind}  {k}={v}  (default {default}; {note})")
     for k in sorted(env):                                  # watched keys we have no intended value for: listed, not judged
         if _WATCH.match(k) and k not in INTENDED:
-            findings.append(f"INFO  {k}={'<hidden>' if _SECRET.search(k) else env[k]}  (no intended default recorded here; compare with docs/ENV_REFERENCE.md)")
+            findings.append(f"INFO  {k}={'<hidden>' if _SECRET.search(k) else env[k]}  (no intended default recorded here; compare with docs/ENV_REFERENCE.txt)")
     return listing, findings
 
 

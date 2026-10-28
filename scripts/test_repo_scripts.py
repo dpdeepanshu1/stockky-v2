@@ -56,7 +56,7 @@ def test_env_reference_ignores_virtualenv(tmp_path):
     repo = _mini_repo(tmp_path)
     r = subprocess.run([sys.executable, str(repo / "scripts" / "gen_env_reference.py")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    text = (repo / "docs" / "ENV_REFERENCE.md").read_text()
+    text = (repo / "docs" / "ENV_REFERENCE.txt").read_text()
     assert "`REAL_FLAG`" in text
     for leaked in ("COVERAGE_CORE", "ODD_VENV_VAR", "TEST_ONLY"):
         assert leaked not in text
@@ -84,7 +84,7 @@ def test_canonical_hash_ignores_version_only_fields():
 
 
 def test_checked_in_generated_files_are_current():
-    """The committed ENV_REFERENCE.md and shared-copy baseline match the code (same as the CI steps)."""
+    """The committed ENV_REFERENCE.txt and shared-copy baseline match the code (same as the CI steps)."""
     for cmd in (["gen_env_reference.py", "--check"], ["check_shared_copies.py"]):
         r = subprocess.run([sys.executable, str(SCRIPTS / cmd[0]), *cmd[1:]], capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -160,19 +160,18 @@ def test_env_reference_reads_wrapper_and_indirect_calls(tmp_path):
     )
     r = subprocess.run([sys.executable, str(repo / "scripts" / "gen_env_reference.py")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    text = (repo / "docs" / "ENV_REFERENCE.md").read_text()
+    text = (repo / "docs" / "ENV_REFERENCE.txt").read_text()
     for name in ("DIRECT_INDIRECT_ONE", "ATTR_PATH_TWO", "WRAPPED_THREE", "WRAPPED_FOUR", "REAL_FLAG"):
         assert f"`{name}`" in text, name
     assert "`WRAPPED_THREE` (helper)" in text and "`DIRECT_INDIRECT_ONE` (helper)" not in text
     assert "NOT_A_VARIABLE" not in text and "lowercase_name" not in text
 
 
-def test_service_sheet_tool_covers_every_area_and_every_sheet_exists():
-    """E170: the sheet tool measures every area, and docs/SERVICE_SHEET_<area>.md exists for each."""
+def test_service_sheet_tool_covers_every_area():
+    """E170: the sheet tool measures every area. (E245: the hand-written docs/SERVICE_SHEET_<area>.md files were folded into
+    CHANGELOG.md and removed - the repo keeps only README.md and CHANGELOG.md - so the test no longer expects them.)"""
     import audit_service_sheet as t
     assert len(t.AREAS) == 12
-    for area in t.AREAS:
-        assert (ROOT / "docs" / f"SERVICE_SHEET_{area}.md").exists(), area
     m = t.measure("kronos-forecast-service")
     assert m["files"] > 0 and m["funcs"] > 0 and m["test_files"] > 0
     row = t.md(m)

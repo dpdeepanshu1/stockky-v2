@@ -3,9 +3,9 @@
 
 The code reads ~600 variables through os.getenv / os.environ.get (tuning knobs, kill switches, thresholds). Most were
 only explained in the session note that added them. This scans the production code (not tests) with the AST and writes
-docs/ENV_REFERENCE.md: variable, services that read it, the default found in the code, and where it is read.
+docs/ENV_REFERENCE.txt: variable, services that read it, the default found in the code, and where it is read.
 
-  python3 scripts/gen_env_reference.py            # (re)write docs/ENV_REFERENCE.md
+  python3 scripts/gen_env_reference.py            # (re)write docs/ENV_REFERENCE.txt
   python3 scripts/gen_env_reference.py --check    # exit 1 when the file is out of date (for CI / before a deploy)
 
 Virtualenvs (`.venv`, `venv`, anything with a pyvenv.cfg) and `site-packages` are never scanned (see _repo_walk.py), so the
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _repo_walk import walk_py  # noqa: E402  (skips .venv / site-packages / caches, same rule for every scanner)
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "docs" / "ENV_REFERENCE.md"
+OUT = ROOT / "docs" / "ENV_REFERENCE.txt"
 SKIP = frozenset({"tests", "scripts"})  # our own test code and helper scripts are not production reads
 HELPER_FN = re.compile(r"(^|_)(env|og|bs|kg|flag)(_|$)|_(float|int|bool|str|csv)$", re.I)  # E170: _env_int("X", 5), _bs_bool("X", "true") ...
 HELPER_NAME = re.compile(r"[A-Z][A-Z0-9]*(_[A-Z0-9]+)+")
@@ -72,7 +72,7 @@ def scan():
                 e["defaults"].append("" if d is None else repr(d))
                 e.setdefault("helper_only", True)
                 if len(e["where"]) < 3:
-                    e["where"].append(f"{rel}:{n.lineno}")
+                    e["where"].append(rel)
                 continue
             found[name]["helper_only"] = False
             default = None
@@ -94,7 +94,7 @@ def scan():
             e["svc"].add(svc)
             e["defaults"].append("(dynamic)" if default is None and len(n.args) > 1 else ("" if default is None else repr(default)))
             if len(e["where"]) < 3:
-                e["where"].append(f"{rel}:{n.lineno}")
+                e["where"].append(rel)
     return found
 
 
@@ -106,7 +106,7 @@ def render(found) -> str:
         f"{len(found)} variables are read by the production code. `Default` is what the code uses when the variable is unset;",
         "`(dynamic)` means the default is computed, `-` means no default is given at the read site. `(helper)` marks a name read only through a small wrapper such as `_env_int(\"X\", 5)` (found by name pattern, so a rare false hit is possible).",
         "",
-        "| Variable | Services | Default | First read at |",
+        "| Variable | Services | Default | Read in (file) |",
         "|---|---|---|---|",
     ]
     for name in sorted(found):
@@ -126,7 +126,7 @@ def main() -> int:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
         if current != text:
             import difflib
-            print("docs/ENV_REFERENCE.md is out of date - run: python3 scripts/gen_env_reference.py")
+            print("docs/ENV_REFERENCE.txt is out of date - run: python3 scripts/gen_env_reference.py")
             # E174: say WHICH rows differ, so a CI failure shows the cause (usually a variable read by a file that is still tracked
             # in git but is no longer in the release, see scripts/check_stale_files.py) instead of just "out of date".
             diff = [l for l in difflib.unified_diff(current.splitlines(), text.splitlines(), "committed", "generated", lineterm="", n=0)
@@ -136,7 +136,7 @@ def main() -> int:
             if len(diff) > 30:
                 print(f"  ... and {len(diff) - 30} more differing rows")
             return 1
-        print("docs/ENV_REFERENCE.md is up to date")
+        print("docs/ENV_REFERENCE.txt is up to date")
         return 0
     OUT.write_text(text, encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)}: {len(found)} variables")

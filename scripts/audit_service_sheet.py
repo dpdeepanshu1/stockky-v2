@@ -115,7 +115,7 @@ def measure(name):
     # env names vs docs
     envs = set()
     sys.path.insert(0, str(R / "scripts"))
-    import gen_env_reference as _g  # same scanner as docs/ENV_REFERENCE.md (direct reads + wrapper reads)
+    import gen_env_reference as _g  # same scanner as docs/ENV_REFERENCE.txt (direct reads + wrapper reads)
     svc = d.name
     for k, v in _g.scan().items():
         if svc in v["svc"]:
@@ -125,7 +125,7 @@ def measure(name):
             envs |= set(ENVRE.findall(p.read_text(errors="ignore")))
     docs = ""
     for q in list(R.rglob("*.md")) + list(R.glob("docker-compose*.yml")) + list(R.glob("**/.env*")) + list((R / "config").glob("*")) + list((R / "deploy").rglob("*")):
-        if q.is_file() and "archive" not in str(q) and "node_modules" not in str(q) and q.name != "ENV_REFERENCE.md":
+        if q.is_file() and "archive" not in str(q) and "node_modules" not in str(q) and q.name not in ("ENV_REFERENCE.md", "ENV_REFERENCE.txt"):
             try:
                 docs += q.read_text(errors="ignore")
             except Exception:
@@ -160,7 +160,7 @@ def md(m):
     L.append(f"| 3 | Silent exceptions | {m['exc']} broad `except Exception`; {m['silent']} do nothing (`pass`) | {'note' if m['silent'] else 'pass'} |")
     L.append(f"| 4 | Zero as missing | {len(m['falsy'])} `int/float(x.get(k) or N)` sites | {'review' if m['falsy'] else 'pass'} |")
     L.append(f"| 6 | Security | {m['guarded_mut']} mutating routes with a login guard, {len(m['open_mut'])} without | {'review' if m['open_mut'] else 'pass'} |")
-    L.append(f"| 7 | Env settings | {m['env_names']} names read; {len(m['env_undoc'])} have no mention outside the generated `docs/ENV_REFERENCE.md` | {'note' if m['env_undoc'] else 'pass'} |")
+    L.append(f"| 7 | Env settings | {m['env_names']} names read; {len(m['env_undoc'])} have no mention outside the generated `docs/ENV_REFERENCE.txt` | {'note' if m['env_undoc'] else 'pass'} |")
     L.append(f"| 9 | Tests | {m['test_files']} files, {m['test_funcs']:,} test functions (not run in the sandbox) | VM run |")
     L.append(f"| 10 | Hygiene | stray files: {len(m['junk'])}; files over 1 MB: {len(m['big'])}; same-name copies of shared/: {len(m['shared_copies'])} | {'finding' if m['junk'] or m['big'] else 'pass'} |")
     return "\n".join(L)

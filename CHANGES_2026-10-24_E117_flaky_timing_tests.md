@@ -1,4 +1,0 @@
-# E117: two wall-clock tests no longer fail on a busy machine
-
-`test_fail_block_off_stays_quick_and_fail_open` and `test_cached_symbol_stays_quick_and_uses_the_cache` (position-stocks `tests/test_group356_event_shared_fetch.py`) failed once during the E115 full run while other suites were running: they compared a measured time with a 0.2 s / 0.3 s limit that sat only ~0.15 s above the 0.05 s quick path. They now use a 1.0 s retry window and a 1.5 s fake delay, so "quick" (about 0.05 s) and "waited out the retry" (about 1.05 s) are separated by a wide margin, and the limit is 0.6 s.
-Test change only; no production code touched. Passed 3 times in a row with four CPU-burning processes running. Not mutation-tested (I did not re-introduce the retry wait to prove the new limit still catches it).

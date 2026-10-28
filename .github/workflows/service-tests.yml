@@ -89,7 +89,7 @@ on:
       - "scripts/check_table_name_collisions.py"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
-      - "docs/ENV_REFERENCE.md"
+      - "docs/ENV_REFERENCE.txt"
       - ".env.example"
       - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
@@ -174,7 +174,7 @@ on:
       - "docker-compose.yml"
       - "scripts/ms_ab_report.py"
       - "scripts/fetch_history_for_backtest.py"
-      - "docs/ENV_REFERENCE.md"
+      - "docs/ENV_REFERENCE.txt"
       - ".env.example"
       - ".env.oracle.recommended"
       - ".github/workflows/service-tests.yml"
@@ -197,7 +197,7 @@ jobs:
         run: python3 scripts/check_ms_package.py
       - name: NSE holiday lists agree
         run: python3 scripts/check_holiday_lists_sync.py
-      - name: docs/ENV_REFERENCE.md is current (regenerate with scripts/gen_env_reference.py)
+      - name: docs/ENV_REFERENCE.txt is current (regenerate with scripts/gen_env_reference.py)
         run: python3 scripts/gen_env_reference.py --check
       - name: No service defaults MARKET_DATA_URL to a public onrender.com host (group379)
         run: |

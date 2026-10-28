@@ -1,8 +1,0 @@
-# E207 - exit engine counts held days in trading sessions, not calendar days
-
-**Where:** real-trade-service/exit_engine/exit.py (`_held_trading_days`, used where `held_days` was `(now - opened_at).days`). Open item from E194.
-**Bug:** a Friday entry had 3 "held days" by Monday, so the time stop (EXIT_MAX_HOLD_DAYS), the early warning and the trail-ATR schedule ran ahead of the market; a long weekend or holiday made it worse.
-**Fix:** held days = weekdays that are not NSE holidays (tz_utils list), counted after the IST entry date through today. Same day = 0, Friday -> Monday = 1. Never raises (falls back to calendar days on error, and for holds over 400 days). All three users of `held_days` move together, so their meaning stays consistent.
-**Behaviour change to be aware of:** the count flips at the IST date change rather than 24 h after entry, so a time stop can fire up to a few hours earlier on its day. Positions across weekends/holidays are held longer than before in calendar terms (the point of the fix). 2027 holidays are not in the list yet (every 2027 weekday counts as a session).
-**Test rig:** existing exit tests that built positions "N calendar days ago" now use `tests/_tdays.opened_at_trading_days_ago(N)` (test_exit_evaluate_mode, test_exit_position_isolation_and_profile, test_exit_remaining_coverage), otherwise they would depend on the weekday the suite runs on.
-**Tests:** tests/test_e207_held_days_are_trading_days.py (14 cases). I ran the helper's logic standalone (all asserts passed, incl. the round-trip over 30 start days); the pytest suites themselves were NOT RUN.

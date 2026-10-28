@@ -27,3 +27,10 @@ run_output*/
 *_run_output*
 *.run.log
 .venv-test/
+
+# E245: the repo keeps only README.md and CHANGELOG.md. Other Markdown files are ignored so a stale zip or a new note cannot sneak back in
+# (already-tracked files are unaffected; add a bullet to CHANGELOG.md instead of a new note).
+*.md
+!README.md
+!CHANGELOG.md
+*.conflict-backup

@@ -2,8 +2,8 @@
 """exit_followup_study.py - E252 (2026-10-28): did the trades we closed early (STAGNATION_EXIT, trailing stop) go on to reach their target, and how many
 REAL-mode stop-outs came within minutes of the entry. Read-only; it only reads the files you give it.
 
-  curl -s "http://127.0.0.1:<port>/positions/DEMO/records?days=60&limit=1000" > ps_$(date +%F).json     # position-stocks records (adjust host / port / auth)
-  curl -s "http://127.0.0.1:8007/positions/REAL/records?days=60&limit=1000"  > rt_$(date +%F).json     # real-trade records
+  curl -s "http://127.0.0.1:8006/trades/history?limit=1000" > ps_$(date +%F).json                       # position-stocks trades
+  python3 scripts/export_records.py --out rt_$(date +%F).json                                           # real-trade REAL records (asks for the admin login)
   python3 scripts/exit_followup_study.py --records ps_*.json rt_*.json --bars /path/to/bar_recorder_dir [--early-min 10] [--json]
 
   D1  FOLLOW-UP: for every closed trade whose exit was STAGNATION_EXIT or a trailing stop (STOP_HIT / TRAIL_STOP closed ABOVE entry for a long, BELOW for a short),
@@ -62,10 +62,12 @@ def load_records(paths: List[str]) -> List[Dict[str, Any]]:
         except Exception as e:  # noqa: BLE001
             print(f"skipped {p}: {e}", file=sys.stderr)
             continue
-        recs = data.get("records") if isinstance(data, dict) else data
+        recs = (data.get("records") or data.get("trades")) if isinstance(data, dict) else data      # real-trade: "records"; position-stocks /trades/history: "trades"
         for r in recs or []:
             if not isinstance(r, dict):
                 continue
+            if not r.get("mode"):
+                r = dict(r, mode="PS")                                   # position-stocks rows carry no mode
             pid = r.get("position_id", r.get("id"))
             by_key[(r.get("mode"), pid) if pid is not None else (id(r),)] = r
     return list(by_key.values())

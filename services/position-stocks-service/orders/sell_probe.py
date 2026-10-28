@@ -51,6 +51,9 @@ _mem: Dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------- the last result (file + memory, same pattern as approve_first)
+COVER_WAIT_MULT = 3.0   # E250: cover confirmation waits poll_s x this (20s x 3 = 60s)
+
+
 def _path() -> str:
     return os.path.join((os.environ.get("CONTROL_DIR") or "").strip() or "/data/control", "sell_probe_ps.json")
 
@@ -692,6 +695,8 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
     run.res["cover_order_id"] = cover_id
     run.step(f"cover BUY placed, id {cover_id}")
     waited = 0.0
+    cover_wait = max(1.0, float(poll_s)) * COVER_WAIT_MULT   # E250: the cover gets 3x the entry poll (20s -> 60s): a late fill is not a FAIL
+    grace_done = False
     while True:
         try:
             for r in broker.get_order_list(db) or []:
@@ -710,11 +715,16 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
             logger.warning("sell probe: order list read failed (%s)", e)
         # E246: the order list can lag or omit the cover (ONGC, 28 Oct: the cover BUY filled but was "not confirmed within 20s", the short was adopted as a live
         # row and stayed OPEN here while Dhan showed the position closed). Dhan's POSITIONS are the fact: flat beyond the baseline means the cover filled.
-        if int(waited) % 2 == 1 or waited >= poll_s:
+        if int(waited) % 2 == 1 or waited >= cover_wait:
             if _flat_after_cover(db, broker, run, security_id, base):
                 return True, ""
-        if waited >= poll_s:
-            return False, f"the cover BUY {cover_id} was not confirmed filled within {poll_s:.0f}s"
+        if waited >= cover_wait:
+            if not grace_done:
+                # E250: one grace look after a short pause (Dhan's book/positions lag), then give up
+                grace_done = True
+                sleep(3.0)
+                continue
+            return False, f"the cover BUY {cover_id} was not confirmed filled within {cover_wait:.0f}s"
         sleep(1.0)
         waited += 1.0
 

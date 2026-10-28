@@ -490,3 +490,20 @@ def test_a_cover_that_really_has_not_filled_is_still_adopted_with_its_cover_orde
     pos = env.db.query(models.ScalpPosition).one()
     assert "COVER NOT CONFIRMED" in r["reason"] and pos.side == "SHORT" and pos.status == "OPEN"
     assert pos.dhan_exit_order_id == "BUY1", "the cover order id is kept so reconcile can price the exit later"
+
+
+# ------------------------------------------------------------------ E250: ONGC, 28 Oct 11:10 - the cover filled a little after the old 20s wait
+def test_a_cover_that_fills_after_the_old_wait_is_still_a_pass(env):
+    b = FakeDhan(cover_status="PENDING")
+    st = {"t": 0.0}
+
+    def slow_sleep(s):
+        if any(c[0] == "place_order" for c in b.calls):
+            st["t"] += s
+            if st["t"] >= 5.0 and "1594" not in b.covered:           # the cover fills 5s after it was placed; the old wait (poll_s=3) had given up by then
+                b.nets["1594"] = 0
+                b.covered.add("1594")
+
+    r = sell_probe.run_probe(env.db, symbol="ITC", confirm=sell_probe.CONFIRM_PHRASE, broker=b, price_fn=lambda s: 100.0, now=NOW, sleep=slow_sleep, poll_s=3.0, notify=env.notify)
+    assert r["verdict"] == "PASS", r["line"]
+    assert env.db.query(models.ScalpPosition).count() == 0 and not any("cover not confirmed" in a for a in env.alerts)

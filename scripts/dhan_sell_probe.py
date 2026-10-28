@@ -54,6 +54,10 @@ def render(doc: Any) -> Tuple[int, str]:
         out.append(f"step  {s}")
     for r in doc.get("rules") or []:
         out.append(f"dhan  {r}")
+    if str(doc.get("verdict")).upper() == "FAIL":
+        # E242: on a FAIL show what Dhan actually answered (the compact rows), so a wrong field name or a lagging list can be read off the run itself
+        for k, v in (doc.get("answers") or {}).items():
+            out.append(f"raw   {k}: {json.dumps(v, default=str)[:600]}")
     out.append(str(doc["line"]))
     return (1 if str(doc.get("verdict")).upper() == "FAIL" else 0), "\n".join(out)
 

@@ -166,3 +166,19 @@ def _reset_reservation_marker():
     _ledger.reset_reservation_marker()
     yield
     _ledger.reset_reservation_marker()
+
+
+import pytest as _pytest_e241  # noqa: E402
+
+
+@_pytest_e241.fixture(autouse=True)
+def _reset_security_load_throttle():
+    """E241b: dhan_client remembers when the Dhan security list last failed to load (to avoid a download per order); never let that leak between tests."""
+    import sys
+    def _clear():
+        mod = sys.modules.get("execution.dhan_client")
+        if mod is not None:
+            mod._security_load_failed_at = 0.0
+    _clear()
+    yield
+    _clear()

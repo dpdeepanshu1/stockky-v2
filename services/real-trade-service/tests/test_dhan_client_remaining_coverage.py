@@ -6,7 +6,7 @@ Run from services/real-trade-service:
     python -m pytest tests/test_dhan_client_remaining_coverage.py -q
 """
 from __future__ import annotations
-import os, sys, unittest.mock as mock
+import os, sys, time, unittest.mock as mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
@@ -993,3 +993,37 @@ class TestGetOrderListNonList:
         db = _sdk_db(monkeypatch, sdk)
         result = dc.get_order_list(db)
         assert result == [{"orderId": "X1"}]
+
+
+# ── E241: an empty security list is reported as such, not as a missing symbol ──
+def test_e241_empty_cache_message_names_the_real_cause(monkeypatch):
+    dc._security_cache.clear()
+    dc._security_cache_loaded_at = 0.0
+    monkeypatch.setattr(dc, "_load_security_cache", mock.Mock())
+    with pytest.raises(dc.SecurityNotResolvedError) as ei:
+        dc.get_security_id(_fresh_db(), "HFCL")
+    assert "security list is empty" in str(ei.value) and "HFCL" in str(ei.value)
+    dc._security_cache["OTHER"] = "1"
+    dc._security_cache_loaded_at = 9_999_999_999.0
+    with pytest.raises(dc.SecurityNotResolvedError) as ei2:
+        dc.get_security_id(_fresh_db(), "HFCL")
+    assert "empty" not in str(ei2.value)
+    dc._security_cache.clear()
+    dc._security_cache_loaded_at = 0.0
+
+
+def test_e241b_failed_load_is_not_retried_on_every_order(monkeypatch):
+    dc._security_cache.clear()
+    dc._security_cache_loaded_at = 0.0
+    dc._security_load_failed_at = 0.0
+    load_mock = mock.Mock()
+    monkeypatch.setattr(dc, "_load_security_cache", load_mock)
+    for _ in range(3):
+        with pytest.raises(dc.SecurityNotResolvedError):
+            dc.get_security_id(_fresh_db(), "HFCL")
+    assert load_mock.call_count == 1, "a failed load must not restart on every order"
+    dc._security_load_failed_at = time.time() - 61
+    with pytest.raises(dc.SecurityNotResolvedError):
+        dc.get_security_id(_fresh_db(), "HFCL")
+    assert load_mock.call_count == 2
+    dc._security_load_failed_at = 0.0

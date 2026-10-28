@@ -4,6 +4,9 @@
 // preflight, and the token is never sent anywhere else).
 // No imports on purpose: this file is tested by plain node (src/gatewayAuth.test.mjs).
 const TOKEN_KEY = "stockky:real_trade_session_token";
+// E241: the gateway accepts the token of either login service (admin_guard._ACCEPT). Someone logged in only on Position Stocks has no real-trade token,
+// so the gateway calls (training, alerts...) went out bare and got a 401. Fall back to the Position Stocks token.
+const TOKEN_KEY_FALLBACK = "stockky:position_stocks_session_token";
 const ADMIN_PATH =
   /^\/(?:notifications\/(?:config|call\/me|test|send-picks)|training\/train|ops\/(?:power-off|circuit-reset|overnight\/(?:config|run)|resume-activity|qstash\/publish)|(?:data-)?feed\/(?:hard-reset|purge-over-cap)|(?:surprise\/)?ipo\/(?:notify-top-picks|purge-non-equity)|(?:surprise|stockky-hot)\/notify-top-picks|scan\/universe\/cache)(?:[/?#]|$)/;
 // E148 (F-12): the training service's own system-level actions, reached through the gateway's /training/* proxy. Mirrors admin_guard._TRAINING_ADMIN
@@ -32,7 +35,7 @@ export function installGatewayAuth(getBase: () => string): void {
       const isReq = typeof Request !== "undefined" && input instanceof Request;
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : isReq ? (input as Request).url : String(input);
       if (isGatewayAdminUrl(url, getBase())) {
-        const token = window.localStorage.getItem(TOKEN_KEY);
+        const token = window.localStorage.getItem(TOKEN_KEY) || window.localStorage.getItem(TOKEN_KEY_FALLBACK);
         if (token) {
           const headers = new Headers(init?.headers ?? (isReq ? (input as Request).headers : undefined));
           if (!headers.has("Authorization")) {

@@ -39,8 +39,9 @@ class FakeDhan:
 
     def __init__(self, **kw):
         self.kw = dict(refuse_sell=None, fill=True, legs="ok", cancel_works=True, cover_works=True, list_fails_after_cancel=False, ambiguous=False,
-                       cover_status="TRADED")
+                       cover_status="TRADED", lag=False, preheld=0, positions_fail=False, flat_despite_fill=False)
         self.kw.update(kw)
+        self.nets = {"1594": int(self.kw["preheld"])} if self.kw["preheld"] else {}      # Dhan's signed net quantity per security id (ITC is 1594)
         self.calls = []
         self.cancelled = False
         self.row = None
@@ -52,14 +53,28 @@ class FakeDhan:
         self.read_stop_leg_price = dhan_client.read_stop_leg_price
         self.is_ambiguous_placement_error = dhan_client.is_ambiguous_placement_error
         self.recovered = None                      # what find_recent_buy_order returns after an unclear SELL
+        self.calls_made_order = False
 
     def get_security_id(self, db, sym):
-        return "1594"
+        return "1594" if sym == "ITC" else "9999"
+
+    def get_positions(self, db):
+        self.calls.append(("get_positions", {}))
+        if self.kw["positions_fail"]:
+            raise RuntimeError("dhan 502")
+        return [{"securityId": sid, "productType": "INTRADAY", "netQty": n, "sellAvg": 100.0 if n < 0 else 0.0} for sid, n in self.nets.items()]
+
+    @property
+    def net(self):
+        return self.nets.get("1594", 0)
 
     def place_super_order(self, db, **kw):
         self.calls.append(("place_super_order", kw))
         if self.kw["refuse_sell"]:
             raise RuntimeError(self.kw["refuse_sell"])
+        self.calls_made_order = True
+        if (self.kw["fill"] or self.kw["lag"]) and not self.kw["flat_despite_fill"]:
+            self.nets[kw["security_id"]] = self.nets.get(kw["security_id"], 0) - kw["quantity"]    # the exchange filled it; with lag=True the list does not say so
         t, s, k = kw["target_price"], kw["stop_loss_price"], self.kw["legs"]
         legs = [{"legName": "ENTRY_LEG", "orderStatus": "TRADED" if self.kw["fill"] else "PENDING", "transactionType": "SELL", "averageTradedPrice": kw["price"] if self.kw["fill"] else 0, "filledQty": kw["quantity"] if self.kw["fill"] else 0}]
         if k != "no_target":
@@ -95,6 +110,8 @@ class FakeDhan:
         if not self.kw["cover_works"]:
             raise RuntimeError("RMS: rejected")
         self.orders.append({"orderId": "BUY1", "orderStatus": self.kw["cover_status"], "averageTradedPrice": 100.4})
+        if self.kw["cover_status"] == "TRADED":
+            self.nets[kw["security_id"]] = self.nets.get(kw["security_id"], 0) + kw["quantity"]
         return {"orderId": "BUY1"}
 
     def get_order_list(self, db):
@@ -199,7 +216,7 @@ def test_no_live_price_open_position_and_held_symbol_skip(env):
     env.db.add(models.SharedSymbolLock(symbol="ITC", held_by_service="real-trade-service", held_by_mode="REAL"))
     env.db.commit()
     assert "held by the other service" in _run(env, b)["reason"]
-    assert b.calls == []
+    assert b.n("place_super_order") == 0 and b.n("place_order") == 0 and b.n("cancel_super_order") == 0     # (positions are read-only and may be read)
 
 
 def test_super_order_must_be_on(env, monkeypatch):
@@ -324,6 +341,74 @@ def test_one_probe_at_a_time(env):
         assert r["verdict"] == "SKIPPED" and "already running" in r["reason"]
     finally:
         sell_probe._lock.release()
+
+
+# ------------------------------------------------------------------ E242: Dhan's POSITIONS are the ground truth (28 Oct 2026 real run)
+# The first real run read "entry never filled ... nothing to cover" from the Super Order list, sent no BUY, and Dhan showed an open ITC short with every leg cancelled
+# and Stockky's Positions tab empty.
+def test_entry_filled_at_dhan_but_not_shown_by_the_list_is_still_covered_and_reported(env):
+    b = FakeDhan(fill=False, lag=True)
+    r = _run(env, b)
+    assert b.n("place_order") == 1, "the position was short, so the 1-share cover is sent"
+    assert b.net == 0, "the book is flat again"
+    assert r["verdict"] == "FAIL" and "did not show the entry as filled" in r["reason"] and "positions show the short filled" in r["reason"]
+    assert env.db.query(models.ScalpPosition).count() == 0 and _locks(env.db) == 0
+    assert r["answers"]["row_after_fill"]["orderStatus"] == "PENDING", "the raw row is kept so the field mismatch can be read off the run"
+
+
+def test_short_at_dhan_with_a_cover_that_fails_is_adopted_even_when_the_list_never_showed_the_fill(env):
+    b = FakeDhan(fill=False, lag=True, cover_works=False)
+    r = _run(env, b)
+    pos = env.db.query(models.ScalpPosition).one()           # this is what the Positions tab shows: not "nothing"
+    assert pos.side == "SHORT" and pos.status == "OPEN" and pos.symbol == "ITC" and pos.quantity == 1
+    assert "adopted as a normal SHORT row" in r["reason"] and any("cover not confirmed" in a for a in env.alerts)
+
+
+def test_a_position_the_probe_did_not_open_blocks_it(env):
+    b = FakeDhan(preheld=-3)                                  # ITC already short 3 at Dhan, as in the screenshot
+    r = _run(env, b, symbol="ITC")
+    assert r["verdict"] == "SKIPPED" and "already has a position at Dhan (net -3)" in r["reason"]
+    assert b.n("place_super_order") == 0 and b.n("place_order") == 0 and _locks(env.db) == 0
+
+
+def test_a_held_first_symbol_moves_the_default_probe_to_the_next_flat_one(env):
+    b = FakeDhan(preheld=-3)
+    r = sell_probe.run_probe(env.db, symbol=None, confirm=sell_probe.CONFIRM_PHRASE, broker=b, price_fn=lambda s: 100.0, now=NOW, sleep=lambda s: None, poll_s=3.0,
+                             notify=env.notify)
+    assert r["symbol"] == "NTPC" and b.n("place_super_order") == 1
+
+
+def test_unreadable_positions_refuse_the_probe_before_any_order(env):
+    b = FakeDhan(positions_fail=True)
+    r = _run(env, b)
+    assert r["verdict"] == "SKIPPED" and "positions could not be read" in r["reason"]
+    assert b.n("place_super_order") == 0 and sell_probe.last_result() == {}
+
+
+def test_positions_going_unreadable_after_the_order_sends_no_blind_buy(env):
+    class B(FakeDhan):
+        def get_positions(self, db):
+            if self.calls_made_order:
+                raise RuntimeError("dhan 502")
+            return super().get_positions(db)
+    b = B(fill=False)
+    r = _run(env, b)
+    assert b.n("place_order") == 0 and r["verdict"] == "FAIL"
+    assert "CHECK DHAN" in r["reason"] or "did not show as filled" in r["reason"]
+
+
+def test_a_filled_row_over_a_flat_position_buys_nothing(env):
+    b = FakeDhan(flat_despite_fill=True)
+    r = _run(env, b)
+    assert b.n("place_order") == 0, "a BUY on a flat book would open a long"
+    assert r["verdict"] == "FAIL" and "positions never showed a short" in r["reason"]
+    assert env.db.query(models.ScalpPosition).count() == 0
+
+
+def test_the_cover_is_checked_against_the_position(env):
+    b = FakeDhan()
+    r = _run(env, b)
+    assert r["verdict"] == "PASS" and b.net == 0 and r["answers"]["short_after_cancel"] == 1
 
 
 # ------------------------------------------------------------------ static rails read from the source

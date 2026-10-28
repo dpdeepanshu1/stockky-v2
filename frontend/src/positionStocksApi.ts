@@ -490,7 +490,8 @@ export const positionStocksApi = {
   timeMachineStatus: () => psRequest<any>("/time-machine/status"),
   timeMachineRun: (body: Record<string, unknown>) => psRequest<any>("/time-machine/run", { method: "POST", body: JSON.stringify(body) }),
   timeMachineGate: () => psRequest<any>("/time-machine/gate"),
-  timeMachineScan: () => psRequest<any>("/time-machine/scan?reason=manual%20panel", { method: "POST" }),
+  // E241: the route needs the admin login (require_admin) - send the stored session token (it was sent bare before and always got a 401).
+  timeMachineScan: () => psRequest<any>("/time-machine/scan?reason=manual%20panel", { method: "POST" }, true),
   timeMachineCompare: (body: Record<string, unknown>) => psRequest<any>("/time-machine/compare", { method: "POST", body: JSON.stringify(body) }),
   // group338: the best 3-to-5 pick CARDS (last entry cycle + board preview), read-only.
   topPicks: () => psRequest<any>("/top-picks"),

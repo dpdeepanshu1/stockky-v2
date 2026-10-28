@@ -78,7 +78,7 @@ def _startup() -> None:
                     max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
                     notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S,
                     after_fn=lambda run: auto.on_run_finished(run, J.PACK_MAP) if auto else None,
-                    workers=config.WORKERS, max_heavy=config.MAX_HEAVY, min_free_mb=config.MIN_FREE_MB)
+                    workers=config.WORKERS, max_heavy=config.MAX_HEAVY, min_free_mb=config.MIN_FREE_MB, heavy_proc_mb=config.HEAVY_PROC_MB, default_pool_jobs=config.DEFAULT_POOL_JOBS)
 
     def _tell(title: str, message: str, urgency: str) -> Optional[str]:
         text = redact(message)

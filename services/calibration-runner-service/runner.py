@@ -84,6 +84,18 @@ def _mem_available_mb() -> Optional[float]:
     return min(vals) if vals else None
 
 
+def _mem_limit_mb() -> Optional[float]:
+    """E240: the container memory limit in MB (cgroup v2 memory.max, else v1 limit_in_bytes). None when unlimited or unreadable."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = open(path).read().strip()
+        except OSError:
+            continue
+        if v.isdigit() and int(v) < (1 << 50):
+            return int(v) / 1048576.0
+    return None
+
+
 def _key_overlap(a: str, b: str) -> bool:
     """E235: two lock keys touch the same thing: equal, one inside the other, or a glob that matches the other."""
     if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
@@ -141,7 +153,7 @@ class Runner:
                  token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
                  keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now,
                  notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False, preflight_s: float = 60.0,
-                 after_fn: Optional[Callable[[Dict[str, Any]], Any]] = None, workers: int = 1, max_heavy: int = 1, min_free_mb: float = 0.0):
+                 after_fn: Optional[Callable[[Dict[str, Any]], Any]] = None, workers: int = 1, max_heavy: int = 1, min_free_mb: float = 0.0, heavy_proc_mb: float = 800.0, default_pool_jobs: int = 3):
         self.data = data_dir
         self.runs_dir = os.path.join(data_dir, "runs")
         self.ctx_base = dict(ctx_base)
@@ -169,6 +181,8 @@ class Runner:
             pass
         self.max_heavy = max(1, int(max_heavy))
         self.min_free_mb = max(0.0, float(min_free_mb))
+        self.heavy_proc_mb = max(1.0, float(heavy_proc_mb))
+        self.default_pool_jobs = max(1, int(default_pool_jobs))
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
         self.queue: Deque[Run] = deque()
@@ -463,6 +477,8 @@ class Runner:
             return f"queued behind {ahead.d.get('title') or ahead.d['target']} (same data)"
         if r.heavy and sum(1 for x in self.running if x.heavy) >= self.max_heavy:
             return f"{self.max_heavy} heavy run(s) already going"
+        if r.heavy and any(x.heavy for x in self.running) and self.min_free_mb > 0 and not self._heavy_fits(r, _mem_limit_mb()):
+            return "waiting for memory: the heavy run already going needs it (RUNNER_HEAVY_PROC_MB, RUNNER_POOL_JOBS)"
         return "starting"
 
     # ---------------------------------------------------------------- worker pool (E235)
@@ -523,6 +539,25 @@ class Runner:
             time.sleep(0.05)
         return False
 
+    def _heavy_footprint_mb(self, r: Run) -> float:
+        """E240: memory a heavy run is expected to take once it has ramped up: its parent plus one process per pool worker (the 'jobs' option)."""
+        try:
+            jobs = int((r.d.get("params") or {}).get("jobs") or 0)
+        except (TypeError, ValueError):
+            jobs = 0
+        if jobs <= 0:
+            jobs = self.default_pool_jobs
+        return (jobs + 1) * self.heavy_proc_mb
+
+    def _heavy_fits(self, r: Run, limit_mb: Optional[float]) -> bool:
+        """E240: may this heavy run start next to the heavy runs already going? A replay ramps its memory up over minutes, so the free memory
+        seen at start-up says nothing (two replays started in the same second on 28 Oct and the container was OOM-killed, failing 8 runs):
+        count what the running ones WILL use, against the container limit, and keep min_free_mb spare. No limit known -> allowed."""
+        if limit_mb is None:
+            return True
+        committed = sum(self._heavy_footprint_mb(x) for x in self.running if x.heavy)
+        return limit_mb - committed - self._heavy_footprint_mb(r) >= self.min_free_mb
+
     def _pick(self) -> Optional[Run]:
         """E235: the first queued run that fits now. FIFO, but a run that cannot start does not hold back a later run that does not clash with
         it; a later run never jumps in front of an older WAITING run it clashes with (a waiting writer is not starved by readers). Caller holds the lock."""
@@ -538,7 +573,7 @@ class Runner:
                     if mem_low is None:
                         free = _mem_available_mb()
                         mem_low = free is not None and free < self.min_free_mb
-                    ok = not mem_low
+                    ok = not mem_low and self._heavy_fits(r, _mem_limit_mb())
             if ok:
                 return r
             ahead.append(r)

@@ -223,6 +223,11 @@ async def lifespan(app: FastAPI):
                 len(released), released,
             )
 
+    # E238: warm the /board/shadow-report cache once after boot (days=30, the value strategy_readout asks for) so the first call is a
+    # cache hit. Background thread, never fatal, skipped when the board or the cache is off.
+    if config.BOARD_ENABLED and config.BOARD_REPORT_CACHE_S > 0 and _board_report_claim(30):
+        threading.Thread(target=_board_report_refresh_bg, args=(30,), daemon=True, name="board-report-warm").start()
+
     if not config.RISK_PER_TRADE_PCT_CONFIRMED:
         # BUG FIX (session112 round 20 — found while adding lifespan()
         # coverage): the old message had a bare, unescaped `%` in
@@ -3073,6 +3078,15 @@ def board_self_check():
 _BOARD_REPORT_CACHE: dict = {}
 _BOARD_REPORT_LOCK = threading.Lock()
 _BOARD_REPORT_BUSY: set = set()
+
+
+def _board_report_claim(days: int) -> bool:
+    """Mark `days` as refreshing (so a request does not start a second refresh); False if one is already running."""
+    with _BOARD_REPORT_LOCK:
+        if days in _BOARD_REPORT_BUSY:
+            return False
+        _BOARD_REPORT_BUSY.add(days)
+        return True
 
 
 def _board_report_compute(db: Session, days: int) -> dict:

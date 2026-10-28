@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import config
 from execution.dhan_client import round_to_tick
@@ -531,6 +531,59 @@ def apply_target_cap(levels: AdaptiveLevels, current_ltp: float, side: Optional[
         return levels
 
 
+def stop_floor_pct(daily_atr_pct: Optional[float], m1_range_pct: Optional[float]) -> Tuple[float, str]:
+    """E251: the smallest stop (%) this stock's own noise allows: the larger of ADAPTIVE_STOP_DAILY_ATR_FRAC x its daily ATR % and ADAPTIVE_STOP_M1_MULT x
+    its average 1-minute range, capped at ADAPTIVE_STOP_FLOOR_MAX_PCT. (0.0, "") when neither number is known. Pure."""
+    parts = []
+    frac, mult = float(getattr(config, "ADAPTIVE_STOP_DAILY_ATR_FRAC", 0.0) or 0.0), float(getattr(config, "ADAPTIVE_STOP_M1_MULT", 0.0) or 0.0)
+    if daily_atr_pct and daily_atr_pct > 0 and frac > 0:
+        parts.append((frac * float(daily_atr_pct), f"{frac:g}xdailyATR {float(daily_atr_pct):.2f}%"))
+    if m1_range_pct and m1_range_pct > 0 and mult > 0:
+        parts.append((mult * float(m1_range_pct), f"{mult:g}x1m-range {float(m1_range_pct):.2f}%"))
+    if not parts:
+        return 0.0, ""
+    val, why = max(parts, key=lambda p: p[0])
+    cap = float(getattr(config, "ADAPTIVE_STOP_FLOOR_MAX_PCT", 0.0) or 0.0)
+    if cap > 0 and val > cap:
+        return cap, f"{why} -> capped at {cap:g}%"
+    return val, why
+
+
+def apply_stop_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optional[str] = None, side: Optional[str] = None) -> AdaptiveLevels:
+    """E251: widen a stop that is smaller than the stock's own noise (stop_floor_pct) and move the target with it so reward:risk stays at least
+    max(ADAPTIVE_BAR_TARGET_RR, ENTRY_MIN_REWARD_RISK). Long only (a short keeps its levels), never tightens, fails open (same levels back)."""
+    try:
+        side = normalize_side(side if side is not None else getattr(levels, "side", "LONG"))
+        if side != "LONG" or not symbol or current_ltp <= 0 or not getattr(config, "ADAPTIVE_STOP_FLOOR_ENABLED", False):
+            return levels
+        daily = None
+        try:
+            from screening import prev_day
+            pdv = prev_day.peek(symbol)
+            daily = getattr(pdv, "atr_pct", None) if pdv else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("adaptive: daily ATR for %s unavailable (stop floor uses 1-minute range only): %s", symbol, e)
+        from orders import entry_timing
+        floor, why = stop_floor_pct(daily, entry_timing.live_avg_1m_range_pct(symbol))
+        if floor <= levels.stop_pct + 1e-9:
+            return levels
+        rr = max(float(getattr(config, "ADAPTIVE_BAR_TARGET_RR", 2.0) or 0.0), float(getattr(config, "ENTRY_MIN_REWARD_RISK", 0.0) or 0.0), 1.2)
+        target_pct = max(levels.target_pct, floor * rr)
+        tmax = float(getattr(config, "ADAPTIVE_BAR_TARGET_MAX_PCT", 0.0) or 0.0)
+        if tmax > 0:
+            target_pct = min(target_pct, max(tmax, floor * rr))     # the cap never takes the 2:1 away from a wider stop
+        target_price, stop_price = _levels_to_prices(current_ltp, target_pct, floor, side)
+        logger.info("adaptive: %s stop floor %.2f%% -> %.2f%% (%s), target %.2f%% -> %.2f%%", symbol, levels.stop_pct, floor, why, levels.target_pct, target_pct)
+        return AdaptiveLevels(
+            target_pct=round(target_pct, 4), stop_pct=round(floor, 4), target_price=target_price, stop_price=stop_price,
+            breakeven_trigger_pct=_breakeven_trigger(target_pct), range_regime=levels.range_regime, range_position=levels.range_position,
+            atr_proxy_pct=levels.atr_proxy_pct, basis=(str(levels.basis or "legacy") + "+f")[:16], side=side,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("adaptive: stop floor failed for %s (keeping the levels): %s", symbol, e)
+        return levels
+
+
 def compute(
     pct_change: float,
     current_ltp: float,
@@ -539,4 +592,4 @@ def compute(
 ) -> AdaptiveLevels:
     """Adaptive target/stop for a scalp (long by default; side="SHORT" for a short), then the group 340 target cap (see apply_target_cap)."""
     side = normalize_side(side)
-    return apply_target_cap(_compute_levels(pct_change, current_ltp, symbol, side), current_ltp, side)
+    return apply_target_cap(apply_stop_floor(_compute_levels(pct_change, current_ltp, symbol, side), current_ltp, symbol, side), current_ltp, side)

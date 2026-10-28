@@ -108,6 +108,7 @@ class TestAdaptiveHook:
         seed("AAA", pd_of(3.0))                                    # bar ~0.75% -> stop 0.75*1.3 = 0.975%
         opening_plan.build(["AAA"], now=MON(9, 10))
         self.at_open(monkeypatch)
+        monkeypatch.setattr(config, "ADAPTIVE_BAR_STOP_MIN_PCT", 0.8)   # E251 raised the production floor to 1.2; this test pins the plan -> stop mapping, not the floor
         lv = adaptive.compute(0.0, 100.0, symbol="AAA")
         assert lv.stop_pct == pytest.approx(0.975, abs=0.01)
         assert lv.stop_pct < config.MIN_STOP_PCT

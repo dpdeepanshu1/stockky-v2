@@ -152,7 +152,7 @@ def test_cutoff_blocks_after_1400_by_default_value(monkeypatch):
 # ---- wiring (static: the DB-backed entry path needs sqlalchemy) -----------------------------------------------------------
 def test_entry_py_wires_the_three_guards_in_order():
     src = (ROOT / "orders" / "entry.py").read_text()
-    assert "stopout_guard.entry_reason(db, candidate.symbol)" in src
+    assert "stopout_guard.entry_reason(db, candidate.symbol, allow_symbol=bool(_reclaim))" in src   # E251: the reclaim re-entry lifts only the symbol block
     assert "orb_shadow.attach(" in src
     assert 'f"MIN_QTY:qty={quantity}<{_min_q}' in src
     assert src.index("stopout_guard.entry_reason") < src.index("# Max concurrent positions")

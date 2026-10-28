@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -236,7 +236,7 @@ def _rejected_entry_reject(db: Session, symbol: str) -> Optional[str]:
         return None
 
 
-def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float) -> Optional[str]:
+def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float, reclaim: bool = False) -> Optional[str]:
     """Same-symbol re-entry guard (this session).
 
     Finds the most recently CLOSED position for this symbol. If it closed
@@ -248,6 +248,11 @@ def _reentry_guard_reject(db: Session, symbol: str, current_ltp: float) -> Optio
     ₹139.50, then stop out). No prior closed trade, or cooldown already
     elapsed, or a real pullback present → allowed (returns None).
     """
+    # E251: one reclaim re-entry (orders/stopout_guard.py::reclaim_decision) already passed its own tests - the loss block and the cooldown below
+    # exist to stop re-buying a fading move, which the reclaim test (price back above the old entry, not chasing) has just checked.
+    if reclaim:
+        return None
+
     # 2026-10-02: a symbol that already closed at a LOSS today is blocked for
     # the rest of the day — the 30-minute cooldown below let the system buy
     # back into the same fading move (GANDHAR, SUPREMEINF re-entered 2-3x).
@@ -373,6 +378,8 @@ _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_", "TIME_MACHINE",
     # E249: per-symbol sizing / level rejects. They ended the cycle, so one high-priced rank-1 name (MIN_QTY) blocked every cheaper passer behind it each ~15 s.
     "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE",
+    # E251: spike-chase / gain-room refusals concern only the symbol just tried; the next shortlisted pick is still tried this cycle.
+    "SPIKE_CHASE", "GAIN_ROOM",
 )
 
 
@@ -433,7 +440,7 @@ def log_quality_reject(db: Session, candidate: Candidate, quality: QualitySignal
 def _stop_basis(levels) -> Optional[str]:
     """group395: the stop's source tag (AdaptiveLevels.basis) for the position row; None when the levels carry no string tag. Never raises."""
     b = getattr(levels, "basis", None)
-    return b if isinstance(b, str) and b else None
+    return b[:16] if isinstance(b, str) and b else None   # E251: scalp_positions.stop_basis is VARCHAR(16)
 
 
 def _arm_pullback(candidate: Candidate, reason: str) -> None:
@@ -500,7 +507,12 @@ def attempt_entry(
 
     # group479: whole-day stop-out guard - STOPOUT_DAY_PAUSE_N losing stop-outs today pause every new automatic entry until the next session, and a
     # symbol stopped out today is not re-bought today (orders/stopout_guard.py; counted from scalp_positions, fails open, STOPOUT_GUARD_ENABLED=false = off).
-    _so_reject = stopout_guard.entry_reason(db, candidate.symbol)
+    # E251: ONE reclaim re-entry - a symbol whose only trade today was a losing stop-out, back above its old entry and not chasing, is allowed once more.
+    # The day pause above still applies, and every other gate below still applies to the re-entry.
+    _reclaim = stopout_guard.reclaim_allowed(db, candidate.symbol, candidate.current_ltp)
+    if _reclaim:
+        logger.info("entry: %s reclaim re-entry allowed - %s", candidate.symbol, _reclaim.get("why"))
+    _so_reject = stopout_guard.entry_reason(db, candidate.symbol, allow_symbol=bool(_reclaim))
     if _so_reject:
         _log_candidate(db, candidate, "SKIPPED", _so_reject, quality=quality)
         return None
@@ -575,6 +587,16 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", f"RANGE_GATE:{range_reject}", quality=quality)
         return None
 
+    # E251: spike-chase guard (orders/entry_timing.py). The entry is a MARKET order, so a buy at the top of a day spike / mid-thrust fills at the top
+    # and the ordinary give-back (ARVIND 28 Oct: stopped inside a minute, then ran to the target) is bigger than the stop. Refused here, armed for the
+    # pullback re-arm (buy after a real pullback and bounce). A re-arm entry has already waited for that pullback. Fails open.
+    spike_reject = None if rearm else entry_timing.spike_reason(candidate.symbol, candidate.current_ltp)
+    if spike_reject:
+        _arm_pullback(candidate, spike_reject)
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", spike_reject, quality=quality)
+        return None
+
     # group 268: opening-quality gate (09:15 until OPENING_GATE_SETTLE_IST). Fails CLOSED while active.
     opening_reject = opening_gate.reject_reason(candidate.symbol, candidate.current_ltp)
     if opening_reject and rearm and pullback_rearm.is_waived_opening_reason(opening_reject):
@@ -598,7 +620,7 @@ def attempt_entry(
     # back into a symbol we just closed at/above the price we exited at,
     # within the cooldown window. See _reentry_guard_reject()'s docstring.
     reentry_reject = _rejected_entry_reject(db, candidate.symbol) or _reentry_guard_reject(
-        db, candidate.symbol, candidate.current_ltp
+        db, candidate.symbol, candidate.current_ltp, reclaim=bool(_reclaim)
     )
     if reentry_reject:
         shared_symbol_lock.release(db, candidate.symbol)
@@ -635,6 +657,14 @@ def attempt_entry(
     if _rr_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _rr_reject, quality=quality)
+        return None
+
+    # E251: gain-room gate (orders/gain_room.py): the final stop / target must be realistically reachable today (replayed odds on the stock's own bars and
+    # the share of its normal day range left above the price). Fails open.
+    _gr_reject = gain_room.reject_reason(candidate.symbol, candidate.current_ltp, levels.stop_pct, levels.target_pct)
+    if _gr_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _gr_reject, quality=quality)
         return None
 
     # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.

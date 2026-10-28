@@ -404,7 +404,7 @@ ADAPTIVE_BAR_MINUTES = _get_int("ADAPTIVE_BAR_MINUTES", 5)
 ADAPTIVE_BAR_LOOKBACK = _get_int("ADAPTIVE_BAR_LOOKBACK", 6)
 ADAPTIVE_BAR_MIN_BARS = _get_int("ADAPTIVE_BAR_MIN_BARS", 3)
 ADAPTIVE_BAR_STOP_MULT = _get_float("ADAPTIVE_BAR_STOP_MULT", 1.3)
-ADAPTIVE_BAR_STOP_MIN_PCT = _get_float("ADAPTIVE_BAR_STOP_MIN_PCT", 0.8)
+ADAPTIVE_BAR_STOP_MIN_PCT = _get_float("ADAPTIVE_BAR_STOP_MIN_PCT", 1.2)   # E251: 0.8 -> 1.2 (11 of 14 trades sat on the 0.8 floor; ARVIND 28 Oct stopped in 1 minute)
 ADAPTIVE_BAR_STOP_MAX_PCT = _get_float("ADAPTIVE_BAR_STOP_MAX_PCT", 2.0)
 ADAPTIVE_BAR_TARGET_RR = _get_float("ADAPTIVE_BAR_TARGET_RR", 2.0)   # 2026-10-22: 1.8 -> 2.0 (reward:risk 1:2)
 ADAPTIVE_BAR_TARGET_MAX_PCT = _get_float("ADAPTIVE_BAR_TARGET_MAX_PCT", 3.5)
@@ -840,9 +840,9 @@ ADAPTIVE_HISTORY_MISS_CACHE_S = _get_float("ADAPTIVE_HISTORY_MISS_CACHE_S", 120.
 # Scalp target cap: no trade on 2026-10-12 got past +2.3% (targets 3.5-4.4%, clocks cut trades at 20-30 min). A target above the cap is cut to
 # it; if reward:risk then falls under SCALP_TARGET_CAP_MIN_RR the stop is tightened to target/MIN_RR (never under SCALP_TARGET_CAP_MIN_STOP_PCT).
 # Risk-based sizing makes a tighter stop a larger position for the SAME rupee risk. 0 = no cap.
-SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 2.5)
+SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 3.0)   # E251: 2.5 -> 3.0 so a 1.5 % stop keeps 2:1 instead of being squeezed back to 1.25 %
 SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 2.0)   # 2026-10-22: 1.5 -> 2.0 (reward:risk 1:2)
-SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 0.8)
+SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 1.2)   # E251: 0.8 -> 1.2
 SCALP_TARGET_CAP_MIN_STOP_ATR_MULT = _get_float("SCALP_TARGET_CAP_MIN_STOP_ATR_MULT", 1.0)   # 2026-10-19: stop floor after a target cap = this x the symbol ATR proxy %; 0 = off
 
 # ── Pullback re-arm entries (2026-10-19, orders/pullback_rearm.py) ────────────────────────────────────────────────
@@ -858,7 +858,7 @@ REARM_MAX_AGE_MIN = _get_float("REARM_MAX_AGE_MIN", 90.0)                # an ar
 REARM_MAX_ATTEMPTS = _get_int("REARM_MAX_ATTEMPTS", 2)                   # per symbol per day
 REARM_MAX_ARMED = _get_int("REARM_MAX_ARMED", 25)
 REARM_STOP_BUFFER_PCT = _get_float("REARM_STOP_BUFFER_PCT", 0.15)        # stop sits this far under the pullback low
-REARM_MIN_STOP_PCT = _get_float("REARM_MIN_STOP_PCT", 0.7)               # ... but never closer than this to the entry
+REARM_MIN_STOP_PCT = _get_float("REARM_MIN_STOP_PCT", 1.0)               # ... but never closer than this to the entry
 # Share rounding (orders/sizing.py): floor() lost up to a share (CLEANMAX: budget ~1.9 shares -> 1). Round up when the extra share costs at most
 # SIZING_MAX_OVERSHOOT_PCT over the budget; when ONE share costs more than SIZING_ONE_SHARE_MAX_MULT x the budget, skip instead of forcing 1
 # share. SIZING_ROUNDING_ENABLED=0 = old behaviour.
@@ -1329,6 +1329,43 @@ EXIT_FILL_CONFIRM_ONCE = _get_bool("EXIT_FILL_CONFIRM_ONCE", True)
 STOPOUT_GUARD_ENABLED = _get_bool("STOPOUT_GUARD_ENABLED", True)
 STOPOUT_DAY_PAUSE_N = _get_int("STOPOUT_DAY_PAUSE_N", 3)            # 0 = no day pause
 STOPOUT_SYMBOL_BLOCK = _get_bool("STOPOUT_SYMBOL_BLOCK", True)
+
+# ── E251 (2026-10-28): ARVIND bought 518.15 right after a spike, 1.2 % stop hit one minute later, then the stock ran to the target. ───────────
+# 1. Volatility-aware stop floor (orders/adaptive.py::apply_stop_floor): the stop is never smaller than ADAPTIVE_STOP_DAILY_ATR_FRAC x the stock's
+#    own daily ATR % nor ADAPTIVE_STOP_M1_MULT x its average 1-minute range (last 5 min), capped at ADAPTIVE_STOP_FLOOR_MAX_PCT; the target moves with it (2:1).
+ADAPTIVE_STOP_FLOOR_ENABLED = _get_bool("ADAPTIVE_STOP_FLOOR_ENABLED", True)
+ADAPTIVE_STOP_DAILY_ATR_FRAC = _get_float("ADAPTIVE_STOP_DAILY_ATR_FRAC", 0.45)
+ADAPTIVE_STOP_M1_MULT = _get_float("ADAPTIVE_STOP_M1_MULT", 2.0)
+ADAPTIVE_STOP_FLOOR_MAX_PCT = _get_float("ADAPTIVE_STOP_FLOOR_MAX_PCT", 1.5)
+# 2. Spike-chase guard (orders/entry_timing.py): no MARKET buy at the top of a day spike / mid-thrust; the symbol is armed for the pullback re-arm instead.
+#    The day-spike and thrust limits scale with the stock's own daily ATR / 1-minute range (the fixed numbers are the fallback when those are unknown).
+SPIKE_GUARD_MODE = _get_str("SPIKE_GUARD_MODE", "live")                  # live (refuse) | log | off
+SPIKE_DAY_PCT = _get_float("SPIKE_DAY_PCT", 4.0)                         # fallback day-gain limit when the daily ATR is unknown; 0 = day-spike test off
+SPIKE_DAY_ATR_MULT = _get_float("SPIKE_DAY_ATR_MULT", 1.2)               # adaptive: limit = this x daily ATR % ...
+SPIKE_DAY_MIN_PCT = _get_float("SPIKE_DAY_MIN_PCT", 2.5)                 # ... clamped to this range
+SPIKE_DAY_MAX_PCT = _get_float("SPIKE_DAY_MAX_PCT", 6.0)
+SPIKE_RANGE_POS = _get_float("SPIKE_RANGE_POS", 0.85)                    # in the top 15 % of today's range
+SPIKE_THRUST_PCT = _get_float("SPIKE_THRUST_PCT", 1.5)                   # fallback: rise inside the window; 0 = thrust test off
+SPIKE_THRUST_M1_MULT = _get_float("SPIKE_THRUST_M1_MULT", 3.0)           # adaptive: limit = this x average 1-minute range ...
+SPIKE_THRUST_MIN_PCT = _get_float("SPIKE_THRUST_MIN_PCT", 1.0)           # ... clamped to this range
+SPIKE_THRUST_MAX_PCT = _get_float("SPIKE_THRUST_MAX_PCT", 2.5)
+SPIKE_THRUST_WINDOW_S = _get_float("SPIKE_THRUST_WINDOW_S", 180.0)
+SPIKE_NEAR_HIGH_PCT = _get_float("SPIKE_NEAR_HIGH_PCT", 0.25)            # within this of the window high = still at the top of the thrust
+SPIKE_MIN_TICKS = _get_int("SPIKE_MIN_TICKS", 8)                         # fewer ticks in the window = no thrust opinion
+# 3. Gain-room gate (orders/gain_room.py): the target has to be realistically reachable today (replayed odds + share of the normal day range left).
+GAIN_ROOM_MODE = _get_str("GAIN_ROOM_MODE", "live")                      # live (refuse) | log | off
+GAIN_ROOM_ODDS_MIN_RESOLVED = _get_int("GAIN_ROOM_ODDS_MIN_RESOLVED", 25)
+GAIN_ROOM_ODDS_MARGIN_PTS = _get_float("GAIN_ROOM_ODDS_MARGIN_PTS", 8.0)  # refuse when the replayed target-first rate is this many points under break-even
+GAIN_ROOM_RANGE_MULT = _get_float("GAIN_ROOM_RANGE_MULT", 2.0)           # expected day high = today's low x (1 + this x average daily range %)
+GAIN_ROOM_MIN_TARGET_FRAC = _get_float("GAIN_ROOM_MIN_TARGET_FRAC", 0.5)  # room to that high must be at least this share of the target; 0 = range test off
+# 4. One reclaim re-entry (orders/stopout_guard.py::reclaim_decision): a symbol whose only trade today was one losing stop-out may be bought once more
+#    after it reclaims the old entry. Every other gate (and the day pause) still applies.
+REENTRY_RECLAIM_ENABLED = _get_bool("REENTRY_RECLAIM_ENABLED", True)
+REENTRY_RECLAIM_MAX_PER_SYMBOL = _get_int("REENTRY_RECLAIM_MAX_PER_SYMBOL", 1)   # 0 = off
+REENTRY_RECLAIM_MIN_WAIT_S = _get_float("REENTRY_RECLAIM_MIN_WAIT_S", 120.0)
+REENTRY_RECLAIM_MAX_AGE_MIN = _get_float("REENTRY_RECLAIM_MAX_AGE_MIN", 120.0)
+REENTRY_RECLAIM_ABOVE_ENTRY_PCT = _get_float("REENTRY_RECLAIM_ABOVE_ENTRY_PCT", 0.1)   # price must be this far above the old entry ...
+REENTRY_RECLAIM_MAX_TARGET_FRAC = _get_float("REENTRY_RECLAIM_MAX_TARGET_FRAC", 0.5)   # ... and not past this share of the way to the old target (that is chasing)
 # E220: a manual BUY is refused while the market is closed and after today's one-shot EOD sweep has run (orders/manual_buy_window.py). false = the old
 # behaviour (the manual route checked neither). A money-safety rule: not part of any report-driven auto-calibration.
 MANUAL_BUY_WINDOW_GUARD = _get_bool("MANUAL_BUY_WINDOW_GUARD", True)

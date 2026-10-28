@@ -159,6 +159,18 @@ def _group479_guards_off_by_default(monkeypatch):
 
 
 @_pytest_entry_pause.fixture(autouse=True)
+def _e251_rules_off_by_default(monkeypatch):
+    """E251: the stop floor, spike-chase guard, gain-room gate and reclaim re-entry are new live rules that read live feed / prev-day data and change the
+    stop numbers; older tests predate them and expect no behaviour change. tests/test_e251_*.py turn them on explicitly (with the production defaults)."""
+    import config as _config
+    monkeypatch.setattr(_config, "ADAPTIVE_STOP_FLOOR_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "SPIKE_GUARD_MODE", "off", raising=False)
+    monkeypatch.setattr(_config, "GAIN_ROOM_MODE", "off", raising=False)
+    monkeypatch.setattr(_config, "REENTRY_RECLAIM_ENABLED", False, raising=False)
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
 def _reset_reservation_marker():
     """E212: capital/ledger.py remembers (process-wide) when capital was last reserved; never let one test's reservation block the next test's
     'no open positions -> reset available_capital' step."""

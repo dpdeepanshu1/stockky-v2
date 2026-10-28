@@ -34,7 +34,8 @@ logger = logging.getLogger("position-stocks-pullback-rearm")
 _IST = ZoneInfo("Asia/Kolkata")
 
 # Skip reasons (as logged by attempt_entry) that arm a symbol. Everything else (quality, liquidity, VWAP, price guard ...) does not.
-ARMING_PREFIXES = ("RANGE_GATE:NEAR_DAY_HIGH", "OPENING_GATE:NEAR_DAY_HIGH", "OPENING_GATE:EXTENDED_ABOVE_OR")
+# E251: SPIKE_CHASE (orders/entry_timing.py) = refused at the top of a day spike / mid-thrust; looked at again after a real pullback and bounce.
+ARMING_PREFIXES = ("RANGE_GATE:NEAR_DAY_HIGH", "OPENING_GATE:NEAR_DAY_HIGH", "OPENING_GATE:EXTENDED_ABOVE_OR", "SPIKE_CHASE")
 # Gate reasons waived for a re-arm entry (the very ones that armed it).
 WAIVED_PREFIXES = ("OPENING_GATE:NEAR_DAY_HIGH", "OPENING_GATE:EXTENDED_ABOVE_OR")
 

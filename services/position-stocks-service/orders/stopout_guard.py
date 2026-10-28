@@ -85,13 +85,76 @@ def symbol_reason(symbol: str, stopped: Set[str]) -> Optional[str]:
     return None
 
 
-def entry_reason(db, symbol: str, now: Optional[datetime] = None) -> Optional[str]:
-    """One call for the entry path: the day-pause reason, else the symbol-block reason, else None. Never raises."""
+def _aware(dt):
+    if dt is None:
+        return None
+    return dt if getattr(dt, "tzinfo", None) else dt.replace(tzinfo=timezone.utc)
+
+
+def reclaim_decision(rows, ltp: float, now: Optional[datetime] = None) -> Tuple[bool, str]:
+    """E251: may this symbol be bought ONE more time after today's single losing stop-out? `rows` are today's trades of the symbol, newest first, as dicts
+    (status, closed_at, realized_pnl, entry_price, target_price). All must hold: switch on; the symbol has no more trades today than
+    REENTRY_RECLAIM_MAX_PER_SYMBOL (the pass is one-time); the last one was a losing stop-out; it closed between REENTRY_RECLAIM_MIN_WAIT_S and
+    REENTRY_RECLAIM_MAX_AGE_MIN ago; price is back above the old entry (+REENTRY_RECLAIM_ABOVE_ENTRY_PCT) but not past REENTRY_RECLAIM_MAX_TARGET_FRAC
+    of the way to the old target (that would be chasing). (ok, reason). Pure, never raises."""
+    try:
+        if not getattr(config, "REENTRY_RECLAIM_ENABLED", False):
+            return False, "reclaim off"
+        max_n = int(getattr(config, "REENTRY_RECLAIM_MAX_PER_SYMBOL", 0) or 0)
+        rows = list(rows or ())
+        if max_n <= 0 or not rows or len(rows) > max_n:
+            return False, "no reclaim pass left"
+        last = rows[0]
+        if str(last.get("status") or "").strip().upper() not in STOP_STATUSES or float(last.get("realized_pnl") or 0.0) >= 0.0:
+            return False, "last trade was not a losing stop-out"
+        closed = _aware(last.get("closed_at"))
+        entry, target = float(last.get("entry_price") or 0.0), float(last.get("target_price") or 0.0)
+        if closed is None or entry <= 0 or target <= entry or ltp <= 0:
+            return False, "last trade has no usable levels"
+        t = _aware(now) or datetime.now(timezone.utc)
+        age_s = (t - closed).total_seconds()
+        if age_s < float(getattr(config, "REENTRY_RECLAIM_MIN_WAIT_S", 120.0)):
+            return False, f"stopped out {age_s:.0f}s ago - too soon"
+        if age_s > float(getattr(config, "REENTRY_RECLAIM_MAX_AGE_MIN", 120.0)) * 60.0:
+            return False, "stop-out too old"
+        lo = entry * (1.0 + float(getattr(config, "REENTRY_RECLAIM_ABOVE_ENTRY_PCT", 0.1)) / 100.0)
+        hi = entry + float(getattr(config, "REENTRY_RECLAIM_MAX_TARGET_FRAC", 0.5)) * (target - entry)
+        if ltp < lo:
+            return False, f"price {ltp:.2f} has not reclaimed the old entry {entry:.2f} (needs >= {lo:.2f})"
+        if ltp > hi:
+            return False, f"price {ltp:.2f} is past {hi:.2f} (half way to the old target) - chasing"
+        return True, f"reclaimed the old entry {entry:.2f} ({ltp:.2f}), {age_s / 60:.1f} min after the stop-out, room left to the old target {target:.2f}"
+    except Exception:  # noqa: BLE001
+        return False, "reclaim check failed"
+
+
+def reclaim_allowed(db, symbol: str, ltp: float, now: Optional[datetime] = None) -> Optional[dict]:
+    """The reclaim verdict for the entry path ({"why": ...}) or None. Reads today's trades of the symbol from scalp_positions. Fails closed (None). Never raises."""
+    try:
+        if not enabled() or not getattr(config, "REENTRY_RECLAIM_ENABLED", False) or int(getattr(config, "REENTRY_RECLAIM_MAX_PER_SYMBOL", 0) or 0) <= 0:
+            return None
+        from models import ScalpPosition
+        since = ist_now(now).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        sym = str(symbol or "").strip().upper()
+        recs = (db.query(ScalpPosition).filter(ScalpPosition.symbol == sym, ScalpPosition.opened_at >= since)
+                .order_by(ScalpPosition.opened_at.desc()).limit(10).all())
+        rows = [{"status": r.status, "closed_at": r.closed_at, "realized_pnl": r.realized_pnl, "entry_price": r.entry_price, "target_price": r.target_price}
+                for r in recs]
+        ok, why = reclaim_decision(rows, float(ltp), now)
+        return {"why": why} if ok else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("stopout_guard: reclaim check failed for %s (no reclaim): %s", symbol, e)
+        return None
+
+
+def entry_reason(db, symbol: str, now: Optional[datetime] = None, allow_symbol: bool = False) -> Optional[str]:
+    """One call for the entry path: the day-pause reason, else the symbol-block reason, else None. allow_symbol (E251 reclaim) lifts only the symbol
+    block - the whole-day pause still wins. Never raises."""
     try:
         if not enabled():
             return None
         n, stopped = stopouts_today(db, now)
-        return pause_reason_from(n) or symbol_reason(symbol, stopped)
+        return pause_reason_from(n) or (None if allow_symbol else symbol_reason(symbol, stopped))
     except Exception:  # noqa: BLE001
         return None
 

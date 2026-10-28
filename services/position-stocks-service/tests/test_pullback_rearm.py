@@ -122,8 +122,8 @@ def test_consume_counts_attempts_and_caps_rearming():
 
 
 def test_structure_stop_is_under_the_low_never_wider_and_never_inside_noise():
-    # entry 773, low 770 -> 0.39% + 0.15% buffer = 0.54% < 0.7% floor -> 0.7%
-    assert pr.structure_stop_pct(773.0, 770.0, 1.5) == pytest.approx(0.7)
+    # entry 773, low 770 -> 0.39% + 0.15% buffer = 0.54% < 1.0% floor (E251: 0.7 -> 1.0) -> 1.0%
+    assert pr.structure_stop_pct(773.0, 770.0, 1.5) == pytest.approx(1.0)
     # deeper low 760: 1.83% structural, adaptive stop 1.2% is tighter -> keep 1.2%
     assert pr.structure_stop_pct(773.0, 760.0, 1.2) == pytest.approx(1.2)
     # adaptive 2.0%, structural 1.83% -> 1.83%

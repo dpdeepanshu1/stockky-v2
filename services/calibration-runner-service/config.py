@@ -37,7 +37,14 @@ NOTIFICATION_URL = _s("NOTIFICATION_URL", "http://notification-scheduler-service
 KRONOS_URL = _s("KRONOS_URL", "http://kronos-forecast-service:8010").rstrip("/")
 TIMESFM_URL = _s("TIMESFM_URL", "http://timesfm-forecast-service:8011").rstrip("/")
 
-# one job at a time, never while a heavy job would starve the trading containers
+# E235: several tests at once. Two runs never overlap when one writes what the other reads or writes (lock keys come from each job's own
+# steps, jobs.derive_locks); at most RUNNER_MAX_HEAVY heavy replays / downloads run together and a second one waits while memory is short.
+# RUNNER_WORKERS=1 restores one-at-a-time.
+WORKERS = max(1, min(8, _i("RUNNER_WORKERS", 4)))
+MAX_HEAVY = max(1, min(WORKERS, _i("RUNNER_MAX_HEAVY", 2)))
+MIN_FREE_MB = max(0, _i("RUNNER_MIN_FREE_MB", 1500))
+# E235: parallel pool processes INSIDE one heavy replay (the "Parallel workers" option of a test; was 2)
+DEFAULT_POOL_JOBS = max(1, min(8, _i("RUNNER_POOL_JOBS", 3)))
 NICE = _i("RUNNER_NICE", 10)
 MAX_OUTPUT_BYTES = _i("RUNNER_MAX_OUTPUT_BYTES", 5 * 1024 * 1024)
 KEEP_RUNS = _i("RUNNER_KEEP_RUNS", 120)

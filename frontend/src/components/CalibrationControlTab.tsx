@@ -10,7 +10,7 @@ import { PageHero } from "./ui/PageHero";   // design v6
 import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { setRealTradeApiUrl } from "../realTradeApi";
 import { setPositionStocksApiUrl } from "../positionStocksApi";
-import { AUTH_LOST_EVENT, anyToken, deriveServiceUrls, getRunnerUrl, serviceUrl, loginBoth, logoutAll, sessionSecondsLeft, setRunnerUrl, type Svc } from "../calibrationApi";
+import { AUTH_LOST_EVENT, activeRuns, anyToken, deriveServiceUrls, getRunnerUrl, serviceUrl, loginBoth, logoutAll, sessionSecondsLeft, setRunnerUrl, type Svc } from "../calibrationApi";
 import SwitchesPanel from "./calibration/SwitchesPanel";
 import TradesPanel from "./calibration/TradesPanel";
 import RunPlanPanel from "./calibration/RunPlanPanel";
@@ -107,12 +107,11 @@ function ConnectionCard() {
   );
 }
 
-function Body() {
-  const [svc, setSvc] = useState<Svc>("rt");
+function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
   const [section, setSection] = useState<Section>("switches");
   const { start, summary } = useRunner();
   // design v6: what the runner is doing, read from the summary the page already polls (nothing new is fetched)
-  const cur = summary?.state?.current;
+  const running = activeRuns(summary?.state);
   const waiting = summary?.state?.queued?.length ?? 0;
   const pulseChips: PulseChip[] = summary?.state ? [
     { label: summary.state.market_open_now ? "Market hours: heavy runs held" : "Market closed", state: summary.state.market_open_now ? "warn" : "ok" },
@@ -122,8 +121,8 @@ function Body() {
     <div className="v6-page v6-flow space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
       <PageHero icon="sliders" title="Real Money Calibration" kicker="AI-assisted · real-money switches"
         subtitle="Switch the rules of both trading services on or off, check the day's trades, and run tests and training from buttons." />
-      <AiPulse title="Calibration runner" working={!!cur} chips={pulseChips}
-        line={cur ? `Running: ${cur.title}` : summary?.state ? "Idle · pick a test, or change a switch below" : "Waiting for the runner to answer"} />
+      <AiPulse title="Calibration runner" working={running.length > 0} chips={pulseChips}
+        line={running.length ? `Running: ${running.map((r) => r.title).join(" · ")}${waiting ? ` · ${waiting} waiting` : ""}` : summary?.state ? "Idle · pick a test, or change a switch below" : "Waiting for the runner to answer"} />
       <SubTabs items={SVC_ITEMS} value={svc} onChange={setSvc} label="Service" />
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
@@ -149,6 +148,7 @@ function Body() {
 
 export default function CalibrationControlTab() {
   const [authKey, setAuthKey] = useState(0);
+  const [svc, setSvc] = useState<Svc>("rt");      // E235: lifted here so the runner provider knows the tab (runs are tagged rt / ps)
   useState(() => { deriveServiceUrls(); return 0; }); // group 445: fill a missing service URL before anything is fetched
   // group 444: any 401 (expired session) clears the tokens and lands here, so the login card replaces the red errors
   useEffect(() => {
@@ -158,8 +158,8 @@ export default function CalibrationControlTab() {
   }, []);
   if (!anyToken()) return <LoginCard onDone={() => setAuthKey((k) => k + 1)} />;
   return (
-    <RunnerProvider authKey={String(authKey)}>
-      <Body />
+    <RunnerProvider authKey={String(authKey)} svc={svc}>
+      <Body svc={svc} setSvc={setSvc} />
     </RunnerProvider>
   );
 }

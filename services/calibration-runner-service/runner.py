@@ -1,4 +1,10 @@
-"""Run engine of calibration-runner-service (group 442): one queue, one job at a time, every run leaves a txt + artifacts under DATA_DIR/runs/<id>/.
+"""Run engine of calibration-runner-service (group 442): one queue, every run leaves a txt + artifacts under DATA_DIR/runs/<id>/.
+
+E235: several runs are active at once (RUNNER_WORKERS, default 4). Two runs never overlap when one WRITES what the other reads or writes
+(lock keys come from each job's own steps, jobs.derive_locks); at most RUNNER_MAX_HEAVY heavy runs go together and a second one waits while
+memory is short; SOLO jobs (live timing, millisecond benchmarks, the real 1-share Dhan probes) run alone. Every run carries a service tag
+("" shared, "rt" Real Trade, "ps" Position Stocks): a page tab sees its own runs plus the shared ones, never the other tab's.
+RUNNER_WORKERS=1 restores one-at-a-time.
 
 Status of a run: queued | running | success | attention | failed | timeout | cancelled | blocked
   attention = the script ran and its own verdict says look at it (FAIL / NO_GO / NOT_ENOUGH_DATA); failed = it did not run properly.
@@ -6,6 +12,7 @@ Nothing here is a shell; output is redacted of the tokens; output.txt is capped.
 """
 from __future__ import annotations
 
+import fnmatch
 import glob as _glob
 import json
 import os
@@ -52,6 +59,51 @@ def _limit_text(seconds: Any) -> str:
     return f"{s / 3600:g} h" if s >= 3600 else f"{s:g} s"
 
 
+MAX_WORKERS = 8      # E235: worker threads that exist; `workers` is how many may be busy (changeable from the page)
+SERVICES = ("", "rt", "ps")
+SERVICE_LABEL = {"": "shared", "rt": "Real Trade", "ps": "Position Stocks"}
+
+
+def _mem_available_mb() -> Optional[float]:
+    """MB the runner can still use (smaller of the container cgroup headroom and the machine's MemAvailable). None if unreadable."""
+    vals: List[float] = []
+    try:
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                if ln.startswith("MemAvailable:"):
+                    vals.append(int(ln.split()[1]) / 1024.0)
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        lim = open("/sys/fs/cgroup/memory.max").read().strip()
+        if lim.isdigit():
+            vals.append((int(lim) - int(open("/sys/fs/cgroup/memory.current").read().strip())) / 1048576.0)
+    except (OSError, ValueError):
+        pass
+    return min(vals) if vals else None
+
+
+def _key_overlap(a: str, b: str) -> bool:
+    """E235: two lock keys touch the same thing: equal, one inside the other, or a glob that matches the other."""
+    if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+        return True
+    return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
+
+
+def _conflict(a: "Run", b: "Run") -> bool:
+    """E235: True when a and b must not run at the same time."""
+    if a.solo or b.solo:
+        return True
+    for x in a.excl:
+        if any(_key_overlap(x, y) for y in b.excl) or any(_key_overlap(x, y) for y in b.shared):
+            return True
+    for x in a.shared:
+        if any(_key_overlap(x, y) for y in b.excl):
+            return True
+    return False
+
+
 class Redactor:
     def __init__(self, secrets_fn: Callable[[], List[str]]):
         self.secrets_fn = secrets_fn
@@ -66,8 +118,14 @@ class Redactor:
 
 
 class Run:
-    def __init__(self, rid: str, kind: str, target: str, title: str, params: Dict[str, Any], by: str, trigger: str):
-        self.d: Dict[str, Any] = {"id": rid, "kind": kind, "target": target, "title": title, "params": params, "by": by, "trigger": trigger, "status": "queued",
+    def __init__(self, rid: str, kind: str, target: str, title: str, params: Dict[str, Any], by: str, trigger: str, service: str = ""):
+        self.cancel = threading.Event()                  # E235: per run (was one flag for the whole runner)
+        self.proc: Optional[subprocess.Popen] = None
+        self.shared: List[str] = []                      # lock keys this run only reads
+        self.excl: List[str] = []                        # lock keys this run writes
+        self.heavy = False
+        self.solo = False
+        self.d: Dict[str, Any] = {"id": rid, "kind": kind, "target": target, "title": title, "params": params, "by": by, "trigger": trigger, "service": service, "status": "queued",
                                   "queued_at": time.time(), "started_at": None, "finished_at": None, "steps": [], "jobs": [], "headline": [], "note": "", "exit_summary": ""}
 
     def public(self) -> Dict[str, Any]:
@@ -83,7 +141,7 @@ class Runner:
                  token_fn: Callable[[], str], extra_secrets: Optional[Callable[[], List[str]]] = None, max_output: int = 5 * 1024 * 1024, nice: int = 10,
                  keep_runs: int = 120, keep_days: int = 45, guard_market: bool = True, now_fn: Callable[[], datetime] = ist_now,
                  notify_fn: Optional[Callable[[Dict[str, Any], str], Optional[str]]] = None, keep_latest_only: bool = False, preflight_s: float = 60.0,
-                 after_fn: Optional[Callable[[Dict[str, Any]], Any]] = None):
+                 after_fn: Optional[Callable[[Dict[str, Any]], Any]] = None, workers: int = 1, max_heavy: int = 1, min_free_mb: float = 0.0):
         self.data = data_dir
         self.runs_dir = os.path.join(data_dir, "runs")
         self.ctx_base = dict(ctx_base)
@@ -103,20 +161,65 @@ class Runner:
         os.makedirs(self.runs_dir, exist_ok=True)
         for sub in ("calibration_out", "exports"):
             os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
+        self.workers_path = os.path.join(data_dir, "state", "workers.json")
+        self.workers = max(1, min(MAX_WORKERS, int(workers)))
+        try:        # a value saved on the page wins over the environment default
+            self.workers = max(1, min(MAX_WORKERS, int(json.load(open(self.workers_path, encoding="utf-8"))["workers"])))
+        except Exception:  # noqa: BLE001
+            pass
+        self.max_heavy = max(1, int(max_heavy))
+        self.min_free_mb = max(0.0, float(min_free_mb))
         self.lock = threading.RLock()
+        self.cond = threading.Condition(self.lock)
         self.queue: Deque[Run] = deque()
-        self.current: Optional[Run] = None
-        self.cancel_flag = threading.Event()
-        self.proc: Optional[subprocess.Popen] = None
-        self.wake = threading.Event()
+        self.running: List[Run] = []
         self.stop = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        self.threads: List[threading.Thread] = []
+        self._tl = threading.local()                     # which run this worker thread is executing
         self.index: Dict[str, Run] = {}
         self._interrupted: List[Run] = []      # runs that were active when the container went down; announced once in start()
         self._load_history()
         self._load_auto()
         if self.keep_latest_only:
             self.supersede_all()
+
+    @property
+    def current(self) -> Optional[Run]:
+        """The oldest active run (the page's single 'Running: ...' line); `running` lists all."""
+        with self.lock:
+            return self.running[0] if self.running else None
+
+    def _run_now(self) -> Optional[Run]:
+        return getattr(self._tl, "run", None)
+
+    def _cancelled(self) -> bool:
+        r = self._run_now()
+        return bool(r is not None and r.cancel.is_set())
+
+    def _set_proc(self, p: Optional["subprocess.Popen"]) -> None:
+        r = self._run_now()
+        if r is not None:
+            r.proc = p
+
+    def _locks_for(self, kind: str, target: str, p: Dict[str, Any]) -> Tuple[List[str], List[str], bool]:
+        from jobs import coerce_params, derive_locks
+        roots = {"cal": os.path.join(self.data, "calibration_out"), "exp": os.path.join(self.data, "exports")}
+        seq = [(target, p)] if kind == "job" else list(self.packs[target]["jobs"])
+        sh: set = set()
+        ex: set = set()
+        solo = False
+        for jid, given in seq:
+            job = self.jobs[jid]
+            try:
+                steps = job["builder"](self.ctx(os.path.join(self.runs_dir, "_plan")), coerce_params(job, given))
+                lk = derive_locks(job, steps, roots)
+            except Exception:  # noqa: BLE001 - unknown shape: serialise this job against itself only
+                lk = {"shared": [], "excl": [f"job:{jid}"], "solo": False}
+            sh.update(lk["shared"])
+            ex.update(lk["excl"])
+            solo = solo or bool(lk.get("solo"))
+        return sorted(sh - ex), sorted(ex), solo
 
     # ---------------------------------------------------------------- history on disk
     def _run_dir(self, rid: str) -> str:
@@ -129,7 +232,7 @@ class Runner:
                 d = json.load(open(p, encoding="utf-8"))
             except Exception:  # noqa: BLE001
                 continue
-            r = Run(d["id"], d["kind"], d["target"], d.get("title", ""), d.get("params", {}), d.get("by", ""), d.get("trigger", ""))
+            r = Run(d["id"], d["kind"], d["target"], d.get("title", ""), d.get("params", {}), d.get("by", ""), d.get("trigger", ""), d.get("service", ""))
             r.d.update(d)
             if r.d["status"] in ("queued", "running"):       # the container restarted in the middle of it
                 r.d["status"] = "failed"
@@ -170,7 +273,10 @@ class Runner:
         return self.ctx_base["scripts"]
 
     def submit(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None, by: str = "", trigger: str = "manual", confirm: bool = False,
-               resume: bool = False) -> Run:
+               resume: bool = False, service: str = "") -> Run:
+        service = (service or "").strip().lower()
+        if service not in SERVICES:
+            raise ValueError("service must be rt (Real Trade), ps (Position Stocks) or empty")
         if kind == "job":
             job = self.jobs.get(target)
             if not job:
@@ -187,14 +293,16 @@ class Runner:
             window = "closed" if heavy else "any"
         else:
             raise KeyError("kind must be job or pack")
-        rid = f"{self.now_fn().strftime('%Y%m%d-%H%M%S')}-{target}-{secrets.token_hex(2)}"
-        r = Run(rid, kind, target, title, p, by, trigger)
+        rid = f"{self.now_fn().strftime('%Y%m%d-%H%M%S')}-{target}-{service + '-' if service else ''}{secrets.token_hex(2)}"
+        r = Run(rid, kind, target, title, p, by, trigger, service)
         r.d["resume"] = bool(resume)      # group 466: continue from the symbols a stopped run already saved (scripts started with --resume)
+        r.heavy = bool(heavy)
+        r.shared, r.excl, r.solo = self._locks_for(kind, target, p)
         with self.lock:
-            if any(q.d["target"] == target and q.d["kind"] == kind and q.d["params"] == p for q in self.queue):
+            if any(q.d["target"] == target and q.d["kind"] == kind and q.d["params"] == p and q.d.get("service", "") == service for q in self.queue):
                 raise ValueError(f"{title} is already waiting in the queue")
-            if len(self.queue) >= 20:
-                raise ValueError("the queue is full (20)")
+            if len(self.queue) >= 60:
+                raise ValueError("the queue is full (60)")
             blocked = self._guard(window, kind == "pack", confirm)
             if blocked:
                 r.d.update(status="blocked", note=blocked, finished_at=time.time())
@@ -205,11 +313,12 @@ class Runner:
                 self.queue.append(r)
                 self._save(r)
         if blocked:
-            self.supersede(kind, target, p)
+            self.supersede(kind, target, p, service)
             if trigger == "schedule":       # an automatic run that did not happen is exactly what you want to hear about
                 threading.Thread(target=self._after_run, args=(r,), name="notify-blocked", daemon=True).start()
             return r
-        self.wake.set()
+        with self.cond:
+            self.cond.notify_all()
         return r
 
     def _guard(self, window: str, is_pack: bool, confirm: bool) -> str:
@@ -232,20 +341,28 @@ class Runner:
                 self.queue.remove(r)
                 r.d.update(status="cancelled", finished_at=time.time(), note="cancelled while queued")
                 self._save(r)
+                self.cond.notify_all()
                 return True
-            if self.current is r:
-                self.cancel_flag.set()
-                p = self.proc
+            if r in self.running:
+                r.cancel.set()
+                p = r.proc
                 if p and p.poll() is None:
                     self._signal_group(p, signal.SIGTERM)
                 return True
         return False
 
-    def list_runs(self, limit: int = 60, target: str = "") -> List[Dict[str, Any]]:
+    @staticmethod
+    def _visible(r: Run, service: str) -> bool:
+        """E235: a tab sees its own runs and the shared / automatic ones, never the other tab's."""
+        return not service or r.d.get("service", "") in (service, "")
+
+    def list_runs(self, limit: int = 60, target: str = "", service: str = "") -> List[Dict[str, Any]]:
         with self.lock:
             rs = sorted(self.index.values(), key=lambda r: r.d["queued_at"], reverse=True)
             if target:
                 rs = [r for r in rs if r.d["target"] == target]
+            if service:
+                rs = [r for r in rs if self._visible(r, service)]
             return [r.public() for r in rs[:limit]]
 
     def get(self, rid: str) -> Optional[Dict[str, Any]]:
@@ -294,7 +411,7 @@ class Runner:
                 z.write(os.path.join(self._run_dir(rid), f["name"]), f["name"])
         return dest
 
-    def zip_latest(self, dest: str, targets: Optional[List[str]] = None) -> int:
+    def zip_latest(self, dest: str, targets: Optional[List[str]] = None, service: str = "") -> int:
         """One zip with the LATEST finished result of every job (and pack): <target>/<its files>, plus _INDEX.txt (status, time, headline per target).
         Returns how many results went in (0 = nothing has run yet; the zip then only holds the index)."""
         ids = list(targets) if targets is not None else list(self.jobs) + list(self.packs)
@@ -302,7 +419,7 @@ class Runner:
         n = 0
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
             for t in ids:
-                r = self.latest(t)
+                r = self.latest(t, service)
                 if not r:
                     rows.append(f"{t}: never run")
                     continue
@@ -314,34 +431,76 @@ class Runner:
             z.writestr("_INDEX.txt", "Latest result of every test (status OK / LOOK / FAILED ...):\n\n" + "\n".join(rows) + "\n")
         return n
 
-    def latest(self, target: str) -> Optional[Dict[str, Any]]:
-        rs = [r for r in self.index.values() if r.d["target"] == target and r.d["status"] in FINAL and r.d["status"] != "blocked"]
+    def latest(self, target: str, service: str = "") -> Optional[Dict[str, Any]]:
+        rs = [r for r in list(self.index.values()) if r.d["target"] == target and r.d["status"] in FINAL and r.d["status"] != "blocked" and self._visible(r, service)]
         return max(rs, key=lambda r: r.d["queued_at"]).public() if rs else None
 
-    def state(self) -> Dict[str, Any]:
+    def state(self, service: str = "") -> Dict[str, Any]:
         with self.lock:
-            return {"current": self.current.public() if self.current else None, "queued": [r.public() for r in self.queue], "market_open_now": market_open_now(self.now_fn()),
+            run = [r for r in self.running if self._visible(r, service)]
+            que = [r for r in self.queue if self._visible(r, service)]
+            q_pub = []
+            for r in que:
+                d = r.public()
+                d["waiting_for"] = self._why_waiting(r)
+                q_pub.append(d)
+            return {"current": run[0].public() if run else None, "running": [r.public() for r in run], "queued": q_pub,
+                    "workers": self.workers, "max_heavy": self.max_heavy, "active_total": len(self.running), "waiting_total": len(self.queue), "service": service,
+                    "market_open_now": market_open_now(self.now_fn()),
                     "now_ist": self.now_fn().astimezone(IST).isoformat(timespec="seconds"),
                     "last_automatic": self.auto.get("last"), "last_automatic_by_pack": dict(self.auto.get("by_pack") or {}),
                     "keep_latest_only": self.keep_latest_only}
 
-    # ---------------------------------------------------------------- worker
+    def _why_waiting(self, r: Run) -> str:
+        """E235: one short reason a queued run has not started (shown on the page). Caller holds the lock."""
+        if len(self.running) >= self.workers:
+            return f"all {self.workers} slots busy"
+        clash = next((x for x in self.running if _conflict(r, x)), None)
+        if clash is not None:
+            return f"waiting for {clash.d.get('title') or clash.d['target']} (same data / exclusive test)"
+        ahead = next((x for x in self.queue if x is not r and _conflict(r, x) and list(self.queue).index(x) < list(self.queue).index(r)), None)
+        if ahead is not None:
+            return f"queued behind {ahead.d.get('title') or ahead.d['target']} (same data)"
+        if r.heavy and sum(1 for x in self.running if x.heavy) >= self.max_heavy:
+            return f"{self.max_heavy} heavy run(s) already going"
+        return "starting"
+
+    # ---------------------------------------------------------------- worker pool (E235)
     def start(self) -> None:
-        if self.thread and self.thread.is_alive():
+        if any(t.is_alive() for t in self.threads):
             return
-        self.thread = threading.Thread(target=self._loop, name="runner", daemon=True)
-        self.thread.start()
+        self.threads = [threading.Thread(target=self._loop, args=(i,), name=f"runner-{i}", daemon=True) for i in range(MAX_WORKERS)]
+        self.thread = self.threads[0]
+        for t in self.threads:
+            t.start()
         if self._interrupted:               # group 447: a restart in the middle of a run used to leave no Telegram and no last-automatic record
             pending, self._interrupted = self._interrupted, []
             threading.Thread(target=lambda: [self._after_run(r) for r in pending], name="notify-interrupted", daemon=True).start()
 
+    def set_workers(self, n: int) -> int:
+        """E235: how many runs may be busy at once (1-8), saved so a restart keeps it. Runs already going are never stopped by lowering it."""
+        n = max(1, min(MAX_WORKERS, int(n)))
+        with self.cond:
+            self.workers = n
+            self.cond.notify_all()
+        try:
+            os.makedirs(os.path.dirname(self.workers_path), exist_ok=True)
+            with open(self.workers_path, "w", encoding="utf-8") as f:
+                json.dump({"workers": n}, f)
+        except OSError:
+            pass
+        return n
+
     def shutdown(self) -> None:
         self.stop.set()
-        self.cancel_flag.set()
-        self.wake.set()
-        p = self.proc
-        if p is not None and p.poll() is None:      # group 466: do not leave pool workers running after the service stops
-            self._signal_group(p, signal.SIGTERM)
+        with self.cond:
+            active = list(self.running)
+            self.cond.notify_all()
+        for r in active:
+            r.cancel.set()
+            p = r.proc
+            if p is not None and p.poll() is None:      # group 466: do not leave pool workers running after the service stops
+                self._signal_group(p, signal.SIGTERM)
 
     @staticmethod
     def _signal_group(p: "subprocess.Popen", sig: int) -> None:
@@ -359,36 +518,64 @@ class Runner:
         end = time.time() + timeout
         while time.time() < end:
             with self.lock:
-                if not self.queue and self.current is None:
+                if not self.queue and not self.running:
                     return True
             time.sleep(0.05)
         return False
 
-    def _loop(self) -> None:
+    def _pick(self) -> Optional[Run]:
+        """E235: the first queued run that fits now. FIFO, but a run that cannot start does not hold back a later run that does not clash with
+        it; a later run never jumps in front of an older WAITING run it clashes with (a waiting writer is not starved by readers). Caller holds the lock."""
+        heavy_active = sum(1 for x in self.running if x.heavy)
+        mem_low: Optional[bool] = None
+        ahead: List[Run] = []
+        for r in self.queue:
+            ok = not any(_conflict(r, x) for x in self.running) and not any(_conflict(r, x) for x in ahead)
+            if ok and r.heavy:
+                if heavy_active >= self.max_heavy:
+                    ok = False
+                elif heavy_active >= 1 and self.min_free_mb > 0:
+                    if mem_low is None:
+                        free = _mem_available_mb()
+                        mem_low = free is not None and free < self.min_free_mb
+                    ok = not mem_low
+            if ok:
+                return r
+            ahead.append(r)
+        return None
+
+    def _loop(self, idx: int = 0) -> None:
         last_prune = 0.0
         while not self.stop.is_set():
-            with self.lock:
-                r = self.queue.popleft() if self.queue else None
-                self.current = r
-            if r is None:
-                if time.time() - last_prune > 3600:
-                    self.prune()
-                    last_prune = time.time()
-                self.wake.wait(5)
-                self.wake.clear()
-                continue
-            self.cancel_flag.clear()
+            with self.cond:
+                r = self._pick() if len(self.running) < self.workers else None
+                if r is not None:
+                    self.queue.remove(r)
+                    self.running.append(r)
+                else:
+                    if idx == 0 and time.time() - last_prune > 3600:
+                        last_prune = time.time()
+                        try:
+                            self.prune()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self.cond.wait(3)
+                    continue
+            self._tl.run = r
             try:
                 try:
                     self._execute(r)
                 except Exception as e:  # noqa: BLE001
                     r.d.update(status="failed", note=f"internal error: {type(e).__name__}: {e}", finished_at=time.time())
                     self._save(r)
-                self._after_run(r)          # group 447: before `current` is cleared, so drain() / the page see the run complete with its Telegram note
+                self._after_run(r)          # group 447: before the run leaves `running`, so drain() / the page see it complete with its Telegram note
             finally:
-                with self.lock:
-                    self.current = None
-                    self.proc = None
+                self._tl.run = None
+                with self.cond:
+                    if r in self.running:
+                        self.running.remove(r)
+                    r.proc = None
+                    self.cond.notify_all()
 
     # ---------------------------------------------------------------- after a run (group 447)
     def _after_run(self, r: Run) -> None:
@@ -396,7 +583,7 @@ class Runner:
         self._notify_done(r)
         try:
             self._record_auto(r)
-            self.supersede(r.d["kind"], r.d["target"], r.d.get("params") or {})
+            self.supersede(r.d["kind"], r.d["target"], r.d.get("params") or {}, r.d.get("service", ""))
         except Exception:  # noqa: BLE001 - bookkeeping must never touch the run
             pass
         if self.after_fn and r.d.get("status") != "blocked":
@@ -469,7 +656,7 @@ class Runner:
     def _same_settings(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
         return json.dumps(a or {}, sort_keys=True, default=str) == json.dumps(b or {}, sort_keys=True, default=str)
 
-    def supersede(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None) -> int:
+    def supersede(self, kind: str, target: str, params: Optional[Dict[str, Any]] = None, service: str = "") -> int:
         """keep_latest_only: for one job / pack WITH THE SAME SETTINGS keep the newest run that has a result, plus a newer blocked / cancelled note if there is one;
         delete the rest. (group 449: runs of one job with different options, e.g. daily_trades 10 days vs 30 days, no longer overwrite each other.)
         params=None means every settings variant of that target at once (the old behaviour).
@@ -478,7 +665,7 @@ class Runner:
             return 0
         with self.lock:
             mine = sorted([r for r in self.index.values() if r.d["kind"] == kind and r.d["target"] == target and r.d["status"] in FINAL
-                           and (params is None or self._same_settings(r.d.get("params"), params))],
+                           and r.d.get("service", "") == service and (params is None or self._same_settings(r.d.get("params"), params))],
                           key=lambda x: x.d["queued_at"], reverse=True)
             keep: List[Run] = []
             newest_result = next((r for r in mine if r.d["status"] in self._RESULT), None)
@@ -494,8 +681,8 @@ class Runner:
             return len(drop)
 
     def supersede_all(self) -> int:
-        groups = {(r.d["kind"], r.d["target"], json.dumps(r.d.get("params") or {}, sort_keys=True, default=str)) for r in list(self.index.values())}
-        return sum(self.supersede(k, t, json.loads(pj)) for k, t, pj in groups)
+        groups = {(r.d["kind"], r.d["target"], json.dumps(r.d.get("params") or {}, sort_keys=True, default=str), r.d.get("service", "")) for r in list(self.index.values())}
+        return sum(self.supersede(k, t, json.loads(pj), sv) for k, t, pj, sv in groups)
 
     # ---------------------------------------------------------------- one run
     def _execute(self, r: Run) -> None:
@@ -505,7 +692,7 @@ class Runner:
         self._save(r)
         out = _Out(os.path.join(d, "output.txt"), self.max_output, self.redact)
         out.line(f"# {r.d['title']}   [{r.d['kind']} {r.d['target']}]")
-        out.line(f"# started {self.now_fn().astimezone(IST).isoformat(timespec='seconds')} IST   by {r.d['by'] or '-'}   trigger {r.d['trigger']}")
+        out.line(f"# started {self.now_fn().astimezone(IST).isoformat(timespec='seconds')} IST   by {r.d['by'] or '-'}   trigger {r.d['trigger']}   tab {SERVICE_LABEL.get(r.d.get('service', ''), 'shared')}")
         if r.d["params"]:
             out.line("# parameters: " + json.dumps(r.d["params"]))
         out.line("# Nothing in this run changes a trading setting unless a step below says POST.")
@@ -526,7 +713,7 @@ class Runner:
         t0 = time.time()
         for jid, given in seq:
             job = self.jobs[jid]
-            if self.cancel_flag.is_set():
+            if self._cancelled():
                 worst = "cancelled"
                 break
             p = coerce_params(job, given)
@@ -540,7 +727,7 @@ class Runner:
                 out.line(f"could not build the job: {e}")
             jstart = time.time()
             for i, st in enumerate(steps, 1):
-                if self.cancel_flag.is_set():
+                if self._cancelled():
                     job_status = "cancelled"
                     break
                 left = job["timeout_s"] - (time.time() - jstart)
@@ -588,7 +775,7 @@ class Runner:
             if not down:
                 out.line("-- services ready")
                 return
-            if time.time() >= end or self.cancel_flag.is_set() or self.stop.is_set():
+            if time.time() >= end or self._cancelled() or self.stop.is_set():
                 out.line(f"-- services still not answering after {int(self.preflight_s)} s ({', '.join(down)}), running anyway")
                 return
             if not waited:
@@ -702,7 +889,7 @@ class Runner:
                 fh.close()
                 self._drop(part_file)
             return "failed", str(e)
-        self.proc = p
+        self._set_proc(p)
         deadline = time.time() + left_s
         timed_out = False
         err_lines: List[str] = []
@@ -714,7 +901,7 @@ class Runner:
         t = threading.Thread(target=pump, args=(p.stdout if not fh else p.stderr, out.line if not fh else err_lines.append), daemon=True)
         t.start()
         while p.poll() is None:
-            if self.cancel_flag.is_set():
+            if self._cancelled():
                 self._signal_group(p, signal.SIGTERM)
                 break
             if time.time() > deadline:
@@ -727,10 +914,10 @@ class Runner:
         except subprocess.TimeoutExpired:
             self._signal_group(p, signal.SIGKILL)
             p.wait()
-        if timed_out or self.cancel_flag.is_set():
+        if timed_out or self._cancelled():
             self._signal_group(p, signal.SIGKILL)      # a pool worker that ignored SIGTERM
         t.join(timeout=5)
-        self.proc = None
+        self._set_proc(None)
         if fh:
             fh.close()
             for ln in err_lines:
@@ -746,9 +933,9 @@ class Runner:
             self._copy_artifact(part_file, ctx, os.path.basename(stdout_file))      # the run folder always shows what this run produced
         rc = p.returncode
         if fh:
-            finished = not timed_out and not self.cancel_flag.is_set() and (rc in st.get("ok", [0]) or rc in st.get("attention", [1]))
+            finished = not timed_out and not self._cancelled() and (rc in st.get("ok", [0]) or rc in st.get("attention", [1]))
             self._publish_out_file(part_file, stdout_file, finished)
-        if self.cancel_flag.is_set():
+        if self._cancelled():
             return "cancelled", "cancelled"
         if timed_out:
             return "timeout", "time limit"
@@ -794,7 +981,7 @@ class Runner:
         deadline = time.time() + (min(left_s, float(poll["max_s"])) if poll else min(left_s, 180.0))
         while True:
             code, body = self._request(method if not poll else "GET", url, hdr, timeout=min(60.0, max(5.0, left_s)))
-            if poll is None or self.cancel_flag.is_set():
+            if poll is None or self._cancelled():
                 break
             try:
                 val = str(json.loads(body).get(poll["key"], "")).lower()

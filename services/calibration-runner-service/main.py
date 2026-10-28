@@ -77,7 +77,8 @@ def _startup() -> None:
     runner = Runner(str(config.DATA_DIR), str(config.SCRIPTS_DIR), _ctx_base(), J.JOBS, J.PACK_MAP, _safe_token, extra_secrets=lambda: [config.SESSION_SECRET, *_all_secrets()],
                     max_output=config.MAX_OUTPUT_BYTES, nice=config.NICE, keep_runs=config.KEEP_RUNS, keep_days=config.KEEP_DAYS, guard_market=config.GUARD_MARKET_HOURS,
                     notify_fn=notifier, keep_latest_only=config.KEEP_LATEST_ONLY, preflight_s=config.PREFLIGHT_S,
-                    after_fn=lambda run: auto.on_run_finished(run, J.PACK_MAP) if auto else None)
+                    after_fn=lambda run: auto.on_run_finished(run, J.PACK_MAP) if auto else None,
+                    workers=config.WORKERS, max_heavy=config.MAX_HEAVY, min_free_mb=config.MIN_FREE_MB)
 
     def _tell(title: str, message: str, urgency: str) -> Optional[str]:
         text = redact(message)
@@ -132,6 +133,14 @@ def _shutdown() -> None:
         weather.stop.set()
 
 
+def _svc(service: str) -> str:
+    """E235: the page tab a request comes from (rt / ps); unknown -> 400, empty = everything."""
+    sv = (service or "").strip().lower()
+    if sv not in ("", "rt", "ps"):
+        raise HTTPException(400, "service must be rt or ps")
+    return sv
+
+
 def _r() -> Runner:
     if runner is None:
         raise HTTPException(503, "runner not started")
@@ -176,13 +185,14 @@ class RunReq(BaseModel):
     params: Dict[str, Any] = {}
     confirm: bool = False
     resume: bool = False         # group 466: continue from the symbols a stopped run already saved
+    service: str = ""            # E235: the page tab that starts it: rt | ps | "" (shared)
 
 
 @app.post("/runs")
 def create_run(req: RunReq, claims: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     try:
         r = _r().submit(req.kind, req.target, req.params, by=str(claims.get("sub") or ""), trigger="manual",
-                        confirm=req.confirm, resume=req.resume)
+                        confirm=req.confirm, resume=req.resume, service=_svc(req.service))
     except KeyError as e:
         raise HTTPException(404, str(e).strip("'\""))
     except ValueError as e:
@@ -191,8 +201,19 @@ def create_run(req: RunReq, claims: Dict[str, Any] = Depends(require_admin)) -> 
 
 
 @app.get("/runs")
-def list_runs(limit: int = Query(60, ge=1, le=200), target: str = "", _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-    return {"state": _r().state(), "runs": _r().list_runs(limit, target)}
+def list_runs(limit: int = Query(60, ge=1, le=200), target: str = "", service: str = "", _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    sv = _svc(service)
+    return {"state": _r().state(sv), "runs": _r().list_runs(limit, target, sv)}
+
+
+class WorkersReq(BaseModel):
+    workers: int
+
+
+@app.put("/runner/workers")
+def set_workers(req: WorkersReq, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    """E235: how many tests may run at the same time (1-8); saved, so it survives a restart."""
+    return {"workers": _r().set_workers(req.workers)}
 
 
 @app.get("/runs/{rid}")
@@ -235,28 +256,30 @@ def download_zip(rid: str, _: Dict[str, Any] = Depends(require_admin)):
 
 
 @app.get("/results/latest.zip")
-def download_latest_zip(_: Dict[str, Any] = Depends(require_admin)):
+def download_latest_zip(service: str = "", _: Dict[str, Any] = Depends(require_admin)):
     """group 471: the latest result of every test in one zip (the 'Download all latest results' button)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
-    _r().zip_latest(tmp.name)
-    return FileResponse(tmp.name, filename="latest_results.zip", media_type="application/zip")
+    sv = _svc(service)
+    _r().zip_latest(tmp.name, service=sv)
+    return FileResponse(tmp.name, filename=(f"latest_results_{sv}.zip" if sv else "latest_results.zip"), media_type="application/zip")
 
 
 @app.get("/latest/{target}")
-def latest(target: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-    return {"run": _r().latest(target)}
+def latest(target: str, service: str = "", _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return {"run": _r().latest(target, _svc(service))}
 
 
 @app.get("/summary")
-def summary(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+def summary(service: str = "", _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     """Last finished run of every job: what the page's checklist shows (green / amber / red / never run)."""
+    sv = _svc(service)
     out = {}
     for j in J.JOB_LIST:
-        r = _r().latest(j["id"])
+        r = _r().latest(j["id"], sv)
         out[j["id"]] = {"status": r["status"], "finished_at": r["finished_at"], "run_id": r["id"], "headline": r["headline"][:3]} if r else None
-    packs = {p["id"]: (lambda r: {"status": r["status"], "finished_at": r["finished_at"], "run_id": r["id"]} if r else None)(_r().latest(p["id"])) for p in J.PACKS}
-    return {"jobs": out, "packs": packs, "state": _r().state()}
+    packs = {p["id"]: (lambda r: {"status": r["status"], "finished_at": r["finished_at"], "run_id": r["id"]} if r else None)(_r().latest(p["id"], sv)) for p in J.PACKS}
+    return {"jobs": out, "packs": packs, "state": _r().state(sv)}
 
 
 @app.get("/calibration-summary")

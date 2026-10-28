@@ -716,6 +716,14 @@ services:
       RUNNER_BAR_DIR: /data/bars
       # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
       RUNNER_SCHEDULER_ENABLED: ${RUNNER_SCHEDULER_ENABLED:-true}
+      # E235: several tests at once. Two runs never overlap when one writes what the other reads or writes
+      # (locks come from the job steps, jobs.derive_locks). MAX_HEAVY = long replays / downloads that may
+      # run together; MIN_FREE_MB = a 2nd heavy run waits while the container has less memory than this.
+      # RUNNER_WORKERS=1 = one test at a time again. POOL_JOBS = processes inside ONE heavy replay (was 2).
+      RUNNER_WORKERS: ${RUNNER_WORKERS:-4}
+      RUNNER_MAX_HEAVY: ${RUNNER_MAX_HEAVY:-2}
+      RUNNER_MIN_FREE_MB: ${RUNNER_MIN_FREE_MB:-1500}
+      RUNNER_POOL_JOBS: ${RUNNER_POOL_JOBS:-3}
       # E98 Market Weather (weather.py / weather_apply.py). A value saved on the page (<data>/state/weather.json) wins over these defaults.
       # ENABLED = run the daily state engine; STAMP = post a stamp-only overlay so trades carry the state; NOTIFY = Telegram brief and change messages;
       # APPLY = send tighten-only dials, but only while the evidence gate passes AND the service itself has MARKET_STATE_MODE=live.
@@ -756,9 +764,9 @@ services:
       retries: 5
       start_period: 30s
     logging: *default-logging
-    # trading containers come first: a replay here must never starve them (jobs are also nice'd 10 and run one at a time)
-    cpus: "0.50"
-    mem_limit: 2200m  # E229: was 900m. Kernel log (VM, 26 Oct 17:33 and 27 Oct 00:04 IST): "Memory cgroup out of memory: Killed process ... python3 anon-rss ~780 MB" x3 (the replay parent and its 2 workers) = the walk-forward / A-B on the 838-symbol seed. A cap only bites when a replay needs it; the VM had ~9 GB available. Prefer jobs=1 for heavy jobs, after the close.
+    # trading containers keep their own caps; runs here are nice 10, and data locks + the heavy cap + the memory guard bound the load (E235)
+    cpus: "1.50"   # E235: was 0.50
+    mem_limit: 6000m  # E235: was 2200m (E229: one replay = parent + workers at ~780 MB each, OOM-killed at 2200m). Two heavy runs may now overlap (RUNNER_MAX_HEAVY=2, 3 pool processes each); RUNNER_MIN_FREE_MB holds the 2nd back when memory is short. VM had ~9 GB free: lower RUNNER_MAX_HEAVY / RUNNER_POOL_JOBS if the kernel log shows OOM kills.
     mem_reservation: 128m
 
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)

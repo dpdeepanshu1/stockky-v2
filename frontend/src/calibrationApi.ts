@@ -181,11 +181,14 @@ export interface RunRec {
   headline: string[]; note: string; exit_summary: string; files?: { name: string; bytes: number }[];
   notified?: string; notified_at?: string | null;     // group 447: the Telegram message of an automatic run ("sent" | "not delivered: ..." | "error: ...")
   resume?: boolean;      // group 466: this run continues from the symbols saved by an earlier run
+  service?: "" | "rt" | "ps";      // E235: the page tab that started it ("" = shared / automatic)
+  waiting_for?: string;            // E235: why a queued run has not started yet
 }
 /** group 447: the latest run the timetable started (blocked ones count: the timetable did fire). */
 export interface AutoRun { id: string; title: string; target: string; status: RunStatus; finished_at: string | null; telegram: string }
 export interface RunnerState {
   current: RunRec | null; queued: RunRec[]; market_open_now: boolean; now_ist: string;
+  running?: RunRec[]; workers?: number; max_heavy?: number; active_total?: number; waiting_total?: number; service?: string;      // E235: every active run, not just the oldest
   last_automatic?: AutoRun | null; last_automatic_by_pack?: Record<string, AutoRun>; keep_latest_only?: boolean;
 }
 /** "2026-10-19T16:09:12+05:30" -> "2026-10-19 16:09" (the runner already writes IST). */
@@ -221,12 +224,14 @@ export const runnerApi = {
   health: () => fetch(`${getRunnerUrl()}/health`).then((r) => r.json()),
   session: () => R<{ ok: boolean; user: string }>("/auth/session"),
   catalog: () => R<Catalog>("/catalog"),
-  summary: () => R<Summary>("/summary"),
-  runs: (limit = 60, target = "") => R<{ state: RunnerState; runs: RunRec[] }>(`/runs?limit=${limit}${target ? `&target=${encodeURIComponent(target)}` : ""}`),
+  summary: (service: Svc | "" = "") => R<Summary>(`/summary${service ? `?service=${service}` : ""}`),
+  runs: (limit = 60, target = "", service: Svc | "" = "") =>
+    R<{ state: RunnerState; runs: RunRec[] }>(`/runs?limit=${limit}${target ? `&target=${encodeURIComponent(target)}` : ""}${service ? `&service=${service}` : ""}`),
   run: (id: string) => R<RunRec>(`/runs/${encodeURIComponent(id)}`),
   tail: (id: string, offset: number) => R<{ status: RunStatus; offset: number; size: number; text: string }>(`/runs/${encodeURIComponent(id)}/tail?offset=${offset}`),
-  start: (kind: "job" | "pack", target: string, params: Record<string, any> = {}, confirm = false, resume = false) =>
-    R<RunRec>("/runs", { method: "POST", body: JSON.stringify({ kind, target, params, confirm, resume }) }),
+  start: (kind: "job" | "pack", target: string, params: Record<string, any> = {}, confirm = false, resume = false, service: Svc | "" = "") =>
+    R<RunRec>("/runs", { method: "POST", body: JSON.stringify({ kind, target, params, confirm, resume, service }) }),
+  setWorkers: (workers: number) => R<{ workers: number }>("/runner/workers", { method: "PUT", body: JSON.stringify({ workers }) }),      // E235
   cancel: (id: string) => R<{ cancelled: boolean }>(`/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   schedule: () => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule"),
   putSchedule: (body: { enabled?: boolean; entries?: ScheduleSlot[] }) => R<{ enabled: boolean; entries: ScheduleSlot[]; last_fired: Record<string, string> }>("/schedule", { method: "PUT", body: JSON.stringify(body) }),
@@ -259,11 +264,18 @@ export async function downloadRunFile(id: string, file: string | "zip"): Promise
 }
 
 /** group 471: the latest result of every test in one zip (GET /results/latest.zip on the runner). */
-export async function downloadLatestResults(): Promise<void> {
-  const resp = await fetch(`${getRunnerUrl()}/results/latest.zip`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
+export async function downloadLatestResults(service: Svc | "" = ""): Promise<void> {
+  const resp = await fetch(`${getRunnerUrl()}/results/latest.zip${service ? `?service=${service}` : ""}`, { headers: { Authorization: `Bearer ${anyToken() || ""}` } });
   if (!resp.ok) throw new ApiError(resp.status, resp.statusText || "download failed");
-  saveBlob(await resp.blob(), "latest_results.zip");
+  saveBlob(await resp.blob(), service ? `latest_results_${service}.zip` : "latest_results.zip");
 }
+
+/** E235: which page tab started a run ("" = the timetable / shared). */
+export const svcLabel = (v: string | null | undefined): string => (v === "rt" ? "Real Trade" : v === "ps" ? "Position Stocks" : "Shared");
+
+/** E235: every run that is going now (several at once); falls back to the single `current` of an older runner. */
+export const activeRuns = (st: RunnerState | null | undefined): RunRec[] =>
+  (st ? (st.running && st.running.length ? st.running : st.current ? [st.current] : []) : []);
 
 export function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);

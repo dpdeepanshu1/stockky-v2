@@ -1,6 +1,6 @@
 // group 442: one runnable job: what it does, when to run it, the last result, its options and a Run button.
 import { useState } from "react";
-import { downloadRunFile, fmtDur, istStamp, relTime, type JobDef } from "../../calibrationApi";
+import { activeRuns, downloadRunFile, fmtDur, istStamp, relTime, type JobDef } from "../../calibrationApi";
 import { Btn, StatusPill } from "./ui";
 import { useRunner } from "./RunnerContext";
 
@@ -8,8 +8,7 @@ export default function JobCard({ job, compact }: { job: JobDef; compact?: boole
   const { summary, start, openRun, cancel } = useRunner();
   const last = summary?.jobs?.[job.id] || null;
   // group 456: tell RUNNING from WAITING (both used to say "In queue") and keep the run's id so it can be watched / cancelled from here
-  const cur = summary?.state?.current;
-  const running = cur && cur.target === job.id ? cur : null;
+  const running = activeRuns(summary?.state).find((r) => r.target === job.id) || null;      // E235: several runs may be going at once
   const queuedRec = running ? null : (summary?.state?.queued || []).find((q) => q.target === job.id) || null;
   const activeRec = running || queuedRec;
   const active = !!activeRec;
@@ -51,7 +50,7 @@ export default function JobCard({ job, compact }: { job: JobDef; compact?: boole
       {activeRec && (
         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-signal-buy px-2 py-1 text-[11px]" role="status" data-testid={`job-live-${job.id}`}>
           <span className="font-bold text-signal-buy">{running ? "● Running now" : "◌ Waiting in the queue"}</span>
-          <span className="text-mist">{running ? `started ${relTime(running.started_at)} · time limit ${fmtDur(job.timeout_s)}` : "it starts when the run before it ends"}</span>
+          <span className="text-mist">{running ? `started ${relTime(running.started_at)} · time limit ${fmtDur(job.timeout_s)}` : (queuedRec?.waiting_for ? `${queuedRec.waiting_for}` : "it starts when a slot is free")}</span>
           <button type="button" className="underline" onClick={() => openRun(activeRec.id)}>Watch live output</button>
         </div>
       )}

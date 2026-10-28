@@ -115,14 +115,14 @@ assert.equal(jobAppliesTo("swing_backtest", "ps"), false);
 assert.equal(jobAppliesTo("swing_shadow_report", "ps"), false);
 assert.equal(jobAppliesTo("swing_universe", "rt"), true);
 const api = readFileSync(new URL("./calibrationApi.ts", import.meta.url), "utf8");
-assert.match(api, /resume = false\) =>\s+R<RunRec>\("\/runs", \{ method: "POST", body: JSON\.stringify\(\{ kind, target, params, confirm, resume \}\) \}\)/);
+assert.match(api, /resume = false, service: Svc \| "" = ""\) =>\s+R<RunRec>\("\/runs", \{ method: "POST", body: JSON\.stringify\(\{ kind, target, params, confirm, resume, service \}\) \}\)/);
 assert.match(api, /resumable\?: boolean/);
 const panel = readFileSync(new URL("./components/calibration/RunsPanel.tsx", import.meta.url), "utf8");
 assert.match(panel, /isResumable\(r, catalog\)/);
 assert.match(panel, /start\(r\.kind, r\.target, r\.params, true\)/);
 assert.match(panel, /Resume \(reuse saved symbols\)/);
 const ctxSrc = readFileSync(new URL("./components/calibration/RunnerContext.tsx", import.meta.url), "utf8");
-assert.match(ctxSrc, /runnerApi\.start\(run\.kind, run\.target, params, true, resume\)/, "the market-hours confirm must keep the resume flag");
+assert.match(ctxSrc, /runnerApi\.start\(run\.kind, run\.target, params, true, resume, svc\)/, "the market-hours confirm must keep the resume flag");
 
 // group 471: "Run all test cases" plan: never the data-changing "model" group, heavy only on request, a job after the jobs it needs, per-service filter
 const J = (id, group, heavy = false, needs = []) => ({ id, group, heavy, needs });
@@ -149,7 +149,11 @@ assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gat
 assert.match(api, /export type SwitchSvc = Svc \| "sch"/);
 assert.match(panel, /Download all latest results/);
 assert.match(api, /\/results\/latest\.zip/);
-assert.match(ctxSrc, /for \(let i = 0; i < ids\.length && !stopAll\.current/, "tests are started one after the other");
+assert.match(ctxSrc, /while \(next < ids\.length && !stopAll\.current/, "E235: tests are taken from the plan in order by several lanes");
+assert.match(ctxSrc, /Promise\.all\(Array\.from\(\{ length: Math\.min\(lanes, ids\.length\) \}/, "E235: several tests at a time");
+assert.match(ctxSrc, /runnerApi\.start\("job", id, \{\}, false, false, svc\)/, "E235: every Run-all test carries the tab (rt / ps)");
+assert.match(api, /service \? `\?service=\$\{service\}`/, "E235: the runner calls send the tab");
+assert.match(tab, /<RunnerProvider authKey=\{String\(authKey\)\} svc=\{svc\}>/, "E235: the provider knows the tab");
 // E231: position-stocks' realized_pnl is before charges; the Trades CSV / totals subtract the row's own charges, and a stagnation exit carries which rule fired
 {
   const n = tradesFromPositionStocks({ trades: [

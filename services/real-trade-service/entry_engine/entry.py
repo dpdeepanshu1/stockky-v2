@@ -47,6 +47,7 @@ import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
+from entry_engine import day_spike_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
@@ -1042,6 +1043,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _g4d_reason, _g4d_tag = None, None
         for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
                           (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
+                          (lambda: day_spike_gate.spike_reason_tick(tick), "spike_chase"),                    # E252: no market buy at the top of a day spike
+                          (lambda: day_spike_gate.range_reason_tick(tick, target_pct), "gain_room"),         # E252: the day's normal range is not already used up
                           (lambda: preopen.gap_reason(cand.symbol), "preopen_gap"),
                           (lambda: stopout_guard.symbol_reason(cand.symbol, _so_syms), "stopout_symbol"),   # group471: no same-day re-buy after a stop-out
                           (lambda: calendar_gate.late_entry_block_reason(), "late_day"),           # group470: one cut-off every day (ENTRY_LAST_TIME_IST)

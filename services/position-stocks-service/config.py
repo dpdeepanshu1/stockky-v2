@@ -625,6 +625,24 @@ NO_FOLLOWTHROUGH_EXIT_ENABLED = _get_bool("NO_FOLLOWTHROUGH_EXIT_ENABLED", True)
 NO_FOLLOWTHROUGH_EXIT_MINUTES = _get_float("NO_FOLLOWTHROUGH_EXIT_MINUTES", 20.0)
 NO_FOLLOWTHROUGH_MIN_GAIN_PCT = _get_float("NO_FOLLOWTHROUGH_MIN_GAIN_PCT", 0.5)
 
+# E252 (2026-10-28): adaptive stagnation / no-follow-through (orders/exit_adaptive.py). After E251 the target is 2.4-3 %, so the fixed +0.5 % / +-0.35 % no longer
+# mean the same thing, and both rules closed trades whether or not a better candidate was waiting. EXIT_ADAPTIVE_ENABLED=false = the fixed numbers and the old behaviour.
+#   gain needed = NFT_TARGET_FRAC x the trade's own target %, clamped NFT_GAIN_MIN_PCT..NFT_GAIN_MAX_PCT
+#   flat band   = STAGNATION_BAND_TARGET_FRAC x target %, clamped STAGNATION_BAND_MIN_PCT..STAGNATION_BAND_MAX_PCT
+#   A flat / no-follow-through trade is closed only when it is FADING (price on the wrong side of the day VWAP, or lower highs over the last EXIT_FADE_WINDOW_MIN
+#   minutes) or a qualifying candidate was actually skipped for capital / slots in the last EXIT_SLOT_PRESSURE_WINDOW_MIN minutes. Otherwise it is left to its stop,
+#   target or the EOD sweep, except that EXIT_HARD_MAX_MINUTES is a hard maximum holding time (the old rules then apply unchanged).
+EXIT_ADAPTIVE_ENABLED = _get_bool("EXIT_ADAPTIVE_ENABLED", True)
+NFT_TARGET_FRAC = _get_float("NFT_TARGET_FRAC", 0.2)
+NFT_GAIN_MIN_PCT = _get_float("NFT_GAIN_MIN_PCT", 0.4)
+NFT_GAIN_MAX_PCT = _get_float("NFT_GAIN_MAX_PCT", 0.8)
+STAGNATION_BAND_TARGET_FRAC = _get_float("STAGNATION_BAND_TARGET_FRAC", 0.15)
+STAGNATION_BAND_MIN_PCT = _get_float("STAGNATION_BAND_MIN_PCT", 0.25)
+STAGNATION_BAND_MAX_PCT = _get_float("STAGNATION_BAND_MAX_PCT", 0.6)
+EXIT_FADE_WINDOW_MIN = _get_float("EXIT_FADE_WINDOW_MIN", 10.0)
+EXIT_SLOT_PRESSURE_WINDOW_MIN = _get_float("EXIT_SLOT_PRESSURE_WINDOW_MIN", 10.0)
+EXIT_HARD_MAX_MINUTES = _get_float("EXIT_HARD_MAX_MINUTES", 90.0)
+
 # ── Breakeven stop buffer (2026-09-18 audit) ────────────────────────────────
 # orders/breakeven.py previously moved the STOP_LOSS_LEG to EXACTLY
 # entry_price when a position's unrealized gain crossed its trigger. A
@@ -816,6 +834,16 @@ TRAIL_MIN_DISTANCE_PCT = _get_float("TRAIL_MIN_DISTANCE_PCT", 0.4)
 TRAIL_MIN_STEP_PCT = _get_float("TRAIL_MIN_STEP_PCT", 0.15)
 TRAIL_MIN_INTERVAL_S = _get_float("TRAIL_MIN_INTERVAL_S", 20.0)
 TRAIL_RETRY_BACKOFF_S = _get_float("TRAIL_RETRY_BACKOFF_S", 60.0)
+# E252 (2026-10-28): SYNGENE 28 Oct - bought 389.45, the trail started at +1.0 % and sat 0.78 % under the peak (0.6 x its 1.3 % stop), exited 391.15 (+0.44 %),
+# then the stock ran to 412.7 (the 2.5 % target was 399.20). The fixed distance / activation ignored how much the stock moves. Adaptive version (orders/exit_adaptive.py):
+#   distance   = max(old distance, TRAIL_BAR_RANGE_MULT x the stock's own average 5-minute bar range), never wider than TRAIL_MAX_DIST_STOP_FRAC x its stop
+#   activation = max(TRAIL_ACTIVATE_PCT, TRAIL_ACTIVATE_TARGET_FRAC x the trade's own target %), capped at TRAIL_ACTIVATE_MAX_PCT
+# TRAIL_ADAPTIVE_ENABLED=false = the old fixed numbers. Breakeven + ticks stays the first lock either way.
+TRAIL_ADAPTIVE_ENABLED = _get_bool("TRAIL_ADAPTIVE_ENABLED", True)
+TRAIL_BAR_RANGE_MULT = _get_float("TRAIL_BAR_RANGE_MULT", 1.0)
+TRAIL_MAX_DIST_STOP_FRAC = _get_float("TRAIL_MAX_DIST_STOP_FRAC", 1.0)
+TRAIL_ACTIVATE_TARGET_FRAC = _get_float("TRAIL_ACTIVATE_TARGET_FRAC", 0.5)
+TRAIL_ACTIVATE_MAX_PCT = _get_float("TRAIL_ACTIVATE_MAX_PCT", 2.0)
 
 # -- group 340 (2026-10-12): stop integrity, candle-history levels, sizing, scalp target cap -------------------------------------
 # Stop-breach watchdog (orders/stop_watchdog.py): FEDDERSHOL's stop was trailed to 58.85 yet the trade ended at 58.41 - nothing noticed the

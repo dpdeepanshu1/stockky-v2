@@ -126,6 +126,12 @@ CATALOG = (
     # ---------------- entry guards ----------------
     Flag("ENTRY_VWAP_GATE_ENABLED", "VWAP entry gate", "Entry guards", "bool", looser="off", help="Refuse an entry priced below VWAP (minus tolerance).",
          targets=((_C, "ENTRY_VWAP_GATE_ENABLED"),), live=True, shipped="true", evidence="intraday_gate_backtest.py (needs recorded 1-minute bars)"),
+    Flag("SPIKE_GUARD_MODE", "Day-spike guard", "Entry guards", "enum", choices=("live", "log", "off"),
+         help="E252: live = no BUY (WAIT) at the top of a day spike: up by the stock's own limit (2x its daily ATR %, 2.5-6 %) AND in the top of today's range; log = record only; off = kill switch. Fails open on missing data.",
+         targets=((_C, "SPIKE_GUARD_MODE"),), live=True, shipped="live", recommended="live", evidence="ARVIND 28 Oct (position-stocks E251)"),
+    Flag("GAIN_ROOM_MODE", "Range-used-up check", "Entry guards", "enum", choices=("live", "log", "off"),
+         help="E252: live = no BUY (WAIT) when the room from the price to today's low x (1 + 2 x daily ATR %) is under half the target %; log = record only; off = kill switch. Fails open on missing data.",
+         targets=((_C, "GAIN_ROOM_MODE"),), live=True, shipped="live", recommended="live", evidence="position-stocks E251 gain-room gate"),
     Flag("ENTRY_VWAP_TOLERANCE_PCT", "VWAP tolerance (%)", "Entry guards", "float", lo=0, hi=2, looser="higher", help="How far below VWAP an entry may be.",
          targets=((_C, "ENTRY_VWAP_TOLERANCE_PCT"),), live=True, shipped="0.15"),
     Flag("OPENING_GATE_ENABLED", "Opening quality gate", "Entry guards", "bool", looser="off", help="Gap, range-position and previous-day checks for entries in the opening window.",

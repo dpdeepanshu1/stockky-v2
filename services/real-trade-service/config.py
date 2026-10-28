@@ -717,6 +717,20 @@ VIX_FETCH_TIMEOUT_S = _og_float("VIX_FETCH_TIMEOUT_S", 3.0)
 #    VWAP. Needs avg_price on the market-data row (Dhan average_price); unknown never blocks.
 ENTRY_VWAP_GATE_ENABLED = ((os.getenv("ENTRY_VWAP_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 ENTRY_VWAP_TOLERANCE_PCT = _og_float("ENTRY_VWAP_TOLERANCE_PCT", 0.15)
+#  * E252 (2026-10-28), ported from position-stocks E251 (entry_engine/day_spike_gate.py): no BUY at the top of a day spike (SPIKE_GUARD_MODE) and no BUY when the
+#    stock has used up its normal day range (GAIN_ROOM_MODE). live (WAIT) | log (record only) | off. Both fail open on missing data.
+def _og_mode(name, default="live"):
+    v = ((os.getenv(name) or "").strip() or default).lower()
+    return v if v in ("live", "log", "off") else default
+SPIKE_GUARD_MODE = _og_mode("SPIKE_GUARD_MODE")
+GAIN_ROOM_MODE = _og_mode("GAIN_ROOM_MODE")
+SPIKE_DAY_PCT = _og_float("SPIKE_DAY_PCT", 4.0)               # fixed day-gain limit used when the stock's daily ATR is unknown; 0 = spike test off
+SPIKE_DAY_ATR_MULT = _og_float("SPIKE_DAY_ATR_MULT", 2.0)     # adaptive limit = this x the stock's daily ATR %, clamped to the two values below
+SPIKE_DAY_MIN_PCT = _og_float("SPIKE_DAY_MIN_PCT", 2.5)
+SPIKE_DAY_MAX_PCT = _og_float("SPIKE_DAY_MAX_PCT", 6.0)
+SPIKE_RANGE_POS = _og_float("SPIKE_RANGE_POS", 0.85)          # and the price must be at / above this position in today's range
+GAIN_ROOM_RANGE_MULT = _og_float("GAIN_ROOM_RANGE_MULT", 2.0)
+GAIN_ROOM_MIN_TARGET_FRAC = _og_float("GAIN_ROOM_MIN_TARGET_FRAC", 0.5)   # 0 = range test off
 #  * Pre-open snapshot (entry_engine/preopen.py): at PREOPEN_SNAPSHOT_TIME_IST (default 09:10 since group 399, before the 09:15 bell) the indicative gap of the
 #    queued candidates is recorded and the caches (previous-day candles, results dates / news, VIX) are warmed. A candidate that gapped up
 #    PREOPEN_GAP_UP_BLOCK_PCT or more (chasing) or down PREOPEN_GAP_DOWN_BLOCK_PCT or more (falling) is not bought until PREOPEN_GAP_GATE_UNTIL_IST.

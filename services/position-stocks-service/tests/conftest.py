@@ -167,6 +167,9 @@ def _e251_rules_off_by_default(monkeypatch):
     monkeypatch.setattr(_config, "SPIKE_GUARD_MODE", "off", raising=False)
     monkeypatch.setattr(_config, "GAIN_ROOM_MODE", "off", raising=False)
     monkeypatch.setattr(_config, "REENTRY_RECLAIM_ENABLED", False, raising=False)
+    # E252: adaptive trail / stagnation read live feed and the candidate log; older tests expect the fixed numbers. tests/test_e252_*.py turn them on explicitly.
+    monkeypatch.setattr(_config, "TRAIL_ADAPTIVE_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "EXIT_ADAPTIVE_ENABLED", False, raising=False)
     yield
 
 

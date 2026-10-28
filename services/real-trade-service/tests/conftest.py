@@ -22,6 +22,15 @@ def _reset_volume_shock_history_state():
 
 
 @_pytest_g172.fixture(autouse=True)
+def _e252_day_spike_gates_off_by_default(monkeypatch):
+    """E252: the day-spike guard and range check read the tick's day stats and previous-day ATR; older tests predate them. tests/test_e252_*.py turn them on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "SPIKE_GUARD_MODE", "off", raising=False)
+    monkeypatch.setattr(_cfg, "GAIN_ROOM_MODE", "off", raising=False)
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
 def _opening_entry_guard_off_by_default(monkeypatch):
     """group 220: the opening entry guard depends on the wall clock (09:15-09:30 IST). Every pre-existing test predates
     it and must not flake when the suite happens to run in that window, so it is off unless a test turns it on

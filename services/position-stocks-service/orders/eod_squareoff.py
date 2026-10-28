@@ -27,7 +27,7 @@ import notifier
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import exit_retry, overnight_stop, side as _side
+from orders import exit_adaptive, exit_retry, overnight_stop, side as _side
 from screening import intraday_eligibility
 from tz_utils import IST, as_aware, ist_time_at_or_after, ist_today_str, parse_hhmm
 
@@ -1295,6 +1295,9 @@ def _stamp_exit_rule(pos, rule: str) -> None:
         logger.debug("exit_rule stamp skipped for %s: %s", getattr(pos, "symbol", "?"), e)
 
 
+_held_logged: set = set()      # E252: position ids whose "held" line was already logged (in-process only)
+
+
 def run_stagnation_exit(db: Session) -> int:
     """session68/69. Toggle is DB-backed (ScalpGateState.stagnation_exit_
     enabled — POST /stagnation-exit/enable|disable, frontend button on the
@@ -1355,6 +1358,10 @@ def run_stagnation_exit(db: Session) -> int:
         nft_on = bool(getattr(config, "NO_FOLLOWTHROUGH_EXIT_ENABLED", False))
         nft_min = float(getattr(config, "NO_FOLLOWTHROUGH_EXIT_MINUTES", 20.0))
         nft_gain = float(getattr(config, "NO_FOLLOWTHROUGH_MIN_GAIN_PCT", 0.5))
+        # E252: the gain a trade must show and the flat band are shares of ITS OWN target (orders/exit_adaptive.py); unknown target / switch off = the fixed numbers
+        _tp = exit_adaptive.target_pct_of(pos.entry_price, pos.target_price)
+        nft_gain = exit_adaptive.nft_min_gain_pct(_tp)
+        band_pct = exit_adaptive.flat_band_pct(_tp)
         stag_age_ok = age_min >= config.STAGNATION_EXIT_MINUTES
         nft_age_ok = nft_on and age_min >= nft_min
         if not (stag_age_ok or nft_age_ok):
@@ -1371,8 +1378,8 @@ def run_stagnation_exit(db: Session) -> int:
 
         pct_move = abs(ltp - pos.entry_price) / pos.entry_price * 100.0
         reason = None
-        if stag_age_ok and pct_move < config.STAGNATION_EXIT_BAND_PCT:
-            reason = f"{age_min:.0f}m flat within ±{config.STAGNATION_EXIT_BAND_PCT:.2f}%"
+        if stag_age_ok and pct_move < band_pct:
+            reason = f"{age_min:.0f}m flat within ±{band_pct:.2f}%"
         elif nft_age_ok:
             # best price seen so far (excursion tracker), never below the live price
             if _side.is_short(pos):
@@ -1388,8 +1395,20 @@ def run_stagnation_exit(db: Session) -> int:
         if reason is None:
             continue  # moved meaningfully — target/stop logic already owns this case
 
+        # E252: a flagged trade is closed only when it is fading or a candidate was actually refused for capital / slots (or the hard maximum age is reached)
+        if exit_adaptive.enabled():
+            _fading = exit_adaptive.is_fading(pos.symbol, ltp, short=_side.is_short(pos))
+            _close, _why = exit_adaptive.stagnation_decision(
+                age_min=age_min, fading=_fading, pressure=exit_adaptive.slot_pressure(db, now))
+            if not _close:
+                if pos.id not in _held_logged:      # once per position, not on every reconcile tick
+                    _held_logged.add(pos.id)
+                    logger.info("STAGNATION_EXIT: %s (id=%d) held - %s (%s)", pos.symbol, pos.id, _why, reason)
+                continue
+            reason = f"{reason}; {_why}"
+
         # E231: both rules close as STAGNATION_EXIT; record which one fired (flow_json["exit_rule"]) so the reports can tell them apart.
-        _stamp_exit_rule(pos, "flat_band" if (stag_age_ok and pct_move < config.STAGNATION_EXIT_BAND_PCT) else "no_followthrough")
+        _stamp_exit_rule(pos, "flat_band" if (stag_age_ok and pct_move < band_pct) else "no_followthrough")
         try:
             close_position_now(db, pos, exit_reason="STAGNATION_EXIT")
             closed += 1

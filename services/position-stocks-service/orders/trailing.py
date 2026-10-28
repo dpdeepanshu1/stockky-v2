@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 import config
 from execution import dhan_client
 from models import ScalpPosition
-from orders import side as side_mod
+from orders import exit_adaptive, side as side_mod
 
 logger = logging.getLogger("position-stocks-trailing")
 
@@ -54,21 +54,21 @@ def compute_trailing_stop(
     target: Optional[float],
     stop_pct: float,
     side: str = "LONG",
+    bar_range_pct: Optional[float] = None,
 ) -> Optional[float]:
     """The stop price to move to, or None when the stop should stay where it is. Pure function.
     side="SHORT" (short selling step 4) mirrors it: `peak` is then the LOWEST price seen (the trough), the stop trails ABOVE it and only ever
     goes DOWN, never above entry - buffer once active, always strictly above the live price, and never at/below the target."""
     try:
         if str(side or "LONG").strip().upper() == "SHORT":
-            return _compute_trailing_stop_short(entry=entry, trough=peak, ltp=ltp, current_stop=current_stop, target=target, stop_pct=stop_pct)
+            return _compute_trailing_stop_short(entry=entry, trough=peak, ltp=ltp, current_stop=current_stop, target=target, stop_pct=stop_pct,
+                                                bar_range_pct=bar_range_pct)
         if not entry or entry <= 0 or not ltp or ltp <= 0 or not peak or peak <= entry:
             return None
-        if (peak - entry) / entry * 100.0 < config.TRAIL_ACTIVATE_PCT:
+        # E252: activation and distance adapt to the trade's own target and the stock's own 5-minute bar range (exit_adaptive; off = the old fixed numbers)
+        if (peak - entry) / entry * 100.0 < exit_adaptive.trail_activation_pct(exit_adaptive.target_pct_of(entry, target)):
             return None
-        dist_pct = max(
-            config.TRAIL_MIN_DISTANCE_PCT,
-            float(stop_pct or 0.0) * config.TRAIL_DISTANCE_STOP_FRACTION,
-        )
+        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct)
         cand = peak * (1.0 - dist_pct / 100.0)
         floor = entry + dhan_client.tick_size_for_price(entry) * config.BREAKEVEN_STOP_BUFFER_TICKS
         cand = dhan_client.round_to_tick(max(cand, floor))
@@ -90,13 +90,13 @@ def compute_trailing_stop(
         return None
 
 
-def _compute_trailing_stop_short(*, entry, trough, ltp, current_stop, target, stop_pct) -> Optional[float]:
+def _compute_trailing_stop_short(*, entry, trough, ltp, current_stop, target, stop_pct, bar_range_pct=None) -> Optional[float]:
     try:
         if not entry or entry <= 0 or not ltp or ltp <= 0 or not trough or trough <= 0 or trough >= entry:
             return None
-        if (entry - trough) / entry * 100.0 < config.TRAIL_ACTIVATE_PCT:
+        if (entry - trough) / entry * 100.0 < exit_adaptive.trail_activation_pct(exit_adaptive.target_pct_of(entry, target)):
             return None
-        dist_pct = max(config.TRAIL_MIN_DISTANCE_PCT, float(stop_pct or 0.0) * config.TRAIL_DISTANCE_STOP_FRACTION)
+        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct)
         cand = trough * (1.0 + dist_pct / 100.0)
         ceiling = entry - dhan_client.tick_size_for_price(entry) * config.BREAKEVEN_STOP_BUFFER_TICKS   # a trailed short cannot end as a loss
         cand = dhan_client.round_to_tick(min(cand, ceiling))
@@ -149,6 +149,7 @@ def run_trailing_stop(db: Session) -> int:
             new_stop = compute_trailing_stop(
                 entry=pos.entry_price, peak=peak, ltp=ltp, current_stop=pos.stop_price,
                 target=pos.target_price, stop_pct=pos.adaptive_stop_pct, side="SHORT" if _short else "LONG",
+                bar_range_pct=exit_adaptive.avg_5m_range_pct(pos.symbol) if exit_adaptive.trail_enabled() else None,
             )
             if new_stop is None:
                 continue

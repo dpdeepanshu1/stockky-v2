@@ -153,6 +153,94 @@ def _compact(row: Optional[dict]) -> Dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------- Dhan's positions: the ground truth for "is a short really open"
+# E242 (28 Oct 2026): the first real run said "entry never filled ... nothing to cover" and sent no BUY, yet Dhan showed an open ITC short with every leg cancelled.
+# The Super Order list is one view of the fill; the position is the fact. The probe now reads the position before (baseline) and after the order, and a BUY
+# is sent only while the position really is short beyond the baseline (never a blind BUY, never a BUY on a flat book).
+def _pos_rows(positions: Any, security_id: str) -> List[dict]:
+    return [r for r in positions or [] if isinstance(r, dict) and str(r.get("securityId") or r.get("security_id") or "") == str(security_id)]
+
+
+def _net_qty(positions: Any, security_id: str) -> int:
+    """Signed net quantity Dhan shows for this security today (negative = short). 0 when there is no row."""
+    total = 0
+    for r in _pos_rows(positions, security_id):
+        try:
+            total += int(float(r.get("netQty") if r.get("netQty") is not None else r.get("net_qty") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _open_rows(positions: Any, security_id: str) -> List[dict]:
+    """Rows for this security with a non-zero net quantity (a +1 delivery row and a -1 intraday row net to 0 but are not flat)."""
+    out = []
+    for r in _pos_rows(positions, security_id):
+        try:
+            if int(float(r.get("netQty") if r.get("netQty") is not None else r.get("net_qty") or 0)) != 0:
+                out.append(r)
+        except (TypeError, ValueError):
+            out.append(r)
+    return out
+
+
+def _sell_avg(positions: Any, security_id: str) -> Optional[float]:
+    for r in _pos_rows(positions, security_id):
+        v = _num(r.get("sellAvg") or r.get("sell_avg"))
+        if v:
+            return v
+    return None
+
+
+def _read_positions(db, broker) -> Optional[list]:
+    """Dhan's positions list, or None when it cannot be read (the caller then refuses to act on a guess)."""
+    try:
+        got = broker.get_positions(db)
+        return got if isinstance(got, list) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sell probe: positions read failed (%s: %s)", type(e).__name__, str(e)[:120])
+        return None
+
+
+def _short_beyond(db, broker, security_id: str, base: int) -> Optional[int]:
+    """Shares short beyond the baseline right now (0 = no probe short open), or None when Dhan's positions cannot be read."""
+    pos = _read_positions(db, broker)
+    if pos is None:
+        return None
+    return max(0, base - _net_qty(pos, security_id))
+
+
+def _leg_entry_done(row: Optional[dict]) -> bool:
+    """Dhan documents no filled-quantity field on legDetails, only totalQuatity (sic) / remainingQuantity / triggeredQuantity. An ENTRY_LEG with a total and nothing
+    remaining, and not dead, is filled. Used only as probe evidence next to the position, never to price a fill."""
+    leg = _leg(row, "ENTRY_LEG")
+    if not leg or _status(leg) in _DEAD:
+        return False
+    total = _num(leg.get("totalQuantity") if leg.get("totalQuantity") is not None else leg.get("totalQuatity"))
+    try:
+        remaining = float(leg.get("remainingQuantity"))
+    except (TypeError, ValueError):
+        return False
+    return bool(total) and remaining == 0
+
+
+def _order_book_fill(db, broker, security_id: str, oid: str) -> Optional[float]:
+    """Average price of a TRADED SELL at Dhan for this security placed by this probe (order id or our correlation tag), from the plain order book. None if absent."""
+    try:
+        for r in broker.get_order_list(db) or []:
+            if not isinstance(r, dict) or str(r.get("securityId") or r.get("security_id") or "") != str(security_id):
+                continue
+            if str(r.get("transactionType") or "").upper() != "SELL" or _status(r) not in _FILLED:
+                continue
+            if str(r.get("orderId") or "") == str(oid) or str(r.get("correlationId") or "") == TAG_ENTRY:
+                v = _num(r.get("averageTradedPrice") or r.get("average_traded_price"))
+                if v:
+                    return v
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sell probe: order book read for the entry fill failed (%s)", e)
+    return None
+
+
 # ---------------------------------------------------------------- the probe
 class _Run:
     """Collects the steps and the verdict of one probe."""
@@ -245,14 +333,32 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         return _skip(sym or "-", f"outside the probe window ({PROBE_FROM_IST}-{PROBE_UNTIL_IST} IST on a trading day)")
 
     candidates = [sym] if sym else list(DEFAULT_SYMBOLS)
-    live = None
+    live, security_id, base, why_not = None, None, 0, []
     for c in candidates:
         px = price_fn(c)
-        if px and px > 0:
-            sym, live = c, float(px)
-            break
+        if not (px and px > 0):
+            continue
+        # E242: the symbol must be FLAT at Dhan (any row, any product) so that what the probe leaves behind can only be its own share, and so an old short is never
+        # mistaken for the probe's fill. An unreadable positions list refuses the probe: it would have no way to tell.
+        try:
+            sid = broker.get_security_id(db, c)
+        except Exception as e:  # noqa: BLE001
+            why_not.append(f"no Dhan security id for {c} ({e})")
+            continue
+        if not sid:
+            why_not.append(f"no Dhan security id for {c}")
+            continue
+        pos0 = _read_positions(db, broker)
+        if pos0 is None:
+            return _skip(c, "Dhan's positions could not be read, so the probe cannot tell its own fill from a position that was already there")
+        held = _net_qty(pos0, str(sid))
+        if held != 0 or _open_rows(pos0, str(sid)):
+            why_not.append(f"{c} already has a position at Dhan (net {held:+d}) that Stockky did not open: close it in Dhan first")
+            continue
+        sym, live, security_id, base = c, float(px), str(sid), held
+        break
     if live is None:
-        return _skip(candidates[0], f"no live price for {', '.join(candidates)} (the tick feed has nothing yet)")
+        return _skip(candidates[0], "; ".join(why_not) if why_not else f"no live price for {', '.join(candidates)} (the tick feed has nothing yet)")
     if db.query(ScalpPosition).filter(ScalpPosition.symbol == sym, ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).first():
         return _skip(sym, f"{sym} already has an open position here")
 
@@ -261,12 +367,6 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         return _skip(sym, f"{sym} is held by the other service")
     claimed = True
     try:
-        try:
-            security_id = broker.get_security_id(db, sym)
-        except Exception as e:  # noqa: BLE001
-            return _skip(sym, f"no Dhan security id for {sym} ({e})")
-        if not security_id:
-            return _skip(sym, f"no Dhan security id for {sym}")
         if not shared_order_budget.check_and_reserve(db):
             return _skip(sym, "the shared daily order budget is used up")
 
@@ -326,11 +426,21 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
             logger.warning("sell probe: order-budget count failed (%s)", e)
 
         # ---- 4. read it back: wait for the entry to fill and the legs to appear
-        row, fill = _poll_row(db, broker, oid, poll_s, sleep)
+        row, fill, seen_short = _poll_row(db, broker, oid, poll_s, sleep, security_id, base)
         run.res["answers"]["row_after_fill"] = _compact(row)
         problems: List[str] = []
-        if fill is None:
-            problems.append(f"the SELL entry did not show as filled within {poll_s:.0f}s (status {_status(row) or 'unreadable'})")
+        if fill is None and seen_short:
+            # the short is open at Dhan but the Super Order list does not show the fill: the probe cannot price it from the row, so it prices it from the
+            # position / order book, covers it below, and reports the mismatch, because the live short's reconcile reads the same list
+            pos_now = _read_positions(db, broker) or []
+            fill = _sell_avg(pos_now, security_id) or _order_book_fill(db, broker, security_id, oid) or live
+            run.res["entry_fill"] = fill
+            run.res["short_seen"] = True
+            run.step(f"Dhan's POSITIONS show the short open (net {_net_qty(pos_now, security_id):+d}) while the Super Order list said {_status(row) or 'nothing'}: treating the entry as filled at about {fill:.2f}")
+            problems.append(f"the Super Order list did not show the entry as filled (status {_status(row) or 'unreadable'}, entry leg {_status(_leg(row, 'ENTRY_LEG')) or 'missing'}) "
+                            f"although Dhan's positions show the short filled: the list's fill fields are not what reconcile reads, see the raw row")
+        elif fill is None:
+            problems.append(f"the SELL entry did not show as filled within {poll_s:.0f}s (status {_status(row) or 'unreadable'}) and Dhan's positions show no short")
         else:
             run.step(f"entry filled at {fill:.2f} (ref {live:.2f}; slippage {live - fill:+.2f} per share in our favour when positive)")
             run.res["entry_fill"] = fill
@@ -367,15 +477,19 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
             problems.append("the Super Order is not in Dhan's list")
 
         # ---- 5. cancel the legs and cover, whatever the checks said (a probe must never leave a short behind)
-        covered, cover_note = _cancel_and_cover(db, broker, run, oid, security_id, sym, fill, sleep, poll_s)
+        covered, cover_note = _cancel_and_cover(db, broker, run, oid, security_id, sym, fill, sleep, poll_s, base)
+        fill = run.res.get("entry_fill") or fill                   # the cover step may have found a late fill (row or position)
         try:
             shared_order_budget.record_order_unconditional(db)
         except Exception as e:  # noqa: BLE001
             logger.warning("sell probe: cover order not counted (%s)", e)
 
+        if run.res.get("flat_despite_fill"):
+            problems.append("the Super Order list showed the entry filled but Dhan's positions never showed a short: the two disagree, nothing was bought")
+
         # ---- 6. a cover we could not finish is adopted as a normal short so nothing is left without an owner
-        if fill is not None and not covered:
-            adopted = _adopt(db, run, sym, security_id, fill, s_px, t_px, oid)
+        if (fill is not None or run.res.get("short_seen")) and not covered:
+            adopted = _adopt(db, run, sym, security_id, float(fill or live), s_px, t_px, oid)
             problems.append(f"COVER NOT CONFIRMED ({cover_note}); {'adopted as a normal SHORT row, the 14:55 cover and the stop watchdog own it now' if adopted else 'could NOT be adopted: cover it by hand in Dhan'}")
             _tell(notify, f"🚨 <b>SELL probe: cover not confirmed</b> - {sym} 1 share\n{cover_note}\n"
                           f"{'It is now a normal short position here (14:55 cover, stop at the broker).' if adopted else 'Cover it by hand in Dhan NOW.'}")
@@ -399,9 +513,12 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
                 logger.error("sell probe: symbol lock release for %s failed (%s)", sym, e)
 
 
-def _poll_row(db, broker, oid: str, poll_s: float, sleep):
-    """Poll Dhan's Super Order list until the entry shows filled and the legs are listed, or poll_s runs out. Returns (row or None, fill or None)."""
-    waited, row, fill = 0.0, None, None
+def _poll_row(db, broker, oid: str, poll_s: float, sleep, security_id: str = "", base: int = 0):
+    """Poll Dhan until the entry shows filled and the legs are listed, or poll_s runs out. Returns (row or None, fill or None, short_seen).
+    fill comes only from the Super Order row (the reading reconcile uses). short_seen is True when Dhan's POSITIONS show a short beyond the baseline, which is
+    the fact the row can lag behind (E242). The wait ends early on a row fill with both legs listed; with a short seen but no row fill it waits out poll_s
+    so the row gets every chance to show it (the mismatch is reported)."""
+    waited, row, fill, seen = 0.0, None, None, False
     while True:
         try:
             row = _row_for(broker.get_super_order_list(db), oid) or row
@@ -409,16 +526,20 @@ def _poll_row(db, broker, oid: str, poll_s: float, sleep):
             logger.warning("sell probe: Super Order list read failed (%s)", e)
         fill = _entry_filled(row)
         if fill is not None and _leg(row, "STOP_LOSS_LEG") is not None and _leg(row, "TARGET_LEG") is not None:
-            return row, fill
+            return row, fill, True
+        if security_id and (not seen or fill is None) and int(waited) % 2 == 0:
+            short = _short_beyond(db, broker, security_id, base)
+            seen = seen or bool(short)
         if waited >= poll_s:
-            return row, fill
+            return row, fill, seen
         sleep(1.0)
         waited += 1.0
 
 
-def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: str, fill: Optional[float], sleep, poll_s: float):
-    """Cancel every leg, read back that none is live, then (only if the entry really filled) BUY 1 share and read the cover back.
-    Returns (covered, note). covered is True when no short remains: either the entry never filled and was cancelled, or the cover is confirmed filled."""
+def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: str, fill: Optional[float], sleep, poll_s: float, base: int = 0):
+    """Cancel every leg, then settle what is REALLY open from Dhan's positions, and only if a short beyond the baseline exists BUY 1 share and read the cover back.
+    Returns (covered, note). covered is True when no short remains: either nothing ever filled, or the cover is confirmed.
+    E242: the BUY decision no longer rests on the Super Order list alone. The first real run read "never filled" from the list while the position was short."""
     answers = run.res["answers"].setdefault("cancel", {})
     for leg in ("ENTRY_LEG", "TARGET_LEG", "STOP_LOSS_LEG"):
         try:
@@ -433,8 +554,26 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
         return False, f"could not read the order back after the cancels ({str(e)[:120]}), so no cover was sent (a BUY blind could open a long)"
     run.res["answers"]["row_after_cancel"] = _compact(row)
     filled_now = _entry_filled(row)
-    if fill is None and filled_now is None:
-        run.step("the entry never filled and the order is cancelled: nothing to cover")
+
+    # what is really open: the position, read after the cancels. A fill can land between the last poll and the cancel, and a position can lag a second or two.
+    short = _short_beyond(db, broker, security_id, base)
+    for _ in range(2):
+        if short != 0 or fill is not None or filled_now is not None:
+            break                                    # a short is seen, unreadable, or the row already says filled: no need to wait for the position
+        sleep(1.0)                                   # nothing seen anywhere: give a lagging position one more look before calling it flat
+        short = _short_beyond(db, broker, security_id, base)
+    run.res["answers"]["short_after_cancel"] = short
+    if short is None and fill is None and filled_now is None:
+        return False, "Dhan's positions could not be read after the cancel and the order list shows no fill, so no cover was sent (a BUY blind could open a long): CHECK DHAN for a 1-share short"
+    if short is not None and short > 0 and fill is None and filled_now is None:
+        pos_now = _read_positions(db, broker) or []
+        late = _sell_avg(pos_now, security_id) or _order_book_fill(db, broker, security_id, oid) or run.res.get("ref_price")
+        run.res["short_seen"] = True
+        run.res["entry_fill"] = late
+        fill = late
+        run.step(f"Dhan's positions show a short of {short} that the order list did not show as filled: covering it (entry about {late})")
+    if fill is None and filled_now is None and not short:
+        run.step("the entry never filled, Dhan's positions are flat and the order is cancelled: nothing to cover")
         live_legs = [lg.get("legName") for lg in (row or {}).get("legDetails") or [] if isinstance(lg, dict) and _status(lg) not in _DEAD | _FILLED]
         return (not live_legs), ("" if not live_legs else f"legs still live after the cancel: {live_legs}")
     if fill is None and filled_now is not None:
@@ -450,13 +589,19 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
             run.step(f"{leg.get('legName')} filled by itself before the cancel: the short is already flat")
             run.res["cover_fill"] = _leg_price(leg, ("averageTradedPrice", "price", "triggerPrice"))
             return True, ""
+    if short is not None and short == 0:
+        # the row says filled but the position is flat: an exit already closed it (or it never was open). A BUY now would open a LONG.
+        run.step("the order list shows a fill but Dhan's positions are flat: nothing to cover (a BUY now would open a long)")
+        run.res["flat_despite_fill"] = True
+        return True, ""
+    cover_qty = PROBE_QTY if short is None else max(1, min(int(short), PROBE_QTY))       # never more than the probe's own share
     # the cover itself
     last = ""
     cover_id = ""
     for attempt in range(1, 4):
         try:
             res = broker.place_order(db, is_armed=True, security_id=security_id, exchange_segment=config.SCALP_EXCHANGE_SEGMENT, transaction_type="BUY",
-                                     quantity=PROBE_QTY, order_type="MARKET", price=0.0, product_type="INTRADAY", tag=TAG_COVER)
+                                     quantity=cover_qty, order_type="MARKET", price=0.0, product_type="INTRADAY", tag=TAG_COVER)
             cover_id = str((res or {}).get("orderId") or (res or {}).get("order_id") or "")
             if cover_id:
                 break
@@ -479,6 +624,9 @@ def _cancel_and_cover(db, broker, run: _Run, oid: str, security_id: str, sym: st
                     if st in _FILLED:
                         run.res["cover_fill"] = _num(r.get("averageTradedPrice") or r.get("average_traded_price")) or run.res.get("ref_price")
                         run.res["answers"]["cover"] = {"orderStatus": st, "averageTradedPrice": r.get("averageTradedPrice")}
+                        left = _short_beyond(db, broker, security_id, base)
+                        if left:
+                            return False, f"the cover BUY filled but Dhan's positions still show a short of {left}"
                         return True, ""
                     if st in _DEAD:
                         return False, f"the cover BUY ended {st}"

@@ -42,6 +42,10 @@ logger = logging.getLogger("real-trade-dhan-client")
 _SECURITY_CACHE_TTL_SECONDS = 24 * 60 * 60
 _security_cache: dict[str, str] = {}
 _security_cache_loaded_at: float = 0.0
+# E241b: when the list could not be loaded (cache still empty) the next orders must not each start another ~100 MB download inside the order path.
+# After a failed load, get_security_id answers from the empty cache for this long, then tries again (the background warm task retries too).
+_SECURITY_LOAD_RETRY_AFTER_FAILURE_S = 60.0
+_security_load_failed_at: float = 0.0
 
 NSE_EQ_SEGMENT = "NSE_EQ"
 
@@ -405,12 +409,21 @@ def get_security_id(db: Session, symbol: str) -> str:
     """Returns the Dhan security_id for an NSE-listed symbol. Raises
     SecurityNotResolvedError rather than returning None/guessing."""
     now = time.time()
+    global _security_load_failed_at
     if not _security_cache or (now - _security_cache_loaded_at) > _SECURITY_CACHE_TTL_SECONDS:
-        _load_security_cache(db)
+        if _security_cache or (now - _security_load_failed_at) > _SECURITY_LOAD_RETRY_AFTER_FAILURE_S:
+            _load_security_cache(db)
+            _security_load_failed_at = 0.0 if _security_cache else time.time()
 
     sym = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
     sec_id = _security_cache.get(sym)
     if sec_id is None:
+        if not _security_cache:
+            # E241: the load above left the cache EMPTY (bad / expired Dhan token, Dhan down, download failed). That is not "this symbol is not
+            # listed": say so, otherwise a normal stock like HFCL looks like a missing symbol and the real cause (the token) is hidden.
+            raise SecurityNotResolvedError(
+                f"No Dhan NSE_EQ security_id found for '{sym}'. The Dhan security list is empty (it did not load - check the Dhan token / connection "
+                f"and the service log for 'Dhan instrument list fetch returned 0 usable rows').")
         raise SecurityNotResolvedError(f"No Dhan NSE_EQ security_id found for '{sym}'.")
     # Defense-in-depth (see _clean_security_id): cleans up an already-cached
     # malformed id immediately, without waiting for the 24h TTL or a

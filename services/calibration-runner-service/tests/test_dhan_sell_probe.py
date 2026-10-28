@@ -87,3 +87,11 @@ def test_the_probe_is_in_no_pack_and_no_schedule():
         assert all(jid != "dhan_sell_probe" for jid, _ in pk["jobs"]), f"pack {pk['id']} would place a real order unattended"
     sched = (HERE / "scheduler.py").read_text(encoding="utf-8")
     assert "dhan_sell_probe" not in sched and "sell_probe" not in sched
+
+
+def test_a_fail_prints_what_dhan_answered_and_a_pass_does_not():
+    """E242: on a FAIL the compact Dhan rows are printed (raw lines) so a field mismatch can be read off the run; a PASS stays short."""
+    failed = {"verdict": "FAIL", "line": "SELL PROBE: FAIL - x", "steps": [], "rules": [], "answers": {"row_after_fill": {"orderStatus": "PENDING"}, "short_after_cancel": 1}}
+    rc, out = S.render(failed)
+    assert rc == 1 and 'raw   row_after_fill: {"orderStatus": "PENDING"}' in out and "raw   short_after_cancel: 1" in out and out.rstrip().endswith("SELL PROBE: FAIL - x")
+    assert "raw " not in S.render(dict(RESULT, answers={"row_after_fill": {}}))[1]

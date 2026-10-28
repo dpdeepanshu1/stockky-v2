@@ -260,3 +260,19 @@ def _holdings_sync_empty_confirm_off_by_default(monkeypatch):
     no positions. Pre-existing tests expect the first empty read to close a ghost; tests/test_e172_holdings_sync_guards.py turns it on."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "HOLDINGS_SYNC_EMPTY_CONFIRM_SECONDS", 0, raising=False)
+
+
+import pytest as _pytest_e241  # noqa: E402
+
+
+@_pytest_e241.fixture(autouse=True)
+def _reset_security_load_throttle():
+    """E241b: dhan_client remembers when the Dhan security list last failed to load (to avoid a download per order); never let that leak between tests."""
+    import sys
+    def _clear():
+        mod = sys.modules.get("execution.dhan_client")
+        if mod is not None:
+            mod._security_load_failed_at = 0.0
+    _clear()
+    yield
+    _clear()

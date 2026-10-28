@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 - E234 (CHANGES_2026-10-27_E234_catalog_flags_for_e232_switches.md): the three E232 switches (SCAN_HITS_ENABLED, DAY_MOVER_ENABLED, DAY_MOVER_SHORT_ENABLED) are now Calibration-page switches, fixing the one failing position-stocks test from the VM run. Tests: 34 + 17 run here.
 >>>>>>> main
 - E233 (CHANGES_2026-10-27_E233_short_and_swing_fully_live.md): swing lane ships live in DEMO and REAL (SWING_LIVE_REAL_ENABLED true) and live shorts are sized by the normal rules (SHORT_LIVE_QTY_CAP 1000); the Dhan SELL probe requirement stays. Tests: swing 49, short 20 + 93 script checks run.

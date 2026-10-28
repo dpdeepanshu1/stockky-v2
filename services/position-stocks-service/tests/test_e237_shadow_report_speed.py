@@ -71,3 +71,10 @@ def test_report_still_ends_to_end():
                              "fwd30_pct": f + 0.1 * (i % 2), "fwd60_pct": None, "fwd_close_pct": None})
     r = board_report.report(rows, 0.12, 30, 10, "b1")["rules"]["chase_guard"]
     assert r["verdict"] == "promote" and r["horizons"]["30m"]["signal"]["n"] == 48
+
+
+def test_startup_warms_the_cache_in_a_background_thread():
+    life = SRC[SRC.index("async def lifespan("):SRC.index("app = FastAPI(")]
+    assert "board-report-warm" in life and "_board_report_claim(30)" in life and "BOARD_REPORT_CACHE_S > 0" in life
+    claim = SRC[SRC.index("def _board_report_claim("):SRC.index("def _board_report_compute(")]
+    assert "_BOARD_REPORT_BUSY.add(days)" in claim and "return False" in claim

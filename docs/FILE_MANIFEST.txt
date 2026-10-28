@@ -1397,6 +1397,7 @@ services/position-stocks-service/tests/test_e231_exit_rule_field.py
 services/position-stocks-service/tests/test_e232_scan_hits_day_mover.py
 services/position-stocks-service/tests/test_e237_shadow_report_speed.py
 services/position-stocks-service/tests/test_e246_probe_short_heal.py
+services/position-stocks-service/tests/test_e249_fallthrough_and_daymover_cap.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py

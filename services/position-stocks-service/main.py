@@ -633,7 +633,7 @@ def _note_capital_starved(db: Session, symbol: str) -> None:
 #     (same OPEN + EXIT_LEGS_REJECTED count).
 # group345: symbol -> monotonic time until which it is left out after a price-only entry-gate reject (see config.GATE_REJECT_COOLDOWN_S).
 _gate_rejected: dict = {}
-_GATE_COOLDOWN_PREFIXES = ("PRICE_GUARD", "RANGE_GATE", "PENNY_STOCK")
+_GATE_COOLDOWN_PREFIXES = ("PRICE_GUARD", "RANGE_GATE", "PENNY_STOCK", "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE")   # E249: + per-symbol sizing / level rejects
 
 
 def _note_gate_reject(symbol: str, skip_reason) -> None:

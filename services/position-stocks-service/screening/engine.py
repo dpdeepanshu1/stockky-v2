@@ -297,6 +297,18 @@ def _day_change_pct(symbol: str, ltp: float) -> Optional[float]:
     return (ltp - ds[3]) / ds[3] * 100.0
 
 
+def _day_mover_max(side: str = "LONG") -> float:
+    """E249: highest day move the day-mover path may list. Entry refuses a long already up more than MAX_DAY_GAIN_PCT (orders/entry.py price guard) and a
+    short already down more than SHORT_MAX_DAY_FALL_PCT (orders/short_gates.py), so listing beyond those only spent shortlist / quality-gate slots on names
+    that can never be bought. 0 on either switch = that guard is off, so DAY_MOVER_MAX_PCT alone applies. Never raises."""
+    try:
+        cap = float(config.DAY_MOVER_MAX_PCT)
+        guard = float(getattr(config, "SHORT_MAX_DAY_FALL_PCT", 0.0) if str(side).upper() == "SHORT" else getattr(config, "MAX_DAY_GAIN_PCT", 0.0))
+        return min(cap, guard) if guard > 0 else cap
+    except Exception:  # noqa: BLE001
+        return float(getattr(config, "DAY_MOVER_MAX_PCT", 20.0))
+
+
 def _day_mover_score(move_pct: float, real_volume: float, range_mult: float, vwap_mult: float) -> float:
     vol_floor = max(config.MIN_AVG_VOLUME, 1)
     liquidity = min(max(real_volume, 1) / vol_floor, 3.0) / 3.0
@@ -493,7 +505,7 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
         # E232: a steady climber / gap-up no rolling window listed is listed once, as window "day" (see DAY_MOVER in config.py).
         if config.DAY_MOVER_ENABLED and len(candidates) == _n_before:
             _dm = _day_change_pct(symbol, current_ltp)
-            if _dm is not None and config.DAY_MOVER_MIN_PCT <= _dm <= config.DAY_MOVER_MAX_PCT:
+            if _dm is not None and config.DAY_MOVER_MIN_PCT <= _dm <= _day_mover_max("LONG"):
                 _dm_score = _day_mover_score(_dm, real_volume, _range_mult, _vwap_mult)
                 if _dm_score > 0:
                     candidates.append(Candidate(
@@ -606,7 +618,7 @@ def scan_shorts(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
             # E232: the mirror of the long day mover - a steady faller / gap-down no rolling window listed (Candidate.pct_change is NEGATIVE).
             if config.DAY_MOVER_ENABLED and config.DAY_MOVER_SHORT_ENABLED and len(out) == _n_before:
                 _dm = _day_change_pct(symbol, current_ltp)
-                if _dm is not None and config.DAY_MOVER_MIN_PCT <= -_dm <= config.DAY_MOVER_MAX_PCT:
+                if _dm is not None and config.DAY_MOVER_MIN_PCT <= -_dm <= _day_mover_max("SHORT"):
                     _dm_score = _day_mover_score(-_dm, real_volume, range_mult, vwap_mult)
                     if _dm_score > 0:
                         out.append(Candidate(symbol=symbol, window_minutes=DAY_WINDOW_MINUTES, pct_change=round(_dm, 4), current_ltp=current_ltp,

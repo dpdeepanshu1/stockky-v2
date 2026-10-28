@@ -66,8 +66,11 @@ def explain(symbol: str) -> dict:
             if dm is None:
                 out["notes"].append("previous close unknown on the feed: the day-mover path cannot judge it")
             if not any_cleared:
-                if dm is not None and config.DAY_MOVER_ENABLED and config.DAY_MOVER_MIN_PCT <= abs(dm) <= config.DAY_MOVER_MAX_PCT:
+                _cap = engine._day_mover_max("LONG" if (dm or 0) >= 0 else "SHORT")
+                if dm is not None and config.DAY_MOVER_ENABLED and config.DAY_MOVER_MIN_PCT <= abs(dm) <= _cap:
                     out["notes"].append(f"no rolling window cleared, but the day move {dm:+.2f}% qualifies it as a day mover")
+                elif dm is not None and config.DAY_MOVER_ENABLED and _cap < abs(dm) <= config.DAY_MOVER_MAX_PCT:
+                    out["blocking"].append(f"day move {dm:+.2f}% is beyond the entry guard ({_cap:g}%: MAX_DAY_GAIN_PCT for a long, SHORT_MAX_DAY_FALL_PCT for a short): entry would refuse it, so it is not listed")
                 elif dm is not None and abs(dm) > config.DAY_MOVER_MAX_PCT:
                     out["blocking"].append(f"day move {dm:+.2f}% is beyond DAY_MOVER_MAX_PCT {config.DAY_MOVER_MAX_PCT} (circuit-chase guard)")
                 else:

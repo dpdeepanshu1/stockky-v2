@@ -371,6 +371,8 @@ _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "PENNY_STOCK", "RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "ENTRY_REJECTED_TODAY", "REENTRY_", "ALREADY_OPEN_HERE",
     "SYMBOL_HELD_BY_OTHER_SERVICE", "DEPTH_", "CIRCUIT_", "PREOPEN_GAP", "VWAP_", "LIQUIDITY_", "BOARD_CHASE", "COST_GATE",
     "SECURITY_NOT_FOUND", "ENTRY_ORDER_FAILED_COOLDOWN", "CATALYST_NONE", "STRUCTURE_", "TIME_MACHINE",
+    # E249: per-symbol sizing / level rejects. They ended the cycle, so one high-priced rank-1 name (MIN_QTY) blocked every cheaper passer behind it each ~15 s.
+    "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE",
 )
 
 

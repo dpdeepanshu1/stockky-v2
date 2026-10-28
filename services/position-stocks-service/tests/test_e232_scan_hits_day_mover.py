@@ -60,9 +60,10 @@ def test_a_rolling_window_hit_is_not_duplicated_by_the_day_mover(monkeypatch):
 
 
 def test_a_steady_all_day_faller_is_a_day_mover_short(monkeypatch):
-    _feed(monkeypatch, {"SLIDE": _flat(94.0)}, {"SLIDE": (100.0, 100.0, 93.0, 100.0)})
+    # E249: 4.5% down - inside SHORT_MAX_DAY_FALL_PCT (5); a 6% faller is no longer listed because entry would refuse it
+    _feed(monkeypatch, {"SLIDE": _flat(95.5)}, {"SLIDE": (100.0, 100.0, 95.0, 100.0)})
     out = engine.scan_shorts()
-    assert [c.symbol for c in out] == ["SLIDE"] and out[0].window_label == "day" and out[0].pct_change < -5.9
+    assert [c.symbol for c in out] == ["SLIDE"] and out[0].window_label == "day" and out[0].pct_change < -4.4
     monkeypatch.setattr(config, "DAY_MOVER_SHORT_ENABLED", False)
     assert engine.scan_shorts() == []
 

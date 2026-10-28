@@ -98,7 +98,7 @@ def main(argv=None) -> int:
         rep = _get(f"{base}/trades/report?days={a.days}", headers)
         if rep:
             print("  entry window:", json.dumps(entry_window_verdict(rep.get("by_entry_hour_ist") or {}, a.cutoff, a.min_trades)))
-        sh = _get(f"{base}/board/shadow-report?days={max(a.days, 30)}", headers, timeout=90)   # E125: the report reads up to 60,000 rows; 20 s timed out
+        sh = _get(f"{base}/board/shadow-report?days={max(a.days, 30)}", headers, timeout=240)   # E125: the report reads up to 60,000 rows; 20 s timed out. E236: it takes ~80 s on the VM (27 and 28 Oct), so 90 s was one slow day from failing
         if sh:
             cg = (sh.get("rules") or {}).get("chase_guard") or {}
             print(f"  board chase guard: {cg.get('verdict')}  (gate_mode={sh.get('gate_mode')}, effective={sh.get('effective_gate_mode')})")

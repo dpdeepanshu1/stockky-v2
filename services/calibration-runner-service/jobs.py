@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 
 try:
-    _POOL_JOBS = max(1, min(8, int(os.environ.get("RUNNER_POOL_JOBS", "3"))))
+    _POOL_JOBS = max(1, min(8, int((os.environ.get("RUNNER_POOL_JOBS") or "").strip() or "3")))      # a blank value (RUNNER_POOL_JOBS=) means the default
 except ValueError:
     _POOL_JOBS = 3
 
@@ -463,7 +463,7 @@ JOB_LIST = [
          "Which switches changed and how each seed's edge, kept % and signal counts moved. Warns when the seeds differ, a seed is incomplete or no switch changed. "
          "A change in edge inside the bootstrap CI is noise. Applies nothing.", b_calibration_compare, timeout_s=60),
     _job("strategy_readout", "Opening-window verdict", "weekly", "Friday after close", "Entries before the cutoff against later ones, from the live 14-day reports: SET / KEEP / NOT ENOUGH DATA.", b_strategy_readout,
-         [P("days", "Days", "int", 14, 3, 60), P("cutoff", "Cutoff IST", "str", "10:30")], timeout_s=240),
+         [P("days", "Days", "int", 14, 3, 60), P("cutoff", "Cutoff IST", "str", "10:30")], timeout_s=420),
     _job("opening_replay", "Opening protection replay", "weekly", "Every day after close (the ledger keeps only ~3 days)", "Saves today's position-stocks ledger and replays the opening protection over every saved ledger.", b_opening_replay, timeout_s=300),
     _job("board_parity", "Board A/B parity", "weekly", "Friday after close", "GO / NO_GO for removing the legacy Market Board maths. It changes nothing.", b_board_parity,
          [P("min_compared", "Min comparisons", "int", 200, 50, 5000), P("min_days", "Min IST days", "int", 3, 1, 30)], timeout_s=120,
@@ -681,6 +681,7 @@ SOLO_JOBS = frozenset({
     "overlay_clear_check", "tm_gate_check",
     "latency_save", "latency_compare", "g1_check",
     "dhan_sell_probe", "dhan_swing_probe",
+    "wiring_check",      # E236: POSTs and DELETEs a stamp-only overlay on the LIVE services; nothing that reads live state may overlap it
 })
 
 

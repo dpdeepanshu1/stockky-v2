@@ -68,16 +68,33 @@ def _stats(vals: List[float], sessions: int) -> dict:
     return {"n": n, "sessions": sessions, "mean_net": round(sum(vals) / n, 4), "win_rate": round(sum(1 for v in vals if v > 0) / n, 3)}
 
 
-def bootstrap_diff(a: Sequence[float], b: Sequence[float], iters: int = 2000, alpha: float = 0.05, seed: int = 7) -> Optional[tuple]:
+# E237: the bootstrap dominated /board/shadow-report (60,000 rows took ~170 s). Two changes, same method and same seeded determinism:
+# random.choices (C-level draw loop, ~4.5x faster per draw than randrange in a generator) and a per-call draw budget so large groups
+# use fewer resamples (never below BOOT_MIN_ITERS; the primary horizon gets a bigger budget because it decides the verdict).
+BOOT_ITERS = 2000
+BOOT_MIN_ITERS = 400
+BOOT_DRAW_BUDGET = 2_000_000
+BOOT_DRAW_BUDGET_PRIMARY = 6_000_000
+
+
+def boot_iters(na: int, nb: int, budget: int = BOOT_DRAW_BUDGET, max_iters: int = BOOT_ITERS) -> int:
+    """Resamples to run for groups of size na and nb: max_iters when cheap, scaled down to fit the draw budget, floor BOOT_MIN_ITERS."""
+    return max(BOOT_MIN_ITERS, min(max_iters, budget // max(1, na + nb)))
+
+
+def bootstrap_diff(a: Sequence[float], b: Sequence[float], iters: Optional[int] = None, alpha: float = 0.05, seed: int = 7,
+                   budget: int = BOOT_DRAW_BUDGET) -> Optional[tuple]:
     if not a or not b:
         return None
-    rng = random.Random(seed)
-    diffs = []
+    a, b = list(a), list(b)
     na, nb = len(a), len(b)
+    if iters is None:
+        iters = boot_iters(na, nb, budget)
+    rng = random.Random(seed)
+    choices = rng.choices
+    diffs = []
     for _ in range(iters):
-        ma = sum(a[rng.randrange(na)] for _ in range(na)) / na
-        mb = sum(b[rng.randrange(nb)] for _ in range(nb)) / nb
-        diffs.append(ma - mb)
+        diffs.append(sum(choices(a, k=na)) / na - sum(choices(b, k=nb)) / nb)
     diffs.sort()
     return (round(diffs[int(iters * alpha / 2)], 4), round(diffs[int(iters * (1 - alpha / 2)) - 1], 4))
 
@@ -108,7 +125,7 @@ def report(rows: Sequence[dict], cost_pct: float, min_obs: int, min_sessions: in
             cv = [v for v in (_net(r, col, cost_pct) for r in ctl_rows) if v is not None]
             s_sessions = len({r.get("day") for r in sig_rows if r.get(col) is not None})
             c_sessions = len({r.get("day") for r in ctl_rows if r.get(col) is not None})
-            horizons[hname] = {"signal": _stats(sv, s_sessions), "control": _stats(cv, c_sessions), "diff_ci95": bootstrap_diff(sv, cv)}
+            horizons[hname] = {"signal": _stats(sv, s_sessions), "control": _stats(cv, c_sessions), "diff_ci95": bootstrap_diff(sv, cv, budget=BOOT_DRAW_BUDGET_PRIMARY if hname == PRIMARY else BOOT_DRAW_BUDGET)}
         p = horizons[PRIMARY]
         out_rules[name] = {"about": rule["about"], "would_switch_on": rule["switch"], "primary_horizon": PRIMARY, "horizons": horizons,
                            "verdict": verdict(p["signal"], p["control"], p["diff_ci95"], min_obs, min_sessions, rule.get("invert", False))}

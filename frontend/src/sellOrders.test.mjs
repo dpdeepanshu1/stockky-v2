@@ -50,3 +50,17 @@ t("the card is wired into the Positions sub-tab and reads /short/orders", () => 
   assert.match(readFileSync(new URL("./positionStocksApi.ts", import.meta.url), "utf8"), /shortOrders: \(\) => psRequest<any>\("\/short\/orders"\)/);
 });
 console.log(`${n} passed`);
+// E244
+t("a short Dhan holds that Stockky never recorded (the 3-share ITC) is listed first and loud", () => {
+  const v = sellOrdersView(doc({ summary: summary({ dhan_shorts_open: 1, dhan_shorts_untracked: 1 }),
+    dhan_shorts: [{ security_id: "1594", symbol: "ITC", net_qty: -3, sell_avg: 254.03, ltp: 253.1, product: "INTRADAY", tracked: false }] }));
+  assert.equal(v.kind, "active"); assert.equal(v.lines[0].symbol, "ITC"); assert.equal(v.lines[0].tone, "bad"); assert.equal(v.lines[0].state, "NOT IN STOCKKY");
+  assert.match(v.lines[0].detail, /3 shares short at Dhan/); assert.match(v.lines[0].detail, /close it in Dhan/);
+  assert.match(v.headline, /1 short held at Dhan \(1 NOT in Stockky\)/);
+});
+t("a SELL order in Dhan's book with no Stockky record is listed; tracked ones are not doubled", () => {
+  const v = sellOrdersView(doc({ summary: summary({ sell_orders_at_dhan: 2, sell_orders_untracked: 1 }),
+    broker_rows: [{ order_id: "1", symbol: "NTPC", status: "CANCELLED", state: "CANCELLED", tracked: false }, { order_id: "2", status: "TRADED", state: "FILLED", tracked: true }] }));
+  assert.equal(v.lines.length, 1); assert.equal(v.lines[0].orderId, "1"); assert.match(v.lines[0].detail, /no record/);
+});
+console.log("E244 ok");

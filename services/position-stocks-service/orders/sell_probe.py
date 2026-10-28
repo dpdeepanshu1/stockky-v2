@@ -506,7 +506,7 @@ def _run(db, sym, broker, price_fn, now, sleep, poll_s, notify) -> Dict[str, Any
         elif fill is None:
             problems.append(f"the SELL entry did not show as filled within {poll_s:.0f}s (status {_status(row) or 'unreadable'}) and Dhan's positions show no short")
         else:
-            run.step(f"entry filled at {fill:.2f} (ref {live:.2f}; slippage {live - fill:+.2f} per share in our favour when positive)")
+            run.step(f"entry filled at {fill:.2f} (ref {live:.2f}; {fill - live:+.2f} per share vs the reference: a SELL is better the higher it fills, so positive is in our favour)")
             run.res["entry_fill"] = fill
             run.rule(f"Dhan accepted a {e_type}-entry INTRADAY SELL Super Order and filled it (1 share).")
         stop_leg, tgt_leg = _leg(row, "STOP_LOSS_LEG"), _leg(row, "TARGET_LEG")

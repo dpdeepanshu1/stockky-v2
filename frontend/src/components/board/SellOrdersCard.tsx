@@ -30,7 +30,7 @@ export default function SellOrdersCard({ active, fetcher }: { active: boolean; f
       <div className="space-y-2 text-[11px]" data-testid="sell-orders">
         {err && <div className="text-signal-hold">{err}</div>}
         {!doc && !err && <div className="text-mist">Loading…</div>}
-        {doc && <div className={v.waiting > 0 ? "text-signal-hold" : "text-mist"} data-testid="sell-orders-headline">{v.headline}</div>}
+        {doc && <div className={v.waiting > 0 || (doc?.summary?.dhan_shorts_untracked ?? 0) > 0 ? "text-signal-hold" : "text-mist"} data-testid="sell-orders-headline">{v.headline}</div>}
         {v.errors.map((e, i) => <div key={i} className="text-signal-hold">{e}</div>)}
         {doc?.entry_style && (
           <div className="text-[10px] text-mist">
@@ -44,7 +44,7 @@ export default function SellOrdersCard({ active, fetcher }: { active: boolean; f
                 <div className="min-w-0">
                   <span className="font-display font-bold text-paper">{l.symbol}</span>
                   <span className="ml-1.5 rounded bg-signal-sell/20 px-1 text-[9px] font-bold uppercase tracking-widest text-signal-sell">SELL</span>
-                  <span className="ml-1 rounded border border-slate px-1 text-[9px] uppercase tracking-widest text-mist">{l.tag === "SELL PROBE" ? "probe" : "short"}</span>
+                  <span className="ml-1 rounded border border-slate px-1 text-[9px] uppercase tracking-widest text-mist">{l.tag === "SELL PROBE" ? "probe" : l.tag === "AT DHAN" ? "at Dhan" : "short"}</span>
                   <div className="text-[10px] text-mist tabular-nums break-words">{l.detail}</div>
                   <div className="text-[9px] text-mist tabular-nums">{l.when ? new Date(l.when).toLocaleString() : "-"}{l.orderId ? ` · Dhan order ${l.orderId}` : ""}</div>
                 </div>

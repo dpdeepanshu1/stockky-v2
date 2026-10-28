@@ -42,3 +42,16 @@ frontend: src/sellOrdersView.ts (new), src/components/board/SellOrdersCard.tsx (
 ## Next
 Rebuild position-stocks-service and frontend, run the Dhan SELL probe again (market hours, 09:30-14:30). Read the "dhan" and "raw" lines: `orderType` on `row_after_fill` should be LIMIT at about
 299.5 with filledQty 1. If it still rests, send the output; the next lever is a larger cushion (`SHORT_ENTRY_CUSHION_PCT` up to 1.0) or a plain MARKET SELL + BUY stop (E114 path).
+
+# E244 (same day, 10:35 IST re-run) - the entry FILLED; two follow-ups
+Result of the E243 fix on NTPC: `orderType LIMIT 299.75, filledQty 1, TRADED`, positions net -1, stop 305.15 / target 291.65 legs read back as BUY, covered at 300.7. The marketable limit works.
+The probe still said FAIL: Dhan's row has `averageTradedPrice 0.0` and no ENTRY_LEG detail, so reconcile's price reader (`_entry_fill_from_row`) returned nothing and the probe took that for "not filled".
+- `sell_probe._entry_filled`: a row with TRADED status or filledQty > 0 is a fill; price falls back to the position's sellAvg, else the limit sent, and a rule line says so. (Reconcile itself is unchanged:
+  it reads quantity/status for the fill and keeps the scan price when Dhan gives no average, so a live short is tracked; only its entry price is the scan price, not Dhan's.)
+- Panel was empty because (1) probe history only exists from E243 on, and (2) the 3-share ITC short from the 09:41 run was never a Stockky row. `/short/orders` now also returns Dhan's positions
+  (shorts held at Dhan, flagged NOT IN STOCKKY when no row) and every SELL Super Order in Dhan's book (flagged when Stockky has no record). They list first, in red.
+- **The 3-share ITC short is still open at Dhan (your screenshot). Nothing in Stockky manages it. Close it in Dhan.**
+- Tests: tests/test_sell_orders.py 7 pass; frontend sellOrders.test.mjs 7 pass; scripted-Dhan run of the real probe with the NTPC row shape: PASS, one cover. New test
+  `test_a_traded_row_with_no_average_price_is_a_fill_not_a_failure` in tests/test_sell_probe.py could not be run here (needs SQLAlchemy): run on the VM.
+
+Also (E244): the probe's entry line now reads fill minus reference for a SELL (positive = sold higher = in our favour); it had the sign backwards. Log wording only.

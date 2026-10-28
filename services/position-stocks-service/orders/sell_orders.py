@@ -70,21 +70,51 @@ def dhan_row(row: dict) -> Dict[str, Any]:
             "created_at": row.get("createTime") or row.get("createdAt") or None}
 
 
-def build(db, *, super_orders: Optional[List[dict]], super_error: Optional[str], probe_history: List[dict], short_rows: List[Any]) -> Dict[str, Any]:
-    """Assemble the view. `short_rows` are ScalpPosition rows with side SHORT (any status); `super_orders` is Dhan's live Super Order list (None = unreadable)."""
+def dhan_short_positions(positions: Optional[list]) -> List[Dict[str, Any]]:
+    """Rows of Dhan's positions that are short right now (netQty < 0): the fact, whoever opened them."""
+    out = []
+    for r in positions or []:
+        if not isinstance(r, dict):
+            continue
+        try:
+            net = int(float(r.get("netQty") if r.get("netQty") is not None else r.get("net_qty") or 0))
+        except (TypeError, ValueError):
+            continue
+        if net < 0:
+            out.append({"security_id": _s(r.get("securityId") or r.get("security_id")) or None, "symbol": _s(r.get("tradingSymbol") or r.get("trading_symbol")) or None,
+                        "net_qty": net, "sell_avg": r.get("sellAvg"), "ltp": r.get("lastTradedPrice") or r.get("ltp"), "product": _s(r.get("productType")) or None,
+                        "unrealized": r.get("unrealizedProfit")})
+    return out
+
+
+def build(db, *, super_orders: Optional[List[dict]], super_error: Optional[str], probe_history: List[dict], short_rows: List[Any],
+          positions: Optional[list] = None, positions_error: Optional[str] = None) -> Dict[str, Any]:
+    """Assemble the view. `short_rows` are ScalpPosition rows with side SHORT (any status); `super_orders` is Dhan's live Super Order list (None = unreadable);
+    `positions` is Dhan's positions list. E244: every SELL Super Order in Dhan's book is shown (Position Stocks and Real Trade only ever open longs with a BUY, so a SELL
+    entry is a short) and every short Dhan holds, each marked `tracked` when Stockky knows it, so a short Stockky lost track of (the 3-share ITC one) cannot hide."""
     errors: List[str] = []
     if super_error:
         errors.append(f"Dhan's order book could not be read: {super_error[:160]}")
+    if positions_error:
+        errors.append(f"Dhan's positions could not be read: {positions_error[:160]}")
 
     probe_ids = {_s(r.get("order_id")) for r in probe_history if _s(r.get("order_id"))}
     short_ids = {_s(getattr(r, "dhan_super_order_id", None)) for r in short_rows if _s(getattr(r, "dhan_super_order_id", None))}
     ours = probe_ids | short_ids
     broker_rows = {}
     for o in super_orders or []:
-        if isinstance(o, dict):
+        if isinstance(o, dict) and _s(o.get("transactionType")).upper() == "SELL":
             oid = _s(o.get("orderId") or o.get("order_id"))
-            if oid in ours and _s(o.get("transactionType")).upper() == "SELL":
-                broker_rows[oid] = dhan_row(o)
+            if oid:
+                d = dhan_row(o)
+                d["tracked"] = oid in ours
+                broker_rows[oid] = d
+
+    open_symbols = {_s(getattr(r, "symbol", None)).upper() for r in short_rows if getattr(r, "status", None) in ("OPEN", "EXIT_LEGS_REJECTED")}
+    open_sids = {_s(getattr(r, "dhan_security_id", None)) for r in short_rows if getattr(r, "status", None) in ("OPEN", "EXIT_LEGS_REJECTED")}
+    dhan_shorts = dhan_short_positions(positions)
+    for p in dhan_shorts:
+        p["tracked"] = bool((p["symbol"] and p["symbol"].upper() in open_symbols) or (p["security_id"] and p["security_id"] in open_sids))
 
     probes = []
     for r in reversed(probe_history[-20:]):
@@ -102,7 +132,10 @@ def build(db, *, super_orders: Optional[List[dict]], super_error: Optional[str],
                        "plain": bool(getattr(r, "plain_stop_order_id", None)),
                        "opened_at": _iso(getattr(r, "opened_at", None)), "broker": broker_rows.get(oid)})
 
+    untracked_orders = [b for b in broker_rows.values() if not b["tracked"]]
     waiting = [b for b in broker_rows.values() if b["state"] == "WAITING"]
-    return {"probes": probes, "shorts": shorts, "broker_rows": list(broker_rows.values()), "errors": errors,
+    untracked_shorts = [p for p in dhan_shorts if not p["tracked"]]
+    return {"probes": probes, "shorts": shorts, "broker_rows": list(broker_rows.values()), "dhan_shorts": dhan_shorts, "errors": errors,
             "summary": {"probe_runs": len(probe_history), "shorts_open": sum(1 for s in shorts if s["status"] in ("OPEN", "EXIT_LEGS_REJECTED")),
-                        "sell_orders_at_dhan": len(broker_rows), "sell_orders_waiting": len(waiting)}}
+                        "sell_orders_at_dhan": len(broker_rows), "sell_orders_waiting": len(waiting), "sell_orders_untracked": len(untracked_orders),
+                        "dhan_shorts_open": len(dhan_shorts), "dhan_shorts_untracked": len(untracked_shorts)}}

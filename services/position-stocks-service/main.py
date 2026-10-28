@@ -2858,8 +2858,13 @@ def short_orders_route(db: Session = Depends(get_db)):
         super_orders = dhan_client.get_super_order_list(db, release_db=True)
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+    positions, perr = None, None
+    try:
+        positions = dhan_client.get_positions(db)
+    except Exception as e:  # noqa: BLE001
+        perr = f"{type(e).__name__}: {e}"
     rows = db.query(ScalpPosition).filter(ScalpPosition.side == "SHORT").order_by(ScalpPosition.opened_at.desc()).limit(30).all()
-    out = sell_orders.build(db, super_orders=super_orders, super_error=err, probe_history=sell_probe.history(), short_rows=rows)
+    out = sell_orders.build(db, super_orders=super_orders, super_error=err, probe_history=sell_probe.history(), short_rows=rows, positions=positions, positions_error=perr)
     out["short_mode"] = str(getattr(config, "SHORT_MODE", "off"))
     out["entry_style"] = {"marketable_limit": bool(getattr(config, "SHORT_ENTRY_MARKETABLE_LIMIT", True)), "cushion_pct": float(getattr(config, "SHORT_ENTRY_CUSHION_PCT", 0.3))}
     return out

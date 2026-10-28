@@ -67,6 +67,44 @@ _company_name_fallback_until: Dict[str, float] = {}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 COMPANY_NAME_CACHE_TTL = 3600  # 1 hour (company name rarely changes)
 
+# E247: at boot / market open the quality gate and the /check warm-up start ~10 symbols together, and each symbol makes several yfinance calls at once. yfinance's HTTP
+# session keeps only 10 connections per host, so the log showed "Connection pool is full, discarding connection: query2.finance.yahoo.com" 20+ times in 30 seconds (each one
+# a wasted reconnect on a service that was already slow, which is what pushed the first event answers past the gate's wait). At most EVENT_YF_MAX_CONCURRENT calls now run
+# at once (default 6, under the pool of 10); the rest wait their turn for up to EVENT_YF_SLOT_WAIT_S (default 20) and then run anyway, so a slot can never block for good.
+# 0 = no cap (old behaviour). Cache hits never take a slot.
+import contextlib as _contextlib
+import threading as _yf_threading
+
+
+def _yf_max_concurrent() -> int:
+    try:
+        return max(0, int((os.getenv("EVENT_YF_MAX_CONCURRENT") or "6").strip()))
+    except ValueError:
+        return 6
+
+
+_yf_slots_n = _yf_max_concurrent()
+_yf_slots = _yf_threading.BoundedSemaphore(_yf_slots_n) if _yf_slots_n > 0 else None
+
+
+@_contextlib.contextmanager
+def _yf_slot():
+    sem = _yf_slots
+    if sem is None:
+        yield
+        return
+    try:
+        wait_s = max(0.0, float((os.getenv("EVENT_YF_SLOT_WAIT_S") or "20").strip()))
+    except ValueError:
+        wait_s = 20.0
+    got = sem.acquire(timeout=wait_s)
+    try:
+        yield
+    finally:
+        if got:
+            sem.release()
+
+
 def cached_yf(method_name: str):
     """Decorator to cache results of yfinance methods with TTL."""
     def decorator(func):
@@ -82,7 +120,8 @@ def cached_yf(method_name: str):
                 else:
                     del _yf_cache[cache_key]
             logger.debug(f"Cache miss for {cache_key}, calling yfinance")
-            result = func(symbol, *args, **kwargs)
+            with _yf_slot():
+                result = func(symbol, *args, **kwargs)
             _yf_cache[cache_key] = {"value": result, "timestamp": now}
             return result
         return wrapper
@@ -262,7 +301,8 @@ def _get_company_name(symbol: str) -> str:
         return _remember_fallback_name(symbol, fallback)
     ticker = _get_ticker(symbol)
     try:
-        info = ticker.info or {}
+        with _yf_slot():
+            info = ticker.info or {}
         name = info.get("longName") or info.get("shortName")
         if name:
             _company_name_cache[symbol] = name

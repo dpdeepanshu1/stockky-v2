@@ -554,6 +554,7 @@ services/analysis-intelligence-service/tests/_analyze_harness.py
 services/analysis-intelligence-service/tests/_ms_bars.py
 services/analysis-intelligence-service/tests/conftest.py
 services/analysis-intelligence-service/tests/golden/technical_baseline.json
+services/analysis-intelligence-service/tests/test_e247_yf_slots.py
 services/analysis-intelligence-service/tests/test_e27_intraday_chart_payload.py
 services/analysis-intelligence-service/tests/test_env_url_blank_fallback.py
 services/analysis-intelligence-service/tests/test_event_depth.py

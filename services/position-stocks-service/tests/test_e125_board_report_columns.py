@@ -6,7 +6,7 @@ SRC = (Path(__file__).resolve().parent.parent / "main.py").read_text()
 
 
 def _route():
-    i = SRC.index('@app.get("/board/shadow-report")')
+    i = SRC.index("def _board_report_compute(")  # E237: the query moved into this helper, still ahead of the route
     return SRC[i:SRC.index('@app.get("/board")', i)]
 
 

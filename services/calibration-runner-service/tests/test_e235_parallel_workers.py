@@ -234,6 +234,15 @@ def test_derive_locks_for_real_catalog():
     assert lk["dhan_sell_probe"]["solo"] and lk["latency_save"]["solo"] and not lk["records_report"]["solo"]
 
 
+def test_wiring_check_runs_alone():
+    ctx = dict(python="py", scripts="/s", bars="/b", rt="http://rt", ps="http://ps", md="http://md", gw="http://gw",
+               analysis="http://an", decision="http://dp", notify="http://n", kronos="http://k", tsfm="http://t",
+               run="/d/runs/x", cal="/d/calibration_out", exp="/d/exports")
+    j = J.JOBS["wiring_check"]
+    lk = J.derive_locks(j, j["builder"](ctx, J.coerce_params(j, {})), {"cal": "/d/calibration_out", "exp": "/d/exports"})
+    assert lk["solo"], "wiring_check writes an overlay on the live services"
+
+
 def test_main_py_wiring_by_text():
     m = open(HERE.parent / "main.py").read()
     assert "workers=config.WORKERS" in m and "service=_svc(req.service)" in m and "_r().state(sv)" in m

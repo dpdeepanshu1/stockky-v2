@@ -102,6 +102,7 @@ import asyncio
 import notifier
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta, time as dt_time
@@ -3069,14 +3070,15 @@ def board_self_check():
     return board_selfcheck.run(bool(is_market_open_ist()))
 
 
-@app.get("/board/shadow-report")
-def board_shadow_report(days: int = 30, db: Session = Depends(get_db)):
-    """Shadow study over scalp_board_log: forward returns of each Market Board rule against a control, and whether the written
-    promotion rule is met. Read-only; research output, not advice."""
+_BOARD_REPORT_CACHE: dict = {}
+_BOARD_REPORT_LOCK = threading.Lock()
+_BOARD_REPORT_BUSY: set = set()
+
+
+def _board_report_compute(db: Session, days: int) -> dict:
     from datetime import timedelta as _td
     from models import ScalpBoardLog
     from screening import board_report
-    days = max(1, min(int(days), 120))
     since = (datetime.now(IST) - _td(days=days)).strftime("%Y-%m-%d")
     # E125: read only the 14 columns the report uses (tuples, not 60,000 full ORM objects): strategy_readout timed out on the full-row read
     _L = ScalpBoardLog
@@ -3090,6 +3092,54 @@ def board_shadow_report(days: int = 30, db: Session = Depends(get_db)):
     out = board_report.report(dicts, config.BOARD_COST_PCT, config.BOARD_PROMOTE_MIN_OBS, config.BOARD_PROMOTE_MIN_SESSIONS,
                               config.BOARD_PARAMS_VERSION)
     out["days"] = days
+    return out
+
+
+def _board_report_refresh_bg(days: int) -> None:
+    """Recompute one cache entry on its own DB session; never raises (the stale entry stays in place on failure)."""
+    try:
+        factory = _db.get_session_factory()
+        if factory is None:
+            return
+        s = factory()
+        try:
+            out = _board_report_compute(s, days)
+        finally:
+            s.close()
+        with _BOARD_REPORT_LOCK:
+            _BOARD_REPORT_CACHE[days] = (time.time(), out)
+    except Exception:  # noqa: BLE001
+        logger.exception("board shadow-report background refresh failed")
+    finally:
+        with _BOARD_REPORT_LOCK:
+            _BOARD_REPORT_BUSY.discard(days)
+
+
+@app.get("/board/shadow-report")
+def board_shadow_report(days: int = 30, fresh: bool = False, db: Session = Depends(get_db)):
+    """Shadow study over scalp_board_log: forward returns of each Market Board rule against a control, and whether the written
+    promotion rule is met. Read-only; research output, not advice. E237: the heavy bootstrap result is cached BOARD_REPORT_CACHE_S
+    seconds per `days`; a stale entry is returned at once (cache.stale=true) while a background refresh runs; ?fresh=true recomputes now."""
+    days = max(1, min(int(days), 120))
+    ttl = config.BOARD_REPORT_CACHE_S
+    now = time.time()
+    hit = None if fresh or ttl <= 0 else _BOARD_REPORT_CACHE.get(days)
+    if hit is not None:
+        age = now - hit[0]
+        if age > ttl:
+            with _BOARD_REPORT_LOCK:
+                start = days not in _BOARD_REPORT_BUSY
+                if start:
+                    _BOARD_REPORT_BUSY.add(days)
+            if start:
+                threading.Thread(target=_board_report_refresh_bg, args=(days,), daemon=True, name="board-report-refresh").start()
+        out = dict(hit[1], cache={"hit": True, "age_s": int(age), "stale": age > ttl})
+    else:
+        out = _board_report_compute(db, days)
+        if ttl > 0:
+            with _BOARD_REPORT_LOCK:
+                _BOARD_REPORT_CACHE[days] = (time.time(), out)
+        out = dict(out, cache={"hit": False, "age_s": 0, "stale": False})
     out["gate_mode"] = config.BOARD_GATE_MODE
     try:
         from orders import board_gate as _bg

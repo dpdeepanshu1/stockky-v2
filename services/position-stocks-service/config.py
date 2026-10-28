@@ -1227,6 +1227,8 @@ FNO_LIST_URL = _get_str("FNO_LIST_URL", "https://images.dhan.co/api-data/api-scr
 # shadow report / promotion rule (group309)
 BOARD_PROMOTE_MIN_OBS = max(1, _get_int("BOARD_PROMOTE_MIN_OBS", 30))
 BOARD_PROMOTE_MIN_SESSIONS = max(1, _get_int("BOARD_PROMOTE_MIN_SESSIONS", 10))
+# E237: /board/shadow-report result cache (seconds); 0 disables. A stale entry is served at once while a refresh runs in the background.
+BOARD_REPORT_CACHE_S = max(0, _get_int("BOARD_REPORT_CACHE_S", 300))
 BOARD_COST_PCT = max(0.0, _get_float("BOARD_COST_PCT", 0.12))                       # flat round-trip cost estimate, % of price
 BOARD_BACKFILL_ENABLED = _get_bool("BOARD_BACKFILL_ENABLED", True)                  # group311: fill today's earlier minutes after a mid-session restart
 BOARD_BACKFILL_TOP_N = max(1, _get_int("BOARD_BACKFILL_TOP_N", 120))                 # backfill the N most liquid symbols that start late

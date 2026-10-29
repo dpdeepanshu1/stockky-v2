@@ -102,11 +102,22 @@ def _hot_symbols() -> List[str]:
         return []
 
 
-def next_batch(hot: List[str]) -> List[str]:
-    """Hot symbols first, then the next slice of the universe (round robin), at most POSITION_BULK_CHUNK in all."""
+def _ws_is_fresh(sym: str, now: float) -> bool:
+    """True when the AngelOne WS ticked `sym` within POSITION_HYBRID_STALE_S (hybrid mode only)."""
+    buf = ws_client._tick_buffers.get(sym)
+    try:
+        return bool(buf) and now - buf[-1][0] <= config.POSITION_HYBRID_STALE_S
+    except (IndexError, TypeError):
+        return False
+
+
+def next_batch(hot: List[str], hybrid: bool = False) -> List[str]:
+    """Hot symbols first, then the next slice of the universe (round robin), at most POSITION_BULK_CHUNK in all.
+    hybrid=True: universe symbols the WS is already ticking are skipped, so Dhan only fills the gaps."""
     global _cursor
     chunk = config.POSITION_BULK_CHUNK
     batch = list(hot[:chunk])
+    now = time.time()
     room = chunk - len(batch)
     if room > 0 and _universe:
         have = set(batch)
@@ -117,7 +128,7 @@ def next_batch(hot: List[str]) -> List[str]:
             s = _universe[_cursor % n]
             _cursor = (_cursor + 1) % n
             scanned += 1
-            if s not in have:
+            if s not in have and not (hybrid and _ws_is_fresh(s, now)):
                 batch.append(s)
                 taken += 1
     return batch
@@ -212,10 +223,10 @@ async def _load_universe() -> bool:
     return True
 
 
-async def poll_once(client: "httpx.AsyncClient") -> int:
+async def poll_once(client: "httpx.AsyncClient", hybrid: bool = False) -> int:
     """One poll: build the batch, fetch, ingest. Returns ticks stored; raises on a failed request."""
     hot = await asyncio.to_thread(_hot_symbols)
-    batch = next_batch(hot)
+    batch = next_batch(hot, hybrid)
     _stats["last_batch"] = len(batch)
     if not batch:
         return 0
@@ -224,7 +235,7 @@ async def poll_once(client: "httpx.AsyncClient") -> int:
     return ingest_rows(rows)
 
 
-async def _poll_loop() -> None:
+async def _poll_loop(hybrid: bool = False) -> None:
     """Runs until ws_client.stop() clears ws_client._running. Never raises: every failure backs off and retries."""
     interval = config.POSITION_BULK_POLL_S
     idle_logged = False
@@ -232,7 +243,8 @@ async def _poll_loop() -> None:
     async with httpx.AsyncClient(timeout=config.POSITION_BULK_TIMEOUT_S) as client:
         while ws_client._running:
             if ws_client._offhours_idle():
-                ws_client._connected = False
+                if not hybrid:
+                    ws_client._connected = False
                 if not idle_logged:
                     logger.info("position-stocks md poller: outside market hours (IST) - idling, rechecking every %.0fs",
                                 ws_client._OFFHOURS_RECHECK_S)
@@ -245,12 +257,13 @@ async def _poll_loop() -> None:
                 if not _universe or time.time() - _universe_loaded_at > _UNIVERSE_REFRESH_S:
                     if not await _load_universe() and not _universe:
                         raise RuntimeError("scrip master map is empty (download failed?)")
-                await poll_once(client)
+                await (poll_once(client, True) if hybrid else poll_once(client))   # keep the 1-arg call: tests stub poll_once(client)
                 fails = 0
                 _stats["consecutive_errors"] = 0
                 _stats["last_ok_at"] = time.time()
-                ws_client._connected = True
-                ws_client._reconnect_attempts = 0
+                if not hybrid:   # hybrid: the WS owns the LIVE badge and the reconnect counter
+                    ws_client._connected = True
+                    ws_client._reconnect_attempts = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - any failure: count it, back off, keep going
@@ -258,9 +271,10 @@ async def _poll_loop() -> None:
                 _stats["errors"] += 1
                 _stats["consecutive_errors"] = fails
                 _stats["last_error"] = f"{type(e).__name__}: {str(e)[:160]}"
-                ws_client._reconnect_attempts += 1
-                if fails >= 3:
-                    ws_client._connected = False
+                if not hybrid:
+                    ws_client._reconnect_attempts += 1
+                    if fails >= 3:
+                        ws_client._connected = False
                 if fails == 1 or fails % _ERROR_LOG_EVERY == 0:
                     logger.warning("position-stocks md poller: poll failed (%s) - %d in a row, backing off", _stats["last_error"], fails)
                 await asyncio.sleep(min(_ERROR_BACKOFF_MAX_S, interval * (2 ** min(fails, 5))))
@@ -278,4 +292,5 @@ def status() -> dict:
         "universe": len(_universe),
         "poll_interval_s": config.POSITION_BULK_POLL_S,
         "chunk": config.POSITION_BULK_CHUNK,
+        "hybrid_stale_s": config.POSITION_HYBRID_STALE_S,
     }

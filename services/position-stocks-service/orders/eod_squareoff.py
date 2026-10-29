@@ -69,15 +69,44 @@ def _place_overnight_stop(
             )
             return None
 
-        result = dhan_client.place_cnc_stop_loss_market(
-            db,
-            is_armed=True,
-            security_id=pos.dhan_security_id,
-            exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
-            quantity=pos.quantity,
-            trigger_price=trigger,
-            tag=f"OVERNIGHT_STOP_{pos.id}",
-        )
+        # E258 (ITC, 29 Oct): the trigger must lie inside the exchange band or Dhan RMS rejects it ("Rate Not Within Ckt Limit"),
+        # and a failed stop turns the carry into a square-off. Clamp it to the lower circuit + 1 tick when the cached quote
+        # knows the band; if it does not, the rejection text carries the band and one clamped retry is made below.
+        from orders import circuit_gate
+        _lo, _up, _px = circuit_gate.band_for(pos.symbol)
+        if _lo:
+            _fit = circuit_gate.clamp_sell_stop(trigger, _lo, dhan_client.stop_tick_for_price(_lo), _px)
+            if _fit is None:
+                logger.error("_place_overnight_stop: %s (id=%d) - price %.2f is on its lower circuit %.2f, no stop can rest below the "
+                             "market - not placing a stop.", pos.symbol, pos.id, _px or 0.0, _lo)
+                return None
+            if _fit != trigger:
+                logger.warning("_place_overnight_stop: %s (id=%d) - %.1f%% stop %.2f is below the lower circuit %.2f; trigger raised to %.2f",
+                               pos.symbol, pos.id, stop_pct, trigger, _lo, _fit)
+                trigger = _fit
+
+        def _send(trig):
+            return dhan_client.place_cnc_stop_loss_market(
+                db,
+                is_armed=True,
+                security_id=pos.dhan_security_id,
+                exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
+                quantity=pos.quantity,
+                trigger_price=trig,
+                tag=f"OVERNIGHT_STOP_{pos.id}",
+            )
+
+        try:
+            result = _send(trigger)
+        except Exception as first:  # noqa: BLE001
+            band = circuit_gate.parse_band(str(first)) if dhan_client.is_circuit_limit_error(str(first)) else None
+            fixed = circuit_gate.clamp_sell_stop(trigger, band[0], dhan_client.stop_tick_for_price(band[0]), None) if band else None
+            if fixed is None or fixed == trigger:
+                raise
+            logger.warning("_place_overnight_stop: %s (id=%d) - Dhan band %.2f-%.2f; retrying once with the trigger raised %.2f -> %.2f",
+                           pos.symbol, pos.id, band[0], band[1], trigger, fixed)
+            trigger = fixed
+            result = _send(trigger)
         order_id = str(result.get("orderId") or result.get("order_id") or "")
         if not order_id:
             logger.error(

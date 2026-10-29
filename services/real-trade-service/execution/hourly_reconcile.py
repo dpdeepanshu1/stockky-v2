@@ -141,9 +141,13 @@ def due(now: Optional[datetime] = None) -> bool:
     return ((now or datetime.now(timezone.utc)) - _last_run_at) >= timedelta(minutes=mins)
 
 
-def edis_blocked(db, symbol: str, now: datetime) -> bool:
+def edis_blocked(db, symbol: str, now: datetime, verified: Optional[bool] = None) -> bool:
     """True when the exit path recorded a CDSL eDIS/TPIN refusal for an open REAL position in `symbol` in the last 6 h (the same
-    `cdsl_alert_last_<position id>` marker exit.py writes when Dhan answers "Validate Qty from CDSL"). Never raises."""
+    `cdsl_alert_last_<position id>` marker exit.py writes when Dhan answers "Validate Qty from CDSL") AND Dhan does not currently report
+    the holdings as verified. `verified` = edis_verification_summary()["verified_today"]; True means the TPIN step is done, so an old marker
+    (it outlives the fix by up to 6 h) must not be blamed for a stale order. Never raises."""
+    if verified is True:
+        return False
     try:
         import models
         from resilience.local_cache import load_snapshot
@@ -204,13 +208,23 @@ async def run_hourly_reconcile(db, notify=None, now: Optional[datetime] = None) 
         stale_min = int(getattr(config, "HOURLY_RECONCILE_STALE_ORDER_MINUTES", 90))
         cutoff = now - timedelta(minutes=stale_min)
         stale = []
+        _ver: dict = {}
+
+        def _verified():
+            """Dhan's own answer to "is today's CDSL authorisation done?", fetched at most once per pass and only when a stale SELL needs it."""
+            if "v" not in _ver:
+                try:
+                    _ver["v"] = dhan_client.edis_verification_summary(db).get("verified_today")
+                except Exception:  # noqa: BLE001
+                    _ver["v"] = None
+            return _ver["v"]
         for o in db.query(models.TradeOrder).filter(
                 models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))).all():
             ts = _aware(o.updated_at or o.created_at)
             if ts is not None and ts < cutoff:
                 item = {"id": o.id, "symbol": o.symbol, "side": o.side, "status": o.status,
                         "age_min": int((now - ts).total_seconds() // 60)}
-                if str(o.side).upper() == "SELL" and edis_blocked(db, o.symbol, now):
+                if str(o.side).upper() == "SELL" and edis_blocked(db, o.symbol, now, _verified()):
                     item["cause"] = EDIS_CAUSE
                 stale.append(item)
         drift = compute_drift(book, broker_qty_map(holdings, positions), stale)

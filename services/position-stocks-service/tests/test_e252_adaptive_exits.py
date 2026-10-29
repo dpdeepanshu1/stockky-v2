@@ -186,6 +186,11 @@ def test_stagnation_exit_is_wired_to_the_adaptive_module_and_switches_are_on_the
     assert "exit_adaptive.stagnation_decision" in eod and "exit_adaptive.flat_band_pct" in eod and "exit_adaptive.nft_min_gain_pct" in eod
     assert "exit_adaptive.trail_distance_pct" in (svc / "orders" / "trailing.py").read_text(encoding="utf-8")
     flags = {f.key: f for f in CATALOG}
+    # conftest.py turns both switches off for every older test, so the shipped default is read from a fresh copy of config.py (env unset in CI)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_fresh_config_e252_exits", Path(config.__file__))
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
     for key in ("TRAIL_ADAPTIVE_ENABLED", "EXIT_ADAPTIVE_ENABLED"):
         assert key in flags and flags[key].live is True and flags[key].shipped == "true"
-        assert getattr(config, key) is True
+        assert getattr(fresh, key) is True

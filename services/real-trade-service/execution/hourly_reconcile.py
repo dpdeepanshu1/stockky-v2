@@ -27,6 +27,8 @@ logger = logging.getLogger("real-trade-hourly-reconcile")
 WARN_KINDS = ("missing_at_broker", "book_over_broker", "stale_order")
 _LIVE_STATUSES = ("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT")
 _REALERT_AFTER = timedelta(hours=4)
+EDIS_CAUSE = "cdsl_edis"
+_EDIS_FRESH = timedelta(hours=6)         # the exit path re-saves its CDSL marker every EXIT_CDSL_ALERT_COOLDOWN_MIN (60) while the block lasts
 
 _last_run_at: Optional[datetime] = None
 _last_report: Optional[dict] = None
@@ -100,8 +102,11 @@ def compute_drift(book: list, broker_qty: dict, stale_orders: list) -> list:
     if only:
         drift.append({"kind": "broker_only", "severity": "info", "symbols": only, "count": len(only)})
     for o in stale_orders:
-        drift.append({"kind": "stale_order", "severity": "warn", "symbol": o["symbol"], "order_id": o["id"],
-                      "side": o["side"], "status": o["status"], "age_minutes": o["age_min"]})
+        item = {"kind": "stale_order", "severity": "warn", "symbol": o["symbol"], "order_id": o["id"],
+                "side": o["side"], "status": o["status"], "age_minutes": o["age_min"]}
+        if o.get("cause"):
+            item["cause"] = o["cause"]
+        drift.append(item)
     return drift
 
 
@@ -111,7 +116,8 @@ def signature(drift: list) -> str:
     for d in drift:
         if d.get("severity") != "warn":
             continue
-        parts.append(f"{d['kind']}:{d.get('symbol')}:{d.get('book_qty', '')}:{d.get('broker_qty', '')}:{d.get('order_id', '')}")
+        parts.append(f"{d['kind']}:{d.get('symbol')}:{d.get('book_qty', '')}:{d.get('broker_qty', '')}:{d.get('order_id', '')}"
+                     + (f":{d['cause']}" if d.get("cause") else ""))
     return "|".join(sorted(parts))
 
 
@@ -135,6 +141,25 @@ def due(now: Optional[datetime] = None) -> bool:
     return ((now or datetime.now(timezone.utc)) - _last_run_at) >= timedelta(minutes=mins)
 
 
+def edis_blocked(db, symbol: str, now: datetime) -> bool:
+    """True when the exit path recorded a CDSL eDIS/TPIN refusal for an open REAL position in `symbol` in the last 6 h (the same
+    `cdsl_alert_last_<position id>` marker exit.py writes when Dhan answers "Validate Qty from CDSL"). Never raises."""
+    try:
+        import models
+        from resilience.local_cache import load_snapshot
+        for p in db.query(models.TradePosition).filter(
+                models.TradePosition.mode == "REAL", models.TradePosition.symbol == symbol,
+                models.TradePosition.status.in_(_LIVE_STATUSES)).all():
+            at = (load_snapshot(db, f"cdsl_alert_last_{p.id}") or {}).get("at")
+            if at:
+                ts = _aware(datetime.fromisoformat(at))
+                if ts is not None and (now - ts) <= _EDIS_FRESH:
+                    return True
+    except Exception:  # noqa: BLE001
+        logger.debug("hourly reconcile: eDIS marker lookup failed (ignored)", exc_info=True)
+    return False
+
+
 def last_report() -> Optional[dict]:
     return _last_report
 
@@ -151,6 +176,9 @@ def _format_alert(drift: list) -> str:
             lines.append(f"• {d['symbol']}: book {d['book_qty']}, broker {d['broker_qty']}")
         elif k == "stale_order":
             lines.append(f"• order #{d['order_id']} {d['symbol']} {d['side']} still {d['status']} after {d['age_minutes']} min")
+            if d.get("cause") == EDIS_CAUSE:
+                lines.append(f"   ↳ cause: Dhan refuses to sell {d['symbol']} until CDSL eDIS/TPIN is authorised. "
+                             "Open the Dhan app -> Verify Holdings and enter the TPIN; the exit retries on its own afterwards.")
     lines.append("Check Orders / Positions; the per-cycle sync handles the first two kinds on its own once past the guard window.")
     return "\n".join(lines)
 
@@ -180,8 +208,11 @@ async def run_hourly_reconcile(db, notify=None, now: Optional[datetime] = None) 
                 models.TradeOrder.mode == "REAL", models.TradeOrder.status.in_(("PLACED", "PARTIAL"))).all():
             ts = _aware(o.updated_at or o.created_at)
             if ts is not None and ts < cutoff:
-                stale.append({"id": o.id, "symbol": o.symbol, "side": o.side, "status": o.status,
-                              "age_min": int((now - ts).total_seconds() // 60)})
+                item = {"id": o.id, "symbol": o.symbol, "side": o.side, "status": o.status,
+                        "age_min": int((now - ts).total_seconds() // 60)}
+                if str(o.side).upper() == "SELL" and edis_blocked(db, o.symbol, now):
+                    item["cause"] = EDIS_CAUSE
+                stale.append(item)
         drift = compute_drift(book, broker_qty_map(holdings, positions), stale)
         report["drift"] = drift
         report["warn_count"] = sum(1 for d in drift if d.get("severity") == "warn")

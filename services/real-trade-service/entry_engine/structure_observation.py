@@ -28,7 +28,7 @@ _stats: Dict[str, Any] = {}
 
 def reset_stats() -> None:
     _stats.clear()
-    _stats.update(recorded=0, skipped_dup=0, skipped_no_opinion=0, skipped_bad=0, errors=0, eval_passes=0, eval_rows=0, eval_completed=0,
+    _stats.update(recorded=0, queued=0, skipped_dup=0, skipped_no_opinion=0, skipped_bad=0, errors=0, eval_passes=0, eval_rows=0, eval_completed=0,
                   eval_fetch_ok=0, eval_fetch_fail=0, eval_gave_up=0, last_pass_at=None, last_error=None, since=time.time())
 
 
@@ -70,9 +70,18 @@ def build_row(symbol: str, mode: str, price: Any, verdict: Dict[str, Any], summa
     return row
 
 
+def _remember(key: tuple, verdict: str) -> None:
+    _seen[key] = verdict
+    if len(_seen) > 5000:
+        for k in list(_seen)[:2500]:
+            _seen.pop(k, None)
+
+
 def record(db, symbol: str, mode: str, price: Any, verdict: Dict[str, Any], summary: Optional[Dict[str, Any]], gate_mode: str, enforced: bool,
            now_ts: Optional[float] = None) -> bool:
-    """Add one StructureObservation to `db` (committed by the caller). True when a row was added. Never raises."""
+    """Store one StructureObservation. True when a row was queued / added. Never raises.
+    Default (STRUCTURE_OBS_WRITE_BEHIND on, write_behind enabled): the row is queued and written by the write-behind worker on its own session,
+    so a slow or timed-out Oracle can never fail an entry cycle. Otherwise it is added to `db` and committed by the caller, as before."""
     try:
         if not getattr(config, "STRUCTURE_OBS_ENABLED", True):
             return False
@@ -83,11 +92,21 @@ def record(db, symbol: str, mode: str, price: Any, verdict: Dict[str, Any], summ
         if key in _seen:
             _stats["skipped_dup"] += 1
             return False
+        # E-structure-obs: the row goes to the write-behind queue, NOT into the entry cycle's session. On 29 Oct 10:15 IST the INSERT here hit
+        # DPY-4024 inside the same transaction as the cycle's orders and failed the whole cycle. The duplicate read moves to the worker too.
+        if getattr(config, "STRUCTURE_OBS_WRITE_BEHIND", True):
+            try:
+                import write_behind
+                queued = write_behind.submit("structure_obs", _to_columns(row))
+            except Exception:  # noqa: BLE001 - fall back to the in-session write below
+                queued = False
+            if queued:
+                _remember(key, row["verdict"])
+                _stats["recorded"] += 1
+                _stats["queued"] = _stats.get("queued", 0) + 1
+                return True
         exists = _exists(db, str(mode).upper(), row["symbol"], row["obs_day"])
-        _seen[key] = row["verdict"]
-        if len(_seen) > 5000:
-            for k in list(_seen)[:2500]:
-                _seen.pop(k, None)
+        _remember(key, row["verdict"])
         if exists:
             _stats["skipped_dup"] += 1
             return False

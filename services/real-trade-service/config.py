@@ -586,7 +586,9 @@ STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
 #   STRUCTURE_EDGE_MIN_N  finished rows per side before the edge / calibration report draws a conclusion
 #   STRUCTURE_EXIT_*  daily structure while a position is OPEN (exit_engine/structure_exit.py): off | log | tighten | exit (default log since group 415)
 STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
-STRUCTURE_OBS_EVAL_INTERVAL_S = max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
+# E-structure-obs (29 Oct 2026): true = the observation row is written by the write-behind worker, never inside the entry cycle's transaction.
+STRUCTURE_OBS_WRITE_BEHIND = ((os.getenv("STRUCTURE_OBS_WRITE_BEHIND") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+STRUCTURE_OBS_EVAL_INTERVAL_S =max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
 STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
 STRUCTURE_OBS_GIVE_UP_DAYS = max(5.0, _og_float("STRUCTURE_OBS_GIVE_UP_DAYS", 45.0))

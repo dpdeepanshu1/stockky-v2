@@ -1995,7 +1995,17 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
         "time_stops":     time_stops,
         "emergency_exits": emergency_exits,
     }
-    log_action(
-        db, actor="system", action="EXIT_CYCLE", mode=mode, detail=str(tally)
-    )
+    # E-structure-obs (29 Oct 2026): this per-tick summary row used to commit on the tick's own session; when Oracle was slow the commit waited
+    # out the 8 s call timeout (and logged "audit log_action failed") inside the exit tick. It goes behind the tick now; a queue that is
+    # disabled / unavailable falls back to the old synchronous write.
+    _audit_queued = False
+    try:
+        import write_behind as _wb_audit
+        _audit_queued = _wb_audit.submit("audit", {"mode": mode, "actor": "system", "action": "EXIT_CYCLE", "detail": str(tally)})
+    except Exception:  # noqa: BLE001
+        _audit_queued = False
+    if not _audit_queued:
+        log_action(
+            db, actor="system", action="EXIT_CYCLE", mode=mode, detail=str(tally)
+        )
     return tally

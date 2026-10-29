@@ -61,6 +61,9 @@ CATALOG = (
     Flag("STRUCTURE_OBS_ENABLED", "Record structure observations", "Structure stop, exit, evidence", "bool", looser="neutral",
          help="Evidence only: stores what the gate saw and what the stock did next (feeds G4). Keep ON.", targets=((_C, "STRUCTURE_OBS_ENABLED"),), live=True,
          shipped="true", recommended="true", evidence="G4 live"),
+    Flag("STRUCTURE_OBS_WRITE_BEHIND", "Structure observations off the cycle", "Structure stop, exit, evidence", "bool", looser="neutral",
+         help="ON = observation rows are written by a background worker, so a slow Oracle (DPY-4024) cannot fail an entry cycle. OFF = old in-cycle write. Keep ON.",
+         targets=((_C, "STRUCTURE_OBS_WRITE_BEHIND"),), live=True, shipped="true", recommended="true", evidence="29 Oct 2026 log: INSERT structure_observations timed out inside the cycle"),
     # ---------------- forecast gates (Kronos 4f, TimesFM 4g) ----------------
     Flag("KRONOS_GATE_MODE", "Kronos gate 4f (REAL)", "Forecast gates", "enum", choices=("enforce", "log", "off"), same_rank=("log", "off"),
          help="off = nothing is fetched; log = fetch, count and store the verdict, never block; enforce = a veto makes the entry WAIT. Unproven: run kronos_backtest.py first.",

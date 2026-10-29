@@ -7,7 +7,9 @@ transaction as real orders. Evidence rows must never delay or fail a stop, a fil
 What goes through the queue (plain dict payloads, never ORM objects, so nothing crosses threads):
   exit_hold       TradeExitDecision rows with action HOLD
   entry_wait      TradeDecision rows with action WAIT (no order, no position hangs off them)
-What stays synchronous: orders, fills, positions, cash, every non-HOLD exit decision, audit rows (log_action commits the caller's session).
+  structure_obs   StructureObservation rows (evidence only; 29 Oct 2026: its INSERT timed out inside the entry cycle's transaction)
+  audit           the EXIT_CYCLE summary row of trade_audit_log (29 Oct 2026: its commit stalled the exit tick for the 8 s call timeout)
+What stays synchronous: orders, fills, positions, cash, every non-HOLD exit decision, every other audit row (log_action commits the caller's session).
 
 Behaviour
   * bounded: WRITE_BEHIND_MAX_QUEUE rows (default 5000); when full the OLDEST row is dropped and counted (evidence, not state)
@@ -290,9 +292,39 @@ def _write_entry_wait(db, payloads: list) -> None:
     db.bulk_insert_mappings(models.TradeDecision, payloads)
 
 
+def _write_structure_obs(db, payloads: list) -> None:
+    """E-structure-obs: StructureObservation rows (one per mode / symbol / IST day, first verdict wins). The de-duplication read happens HERE,
+    on the worker's own session, not inside the entry cycle. A retried batch is safe: a row that already landed is skipped."""
+    import models
+    from entry_engine import structure_observation as _so
+    seen: set = set()
+    rows: list = []
+    for p in payloads:
+        key = (str(p.get("mode") or "").upper(), p.get("symbol"), p.get("obs_day"))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _so._exists(db, key[0], key[1], key[2]):
+            continue
+        q = dict(p)
+        if q.get("created_at") is None:
+            q["created_at"] = datetime.now(timezone.utc)
+        rows.append(q)
+    if rows:
+        db.bulk_insert_mappings(models.StructureObservation, rows)
+
+
+def _write_audit(db, payloads: list) -> None:
+    """E-structure-obs: EXIT_CYCLE summary rows of trade_audit_log (occurred_at takes its column default)."""
+    import models
+    db.bulk_insert_mappings(models.TradeAuditLog, payloads)
+
+
 def register_defaults() -> None:
     register("exit_hold", _write_exit_hold)
     register("entry_wait", _write_entry_wait)
+    register("structure_obs", _write_structure_obs)
+    register("audit", _write_audit)
 
 
 register_defaults()

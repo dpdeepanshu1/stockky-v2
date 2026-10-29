@@ -94,6 +94,8 @@ ANGELONE_WS_URL = _get_str("ANGELONE_WS_URL", "wss://smartapisocket.angelone.in/
 ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION = _get_int(
     "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 1000
 )
+# E255: AngelOne only streams ~1000 tokens per connection; open ceil(tokens/1000) connections, at most this many (SmartAPI limit is 3).
+ANGELONE_WS_MAX_CONNECTIONS = max(1, min(3, _get_int("ANGELONE_WS_MAX_CONNECTIONS", 3)))
 ANGELONE_WS_HEARTBEAT_INTERVAL_S = _get_float("ANGELONE_WS_HEARTBEAT_INTERVAL_S", 10.0)
 # BUG FIX (session14, live-tested): was 25.0. AngelOne's own reference
 # client (smartapi-python's SmartWebSocketV2) sends its "ping" heartbeat
@@ -115,8 +117,11 @@ ANGELONE_WS_RECONNECT_BACKOFF_MAX_S = _get_float(
 # The poller sends one request per POSITION_BULK_POLL_S: open positions first (every request), then the next
 # POSITION_BULK_CHUNK symbols of the universe, round robin. Dhan allows 1 bulk request per second.
 POSITION_FEED_SOURCE = _get_str("POSITION_FEED_SOURCE", "angelone_ws").lower()
-if POSITION_FEED_SOURCE not in ("angelone_ws", "market_data"):
+# E255: "hybrid" = AngelOne WS (up to 3 connections) as the primary feed PLUS the Dhan bulk poller as a gap filler: it only polls
+# open positions and symbols the WS has not ticked for POSITION_HYBRID_STALE_S seconds (or never), so Dhan covers anything AngelOne misses.
+if POSITION_FEED_SOURCE not in ("angelone_ws", "market_data", "hybrid"):
     POSITION_FEED_SOURCE = "angelone_ws"
+POSITION_HYBRID_STALE_S = max(2.0, _get_float("POSITION_HYBRID_STALE_S", 20.0))
 POSITION_BULK_POLL_S = max(0.2, _get_float("POSITION_BULK_POLL_S", 1.0))
 POSITION_BULK_CHUNK = min(1000, max(1, _get_int("POSITION_BULK_CHUNK", 500)))
 POSITION_BULK_TIMEOUT_S = max(1.0, _get_float("POSITION_BULK_TIMEOUT_S", 8.0))

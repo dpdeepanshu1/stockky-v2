@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """short_history_replay.py - E107 P2 item 18: would the mirrored SHORT rule have made money on recent 5-minute bars? (read-only, evidence only, gates nothing)
 
-  python3 scripts/short_history_replay.py [--base http://127.0.0.1:8001] [--symbols A,B,C] [--stop-pct 1.0] [--target-pct 2.0] [--charges-pct 0.08]
+  python3 scripts/short_history_replay.py [--base http://127.0.0.1:8001] [--symbols A,B,C] [--stop-pct 1.0] [--target-pct 2.0] [--charges-pct 0.11]
                                           [--entry-times 10:00,10:30,...] [--min-sessions 10] [--min-trades 200]
 
 For every symbol and every recent session it pretends to SELL at the open of each entry-time bar and walks the following 5-minute bars: a bar that reaches
@@ -98,6 +98,9 @@ def replay(sessions: Dict[str, List[Bar]], side: str, entry_times: Sequence[int]
     return out
 
 
+MIN_PASS_R = 0.05   # E257: smallest average R that can count as a PASS
+
+
 def summarize(trades: Sequence[dict], stop_pct: float, target_pct: float) -> Dict[str, Any]:
     n = len(trades)
     if n == 0:
@@ -105,7 +108,17 @@ def summarize(trades: Sequence[dict], stop_pct: float, target_pct: float) -> Dic
     rr = target_pct / stop_pct
     c = {k: sum(1 for t in trades if t["outcome"] == k) for k in ("target", "stop", "eod")}
     avg = sum(t["net_pct"] for t in trades) / n
-    return {"n": n, "target": c["target"], "stop": c["stop"], "eod": c["eod"], "p_target": c["target"] / n, "be_win": 1.0 / (1.0 + rr), "rr": rr,
+    # E257: trades of one session share the same bars, so the honest sample size is the number of sessions. Standard error of the mean across per-session averages.
+    by_day: Dict[str, List[float]] = {}
+    for t in trades:
+        by_day.setdefault(t["day"], []).append(t["net_pct"])
+    day_means = [sum(v) / len(v) for v in by_day.values()]
+    if len(day_means) > 1:
+        m = sum(day_means) / len(day_means)
+        day_se = (sum((x - m) ** 2 for x in day_means) / (len(day_means) - 1) / len(day_means)) ** 0.5
+    else:
+        day_se = float("inf")
+    return {"n": n, "day_se": day_se, "target": c["target"], "stop": c["stop"], "eod": c["eod"], "p_target": c["target"] / n, "be_win": 1.0 / (1.0 + rr), "rr": rr,
             "avg_net_pct": avg, "avg_r": avg / stop_pct, "win_rate": sum(1 for t in trades if t["net_pct"] > 0) / n,
             "sessions": len({t["day"] for t in trades})}
 
@@ -121,6 +134,11 @@ def evaluate(sell: Dict[str, Any], buy: Dict[str, Any], min_sessions: int, min_t
     if buy.get("n"):
         lines.append(f"BUY control {buy['n']} replays: target {buy['p_target']*100:.1f}%, average {buy['avg_net_pct']:+.3f}% ({buy['avg_r']:+.2f} R) after charges")
     drift = bool(buy.get("n")) and buy["avg_net_pct"] > 0 >= sell["avg_net_pct"]
+    se = float(sell.get("day_se", 0.0))
+    if sell["avg_net_pct"] > 0 and (sell["avg_r"] < MIN_PASS_R or sell["avg_net_pct"] - 1.64 * se <= 0):
+        # E257: a mean a hair above zero is not evidence (the 28 Oct run passed at +0.007% with a 3.3% target-hit rate against 33% break-even).
+        lines.append(f"average is {sell['avg_net_pct']:+.3f}% with a session-level standard error of {se:.3f}%; PASS needs the 90% lower bound above zero and at least {MIN_PASS_R:+.2f} R")
+        return "NOT_ENOUGH_DATA", f"the short rule's edge ({sell['avg_net_pct']:+.3f}%, {sell['avg_r']:+.2f} R) is not distinguishable from zero over {ses} sessions", lines
     if sell["avg_net_pct"] > 0:
         return "PASS", f"the short rule averages {sell['avg_net_pct']:+.3f}% per trade after charges ({sell['avg_r']:+.2f} R) over {n} replays", lines
     why = "the window was a rising market (the long mirror earned), so this is weak evidence against the short rule" if drift else "the short mirror does not earn after charges on these bars"
@@ -164,7 +182,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     ap.add_argument("--stop-pct", type=float, default=1.0)
     ap.add_argument("--target-pct", type=float, default=2.0)
-    ap.add_argument("--charges-pct", type=float, default=0.08)
+    ap.add_argument("--charges-pct", type=float, default=0.11)   # E257: live intraday charges measured at about 0.106% of one leg (0.08 understated them)
     ap.add_argument("--entry-times", default=",".join(DEFAULT_ENTRY_TIMES))
     ap.add_argument("--min-sessions", type=int, default=10)
     ap.add_argument("--min-trades", type=int, default=200)

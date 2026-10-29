@@ -2807,6 +2807,13 @@ def _swing_jsonable(rows):
     return out
 
 
+@app.get("/entry/guard-stats")
+async def entry_guard_stats(admin: Optional[str] = Depends(require_admin)):
+    """E257: how often the day-spike and gain-room range guards held, only logged, passed, or had no data to judge (in-process, since the last restart). Read-only."""
+    from entry_engine import day_spike_gate as _dsg
+    return {"since_restart": True, "spike_mode": _dsg._spike_mode(), "range_mode": _dsg._range_mode(), **_dsg.guard_stats()}
+
+
 @app.get("/swing/status")
 async def swing_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132 (swing plan S3-S5): the swing lane at a glance. Read-only."""

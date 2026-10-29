@@ -22,6 +22,7 @@ import time
 from typing import List, Optional, Sequence, Tuple
 
 import config
+from orders import guard_stats
 
 logger = logging.getLogger("position-stocks-entry-timing")
 
@@ -173,10 +174,14 @@ def spike_reason(symbol: str, ltp: float, now: Optional[float] = None) -> Option
         why = judge(day_pct, range_pos, stats, atr_pct=atr_pct, m1_range_pct=avg_1m_range_pct(ticks, t))
         if why and m == "log":
             logger.info("entry-timing (log only): %s would be skipped - %s", symbol, why)
+            guard_stats.bump("spike", "log_only")
             return None
+        # E257: no_data = no day % / range position, or a cold daily-ATR cache (the fixed day limit was used, not the stock's own volatility)
+        guard_stats.bump("spike", "held" if why else "no_data" if (day_pct is None or range_pos is None or atr_pct is None) else "passed")
         return why
     except Exception as e:  # noqa: BLE001
         logger.debug("entry-timing: spike check failed for %s (no opinion): %s", symbol, e)
+        guard_stats.bump("spike", "error")
         return None
 
 

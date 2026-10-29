@@ -7,7 +7,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVICE = os.path.join(HERE, "..", "services", "position-stocks-service")
-CASES = [("test_plain_short.py", 61), ("test_short_exit_paths.py", 75), ("test_short_live.py", 67)]
+CASES = [("test_plain_short.py", 61), ("test_short_exit_paths.py", 75), ("test_short_live.py", 93)]
 
 
 @pytest.mark.parametrize("script,expected", CASES)

@@ -18,6 +18,7 @@ import logging
 from typing import Any, Optional, Sequence
 
 import config
+from orders import guard_stats
 
 logger = logging.getLogger("position-stocks-gain-room")
 
@@ -76,24 +77,34 @@ def reject_reason(symbol: str, ltp: float, stop_pct: float, target_pct: float) -
         if m == "off":
             return None
         why = None
+        range_inputs = True
+        check_failed = False
         try:
             from feed import bar_store
             why = odds_reason(bar_store.get_bars(str(symbol or "").strip().upper()), float(stop_pct), float(target_pct))
         except Exception as e:  # noqa: BLE001
             logger.debug("gain-room: odds check failed for %s (no opinion): %s", symbol, e)
+            check_failed = True
         if not why:
             try:
                 from feed import ws_client
                 from screening import prev_day
                 rng = ws_client.get_day_range(symbol)
                 pdv = prev_day.get(symbol)
-                why = range_reason(rng[0] if rng else None, float(ltp), getattr(pdv, "avg_range_pct", None) if pdv else None, float(target_pct))
+                _avg = getattr(pdv, "avg_range_pct", None) if pdv else None
+                range_inputs = bool(rng) and bool(_avg)
+                why = range_reason(rng[0] if rng else None, float(ltp), _avg, float(target_pct))
             except Exception as e:  # noqa: BLE001
                 logger.debug("gain-room: range check failed for %s (no opinion): %s", symbol, e)
+                check_failed = True
         if why and m == "log":
             logger.info("gain-room (log only): %s would be skipped - %s", symbol, why)
+            guard_stats.bump("gain_room", "log_only")
             return None
+        # E257: error = an input source raised; no_data = no day range / average range to judge by
+        guard_stats.bump("gain_room", "held" if why else "error" if check_failed else "passed" if range_inputs else "no_data")
         return why
     except Exception as e:  # noqa: BLE001
         logger.debug("gain-room: check failed for %s (no opinion): %s", symbol, e)
+        guard_stats.bump("gain_room", "error")
         return None

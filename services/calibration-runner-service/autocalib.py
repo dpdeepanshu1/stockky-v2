@@ -116,6 +116,8 @@ PROTECTED: Dict[str, str] = {
     "TM_AUTO_ENABLED": "Time Machine timer (E115): a calibrator never changes it",
     "TM_AUTO_INTERVAL_MIN": "Time Machine timer (E115): a calibrator never changes it",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
+    "STRUCTURE_OBS_WRITE_BEHIND": "evidence recorder plumbing (E253): how the observation row reaches the database; a report never decides it",
+    "SHORT_ENTRY_CUSHION_PCT": "money safety (short selling): how far below the last price a short's SELL limit sits is your decision, never a report's",
     "ORDER_FLOW_RECORD": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_DEPTH20": "evidence recorder: always on so tests have data",
     "BAR_RECORD_ENABLED": "evidence recorder: always on so tests have data",

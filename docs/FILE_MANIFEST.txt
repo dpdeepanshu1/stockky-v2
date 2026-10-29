@@ -437,6 +437,7 @@ scripts/test_ms_ab_report.py
 scripts/test_ms_g1_check.py
 scripts/test_opening_replay.py
 scripts/test_p8_retest_evidence.py
+scripts/test_e257_report_fixes.py
 scripts/test_plain_short.py
 scripts/test_policy_replay.py
 scripts/test_position_stocks_pipeline_offline.py
@@ -1275,6 +1276,7 @@ services/position-stocks-service/orders/eod_squareoff.py
 services/position-stocks-service/orders/excursion.py
 services/position-stocks-service/orders/exit_retry.py
 services/position-stocks-service/orders/gain_room.py
+services/position-stocks-service/orders/guard_stats.py
 services/position-stocks-service/orders/journal_notes.py
 services/position-stocks-service/orders/liquidity_gate.py
 services/position-stocks-service/orders/live_anchor.py
@@ -1401,6 +1403,7 @@ services/position-stocks-service/tests/test_e237_shadow_report_speed.py
 services/position-stocks-service/tests/test_e246_probe_short_heal.py
 services/position-stocks-service/tests/test_e249_fallthrough_and_daymover_cap.py
 services/position-stocks-service/tests/test_e251_stop_floor_spike_gain_room_reclaim.py
+services/position-stocks-service/tests/test_e257_guard_stats.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -2048,6 +2051,7 @@ shared/market_structure/tests/_bars.py
 shared/market_structure/tests/golden/analyze_golden.json
 shared/market_structure/tests/run_plain.py
 shared/market_structure/tests/test_backtest.py
+shared/market_structure/tests/test_walkforward_e257.py
 shared/market_structure/tests/test_chart_context.py
 shared/market_structure/tests/test_chart_context_intraday.py
 shared/market_structure/tests/test_corp_actions.py

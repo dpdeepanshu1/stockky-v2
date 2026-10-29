@@ -241,6 +241,29 @@ def limit_price_below(trigger: float, pct: float = 0.5) -> float:
     return px
 
 
+def _not_in_demat_holdings(db: Session, symbol: str) -> bool:
+    """E256: True only when Dhan's demat holdings were read successfully and do NOT list `symbol` (with a quantity).
+    "Insufficient Holding Quantity" is what Dhan also says for a same-day CNC delivery buy that has not settled into demat yet (T+1,
+    still under Dhan *positions*): a TPIN cannot fix that, so the alert must not send the user to Verify Holdings. Any read error
+    returns False (keeps the original eDIS wording)."""
+    try:
+        want = str(symbol or "").strip().upper()
+        for row in dhan_client.get_holdings(db) or []:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("tradingSymbol") or row.get("trading_symbol") or row.get("symbol") or "").strip().upper()
+            qty = row.get("totalQty", row.get("total_qty", row.get("quantity")))
+            try:
+                qty = float(qty) if qty is not None else 1.0
+            except (TypeError, ValueError):
+                qty = 1.0
+            if sym == want and qty > 0:
+                return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _send_stop(db: Session, security_id: str, position, trigger: float, otype: str):
     price = limit_price_below(trigger, 0.5) if otype == "STOP_LOSS" else 0.0
     return dhan_client.place_order(
@@ -299,9 +322,15 @@ def _place(db: Session, position, trigger: float, now: Optional[float] = None) -
             if backoff > 0:
                 _edis_until[position.symbol] = (time.monotonic() if now is None else now) + backoff
             retry = "every %d min" % (max(1, int(backoff // 60))) if backoff > 0 else "on every sync pass"
-            _warn_once(position.symbol, "broker stop for %s refused: CDSL eDIS / TPIN authorisation is needed before Dhan "
-                       "accepts a sell order on this holding (%s). Open the Dhan app -> Verify Holdings and enter the TPIN; "
-                       "placement is retried automatically %s", position.symbol, msg[:160], retry)
+            if _not_in_demat_holdings(db, position.symbol):
+                _warn_once(position.symbol, "broker stop for %s deferred: this is a same-day delivery (CNC) buy that has not settled "
+                           "into your demat holdings yet (T+1), so Dhan cannot take a sell stop on it (%s). No TPIN is needed; "
+                           "placement is retried automatically %s and should succeed once it settles",
+                           position.symbol, msg[:160], retry)
+            else:
+                _warn_once(position.symbol, "broker stop for %s refused: CDSL eDIS / TPIN authorisation is needed before Dhan "
+                           "accepts a sell order on this holding (%s). Open the Dhan app -> Verify Holdings and enter the TPIN; "
+                           "placement is retried automatically %s", position.symbol, msg[:160], retry)
         elif _is_tick_size_error(msg):
             # group 412: a deterministic exchange rejection - the same trigger would be refused again. Back off (same window as
             # eDIS) instead of sending a doomed order every sync pass; the price is re-derived (and re-rounded) on the next try.

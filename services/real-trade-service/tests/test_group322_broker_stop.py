@@ -611,3 +611,40 @@ def test_tick_size_rejection_backs_off_instead_of_resending_every_pass(rig, monk
     assert t["backoff"] == 1 and st.n == 0                       # Dhan is not called again inside the window
     st.place_error = None
     assert sync(db, [p], now=2000.0)["placed"] == 1              # after the window it is tried once more and succeeds
+
+
+# ---- E256: same-day unsettled CNC buy must not be reported as a TPIN problem ---------------------------
+
+def _alert_for_refusal(rig, monkeypatch, holdings):
+    db, st = rig
+    monkeypatch.setattr(config, "BROKER_STOP_EDIS_BACKOFF_S", 900)
+    _abdl_like_dhan(monkeypatch, [])
+    if isinstance(holdings, Exception):
+        def boom(db_):
+            raise holdings
+        monkeypatch.setattr(dhan_client, "get_holdings", boom)
+    else:
+        monkeypatch.setattr(dhan_client, "get_holdings", lambda db_: holdings)
+    sync(db, [pos(db)], now=1000.0)
+    return " ".join(st.alerts)
+
+
+def test_unsettled_same_day_buy_says_no_tpin_needed(rig, monkeypatch):
+    text = _alert_for_refusal(rig, monkeypatch, [{"tradingSymbol": "OTHER", "totalQty": 5}])
+    assert "has not settled" in text and "No TPIN is needed" in text
+    assert "Verify Holdings" not in text
+
+
+def test_real_edis_refusal_keeps_the_tpin_wording_when_the_stock_is_in_holdings(rig, monkeypatch):
+    text = _alert_for_refusal(rig, monkeypatch, [{"tradingSymbol": "ABC", "totalQty": 3}])
+    assert "Verify Holdings" in text and "has not settled" not in text
+
+
+def test_holdings_read_failure_keeps_the_tpin_wording(rig, monkeypatch):
+    text = _alert_for_refusal(rig, monkeypatch, RuntimeError("dhan down"))
+    assert "Verify Holdings" in text
+
+
+def test_unsettled_message_still_backs_off(rig, monkeypatch):
+    _alert_for_refusal(rig, monkeypatch, [])
+    assert B.edis_backoff_left("ABC", now=1100.0) > 0

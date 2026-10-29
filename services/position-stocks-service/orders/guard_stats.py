@@ -5,8 +5,11 @@ Without this a guard that never gets its inputs (cold ATR cache, no day range, t
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Dict
+
+logger = logging.getLogger("position-stocks-guard-stats")
 
 _LOCK = threading.Lock()
 _STATS: Dict[str, Dict[str, int]] = {}
@@ -17,8 +20,8 @@ def bump(gate: str, outcome: str) -> None:
         with _LOCK:
             d = _STATS.setdefault(gate, {})
             d[outcome] = d.get(outcome, 0) + 1
-    except Exception:  # noqa: BLE001 - a counter must never break an entry
-        pass
+    except Exception as e:  # noqa: BLE001 - a counter must never break an entry
+        logger.debug("guard_stats: bump(%r, %r) failed: %s", gate, outcome, e)
 
 
 def snapshot() -> Dict[str, Dict[str, int]]:

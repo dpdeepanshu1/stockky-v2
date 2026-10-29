@@ -37,6 +37,7 @@ class TestAdaptiveBasis:
     def test_the_opening_plan_is_tagged_opening_plan(self, monkeypatch):
         monkeypatch.setattr(adaptive, "_bar_atr_pct", lambda s, p: None)
         monkeypatch.setattr(opening_plan, "bar_atr_pct", lambda s, now=None: 0.75)
+        monkeypatch.setattr(config, "ADAPTIVE_BAR_STOP_MIN_PCT", 0.8)   # E251 raised the production floor to 1.2; this test pins the plan -> stop mapping (0.75 x 1.3), not the floor
         lv = adaptive.compute(0.0, 100.0, symbol="AAA")
         assert lv.basis == "opening_plan" and lv.stop_pct == pytest.approx(0.975, abs=0.01)
 

@@ -154,6 +154,16 @@ def test_edis_marker_marks_the_stale_sell_with_its_cause(monkeypatch):
         assert hr.edis_blocked(_edis_db(), "BANKINDIA", NOW) is False
 
 
+def test_a_verified_edis_status_overrides_an_old_cdsl_marker(monkeypatch):
+    """The marker outlives the fix by up to 6 h; once Dhan reports the holdings verified, the TPIN must not be blamed for a stale SELL."""
+    monkeypatch.setitem(sys.modules, "models", NS(TradePosition=NS(mode=1, symbol=1, status=NS(in_=lambda x: 1))))
+    marker = {"at": (NOW - timedelta(minutes=30)).isoformat()}
+    with mock.patch("resilience.local_cache.load_snapshot", lambda db, key: marker):
+        assert hr.edis_blocked(_edis_db(), "BANKINDIA", NOW, verified=True) is False
+        assert hr.edis_blocked(_edis_db(), "BANKINDIA", NOW, verified=False) is True
+        assert hr.edis_blocked(_edis_db(), "BANKINDIA", NOW, verified=None) is True      # status unreadable: keep the marker's word
+
+
 def test_alert_text_names_the_tpin_step_only_when_the_cause_is_known():
     base = {"id": 1142, "symbol": "BANKINDIA", "side": "SELL", "status": "PLACED", "age_min": 103}
     plain = hr._format_alert(hr.compute_drift([], {}, [base]))

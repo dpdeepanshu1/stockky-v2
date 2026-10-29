@@ -197,3 +197,16 @@ def _reset_security_load_throttle():
     _clear()
     yield
     _clear()
+
+
+import pytest as _pytest_e258  # noqa: E402
+
+
+@_pytest_e258.fixture(autouse=True)
+def _circuit_band_lookup_off_by_default(request, monkeypatch):
+    """E258: _place_overnight_stop reads the exchange circuit band from the cached /quote row (one HTTP call to market-data). Older tests
+    must not make that call, so the lookup answers "unknown" for them; test_e258_overnight_stop_circuit_band.py sets the band itself."""
+    if "test_e258" in request.node.nodeid:
+        return
+    from orders import circuit_gate
+    monkeypatch.setattr(circuit_gate, "band_for", lambda symbol: (None, None, None))

@@ -1404,6 +1404,7 @@ services/position-stocks-service/tests/test_e246_probe_short_heal.py
 services/position-stocks-service/tests/test_e249_fallthrough_and_daymover_cap.py
 services/position-stocks-service/tests/test_e251_stop_floor_spike_gain_room_reclaim.py
 services/position-stocks-service/tests/test_e257_guard_stats.py
+services/position-stocks-service/tests/test_e258_overnight_stop_circuit_band.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1785,6 +1786,8 @@ services/real-trade-service/tests/test_e206_manual_buy_target_must_exceed_entry.
 services/real-trade-service/tests/test_e207_held_days_are_trading_days.py
 services/real-trade-service/tests/test_e214_stale_tick_no_target_partial.py
 services/real-trade-service/tests/test_e217_circuit_rejected_symbol_not_retried.py
+services/real-trade-service/tests/test_e257_guard_stats.py
+services/real-trade-service/tests/test_e258_broker_stop_circuit_band.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

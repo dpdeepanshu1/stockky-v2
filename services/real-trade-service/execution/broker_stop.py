@@ -29,8 +29,10 @@ NOT verified against a live Dhan account. Try it with ONE small position first a
 from __future__ import annotations
 
 import logging
+import math
+import re
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -48,6 +50,8 @@ _cancel_fails: dict = {}       # symbol -> consecutive cancel failures
 _warned: dict = {}             # symbol -> monotonic time of the last placement warning
 _edis_until: dict = {}         # symbol -> clock time before which no placement is attempted (eDIS / TPIN refusal backoff)
 _slm_rejected: bool = False    # True once Dhan is known to reject STOP_LOSS_MARKET here (go straight to STOP_LOSS)
+_band: dict = {}               # E258: symbol -> (lower, upper) circuit band read from a Dhan "Rate Not Within Ckt Limit" rejection
+_BAND_RE = re.compile(r"(?:ckt limit|circuit limit|within)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*to\s*(\d+(?:\.\d+)?)", re.I)
 
 
 def enabled() -> bool:
@@ -77,7 +81,7 @@ def boot_safety_message(enabled: bool, store_persistent: Optional[bool]) -> Opti
 
 def reset_state() -> None:
     global _slm_rejected
-    _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear()
+    _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear(); _band.clear()
     _slm_rejected = False
 
 
@@ -138,11 +142,40 @@ def skip_reason(position, today_ist: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def trigger_for(stop: float, ltp: Optional[float]) -> Optional[float]:
-    """Tick-rounded trigger = software stop less the buffer; None unless it is below the live price (a sell stop at or above
-    the market would trigger at once / be rejected - the software emergency exit owns that case)."""
+def parse_circuit_band(message) -> Optional[Tuple[float, float]]:
+    """E258: (lower, upper) from Dhan's text ('Rate Not Within Ckt Limit 257.80 To 273.70' / 'Place order within 78.95 to 113.60'), else None."""
+    try:
+        m = _BAND_RE.search(str(message or ""))
+        if not m:
+            return None
+        lo, up = float(m.group(1)), float(m.group(2))
+        return (lo, up) if 0 < lo < up else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _lower_circuit(tick, symbol: str) -> Optional[float]:
+    """E258: the lower circuit from the live tick, else the band learned from an earlier Dhan rejection, else None."""
+    try:
+        v = float(getattr(tick, "lower_circuit", None))
+        if math.isfinite(v) and v > 0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    band = _band.get(symbol)
+    return band[0] if band else None
+
+
+def trigger_for(stop: float, ltp: Optional[float], lower: Optional[float] = None) -> Optional[float]:
+    """Tick-rounded trigger = software stop less the buffer, raised to the lower circuit + 1 tick when it would sit below the
+    exchange band (E258: Dhan rejects it with 'Rate Not Within Ckt Limit'); None unless it is below the live price (a sell stop at
+    or above the market would trigger at once / be rejected - the software emergency exit owns that case)."""
     try:
         trig = dhan_client.round_stop_to_tick(float(stop) * (1.0 - float(config.BROKER_STOP_BUFFER_PCT) / 100.0))
+        if lower and float(lower) > 0 and trig and trig > 0:
+            floor = dhan_client.round_stop_to_tick(float(lower) + dhan_client.stop_tick_for_price(float(lower)))
+            if trig < floor:
+                trig = floor
         if not trig or trig <= 0 or not ltp or float(ltp) <= 0 or trig >= float(ltp):
             return None
         return trig
@@ -331,6 +364,19 @@ def _place(db: Session, position, trigger: float, now: Optional[float] = None) -
                 _warn_once(position.symbol, "broker stop for %s refused: CDSL eDIS / TPIN authorisation is needed before Dhan "
                            "accepts a sell order on this holding (%s). Open the Dhan app -> Verify Holdings and enter the TPIN; "
                            "placement is retried automatically %s", position.symbol, msg[:160], retry)
+        elif dhan_client.is_circuit_limit_error(msg):
+            # E258 (ITC, 29 Oct): the trigger lay outside the exchange band. The band in Dhan's text is remembered so the next pass
+            # sends a trigger inside it; if the band was already known and it still fails, back off instead of re-sending.
+            band = parse_circuit_band(msg)
+            known = position.symbol in _band
+            if band:
+                _band[position.symbol] = band
+            if known or not band:
+                backoff = _edis_backoff_s()
+                if backoff > 0:
+                    _edis_until[position.symbol] = (time.monotonic() if now is None else now) + backoff
+            _warn_once(position.symbol, "broker stop for %s rejected: trigger %.2f is outside the circuit band (%s)%s",
+                       position.symbol, trigger, msg[:160], "" if (known or not band) else " - retrying inside the band on the next pass")
         elif _is_tick_size_error(msg):
             # group 412: a deterministic exchange rejection - the same trigger would be refused again. Back off (same window as
             # eDIS) instead of sending a doomed order every sync pass; the price is re-derived (and re-rounded) on the next try.
@@ -368,7 +414,7 @@ async def sync_stops(db: Session, mode: str, positions, ticks: dict, now_mono: O
                 tally["skipped"] += 1
                 continue
             tick = ticks.get(pos.symbol)
-            trig = trigger_for(pos.current_stop, getattr(tick, "price", None))
+            trig = trigger_for(pos.current_stop, getattr(tick, "price", None), _lower_circuit(tick, pos.symbol))
             if trig is None:
                 tally["skipped"] += 1
                 continue

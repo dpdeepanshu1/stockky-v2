@@ -51,6 +51,7 @@ Run from services/position-stocks-service:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import struct
@@ -83,6 +84,10 @@ def _reset_state():
     wsc._reconnect_attempts = 0
     wsc._last_tick_at = None
     wsc._ws_task = None
+    wsc._conn_up.clear()
+    wsc._conn_tokens.clear()
+    wsc._ws_extra_tasks.clear()
+    wsc._uncovered_tokens = 0
 
 
 def _build_mode3_frame(token: str, ltp_paise: int, volume: int = 0,
@@ -390,15 +395,63 @@ class TestWsLoopHappyPath:
             asyncio.run(wsc._ws_loop())
         assert any("server closed the connection cleanly" in r.message for r in caplog.records)
 
-    def test_multi_chunk_subscribe(self, monkeypatch):
+    def test_connection_zero_subscribes_only_its_slice_and_spawns_the_rest(self, monkeypatch):
+        """E255: 3 tokens, cap 2 -> connection 0 subscribes tokens 1-2 in ONE message and starts connection 1 for token 3."""
         monkeypatch.setattr(config, "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 2)
         ws = _FakeWS([])
         session = _FakeSession(ready=True)
         symbol_map = {"A": "1", "B": "2", "C": "3"}
         _patch_common(monkeypatch, session, symbol_map, _FakeConnect(ws))
+        spawned = []
+        monkeypatch.setattr(wsc.asyncio, "create_task",
+                            lambda coro, name=None: (coro.close(), spawned.append(name), type("T", (), {"done": lambda self: False})())[2])
         wsc._running = True
-        asyncio.run(wsc._ws_loop())
-        assert len(ws.sent) == 2  # 3 tokens, chunk size 2 -> 2 messages
+        asyncio.run(wsc._ws_loop(0))
+        assert len(ws.sent) == 1
+        assert json.loads(ws.sent[0])["params"]["tokenList"][0]["tokens"] == ["1", "2"]
+        assert spawned == ["position-stocks-ws-1"]
+        assert wsc._conn_tokens[0] == 2
+
+    def test_extra_connection_subscribes_the_next_slice(self, monkeypatch):
+        monkeypatch.setattr(config, "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 2)
+        ws = _FakeWS([])
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"A": "1", "B": "2", "C": "3"}, _FakeConnect(ws))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop(1))
+        assert json.loads(ws.sent[0])["params"]["tokenList"][0]["tokens"] == ["3"]
+        assert wsc._conn_tokens[1] == 1
+
+    def test_extra_connection_with_no_tokens_exits(self, monkeypatch):
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"A": "1"}, _FakeConnect(_FakeWS([])))
+        wsc._running = True
+        asyncio.run(wsc._ws_loop(2))
+        assert wsc._conn_tokens[2] == 0 and wsc._conn_up[2] is False
+
+    def test_connected_means_at_least_one_connection_up(self):
+        wsc._mark_conn(0, True)
+        wsc._mark_conn(1, True)
+        wsc._mark_conn(0, False)
+        assert wsc._connected is True
+        wsc._mark_conn(1, False)
+        assert wsc._connected is False
+
+    def test_plan_connections_clamps_to_max(self, monkeypatch):
+        monkeypatch.setattr(config, "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 1000)
+        monkeypatch.setattr(config, "ANGELONE_WS_MAX_CONNECTIONS", 3)
+        assert wsc._plan_connections(1) == 1
+        assert wsc._plan_connections(1000) == 1
+        assert wsc._plan_connections(2620) == 3
+        assert wsc._plan_connections(9000) == 3
+
+    def test_uncovered_tokens_counted_when_universe_exceeds_all_connections(self, monkeypatch):
+        monkeypatch.setattr(config, "ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION", 1)
+        monkeypatch.setattr(config, "ANGELONE_WS_MAX_CONNECTIONS", 2)
+        _patch_common(monkeypatch, _FakeSession(ready=True), {"A": "1", "B": "2", "C": "3", "D": "4"}, _FakeConnect(_FakeWS([])))
+        monkeypatch.setattr(wsc.asyncio, "create_task",
+                            lambda coro, name=None: (coro.close(), type("T", (), {"done": lambda self: False})())[1])
+        wsc._running = True
+        asyncio.run(wsc._ws_loop(0))
+        assert wsc._uncovered_tokens == 2
 
 
 # ══════════════════════════════════════════════════════════════════════════════

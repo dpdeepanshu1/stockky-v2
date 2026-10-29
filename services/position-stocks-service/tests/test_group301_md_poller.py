@@ -541,3 +541,51 @@ class TestOpenPositionSymbols:
                 return q
         monkeypatch.setattr(_db, "get_session_factory", lambda: (lambda: _S()))
         assert mp.open_position_symbols() == ["SBIN", "TCS"]
+
+
+# ── hybrid mode (E255): Dhan only fills what the AngelOne WS is not ticking ───────────────────────────
+class TestHybridGapFill:
+    def test_skips_symbols_the_ws_ticked_recently_and_keeps_stale_or_silent_ones(self, monkeypatch):
+        mp.reset()
+        wsc._tick_buffers.clear()
+        monkeypatch.setattr(mp, "_universe", ["FRESH", "STALE", "NEVER"])
+        now = time.time()
+        wsc._tick_buffers["FRESH"].append((now - 1, 10.0))
+        wsc._tick_buffers["STALE"].append((now - 600, 10.0))
+        assert mp.next_batch([], hybrid=True) == ["STALE", "NEVER"]
+
+    def test_non_hybrid_ignores_ws_freshness(self, monkeypatch):
+        mp.reset()
+        wsc._tick_buffers.clear()
+        monkeypatch.setattr(mp, "_universe", ["FRESH", "NEVER"])
+        wsc._tick_buffers["FRESH"].append((time.time(), 10.0))
+        assert mp.next_batch([]) == ["FRESH", "NEVER"]
+
+    def test_hot_symbols_are_always_polled_even_if_ws_fresh(self, monkeypatch):
+        mp.reset()
+        wsc._tick_buffers.clear()
+        monkeypatch.setattr(mp, "_universe", ["HELD", "NEVER"])
+        wsc._tick_buffers["HELD"].append((time.time(), 10.0))
+        assert mp.next_batch(["HELD"], hybrid=True) == ["HELD", "NEVER"]
+
+    def test_hybrid_poll_loop_does_not_touch_the_ws_connected_flag(self, monkeypatch):
+        wsc._connected = False
+        monkeypatch.setattr(mp, "get_all_nse_eq", lambda: {"SBIN": "1"})
+        monkeypatch.setattr(mp, "drop_etfs", lambda m: (m, 0))
+        sleeps = []
+
+        async def fake_sleep(d):
+            sleeps.append(d)
+            wsc._running = False
+
+        async def fake_poll(client, hybrid=False):
+            assert hybrid is True
+            return 0
+        monkeypatch.setattr(mp.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(mp, "poll_once", fake_poll)
+        monkeypatch.setattr(mp.httpx, "AsyncClient", _ClientCtx)
+        monkeypatch.setattr(wsc, "_offhours_idle", lambda: False)
+        mp.set_hot_symbols_provider(lambda: [])
+        wsc._running = True
+        asyncio.run(mp._poll_loop(hybrid=True))
+        assert mp._stats["polls"] == 1 and wsc._connected is False

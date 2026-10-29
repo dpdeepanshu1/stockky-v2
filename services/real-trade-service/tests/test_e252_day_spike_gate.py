@@ -74,5 +74,10 @@ def test_gate_is_wired_into_entry_and_on_the_calibration_page():
     src = (Path(__file__).resolve().parent.parent / "entry_engine" / "entry.py").read_text(encoding="utf-8")
     assert "day_spike_gate.spike_reason_tick(tick)" in src and "day_spike_gate.range_reason_tick(tick, target_pct)" in src
     flags = {f.key: f for f in CATALOG}
+    # conftest.py forces both modes "off" for every test, so the shipped default is read from a fresh copy of config.py (env unset in CI)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_fresh_config_e252_spike", Path(config.__file__))
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
     for key in ("SPIKE_GUARD_MODE", "GAIN_ROOM_MODE"):
-        assert key in flags and flags[key].shipped == "live" and getattr(config, key) == "live"
+        assert key in flags and flags[key].shipped == "live" and getattr(fresh, key) == "live"

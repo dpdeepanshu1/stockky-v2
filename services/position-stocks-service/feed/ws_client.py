@@ -562,9 +562,39 @@ def _offhours_idle() -> bool:
         return False
 
 
-async def _ws_loop() -> None:
-    """Persistent WS loop with exponential-backoff reconnect."""
-    global _subscribed_tokens, _connected, _reconnect_attempts, _last_tick_at
+# E255 (29 Oct 2026): AngelOne delivers frames for at most ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION (1000) tokens per WebSocket connection.
+# The scalper subscribed all 2,620 NSE-EQ tokens on ONE connection, so only the first 1,000 (scrip-master order) ever ticked
+# (ws-status day_stats_symbols was exactly 1000; Adani Ports, Eternal, Poonawalla showed "fewer than 2 ticks").
+# Connection 0 takes tokens[0:1000] and starts one more loop per further 1,000 tokens (SmartAPI allows 3 connections per client code).
+_conn_up: Dict[int, bool] = {}
+_conn_tokens: Dict[int, int] = {}
+_ws_extra_tasks: Dict[int, "asyncio.Task"] = {}
+_md_gap_task: Optional["asyncio.Task"] = None
+_uncovered_tokens = 0     # tokens beyond MAX_CONNECTIONS x cap; not subscribed anywhere on AngelOne
+
+
+def _mark_conn(idx: int, up: bool) -> None:
+    """Record connection `idx` up/down; module-level `_connected` (dashboard LIVE badge) = at least one connection is up."""
+    global _connected
+    _conn_up[idx] = bool(up)
+    _connected = any(_conn_up.values())
+
+
+def _plan_connections(n_tokens: int) -> int:
+    """Connections needed for n tokens: ceil(n / cap), clamped to 1..ANGELONE_WS_MAX_CONNECTIONS."""
+    cap = max(1, int(config.ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION))
+    need = max(1, -(-n_tokens // cap))
+    return min(need, max(1, int(config.ANGELONE_WS_MAX_CONNECTIONS)))
+
+
+def _slice_for(idx: int, tokens: list) -> list:
+    cap = max(1, int(config.ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION))
+    return tokens[idx * cap:(idx + 1) * cap]
+
+
+async def _ws_loop(idx: int = 0) -> None:
+    """Persistent WS loop with exponential-backoff reconnect. `idx` = connection index (0 is the primary and spawns the others)."""
+    global _subscribed_tokens, _connected, _reconnect_attempts, _last_tick_at, _uncovered_tokens
     session = get_session()
     backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_S
     max_backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_MAX_S
@@ -573,7 +603,7 @@ async def _ws_loop() -> None:
 
     while _running:
         if _offhours_idle():
-            _connected = False
+            _mark_conn(idx, False)
             if not _idle_logged:
                 logger.info("position-stocks WS: outside market hours (IST) - idling, rechecking every %.0fs", _OFFHOURS_RECHECK_S)
                 _idle_logged = True
@@ -584,7 +614,7 @@ async def _ws_loop() -> None:
             await session.ensure_session()
             if not session.token or not session.feed_token or not session.client_id:
                 logger.error("position-stocks WS: AngelOne session not ready — retrying in %ss", backoff)
-                _connected = False
+                _mark_conn(idx, False)
                 _reconnect_attempts += 1
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
@@ -619,14 +649,30 @@ async def _ws_loop() -> None:
                     "position-stocks WS: scrip master map is empty (download failed?) — retrying in %ss",
                     backoff,
                 )
-                _connected = False
+                _mark_conn(idx, False)
                 _reconnect_attempts += 1
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
                 continue
             _build_reverse_map(symbol_token_map)
-            _subscribed_tokens = list(symbol_token_map.values())
-            logger.info("position-stocks WS: subscribing to %d NSE-EQ tokens", len(_subscribed_tokens))
+            all_tokens = list(symbol_token_map.values())
+            n_conn = _plan_connections(len(all_tokens))
+            my_tokens = _slice_for(idx, all_tokens)
+            if idx == 0:
+                _subscribed_tokens = all_tokens
+                _uncovered_tokens = max(0, len(all_tokens) - n_conn * max(1, int(config.ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION)))
+                for i in range(1, n_conn):
+                    t = _ws_extra_tasks.get(i)
+                    if t is None or t.done():
+                        _ws_extra_tasks[i] = asyncio.create_task(_ws_loop(i), name=f"position-stocks-ws-{i}")
+                if _uncovered_tokens:
+                    logger.warning("position-stocks WS: %d tokens exceed %d connections x cap and get no AngelOne ticks", _uncovered_tokens, n_conn)
+            if not my_tokens:   # universe shrank below this connection's range
+                _mark_conn(idx, False)
+                _conn_tokens[idx] = 0
+                return
+            _conn_tokens[idx] = len(my_tokens)
+            logger.info("position-stocks WS[%d]: subscribing to %d of %d NSE-EQ tokens", idx, len(my_tokens), len(all_tokens))
 
             ws_url = (
                 f"{config.ANGELONE_WS_URL}"
@@ -644,13 +690,13 @@ async def _ws_loop() -> None:
             ) as ws:
                 logger.info("position-stocks WS: connected")
                 backoff = config.ANGELONE_WS_RECONNECT_BACKOFF_S  # reset on success
-                _connected = True
+                _mark_conn(idx, True)
                 _reconnect_attempts = 0
 
                 # Subscribe in chunks of 1000 (AngelOne cap per message)
                 chunk_size = config.ANGELONE_WS_MAX_SYMBOLS_PER_CONNECTION
-                for i in range(0, len(_subscribed_tokens), chunk_size):
-                    chunk = _subscribed_tokens[i:i + chunk_size]
+                for i in range(0, len(my_tokens), chunk_size):
+                    chunk = my_tokens[i:i + chunk_size]
                     await ws.send(_build_subscribe_msg(chunk))
                     await asyncio.sleep(0.1)
 
@@ -740,7 +786,7 @@ async def _ws_loop() -> None:
         except Exception as e:
             logger.error("position-stocks WS: error (%s) — reconnecting in %ss", e, backoff)
 
-        _connected = False
+        _mark_conn(idx, False)
         if _running:
             _reconnect_attempts += 1
             await asyncio.sleep(backoff)
@@ -762,12 +808,35 @@ async def start() -> None:
         return
     _ws_task = asyncio.create_task(_ws_loop(), name="position-stocks-ws")
     logger.info("position-stocks WS: task started")
+    if config.POSITION_FEED_SOURCE == "hybrid":
+        # E255: Dhan (market-data /quotes/bulk) fills whatever AngelOne is not ticking.
+        global _md_gap_task
+        from feed import md_poller
+        _md_gap_task = asyncio.create_task(md_poller._poll_loop(hybrid=True), name="position-stocks-md-gapfill")
+        logger.info("position-stocks feed: hybrid - Dhan gap-fill poller started alongside the AngelOne WS")
 
 
 async def stop() -> None:
     global _running, _connected
     _running = False
     _connected = False
+    _conn_up.clear()
+    for _t in list(_ws_extra_tasks.values()):
+        if not _t.done():
+            _t.cancel()
+            try:
+                await _t
+            except asyncio.CancelledError:
+                pass
+    _ws_extra_tasks.clear()
+    global _md_gap_task
+    if _md_gap_task is not None and not _md_gap_task.done():
+        _md_gap_task.cancel()
+        try:
+            await _md_gap_task
+        except asyncio.CancelledError:
+            pass
+    _md_gap_task = None
     if _ws_task and not _ws_task.done():
         _ws_task.cancel()
         try:
@@ -788,9 +857,11 @@ def ws_status() -> dict:
     # reconnect counter and last-tick timestamp never appeared at all.
     _md = config.POSITION_FEED_SOURCE == "market_data"
     _extra = {}
-    if _md:
+    if _md or config.POSITION_FEED_SOURCE == "hybrid":
         from feed import md_poller
         _extra = {"md_poller": md_poller.status()}
+    _extra["ws_connections"] = {str(i): {"up": _conn_up.get(i, False), "tokens": _conn_tokens.get(i, 0)} for i in sorted(_conn_tokens)}
+    _extra["uncovered_tokens"] = _uncovered_tokens
     return {
         **_extra,
         "source": "market_data" if _md else "angelone_ws",

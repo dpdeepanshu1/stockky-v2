@@ -213,7 +213,18 @@ def build_report(rows: List[Dict[str, Any]], horizon: int, min_n: int, n_boot: i
         "added_share_of_buy_now_pct": round(100.0 * len(resc) / (len(resc) + len(cln)), 1) if (resc or cln) else None}
     rep["verdict"] = verdict(len(resc), len(blk), len(rows), rep["groups"]["rescued"].get("mean_net"), b_blk.get("ci90"), b_cln.get("ci90"),
                              vs_block, halves, min_n)
+    rep["min_n"] = min_n
     return rep
+
+
+def _edge_lines(rep: Dict[str, Any], f: Any) -> List[str]:
+    """E257: with too few rescued or blocked days the bootstrap runs on one or two values and prints a tight interval and P(>0) = 1.0. Show that as not available instead."""
+    if rep.get("verdict") in ("no_data", "insufficient_sample"):
+        c = rep["counts"]
+        why = f"n/a - sample too small (rescued {c['rescued']}, blocked {c['blocked']}, minimum {rep.get('min_n', '?')} each); the interval would be built from a handful of values"
+        return [f"- rescued - blocked: {why}", f"- rescued - clean: {why}"]
+    return [f"- rescued - blocked: **{f(rep['rescued_minus_blocked_pp'])} pp**, 90% CI {f(rep['bootstrap_vs_blocked']['ci90'])}, P(>0) {f(rep['bootstrap_vs_blocked']['p_positive'])}",
+            f"- rescued - clean: {f(rep['rescued_minus_clean_pp'])} pp, 90% CI {f(rep['bootstrap_vs_clean']['ci90'])}"]
 
 
 def to_markdown(rep: Dict[str, Any]) -> str:
@@ -224,8 +235,7 @@ def to_markdown(rep: Dict[str, Any]) -> str:
                     f"- symbols: {m['symbols']} (skipped {m['skipped']}), benchmark: {m['benchmark']}, step {m['step']}, cost {m['cost_pct']}% + {m['slip_pct']}% slippage",
                     f"- days: clean {c['clean']}, rescued {c['rescued']}, blocked {c['blocked']}, other {c['other']}",
                     f"- the branch would add {f(rep['added_share_of_buy_now_pct'])}% to today's BUY NOW days",
-                    f"- rescued - blocked: **{f(rep['rescued_minus_blocked_pp'])} pp**, 90% CI {f(rep['bootstrap_vs_blocked']['ci90'])}, P(>0) {f(rep['bootstrap_vs_blocked']['p_positive'])}",
-                    f"- rescued - clean: {f(rep['rescued_minus_clean_pp'])} pp, 90% CI {f(rep['bootstrap_vs_clean']['ci90'])}",
+                    *_edge_lines(rep, f),
                     f"- halves (cut {f(rep['halves_vs_blocked']['cut'])}): first {f(rep['halves_vs_blocked']['first'])} pp, second {f(rep['halves_vs_blocked']['second'])} pp", "",
                     "| group | n | mean net % | win % | stop first % |", "|---|---|---|---|---|"]
     for g, x in rep["groups"].items():

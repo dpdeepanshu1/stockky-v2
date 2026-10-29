@@ -14,11 +14,34 @@ The stop widening and the reclaim re-entry of E251 are NOT ported (a real-trade 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import threading
+from typing import Dict, Optional
 
 import config
 
 logger = logging.getLogger("real-trade-day-spike-gate")
+
+# E257: how often each guard decided something. Without this a cold ATR cache (peek only, no pre-warm) makes both guards silently allow every entry and nobody can tell.
+# In-process counters since the last restart; read through GET /entry/guard-stats. outcome: held | log_only | passed | no_data | error.
+_STATS_LOCK = threading.Lock()
+_STATS: Dict[str, Dict[str, int]] = {"spike": {}, "range": {}}
+
+
+def _bump(gate: str, outcome: str) -> None:
+    with _STATS_LOCK:
+        d = _STATS[gate]
+        d[outcome] = d.get(outcome, 0) + 1
+
+
+def guard_stats() -> Dict[str, Dict[str, int]]:
+    with _STATS_LOCK:
+        return {g: dict(v) for g, v in _STATS.items()}
+
+
+def reset_stats() -> None:
+    with _STATS_LOCK:
+        for v in _STATS.values():
+            v.clear()
 
 
 def _cfg(name: str, default):
@@ -112,11 +135,16 @@ def spike_reason_tick(tick) -> Optional[str]:
         m = _spike_mode()
         if m == "off" or tick is None:
             return None
-        why = judge_spike(getattr(tick, "price", None), getattr(tick, "prev_close", None), getattr(tick, "day_high", None),
-                          getattr(tick, "day_low", None), _atr_pct(tick))
-        return _apply(m, why, tick)
+        vals = [_num(getattr(tick, n, None)) for n in ("price", "prev_close", "day_high", "day_low")]
+        atr = _atr_pct(tick)
+        why = judge_spike(vals[0], vals[1], vals[2], vals[3], atr)
+        out = _apply(m, why, tick)
+        # no_data = an input of the check was missing (the check then allows); a missing ATR only loosens the limit to the fixed 4%, so it is not counted here
+        _bump("spike", "no_data" if (not all(vals) or vals[2] <= vals[3]) else "held" if out else "log_only" if why else "passed")
+        return out
     except Exception as e:  # noqa: BLE001
         logger.debug("day-spike gate failed (allowing): %s", e)
+        _bump("spike", "error")
         return None
 
 
@@ -125,8 +153,12 @@ def range_reason_tick(tick, target_pct) -> Optional[str]:
         m = _range_mode()
         if m == "off" or tick is None:
             return None
-        why = judge_range(getattr(tick, "price", None), getattr(tick, "day_low", None), _atr_pct(tick), target_pct)
-        return _apply(m, why, tick)
+        price, low, atr = _num(getattr(tick, "price", None)), _num(getattr(tick, "day_low", None)), _atr_pct(tick)
+        why = judge_range(price, low, atr, target_pct)
+        out = _apply(m, why, tick)
+        _bump("range", "no_data" if not (price and low and _num(atr) and _num(target_pct)) else "held" if out else "log_only" if why else "passed")
+        return out
     except Exception as e:  # noqa: BLE001
         logger.debug("gain-room range gate failed (allowing): %s", e)
+        _bump("range", "error")
         return None

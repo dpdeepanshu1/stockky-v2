@@ -2815,6 +2815,13 @@ def _board_open_symbols() -> list:
         return []
 
 
+@app.get("/entry/guard-stats")
+def entry_guard_stats(admin: str = Depends(require_admin)):
+    """E257: how often the spike-chase and gain-room guards held, only logged, passed, or had no data (in-process, since the last restart). Read-only."""
+    from orders import entry_timing, gain_room, guard_stats
+    return {"since_restart": True, "spike_mode": entry_timing.mode(), "gain_room_mode": gain_room.mode(), **guard_stats.snapshot()}
+
+
 @app.get("/short/shadow")
 def short_shadow_route(db: Session = Depends(get_db)):
     """Short selling step 5: the shadow shorts (what Stockky would have shorted and what happened next) and the gate counters. Read-only; no order exists."""

@@ -99,8 +99,12 @@ def rows_from_ps(doc: Any) -> List[Dict[str, Any]]:
         st = str(r.get("status") or "").upper()
         if st in _PS_BAD or r.get("exit_price") is None or r.get("realized_pnl") is None:
             continue
+        if str(r.get("window_source") or "").upper() == "PROBE":
+            continue   # E257: the 1-share Dhan SELL probe is a wiring test, not a trade; counted, it adds a fake row to wins, losses and the on/off sample
         ep, xp = num(r.get("entry_price")), num(r.get("exit_price"))
         ret = ((xp - ep) / ep * 100.0) if ep and xp is not None else None
+        if ret is not None and str(r.get("side") or "").upper() in ("SHORT", "SELL"):
+            ret = -ret   # E257: a short earns when the price falls; the return column was computed as if every row were a long
         # E231: position-stocks' realized_pnl is GROSS (before charges) while real-trade's net_pnl is net; the two were summed as if alike. Subtract the row's
         # own round-trip charges (null on an unbookable row -> left as is). Win / loss is counted on this net figure.
         ch = num(r.get("charges"))

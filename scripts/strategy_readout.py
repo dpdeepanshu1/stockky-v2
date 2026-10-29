@@ -42,6 +42,7 @@ def entry_window_verdict(buckets: Dict[str, dict], cutoff: str = "10:30", min_tr
     pre_n = post_n = 0
     pre_sum = post_sum = 0.0
     ambiguous = []
+    left_out_n = 0
     for key, agg in (buckets or {}).items():
         b = _bounds(key)
         if b is None or not isinstance(agg, dict):
@@ -56,9 +57,14 @@ def entry_window_verdict(buckets: Dict[str, dict], cutoff: str = "10:30", min_tr
             post_n += n; post_sum += n * float(e)
         else:
             ambiguous.append(key)
+            left_out_n += n
     pre_e = pre_sum / pre_n if pre_n else None
     post_e = post_sum / post_n if post_n else None
-    if pre_n < min_trades or post_n < min_trades:
+    total_n = pre_n + post_n + left_out_n
+    if left_out_n and total_n and left_out_n * 4 > total_n:
+        # E257: the 28 Oct report showed "before 10:30: 0 trades" because the whole 10:xx hour (5 of 17 trades) was left out. Say so instead of reading the empty side.
+        verdict = f"NOT ENOUGH DATA - the {cutoff} cutoff falls inside an hourly bucket holding {left_out_n} of {total_n} trades; use a cutoff on the hour"
+    elif pre_n < min_trades or post_n < min_trades:
         verdict = "NOT ENOUGH DATA"
     elif pre_e < 0 and pre_e < post_e:
         verdict = f"SET OPENING_ENTRY_NOT_BEFORE_IST={cutoff}"
@@ -66,7 +72,7 @@ def entry_window_verdict(buckets: Dict[str, dict], cutoff: str = "10:30", min_tr
         verdict = "KEEP THE CURRENT WINDOW"
     return {"cutoff": cutoff, "before": {"trades": pre_n, "expectancy": None if pre_e is None else round(pre_e, 2)},
             "after": {"trades": post_n, "expectancy": None if post_e is None else round(post_e, 2)},
-            "left_out_straddling": ambiguous, "min_trades": min_trades, "verdict": verdict}
+            "left_out_straddling": ambiguous, "left_out_trades": left_out_n, "min_trades": min_trades, "verdict": verdict}
 
 
 def _get(url: str, headers: Dict[str, str], timeout: float = 20) -> Optional[dict]:

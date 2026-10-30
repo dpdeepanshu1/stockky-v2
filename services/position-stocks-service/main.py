@@ -743,15 +743,18 @@ async def _pullback_rearm_step(db, trigger, gate, summary, _stage):
         return None
 
 
-_last_shortlist: dict = {"at": None, "rows": [], "evaluated": 0, "passed": 0, "entered_symbol": None}   # group332/337: latest best-picks shortlist, for GET /shortlist
+_last_shortlist: dict = {"at": None, "rows": [], "evaluated": 0, "passed": 0, "entered_symbol": None, "held_by_gate": []}   # group332/337: latest best-picks shortlist, for GET /shortlist
 
 
-def _mark_pick(symbol: str, outcome: str) -> None:
-    """group337: record what became of one shortlisted pick (ENTERED / SKIPPED:<reason> / NOT_TRIED). Display only; never raises."""
+def _mark_pick(symbol: str, outcome: str, detail: Optional[str] = None) -> None:
+    """group337: record what became of one shortlisted pick (ENTERED / SKIPPED:<reason> / NOT_TRIED). Display only; never raises.
+    E259: `detail` is the full skip text (e.g. OPENING_GATE:GAP_UP:+5.46% > +3.00%); the outcome keeps only the code."""
     try:
         for r in _last_shortlist["rows"]:
             if r.get("symbol") == symbol:
                 r["outcome"] = outcome
+                if detail:
+                    r["skip_detail"] = str(detail)[:140]
         if outcome == "ENTERED":
             _last_shortlist["entered_symbol"] = symbol
     except Exception:  # noqa: BLE001
@@ -1382,6 +1385,18 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
             result = None
             capital_skipped: list[str] = []
             quality_passers = [(c, q) for c, q in zip(top_n, quality_results) if q.passes()[0]]
+            # E259: names the opening gate refuses right now (gap, under the open, weak previous day ...) must not use up the shortlist slots
+            _held_by_gate: list = []
+            try:
+                from screening import gate_prefilter as _gpf
+                quality_passers, _held_by_gate = _gpf.partition(quality_passers)
+            except Exception:  # noqa: BLE001 - fail open: keep every passer
+                _held_by_gate = []
+            _last_shortlist["held_by_gate"] = _held_by_gate
+            for _h in _held_by_gate:
+                _hn = _skip_is_new("PF:" + _h["symbol"], _h["reason"])
+                logger.log(logging.INFO if _hn else logging.DEBUG,
+                           "position-stocks: %s held out of the shortlist (%s)", _h["symbol"], _h["reason"])
             if config.SHORTLIST_ENABLED and quality_passers:
                 # group332: best 3-5 passers on scan score + Market Board conviction + quality + zone, tried best-first.
                 _ts = time.perf_counter()
@@ -1415,7 +1430,8 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
                     result, _skip = await asyncio.to_thread(_attempt_entry_with_skip_reason, db, _c, _q)
                     candidate = _c  # track which one actually attempted
                     quality = _q
-                    _mark_pick(_c.symbol, "ENTERED" if result else "SKIPPED:" + (str(_skip).split(":", 1)[0] if _skip else "NO_ENTRY"))
+                    _mark_pick(_c.symbol, "ENTERED" if result else "SKIPPED:" + (str(_skip).split(":", 1)[0] if _skip else "NO_ENTRY"),
+                               None if result else (str(_skip) if _skip else None))
                     if (not result and config.SHORTLIST_FALLTHROUGH and is_symbol_specific_skip(_skip)):
                         # group335: this symbol failed a gate that only concerns it (VWAP / liquidity / depth / circuit / ...) -
                         # the next shortlisted pick may still be fine; global skips (not armed, kill switch, budget, max positions) still stop.
@@ -2966,6 +2982,7 @@ def shortlist_route():
             "as_of": _last_shortlist["at"], "picks": _last_shortlist["rows"],
             "evaluated": _last_shortlist["evaluated"], "passed_quality_gate": _last_shortlist["passed"],
             "entered_symbol": _last_shortlist["entered_symbol"],
+            "held_by_gate": _last_shortlist.get("held_by_gate") or [],
             "weights": {"scan": config.SHORTLIST_W_SCAN, "board": config.SHORTLIST_W_BOARD,
                         "quality": config.SHORTLIST_W_QUALITY, "zone": config.SHORTLIST_W_ZONE}}
 
@@ -2982,7 +2999,12 @@ def top_picks_route():
             payload = _board.build(None, None, _board_open_symbols())
         except Exception as e:  # noqa: BLE001 - no board = engine picks without live prices
             logger.debug("top-picks: board unavailable (%s)", e)
-    built = top_picks.build(_last_shortlist["rows"], _last_shortlist["at"], payload, time.time())
+    def _symbol_row(sym: str):
+        # E259: a shortlisted name the ranked board list left out (choppy open: score 0) still has bars - read its own board view
+        from screening import board as _board
+        return top_picks.row_from_symbol_view(_board.symbol_view(sym))
+    built = top_picks.build(_last_shortlist["rows"], _last_shortlist["at"], payload, time.time(),
+                            fallback=_symbol_row if config.BOARD_ENABLED else None)
     market_open = bool(is_market_open_ist())
     note = None
     if not built["picks"]:

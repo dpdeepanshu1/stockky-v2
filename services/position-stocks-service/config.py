@@ -433,6 +433,11 @@ QUALITY_GATE_TOP_N = _get_int("QUALITY_GATE_TOP_N", 3)
 # passers are re-ranked on scan score + Market Board conviction + quality + zone score, and the best SHORTLIST_MAX are tried
 # best-first. Never lowers a gate. SHORTLIST_ENABLED=0 restores the old scan-order behaviour.
 SHORTLIST_ENABLED = _get_bool("SHORTLIST_ENABLED", True)
+# E259: with this on, quality-passers that the opening gate would refuse RIGHT NOW (gap above / below the limits, under the open or previous close,
+# near the day high, outside the opening-range rules, weak previous day, Nifty weak) are taken out BEFORE the shortlist is ranked, so they no longer
+# use up the SHORTLIST_MAX slots (5 gap-up names were blocking every cycle 09:15-10:00). It never loosens a gate: entry.py still runs the same
+# opening_gate.reject_reason on whatever is tried. Names whose data is simply not ready (no prev-day candle, no day stats) stay in. 0 = old behaviour.
+SHORTLIST_GATE_PREFILTER = _get_bool("SHORTLIST_GATE_PREFILTER", True)
 SHORTLIST_MAX = max(1, min(10, _get_int("SHORTLIST_MAX", 5)))
 SHORTLIST_MIN_SCORE = _get_float("SHORTLIST_MIN_SCORE", 0.0)
 SHORTLIST_W_SCAN = _get_float("SHORTLIST_W_SCAN", 0.40)

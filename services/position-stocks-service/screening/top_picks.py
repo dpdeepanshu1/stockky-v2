@@ -69,6 +69,28 @@ def _base(row: Optional[dict]) -> dict:
     }
 
 
+def row_from_symbol_view(view: Optional[dict]) -> Optional[dict]:
+    """E259: a board-row-shaped dict (ltp, change %, zone score, invalidation, R:R, spark) from board.symbol_view(), for a symbol the ranked board
+    list does not hold (its move from the open is not one-sided, so rank_rows drops it). Flagged off_board=True. None without a price."""
+    try:
+        if not isinstance(view, dict) or _num(view.get("ltp")) is None:
+            return None
+        ltp = _num(view.get("ltp"))
+        day = view.get("day") if isinstance(view.get("day"), dict) else {}
+        ref = _num(day.get("prev_close")) or _num(day.get("open"))
+        chg = (ltp - ref) / ref * 100.0 if ref else None
+        ir = view.get("invalidation_risk") if isinstance(view.get("invalidation_risk"), dict) else {}
+        rr = view.get("rr")
+        rr_v = _num(rr.get("rr")) if isinstance(rr, dict) else _num(rr)
+        closes = [c[4] for c in (view.get("candles") or []) if isinstance(c, (list, tuple)) and len(c) > 4]
+        return {"symbol": view.get("symbol"), "name": view.get("symbol"), "sector": view.get("sector"), "side": view.get("side"),
+                "ltp": ltp, "change_pct": chg, "zone_score": _num(view.get("zone_score")), "invalidation": _num(ir.get("invalidation")),
+                "rr": rr_v, "extended": bool(view.get("extended")), "in_position": bool(view.get("position")),
+                "spark": [x for x in closes if _num(x) is not None][-40:], "conviction": None, "rank": None, "off_board": True}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _zone_score(row: dict) -> Optional[float]:
     z = row.get("zone")
     if isinstance(z, dict) and _num(z.get("score")) is not None:
@@ -88,6 +110,8 @@ def _reasons(row: Optional[dict]) -> List[str]:
     rr = _num(row.get("rr"))
     if rr is not None:
         out.append(f"R:R {rr:.1f}")
+    if row.get("off_board"):
+        out.append("not on the ranked board (move from the open is not one-sided)")
     if row.get("side") == "bear":
         out.append("board is BEARISH on it")
     if row.get("extended"):
@@ -143,16 +167,28 @@ def from_engine(engine_rows: List[dict], idx: Dict[str, dict]) -> List[dict]:
             card["rank"] = r.get("board_rank")
         if r.get("extended"):
             card["extended"] = True
+        if r.get("skip_detail"):                       # E259: the full gate text, not just "opening gate"
+            card["reasons"] = card["reasons"] + ["gate: " + str(r["skip_detail"])]
         out.append(card)
     return out
 
 
-def build(engine_rows: List[dict], engine_at: Optional[float], board_payload: Optional[dict], now: float) -> dict:
+def build(engine_rows: List[dict], engine_at: Optional[float], board_payload: Optional[dict], now: float, fallback=None) -> dict:
     """The card list for GET /top-picks: fresh engine picks first, board preview picks fill up to TOP_PICKS_N."""
     try:
         n = max(1, min(10, int(config.TOP_PICKS_N)))
         fresh = bool(engine_at) and (now - float(engine_at)) <= float(config.TOP_PICKS_FRESH_S)
         idx = board_index(board_payload)
+        if fresh and fallback is not None:             # E259: engine picks with no ranked board row get their own symbol view
+            for r in (engine_rows or [])[:n]:
+                sym = r.get("symbol")
+                if sym and sym not in idx:
+                    try:
+                        row = fallback(sym)
+                    except Exception:  # noqa: BLE001
+                        row = None
+                    if row:
+                        idx[sym] = row
         picks = from_engine(engine_rows, idx)[:n] if fresh else []
         engine_n = len(picks)
         if len(picks) < min(int(config.TOP_PICKS_MIN_SHOWN), n):

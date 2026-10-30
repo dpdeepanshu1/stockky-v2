@@ -266,6 +266,8 @@ def b_swing_probe(ctx, p):
         args.append("--yes")
         if ph == "open" and p.get("symbol"):
             args += ["--symbol", str(p["symbol"]).strip().upper()]
+        if ph == "open" and str(p.get("kind", "forever")) in ("forever", "day"):
+            args += ["--kind", str(p.get("kind", "forever"))]
     return [_py(ctx, "dhan_swing_probe.py", *args, title="Dhan swing probe (S4): 1-share CNC buy with a resting stop, read back the next morning", env={"TOKEN": "{token}"}, attention=(1,))]
 
 
@@ -502,8 +504,9 @@ JOB_LIST = [
          after="NOT_ENOUGH_DATA: keep collecting. USEFUL: 30+ net-positive shadow trades is the gate to run the S4 probe; SWING_MODE=live stays your decision. NO_EDGE: do not go live. The exact lane trades (stop, ratchet) are at GET /swing/report."),
     _job("swing_universe", "Swing lane universe (E132)", "ops", "Once, before SWING_MODE is shadow (and after fetch_history grows the folder)", "Prints the SWING_UNIVERSE_SYMBOLS line from the history folder the replay used, so the lane ranks the same stocks the replay tested. Paste it into .env.", b_swing_universe, [SEED], timeout_s=60,
          after="Copy the SWING_UNIVERSE_SYMBOLS line into .env and restart real-trade-service."),
-    _job("dhan_swing_probe", "Dhan swing probe (S4) - places 1 real share", "ops", "Open phase 09:30-14:30 IST on one trading day, check phase on the NEXT trading morning, before SWING_BROKER_STOP_ENABLED or live REAL swing", "PLACES ONE REAL 1-share CNC BUY with a resting stop in phase open; phase check reads the stop back the next morning (PASS only if it survived the night), cancels it and sells the share. Nothing is sent unless you tick the box. Selling needs the CDSL TPIN that morning.", b_swing_probe,
-         [P("phase", "Phase", "choice", "status", choices=["status", "open", "check"]), P("yes", "I understand this places a real 1-share order", "bool", False), P("symbol", "Symbol (open only; blank = ITC, NTPC, ONGC, SBIN, TATASTEEL in turn)", "str", "")], window="open", timeout_s=300,
+    _job("dhan_swing_probe", "Dhan swing probe (S4) - places 1 real share", "ops", "Open phase 09:30-14:30 IST on one trading day, check phase on the NEXT trading morning, before SWING_BROKER_STOP_ENABLED or live REAL swing", "PLACES ONE REAL 1-share CNC BUY with a resting stop in phase open; phase check reads the stop back the next morning (PASS only if it survived the night), cancels it and sells the share. A normal DAY stop is dropped by Dhan at the close (30 Oct 2026 FAIL), so the default stop type is now the Forever Order. Nothing is sent unless you tick the box. Selling needs the CDSL TPIN that morning.", b_swing_probe,
+         [P("phase", "Phase", "choice", "status", choices=["status", "open", "check"]), P("yes", "I understand this places a real 1-share order", "bool", False), P("symbol", "Symbol (open only; blank = ITC, NTPC, ONGC, SBIN, TATASTEEL in turn)", "str", ""),
+          P("kind", "Stop type (open only): forever = Dhan Forever Order (GTT), day = normal stop (known to expire at the close)", "choice", "forever", choices=["forever", "day"])], window="open", timeout_s=300,
          after="PASS: a resting stop on a CNC holding survives the night: SWING_BROKER_STOP_ENABLED is now a safe switch. FAIL: read the step lines; keep it off and rely on the software stop."),
     _job("p8_retest", "P8 retest / CHOCH evidence", "monthly", "Monthly", "Is the retest branch worth switching on (STRUCTURE_POLICY retest_entry=1)?", b_p8, [SEED, JOBS_P], heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("ml_v2", "ML V2 walk-forward", "monthly", "Monthly", "Does a model on the V2 structure features beat chance out of sample? Evidence only: nothing is trained into production.", b_ml_v2, [SEED, JOBS_P, P("sample", "Symbols", "int", 200, 50, 800)],

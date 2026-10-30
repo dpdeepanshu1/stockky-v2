@@ -1528,3 +1528,72 @@ def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
     logger.info("Cancelling REAL order %s", dhan_order_id)
     resp = client.cancel_order(dhan_order_id)
     return _extract_data(resp) or {}
+
+
+# ── E261: Forever Orders (Dhan's good-till-triggered orders) ─────────────────────────────────────────────────────────────────────────────
+# A normal STOP_LOSS order is validity DAY and Dhan drops it at the close, so it can never be a resting stop for a position carried overnight
+# (the E132 swing probe FAILed for exactly that reason, 30 Oct 2026). A Forever Order (POST /v2/forever/orders) stays at Dhan until it triggers
+# or is cancelled. Direct REST like ddpi_status (the dhanhq SDK method names differ by version). Not an order-book row: it is listed by
+# GET /v2/forever/all (docs also show /v2/forever/orders; both are tried).
+_FOREVER_LIVE_STATES = ("PENDING", "CONFIRM", "TRANSIT")
+
+
+def _forever_headers_and_client(db: Session) -> tuple:
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials stored - connect Dhan first.")
+    client_id, token = creds
+    return client_id, {"Content-Type": "application/json", "Accept": "application/json", "access-token": token}
+
+
+def place_forever_order(db: Session, *, is_armed: bool, security_id: str, exchange_segment: str, transaction_type: str, quantity: int, price: float,
+                        trigger_price: float, product_type: str = "CNC", order_type: str = "LIMIT", tag: Optional[str] = None) -> dict:
+    """E261: POST /v2/forever/orders, orderFlag SINGLE. Places a REAL (resting) order: is_armed MUST be True. Returns Dhan's JSON ({orderId, orderStatus}).
+    Prices are rounded to the tick like place_order does; the trigger gets the same >= 0.05 floor as a stop."""
+    if not is_armed:
+        raise RuntimeError("place_forever_order refused: not armed")
+    if int(quantity) <= 0:
+        raise ValueError("a forever order needs a positive quantity")
+    trig = round_stop_to_tick(trigger_price)
+    px = round_stop_to_tick(price) if price else 0.0
+    if not trig or trig <= 0:
+        raise ValueError("a forever order needs a positive trigger price")
+    client_id, headers = _forever_headers_and_client(db)
+    body = {
+        "dhanClientId": str(client_id), "correlationId": (tag or "")[:30], "orderFlag": "SINGLE", "transactionType": transaction_type,
+        "exchangeSegment": exchange_segment, "productType": product_type, "orderType": order_type, "validity": "DAY",
+        "securityId": str(security_id), "quantity": int(quantity), "disclosedQuantity": 0, "price": px, "triggerPrice": trig,
+    }
+    logger.info("place_forever_order: outbound payload -> %s", {k: v for k, v in body.items() if k != "dhanClientId"})
+    resp = httpx.post(f"{_DHAN_REST_BASE}/forever/orders", headers=headers, json=body, timeout=15.0)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"forever order refused ({resp.status_code}): {resp.text[:300]}")
+    j = resp.json() or {}
+    return (j.get("data") if isinstance(j.get("data"), dict) else j) or {}
+
+
+def get_forever_orders(db: Session) -> list:
+    """E261: every Forever Order on the account (read-only, no arm check). Tries /forever/all, then /forever/orders (Dhan's docs show both)."""
+    _cid, headers = _forever_headers_and_client(db)
+    last: Optional[Exception] = None
+    for path in ("/forever/all", "/forever/orders"):
+        try:
+            resp = httpx.get(f"{_DHAN_REST_BASE}{path}", headers=headers, timeout=15.0)
+            resp.raise_for_status()
+            j = resp.json()
+            if isinstance(j, dict):
+                j = j.get("data") if isinstance(j.get("data"), list) else []
+            return [r for r in (j or []) if isinstance(r, dict)]
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise RuntimeError(f"forever order list unreadable: {last}")
+
+
+def cancel_forever_order(db: Session, *, dhan_order_id: str) -> dict:
+    """E261: DELETE /v2/forever/orders/{id}. Cancelling is always allowed, armed or not (same rule as cancel_order)."""
+    _cid, headers = _forever_headers_and_client(db)
+    resp = httpx.delete(f"{_DHAN_REST_BASE}/forever/orders/{dhan_order_id}", headers=headers, timeout=15.0)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"forever order cancel refused ({resp.status_code}): {resp.text[:300]}")
+    j = resp.json() if resp.content else {}
+    return (j.get("data") if isinstance(j.get("data"), dict) else j) or {}

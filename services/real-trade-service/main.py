@@ -2902,9 +2902,10 @@ async def swing_resume(mode: str = "DEMO", admin: Optional[str] = Depends(requir
 
 
 @app.post("/swing/probe")
-async def swing_probe(phase: str = "status", yes: bool = False, symbol: str = "", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+async def swing_probe(phase: str = "status", yes: bool = False, symbol: str = "", kind: str = "forever", admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132 (swing plan S4): does a resting Dhan stop on a CNC holding survive the night? phase=open places a REAL 1-share CNC BUY + stop (needs yes=true, REAL armed,
-    09:30-14:30 IST); phase=check (a LATER trading morning) reads the stop back and cleans up; phase=status only shows the last result."""
+    09:30-14:30 IST); phase=check (a LATER trading morning) reads the stop back and cleans up; phase=status only shows the last result.
+    E261: kind=forever (default) tests Dhan's Forever Order (good-till-triggered); kind=day is the old normal STOP_LOSS, which Dhan drops at the close."""
     import asyncio as _aio
     from swing import probe
     from swing.repo import SqlRepo
@@ -2912,14 +2913,14 @@ async def swing_probe(phase: str = "status", yes: bool = False, symbol: str = ""
     ph = (phase or "status").lower()
     if ph == "status":
         last = probe.last_probe(repo)
-        return {"verdict": (last or {}).get("verdict", "NOT_RUN"), "line": f"SWING PROBE (last): {(last or {}).get('verdict', 'NOT_RUN')} - {(last or {}).get('check_reason') or (last or {}).get('summary') or 'never run'}", "last": last}
+        return {"verdict": (last or {}).get("verdict", "NOT_RUN"), "steps": list((last or {}).get("check_steps") or []), "line": f"SWING PROBE (last): {(last or {}).get('verdict', 'NOT_RUN')} - {(last or {}).get('check_reason') or (last or {}).get('summary') or 'never run'}", "last": last}
     if ph not in ("open", "check"):
         raise HTTPException(status_code=400, detail="phase must be open, check or status")
     if not yes:
         return {"verdict": "NOT_RUN", "line": "SWING PROBE: SKIPPED - tick the confirmation: this places a real 1-share order", "steps": []}
     gate = db.query(models.TradeGateState).filter_by(mode="REAL").first()
     armed = bool(gate is not None and gate.armed)
-    fn = (lambda: probe.open_phase(db, repo, armed, symbol)) if ph == "open" else (lambda: probe.check_phase(db, repo, armed))
+    fn = (lambda: probe.open_phase(db, repo, armed, symbol, kind)) if ph == "open" else (lambda: probe.check_phase(db, repo, armed))
     return await _aio.to_thread(fn)
 
 

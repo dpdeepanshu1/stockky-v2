@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """dhan_swing_probe.py - E132 (swing plan S4): does a resting Dhan stop on a CNC holding survive the night? The `open` phase PLACES A REAL 1-SHARE ORDER.
 
-  TOKEN=<admin session token> python3 scripts/dhan_swing_probe.py --phase open --yes [--symbol ITC] [--rt-url http://127.0.0.1:8005]    (market hours 09:30-14:30 IST, REAL armed)
+  TOKEN=<admin session token> python3 scripts/dhan_swing_probe.py --phase open --yes [--symbol ITC] [--kind forever|day] [--rt-url http://127.0.0.1:8005]    (market hours 09:30-14:30 IST, REAL armed)
   TOKEN=<admin session token> python3 scripts/dhan_swing_probe.py --phase check --yes                                                  (the NEXT trading morning 09:20-14:30)
   TOKEN=<admin session token> python3 scripts/dhan_swing_probe.py --phase status                                                      (the last result, places nothing)
 
 Calls real-trade-service POST /swing/probe, which does the work with the service's own Dhan credentials, symbol lock and order budget: open = BUY 1 share CNC, wait for the fill,
-place a STOP_LOSS sell 4% below, read it back; check = read the stop back the next morning (PASS only if it is still live), cancel it and sell the share (a CDSL TPIN refusal is reported).
+place a resting sell 4% below (E261: kind forever = Dhan Forever Order / GTT, the default; kind day = a normal STOP_LOSS, which Dhan drops at the close), read it back; check = read the stop back the next morning (PASS only if it is still live), cancel it and sell the share (a CDSL TPIN refusal is reported).
 Without --yes nothing is sent. Ends with `SWING PROBE (...): PASS | FAIL - <reason> | NOT_RUN - <reason>`. Exit 0 = PASS / NOT_RUN / SKIPPED, 1 = FAIL or no answer, 2 = bad usage. Stdlib only.
 """
 from __future__ import annotations
@@ -48,11 +48,14 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--phase", choices=("open", "check", "status"), default="status")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--symbol", default="")
+    ap.add_argument("--kind", choices=("forever", "day"), default="forever")
     ap.add_argument("--rt-url", default=os.getenv("REAL_TRADE_URL", "http://127.0.0.1:8005"))
     a = ap.parse_args(argv)
     q = {"phase": a.phase, "yes": "true" if a.yes else "false"}
     if a.symbol:
         q["symbol"] = a.symbol.strip().upper()
+    if a.phase == "open":
+        q["kind"] = a.kind
     code, doc = call(a.rt_url.rstrip("/") + "/swing/probe?" + urllib.parse.urlencode(q), os.getenv("TOKEN", ""))
     if code != 200:
         print(f"SWING PROBE: FAIL - the service answered {code}: {str(doc)[:160]}")

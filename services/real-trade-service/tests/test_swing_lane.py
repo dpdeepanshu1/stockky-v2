@@ -365,6 +365,40 @@ def test_report_since_counts_only_later_signals():
     assert "since=(since" in _src("main.py")
 
 
+def test_probe_judgement_forever_and_day_kinds_e261():
+    from swing import probe
+    # forever order (GTT): lives in Dhan's forever list; PENDING / CONFIRM / TRANSIT mean "still waiting for its trigger"
+    for st in ("PENDING", "CONFIRM", "TRANSIT"):
+        assert probe.judge_check({"orderStatus": st}, "forever")["verdict"] == "PASS"
+    for st in ("EXPIRED", "CANCELLED", "REJECTED", "TRADED", ""):
+        assert probe.judge_check({"orderStatus": st}, "forever")["verdict"] == "FAIL"
+    r = probe.judge_check(None, "forever")
+    assert r["verdict"] == "FAIL" and "forever-order list" in r["reason"]
+    # the old DAY stop: gone / EXPIRED is the expected result, and the reason now says why
+    r = probe.judge_check(None, "day")
+    assert r["verdict"] == "FAIL" and "DAY order is dropped at the close" in r["reason"]
+    assert probe.judge_check({"orderStatus": "EXPIRED"}, "day")["verdict"] == "FAIL"
+    assert probe.judge_check({"orderStatus": "CONFIRM"}, "day")["verdict"] == "FAIL"     # CONFIRM is a forever-order status only
+    assert probe.judge_check({"orderStatus": "TRIGGER_PENDING"})["verdict"] == "PASS"    # default kind stays "day" (old callers)
+
+
+def test_probe_uses_forever_orders_by_default_e261():
+    src = _src("swing", "probe.py")
+    assert 'kind: str = "forever"' in src and "place_forever_order(" in src and "get_forever_orders(db)" in src and "cancel_forever_order(" in src
+    assert 'str(prev.get("kind") or "day")' in src                 # a probe saved before E261 has no kind: it placed a DAY stop
+    cl = _src("execution", "dhan_client.py")
+    assert "/forever/orders" in cl and "/forever/all" in cl and '"orderFlag": "SINGLE"' in cl and 'if not is_armed:' in cl.split("def place_forever_order")[1][:700]
+    m = _src("main.py")
+    assert 'kind: str = "forever"' in m and "probe.open_phase(db, repo, armed, symbol, kind)" in m
+
+
+def test_probe_check_releases_the_lock_when_cleanup_fails_e261():
+    src = _src("swing", "probe.py")
+    tail = src.split("def check_phase")[1]
+    exc = tail.split("except Exception as e:  # noqa: BLE001")[1]
+    assert "shared_symbol_lock.release(db, sym)" in exc
+
+
 def test_probe_failed_open_does_not_block_the_next_open_and_releases_the_lock():
     from swing import probe
     assert probe.waiting_for_check({"phase": "open", "stop_id": "9", "checked": False}) is True

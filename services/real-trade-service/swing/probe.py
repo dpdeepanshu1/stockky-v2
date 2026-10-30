@@ -1,5 +1,9 @@
 """swing/probe.py - E132 (plan step S4): does a resting Dhan stop on a CNC holding survive the night? PLACES REAL ORDERS (1 share). Never automatic.
 
+E261 (30 Oct 2026): the first run (a normal STOP_LOSS, validity DAY) FAILed the next morning - correctly: Dhan drops DAY orders at the close and its order book
+only lists today's orders, so that order type can never rest overnight. The probe now defaults to kind=forever (Dhan's Forever Order / good-till-triggered,
+POST /v2/forever/orders, read back from GET /v2/forever/all); kind=day keeps the old stop as a control.
+
 Two phases, started by hand (POST /swing/probe?phase=open|check&yes=true, or the runner job dhan_swing_probe):
   open   market hours, armed REAL: BUY 1 share (CNC, limit a little above the price), wait for the fill, place a STOP_LOSS sell 4 % below with a limit under its trigger,
          read it back. Saves {symbol, buy order id, stop order id, ...} in trade_swing_runs (kind probe).
@@ -18,6 +22,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("real-trade-swing-probe")
 CANDIDATES = ("ITC", "NTPC", "ONGC", "SBIN", "TATASTEEL")
 LIVE_STOP_STATES = ("PENDING", "TRIGGER_PENDING", "OPEN", "TRANSIT", "PART_TRADED")
+FOREVER_LIVE_STATES = ("PENDING", "CONFIRM", "TRANSIT")      # Dhan's Forever Order (GTT) statuses that mean "still waiting for its trigger"
+KINDS = ("forever", "day")
 
 
 def _status(row: Dict[str, Any]) -> str:
@@ -28,12 +34,16 @@ def _oid(row: Dict[str, Any]) -> str:
     return str(row.get("orderId") or row.get("order_id") or "")
 
 
-def judge_check(stop_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Pure: the verdict for the morning-after order-book row of the stop order (None = Dhan no longer lists it)."""
+def judge_check(stop_row: Optional[Dict[str, Any]], kind: str = "day") -> Dict[str, Any]:
+    """Pure: the verdict for the morning-after row of the stop order (None = Dhan no longer lists it). kind "forever" reads Dhan's Forever Order list,
+    "day" the normal order book (a DAY order is expected to be gone or EXPIRED by the next morning)."""
+    forever = kind == "forever"
+    where = "Dhan's forever-order list" if forever else "Dhan's order book"
     if stop_row is None:
-        return {"verdict": "FAIL", "reason": "the stop order is no longer in Dhan's order book: it did not survive the night"}
+        why = "" if forever else " (a DAY order is dropped at the close, so this order type cannot rest overnight)"
+        return {"verdict": "FAIL", "reason": f"the stop order is no longer in {where}: it did not survive the night{why}"}
     st = _status(stop_row)
-    if st in LIVE_STOP_STATES:
+    if st in (FOREVER_LIVE_STATES if forever else LIVE_STOP_STATES):
         return {"verdict": "PASS", "reason": f"the stop order is still live at Dhan ({st})"}
     return {"verdict": "FAIL", "reason": f"the stop order is {st or 'unreadable'} the next morning, not live"}
 
@@ -58,7 +68,7 @@ def waiting_for_check(prev: Optional[Dict[str, Any]]) -> bool:
     return bool(prev and prev.get("phase") == "open" and prev.get("stop_id") and not prev.get("checked"))
 
 
-def open_phase(db: Any, repo: Any, armed: bool, symbol: str = "") -> Dict[str, Any]:
+def open_phase(db: Any, repo: Any, armed: bool, symbol: str = "", kind: str = "forever") -> Dict[str, Any]:
     import config
     from execution import dhan_client, shared_symbol_lock
     from tz_utils import ist_today_str, is_market_open_ist, ist_time_at_or_after, parse_hhmm
@@ -75,10 +85,13 @@ def open_phase(db: Any, repo: Any, armed: bool, symbol: str = "") -> Dict[str, A
         return out("NOT_RUN", "an earlier open phase is waiting for its check phase")
     sym = (symbol or "").upper().strip()
     syms = [sym] if sym else list(CANDIDATES)
-    return _open_live(db, repo, syms, steps, out, ist_today_str(), dhan_client, shared_symbol_lock, config)
+    kind = (kind or "forever").lower()
+    if kind not in KINDS:
+        return out("NOT_RUN", f"kind must be one of {', '.join(KINDS)}")
+    return _open_live(db, repo, syms, steps, out, ist_today_str(), dhan_client, shared_symbol_lock, config, kind)
 
 
-def _open_live(db, repo, syms, steps, out, today, dhan_client, shared_symbol_lock, config):
+def _open_live(db, repo, syms, steps, out, today, dhan_client, shared_symbol_lock, config, kind="forever"):
     import models
     held = {p.symbol for p in db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED"))).all()}
     sym = next((s for s in syms if s not in held), None)
@@ -123,15 +136,23 @@ def _open_live(db, repo, syms, steps, out, today, dhan_client, shared_symbol_loc
             return out("FAIL", "the 1-share BUY did not fill in 60 s (cancel sent)")
         trig = dhan_client.round_stop_to_tick(limit * 0.96)
         lim = dhan_client.round_stop_to_tick(trig * 0.995)
-        stop = dhan_client.place_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
-                                       order_type="STOP_LOSS", price=lim, product_type="CNC", tag="SWPROBE", trigger_price=trig)
+        if kind == "forever":
+            stop = dhan_client.place_forever_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
+                                                   price=lim, trigger_price=trig, product_type="CNC", order_type="LIMIT", tag="SWPROBE")
+            label = "SELL forever order"
+        else:
+            stop = dhan_client.place_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
+                                           order_type="STOP_LOSS", price=lim, product_type="CNC", tag="SWPROBE", trigger_price=trig)
+            label = "SELL stop"
         stop_id = str(stop.get("orderId") or stop.get("order_id") or "")
-        steps.append(f"SELL stop 1 {sym} trigger {trig} limit {lim} -> order {stop_id}")
-        row = next((x for x in dhan_client.get_order_list(db) if _oid(x) == stop_id), None)
+        steps.append(f"{label} 1 {sym} trigger {trig} limit {lim} -> order {stop_id}")
+        rows = dhan_client.get_forever_orders(db) if kind == "forever" else dhan_client.get_order_list(db)
+        row = next((x for x in rows if _oid(x) == stop_id), None)
         st = _status(row) if row else "NOT LISTED"
-        steps.append(f"stop read back: {st}")
-        doc = {"phase": "open", "symbol": sym, "buy_id": buy_id, "stop_id": stop_id, "trigger": trig, "stop_status": st, "checked": False,
-               "verdict": "PASS" if st in LIVE_STOP_STATES else "FAIL"}
+        steps.append(f"stop read back ({kind}): {st}")
+        live_now = FOREVER_LIVE_STATES if kind == "forever" else LIVE_STOP_STATES
+        doc = {"phase": "open", "kind": kind, "symbol": sym, "buy_id": buy_id, "stop_id": stop_id, "trigger": trig, "stop_status": st, "checked": False,
+               "verdict": "PASS" if st in live_now else "FAIL"}
         _save(repo, today, doc["verdict"] == "PASS", f"open: {sym} stop {st}", doc)
         if doc["verdict"] != "PASS":
             return out("FAIL", f"Dhan did not leave the stop live ({st}); the share is held: sell it in the Dhan app", **doc)
@@ -163,14 +184,19 @@ def check_phase(db: Any, repo: Any, armed: bool) -> Dict[str, Any]:
         return out("NOT_RUN", "the check must run on a LATER day than the open phase (that is the point: does the stop survive the night)")
     if not armed or not is_market_open_ist() or not ist_time_at_or_after(parse_hhmm("09:20", 9, 20)) or ist_time_at_or_after(parse_hhmm("14:30", 14, 30)):
         return out("NOT_RUN", "needs REAL armed, 09:20-14:30 IST on a trading day")
-    rows = dhan_client.get_order_list(db)
+    kind = str(prev.get("kind") or "day")             # a probe saved before E261 placed a DAY stop
+    rows = dhan_client.get_forever_orders(db) if kind == "forever" else dhan_client.get_order_list(db)
     stop_row = next((x for x in rows if _oid(x) == str(prev["stop_id"])), None)
-    j = judge_check(stop_row)
+    j = judge_check(stop_row, kind)
+    live_now = FOREVER_LIVE_STATES if kind == "forever" else LIVE_STOP_STATES
     steps.append(f"stop {prev['stop_id']}: {j['reason']}")
     sym = prev["symbol"]
     try:
-        if stop_row is not None and _status(stop_row) in LIVE_STOP_STATES:
-            dhan_client.cancel_order(db, is_armed=True, dhan_order_id=str(prev["stop_id"]))
+        if stop_row is not None and _status(stop_row) in live_now:
+            if kind == "forever":
+                dhan_client.cancel_forever_order(db, dhan_order_id=str(prev["stop_id"]))
+            else:
+                dhan_client.cancel_order(db, is_armed=True, dhan_order_id=str(prev["stop_id"]))
             steps.append("stop cancelled")
         sid = dhan_client.get_security_id(db, sym)
         sell = dhan_client.place_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
@@ -180,6 +206,10 @@ def check_phase(db: Any, repo: Any, armed: bool) -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         edis = dhan_client.is_cdsl_edis_error(str(e))
         steps.append(("CDSL eDIS / TPIN needed to sell the share: Verify Holdings in the Dhan app, then sell 1 " if edis else "cleanup failed, sell 1 ") + f"{sym} by hand ({str(e)[:100]})")
-    doc = {**prev, "checked": True, "check_day": today, "verdict": j["verdict"], "check_reason": j["reason"]}
+        try:
+            shared_symbol_lock.release(db, sym)          # the probe's claim must not outlive the probe (it would block position-stocks on this symbol)
+        except Exception:  # noqa: BLE001
+            logger.warning("swing probe: could not release the symbol lock for %s", sym)
+    doc = {**prev, "checked": True, "check_day": today, "verdict": j["verdict"], "check_reason": j["reason"], "check_steps": list(steps)}
     _save(repo, today, j["verdict"] == "PASS", f"check: {j['verdict']}", {**doc, "phase": "open"})
     return out(j["verdict"], j["reason"])

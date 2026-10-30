@@ -514,6 +514,9 @@ OPENING_GATE_PREVDAY_MAX_AGE_DAYS = int(_og_float("OPENING_GATE_PREVDAY_MAX_AGE_
 #    overnight is also not carried when results fall on the next trading day (EARNINGS_CARRY_BLOCK). Date comes from
 #    analysis-intelligence-service GET /events/{symbol}/categorized -> upcoming[type=earnings_date].
 CIRCUIT_GATE_ENABLED = ((os.getenv("CIRCUIT_GATE_ENABLED") or "").strip() or "true").lower() == "true"
+# E264: no REAL BUY decision for a symbol Dhan will not give an NSE_EQ security id for (listed only in series BE / not in the list).
+# Off = the old behaviour: the order is created, then refused by Dhan. See execution/dhan_client.untradable_reason.
+ENTRY_TRADABLE_GATE_ENABLED = ((os.getenv("ENTRY_TRADABLE_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 CIRCUIT_UPPER_BUFFER_PCT = _og_float("CIRCUIT_UPPER_BUFFER_PCT", 1.0)
 CIRCUIT_LOWER_BUFFER_PCT = _og_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
 EARNINGS_DAY_BLOCK = ((os.getenv("EARNINGS_DAY_BLOCK") or "").strip() or "true").lower() == "true"

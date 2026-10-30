@@ -1010,6 +1010,19 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": decision.reasoning, "risk_verdict": None})
             continue
 
+        # ── Gate 4a (E264): can Dhan trade it at all? ──────────────────────────────────────────────────────────────────
+        # 30 Oct 2026: HFCL passed every gate, was ENTER-approved, then Dhan refused the order ("No Dhan NSE_EQ security_id found": listed
+        # on NSE only in series BE). REAL only; fails open when the Dhan list is not loaded. Off with ENTRY_TRADABLE_GATE_ENABLED=false.
+        if mode == "REAL" and config.ENTRY_TRADABLE_GATE_ENABLED:
+            _tradable_reason = dhan_client.untradable_reason(db, cand.symbol)
+            if _tradable_reason:
+                _wait_with_preview(_tradable_reason)
+                decision.gate_tag = "not_tradable"
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _tradable_reason,
+                                       "risk_verdict": None, "gate_tag": "not_tradable"})
+                continue
+
         # ── Gate 4b (group 329): exchange circuit band ────────────────────────────────────────────────────────────
         # No BUY at / next to the upper circuit (cannot fill, no room) or close to the lower circuit (a stop or square-off may
         # not execute). Unknown limits never block. See entry_engine/circuit_gate.py (off with CIRCUIT_GATE_ENABLED=false).

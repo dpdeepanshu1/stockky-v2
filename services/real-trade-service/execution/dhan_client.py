@@ -476,6 +476,29 @@ def get_security_id(db: Session, symbol: str) -> str:
     return _clean_security_id(sec_id)
 
 
+def untradable_reason(db: Session, symbol: str) -> Optional[str]:
+    """E264: why a REAL BUY of `symbol` cannot be sent to Dhan, or None when it can (or when that is not known).
+
+    30 Oct 2026: HFCL, STLTECH, TBZ and MOREPENLAB were each approved as an entry (three of them as swing-lane ENTERs) and only then
+    refused by Dhan with "No Dhan NSE_EQ security_id found": Dhan lists them on NSE only in series BE (trade-for-trade), which this
+    service does not trade. Asking at decision time lets the caller skip the symbol and move to the next one.
+
+    Uses the same lookup as the order path (get_security_id, one dict read when the list is loaded). FAIL OPEN: an empty / not-loaded
+    list (token or download trouble), or any error that is not SecurityNotResolvedError, returns None so this check never blocks on
+    missing information - the order path still reports the real cause. Never raises."""
+    try:
+        get_security_id(db, symbol)
+        return None
+    except SecurityNotResolvedError as e:
+        if not _security_cache:
+            return None                                    # list not loaded: "not listed" would be a guess, not a fact
+        msg = str(e)
+        return "NOT_TRADABLE_SERIES: " + msg.replace("No Dhan NSE_EQ security_id found for ", "", 1)
+    except Exception:  # noqa: BLE001
+        logger.debug("untradable_reason: lookup failed for %s", symbol, exc_info=True)
+        return None
+
+
 # 2026-10-06 (group 179): the Dhan instrument list (~100k rows, pandas parse, up to two downloads) was first loaded
 # INSIDE get_security_id(), i.e. in the order path: the first order after a restart, and the first one after the
 # 24 h TTL expired, waited for the whole download (and a failed load was retried by the next order too). A background

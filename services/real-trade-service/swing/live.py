@@ -240,6 +240,11 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
             if tick is None or not tick.price:
                 skip("no live price")
                 continue
+            if mode == "REAL" and bool(_cfg("ENTRY_TRADABLE_GATE_ENABLED", True)):      # E264: Dhan cannot trade this symbol (series BE / not listed)
+                _nt = dhan_client.untradable_reason(db, sym)
+                if _nt:
+                    skip(_nt)
+                    continue
             sec = NSE_SECTOR_MAP.get(sym)
             if sec and sectors.count(sec) >= int(_cfg("SWING_MAX_PER_SECTOR", 1)):
                 skip(f"sector {sec} already held")

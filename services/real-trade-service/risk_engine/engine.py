@@ -56,6 +56,23 @@ def _market_state_risk_mult() -> float:
         logger.warning("market-state risk multiplier unreadable (%s): using 1.0", type(e).__name__)
         return 1.0
 
+def _conviction_cap(base_cap: float, intent: "OrderIntent", equity: float) -> float:
+    """E266: `base_cap` (rupees) moved by the intent's conviction multiple. An upsize is bounded by size_ceiling_pct % of equity and is never below the base cap; a
+    multiple below 1 only lowers it. The maths is the pure entry_engine/conviction_sizing.py. Anything missing or odd = `base_cap` unchanged. Never raises."""
+    try:
+        m = intent.size_mult
+        if m is None or not math.isfinite(m) or m == 1.0 or not (base_cap > 0):
+            return base_cap
+        if m > 1.0 and not (intent.size_ceiling_pct and intent.size_ceiling_pct > 0 and equity > 0):
+            return base_cap                                  # an upsize needs a known ceiling
+        from entry_engine import conviction_sizing
+        ceiling = float(equity) * float(intent.size_ceiling_pct or 0.0) / 100.0
+        return float(conviction_sizing.scaled_cap(base_cap, float(m), ceiling))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("conviction cap unreadable (%s): using the fixed cap", type(e).__name__)
+        return base_cap
+
+
 # ── New caps from market research ─────────────────────────────────────────────
 # Single position cannot be > 25% of equity. Forces diversification and caps
 # damage if one holding gaps down in a weak market environment.
@@ -184,6 +201,12 @@ class OrderIntent:
     # check #5 uses this instead of account.risk_per_trade_pct so the
     # conviction bump actually survives to the placed order.
     adj_risk_pct:           Optional[float]   = None
+    # E266 (2026-10-30): conviction-based size. size_mult moves the two RUPEE caps of a BUY below (single-position concentration 5c and max trade value 5c-ii): > 1 lifts
+    # them (never above size_ceiling_pct % of equity, never below the base cap), < 1 lowers them in proportion. None / 1.0 = the fixed caps exactly as before, so every
+    # caller that does not set them (manual orders, the dry-run endpoint, old tests) is unchanged. The per-trade RISK cap (5), cash (5b), capital share (5b-ii) and
+    # portfolio risk (6) are NOT moved by it: an upsized trade still cannot risk more than the per-trade budget.
+    size_mult:              Optional[float]   = None
+    size_ceiling_pct:       Optional[float]   = None
 
 
 @dataclass
@@ -611,7 +634,7 @@ def evaluate(
     # Protects against a single gap-down destroying the account in a weak market.
     if intent.side == "BUY":
         position_value    = intent.entry_price * final_qty
-        max_position_val  = account.equity * (MAX_POSITION_CONCENTRATION_PCT / 100.0)
+        max_position_val  = _conviction_cap(account.equity * (MAX_POSITION_CONCENTRATION_PCT / 100.0), intent, account.equity)   # E266: x conviction multiple
         if position_value > max_position_val:
             conc_qty = int(max_position_val // intent.entry_price) if intent.entry_price > 0 else 0
             if conc_qty <= 0:
@@ -641,23 +664,24 @@ def evaluate(
     # see the field's own docstring on AccountState.
     if intent.side == "BUY" and account.max_trade_value is not None and account.max_trade_value > 0:
         position_value = intent.entry_price * final_qty
-        if position_value > account.max_trade_value:
+        _mtv = _conviction_cap(account.max_trade_value, intent, account.equity)                    # E266: x conviction multiple
+        if position_value > _mtv:
             mtv_qty = (
-                int(account.max_trade_value // intent.entry_price)
+                int(_mtv // intent.entry_price)
                 if intent.entry_price > 0 else 0
             )
             if mtv_qty <= 0:
                 return RiskResult(
                     RiskVerdict.REJECTED, "max_trade_value_cap",
                     f"Even 1 share at ₹{intent.entry_price:.2f} would exceed the "
-                    f"₹{account.max_trade_value:.0f} max-trade-value cap.",
+                    f"₹{_mtv:.0f} max-trade-value cap.",
                 )
             if mtv_qty < final_qty:
                 prev_qty  = final_qty
                 final_qty = mtv_qty
                 downsize_reason = (
                     f"Qty {prev_qty} → {final_qty} "
-                    f"(max trade value cap ₹{account.max_trade_value:.0f})."
+                    f"(max trade value cap ₹{_mtv:.0f})."
                 )
                 order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
 

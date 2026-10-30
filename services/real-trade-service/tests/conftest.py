@@ -22,6 +22,15 @@ def _reset_volume_shock_history_state():
 
 
 @_pytest_g172.fixture(autouse=True)
+def _e266_conviction_sizing_off_by_default(monkeypatch):
+    """E266: conviction sizing moves risk_engine's two rupee caps (x0.5 .. x3), which older tests assert on. They run at the fixed caps;
+    tests/test_e266_conviction_sizing.py turns it on explicitly."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "CONVICTION_SIZING_ENABLED", False, raising=False)
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
 def _e252_day_spike_gates_off_by_default(monkeypatch):
     """E252: the day-spike guard and range check read the tick's day stats and previous-day ATR; older tests predate them. tests/test_e252_*.py turn them on."""
     import config as _cfg

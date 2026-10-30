@@ -1071,6 +1071,28 @@ SYMBOL_LOCK_SWEEP_INTERVAL_S = _get_float("SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0)
 # fills and corrected (orders/reconcile.py::auto_repair_closed_entry_prices). 0 = off.
 ENTRY_REPAIR_AUTO_INTERVAL_S = _get_float("ENTRY_REPAIR_AUTO_INTERVAL_S", 300.0)
 SYMBOL_LOCK_SWEEP_MIN_AGE_S = _get_float("SYMBOL_LOCK_SWEEP_MIN_AGE_S", 600.0)
+# E265: a database-driver error in the symbol-lock claim is retried this many times (after a rollback and a short pause) before the BUY is
+# refused; 0 = the old behaviour (first error refuses the entry). The pause is DELAY x attempt number, in seconds.
+SYMBOL_LOCK_DB_RETRIES = _get_int("SYMBOL_LOCK_DB_RETRIES", 1)
+SYMBOL_LOCK_DB_RETRY_DELAY_S = _get_float("SYMBOL_LOCK_DB_RETRY_DELAY_S", 0.3)
+
+# ---- E266 (2026-10-30): conviction-based trade size (capital/conviction_sizing.py, orders/conviction.py, capital/ledger.py) -----------------------------------
+# Before: every trade got about the same rupees (risk % / slots / stop, slot-capped at SCALP_SLOT_NOTIONAL_CAP_MULT x pool/slots = 30 % of the pool), whatever the
+# setup, so a clean setup that hit its target paid ~Rs 20 while most of the pool sat idle. Now each entry gets an internal 0-100 conviction score (board conviction,
+# reward:risk, volume pace, technical score, zone freshness, catalyst) and the fixed-rule budget is MULTIPLIED: score <= CONVICTION_SCORE_LOW -> CONVICTION_MIN_MULT
+# (a doubtful trade is small), CONVICTION_SCORE_MID -> 1.0 (the old size), >= CONVICTION_SCORE_HIGH -> CONVICTION_MAX_MULT (CONVICTION_SHORT_MAX_MULT for a short).
+# An upsize is bounded by CONVICTION_MAX_POOL_PCT % of the pool, by the plain per-trade risk (RISK_PER_TRADE_PCT of the pool at the trade's own stop) and by the free
+# cash; it is held at 1.0 on a day this pool is net negative (CONVICTION_NO_UPSIZE_ON_LOSS_DAY). Every later step (depth / VIX / calendar / opening size-down,
+# ENTRY_MIN_QTY, cost gate, daily-loss kill switch, account-wide cap, shared order budget) is unchanged. CONVICTION_SIZING_ENABLED=false = the old fixed size.
+CONVICTION_SIZING_ENABLED = _get_bool("CONVICTION_SIZING_ENABLED", True)
+CONVICTION_SCORE_LOW = _get_float("CONVICTION_SCORE_LOW", 35.0)
+CONVICTION_SCORE_MID = _get_float("CONVICTION_SCORE_MID", 50.0)
+CONVICTION_SCORE_HIGH = _get_float("CONVICTION_SCORE_HIGH", 80.0)
+CONVICTION_MIN_MULT = min(1.0, max(0.1, _get_float("CONVICTION_MIN_MULT", 0.5)))
+CONVICTION_MAX_MULT = min(5.0, max(1.0, _get_float("CONVICTION_MAX_MULT", 3.0)))
+CONVICTION_SHORT_MAX_MULT = min(5.0, max(1.0, _get_float("CONVICTION_SHORT_MAX_MULT", 2.0)))
+CONVICTION_MAX_POOL_PCT = min(100.0, max(0.0, _get_float("CONVICTION_MAX_POOL_PCT", 50.0)))
+CONVICTION_NO_UPSIZE_ON_LOSS_DAY = _get_bool("CONVICTION_NO_UPSIZE_ON_LOSS_DAY", True)
 ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINUTES", 5)
 
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────

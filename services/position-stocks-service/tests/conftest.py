@@ -16,6 +16,17 @@ def _reset_entry_pause():
 
 
 @_pytest_entry_pause.fixture(autouse=True)
+def _e266_conviction_sizing_off_by_default(monkeypatch):
+    """E266: conviction sizing changes the rupees of an entry (x0.5 .. x3 of the fixed size), which older tests assert on. They run at the fixed size;
+    tests/test_e266_conviction_sizing.py turns it on explicitly."""
+    import config as _config
+    monkeypatch.setattr(_config, "CONVICTION_SIZING_ENABLED", False, raising=False)
+    from screening import shortlist as _sl
+    _sl.reset_recent()
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
 def _opening_gate_off_by_default(monkeypatch):
     """group 268: screening/opening_gate.py is time-of-day dependent (active 09:15-10:00 IST on a trading day). Switch it off
     for every older test so none of them can flake when the suite runs inside that window; test_group268_opening_gate.py

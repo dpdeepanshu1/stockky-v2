@@ -51,6 +51,7 @@ from entry_engine import day_spike_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
+from entry_engine import conviction_size as _conviction_size   # E266
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
 try:
@@ -1266,6 +1267,25 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception as _atv_err:
             logger.debug("entry_engine: traded value unavailable for %s (fail-open): %s", getattr(cand, 'symbol', '?'), _atv_err)
 
+        # E266: conviction score of this entry -> a size multiple for risk_engine's two RUPEE caps (None = feature off / too little known = the old fixed caps).
+        # REAL only (DEMO keeps the plain caps). Never raises: any problem leaves the old size.
+        _cv, _cv_note = None, ""
+        if mode == "REAL":
+            try:
+                _cv_hold = _conviction_size.hold_reasons(
+                    realized_pnl_today=account_state.realized_pnl_today, regime_override=bool(is_regime_override),
+                    vix_mult=_vix_mult, calendar_mult=_cal_mult, opening_mult=_open_mult)
+                _cv = _conviction_size.long_decision(
+                    cand, rr=rr, rr_floor=MIN_REWARD_RISK_RATIO, market_score=market_score, threshold=threshold,
+                    regime_override=bool(is_regime_override), drift_pct=drift_pct, max_drift_pct=max_drift_pct,
+                    board_row=_board_rows.get(cand.symbol), hold=_cv_hold)
+                _cv_note = _conviction_size.note(_cv)
+                if _cv:
+                    logger.info("entry_engine: %s %s %s parts=%s", mode, cand.symbol, _cv_note, _cv.get("detail"))
+            except Exception as _cv_err:  # noqa: BLE001 - sizing extras must never stop an entry
+                _cv, _cv_note = None, ""
+                logger.warning("entry_engine: conviction sizing failed for %s (using the fixed caps): %s", cand.symbol, _cv_err)
+
         intent = OrderIntent(
             mode=mode, symbol=cand.symbol, side="BUY", qty=proposed_qty,
             entry_price=entry_price, stop_price=stop_price, target_price=target_price,
@@ -1273,6 +1293,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             recent_atr_pct=atr_pct,
             latest_tick_move_pct=None,
             avg_traded_value=avg_traded_value,
+            size_mult=(_cv or {}).get("mult"),                       # E266
+            size_ceiling_pct=(_conviction_size.ceiling_pct() if _cv else None),
             # 2026-09-01 fix: without this, risk_engine's own per-trade cap
             # check re-derives max_trade_risk from the raw (non-conviction)
             # account.risk_per_trade_pct and silently claws proposed_qty
@@ -1519,6 +1541,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             "cand": cand, "decision": decision,
             "entry_price": entry_price, "stop_price": stop_price, "target_price": target_price,
             "rr": rr, "adj_risk_pct": adj_risk_pct, "is_regime_override": is_regime_override,
+            "size_note": _cv_note,                                  # E266
             "composite_score": composite_score,
             "raw_composite_score": raw_composite_score,
             "is_upper_circuit": is_upper_circuit,
@@ -1750,6 +1773,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 f"regime_score {market_score} (gate={threshold},{threshold_src}) | "
                 f"composite {_raw:.1f}{_uc_note}{_op_note}{_sb_note}"
                 f"{' | REGIME OVERRIDE' if is_regime_override else ''} | "
+                f"{(e.get('size_note') + ' | ') if e.get('size_note') else ''}"
                 f"valid {config.ENTRY_VALIDITY_MINUTES}m"
             ),
         ))
@@ -1836,7 +1860,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     f"| stop ₹{stop_price:.2f} | target ₹{target_price:.2f}\n"
                     f"R:R {rr:.2f} | conviction {cand.conviction_score} | composite {e['composite_score']:.1f}"
                     f"\n| market score {market_score} (gate={threshold},{threshold_src})\n"
-                    f"Awaiting broker fill confirmation."
+                    + (f"{e['size_note']} | ₹{decision.proposed_qty * entry_price:,.0f} position\n" if e.get("size_note") else "")
+                    + f"Awaiting broker fill confirmation."
                 )
             except Exception as ex:
                 logger.error("REAL order placement failed for %s: %s", cand.symbol, ex)

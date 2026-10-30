@@ -1390,7 +1390,35 @@ EXIT_DP_MIN_GAIN_RATIO   = float(((os.getenv("EXIT_DP_MIN_GAIN_RATIO") or "").st
 EXIT_TARGET_STALE_GUARD_ENABLED = ((os.getenv("EXIT_TARGET_STALE_GUARD_ENABLED") or "").strip() or "true").lower() == "true"
 EXIT_TARGET_MAX_TICK_AGE_S      = float(((os.getenv("EXIT_TARGET_MAX_TICK_AGE_S") or "").strip() or "30"))
 REENTRY_SAME_DAY_BLOCK   = ((os.getenv("REENTRY_SAME_DAY_BLOCK") or "").strip() or "true").lower() == "true"
+def _bs_float_early(name, default):
+    """Blank-safe float env read usable before the later helpers of this file are defined (a bad value gives the default, never an import error)."""
+    try:
+        v = float(((os.getenv(name) or "").strip() or str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return float(default) if v != v else v
+
+
 MAX_TRADE_VALUE          = float(((os.getenv("MAX_TRADE_VALUE") or "").strip() or "3000.0"))
+
+# ---- E266 (2026-10-30): conviction-based trade size (entry_engine/conviction_sizing.py, entry_engine/conviction_size.py, risk_engine/engine.py) -------------------
+# Before: the two rupee caps of risk_engine (MAX_TRADE_VALUE Rs 3,000 and the 25 % single-position concentration cap, ~Rs 1,750 of a ~Rs 7,000 share) fixed the size of
+# every entry whatever the setup, so a clean setup that hit its target paid a few rupees while most of the share sat idle. Now each entry gets an internal 0-100
+# conviction score (the candidate's own conviction, Market Board conviction, reward:risk, regime strength vs its gate, entry freshness) and a size multiple that MOVES
+# BOTH RUPEE CAPS: score <= CONVICTION_SCORE_LOW -> CONVICTION_MIN_MULT (a doubtful trade is small), CONVICTION_SCORE_MID -> 1.0 (the old caps; an all-unknown score is
+# exactly 50), >= CONVICTION_SCORE_HIGH -> CONVICTION_MAX_MULT. An upsized position never takes more than CONVICTION_MAX_POSITION_PCT % of this service's equity, and
+# the per-trade RISK cap (risk % x equity at the trade's own stop), the capital-share cap (50 % of the account), the cash check, the portfolio risk cap, the daily-loss
+# caps and the loss-streak brake all still apply on top. An upsize is HELD at 1.0 on a losing day (CONVICTION_NO_UPSIZE_ON_LOSS_DAY), in a regime override, and while a
+# VIX / calendar / opening-window size-down is in force (those scale the share count BEFORE the rupee caps, so they would not bite on an upsized cap).
+# CONVICTION_SIZING_ENABLED=false = the old fixed caps exactly.
+CONVICTION_SIZING_ENABLED = ((os.getenv("CONVICTION_SIZING_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+CONVICTION_SCORE_LOW = _bs_float_early("CONVICTION_SCORE_LOW", 35.0)
+CONVICTION_SCORE_MID = _bs_float_early("CONVICTION_SCORE_MID", 50.0)
+CONVICTION_SCORE_HIGH = _bs_float_early("CONVICTION_SCORE_HIGH", 80.0)
+CONVICTION_MIN_MULT = min(1.0, max(0.1, _bs_float_early("CONVICTION_MIN_MULT", 0.5)))
+CONVICTION_MAX_MULT = min(5.0, max(1.0, _bs_float_early("CONVICTION_MAX_MULT", 3.0)))
+CONVICTION_MAX_POSITION_PCT = min(100.0, max(0.0, _bs_float_early("CONVICTION_MAX_POSITION_PCT", 50.0)))
+CONVICTION_NO_UPSIZE_ON_LOSS_DAY = ((os.getenv("CONVICTION_NO_UPSIZE_ON_LOSS_DAY") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
 
 # group 481 (2026-10-21): evidence-gated size ladder (entry_engine/size_ladder.py). The per-trade cap above grows by SIZE_LADDER_STEP_PCT per level, but
 # only while the stored daily NET P&L (after charges) earns it: level 1 after SIZE_LADDER_MIN_DAYS captured trading days, level 2 after twice that, each with a

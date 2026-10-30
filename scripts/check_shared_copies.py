@@ -34,8 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "shared_copies_baseline.json"
 
 # family name -> file name that is duplicated across services
-FAMILIES = ["oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier", "session_proof_client", "session_keys", "gate_core"]
-IDENTICAL = {"oracle_compat", "boot_forensics", "session_proof_client", "session_keys", "gate_core"}  # group320: six copies of the closed-market client
+FAMILIES = ["oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier", "session_proof_client", "session_keys", "gate_core", "conviction_sizing"]
+IDENTICAL = {"oracle_compat", "boot_forensics", "session_proof_client", "session_keys", "gate_core", "conviction_sizing"}  # group320: six copies of the closed-market client
 SKIP_DIRS = frozenset({"tests", "scripts"})
 
 

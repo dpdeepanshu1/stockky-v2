@@ -38,8 +38,9 @@ NOTES = []
 # orders.* helper modules short_entry imports
 import importlib
 orders = types.ModuleType("orders"); orders.__path__ = ["orders"]; sys.modules["orders"] = orders
-for m in ("calendar_gate", "cost_gate", "depth_gate", "entry_pause", "rr_floor", "short_gates", "sizing", "stopout_guard", "approve_first", "entry_cap", "opening_protect"):
+for m in ("calendar_gate", "cost_gate", "depth_gate", "entry_pause", "rr_floor", "short_gates", "sizing", "stopout_guard", "approve_first", "entry_cap", "opening_protect", "conviction"):
     mod = types.ModuleType("orders." + m); sys.modules["orders." + m] = mod; setattr(orders, m, mod)
+sys.modules["orders.conviction"].short_decision = lambda *a, **k: None; sys.modules["orders.conviction"].note = lambda *a, **k: ""   # E266: sizing by conviction is tested in tests/test_e266_conviction_sizing.py
 sp = types.ModuleType("orders.sell_probe"); sp.passed = lambda: True; sys.modules["orders.sell_probe"] = sp; setattr(orders, "sell_probe", sp)   # E108: the T6 PASS is on record in this script (its own tests: tests/test_sell_probe.py)
 ad = types.ModuleType("orders.adaptive"); ad.compute = lambda *a, **k: None; ad.round_to_tick = lambda x: round(round(x / 0.05) * 0.05, 2); sys.modules["orders.adaptive"] = ad
 
@@ -60,7 +61,7 @@ def reset(mode="live", cap=1, qty=200):
     config.SCALP_EXCHANGE_SEGMENT = "NSE_EQ"; config.ENTRY_MARGIN_PAUSE_MINUTES = 5; config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = 5
     af.active = lambda: False; ec.entry_reason = lambda db: None; op.pause_reason = lambda db: None
     ssl.try_claim = lambda db, s: True; ssl.release = lambda db, s: calls["lock_rel"].append(s)
-    ledger.reserve_capital = lambda db, adaptive_stop_pct, side: (calls["reserved"].append(side) or 20000.0)
+    ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None: (calls["reserved"].append(side) or 20000.0)
     ledger.release_capital = lambda db, position_value, realized_pnl: calls["released"].append(position_value)
     ledger.reserve_additional = lambda db, x: True
     sob.check_and_reserve = lambda db: True
@@ -131,7 +132,7 @@ reset(); ssl.try_claim = lambda db, s: False; r = sl.attempt_short_live(DB(gate(
 # 5 failures after claiming: all released
 def undo_ok(): return calls["lock_rel"] == ["X"]
 reset(); se.plan_short = lambda *a, **k: None; r = sl.attempt_short_live(DB(gate()), cand); check("plan refused: lock released, no capital taken", r is None and undo_ok() and not calls["reserved"])
-reset(); ledger.reserve_capital = lambda db, adaptive_stop_pct, side: None; r = sl.attempt_short_live(DB(gate()), cand); check("ledger refuses: lock released, no order", r is None and undo_ok() and not calls["orders"])
+reset(); ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None: None; r = sl.attempt_short_live(DB(gate()), cand); check("ledger refuses: lock released, no order", r is None and undo_ok() and not calls["orders"])
 reset(); sob.check_and_reserve = lambda db: False; r = sl.attempt_short_live(DB(gate()), cand); check("shared budget: capital + lock released", r is None and undo_ok() and calls["released"] and not calls["orders"])
 reset(); dc.get_security_id = lambda db, s: (_ for _ in ()).throw(dc.SecurityNotResolvedError("x")); r = sl.attempt_short_live(DB(gate()), cand); check("no security id: capital + lock released", r is None and undo_ok() and calls["released"])
 # 6 Dhan refuses the SELL Super Order: NO fallback order, everything released

@@ -54,6 +54,16 @@ def _fail_closed() -> bool:
         return True
 
 
+def _err_brief(err, limit: int = 200) -> str:
+    """First line of the driver's own message (e.g. 'ORA-00942: table or view does not exist'), so the Telegram alert says WHY, not only the class name."""
+    try:
+        raw = str(getattr(err, "orig", None) or err).strip()
+        first = raw.splitlines()[0] if raw else ""
+        return (first[:limit] or "no message")
+    except Exception:  # noqa: BLE001
+        return "no message"
+
+
 def _gate_failed(gate: str, err) -> bool:
     """What the gate returns when it could not decide: True (allow) only if fail-closed is switched off. Loud: CRITICAL log + a rate-limited Telegram."""
     if not _fail_closed():
@@ -66,7 +76,7 @@ def _gate_failed(gate: str, err) -> bool:
         _last_alert["t"] = now
         try:
             from notifier import notify_fire_and_forget
-            notify_fire_and_forget(f"{SVC}: the {gate} check could not reach the database ({type(err).__name__}). "
+            notify_fire_and_forget(f"{SVC}: the {gate} check could not reach the database ({type(err).__name__}: {_err_brief(err)}). "
                                    "New BUY entries are being refused until it recovers. Exits are not affected.")
         except Exception:  # noqa: BLE001 - the alert must never break the gate
             pass
@@ -76,14 +86,59 @@ def _gate_failed(gate: str, err) -> bool:
 _SERVICE_NAME = "position-stocks-service"
 
 
-def try_claim(db: Session, symbol: str) -> bool:
-    """Call BEFORE a BUY for `symbol` goes to Dhan. Returns True if the
-    claim succeeded (no other service currently holds this symbol, or
-    this service already holds it itself — e.g. an averaging-in add),
-    False if real-trade-service already holds it and the BUY should be
-    skipped this cycle. On ANY error, logs and returns True (fail open) —
-    same rationale as shared_order_budget.check_and_reserve."""
-    symbol = symbol.strip().upper()
+# ── E265: one transient DB error no longer refuses the entry ─────────────────
+# Before, ANY exception in the claim (a DatabaseError from a slow / reconnecting Oracle, a pool timeout, a half-dead connection) went straight to
+# fail-closed, so one blip refused the BUY and sent the "could not reach the database" alert. Now a database-driver error (sqlalchemy DBAPIError:
+# DatabaseError / OperationalError / InterfaceError, a pool TimeoutError, PendingRollbackError) is retried SYMBOL_LOCK_DB_RETRIES times (default 1)
+# after a rollback and a short pause; only when the retry fails too does the gate fail closed as before. A "table does not exist" error also
+# re-creates the table (create with checkfirst, never ALTERs, at most once per 5 minutes). Programming errors (anything that is not a driver error)
+# are NOT retried. SYMBOL_LOCK_DB_RETRIES=0 restores the exact old behaviour.
+_ENSURE_TABLE_EVERY_S = 300.0
+_last_ensure = {"t": None}
+
+
+def _cfg_num(name: str, default, cast):
+    try:
+        import config
+        return cast(getattr(config, name, default))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _is_transient_db_error(err) -> bool:
+    """True for a database-driver / pool error that a second attempt can fix; False for anything else (a bug must not be retried)."""
+    try:
+        from sqlalchemy import exc as sa_exc
+    except Exception:  # noqa: BLE001
+        return False
+    kinds = [sa_exc.DBAPIError]
+    for name in ("TimeoutError", "PendingRollbackError"):
+        k = getattr(sa_exc, name, None)
+        if k is not None:
+            kinds.append(k)
+    return isinstance(err, tuple(kinds))
+
+
+def _looks_like_missing_table(err) -> bool:
+    text = f"{err} {getattr(err, 'orig', '')}".upper()
+    return "ORA-00942" in text or "UNDEFINEDTABLE" in text or ("DOES NOT EXIST" in text and "RELATION" in text)
+
+
+def _ensure_table(db: Session) -> None:
+    """Create stockky_shared_symbol_lock when it is missing (checkfirst: an existing table is left alone). Rate-limited, never raises."""
+    now = time.monotonic()
+    if _last_ensure["t"] is not None and now - _last_ensure["t"] < _ENSURE_TABLE_EVERY_S:
+        return
+    _last_ensure["t"] = now
+    try:
+        SharedSymbolLock.__table__.create(bind=db.get_bind(), checkfirst=True)
+        logger.warning("%s: symbol lock table was missing - created it (checkfirst)", SVC)
+    except Exception as e:  # noqa: BLE001
+        logger.error("%s: could not re-create the symbol lock table: %s", SVC, e)
+
+
+def _claim_once(db: Session, symbol: str) -> bool:
+    """One claim attempt. Returns True / False for a decision; a database error other than the unique-constraint race is RAISED to try_claim."""
     try:
         existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
         if existing is not None:
@@ -115,13 +170,40 @@ def try_claim(db: Session, symbol: str) -> bool:
             logger.warning("position-stocks: symbol lock race re-check for %s failed (%s)", symbol, chk_e)
             return _gate_failed("symbol lock", chk_e)
         return True
-    except Exception as e:
-        logger.error("position-stocks: shared_symbol_lock.try_claim(%s) failed: %s", symbol, e, exc_info=True)
+
+
+def try_claim(db: Session, symbol: str) -> bool:
+    """Call BEFORE a BUY for `symbol` goes to Dhan. Returns True if the
+    claim succeeded (no other service currently holds this symbol, or
+    this service already holds it itself — e.g. an averaging-in add),
+    False if real-trade-service already holds it and the BUY should be
+    skipped this cycle.
+
+    On a database error the claim is retried (E265, see above); if it still cannot be decided, the gate fails CLOSED
+    (group 448): False, CRITICAL log + a rate-limited Telegram naming the real error. SHARED_GATES_FAIL_CLOSED=false
+    makes that True (fail open) instead."""
+    symbol = symbol.strip().upper()
+    retries = max(0, _cfg_num("SYMBOL_LOCK_DB_RETRIES", 1, int))
+    delay = max(0.0, _cfg_num("SYMBOL_LOCK_DB_RETRY_DELAY_S", 0.3, float))
+    attempt = 0
+    while True:
         try:
-            db.rollback()
-        except Exception:
-            pass
-        return _gate_failed("symbol lock", e)
+            return _claim_once(db, symbol)
+        except Exception as e:
+            logger.error("position-stocks: shared_symbol_lock.try_claim(%s) failed (attempt %d): %s", symbol, attempt + 1, e, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if attempt < retries and _is_transient_db_error(e):
+                if _looks_like_missing_table(e):
+                    _ensure_table(db)
+                attempt += 1
+                logger.warning("position-stocks: symbol lock claim for %s hit a database error - retrying (%d/%d)", symbol, attempt, retries)
+                if delay > 0:
+                    time.sleep(delay * attempt)
+                continue
+            return _gate_failed("symbol lock", e)
 
 
 def release(db: Session, symbol: str) -> None:

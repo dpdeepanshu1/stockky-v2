@@ -14,11 +14,47 @@ It never adds a candidate and never lowers a gate; any error falls back to the o
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import config
 
 logger = logging.getLogger("position-stocks-shortlist")
+
+# E266: what the Market Board said about each ranked name on the latest shortlist pass, kept for orders/conviction.py (the entry sizing reads it a few seconds later
+# for the SAME name). {(symbol, "LONG"|"SHORT"): (monotonic time, {"board_conviction", "zone_score"})}. Process memory only; read-only for everyone else.
+_RECENT: Dict[Tuple[str, str], Tuple[float, dict]] = {}
+_RECENT_LOCK = threading.Lock()
+
+
+def _remember(symbol, side: str, board_conviction, zone_score) -> None:
+    try:
+        with _RECENT_LOCK:
+            _RECENT[(str(symbol), side)] = (time.monotonic(), {"board_conviction": board_conviction, "zone_score": zone_score})
+            if len(_RECENT) > 800:
+                for k in list(_RECENT)[:200]:
+                    _RECENT.pop(k, None)
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        pass
+
+
+def recent(symbol, side: str = "LONG", max_age_s: float = 180.0) -> Optional[dict]:
+    """{"board_conviction", "zone_score"} the latest shortlist pass saw for this name and side, or None when there is none or it is older than max_age_s. Never raises."""
+    try:
+        with _RECENT_LOCK:
+            hit = _RECENT.get((str(symbol), side))
+        if not hit or time.monotonic() - hit[0] > float(max_age_s):
+            return None
+        return dict(hit[1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def reset_recent() -> None:
+    """Tests: forget every remembered board reading."""
+    with _RECENT_LOCK:
+        _RECENT.clear()
 
 
 def _tm_nudge(symbol, side: str) -> float:
@@ -108,6 +144,8 @@ def build(passers: Sequence[Tuple[object, object]], board_payload: Optional[dict
                          "board_conviction": _num(brow.get("conviction")) if brow else None,
                          "board_side": brow.get("side") if brow else None,
                          "extended": s["extended"], "parts": s["parts"], "cand": c, "quality": q})
+            if brow and brow.get("side") == "bull":
+                _remember(c.symbol, "LONG", _num(brow.get("conviction")), _zone_score(brow))
         floor = float(config.SHORTLIST_MIN_SCORE or 0.0)
         rows.sort(key=lambda r: (-r["score"], r["scan_rank"]))      # stable: equal scores keep scan order
         kept = [r for r in rows if r["score"] >= floor] or rows[:1]
@@ -191,6 +229,8 @@ def build_short(passers: Sequence[Tuple[object, object]], bear_index: Optional[D
             rows.append({"symbol": c.symbol, "score": s["score"], "scan_rank": i + 1, "board_rank": brow.get("rank") if brow else None,
                          "board_conviction": _num(brow.get("conviction")) if brow else None, "extended": s["extended"], "parts": s["parts"],
                          "cand": c, "quality": q})
+            if brow:
+                _remember(c.symbol, "SHORT", _num(brow.get("conviction")), _zone_score(brow))
         rows.sort(key=lambda r: (-r["score"], r["scan_rank"]))
         kept = rows[:cap]
     except Exception as e:  # noqa: BLE001

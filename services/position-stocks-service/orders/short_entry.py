@@ -22,7 +22,7 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
-from orders import calendar_gate, cost_gate, depth_gate, entry_pause, rr_floor, short_gates, sizing, stopout_guard, tm_gate
+from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
 from tz_utils import ist_time_at_or_after, ist_today_str, parse_hhmm
 
@@ -128,7 +128,7 @@ def _live_price(symbol: str) -> Optional[float]:
     return None
 
 
-def _short_position_value(db: Session, stop_pct: float) -> Optional[float]:
+def _short_position_value(db: Session, stop_pct: float, conviction_mult: Optional[float] = None) -> Optional[float]:
     """The rupee budget a REAL short would get: the same formula as capital/ledger.reserve_capital (risk % x market-state x short multiplier / slots
     / stop), without reserving anything. None when the pool is unknown or too small."""
     row = ledger._get_or_create(db)
@@ -140,6 +140,8 @@ def _short_position_value(db: Session, stop_pct: float) -> Optional[float]:
     cap_mult = float(getattr(config, "SCALP_SLOT_NOTIONAL_CAP_MULT", 0.0) or 0.0)
     if cap_mult > 0:
         value = min(value, row.total_allocated_capital / max(1, config.MAX_CONCURRENT_SCALP_POSITIONS) * cap_mult)
+    if conviction_mult is not None:
+        value = ledger.conviction_budget(row, value, conviction_mult, stop_pct, "SHORT")     # E266: same multiple, same ceilings as ledger.reserve_capital
     if value > row.available_capital:
         return None
     return value
@@ -248,7 +250,9 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         _refuse(db, cand, "SHORT_TIME_MACHINE", _tm_reason)
         return None
 
-    value = _short_position_value(db, budget_stop_pct)
+    _cv = conviction.short_decision(cand, quality, board_row, levels)        # E266: None = feature off / too little known = the old fixed size
+    _cv_mult = (_cv or {}).get("mult")
+    value = _short_position_value(db, budget_stop_pct, _cv_mult)
     if value is None:
         _refuse(db, cand, "SHORT_NO_CAPITAL", "the short budget does not fit the available pool")
         return None
@@ -266,7 +270,8 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         return None
 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
-    return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev}
+    return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
+            "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv)}
 
 
 def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:

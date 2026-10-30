@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -794,8 +794,14 @@ def attempt_entry(
                 _skip_state.reason = "APPROVAL_PENDING"
             return None
 
+    # E266: conviction score of this entry -> size multiple (None = feature off / too little known = the old fixed size). Never raises.
+    _cv = conviction.long_decision(candidate, quality, levels)
+    _cv_note = conviction.note(candidate.symbol, "LONG", _cv)
+    if _cv:
+        logger.info("position-stocks entry: %s %s parts=%s", candidate.symbol, _cv_note, _cv.get("detail"))
+
     # Reserve capital (also checks kill switch again in the ledger)
-    position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
+    position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct, conviction_mult=(_cv or {}).get("mult"))
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
         # FIX (session70): raise instead of returning None so _run_cycle()
@@ -1200,6 +1206,7 @@ def attempt_entry(
         f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"
         f"Window {candidate.window_label} | Capital ₹{position_value:,.2f} "
         f"| Super Order {dhan_super_order_id or 'N/A'}"
+        + (f"\n{_cv_note}" if _cv_note else "")
     )
     approve_first.mark_entered(candidate.symbol, {"qty": quantity, "price": candidate.current_ltp})   # group469
     return pos

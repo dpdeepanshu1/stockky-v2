@@ -54,7 +54,8 @@ def test_the_plain_short_guard_is_wired_and_the_cover_releases_the_stop_first():
 
 def test_size_cap_mode_and_ledger_are_enforced():
     assert "min(int(plan[\"qty\"]), qty_cap())" in SRC
-    assert 'ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT")' in SRC
+    assert 'ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT",' in SRC
+    assert 'conviction_mult=plan.get("conv_mult"))' in SRC       # E266: the conviction multiple planned with the shadow size is the one reserved
     assert "if not live_mode():" in SRC
     assert re.search(r'return max\(1, v\)', SRC) and re.search(r'except Exception:  # noqa: BLE001\n\s+return 1', SRC)      # junk cap = 1 share, never "no cap"
 
@@ -85,7 +86,7 @@ def test_the_cap_switch_is_in_the_catalog_and_protected_from_the_calibrator():
 
 def test_step12_size_comes_from_the_normal_stop_and_the_catalog_has_the_two_switches():
     se = (ROOT / "orders" / "short_entry.py").read_text(encoding="utf-8")
-    assert "value = _short_position_value(db, budget_stop_pct)" in se and "budget_stop_pct = float(levels.stop_pct)" in se
+    assert "value = _short_position_value(db, budget_stop_pct, _cv_mult)" in se and "budget_stop_pct = float(levels.stop_pct)" in se
     assert se.index("budget_stop_pct = float(levels.stop_pct)") < se.index("tighten_short_levels(levels, live, mult)")      # captured BEFORE the tightening
     cat = (ROOT / "control" / "catalog.py").read_text(encoding="utf-8")
     auto = (REPO / "services" / "calibration-runner-service" / "autocalib.py").read_text(encoding="utf-8")

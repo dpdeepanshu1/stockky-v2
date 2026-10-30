@@ -37,7 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
-from capital import shared_daily_pnl, shared_exposure
+from capital import conviction_sizing, shared_daily_pnl, shared_exposure
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -551,11 +551,55 @@ def sync_peer_pnl(db: Session) -> Optional[float]:
         return None
 
 
+def conviction_mult_in_force(row: ScalpCapitalLedger, requested: Optional[float], side: str = "LONG") -> float:
+    """E266: the conviction multiple that will really be applied. 1.0 when the feature is off or nothing was asked; otherwise the request limited to
+    CONVICTION_MIN_MULT .. CONVICTION_MAX_MULT (CONVICTION_SHORT_MAX_MULT for a short), and an upsize is held at 1.0 on a day this pool is net negative
+    (CONVICTION_NO_UPSIZE_ON_LOSS_DAY). Read at call time. Never raises: any doubt = 1.0, the old fixed size."""
+    try:
+        if not getattr(config, "CONVICTION_SIZING_ENABLED", False) or requested is None:
+            return 1.0
+        m = float(requested)
+        if not (m == m) or m <= 0:
+            return 1.0
+        _is_short = str(side or "").strip().upper() == "SHORT"
+        _hi = float(getattr(config, "CONVICTION_SHORT_MAX_MULT", 2.0) if _is_short else getattr(config, "CONVICTION_MAX_MULT", 3.0))
+        m = min(max(1.0, _hi), max(float(getattr(config, "CONVICTION_MIN_MULT", 0.5)), m))
+        lost_today = float(getattr(row, "realized_pnl_today", 0.0) or 0.0) < 0.0
+        return conviction_sizing.hold_back(m, no_upsize=bool(getattr(config, "CONVICTION_NO_UPSIZE_ON_LOSS_DAY", True)) and lost_today)
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def conviction_budget(row: ScalpCapitalLedger, base_value: float, requested: Optional[float], stop_pct: float, side: str = "LONG") -> float:
+    """E266: `base_value` (the fixed rule: risk / slots / stop, slot-capped) x the conviction multiple in force. A smaller multiple just shrinks it. An UPSIZE is bounded
+    by (a) CONVICTION_MAX_POOL_PCT % of the pool, (b) the plain per-trade risk: RISK_PER_TRADE_PCT of the pool (x Market Weather x the short multiplier) at this trade's
+    own stop, i.e. one trade may never risk more than the whole per-trade budget, and (c) the free capital; and it is never below `base_value`. Never raises."""
+    try:
+        m = conviction_mult_in_force(row, requested, side)
+        if m == 1.0 or not (base_value > 0):
+            return base_value
+        pool = float(row.total_allocated_capital or 0.0)
+        ceiling = pool * float(getattr(config, "CONVICTION_MAX_POOL_PCT", 50.0)) / 100.0
+        risk_cap = None
+        if stop_pct and stop_pct > 0:
+            _ms, _sd = _market_state_risk_mult(), _short_risk_mult(side)       # the same two dials reserve_capital's sizing formula applies, read once more for the cap
+            risk_cap = (pool * (config.RISK_PER_TRADE_PCT / 100.0) * _ms * _sd) / (stop_pct / 100.0)
+        value = conviction_sizing.upsized_value(base_value, m, ceiling=ceiling, risk_cap=risk_cap, available=float(row.available_capital or 0.0))
+        if abs(value - base_value) > 0.005:
+            logger.info("ledger.conviction_budget: %s budget Rs%.2f -> Rs%.2f (conviction x%.2f; pool Rs%.0f, ceiling Rs%.0f, stop %.2f%%)",
+                        side, base_value, value, m, pool, ceiling, stop_pct or 0.0)
+        return value
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ledger.conviction_budget failed (%s) - using the fixed size", e)
+        return base_value
+
+
 def reserve_capital(
     db: Session,
     *,
     adaptive_stop_pct: float,
     side: str = "LONG",
+    conviction_mult: Optional[float] = None,
 ) -> Optional[float]:
     """Gate check + decrement. Returns position_value (₹) if OK, None if
     insufficient capital or kill-switch tripped. side="SHORT" (short selling step 4) risks config.SHORT_RISK_MULT of a long's risk and is
@@ -649,6 +693,10 @@ def reserve_capital(
             logger.info("ledger.reserve_capital: slot notional capped Rs%.2f -> Rs%.2f (stop %.2f%% would size it above %.1fx a slot)",
                         position_value, _slot_cap, adaptive_stop_pct, _cap_mult)
             position_value = _slot_cap
+
+    # E266: conviction-based size (None / feature off = unchanged). Applied AFTER the slot cap on purpose: the slot cap is the old fixed size, the multiple moves it.
+    if conviction_mult is not None:
+        position_value = conviction_budget(row, position_value, conviction_mult, adaptive_stop_pct, side)
 
     if position_value > row.available_capital:
         logger.info(

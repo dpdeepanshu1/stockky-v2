@@ -182,7 +182,8 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             _undo()
             return None
 
-        position_value = ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT")
+        position_value = ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT",
+                                                conviction_mult=plan.get("conv_mult"))
         if position_value is None:
             _skip(db, cand, "SHORT_NO_CAPITAL", "ledger refused the short (mode, kill switch, dial or pool)")
             _undo()
@@ -357,7 +358,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
         short_entry._stats["entered"] = short_entry._stats.get("entered", 0) + 1
         notifier.notify_fire_and_forget(
             f"📉 <b>SHORT placed</b> - {sym} x{qty}\nEntry ~₹{live:.2f} | Target ₹{levels.target_price:.2f} ({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} "
-            f"({levels.stop_pct:.2f}%)\nBoard conviction {conv if conv is not None else 'n/a'} | {'Plain order ' + str(plain.get('entry_order_id')) + ' + broker stop ' + str(plain.get('stop_order_id')) + (' (NO broker stop: guard covers by hand)' if not plain.get('protected') else '') if plain else 'Super Order ' + str(super_id)}\nCovered by 14:55 at the latest. Live short cap: {qty_cap()} share(s).")
+            f"({levels.stop_pct:.2f}%)\nBoard conviction {conv if conv is not None else 'n/a'} | {'Plain order ' + str(plain.get('entry_order_id')) + ' + broker stop ' + str(plain.get('stop_order_id')) + (' (NO broker stop: guard covers by hand)' if not plain.get('protected') else '') if plain else 'Super Order ' + str(super_id)}\nCovered by 14:55 at the latest. Live short cap: {qty_cap()} share(s)." + (f"\n{plan.get('conv_note')}" if plan.get("conv_note") else ""))
     except Exception as e:  # noqa: BLE001
         logger.warning("short live: post-entry log/alert for %s failed (%s)", sym, e)
     logger.info("position-stocks SHORT ENTERED %s x%d @ %.2f target=%.2f stop=%.2f order=%s", sym, qty, live, levels.target_price, levels.stop_price, (plain or {}).get("entry_order_id") or super_id)

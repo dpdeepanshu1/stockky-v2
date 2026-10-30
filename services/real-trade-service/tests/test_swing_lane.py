@@ -399,6 +399,31 @@ def test_probe_check_releases_the_lock_when_cleanup_fails_e261():
     assert "shared_symbol_lock.release(db, sym)" in exc
 
 
+def test_probe_share_is_not_adopted_by_the_broker_holdings_import_e262():
+    from swing import probe
+    assert probe.is_probe_symbol(None, "") is False
+    assert probe.is_probe_symbol(None, "NTPC") is False                  # no db / no saved probe: fail-open, the import behaves as before
+    probe._ACTIVE.add("NTPC")
+    try:
+        assert probe.is_probe_symbol(None, "ntpc") is True              # the open phase is working on it (the BUY fills before the row is saved)
+        assert probe.is_probe_symbol(None, "ITC") is False
+    finally:
+        probe._ACTIVE.discard("NTPC")
+    assert probe.is_probe_symbol(None, "NTPC") is False
+    src = _src("swing", "probe.py")
+    assert "_ACTIVE.add(sym)" in src and "finally:\n        for s in syms:\n            _ACTIVE.discard(s)" in src
+    imp = _src("portfolio", "portfolio.py")
+    assert "_swing_probe.is_probe_symbol(db, symbol)" in imp
+    assert imp.index("_swing_probe.is_probe_symbol(db, symbol)") < imp.index("_has_pending_bot_buy(db, symbol, float(")     # before anything is created for the symbol
+
+
+def test_probe_check_does_not_sell_a_share_the_exit_engine_tracks_e262():
+    tail = _src("swing", "probe.py").split("def check_phase")[1]
+    assert "models.TradePosition.status.in_((\"OPEN\", \"PARTIALLY_CLOSED\", \"PENDING_EXIT\"))" in tail
+    guard = tail.split("if tracked is not None:")[1]
+    assert "not sold by the probe" in guard.split("else:")[0] and "transaction_type=\"SELL\"" in guard.split("else:")[1]
+
+
 def test_probe_failed_open_does_not_block_the_next_open_and_releases_the_lock():
     from swing import probe
     assert probe.waiting_for_check({"phase": "open", "stop_id": "9", "checked": False}) is True

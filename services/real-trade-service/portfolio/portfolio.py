@@ -626,6 +626,16 @@ async def import_broker_holdings(db: Session) -> int:
         if already_tracked is not None:
             continue
 
+        # E262: the swing probe's own 1 share (its stop-survival test) is not a holding to manage: the exit engine and broker_stop would put
+        # their own DAY stops on it and could sell it before the next-morning check. Fail-open inside is_probe_symbol.
+        try:
+            from swing import probe as _swing_probe
+            if _swing_probe.is_probe_symbol(db, symbol):
+                logger.info("import_broker_holdings: %s skipped - it is the swing probe's 1 share (waiting for its check phase).", symbol)
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+
         # group438: our own BUY is waiting for its fill to be booked - leave it to record_real_fill (see _has_pending_bot_buy)
         if _has_pending_bot_buy(db, symbol, float(getattr(config, "IMPORT_SKIP_PENDING_BUY_MIN", 45.0) or 0.0)):
             logger.info("import_broker_holdings: %s skipped - a BUY from this service is still PLACED/PARTIAL; its fill will be booked by reconcile, not imported.", symbol)

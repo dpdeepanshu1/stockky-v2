@@ -24,6 +24,7 @@ CANDIDATES = ("ITC", "NTPC", "ONGC", "SBIN", "TATASTEEL")
 LIVE_STOP_STATES = ("PENDING", "TRIGGER_PENDING", "OPEN", "TRANSIT", "PART_TRADED")
 FOREVER_LIVE_STATES = ("PENDING", "CONFIRM", "TRANSIT")      # Dhan's Forever Order (GTT) statuses that mean "still waiting for its trigger"
 KINDS = ("forever", "day")
+_ACTIVE: set = set()          # E262: symbols the open phase is working on right now (the BUY fills before the probe row is saved)
 
 
 def _status(row: Dict[str, Any]) -> str:
@@ -62,6 +63,24 @@ def last_probe(repo) -> Optional[Dict[str, Any]]:
         return {"day": r["day"], "ok": r["ok"], "summary": r["summary"]}
 
 
+def is_probe_symbol(db: Any, symbol: str) -> bool:
+    """E262: True while `symbol` is the probe's 1 share - the open phase is running on it, or it was opened and its check phase has not run.
+    portfolio.import_broker_holdings skips such a symbol: the 30 Oct 2026 NTPC probe share was imported as a tracked REAL position within
+    seconds of its fill, so the exit engine and broker_stop (BSTOP) put their own DAY stops on it and would sell it before the next-morning check.
+    Fail-open: any error answers False (the import then behaves as before)."""
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return False
+    if sym in _ACTIVE:
+        return True
+    try:
+        from swing.repo import SqlRepo
+        prev = last_probe(SqlRepo(db))
+        return bool(waiting_for_check(prev) and str(prev.get("symbol") or "").upper() == sym)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def waiting_for_check(prev: Optional[Dict[str, Any]]) -> bool:
     """True only for an open phase that placed a stop and has not been checked yet. A FAILED open (no stop id) is finished: it must not block a new open
     phase, and there is nothing for the check phase to read."""
@@ -88,7 +107,11 @@ def open_phase(db: Any, repo: Any, armed: bool, symbol: str = "", kind: str = "f
     kind = (kind or "forever").lower()
     if kind not in KINDS:
         return out("NOT_RUN", f"kind must be one of {', '.join(KINDS)}")
-    return _open_live(db, repo, syms, steps, out, ist_today_str(), dhan_client, shared_symbol_lock, config, kind)
+    try:
+        return _open_live(db, repo, syms, steps, out, ist_today_str(), dhan_client, shared_symbol_lock, config, kind)
+    finally:
+        for s in syms:
+            _ACTIVE.discard(s)
 
 
 def _open_live(db, repo, syms, steps, out, today, dhan_client, shared_symbol_lock, config, kind="forever"):
@@ -110,6 +133,7 @@ def _open_live(db, repo, syms, steps, out, today, dhan_client, shared_symbol_loc
         return out("NOT_RUN", f"no price for {sym}")
     if not shared_symbol_lock.try_claim(db, sym, mode="REAL"):
         return out("NOT_RUN", f"{sym} is held by position-stocks-service")
+    _ACTIVE.add(sym)          # E262: from here until the probe row is saved, the broker-holdings import must leave this symbol alone
     sid = dhan_client.get_security_id(db, sym)
     limit = dhan_client.round_to_tick(price * 1.003)
     filled = False
@@ -191,6 +215,13 @@ def check_phase(db: Any, repo: Any, armed: bool) -> Dict[str, Any]:
     live_now = FOREVER_LIVE_STATES if kind == "forever" else LIVE_STOP_STATES
     steps.append(f"stop {prev['stop_id']}: {j['reason']}")
     sym = prev["symbol"]
+    tracked = None
+    try:
+        import models
+        tracked = db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.symbol == sym,
+                                                        models.TradePosition.status.in_(("OPEN", "PARTIALLY_CLOSED", "PENDING_EXIT"))).first()
+    except Exception:  # noqa: BLE001
+        tracked = None
     try:
         if stop_row is not None and _status(stop_row) in live_now:
             if kind == "forever":
@@ -198,10 +229,15 @@ def check_phase(db: Any, repo: Any, armed: bool) -> Dict[str, Any]:
             else:
                 dhan_client.cancel_order(db, is_armed=True, dhan_order_id=str(prev["stop_id"]))
             steps.append("stop cancelled")
-        sid = dhan_client.get_security_id(db, sym)
-        sell = dhan_client.place_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
-                                       order_type="MARKET", price=0, product_type="CNC", tag="SWPROBE")
-        steps.append(f"SELL 1 {sym} market -> order {str(sell.get('orderId') or sell.get('order_id') or '')}")
+        if tracked is not None:
+            # E262: the exit engine already manages this share (it was imported as a tracked REAL position): selling it here would be a second,
+            # uncoordinated seller on one share. The verdict above is about the stop order and does not depend on the share.
+            steps.append(f"1 {sym} is a tracked REAL position (the exit engine manages it): not sold by the probe")
+        else:
+            sid = dhan_client.get_security_id(db, sym)
+            sell = dhan_client.place_order(db, is_armed=True, security_id=sid, exchange_segment=dhan_client.NSE_EQ_SEGMENT, transaction_type="SELL", quantity=1,
+                                           order_type="MARKET", price=0, product_type="CNC", tag="SWPROBE")
+            steps.append(f"SELL 1 {sym} market -> order {str(sell.get('orderId') or sell.get('order_id') or '')}")
         shared_symbol_lock.release(db, sym)
     except Exception as e:  # noqa: BLE001
         edis = dhan_client.is_cdsl_edis_error(str(e))

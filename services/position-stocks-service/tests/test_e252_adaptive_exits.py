@@ -133,7 +133,7 @@ def test_stagnation_decision_close_only_when_fading_or_slot_wanted_or_hard_max()
     assert exit_adaptive.stagnation_decision(age_min=25, fading=False, pressure=None)[0] is False
     assert exit_adaptive.stagnation_decision(age_min=25, fading=None, pressure=None)[0] is False
     assert exit_adaptive.stagnation_decision(age_min=25, fading=True, pressure=None)[0] is True
-    assert exit_adaptive.stagnation_decision(age_min=25, fading=False, pressure="TREL: MAX_POSITIONS")[0] is True
+    assert exit_adaptive.stagnation_decision(age_min=50, fading=False, pressure="TREL: MAX_POSITIONS")[0] is True     # E263: a waiting candidate needs the trade to be 45 min old
     assert exit_adaptive.stagnation_decision(age_min=95, fading=False, pressure=None)[0] is True
 
 

@@ -1426,7 +1426,7 @@ def run_stagnation_exit(db: Session) -> int:
 
         # E252: a flagged trade is closed only when it is fading or a candidate was actually refused for capital / slots (or the hard maximum age is reached)
         if exit_adaptive.enabled():
-            _fading = exit_adaptive.is_fading(pos.symbol, ltp, short=_side.is_short(pos))
+            _fading = exit_adaptive.is_fading(pos.symbol, ltp, short=_side.is_short(pos), entry=pos.entry_price)
             _close, _why = exit_adaptive.stagnation_decision(
                 age_min=age_min, fading=_fading, pressure=exit_adaptive.slot_pressure(db, now))
             if not _close:

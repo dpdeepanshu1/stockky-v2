@@ -139,10 +139,16 @@ def flat_band_pct(target_pct: Optional[float]) -> float:
     return _clamp(float(_cfg("STAGNATION_BAND_TARGET_FRAC", 0.15)) * target_pct, float(_cfg("STAGNATION_BAND_MIN_PCT", 0.25)), float(_cfg("STAGNATION_BAND_MAX_PCT", 0.6)))
 
 
-def is_fading(symbol: str, ltp: float, short: bool = False, now_ts: Optional[float] = None) -> Optional[bool]:
+def is_fading(symbol: str, ltp: float, short: bool = False, now_ts: Optional[float] = None, entry: Optional[float] = None) -> Optional[bool]:
     """True when the trade is on the wrong side of the day VWAP or has made lower highs (a short: higher lows) over the last EXIT_FADE_WINDOW_MIN minutes.
-    False when neither shows; None when there is no data to say."""
+    False when neither shows; None when there is no data to say.
+
+    E263 (EXIT_FADE_STRICT, default on): on a flat price, "lower highs over the last 10 minutes" is true in roughly half of all windows, so it fired on many flat
+    trades and the E252 hold rule closed them anyway (30 Oct: SATIN 30 min, RAMKY 24 min, CAMS 20 and 28 min, all STAGNATION_EXIT, -0.38 % .. +0.02 %, no stop or
+    target ever near). Strict mode needs MORE than noise: the VWAP side must be missed by EXIT_FADE_VWAP_MARGIN_PCT (0.10 %), and lower highs only count while the trade
+    is not in profit (`entry` given; a long at or under its entry, a short at or over it). EXIT_FADE_STRICT=0 or no entry price = the E252 rule unchanged."""
     try:
+        strict = bool(_cfg("EXIT_FADE_STRICT", True))
         verdict_known = False
         vw = None
         try:
@@ -152,7 +158,8 @@ def is_fading(symbol: str, ltp: float, short: bool = False, now_ts: Optional[flo
             vw = None
         if vw:
             verdict_known = True
-            if (ltp > vw) if short else (ltp < vw):
+            margin = max(0.0, float(_cfg("EXIT_FADE_VWAP_MARGIN_PCT", 0.10))) / 100.0 if strict else 0.0
+            if (ltp > vw * (1.0 + margin)) if short else (ltp < vw * (1.0 - margin)):
                 return True
         from feed import ws_client
         buf = ws_client.get_tick_buffer(symbol)
@@ -164,6 +171,11 @@ def is_fading(symbol: str, ltp: float, short: bool = False, now_ts: Optional[flo
             prior = [float(p) for t, p in buf if end - win <= float(t) < end - half]
             if len(recent) >= 5 and len(prior) >= 5:
                 verdict_known = True
+                _in_profit = False
+                if strict and entry and float(entry) > 0:
+                    _in_profit = (ltp < float(entry)) if short else (ltp > float(entry))
+                if _in_profit:
+                    return False                           # E263: lower highs on a trade that is in profit are a pause, not a fade
                 if short:
                     return min(recent) > min(prior)      # higher lows
                 return max(recent) < max(prior)          # lower highs
@@ -191,14 +203,29 @@ def slot_pressure(db: Any, now: Optional[datetime] = None) -> Optional[str]:
     return None
 
 
+def slot_pressure_min_age_min() -> float:
+    """E263: how old a flat trade must be before a waiting candidate alone may close it (EXIT_SLOT_PRESSURE_MIN_AGE_MIN, default 45; 0 = the E252 rule)."""
+    try:
+        return max(0.0, float(_cfg("EXIT_SLOT_PRESSURE_MIN_AGE_MIN", 45.0)))
+    except (TypeError, ValueError):
+        return 45.0
+
+
 def stagnation_decision(*, age_min: float, fading: Optional[bool], pressure: Optional[str]) -> Tuple[bool, str]:
-    """(close_now, why) for a trade that one of the two rules has already flagged. Adaptive off -> always close (old behaviour)."""
+    """(close_now, why) for a trade that one of the two rules has already flagged. Adaptive off -> always close (old behaviour).
+
+    E263: each slot is capped at pool / MAX_CONCURRENT x SCALP_SLOT_NOTIONAL_CAP_MULT (30 % of the pool with the defaults), so only about three of the five slots
+    can ever be filled and a candidate refused for INSUFFICIENT_CAPITAL is on the log most of the day: `pressure` was nearly always set and a flat trade was closed
+    at its timer whatever it was doing. A waiting candidate now closes a flat
+    trade only once it is EXIT_SLOT_PRESSURE_MIN_AGE_MIN old; a fading trade can still be closed from the first timer."""
     if not enabled():
         return True, "adaptive exits off"
     if age_min >= float(_cfg("EXIT_HARD_MAX_MINUTES", 90.0)):
         return True, f"hard maximum {age_min:.0f}m"
-    if pressure:
+    if pressure and age_min >= slot_pressure_min_age_min():
         return True, f"slot wanted ({pressure})"
     if fading:
         return True, "fading (wrong side of VWAP / lower highs)"
+    if pressure:
+        return False, f"candidate waiting ({pressure}) but only {age_min:.0f}m old (needs {slot_pressure_min_age_min():.0f}m) and not fading"
     return False, "not fading and no candidate waiting"

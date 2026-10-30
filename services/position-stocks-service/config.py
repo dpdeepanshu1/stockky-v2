@@ -652,6 +652,12 @@ STAGNATION_BAND_MAX_PCT = _get_float("STAGNATION_BAND_MAX_PCT", 0.6)
 EXIT_FADE_WINDOW_MIN = _get_float("EXIT_FADE_WINDOW_MIN", 10.0)
 EXIT_SLOT_PRESSURE_WINDOW_MIN = _get_float("EXIT_SLOT_PRESSURE_WINDOW_MIN", 10.0)
 EXIT_HARD_MAX_MINUTES = _get_float("EXIT_HARD_MAX_MINUTES", 90.0)
+# E263 (30 Oct 2026): the E252 hold rule closed every flat trade at its timer (the pool fits ~3 of 5 slots, so "a candidate was refused for capital" was always true, and
+# "lower highs" is true in about half of all windows). EXIT_SLOT_PRESSURE_MIN_AGE_MIN = a waiting candidate alone may close a flat trade only after this many minutes (0 = E252).
+# EXIT_FADE_STRICT = fading needs the VWAP side missed by EXIT_FADE_VWAP_MARGIN_PCT, and lower highs only count while the trade is not in profit (0 = E252).
+EXIT_SLOT_PRESSURE_MIN_AGE_MIN = _get_float("EXIT_SLOT_PRESSURE_MIN_AGE_MIN", 45.0)
+EXIT_FADE_STRICT = _get_bool("EXIT_FADE_STRICT", True)
+EXIT_FADE_VWAP_MARGIN_PCT = _get_float("EXIT_FADE_VWAP_MARGIN_PCT", 0.10)
 
 # ── Breakeven stop buffer (2026-09-18 audit) ────────────────────────────────
 # orders/breakeven.py previously moved the STOP_LOSS_LEG to EXACTLY

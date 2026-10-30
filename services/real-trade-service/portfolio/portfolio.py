@@ -634,7 +634,7 @@ async def import_broker_holdings(db: Session) -> int:
                 logger.info("import_broker_holdings: %s skipped - it is the swing probe's 1 share (waiting for its check phase).", symbol)
                 continue
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("import_broker_holdings: swing-probe check failed for %s; importing it as before", symbol, exc_info=True)      # E264: logged, not silent (fail-open unchanged)
 
         # group438: our own BUY is waiting for its fill to be booked - leave it to record_real_fill (see _has_pending_bot_buy)
         if _has_pending_bot_buy(db, symbol, float(getattr(config, "IMPORT_SKIP_PENDING_BUY_MIN", 45.0) or 0.0)):

@@ -48,6 +48,59 @@ IDLE_RECHECK_S = 60.0
 # no log line explaining why, and the first socket was never closed.
 MIN_RECONNECT_GAP_S = 5.0
 
+class _YfLiveNoiseFilter(logging.Filter):
+    """E267: yfinance's own live client logs a full traceback at ERROR ("Error while listening to messages: no close frame received or sent") and an INFO
+    "Attempting to reconnect..." every time Yahoo drops the socket, which on a bad day is every few seconds and buries real errors. The client reconnects by
+    itself, so the first drop in each WINDOW_S is kept as ONE short WARNING line (no traceback) saying how many more were not shown, and the rest of the window is
+    dropped. Only those two yfinance messages are touched. Never raises (a doubt lets the record through unchanged)."""
+    WINDOW_S = 60.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last: Dict[str, float] = {}
+        self._hidden: Dict[str, int] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.name != "yfinance":
+                return True
+            msg = record.getMessage()
+            if msg.startswith("Error while listening to messages"):
+                key = "listen"
+            elif msg.startswith("Attempting to reconnect"):
+                key = "reconnect"
+            else:
+                return True
+            now = time.monotonic()
+            last = self._last.get(key)
+            if last is not None and now - last < self.WINDOW_S:
+                self._hidden[key] = self._hidden.get(key, 0) + 1
+                return False
+            self._last[key] = now
+            n = self._hidden.pop(key, 0)
+            tail = f" ({n} more in the last minute not shown)" if n else ""
+            if key == "listen":
+                record.levelno, record.levelname = logging.WARNING, "WARNING"
+                record.msg = f"yfinance live feed dropped ({msg}); yfinance reconnects by itself{tail}"
+                record.args = ()
+                record.exc_info = None
+                record.exc_text = None
+            else:
+                record.msg = f"{msg}{tail}"
+                record.args = ()
+            return True
+        except Exception:  # noqa: BLE001
+            return True
+
+
+def _install_log_filter() -> None:
+    lg = logging.getLogger("yfinance")
+    if not any(isinstance(f, _YfLiveNoiseFilter) for f in lg.filters):
+        lg.addFilter(_YfLiveNoiseFilter())
+
+
+_install_log_filter()
+
 _LIVE: Dict[str, dict] = {}
 _LOCK = threading.Lock()
 _STATE: Dict[str, Any] = {

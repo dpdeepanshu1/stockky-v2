@@ -784,7 +784,11 @@ async def _ws_loop(idx: int = 0) -> None:
                 e, getattr(e, "code", None), getattr(e, "reason", None), backoff,
             )
         except Exception as e:
-            logger.error("position-stocks WS: error (%s) — reconnecting in %ss", e, backoff)
+            # E267: the FIRST failure after a good connection (backoff is still at its starting value) is a WARNING - AngelOne drops or refuses a socket now and then
+            # and the next attempt almost always works (a restart logged "did not receive a valid HTTP response" and was connected the same second). A repeat
+            # (backoff already grown) stays ERROR.
+            _lvl = logging.ERROR if backoff > config.ANGELONE_WS_RECONNECT_BACKOFF_S else logging.WARNING
+            logger.log(_lvl, "position-stocks WS: error (%s) — reconnecting in %ss", e, backoff)
 
         _mark_conn(idx, False)
         if _running:

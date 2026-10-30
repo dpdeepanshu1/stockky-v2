@@ -44,6 +44,18 @@ _security_cache_loaded_at: float = 0.0
 # After a failed load, get_security_id answers from the empty cache for this long, then tries again (the background warm task retries too).
 _SECURITY_LOAD_RETRY_AFTER_FAILURE_S = 60.0
 _security_load_failed_at: float = 0.0
+# E259: symbols the Dhan list holds only OUTSIDE series EQ (BE / BZ / SM ...), so a miss can say "listed, but not tradable here" instead of "not found";
+# and a throttle for the one forced re-load a miss may trigger (the 24 h cache can lag a fresh list).
+_security_other_series: dict[str, str] = {}
+_security_miss_reload_at: float = 0.0
+_SECURITY_MISS_RELOAD_MIN_S = 1800.0
+
+
+def _norm_series(v) -> str:
+    """E259: a blank SEM_SERIES read through pandas is NaN and str(nan) == 'nan', which the series filter (EQ or blank) then rejected - a normal NSE
+    equity row with an empty series vanished from the cache. Blank-like values now count as blank, exactly as the CSV fallback path already treated them."""
+    t = str(v).strip() if v is not None else ""
+    return "" if t.lower() in ("nan", "none", "null") else t
 _security_collision_count = 0
 
 NSE_EQ_SEGMENT = "NSE_EQ"
@@ -274,11 +286,12 @@ def _load_security_cache(db: Session) -> None:
     """Same load logic as real-trade-service's (SDK compact CSV, CSV-download
     fallback), duplicated so this service's cache lives in its own process
     memory and refresh cycle."""
-    global _security_cache, _security_cache_loaded_at, _security_collision_count
+    global _security_cache, _security_cache_loaded_at, _security_collision_count, _security_other_series
     client = _get_sdk_client(db)
     _security_collision_count = 0
 
     fresh: dict[str, str] = {}
+    fresh_other: dict[str, str] = {}      # E259: symbol -> non-EQ series
     try:
         df = _fetch_security_list_quiet(client)
         if df is not None and not df.empty:
@@ -286,11 +299,13 @@ def _load_security_cache(db: Session) -> None:
                 try:
                     exch = str(row.get("SEM_EXM_EXCH_ID", row.get("EXCH_ID", ""))).strip()
                     instrument = str(row.get("SEM_INSTRUMENT_NAME", row.get("INSTRUMENT_NAME", ""))).strip()
-                    series = str(row.get("SEM_SERIES", row.get("SERIES", ""))).strip()
+                    series = _norm_series(row.get("SEM_SERIES", row.get("SERIES", "")))
                     sym = str(row.get("SEM_TRADING_SYMBOL", row.get("TRADING_SYMBOL", ""))).strip().upper()
                     sec_id_raw = str(row.get("SEM_SMST_SECURITY_ID", row.get("SECURITY_ID", ""))).strip()
                     if exch == "NSE" and instrument == "EQUITY" and series in ("EQ", ""):
                         _add_security(fresh, sym, sec_id_raw)
+                    elif exch == "NSE" and instrument == "EQUITY" and sym:
+                        fresh_other.setdefault(sym, series)
                 except Exception:
                     continue
     except Exception as e:
@@ -315,6 +330,9 @@ def _load_security_cache(db: Session) -> None:
                     if row.get("SEM_INSTRUMENT_NAME") != "EQUITY":
                         continue
                     if row.get("SEM_SERIES") not in (None, "", "EQ"):
+                        _sy = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
+                        if _sy:
+                            fresh_other.setdefault(_sy, str(row.get("SEM_SERIES")).strip())
                         continue
                     sym = (row.get("SEM_TRADING_SYMBOL") or "").strip().upper()
                     sec_id_raw = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
@@ -335,8 +353,25 @@ def _load_security_cache(db: Session) -> None:
         )
 
     _security_cache = fresh
+    _security_other_series = fresh_other
     _security_cache_loaded_at = time.time()
     logger.info("position-stocks: loaded %d NSE equity security IDs from Dhan", len(fresh))
+
+
+def _reload_on_miss(db: Session) -> bool:
+    """E259: at most one forced security-list re-load per _SECURITY_MISS_RELOAD_MIN_S, only after a symbol miss. True when a load ran (the
+    cache keeps the old list when the load gives nothing). Never raises."""
+    global _security_miss_reload_at
+    now = time.time()
+    if now - _security_miss_reload_at < _SECURITY_MISS_RELOAD_MIN_S:
+        return False
+    _security_miss_reload_at = now
+    try:
+        _load_security_cache(db)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("security list re-load after a miss failed (%s)", e)
+        return False
 
 
 def get_security_id(db: Session, symbol: str) -> str:
@@ -355,7 +390,17 @@ def get_security_id(db: Session, symbol: str) -> str:
             raise SecurityNotResolvedError(
                 f"No Dhan NSE_EQ security_id found for '{sym}'. The Dhan security list is empty (it did not load - check the Dhan token / connection "
                 f"and the service log for 'Dhan instrument list fetch returned 0 usable rows').")
-        raise SecurityNotResolvedError(f"No Dhan NSE_EQ security_id found for '{sym}'.")
+        # E259: the cache is loaded but the symbol is not in it. Try ONE forced re-load (throttled) in case the cached list lags, then say WHY.
+        if _reload_on_miss(db):
+            sec_id = _security_cache.get(sym)
+        if sec_id is None:
+            other = _security_other_series.get(sym)
+            if other:
+                raise SecurityNotResolvedError(
+                    f"No Dhan NSE_EQ security_id found for '{sym}': Dhan lists it on NSE only in series '{other}' (not EQ - usually trade-for-trade / "
+                    f"surveillance, no intraday), so it is not tradable here.")
+            raise SecurityNotResolvedError(
+                f"No Dhan NSE_EQ security_id found for '{sym}': not in Dhan's NSE equity list ({len(_security_cache)} symbols, checked again just now).")
     return _clean_security_id(sec_id)
 
 
@@ -1134,6 +1179,39 @@ def edis_inquire(db: Session, isin: str = "ALL") -> dict:
     return resp.json() or {}
 
 
+_DDPI_TTL_OK_S = 3600.0        # a known answer is reused for an hour
+_DDPI_TTL_UNKNOWN_S = 300.0    # a failed / unreadable answer is retried after 5 min
+_ddpi_cache: dict = {"at": 0.0, "ttl": 0.0, "value": None}
+
+
+def ddpi_status(db: Session) -> dict:
+    """E259: is DDPI (Demat Debit and Pledge Instruction, Dhan's standing 'fast sell' authorisation) Active on the account? GET /v2/profile -> field
+    "ddpi" ("Active" / "Deactive"). Returns {"active": True | False | None, "raw": <text or None>}; None = could not tell (never treated as active).
+    With DDPI active a SELL of a holding needs no daily CDSL TPIN step, so the daily eDIS 'pending' verdict and the 'Verify Holdings' alert do not apply.
+    NOT yet confirmed against a live response from this account: if "raw" comes back None, the profile body had no 'ddpi' key. Never raises."""
+    now = time.time()
+    c = _ddpi_cache
+    if c["value"] is not None and (now - c["at"]) < c["ttl"]:
+        return dict(c["value"])
+    out = {"active": None, "raw": None}
+    try:
+        creds = dhan_credentials_ro.get_decrypted_credentials(db)
+        if creds is not None:
+            _cid, token = creds
+            resp = httpx.get("https://api.dhan.co/v2/profile", headers={"Content-Type": "application/json", "access-token": token}, timeout=10.0)
+            resp.raise_for_status()
+            body = resp.json() or {}
+            body = body.get("data") if isinstance(body.get("data"), dict) else body
+            raw = body.get("ddpi") if isinstance(body, dict) else None
+            if raw is not None:
+                txt = str(raw).strip()
+                out = {"active": txt.lower() in ("active", "true", "enabled", "yes", "y"), "raw": txt}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("ddpi_status: profile read failed (%s)", e)
+    c.update(at=now, ttl=_DDPI_TTL_OK_S if out["active"] is not None else _DDPI_TTL_UNKNOWN_S, value=out)
+    return dict(out)
+
+
 def edis_verification_summary(db: Session) -> dict:
     """Summarize edis_inquire("ALL") into "is today's CDSL authorization
     already done for every current holding?" Three outcomes, kept
@@ -1151,6 +1229,15 @@ def edis_verification_summary(db: Session) -> dict:
     """
     from datetime import datetime, timezone
     checked_at = datetime.now(timezone.utc).isoformat()
+    # E259: DDPI active = holdings sell without the daily TPIN step, whatever the per-holding inquire rows say
+    try:
+        _dd = ddpi_status(db)
+    except Exception:  # noqa: BLE001
+        _dd = {"active": None}
+    if _dd.get("active") is True:
+        return {"verified_today": True, "no_holdings": False, "ddpi_active": True, "checked_at": checked_at,
+                "detail": "DDPI is Active on the Dhan account - holdings can be sold without the daily TPIN step.",
+                "holdings_total": 0, "holdings_pending": 0, "pending_symbols": []}
     try:
         raw = edis_inquire(db, isin="ALL")
     except DhanNotConnectedError as e:

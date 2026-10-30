@@ -128,6 +128,14 @@ EARLY_WARN_DAYS = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or "").strip() or "6")
 # unaffected — only the notification is throttled.
 CDSL_ALERT_COOLDOWN_MIN = int(((os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN") or "").strip() or "60"))
 
+
+def _ddpi_active(db) -> bool:
+    """E259: True only when Dhan's profile says DDPI is Active (cached, never raises)."""
+    try:
+        return dhan_client.ddpi_status(db).get("active") is True
+    except Exception:  # noqa: BLE001
+        return False
+
 # 2026-09-07: after this many CONSECUTIVE unrecognized SELL rejections for
 # the same position, escalate to a distinctly-worded alert (see the generic
 # rejection branch in _send_real_sell) instead of sending an identical
@@ -916,7 +924,18 @@ def _send_real_sell(
                     due = elapsed_min >= CDSL_ALERT_COOLDOWN_MIN
                 except Exception:
                     due = True
-            if due:
+            if due and _ddpi_active(db):
+                # E259: DDPI shows Active, so the 'Verify Holdings' TPIN step should not be needed - a refusal now means something else is wrong
+                notify_sync(
+                    f"🔒 *EXIT BLOCKED — CDSL refusal although DDPI is Active* — "
+                    f"{position.symbol} ×{qty} ({reason})\n"
+                    "Dhan's profile says DDPI is Active, yet it still refused this SELL with a CDSL error. Usual causes: DDPI was switched on "
+                    "today and is not effective for this holding yet (it can take until the next day), or this ISIN is not covered. "
+                    "Try the Dhan app -> Verify Holdings once for this stock, or ask Dhan support. Position remains open; retries continue.\n"
+                    f"(Next alert for this position suppressed for {CDSL_ALERT_COOLDOWN_MIN} min.)"
+                )
+                save_snapshot(db, snap_key, {"at": datetime.now(timezone.utc).isoformat()})
+            elif due:
                 notify_sync(
                     f"🔒 *EXIT BLOCKED — CDSL authorization required* — "
                     f"{position.symbol} ×{qty} ({reason})\n"

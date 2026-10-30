@@ -956,6 +956,12 @@ async def dhan_edis_status(admin: str = Depends(require_admin), db: Session = De
     return dhan_client.edis_inquire(db, isin=isin)
 
 
+@app.get("/dhan/ddpi")
+async def dhan_ddpi(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """E259: Dhan's own DDPI ('fast sell') flag from GET /v2/profile: {active: true|false|null, raw: 'Active'|...}. null = could not tell. Read-only; cached 1 h."""
+    return dhan_client.ddpi_status(db)
+
+
 @app.get("/dhan/edis/summary")
 async def dhan_edis_summary(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     """Dashboard-friendly rollup of the daily CDSL eDIS check — this is what

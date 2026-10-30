@@ -1413,6 +1413,7 @@ services/position-stocks-service/tests/test_e252_adaptive_exits.py
 services/position-stocks-service/tests/test_e257_guard_stats.py
 services/position-stocks-service/tests/test_e258_overnight_stop_circuit_band.py
 services/position-stocks-service/tests/test_e259_gate_prefilter.py
+services/position-stocks-service/tests/test_e259_security_ddpi.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1798,6 +1799,7 @@ services/real-trade-service/tests/test_e217_circuit_rejected_symbol_not_retried.
 services/real-trade-service/tests/test_e252_day_spike_gate.py
 services/real-trade-service/tests/test_e257_guard_stats.py
 services/real-trade-service/tests/test_e258_broker_stop_circuit_band.py
+services/real-trade-service/tests/test_e259_security_ddpi.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

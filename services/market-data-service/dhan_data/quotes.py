@@ -358,11 +358,17 @@ def peek(symbol: str, max_age_s: Optional[float] = None) -> Optional[dict]:
 
 def inject_rows(rows: Iterable[dict]) -> None:
     """Websocket ticks land here so REST callers see them without another request."""
+    rows = list(rows)                                       # E268: the rows are read twice (cache, then the order-flow tape); a generator would be empty the second time
     with _cond:
         for row in rows:
             if row.get("symbol") and row.get("price"):
                 _rows[row["symbol"]] = row
         _stats["rows_cached"] = len(_rows)
+    try:                                                    # E268: websocket ticks feed the order-flow tape too (REST rows reach it via the listener)
+        import order_flow_tape
+        order_flow_tape.on_rows(rows)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 _last_call: dict = {}      # group344: breakdown of the most recent get_quotes() call (see last_call_breakdown)

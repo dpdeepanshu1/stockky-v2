@@ -47,7 +47,7 @@ import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
-from entry_engine import day_spike_gate
+from entry_engine import day_spike_gate, flow_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
@@ -1074,6 +1074,18 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _g4d_reason,
                                    "risk_verdict": None, "gate_tag": _g4d_tag})
+            continue
+
+        # ── Gate 4d-2 (E268): intraday order-flow tape ───────────────────────
+        # Six-point order-flow checklist from market-data's tape (value area, HVN wall, aggressor, absorption / exhaustion, delta, big prints).
+        # Refuses only on a RELIABLE tape with FLOW_GATE_MIN_AGAINST adverse checks; no tape / unreliable / slow = no opinion. FLOW_GATE_MODE live|log|off.
+        _flow_reason = await flow_gate.check(decision, cand.symbol, "LONG")
+        if _flow_reason:
+            _wait_with_preview(_flow_reason)
+            decision.gate_tag = "order_flow"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _flow_reason,
+                                   "risk_verdict": None, "gate_tag": "order_flow"})
             continue
 
         # ── Gate 4e (group 351): daily market-structure ("good stock, bad entry?") ───────────────────────────────────────

@@ -34,6 +34,7 @@ def db(monkeypatch):
                       (se.calendar_gate, "scalp_cutoff_reason"), (se.depth_gate, "max_qty_from_book"), (se.depth_gate, "max_qty_from_depth20"),
                       (se.cost_gate, "reject_reason"), (se.entry_pause, "symbol_blocked")):
         monkeypatch.setattr(mod, name, lambda *a, **k: None)
+    monkeypatch.setattr(se.flow_gate, "entry_check", lambda *a, **k: (None, None))      # E269: no order-flow tape (and no network call) unless a test sets one
     from screening import opening_gate
     monkeypatch.setattr(opening_gate, "stop_reject", lambda *a, **k: None)
     lv = types.SimpleNamespace(stop_price=101.0, target_price=98.0, stop_pct=1.0, target_pct=2.0, side="SHORT")
@@ -83,6 +84,24 @@ def test_a_gate_refusal_logs_one_skip_row_per_five_minutes(db, monkeypatch):
     assert len(rows) == 1 and rows[0].decision == "SHORT_SKIP" and rows[0].reason.startswith("VWAP_ABOVE:")
     assert db.query(models.ScalpShortShadow).count() == 0
     assert se.summary(db)["gate_counters"]["by_code"]["VWAP_ABOVE"] == 2
+
+
+def test_e269_a_reliable_adverse_tape_refuses_the_shadow_short(db, monkeypatch):
+    seen = []
+    monkeypatch.setattr(se.flow_gate, "entry_check", lambda sym, side, fj=None: (seen.append((sym, side)) or ("ORDER_FLOW:3_of_6_against_short(delta)", None)))
+    assert se.attempt_short_shadow(db, cand(), None, {"conviction": 70}, NOW) is None
+    assert seen == [("X", "SHORT")]                                                     # the SHORT checklist, not the long one
+    rows = db.query(models.ScalpCandidateLog).all()
+    assert len(rows) == 1 and rows[0].decision == "SHORT_SKIP" and rows[0].reason.startswith("SHORT_ORDER_FLOW:")
+    assert db.query(models.ScalpShortShadow).count() == 0
+    assert se.summary(db)["gate_counters"]["by_code"]["SHORT_ORDER_FLOW"] == 1
+
+
+def test_e269_no_tape_opinion_leaves_the_shadow_short_untouched_and_plan_carries_the_tape(db, monkeypatch):
+    monkeypatch.setattr(se.flow_gate, "entry_check", lambda sym, side, fj=None: (None, '{"tape":{"against":1}}'))
+    plan = se.plan_short(db, cand(), None, {"conviction": 70}, NOW)
+    assert plan is not None and plan["tape_json"] == '{"tape":{"against":1}}'
+    assert se.attempt_short_shadow(db, cand("Y"), None, {"conviction": 70}, NOW) is not None
 
 
 def test_a_symbol_held_as_a_long_is_refused(db, monkeypatch):

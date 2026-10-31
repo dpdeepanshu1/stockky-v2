@@ -46,6 +46,7 @@ archive/stray-root-files/production_fixes_round3.patch
 archive/stray-root-files/tier_breakdown.csv
 config/service_urls.py
 data/prediction-model/model.pkl
+data/prediction-model/model.pkl.backup-2026-10-30
 deploy/deploy.sh
 deploy/nginx-stockky.conf
 docker-compose.yml
@@ -126,11 +127,9 @@ frontend/src/components/WatchlistPulse.tsx
 frontend/src/components/alertsView.ts
 frontend/src/components/app/AiInsightDeck.tsx
 frontend/src/components/app/AppNav.tsx
-frontend/src/components/app/BackendStatusDot.tsx
 frontend/src/components/app/DashboardView.tsx
 frontend/src/components/app/OvernightAutomationPanel.tsx
 frontend/src/components/app/SettingsPage.tsx
-frontend/src/components/app/TabButton.tsx
 frontend/src/components/app/TabContent.tsx
 frontend/src/components/app/appTypes.ts
 frontend/src/components/app/clocks.tsx
@@ -179,6 +178,8 @@ frontend/src/components/calibration/ShortSellingPanel.tsx
 frontend/src/components/calibration/StatusProbesPanel.tsx
 frontend/src/components/calibration/SwingPanel.tsx
 frontend/src/components/calibration/SwitchesPanel.tsx
+frontend/src/components/calibration/TapePanel.tsx
+frontend/src/components/calibration/TapeSymbolCard.tsx
 frontend/src/components/calibration/TestsPanel.tsx
 frontend/src/components/calibration/TradesPanel.tsx
 frontend/src/components/calibration/WeatherPanel.tsx
@@ -282,6 +283,10 @@ frontend/src/structureView.ts
 frontend/src/surpriseView.test.mjs
 frontend/src/swing.test.mjs
 frontend/src/swingView.ts
+frontend/src/tape.test.mjs
+frontend/src/tapeSymbol.test.mjs
+frontend/src/tapeSymbolView.ts
+frontend/src/tapeView.ts
 frontend/src/timeMachine.test.mjs
 frontend/src/timeMachineView.ts
 frontend/src/tradesView.test.mjs
@@ -358,6 +363,7 @@ scripts/exit_followup_study.py
 scripts/export_intraday.py
 scripts/export_records.py
 scripts/fetch_history_for_backtest.py
+scripts/flow_tape_report.py
 scripts/freeze_constraints.sh
 scripts/gate_scorecard.py
 scripts/gen_env_reference.py
@@ -375,6 +381,7 @@ scripts/ma_baseline.py
 scripts/ml_v2_walkforward.py
 scripts/mode_compare.py
 scripts/monday_check.py
+scripts/movers_review.py
 scripts/ms_ab_report.py
 scripts/ms_g1_check.py
 scripts/opening_replay.py
@@ -427,6 +434,7 @@ scripts/test_env_review_check.py
 scripts/test_env_structure_check.py
 scripts/test_exit_followup_study.py
 scripts/test_export_records.py
+scripts/test_flow_tape_report.py
 scripts/test_group467_performance.py
 scripts/test_group468_calibration_snapshot.py
 scripts/test_group468_entry_slippage_review.py
@@ -438,6 +446,7 @@ scripts/test_legacy_gate_backtest.py
 scripts/test_live_vs_backtest.py
 scripts/test_ma_baseline.py
 scripts/test_ml_v2_walkforward.py
+scripts/test_movers_review.py
 scripts/test_ms_ab_report.py
 scripts/test_ms_g1_check.py
 scripts/test_opening_replay.py
@@ -1088,6 +1097,7 @@ services/market-data-service/migrations/fundamentals_cache.sql
 services/market-data-service/migrations/live_quotes.sql
 services/market-data-service/migrations/symbol_master.sql
 services/market-data-service/oracle_compat.py
+services/market-data-service/order_flow_tape.py
 services/market-data-service/rate_limiter.py
 services/market-data-service/requirements.txt
 services/market-data-service/session_proof.py
@@ -1108,6 +1118,8 @@ services/market-data-service/tests/test_e188_bulk_quote_freshness.py
 services/market-data-service/tests/test_e210_single_quote_live_tick_fetched_at.py
 services/market-data-service/tests/test_e218_angelone_rest_ltp_only.py
 services/market-data-service/tests/test_e267_yfinance_log_noise.py
+services/market-data-service/tests/test_e268_order_flow_tape.py
+services/market-data-service/tests/test_e271_tape_status_health.py
 services/market-data-service/tests/test_e27_intraday_row_cap.py
 services/market-data-service/tests/test_fallback_universe_has_no_delisted.py
 services/market-data-service/tests/test_feed_universe_drops_delisted.py
@@ -1283,6 +1295,7 @@ services/position-stocks-service/orders/eod_squareoff.py
 services/position-stocks-service/orders/excursion.py
 services/position-stocks-service/orders/exit_adaptive.py
 services/position-stocks-service/orders/exit_retry.py
+services/position-stocks-service/orders/flow_gate.py
 services/position-stocks-service/orders/gain_room.py
 services/position-stocks-service/orders/guard_stats.py
 services/position-stocks-service/orders/journal_notes.py
@@ -1310,6 +1323,8 @@ services/position-stocks-service/orders/stop_watchdog.py
 services/position-stocks-service/orders/stopout_guard.py
 services/position-stocks-service/orders/structure_gate.py
 services/position-stocks-service/orders/structure_observation.py
+services/position-stocks-service/orders/tape_exit.py
+services/position-stocks-service/orders/tape_hook.py
 services/position-stocks-service/orders/tm_gate.py
 services/position-stocks-service/orders/trade_odds.py
 services/position-stocks-service/orders/trade_report.py
@@ -1417,8 +1432,14 @@ services/position-stocks-service/tests/test_e257_guard_stats.py
 services/position-stocks-service/tests/test_e258_overnight_stop_circuit_band.py
 services/position-stocks-service/tests/test_e259_gate_prefilter.py
 services/position-stocks-service/tests/test_e259_security_ddpi.py
+services/position-stocks-service/tests/test_e263_exit_hold_rules.py
+services/position-stocks-service/tests/test_e265_symbol_lock_retry.py
 services/position-stocks-service/tests/test_e266_conviction_sizing.py
 services/position-stocks-service/tests/test_e267_ws_error_level.py
+services/position-stocks-service/tests/test_e268_flow_gate.py
+services/position-stocks-service/tests/test_e269_short_tape_gate_wiring.py
+services/position-stocks-service/tests/test_e270_tape_exit.py
+services/position-stocks-service/tests/test_e271_tape_record_and_stats.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1614,6 +1635,7 @@ services/real-trade-service/entry_engine/conviction_sizing.py
 services/real-trade-service/entry_engine/day_spike_gate.py
 services/real-trade-service/entry_engine/entry.py
 services/real-trade-service/entry_engine/event_risk.py
+services/real-trade-service/entry_engine/flow_gate.py
 services/real-trade-service/entry_engine/global_cues.py
 services/real-trade-service/entry_engine/kronos_gate.py
 services/real-trade-service/entry_engine/liquidity_gate.py
@@ -1657,6 +1679,7 @@ services/real-trade-service/exit_engine/excursion.py
 services/real-trade-service/exit_engine/exit.py
 services/real-trade-service/exit_engine/exit.py,cover
 services/real-trade-service/exit_engine/structure_exit.py
+services/real-trade-service/exit_engine/tape_exit.py
 services/real-trade-service/intraday_eligibility.py
 services/real-trade-service/journal_notes.py
 services/real-trade-service/main.py
@@ -1807,7 +1830,11 @@ services/real-trade-service/tests/test_e252_day_spike_gate.py
 services/real-trade-service/tests/test_e257_guard_stats.py
 services/real-trade-service/tests/test_e258_broker_stop_circuit_band.py
 services/real-trade-service/tests/test_e259_security_ddpi.py
+services/real-trade-service/tests/test_e264_tradable_gate.py
 services/real-trade-service/tests/test_e266_conviction_sizing.py
+services/real-trade-service/tests/test_e268_flow_gate.py
+services/real-trade-service/tests/test_e270_tape_exit.py
+services/real-trade-service/tests/test_e271_tape_history_and_stats.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

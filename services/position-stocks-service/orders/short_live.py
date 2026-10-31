@@ -32,7 +32,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from control.kit import current_profile as _current_profile
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import approve_first, entry_cap, entry_pause, opening_protect, plain_short, sell_probe, short_entry, tm_gate, trade_odds
+from orders import approve_first, entry_cap, entry_pause, flow_gate, opening_protect, plain_short, sell_probe, short_entry, tm_gate, trade_odds
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-short-live")
@@ -339,6 +339,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             pos.flow_json = _orb.attach(pos.flow_json, sym, _dg._fresh_quote(sym), live, side="SHORT")   # E119: mirrored opening-range record (close below the range low), record only
         except Exception:  # noqa: BLE001
             logger.debug("short live: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
+        pos.flow_json = flow_gate.merge_tape(pos.flow_json, plan.get("tape_json"))   # E269: the order-flow tape verdict seen at entry, record only, never raises
         pos.flow_json = tm_gate.stamp(pos.flow_json, plan.get("tm_ev"))      # E115: the Time Machine verdict, record only, never raises
         db.add(pos)
         db.commit()

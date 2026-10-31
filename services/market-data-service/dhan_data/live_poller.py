@@ -96,8 +96,18 @@ def _observe_for_session_proof(rows: List[dict]) -> None:
         pass
 
 
+def _observe_for_flow_tape(rows: List[dict]) -> None:
+    """E268: every Dhan quote row also feeds the intraday order-flow tape (order_flow_tape.py). Never raises."""
+    try:
+        import order_flow_tape
+        order_flow_tape.on_rows(rows)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _on_rows(rows: List[dict]) -> None:
     _observe_for_session_proof(rows)
+    _observe_for_flow_tape(rows)
     live_store.submit(rows)
     if config.shadow_compare():
         _compare(rows)

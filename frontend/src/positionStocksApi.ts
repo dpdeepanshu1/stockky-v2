@@ -9,6 +9,8 @@
 // service's real-money controls through a shared client.
 
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
+import type { FlowStatsDoc } from "./tapeView";
+import type { SymbolTapeDoc } from "./tapeSymbolView";
 
 const STORAGE_URL_KEY = "stockky:position_stocks_api_url";
 // Deliberately a SEPARATE localStorage key from real-trade-service's
@@ -581,6 +583,10 @@ export const positionStocksApi = {
   probe: (path: string) => psRequest<any>(path, undefined, true),
   // E144: read-only list of exits still waiting for their real fill (the Resolve-now sweep, POST /reconcile/pending/resolve, stays API-only).
   reconcilePending: () => psRequest<PendingReconcileDoc>("/reconcile/pending"),
+  // E271: order-flow tape health + entry-gate / exit counters of this service (GET /flow/stats, admin, read-only).
+  flowStats: () => psRequest<FlowStatsDoc>("/flow/stats", undefined, true),
+  // E271: the tape of one symbol (GET /flow/symbol/{symbol}, admin, read-only): profile levels, signals and the six checks for LONG and SHORT.
+  flowSymbol: (symbol: string) => psRequest<SymbolTapeDoc>(`/flow/symbol/${encodeURIComponent(symbol.trim().toUpperCase())}`, undefined, true),
 
   // ADDED (this session — "manual control to buy... and manual exit if
   // needed"): neither existed before. manualBuy sizes automatically when

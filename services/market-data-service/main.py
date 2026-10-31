@@ -1010,6 +1010,41 @@ def depth20_book(symbol: str, qty: Optional[float] = None, slip_pct: Optional[fl
         return {"symbol": (symbol or "").upper(), "available": False, "reason": f"error:{type(e).__name__}"}
 
 
+@app.get("/flow/{symbol}")
+def order_flow_summary(symbol: str, side: Optional[str] = None, min_against: Optional[int] = None):
+    """E268: intraday order-flow tape for one NSE symbol (order_flow_tape.py): estimated buy / sell delta per minute, big prints, footprint levels,
+    session volume profile (POC / VAH / VAL / HVN / LVN), absorption / exhaustion and the six-point checklist for LONG and SHORT. Built from Dhan quote
+    snapshots (cumulative volume + VWAP), so it is an ESTIMATE; `reliable` is False until the tape has seen enough of the day (callers treat that as no
+    opinion). With `side=LONG|SHORT` the answer is the compact gate verdict (`block`, `reason`). Always HTTP 200; never raises."""
+    try:
+        import order_flow_tape
+        if side:
+            return _sanitize_for_json(order_flow_tape.verdict(symbol, side, min_against))
+        return _sanitize_for_json(order_flow_tape.snapshot(symbol))
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": (symbol or "").upper(), "available": False, "reliable": False, "reason": f"error:{type(e).__name__}"}
+
+
+@app.get("/flow/{symbol}/bars")
+def order_flow_bars(symbol: str, limit: int = 60):
+    """E268: the last `limit` (max 420) 1-minute flow bars with the per-price footprint levels. Empty list when there is no tape."""
+    try:
+        import order_flow_tape
+        return _sanitize_for_json({"symbol": (symbol or "").upper(), "bars": order_flow_tape.bars(symbol, max(1, min(420, int(limit))))})
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": (symbol or "").upper(), "bars": [], "reason": f"error:{type(e).__name__}"}
+
+
+@app.get("/internal/flow-status")
+def order_flow_status():
+    """E268: tape health: symbols tracked, rows / intervals counted, rows skipped (no volume, reset, gap), errors."""
+    try:
+        import order_flow_tape
+        return _sanitize_for_json(order_flow_tape.status())
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": f"{type(e).__name__}"}
+
+
 @app.get("/internal/data-sources")
 def data_sources_status():
     """group278: provider order, health of Dhan / AngelOne / yfinance and which one is serving right now, for

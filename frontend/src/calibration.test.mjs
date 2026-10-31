@@ -142,7 +142,7 @@ for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); asse
 const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
 assert.match(bar, /Run all test cases/);
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
-assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the three read-only status sections added in E144 (Swing lane, Reconciliation, Status probes: they start no test)");
+assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"tape\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the read-only status sections (Swing lane, Reconciliation and Status probes from E144, Order-flow tape from E271: they start no test)");
 // E51: the scheduler's alert switches go through the gateway proxy, never straight to the scheduler
 assert.match(tab, /section === \"alerts\" && <SwitchesPanel svc=\"sch\" \/>/);
 assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gateway proxy path");

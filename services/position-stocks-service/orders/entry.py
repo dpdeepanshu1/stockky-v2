@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -717,6 +717,14 @@ def attempt_entry(
     if _vwap_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _vwap_reject, quality=quality)
+        return None
+
+    # E268: intraday order-flow tape (orders/flow_gate.py): refuses only on a RELIABLE tape with FLOW_GATE_MIN_AGAINST adverse checks of the six-point
+    # order-flow checklist; no tape / unreliable / slow = no opinion. FLOW_GATE_MODE live | log | off. Verdict stamped into flow_json["tape"]. Never raises.
+    _flow_reject, _flow_snap = flow_gate.entry_check(candidate.symbol, "LONG", _flow_snap)
+    if _flow_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _flow_reject, quality=quality)
         return None
 
     # group333: volume / turnover floor - normal daily turnover, today's turnover so far, relative volume (orders/liquidity_gate.py). Cached data only; fails open.

@@ -110,6 +110,13 @@ check("live: capital reserved as SHORT, unused part released", calls["reserved"]
 check("live: position saved as SHORT/OPEN with the order id", r is not None and r.side == "SHORT" and r.status == "OPEN" and r.dhan_super_order_id == "S1" and r.quantity == 1 and r.capital_risked == 100.0)
 check("live: order budget counted, symbol lock kept", db.gate.orders_placed_today == 1 and not calls["lock_rel"])
 check("live: telegram sent", any("SHORT placed" in n for n in NOTES))
+# 2b E269: the order-flow tape verdict the plan saw is saved on the position (record only); no tape in the plan = nothing added
+import json as _json
+reset(); _p0 = se.plan_short; se.plan_short = lambda *a, **k: {**_p0(*a, **k), "tape_json": _json.dumps({"tape": {"reliable": True, "block": False, "against": 1}})}
+db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("E269: the entry tape is stamped on the live short's flow_json", r is not None and _json.loads(r.flow_json)["tape"]["against"] == 1)
+reset(); db = DB(gate()); r = sl.attempt_short_live(db, cand)
+check("E269: no tape in the plan -> flow_json has no tape key", r is not None and "tape" not in _json.loads(r.flow_json or "{}"))
 # 3 raised cap
 reset(cap=50); db = DB(gate()); sl.attempt_short_live(db, cand); check("cap 50: qty 50", calls["orders"][0]["quantity"] == 50)
 reset(cap=500, qty=30); db = DB(gate()); sl.attempt_short_live(db, cand); check("cap above plan: plan qty wins", calls["orders"][0]["quantity"] == 30)

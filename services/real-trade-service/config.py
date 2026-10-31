@@ -701,6 +701,44 @@ ORDER_FLOW_RECORD = _of_on("ORDER_FLOW_RECORD")
 ORDER_FLOW_DEPTH20 = _of_on("ORDER_FLOW_DEPTH20")
 ORDER_FLOW_DEPTH20_TIMEOUT_S = max(0.2, _og_float("ORDER_FLOW_DEPTH20_TIMEOUT_S", 1.5))
 
+# ── E268: order-flow tape gate (market-data GET /flow/{symbol}?side=LONG) ─────
+#   FLOW_GATE_MODE         live (default) | log | off   live = a LONG entry is refused (WAIT, gate_tag "order_flow") when the tape is RELIABLE and at
+#                          least FLOW_GATE_MIN_AGAINST independent checks of the six-point order-flow checklist are against it (value area, HVN wall,
+#                          aggressor / stacked imbalance, absorption / exhaustion / book lean, delta, big prints). log = record the verdict, never
+#                          block. An unreliable tape, market-data down or a slow call = no opinion, the entry goes on.
+#   FLOW_GATE_MIN_AGAINST  adverse checks needed to refuse (default 2, 1..6)
+#   FLOW_GATE_TIMEOUT_S    longest wait for the one call (default 1.0 s)
+#   FLOW_RECORD            1 (default) | 0   store the verdict on decision.flow_json["tape"] for every entry that reaches the gate
+FLOW_GATE_MODE = (os.getenv("FLOW_GATE_MODE") or "live").strip().lower()
+if FLOW_GATE_MODE not in ("live", "log", "off"):
+    FLOW_GATE_MODE = "off"                                                   # a typo must not switch a gate on
+FLOW_GATE_MIN_AGAINST = int(min(6, max(1, _og_float("FLOW_GATE_MIN_AGAINST", 2))))
+FLOW_GATE_TIMEOUT_S = max(0.2, _og_float("FLOW_GATE_TIMEOUT_S", 1.0))
+
+# ── E270: order-flow tape on EXITS (tape_exit.py; same tape as the entry gate) ──────────────────────────────────────────────────────────────
+#   FLOW_EXIT_MODE           live (default) | log | off   live = a RELIABLE adverse tape pulls an open trade's stop in and trims its target to the next
+#                            HVN wall; log = decide and log only; off = nothing runs. Only ever tightens (stop never loosened, target never raised).
+#   FLOW_EXIT_MIN_AGAINST    adverse checks needed (default 3, 1..6); at least one must be delta or imbalance
+#   FLOW_EXIT_MIN_PROFIT_PCT stop is tightened when the trade is at least this % in profit (default 0.3) ...
+#   FLOW_EXIT_NEAR_STOP_FRAC ... or the price has used this fraction of the way from entry to the stop (default 0.5)
+#   FLOW_EXIT_STOP_GAP_PCT   new stop sits this % behind the live price (default 0.25)
+#   FLOW_EXIT_MIN_TARGET_PCT a trimmed target must still pay this % from entry (default 0.5)
+#   FLOW_EXIT_MIN_INTERVAL_S per-position minimum seconds between tape moves (default 20)
+#   FLOW_EXIT_TIMEOUT_S      longest wait for the one market-data call (default 0.6 s; slower = no opinion)
+#   FLOW_EXIT_SAME_DAY_ONLY  1 (default) | 0   real-trade only: the tape is today's session, so a position bought on an earlier day is left alone
+FLOW_EXIT_MODE = (os.getenv("FLOW_EXIT_MODE") or "live").strip().lower()
+if FLOW_EXIT_MODE not in ("live", "log", "off"):
+    FLOW_EXIT_MODE = "off"                                                   # a typo must not switch it on
+FLOW_EXIT_MIN_AGAINST = int(min(6, max(1, _og_float("FLOW_EXIT_MIN_AGAINST", 3))))
+FLOW_EXIT_MIN_PROFIT_PCT = max(0.0, _og_float("FLOW_EXIT_MIN_PROFIT_PCT", 0.3))
+FLOW_EXIT_NEAR_STOP_FRAC = min(1.0, max(0.05, _og_float("FLOW_EXIT_NEAR_STOP_FRAC", 0.5)))
+FLOW_EXIT_STOP_GAP_PCT = max(0.05, _og_float("FLOW_EXIT_STOP_GAP_PCT", 0.25))
+FLOW_EXIT_MIN_TARGET_PCT = max(0.0, _og_float("FLOW_EXIT_MIN_TARGET_PCT", 0.5))
+FLOW_EXIT_MIN_INTERVAL_S = max(0.0, _og_float("FLOW_EXIT_MIN_INTERVAL_S", 20.0))
+FLOW_EXIT_TIMEOUT_S = max(0.2, _og_float("FLOW_EXIT_TIMEOUT_S", 0.6))
+FLOW_EXIT_SAME_DAY_ONLY = _og_float("FLOW_EXIT_SAME_DAY_ONLY", 1.0) != 0.0
+FLOW_RECORD = _of_on("FLOW_RECORD")
+
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
 #      VIX_GATE_ENABLED         master switch for the VIX checks

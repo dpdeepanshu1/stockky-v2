@@ -9,6 +9,8 @@
 // architecture is built around.
 
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
+import type { FlowStatsDoc } from "./tapeView";
+import type { SymbolTapeDoc } from "./tapeSymbolView";
 
 const STORAGE_URL_KEY = "stockky:real_trade_api_url";
 const STORAGE_TOKEN_KEY = "stockky:real_trade_session_token";
@@ -658,6 +660,10 @@ export const realTradeApi = {
   probe: (path: string) => rtRequest<any>(path, undefined, true),
   // E144: hourly broker-vs-book drift report (REAL only; read-only). The page never passes run=true: it reads the stored report.
   reconcileReport: () => rtRequest<ReconcileReportDoc>("/reconcile-report/REAL", undefined, true),
+  // E271: order-flow tape health + entry-gate / exit counters of this service (GET /flow/stats, admin, read-only).
+  flowStats: () => rtRequest<FlowStatsDoc>("/flow/stats", undefined, true),
+  // E271: the tape of one symbol (GET /flow/symbol/{symbol}, admin, read-only): profile levels, signals and the six checks for LONG and SHORT.
+  flowSymbol: (symbol: string) => rtRequest<SymbolTapeDoc>(`/flow/symbol/${encodeURIComponent(symbol.trim().toUpperCase())}`, undefined, true),
 
   dhanEdisSummary: () => rtRequest<DhanEdisSummary>("/dhan/edis/summary"),
   dhanEdisRequestTpin: () =>

@@ -1978,6 +1978,49 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     trailed += 1
                     continue
 
+            # ── 5b. E270: order-flow tape on EXITS ───────────────────────────────────────────────────────────────────────────────
+            # A RELIABLE adverse tape (>= FLOW_EXIT_MIN_AGAINST checks, one of them delta / imbalance) pulls the software stop in and trims the target to
+            # the next HVN wall. Only ever tightens; exits already decided above won; DEMO and REAL alike (REAL's broker safety-net stop follows
+            # current_stop through broker_stop.sync_stops). FLOW_EXIT_MODE live | log | off. Any error is swallowed: the tape is advisory.
+            try:
+                from entry_engine import flow_gate as _fg
+                if _fg.exit_mode() != "off" and position.current_stop and not _fg.exit_throttled(("rt", mode, position.id)) and (
+                        not config.FLOW_EXIT_SAME_DAY_ONLY
+                        or as_aware(position.opened_at).astimezone(IST).date() == datetime.now(IST).date()):
+                    _tx = await _fg.exit_check(position.symbol, "LONG", entry=position.avg_entry_price, stop=position.current_stop,
+                                               target=position.current_target, ltp=ltp, tick=0.05)
+                    if _tx and _tx.get("action") == "TIGHTEN":
+                        _n_stop, _n_tgt = _tx.get("new_stop"), _tx.get("new_target")
+                        if _n_stop is not None and float(_n_stop) <= float(position.current_stop):
+                            _n_stop = None                                   # never loosen
+                        if _n_tgt is not None and position.current_target is not None and float(_n_tgt) >= float(position.current_target):
+                            _n_tgt = None                                    # never raise
+                        if _n_stop is not None or _n_tgt is not None:
+                            _fg.exit_mark(("rt", mode, position.id))
+                            if _fg.exit_mode() == "live":
+                                _old_s, _old_t = position.current_stop, position.current_target
+                                if _n_stop is not None:
+                                    position.current_stop = float(_n_stop)
+                                if _n_tgt is not None:
+                                    position.current_target = float(_n_tgt)
+                                db.add(models.TradePositionEvent(
+                                    position_id=position.id, event_type="TAPE_TIGHTEN",
+                                    detail=(f"Stop ₹{_old_s} -> ₹{position.current_stop}, target ₹{_old_t} -> ₹{position.current_target} by the order-flow tape: "
+                                            f"{_tx.get('reason')}")[:400]))
+                                db.commit()
+                                _fg.exit_applied()
+                                _write_exit_decision(db, position, "TRAIL_STOP",
+                                                     f"Tape tighten: stop ₹{position.current_stop} target ₹{position.current_target}. {_tx.get('reason')}"[:300], ltp)
+                                trailed += 1
+                                continue
+                            logger.info("TAPE_EXIT[log]: %s would move stop %s target %s - %s", position.symbol, _n_stop, _n_tgt, _tx.get("reason"))
+            except Exception as _tx_exc:  # noqa: BLE001 - the tape is advisory; never stop the exit loop
+                try:
+                    db.rollback()
+                except Exception as _tx_rb:  # noqa: BLE001
+                    logger.debug("exit tape step rollback failed for %s (ignored): %s", position.symbol, _tx_rb)
+                logger.debug("exit tape step failed for %s (ignored): %s", position.symbol, _tx_exc)
+
             # ── 6. Hold ───────────────────────────────────────────────────────────
             _write_exit_decision(
                 db, position, "HOLD",

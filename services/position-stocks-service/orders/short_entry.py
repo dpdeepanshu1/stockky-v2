@@ -22,7 +22,7 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
-from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, rr_floor, short_gates, sizing, stopout_guard, tm_gate
+from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
 from tz_utils import ist_time_at_or_after, ist_today_str, parse_hhmm
 
@@ -227,6 +227,13 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         _refuse(db, cand, verdict[0], verdict[1])
         return None
 
+    # E269: intraday order-flow tape for a SHORT (orders/flow_gate.py, side SHORT): refuses only on a RELIABLE tape with FLOW_GATE_MIN_AGAINST adverse checks
+    # of the six-point checklist mirrored for a short; no tape / unreliable / slow = no opinion. Lives in the shared plan so shadow rows refuse like live. Never raises.
+    _flow_reason, _tape_json = flow_gate.entry_check(sym, "SHORT", None)
+    if _flow_reason:
+        _refuse(db, cand, "SHORT_ORDER_FLOW", _flow_reason)
+        return None
+
     live = float(facts.get("live") or ltp)
     levels = compute_levels(cand.pct_change, live, symbol=sym, side="SHORT")
     budget_stop_pct = float(levels.stop_pct)                 # size is worked out from the NORMAL stop (step 12): a tighter stop lowers risk, never grows the position
@@ -271,7 +278,8 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
     return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
-            "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv)}
+            "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv),
+            "tape_json": _tape_json}
 
 
 def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:

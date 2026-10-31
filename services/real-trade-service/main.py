@@ -2185,6 +2185,89 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
 # trades) short of querying the DB directly. This is read-only history, so
 # unlike /positions/{mode} above it does NOT call _self_heal_orders or fetch
 # live prices — a closed position's price never changes again.
+def _tape_fields_for_positions(db, rows) -> dict:
+    """E271: {position_id: {"tape": entry tape dict | None, "tightens": int}} for closed positions. The entry tape is read from the latest ENTER decision for the
+    symbol made at or shortly before the position opened (two bounded queries for the whole page); TAPE_TIGHTEN events are counted per position.
+    Fail-open: any error gives an empty dict and the history is returned as before. Read-only."""
+    out: dict = {}
+    try:
+        import json as _json
+        from sqlalchemy import func
+        ids = [p.id for p in rows]
+        if not ids:
+            return out
+        for pid, n in (db.query(models.TradePositionEvent.position_id, func.count(models.TradePositionEvent.id))
+                       .filter(models.TradePositionEvent.position_id.in_(ids), models.TradePositionEvent.event_type == "TAPE_TIGHTEN")
+                       .group_by(models.TradePositionEvent.position_id).all()):
+            out.setdefault(pid, {})["tightens"] = int(n)
+        syms = list({p.symbol for p in rows})
+        lo = min((p.opened_at for p in rows if p.opened_at), default=None)
+        if syms and lo is not None:
+            decs = (db.query(models.TradeDecision)
+                    .filter(models.TradeDecision.symbol.in_(syms), models.TradeDecision.decision_type == "ENTRY", models.TradeDecision.action == "ENTER",
+                            models.TradeDecision.flow_json.isnot(None), models.TradeDecision.created_at >= lo - timedelta(hours=1))
+                    .order_by(models.TradeDecision.created_at.desc()).limit(2000).all())
+            for p in rows:
+                if not p.opened_at:
+                    continue
+                for d in decs:
+                    if d.symbol == p.symbol and d.mode == p.mode and d.created_at <= p.opened_at + timedelta(minutes=2) and d.created_at >= p.opened_at - timedelta(hours=1):
+                        try:
+                            t = _json.loads(d.flow_json or "{}").get("tape")
+                        except Exception:  # noqa: BLE001
+                            t = None
+                        if isinstance(t, dict):
+                            out.setdefault(p.id, {})["tape"] = t
+                        break
+    except Exception as e:  # noqa: BLE001
+        logger.debug("history tape fields unavailable: %s", e)
+        return {}
+    return out
+
+
+@app.get("/flow/stats")
+async def flow_stats_route(admin: Optional[str] = Depends(require_admin)):
+    """E271: order-flow tape health for the calibration card: this service's entry-gate and exit counters (in-process, since the last restart), both
+    modes, and market-data's tape status (one short call; null when it does not answer). Read-only."""
+    from entry_engine import flow_gate as _fg
+    tape = None
+    try:
+        import httpx
+        from market_feed.feed import MARKET_DATA_URL
+        async with httpx.AsyncClient(timeout=1.5) as c:
+            r = await c.get(f"{MARKET_DATA_URL}/internal/flow-status")
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            tape = r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("flow stats: market-data tape status unavailable: %s", type(e).__name__)
+    return {"since_restart": True, "service": "real-trade", "gate": _fg.stats(), "tape": tape,
+            "min_against": getattr(config, "FLOW_GATE_MIN_AGAINST", None), "exit_min_against": getattr(config, "FLOW_EXIT_MIN_AGAINST", None)}
+
+
+def _flow_symbol_ok(sym) -> bool:
+    """E271: a plain NSE symbol only (letters, digits, & - _ ; at most 20 characters), so the path can never be bent into another market-data URL."""
+    import re
+    return isinstance(sym, str) and re.fullmatch(r"[A-Za-z0-9&_-]{1,20}", sym) is not None
+
+
+@app.get("/flow/symbol/{symbol}")
+async def flow_symbol_route(symbol: str, admin: Optional[str] = Depends(require_admin)):
+    """E271: the order-flow tape of ONE symbol for the calibration card (market-data's GET /flow/{symbol}: session profile VAH / VAL / POC / HVN / LVN,
+    footprint, absorption / exhaustion, delta, big prints and the six checks for LONG and SHORT). Read-only, one 1.5 s call, never raises."""
+    if not _flow_symbol_ok(symbol):
+        raise HTTPException(status_code=400, detail="invalid symbol")
+    try:
+        import httpx
+        from market_feed.feed import MARKET_DATA_URL
+        async with httpx.AsyncClient(timeout=1.5) as c:
+            r = await c.get(f"{MARKET_DATA_URL}/flow/{symbol.upper()}")
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            return r.json()
+        return {"symbol": symbol.upper(), "available": False, "reliable": False, "reason": f"market_data_http_{r.status_code}"}
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": symbol.upper(), "available": False, "reliable": False, "reason": f"market_data_{type(e).__name__}"}
+
+
 @app.get("/positions/{mode}/history")
 async def list_closed_positions(
     mode: str, limit: int = 100,
@@ -2199,9 +2282,13 @@ async def list_closed_positions(
         .limit(limit)
         .all()
     )
+    _tape_by_pos = _tape_fields_for_positions(db, rows)   # E271
     positions = [{
         "id": p.id, "symbol": p.symbol, "qty_open": p.qty_open,
         "avg_entry_price": p.avg_entry_price, "realized_pnl": p.realized_pnl,
+        "tape": _tape_by_pos.get(p.id, {}).get("tape"),                 # E271: tape verdict seen at entry (from the ENTER decision), else null
+        "tape_tightens": _tape_by_pos.get(p.id, {}).get("tightens", 0),  # E271: TAPE_TIGHTEN events while the trade was open
+        "mode": p.mode,
         "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at),
         "source_tab": getattr(p, "source_tab", None),
         # 2026-09-18 fix (follow-on item #2): net-of-cost figure for this

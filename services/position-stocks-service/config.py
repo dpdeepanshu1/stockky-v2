@@ -1005,6 +1005,40 @@ ENTRY_DEPTH20_WAIT_S = _get_float("ENTRY_DEPTH20_WAIT_S", 1.0)
 ORDER_FLOW_RECORD = _get_bool("ORDER_FLOW_RECORD", True)
 ORDER_FLOW_DEPTH20 = _get_bool("ORDER_FLOW_DEPTH20", True)
 ORDER_FLOW_DEPTH20_TIMEOUT_S = max(0.2, _get_float("ORDER_FLOW_DEPTH20_TIMEOUT_S", 1.5))
+# E268: order-flow tape gate (market-data GET /flow/{symbol}?side=LONG).
+# FLOW_GATE_MODE live (default) | log | off. live = an entry is refused when the tape is RELIABLE and at least FLOW_GATE_MIN_AGAINST of the six
+# order-flow checks (value area, HVN wall, aggressor / stacked imbalance, absorption / exhaustion / book lean, delta, big prints) are against the trade;
+# log = record only; off = nothing runs. An unreliable tape, a slow or failed call = no opinion. FLOW_RECORD=0 stops the verdict being stored on
+# scalp_positions.flow_json["tape"].
+FLOW_GATE_MODE = _get_str("FLOW_GATE_MODE", "live").lower()
+if FLOW_GATE_MODE not in ("live", "log", "off"):
+    FLOW_GATE_MODE = "off"                                                   # a typo must not switch a gate on
+FLOW_GATE_MIN_AGAINST = min(6, max(1, _get_int("FLOW_GATE_MIN_AGAINST", 2)))
+FLOW_GATE_TIMEOUT_S = max(0.2, _get_float("FLOW_GATE_TIMEOUT_S", 1.0))
+
+# ── E270: order-flow tape on EXITS (tape_exit.py; same tape as the entry gate) ──────────────────────────────────────────────────────────────
+#   FLOW_EXIT_MODE           live (default) | log | off   live = a RELIABLE adverse tape pulls an open trade's stop in and trims its target to the next
+#                            HVN wall; log = decide and log only; off = nothing runs. Only ever tightens (stop never loosened, target never raised).
+#   FLOW_EXIT_MIN_AGAINST    adverse checks needed (default 3, 1..6); at least one must be delta or imbalance
+#   FLOW_EXIT_MIN_PROFIT_PCT stop is tightened when the trade is at least this % in profit (default 0.3) ...
+#   FLOW_EXIT_NEAR_STOP_FRAC ... or the price has used this fraction of the way from entry to the stop (default 0.5)
+#   FLOW_EXIT_STOP_GAP_PCT   new stop sits this % behind the live price (default 0.25)
+#   FLOW_EXIT_MIN_TARGET_PCT a trimmed target must still pay this % from entry (default 0.5)
+#   FLOW_EXIT_MIN_INTERVAL_S per-position minimum seconds between tape moves (default 20)
+#   FLOW_EXIT_TIMEOUT_S      longest wait for the one market-data call (default 0.6 s; slower = no opinion)
+#   FLOW_EXIT_SAME_DAY_ONLY  1 (default) | 0   real-trade only: the tape is today's session, so a position bought on an earlier day is left alone
+FLOW_EXIT_MODE = (_get_str("FLOW_EXIT_MODE", "live")).strip().lower()
+if FLOW_EXIT_MODE not in ("live", "log", "off"):
+    FLOW_EXIT_MODE = "off"                                                   # a typo must not switch it on
+FLOW_EXIT_MIN_AGAINST = min(6, max(1, _get_int("FLOW_EXIT_MIN_AGAINST", 3)))
+FLOW_EXIT_MIN_PROFIT_PCT = max(0.0, _get_float("FLOW_EXIT_MIN_PROFIT_PCT", 0.3))
+FLOW_EXIT_NEAR_STOP_FRAC = min(1.0, max(0.05, _get_float("FLOW_EXIT_NEAR_STOP_FRAC", 0.5)))
+FLOW_EXIT_STOP_GAP_PCT = max(0.05, _get_float("FLOW_EXIT_STOP_GAP_PCT", 0.25))
+FLOW_EXIT_MIN_TARGET_PCT = max(0.0, _get_float("FLOW_EXIT_MIN_TARGET_PCT", 0.5))
+FLOW_EXIT_MIN_INTERVAL_S = max(0.0, _get_float("FLOW_EXIT_MIN_INTERVAL_S", 20.0))
+FLOW_EXIT_TIMEOUT_S = max(0.2, _get_float("FLOW_EXIT_TIMEOUT_S", 0.6))
+FLOW_EXIT_SAME_DAY_ONLY = _get_float("FLOW_EXIT_SAME_DAY_ONLY", 1.0) != 0.0
+FLOW_RECORD = _get_bool("FLOW_RECORD", True)
 # group280 (plan Phase C1): read-only Dhan order-update WebSocket (execution/order_ws.py). Off by default; nothing in the
 # trading path depends on it. See GET /orders/ws-status.
 DHAN_ORDER_WS_ENABLED = _get_bool("DHAN_ORDER_WS_ENABLED", False)

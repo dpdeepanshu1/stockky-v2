@@ -166,7 +166,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition, ScalpTradeJournal
-from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, trailing
+from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, tape_hook, trailing
 from orders import adaptive, plain_short, pullback_rearm
 from orders import calendar_gate, charges_ledger, excursion, journal_notes, review_stats, trade_stats, window_health
 from orders.entry import (
@@ -526,6 +526,14 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: trailing-stop raised %d stop(s)", n_trail)
                 except Exception as e:
                     logger.error("position-stocks: trailing-stop error: %s", e, exc_info=True)
+                try:
+                    # E270: a reliable adverse order-flow tape pulls an open trade's stop in / trims its target to the next HVN wall (orders/tape_hook.py).
+                    # After trailing, before the stop watchdog and the plain-short guard; FLOW_EXIT_MODE live | log | off.
+                    n_tape = await asyncio.to_thread(tape_hook.run_tape_exit, db)
+                    if n_tape:
+                        logger.info("position-stocks: tape-exit tightened %d position(s)", n_tape)
+                except Exception as e:
+                    logger.error("position-stocks: tape-exit error: %s", e, exc_info=True)
                 try:
                     # group 340: close a position whose own stop did not fire (orders/stop_watchdog.py)
                     n_breach = await asyncio.to_thread(stop_watchdog.run_stop_watchdog, db)
@@ -2382,6 +2390,19 @@ def _row_exit_rule(r):
         return None
 
 
+def _row_tape(r):
+    """E271: (entry tape verdict, list of tape exit moves) from flow_json, for the trade history; (None, None) when absent or unreadable. Never raises."""
+    try:
+        import json as _json
+        d = _json.loads(getattr(r, "flow_json", None) or "{}")
+        if not isinstance(d, dict):
+            return None, None
+        t, x = d.get("tape"), d.get("tape_exit")
+        return (t if isinstance(t, dict) else None), (x if isinstance(x, list) and x else None)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 def _row_charges(r):
     """E215: estimated round-trip charges of one settled trade, from the same formula the charges ledger books
     (charges_ledger.charges_for_trade), so the Trades CSV column matches /charges/trades. None when the row is not
@@ -2482,6 +2503,8 @@ def trades_history(
                 "signal_price": r.signal_price,
                 "stop_basis": r.stop_basis,
                 "exit_rule": _row_exit_rule(r),   # E231: which stagnation rule closed it (flat_band | no_followthrough), else null
+                "tape": _row_tape(r)[0],          # E271: the order-flow tape verdict seen at entry (record only), else null
+                "tape_exit": _row_tape(r)[1],     # E271: the stop / target moves the tape made while the trade was open, else null
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,
@@ -2836,6 +2859,47 @@ def entry_guard_stats(admin: str = Depends(require_admin)):
     """E257: how often the spike-chase and gain-room guards held, only logged, passed, or had no data (in-process, since the last restart). Read-only."""
     from orders import entry_timing, gain_room, guard_stats
     return {"since_restart": True, "spike_mode": entry_timing.mode(), "gain_room_mode": gain_room.mode(), **guard_stats.snapshot()}
+
+
+@app.get("/flow/stats")
+def flow_stats_route(admin: str = Depends(require_admin)):
+    """E271: order-flow tape health for the calibration card: this service's entry-gate and exit counters (in-process, since the last restart), both
+    modes, and market-data's tape status (one short call; null when it does not answer). Read-only."""
+    from orders import flow_gate
+    tape = None
+    try:
+        import httpx
+        with httpx.Client(timeout=1.5) as c:
+            r = c.get(f"{config.MARKET_DATA_URL}/internal/flow-status")
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            tape = r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("flow stats: market-data tape status unavailable: %s", type(e).__name__)
+    return {"since_restart": True, "service": "position-stocks", "gate": flow_gate.stats(), "tape": tape,
+            "min_against": getattr(config, "FLOW_GATE_MIN_AGAINST", None), "exit_min_against": getattr(config, "FLOW_EXIT_MIN_AGAINST", None)}
+
+
+def _flow_symbol_ok(sym) -> bool:
+    """E271: a plain NSE symbol only (letters, digits, & - _ ; at most 20 characters), so the path can never be bent into another market-data URL."""
+    import re
+    return isinstance(sym, str) and re.fullmatch(r"[A-Za-z0-9&_-]{1,20}", sym) is not None
+
+
+@app.get("/flow/symbol/{symbol}")
+def flow_symbol_route(symbol: str, admin: str = Depends(require_admin)):
+    """E271: the order-flow tape of ONE symbol for the calibration card (market-data's GET /flow/{symbol}: session profile VAH / VAL / POC / HVN / LVN,
+    footprint, absorption / exhaustion, delta, big prints and the six checks for LONG and SHORT). Read-only, one 1.5 s call, never raises."""
+    if not _flow_symbol_ok(symbol):
+        raise HTTPException(status_code=400, detail="invalid symbol")
+    try:
+        import httpx
+        with httpx.Client(timeout=1.5) as c:
+            r = c.get(f"{config.MARKET_DATA_URL}/flow/{symbol.upper()}")
+        if r.status_code == 200 and isinstance(r.json(), dict):
+            return r.json()
+        return {"symbol": symbol.upper(), "available": False, "reliable": False, "reason": f"market_data_http_{r.status_code}"}
+    except Exception as e:  # noqa: BLE001
+        return {"symbol": symbol.upper(), "available": False, "reliable": False, "reason": f"market_data_{type(e).__name__}"}
 
 
 @app.get("/short/shadow")

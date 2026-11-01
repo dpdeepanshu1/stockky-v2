@@ -896,6 +896,10 @@ OPENING_PAUSE_STOPOUTS = _get_int("OPENING_PAUSE_STOPOUTS", 2)   # 0 = no pause
 # entry once the REALISED loss since the bell reaches OPENING_LOSS_BUDGET_FRAC of the day's loss cap (MAX_DAILY_LOSS_PCT_OF_POOL x pool; 0 = off).
 OPENING_MAX_POSITIONS = _get_int("OPENING_MAX_POSITIONS", 2)
 OPENING_LOSS_BUDGET_FRAC = max(0.0, min(1.0, _get_float("OPENING_LOSS_BUDGET_FRAC", 1.0 / 3.0)))
+# E285 round 119: one kill switch for the 09:21 to OPENING_0920_PATH_UNTIL_IST slot (S1 long / S4 short, quarter size, limit order). true = the slot trades as built;
+# false = no automatic entry, long or short, until OPENING_0920_PATH_UNTIL_IST (09:30), when S2 starts. Manual BUYs are not touched.
+OPENING_0920_PATH = _get_bool("OPENING_0920_PATH", True)
+OPENING_0920_PATH_UNTIL_IST = _get_str("OPENING_0920_PATH_UNTIL_IST", "09:30")
 
 # group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
 # depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.

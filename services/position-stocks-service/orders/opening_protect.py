@@ -8,6 +8,7 @@ E285 round 99 adds two more guards to pause_reason(): early_cap_reason (at most 
 (realised loss since the bell reaching OPENING_LOSS_BUDGET_FRAC, ships 1/3, of the day's loss cap = MAX_DAILY_LOSS_PCT_OF_POOL x pool). Both fail open; 0 turns each off.
 Only the automatic path uses these; a manual BUY was confirmed by a person. Fails open (a DB error or bad clock means no pause / full size).
 OPENING_PROTECT_ENABLED=0 turns both off.
+E285 round 119: OPENING_0920_PATH=false (its own switch) refuses every automatic entry from 09:15 until 09:30 (slot_0920_reason).
 """
 from __future__ import annotations
 
@@ -142,9 +143,29 @@ def loss_budget_reason(db, now: Optional[datetime] = None) -> Optional[str]:
         return None
 
 
+def slot_0920_reason(now: Optional[datetime] = None) -> Optional[str]:
+    """E285 round 119: a skip reason while OPENING_0920_PATH is off and the clock is inside 09:15 .. OPENING_0920_PATH_UNTIL_IST (09:30) on a trading day, else None.
+    Independent of OPENING_PROTECT_ENABLED (it is its own switch). Never raises."""
+    try:
+        if getattr(config, "OPENING_0920_PATH", True):
+            return None
+        n = ist_now(now)
+        if n.weekday() >= 5 or is_nse_holiday(n):
+            return None
+        until = parse_hhmm(str(getattr(config, "OPENING_0920_PATH_UNTIL_IST", "09:30")), 9, 30)
+        if _time(9, 15) <= n.time() < until:
+            return f"OPENING_PROTECT:SLOT_0920_OFF:no automatic entry before {until.strftime('%H:%M')} (OPENING_0920_PATH off)"
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def pause_reason(db, now: Optional[datetime] = None) -> Optional[str]:
     """A skip reason while an opening guard is in force (stop-out pause, E285 round 99 position cap, E285 round 99 loss budget), else None. Never raises."""
     try:
+        slot = slot_0920_reason(now)
+        if slot:
+            return slot
         limit = int(config.OPENING_PAUSE_STOPOUTS or 0)
         if limit > 0 and active(now):
             n = stopouts_since_open(db, now)

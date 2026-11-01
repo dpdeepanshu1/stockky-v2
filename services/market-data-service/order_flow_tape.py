@@ -56,7 +56,7 @@ def _envf(name: str, default: float) -> float:
 
 
 def enabled() -> bool:
-    return str(os.getenv("FLOW_TAPE_ENABLED", "1")).strip().lower() not in ("0", "false", "no", "off")
+    return ((os.getenv("FLOW_TAPE_ENABLED") or "").strip() or "1").lower() not in ("0", "false", "no", "off")   # a blank value stays on (group 75 sweep)
 
 
 def _max_symbols() -> int:

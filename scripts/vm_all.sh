@@ -172,6 +172,16 @@ cmd_halfsell(){
   # E283 / E285 round 98: the half-sell probe. `status` reads only. `run` places REAL orders (buy 2, sell 1, sell 1 of one share-priced-under-500 stock).
   local mode="${1:-}" sym="${2:-}" U P PS
   case "$mode" in status|run) ;; *) echo "usage: bash scripts/vm_all.sh halfsell status | run [SYMBOL]"; return 2;; esac
+  if [ "$mode" = "run" ] && [ -z "${HALFSELL_SKIP_WINDOW_CHECK:-}" ]; then
+    # E285 round 121: say "outside the window" BEFORE asking for the admin login and the HALFSELL confirmation (the VM report of 1 Nov typed HALFSELL on a Sunday and then read SKIPPED).
+    # The service still checks the window itself (and NSE holidays); this only saves a pointless prompt. HALFSELL_NOW="<weekday 1-7> <HHMM>" is for tests.
+    local dow hm
+    read -r dow hm <<< "${HALFSELL_NOW:-$(TZ=Asia/Kolkata date '+%u %H%M')}"
+    if [ "${dow:-1}" -ge 6 ] || [ "$((10#${hm:-0930}))" -lt 930 ] || [ "$((10#${hm:-0930}))" -ge 1430 ]; then
+      echo "HALF-SELL PROBE: NOT STARTED - outside the probe window (09:30-14:30 IST, Monday to Friday). Nothing was asked and nothing was sent. Run it again in the window."
+      return 0
+    fi
+  fi
   read -rp "admin user: " U; read -rsp "admin password: " P; echo
   PS=$(curl -s -m 20 -X POST "$BASE/positionstocks/auth/login" -H "Content-Type: application/json" -d "{\"username\":\"$U\",\"password\":\"$P\"}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null); unset P
   [ -n "$PS" ] || { echo "PS LOGIN FAILED"; return 1; }

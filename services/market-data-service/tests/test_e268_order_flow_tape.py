@@ -247,3 +247,14 @@ def test_flow_routes_answer_with_and_without_a_tape():
     assert c.get("/flow/NOPE", params={"side": "LONG"}).json()["block"] is False
     assert c.get("/flow/ABC/bars", params={"limit": 5}).status_code == 200
     assert "enabled" in c.get("/internal/flow-status").json()
+
+
+def test_flow_tape_switch_blank_value_stays_on_and_zero_turns_off(monkeypatch):
+    """E285 round 120: a stray `FLOW_TAPE_ENABLED=` in a .env must not switch the tape off (the group 75 blank-value sweep)."""
+    monkeypatch.setenv("FLOW_TAPE_ENABLED", "")
+    assert t.enabled() is True
+    monkeypatch.delenv("FLOW_TAPE_ENABLED", raising=False)
+    assert t.enabled() is True
+    for off in ("0", "false", "off", "no"):
+        monkeypatch.setenv("FLOW_TAPE_ENABLED", off)
+        assert t.enabled() is False

@@ -145,6 +145,7 @@ def _live_th(th):
     d = {k: float(th[v]) for k, v in _OG_KEYS.items()}
     d["OPENING_GATE_MIN_STOP_ATR_FRAC"] = 0.0                       # the stop-vs-ATR check is not replayed
     d["OPENING_GATE_ENABLED"] = True
+    d["OPENING_GATE_PENALTY_ENABLED"] = False                        # E273 rounds 17/27 made below-prev-close / near-day-high / weak-close a size penalty up to a hard ceiling; the replay models the hard limits, so the live gate is compared with the penalty off
     d["ENTRY_VWAP_GATE_ENABLED"] = True
     d["ENTRY_VWAP_TOLERANCE_PCT"] = th["vwap_tol_pct"]
     return d

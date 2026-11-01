@@ -240,3 +240,13 @@ def test_env_reference_check_names_the_differing_rows(tmp_path):
     (repo / "services" / "demo-service" / "extra.py").write_text('import os\nos.getenv("STALE_LEFTOVER_VAR", "1")\n')
     r = subprocess.run([sys.executable, "scripts/gen_env_reference.py", "--check"], cwd=repo, capture_output=True, text=True)
     assert r.returncode == 1 and "out of date" in r.stdout and "STALE_LEFTOVER_VAR" in r.stdout
+
+
+def test_halfsell_run_refuses_before_any_prompt_outside_the_window():
+    """E285 round 121: `vm_all.sh halfsell run` outside 09:30-14:30 IST on a weekday says so at once: no admin prompt, no HALFSELL prompt, exit 0."""
+    import os
+    for now in ("7 1000", "6 1100", "1 0929", "3 1430", "2 2200"):
+        r = subprocess.run(["bash", "scripts/vm_all.sh", "halfsell", "run"], cwd=ROOT, input="", capture_output=True, text=True, timeout=30, env={**os.environ, "HALFSELL_NOW": now, "REPO": str(ROOT)})
+        assert r.returncode == 0 and "NOT STARTED" in r.stdout and "admin user" not in r.stdout and "Type HALFSELL" not in r.stdout, (now, r.stdout, r.stderr)
+    r = subprocess.run(["bash", "scripts/vm_all.sh", "halfsell", "run"], cwd=ROOT, input="", capture_output=True, text=True, timeout=30, env={**os.environ, "HALFSELL_NOW": "2 1000", "REPO": str(ROOT)})
+    assert "NOT STARTED" not in r.stdout                                  # inside the window the old flow continues (it asks for the login)

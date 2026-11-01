@@ -524,7 +524,10 @@ def _style_message(label: str, part: str, chat_id: str):
     """E285 round 93: the styled Telegram text for one part, plus the extra payload fields (message effect for a private chat, an optional dashboard button).
     None = styling is off or failed, and the caller sends the old layout."""
     try:
-        import tg_style
+        try:
+            import tg_style                          # the service run: main.py puts notification/ on sys.path
+        except ImportError:
+            from notification import tg_style        # imported as a package (tests, tools): the sibling module is not on sys.path
         if not tg_style.style_enabled():
             return None
         r = tg_style.render(label, part)

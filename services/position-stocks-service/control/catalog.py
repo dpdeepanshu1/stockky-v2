@@ -85,6 +85,9 @@ CATALOG = (
          targets=((_C, "OPENING_MAX_POSITIONS"),), live=True, shipped="2", evidence="opening_replay.py"),
     Flag("OPENING_LOSS_BUDGET_FRAC", "Opening loss budget (share of the day's loss cap)", "Opening window", "float", lo=0, hi=1, looser="higher", zero_off=True, help="E285 round 99: once the realised loss since the bell reaches this share of the day's loss cap, no new entry until the window ends. 0 = off.",
          targets=((_C, "OPENING_LOSS_BUDGET_FRAC"),), live=True, shipped="0.333333", evidence="opening_replay.py"),
+    Flag("OPENING_0920_PATH", "09:21 to 09:30 slot (S1 long, S4 short)", "Opening window", "bool", looser="off",
+         help="E285 round 119: kill switch for the whole 09:21 to 09:30 slot (first closed bar after the 09:15-09:20 range; S1 and S4 only, quarter size, limit order). ON = trades as built. OFF = no automatic entry, long or short, until 09:30, when S2 starts. Manual BUYs are not touched.",
+         targets=((_C, "OPENING_0920_PATH"),), live=True, shipped="true", evidence="opening_replay.py"),
     Flag("OPENING_PLAN_ENABLED", "09:10 opening plan", "Opening window", "bool", looser="neutral", help="Plans stops from the pre-open snapshot.",
          targets=((_C, "OPENING_PLAN_ENABLED"),), live=True, shipped="true"),
     # ---------------- evidence recording ----------------

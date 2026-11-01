@@ -50,9 +50,9 @@ def test_wrong_or_missing_key_is_401(client):
     assert client.post("/control/flags/PATTERN_ALERTS_TIME", json={"value": "17:00"}).status_code == 401
 
 
-def test_lists_all_eight_switches_with_shipped_values(client):
+def test_lists_all_ten_switches_with_shipped_values(client):
     d = client.get("/control/flags", headers=H).json()
-    assert d["service"] == "notification-scheduler-service" and d["summary"]["flags"] == 8
+    assert d["service"] == "notification-scheduler-service" and d["summary"]["flags"] == 10
     assert {f["key"]: f["effective"] for f in d["flags"]}["PATTERN_ALERTS_TIME"] == "16:05"
 
 
@@ -82,7 +82,13 @@ def test_out_of_range_and_unknown_are_refused_and_audit_names_the_admin(client):
 def test_catalog_shipped_values_match_the_code_defaults():
     from control.catalog import CATALOG
     src = (SVC / "scheduler" / "pattern_alerts.py").read_text() + (SVC / "scheduler" / "watchlist_moves.py").read_text()
+    style_src = (SVC / "notification" / "tg_style.py").read_text()       # E285 round 93: the two Telegram style switches are read there, as `os.environ.get("KEY") or "default"`
     for f in CATALOG:
+        if f.key.startswith("TELEGRAM_"):
+            m = re.search(r'"%s"\)\s*or\s*"([^"]+)"' % f.key, style_src)
+            assert m, f.key
+            assert m.group(1).lower() == f.shipped.lower(), (f.key, m.group(1), f.shipped)
+            continue
         m = re.search(r'"%s",\s*([^,)\n]+)' % f.key, src)
         assert m, f.key
         default = m.group(1).strip().strip('"')

@@ -395,6 +395,13 @@ ORDER_RATE_SHARED_ENABLED = (os.getenv("ORDER_RATE_SHARED_ENABLED") or "true").s
 RISK_LADDER_ENABLED = (os.getenv("RISK_LADDER_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 RISK_LADDER_HEAT_STEP_PCT = float(((os.getenv("RISK_LADDER_HEAT_STEP_PCT") or "").strip() or "1.0"))
 RISK_LADDER_CACHE_S = float(((os.getenv("RISK_LADDER_CACHE_S") or "").strip() or "300"))
+# E285 round 95: the other two halves of the ladder (the Position Stocks twin has had them since E276 rounds 55 / 56).
+# RISK_LADDER_LOSS_DAYS_ENABLED: a stage above 0 drops one more stage when the daily loss limit (the REAL risk row's max_daily_loss_pct of the equity) was hit on 2 or more of the last 5 trading days
+# (net P&L per day from trade_pnl_daily). RISK_LADDER_RISK_ENABLED: per-trade risk rises with the stage, risk % x (1 + stage x RISK_LADDER_RISK_STEP) = 2 % -> 2.5 % (stage 1) -> 3 % (stage 2; stage 3 stays at 3 %).
+# The 3 % daily-loss cap on per-trade risk, the per-trade value cap, the heat limit and free cash still bound it. Stage 0 = today's size. Any error = no change.
+RISK_LADDER_LOSS_DAYS_ENABLED = (os.getenv("RISK_LADDER_LOSS_DAYS_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
+RISK_LADDER_RISK_ENABLED = (os.getenv("RISK_LADDER_RISK_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
+RISK_LADDER_RISK_STEP = float(((os.getenv("RISK_LADDER_RISK_STEP") or "").strip() or "0.25"))
 HEAT_GAP_MIN_PCT = float(((os.getenv("HEAT_GAP_MIN_PCT") or "").strip() or "0.5"))   # floor on the cached p95 gap
 HEAT_GAP_P95_ENABLED = (os.getenv("HEAT_GAP_P95_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 # E276 round 60: same-sector rule. A new BUY in a sector that already holds an open long (this service or position-stocks-service, from its published split)

@@ -27,12 +27,10 @@ t("mode view: live = real orders (bad tone), shadow = no order, anything else = 
   assert.equal(shortModeView("shadow").orders, false); assert.match(shortModeView("shadow").title, /shadow only/);
   for (const m of ["off", "", null, undefined, "junk"]) { assert.equal(shortModeView(m).mode, "off"); assert.equal(shortModeView(m).orders, false); }
 });
-t("the shadow view no longer calls live mode 'off'", () => {
-  const base = { total: 0, open: 0, closed: 0, target: 0, stop: 0, eod: 0, expired: 0, net_pnl: 0, gross_pnl: 0, win_rate_pct: null, days_with_results: 0,
-    s2_progress: { would_be_shorts: 0, needed: 100, days: 0, weeks_needed: 4 }, gate_counters: {}, recent: [] };
-  assert.equal(shortShadowView({ ...base, mode: "live" }).kind, "waiting"); assert.match(shortShadowView({ ...base, mode: "live" }).headline, /LIVE/);
-  assert.equal(shortShadowView({ ...base, mode: "off" }).kind, "off"); assert.equal(shortShadowView({ ...base, mode: "shadow" }).kind, "waiting");
-  assert.match(shortShadowView({ ...base, mode: "live", total: 2, closed: 2 }).headline, /live shorts show under Positions/);
+t("the short view calls live mode live and off mode off", () => {
+  const base = { gate_counters: {} };
+  assert.equal(shortShadowView({ ...base, mode: "live" }).kind, "live"); assert.match(shortShadowView({ ...base, mode: "live" }).headline, /LIVE/);
+  assert.equal(shortShadowView({ ...base, mode: "off" }).kind, "off");
 });
 t("the Positions tab uses the helpers (badge, leg labels, short-aware P&L %) and has no long-only P&L formula left", () => {
   const src = readFileSync(new URL("./components/PositionStocksTab.tsx", import.meta.url), "utf8");

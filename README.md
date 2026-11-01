@@ -136,7 +136,7 @@ They are still in git history: `git log --diff-filter=D --name-only -- "docs/*.m
 | `healthcheck.sh`, `vm_ops.sh`, `vm_docker_recover.sh`, `wake_all.sh` | VM health and recovery |
 | `backup_state.sh` | backup / verify / restore-test of the state volumes |
 | `vm_calibrate.sh`, `vm_review_evidence.sh`, `vm_structure_report.sh` | read-only evidence reports on the VM |
-| `dhan_sell_probe.py`, `dhan_swing_probe.py` | broker probes (market hours only; see CHANGELOG E242-E244 before running) |
+| `dhan_sell_probe.py`, `dhan_swing_probe.py`, `dhan_half_sell_probe.py` | broker probes (market hours only; see CHANGELOG E242-E244 and E285 round 98 before running; the half-sell probe is started with `bash scripts/vm_all.sh halfsell run`) |
 | `daily_trade_report.py`, `charges_split.py`, `calibration_status.py` | trade / charges / calibration reports |
 | `check_*.py`, `gen_env_reference.py`, `audit_*.py` | repo guards and audits (what CI runs) |
 | `*_backtest.py`, `ml_v2_walkforward.py`, `swing_*.py`, `robustness.py` | offline backtests (stdlib, deterministic) |

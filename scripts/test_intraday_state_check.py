@@ -24,8 +24,7 @@ def go(phase, routes, now, expect="any"):
     return C.run(phase, fake({"/market/session": (200, {"calendar_holiday": False}), **routes}), RT, PS, MD, expect, now)
 
 
-SHADOW = {"mode": "shadow", "total": 3, "open": 1, "closed": 2, "net_pnl": 5.0, "gate_counters": {"a": 4, "b": 0},
-          "s2_progress": {"would_be_shorts": 2, "needed": 100}, "sell_probe": {"verdict": "NOT_RUN"}}
+SHADOW = {"mode": "shadow", "gate_counters": {"a": 4, "b": 0}, "sell_probe": {"verdict": "NOT_RUN"}}
 HEALTH = {"orb": {"bars": {"hit": 5, "miss": 1, "stale": 0}}}
 
 

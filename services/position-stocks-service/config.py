@@ -1192,6 +1192,18 @@ ENTRY_REJECT_MAX_PER_SYMBOL_DAY = _get_int("ENTRY_REJECT_MAX_PER_SYMBOL_DAY", 2)
 # not count against the symbol's own ENTRY_REJECT_* limits. An unclassified BUY placement failure rests just that
 # symbol for the second knob. 0 disables the respective pause. See orders/entry_pause.py.
 ENTRY_MARGIN_PAUSE_MINUTES = _get_int("ENTRY_MARGIN_PAUSE_MINUTES", 5)
+# E285 round 95: Dhan's static-IP rule. Placing, modifying and cancelling orders is only accepted from an IP registered in Dhan (Dhan's own FAQ shows the rejection as "DH-905 Invalid IP"; reads like funds
+# and the order book are not IP-gated). When any Dhan call comes back with that rejection, orders/ip_guard.py pauses NEW entries for ENTRY_IP_PAUSE_MINUTES (every further BUY would fail the same way and spend
+# the order budget) and sends one loud alert per IP_ALERT_EVERY_MIN minutes. Exits, stops and square-off are never paused. IP_GUARD_ENABLED off = no pause and no alert (the plain failure handling stays).
+IP_GUARD_ENABLED = _get_bool("IP_GUARD_ENABLED", True)
+ENTRY_IP_PAUSE_MINUTES = _get_int("ENTRY_IP_PAUSE_MINUTES", 15)
+IP_ALERT_EVERY_MIN = _get_int("IP_ALERT_EVERY_MIN", 30)
+# E285 round 95: Dhan allows at most 25 modifications per order (Dhan API docs, Rate Limits). Every stop trail, breakeven, tape / momentum / event stop or target move is one modify of the same Super Order, so a strong winner can
+# reach the cap and every later move would be refused (and retried each minute, spending the order budget). The client now counts the modifies it has made per order (in memory; a restart starts a count of 0) and refuses one
+# past DHAN_MODIFY_CAP_PER_ORDER without calling Dhan; the stop TRAIL alone stops DHAN_MODIFY_RESERVE short of the cap, so the last moves stay for the protective ones (breakeven, event, momentum, tape). Off = no counting.
+DHAN_MODIFY_CAP_ENABLED = _get_bool("DHAN_MODIFY_CAP_ENABLED", True)
+DHAN_MODIFY_CAP_PER_ORDER = _get_int("DHAN_MODIFY_CAP_PER_ORDER", 25)
+DHAN_MODIFY_RESERVE = _get_int("DHAN_MODIFY_RESERVE", 3)
 # Group 210 (item 14): periodic sweep of symbol locks that no live position backs (0 = off). A claim younger
 # than the min age is never swept (its position row may not exist yet).
 SYMBOL_LOCK_SWEEP_INTERVAL_S = _get_float("SYMBOL_LOCK_SWEEP_INTERVAL_S", 60.0)

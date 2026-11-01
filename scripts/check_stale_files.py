@@ -8,6 +8,10 @@ leftover code and disagree with the committed docs. Everything passes on the zip
 
   python3 scripts/check_stale_files.py            # list tracked files that are not in docs/FILE_MANIFEST.txt, with the git rm lines
   python3 scripts/check_stale_files.py --write    # (release step) rewrite docs/FILE_MANIFEST.txt from the files on disk
+  python3 scripts/check_stale_files.py --verify   # (release step, E285 round 96) fail when the manifest and the files on disk differ, in either direction
+
+WHY --verify: in round 95 seven live files (shared_rate_window.py, liveStateView.ts and their tests) were on disk but missing from the manifest, so the first form told the VM to `git rm` them.
+Deleting those would have broken the shared order window. A release is not done until `--verify` says the manifest matches the disk.
 
 Run the first form right after unpacking a release and before committing. It changes nothing; it prints the commands.
 Files you added yourself after the release will also be listed: read the list before running the `git rm` lines.
@@ -48,6 +52,23 @@ def stale(tracked: list[str], manifest: set[str]) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    if "--verify" in argv:
+        if not MANIFEST.exists():
+            print("docs/FILE_MANIFEST.txt is missing")
+            return 2
+        on_disk = set(disk_files())
+        on_disk.add("docs/FILE_MANIFEST.txt")
+        listed = {l.strip() for l in MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
+        extra, missing = sorted(on_disk - listed), sorted(listed - on_disk)
+        if not extra and not missing:
+            print(f"manifest matches the disk: {len(listed)} files")
+            return 0
+        for f in extra:
+            print(f"on disk but not in the manifest (the VM would be told to git rm it): {f}")
+        for f in missing:
+            print(f"in the manifest but not on disk: {f}")
+        print("fix: python3 scripts/check_stale_files.py --write")
+        return 1
     if "--write" in argv:
         files = disk_files()
         if "docs/FILE_MANIFEST.txt" not in files:

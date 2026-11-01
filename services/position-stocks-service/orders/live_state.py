@@ -1,10 +1,13 @@
 """orders/live_state.py - E283: one read-only picture of the live safety state for the Calibration tab (GET /live/state).
 
-Four parts, each in its own try/except (a part that cannot be read is {"ok": false, "error": ...}; the others still answer). It changes nothing and places nothing:
+Seven parts, each in its own try/except (a part that cannot be read is {"ok": false, "error": ...}; the others still answer). It changes nothing and places nothing:
   order_rate   execution/order_rate.snapshot()   Dhan order calls counted this process, waits, the per-second budget (E282 round 77)
   momentum     orders/momentum_hook.stats()      momentum-exit mode and counters since the last restart
   shared_heat  capital/shared_heat.get_peer*     the OTHER service's open risk, capital base, age and sector risk, plus this service's heat limit
   ladder       orders/risk_stage.stage_for       the risk-ladder stage (0..) of every setup / side, and whether the ladder is on
+  ip_guard     orders/ip_guard.status            (E285 round 96) Dhan IP refusals since start, the last message, the entry pause length
+  modify_cap   dhan_client.modify_stats          (E285 round 96) the 25-modifies-per-order counter: highest count, orders whose trail has stopped, modifies refused
+  volume_profile orders/volume_profile.snapshot  (E285 round 96) the learned volume curve: ready, building, days, symbol-days
 """
 from __future__ import annotations
 
@@ -60,5 +63,21 @@ def ladder_part(db: Any) -> Dict[str, Any]:
     return {"enabled": bool(risk_stage.enabled()), "stages": stages, "short_cap": int(risk_stage.short_cap_for(db))}
 
 
+def ip_guard_part() -> Dict[str, Any]:
+    from orders import ip_guard
+    return ip_guard.status()                  # E285 round 96: Dhan IP refusals seen since the process started (a refusal pauses new entries; exits and stops keep working)
+
+
+def modify_cap_part() -> Dict[str, Any]:
+    from execution import dhan_client
+    return dhan_client.modify_stats()         # E285 round 96: Dhan's 25-modifies-per-order counter
+
+
+def volume_part() -> Dict[str, Any]:
+    from orders import volume_profile
+    return volume_profile.snapshot()          # E285 round 96: the learned volume curve (ready, days, symbol-days, still building)
+
+
 def snapshot(db: Any) -> Dict[str, Any]:
-    return {"order_rate": _part(order_rate_part), "momentum": _part(momentum_part), "shared_heat": _part(lambda: heat_part(db)), "ladder": _part(lambda: ladder_part(db))}
+    return {"order_rate": _part(order_rate_part), "momentum": _part(momentum_part), "shared_heat": _part(lambda: heat_part(db)), "ladder": _part(lambda: ladder_part(db)),
+            "ip_guard": _part(ip_guard_part), "modify_cap": _part(modify_cap_part), "volume_profile": _part(volume_part)}

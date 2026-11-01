@@ -31,7 +31,6 @@ export const PLAN: { id: string; title: string; blurb: string; rows: PlanRow[] }
     id: "friday", title: "Friday after the close", blurb: "The weekly review of what the real money actually did.",
     rows: [
       { when: "16:40 IST", what: "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, changed switches", pack: "friday_review", note: "board parity GO two Fridays in a row = the legacy board maths may be retired (scripts/retire_legacy_board.py, dry run first)." },
-      { when: "Friday, after the pack", what: "Short selling shadow report (counters agree; net after charges once there is enough data)", jobs: ["short_shadow_report"], note: "NOT_ENOUGH_DATA is normal for the first weeks. It never touches SHORT_MODE." },
       { when: "Friday, after the pack", what: "Short selling bar replay (mirrored short rule on recent 5-minute bars, with a long control)", jobs: ["short_history_replay"], note: "NOT_ENOUGH_DATA means market-data did not serve enough 5-minute history. Evidence only; it gates nothing." },
       { when: "Friday, after the pack", what: "Swing lane report on the paper ledger (the screened stocks after the screening day, net of delivery cost, against all the others; 5, 10 or 20 sessions)", jobs: ["swing_shadow_report"], note: "Also part of the Friday review pack. NOT_ENOUGH_DATA is normal: about 30 saved trading days for 5 sessions, 40+ for the 20-session answer (late December 2026). It never touches SWING_MODE." },
     ],
@@ -64,7 +63,7 @@ export const AUTOMATIC_ELSEWHERE = [
 export const JOB_SERVICES: Record<string, Svc[]> = {
   daily_trades: ["rt", "ps"], export_records: ["rt"], records_report: ["rt"], entry_slippage: ["rt"], hold_bucket: ["rt"], strategy_readout: ["rt", "ps"], legacy_gate: ["rt"], entry_rules: ["rt"],
   kronos_backtest: ["rt"], tsfm_nightly: ["rt"], tsfm_probe: ["rt"], tsfm_combine: ["rt"], latency_save: ["rt", "ps"], latency_compare: ["rt", "ps"],
-  wiring_check: ["rt", "ps"], dhan_sell_probe: ["ps"], short_shadow_report: ["ps"], short_history_replay: ["ps"], opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
+  wiring_check: ["rt", "ps"], dhan_sell_probe: ["ps"], short_history_replay: ["ps"], opening_replay: ["ps"], board_parity: ["ps"], intraday_gates: ["ps"], p8_retest: ["ps", "rt"], ml_v2: ["rt", "ps"],
   swing_backtest: ["rt"], swing_shadow_report: ["rt"], swing_universe: ["rt"],   // E142: the swing lane lives in real-trade-service only
 };
 

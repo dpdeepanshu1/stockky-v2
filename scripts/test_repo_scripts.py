@@ -206,6 +206,34 @@ def test_stale_files_script_in_a_real_git_repo(tmp_path):
     assert r.returncode == 1 and "git rm -f -- 'gone.txt'" in r.stdout and "keep.txt'" not in r.stdout
 
 
+def test_verify_mode_flags_a_file_missing_from_the_manifest_and_one_that_is_gone(tmp_path):
+    """E285 round 96: --verify compares the manifest with the files on disk in BOTH directions (round 95 shipped 7 live files the manifest did not list)."""
+    repo = tmp_path / "r"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    shutil.copy(SCRIPTS / "check_stale_files.py", repo / "scripts" / "check_stale_files.py")
+    (repo / "a.py").write_text("a")
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True)
+    assert run(sys.executable, "scripts/check_stale_files.py", "--write").returncode == 0
+    ok = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert ok.returncode == 0 and "matches the disk" in ok.stdout
+    (repo / "new_live_file.py").write_text("x")                      # added to the release, manifest not regenerated
+    (repo / "a.py").unlink()                                         # listed, but not in the release
+    bad = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert bad.returncode == 1 and "new_live_file.py" in bad.stdout and "in the manifest but not on disk: a.py" in bad.stdout and "--write" in bad.stdout
+
+
+def test_every_tracked_file_of_this_checkout_is_in_the_manifest():
+    """E285 round 96: the same gap seen from CI. A tracked file the manifest does not list makes the VM's check_stale_files print a `git rm` line for live code. Skipped outside a git checkout."""
+    import check_stale_files as csf
+    tracked = csf.tracked_files(csf.ROOT)
+    if not tracked:
+        return
+    known = {l.strip() for l in csf.MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
+    gone = csf.stale(tracked, known)
+    assert not gone, f"tracked files missing from docs/FILE_MANIFEST.txt (run: python3 scripts/check_stale_files.py --write): {gone[:10]}"
+
+
 def test_env_reference_check_names_the_differing_rows(tmp_path):
     repo = _mini_repo(tmp_path)
     subprocess.run([sys.executable, "scripts/gen_env_reference.py"], cwd=repo, check=True, capture_output=True)

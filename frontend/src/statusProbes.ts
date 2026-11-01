@@ -16,6 +16,7 @@ export const STATUS_PROBES: StatusProbe[] = [
   { svc: "rt", id: "db-latency", path: "/ops/db-latency", title: "Database latency", what: "Connect and execute times, the last slow statement and the pool state." },
   { svc: "rt", id: "live-state", path: "/live/state", title: "Pool, heat and setup stamps", what: "The pool rupees per mode, own and peer open risk against the heat limit, and how the newest entries were stamped by setup." },
   { svc: "ps", id: "live-state", path: "/live/state", title: "Order rate, momentum exit, heat, ladder", what: "Dhan order calls this process counted (waits, per-second budget), momentum-exit mode and counters, the other service's heat, and every setup's ladder stage." },
+  { svc: "ps", id: "ip-status", path: "/dhan/ip-status", title: "Dhan IP check", what: "Asks Dhan (read-only getIP) whether this host's IP is the registered one: OK, MISMATCH or NOT_CONFIGURED, the IPs on file, whether a change is allowed today, and the IP-guard counters." },
   { svc: "ps", id: "short-plain", path: "/short/plain", title: "Plain-order short fallback", what: "The switch, the day breaker, counters and SELLs under watch. Places nothing." },
   { svc: "ps", id: "short-probe", path: "/short/probe", title: "Last Dhan SELL probe", what: "The last probe on record (the probe itself is started from the Run tab with its confirm box)." },
   { svc: "ps", id: "board-status", path: "/board/status", title: "Market board status", what: "Board switches, bar recorder and parity counters." },

@@ -168,8 +168,18 @@ def adjust(old_fraction: float, minutes_since_open: float) -> float:
         return old_fraction
 
 
+def warm() -> None:
+    """E285 round 96: start the background build now (at service start) so the curve is ready before the first liquidity check, instead of on that first call. Never raises, never waits."""
+    try:
+        if getattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True):
+            _profile()
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("volume_profile.warm: skipped (%s)", _e)                        # E285 round 98: logged, no longer silent (the group322 pin); a warm-up never blocks start
+
+
 def snapshot() -> Dict[str, Any]:
+    """`building` is True while the background read of the recorder folders is still running (it reads every day's files, so it can take longer than a few seconds): then ready / days read as unknown, not as 'no data'."""
     with _lock:
         p = _state["profile"] or {}
-        return {"ready": bool(p.get("curve")), "days": p.get("days"), "symbol_days": p.get("symbol_days"), "files": p.get("files"), "built_age_s": round(time.time() - _state["built_at"]) if _state["built_at"] else None,
-                "error": _state["error"]}
+        return {"ready": bool(p.get("curve")), "building": bool(_state["building"]), "days": p.get("days"), "symbol_days": p.get("symbol_days"), "files": p.get("files"),
+                "built_age_s": round(time.time() - _state["built_at"]) if _state["built_at"] else None, "error": _state["error"]}

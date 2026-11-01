@@ -31,6 +31,7 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
+import config
 import notifier
 from auth import dhan_credentials_ro
 from execution import order_rate
@@ -246,6 +247,11 @@ def _extract_data(response: dict, key: str = "data"):
             msg = remarks.get("error_message", str(remarks))
         else:
             msg = str(remarks)
+        try:                                                    # E285 round 95: a refusal for the source IP pauses new entries and alerts once (orders/ip_guard.py); never raises
+            from orders import ip_guard
+            ip_guard.on_rejection(f"{msg} {remarks if isinstance(remarks, dict) else ''}")
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("dhan_client: ip_guard.on_rejection skipped (%s)", _e)      # E285 round 98: logged, no longer silent (the group322 pin); the real error is raised below
         raise RuntimeError(f"Dhan API error: {msg}")
     return response.get(key)
 
@@ -984,6 +990,9 @@ def modify_super_order(
             raise ValueError("modify_super_order: TARGET_LEG requires target_price.")
         kwargs["targetPrice"] = round_to_tick(float(target_price))
 
+    if modify_room(order_id) <= 0:                              # E285 round 95: Dhan's 25-modifications-per-order cap; refuse here instead of spending an order call on a certain refusal
+        _MODIFY_STATS["refused"] += 1                           # E285 round 96: counted for GET /live/state
+        raise DhanModifyCapReached(f"modify_super_order: order {order_id} has already taken {modify_count(order_id)} modifies (Dhan allows {int(getattr(config, 'DHAN_MODIFY_CAP_PER_ORDER', 25))} per order) - leg left as it is.")
     client = _get_sdk_client(db)
 
     logger.info(
@@ -997,7 +1006,12 @@ def modify_super_order(
         leg_name=order_leg,
         **kwargs,
     )
-    return _extract_data(resp) or {}
+    out = _extract_data(resp) or {}
+    _MODIFY_COUNT[str(order_id)] = modify_count(order_id) + 1       # only an accepted modify counts
+    if len(_MODIFY_COUNT) > 2000:                                    # a day holds a few dozen orders; keep the dict small across a long-lived process
+        for k in list(_MODIFY_COUNT)[:1000]:
+            _MODIFY_COUNT.pop(k, None)
+    return out
 
 
 _STOP_LEG_PRICE_KEYS = ("triggerPrice", "stopLossPrice", "stopPrice", "price")
@@ -1501,6 +1515,43 @@ def place_intraday_buy_stop(db: Session, *, is_armed: bool, security_id: str, ex
     return result
 
 
+def place_intraday_sell_stop(db: Session, *, is_armed: bool, security_id: str, exchange_segment: str, quantity: int, trigger_price: float,
+                             tag: Optional[str] = None) -> dict:
+    """E285 round 98 (half-sell probe only): SELL STOP_LOSS_MARKET, INTRADAY - the broker stop of a LONG whose Super Order legs were cancelled (a long's stop sits BELOW the price;
+    Dhan fires the SELL when the LTP falls to the trigger). The mirror of place_intraday_buy_stop with the same blocking read-back: raises when Dhan gives no order id, the order is
+    not in the book, the book says another order type, or its status is not live - the caller treats any raise as 'no stop exists'. Nothing in the live entry or exit path calls this."""
+    if not is_armed:
+        raise DhanNotArmedError("position-stocks-service is not armed - refusing to place a protective SELL stop order.")
+    trig = round_stop_to_tick(float(trigger_price))
+    if trig <= 0:
+        raise ValueError(f"place_intraday_sell_stop: trigger_price must be > 0 (got {trigger_price!r} -> {trig!r}).")
+    client = _get_sdk_client(db)
+    logger.warning("position-stocks: placing REAL protective stop: STOP_LOSS_MARKET SELL %s x%d trigger=\u20b9%.2f (INTRADAY)", security_id, quantity, trig)
+    order_rate.acquire("place_order")
+    resp = client.place_order(security_id=security_id, exchange_segment=exchange_segment, transaction_type="SELL", quantity=int(quantity),
+                              order_type="STOP_LOSS_MARKET", product_type="INTRADAY", price=0.0, trigger_price=trig, validity="DAY", tag=tag)
+    result = _extract_data(resp) or {}
+    oid = str(result.get("orderId") or result.get("order_id") or "")
+    if not oid:
+        raise RuntimeError(f"place_intraday_sell_stop: Dhan did not return an orderId (raw: {result!r}) - treating as placement failure.")
+    try:
+        rows = _extract_data(client.get_order_list())
+        rows = rows if isinstance(rows, list) else []
+        row = next((r for r in rows if str(r.get("orderId") or r.get("order_id") or "") == oid), None)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"place_intraday_sell_stop: placed {oid} but the order list could not be read, so the stop is not confirmed live: {e}") from e
+    if row is None:
+        raise RuntimeError(f"place_intraday_sell_stop: placed {oid} but it is not in the order list - treating as placement failure.")
+    otype = str(row.get("orderType") or row.get("order_type") or "").upper()
+    status = str(row.get("orderStatus") or row.get("status") or "").upper()
+    if otype not in ("STOP_LOSS_MARKET", "SL-M", "SLM"):
+        raise RuntimeError(f"place_intraday_sell_stop: ORDER TYPE MISMATCH for {oid}: sent STOP_LOSS_MARKET, Dhan reports {otype!r} (row: {row!r})")
+    if status and status not in ("PENDING", "TRANSIT", "OPEN"):
+        raise RuntimeError(f"place_intraday_sell_stop: order {oid} status {status!r} is not a live pending state (row: {row!r})")
+    result["orderId"] = oid
+    return result
+
+
 def get_order_row(db: Session, order_id: str) -> Optional[dict]:
     """The order-book row of one plain order, None when it is not in the book. RAISES when the book call fails (a Dhan 'failure' answer, a network error), so callers can
     tell 'not there' from 'could not read'. An answer that is not a list reads as an empty book, which callers must treat as 'not there', never as 'dead'."""
@@ -1579,6 +1630,83 @@ def is_security_intraday_restricted_error(message: str) -> bool:
     future cycles skip it before even trying to buy."""
     m = (message or "").lower()
     return any(marker in m for marker in _SECURITY_INTRADAY_RESTRICTED_MARKERS)
+
+
+def is_invalid_ip_error(message: str) -> bool:
+    """E285 round 95: True when Dhan refuses an order call because the request's source IP is not registered (Dhan's FAQ shows "DH-905 Invalid IP"). Same markers as orders/ip_guard."""
+    from orders import ip_guard
+    return ip_guard.is_ip_rejection(message)
+
+
+DHAN_API_BASE = "https://api.dhan.co/v2"
+
+
+def get_outbound_ip() -> Optional[str]:
+    """Best-effort: the IP an IP-echo service sees for this host. Dhan's own detectedIP (get_ip_status) is the one that counts; this is the fallback when getIP cannot be read. Never raises."""
+    try:
+        resp = httpx.get("https://api.ipify.org?format=json", timeout=6.0)
+        resp.raise_for_status()
+        return resp.json().get("ip")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position-stocks: get_outbound_ip lookup failed: %s", e)
+        return None
+
+
+def get_ip_status(db: Session) -> dict:
+    """E285 round 95: Dhan's own view of this host's IP (GET /v2/ip/getIP: the IPs on file, the IP Dhan detected, and whether they match), summarised by orders/ip_guard.summarize_ip_status.
+    Read-only (not IP-gated, no order is touched). Raises DhanNotConnectedError when no credentials are stored; any HTTP or parse failure comes back as {verdict: UNKNOWN, error: ...}."""
+    from orders import ip_guard
+    creds = dhan_credentials_ro.get_decrypted_credentials(db)
+    if creds is None:
+        raise DhanNotConnectedError("No Dhan credentials found - connect Dhan in real-trade-service first.")
+    client_id, access_token = creds
+    _release_connection(db)
+    outbound = get_outbound_ip()
+    try:
+        resp = httpx.get(f"{DHAN_API_BASE}/ip/getIP", headers={"access-token": access_token, "client-id": str(client_id), "Accept": "application/json"}, timeout=8.0)
+        resp.raise_for_status()
+        out = ip_guard.summarize_ip_status(resp.json(), outbound)
+    except Exception as e:  # noqa: BLE001
+        out = ip_guard.summarize_ip_status(None, outbound)
+        out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        out["advice"] = "Could not read Dhan's IP status (token expired, or Dhan unreachable). " + (f"This host's IP by an echo service: {outbound}." if outbound else "")
+    return out
+
+
+# E285 round 95: Dhan allows 25 modifications per order. In-memory count of the successful modify_super_order calls per order id (a restart starts at 0: Dhan's own refusal then still applies).
+_MODIFY_COUNT: dict = {}
+
+
+def modify_count(order_id: str) -> int:
+    return int(_MODIFY_COUNT.get(str(order_id), 0))
+
+
+def modify_room(order_id: str) -> int:
+    """How many more modifies the order can take before the cap (a large number when the cap logic is off)."""
+    if not bool(getattr(config, "DHAN_MODIFY_CAP_ENABLED", True)):
+        return 10 ** 6
+    return int(getattr(config, "DHAN_MODIFY_CAP_PER_ORDER", 25)) - modify_count(order_id)
+
+
+_MODIFY_STATS: dict = {"refused": 0}                      # E285 round 96: modifies refused at the cap since the process started
+
+
+def modify_stats() -> dict:
+    """E285 round 96: for GET /live/state - the cap, the reserve, how many orders are being counted, the highest count on any order, how many orders are inside the reserve (the trail has stopped on them) and how many modifies were refused at the cap."""
+    cap = int(getattr(config, "DHAN_MODIFY_CAP_PER_ORDER", 25))
+    reserve = max(0, int(getattr(config, "DHAN_MODIFY_RESERVE", 3)))
+    counts = list(_MODIFY_COUNT.values())
+    return {"enabled": bool(getattr(config, "DHAN_MODIFY_CAP_ENABLED", True)), "cap": cap, "reserve": reserve, "orders_counted": len(counts), "max_modifies_on_one_order": max(counts) if counts else 0,
+            "orders_trail_stopped": sum(1 for c in counts if cap - c <= reserve), "refused_at_cap": int(_MODIFY_STATS["refused"])}
+
+
+def trail_has_room(order_id: str) -> bool:
+    """True while the stop TRAIL may still modify this order: it stops DHAN_MODIFY_RESERVE short of the cap so the last modifies stay for the protective moves."""
+    return modify_room(order_id) > max(0, int(getattr(config, "DHAN_MODIFY_RESERVE", 3)))
+
+
+class DhanModifyCapReached(RuntimeError):
+    """Raised before any call to Dhan when an order has already taken DHAN_MODIFY_CAP_PER_ORDER modifies."""
 
 
 def is_insufficient_funds_error(message: str) -> bool:

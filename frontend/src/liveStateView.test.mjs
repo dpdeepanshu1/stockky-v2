@@ -52,6 +52,24 @@ assert.equal(val(find(c, "momentum"), "mode"), "live"); assert.equal(val(find(c,
 assert.equal(val(find(c, "shared_heat"), "other service: open risk"), "₹13");
 assert.equal(find(c, "ladder").rows.filter((r) => r.label.startsWith("  "))[0].label, "  S4_CATALYST_DOWN SHORT");   // stage 2 first
 assert.equal(val(find(c, "ladder"), "  S4_CATALYST_DOWN SHORT"), "stage 2");
+// E285 round 96: IP rule, 25-modifies cap and the learned volume curve
+const ps2 = { ...ps,
+  ip_guard: { ok: true, enabled: true, hits: 2, last_message: "DH-905 Invalid IP", pause_minutes: 15 },
+  modify_cap: { ok: true, enabled: true, cap: 25, reserve: 3, orders_counted: 4, max_modifies_on_one_order: 23, orders_trail_stopped: 1, refused_at_cap: 0 },
+  volume_profile: { ok: true, ready: false, building: true, days: null, symbol_days: null },
+};
+const d = liveStateBlocks("ps", ps2);
+assert.deepEqual(d.map((x) => x.id), ["order_rate", "shared_window", "momentum", "shared_heat", "ladder", "ip_guard", "modify_cap", "volume_profile"]);
+assert.equal(val(find(d, "ip_guard"), "IP refusals since restart"), "2"); assert.equal(find(d, "ip_guard").rows.find((r) => r.label === "IP refusals since restart").tone, "bad");
+assert.equal(val(find(d, "ip_guard"), "new entries paused for"), "15 min"); assert.equal(val(find(d, "ip_guard"), "last refusal"), "DH-905 Invalid IP");
+const quiet = liveStateBlocks("ps", { ...ps2, ip_guard: { ok: true, enabled: true, hits: 0, last_message: "", pause_minutes: 15 } });
+assert.equal(find(quiet, "ip_guard").rows.length, 2); assert.equal(find(quiet, "ip_guard").rows[1].tone, "good");
+assert.equal(val(find(d, "modify_cap"), "most modifies on one order"), "23"); assert.equal(find(d, "modify_cap").rows.find((r) => r.label.startsWith("orders whose")).tone, "warn");
+assert.equal(find(liveStateBlocks("ps", { ...ps2, modify_cap: { ...ps2.modify_cap, refused_at_cap: 1 } }), "modify_cap").rows.find((r) => r.label.startsWith("modifies refused")).tone, "bad");
+assert.equal(val(find(d, "volume_profile"), "curve ready"), "building now"); assert.equal(val(find(d, "volume_profile"), "recorded days used"), "-");
+assert.equal(val(find(liveStateBlocks("ps", { ...ps2, volume_profile: { ok: true, ready: true, building: false, days: 8, symbol_days: 2100 } }), "volume_profile"), "curve ready"), "yes");
+assert.equal(find(liveStateBlocks("ps", { ...ps2, volume_profile: { ok: true, ready: false, building: false } }), "volume_profile").rows[0].tone, "warn");
+assert.equal(find(liveStateBlocks("ps", { ...ps2, ip_guard: { ok: false, error: "boom" } }), "ip_guard").ok, false);
 // forced calls are red; a failed part does not hide the others
 assert.equal(find(liveStateBlocks("ps", { ...ps, order_rate: { ...ps.order_rate, forced: 2 } }), "order_rate").rows.find((r) => r.label.startsWith("let through")).tone, "bad");
 assert.equal(find(liveStateBlocks("ps", { ...ps, momentum: { ok: false, error: "boom" } }), "momentum").ok, false);
@@ -66,8 +84,15 @@ const root = new URL("../../", import.meta.url);
 const rtSrc = readFileSync(new URL("services/real-trade-service/execution/live_state.py", root), "utf8");
 const psSrc = readFileSync(new URL("services/position-stocks-service/orders/live_state.py", root), "utf8");
 for (const k of ["starting_capital", "current_equity", "cash_available", "broker_cash_available", "own_open_risk", "own_gap_allowance", "peer_open_risk", "peer_capital_base", "limit_pct", "by_setup", "by_slot", "unstamped", "order_rate"]) assert.ok(rtSrc.includes(`"${k}"`) || rtSrc.includes(k), `rt live_state has no ${k}`);
-for (const k of ["order_rate", "momentum", "shared_heat", "ladder", "peer_age_s", "peer_max_age_s", "short_cap", "stages", "limit_pct", "\"shared\""]) assert.ok(psSrc.includes(k), `ps live_state has no ${k}`);
+for (const k of ["order_rate", "momentum", "shared_heat", "ladder", "ip_guard", "modify_cap", "volume_profile", "peer_age_s", "peer_max_age_s", "short_cap", "stages", "limit_pct", "\"shared\""]) assert.ok(psSrc.includes(k), `ps live_state has no ${k}`);
 const orSrc = readFileSync(new URL("services/position-stocks-service/execution/order_rate.py", root), "utf8");
 for (const k of ["calls", "waits", "max_wait_s", "forced", "peak_in_window", "budget_per_s", "shared_enabled", "account_per_s", "account_waits", "shared_recorded", "shared_unusable"]) assert.ok(orSrc.includes(`"${k}"`), `order_rate has no ${k}`);
+
+const dcSrc = readFileSync(new URL("services/position-stocks-service/execution/dhan_client.py", root), "utf8");
+for (const k of ["enabled", "cap", "orders_counted", "max_modifies_on_one_order", "orders_trail_stopped", "refused_at_cap"]) assert.ok(dcSrc.includes(`"${k}"`), `modify_stats has no ${k}`);
+const igSrc = readFileSync(new URL("services/position-stocks-service/orders/ip_guard.py", root), "utf8");
+for (const k of ["enabled", "hits", "last_message", "pause_minutes"]) assert.ok(igSrc.includes(`"${k}"`), `ip_guard.status has no ${k}`);
+const vpSrc = readFileSync(new URL("services/position-stocks-service/orders/volume_profile.py", root), "utf8");
+for (const k of ["ready", "building", "days", "symbol_days", "error"]) assert.ok(vpSrc.includes(`"${k}"`), `volume_profile.snapshot has no ${k}`);
 
 console.log("liveStateView.test.mjs: all checks passed");

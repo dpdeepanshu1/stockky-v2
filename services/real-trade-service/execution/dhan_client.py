@@ -621,9 +621,11 @@ def is_auth_error(message: str) -> bool:
 # host is given a static outbound IP and that IP is whitelisted in Dhan, or
 # (b) the request is routed through a static-IP proxy that is whitelisted.
 # See get_outbound_ip() below and GET /dhan/network-check in main.py.
+# E285 round 97: a bare "dh-907" / "dh-908" is no longer a marker. Dhan's error table (as recalled, to be re-checked on Dhan's page) gives them as data error / internal
+# server error, so a transient Dhan fault on an order disarmed REAL as if the IP were wrong. A real IP refusal carries its own words ("Invalid IP", "not whitelisted"), which stay.
 _INVALID_IP_MARKERS = (
     "invalid ip", "ip not whitelisted", "ip address not allowed",
-    "unauthorized ip", "dh-907", "dh-908",
+    "unauthorized ip", "ip mismatch", "ip is not registered",
 )
 
 

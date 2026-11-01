@@ -286,25 +286,10 @@ def expire_open(db: Session, now: Optional[datetime] = None) -> int:
     return closed
 
 
-def _row_dict(r: ScalpShortShadow) -> Dict[str, Any]:
-    return {k: getattr(r, k, None) for k in ("id", "day", "symbol", "window_source", "pct_change", "entry_price", "stop_price", "target_price", "quantity",
-                                             "status", "exit_price", "gross_pnl", "net_pnl", "net_pnl_pct", "low_water", "high_water", "board_conviction",
-                                             "market_state")} | {"created_at": r.created_at.isoformat() if r.created_at else None}
-
-
-def summary(db: Session, recent: int = 50) -> Dict[str, Any]:
-    """Read-only: totals over closed (TARGET / STOP / EOD) rows, the S2 progress counters, the gate refusal counters and the latest rows."""
-    rows: List[ScalpShortShadow] = db.query(ScalpShortShadow).order_by(ScalpShortShadow.id.desc()).all()
-    done = [r for r in rows if r.status in ("TARGET", "STOP", "EOD")]
-    wins = [r for r in done if (r.net_pnl or 0.0) > 0]
-    days = sorted({r.day for r in done})
-    return {"mode": cfg_mode(), "total": len(rows), "open": sum(1 for r in rows if r.status == "OPEN"), "closed": len(done),
-            "target": sum(1 for r in rows if r.status == "TARGET"), "stop": sum(1 for r in rows if r.status == "STOP"),
-            "eod": sum(1 for r in rows if r.status == "EOD"), "expired": sum(1 for r in rows if r.status == "EXPIRED"),
-            "net_pnl": round(sum(r.net_pnl or 0.0 for r in done), 2), "gross_pnl": round(sum(r.gross_pnl or 0.0 for r in done), 2),
-            "win_rate_pct": round(len(wins) / len(done) * 100.0, 1) if done else None, "days_with_results": len(days),
-            "s2_progress": {"would_be_shorts": len(done), "needed": 100, "days": len(days), "weeks_needed": 4},
-            "gate_counters": {k: v for k, v in _stats.items()}, "shortlist": dict(_last_shortlist), "recent": [_row_dict(r) for r in rows[:max(1, int(recent))]]}
+def summary(db: Session = None, recent: int = 0) -> Dict[str, Any]:
+    """Read-only: the mode, the gate refusal counters and the latest shortlist. E285 round 94: the shadow history (rows, totals, S2 progress) is gone - nothing writes a
+    shadow-short row any more and old rows are only ever expired; the table stays in the database untouched. `db` and `recent` are accepted and ignored."""
+    return {"mode": cfg_mode(), "gate_counters": {k: v for k, v in _stats.items()}, "shortlist": dict(_last_shortlist)}
 
 
 def _board_defers(quality: Any) -> bool:

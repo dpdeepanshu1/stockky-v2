@@ -40,7 +40,7 @@ def test_the_monday_pack_no_longer_runs_the_09_30_check_at_08_50():
     assert ["monday_check_0930", {}] in J.PACK_MAP["live_check_open"]["jobs"] and ["shadow_shorts_check", {}] in J.PACK_MAP["live_check_open"]["jobs"]
     assert ["monday_check_1015", {}] in J.PACK_MAP["live_check_1015"]["jobs"]
     assert ["wiring_check", {}] in J.PACK_MAP["morning_open"]["jobs"]
-    assert ["short_shadow_report", {}] in J.PACK_MAP["friday_review"]["jobs"]
+    assert "short_shadow_report" not in [j for j, _ in J.PACK_MAP["friday_review"]["jobs"]]      # E285 round 94: the shadow-short report is removed
 
 
 def test_no_pack_places_a_real_order():

@@ -131,6 +131,49 @@ export function liveStateBlocks(svc: "rt" | "ps", value: unknown): Block[] {
       }
       out.push({ id: "ladder", title: "Risk ladder", ok: true, rows });
     }
+    // E285 round 96: parts an older service build does not send are simply left out
+    if ("ip_guard" in value) {
+      const g = failed("ip_guard", "Dhan IP rule", value.ip_guard);
+      if (g) out.push(g);
+      else {
+        const p = value.ip_guard as Obj;
+        const hits = numOrNull(p.hits);
+        const rows: Row[] = [{ label: "IP guard", value: yesNo(p.enabled), tone: p.enabled === false ? "warn" : undefined },
+                             { label: "IP refusals since restart", value: plain(p.hits), tone: hits ? "bad" : hits === 0 ? "good" : undefined }];
+        if (hits) rows.push({ label: "last refusal", value: String(p.last_message ?? "-").slice(0, 120), tone: "bad" }, { label: "new entries paused for", value: `${plain(p.pause_minutes)} min` });
+        out.push({ id: "ip_guard", title: "Dhan IP rule", ok: true, rows });
+      }
+    }
+    if ("modify_cap" in value) {
+      const m = failed("modify_cap", "Dhan 25-modifies cap", value.modify_cap);
+      if (m) out.push(m);
+      else {
+        const p = value.modify_cap as Obj;
+        const stopped = numOrNull(p.orders_trail_stopped), refused = numOrNull(p.refused_at_cap);
+        out.push({ id: "modify_cap", title: "Dhan 25-modifies cap", ok: true, rows: [
+          { label: "cap logic", value: yesNo(p.enabled), tone: p.enabled === false ? "warn" : undefined },
+          { label: "modifies allowed per order", value: plain(p.cap) },
+          { label: "orders counted (since restart)", value: plain(p.orders_counted) },
+          { label: "most modifies on one order", value: plain(p.max_modifies_on_one_order) },
+          { label: "orders whose stop trail has stopped", value: plain(p.orders_trail_stopped), tone: stopped ? "warn" : undefined },
+          { label: "modifies refused at the cap", value: plain(p.refused_at_cap), tone: refused ? "bad" : undefined },
+        ] });
+      }
+    }
+    if ("volume_profile" in value) {
+      const v = failed("volume_profile", "Learned volume curve", value.volume_profile);
+      if (v) out.push(v);
+      else {
+        const p = value.volume_profile as Obj;
+        const ready = p.ready === true, building = p.building === true;
+        out.push({ id: "volume_profile", title: "Learned volume curve", ok: true, rows: [
+          { label: "curve ready", value: ready ? "yes" : building ? "building now" : "no (old curve in use)", tone: ready ? "good" : building ? undefined : "warn" },
+          { label: "recorded days used", value: plain(p.days) },
+          { label: "symbol-days used", value: plain(p.symbol_days) },
+          ...(typeof p.error === "string" && p.error ? [{ label: "last error", value: p.error.slice(0, 100), tone: "warn" as Tone }] : []),
+        ] });
+      }
+    }
     return out;
   } catch {
     return [{ id: "all", title: "Answer", ok: false, rows: [{ label: "answer", value: "could not be read", tone: "bad" }] }];

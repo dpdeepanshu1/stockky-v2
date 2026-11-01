@@ -1,68 +1,40 @@
-// Run: node --experimental-strip-types shortShadow.test.mjs  (Node >= 22.6). Short selling step 6: the "Short selling (shadow)" card helpers.
+// Run: node --experimental-strip-types shortShadow.test.mjs  (Node >= 22.6). The "Short selling" panel helpers.
 import assert from "node:assert/strict";
-import { sellProbeView, shortShadowView, statusTone, rupees, S2_DAYS_NEEDED, shortSwitchRows, canSwitchShortOff } from "./shortShadowView.ts";
-import { readFileSync } from "node:fs";
+import { sellProbeView, shortShadowView, shortSwitchRows, canSwitchShortOff } from "./shortShadowView.ts";
+import { readFileSync, existsSync } from "node:fs";
 
-const row = (o = {}) => ({ id: 1, day: "2026-10-23", symbol: "AAA", window_source: "5m", pct_change: -1.2, entry_price: 100, stop_price: 102, target_price: 96, quantity: 10,
-  status: "TARGET", exit_price: 96, gross_pnl: 40, net_pnl: 31, net_pnl_pct: 3.1, low_water: 96, high_water: 100.5, board_conviction: 62, market_state: "stressed", created_at: "2026-10-23T05:00:00+00:00", ...o });
-const doc = (o = {}) => ({ mode: "shadow", total: 0, open: 0, closed: 0, target: 0, stop: 0, eod: 0, expired: 0, net_pnl: 0, gross_pnl: 0, win_rate_pct: null, days_with_results: 0,
-  s2_progress: { would_be_shorts: 0, needed: 100, days: 0, weeks_needed: 4 }, gate_counters: { by_code: {} }, recent: [], ...o });
+const doc = (o = {}) => ({ mode: "off", gate_counters: { by_code: {} }, ...o });
 
 // unavailable
 assert.equal(shortShadowView(null).kind, "unavailable");
-assert.equal(shortShadowView(undefined).s2Ready, false);
+assert.equal(shortShadowView(undefined).refusals.length, 0);
 
-// off: mode off and nothing recorded -> tells where to switch it on, S2 is not ready
+// off: tells where to switch it on; a leftover "shadow" mode reads as off (the service cannot run it any more)
 const off = shortShadowView(doc({ mode: "off" }));
 assert.equal(off.kind, "off");
 assert.match(off.headline, /SHORT_MODE is off/);
-assert.equal(off.s2Ready, false);
+assert.equal(shortShadowView(doc({ mode: "shadow" })).kind, "off");
 
-// waiting: shadow on, no row yet; refusals sorted biggest first and capped at 6
-const waiting = shortShadowView(doc({ gate_counters: { by_code: { SHORT_VWAP: 4, SHORT_NEAR_LOW: 9, A: 1, B: 1, C: 1, D: 1, E: 1, ZERO: 0 } } }));
-assert.equal(waiting.kind, "waiting");
-assert.deepEqual(waiting.refusals.map((r) => r.code), ["SHORT_NEAR_LOW", "SHORT_VWAP", "A", "B", "C", "D"], "biggest first, ties by code, zero counts dropped, at most 6");
-assert.match(waiting.headline, /fail closed/);
+// live: says real orders are allowed and where they show
+const live = shortShadowView(doc({ mode: "live" }));
+assert.equal(live.kind, "live");
+assert.match(live.headline, /LIVE/);
+assert.match(live.headline, /Positions/);
 
-// active but short of the S2 gate: says exactly what is missing
-const a = shortShadowView(doc({ total: 12, closed: 10, open: 2, net_pnl: -85.5, days_with_results: 3, s2_progress: { would_be_shorts: 10, needed: 100, days: 3, weeks_needed: 4 }, recent: [row(), row({ id: 2, status: "STOP", net_pnl: -40 })] }));
-assert.equal(a.kind, "active");
-assert.equal(a.s2Ready, false);
-assert.equal(a.progress.pct, 10);
-assert.equal(a.s2Missing.length, 3);
-assert.match(a.s2Missing[0], /90 more would-be shorts \(10 of 100\)/);
-assert.match(a.s2Missing[1], new RegExp(`${S2_DAYS_NEEDED - 3} more trading days`));
-assert.match(a.s2Missing[2], /negative/);
-assert.equal(a.rows.length, 2);
-assert.match(a.headline, /^12 would-be shorts recorded, 10 closed, 2 open\.$/);
-assert.match(shortShadowView(doc({ total: 1, closed: 1 })).headline, /^1 would-be short recorded/);
+// refusals sorted biggest first (ties by code), zero counts dropped, at most 6
+const r = shortShadowView(doc({ mode: "live", gate_counters: { by_code: { SHORT_VWAP: 4, SHORT_NEAR_LOW: 9, A: 1, B: 1, C: 1, D: 1, E: 1, ZERO: 0 } } }));
+assert.deepEqual(r.refusals.map((x) => x.code), ["SHORT_NEAR_LOW", "SHORT_VWAP", "A", "B", "C", "D"]);
 
-// the three numbers pass -> ready (a person still checks it is not from one or two days: the card says so)
-const ready = shortShadowView(doc({ total: 130, closed: 120, net_pnl: 2100, days_with_results: 21, s2_progress: { would_be_shorts: 120, needed: 100, days: 21, weeks_needed: 4 } }));
-assert.equal(ready.s2Ready, true);
-assert.deepEqual(ready.s2Missing, []);
-assert.equal(ready.progress.pct, 100);
-// 100 shorts and positive but too few days is NOT ready; zero net is not positive
-assert.equal(shortShadowView(doc({ total: 100, closed: 100, net_pnl: 500, days_with_results: 5, s2_progress: { would_be_shorts: 100, needed: 100, days: 5, weeks_needed: 4 } })).s2Ready, false);
-assert.match(shortShadowView(doc({ total: 100, closed: 100, net_pnl: 0, days_with_results: 25, s2_progress: { would_be_shorts: 100, needed: 100, days: 25, weeks_needed: 4 } })).s2Missing[0], /zero/);
+// malformed input never throws
+assert.equal(shortShadowView({ mode: "live" }).refusals.length, 0);
+assert.equal(shortShadowView({ mode: "off", gate_counters: { by_code: { X: "bad" } } }).refusals.length, 0);
 
-// SHORT_MODE switched back to off with rows left over: still active, and says so
-assert.match(shortShadowView(doc({ mode: "off", total: 4, closed: 4 })).headline, /SHORT_MODE is off now/);
-
-// malformed numbers never throw
-assert.equal(shortShadowView(doc({ s2_progress: {}, closed: 7, days_with_results: 2, total: 7 })).progress.done, 7);
-assert.equal(shortShadowView({ mode: "shadow", total: 0 }).kind, "waiting");
-
-// tones and money
-assert.equal(statusTone("TARGET"), "good");
-assert.equal(statusTone("STOP"), "bad");
-assert.equal(statusTone("OPEN"), "warn");
-assert.equal(statusTone("EXPIRED"), undefined);
-assert.equal(rupees(1234.6), "+₹1,235");
-assert.equal(rupees(-40.2), "-₹40");
-assert.equal(rupees(0), "₹0");
-assert.equal(rupees(null), "-");
-assert.equal(rupees(NaN), "-");
+// the shadow history is gone from the view and the helpers module
+const viewSrc = readFileSync(new URL("./shortShadowView.ts", import.meta.url), "utf8");
+for (const gone of ["s2Ready", "s2Missing", "ShortShadowRow", "statusTone", "S2_DAYS_NEEDED", "would-be"]) assert.ok(!viewSrc.includes(gone), `${gone} is removed`);
+assert.ok(!existsSync(new URL("./components/board/ShortShadowCard.tsx", import.meta.url)), "the shadow card file is deleted");
+const tabSrc = readFileSync(new URL("./components/PositionStocksTab.tsx", import.meta.url), "utf8");
+assert.ok(!tabSrc.includes("ShortShadowCard"), "the Position Stocks board no longer shows the shadow card");
 
 console.log("shortShadow.test.mjs: ok");
 
@@ -79,7 +51,8 @@ const spCode = sp.replace(/^\s*\/\/.*$/gm, "");
 assert.match(sp, /data-testid="short-selling"/);
 assert.match(sp, /controlApi\.set\("ps", "SHORT_MODE", "off"/);          // the one-click action can only set OFF
 assert.ok(!/"SHORT_MODE", "(live|shadow)"/.test(spCode), "the panel never turns shorting on");
-assert.match(sp, /start\("job", "short_shadow_report"/);
+assert.ok(!sp.includes("short_shadow_report"), "the shadow report button is removed");
+assert.ok(!sp.includes("short-s2") && !sp.includes("short-counters"), "the S2 line and the shadow counters are removed");
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
 assert.match(tab, /section === "short" && <ShortSellingPanel \/>/);
 console.log("shortShadow panel: ok");

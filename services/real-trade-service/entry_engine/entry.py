@@ -1406,6 +1406,15 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         _setup_mult = float(_setup_res.get("size_mult") or 1.0)
                         adj_risk_pct *= _setup_mult
                         logger.info("entry_engine: %s %s matched %s (%s), sized x%.2f", mode, cand.symbol, _setup_res["id"], "; ".join(_setup_res.get("confirmations") or []), _setup_mult)
+                        if mode == "REAL":                                                       # E285 round 95: a setup that earned a ladder stage risks more per trade (only ever raises; stage 0 = 1.0)
+                            try:
+                                from entry_engine import risk_stage as _rs_r
+                                _rm = _rs_r.risk_mult_for(db, _setup_res["id"])
+                                if _rm > 1.0:
+                                    adj_risk_pct *= _rm
+                                    logger.info("entry_engine: %s %s risk x%.2f for its ladder stage", mode, cand.symbol, _rm)
+                            except Exception:  # noqa: BLE001 - the ladder only loosens; a failure keeps the base risk
+                                logger.debug("entry: ladder risk multiple failed (base risk)", exc_info=True)
             except Exception:  # noqa: BLE001 - the setup walk must never stop an entry
                 _setup_res, _setup_mult = None, None
                 logger.debug("entry_engine: setup walk failed for %s (legacy stamp, full size)", cand.symbol, exc_info=True)

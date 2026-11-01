@@ -81,6 +81,7 @@ API endpoints:
                                           automatically by the lazy daily reset)
   POST /kill                         — manual kill switch (like /disarm + kill)
   GET  /ws-status                    — WebSocket feed status
+  GET  /dhan/ip-status                — E285 round 95: is this host's IP the one Dhan has registered (Dhan's getIP) + the IP guard counters
   GET  /dhan/live-orders              — raw live Dhan super-order book for this
                                           service's tagged orders (broker-side truth)
   GET  /dhan/account                  — Dhan connection/token status + live funds,
@@ -227,6 +228,13 @@ async def lifespan(app: FastAPI):
     # cache hit. Background thread, never fatal, skipped when the board or the cache is off.
     if config.BOARD_ENABLED and config.BOARD_REPORT_CACHE_S > 0 and _board_report_claim(30):
         threading.Thread(target=_board_report_refresh_bg, args=(30,), daemon=True, name="board-report-warm").start()
+
+    # E285 round 96: build the learned volume curve now, in the background, so it is ready before 09:45 (it was built on the first liquidity check). Never fatal.
+    try:
+        from orders import volume_profile as _vp
+        _vp.warm()
+    except Exception as _vpe:  # noqa: BLE001
+        logger.debug("volume profile warm-up skipped: %s", _vpe)
 
     if not config.RISK_PER_TRADE_PCT_CONFIRMED:
         # BUG FIX (session112 round 20 — found while adding lifespan()
@@ -2631,6 +2639,23 @@ def dhan_funds(admin: str = Depends(require_admin), db: Session = Depends(get_db
         raise HTTPException(status_code=502, detail=f"Dhan funds fetch failed: {e}")
 
 
+@app.get("/dhan/ip-status")
+def dhan_ip_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """E285 round 95: is THIS host's IP the one Dhan has registered? Dhan accepts order place / modify / cancel only from a registered static IP (one primary, one secondary, one change in 7 days) and refuses
+    the rest with "Invalid IP", while reads (funds, order book) still work, so a wrong IP looks healthy until the first order. Calls Dhan's GET /v2/ip/getIP (read-only) and returns the verdict
+    (OK | MISMATCH | NOT_CONFIGURED | ORDERS_NOT_ALLOWED | UNKNOWN), the IPs on file, the IP Dhan detected, whether a change is allowed today, and this service's IP-guard counters (rejections seen since start).
+    Admin-gated. Dhan-side failures map to 409 / 502, never 401 (the dashboard clears the admin session on any 401)."""
+    from orders import ip_guard
+    try:
+        out = dhan_client.get_ip_status(db)
+    except dhan_client.DhanNotConnectedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Dhan IP status failed: {e}")
+    out["guard"] = ip_guard.status()
+    return out
+
+
 @app.get("/reconcile/pending")
 def reconcile_pending(db: Session = Depends(get_db)):
     """Read-only diagnostic (session 72, open-issue #5): every position still
@@ -2994,7 +3019,7 @@ def flow_symbol_route(symbol: str, admin: str = Depends(require_admin)):
 
 @app.get("/short/shadow")
 def short_shadow_route(db: Session = Depends(get_db)):
-    """Short selling step 5: the shadow shorts (what Stockky would have shorted and what happened next) and the gate counters. Read-only; no order exists."""
+    """Short selling: the mode, the gate refusal counters, the latest shortlist and the last SELL probe verdict. Read-only; no order exists behind it. (E285 round 94: the shadow-short rows are no longer listed.)"""
     from orders import sell_probe, short_entry
     out = short_entry.summary(db)
     try:
@@ -3023,6 +3048,26 @@ def short_probe_last_route():
     """E108 / T6: the last probe on record (verdict, rules learned about Dhan's SELL Super Order, answers). Read-only."""
     from orders import sell_probe
     return sell_probe.last_result() or {"verdict": "NOT_RUN", "line": "SELL PROBE: NOT_RUN - T6 has not been run yet"}
+
+
+class HalfSellProbeRequest(BaseModel):
+    symbol: Optional[str] = None
+    confirm: str = ""
+
+
+@app.post("/half-sell/probe")
+def half_sell_probe_route(body: HalfSellProbeRequest, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """E283 / E285 round 98: the supervised half-sell probe - BUY 2 shares with a Super Order, cancel both legs, SELL 1, place a SELL stop for the other share, then flatten.
+    Admin only, needs confirm=PLACE_REAL_HALF_SELL_PROBE, market hours only. Returns the verdict line, the answers Q1..Q7 and the timeline. See orders/half_sell_probe.py."""
+    from orders import half_sell_probe
+    return half_sell_probe.run_probe(db, symbol=body.symbol, confirm=body.confirm)
+
+
+@app.get("/half-sell/probe")
+def half_sell_probe_last_route():
+    """E283: the last half-sell probe on record (verdict, answers Q1..Q7, timeline). Read-only."""
+    from orders import half_sell_probe
+    return half_sell_probe.last_result() or {"verdict": "NOT_RUN", "line": "HALF-SELL PROBE: NOT_RUN - E283 has not been run yet"}
 
 
 @app.get("/short/orders")

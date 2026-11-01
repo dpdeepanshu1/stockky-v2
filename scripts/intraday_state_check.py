@@ -97,8 +97,6 @@ def phase_shadow_shorts(call: Call, rt: str, ps: str, expect_mode: str, rep: Rep
             rep.add("OK", "gate counters present" + (": " + ", ".join(f"{k}={v:g}" for k, v in top) if top else " (all zero so far)"))
         else:
             rep.add("FAIL", "GET /short/shadow carries no gate_counters")
-        rep.add("INFO", f"would-be shorts: total {js.get('total')}, open {js.get('open')}, closed {js.get('closed')}, net {js.get('net_pnl')} "
-                        f"(progress {(js.get('s2_progress') or {}).get('would_be_shorts')}/{(js.get('s2_progress') or {}).get('needed')})")
         probe = js.get("sell_probe")
         verdict = (probe or {}).get("verdict") if isinstance(probe, dict) else None
         if not verdict or verdict == "NOT_RUN":

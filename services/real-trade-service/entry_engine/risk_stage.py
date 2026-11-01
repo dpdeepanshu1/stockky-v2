@@ -80,6 +80,33 @@ def older_cells(rows: list) -> Dict[str, Any]:
         return {}
 
 
+def day_nets(db, mode: str = "REAL", n: int = 10) -> list:
+    """E285 round 95: the net closed P&L of the last n captured trading days (newest first) from trade_pnl_daily. A day counts only when it has orders and a stored net
+    (the same rule size_ladder uses). Never raises: [] when unreadable."""
+    try:
+        import models
+        rows = (db.query(models.TradePnlDaily).filter(models.TradePnlDaily.mode == mode.upper()).order_by(models.TradePnlDaily.day.desc()).limit(max(1, int(n)) + 5).all())
+        return [float(r.net_realized) for r in rows if r.net_realized is not None and (r.orders or 0) > 0][:n]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def loss_days_hit(db, mode: str = "REAL") -> bool:
+    """True when the daily loss limit was hit on LOSS_DAY_HITS or more of the last LOSS_DAY_SESSIONS captured days. The limit is the mode's risk row max_daily_loss_pct (else
+    DEFAULT_MAX_DAILY_LOSS_PCT) of the account equity. No equity, no limit or too few days = False. Never raises."""
+    try:
+        if not bool(getattr(config, "RISK_LADDER_LOSS_DAYS_ENABLED", True)):
+            return False
+        import models
+        acct = db.query(models.TradeAccount).filter_by(mode=mode.upper()).first()
+        pool = float(getattr(acct, "current_equity", 0.0) or 0.0)
+        risk = db.query(models.TradeRiskConfig).filter_by(mode=mode.upper()).first()
+        limit = float(getattr(risk, "max_daily_loss_pct", 0.0) or 0.0) or float(getattr(config, "DEFAULT_MAX_DAILY_LOSS_PCT", 3.0) or 0.0)
+        return risk_ladder.loss_days_brake(day_nets(db, mode, risk_ladder.LOSS_DAY_SESSIONS), pool, limit)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _load(db) -> Dict[str, Any]:
     import models
     pos = (db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.status == "CLOSED",
@@ -99,7 +126,7 @@ def _load(db) -> Dict[str, Any]:
     rows = build_rows(pos, opened, decisions)
     older = older_cells(rows)
     pnls = [(p.net_realized_pnl if p.net_realized_pnl is not None else p.realized_pnl) for p in pos[:risk_ladder.BRAKE_TRADES]]
-    return {"cells": ladder_stats.summarize(rows), "older": older, "last": pnls}
+    return {"cells": ladder_stats.summarize(rows), "older": older, "last": pnls, "loss_days": loss_days_hit(db, "REAL")}
 
 
 def _data(db) -> Dict[str, Any]:
@@ -118,7 +145,7 @@ def stage_for(db, setup_id: Optional[str]) -> int:
             return 0
         d = _data(db)
         key = f"{ladder_stats.cell_id(setup_id, 'LONG')}|ALL"
-        return risk_ladder.stage((d.get("cells") or {}).get(key), d.get("last") or [], False, (d.get("older") or {}).get(key))
+        return risk_ladder.stage((d.get("cells") or {}).get(key), d.get("last") or [], bool(d.get("loss_days")), (d.get("older") or {}).get(key))
     except Exception:  # noqa: BLE001
         logger.debug("risk stage: read failed (stage 0)", exc_info=True)
         return 0
@@ -130,3 +157,14 @@ def heat_limit_pct(db, setup_id: Optional[str], base_pct: float) -> float:
         return risk_ladder.heat_limit_pct(base_pct, stage_for(db, setup_id), float(getattr(config, "RISK_LADDER_HEAT_STEP_PCT", 1.0)))
     except Exception:  # noqa: BLE001
         return base_pct
+
+
+def risk_mult_for(db, setup_id: Optional[str]) -> float:
+    """E285 round 95: the per-trade risk multiple for this setup's stage: 1.0 at stage 0 (today's size), 1 + stage x RISK_LADDER_RISK_STEP above it (x1.25, x1.5; stage 3 stays at x1.5).
+    Never below 1.0 (the ladder only raises), 1.0 when the switch is off or on any error."""
+    try:
+        if not enabled() or not setup_id or not bool(getattr(config, "RISK_LADDER_RISK_ENABLED", True)):
+            return 1.0
+        return max(1.0, float(risk_ladder.risk_mult(stage_for(db, setup_id), float(getattr(config, "RISK_LADDER_RISK_STEP", 0.25)))))
+    except Exception:  # noqa: BLE001
+        return 1.0

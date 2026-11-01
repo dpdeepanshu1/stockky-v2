@@ -110,7 +110,7 @@ def test_every_dhan_order_call_in_the_client_is_counted_and_only_modify_waits():
     lines = src.split("\n")
     order_call = re.compile(r"^\s*resp = (?:client\.(?:place_order|cancel_order|place_super_order|modify_super_order|cancel_super_order)\(|dhan_http\.post\()")
     sites = [i for i, l in enumerate(lines) if order_call.match(l)]
-    assert len(sites) == 11, len(sites)
+    assert len(sites) == 12, len(sites)      # E285 round 98: +1 = place_intraday_sell_stop (the half-sell probe's stop), counted like the others
     uncounted = [i + 1 for i in sites if "order_rate.acquire(" not in lines[i - 1]]
     assert len(uncounted) == 1 and "place_super_order" in lines[uncounted[0] - 1], uncounted     # only the `tag` retry
     waits = re.findall(r"order_rate\.acquire\([^)]*wait=True", src)

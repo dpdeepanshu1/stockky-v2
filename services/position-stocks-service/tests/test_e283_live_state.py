@@ -1,4 +1,4 @@
-"""E283: GET /live/state (orders/live_state.py): four read-only parts, each isolated. No database, no market data."""
+"""E283: GET /live/state (orders/live_state.py): seven read-only parts (E285 round 96 added ip_guard, modify_cap, volume_profile), each isolated. No database, no market data."""
 import re
 import sys
 import types
@@ -9,13 +9,17 @@ from orders import live_state as ls
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_snapshot_has_the_four_parts_and_one_failure_does_not_hide_the_others(monkeypatch):
+def test_snapshot_has_all_the_parts_and_one_failure_does_not_hide_the_others(monkeypatch):
     monkeypatch.setattr(ls, "order_rate_part", lambda: {"enabled": True, "budget_per_s": 4})
     monkeypatch.setattr(ls, "momentum_part", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(ls, "heat_part", lambda db: {"peer_open_risk": 12.5})
     monkeypatch.setattr(ls, "ladder_part", lambda db: {"enabled": True, "stages": {"S1_CATALYST_UP|LONG": 1}})
+    monkeypatch.setattr(ls, "ip_guard_part", lambda: {"hits": 0})
+    monkeypatch.setattr(ls, "modify_cap_part", lambda: {"cap": 25})
+    monkeypatch.setattr(ls, "volume_part", lambda: {"ready": False, "building": True})
     out = ls.snapshot(object())
-    assert set(out) == {"order_rate", "momentum", "shared_heat", "ladder"}
+    assert set(out) == {"order_rate", "momentum", "shared_heat", "ladder", "ip_guard", "modify_cap", "volume_profile"}
+    assert out["ip_guard"] == {"ok": True, "hits": 0} and out["volume_profile"]["building"] is True
     assert out["order_rate"] == {"ok": True, "enabled": True, "budget_per_s": 4}
     assert out["momentum"]["ok"] is False and out["momentum"]["error"].startswith("RuntimeError: boom")
     assert out["shared_heat"]["ok"] is True and out["shared_heat"]["peer_open_risk"] == 12.5

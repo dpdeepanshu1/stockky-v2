@@ -142,7 +142,6 @@ frontend/src/components/board/MarketStrip.tsx
 frontend/src/components/board/SectorRail.tsx
 frontend/src/components/board/SellOrdersCard.tsx
 frontend/src/components/board/SessionHealthPanel.tsx
-frontend/src/components/board/ShortShadowCard.tsx
 frontend/src/components/board/ShortlistPanel.tsx
 frontend/src/components/board/StockPopup.tsx
 frontend/src/components/board/TopPicks.tsx
@@ -262,6 +261,8 @@ frontend/src/ipoView.test.mjs
 frontend/src/labels.test.mjs
 frontend/src/light-contrast.css
 frontend/src/lightContrast.test.mjs
+frontend/src/liveStateView.test.mjs
+frontend/src/liveStateView.ts
 frontend/src/main.tsx
 frontend/src/paperNet.test.mjs
 frontend/src/paperNet.ts
@@ -357,6 +358,7 @@ scripts/check_table_name_collisions.py
 scripts/conftest.py
 scripts/control_snapshot.py
 scripts/daily_trade_report.py
+scripts/dhan_half_sell_probe.py
 scripts/dhan_sell_probe.py
 scripts/dhan_swing_probe.py
 scripts/diagnose_g132_row.py
@@ -420,7 +422,6 @@ scripts/setup-secrets.html
 scripts/setup_backtest.py
 scripts/shared_copies_baseline.json
 scripts/short_history_replay.py
-scripts/short_shadow_report.py
 scripts/stats_loop.sh
 scripts/strategy_readout.py
 scripts/structure_backtest.py
@@ -504,6 +505,7 @@ scripts/test_vm_structure_report.py
 scripts/time_machine_gate_check.py
 scripts/tsfm_nightly.py
 scripts/tsfm_probe.py
+scripts/vm_all.sh
 scripts/vm_calibrate.sh
 scripts/vm_docker_recover.sh
 scripts/vm_ops.sh
@@ -918,7 +920,6 @@ services/calibration-runner-service/tests/test_regime_package.py
 services/calibration-runner-service/tests/test_regime_shadow_report.py
 services/calibration-runner-service/tests/test_runner_engine.py
 services/calibration-runner-service/tests/test_short_history_replay.py
-services/calibration-runner-service/tests/test_short_shadow_report.py
 services/calibration-runner-service/tests/test_weather.py
 services/calibration-runner-service/tests/test_weather_apply.py
 services/calibration-runner-service/tests/test_weather_overlay.py
@@ -1290,6 +1291,7 @@ services/position-stocks-service/execution/__init__.py
 services/position-stocks-service/execution/dhan_client.py
 services/position-stocks-service/execution/order_rate.py
 services/position-stocks-service/execution/order_ws.py
+services/position-stocks-service/execution/shared_rate_window.py
 services/position-stocks-service/feed/__init__.py
 services/position-stocks-service/feed/angelone_session.py
 services/position-stocks-service/feed/bar_backfill.py
@@ -1333,6 +1335,8 @@ services/position-stocks-service/orders/flow_gate.py
 services/position-stocks-service/orders/gain_room.py
 services/position-stocks-service/orders/gap_event.py
 services/position-stocks-service/orders/guard_stats.py
+services/position-stocks-service/orders/half_sell_probe.py
+services/position-stocks-service/orders/ip_guard.py
 services/position-stocks-service/orders/journal_notes.py
 services/position-stocks-service/orders/learned_limit.py
 services/position-stocks-service/orders/learned_stop.py
@@ -1544,6 +1548,10 @@ services/position-stocks-service/tests/test_e283_live_state.py
 services/position-stocks-service/tests/test_e283_long_target.py
 services/position-stocks-service/tests/test_e283_premarket_refresh.py
 services/position-stocks-service/tests/test_e284_volume_profile.py
+services/position-stocks-service/tests/test_e285_ip_guard.py
+services/position-stocks-service/tests/test_e285_no_shadow_modes.py
+services/position-stocks-service/tests/test_e285_round96_live_state.py
+services/position-stocks-service/tests/test_e285_shared_order_rate.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1639,6 +1647,7 @@ services/position-stocks-service/tests/test_group477_catalog_matches_config.py
 services/position-stocks-service/tests/test_group479_guards.py
 services/position-stocks-service/tests/test_group480_cost_gate_brokerage.py
 services/position-stocks-service/tests/test_group488_scrip_master_stagger.py
+services/position-stocks-service/tests/test_half_sell_probe.py
 services/position-stocks-service/tests/test_ledger_coverage.py
 services/position-stocks-service/tests/test_ledger_stale_sync_e186.py
 services/position-stocks-service/tests/test_live_anchor_20261022.py
@@ -1794,6 +1803,7 @@ services/real-trade-service/execution/shared_daily_pnl.py
 services/real-trade-service/execution/shared_exposure.py
 services/real-trade-service/execution/shared_heat.py
 services/real-trade-service/execution/shared_order_budget.py
+services/real-trade-service/execution/shared_rate_window.py
 services/real-trade-service/execution/shared_symbol_lock.py
 services/real-trade-service/exit_engine/__init__.py
 services/real-trade-service/exit_engine/event_exit.py
@@ -1997,6 +2007,8 @@ services/real-trade-service/tests/test_e277_module_isolation_a.py
 services/real-trade-service/tests/test_e277_module_isolation_b.py
 services/real-trade-service/tests/test_e283_learned_hold.py
 services/real-trade-service/tests/test_e283_live_state.py
+services/real-trade-service/tests/test_e285_rt_ladder_risk.py
+services/real-trade-service/tests/test_e285_shared_order_window.py
 services/real-trade-service/tests/test_e285_swing_target.py
 services/real-trade-service/tests/test_e285_tg_style.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py

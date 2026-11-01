@@ -145,11 +145,11 @@ def test_the_follower_is_gone():
     assert not hasattr(se, "resolve_open") and not hasattr(se, "_close")
 
 
-def test_summary_counts_closed_rows_only(db):
+def test_summary_has_no_shadow_history(db):
     _open_row(db, symbol="A", status="TARGET", exit_price=98.0, gross_pnl=20.0, net_pnl=18.0)
-    _open_row(db, symbol="B")
     s = se.summary(db)
-    assert s["total"] == 2 and s["closed"] == 1 and s["open"] == 1 and s["target"] == 1 and s["net_pnl"] > 0
+    assert set(s) == {"mode", "gate_counters", "shortlist"}                      # E285 round 94: no rows, totals or S2 progress
+    assert not hasattr(se, "_row_dict")
 
 
 def test_cycle_in_off_mode_places_nothing_and_does_not_scan(db, monkeypatch):

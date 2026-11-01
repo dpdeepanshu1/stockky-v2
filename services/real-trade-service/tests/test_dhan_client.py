@@ -68,8 +68,10 @@ _CASES = [
             "DH-907: Invalid IP",
             "DH-908: IP not whitelisted",
             "Unauthorized IP address not allowed",
+            "DH-905 Invalid IP",
+            "IP mismatch for this API key",
         ],
-        ["DH-901: Invalid access token"],
+        ["DH-901: Invalid access token", "DH-907: Data error, no data present", "DH-908: Internal Server Error", "DH-907", "DH-908"],   # E285 round 97: a bare code is not an IP refusal
     ),
     (
         dc.is_cdsl_edis_error,

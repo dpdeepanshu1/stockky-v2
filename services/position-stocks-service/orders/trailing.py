@@ -37,6 +37,7 @@ logger = logging.getLogger("position-stocks-trailing")
 # position id -> monotonic time before which no new modify is attempted (in-process only; lost on restart)
 _next_attempt: dict = {}
 _notified: set = set()
+_cap_logged: set = set()                          # E285 round 95: positions already told about the modify cap (one log line each)
 
 
 def reset_state() -> None:
@@ -152,6 +153,13 @@ def run_trailing_stop(db: Session) -> int:
                 bar_range_pct=exit_adaptive.avg_5m_range_pct(pos.symbol) if exit_adaptive.trail_enabled() else None,
             )
             if new_stop is None:
+                continue
+            if not dhan_client.trail_has_room(pos.dhan_super_order_id):      # E285 round 95: Dhan allows 25 modifies per order; the trail stops short of it so the last ones stay for the protective moves
+                _next_attempt[pos.id] = now + 600.0
+                if pos.id not in _cap_logged:
+                    _cap_logged.add(pos.id)
+                    logger.warning("TRAILING_STOP: %s (id=%d) order %s is near Dhan's %d-modifies-per-order cap (%d used) - the trail stops here, the stop stays at ₹%.2f",
+                                   pos.symbol, pos.id, pos.dhan_super_order_id, config.DHAN_MODIFY_CAP_PER_ORDER, dhan_client.modify_count(pos.dhan_super_order_id), pos.stop_price or 0.0)
                 continue
             _next_attempt[pos.id] = now + config.TRAIL_MIN_INTERVAL_S
             try:

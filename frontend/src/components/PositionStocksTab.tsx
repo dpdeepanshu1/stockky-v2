@@ -41,7 +41,6 @@ import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
 import { EMOTION_LABEL, FALLBACK_EMOTIONS } from "./board/journalNotesView";
 import ShortlistPanel from "./board/ShortlistPanel";
-import ShortShadowCard from "./board/ShortShadowCard";
 import SellOrdersCard from "./board/SellOrdersCard";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
@@ -925,7 +924,6 @@ export default function PositionStocksTab() {
           <ShortlistPanel active={subTab === "board"} kind="scalp" fetcher={() => positionStocksApi.shortlist()}
             title="Best picks · next entries (scalp pool)" note="Display only. The entry gates still decide; a pick that fails one is skipped and the next pick is tried." />
           <PremarketPlanCard active={subTab === "board"} fetcher={() => positionStocksApi.premarketPlan()} />
-          <ShortShadowCard active={subTab === "board"} fetcher={() => positionStocksApi.shortShadow()} />
           <SessionHealthPanel active={subTab === "board"} />
           <MarketBoard active={subTab === "board"} title="Position Stocks · Market Board" />
           <JournalPanel active={subTab === "board"} />

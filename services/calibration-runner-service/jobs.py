@@ -367,12 +367,6 @@ def b_tm_gate(ctx, p):
     return [_py(ctx, "time_machine_gate_check.py", *args, title="Time Machine live gate (real-trade + position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
 
 
-def b_short_shadow(ctx, p):
-    """E98 P0 item 7b: the shadow shorts' numbers, judged. Read-only; never touches SHORT_MODE."""
-    return [_py(ctx, "short_shadow_report.py", "--ps-url", ctx["ps"], "--min-trades", str(p.get("min_trades", 100)), "--min-days", str(p.get("min_days", 20)),
-                title="Short selling: shadow report (position-stocks)", env={"TOKEN": "{token}"}, attention=(1,))]
-
-
 def b_short_replay(ctx, p):
     """E107 P2 item 18: the mirrored short rule replayed on recent 5-minute bars (SELL, with a BUY control). Read-only; gates nothing."""
     return [_py(ctx, "short_history_replay.py", "--base", ctx["md"], "--stop-pct", str(p.get("stop_pct", 1.0)), "--target-pct", str(p.get("target_pct", 2.0)),
@@ -558,11 +552,6 @@ JOB_LIST = [
          [P("scan", "Trigger a scan first", "bool", True), P("wait", "Wait for the verdicts", "bool", False), P("expect_mode", "Expected mode", "choice", "live", choices=["live", "log", "off", "any"]),
           P("min_checks", "Checks needed before judging the refusal rate", "int", 10, 1, 500)], timeout_s=180,
          after="PASS: the gate is on in both services. NOT_ENOUGH_DATA: wired, no entries yet. FAIL: the line names the service; a high refusal rate means set TM_GATE_MODE=log (one switch) and read recent_checks."),
-    _job("short_shadow_report", "Short selling shadow report", "weekly", "Weekly while SHORT_MODE is shadow (and before any move to live)",
-         "Reads the shadow shorts from position-stocks and judges the numbers: do the counters agree, and once there are enough closed would-be shorts over enough days, "
-         "is the net P&L after charges above zero. Verdict PASS / FAIL / NOT_ENOUGH_DATA. Changes nothing and never touches SHORT_MODE.", b_short_shadow,
-         [P("min_trades", "Closed would-be shorts needed", "int", 100, 1, 1000), P("min_days", "Days with results needed", "int", 20, 1, 120)], timeout_s=120,
-         after="NOT_ENOUGH_DATA: keep collecting, nothing to do. PASS: the shadow shorts earn after charges; SHORT_MODE stays your decision. FAIL: do not move to live; read the gate counters and the recent rows first."),
     _job("dhan_sell_probe", "Dhan SELL probe (T6) - places 1 real share", "ops", "Once, in market hours 09:30-14:30 IST, before SHORT_MODE goes live (and again after any Dhan change)",
          "PLACES ONE REAL 1-share INTRADAY SELL Super Order on a liquid stock, reads Dhan's stop and target legs back, cancels the legs, covers with a 1-share BUY and reads the cover back. "
          "Records Dhan's answers and a verdict PASS / FAIL. A live short is refused until this has a PASS (SHORT_LIVE_REQUIRES_PROBE). Nothing is sent unless you tick the box. "
@@ -625,8 +614,8 @@ PACKS: List[Dict[str, Any]] = [
      "what": "Daily trades with entry / exit time and P&L, which service to keep ON / pause (advice only), save records, save the position-stocks ledger, score outcomes, structure refresh, TimesFM cache.",
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
-     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, short shadow report, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["short_shadow_report", {}], ["swing_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
+     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["swing_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},

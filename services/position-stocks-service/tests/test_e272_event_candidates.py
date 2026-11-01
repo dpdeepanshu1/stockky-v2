@@ -5,10 +5,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import types
 import config
 import feed
-_ws = types.ModuleType("feed.ws_client")           # the real client needs websockets / httpx, which the test never uses
-_ws.get_last_ltp = lambda s: None; _ws.get_tick_buffer = lambda s: []; _ws.get_day_stats = lambda s: None
-sys.modules["feed.ws_client"] = _ws; feed.ws_client = _ws
-from feed import ws_client
+try:
+    from feed import ws_client                     # E277: use the real client when it imports (it does in the Docker test image). Replacing feed.ws_client at import
+except Exception:                                  # time left the stand-in in sys.modules for the whole pytest run and broke every later test that reads it
+    _ws = types.ModuleType("feed.ws_client")       # bare sandbox only: the real client needs websockets / httpx, which the test never uses
+    _ws.get_last_ltp = lambda s: None; _ws.get_tick_buffer = lambda s: []; _ws.get_day_stats = lambda s: None
+    sys.modules["feed.ws_client"] = _ws; feed.ws_client = _ws
+    from feed import ws_client
 from screening import engine
 
 EV = {"AAA": {"polarity": 1, "strength": 0.8, "age_min": 30.0}, "BBB": {"polarity": -1, "strength": 0.6, "age_min": 60.0},
@@ -17,12 +20,12 @@ EV = {"AAA": {"polarity": 1, "strength": 0.8, "age_min": 30.0}, "BBB": {"polarit
 
 def _run(side, held=None, events=EV):
     prices = {"AAA": 101.0, "BBB": 99.0, "CCC": 50.0, "DDD": 70.0, "EEE": 20.0}   # FFF has no price
-    orig, orig_buf = ws_client.get_last_ltp, ws_client.get_tick_buffer
-    ws_client.get_last_ltp = lambda s: prices.get(s); ws_client.get_tick_buffer = lambda s: [1, 2, 3]
+    orig, orig_buf, orig_ds = ws_client.get_last_ltp, ws_client.get_tick_buffer, ws_client.get_day_stats
+    ws_client.get_last_ltp = lambda s: prices.get(s); ws_client.get_tick_buffer = lambda s: [1, 2, 3]; ws_client.get_day_stats = lambda s: None
     try:
         return engine.scan_event_candidates(side, held, events)
     finally:
-        ws_client.get_last_ltp, ws_client.get_tick_buffer = orig, orig_buf
+        ws_client.get_last_ltp, ws_client.get_tick_buffer, ws_client.get_day_stats = orig, orig_buf, orig_ds
 
 def test_long_and_short_sides():
     assert [c.symbol for c in _run("LONG")] == ["AAA", "EEE"]          # CCC weak, DDD too old, FFF unpriced, BBB negative

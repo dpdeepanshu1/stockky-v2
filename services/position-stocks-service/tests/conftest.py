@@ -250,17 +250,16 @@ def _e275_learned_limit_off_and_private(monkeypatch, tmp_path):
 
 
 # ---- E277 (test isolation) ------------------------------------------------------------------------------------------------------------
-# Several older tests replace real modules in sys.modules (config, models, execution.*, sqlalchemy ...) with small stand-ins and never put the
-# real ones back. Every later test then runs against the stand-in: a setup ERROR in the autouse fixtures above (monkeypatch.setattr on a
-# stand-in config) or an ImportError such as "cannot import name X from 'models' (unknown location)". This puts back whatever a test MODULE
-# swapped, once the module is done, so one file can no longer break the files after it. Stand-ins installed at import / collection time
-# (before the first test of the module runs) are part of the snapshot and stay, as before.
+# Several older tests replace real modules in sys.modules (config, models, feed.ws_client, watchlist_engine.* ...) with small stand-ins, or delete
+# them, and never put the real ones back. Every later test then runs against the stand-in: a setup ERROR in the autouse fixtures above
+# (monkeypatch.setattr on a stand-in config), an ImportError such as "cannot import name X from 'models' (unknown location)", or a patch that lands
+# on a different module object than the code under test reads. This snapshots sys.modules before the first test of a test MODULE and, when the module
+# is done, puts back whatever it swapped or deleted and drops stand-ins it added. Real modules a test imported for the first time stay loaded
+# (re-importing would make a second copy). Stand-ins installed at import / collection time are part of the snapshot, so a test file must not install
+# those itself: see tests/test_e272_event_candidates.py.
 import sys as _sys_e277
 import pytest as _pytest_e277
 
-_E277_WATCHED = ("config", "models", "notifier", "symbol_master", "httpx", "sqlalchemy", "sqlalchemy.orm",
-                 "execution", "execution.dhan_client", "execution.shared_symbol_lock", "execution.lock_sweep",
-                 "orders.side", "resilience.local_cache", "watchlist_engine.intraday_news")
 _E277_GONE = object()
 
 
@@ -269,26 +268,32 @@ def _e277_is_stand_in(mod):
     return getattr(mod, "__spec__", None) is None
 
 
+def _e277_set(name, mod):
+    """Put `mod` (or nothing) back under `name`, and on its parent package, where `from pkg import name` reads it first."""
+    if mod is _E277_GONE:
+        _sys_e277.modules.pop(name, None)
+    else:
+        _sys_e277.modules[name] = mod
+    parent, _, child = name.rpartition(".")
+    pkg = _sys_e277.modules.get(parent) if parent else None
+    if pkg is not None:
+        if mod is _E277_GONE:
+            pkg.__dict__.pop(child, None)
+        else:
+            setattr(pkg, child, mod)
+
+
 @_pytest_e277.fixture(autouse=True, scope="module")
 def _e277_restore_swapped_modules():
-    saved = {k: _sys_e277.modules.get(k, _E277_GONE) for k in _E277_WATCHED}
+    saved = dict(_sys_e277.modules)
     yield
     for k, v in saved.items():
         cur = _sys_e277.modules.get(k, _E277_GONE)
         if cur is v:
             continue
-        if v is _E277_GONE:
-            if cur is _E277_GONE or not _e277_is_stand_in(cur):
-                continue                         # a real module first imported by a test stays loaded (re-importing it would make a second copy)
-            _sys_e277.modules.pop(k, None)
-        else:
-            if _e277_is_stand_in(v) and not _e277_is_stand_in(cur):
-                continue                         # was a stand-in before, a real module now: leave as it was
-            _sys_e277.modules[k] = v
-        parent, _, child = k.rpartition(".")
-        pkg = _sys_e277.modules.get(parent) if parent else None
-        if pkg is not None:                      # `from execution import dhan_client` reads the package attribute first
-            if v is _E277_GONE:
-                pkg.__dict__.pop(child, None)
-            else:
-                setattr(pkg, child, v)
+        if _e277_is_stand_in(v) and cur is not _E277_GONE and not _e277_is_stand_in(cur):
+            continue                             # was a stand-in before, a real module now: leave as it was
+        _e277_set(k, v)
+    for k in [k for k in _sys_e277.modules if k not in saved]:
+        if _e277_is_stand_in(_sys_e277.modules[k]):
+            _e277_set(k, _E277_GONE)

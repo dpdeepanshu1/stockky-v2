@@ -16,6 +16,17 @@ def _reset_entry_pause():
 
 
 @_pytest_entry_pause.fixture(autouse=True)
+def _e282_order_rate_limit_off_by_default(monkeypatch):
+    """E282 round 77: execution/order_rate.py makes a stop / target modify wait when the last second holds ORDER_RATE_PER_S order calls. Older tests fire many calls in
+    well under a second and must not sleep; tests/test_e282_order_rate.py turns it on explicitly (with a fake clock)."""
+    import config as _config
+    monkeypatch.setattr(_config, "ORDER_RATE_LIMIT_ENABLED", False, raising=False)
+    from execution import order_rate as _orr
+    _orr.reset()
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
 def _e266_conviction_sizing_off_by_default(monkeypatch):
     """E266: conviction sizing changes the rupees of an entry (x0.5 .. x3 of the fixed size), which older tests assert on. They run at the fixed size;
     tests/test_e266_conviction_sizing.py turns it on explicitly."""

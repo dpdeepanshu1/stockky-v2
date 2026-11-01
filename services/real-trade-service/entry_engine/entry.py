@@ -646,7 +646,7 @@ def _preopen_gap_or_waive(symbol: str, db, waived: list, pen: Optional[dict] = N
                 waived.append(reason)
                 return None
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("gap-event waiver check failed (the candidate is judged without the waiver)", exc_info=True)
     if reason and pen is not None:        # E273 round 25: an unexplained gap shrinks the size; only a gap at twice its limit is still refused (soft_gates.preopen_gap)
         _why, _m = soft_gates.preopen_gap(symbol, reason)
         if _why is None and _m < 1.0:
@@ -665,7 +665,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         from entry_engine import candidate_outcomes as _co_wanted
         _co_wanted.note_candidates(candidates)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("candidate_outcomes.note_candidates failed (record only)", exc_info=True)
 
     # group 220 (review item 6): no automatic entries in the first minutes after the open. Returns BEFORE the loop
     # below, so no candidate is consumed or rejected: they stay queued and are evaluated normally once the guard lifts.
@@ -1522,7 +1522,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             from entry_engine import risk_stage as _rs
             account_state.max_portfolio_risk_pct = _rs.heat_limit_pct(db, (_setup_res or {}).get("id"), float(account_state.max_portfolio_risk_pct))
         except Exception:  # noqa: BLE001 - the ladder only loosens; a failure leaves the base limit
-            pass
+            logger.debug("risk_stage.heat_limit_pct failed (the base portfolio-risk limit stays)", exc_info=True)
         result = risk_evaluate(intent, account_state)
 
         decision.proposed_qty        = result.approved_qty or proposed_qty

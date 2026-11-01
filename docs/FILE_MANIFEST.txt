@@ -423,6 +423,7 @@ scripts/stats_loop.sh
 scripts/strategy_readout.py
 scripts/structure_backtest.py
 scripts/structure_gate_check.py
+scripts/sweep_study.py
 scripts/swing_backtest.py
 scripts/swing_shadow_report.py
 scripts/swing_snapshot.py
@@ -488,6 +489,7 @@ scripts/test_standalone_behaviour_scripts.py
 scripts/test_strategy_readout.py
 scripts/test_structure_backtest_resume.py
 scripts/test_structure_gate_check.py
+scripts/test_sweep_study.py
 scripts/test_swing_backtest.py
 scripts/test_swing_shadow_horizons.py
 scripts/test_swing_universe.py
@@ -1282,6 +1284,7 @@ services/position-stocks-service/control/kit.py
 services/position-stocks-service/db.py
 services/position-stocks-service/execution/__init__.py
 services/position-stocks-service/execution/dhan_client.py
+services/position-stocks-service/execution/order_rate.py
 services/position-stocks-service/execution/order_ws.py
 services/position-stocks-service/feed/__init__.py
 services/position-stocks-service/feed/angelone_session.py
@@ -1328,6 +1331,7 @@ services/position-stocks-service/orders/gap_event.py
 services/position-stocks-service/orders/guard_stats.py
 services/position-stocks-service/orders/journal_notes.py
 services/position-stocks-service/orders/learned_limit.py
+services/position-stocks-service/orders/learned_stop.py
 services/position-stocks-service/orders/liquidity_gate.py
 services/position-stocks-service/orders/live_anchor.py
 services/position-stocks-service/orders/manual_buy_window.py
@@ -1524,7 +1528,11 @@ services/position-stocks-service/tests/test_e276_no_setup_readiness.py
 services/position-stocks-service/tests/test_e276_risk_ladder.py
 services/position-stocks-service/tests/test_e276_sector_heat.py
 services/position-stocks-service/tests/test_e276_short_day_fall_range.py
+services/position-stocks-service/tests/test_e277_module_isolation_a.py
+services/position-stocks-service/tests/test_e277_module_isolation_b.py
 services/position-stocks-service/tests/test_e277_premarket_route.py
+services/position-stocks-service/tests/test_e282_learned_stop.py
+services/position-stocks-service/tests/test_e282_order_rate.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1970,6 +1978,8 @@ services/real-trade-service/tests/test_e276_portfolio_heat.py
 services/real-trade-service/tests/test_e276_risk_ladder.py
 services/real-trade-service/tests/test_e276_rt_setups_s2_s3.py
 services/real-trade-service/tests/test_e276_sector_heat.py
+services/real-trade-service/tests/test_e277_module_isolation_a.py
+services/real-trade-service/tests/test_e277_module_isolation_b.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

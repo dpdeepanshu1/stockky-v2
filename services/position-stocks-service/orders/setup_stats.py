@@ -80,6 +80,30 @@ def _gain_pct(row: Dict[str, Any], short: bool) -> Optional[float]:
     return g if g > 0 else None
 
 
+def _adverse_pct(row: Dict[str, Any], short: bool) -> Optional[float]:
+    """E282: the worst price the trade went through on the wrong side of its entry, as % of entry (a long's lowest price, a short's highest); 0.0 when it never went against
+    the entry; None when unreadable. Used for WINNERS only (the stop a winner would have survived)."""
+    e = _f(row.get("entry_price"))
+    worst = _f(row.get("max_price_seen") if short else row.get("min_price_seen"))
+    if e is None or e <= 0 or worst is None or worst <= 0:
+        return None
+    a = ((worst - e) if short else (e - worst)) / e * 100.0
+    return a if a > 0 else 0.0
+
+
+def _percentile(v: List[float], q: float) -> Optional[float]:
+    """q-th percentile (0..100), linear interpolation; None for an empty list."""
+    if not v:
+        return None
+    s = sorted(v)
+    pos = (len(s) - 1) * min(100.0, max(0.0, q)) / 100.0
+    lo, hi = int(math.floor(pos)), int(math.ceil(pos))
+    return s[lo] + (s[hi] - s[lo]) * (pos - lo)
+
+
+ADVERSE_PCTL = 90.0
+
+
 def _ttp_min(row: Dict[str, Any], short: bool) -> Optional[float]:
     """Minutes from the entry to the trade's best price, from flow_json["peak"] (written by excursion.py) and `opened_ts`; None when missing or absurd."""
     try:
@@ -143,7 +167,7 @@ def _lower_bound(rs: List[float], days: List[str]) -> Optional[float]:
 
 def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> Dict[str, Dict[str, Any]]:
     """{"<setup id>|<slot>": {n, wins, win_rate, days, avg_r, r_n, lower_bound_r, verdict}} for every cell that has a stamp, plus "<setup id>|ALL"."""
-    cells: Dict[str, Dict[str, list]] = defaultdict(lambda: {"win": [], "r": [], "rday": [], "day": [], "gain": [], "ttp": [], "alldays": []})
+    cells: Dict[str, Dict[str, list]] = defaultdict(lambda: {"win": [], "r": [], "rday": [], "day": [], "gain": [], "ttp": [], "alldays": [], "mae": []})
     try:
         for row in rows or []:
             st = setup_stamp.read(row.get("flow_json")) if isinstance(row, dict) else None
@@ -159,6 +183,7 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
             short = str(row.get("side") or st.get("side") or "LONG").upper() == "SHORT"
             gain = _gain_pct(row, short) if pnl > 0 else None          # E275 round 37: winners only - the typical maximum gain a WINNER reached
             ttp = _ttp_min(row, short) if pnl > 0 else None
+            mae = _adverse_pct(row, short) if pnl > 0 else None          # E282: how far a WINNER went against its entry (learned stop)
             cid = cell_id(st["id"], "SHORT" if short else "LONG")                  # E274 round 44: a short S2 / S3 has its own cell
             for key in (f"{cid}|{st.get('slot') or 'later'}", f"{cid}|ALL"):
                 c = cells[key]
@@ -169,6 +194,8 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
                     c["gain"].append(gain)
                 if ttp is not None:
                     c["ttp"].append(ttp)
+                if mae is not None:
+                    c["mae"].append(mae)
                 if r is not None:
                     c["r"].append(r)
                     c["rday"].append(day)
@@ -186,5 +213,6 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
         out[key] = {"n": n, "wins": sum(c["win"]), "win_rate": round(sum(c["win"]) / n, 4) if n else None, "r_n": len(rs), "days": len(set(c["alldays"])),
                     "avg_r": round(sum(rs) / len(rs), 4) if rs else None, "lower_bound_r": None if lb is None else round(lb, 4), "verdict": verdict,
                     "gain_n": len(c["gain"]), "typical_gain_pct": None if len(c["gain"]) < MIN_EXIT_SAMPLES else round(_median(c["gain"]), 3),
-                    "ttp_n": len(c["ttp"]), "ttp_min": None if len(c["ttp"]) < MIN_EXIT_SAMPLES else round(_median(c["ttp"]), 2)}
+                    "ttp_n": len(c["ttp"]), "ttp_min": None if len(c["ttp"]) < MIN_EXIT_SAMPLES else round(_median(c["ttp"]), 2),
+                    "mae_n": len(c["mae"]), "adverse_p90_pct": None if len(c["mae"]) < MIN_EXIT_SAMPLES else round(_percentile(c["mae"], ADVERSE_PCTL), 3)}
     return out

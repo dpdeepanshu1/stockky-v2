@@ -93,6 +93,7 @@ class TestVixOnEntryPath:
 
 class TestVwapOnEntryPath:
     def test_below_vwap_waits(self, db, monkeypatch):
+        monkeypatch.setattr(config, "SOFT_GATES_MODE", "veto")       # E283: since E273 round 24 the default is a size penalty; "veto" is the old refusal this test pins
         tally, d = _first(db, monkeypatch, vwap=100.8)
         assert tally["entered"] == 0 and d["gate_tag"] == "vwap_below" and d["reasoning"].startswith("VWAP_BELOW")
 

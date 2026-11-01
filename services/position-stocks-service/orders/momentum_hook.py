@@ -237,6 +237,6 @@ def run_momentum_exit(db: Session) -> int:
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("momentum_hook: ignored failure (E283: no silent except on an order path)", exc_info=True)
             logger.warning("momentum-exit: %s failed: %s", getattr(pos, "symbol", "?"), e)
     return acted

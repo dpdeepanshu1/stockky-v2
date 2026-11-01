@@ -64,6 +64,21 @@ from watchlist_engine import event_reader as er  # noqa: E402
 from watchlist_engine import intraday_news as inews  # noqa: E402
 from tz_utils import ist_today_str  # noqa: E402
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _snapshot_store_stand_in(monkeypatch):
+    """E283: with the real sqlalchemy installed (Docker) the stand-ins above are skipped and intraday_news read the real DB-backed snapshot store, so
+    every _store() was invisible to it. Point resilience.local_cache at the in-memory _SNAP for each test only (monkeypatch undoes it)."""
+    if _REAL:
+        import resilience.local_cache as _lc
+        monkeypatch.setattr(_lc, "load_snapshot", lambda db, key: _SNAP.get(key))
+        monkeypatch.setattr(_lc, "save_snapshot", lambda db, key, data: _SNAP.__setitem__(key, data))
+    yield
+
+
+
 _AP = open(os.path.join(ROOT, "execution", "auto_pilot.py"), encoding="utf-8").read()
 _AS = open(os.path.join(ROOT, "watchlist_engine", "afterhours_scan.py"), encoding="utf-8").read()
 _EN = open(os.path.join(ROOT, "entry_engine", "entry.py"), encoding="utf-8").read()

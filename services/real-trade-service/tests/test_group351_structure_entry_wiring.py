@@ -64,6 +64,7 @@ def test_old_shadow_value_is_live_and_waits(db, monkeypatch):
 
 def test_enforce_waits_with_structure_tag(db, monkeypatch):
     monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")
+    monkeypatch.setattr(config, "SOFT_GATES_MODE", "veto")           # E283: since E273 the structure verdict is a size penalty by default; "veto" is the refusal this test pins
     _cand(db, _sum(ms_chase_atr=2.5))
     quotes(monkeypatch, {"GOODCO": tick(100.0, symbol="GOODCO")})
     approve_all(monkeypatch)

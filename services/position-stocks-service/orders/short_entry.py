@@ -22,7 +22,7 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
-from orders import setup_short, short_target, squeeze_guard
+from orders import learned_stop, setup_short, short_target, squeeze_guard
 from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
 from tz_utils import ist_now, ist_time_at_or_after, ist_today_str, parse_hhmm
@@ -98,7 +98,7 @@ def _log(db: Session, cand: Any, decision: str, reason: str) -> None:
         from feed import bar_recorder as _br
         _br.note_symbols([cand.symbol])
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("short_entry: ignored failure (E283: no silent except on an order path)", exc_info=True)
     try:
         db.add(ScalpCandidateLog(symbol=cand.symbol, window_source=str(getattr(cand, "window_label", "") or "")[:8],
                                  pct_change=float(getattr(cand, "pct_change", 0.0) or 0.0),
@@ -269,6 +269,9 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     mult = stop_mult_for_state((_current_profile() or {}).get("market_state"))
     if mult < 1.0:
         tighten_short_levels(levels, live, mult)
+    _snote = learned_stop.adjust(levels, live, symbol=sym, setup=_setup, now=ist_now(now), db=db, side="SHORT")      # E282 round 76: a stop from the setup's own winners (tighter only; size stays on budget_stop_pct)
+    if _snote:
+        logger.info("short plan: %s stop tightened %s", sym, _snote)
     _tnote = short_target.adjust(levels, live, symbol=sym, setup=_setup, now=ist_now(now), db=db)      # E274 round 43: a reachable target (nearer only); the checks below judge the NEW target
     if _tnote:
         logger.info("short plan: %s target moved %s", sym, _tnote)
@@ -315,7 +318,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
     return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
             "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv),
-            "tape_json": _tape_json, "setup": _setup, "early": early, "target_note": _tnote}
+            "tape_json": _tape_json, "setup": _setup, "early": early, "target_note": _tnote, "stop_note": _snote}
 
 
 def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:

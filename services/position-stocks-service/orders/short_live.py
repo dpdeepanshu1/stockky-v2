@@ -386,6 +386,11 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             pos.flow_json = _st.stamp(pos.flow_json, plan.get("target_note"))                # E274 round 43: how the target was moved (learned gain / HVN wall), record only
         except Exception:  # noqa: BLE001
             logger.debug("short live: target stamp failed (record only, entry unaffected)", exc_info=True)
+        try:
+            from orders import learned_stop as _ls
+            pos.flow_json = _ls.stamp(pos.flow_json, plan.get("stop_note"))                  # E282 round 76: how the stop was learned (tighter only), record only
+        except Exception:  # noqa: BLE001
+            logger.debug("short live: learned stop stamp failed (record only, entry unaffected)", exc_info=True)
         db.add(pos)
         db.commit()
         db.refresh(pos)

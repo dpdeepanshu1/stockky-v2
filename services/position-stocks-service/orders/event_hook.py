@@ -226,6 +226,6 @@ def run_event_tighten(db, *, fetch: Optional[Callable[[str], Optional[dict]]] = 
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("event_hook: ignored failure (E283: no silent except on an order path)", exc_info=True)
             logger.warning("event-tighten: %s failed: %s", getattr(pos, "symbol", "?"), e)
     return moved

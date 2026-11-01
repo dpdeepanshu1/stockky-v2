@@ -55,7 +55,7 @@ def test_the_plain_short_guard_is_wired_and_the_cover_releases_the_stop_first():
 def test_size_cap_mode_and_ledger_are_enforced():
     assert "min(int(plan[\"qty\"]), qty_cap())" in SRC
     assert 'ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT",' in SRC
-    assert 'conviction_mult=plan.get("conv_mult"))' in SRC       # E266: the conviction multiple planned with the shadow size is the one reserved
+    assert 'conviction_mult=plan.get("conv_mult"),' in SRC       # E266: the conviction multiple planned with the shadow size is the one reserved
     assert "if not live_mode():" in SRC
     assert re.search(r'return max\(1, v\)', SRC) and re.search(r'except Exception:  # noqa: BLE001\n\s+return 1', SRC)      # junk cap = 1 share, never "no cap"
 

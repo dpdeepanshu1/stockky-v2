@@ -96,10 +96,15 @@ def test_orb_record_says_live_and_no_record_only_wording():
 def test_fetch_now_caches_and_fails_soft():
     OB._reset_for_tests()
     import stockky_ms.timeframes as TF  # noqa: F401
-    OB._fetch = lambda s: (_ for _ in ()).throw(RuntimeError("down"))
-    before = OB.stats()["failed"]
-    assert OB.fetch_now("ABC", at(9, 26)) is None and OB.stats()["failed"] == before + 1
-    OB._reset_for_tests()
+    saved_on = OB.FETCH_ON
+    OB.FETCH_ON = True                      # E283: tests/conftest.py switches the background fetch off for every test; this one exercises the fetch itself
+    try:
+        OB._fetch = lambda s: (_ for _ in ()).throw(RuntimeError("down"))
+        before = OB.stats()["failed"]
+        assert OB.fetch_now("ABC", at(9, 26)) is None and OB.stats()["failed"] == before + 1
+    finally:
+        OB.FETCH_ON = saved_on
+        OB._reset_for_tests()
 
 
 def test_swing_entry_skips_a_reversed_pick_and_buys_the_next():

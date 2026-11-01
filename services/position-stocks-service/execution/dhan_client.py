@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 import notifier
 from auth import dhan_credentials_ro
+from execution import order_rate
 
 logger = logging.getLogger("position-stocks-dhan-client")
 
@@ -528,6 +529,7 @@ def place_order(
     }
     logger.info("position-stocks: place_order: outbound payload -> %s", outbound)
 
+    order_rate.acquire("place_order")
     resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
@@ -599,6 +601,7 @@ def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
     """Cancelling is always allowed even when NOT armed."""
     client = _get_sdk_client(db)
     logger.info("position-stocks: Cancelling REAL order %s", dhan_order_id)
+    order_rate.acquire("cancel_order")
     resp = client.cancel_order(dhan_order_id)
     return _extract_data(resp) or {}
 
@@ -789,6 +792,7 @@ def place_super_order(
             transaction_type, security_id, quantity, t_price, s_price,
             product_type,
         )
+        order_rate.acquire("place_super_order")
         resp = dhan_http.post("/super/orders", payload)
         return _require_order_id(_extract_data(resp), f"place_super_order {transaction_type} {security_id} x{quantity}")   # E182
 
@@ -847,6 +851,7 @@ def place_super_order(
     # /dhan/live-orders to distinguish SCALP from real-trade-service orders)
     # — losing it is not a trading-safety failure, just a visibility gap.
     try:
+        order_rate.acquire("place_super_order")
         resp = client.place_super_order(
             security_id=security_id,
             exchange_segment=exchange_segment,
@@ -925,6 +930,7 @@ def cancel_super_order(db: Session, *, order_id: str, order_leg: str) -> dict:
     one of ENTRY_LEG, TARGET_LEG, STOP_LOSS_LEG."""
     client = _get_sdk_client(db)
     logger.info("position-stocks: Cancelling REAL super order %s leg=%s", order_id, order_leg)
+    order_rate.acquire("cancel_super_order")
     resp = client.cancel_super_order(order_id, order_leg)
     return _extract_data(resp) or {}
 
@@ -984,6 +990,7 @@ def modify_super_order(
         "position-stocks: Modifying REAL super order %s leg=%s -> %s",
         order_id, order_leg, kwargs,
     )
+    order_rate.acquire("modify_super_order", wait=True)       # E282 round 77: the only call that may wait for the per-second budget
     resp = client.modify_super_order(
         order_id=order_id,
         order_type="MARKET",  # ignored by the SDK for this leg_name — see docstring above
@@ -1137,6 +1144,7 @@ def convert_position(
         "(overnight carry)",
         security_id, convert_qty, from_product_type, to_product_type,
     )
+    order_rate.acquire("convert")
     resp = dhan_http.post("/positions/convert", payload)
     return _extract_data(resp) or {}
 
@@ -1354,6 +1362,7 @@ def place_cnc_stop_loss_market(
         security_id, quantity, trigger_price_rounded,
     )
 
+    order_rate.acquire("place_order")
     resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
@@ -1449,6 +1458,7 @@ def cancel_cnc_stop_loss_order(
     """
     client = _get_sdk_client(db)
     logger.info("position-stocks: cancelling overnight protective stop order %s", order_id)
+    order_rate.acquire("cancel_order")
     resp = client.cancel_order(order_id)
     return _extract_data(resp) or {}
 
@@ -1466,6 +1476,7 @@ def place_intraday_buy_stop(db: Session, *, is_armed: bool, security_id: str, ex
         raise ValueError(f"place_intraday_buy_stop: trigger_price must be > 0 (got {trigger_price!r} -> {trig!r}).")
     client = _get_sdk_client(db)
     logger.warning("position-stocks: placing REAL short protective stop: STOP_LOSS_MARKET BUY %s x%d trigger=\u20b9%.2f (INTRADAY)", security_id, quantity, trig)
+    order_rate.acquire("place_order")
     resp = client.place_order(security_id=security_id, exchange_segment=exchange_segment, transaction_type="BUY", quantity=int(quantity),
                               order_type="STOP_LOSS_MARKET", product_type="INTRADAY", price=0.0, trigger_price=trig, validity="DAY", tag=tag)
     result = _extract_data(resp) or {}

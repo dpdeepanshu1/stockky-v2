@@ -29,17 +29,30 @@ class _Stub:
             sa = types.ModuleType("sqlalchemy"); orm = types.ModuleType("sqlalchemy.orm"); orm.Session = object; sa.orm = orm
             m = types.ModuleType("models"); m.SharedHeat = object; m.SharedHeatSectors = object
             sys.modules.update({"sqlalchemy": sa, "sqlalchemy.orm": orm, "models": m})
+        import capital as _cap
+        # E283: `from capital import ledger` reads the PACKAGE ATTRIBUTE first, and with the real sqlalchemy installed an earlier test has already set it to the
+        # real module, so the stub in sys.modules was never seen (the gate then called the real ledger with db=None and failed open). Swap the attributes too.
+        self._attrs = {k: _cap.__dict__.get(k) for k in ("ledger", "shared_heat", "heat_gate")}
         self.ledger = types.ModuleType("capital.ledger")
         self.ledger.own_heat = lambda db: self.own
         sys.modules["capital.ledger"] = self.ledger
+        _cap.ledger = self.ledger
         for k in ("capital.shared_heat", "capital.heat_gate"):
             sys.modules.pop(k, None)
+        _cap.__dict__.pop("shared_heat", None)
+        _cap.__dict__.pop("heat_gate", None)
         from capital import heat_gate, shared_heat
         shared_heat.get_peer = lambda db, max_age_s=900.0: self.peer
         self.gate = heat_gate
         return self
 
     def __exit__(self, *a):
+        import capital as _cap
+        for k, v in self._attrs.items():
+            if v is None:
+                _cap.__dict__.pop(k, None)
+            else:
+                setattr(_cap, k, v)
         for k, v in self._orig.items():
             if v is None:
                 sys.modules.pop(k, None)

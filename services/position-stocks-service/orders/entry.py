@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -450,7 +450,7 @@ def _log_candidate(
         from feed import bar_recorder as _br
         _br.note_symbols([candidate.symbol])
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("entry: ignored failure (E283: no silent except on an order path)", exc_info=True)
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,
@@ -934,6 +934,21 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _ns_reject, quality=quality)
         return None
 
+    # E282 round 76: a stop learned from the setup's own winners (orders/learned_stop.py). Only ever TIGHTER than the stop above, never below the stock's noise floor, the plan's
+    # stop until the cell has 30 closed trades. The SIZE below is still worked out from the plan's stop (`_budget_stop_pct`), so a tighter stop lowers the risk and never grows
+    # the position. The note is stamped in flow_json["learned_stop"] (record only). Fails open (the levels stay as they were).
+    _budget_stop_pct = levels.stop_pct
+    try:
+        import dataclasses as _dc2
+        _ls_levels = _dc2.replace(levels)
+        _ls_note = learned_stop.adjust(_ls_levels, candidate.current_ltp, symbol=candidate.symbol, setup=_setup_res, now=_now_ist, db=db, side="LONG")
+        if _ls_note:
+            levels = _ls_levels
+            _flow_snap = learned_stop.stamp(_flow_snap, _ls_note)
+            logger.info("position-stocks entry: %s learned stop %s", candidate.symbol, _ls_note)
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: learned stop failed (entry unaffected)", exc_info=True)
+
     # E115: Time Machine gate (orders/tm_gate.py). Replays THIS trade's own stop % / target % at this time of day on the stock's recent 5-minute sessions and on
     # made-up sessions; AGAINST (both negative after charges and slippage) refuses the entry. It can only say NO; no data / slow data = no opinion and the
     # entry goes on. TM_GATE_MODE live | log | off. The verdict is stamped into flow_json["tm"] whatever it was. Never raises.
@@ -1099,7 +1114,7 @@ def attempt_entry(
         _risk_mult = _rs.risk_mult_for(db, (_setup_res or {}).get("id"), "LONG")
     except Exception:  # noqa: BLE001
         _risk_mult = 1.0
-    position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)
+    position_value = ledger.reserve_capital(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)      # E282: sized from the plan's stop, not a learned tighter one
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
         # FIX (session70): raise instead of returning None so _run_cycle()

@@ -152,7 +152,7 @@ class TestRejectReason:
 
     def test_error_holds_the_candidate_back(self, monkeypatch):
         at(monkeypatch, "09:30")
-        monkeypatch.setattr(config, "OPENING_GATE_MIN_CHANGE_PCT", "bad")   # forces a TypeError inside the comparison
+        monkeypatch.setattr(config, "OPENING_GATE_MAX_CHANGE_PCT", "bad")   # forces a TypeError inside the comparison (E283: MIN_CHANGE_PCT now goes through float() in _down_floor -> ValueError)
         assert opening_gate.reject_reason("REAL", tk()) == "OPENING_GATE:ERROR:TypeError"
 
 

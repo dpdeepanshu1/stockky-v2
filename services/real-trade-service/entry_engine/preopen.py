@@ -161,6 +161,21 @@ def _warm_blocking(symbols: list, *, _clock=None) -> int:
         from entry_engine import event_risk, prev_day, vix_gate
         prev_day.prefetch(symbols)                      # background threads, never blocks
         vix_gate.snapshot()
+        try:
+            from entry_engine import gap_rank
+            gap_rank.warm(symbols, limit=int(config.PREOPEN_WARM_MAX_SYMBOLS))      # E285 round 103: each stock's own gap history, one background thread
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from entry_engine import own_norms
+            own_norms.warm(symbols[: max(0, int(config.PREOPEN_WARM_MAX_SYMBOLS))])      # E285 round 111: each stock's own 1-minute range and volume pace, one background thread
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from entry_engine import own_spread
+            own_spread.warm(symbols[: max(0, int(config.PREOPEN_WARM_MAX_SYMBOLS))])      # E285 round 114: each stock's own recorded spread, one background thread
+        except Exception:  # noqa: BLE001
+            pass
         budget = float(getattr(config, "PREOPEN_WARM_BUDGET_S", 0.0) or 0.0)
         stop_at_open = bool(getattr(config, "PREOPEN_WARM_STOP_AT_OPEN", True))
         start = clock()

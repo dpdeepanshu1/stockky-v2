@@ -36,15 +36,27 @@ def _pos(v) -> Optional[float]:
     return f if math.isfinite(f) and f > 0 else None
 
 
-def decide_scored(price, vwap):
+def own_tolerance_pct(symbol) -> Optional[float]:
+    """E285 round 108: this stock's own VWAP tolerance (%) from orders/own_norms (its median one-minute range, shrunk toward ENTRY_VWAP_TOLERANCE_PCT, within +-50 % of it), or None
+    (the constant is used) when the switch is off, the history is not loaded yet, or the stock has fewer than 5 complete recorded days. Never raises, never waits."""
+    try:
+        from orders import own_norms
+        note = own_norms.vwap_tolerance_pct(symbol, float(getattr(config, "ENTRY_VWAP_TOLERANCE_PCT", 0.15) or 0.0))
+        return float(note["value"]) if note and note.get("source") != "constant" and note.get("value") else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("vwap gate %s: own tolerance unavailable (constant): %s", symbol, e)
+        return None
+
+
+def decide_scored(price, vwap, tol=None):
     """(reason, penalty) from numbers. E273 round 9: the penalty is the distance over its own limit: for VWAP_BELOW the % under the VWAP divided by the tolerance
-    (ENTRY_VWAP_TOLERANCE_PCT, floor 0.05), for VWAP_EXTENDED the % over divided by ENTRY_VWAP_MAX_EXTENSION_PCT; capped (orders/soft_gates.py). (None, None) = fine. Never raises."""
+    (ENTRY_VWAP_TOLERANCE_PCT, floor 0.05), for VWAP_EXTENDED the % over divided by ENTRY_VWAP_MAX_EXTENSION_PCT; capped (orders/soft_gates.py). (None, None) = fine. `tol` (E285 round 108) is the stock's own tolerance in %; None = ENTRY_VWAP_TOLERANCE_PCT. Never raises."""
     try:
         from orders import soft_gates
         p, v = _pos(price), _pos(vwap)
         if p is None or v is None or abs(p - v) / v > _MAX_SANE_DISTANCE:
             return None, None
-        tol = max(0.0, float(getattr(config, "ENTRY_VWAP_TOLERANCE_PCT", 0.15) or 0.0))
+        tol = max(0.0, float(tol if tol is not None else (getattr(config, "ENTRY_VWAP_TOLERANCE_PCT", 0.15) or 0.0)))
         if p < v * (1.0 - tol / 100.0):
             gap = (v - p) / v * 100.0
             return (f"VWAP_BELOW:price {p:.2f} is {gap:.2f}% under the day's VWAP {v:.2f} (sellers in control) - not a long entry",
@@ -60,9 +72,9 @@ def decide_scored(price, vwap):
         return None, None
 
 
-def decide(price, vwap) -> Optional[str]:
+def decide(price, vwap, tol=None) -> Optional[str]:
     """Pure decision from numbers: a "VWAP_BELOW:..." / "VWAP_EXTENDED:..." reason or None. Never raises."""
-    return decide_scored(price, vwap)[0]
+    return decide_scored(price, vwap, tol)[0]
 
 
 def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[str]:
@@ -73,7 +85,7 @@ def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[
         if not ist_time_at_or_after(parse_hhmm(str(getattr(config, "ENTRY_VWAP_MIN_TIME_IST", "09:45")), 9, 45), now):
             return None
         q = depth_gate._fresh_quote(symbol)
-        return decide(ltp, q.get("avg_price")) if q else None
+        return decide(ltp, q.get("avg_price"), own_tolerance_pct(symbol)) if q else None
     except Exception as e:  # noqa: BLE001
         logger.debug("vwap gate %s failed (allowing): %s", symbol, e)
         return None
@@ -87,7 +99,7 @@ def penalty(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[dict]:
         if not ist_time_at_or_after(parse_hhmm(str(getattr(config, "ENTRY_VWAP_MIN_TIME_IST", "09:45")), 9, 45), now):
             return None
         q = depth_gate._fresh_quote(symbol)
-        why, pen = decide_scored(ltp, q.get("avg_price")) if q else (None, None)
+        why, pen = decide_scored(ltp, q.get("avg_price"), own_tolerance_pct(symbol)) if q else (None, None)
         return {"penalty": float(pen), "why": why} if why and pen else None
     except Exception as e:  # noqa: BLE001
         logger.debug("vwap gate penalty %s failed (no opinion): %s", symbol, e)

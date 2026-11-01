@@ -144,6 +144,11 @@ def event_records(body: Any, watchlist: Optional[Iterable[str]] = None) -> Dict[
             if pol not in (1, -1):
                 continue
             st = _num(e.get("strength")) or 0.0
+            try:
+                from orders import event_weights
+                st = float(event_weights.apply(e.get("type") or "other", pol, st))      # E285 round 113: same learned weight as the quality gate reads (positive events only)
+            except Exception:  # noqa: BLE001
+                pass
             cur = out.get(sym)
             if cur is None or st > cur["strength"]:
                 out[sym] = {"type": str(e.get("type") or "other"), "polarity": pol, "strength": round(st, 4),

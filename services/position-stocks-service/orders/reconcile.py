@@ -1975,6 +1975,11 @@ def run_exit_reconciliation(db: Session) -> int:
         # separate, already-reserved software allocation and out of this
         # fix's scope.
         try:
+            from orders import stale_entry
+            stale_entry.cancel_if_stale(db, pos, row)   # E285 round 100: a limit BUY that never filled is cancelled; the dead-entry path below books it on the next pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reconcile: stale-entry check failed for %s (id=%s): %s", pos.symbol, pos.id, e)
+        try:
             _sync_entry_quantity(db, pos, row)   # E184: before the price correction, so capital is corrected off the real quantity
         except Exception as e:  # noqa: BLE001
             db.rollback()

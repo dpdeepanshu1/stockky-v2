@@ -57,7 +57,7 @@ def vwap(tick) -> Tuple[Optional[str], float]:
             return why, 1.0
         p, v = float(tick.price), float(tick.vwap)
         under = (v - p) / v * 100.0
-        tol = max(0.0, float(getattr(config, "ENTRY_VWAP_TOLERANCE_PCT", 0.15) or 0.0))
+        tol = vwap_gate.tolerance_for_tick(tick)                      # E285 round 111: the stock's own tolerance when known
         hard = max(tol + 0.01, _cfg("VWAP_HARD_UNDER_PCT", 1.5))
         if under >= hard:
             return why, 1.0

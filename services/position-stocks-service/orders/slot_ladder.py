@@ -62,7 +62,13 @@ def _load(db) -> Dict[str, Any]:
     from models import ScalpPosition
     rows = (db.query(ScalpPosition).filter(ScalpPosition.realized_pnl.isnot(None))
             .order_by(ScalpPosition.opened_at.desc()).limit(1000).all())
-    return from_rows(rows_from_positions(rows))
+    data = rows_from_positions(rows)
+    try:
+        from orders import event_weights
+        event_weights.update(data)      # E285 round 113: the positive event types' learned weights come from the same closed-trade rows
+    except Exception:  # noqa: BLE001
+        logger.debug("slot ladder: event weights not updated", exc_info=True)
+    return from_rows(data)
 
 
 _cells_cache: Dict[str, Any] = {"at": 0.0, "val": None}

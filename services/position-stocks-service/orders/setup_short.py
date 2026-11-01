@@ -184,17 +184,18 @@ def decide(*, symbol: str, price: float, now: Optional[datetime], quality: Any, 
         return {"id": None, "skip": "NO_SETUP", "why": "error"}
 
 
-def stamp(flow_json: Any, res: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> Any:
-    """flow_json text with the short's setup stamp: the matched S4, or the legacy shortlist stamp (side SHORT) when nothing matched. SETUP_STAMP_ENABLED off = unchanged."""
+def stamp(flow_json: Any, res: Optional[Dict[str, Any]], now: Optional[datetime] = None, event: Any = None) -> Any:
+    """flow_json text with the short's setup stamp: the matched S4, or the legacy shortlist stamp (side SHORT) when nothing matched. SETUP_STAMP_ENABLED off = unchanged.
+    E285 round 115: `event` (the plan's typed event, setup_stamp.event_part) is recorded in the stamp so event_stats reports the short's `<type>|DOWN` follow-through; record only."""
     try:
         if not getattr(config, "SETUP_STAMP_ENABLED", True):
             return flow_json
         from orders import setup_stamp
         if isinstance(res, dict) and res.get("id"):
             st = setup_stamp.build(setup_id=res["id"], trigger=res.get("trigger", ""), confirmations=res.get("confirmations"),
-                                   penalties=(res.get("stamp") or {}).get("penalties"), size_mult=res.get("size_mult"), now=now, side="SHORT")
+                                   penalties=(res.get("stamp") or {}).get("penalties"), size_mult=res.get("size_mult"), now=now, side="SHORT", event=event)
         else:
-            st = setup_stamp.build(trigger="shortlist", now=now, side="SHORT")
+            st = setup_stamp.build(trigger="shortlist", now=now, side="SHORT", event=event)
         return setup_stamp.attach(flow_json, st)
     except Exception:  # noqa: BLE001
         return flow_json

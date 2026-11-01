@@ -158,7 +158,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
             _refuse(db, cand, "SHORT_GUARD", str(why))
             return None
     if ledger._market_state_short_mult() <= 0.0:
-        # step 6: the Market Weather short dial is 0 today (calm / choppy market, or unreadable). Nothing downstream may size a short.
+        # step 6: the Market Weather short dial is 0 today (state unreadable, or a person set it to 0; calm / choppy now only shrink a short to 0.25 - E285 round 99). Nothing downstream may size a short.
         _refuse(db, cand, "SHORT_MARKET_STATE_OFF", f"Market Weather: no shorts today (state {(_current_profile() or {}).get('market_state') or 'unknown'}, short dial 0)")
         return None
     if ltp < float(config.MIN_STOCK_PRICE or 0.0) or ltp < float(getattr(config, "ENTRY_MIN_PRICE", 0.0) or 0.0):
@@ -261,7 +261,12 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         return None
 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
-    return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
+    try:
+        from orders import setup_stamp as _sst
+        _event = _sst.event_part(quality)                   # E285 round 115: the typed event this short saw (record only: event_stats reports `<type>|DOWN`)
+    except Exception:  # noqa: BLE001
+        _event = None
+    return {"live": live, "event": _event, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
             "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv),
             "tape_json": _tape_json, "setup": _setup, "early": early, "target_note": _tnote, "stop_note": _snote}
 

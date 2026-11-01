@@ -378,7 +378,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
         try:
             from orders import setup_short as _ss
             from tz_utils import ist_now as _ist_now
-            pos.flow_json = _ss.stamp(pos.flow_json, plan.get("setup"), _ist_now())          # E274 round 40: S4_CATALYST_DOWN or the legacy shortlist stamp (side SHORT), record only
+            pos.flow_json = _ss.stamp(pos.flow_json, plan.get("setup"), _ist_now(), event=plan.get("event"))          # E274 round 40: S4_CATALYST_DOWN or the legacy shortlist stamp (side SHORT), record only
         except Exception:  # noqa: BLE001
             logger.debug("short live: setup stamp failed (record only, entry unaffected)", exc_info=True)
         try:

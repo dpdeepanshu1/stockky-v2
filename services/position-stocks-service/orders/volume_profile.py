@@ -152,7 +152,7 @@ def _profile() -> Optional[Dict[str, Any]]:
 def adjust(old_fraction: float, minutes_since_open: float) -> float:
     """The learned share of the day's volume expected by now, bounded to +-25 % of the old curve value; the old value when unavailable. Never raises, never waits."""
     try:
-        if not getattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True) or old_fraction <= 0:
+        if not getattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True) or not getattr(config, "ADAPTIVE_ENTRY_PARAMS", True) or old_fraction <= 0:     # E285 round 110: master switch
             return old_fraction
         prof = _profile()
         curve = (prof or {}).get("curve")
@@ -171,7 +171,7 @@ def adjust(old_fraction: float, minutes_since_open: float) -> float:
 def warm() -> None:
     """E285 round 96: start the background build now (at service start) so the curve is ready before the first liquidity check, instead of on that first call. Never raises, never waits."""
     try:
-        if getattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True):
+        if getattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True) and getattr(config, "ADAPTIVE_ENTRY_PARAMS", True):
             _profile()
     except Exception as _e:  # noqa: BLE001
         logger.debug("volume_profile.warm: skipped (%s)", _e)                        # E285 round 98: logged, no longer silent (the group322 pin); a warm-up never blocks start

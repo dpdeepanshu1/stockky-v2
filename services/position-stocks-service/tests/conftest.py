@@ -157,6 +157,17 @@ def _live_tick_requirement_off_by_default(monkeypatch):
 
 
 @_pytest_entry_pause.fixture(autouse=True)
+def _long_marketable_limit_off_by_default(monkeypatch):
+    """E285 round 100: the automatic long entry is a marketable LIMIT by default (config.LONG_ENTRY_MARKETABLE_LIMIT) and reconcile cancels a stale one. Older tests pin the
+    MARKET entry and a Super Order row that never fills; tests/test_e285_round100_long_limit_entry.py turns it on."""
+    import config as _config
+    monkeypatch.setattr(_config, "LONG_ENTRY_MARKETABLE_LIMIT", False, raising=False)
+    from orders import stale_entry as _se
+    _se.reset()
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
 def _opening_protect_off_by_default(monkeypatch):
     """group392: orders/opening_protect.py is time-of-day dependent (09:15-09:45 IST on a trading day: half size, pause after stop-outs).
     Off for every older test so none can flake inside that window; test_group392_opening_protect.py turns it on and pins the clock."""
@@ -170,6 +181,7 @@ def _bar_record_off_by_default(monkeypatch):
     """group441: feed/bar_recorder.py writes files under BAR_RECORD_DIR; no older test may touch the disk (test_group441_bar_recorder.py turns it on in a temp dir)."""
     import config as _config
     monkeypatch.setattr(_config, "BAR_RECORD_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "SPREAD_RECORD_ENABLED", False, raising=False)           # E285 round 109: the spread recorder is off for older tests too; tests/test_e285_round109_spread_recorder.py turns it on
     monkeypatch.setattr(_config, "VOLUME_PROFILE_LEARNED_ENABLED", False, raising=False)     # E284: no older test starts the profile's background read
     from feed import bar_recorder as _br
     _br.reset()
@@ -342,3 +354,59 @@ def e277_restore_after_each_test():
     snap = _e277_snapshot()
     yield
     _e277_restore(snap)
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e285_gap_rank_off_by_default(monkeypatch):
+    """E285 round 103: orders/gap_rank starts a background history fetch for a symbol it has not seen. Older tests must not start threads or call out;
+    tests/test_e285_round103_gap_rank.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "GAP_RANK_ENABLED", False, raising=False)
+    try:
+        from orders import gap_rank as _gr
+        _gr.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e285_event_weights_off_by_default(monkeypatch):
+    """E285 round 113: orders/event_weights keeps a process-wide cache filled by slot_ladder._load. Older tests must see the feed's fixed strengths;
+    tests/test_e285_round113_event_weights.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "EVENT_WEIGHTS_LEARNED_ENABLED", False, raising=False)
+    try:
+        from orders import event_weights as _ew
+        _ew.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e285_own_spread_off_by_default(monkeypatch):
+    """E285 round 112: orders/own_spread starts a background read of the spread recorder for a symbol it has not seen. Older tests must not start threads or read /data/bars;
+    tests/test_e285_round112_own_spread.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_OWN_SPREAD_ENABLED", False, raising=False)
+    try:
+        from orders import own_spread as _os
+        _os.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e285_own_norms_off_by_default(monkeypatch):
+    """E285 round 108: orders/own_norms starts a background read of the recorder folders for a symbol it has not seen. Older tests must not start threads or read /data/bars;
+    tests/test_e285_round108_own_norms.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_OWN_NORMS_ENABLED", False, raising=False)
+    try:
+        from orders import own_norms as _on
+        _on.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield

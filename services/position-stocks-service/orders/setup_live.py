@@ -51,7 +51,7 @@ def tape_sign(tape: Any) -> int:
 
 
 INPUT_KEYS = frozenset({"sector_third", "event_priced_in", "rs_pct", "gap_pct", "structure_ok", "or_break", "pullback_hold", "vol_vs_norm", "candle", "z_move", "kind",
-                        "liquid", "failure_candle", "tape_exhaustion", "vwap_stretch", "climax_volume", "wall_close", "promoted"})
+                        "liquid", "failure_candle", "tape_exhaustion", "vwap_stretch", "climax_volume", "wall_close", "promoted", "gap_pctile"})
 
 
 def allowed_set(*, s1: bool = True, s2: bool = False, s3: bool = False) -> set:

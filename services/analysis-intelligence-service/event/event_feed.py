@@ -15,8 +15,14 @@ Rules that matter:
     a negative word about a COST ("fall in input costs") is not negative; "loss narrows" is positive.
   * With no healthy source the routes answer ok:false with no events. Nothing here blocks a trade by itself.
 
-Env: EVENT_FEED_ENABLED (1), EVENT_FEED_BLOCK_COOLDOWN_S (1800), EVENT_FEED_EXTRA_SYMBOLS (comma list, optional), EVENT_FEED_POLL_S (300),
-EVENT_FEED_MAX_AGE_H (24).
+Polling cadence (E285 round 105, EVENT_FEED_CADENCE_V2 = 1): the collector follows the same clock as Real Trade's news scan instead of one flat interval -
+every EVENT_FEED_EVENING_S (1800) 15:30-20:00 IST, every EVENT_FEED_NIGHT_S (7200) 20:00-08:00, every EVENT_FEED_RAMP_S (600) 08:00-09:00, every
+EVENT_FEED_OPEN_S (60) 09:00-09:20, every EVENT_FEED_SESSION_S (180) 09:20-15:30; Saturday and Sunday use the night interval. Each interval has a 60 s floor
+and the sleep is cut at the next boundary, so the loop is awake at 08:00, 09:00, 09:20, 15:30 and 20:00. EVENT_FEED_CADENCE_V2=0 = the old flat
+EVENT_FEED_POLL_S.
+
+Env: EVENT_FEED_ENABLED (1), EVENT_FEED_BLOCK_COOLDOWN_S (1800), EVENT_FEED_EXTRA_SYMBOLS (comma list, optional), EVENT_FEED_POLL_S (300, used only with
+EVENT_FEED_CADENCE_V2=0), EVENT_FEED_CADENCE_V2 (1), EVENT_FEED_OPEN_S / _SESSION_S / _RAMP_S / _EVENING_S / _NIGHT_S, EVENT_FEED_MAX_AGE_H (24).
 """
 from __future__ import annotations
 
@@ -279,6 +285,48 @@ def build_response(events: List[Dict[str, Any]], sources: Dict[str, Dict[str, An
 FetchFn = Callable[[str], Tuple[List[Any], Optional[int]]]
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+# (phase, start second of the IST day, env name of its interval, default seconds); a phase lasts until the next one starts, the last one until midnight.
+_PHASES: Tuple[Tuple[str, int, str, float], ...] = (
+    ("night", 0, "EVENT_FEED_NIGHT_S", 7200.0),
+    ("ramp", 8 * 3600, "EVENT_FEED_RAMP_S", 600.0),
+    ("open", 9 * 3600, "EVENT_FEED_OPEN_S", 60.0),
+    ("session", 9 * 3600 + 20 * 60, "EVENT_FEED_SESSION_S", 180.0),
+    ("evening", 15 * 3600 + 30 * 60, "EVENT_FEED_EVENING_S", 1800.0),
+    ("night", 20 * 3600, "EVENT_FEED_NIGHT_S", 7200.0),
+)
+MIN_POLL_S = 60.0
+
+
+def cadence_v2_enabled() -> bool:
+    return (os.getenv("EVENT_FEED_CADENCE_V2") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def poll_plan(now: datetime) -> Tuple[str, float, float]:
+    """(phase, poll interval in s, seconds until the phase ends) for an instant. Pure; the intervals come from the env at call time."""
+    t = now.astimezone(IST)
+    sod = t.hour * 3600 + t.minute * 60 + t.second
+    if t.weekday() >= 5:                                   # Saturday / Sunday: nothing trades, the night interval all day, woken at midnight
+        return "weekend", max(MIN_POLL_S, _f(os.getenv("EVENT_FEED_NIGHT_S"), 7200.0)), float(86400 - sod)
+    idx = max(i for i, ph in enumerate(_PHASES) if ph[1] <= sod)
+    name, _start, env, default = _PHASES[idx]
+    end = _PHASES[idx + 1][1] if idx + 1 < len(_PHASES) else 86400
+    return name, max(MIN_POLL_S, _f(os.getenv(env), default)), float(end - sod)
+
+
+def next_delay_s(now: datetime) -> float:
+    """How long the collector sleeps after a poll made at `now`: the phase's interval, cut at the phase end so a boundary is never slept through."""
+    _name, every, until = poll_plan(now)
+    return max(1.0, min(every, until))
+
+
+def _cache_max_age_s() -> Optional[float]:
+    """A cached copy of a feed older than 80 % of the current poll interval is not good enough (the downloader keeps one for 300 s); None = old behaviour."""
+    if not cadence_v2_enabled():
+        return None
+    return max(30.0, 0.8 * poll_plan(datetime.now(timezone.utc))[1])
+
+
 def _default_fetch(url: str) -> Tuple[List[Any], Optional[int]]:
     """(entries, http status) through the service's shared downloader (news/feed_fetch.py, loaded by path); (list, None) when it is unavailable."""
     import importlib.util as ilu
@@ -286,7 +334,8 @@ def _default_fetch(url: str) -> Tuple[List[Any], Optional[int]]:
     spec = ilu.spec_from_file_location("event_feed_shared_fetch", path)
     mod = ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    parsed, info = mod.fetch_feed_ex(url, "event-feed")
+    max_age = _cache_max_age_s()
+    parsed, info = mod.fetch_feed_ex(url, "event-feed") if max_age is None else mod.fetch_feed_ex(url, "event-feed", max_age_s=max_age)
     return list(getattr(parsed, "entries", []) or []), (info or {}).get("status")
 
 
@@ -398,14 +447,28 @@ def start_collector(symbols_fn: Callable[[], Iterable[str]], fetch_fn: Optional[
         return _collector
     _collector = FeedCollector(symbols_fn, fetch_fn, snapshot_fn=snapshot_fn)
     every = max(60.0, _f(os.getenv("EVENT_FEED_POLL_S"), 300.0) if interval_s is None else float(interval_s))
+    scheduled = interval_s is None and cadence_v2_enabled()      # an explicit interval (tests) or CADENCE_V2=0 keeps the flat interval
 
     def _loop() -> None:
+        last_phase = None
         while True:
             try:
                 _collector.poll_once()
             except Exception as e:  # noqa: BLE001
                 logger.warning("event feed: poll failed (%s)", e)
-            time.sleep(every)
+            if not scheduled:
+                time.sleep(every)
+                continue
+            try:
+                now = datetime.now(timezone.utc)
+                phase, ivl, _until = poll_plan(now)
+                if phase != last_phase:
+                    last_phase = phase
+                    logger.info("event feed cadence: %s, every %d s", phase, int(ivl))
+                time.sleep(next_delay_s(now))
+            except Exception as e:  # noqa: BLE001 - never let the schedule kill the loop
+                logger.warning("event feed: cadence failed (%s) - flat %d s", e, int(every))
+                time.sleep(every)
 
     threading.Thread(target=_loop, name="event-feed-collector", daemon=True).start()
     return _collector

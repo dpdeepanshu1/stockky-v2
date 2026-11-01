@@ -11,6 +11,7 @@
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
 import type { FlowStatsDoc } from "./tapeView";
 import type { SymbolTapeDoc } from "./tapeSymbolView";
+import type { SetupStamp } from "./setupView";   // E285 round 104: Entry reason on the Positions cards and the History rows
 
 const STORAGE_URL_KEY = "stockky:real_trade_api_url";
 const STORAGE_TOKEN_KEY = "stockky:real_trade_session_token";
@@ -285,6 +286,8 @@ export interface Position {
   realized_cost_estimate: number | null;
   entry_decision_label: string | null;
   overnight_hold_reason: string | null;
+  /** E285 round 104: the rule that took the entry (setup stamp); null / missing for a broker import or a trade opened before entries were stamped. */
+  setup?: SetupStamp | null;
 }
 
 export interface ClosedPosition {
@@ -295,6 +298,7 @@ export interface ClosedPosition {
   realized_cost_estimate: number | null;
   entry_decision_label: string | null;
   overnight_hold_reason: string | null;
+  setup?: SetupStamp | null;   // E285 round 104
 }
 
 // E75: trade journal notes (backend journal_notes.py, GET/PUT /journal/notes/{mode}); descriptive only, no gate reads a note.
@@ -330,6 +334,7 @@ export interface TradeRecord {
   gross_pnl?: number | null; charges?: number | null; net_pnl?: number | null;
   stop_pct?: number | null; max_gain_pct?: number | null; max_drawdown_pct?: number | null;
   opened_at?: string | null; closed_at?: string | null;
+  setup?: SetupStamp | null;   // E285 round 104: the rule that took the entry (History "Entry reason")
 }
 export interface TradeRecordsResponse { mode: string; days: number; symbol: string | null; total: number; returned: number; records: TradeRecord[] }
 

@@ -920,6 +920,27 @@ def short_entry_order(live: float, target_price: float, stop_price: float) -> tu
     return "MARKET", live
 
 
+def long_entry_order(live: float, target_price: float, stop_price: float) -> tuple:
+    """E285 round 100: (order_type, price) for a BUY Super Order entry. A marketable LIMIT a little ABOVE the live price (LONG_ENTRY_CUSHION_PCT, rounded UP to a tick and never
+    under the live price) when LONG_ENTRY_MARKETABLE_LIMIT is on and the legs still sit on the right sides of it (stop < price < target); otherwise the old ("MARKET", live).
+    The cushion is the slippage cap: the order cannot fill above it. Never raises."""
+    try:
+        import config
+        if getattr(config, "LONG_ENTRY_MARKETABLE_LIMIT", True) and live and live > 0:
+            raw = float(live) * (1.0 + float(getattr(config, "LONG_ENTRY_CUSHION_PCT", 0.3)) / 100.0)
+            px = round_to_tick(raw)
+            tick = tick_size_for_price(px)
+            if px < raw - 1e-9:                                   # nearest-tick rounding went down: take the next tick up so the cushion is never smaller than asked
+                px = round_to_tick(px + tick)
+            if px < float(live):
+                px = round_to_tick(float(live))
+            if px > 0 and is_valid_tick_price(px) and float(stop_price) < px < float(target_price):
+                return "LIMIT", px
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position-stocks: long_entry_order fell back to MARKET (%s)", e)
+    return "MARKET", live
+
+
 def get_super_order_list(db: Session, release_db: bool = False) -> list:
     """Read-only — no arm check. Used by the exit monitor to poll leg status.
     release_db=True (read-only routes): give the pooled DB connection back before the Dhan call (group 267)."""

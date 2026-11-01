@@ -120,6 +120,21 @@ def _ttp_min(row: Dict[str, Any], short: bool) -> Optional[float]:
         return None
 
 
+def _dip_pct(row: Dict[str, Any]) -> Optional[float]:
+    """E285 round 107: the deepest recovered dip of the trade (flow_json["peak"]["dip_pct"], written by excursion.py); None when not recorded. 0.0 = in profit, never dipped and recovered."""
+    try:
+        fj = row.get("flow_json")
+        d = json.loads(fj) if isinstance(fj, str) and fj else fj
+        pk = d.get("peak") if isinstance(d, dict) else None
+        v = _f(pk.get("dip_pct")) if isinstance(pk, dict) else None
+        return v if v is not None and 0.0 <= v <= 50.0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+DIP_PCTL = 75.0
+
+
 def exit_numbers(cell: Optional[Dict[str, Any]], *, ttp_fallback_min: float, target_pct: Optional[float] = None, prior: int = MIN_TRADES) -> Dict[str, Any]:
     """E275 round 37: the exit numbers one setup cell's own winners support, shrunk toward the old constants. A cell with fewer than MIN_TRADES closed trades, or a metric
     with fewer than MIN_EXIT_SAMPLES samples, gives the constant (source "fallback"). Otherwise value = w x learned + (1 - w) x constant with w = n / (n + prior).
@@ -167,7 +182,7 @@ def _lower_bound(rs: List[float], days: List[str]) -> Optional[float]:
 
 def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> Dict[str, Dict[str, Any]]:
     """{"<setup id>|<slot>": {n, wins, win_rate, days, avg_r, r_n, lower_bound_r, verdict}} for every cell that has a stamp, plus "<setup id>|ALL"."""
-    cells: Dict[str, Dict[str, list]] = defaultdict(lambda: {"win": [], "r": [], "rday": [], "day": [], "gain": [], "ttp": [], "alldays": [], "mae": []})
+    cells: Dict[str, Dict[str, list]] = defaultdict(lambda: {"win": [], "r": [], "rday": [], "day": [], "gain": [], "ttp": [], "alldays": [], "mae": [], "dip": []})
     try:
         for row in rows or []:
             st = setup_stamp.read(row.get("flow_json")) if isinstance(row, dict) else None
@@ -184,6 +199,7 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
             gain = _gain_pct(row, short) if pnl > 0 else None          # E275 round 37: winners only - the typical maximum gain a WINNER reached
             ttp = _ttp_min(row, short) if pnl > 0 else None
             mae = _adverse_pct(row, short) if pnl > 0 else None          # E282: how far a WINNER went against its entry (learned stop)
+            dip = _dip_pct(row) if pnl > 0 else None                      # E285 round 107: how deep a WINNER dipped from a peak before a new high (learned trail)
             cid = cell_id(st["id"], "SHORT" if short else "LONG")                  # E274 round 44: a short S2 / S3 has its own cell
             for key in (f"{cid}|{st.get('slot') or 'later'}", f"{cid}|ALL"):
                 c = cells[key]
@@ -196,6 +212,8 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
                     c["ttp"].append(ttp)
                 if mae is not None:
                     c["mae"].append(mae)
+                if dip is not None:
+                    c["dip"].append(dip)
                 if r is not None:
                     c["r"].append(r)
                     c["rday"].append(day)
@@ -214,5 +232,6 @@ def summarize(rows: Iterable[Dict[str, Any]], min_trades: int = MIN_TRADES) -> D
                     "avg_r": round(sum(rs) / len(rs), 4) if rs else None, "lower_bound_r": None if lb is None else round(lb, 4), "verdict": verdict,
                     "gain_n": len(c["gain"]), "typical_gain_pct": None if len(c["gain"]) < MIN_EXIT_SAMPLES else round(_median(c["gain"]), 3),
                     "ttp_n": len(c["ttp"]), "ttp_min": None if len(c["ttp"]) < MIN_EXIT_SAMPLES else round(_median(c["ttp"]), 2),
-                    "mae_n": len(c["mae"]), "adverse_p90_pct": None if len(c["mae"]) < MIN_EXIT_SAMPLES else round(_percentile(c["mae"], ADVERSE_PCTL), 3)}
+                    "mae_n": len(c["mae"]), "adverse_p90_pct": None if len(c["mae"]) < MIN_EXIT_SAMPLES else round(_percentile(c["mae"], ADVERSE_PCTL), 3),
+                    "dip_n": len(c["dip"]), "dip_p75_pct": None if len(c["dip"]) < MIN_EXIT_SAMPLES else round(_percentile(c["dip"], DIP_PCTL), 3)}
     return out

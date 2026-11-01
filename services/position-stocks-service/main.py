@@ -2948,8 +2948,20 @@ def setup_stats_route(db: Session = Depends(get_db), limit: int = 1000, admin: s
         from orders import slot_ladder as _sl
         data = _sl.rows_from_positions(rows)
         _lad = _sl.from_rows(data)      # E273 round 35: the cells the entry sizes up (promoted) or down (demoted) right now
+        try:
+            from orders import event_stats as _es
+            _events = _es.summarize(data)       # E285 round 106: follow-through per typed event type (record only; changes nothing)
+        except Exception:  # noqa: BLE001
+            logger.debug("setup stats: event_stats failed (omitted)", exc_info=True)
+            _events = {}
+        try:
+            from orders import event_weights as _ew
+            _ew.update(data)                    # E285 round 113: refresh the learned weights from the rows this report just read
+            _ewt = _ew.snapshot()
+        except Exception:  # noqa: BLE001
+            _ewt = {}
         return {"ok": True, "rows_read": len(data), "min_trades": _ss.MIN_TRADES, "cells": _lad["cells"], "ladder_enabled": _sl.enabled(),
-                "promoted": sorted(_lad["promoted"]), "demoted": sorted(_lad["demoted"])}
+                "promoted": sorted(_lad["promoted"]), "demoted": sorted(_lad["demoted"]), "event_types": _events, "event_weights": _ewt}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}", "cells": {}}
 
@@ -3271,7 +3283,7 @@ def board_status():
             "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
             "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors()),
             "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover),
-            "ms_engine": _ms_engine_status(), "bar_record": _bar_record_status()}
+            "ms_engine": _ms_engine_status(), "bar_record": _bar_record_status(), "spread_record": _spread_record_status()}
 
 
 def _bar_record_status() -> dict:
@@ -3279,6 +3291,15 @@ def _bar_record_status() -> dict:
     try:
         from feed import bar_recorder
         return bar_recorder.stats()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)[:120]}
+
+
+def _spread_record_status() -> dict:
+    """E285 round 109: the per-minute spread recorder (feed/spread_recorder.py). Never raises."""
+    try:
+        from feed import spread_recorder
+        return spread_recorder.stats()
     except Exception as e:  # noqa: BLE001
         return {"enabled": False, "error": str(e)[:120]}
 

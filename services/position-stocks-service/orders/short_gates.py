@@ -180,6 +180,9 @@ def depth_gate_short(f: Dict[str, Any], now: Optional[datetime]) -> Verdict:
     if spread is None and book is None:
         return ("SHORT_DEPTH_MISSING", "no spread / book reading: the cover order's liquidity is unknown")
     max_spread = _cfg("ENTRY_DEPTH_MAX_SPREAD_PCT", 0.0)
+    if max_spread > 0 and f.get("symbol"):
+        from orders import depth_gate
+        max_spread = depth_gate.own_max_spread_pct(str(f["symbol"]), max_spread)          # E285 round 112: the stock's own ceiling when known
     if max_spread > 0 and spread is not None and spread > max_spread:
         return ("DEPTH_SPREAD", f"{spread:.2f}% > {max_spread:.2f}%")
     min_book = _cfg("ENTRY_MIN_BOOK_VALUE", 0.0)
@@ -305,7 +308,7 @@ def gather_facts(symbol: str, ltp: float, board_row: Optional[dict] = None, qual
     from datetime import timedelta
     from tz_utils import ist_now
     f: Dict[str, Any] = {"ltp": ltp, "signal_ltp": ltp, "board_row": board_row, "quality": quality, "live": None, "tick_age_s": None,
-                         "day_open": None, "day_high": None, "day_low": None, "prev_close": None, "vwap": None, "quote": None, "structure": None}
+                         "day_open": None, "day_high": None, "day_low": None, "prev_close": None, "vwap": None, "quote": None, "structure": None, "symbol": symbol}
     try:
         n = ist_now(now)
         f["today"] = n.strftime("%Y-%m-%d")

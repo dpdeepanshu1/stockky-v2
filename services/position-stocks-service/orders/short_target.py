@@ -99,7 +99,7 @@ def adjust(levels: Any, live: Any, *, symbol: str, setup: Any = None, now: Any =
                 tick = 0.05
         from orders.adaptive import round_to_tick
         floor = _min_pct()
-        if bool(getattr(config, "SHORT_TARGET_LEARNED_ENABLED", True)):
+        if bool(getattr(config, "SHORT_TARGET_LEARNED_ENABLED", True)) and bool(getattr(config, "ADAPTIVE_ENTRY_PARAMS", True)):     # E285 round 110: ADAPTIVE_ENTRY_PARAMS is the master switch
             lg = learned_gain(setup, now, db, tpct)
             if lg and lg["gain_pct"] >= floor:
                 px = round_to_tick(lv * (1.0 - lg["gain_pct"] / 100.0))

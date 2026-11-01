@@ -4,6 +4,7 @@ import { type Position } from "../../realTradeApi";
 import StockCandleBlock from "../StockCandleBlock";
 import { RiskRail } from "../ui/RiskRail";   // design v7
 import { fmtDate, fmtInr, fmtTime, pnlColor, positionLevels } from "./format";
+import { entryReason } from "../../setupView";   // E285 round 104: the Entry reason line (same helper as Position Stocks)
 
 // AUDIT FIX (session64, issue #8 follow-up — "show demat-imported holdings
 // under Positions in their own sub-section"): factored the existing
@@ -85,6 +86,12 @@ export function PositionCard({
           <br/><span className="text-signal-buy font-bold">{p.current_target ? `₹${p.current_target}` : "—"}</span>
         </div>
       </div>
+      {/* E285 round 104: why this trade was taken (setup stamp); "-" for a broker import or a trade opened before entries were stamped */}
+      {(() => { const er = entryReason(p.setup); return (
+        <div className="font-display tabular-nums text-[10px] mb-2" title={er.title} data-testid="entry-reason">
+          <span className="text-mist">Entry reason </span>
+          <span className={er.known ? "text-paper font-bold" : "text-mist"}>{er.label}{er.known && <span className="ml-1 text-[9px] text-mist">{er.slot}</span>}</span>
+        </div>); })()}
       {/* design v7: stop / entry / target drawn TO SCALE with the live price marker (the old bar split stop and target 50/50 whatever the entry was) */}
       {p.current_stop && p.current_target && (
         <RiskRail side="LONG" entry={p.avg_entry_price} stop={p.current_stop} target={p.current_target} price={p.current_price} />

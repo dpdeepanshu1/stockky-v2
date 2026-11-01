@@ -580,6 +580,13 @@ CIRCUIT_LOWER_BUFFER_PCT = _og_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
 EARNINGS_DAY_BLOCK = ((os.getenv("EARNINGS_DAY_BLOCK") or "").strip() or "true").lower() == "true"
 EARNINGS_CARRY_BLOCK = ((os.getenv("EARNINGS_CARRY_BLOCK") or "").strip() or "true").lower() == "true"
 EARNINGS_FETCH_TIMEOUT_S = _og_float("EARNINGS_FETCH_TIMEOUT_S", 6.0)
+# E285 round 101: results-day split for the ENTRY check (the same rule Position Stocks has had since E272). A stock whose results are dated today is blocked only while the
+# timing is unknown or too fresh: results published before EARNINGS_KNOWN_BEFORE_IST (09:00) are a KNOWN event (the open already prices them) and no longer block; results
+# published later in the session block until EARNINGS_REACTION_WAIT_MIN minutes after publication (the first reaction bar); no publication time found = blocked, as before.
+# The overnight-carry check is not split. false = every results day blocked (the old rule).
+EARNINGS_SPLIT_ENABLED = ((os.getenv("EARNINGS_SPLIT_ENABLED") or "").strip() or "true").lower() == "true"
+EARNINGS_KNOWN_BEFORE_IST = ((os.getenv("EARNINGS_KNOWN_BEFORE_IST") or "").strip() or "09:00")
+EARNINGS_REACTION_WAIT_MIN = max(0.0, min(60.0, _og_float("EARNINGS_REACTION_WAIT_MIN", 5.0)))
 # group 329: re-check the bid-ask spread / best-5 book on the FRESH tick at the moment of the BUY (the watchlist path only checked it when
 # the row was queued, which can be minutes earlier). Same limits as the queue-time check: WATCHLIST_MAX_SPREAD_PCT (0.5), WATCHLIST_MIN_BOOK_VALUE.
 ENTRY_DEPTH_RECHECK = ((os.getenv("ENTRY_DEPTH_RECHECK") or "").strip() or "true").lower() == "true"
@@ -840,6 +847,25 @@ PREOPEN_SNAPSHOT_ENABLED = ((os.getenv("PREOPEN_SNAPSHOT_ENABLED") or "").strip(
 PREOPEN_SNAPSHOT_TIME_IST = (os.getenv("PREOPEN_SNAPSHOT_TIME_IST") or "").strip() or "09:10"   # group 399: was 09:08
 PREOPEN_SNAPSHOT_PASSES_IST = (os.getenv("PREOPEN_SNAPSHOT_PASSES_IST") or "").strip()    # "" = PREOPEN_SNAPSHOT_TIME_IST, 09:12, 09:14
 PREOPEN_GAP_GATE_UNTIL_IST = (os.getenv("PREOPEN_GAP_GATE_UNTIL_IST") or "").strip() or "11:00"
+# E285 round 103: the stock's own gap rank (entry_engine/gap_rank.py). A gap above the 95th percentile of the stock's own last GAP_RANK_SESSIONS overnight gaps halves the
+# setup size (setup_engine GAP_HALF_PCTILE). Needs GAP_RANK_MIN_SESSIONS gaps; unknown = the old size. false = the rule stays off.
+GAP_RANK_ENABLED = ((os.getenv("GAP_RANK_ENABLED") or "").strip() or "true").lower() == "true"
+GAP_RANK_SESSIONS = max(10, int(_og_float("GAP_RANK_SESSIONS", 60.0)))
+GAP_RANK_MIN_SESSIONS = max(5, int(_og_float("GAP_RANK_MIN_SESSIONS", 30.0)))
+# E285 round 102: overseas cues read at 08:30 IST (entry_engine/open_cues.py). A weak overnight lead (live Asia + US index futures) shrinks every long entry until OPEN_CUES_UNTIL_IST;
+# it never refuses an entry and never sizes up. Weak = the average day move <= OPEN_CUES_WEAK_AVG_PCT or a US-futures cue <= OPEN_CUES_WEAK_US_FUT_PCT (size x OPEN_CUES_WEAK_MUL);
+# OPEN_CUES_VERY_WEAK_FACTOR times those limits = very weak (size x OPEN_CUES_VERY_WEAK_MUL). Needs GLOBAL_CUE_MIN_READINGS readings. 0 disables a limit.
+OPEN_CUES_ENABLED = ((os.getenv("OPEN_CUES_ENABLED") or "").strip() or "true").lower() == "true"
+OPEN_CUES_SYMBOLS = (os.getenv("OPEN_CUES_SYMBOLS") or "").strip() or "^N225,^HSI,ES=F,NQ=F"
+OPEN_CUES_TIME_IST = (os.getenv("OPEN_CUES_TIME_IST") or "").strip() or "08:30"
+OPEN_CUES_UNTIL_IST = (os.getenv("OPEN_CUES_UNTIL_IST") or "").strip() or "10:30"
+OPEN_CUES_RETRY_S = max(30.0, _og_float("OPEN_CUES_RETRY_S", 300.0))
+OPEN_CUES_MAX_AGE_S = _og_float("OPEN_CUES_MAX_AGE_S", 7200.0)
+OPEN_CUES_WEAK_AVG_PCT = _og_float("OPEN_CUES_WEAK_AVG_PCT", -0.9)
+OPEN_CUES_WEAK_US_FUT_PCT = _og_float("OPEN_CUES_WEAK_US_FUT_PCT", -1.2)
+OPEN_CUES_VERY_WEAK_FACTOR = max(1.0, _og_float("OPEN_CUES_VERY_WEAK_FACTOR", 2.0))
+OPEN_CUES_WEAK_MUL = max(0.05, min(1.0, _og_float("OPEN_CUES_WEAK_MUL", 0.7)))
+OPEN_CUES_VERY_WEAK_MUL = max(0.05, min(1.0, _og_float("OPEN_CUES_VERY_WEAK_MUL", 0.5)))
 PREOPEN_GAP_UP_BLOCK_PCT = _og_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
 PREOPEN_GAP_DOWN_BLOCK_PCT = _og_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _og_float("PREOPEN_MAX_PRICE_AGE_S", 420.0)   # group 399: was 180; the 09:08-09:15 buffer sends no order updates, so a 09:14 pass sees a ~6 min old price
@@ -1892,6 +1918,29 @@ BAR_RECORDS_DIR = (os.getenv("BAR_RECORDS_DIR") or "").strip() or "/data/bars/rt
 # E272 round 8: the symbols this service evaluated today go to <BAR_RECORDS_DIR>/wanted/<day>.json so position-stocks records their bars (RT_BAR_WANTED_ENABLED=false stops it).
 RT_BAR_WANTED_ENABLED = _bs_bool("RT_BAR_WANTED_ENABLED", "true")
 RT_BAR_WANTED_MAX = max(10, _bs_int("RT_BAR_WANTED_MAX", 400))
+# E285 round 111: the stock's own normal 1-minute range and volume pace (entry_engine/own_norms.py), read from the minute bars Position Stocks records on the shared bar-records volume
+# (/data/bars). The VWAP tolerance becomes the stock's own median one-minute range x ENTRY_OWN_NORMS_VWAP_RANGE_MULT and the relative-volume base its own median cumulative volume by this
+# minute; each is shrunk toward the old constant (n / (n + 10) over complete days) and held within +-ENTRY_OWN_NORMS_BAND of it. Fewer than ENTRY_OWN_NORMS_MIN_DAYS (5) complete
+# recorded days, or a history not loaded yet = the old constant. ADAPTIVE_ENTRY_PARAMS is the master switch (this service: only these own norms; Real Trade has no other learned entry number).
+ADAPTIVE_ENTRY_PARAMS = _bs_bool("ADAPTIVE_ENTRY_PARAMS", "true")
+ENTRY_OWN_NORMS_ENABLED = _bs_bool("ENTRY_OWN_NORMS_ENABLED", "true")
+ENTRY_OWN_NORMS_DAYS = max(5, _bs_int("ENTRY_OWN_NORMS_DAYS", 20))
+ENTRY_OWN_NORMS_MIN_DAYS = max(5, _bs_int("ENTRY_OWN_NORMS_MIN_DAYS", 5))
+ENTRY_OWN_NORMS_BAND = max(0.05, min(0.9, _bs_float("ENTRY_OWN_NORMS_BAND", 0.5)))
+ENTRY_OWN_NORMS_VWAP_RANGE_MULT = max(0.1, _bs_float("ENTRY_OWN_NORMS_VWAP_RANGE_MULT", 1.0))
+ENTRY_OWN_NORMS_WARM_MAX = max(1, _bs_int("ENTRY_OWN_NORMS_WARM_MAX", 40))
+ENTRY_OWN_NORMS_BARS_DIR = (os.getenv("ENTRY_OWN_NORMS_BARS_DIR") or "").strip()      # blank = the parent of BAR_RECORDS_DIR (/data/bars)
+
+# E285 round 114: the bid-ask spread ceiling (WATCHLIST_MAX_SPREAD_PCT, 0.5 %, at queue time and at the order) becomes the stock's own: its normal wide spread (the median over its recorded days of that
+# day's 90th-percentile spread, 09:45-15:15) x ENTRY_OWN_SPREAD_MULT, read from the spread files Position Stocks records (<recorder root>/spread, round 109). Shrunk toward the fixed ceiling (n / (n + 10)
+# over usable days) and held within +-ENTRY_OWN_SPREAD_BAND of it; fewer than ENTRY_OWN_SPREAD_MIN_DAYS (5) usable days (each needs ENTRY_OWN_SPREAD_MIN_ROWS minute readings), or a history not
+# loaded yet = the fixed ceiling. ADAPTIVE_ENTRY_PARAMS (above) is the master switch.
+ENTRY_OWN_SPREAD_ENABLED = _bs_bool("ENTRY_OWN_SPREAD_ENABLED", "true")
+ENTRY_OWN_SPREAD_DAYS = max(5, _bs_int("ENTRY_OWN_SPREAD_DAYS", 20))
+ENTRY_OWN_SPREAD_MIN_DAYS = max(5, _bs_int("ENTRY_OWN_SPREAD_MIN_DAYS", 5))
+ENTRY_OWN_SPREAD_MIN_ROWS = max(10, _bs_int("ENTRY_OWN_SPREAD_MIN_ROWS", 60))
+ENTRY_OWN_SPREAD_BAND = max(0.05, min(0.9, _bs_float("ENTRY_OWN_SPREAD_BAND", 0.5)))
+ENTRY_OWN_SPREAD_MULT = max(0.5, _bs_float("ENTRY_OWN_SPREAD_MULT", 1.5))
 
 # Stale shared-symbol-lock sweep (execution/lock_sweep.py, run from the REAL cycle). LOCK_SWEEP=false switches it off (calibration page: LOCK_SWEEP).
 # A REAL lock held by real-trade is released only when there is no open TradePosition, no open swing row, no live BUY order, and neither Dhan holdings nor

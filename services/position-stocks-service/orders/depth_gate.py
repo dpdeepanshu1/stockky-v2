@@ -47,6 +47,12 @@ def _fetch(symbol: str) -> Optional[dict]:
     body = r.json() if r.status_code == 200 else None
     body = body if isinstance(body, dict) else None
     _cache[symbol] = (now, body)
+    if body:
+        try:   # E285 round 109: a candidate's quoted spread is recorded too (record only, never raises)
+            from feed import spread_recorder
+            spread_recorder.note(symbol, body.get("spread_pct"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("depth gate %s: spread record skipped (%s)", symbol, e)
     return body
 
 
@@ -140,6 +146,19 @@ def _missing_depth_reason(symbol: str) -> Optional[str]:
         return None
 
 
+def own_max_spread_pct(symbol: str, constant: float) -> float:
+    """E285 round 112: the spread ceiling (%) for this stock: its own (orders/own_spread, within +-50 % of `constant`) when it has 5 usable recorded days, else `constant`. Never raises, never waits."""
+    try:
+        if constant <= 0:
+            return constant
+        from orders import own_spread
+        note = own_spread.ceiling_pct(symbol, constant)
+        return float(note["value"]) if note and note.get("source") != "constant" and note.get("value") else constant
+    except Exception as e:  # noqa: BLE001
+        logger.debug("depth gate %s: own spread ceiling unavailable (constant): %s", symbol, e)
+        return constant
+
+
 def reject_reason(symbol: str) -> Optional[str]:
     """A skip reason ("DEPTH_SPREAD:..." / "DEPTH_THIN_BOOK:...") or None when the entry may go ahead."""
     try:
@@ -156,6 +175,7 @@ def reject_reason(symbol: str) -> Optional[str]:
         if spread is None and book is None:
             return _missing_depth_reason(symbol)
         _mark_depth_proven()
+        max_spread = own_max_spread_pct(symbol, max_spread)
         if max_spread > 0 and spread is not None and spread > max_spread:
             return f"DEPTH_SPREAD:{spread:.2f}% > {max_spread:.2f}% (src={src})"
         if min_book > 0 and book is not None and book < min_book:

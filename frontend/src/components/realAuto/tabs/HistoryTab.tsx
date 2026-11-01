@@ -9,6 +9,7 @@ import { Spark } from "../../ui/Spark";
 import { AiOrb } from "../../ui/AiOrb";
 import { Skeleton } from "../../ui/motion";
 import type { Mode } from "../types";
+import { entryReason } from "../../../setupView";   // E285 round 104: Entry reason on each closed trade
 import {
   HISTORY_RANGES, daysFor, equityCurve, heldLabel, inRange, insights, newestFirst, pctLabel, pnlOf, priceLabel,
   reasonLabel, signedInr, summarize, toCsv, type HistoryRange,
@@ -161,7 +162,7 @@ export function HistoryTab({ mode, loggedIn }: HistoryTabProps) {
                             <button type="button" className="v6-row-main" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : r.position_id)}>
                               <span className="v6-row-sym"><b>{r.symbol}</b><small>{stamp(r)}</small></span>
                               <span className="v6-row-px">{priceLabel(r.entry_price)} → {priceLabel(r.exit_price)}<small>{r.quantity ?? "—"} qty · {heldLabel(r)}</small></span>
-                              <span className="v6-row-why">{reasonLabel(r.exit_reason)}</span>
+                              <span className="v6-row-why">{reasonLabel(r.exit_reason)}{(() => { const er = entryReason(r.setup); return er.known ? <small title={er.title} data-testid="entry-reason">in: {er.label} · {er.slot}</small> : null; })()}</span>
                               <span className={`v6-pnl ${t}`}>{t === "up" ? "▲ " : t === "down" ? "▼ " : ""}{signedInr(p)}<small>{pctLabel(r.return_pct)}</small></span>
                               <span className="v6-chev" aria-hidden="true">{isOpen ? "▴" : "▾"}</span>
                             </button>
@@ -174,6 +175,7 @@ export function HistoryTab({ mode, loggedIn }: HistoryTabProps) {
                                 <div><dt>Best run</dt><dd>{pctLabel(r.max_gain_pct)}</dd></div>
                                 <div><dt>Worst dip</dt><dd>{pctLabel(r.max_drawdown_pct)}</dd></div>
                                 <div><dt>Stop distance</dt><dd>{r.stop_pct != null ? `${r.stop_pct.toFixed(2)}%` : "—"}</dd></div>
+                                {(() => { const er = entryReason(r.setup); return <div title={er.title} data-testid="entry-reason-detail"><dt>Entry reason</dt><dd>{er.known ? `${er.label} · ${er.slot}` : "— (no setup stamp)"}</dd></div>; })()}
                                 <div><dt>Watchlist tier</dt><dd>{r.tier_name ?? "not from a watchlist entry"}</dd></div>
                                 <div><dt>Catalyst</dt><dd>{r.catalyst_type ?? "—"}</dd></div>
                                 <div><dt>Source</dt><dd>{r.source_tab ?? "—"}{r.origin === "imported" ? " · imported from broker" : ""}</dd></div>

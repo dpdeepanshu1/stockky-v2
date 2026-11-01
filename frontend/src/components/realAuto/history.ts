@@ -169,6 +169,7 @@ export function toCsv(records: TradeRecord[]): string {
     ["entry_price", (r) => r.entry_price], ["exit_price", (r) => r.exit_price], ["exit_reason", (r) => r.exit_reason],
     ["held", (r) => heldLabel(r)], ["gross_pnl", (r) => r.gross_pnl], ["charges", (r) => r.charges], ["net_pnl", (r) => r.net_pnl],
     ["return_pct", (r) => r.return_pct], ["tier", (r) => r.tier_name], ["source", (r) => r.source_tab],
+    ["entry_setup", (r) => r.setup?.id ?? ""], ["entry_slot", (r) => r.setup?.slot ?? ""],   // E285 round 104
   ];
   return [cols.map(([h]) => h).join(","), ...records.map((r) => cols.map(([, f]) => csvCell(f(r))).join(","))].join("\n");
 }

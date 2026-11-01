@@ -117,6 +117,7 @@ STALE_DAYS = _env_int("NEWS_FEED_STALE_DAYS", 3, 0, 60)   # 0 disables the all-s
 _FALLBACKS_ENABLED = (os.getenv("NEWS_FEED_FALLBACKS") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
+_stored_at: Dict[str, float] = {}   # E285 round 105: monotonic time a URL's cache entry was written (fetch_feed_ex(max_age_s=...) reads it)
 _lock = threading.Lock()
 
 # group346 (log review #17): a primary feed that is retired (404/410), frozen (all entries stale) or serving HTML was
@@ -168,6 +169,7 @@ def _warn_throttled(key: str, msg: str, *args: Any) -> None:
 def clear_cache() -> None:
     with _lock:
         _cache.clear()
+        _stored_at.clear()
         _primary_dead_until.clear()
         _health.clear()
 
@@ -315,15 +317,23 @@ def _short(url: str) -> str:
     return url if len(url) <= 90 else url[:87] + "..."
 
 
-def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
-    """-> (parsed, info). info: status / error / entries / cached. parsed always has an `.entries` list."""
+def fetch_feed_ex(url: str, source: str = "feed", max_age_s: Optional[float] = None) -> Tuple[Any, Dict[str, Any]]:
+    """-> (parsed, info). info: status / error / entries / cached. parsed always has an `.entries` list.
+
+    max_age_s (E285 round 105): a GOOD cached copy older than this is not used and the feed is downloaded again, so a caller that polls faster than
+    the cache lifetime (the event feed collector, every minute around the open) really gets a new copy. A cached failure / empty / blocked answer is
+    never bypassed (a dead source is not hit every minute). None = the old behaviour."""
     ttl = _ttl_for(url)
     now = time.monotonic()
     if ttl > 0:
         with _lock:
             hit = _cache.get(url)
+            stored = _stored_at.get(url)
         if hit and hit[0] > now:
-            return hit[1], dict(hit[2], cached=True)
+            good = not hit[2].get("error") and bool(hit[2].get("entries"))
+            too_old = max_age_s is not None and good and stored is not None and (now - stored) > max_age_s
+            if not too_old:
+                return hit[1], dict(hit[2], cached=True)
 
     if _primary_is_dead(url):
         raw, info = None, {"status": None, "error": "primary_known_dead"}
@@ -365,6 +375,9 @@ def fetch_feed_ex(url: str, source: str = "feed") -> Tuple[Any, Dict[str, Any]]:
     if keep > 0:
         with _lock:
             _cache[url] = (now + keep, parsed, dict(info))
+            _stored_at[url] = now
+            if len(_stored_at) > 800:
+                _stored_at.clear()
             if len(_cache) > 400:               # bounded: drop expired, then oldest
                 for k in [k for k, v in _cache.items() if v[0] <= now]:
                     _cache.pop(k, None)

@@ -63,14 +63,21 @@ def trail_activation_pct(target_pct: Optional[float]) -> float:
     return min(max(base, float(_cfg("TRAIL_ACTIVATE_TARGET_FRAC", 0.5)) * target_pct), max(cap, base))
 
 
-def trail_distance_pct(stop_pct: Optional[float], bar_range_pct: Optional[float]) -> float:
-    """Distance below the peak: the old fixed distance, widened to the stock's average 5-minute bar range, never wider than the stop."""
+def trail_distance_pct(stop_pct: Optional[float], bar_range_pct: Optional[float], dip: Optional[dict] = None) -> float:
+    """Distance below the peak: the old fixed distance, widened to the stock's average 5-minute bar range, never wider than the stop.
+    E285 round 107: `dip` (orders/trail_dip.cell_dip: how deep the setup's own winners dipped before a new high) widens it further, still never wider than the stop."""
     sp = float(stop_pct or 0.0)
     old = max(float(_cfg("TRAIL_MIN_DISTANCE_PCT", 0.4)), sp * float(_cfg("TRAIL_DISTANCE_STOP_FRACTION", 0.6)))
-    if not trail_enabled() or not bar_range_pct or bar_range_pct <= 0:
+    if not trail_enabled():
         return old
-    dist = max(old, float(_cfg("TRAIL_BAR_RANGE_MULT", 1.0)) * float(bar_range_pct))
-    if sp > 0:
+    dist = old if not bar_range_pct or bar_range_pct <= 0 else max(old, float(_cfg("TRAIL_BAR_RANGE_MULT", 1.0)) * float(bar_range_pct))
+    if dip:
+        try:
+            from orders import trail_dip
+            dist = trail_dip.widen(dist, dip)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("exit-adaptive: learned dip skipped: %s", e)
+    if sp > 0 and (dist != old):
         dist = min(dist, max(sp * float(_cfg("TRAIL_MAX_DIST_STOP_FRAC", 1.0)), old))
     return dist
 

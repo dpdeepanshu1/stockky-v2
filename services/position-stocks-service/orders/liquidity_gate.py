@@ -47,6 +47,30 @@ def _cfg(name: str, dflt: float) -> float:
         return float(dflt)
 
 
+def minutes_since_open(now: Optional[datetime] = None) -> float:
+    n = ist_now(now)
+    return (n.hour * 60 + n.minute + n.second / 60.0) - (9 * 60 + 15)
+
+
+def own_expected_volume(symbol, avg_volume, now: Optional[datetime] = None) -> Optional[float]:
+    """E285 round 108: the volume this stock has normally traded by now (its own recorded days, orders/own_norms), shrunk toward the old `average daily volume x market share of the
+    session` and held within +-50 % of it; None = use the old number (switch off, history not loaded yet, fewer than 5 complete recorded days, no average volume). Never raises, never waits."""
+    try:
+        av = _pos(avg_volume)
+        mins = minutes_since_open(now)
+        if av is None or mins <= 0:
+            return None
+        frac = elapsed_fraction(now)
+        if frac <= 0:
+            return None
+        from orders import own_norms
+        note = own_norms.expected_volume(symbol, av * frac, mins)
+        return float(note["value"]) if note and note.get("source") != "constant" and note.get("value") else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("liquidity gate %s: own volume pace unavailable (old curve): %s", symbol, e)
+        return None
+
+
 def elapsed_fraction(now: Optional[datetime] = None) -> float:
     """Share of the normal day's volume expected to have traded by now (front-loaded, 0..1)."""
     n = ist_now(now)
@@ -58,8 +82,9 @@ def elapsed_fraction(now: Optional[datetime] = None) -> float:
     return volume_profile.adjust(old, mins)
 
 
-def decide(price, day_volume, avg_volume, avg_turnover, now: Optional[datetime] = None) -> Optional[str]:
-    """Pure decision from numbers: a "LIQUIDITY_*:..." reason or None. Never raises."""
+def decide(price, day_volume, avg_volume, avg_turnover, now: Optional[datetime] = None, own_expected: Optional[float] = None) -> Optional[str]:
+    """Pure decision from numbers: a "LIQUIDITY_*:..." reason or None. `own_expected` (E285 round 108) replaces `avg_volume x elapsed share` as the volume the stock should have
+    traded by now when it is a positive number. Never raises."""
     try:
         p, dv, av, at = _pos(price), _pos(day_volume), _pos(avg_volume), _pos(avg_turnover)
         min_avg = _cfg("ENTRY_MIN_AVG_TURNOVER_CR", 3.0)
@@ -74,8 +99,9 @@ def decide(price, day_volume, avg_volume, avg_turnover, now: Optional[datetime] 
         if (min_rv > 0 and dv is not None and av is not None
                 and ist_time_at_or_after(parse_hhmm(str(getattr(config, "ENTRY_RVOL_MIN_TIME_IST", "09:45")), 9, 45), now)):
             frac = elapsed_fraction(now)
-            if frac > 0 and dv / (av * frac) < min_rv:
-                return (f"LIQUIDITY_RVOL:volume is {dv / (av * frac):.2f}x its normal pace for this time (< {min_rv:.2f}x) - "
+            base = _pos(own_expected) or (av * frac)
+            if frac > 0 and base > 0 and dv / base < min_rv:
+                return (f"LIQUIDITY_RVOL:volume is {dv / base:.2f}x its normal pace for this time (< {min_rv:.2f}x) - "
                         "the name is not trading today")
         return None
     except Exception as e:  # noqa: BLE001
@@ -91,7 +117,8 @@ def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[
         from screening import prev_day
         pdv = prev_day.get(str(symbol or "").upper().replace(".NS", "").strip())
         q = depth_gate._fresh_quote(symbol)
-        return decide(ltp, (q or {}).get("volume"), getattr(pdv, "avg_volume", None), getattr(pdv, "avg_turnover", None), now)
+        return decide(ltp, (q or {}).get("volume"), getattr(pdv, "avg_volume", None), getattr(pdv, "avg_turnover", None), now,
+                      own_expected=own_expected_volume(symbol, getattr(pdv, "avg_volume", None), now))
     except Exception as e:  # noqa: BLE001
         logger.debug("liquidity gate %s failed (allowing): %s", symbol, e)
         return None
@@ -105,7 +132,9 @@ def rvol_ratio(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[flo
         q = depth_gate._fresh_quote(symbol)
         dv, av = _pos((q or {}).get("volume")), _pos(getattr(pdv, "avg_volume", None))
         frac = elapsed_fraction(now)
-        return None if dv is None or av is None or frac <= 0 else dv / (av * frac)
+        if dv is None or av is None or frac <= 0:
+            return None
+        return dv / (own_expected_volume(symbol, av, now) or (av * frac))
     except Exception:  # noqa: BLE001
         return None
 

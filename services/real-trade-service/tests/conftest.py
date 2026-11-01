@@ -394,3 +394,62 @@ def _e285_shared_order_window_off_by_default(monkeypatch):
     import config as _cfg
     monkeypatch.setattr(_cfg, "ORDER_RATE_SHARED_ENABLED", False, raising=False)
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e285_earnings_split_off_by_default(monkeypatch):
+    """E285 round 101: entry_engine/event_risk.reject_reason splits a results day (known / waited-out results no longer block) and asks the event service when the results were
+    published. Older tests pin the plain 'results dated today = blocked' rule and must not call out; tests/test_e285_rt_results_split.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "EARNINGS_SPLIT_ENABLED", False, raising=False)
+    try:
+        from entry_engine import event_risk as _er
+        _er.reset()
+    except Exception:  # noqa: BLE001 - a test that stubs the package away
+        pass
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e285_open_cues_off_by_default(monkeypatch):
+    """E285 round 102: entry_engine/open_cues reads Asia + US futures once a morning (a network call) and sizes longs down on a weak lead. Older tests must not call out or see
+    a size change; tests/test_e285_rt_open_cues.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "OPEN_CUES_ENABLED", False, raising=False)
+    try:
+        from entry_engine import open_cues as _oc
+        _oc.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e285_rt_own_norms_off_by_default(monkeypatch):
+    """E285 round 111: entry_engine/own_norms starts a background read of the recorder folders for a symbol it has not seen. Older tests must not start threads or read /data/bars;
+    tests/test_e285_round111_rt_own_norms.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ENTRY_OWN_NORMS_ENABLED", False, raising=False)
+    monkeypatch.setattr(_cfg, "ENTRY_OWN_SPREAD_ENABLED", False, raising=False)     # E285 round 114: the spread ceiling reads the recorder folders too
+    try:
+        from entry_engine import own_norms as _on
+        _on.reset()
+        from entry_engine import own_spread as _os
+        _os.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e285_gap_rank_off_by_default(monkeypatch):
+    """E285 round 103: entry_engine/gap_rank starts a background history fetch for a symbol it has not seen. Older tests must not start threads or call out;
+    tests/test_e285_round103_gap_rank.py turns it on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "GAP_RANK_ENABLED", False, raising=False)
+    try:
+        from entry_engine import gap_rank as _gr
+        _gr.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield

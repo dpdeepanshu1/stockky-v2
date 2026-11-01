@@ -86,6 +86,35 @@ def percentile_value(history: Optional[Iterable[Any]], q: float, min_history: in
         return None
 
 
+def overnight_gaps(opens: Optional[Iterable[Any]], closes: Optional[Iterable[Any]], max_n: int = 60) -> List[float]:
+    """E285 round 103: the stock's own overnight gaps in %, (open[i] - close[i-1]) / close[i-1] x 100 over aligned daily bars, oldest first, at most the last `max_n`.
+    A pair that is unreadable, not positive or beyond +/-60 % (a split / bad bar) is skipped. [] on any problem. Signed: a gap UP is positive."""
+    try:
+        o, c = list(opens or []), list(closes or [])
+        n = min(len(o), len(c))
+        out: List[float] = []
+        for i in range(1, n):
+            a, b = _f(o[i]), _f(c[i - 1])
+            if a is None or b is None or a <= 0 or b <= 0:
+                continue
+            g = (a - b) / b * 100.0
+            if abs(g) <= 60.0:
+                out.append(g)
+        return out[-max(1, int(max_n)):]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def gap_pctile(gap_pct: Any, gaps: Optional[Iterable[Any]], min_history: int = 30) -> Optional[float]:
+    """E285 round 103: where today's signed gap ranks among the stock's own gaps, 0..1 (1 = bigger than every one of them). None when the gap is unreadable or the history has
+    fewer than `min_history` gaps (a thin history never halves a size)."""
+    try:
+        p = percentile_of(gap_pct, gaps, max(1, int(min_history)))
+        return None if p is None else round(p / 100.0, 4)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def shrink_weight(n: Any, prior: int = PRIOR) -> float:
     """n / (n + prior), 0 for n <= 0."""
     try:

@@ -119,10 +119,10 @@ def test_calm_and_normal_send_an_empty_stamp_and_nothing_after_1530():
     c = FakeControl()
     WA.Applier(c, lambda: (True, "ok"), "rt", "ps")("normal", NOW)
     assert all(b["entries"] == {} for _, b in c.overlays) and len(c.overlays) == 2
-    c = FakeControl()                                                       # calm: real-trade is still a bare stamp; position-stocks gets only the short dial (shorts off)
+    c = FakeControl()                                                       # calm: real-trade is still a bare stamp; position-stocks gets only the short dial (floor 0.25)
     WA.Applier(c, lambda: (True, "ok"), "rt", "ps")("calm", NOW)
     got = dict(c.overlays)
-    assert got["rt"]["entries"] == {} and got["ps"]["entries"] == {"MARKET_STATE_SHORT_MULT": "0"} and len(c.overlays) == 2
+    assert got["rt"]["entries"] == {} and got["ps"]["entries"] == {"MARKET_STATE_SHORT_MULT": "0.25"} and len(c.overlays) == 2
     c = FakeControl()
     r = WA.Applier(c, lambda: (True, "ok"), "rt", "ps")("panic", T._at(15, 40))
     assert c.overlays == [] and r["applied"] is False

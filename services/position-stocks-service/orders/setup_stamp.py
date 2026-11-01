@@ -31,7 +31,7 @@ def time_slot(now: Optional[datetime]) -> str:
 
 
 def build(setup_id: str = LEGACY_ID, trigger: str = "", confirmations: Optional[List[str]] = None, penalties: Optional[Dict[str, float]] = None,
-          size_mult: Optional[float] = None, now: Optional[datetime] = None, side: str = "LONG") -> Dict[str, Any]:
+          size_mult: Optional[float] = None, now: Optional[datetime] = None, side: str = "LONG", event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     try:
         pen = {str(k): round(float(v), 4) for k, v in (penalties or {}).items()}
     except (TypeError, ValueError):
@@ -40,8 +40,37 @@ def build(setup_id: str = LEGACY_ID, trigger: str = "", confirmations: Optional[
         sm = None if size_mult is None else round(float(size_mult), 4)
     except (TypeError, ValueError):
         sm = None
-    return {"id": str(setup_id or LEGACY_ID), "trigger": str(trigger or "")[:200], "confirmations": [str(c) for c in (confirmations or [])][:10],
-            "penalties": pen, "size_mult": sm, "slot": time_slot(now), "side": str(side or "LONG").upper()}
+    st = {"id": str(setup_id or LEGACY_ID), "trigger": str(trigger or "")[:200], "confirmations": [str(c) for c in (confirmations or [])][:10],
+          "penalties": pen, "size_mult": sm, "slot": time_slot(now), "side": str(side or "LONG").upper()}
+    ev = event_part(event)
+    if ev:
+        st["event"] = ev                # E285 round 106: the typed event the entry saw (type, polarity, strength, age) - event_stats learns per type from it
+    return st
+
+
+def event_part(event: Any) -> Optional[Dict[str, Any]]:
+    """{"type", "pol", "strength", "age_min"} from a quality signal's typed event (a dict with those keys, or an object with event_type / event_polarity / event_strength /
+    event_age_min), or None when there is no readable type or the polarity is not +1 / -1. Never raises."""
+    try:
+        if event is None:
+            return None
+        get = event.get if isinstance(event, dict) else (lambda k, d=None, _e=event: getattr(_e, "event_" + k if k != "pol" else "event_polarity", d))
+        et = str(get("type") or "").strip().lower()[:24]
+        pol = get("pol")
+        pol = int(pol) if pol in (1, -1) else 0
+        if not et or not pol:
+            return None
+        out: Dict[str, Any] = {"type": et, "pol": pol}
+        for k in ("strength", "age_min"):
+            try:
+                v = float(get(k))
+                if v == v and abs(v) != float("inf"):
+                    out[k] = round(v, 3)
+            except (TypeError, ValueError):
+                pass
+        return out
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def attach(flow_json: Any, stamp: Dict[str, Any]) -> Any:

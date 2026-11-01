@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -890,6 +890,10 @@ def attempt_entry(
             _ladder = slot_ladder.get(db)
             if isinstance(_inputs, dict) and _ladder.get("promoted"):
                 _inputs["promoted"] = _ladder["promoted"]
+            _gp = gap_rank.pctile(candidate.symbol, _gap)             # E285 round 103: the gap's rank among the stock's own gaps (above the 95th percentile halves the size)
+            if _gp is not None:
+                _inputs = dict(_inputs) if isinstance(_inputs, dict) else {}
+                _inputs["gap_pctile"] = _gp
             _setup_res = setup_live.classify_long(
                 symbol=candidate.symbol, price=candidate.current_ltp, now=_now_ist,
                 event_polarity=getattr(quality, "event_polarity", None) if quality else None, flow_json=_flow_snap,
@@ -903,10 +907,11 @@ def attempt_entry(
             if _setup_res and _setup_res.get("id"):
                 _flow_snap = setup_stamp.attach(_flow_snap, setup_stamp.build(
                     setup_id=_setup_res["id"], trigger=_setup_res.get("trigger", ""), confirmations=_setup_res.get("confirmations"),
-                    penalties=(_setup_res.get("stamp") or {}).get("penalties"), size_mult=_setup_res.get("size_mult"), now=_now_ist, side="LONG"))
+                    penalties=(_setup_res.get("stamp") or {}).get("penalties"), size_mult=_setup_res.get("size_mult"), now=_now_ist, side="LONG",
+                    event=quality))
             else:
                 _flow_snap = setup_stamp.attach(_flow_snap, setup_stamp.build(trigger="shortlist", now=_now_ist, side="LONG", penalties=_penalties,
-                                                                              size_mult=setup_live.penalty_size(_penalties)))
+                                                                              size_mult=setup_live.penalty_size(_penalties), event=quality))
         if _setup_res and _setup_res.get("id"):
             _setup_mult = _setup_res.get("size_mult")
             logger.info("position-stocks entry: %s matches %s (%s) size x%s", candidate.symbol, _setup_res["id"], ",".join(_setup_res.get("confirmations") or []), _setup_mult)
@@ -1338,6 +1343,7 @@ def attempt_entry(
     error_msg = None
     try:
         if config.USE_SUPER_ORDER:
+            _e_type, _e_px = dhan_client.long_entry_order(_ref_price, float(levels.target_price), float(levels.stop_price))   # E285 round 100: marketable limit with a slippage cap
             result = dhan_client.place_super_order(
                 db,
                 is_armed=gate.is_armed,
@@ -1345,8 +1351,8 @@ def attempt_entry(
                 exchange_segment=config.SCALP_EXCHANGE_SEGMENT,
                 transaction_type="BUY",
                 quantity=quantity,
-                order_type="MARKET",
-                price=_ref_price,   # entry reference price (live tick when the legs were re-anchored)
+                order_type=_e_type,
+                price=_e_px,        # MARKET: the entry reference price (live tick when the legs were re-anchored); LIMIT: a marketable limit just above it (E285 round 100)
                 target_price=levels.target_price,
                 stop_loss_price=levels.stop_price,
                 trailing_jump=0.0,

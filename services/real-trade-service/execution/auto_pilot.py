@@ -1762,6 +1762,15 @@ async def _schedule_tick_body(mode: str) -> None:
         except Exception:
             logger.exception("[schedule] pre-open snapshot failed for %s (non-fatal)", mode)
 
+        # -- Overseas cues (E285 round 102): one read of Asia + US futures from 08:30 IST; a weak lead shrinks the morning's long entries (entry_engine/open_cues.py).
+        # Best-effort, in-memory, once per IST day; a failure never touches pre-pick or entries.
+        try:
+            from entry_engine import open_cues as _open_cues
+            if _open_cues.due():
+                await asyncio.to_thread(_open_cues.take)
+        except Exception:
+            logger.exception("[schedule] overseas cues read failed for %s (non-fatal)", mode)
+
         # -- group344: warn when an open position's symbol has no primary price feed (AngelOne token / Dhan id). Throttled inside, report only.
         try:
             from market_feed import held_coverage as _hc

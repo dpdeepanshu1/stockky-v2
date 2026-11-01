@@ -128,6 +128,11 @@ def _typed_event_from(body) -> Optional[dict]:
             if pol not in (1, -1):
                 continue
             st = float(e.get("strength") or 0.0)
+            try:
+                from orders import event_weights
+                st = float(event_weights.apply(e.get("type") or "other", pol, st))      # E285 round 113: a positive type's weight follows its own closed trades (cache read; negatives untouched)
+            except Exception:  # noqa: BLE001
+                pass
             if best is None or st > best["strength"]:
                 best = {"type": str(e.get("type") or "other"), "polarity": pol, "strength": round(st, 4),
                         "age_min": round(float(e.get("age_s") or 0.0) / 60.0, 1), "announced_at": e.get("published")}

@@ -89,6 +89,12 @@ def run_once(now: float, market_open: bool, open_symbols_fn: Optional[Callable[[
             did["recorded"] = (record_fn or bar_recorder.run_once)(now, market_open)
     except Exception as e:  # noqa: BLE001
         logger.warning("board runner record step failed (%s: %s)", type(e).__name__, e)
+    try:                                                    # E285 round 109: record each stock's quoted spread by minute (own guard)
+        if getattr(config, "SPREAD_RECORD_ENABLED", True) and record_fn is None:
+            from feed import spread_recorder
+            did["spread_recorded"] = spread_recorder.run_once(now, market_open)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("board runner spread record step failed (%s: %s)", type(e).__name__, e)
     return did
 
 

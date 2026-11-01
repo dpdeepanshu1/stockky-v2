@@ -431,6 +431,11 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
             stop_basis = stop_basis if isinstance(stop_basis, str) and stop_basis else None
             from entry_engine import order_flow as _of          # group 427: order-flow numbers recorded at the entry decision
             flow = _of.parse(getattr(decision, "flow_json", None))
+            try:                                                # E285 round 104: the rule that took the entry (flow_json["setup"]), null for an older or imported trade
+                from entry_engine import setup_stamp as _stp
+                setup = _stp.public(getattr(decision, "flow_json", None))
+            except Exception:  # noqa: BLE001
+                setup = None
             held = None
             if p.closed_at is not None:
                 held = round((as_aware(p.closed_at) - as_aware(p.opened_at)).total_seconds() / 60.0, 1)
@@ -468,6 +473,7 @@ def build_records(positions: Iterable, orders: Iterable, fills: Iterable, decisi
                 "return_pct": ret_pct, "return_basis": ret_basis,
                 "gross_pnl": gross, "charges": charges, "charges_source": charges_src, "net_pnl": net,
                 "orders_matched": bool(buys or sells),
+                "setup": setup,                                      # E285 round 104: Entry reason column (History tab)
                 "stop_pct": stop_pct, "stop_basis": stop_basis,
                 "imbalance_5": flow.get("imbalance_5"), "imbalance_20": flow.get("imbalance_20"),
                 "flow_spread_pct": flow.get("spread_pct"), "flow_book_value_5": flow.get("book_value_5"),

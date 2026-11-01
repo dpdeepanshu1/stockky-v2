@@ -236,6 +236,12 @@ SHORT_PLAIN_FALLBACK = _get_bool("SHORT_PLAIN_FALLBACK", True)
 # probe alike, so the probe tests exactly what the live short sends.
 SHORT_ENTRY_MARKETABLE_LIMIT = _get_bool("SHORT_ENTRY_MARKETABLE_LIMIT", True)
 SHORT_ENTRY_CUSHION_PCT = max(0.05, min(1.0, _get_float("SHORT_ENTRY_CUSHION_PCT", 0.3)))
+# E285 round 100: the automatic LONG entry used a bare MARKET order (Dhan turns it into a LIMIT at the last price anyway, E243). With this on, the BUY Super Order entry is a
+# marketable LIMIT a few ticks ABOVE the live price (never worse than the cushion = the slippage cap), and an entry that has not filled LONG_ENTRY_STALE_S seconds after
+# placing is cancelled (orders/stale_entry.py) so a price that ran away is never chased. A manual BUY and the plain-order fallback keep MARKET. false = the old MARKET entry.
+LONG_ENTRY_MARKETABLE_LIMIT = _get_bool("LONG_ENTRY_MARKETABLE_LIMIT", True)
+LONG_ENTRY_CUSHION_PCT = max(0.05, min(1.0, _get_float("LONG_ENTRY_CUSHION_PCT", 0.3)))
+LONG_ENTRY_STALE_S = max(3.0, min(120.0, _get_float("LONG_ENTRY_STALE_S", 15.0)))
 SHORT_PLAIN_FILL_WAIT_S = max(2.0, min(30.0, _get_float("SHORT_PLAIN_FILL_WAIT_S", 8.0)))      # how long to wait for the SELL to show as filled before cancelling it
 SHORT_PLAIN_STOP_GRACE_S = max(1.0, min(120.0, _get_float("SHORT_PLAIN_STOP_GRACE_S", 6.0)))   # price this long past the stop with the broker stop still resting: cover by hand
 # E107 (P2 item 17): rank the bearish short candidates against each other (screening/shortlist.py build_short) and try them best-first, so the capital and the
@@ -272,6 +278,10 @@ VOLUME_PROFILE_LEARNED_ENABLED = _get_bool("VOLUME_PROFILE_LEARNED_ENABLED", Tru
 SHORT_TARGET_LEARNED_ENABLED = _get_bool("SHORT_TARGET_LEARNED_ENABLED", True)           # E274 round 43: an S4 short's target = its setup cell's typical favourable move when that is nearer (30+ closed trades, 10+ winners)
 SHORT_TARGET_HVN_ENABLED = _get_bool("SHORT_TARGET_HVN_ENABLED", True)                   # E274 round 43: a short's target is trimmed to one tick above the next high-volume node below (reliable tape), when nearer
 SHORT_TARGET_MIN_PCT = max(0.0, _get_float("SHORT_TARGET_MIN_PCT", 0.5))                 # E274 round 43: a trimmed short target must still pay this % from the entry
+# E285 round 110: ADAPTIVE_ENTRY_PARAMS is the ONE master switch for every entry number learned from history: the learned stop, the long and the short target, the measured volume curve and the
+# stock's own VWAP tolerance / volume pace. false = all of them give the plan's fixed numbers at once, whatever their own switches say; true = each follows its own switch. Not covered: the
+# trail from winners' dips (TRAIL_LEARNED_DIP_ENABLED, an exit) and the gap rank (GAP_RANK_ENABLED, a size rule).
+ADAPTIVE_ENTRY_PARAMS = _get_bool("ADAPTIVE_ENTRY_PARAMS", True)
 LEARNED_STOP_ENABLED = _get_bool("LEARNED_STOP_ENABLED", True)                           # E282 round 76: a stop from the setup's own winners (90th percentile of how far they went against the entry x1.10), tighter only, plan stop until 30 closed trades (orders/learned_stop.py)
 LEARNED_STOP_MIN_PCT = max(0.0, _get_float("LEARNED_STOP_MIN_PCT", 0.5))                 # E282 round 76: a learned stop is never tighter than this % (on top of the stock's own noise floor)
 ORDER_RATE_LIMIT_ENABLED = _get_bool("ORDER_RATE_LIMIT_ENABLED", True)                   # E282 round 77: a stop / target modify waits (at most ~1 s, hard cap 2 s) when the last second already holds ORDER_RATE_PER_S Dhan order calls; every other order call is counted, never delayed (execution/order_rate.py)
@@ -755,6 +765,33 @@ EARNINGS_DAY_BLOCK = _get_bool("EARNINGS_DAY_BLOCK", True)
 # EARNINGS_KNOWN_BEFORE_IST is a KNOWN event and no longer blocked; results published during the session are blocked for EARNINGS_REACTION_WAIT_MIN
 # minutes after publication (the first reaction bar); results dated today with no publication time found stay blocked, as before.
 EARNINGS_SPLIT_ENABLED = _get_bool("EARNINGS_SPLIT_ENABLED", True)
+# E285 round 103: the stock's own gap rank (orders/gap_rank.py). A gap above the 95th percentile of the stock's own last GAP_RANK_SESSIONS overnight gaps halves the setup size
+# (setup_engine GAP_HALF_PCTILE). Needs GAP_RANK_MIN_SESSIONS gaps; unknown = the old size. false = the rule stays off.
+GAP_RANK_ENABLED = _get_bool("GAP_RANK_ENABLED", True)
+GAP_RANK_SESSIONS = max(10, _get_int("GAP_RANK_SESSIONS", 60))
+# E285 round 108: the stock's own normal 1-minute range and volume pace (orders/own_norms.py) from its recorded minute bars. The VWAP tolerance becomes the stock's own median one-minute range
+# x ENTRY_OWN_NORMS_VWAP_RANGE_MULT and the relative-volume base becomes the stock's own median cumulative volume by this minute; each is shrunk toward the old constant (n / (n + 10) over
+# complete days) and held within +-ENTRY_OWN_NORMS_BAND of it. Fewer than ENTRY_OWN_NORMS_MIN_DAYS (5) complete recorded days, or a history not loaded yet = the old constant. false = the old numbers.
+ENTRY_OWN_NORMS_ENABLED = _get_bool("ENTRY_OWN_NORMS_ENABLED", True)
+ENTRY_OWN_NORMS_DAYS = max(5, _get_int("ENTRY_OWN_NORMS_DAYS", 20))
+ENTRY_OWN_NORMS_MIN_DAYS = max(5, _get_int("ENTRY_OWN_NORMS_MIN_DAYS", 5))
+ENTRY_OWN_NORMS_BAND = max(0.05, min(0.9, _get_float("ENTRY_OWN_NORMS_BAND", 0.5)))
+ENTRY_OWN_NORMS_VWAP_RANGE_MULT = max(0.1, _get_float("ENTRY_OWN_NORMS_VWAP_RANGE_MULT", 1.0))
+# E285 round 112: the stock's own spread ceiling (orders/own_spread.py) from the spread recorder (round 109). Ceiling = the stock's own normal wide spread (median over days of the day's 90th
+# percentile of its per-minute median spread, 09:45-15:15) x ENTRY_OWN_SPREAD_MULT, shrunk toward ENTRY_DEPTH_MAX_SPREAD_PCT (n / (n + 10)) and held within +-ENTRY_OWN_SPREAD_BAND of it.
+# Fewer than ENTRY_OWN_SPREAD_MIN_DAYS (5) usable days (each with ENTRY_OWN_SPREAD_MIN_ROWS minute readings) = the fixed ceiling. false = the fixed ceiling.
+ENTRY_OWN_SPREAD_ENABLED = _get_bool("ENTRY_OWN_SPREAD_ENABLED", True)
+ENTRY_OWN_SPREAD_DAYS = max(5, _get_int("ENTRY_OWN_SPREAD_DAYS", 20))
+ENTRY_OWN_SPREAD_MIN_DAYS = max(5, _get_int("ENTRY_OWN_SPREAD_MIN_DAYS", 5))
+ENTRY_OWN_SPREAD_MIN_ROWS = max(10, _get_int("ENTRY_OWN_SPREAD_MIN_ROWS", 60))
+ENTRY_OWN_SPREAD_BAND = max(0.05, min(0.9, _get_float("ENTRY_OWN_SPREAD_BAND", 0.5)))
+ENTRY_OWN_SPREAD_MULT = max(0.5, _get_float("ENTRY_OWN_SPREAD_MULT", 1.5))
+# E285 round 113: learned event weights (orders/event_weights.py). A POSITIVE event type's strength is multiplied by 1 + its closed trades' average R (clipped to +-0.5), shrunk n / (n + 30) and held
+# inside [EVENT_WEIGHT_MIN_MULT, EVENT_WEIGHT_MAX_MULT]; nothing moves until a type has 30 closed trades with a readable R. Negative events are never touched. false = the feed's fixed weights.
+EVENT_WEIGHTS_LEARNED_ENABLED = _get_bool("EVENT_WEIGHTS_LEARNED_ENABLED", True)
+EVENT_WEIGHT_MIN_MULT = max(0.1, min(1.0, _get_float("EVENT_WEIGHT_MIN_MULT", 0.6)))
+EVENT_WEIGHT_MAX_MULT = max(1.0, min(2.0, _get_float("EVENT_WEIGHT_MAX_MULT", 1.2)))
+GAP_RANK_MIN_SESSIONS = max(5, _get_int("GAP_RANK_MIN_SESSIONS", 30))
 # E272: typed event fields on every quality check (event_type / polarity / strength / age / announce time) from the event feed, and the live veto: a fresh
 # NEGATIVE event of at least NEG_EVENT_VETO_MIN_STRENGTH refuses a long (NEG_EVENT:...). Feed down or polarity unknown = no veto, no trigger.
 TYPED_EVENT_ENABLED = _get_bool("TYPED_EVENT_ENABLED", True)
@@ -855,6 +892,10 @@ OPENING_PROTECT_ENABLED = _get_bool("OPENING_PROTECT_ENABLED", True)
 OPENING_PROTECT_UNTIL_IST = _get_str("OPENING_PROTECT_UNTIL_IST", "09:45")
 OPENING_SIZE_MULT = _get_float("OPENING_SIZE_MULT", 0.5)
 OPENING_PAUSE_STOPOUTS = _get_int("OPENING_PAUSE_STOPOUTS", 2)   # 0 = no pause
+# E285 round 99: the plan's two extra opening guards. At most OPENING_MAX_POSITIONS positions open at once until OPENING_PROTECT_UNTIL_IST (0 = no cap), and no new
+# entry once the REALISED loss since the bell reaches OPENING_LOSS_BUDGET_FRAC of the day's loss cap (MAX_DAILY_LOSS_PCT_OF_POOL x pool; 0 = off).
+OPENING_MAX_POSITIONS = _get_int("OPENING_MAX_POSITIONS", 2)
+OPENING_LOSS_BUDGET_FRAC = max(0.0, min(1.0, _get_float("OPENING_LOSS_BUDGET_FRAC", 1.0 / 3.0)))
 
 # group 333 (2026-10-12): VWAP confirmation (orders/vwap_gate.py). No long below the day's VWAP (Dhan average_price on the /quote row, the same row the
 # depth and circuit gates read) by more than the tolerance; before ENTRY_VWAP_MIN_TIME_IST the average rests on too few trades to judge.
@@ -929,6 +970,7 @@ TRAIL_RETRY_BACKOFF_S = _get_float("TRAIL_RETRY_BACKOFF_S", 60.0)
 #   activation = max(TRAIL_ACTIVATE_PCT, TRAIL_ACTIVATE_TARGET_FRAC x the trade's own target %), capped at TRAIL_ACTIVATE_MAX_PCT
 # TRAIL_ADAPTIVE_ENABLED=false = the old fixed numbers. Breakeven + ticks stays the first lock either way.
 TRAIL_ADAPTIVE_ENABLED = _get_bool("TRAIL_ADAPTIVE_ENABLED", True)
+TRAIL_LEARNED_DIP_ENABLED = _get_bool("TRAIL_LEARNED_DIP_ENABLED", True)    # E285 round 107: the trail sits at least as far below the peak as the setup's own winners usually dipped before a new high (orders/trail_dip.py); plan distance until 30 closed trades
 TRAIL_BAR_RANGE_MULT = _get_float("TRAIL_BAR_RANGE_MULT", 1.0)
 TRAIL_MAX_DIST_STOP_FRAC = _get_float("TRAIL_MAX_DIST_STOP_FRAC", 1.0)
 TRAIL_ACTIVATE_TARGET_FRAC = _get_float("TRAIL_ACTIVATE_TARGET_FRAC", 0.5)
@@ -1475,6 +1517,13 @@ BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
 BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
 BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
 BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
+# E285 round 109: record each stock's quoted spread (market-data `spread_pct`), one median / max reading per minute, under <BAR_RECORD_DIR>/spread/<day>/ (feed/spread_recorder.py).
+# RECORD ONLY: nothing in the entry path reads it; a later round learns each stock's own spread ceiling from it. Same volume as the bar recorder.
+SPREAD_RECORD_ENABLED = _get_bool("SPREAD_RECORD_ENABLED", True)
+SPREAD_RECORD_EVERY_S = max(60, _get_int("SPREAD_RECORD_EVERY_S", 300))
+SPREAD_RECORD_KEEP_DAYS = max(2, _get_int("SPREAD_RECORD_KEEP_DAYS", 45))
+SPREAD_RECORD_MAX_SYMBOLS = max(10, _get_int("SPREAD_RECORD_MAX_SYMBOLS", 600))
+SPREAD_RECORD_MAX_SAMPLES = max(1, _get_int("SPREAD_RECORD_MAX_SAMPLES", 30))
 # E272: every scan candidate and premarket watchlist name is also recorded (beyond the turnover cut), so each skipped candidate can be labelled later.
 BAR_RECORD_PRIORITY_ENABLED = _get_bool("BAR_RECORD_PRIORITY_ENABLED", True)
 BAR_RECORD_PRIORITY_MAX = max(0, _get_int("BAR_RECORD_PRIORITY_MAX", 400))

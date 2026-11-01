@@ -244,6 +244,21 @@ async def run(symbols: Optional[list] = None) -> dict:
             for s in syms:
                 prev_day.get(s)                             # background thread per symbol, never blocks
                 warmed += 1
+            try:
+                from orders import gap_rank
+                gap_rank.warm(syms, limit=int(getattr(config, "PREOPEN_WARM_MAX_SYMBOLS", 40)))      # E285 round 103: each stock's own gap history, one background thread
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from orders import own_norms
+                own_norms.warm(syms)                        # E285 round 108: each stock's own 1-minute range and volume pace, one background thread
+            except Exception as e:  # noqa: BLE001
+                logger.debug("preopen own-norms warm failed (ignored): %s", e)
+            try:
+                from orders import own_spread
+                own_spread.warm(syms)                       # E285 round 112: each stock's own normal spread, one background thread
+            except Exception as e:  # noqa: BLE001
+                logger.debug("preopen own-spread warm failed (ignored): %s", e)
         except Exception as e:  # noqa: BLE001
             logger.debug("preopen warm failed (ignored): %s", e)
         stored = record(await _fetch_rows(syms)) if syms else 0

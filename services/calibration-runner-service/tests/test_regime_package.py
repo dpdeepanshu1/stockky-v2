@@ -188,12 +188,12 @@ def test_profile_gets_stricter_from_choppy_to_panic():
 
 def test_short_dial_follows_the_plan_table_and_only_reaches_position_stocks():
     key = "MARKET_STATE_SHORT_MULT"
-    want = {"calm": 0.0, "normal": None, "choppy": 0.0, "stressed": None, "panic": 0.5}
+    want = {"calm": 0.25, "normal": None, "choppy": 0.25, "stressed": None, "panic": 0.5}
     for st, v in want.items():
         assert profiles.PROFILE[st].get(key) == v, st
     saved = dict(SAVED_PS, **{key: "1.0"})
-    assert profiles.build_overlay("position-stocks", "calm", saved, NOW_IST_MORNING)["entries"] == {key: "0"}
-    assert profiles.build_overlay("position-stocks", "choppy", saved, NOW_IST_MORNING)["entries"][key] == "0"
+    assert profiles.build_overlay("position-stocks", "calm", saved, NOW_IST_MORNING)["entries"] == {key: "0.25"}
+    assert profiles.build_overlay("position-stocks", "choppy", saved, NOW_IST_MORNING)["entries"][key] == "0.25"
     assert profiles.build_overlay("position-stocks", "panic", saved, NOW_IST_MORNING)["entries"][key] == "0.5"
     for st in ("normal", "stressed"):
         assert key not in profiles.build_overlay("position-stocks", st, saved, NOW_IST_MORNING)["entries"]

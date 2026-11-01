@@ -46,6 +46,18 @@ def reset_state() -> None:
     _notified.clear()
 
 
+def _learned_dip(pos, db):
+    """E285 round 107: how deep the position's setup winners usually dip before a new high (orders/trail_dip.py), or None. Never raises."""
+    try:
+        if not exit_adaptive.trail_enabled():
+            return None
+        from orders import trail_dip
+        return trail_dip.cell_dip(pos, db)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("trailing: learned dip for %s skipped: %s", getattr(pos, "symbol", "?"), e)
+        return None
+
+
 def compute_trailing_stop(
     *,
     entry: float,
@@ -56,6 +68,7 @@ def compute_trailing_stop(
     stop_pct: float,
     side: str = "LONG",
     bar_range_pct: Optional[float] = None,
+    dip: Optional[dict] = None,
 ) -> Optional[float]:
     """The stop price to move to, or None when the stop should stay where it is. Pure function.
     side="SHORT" (short selling step 4) mirrors it: `peak` is then the LOWEST price seen (the trough), the stop trails ABOVE it and only ever
@@ -63,13 +76,13 @@ def compute_trailing_stop(
     try:
         if str(side or "LONG").strip().upper() == "SHORT":
             return _compute_trailing_stop_short(entry=entry, trough=peak, ltp=ltp, current_stop=current_stop, target=target, stop_pct=stop_pct,
-                                                bar_range_pct=bar_range_pct)
+                                                bar_range_pct=bar_range_pct, dip=dip)
         if not entry or entry <= 0 or not ltp or ltp <= 0 or not peak or peak <= entry:
             return None
         # E252: activation and distance adapt to the trade's own target and the stock's own 5-minute bar range (exit_adaptive; off = the old fixed numbers)
         if (peak - entry) / entry * 100.0 < exit_adaptive.trail_activation_pct(exit_adaptive.target_pct_of(entry, target)):
             return None
-        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct)
+        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct, dip)
         cand = peak * (1.0 - dist_pct / 100.0)
         floor = entry + dhan_client.tick_size_for_price(entry) * config.BREAKEVEN_STOP_BUFFER_TICKS
         cand = dhan_client.round_to_tick(max(cand, floor))
@@ -91,13 +104,13 @@ def compute_trailing_stop(
         return None
 
 
-def _compute_trailing_stop_short(*, entry, trough, ltp, current_stop, target, stop_pct, bar_range_pct=None) -> Optional[float]:
+def _compute_trailing_stop_short(*, entry, trough, ltp, current_stop, target, stop_pct, bar_range_pct=None, dip=None) -> Optional[float]:
     try:
         if not entry or entry <= 0 or not ltp or ltp <= 0 or not trough or trough <= 0 or trough >= entry:
             return None
         if (entry - trough) / entry * 100.0 < exit_adaptive.trail_activation_pct(exit_adaptive.target_pct_of(entry, target)):
             return None
-        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct)
+        dist_pct = exit_adaptive.trail_distance_pct(stop_pct, bar_range_pct, dip)
         cand = trough * (1.0 + dist_pct / 100.0)
         ceiling = entry - dhan_client.tick_size_for_price(entry) * config.BREAKEVEN_STOP_BUFFER_TICKS   # a trailed short cannot end as a loss
         cand = dhan_client.round_to_tick(min(cand, ceiling))
@@ -151,6 +164,7 @@ def run_trailing_stop(db: Session) -> int:
                 entry=pos.entry_price, peak=peak, ltp=ltp, current_stop=pos.stop_price,
                 target=pos.target_price, stop_pct=pos.adaptive_stop_pct, side="SHORT" if _short else "LONG",
                 bar_range_pct=exit_adaptive.avg_5m_range_pct(pos.symbol) if exit_adaptive.trail_enabled() else None,
+                dip=_learned_dip(pos, db),
             )
             if new_stop is None:
                 continue

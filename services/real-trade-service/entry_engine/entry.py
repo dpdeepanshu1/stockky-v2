@@ -47,7 +47,7 @@ import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
 from entry_engine import gap_event, setup_live, setup_stamp, approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, soft_gates, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
-from entry_engine import day_spike_gate, flow_gate
+from entry_engine import day_spike_gate, flow_gate, gap_rank, open_cues
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
@@ -1346,6 +1346,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             adj_risk_pct *= _og_pen["mult"]
             logger.info("entry_engine: %s %s sized x%.2f by the opening gate (%s)", mode, cand.symbol, _og_pen["mult"], "; ".join(_og_pen["reasons"]))
         # E273 round 24: VWAP-below / spike chase / gain room as a size penalty (soft_gates.py), floor SOFT_GATE_FLOOR
+        try:                                    # E285 round 102: a weak overseas lead at 08:30 sizes the morning's longs down (entry_engine/open_cues.py); never a refusal
+            _oc_m, _oc_why = open_cues.multiplier()
+            if _oc_m < 1.0:
+                _soft_pen["open_cues"] = _oc_m
+                logger.info("entry_engine: %s %s %s", mode, cand.symbol, _oc_why)
+        except Exception:  # noqa: BLE001 - fail open (entry unaffected), but never silent: group 322 pins the count of bare `pass` handlers on this path
+            logger.debug("entry_engine: open_cues multiplier failed for %s (entry unaffected)", cand.symbol, exc_info=True)
         _soft_mult = soft_gates.combine(_soft_pen.values()) if _soft_pen else 1.0
         if _soft_mult < 1.0:
             adj_risk_pct *= _soft_mult
@@ -1355,6 +1362,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # the closed 1-minute bars and the book / tape (entry_engine/setup_inputs.py). A match is stamped with its id and sets the size multiplier (0.25 in the 09:20 slot, 0.5 later);
         # no match keeps the legacy stamp and full size. A candidate with no event only costs a cached bar read (non-blocking), and only from 09:30. Never raises, never blocks an entry.
         _setup_res, _setup_mult = None, None
+        _stamp_event = None                       # E285 round 115: the fresh typed positive event this entry saw (record only: the stamp carries it)
         _ns_all_ran = False                       # E276 round 70: True only when the walk ran with S1, S2 and S3 all able to fire (NO_SETUP refusal below)
         _s1_on = bool(config.SETUP_S1_ENABLED)
         if config.SETUP_ENGINE_ENABLED and (_s1_on or config.SETUP_S2_ENABLED or config.SETUP_S3_ENABLED):
@@ -1366,6 +1374,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 _s2_on = bool(config.SETUP_S2_ENABLED) and _mnt >= 9 * 60 + 30
                 _s3_on = bool(config.SETUP_S3_ENABLED) and _mnt >= 9 * 60 + 45
                 _pev = positive_event(db, cand.symbol) if _s1_on else None
+                _stamp_event = _pev
                 if tick is not None and (_pev is not None or _s2_on or _s3_on):
                     if _pev is not None:
                         _bars = await asyncio.to_thread(lambda s=cand.symbol: orb_bars.fetch_now(s) or orb_bars.get_bars(s))
@@ -1394,6 +1403,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                             orb=_orb, tape=_flow.get("tape"), imbalance_5=_flow.get("imbalance_5"),
                             avg_turnover=getattr(_pd, "avg_turnover", None) if _pd is not None else None, sector=_sector,
                             liquid_min_cr=getattr(config, "SETUP_S3_LIQUID_MIN_TURNOVER_CR", 100.0), want_s2=_s2_on, want_s3=_s3_on)
+                    _gp = gap_rank.pctile(cand.symbol, _gap_now)                 # E285 round 103: the gap's rank among the stock's own gaps (above the 95th percentile halves the size)
+                    if _gp is not None:
+                        _inputs = dict(_inputs) if isinstance(_inputs, dict) else {}
+                        _inputs["gap_pctile"] = _gp
                     _setup_res = setup_live.classify_long(
                         price=tick.price, prev_close=getattr(tick, "prev_close", None), gap_pct=_gap_now, event=_pev,
                         bars_facts=_orb, imbalance_5=_flow.get("imbalance_5"), inputs=_inputs,
@@ -1474,10 +1487,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             for _v in _stp_pen.values():
                 _stp_mult *= _v
             if isinstance(_setup_res, dict) and _setup_res.get("id") and isinstance(_setup_res.get("stamp"), dict):      # E273 round 19: a matched setup is the stamped reason
-                decision.flow_json = setup_stamp.attach(getattr(decision, "flow_json", None), _setup_res["stamp"])
+                _mst = dict(_setup_res["stamp"])
+                _mev = setup_stamp.event_part(_stamp_event)                                          # E285 round 115: and the typed event it was taken on
+                if _mev and "event" not in _mst:
+                    _mst["event"] = _mev
+                decision.flow_json = setup_stamp.attach(getattr(decision, "flow_json", None), _mst)
             decision.flow_json = setup_stamp.attach(getattr(decision, "flow_json", None), setup_stamp.build(
                 trigger=str(cand.decision_label or "shortlist"), confirmations=setup_stamp.confirmations_from(getattr(decision, "flow_json", None), tick),
-                penalties=_stp_pen, size_mult=_stp_mult, now=ist_now(), side="LONG"))
+                penalties=_stp_pen, size_mult=_stp_mult, now=ist_now(), side="LONG", event=_stamp_event))
         except Exception:  # noqa: BLE001 - a stamp bug must never stop an entry
             logger.debug("entry_engine: setup stamp failed for %s (entry unaffected)", cand.symbol, exc_info=True)
 
@@ -2832,11 +2849,27 @@ def _watchlist_stale_price_reason(tick, *, baseline: bool) -> Optional[str]:
     return None
 
 
+def _own_spread_ceiling(symbol, constant: float) -> float:
+    """E285 round 114: the spread ceiling (%) for this stock: its own (entry_engine/own_spread, from the spread Position Stocks records, within +-50 % of `constant`) once it has
+    5 usable recorded days, else `constant`. A 0 constant (gate off) stays off. Never raises, never waits."""
+    try:
+        if constant <= 0:
+            return constant
+        from entry_engine import own_spread
+        note = own_spread.ceiling_pct(symbol, constant)
+        return float(note["value"]) if note and note.get("source") != "constant" and note.get("value") else constant
+    except Exception as e:  # noqa: BLE001
+        logger.debug("depth check %s: own spread ceiling unavailable (constant): %s", symbol, e)
+        return constant
+
+
 def _watchlist_depth_reason(tick) -> Optional[str]:
     """group277: reason string when the tick's depth says the stock is too expensive to trade, else None. Never raises."""
     try:
         max_spread = _wl_env_float("WATCHLIST_MAX_SPREAD_PCT", 0.5)
         spread = getattr(tick, "spread_pct", None)
+        if max_spread > 0 and spread is not None:
+            max_spread = _own_spread_ceiling(getattr(tick, "symbol", None), max_spread)     # E285 round 114: the stock's own, within +-50 % of the fixed one
         if max_spread > 0 and spread is not None and float(spread) > max_spread:
             return f"bid-ask spread {float(spread):.2f}% is above the limit {max_spread:.2f}%"
         min_book = _wl_env_float("WATCHLIST_MIN_BOOK_VALUE", 0.0)

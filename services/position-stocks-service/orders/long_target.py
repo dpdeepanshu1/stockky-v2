@@ -42,7 +42,7 @@ def _num(v: Any) -> Optional[float]:
 
 
 def enabled() -> bool:
-    return bool(getattr(config, "LONG_TARGET_LEARNED_ENABLED", True))
+    return bool(getattr(config, "LONG_TARGET_LEARNED_ENABLED", True)) and bool(getattr(config, "ADAPTIVE_ENTRY_PARAMS", True))     # E285 round 110: ADAPTIVE_ENTRY_PARAMS is the master switch
 
 
 def _min_pct() -> float:

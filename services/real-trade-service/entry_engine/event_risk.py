@@ -6,7 +6,8 @@ it). The event service already knows the date (yfinance earnings calendar) but o
 service used it as a risk check.
 
 RULES
-  * entry:  EARNINGS_DAY_BLOCK (default on) - no BUY when the stock's results are dated today.
+  * entry:  EARNINGS_DAY_BLOCK (default on) - no BUY when the stock's results are dated today, except (E285 round 101, EARNINGS_SPLIT_ENABLED) results published before 09:00
+            (a known event) or more than EARNINGS_REACTION_WAIT_MIN minutes ago; unknown publication time stays blocked.
   * carry:  EARNINGS_CARRY_BLOCK (default on) - a position that would be held overnight is NOT carried when the results fall today
             or on the next trading day (an overnight gap on the announcement is the one risk the carry rules do not price).
 
@@ -24,7 +25,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import config
@@ -33,11 +34,13 @@ from tz_utils import IST, ist_now, ist_today_str, is_nse_holiday
 logger = logging.getLogger("real-trade-event-risk")
 
 FAILURE_RETRY_S = 120.0
+RESULT_OUT_RETRY_S = 60.0     # E285 round 101: a "not published yet" answer is asked again after this long (results can land any minute of the session)
 
 _lock = threading.Lock()
 _cache: dict = {}        # symbol -> (ist_date_str, earnings_date | None)
 _news_cache: dict = {}   # symbol -> (ist_date_str, negative-news reason | None)   (group330, filled from the same body)
 _failed_at: dict = {}    # symbol -> monotonic time of the last failed fetch
+_out_cache: dict = {}    # symbol -> (ist_date_str, published ISO | None, monotonic time of the fetch)   (E285 round 101, results-day split)
 
 
 def reset() -> None:
@@ -45,6 +48,7 @@ def reset() -> None:
         _cache.clear()
         _news_cache.clear()
         _failed_at.clear()
+        _out_cache.clear()
 
 
 def parse_earnings_date(body) -> Optional[date]:
@@ -139,6 +143,87 @@ def next_trading_day(today: date) -> date:
     return today + timedelta(days=1)
 
 
+def _parse_utc(raw) -> Optional[datetime]:
+    try:
+        if not raw:
+            return None
+        d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def result_out_from(body) -> Optional[str]:
+    """Earliest published time (ISO) of a type "results" event in a GET /events/{symbol}/active body, or None. Never raises."""
+    try:
+        times = []
+        for e in ((body or {}).get("events") or []) if isinstance(body, dict) else []:
+            if isinstance(e, dict) and e.get("type") == "results" and _parse_utc(e.get("published")) is not None:
+                times.append(_parse_utc(e.get("published")))
+        return min(times).isoformat() if times else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fetch_active(symbol: str):
+    import httpx
+    from urllib.parse import quote
+    sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    with httpx.Client(timeout=float(config.EARNINGS_FETCH_TIMEOUT_S)) as client:
+        r = client.get(f"{config.EVENT_URL}/events/{quote(sym, safe='&')}/active")
+    if r.status_code != 200:
+        raise RuntimeError(f"events/active HTTP {r.status_code}")
+    return r.json()
+
+
+def result_out_at(symbol: str) -> Optional[str]:
+    """When today's results were first published (typed event feed, type "results"), or None when not found / the feed failed. A found time is cached for the IST day; None is
+    asked again after RESULT_OUT_RETRY_S. Blocks on a cache miss. Never raises."""
+    try:
+        today = ist_today_str()
+        with _lock:
+            hit = _out_cache.get(symbol)
+            if hit and hit[0] == today and (hit[1] is not None or time.monotonic() - hit[2] < RESULT_OUT_RETRY_S):
+                return hit[1]
+        try:
+            out = result_out_from(_fetch_active(symbol))
+        except Exception as e:  # noqa: BLE001
+            logger.info("event_risk: results-time lookup for %s failed (%s: %s) - results day stays blocked", symbol, type(e).__name__, e)
+            out = None
+        with _lock:
+            _out_cache[symbol] = (today, out, time.monotonic())
+        return out
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def split_reason(out_at, now: Optional[datetime] = None) -> Optional[str]:
+    """E285 round 101 results-day split for a stock whose results are dated TODAY (same rule as position-stocks screening/quality_gate.earnings_split_reason).
+    None = do not block; otherwise the reason text. Split off or no publication time known -> blocked; published before EARNINGS_KNOWN_BEFORE_IST -> a known event, not
+    blocked; published later -> blocked until EARNINGS_REACTION_WAIT_MIN minutes after publication. Never raises (an error blocks)."""
+    base = "gap risk the stop cannot cover"
+    try:
+        if not getattr(config, "EARNINGS_SPLIT_ENABLED", True):
+            return base
+        out = _parse_utc(out_at)
+        if out is None:
+            return base + " (publication time unknown)"
+        from tz_utils import parse_hhmm
+        out_ist = out.astimezone(IST)
+        n = ist_now(now)
+        if out_ist.date() != n.date():
+            return base + " (publication time not from today)"
+        kt = parse_hhmm(getattr(config, "EARNINGS_KNOWN_BEFORE_IST", "09:00"), 9, 0)
+        if (out_ist.hour, out_ist.minute) < (kt.hour, kt.minute):
+            return None
+        left = out_ist.timestamp() + float(getattr(config, "EARNINGS_REACTION_WAIT_MIN", 5.0) or 0.0) * 60.0 - n.timestamp()
+        if left > 0:
+            return f"results published {out_ist.strftime('%H:%M')} IST, waiting {left / 60.0:.1f} more min for the first reaction"
+        return None
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def reason_for_date(d: Optional[date], *, carry: bool = False, today: Optional[date] = None) -> Optional[str]:
     """Pure decision from an earnings date: a reason string or None. carry=True also covers the next trading day."""
     try:
@@ -160,7 +245,12 @@ def reject_reason(symbol: str, *, carry: bool = False) -> Optional[str]:
     try:
         if not (config.EARNINGS_DAY_BLOCK or (carry and config.EARNINGS_CARRY_BLOCK)):
             return None
-        return reason_for_date(lookup(symbol), carry=carry)
+        d = lookup(symbol)
+        base = reason_for_date(d, carry=carry)
+        if base and not carry and d == ist_now().date() and getattr(config, "EARNINGS_SPLIT_ENABLED", True):
+            sr = split_reason(result_out_at(symbol))                  # E285 round 101: known / waited-out results no longer block an entry
+            return None if sr is None else f"EARNINGS_TODAY: results dated {d.isoformat()} (today) - {sr}"
+        return base
     except Exception:  # noqa: BLE001
         return None
 

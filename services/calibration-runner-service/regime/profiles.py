@@ -31,19 +31,22 @@ DIALS: Dict[str, Dict[str, Any]] = {
     "MARKET_STATE_SHORT_MULT": {"kind": "float", "looser": "higher", "services": ("position-stocks",)},
 }
 
-# Dials that follow the plan's short-exposure table, not the severity ladder: shorts are OFF in calm (a rising market squeezes them) and in choppy
-# (both sides get chopped), then allowed again, smaller, when the market is stressed or in panic. So their values do not tighten from state to state.
+# Dials that follow the plan's short-exposure table, not the severity ladder: shorts are SMALL (floor 0.25, E285 round 99) in calm (a rising market squeezes them) and in choppy
+# (both sides get chopped), unchanged in normal / stressed, and half in panic. So their values do not tighten from state to state.
 STATE_SPECIFIC_DIALS = ("MARKET_STATE_SHORT_MULT",)
 
-# state -> value per dial; None = leave the saved value alone. Normal changes nothing (it only stamps). Calm changes only the short dial (shorts off).
-# Short dial (plan table): calm 0 (off), normal / stressed unchanged (the saved SHORT_RISK_MULT already makes a short half a long), choppy 0 (off),
+# state -> value per dial; None = leave the saved value alone. Normal changes nothing (it only stamps). Calm changes only the short dial (floor 0.25).
+# Short dial (plan table): calm 0.25 (floor; was 0 = off before E285 round 99), normal / stressed unchanged (the saved SHORT_RISK_MULT already makes a short half a long), choppy 0.25 (floor),
 # panic 0.5 (a quarter of a long). The "tighter stop" for stressed / panic shorts is not a dial: position-stocks reads the stamped market state and applies SHORT_STOP_MULT_STRESSED / SHORT_STOP_MULT_PANIC itself (E101).
+# E285 round 99: the plan says market state only SCALES a short's size (floor 0.25); zero is kept for an unreadable state (the ledger fails closed) or a person who sets it.
+SHORT_FLOOR = 0.25
+
 PROFILE: Dict[str, Dict[str, Optional[Any]]] = {
-    "calm": {"MARKET_STATE_SHORT_MULT": 0.0},
+    "calm": {"MARKET_STATE_SHORT_MULT": SHORT_FLOOR},
     "normal": {},
     "choppy": {"MARKET_STATE_RISK_MULT": 0.8, "MARKET_STATE_CONVICTION_ADD": 3, "OPENING_ENTRY_NOT_BEFORE_IST": "09:30",
                "RISK_MAX_ENTRIES_PER_DAY": 4, "ENTRY_LAST_TIME_IST": "13:30", "MAX_CONCURRENT_SCALP_POSITIONS": 4, "SCALP_ENTRY_CUTOFF_IST": "13:30",
-               "MARKET_STATE_SHORT_MULT": 0.0},
+               "MARKET_STATE_SHORT_MULT": SHORT_FLOOR},
     "stressed": {"MARKET_STATE_RISK_MULT": 0.6, "MARKET_STATE_CONVICTION_ADD": 6, "OPENING_ENTRY_NOT_BEFORE_IST": "09:45",
                  "RISK_MAX_ENTRIES_PER_DAY": 3, "ENTRY_LAST_TIME_IST": "13:00", "MAX_CONCURRENT_SCALP_POSITIONS": 3, "SCALP_ENTRY_CUTOFF_IST": "13:00"},
     "panic": {"MARKET_STATE_RISK_MULT": 0.4, "MARKET_STATE_CONVICTION_ADD": 10, "OPENING_ENTRY_NOT_BEFORE_IST": "10:15",

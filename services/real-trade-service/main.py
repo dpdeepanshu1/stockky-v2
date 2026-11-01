@@ -604,6 +604,14 @@ def ops_db_latency():
         return {"enabled": False, "error": str(e)[:160]}
 
 
+@app.get("/open-cues/status")
+def open_cues_status():
+    """E285 round 102: today's 08:30 overseas-cue reading (Asia + US futures), the weak / very weak level and the size multiplier now in force."""
+    from entry_engine import open_cues
+    m, why = open_cues.multiplier()
+    return {**open_cues.status(), "multiplier_now": m, "reason_now": why}
+
+
 @app.get("/preopen/status")
 def preopen_status():
     """group331: today's 09:08 pre-open snapshot - passes done, per-pass coverage (queued / priced / fresh gaps) and the biggest gaps."""
@@ -2128,6 +2136,7 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
     )  # includes PENDING_EXIT (a REAL exit already sent to Dhan, awaiting confirmation) — the DEMO/entry-cycle
        # open_positions() helper deliberately excludes it from re-evaluation; this endpoint should still show it.
     prices = await _live_prices([p.symbol for p in rows])
+    _setup_by_pos = _tape_fields_for_positions(db, rows, with_tightens=False)   # E285 round 104: setup stamp of each entry (fail-open: {} on any error)
     out = []
     for p in rows:
         ltp = prices.get(p.symbol)
@@ -2184,6 +2193,7 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
             "realized_cost_estimate": p.realized_cost_estimate,
             "entry_decision_label": getattr(p, "entry_decision_label", None),
             "overnight_hold_reason": getattr(p, "overnight_hold_reason", None),
+            "setup": _setup_by_pos.get(p.id, {}).get("setup"),   # E285 round 104: the rule that took the entry (Entry reason), null for an import or an older trade
         })
     return out
 
@@ -2195,7 +2205,7 @@ async def list_positions(mode: str, admin: Optional[str] = Depends(require_admin
 # trades) short of querying the DB directly. This is read-only history, so
 # unlike /positions/{mode} above it does NOT call _self_heal_orders or fetch
 # live prices — a closed position's price never changes again.
-def _tape_fields_for_positions(db, rows) -> dict:
+def _tape_fields_for_positions(db, rows, with_tightens: bool = True) -> dict:
     """E271: {position_id: {"tape": entry tape dict | None, "tightens": int}} for closed positions. The entry tape is read from the latest ENTER decision for the
     symbol made at or shortly before the position opened (two bounded queries for the whole page); TAPE_TIGHTEN events are counted per position.
     Fail-open: any error gives an empty dict and the history is returned as before. Read-only."""
@@ -2206,10 +2216,11 @@ def _tape_fields_for_positions(db, rows) -> dict:
         ids = [p.id for p in rows]
         if not ids:
             return out
-        for pid, n in (db.query(models.TradePositionEvent.position_id, func.count(models.TradePositionEvent.id))
-                       .filter(models.TradePositionEvent.position_id.in_(ids), models.TradePositionEvent.event_type == "TAPE_TIGHTEN")
-                       .group_by(models.TradePositionEvent.position_id).all()):
-            out.setdefault(pid, {})["tightens"] = int(n)
+        if with_tightens:                                       # E285 round 104: the open-positions poll skips this count (it only needs the entry stamp)
+            for pid, n in (db.query(models.TradePositionEvent.position_id, func.count(models.TradePositionEvent.id))
+                           .filter(models.TradePositionEvent.position_id.in_(ids), models.TradePositionEvent.event_type == "TAPE_TIGHTEN")
+                           .group_by(models.TradePositionEvent.position_id).all()):
+                out.setdefault(pid, {})["tightens"] = int(n)
         syms = list({p.symbol for p in rows})
         lo = min((p.opened_at for p in rows if p.opened_at), default=None)
         if syms and lo is not None:
@@ -2228,6 +2239,13 @@ def _tape_fields_for_positions(db, rows) -> dict:
                             t = None
                         if isinstance(t, dict):
                             out.setdefault(p.id, {})["tape"] = t
+                        try:                                    # E285 round 104: the setup stamp of the same ENTER decision (Entry reason column)
+                            from entry_engine import setup_stamp as _stp
+                            _st = _stp.public(d.flow_json)
+                        except Exception:  # noqa: BLE001
+                            _st = None
+                        if _st:
+                            out.setdefault(p.id, {})["setup"] = _st
                         break
     except Exception as e:  # noqa: BLE001
         logger.debug("history tape fields unavailable: %s", e)
@@ -2298,6 +2316,7 @@ async def list_closed_positions(
         "avg_entry_price": p.avg_entry_price, "realized_pnl": p.realized_pnl,
         "tape": _tape_by_pos.get(p.id, {}).get("tape"),                 # E271: tape verdict seen at entry (from the ENTER decision), else null
         "tape_tightens": _tape_by_pos.get(p.id, {}).get("tightens", 0),  # E271: TAPE_TIGHTEN events while the trade was open
+        "setup": _tape_by_pos.get(p.id, {}).get("setup"),                # E285 round 104: the rule that took the entry (Entry reason), else null
         "mode": p.mode,
         "opened_at": iso_utc(p.opened_at), "closed_at": iso_utc(p.closed_at),
         "source_tab": getattr(p, "source_tab", None),

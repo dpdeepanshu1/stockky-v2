@@ -63,6 +63,38 @@ def test_stage_and_heat_limit():
         config.RISK_LADDER_ENABLED = True
 
 
+def _row(day, pnl):
+    return {"flow_json": json.dumps({"setup": {"id": "S1_CATALYST_UP", "slot": "0930", "side": "LONG"}}), "net_pnl": pnl, "entry_price": 100.0, "stop_price": 98.0,
+            "quantity": 10, "opened_at": day + " 10:00:00", "side": "LONG"}
+
+
+def test_older_cells_and_stage_3():
+    from datetime import date, timedelta
+    d0 = date(2026, 1, 1)
+    days = [(d0 + timedelta(days=i)).isoformat() for i in range(70)]
+    rows = [_row(d, 4.0 if i % 3 else -2.0) for i, d in enumerate(days) for _ in range(5)]          # 70 days x 5 trades
+    old = rs.older_cells(rows)
+    cutoff = sorted(days, reverse=True)[risk_ladder.SUSTAIN_DAYS - 1]
+    n_old = sum(1 for r in rows if r["opened_at"][:10] < cutoff)
+    assert old["S1_CATALYST_UP|ALL"]["n"] == n_old == 50                                     # only trades from before the last 60 days
+    assert rs.older_cells(rows[:5 * 60]) == {} and rs.older_cells([]) == {} and rs.older_cells(None) == {}   # 60 days or fewer = no stage 3
+    saved = rs._data
+    try:
+        s2 = {"r_n": 400, "lower_bound_r": 0.3}
+        rs._data = lambda db: {"cells": {"S1_CATALYST_UP|ALL": s2}, "older": {"S1_CATALYST_UP|ALL": s2}, "last": []}
+        assert rs.stage_for(None, "S1_CATALYST_UP") == 3 and rs.heat_limit_pct(None, "S1_CATALYST_UP", 5.0) == 8.0
+        rs._data = lambda db: {"cells": {"S1_CATALYST_UP|ALL": s2}, "older": {"S1_CATALYST_UP|ALL": {"r_n": 150, "lower_bound_r": 0.1}}, "last": []}
+        assert rs.stage_for(None, "S1_CATALYST_UP") == 2                                      # not sustained
+        rs._data = lambda db: {"cells": {"S1_CATALYST_UP|ALL": s2}, "last": []}               # no older data
+        assert rs.stage_for(None, "S1_CATALYST_UP") == 2
+        rs._data = lambda db: {"cells": {"S1_CATALYST_UP|ALL": {"r_n": 150, "lower_bound_r": 0.1}}, "older": {"S1_CATALYST_UP|ALL": s2}, "last": []}
+        assert rs.stage_for(None, "S1_CATALYST_UP") == 1                                      # older stage 2 does not lift a setup that is on stage 1 now
+        rs._data = lambda db: {"cells": {"S1_CATALYST_UP|ALL": s2}, "older": {"S1_CATALYST_UP|ALL": s2}, "last": [-1.0] * 20}
+        assert rs.stage_for(None, "S1_CATALYST_UP") == 2                                      # the 20-trade brake drops 3 to 2
+    finally:
+        rs._data = saved
+
+
 if __name__ == "__main__":
     n = 0
     for k, f in list(globals().items()):

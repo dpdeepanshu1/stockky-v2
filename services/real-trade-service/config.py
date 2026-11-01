@@ -1840,6 +1840,9 @@ SWING_MAX_PER_SECTOR = max(1, _bs_int("SWING_MAX_PER_SECTOR", 1))
 SWING_MAX_HOLD_DAYS = max(1, _bs_int("SWING_MAX_HOLD_DAYS", 5))                # sessions, the entry session counts as 1; the last one is sold at 15:00
 SWING_LEARNED_HOLD_ENABLED = _bs_bool("SWING_LEARNED_HOLD_ENABLED", "true")        # E283: a shorter hold from the ledger's own closed winners (30 closed trades, 10 winners); never longer than SWING_MAX_HOLD_DAYS
 SWING_LEARNED_HOLD_MIN_DAYS = max(1, _bs_int("SWING_LEARNED_HOLD_MIN_DAYS", 3))       # E283: the learned hold never goes below this many sessions
+SWING_LEARNED_TARGET_ENABLED = _bs_bool("SWING_LEARNED_TARGET_ENABLED", "true")    # E285 round 91: a LIVE swing position at its learned take-profit level is sold at the 15:00 decision instead of carried (30 closed trades with a peak, 10 winners)
+SWING_TARGET_MIN_R = min(5.0, max(1.0, _bs_float("SWING_TARGET_MIN_R", 1.5)))      # E285 round 91: a learned target is never nearer than this many times the trade's own stop %
+SWING_TARGET_MIN_PCT = min(15.0, max(1.0, _bs_float("SWING_TARGET_MIN_PCT", 3.0)))   # E285 round 91: ... and never under this % over the entry
 SWING_TOP_PCT = min(99.0, max(50.0, _bs_float("SWING_TOP_PCT", 80.0)))          # the screen: percentile rank at or above this AND above the 200-day average
 SWING_STOP_ATR_MULT = max(0.5, _bs_float("SWING_STOP_ATR_MULT", 1.5))           # stop = ATR14 x this, clamped SWING_STOP_MIN_PCT..SWING_STOP_MAX_PCT (same as the replay)
 SWING_STOP_MIN_PCT = max(0.5, _bs_float("SWING_STOP_MIN_PCT", 2.0))

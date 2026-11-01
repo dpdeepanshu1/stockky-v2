@@ -272,6 +272,14 @@ def _direct_telegram(text: str) -> bool:
     # (2026-09-07): Markdown silently drops messages containing
     # unescaped `_`, `.`, `(` etc, common in symbol names / Dhan error text.
     html_text = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', text)
+    try:                                                                 # E285 round 93: the shared Stockky look (tg_style.py); any failure keeps the line above
+        import tg_style
+        if tg_style.style_enabled():
+            _styled = tg_style.render("Stockky Trade", text).get("html")
+            if _styled:
+                html_text = _styled
+    except Exception:  # noqa: BLE001
+        logger.debug("direct telegram: style ignored", exc_info=True)
     payload = {
         "chat_id": chat_id,
         "text": html_text,

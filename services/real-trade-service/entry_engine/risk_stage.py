@@ -2,7 +2,7 @@
 
 A closed position's setup comes from the entry decision's flow_json["setup"], found through the "[decision=<id>]" tag that portfolio.py now writes into the OPENED event (no database column).
 Positions opened before the tag, imported holdings and positions whose decision has no setup stamp are not counted. R = net P&L / (initial stop distance x entry quantity).
-stage_for(db, setup_id) -> 0..2 (stage 3 needs 60 sustained trading days; not read here). 0 when the switch is off, the setup is unknown or anything fails (the base heat limit).
+stage_for(db, setup_id) -> 0..3 (E285 round 92: stage 3 = stage 2 now AND stage 2 on the setup's trades from before the last 60 trading days, so the edge has lasted). 0 when the switch is off, the setup is unknown or anything fails (the base heat limit).
 heat_limit_pct(db, setup_id) = DEFAULT_MAX_PORTFOLIO_RISK_PCT + stage x RISK_LADDER_HEAT_STEP_PCT is applied in entry_engine/entry.py. Stage rules: entry_engine/risk_ladder.py (identical copy of position-stocks)."""
 from __future__ import annotations
 
@@ -67,6 +67,19 @@ def build_rows(positions, opened: Dict[int, Any], decisions: Dict[int, Any]) -> 
     return out
 
 
+def older_cells(rows: list) -> Dict[str, Any]:
+    """E285 round 92 (stage 3): the cells as they stood before the last risk_ladder.SUSTAIN_DAYS trading days, from the same counted rows. Needs more than SUSTAIN_DAYS
+    distinct trading days (the opened day) else {} (no stage 3). Never raises."""
+    try:
+        days = sorted({str(r.get("opened_at") or "")[:10] for r in rows if str(r.get("opened_at") or "")[:10]}, reverse=True)
+        if len(days) <= risk_ladder.SUSTAIN_DAYS:
+            return {}
+        cutoff = days[risk_ladder.SUSTAIN_DAYS - 1]
+        return ladder_stats.summarize([r for r in rows if str(r.get("opened_at") or "")[:10] < cutoff])
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _load(db) -> Dict[str, Any]:
     import models
     pos = (db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.status == "CLOSED",
@@ -84,8 +97,9 @@ def _load(db) -> Dict[str, Any]:
         for d in db.query(models.TradeDecision).filter(models.TradeDecision.id.in_(dids[i:i + 400])).all():
             decisions[d.id] = d.flow_json
     rows = build_rows(pos, opened, decisions)
+    older = older_cells(rows)
     pnls = [(p.net_realized_pnl if p.net_realized_pnl is not None else p.realized_pnl) for p in pos[:risk_ladder.BRAKE_TRADES]]
-    return {"cells": ladder_stats.summarize(rows), "last": pnls}
+    return {"cells": ladder_stats.summarize(rows), "older": older, "last": pnls}
 
 
 def _data(db) -> Dict[str, Any]:
@@ -103,7 +117,8 @@ def stage_for(db, setup_id: Optional[str]) -> int:
         if not enabled() or not setup_id:
             return 0
         d = _data(db)
-        return min(2, risk_ladder.stage((d.get("cells") or {}).get(f"{ladder_stats.cell_id(setup_id, 'LONG')}|ALL"), d.get("last") or []))
+        key = f"{ladder_stats.cell_id(setup_id, 'LONG')}|ALL"
+        return risk_ladder.stage((d.get("cells") or {}).get(key), d.get("last") or [], False, (d.get("older") or {}).get(key))
     except Exception:  # noqa: BLE001
         logger.debug("risk stage: read failed (stage 0)", exc_info=True)
         return 0

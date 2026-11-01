@@ -46,6 +46,12 @@ def test_single_overlong_line_is_hard_split():
     assert [len(p) for p in parts] == [3800, 3800, 1400]
 
 
+@pytest.fixture(autouse=True)
+def _plain_layout(monkeypatch):
+    """E285 round 93: this file pins the old plain layout; the styled layout is tested in test_e285_tg_style.py."""
+    monkeypatch.setenv("TELEGRAM_STYLE_ENABLED", "false")
+
+
 @pytest.fixture
 def wire(monkeypatch):
     seen = []

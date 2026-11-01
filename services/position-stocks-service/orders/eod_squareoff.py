@@ -1265,7 +1265,7 @@ _short_cover_logged: set = set()   # (position id, reason) pairs already logged,
 def run_short_squareoff(db: Session, now: Optional[datetime] = None) -> int:
     """Short selling, E102 (P1 item 10). Covers every OPEN short at SHORT_SQUAREOFF_TIME_IST (14:55), five minutes before the 15:00 sweep.
 
-    Before this, SHORT_SQUAREOFF_TIME_IST was read only by the shadow shorts (short_entry.resolve_open). A LIVE short was left to the
+    Before this, SHORT_SQUAREOFF_TIME_IST was read only by the old shadow shorts (their follower is gone since E285 round 90). A LIVE short was left to the
     15:00 long sweep, although short_live.py's alert says "Covered by 14:55 at the latest" and the T7 pass rule is "the position never
     exists after 14:55". This closes that gap.
 

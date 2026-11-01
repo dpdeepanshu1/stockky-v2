@@ -561,8 +561,8 @@
   "services/real-trade-service/notifier.py": "d38b56c8"
  },
  "notifier::_direct_telegram": {
-  "services/position-stocks-service/notifier.py": "336990b2",
-  "services/real-trade-service/notifier.py": "e71870cd"
+  "services/position-stocks-service/notifier.py": "88831dfc",
+  "services/real-trade-service/notifier.py": "ad75714f"
  },
  "notifier::_env_url": {
   "services/position-stocks-service/notifier.py": "-",

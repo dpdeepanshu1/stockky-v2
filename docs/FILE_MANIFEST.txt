@@ -1232,6 +1232,7 @@ services/notification-scheduler-service/notification/kv_cache.py
 services/notification-scheduler-service/notification/main.py
 services/notification-scheduler-service/notification/oracle_compat.py
 services/notification-scheduler-service/notification/requirements.txt
+services/notification-scheduler-service/notification/tg_style.py
 services/notification-scheduler-service/requirements.txt
 services/notification-scheduler-service/scheduler/.dockerignore
 services/notification-scheduler-service/scheduler/Dockerfile
@@ -1250,6 +1251,7 @@ services/notification-scheduler-service/scheduler/weekend_hydrator.py
 services/notification-scheduler-service/tests/__init__.py
 services/notification-scheduler-service/tests/conftest.py
 services/notification-scheduler-service/tests/test_api_gateway_url_env.py
+services/notification-scheduler-service/tests/test_e285_tg_style_send.py
 services/notification-scheduler-service/tests/test_e51_control_routes.py
 services/notification-scheduler-service/tests/test_env_url_blank_fallback.py
 services/notification-scheduler-service/tests/test_pattern_alerts.py
@@ -1695,6 +1697,7 @@ services/position-stocks-service/tests/test_ws_client.py
 services/position-stocks-service/tests/test_ws_client_loop.py
 services/position-stocks-service/tests/test_ws_client_secret_redaction.py
 services/position-stocks-service/tests/test_ws_offhours_idle.py
+services/position-stocks-service/tg_style.py
 services/position-stocks-service/timemachine/__init__.py
 services/position-stocks-service/timemachine/data.py
 services/position-stocks-service/timemachine/engine.py
@@ -1878,6 +1881,7 @@ services/real-trade-service/swing/__init__.py
 services/real-trade-service/swing/engine.py
 services/real-trade-service/swing/lane.py
 services/real-trade-service/swing/learned_hold.py
+services/real-trade-service/swing/learned_target.py
 services/real-trade-service/swing/live.py
 services/real-trade-service/swing/momentum.py
 services/real-trade-service/swing/probe.py
@@ -1993,6 +1997,8 @@ services/real-trade-service/tests/test_e277_module_isolation_a.py
 services/real-trade-service/tests/test_e277_module_isolation_b.py
 services/real-trade-service/tests/test_e283_learned_hold.py
 services/real-trade-service/tests/test_e283_live_state.py
+services/real-trade-service/tests/test_e285_swing_target.py
+services/real-trade-service/tests/test_e285_tg_style.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py
@@ -2196,6 +2202,7 @@ services/real-trade-service/tests/test_watchlist_decay_and_watchlist.py
 services/real-trade-service/tests/test_watchlist_dynamic_universe.py
 services/real-trade-service/tests/test_watchlist_sources.py
 services/real-trade-service/tests/test_watchlist_trigger.py
+services/real-trade-service/tg_style.py
 services/real-trade-service/timemachine/__init__.py
 services/real-trade-service/timemachine/data.py
 services/real-trade-service/timemachine/engine.py

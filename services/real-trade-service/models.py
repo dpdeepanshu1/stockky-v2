@@ -1154,6 +1154,8 @@ class SwingTrade(Base):
     net_pct = Column(Float, nullable=True)
     qty = Column(Integer, nullable=True)
     size_value = Column(Float, nullable=True)                 # Rs the cost % was worked out at (SHADOW) / the Rs bought (LIVE)
+    peak_pct = Column(Float, nullable=True)                   # E285 round 91: the best high since the entry, % over the entry price (the evidence a swing target is learned from)
+    target_px = Column(Float, nullable=True)                  # E285 round 91: LIVE rows: the take-profit level fixed at entry from the learned target (NULL = none learned yet)
     position_id = Column(Integer, nullable=True)              # LIVE
     order_id = Column(Integer, nullable=True)                 # LIVE
     closed_at = Column(String(32), nullable=True)             # ISO text, LIVE: when the position closed (the pause rule orders by it)

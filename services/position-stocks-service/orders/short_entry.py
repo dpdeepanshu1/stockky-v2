@@ -2,8 +2,8 @@
 
 WHAT: with SHORT_MODE=live every cycle scans for fallers (screening.engine.scan_shorts), ranks them, and hands each to orders/short_live.py, which walks the mirrored
 fail-closed gates through `plan_short` (below, orders/short_gates.py) and places the real SELL Super Order. `plan_short` is the shared gate walk, levels and sizing.
-Rows in `scalp_short_shadow` left from the old shadow mode (E105 to E284) are still followed to their stop, target or the short square-off time, summarised and shown
-(`resolve_open`, `summary`), but nothing writes a new one. With the mode `off` the cycle only closes such leftover rows. Everything here swallows its own errors.
+Rows in `scalp_short_shadow` left from the old shadow mode (E105 to E284) are only read (`summary`); nothing writes a new one and nothing follows a price any more
+(E285 round 90: `resolve_open` is gone). A row still OPEN is marked EXPIRED once (`expire_open`). Everything here swallows its own errors.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
 from orders import learned_stop, setup_short, short_target, squeeze_guard
 from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
-from tz_utils import ist_now, ist_time_at_or_after, ist_today_str, parse_hhmm
+from tz_utils import ist_now
 
 logger = logging.getLogger("position-stocks-short-entry")
 
@@ -266,53 +266,19 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
             "tape_json": _tape_json, "setup": _setup, "early": early, "target_note": _tnote, "stop_note": _snote}
 
 
-def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:
-    qty = int(r.quantity or 0)
-    gross = (float(r.entry_price) - exit_price) * qty
-    try:
-        # a short sells first and buys back later: the buy leg is the EXIT, the sell leg the entry
-        levies = cost_gate.estimate_levies(exit_price, qty, float(r.entry_price)) if qty > 0 else 0.0
-    except Exception as e:  # noqa: BLE001
-        logger.debug("short shadow: levy estimate failed (%s)", e)
-        levies = 0.0
-    r.status, r.exit_price = status, round(exit_price, 2)
-    r.gross_pnl, r.net_pnl = round(gross, 2), round(gross - levies, 2)
-    base = float(r.entry_price) * qty
-    r.net_pnl_pct = round((gross - levies) / base * 100.0, 3) if base > 0 else None
-    r.closed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-
-
-def resolve_open(db: Session, now: Optional[datetime] = None) -> int:
-    """Follow every OPEN shadow row with the live price. Returns how many were closed. Never raises."""
+def expire_open(db: Session, now: Optional[datetime] = None) -> int:
+    """E285 round 90: nothing writes a shadow row any more, so a row still OPEN is a leftover that no price will ever follow. Mark every one EXPIRED (no exit price,
+    no P&L) and return how many. Rows already TARGET / STOP / EOD / EXPIRED are left alone. Never raises."""
     closed = 0
     try:
-        today = ist_today_str(now)
-        sq = parse_hhmm(str(getattr(config, "SHORT_SQUAREOFF_TIME_IST", "14:55")), 14, 55)
+        stamp = now or datetime.now(timezone.utc)
         for r in db.query(ScalpShortShadow).filter(ScalpShortShadow.status == "OPEN").all():
-            try:
-                if r.day != today:
-                    r.status, r.closed_at = "EXPIRED", (now or datetime.now(timezone.utc))
-                    closed += 1
-                    continue
-                px = _live_price(r.symbol)
-                if px is None:
-                    continue
-                r.low_water = min(float(r.low_water or px), px)
-                r.high_water = max(float(r.high_water or px), px)
-                if px >= float(r.stop_price):
-                    _close(r, "STOP", px, now)
-                elif px <= float(r.target_price):
-                    _close(r, "TARGET", float(r.target_price), now)
-                elif ist_time_at_or_after(sq, now):
-                    _close(r, "EOD", px, now)
-                else:
-                    continue
-                closed += 1
-            except Exception as e:  # noqa: BLE001
-                logger.debug("short shadow: resolve of %s failed (%s)", getattr(r, "symbol", "?"), e)
+            r.status, r.closed_at = "EXPIRED", stamp
+            closed += 1
         db.commit()
     except Exception as e:  # noqa: BLE001
-        logger.warning("short shadow: resolve failed (%s)", e)
+        logger.warning("short shadow: expiring leftover rows failed (%s)", e)
+        closed = 0
         try:
             db.rollback()
         except Exception as _e:  # noqa: BLE001
@@ -363,13 +329,13 @@ def _bear_rows() -> Dict[str, dict]:
 
 
 async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[str, Any]:
-    """One short pass: follow the leftover old shadow rows, then (live mode, inside the entry window, market open) look for new shorts and hand each candidate to
+    """One short pass: expire any leftover OPEN shadow row, then (live mode, inside the entry window, market open) look for new shorts and hand each candidate to
     orders/short_live.py (a real SELL Super Order, capped by SHORT_LIVE_QTY_CAP).
     Returns {"mode", "resolved", "recorded"} (recorded is None when no scan ran). Never raises, never orders."""
     cm = cfg_mode()
     out: Dict[str, Any] = {"mode": cm, "resolved": 0, "recorded": None}
     try:
-        out["resolved"] = await asyncio.to_thread(resolve_open, db, now)     # follows leftover shadow rows in every mode
+        out["resolved"] = await asyncio.to_thread(expire_open, db, now)      # E285 round 90: leftover OPEN shadow rows are expired, never followed
         if cm != "live":                                                    # E285 round 89: only live scans; there is no shadow recorder any more
             return out
         from tz_utils import is_market_open_ist

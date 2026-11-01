@@ -162,6 +162,7 @@ def init_schema() -> None:
     _ensure_regime_override_columns(eng, dialect())
     _ensure_fill_notional_column(eng, dialect())
     _ensure_edis_check_columns(eng, dialect())
+    _ensure_swing_ledger_columns(eng, dialect())
 
 
 # 2026-08-27 data fixup: docker-compose.yml/.env.example/.env.oracle.example
@@ -1351,3 +1352,32 @@ def _ensure_edis_check_columns(engine, dialect_name: str) -> None:
             if "already exists" in m.lower() or "ORA-01430" in m:
                 continue
             logger.warning("real-trade-db: could not add trade_gate_state.%s: %s", col_name, e)
+
+
+# E285 round 91: trade_swing_ledger gained peak_pct (best high since entry, %) and target_px (the learned take-profit level of a LIVE row). The table already exists on a
+# deployed database, so create_all() will not add them: same additive idiom as above (a failure is logged and never stops the service booting).
+def _ensure_swing_ledger_columns(engine, dialect_name: str) -> None:
+    from sqlalchemy import inspect, text
+
+    try:
+        existing = {c["name"].lower() for c in inspect(engine).get_columns("trade_swing_ledger")}
+    except Exception as e:
+        logger.warning("real-trade-db: could not inspect trade_swing_ledger columns: %s", e)
+        return
+    if not existing:        # table not there (create_all makes it with the columns)
+        return
+    ctype = "BINARY_DOUBLE" if dialect_name == "oracle" else "DOUBLE PRECISION"
+    for col_name in ("peak_pct", "target_px"):
+        if col_name in existing:
+            continue
+        sql = (f"ALTER TABLE trade_swing_ledger ADD ({col_name} {ctype})" if dialect_name == "oracle"
+               else f"ALTER TABLE trade_swing_ledger ADD COLUMN {col_name} {ctype}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+            logger.info("real-trade-db: added trade_swing_ledger.%s", col_name)
+        except Exception as e:
+            m = str(e)
+            if "already exists" in m.lower() or "ORA-01430" in m:
+                continue
+            logger.warning("real-trade-db: could not add trade_swing_ledger.%s: %s", col_name, e)

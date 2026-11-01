@@ -7,6 +7,7 @@
                                    position is flattened).
   after_scan(db, repo, scan)       evening, on the scan thread: link ledger rows to their positions, close them when the position closed, and ratchet each open
                                    position's stop to (close - stop %) from the day's real close (the replay's rule).
+                                   E285 round 91: a position at or above its learned take-profit level (ledger target_px) is sold instead of carried.
   pause_for(repo, mode)            the S5 auto-stop: 3 losing swing trades in a row, or an exit that lost more than 1.3 x its planned stop.
   overdue(position)                E138 backstop, asked by the exit engine on every tick: sells a swing position the 15:00 square-off failed to sell / never saw.
   eod_squareoff_on(db, mode)       E138: live entries refuse to start unless the gate's EOD square-off switch is on (it is what runs the 15:00 hold decision).
@@ -21,7 +22,7 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from swing import engine, lane
+from swing import engine, lane, learned_target
 
 logger = logging.getLogger("real-trade-swing-live")
 
@@ -367,6 +368,7 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
             if qty < 1:
                 skip("no room: size / exposure cap")
                 continue
+            tgt = learned_target.target_px_for(db, limit, sp) if bool(_cfg("SWING_LEARNED_TARGET_ENABLED", True)) else None      # E285 round 91: None until the ledger has the trades (cached read, run inline: the session is not thread-safe)
             req = SimpleNamespace(symbol=sym, side="BUY", qty=qty, order_type="LIMIT", product_type="CNC", limit_price=limit, stop_price=stop,
                                   target_price=None, position_id=None)
             res = await manual_engine.evaluate_manual_order(db, mode, gate_armed, req, confirm=True, admin="swing-lane", swing={"max_trade_value": maxv})
@@ -374,14 +376,14 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
                 approved = int(res.get("approved_qty") or qty)
                 repo.add_trade(kind="LIVE", mode=mode, symbol=sym, status="OPEN", signal_day=pk["signal_day"], rank=pk.get("rank"), pct_rank=pk.get("pct_rank"),
                                signal_close=pk.get("signal_close"), atr_pct=pk.get("atr_pct"), stop_pct=sp, entry_day=today, entry_price=limit, stop_px=stop,
-                               qty=approved, size_value=round(approved * limit, 2), order_id=int(res["order_id"]), position_id=None,
+                               qty=approved, size_value=round(approved * limit, 2), order_id=int(res["order_id"]), position_id=None, target_px=tgt,
                                note=f"{res.get('status')}")
                 out["placed"] += 1
                 value += approved * limit
                 held.add(sym)
                 if sec:
                     sectors.append(sec)
-                await _notify(f"🌱 *Swing entry — {mode}* {sym}\n{approved} @ ₹{limit:.2f} (CNC) | stop ₹{stop:.2f} ({sp:.1f}%) | rank {pk.get('rank')} | "
+                await _notify(f"🌱 *Swing entry — {mode}* {sym}\n{approved} @ ₹{limit:.2f} (CNC) | stop ₹{stop:.2f} ({sp:.1f}%) | " + (f"target ₹{tgt:.2f} | " if tgt else "") + f"rank {pk.get('rank')} | "
                               f"max {hold_days(db)} sessions\n{res.get('status')}"
                               + (f"\nEvent: {_backed[sym].get('type')} (strength {float(_backed[sym].get('strength') or 0):.2f})" if isinstance(_backed.get(sym), dict) else ""))
             else:
@@ -461,6 +463,11 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
             ok, why = lane.hold_verdict(sessions=sessions, max_hold=hold_days(db) + _ext, ltp=getattr(tick, "price", None), stop=p.current_stop,
                                         sma10=row.get("sma10"), pct_rank=row.get("pct_rank"), keep_min_pct_rank=float(_cfg("SWING_KEEP_MIN_PCT_RANK", 50.0)),
                                         require_above_sma10=bool(_cfg("SWING_KEEP_ABOVE_SMA10", True)), vetoes=vetoes)
+            t = ledger.get(p.id)
+            if ok and t and bool(_cfg("SWING_LEARNED_TARGET_ENABLED", True)):      # E285 round 91: take the profit instead of carrying it (only ever carry -> sale)
+                _tw = lane.target_sale(getattr(tick, "price", None), t.get("target_px"))
+                if _tw:
+                    ok, why = False, _tw
             if ok and len(keep) >= cap:
                 ok, why = False, f"carry cap {cap} for today's calendar reached"
             if ok:
@@ -468,7 +475,6 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
                 reasons[p.id] = "swing: " + why
             else:
                 db.add(models.TradePositionEvent(position_id=p.id, event_type="SWING_EXIT_DECISION", detail=why[:300]))
-                t = ledger.get(p.id)
                 if t:
                     repo.update_trade(t["id"], note=("exit decision: " + why)[:300], sessions=sessions)
         db.commit()
@@ -532,6 +538,7 @@ def after_scan(db: Any, repo: Any, scan: Optional[Dict[str, Any]]) -> Dict[str, 
                     db.commit()
                     n["ratcheted"] += 1
                 opened = _day(pos.opened_at) or asof
+                f.update(peak_pct=lane.peak_pct_after(t.get("peak_pct"), t.get("entry_price") or pos.avg_entry_price, r.get("last_high"), r.get("last_close")))      # E285 round 91
                 f.update(stop_px=pos.current_stop, last_close=r.get("last_close"), last_day=asof,
                          sessions=lane.count_sessions(date.fromisoformat(opened), date.fromisoformat(asof), cg._is_trading_day))
             if f:

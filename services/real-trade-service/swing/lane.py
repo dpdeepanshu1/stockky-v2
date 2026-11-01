@@ -14,6 +14,8 @@ Added on top of the replay (all three can only SHORTEN a hold, none can start a 
   * the 15:00 re-check sells when the price is under its 10-day average or last night's percentile rank fell under SWING_KEEP_MIN_PCT_RANK;
   * a carry veto (results due, negative news, market selling into the close) sells instead of carrying;
   * a gap-up of more than SWING_MAX_GAP_UP_PCT over the signal close is not bought.
+  * E285 round 91: a LIVE position that reached its learned take-profit level (swing/learned_target.py, stored in the ledger's target_px) is sold at the 15:00 decision
+    instead of carried (`target_sale`). The ledger records every trade's peak (`peak_pct_after`) so the target can be learned. The SHADOW lane still plans with no target.
 """
 from __future__ import annotations
 
@@ -169,6 +171,36 @@ def advance(state: Dict[str, Any], bar: Dict[str, Any], hold: int) -> Dict[str, 
         return st
     st["closed"] = False
     return st
+
+
+def peak_pct_after(prev_peak: Any, entry: Any, high: Any, close: Any) -> Optional[float]:
+    """E285 round 91: the best price the trade has reached, in % over the entry price: max(previous peak, the bar's high, the bar's close), rounded for storage.
+    A bar without a usable high still counts its close. Never lowers a peak. None when there is neither a usable entry nor a previous peak. Pure, never raises."""
+    try:
+        prev = _f(prev_peak)
+        e = _f(entry)
+        if e is None or e <= 0:
+            return None if prev is None else round(prev, 4)
+        tops = [x for x in (_f(high), _f(close)) if x is not None and x > 0]
+        cand = (max(tops) / e - 1.0) * 100.0 if tops else None
+        vals = [v for v in (prev, cand) if v is not None]
+        return round(max(vals), 4) if vals else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def target_sale(ltp: Any, target_px: Any) -> Optional[str]:
+    """E285 round 91: the reason to SELL a carried swing position at the 15:00 decision because it reached its take-profit level, else None. Only ever turns a carry
+    into a sale (the caller applies it after hold_verdict said keep). No target, no price or a target not reached = None. Pure, never raises."""
+    try:
+        t, p = _f(target_px), _f(ltp)
+        if t is None or t <= 0 or p is None or p <= 0:
+            return None
+        if p >= t:
+            return f"target {t:.2f} reached (price {p:.2f}): profit taken at the close"
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def result_pcts(entry: float, exit_price: float, cost_pct: float) -> Dict[str, float]:

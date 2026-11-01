@@ -520,6 +520,29 @@ def _split_for_telegram(message: str, limit: int = _TELEGRAM_PART_CHARS) -> list
     return parts or [""]
 
 
+def _style_message(label: str, part: str, chat_id: str):
+    """E285 round 93: the styled Telegram text for one part, plus the extra payload fields (message effect for a private chat, an optional dashboard button).
+    None = styling is off or failed, and the caller sends the old layout."""
+    try:
+        import tg_style
+        if not tg_style.style_enabled():
+            return None
+        r = tg_style.render(label, part)
+        if not r.get("html"):
+            return None
+        extra = {}
+        eff = tg_style.effect_for(r.get("kind"), chat_id)
+        if eff:
+            extra["message_effect_id"] = eff
+        dash = (os.getenv("TELEGRAM_DASHBOARD_URL") or "").strip()
+        if dash.startswith("https://"):
+            extra["reply_markup"] = {"inline_keyboard": [[{"text": "📊 Open Stockky", "url": dash}]]}
+        return {"html": r["html"], "extra": extra}
+    except Exception:  # noqa: BLE001 - styling must never stop a message
+        logger.debug("telegram style: ignored error (old layout)", exc_info=True)
+        return None
+
+
 def _send_telegram(cfg: dict, title: str, message: str):
     token = _cfg_text(cfg, "telegram_bot_token")
     chat_id = _cfg_text(cfg, "telegram_chat_id")
@@ -552,14 +575,20 @@ def _send_telegram(cfg: dict, title: str, message: str):
     for idx, part in enumerate(parts, 1):
         label = f"{title} ({idx}/{total})" if total > 1 else title
         html_message = _re.sub(r'\*([^*]+)\*', r'<b>\1</b>', part)
+        styled = _style_message(label, part, chat_id)                   # E285 round 93: header, readable lines, escaped HTML, optional effect / button
         payload = {
             "chat_id": chat_id,
-            "text": f"<b>{label}</b>\n\n{html_message}",
+            "text": styled["html"] if styled else f"<b>{label}</b>\n\n{html_message}",
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
+        if styled:
+            payload.update(styled["extra"])
         try:
             resp = httpx.post(url, json=payload, timeout=10)
+            if resp.status_code != 200 and styled and "message_effect_id" in payload:     # the effect is a nicety: retry once without it
+                payload.pop("message_effect_id", None)
+                resp = httpx.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 continue
             logger.error(f"Telegram API error: {resp.status_code} - {resp.text[:200]}")

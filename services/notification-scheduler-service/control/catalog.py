@@ -7,6 +7,7 @@ from control.kit import Flag
 SERVICE = "notification-scheduler-service"
 _V = "control.env_view"
 _G1, _G2 = "Chart-pattern digest (E29)", "Watchlist move alert (E28)"
+_G3 = "Telegram message style (E285)"
 
 CATALOG = (
     Flag("PATTERN_ALERTS_ENABLED", "Daily chart-pattern digest", _G1, "bool", looser="neutral", targets=((_V, "PATTERN_ALERTS_ENABLED"),), live=True, shipped="true",
@@ -25,4 +26,8 @@ CATALOG = (
          help="How often prices are compared with the baseline."),
     Flag("WATCHLIST_MOVE_MAX_SYMBOLS", "Move alert max stocks", _G2, "int", looser="neutral", lo=1, hi=500, targets=((_V, "WATCHLIST_MOVE_MAX_SYMBOLS"),), live=True, shipped="80",
          help="How many watchlist stocks are compared per check."),
+    Flag("TELEGRAM_STYLE_ENABLED", "Styled Telegram messages", _G3, "bool", looser="neutral", targets=((_V, "TELEGRAM_STYLE_ENABLED"),), live=True, shipped="true",
+         help="E285 round 93: every Telegram message gets a header, a kind and time line, a divider, and readable bullet lines (news items quoted, P&L lines marked green / red). Off = the old plain layout. Text only; no trade is touched."),
+    Flag("TELEGRAM_EFFECTS_ENABLED", "Telegram message effects", _G3, "bool", looser="neutral", targets=((_V, "TELEGRAM_EFFECTS_ENABLED"),), live=True, shipped="true",
+         help="Confetti on a target hit and a thumbs-up on a buy, shown by Telegram in a private chat only (never in a group). Off = no effect."),
 )

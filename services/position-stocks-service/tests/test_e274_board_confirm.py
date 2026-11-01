@@ -182,7 +182,7 @@ def test_the_cycle_checks_off_board_names_and_keeps_only_the_negative_event_ones
     monkeypatch.setattr(tz_utils, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(short_gates, "time_window", lambda f, now, early=False: None)
     monkeypatch.setattr(short_gates, "early_open", lambda now: False)
-    monkeypatch.setattr(se, "resolve_open", lambda db, now=None: 0)
+    monkeypatch.setattr(se, "expire_open", lambda db, now=None: 0)
     monkeypatch.setattr(se, "_bear_rows", lambda: {"BEARISH": dict(BEAR)})
     cs = [cand("BEARISH"), cand("OFFNEG"), cand("OFFPLAIN")]
     monkeypatch.setattr(eng_mod, "scan_shorts", lambda held: cs)

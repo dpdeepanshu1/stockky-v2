@@ -195,7 +195,8 @@ def settle_shadow(repo: Any, rows_by_symbol: Dict[str, Dict[str, Any]], asof: st
             repo.update_trade(t["id"], status="SKIPPED", skip_reason="unusable bar for the entry session")
             n["skipped"] += 1
             continue
-        base = {"entry_day": asof, "entry_price": round(lv["entry"], 4), "qty": qty, "size_value": round(qty * lv["entry"], 2)}
+        base = {"entry_day": asof, "entry_price": round(lv["entry"], 4), "qty": qty, "size_value": round(qty * lv["entry"], 2),
+                "peak_pct": lane.peak_pct_after(None, lv["entry"], row.get("last_high"), row.get("last_close"))}      # E285 round 91: evidence for the learned target
         n["entered"] += 1
         _store(repo, t["id"], st, base, cost_fn, n)
     for t in repo.trades(kind="SHADOW", status="OPEN"):
@@ -220,7 +221,7 @@ def settle_shadow(repo: Any, rows_by_symbol: Dict[str, Dict[str, Any]], asof: st
             n["void"] += 1
             continue
         n["advanced"] += 1
-        _store(repo, t["id"], st, {}, cost_fn, n, t)
+        _store(repo, t["id"], st, {"peak_pct": lane.peak_pct_after(t.get("peak_pct"), t.get("entry_price"), row.get("last_high"), row.get("last_close"))}, cost_fn, n, t)
     return n
 
 

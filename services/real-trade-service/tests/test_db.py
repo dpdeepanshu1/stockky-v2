@@ -100,6 +100,7 @@ COLUMN_FUNCS = [
     "_ensure_edis_check_columns",
     "_ensure_fill_notional_column",
     "_ensure_structure_obs_bench_columns",   # group402: market-relative return columns on structure_observations
+    "_ensure_swing_ledger_columns",          # E285 round 91: peak_pct / target_px on trade_swing_ledger
     "_ensure_market_state_columns",          # E98: Market Weather stamp (market_state / profile_version) on trade_orders and trade_positions
 ]
 INDEX_FUNCS = ["_ensure_hot_path_indexes", "_ensure_nextday_watchlist_indexes"]

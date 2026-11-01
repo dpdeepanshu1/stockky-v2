@@ -288,7 +288,7 @@ check("E222 helper: off cases", sl.automatic_entry_off(DB(gate(auto_pilot_enable
       and sl.automatic_entry_off(DB(gate(is_armed=False)))[0] == "SHORT_NOT_ARMED" and sl.automatic_entry_off(DB(None))[0] == "SHORT_NOT_ARMED" and sl.automatic_entry_off(DB(gate())) is None)
 # the short cycle skips its scan (no quality-gate calls) while the switches say no, and still resolves leftover shadow rows
 import asyncio, tz_utils
-se.resolve_open = lambda db, now=None: 0; sg.time_window = lambda c, n, early=False: None; sg.early_open = lambda n: False;      # E274 round 41: the cycle asks short_gates.early_open(now) and passes early= to time_window
+se.expire_open = lambda db, now=None: 0; sg.time_window = lambda c, n, early=False: None; sg.early_open = lambda n: False;      # E274 round 41: the cycle asks short_gates.early_open(now) and passes early= to time_window
 tz_utils.is_market_open_ist = lambda *a, **k: True
 for name, g in [("auto-pilot off", gate(auto_pilot_enabled=False)), ("module disabled", gate(service_enabled=False)), ("not armed", gate(is_armed=False))]:
     reset(); o = asyncio.run(se.run_short_cycle(DB(g)))

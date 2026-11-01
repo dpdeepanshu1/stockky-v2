@@ -111,6 +111,12 @@ class Net:
 
 
 @pytest.fixture(autouse=True)
+def _plain_layout(monkeypatch):
+    """E285 round 93: these tests pin the old plain layout of _direct_telegram; the styled layout is tested in test_e285_tg_style.py."""
+    monkeypatch.setenv("TELEGRAM_STYLE_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     notifier._dedup_cache.clear()
     notifier._failed_hashes.clear()

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 TRADE_FIELDS = ("kind", "mode", "symbol", "status", "signal_day", "rank", "pct_rank", "signal_close", "atr_pct", "stop_pct", "entry_day", "entry_price",
                 "stop_px", "sessions", "last_day", "last_close", "exit_day", "exit_price", "exit_reason", "gap_through", "gross_pct", "cost_pct", "net_pct",
-                "qty", "size_value", "position_id", "order_id", "closed_at", "skip_reason", "note")
+                "qty", "size_value", "peak_pct", "target_px", "position_id", "order_id", "closed_at", "skip_reason", "note")
 
 
 def _clean(fields: Dict[str, Any]) -> Dict[str, Any]:

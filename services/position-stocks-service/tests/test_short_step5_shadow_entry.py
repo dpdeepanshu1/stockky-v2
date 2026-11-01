@@ -15,7 +15,6 @@ from orders import short_entry as se, short_gates
 
 IST = timezone(timedelta(hours=5, minutes=30))
 NOW = datetime(2026, 10, 23, 10, 30, tzinfo=IST)
-AFTER_SQ = datetime(2026, 10, 23, 15, 0, tzinfo=IST)
 
 
 @pytest.fixture()
@@ -123,60 +122,32 @@ def _open_row(db, **kw):
     return r
 
 
-@pytest.mark.parametrize("px,status,exit_px,gross", [(101.5, "STOP", 101.5, -15.0), (97.9, "TARGET", 98.0, 20.0)])
-def test_resolve_stop_and_target(db, monkeypatch, px, status, exit_px, gross):
+def test_expire_open_marks_leftover_rows_expired_without_a_result(db):
+    r1, r2 = _open_row(db, symbol="A"), _open_row(db, symbol="B", day="2026-10-22")
+    done = _open_row(db, symbol="C", status="TARGET", exit_price=98.0, gross_pnl=20.0, net_pnl=18.0)
+    assert se.expire_open(db, NOW) == 2
+    for r in (r1, r2, done):
+        db.refresh(r)
+    assert r1.status == "EXPIRED" and r2.status == "EXPIRED" and r1.net_pnl is None and r1.exit_price is None and r1.closed_at is not None
+    assert done.status == "TARGET" and done.net_pnl == 18.0                    # a closed row is never touched
+    assert se.expire_open(db, NOW) == 0                                        # second pass: nothing left
+
+
+def test_expire_open_never_follows_a_price(db, monkeypatch):
     r = _open_row(db)
-    monkeypatch.setattr(se, "_live_price", lambda s: px)
-    assert se.resolve_open(db, NOW) == 1
+    monkeypatch.setattr(se, "_live_price", lambda s: (_ for _ in ()).throw(AssertionError("followed a price")))
+    assert se.expire_open(db, NOW) == 1
     db.refresh(r)
-    assert r.status == status and r.exit_price == exit_px and r.gross_pnl == gross and r.net_pnl < gross
+    assert r.status == "EXPIRED" and r.low_water == 100.0
 
 
-def test_resolve_leaves_a_midrange_row_open_and_tracks_water(db, monkeypatch):
-    r = _open_row(db)
-    monkeypatch.setattr(se, "_live_price", lambda s: 99.5)
-    assert se.resolve_open(db, NOW) == 0
-    db.refresh(r)
-    assert r.status == "OPEN" and r.low_water == 99.5
+def test_the_follower_is_gone():
+    assert not hasattr(se, "resolve_open") and not hasattr(se, "_close")
 
 
-def test_resolve_closes_at_the_short_squareoff_time(db, monkeypatch):
-    r = _open_row(db)
-    monkeypatch.setattr(se, "_live_price", lambda s: 99.5)
-    assert se.resolve_open(db, AFTER_SQ) == 1
-    db.refresh(r)
-    assert r.status == "EOD" and r.exit_price == 99.5 and r.gross_pnl == 5.0
-
-
-def test_a_missing_price_leaves_the_row_open(db, monkeypatch):
-    r = _open_row(db)
-    monkeypatch.setattr(se, "_live_price", lambda s: None)
-    assert se.resolve_open(db, NOW) == 0
-    db.refresh(r)
-    assert r.status == "OPEN"
-
-
-def test_stop_wins_when_both_levels_are_crossed(db, monkeypatch):
-    r = _open_row(db, stop_price=99.0, target_price=101.0)           # nonsense geometry: price 100 is past both -> the conservative STOP
-    monkeypatch.setattr(se, "_live_price", lambda s: 100.0)
-    se.resolve_open(db, NOW)
-    db.refresh(r)
-    assert r.status == "STOP"
-
-
-def test_an_unresolved_row_from_an_earlier_day_expires_without_a_result(db, monkeypatch):
-    r = _open_row(db, day="2026-10-22")
-    monkeypatch.setattr(se, "_live_price", lambda s: 99.5)
-    assert se.resolve_open(db, NOW) == 1
-    db.refresh(r)
-    assert r.status == "EXPIRED" and r.net_pnl is None
-
-
-def test_summary_counts_closed_rows_only(db, monkeypatch):
-    _open_row(db, symbol="A")
+def test_summary_counts_closed_rows_only(db):
+    _open_row(db, symbol="A", status="TARGET", exit_price=98.0, gross_pnl=20.0, net_pnl=18.0)
     _open_row(db, symbol="B")
-    monkeypatch.setattr(se, "_live_price", lambda s: 97.0 if s == "A" else 99.0)
-    se.resolve_open(db, NOW)
     s = se.summary(db)
     assert s["total"] == 2 and s["closed"] == 1 and s["open"] == 1 and s["target"] == 1 and s["net_pnl"] > 0
 
@@ -189,13 +160,12 @@ def test_cycle_in_off_mode_places_nothing_and_does_not_scan(db, monkeypatch):
     assert out["mode"] == "off" and out["recorded"] is None
 
 
-def test_cycle_in_off_mode_still_closes_leftover_rows(db, monkeypatch):
+def test_cycle_in_off_mode_still_expires_leftover_rows(db, monkeypatch):
     r = _open_row(db)
     monkeypatch.setattr(config, "SHORT_MODE", "off")
-    monkeypatch.setattr(se, "_live_price", lambda s: 101.5)
     assert asyncio.run(se.run_short_cycle(db, NOW))["resolved"] == 1
     db.refresh(r)
-    assert r.status == "STOP"
+    assert r.status == "EXPIRED"
 
 
 def test_live_cycle_hands_only_the_board_ranked_faller_to_short_live(db, monkeypatch):

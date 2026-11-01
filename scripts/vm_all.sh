@@ -83,7 +83,7 @@ cmd_check(){
 
   hr "4. Dhan IP rule: is this host the registered IP? (expect verdict OK; MISMATCH / NOT_CONFIGURED = every order will be refused)"
   get positionstocks/dhan/ip-status "$PS" 40
-  echo "VM public IP (compare by hand with the static IP in Dhan Web):"; curl -s -m 10 ifconfig.me; echo
+  echo "VM public IP (compare by hand with the static IP in Dhan Web):"; vm_ip=""; for u in https://api.ipify.org https://checkip.amazonaws.com https://ifconfig.me; do vm_ip="$(curl -s -m 8 "$u" 2>/dev/null | tr -d '[:space:]')"; echo "$vm_ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' && break; vm_ip=""; done; echo "${vm_ip:-could not read it from ipify / amazonaws / ifconfig.me (an outside service was down; the Dhan ip-status above and the network-check below report the IP too)}"
   get realtrade/dhan/network-check "$RT" 25
 
   hr "5. Position Stocks /live/state (order rate, momentum, heat, ladder, ip_guard, modify_cap, volume_profile)"

@@ -162,7 +162,8 @@ def test_trail_distance_unchanged_without_a_dip():
         assert exit_adaptive.trail_distance_pct(sp, br) == exit_adaptive.trail_distance_pct(sp, br, None)
 
 
-def test_dip_widens_the_trail_but_never_past_the_stop():
+def test_dip_widens_the_trail_but_never_past_the_stop(monkeypatch):
+    monkeypatch.setattr(config, "TRAIL_ADAPTIVE_ENABLED", True, raising=False)      # conftest turns it off for older tests
     base = exit_adaptive.trail_distance_pct(1.0, 0.3)
     wide = exit_adaptive.trail_distance_pct(1.0, 0.3, {"dip_pct": 0.9, "n": 300, "cell": "w|x"})
     assert wide > base and wide <= 1.0 + 1e-9
@@ -178,7 +179,8 @@ def test_adaptive_off_ignores_the_dip():
         config.TRAIL_ADAPTIVE_ENABLED = True
 
 
-def test_trailing_stop_sits_lower_with_a_dip():
+def test_trailing_stop_sits_lower_with_a_dip(monkeypatch):
+    monkeypatch.setattr(config, "TRAIL_ADAPTIVE_ENABLED", True, raising=False)      # conftest turns it off for older tests
     import importlib.util
     names = ("sqlalchemy", "sqlalchemy.orm", "models", "execution", "execution.dhan_client")
     saved = {k: sys.modules.get(k) for k in names}

@@ -90,14 +90,14 @@ def early_cap_reason(db, now: Optional[datetime] = None) -> Optional[str]:
 
 
 def realized_since_open(db, now: Optional[datetime] = None) -> float:
-    """Net realised rupees of positions closed since today's 09:15 bell (net_pnl, else realized_pnl, else 0 per row). 0.0 on any error."""
+    """Net realised rupees of positions closed since today's 09:15 bell (the position's realized_pnl, 0 for a row without one; charges are not deducted, so it is the gross figure). 0.0 on any error."""
     try:
         from models import ScalpPosition
         n = ist_now(now)
         since = n.replace(hour=9, minute=15, second=0, microsecond=0).astimezone(timezone.utc)
         total = 0.0
         for r in db.query(ScalpPosition).filter(ScalpPosition.closed_at.isnot(None), ScalpPosition.closed_at >= since).all():
-            v = r.net_pnl if r.net_pnl is not None else r.realized_pnl
+            v = r.realized_pnl      # E285 round 116: ScalpPosition has no net_pnl column (that one is on the charges ledger); reading it raised and the budget never fired
             if v is not None and v == v:
                 total += float(v)
         return total

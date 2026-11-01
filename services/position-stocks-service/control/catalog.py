@@ -84,7 +84,7 @@ CATALOG = (
     Flag("OPENING_MAX_POSITIONS", "Open positions allowed in the opening window", "Opening window", "int", lo=0, hi=10, looser="higher", zero_off=True, help="E285 round 99: at most this many positions open at once until the window ends. 0 = no cap.",
          targets=((_C, "OPENING_MAX_POSITIONS"),), live=True, shipped="2", evidence="opening_replay.py"),
     Flag("OPENING_LOSS_BUDGET_FRAC", "Opening loss budget (share of the day's loss cap)", "Opening window", "float", lo=0, hi=1, looser="higher", zero_off=True, help="E285 round 99: once the realised loss since the bell reaches this share of the day's loss cap, no new entry until the window ends. 0 = off.",
-         targets=((_C, "OPENING_LOSS_BUDGET_FRAC"),), live=True, shipped="0.3333", evidence="opening_replay.py"),
+         targets=((_C, "OPENING_LOSS_BUDGET_FRAC"),), live=True, shipped="0.333333", evidence="opening_replay.py"),
     Flag("OPENING_PLAN_ENABLED", "09:10 opening plan", "Opening window", "bool", looser="neutral", help="Plans stops from the pre-open snapshot.",
          targets=((_C, "OPENING_PLAN_ENABLED"),), live=True, shipped="true"),
     # ---------------- evidence recording ----------------

@@ -50,7 +50,7 @@ def pos(db, status="OPEN", closed_at=None, net=None, realized=None):
     n = next(_ids)
     db.add(models.ScalpPosition(symbol=f"R99{n}", dhan_security_id=str(n), window_source="5m", status=status, entry_price=100.0, quantity=1,
                                 target_price=104.0, stop_price=99.0, adaptive_target_pct=4.0, adaptive_stop_pct=1.0, capital_risked=100.0,
-                                closed_at=closed_at.astimezone(timezone.utc) if closed_at else None, net_pnl=net, realized_pnl=realized))
+                                closed_at=closed_at.astimezone(timezone.utc) if closed_at else None, realized_pnl=(net if net is not None else realized)))
     db.commit()
 
 

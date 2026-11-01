@@ -5,7 +5,7 @@
   TOKEN=<admin session token> python3 scripts/dhan_half_sell_probe.py --status          (reads the last result, places nothing)
 
 Without --yes nothing is sent: it prints what would happen and `HALF-SELL PROBE: SKIPPED - ...`. With --yes it calls position-stocks POST /half-sell/probe, which runs the whole
-sequence inside the service (docs/E283_HALF_SELL_PROBE_PROTOCOL.md): BUY 2 with a Super Order, cancel the target leg, cancel the stop leg, MARKET SELL 1, SELL stop for the other
+sequence inside the service (the steps T0..T6 and questions Q1..Q7 are written at the top of services/position-stocks-service/orders/half_sell_probe.py): BUY 2 with a Super Order, cancel the target leg, cancel the stop leg, MARKET SELL 1, SELL stop for the other
 share, read everything back, cancel the stop, SELL the last share. The service refuses outside 09:30-14:30 IST, when not armed, when the kill switch is tripped, for a stock above
 Rs 500 and for any symbol that is held. If it cannot get flat the leftover is adopted as a normal long position and Telegram shouts.
 Prints the steps, the answers Q1..Q7 and ends with `HALF-SELL PROBE: PASS | FAIL - <reason> | SKIPPED - <reason> | NOT_RUN - <reason>`.

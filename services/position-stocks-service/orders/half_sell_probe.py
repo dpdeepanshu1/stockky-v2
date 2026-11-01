@@ -1,6 +1,6 @@
 """orders/half_sell_probe.py - E283 / E285 round 98: the Dhan HALF-SELL probe. Position Stocks only. Run it ONCE, supervised, before `MOMENTUM_SCALEOUT` is built.
 
-WHAT (docs/E283_HALF_SELL_PROBE_PROTOCOL.md, in code): `modify_super_order` changes only a leg's PRICE, so selling half of a position that sits under a Super Order cannot be one
+WHAT (the protocol, written down here; the separate Markdown note was removed in round 124 because .gitignore keeps only README and CHANGELOG): `modify_super_order` changes only a leg's PRICE, so selling half of a position that sits under a Super Order cannot be one
 modify. The planned sequence is: cancel both legs, sell half at market, place a new stop for the rest. Nothing in this repo has proven that on Dhan. This runs it once, at the
 smallest size, and writes down what Dhan did:
   T0 BUY 2 shares INTRADAY with a Super Order (target above, stop below), wait for the fill, read the order back

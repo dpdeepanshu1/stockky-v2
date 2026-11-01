@@ -242,7 +242,7 @@ def test_verify_mode_ignores_gitignored_leftovers_but_still_checks_listed_files(
     ok = run(sys.executable, "scripts/check_stale_files.py", "--verify")
     assert ok.returncode == 0 and "matches the disk" in ok.stdout, ok.stdout
     (repo / "docs" / "kept.md").unlink()                             # listed file gone: still reported
-    (repo / "new_live_file.py").write_text("n")                      # not ignored, not listed: still reported
+    (repo / "new_live_file.py").write_text("n")                      # not ignored, not listed: still reported (no file is tracked yet, so the disk-only rules apply)
     bad = run(sys.executable, "scripts/check_stale_files.py", "--verify")
     assert bad.returncode == 1 and "new_live_file.py" in bad.stdout and "docs/kept.md" in bad.stdout and ".venv-test" not in bad.stdout
 
@@ -256,6 +256,152 @@ def test_every_tracked_file_of_this_checkout_is_in_the_manifest():
     known = {l.strip() for l in csf.MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
     gone = csf.stale(tracked, known)
     assert not gone, f"tracked files missing from docs/FILE_MANIFEST.txt (run: python3 scripts/check_stale_files.py --write): {gone[:10]}"
+
+
+def _git_repo_with_release(tmp_path):
+    """E285 round 124: a checkout like the VM's: a tracked release (listed in the manifest) plus untracked local leftovers that .gitignore does NOT cover."""
+    repo = tmp_path / "r"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    shutil.copy(SCRIPTS / "check_stale_files.py", repo / "scripts" / "check_stale_files.py")
+    (repo / ".gitignore").write_text(".venv-test/\n")
+    (repo / "a.py").write_text("a")
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True)
+    run("git", "init", "-q")
+    assert run(sys.executable, "scripts/check_stale_files.py", "--write").returncode == 0      # manifest = the release
+    run("git", "add", "-A")
+    return repo, run
+
+
+def test_verify_in_a_git_checkout_summarises_untracked_leftovers_in_one_line(tmp_path):
+    """E285 round 124: bars/, hist400/, kronos*.log, rt_*.json ... are untracked and NOT ignored. --verify printed ~10,000 `git rm` lines for them."""
+    repo, run = _git_repo_with_release(tmp_path)
+    for d, n in (("bars", 30), ("hist400", 50)):
+        (repo / d).mkdir()
+        for i in range(n):
+            (repo / d / f"f{i}.json").write_text("{}")
+    (repo / "kronos_full.log").write_text("l")
+    (repo / "rt_2026-10-18.json").write_text("{}")
+    (repo / ".venv-test").mkdir()
+    (repo / ".venv-test" / "x.py").write_text("x")
+    r = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert r.returncode == 0 and r.stdout.splitlines()[0].startswith("manifest matches the disk: "), r.stdout
+    assert "git rm" not in r.stdout and "on disk but not in the manifest" not in r.stdout
+    lines = [l for l in r.stdout.splitlines() if l.strip()]
+    assert len(lines) == 2 and lines[1].startswith("note: ") and "hist400/ (50)" in lines[1] and "bars/ (30)" in lines[1] and "kronos_full.log" in lines[1], r.stdout
+
+
+def test_verify_in_a_git_checkout_still_flags_a_tracked_file_the_manifest_lacks_and_a_listed_file_that_is_gone(tmp_path):
+    repo, run = _git_repo_with_release(tmp_path)
+    (repo / "new_live_file.py").write_text("n")
+    run("git", "add", "new_live_file.py")                           # tracked now, manifest not regenerated
+    (repo / "a.py").unlink()                                        # listed, gone from disk
+    (repo / "bars").mkdir()
+    (repo / "bars" / "x.json").write_text("{}")
+    r = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert r.returncode == 1, r.stdout
+    assert "on disk but not in the manifest (the VM would be told to git rm it): new_live_file.py" in r.stdout
+    assert "in the manifest but not on disk: a.py" in r.stdout and "bars/x.json" not in r.stdout and "note: 1 untracked" in r.stdout
+
+
+def test_untracked_summary_groups_by_top_level_folder_and_caps_the_groups():
+    import check_stale_files as csf
+    paths = [f"d{i}/f.json" for i in range(12)] + ["bars/a.json", "bars/b.json", "x.log"]
+    out = csf.untracked_summary(sorted(paths))
+    assert out.startswith("note: 15 untracked local file(s)") and "bars/ (2)" in out and "+6 more" in out and out.count("\n") == 0
+    assert "x.log" in csf.untracked_summary(["x.log"]) and "x.log (" not in csf.untracked_summary(["x.log"])
+
+
+def test_the_e283_protocol_note_is_gone_and_no_code_points_at_it():
+    """E285 round 124: .gitignore keeps only README.md and CHANGELOG.md, so docs/E283_HALF_SELL_PROBE_PROTOCOL.md could never be in a git checkout (--verify: "in the manifest but not on disk")."""
+    name = "E283_HALF_SELL_PROBE_PROTOCOL"
+    assert not (ROOT / "docs" / (name + ".md")).exists()
+    assert name not in (ROOT / "docs" / "FILE_MANIFEST.txt").read_text(encoding="utf-8")
+    for rel in ("scripts/dhan_half_sell_probe.py", "services/position-stocks-service/orders/half_sell_probe.py"):
+        assert name not in (ROOT / rel).read_text(encoding="utf-8"), rel
+    md = [l for l in (ROOT / "docs" / "FILE_MANIFEST.txt").read_text(encoding="utf-8").splitlines() if l.startswith("docs/") and l.endswith(".md")]
+    assert md == [], md                                             # docs/ holds no Markdown note any more (a note there cannot survive a git checkout)
+
+
+# ── E285 round 124: daily history freshness (fetch_history_for_backtest --max-age-days / --report-ages) ───────────────
+
+def _fh_candles(last, n=300):
+    import datetime as dt
+    end = dt.date.fromisoformat(last)
+    return [{"date": (end - dt.timedelta(days=n - 1 - i)).isoformat(), "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1} for i in range(n)]
+
+
+def test_candle_date_reads_iso_and_epoch_and_is_stale_only_beyond_the_limit():
+    import datetime as dt
+    import fetch_history_for_backtest as fh
+    assert fh.candle_date({"date": "2026-10-30"}) == dt.date(2026, 10, 30)
+    assert fh.candle_date({"date": "2026-10-30T00:00:00+05:30"}) == dt.date(2026, 10, 30)
+    assert fh.candle_date({"t": 1793318400}) is not None and fh.candle_date({"date": "junk"}) is None and fh.candle_date("x") is None
+    today = dt.date(2026, 11, 2)
+    assert fh.is_stale(dt.date(2026, 10, 28), 5, today) is False        # 5 days old: a long weekend is not stale
+    assert fh.is_stale(dt.date(2026, 10, 27), 5, today) is True
+    assert fh.is_stale(dt.date(2020, 1, 1), 0, today) is False          # off by default
+    assert fh.is_stale(None, 5, today) is True
+
+
+def test_a_rerun_fetches_a_stale_file_again_and_keeps_the_old_one_when_the_refetch_fails_or_is_not_newer(tmp_path, monkeypatch, capsys):
+    import json
+    import fetch_history_for_backtest as fh
+    out = tmp_path / "h"
+    out.mkdir()
+    old = _fh_candles("2026-10-20")
+    for sym in ("OLDOK", "OLDFAIL", "OLDSAME", "FRESH"):
+        last = "2026-10-30" if sym == "FRESH" else "2026-10-20"
+        (out / f"{sym}.json").write_text(json.dumps({"symbol": sym, "candles": _fh_candles(last)}))
+    (out / "^NSEI.json").write_text(json.dumps({"symbol": "^NSEI", "candles": _fh_candles("2026-10-30")}))
+    monkeypatch.setattr(fh, "today_ist", lambda: __import__("datetime").date(2026, 11, 2))
+    calls = []
+
+    def fake(base, sym, period, retries, sleep, timeout):
+        calls.append(sym)
+        if sym == "OLDOK":
+            return _fh_candles("2026-10-30"), ""
+        if sym == "OLDSAME":
+            return old, ""
+        return None, "network"
+    monkeypatch.setattr(fh, "fetch_one_ex", fake)
+    monkeypatch.setattr(fh, "fetch_one", lambda *a, **k: fake(*a, **k)[0])
+    rc = fh.main([str(out), "--symbols", "OLDOK,OLDFAIL,OLDSAME,FRESH", "--base", "http://x", "--sleep", "0", "--min-bars", "250", "--max-age-days", "5"])
+    assert rc == 0 and sorted(calls) == ["OLDFAIL", "OLDOK", "OLDSAME"]            # FRESH is not fetched
+    summary = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert (summary["saved"], summary["refreshed"], summary["stale_kept"], summary["failed"]) == (1, 1, 2, 0)
+    assert summary["newest_last_candle"] == "2026-10-30" and summary["oldest_last_candle"] == "2026-10-20"
+    assert fh.last_candle_date(json.loads((out / "OLDOK.json").read_text())["candles"]).isoformat() == "2026-10-30"
+    assert fh.last_candle_date(json.loads((out / "OLDFAIL.json").read_text())["candles"]).isoformat() == "2026-10-20"     # old file survived
+
+
+def test_without_max_age_days_a_kept_file_is_never_fetched_again(tmp_path, monkeypatch, capsys):
+    import json
+    import fetch_history_for_backtest as fh
+    out = tmp_path / "h"
+    out.mkdir()
+    (out / "A.json").write_text(json.dumps({"symbol": "A", "candles": _fh_candles("2026-01-05")}))
+    (out / "^NSEI.json").write_text(json.dumps({"symbol": "^NSEI", "candles": _fh_candles("2026-01-05")}))
+    monkeypatch.setattr(fh, "fetch_one_ex", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch")))
+    monkeypatch.setattr(fh, "fetch_one", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch")))
+    assert fh.main([str(out), "--symbols", "A", "--base", "http://x", "--sleep", "0"]) == 0
+    summary = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert summary["kept"] == 1 and summary["saved"] == 0 and "refreshed" not in summary
+
+
+def test_report_ages_prints_the_freshness_of_a_history_folder_without_the_network(tmp_path, monkeypatch, capsys):
+    import json
+    import fetch_history_for_backtest as fh
+    out = tmp_path / "h"
+    out.mkdir()
+    for sym, last in (("A", "2026-10-30"), ("B", "2026-10-30"), ("C", "2026-10-21")):
+        (out / f"{sym}.json").write_text(json.dumps({"symbol": sym, "candles": _fh_candles(last, 10)}))
+    (out / "BAD.json").write_text("not json")
+    monkeypatch.setattr(fh, "today_ist", lambda: __import__("datetime").date(2026, 11, 2))
+    monkeypatch.setattr(fh, "_get_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network")))
+    assert fh.main([str(out), "--report-ages", "--max-age-days", "5"]) == 0
+    text = capsys.readouterr().out
+    assert "3 file(s); newest last candle 2026-10-30, oldest 2026-10-21" in text and "1 older than 5 day(s)" in text and "1 unreadable" in text and "2026-10-30 x2" in text
 
 
 def test_env_reference_check_names_the_differing_rows(tmp_path):

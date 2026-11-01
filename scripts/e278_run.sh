@@ -3,10 +3,12 @@
 #   bash scripts/e278_run.sh                 # all names in SWING_UNIVERSE_SYMBOLS (.env), 5 years of daily history, then the study
 #   bash scripts/e278_run.sh --skip-fetch    # reuse the history already in $HIST (a re-run takes seconds)
 #   bash scripts/e278_run.sh --sample 200    # a random 200 of the universe (faster, still unbiased)
+# E285 round 124: a kept history file whose last candle is more than MAX_AGE_DAYS (default 5) days old is fetched again, so a re-run no longer says "kept 742, saved 0" on an old
+# history. Step 2 ends with one line that shows how fresh the history is (newest / oldest last candle); with --skip-fetch it is the only thing that step does.
 # Folders (override by exporting before the command): HIST=~/hist744  BARS=~/bar_copy  OUT=~/sweep_out.  Market data: $MARKET_DATA_URL, else http://127.0.0.1:8001
 # (the port docker-compose.yml publishes on the host). Offline study: it reads files and one read-only history route, never touches an order, a switch or the database.
 cd "$(dirname "$0")/.." || exit 2
-HIST="${HIST:-$HOME/hist744}"; BARS="${BARS:-$HOME/bar_copy}"; OUT="${OUT:-$HOME/sweep_out}"
+HIST="${HIST:-$HOME/hist744}"; BARS="${BARS:-$HOME/bar_copy}"; OUT="${OUT:-$HOME/sweep_out}"; MAX_AGE_DAYS="${MAX_AGE_DAYS:-5}"
 BASE="${MARKET_DATA_URL:-http://127.0.0.1:8001}"
 SKIP_FETCH=0; SAMPLE=0
 while [ $# -gt 0 ]; do
@@ -36,12 +38,13 @@ urllib.request.urlopen(sys.argv[1].rstrip("/") + "/health", timeout=15).read()
 PY
   EXTRA=()
   [ "$SAMPLE" -gt 0 ] && EXTRA=(--sample "$SAMPLE")
-  MARKET_DATA_URL="$BASE" python3 scripts/fetch_history_for_backtest.py "$HIST" --symbols-file "$SYMS" --period 5y --limit 0 --min-bars 250 "${EXTRA[@]}" \
+  MARKET_DATA_URL="$BASE" python3 scripts/fetch_history_for_backtest.py "$HIST" --symbols-file "$SYMS" --period 5y --limit 0 --min-bars 250 --max-age-days "$MAX_AGE_DAYS" "${EXTRA[@]}" \
     || echo "NOTE: the fetch reported failures; the study still runs on the files that were saved"
 else
   step "2. history: skipped (using $HIST)"
 fi
 [ -d "$HIST" ] && [ "$(ls "$HIST" | wc -l)" -ge 1 ] || die "no daily history in $HIST (part A cannot run)"
+python3 scripts/fetch_history_for_backtest.py "$HIST" --report-ages --max-age-days "$MAX_AGE_DAYS" || true
 
 step "3. copy the recorded 1-minute bars to $BARS"
 V=$(docker volume ls -q | grep -E 'bar-records$' | head -1)

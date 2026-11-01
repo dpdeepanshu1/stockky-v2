@@ -3,13 +3,16 @@
 
   [MARKET_DATA_URL=http://host:port] python3 scripts/fetch_history_for_backtest.py OUT_DIR [--symbols RELIANCE,TCS | --symbols-file f.txt | --universe-url URL]
         [--period 5y] [--sample 400 | --limit 0] [--seed 7] [--manifest sample.json] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI]
-        [--max-failures-pct 60]
+        [--max-failures-pct 60] [--max-age-days N] [--report-ages]
 
 Base URL (E284): --base, else $MARKET_DATA_URL, else http://127.0.0.1:8001, the market-data port docker-compose.yml publishes on the VM host
 (loopback only), so on the VM the command needs no URL at all. An explicit empty --base is still an error.
 Symbols come from (first that is given): --symbols, --symbols-file (one per line, '#' comments), --universe-url (the gateway's /api/universe: a JSON list).
 The benchmark (default ^NSEI) is always fetched first and saved as ^NSEI.json; the A/B report needs it to tag regimes. Existing files with >= --min-bars
 candles are kept (re-run to resume) unless --refresh.
+--max-age-days N (E285 round 124; 0 = off, the default): a kept file whose LAST candle is more than N calendar days before today (IST) is fetched again, so a re-run
+refreshes an old history instead of reporting "kept 742, saved 0" forever. A failed re-fetch keeps the old file; a re-fetch that is not newer counts as stale_kept.
+--report-ages: read nothing from the network; print how fresh the files in OUT_DIR are (newest / oldest last candle, how many are older than --max-age-days) and stop.
 --sample N draws N symbols at random from the de-duplicated, SORTED list, so the same --seed gives the same sample whatever order the universe endpoint
 returns (the old draw depended on that order). --manifest FILE writes the seed, the universe size and the exact symbols drawn (keep it outside OUT_DIR:
 the A/B report reads every *.json in OUT_DIR); feed its "symbols" back with --symbols to replay the identical sample. Stdlib only. Exit 0 when the benchmark and at least one symbol were saved and the failure rate is
@@ -18,6 +21,7 @@ under --max-failures-pct; otherwise 1, so a CI run does not report on a hollow d
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import sys
@@ -46,6 +50,71 @@ def _get_json(url: str, timeout: float) -> Any:
 def candles_of(doc: Any) -> list:
     c = doc.get("candles") if isinstance(doc, dict) else doc
     return c if isinstance(c, list) else []
+
+
+_IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+
+
+def today_ist() -> _dt.date:
+    return _dt.datetime.now(_IST).date()
+
+
+def candle_date(c: Any) -> Optional[_dt.date]:
+    """E285 round 124: the session date of one daily candle ({date|t|timestamp: 'YYYY-MM-DD[...]' or epoch s/ms}); None when it cannot be read."""
+    if not isinstance(c, dict):
+        return None
+    v = c.get("date") if c.get("date") is not None else (c.get("t") if c.get("t") is not None else c.get("timestamp"))
+    try:
+        if isinstance(v, bool) or v is None:
+            return None
+        if isinstance(v, (int, float)):
+            x = float(v)
+            x = x / 1000.0 if x > 1e11 else x
+            return _dt.datetime.fromtimestamp(x, tz=_dt.timezone.utc).astimezone(_IST).date()
+        s = str(v).strip()
+        return _dt.date.fromisoformat(s[:10]) if len(s) >= 10 else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def last_candle_date(candles: Any) -> Optional[_dt.date]:
+    """The newest session date among the candles (does not assume they are sorted)."""
+    best = None
+    for c in candles if isinstance(candles, list) else []:
+        d = candle_date(c)
+        if d is not None and (best is None or d > best):
+            best = d
+    return best
+
+
+def is_stale(last: Optional[_dt.date], max_age_days: int, today: Optional[_dt.date] = None) -> bool:
+    """True when --max-age-days is on and the newest candle is more than that many calendar days old (an unreadable date counts as stale)."""
+    if max_age_days <= 0:
+        return False
+    if last is None:
+        return True
+    return ((today or today_ist()) - last).days > max_age_days
+
+
+def ages_report(out: Path, max_age_days: int, today: Optional[_dt.date] = None) -> dict:
+    """How fresh the per-symbol files in `out` are. Pure file reads."""
+    today = today or today_ist()
+    by: dict = {}
+    unreadable = 0
+    for p in sorted(out.glob("*.json")):
+        try:
+            d = last_candle_date(candles_of(json.loads(p.read_text())))
+        except Exception:  # noqa: BLE001
+            d = None
+        if d is None:
+            unreadable += 1
+            continue
+        by[d.isoformat()] = by.get(d.isoformat(), 0) + 1
+    files = sum(by.values())
+    older = sum(n for k, n in by.items() if is_stale(_dt.date.fromisoformat(k), max_age_days, today)) if max_age_days > 0 else 0
+    return {"files": files, "unreadable": unreadable, "newest": max(by) if by else None, "oldest": min(by) if by else None,
+            "older_than_days": older, "max_age_days": max_age_days, "today_ist": today.isoformat(),
+            "last_dates": dict(sorted(by.items(), reverse=True)[:6])}
 
 
 def read_symbols(args: argparse.Namespace) -> List[str]:
@@ -144,6 +213,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--min-bars", type=int, default=250)
     ap.add_argument("--max-failures-pct", type=float, default=60.0)
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--max-age-days", type=int, default=0, help="fetch again a kept file whose last candle is more than N days old (0 = off)")
+    ap.add_argument("--report-ages", action="store_true", help="print how fresh the files in OUT_DIR are and stop (no network)")
     ap.add_argument("--benchmark-only", action="store_true", help="fetch / refresh just the benchmark (^NSEI.json, the exchange calendar the entry-rules backtest needs) and stop")
     a = ap.parse_args(argv)
     base = resolve_base(a.base)
@@ -151,6 +222,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("--base / MARKET_DATA_URL must start with http:// or https:// (or leave both unset to use " + DEFAULT_BASE + ")", file=sys.stderr)
         return 2
     out = Path(a.out_dir)
+    if a.report_ages:
+        r = ages_report(out, a.max_age_days)
+        line = (f"history freshness in {out}: {r['files']} file(s); newest last candle {r['newest']}, oldest {r['oldest']} (today {r['today_ist']} IST)"
+                + (f"; {r['older_than_days']} older than {r['max_age_days']} day(s)" if r["max_age_days"] > 0 else "")
+                + (f"; {r['unreadable']} unreadable" if r["unreadable"] else ""))
+        print(line)
+        if r["last_dates"]:
+            print("  last candle dates (newest first): " + ", ".join(f"{k} x{v}" for k, v in r["last_dates"].items()))
+        return 0
     out.mkdir(parents=True, exist_ok=True)
     if a.benchmark_only:                      # group427: hist400 had no ^NSEI.json; this adds it without touching the 400 stock files
         bpath = out / f"{a.benchmark}.json"
@@ -189,34 +269,65 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"could not write the sample manifest {a.manifest}: {e}", file=sys.stderr)
             return 2
 
-    def keep(path: Path) -> bool:
+    def inspect(path: Path) -> tuple:
+        """(state, last candle date): state is "missing" (no usable file, or --refresh), "stale" (enough candles, but the newest is older than --max-age-days) or "fresh"."""
         if a.refresh or not path.exists():
-            return False
+            return "missing", None
         try:
-            return len(candles_of(json.loads(path.read_text()))) >= a.min_bars
+            cs = candles_of(json.loads(path.read_text()))
         except Exception:  # noqa: BLE001
-            return False
+            return "missing", None
+        if len(cs) < a.min_bars:
+            return "missing", None
+        last = last_candle_date(cs)
+        return ("stale" if is_stale(last, a.max_age_days) else "fresh"), last
+
+    def keep(path: Path) -> bool:
+        return inspect(path)[0] == "fresh"
 
     bm = a.benchmark
     bpath = out / f"{bm}.json"
-    if not keep(bpath):
+    bstate, _blast = inspect(bpath)
+    if bstate != "fresh":
         c = fetch_one(base, bm, a.period, a.retries, a.sleep, a.timeout)
-        if not c or len(c) < a.min_bars:
+        if c and len(c) >= a.min_bars:
+            bpath.write_text(json.dumps({"symbol": bm, "candles": c}))
+        elif bstate == "stale":
+            print(f"NOTE: benchmark {bm} could not be refreshed; keeping the old file (last candle {_blast})", file=sys.stderr)
+        else:
             print(f"benchmark {bm} unavailable ({len(c or [])} candles) - the report cannot tag regimes", file=sys.stderr)
             return 1
-        bpath.write_text(json.dumps({"symbol": bm, "candles": c}))
-    ok = skipped = 0
+    ok = skipped = refreshed = stale_kept = 0
     failed: List[str] = []
     reasons: dict = {}
+    lasts: List[_dt.date] = []
     for n, sym in enumerate(syms, 1):
         p = out / f"{sym}.json"
-        if keep(p):
+        state, last = inspect(p)
+        if state == "fresh":
             skipped += 1
+            if last:
+                lasts.append(last)
             continue
         c, why = fetch_one_ex(base, sym, a.period, a.retries, a.sleep, a.timeout)
-        if c and len(c) >= a.min_bars:
+        if state == "stale":
+            new_last = last_candle_date(c) if c else None
+            if c and len(c) >= a.min_bars and new_last is not None and (last is None or new_last > last):
+                p.write_text(json.dumps({"symbol": sym, "candles": c}))
+                ok += 1
+                refreshed += 1
+                lasts.append(new_last)
+            else:                                   # the old file is still usable: keep it, do not count a failure
+                skipped += 1
+                stale_kept += 1
+                if last:
+                    lasts.append(last)
+        elif c and len(c) >= a.min_bars:
             p.write_text(json.dumps({"symbol": sym, "candles": c}))
             ok += 1
+            nl = last_candle_date(c)
+            if nl:
+                lasts.append(nl)
         else:
             failed.append(sym)
             key = why or "short_history"          # candles came back but fewer than --min-bars (a recent listing)
@@ -226,8 +337,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         time.sleep(a.sleep)
     total = len(syms)
     pct = 100.0 * len(failed) / total
-    print(json.dumps({"requested": total, "saved": ok, "kept": skipped, "failed": len(failed), "failed_pct": round(pct, 1),
-                      "failed_reasons": reasons, "failed_sample": failed[:20]}))
+    summary = {"requested": total, "saved": ok, "kept": skipped, "failed": len(failed), "failed_pct": round(pct, 1),
+               "failed_reasons": reasons, "failed_sample": failed[:20]}
+    if lasts:
+        summary.update({"newest_last_candle": max(lasts).isoformat(), "oldest_last_candle": min(lasts).isoformat()})
+    if a.max_age_days > 0:
+        summary.update({"refreshed": refreshed, "stale_kept": stale_kept, "max_age_days": a.max_age_days})
+    print(json.dumps(summary))
     if ok == 0 and failed and reasons.get("http_404", 0) == len(failed):
         print(f"HINT: nothing new was saved and every failure was HTTP 404 from {base}/history/<SYM>. --base must be the MARKET-DATA service "
               f"(it serves /history/<SYM>); the api-gateway only has /market/history/<SYM>. Check --base / MARKET_DATA_URL.", file=sys.stderr)

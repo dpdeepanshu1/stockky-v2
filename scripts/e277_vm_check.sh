@@ -3,6 +3,30 @@
 #   bash scripts/e277_vm_check.sh
 cd "$(dirname "$0")/.." || exit 2
 ok(){ echo "PASS $*"; }; bad(){ echo "FAIL $*"; }; warn(){ echo "WARN $*"; }
+# E285 round 124: ask one service for one route from INSIDE its container and keep asking until it answers (E277_WAIT_S seconds, default 90, every E277_POLL_S, default 5).
+# A service started a few seconds earlier is not listening yet; the first answer was `ERR URLError` and looked like a fault. Every line names its service.
+#   probe <service> <port> <path>      any HTTP answer below 500 counts as "answering" (401 = the route exists and wants the admin login)
+probe(){
+  local svc="$1" port="$2" path="$3" wait="${E277_WAIT_S:-90}" poll="${E277_POLL_S:-5}" t0=$SECONDS r last="no answer yet"
+  while :; do
+    r=$(docker compose exec -T "$svc" python -c "import urllib.request,urllib.error
+try: print('OK',urllib.request.urlopen('http://localhost:$port$path',timeout=15).status)
+except urllib.error.HTTPError as e: print('HTTP',e.code)
+except Exception as e: print('ERR',type(e).__name__)" 2>/dev/null | tr -d '\r' | tail -1)
+    case "$r" in
+      "OK "*)   ok "$svc :$port$path answered ${r#OK }"; return 0 ;;
+      "HTTP "*) if [ "${r#HTTP }" -lt 500 ] 2>/dev/null; then ok "$svc :$port$path answered HTTP ${r#HTTP } (the route exists; 401 = needs the admin login)"; return 0; fi
+                last="$r" ;;
+      "ERR "*)  last="$r (not listening yet?)" ;;
+      *)        last="the container did not run the check (is it up? docker compose ps $svc)" ;;
+    esac
+    if [ $((SECONDS - t0)) -ge "$wait" ]; then break; fi
+    sleep "$poll"
+  done
+  bad "$svc :$port$path gave no answer in ${wait}s - last: $last. Look: docker compose ps $svc ; docker compose logs --tail 40 $svc"
+  return 1
+}
+[ "${E277_FUNCS_ONLY:-0}" = 1 ] && { return 0 2>/dev/null || exit 0; }
 echo "== 1. is the E277 code in the running containers?"
 n=$(docker compose exec -T position-stocks-service grep -c '/premarket/plan' main.py 2>/dev/null | tr -d '\r')
 [ "${n:-0}" -ge 1 ] && ok "position-stocks has GET /premarket/plan" || bad "position-stocks has no /premarket/plan (rebuild: docker compose up -d --build position-stocks-service)"
@@ -26,12 +50,6 @@ echo "== 4. files the release no longer contains (stale tests break the suites; 
 python3 scripts/check_stale_files.py 2>&1 | tail -30
 echo "== 5. E276 database checks"
 python3 scripts/e276_check.py 2>&1 | tail -40
-echo "== 6. services answering (Real Trade is on 8005, Position Stocks on 8006; 401 on a token route is fine)"
-docker compose exec -T real-trade-service python -c "import urllib.request,urllib.error
-try: print(urllib.request.urlopen('http://localhost:8005/health',timeout=15).status)
-except urllib.error.HTTPError as e: print('HTTP',e.code)
-except Exception as e: print('ERR',type(e).__name__)"
-docker compose exec -T position-stocks-service python -c "import urllib.request,urllib.error
-try: print(urllib.request.urlopen('http://localhost:8006/premarket/plan',timeout=15).status)
-except urllib.error.HTTPError as e: print('HTTP',e.code,'(401 = route exists, needs admin login)')
-except Exception as e: print('ERR',type(e).__name__)"
+echo "== 6. services answering (Real Trade is on 8005, Position Stocks on 8006; 401 on a token route is fine; each one is retried for up to ${E277_WAIT_S:-90}s after a restart)"
+probe real-trade-service 8005 /health
+probe position-stocks-service 8006 /premarket/plan

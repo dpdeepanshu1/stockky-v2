@@ -50,7 +50,6 @@ data/prediction-model/model.pkl.backup-2026-10-30
 deploy/deploy.sh
 deploy/nginx-stockky.conf
 docker-compose.yml
-docs/E283_HALF_SELL_PROBE_PROTOCOL.md
 docs/ENV_REFERENCE.txt
 docs/FILE_MANIFEST.txt
 docs/ROUTE_AUTH_TRIAGE.json

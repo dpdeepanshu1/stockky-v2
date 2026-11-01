@@ -52,6 +52,9 @@ class FakeDB:
         pass
 
 
+import pytest as _pytest_e277
+pytestmark = _pytest_e277.mark.usefixtures("e277_restore_after_each_test")   # E277: _install() swaps config / models / notifier / watchlist_engine.* in sys.modules; undo it after each test
+
 def _install(mode, feed_doc, rss_items=None):
     cfg = types.SimpleNamespace(AFTERHOURS_EVENT_FEED_MODE=mode, AFTERHOURS_EVENT_FEED_TIMEOUT_S=1.0, EVENT_URL="http://event", AFTERHOURS_SCAN_MAX_NEWS_AGE_DAYS=3,
                                 AFTERHOURS_RSS_BLOCKED_COOLDOWN_SECONDS=60, AFTERHOURS_SCAN_MIN_INJECT_SCORE=30.0)

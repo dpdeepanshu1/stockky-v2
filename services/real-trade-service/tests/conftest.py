@@ -306,17 +306,22 @@ def _e272_afterhours_event_reader_off_by_default(monkeypatch):
 
 
 # ---- E277 (test isolation) ------------------------------------------------------------------------------------------------------------
-# Several older tests replace real modules in sys.modules (config, models, feed.ws_client, watchlist_engine.* ...) with small stand-ins, or delete
-# them, and never put the real ones back. Every later test then runs against the stand-in: a setup ERROR in the autouse fixtures above
-# (monkeypatch.setattr on a stand-in config), an ImportError such as "cannot import name X from 'models' (unknown location)", or a patch that lands
-# on a different module object than the code under test reads. This snapshots sys.modules before the first test of a test MODULE and, when the module
-# is done, puts back whatever it swapped or deleted and drops stand-ins it added. Real modules a test imported for the first time stay loaded
+# Older tests change shared state and never put it back: they replace real modules in sys.modules (config, models, feed.ws_client, watchlist_engine.* ...)
+# with stand-ins or delete them, and they overwrite names on the service's own modules (opening_gate.is_active = ..., config.X = ...). Every later test then
+# runs against the leftovers: setup ERRORs in the autouse fixtures above, "cannot import name X from 'models' (unknown location)", patches that land on
+# a different module object than the code under test reads, or gates that behave as an earlier test left them.
+# This snapshots, before the first test of a test MODULE, (a) sys.modules and (b) the top-level names of the service's own modules, and when the module
+# is done puts back whatever it swapped, deleted or overwrote and drops stand-ins it added. Real modules a test imported for the first time stay loaded
 # (re-importing would make a second copy). Stand-ins installed at import / collection time are part of the snapshot, so a test file must not install
-# those itself: see tests/test_e272_event_candidates.py.
+# those itself: see tests/test_e272_event_candidates.py. A test module whose OWN tests swap modules between tests can opt in to the same restore after
+# every test with   pytestmark = pytest.mark.usefixtures("e277_restore_after_each_test").
+import os as _os_e277
 import sys as _sys_e277
 import pytest as _pytest_e277
 
 _E277_GONE = object()
+_E277_ROOT = _os_e277.path.dirname(_os_e277.path.dirname(_os_e277.path.abspath(__file__)))
+_E277_TESTS = _os_e277.path.join(_E277_ROOT, "tests")
 
 
 def _e277_is_stand_in(mod):
@@ -339,10 +344,18 @@ def _e277_set(name, mod):
             setattr(pkg, child, mod)
 
 
-@_pytest_e277.fixture(autouse=True, scope="module")
-def _e277_restore_swapped_modules():
-    saved = dict(_sys_e277.modules)
-    yield
+def _e277_snapshot():
+    own = {}
+    for name, m in list(_sys_e277.modules.items()):
+        f = getattr(m, "__file__", None)
+        d = getattr(m, "__dict__", None)
+        if isinstance(f, str) and d is not None and f.startswith(_E277_ROOT) and not f.startswith(_E277_TESTS):
+            own[name] = (m, {k: v for k, v in list(d.items()) if not k.startswith("__")})
+    return dict(_sys_e277.modules), own
+
+
+def _e277_restore(snap):
+    saved, own = snap
     for k, v in saved.items():
         cur = _sys_e277.modules.get(k, _E277_GONE)
         if cur is v:
@@ -353,3 +366,22 @@ def _e277_restore_swapped_modules():
     for k in [k for k in _sys_e277.modules if k not in saved]:
         if _e277_is_stand_in(_sys_e277.modules[k]):
             _e277_set(k, _E277_GONE)
+    for _name, (m, d) in own.items():            # names the module had at the start: put back any a test re-pointed (og.is_active = lambda ..., config.X = ...)
+        cur = m.__dict__
+        for k, v in d.items():
+            if cur.get(k, _E277_GONE) is not v:
+                cur[k] = v
+
+
+@_pytest_e277.fixture(autouse=True, scope="module")
+def _e277_restore_swapped_modules():
+    snap = _e277_snapshot()
+    yield
+    _e277_restore(snap)
+
+
+@_pytest_e277.fixture()
+def e277_restore_after_each_test():
+    snap = _e277_snapshot()
+    yield
+    _e277_restore(snap)

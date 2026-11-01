@@ -11,6 +11,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 NOW = datetime(2026, 10, 31, 10, 0, tzinfo=timezone.utc)
 
+# E277: _load() below swaps config / models / execution.* for stand-ins. Put the real ones back after EVERY test, otherwise the next test's autouse fixtures
+# (conftest.py: monkeypatch.setattr on config) run against the stand-in and error at setup, and so does every test file after this one.
+_TOUCHED = ("config", "models", "notifier", "execution.shared_symbol_lock", "execution.lock_sweep", "execution.dhan_client")
+_GONE = object()
+try:
+    import pytest
+except ImportError:                      # plain runner: python3 tests/test_task4_lock_sweep.py
+    pytest = None
+
+if pytest is not None:
+    @pytest.fixture(autouse=True)
+    def _restore_modules():
+        saved = {k: sys.modules.get(k, _GONE) for k in _TOUCHED}
+        pkg = sys.modules.get("execution")
+        attrs = {n: (pkg.__dict__.get(n, _GONE) if pkg is not None else _GONE) for n in ("shared_symbol_lock", "lock_sweep", "dhan_client")}
+        yield
+        for k, v in saved.items():
+            if v is _GONE:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        pkg = sys.modules.get("execution")
+        if pkg is not None:
+            for n, v in attrs.items():
+                if v is _GONE:
+                    pkg.__dict__.pop(n, None)
+                else:
+                    setattr(pkg, n, v)
+
 
 def _load(sweep_on=True):
     for m in ("config", "models", "execution.shared_symbol_lock", "notifier"):

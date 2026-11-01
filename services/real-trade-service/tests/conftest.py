@@ -303,3 +303,48 @@ def _e272_afterhours_event_reader_off_by_default(monkeypatch):
     monkeypatch.setattr(_cfg, "AFTERHOURS_EVENT_FEED_MODE", "legacy", raising=False)
     monkeypatch.setattr(_cfg, "AFTERHOURS_CADENCE_V2", False, raising=False)
     yield
+
+
+# ---- E277 (test isolation) ------------------------------------------------------------------------------------------------------------
+# Several older tests replace real modules in sys.modules (config, models, execution.*, sqlalchemy ...) with small stand-ins and never put the
+# real ones back. Every later test then runs against the stand-in: a setup ERROR in the autouse fixtures above (monkeypatch.setattr on a
+# stand-in config) or an ImportError such as "cannot import name X from 'models' (unknown location)". This puts back whatever a test MODULE
+# swapped, once the module is done, so one file can no longer break the files after it. Stand-ins installed at import / collection time
+# (before the first test of the module runs) are part of the snapshot and stay, as before.
+import sys as _sys_e277
+import pytest as _pytest_e277
+
+_E277_WATCHED = ("config", "models", "notifier", "symbol_master", "httpx", "sqlalchemy", "sqlalchemy.orm",
+                 "execution", "execution.dhan_client", "execution.shared_symbol_lock", "execution.lock_sweep",
+                 "orders.side", "resilience.local_cache", "watchlist_engine.intraday_news")
+_E277_GONE = object()
+
+
+def _e277_is_stand_in(mod):
+    """A real module carries an import spec (a ModuleType('x') or SimpleNamespace stand-in does not)."""
+    return getattr(mod, "__spec__", None) is None
+
+
+@_pytest_e277.fixture(autouse=True, scope="module")
+def _e277_restore_swapped_modules():
+    saved = {k: _sys_e277.modules.get(k, _E277_GONE) for k in _E277_WATCHED}
+    yield
+    for k, v in saved.items():
+        cur = _sys_e277.modules.get(k, _E277_GONE)
+        if cur is v:
+            continue
+        if v is _E277_GONE:
+            if cur is _E277_GONE or not _e277_is_stand_in(cur):
+                continue                         # a real module first imported by a test stays loaded (re-importing it would make a second copy)
+            _sys_e277.modules.pop(k, None)
+        else:
+            if _e277_is_stand_in(v) and not _e277_is_stand_in(cur):
+                continue                         # was a stand-in before, a real module now: leave as it was
+            _sys_e277.modules[k] = v
+        parent, _, child = k.rpartition(".")
+        pkg = _sys_e277.modules.get(parent) if parent else None
+        if pkg is not None:                      # `from execution import dhan_client` reads the package attribute first
+            if v is _E277_GONE:
+                pkg.__dict__.pop(child, None)
+            else:
+                setattr(pkg, child, v)

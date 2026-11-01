@@ -223,6 +223,30 @@ def test_verify_mode_flags_a_file_missing_from_the_manifest_and_one_that_is_gone
     assert bad.returncode == 1 and "new_live_file.py" in bad.stdout and "in the manifest but not on disk: a.py" in bad.stdout and "--write" in bad.stdout
 
 
+def test_verify_mode_ignores_gitignored_leftovers_but_still_checks_listed_files(tmp_path):
+    """E285 round 122: the VM checkout holds .venv-test/ and stockky_test_report_*/ (both in .gitignore, never in a release). --verify listed thousands of them."""
+    repo = tmp_path / "r"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    shutil.copy(SCRIPTS / "check_stale_files.py", repo / "scripts" / "check_stale_files.py")
+    (repo / ".gitignore").write_text(".venv-test/\nstockky_test_report_*/\n*.md\n")
+    (repo / "a.py").write_text("a")
+    (repo / "docs" / "kept.md").write_text("k")                      # ignored by *.md but listed in the manifest (like docs/E283_*.md)
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True)
+    run("git", "init", "-q")
+    assert run(sys.executable, "scripts/check_stale_files.py", "--write").returncode == 0
+    (repo / ".venv-test" / "lib").mkdir(parents=True)
+    (repo / ".venv-test" / "lib" / "x.py").write_text("x")
+    (repo / "stockky_test_report_20261101-000000").mkdir()
+    (repo / "stockky_test_report_20261101-000000" / "r.log").write_text("l")
+    ok = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert ok.returncode == 0 and "matches the disk" in ok.stdout, ok.stdout
+    (repo / "docs" / "kept.md").unlink()                             # listed file gone: still reported
+    (repo / "new_live_file.py").write_text("n")                      # not ignored, not listed: still reported
+    bad = run(sys.executable, "scripts/check_stale_files.py", "--verify")
+    assert bad.returncode == 1 and "new_live_file.py" in bad.stdout and "docs/kept.md" in bad.stdout and ".venv-test" not in bad.stdout
+
+
 def test_every_tracked_file_of_this_checkout_is_in_the_manifest():
     """E285 round 96: the same gap seen from CI. A tracked file the manifest does not list makes the VM's check_stale_files print a `git rm` line for live code. Skipped outside a git checkout."""
     import check_stale_files as csf

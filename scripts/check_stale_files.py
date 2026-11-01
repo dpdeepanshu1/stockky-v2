@@ -9,6 +9,7 @@ leftover code and disagree with the committed docs. Everything passes on the zip
   python3 scripts/check_stale_files.py            # list tracked files that are not in docs/FILE_MANIFEST.txt, with the git rm lines
   python3 scripts/check_stale_files.py --write    # (release step) rewrite docs/FILE_MANIFEST.txt from the files on disk
   python3 scripts/check_stale_files.py --verify   # (release step, E285 round 96) fail when the manifest and the files on disk differ, in either direction
+                                                  # (round 122: files .gitignore covers and the manifest does not list, such as .venv-test/, are left out)
 
 WHY --verify: in round 95 seven live files (shared_rate_window.py, liveStateView.ts and their tests) were on disk but missing from the manifest, so the first form told the VM to `git rm` them.
 Deleting those would have broken the shared order window. A release is not done until `--verify` says the manifest matches the disk.
@@ -39,6 +40,20 @@ def disk_files(root: Path = ROOT) -> list[str]:
     return out
 
 
+def git_ignored(paths: list[str], root: Path = ROOT) -> set[str]:
+    """E285 round 122: the subset of `paths` that .gitignore covers (empty outside a git checkout or when git is missing)."""
+    if not paths:
+        return set()
+    try:
+        r = subprocess.run(["git", "-C", str(root), "check-ignore", "--no-index", "-z", "--stdin"],
+                           input="\0".join(paths).encode("utf-8"), capture_output=True)
+    except OSError:
+        return set()
+    if r.returncode not in (0, 1):                      # 128 = not a git repository
+        return set()
+    return {x for x in r.stdout.decode("utf-8", "replace").split("\0") if x}
+
+
 def tracked_files(root: Path = ROOT) -> list[str] | None:
     try:
         r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True)
@@ -59,6 +74,9 @@ def main(argv: list[str]) -> int:
         on_disk = set(disk_files())
         on_disk.add("docs/FILE_MANIFEST.txt")
         listed = {l.strip() for l in MANIFEST.read_text(encoding="utf-8").splitlines() if l.strip()}
+        # E285 round 122: on the VM the checkout also holds local leftovers that .gitignore already covers (.venv-test/, stockky_test_report_*/,
+        # saved run output). They are not part of any release, so `--verify` printed ~10,000 "git rm" lines for them. A file the manifest lists is still checked.
+        on_disk -= {f for f in git_ignored(sorted(on_disk - listed)) if f not in listed}
         extra, missing = sorted(on_disk - listed), sorted(listed - on_disk)
         if not extra and not missing:
             print(f"manifest matches the disk: {len(listed)} files")

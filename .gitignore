@@ -34,3 +34,6 @@ run_output*/
 !README.md
 !CHANGELOG.md
 *.conflict-backup
+
+# E285 round 122: local snapshot output written by the VM tooling
+snap.jsonl

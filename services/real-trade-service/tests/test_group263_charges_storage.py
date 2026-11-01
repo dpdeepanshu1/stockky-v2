@@ -17,7 +17,11 @@ import config
 import models
 from tz_utils import ist_today_str
 
-NOW = datetime.now(timezone.utc) - timedelta(minutes=2)
+# E285 round 122: anchor the fixture clock at 11:00 IST of today's IST date instead of "now - 2 min". The orders sit up to 8
+# minutes apart and charges_ledger dates each order by its first fill's IST day, so a CI run that started a few minutes
+# before IST midnight (18:30 UTC) split the buy and the sell onto two days: the buy was priced as delivery (STT 1.0)
+# and the test failed. 11:00 IST can never straddle midnight, whatever time the suite runs.
+NOW = datetime.strptime(ist_today_str() + " 05:30", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)   # 05:30 UTC = 11:00 IST
 
 
 @pytest.fixture()

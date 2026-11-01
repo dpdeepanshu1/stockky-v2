@@ -1,3 +1,23 @@
+## 2 Nov 2026 - E285 round 123: `check_stale_files.py --verify` no longer lists the VM's local leftovers (scripts)
+
+ * **Your request (2 Nov):** "fix all issue" for the VM paste: `check_stale_files.py --verify` (inside the release checks) followed by the catalog, shared-copies, merge-marker, ENV reference, tooling-test, `docker_frontend_check.sh`, opening-path and `halfsell run` lines.
+ * **Read and judged fine (nothing changed):** control catalogs ok; shared copies "21 families, no new drift"; no merge-conflict markers; ENV_REFERENCE up to date; the tooling tests (`unsupported --tf [30]` is the test of the refusal, 17 passed); frontend type-check, build and all unit tests pass; `OPENING_0920_PATH` True until 09:30, `OPENING_LOSS_BUDGET_FRAC` 0.3333, `FLOW_TAPE` enabled; `halfsell run` on Sunday says NOT STARTED before asking anything (round 121); event feed cadence weekend/night every 7200 s.
+ * **The one real problem, fixed:** `--verify` printed about 10,000 lines `on disk but not in the manifest (the VM would be told to git rm it)`. They were never release files: `services/position-stocks-service/.venv-test/` (a local test venv), the `stockky_test_report_*/` folders (coverage and diagnostics from earlier runs) and a stray `snap.jsonl`. `.gitignore` already covers the first two, so git does not track them and nothing should be removed. `--verify` now leaves out any file `.gitignore` covers that the manifest does not list. A file the manifest does list is still checked, in both directions. New test `test_verify_mode_ignores_gitignored_leftovers_but_still_checks_listed_files`. `snap.jsonl` is now in `.gitignore`.
+ * **`docs/E283_HALF_SELL_PROBE_PROTOCOL.md` "in the manifest but not on disk":** the file is in this zip, so unpacking it brings it back. It was missing from your checkout (`.gitignore` ignores every `*.md` except README and CHANGELOG, so git never tracked it and a clean checkout does not have it). After `apply` the line goes away. If you want it kept in git as well, run `git add -f docs/E283_HALF_SELL_PROBE_PROTOCOL.md`.
+ * **Your side (git):** nothing is required. The two stale files of round 122 are already removed.
+
+**Deploy:** `bash scripts/vm_all.sh apply <zip>` (scripts only; no service changes). **VM check:** `python3 scripts/check_stale_files.py --verify` should print `manifest matches the disk: 2342 files`.
+
+## 2 Nov 2026 - E285 round 122: the two CI failures fixed (real-trade charges test clock; stale git files)
+
+ * **Your request (2 Nov):** the CI logs of 1 Nov: scripts `test_every_tracked_file_of_this_checkout_is_in_the_manifest` and real-trade `test_persist_stores_one_row_per_order_with_full_split` (`assert 1.0 == 0.0` on the buy's STT), on both Python 3.11 and 3.12 runners.
+ * **Cause, real-trade test:** the test built its orders from `now - 2 min` and spread them up to 6 minutes apart. `charges_ledger` dates every order by its first fill's IST day, and a same-day buy and sell is priced as intraday (group 266). When CI started a few minutes before IST midnight (18:30 UTC), the buy and the sell landed on different IST days, so the buy was priced as delivery (STT 1.0 instead of 0). No service code was wrong; the test depended on the wall clock.
+ * **Fixed:** `tests/test_group263_charges_storage.py` now anchors its clock at 11:00 IST of today's IST date, so it cannot straddle midnight at any run time. Real Trade: 5972 passed, 1 skipped.
+ * **Cause, scripts test:** not a zip fault. `scripts/short_shadow_report.py` and `services/calibration-runner-service/tests/test_short_shadow_report.py` were deleted in the release, but a zip cannot delete files from git. `python3 scripts/check_stale_files.py --verify` on this zip says the manifest matches the disk (2342 files).
+ * **Your side (git):** `git rm -f -- scripts/short_shadow_report.py services/calibration-runner-service/tests/test_short_shadow_report.py`, commit and push. This is the only step that turns the scripts job green; it is the same line as in round 121.
+
+**Deploy:** none needed (tests only). **CI:** push the `git rm` commit together with this zip.
+
 ## 1 Nov 2026 - E285 round 121: the VM report read line by line; `halfsell run` says "outside the window" before it asks anything (scripts)
 
  * **Your request (1 Nov):** "check if any issue in log and not already fix then fix". The VM paste: `docker_test.sh` of both services (Position Stocks and Real Trade, no failures), `halfsell run`, `vm_all.sh check`, the bars / spread listing, the cadence line. No service code changed.

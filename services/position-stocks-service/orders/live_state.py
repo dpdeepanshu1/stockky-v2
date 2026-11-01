@@ -29,7 +29,11 @@ def _part(fn) -> Dict[str, Any]:
 
 def order_rate_part() -> Dict[str, Any]:
     from execution import order_rate
-    return order_rate.snapshot()
+    out = order_rate.snapshot()
+    if out.get("shared_enabled"):
+        from execution import shared_rate_window
+        out["shared"] = shared_rate_window.snapshot()          # E285 round 87: the account-wide window both services append to (calls in the last second per service)
+    return out
 
 
 def momentum_part() -> Dict[str, Any]:

@@ -114,17 +114,18 @@ class TestTodayEntryCount:
         assert pf.today_entry_count(Boom(), "REAL", NOW) == 0
 
 
-class TestStructureGateLogMode:
-    def test_shipped_default_is_log(self, monkeypatch):
+class TestStructureGateModes:      # E285 round 88: the A9 log mode is gone; enforce | off only
+    def test_shipped_default_is_enforce(self, monkeypatch):
         monkeypatch.delenv("STRUCTURE_GATE_MODE", raising=False)
-        assert config._sg_mode("STRUCTURE_GATE_MODE", "log") == "log"
+        assert config._sg_mode("STRUCTURE_GATE_MODE", "enforce") == "enforce"
+        assert config._sg_mode("STRUCTURE_GATE_MODE", "log") == "enforce"      # a stale default of log is not a mode either
 
-    @pytest.mark.parametrize("raw,expected", [("log", "log"), ("OFF", "off"), ("enforce", "enforce"), ("shadow", "enforce")])
+    @pytest.mark.parametrize("raw,expected", [("log", "enforce"), ("OFF", "off"), ("enforce", "enforce"), ("shadow", "enforce")])
     def test_env_values(self, monkeypatch, raw, expected):
         monkeypatch.setenv("STRUCTURE_GATE_MODE", raw)
-        assert config._sg_mode("STRUCTURE_GATE_MODE", "log") == expected
+        assert config._sg_mode("STRUCTURE_GATE_MODE", "enforce") == expected
 
-    @pytest.mark.parametrize("val,expected", [("log", "log"), ("off", "off"), ("enforce", "enforce")])
+    @pytest.mark.parametrize("val,expected", [("log", "enforce"), ("off", "off"), ("enforce", "enforce")])
     def test_mode_for(self, monkeypatch, val, expected):
         monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", val)
         monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", val)

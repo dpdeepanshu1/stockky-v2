@@ -24,8 +24,9 @@ def test_snapshot_isolates_a_failing_part(monkeypatch):
     monkeypatch.setattr(ls, "pool_part", lambda db: {"accounts": [{"mode": "REAL", "starting_capital": 7288.0}]})
     monkeypatch.setattr(ls, "heat_part", lambda db: (_ for _ in ()).throw(RuntimeError("db down")))
     monkeypatch.setattr(ls, "stamp_part", lambda db, limit=300: {"n": 0})
+    monkeypatch.setattr(ls, "order_rate_part", lambda: {"enabled": True, "working": True})
     out = ls.snapshot(object())
-    assert set(out) == {"pool", "heat", "setup_stamp"}
+    assert set(out) == {"pool", "heat", "setup_stamp", "order_rate"}      # E285 round 87 added order_rate
     assert out["pool"]["ok"] is True and out["pool"]["accounts"][0]["mode"] == "REAL"
     assert out["heat"] == {"ok": False, "error": "RuntimeError: db down"}
     assert out["setup_stamp"]["ok"] is True

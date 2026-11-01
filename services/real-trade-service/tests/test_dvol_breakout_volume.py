@@ -1,5 +1,5 @@
-"""D-vol (2026-10-23): a fresh bullish daily breakout on thin volume. Default = log: recorded as an observation, never a reason, never a WAIT.
-enforce = a gate reason (the entry WAITs); off = not checked. A summary without ms_bos_vol_ratio is no opinion, never a block."""
+"""D-vol (2026-10-23) / E285 round 88: a fresh bullish daily breakout on thin volume. enforce (default) = a gate reason (the entry WAITs); off = not checked; the old log
+value is gone (a leftover reads as enforce). A summary without ms_bos_vol_ratio is no opinion, never a block."""
 from datetime import datetime, timezone
 
 import pytest
@@ -21,21 +21,21 @@ def _defaults(monkeypatch):
     for k, v in (("STRUCTURE_MAX_CHASE_ATR", 1.5), ("STRUCTURE_MAX_STRETCH_ATR", 3.0), ("STRUCTURE_MIN_ROOM_ATR", 0.5), ("STRUCTURE_MIN_RR", 0.0),
                  ("STRUCTURE_REJECT_STOP_WIDE", True), ("STRUCTURE_BEARISH_BLOCK", True), ("STRUCTURE_BEARISH_BOS_BARS", 5),
                  ("STRUCTURE_MAX_AGE_DAYS", 7.0), ("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0), ("STRUCTURE_REQUIRE_DATA", False),
-                 ("STRUCTURE_BREAKOUT_VOLUME_MODE", "log"), ("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2), ("STRUCTURE_BREAKOUT_BARS", 5)):
+                 ("STRUCTURE_BREAKOUT_VOLUME_MODE", "enforce"), ("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2), ("STRUCTURE_BREAKOUT_BARS", 5)):
         monkeypatch.setattr(config, k, v, raising=False)
     sg.reset_stats()
 
 
-def test_shipped_defaults_are_log_and_1_2():
+def test_shipped_defaults_are_enforce_and_1_2():
     import importlib
-    assert config.STRUCTURE_BREAKOUT_VOLUME_MODE in ("log", "enforce", "off")
+    assert config.STRUCTURE_BREAKOUT_VOLUME_MODE in ("enforce", "off")
     assert importlib.import_module("config").STRUCTURE_BREAKOUT_MIN_VOL_RATIO >= 0
 
 
-def test_log_mode_records_an_observation_and_never_blocks():
+def test_a_thin_breakout_is_a_reason_under_enforce():
     v = sg.evaluate(_summary(), 100.0)
-    assert v["opinion"] == "ok" and not v["would_reject"] and v["reasons"] == [] and v["tag"] is None
-    assert len(v["observations"]) == 1 and "thin volume" in v["observations"][0] and "0.60x" in v["observations"][0]
+    assert v["opinion"] == "ok" and v["would_reject"] and v["tag"] == "structure" and v["observations"] == []
+    assert len(v["reasons"]) == 1 and "thin volume" in v["reasons"][0] and "0.60x" in v["reasons"][0]
 
 
 def test_enforce_mode_makes_it_a_reason():
@@ -68,9 +68,9 @@ def test_a_summary_without_the_key_is_no_opinion_on_this_test():
     assert not sg.evaluate(s, 100.0)["would_reject"]
 
 
-def test_snapshot_and_counter_carry_the_observation():
+def test_snapshot_and_counter_carry_the_reason():
     v = sg.evaluate(_summary(), 100.0)
-    doc = __import__("json").loads(sg.snapshot(_summary(), v, "log", False))
-    assert doc["observations"] == v["observations"] and doc["summary"]["ms_bos_vol_ratio"] == 0.6
-    sg.record("INFY", "REAL", v, "log", False, 100.0)
-    assert sg.stats()["thin_volume_breakouts"] == 1 and sg.stats()["config"]["STRUCTURE_BREAKOUT_VOLUME_MODE"] == "log"
+    doc = __import__("json").loads(sg.snapshot(_summary(), v, "enforce", True))
+    assert any("thin volume" in r for r in doc["reasons"]) and doc["summary"]["ms_bos_vol_ratio"] == 0.6
+    sg.record("INFY", "REAL", v, "enforce", True, 100.0)
+    assert sg.stats()["thin_volume_breakouts"] == 1 and sg.stats()["config"]["STRUCTURE_BREAKOUT_VOLUME_MODE"] == "enforce"

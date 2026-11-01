@@ -28,7 +28,7 @@ def env(monkeypatch):
     s.commit()
     se.reset()
     calls = {"evaluate": [], "decide": 0, "squeeze": []}
-    monkeypatch.setattr(config, "SHORT_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "SHORT_MODE", "live", raising=False)
     monkeypatch.setattr(short_gates, "gather_facts", lambda *a, **k: {"live": 100.0, "quote": None})
 
     def _eval(f, now=None, early=False):
@@ -109,8 +109,8 @@ def test_the_guard_is_told_when_the_short_is_an_s4_match(env):
     assert env.calls["squeeze"][0]["s4"] is True
 
 
-def test_the_shadow_row_follows_the_same_plan(env):
-    assert se.attempt_short_shadow(env.db, cand("A"), None, {"conviction": 70}, EARLY) is None          # no S4 before 09:45: no shadow row either
+def test_the_early_plan_needs_an_s4_match(env):
+    assert se.plan_short(env.db, cand("A"), None, {"conviction": 70}, EARLY) is None          # no S4 before 09:45: no plan
     env.box["setup"] = S4
-    r = se.attempt_short_shadow(env.db, cand("B"), None, {"conviction": 70}, EARLY)
-    assert r is not None and r.status == "OPEN"
+    r = se.plan_short(env.db, cand("B"), None, {"conviction": 70}, EARLY)
+    assert r is not None and r["qty"] > 0

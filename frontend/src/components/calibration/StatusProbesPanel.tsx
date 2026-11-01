@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { Svc } from "../../calibrationApi";
 import { positionStocksApi } from "../../positionStocksApi";
 import { realTradeApi } from "../../realTradeApi";
+import { liveStateBlocks } from "../../liveStateView";
 import { probeBadge, probesFor, probeText, type StatusProbe } from "../../statusProbes";
 import { Btn, Card, Chip, Msg } from "./ui";
 
@@ -41,8 +42,26 @@ export default function StatusProbesPanel({ svc }: { svc: Svc }) {
             </>}>
             <p className="text-[11px] text-mist">{p.what} <span className="opacity-70">GET {p.path}</span></p>
             {r?.error && <div className="mt-2"><Msg kind="err">{r.error}</Msg></div>}
+            {r && r.error == null && p.id === "live-state" && (
+              <div className="mt-2 grid gap-2 sm:grid-cols-2" data-testid="live-state-card">
+                {liveStateBlocks(p.svc, r.value).map((blk) => (
+                  <div key={blk.id} className={`rounded-lg border p-2 text-[11px] leading-snug ${blk.ok ? "border-slate" : "border-red-500/60"}`}>
+                    <div className="mb-1 font-semibold">{blk.title}</div>
+                    {blk.rows.map((row, i) => (
+                      <div key={i} className="flex justify-between gap-3">
+                        <span className="whitespace-pre text-mist">{row.label}</span>
+                        <span className={row.tone === "bad" ? "text-red-400" : row.tone === "warn" ? "text-amber-400" : row.tone === "good" ? "text-emerald-400" : ""}>{row.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
             {r && r.error == null && (
-              <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-slate p-2 text-[11px] leading-snug" data-testid={`probe-${p.id}`}>{probeText(r.value)}</pre>
+              <details className="mt-2" open={p.id !== "live-state"}>
+                {p.id === "live-state" && <summary className="cursor-pointer text-[11px] text-mist">Raw JSON</summary>}
+                <pre className="mt-1 max-h-72 overflow-auto rounded-lg border border-slate p-2 text-[11px] leading-snug" data-testid={`probe-${p.id}`}>{probeText(r.value)}</pre>
+              </details>
             )}
           </Card>
         );

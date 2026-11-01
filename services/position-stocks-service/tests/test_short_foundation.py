@@ -53,9 +53,9 @@ def _mode(env_value):
     return line[5:]
 
 
-def test_short_mode_ships_off_and_only_off_shadow_live_are_accepted():
+def test_short_mode_ships_off_and_only_off_live_are_accepted():
     assert _mode(None) == "off"
-    assert _mode("shadow") == "shadow" and _mode(" SHADOW ") == "shadow"
+    assert _mode("shadow") == "off" and _mode(" SHADOW ") == "off"          # E285 round 87: no shadow mode; an old value reads as off, never live
     assert _mode("live") == "live" and _mode(" LIVE ") == "live"          # step 8: accepted (real orders still need the cap and the broker stop)
     for bad in ("on", "true", "1", "", "junk", "real"):
         assert _mode(bad) == "off", bad
@@ -65,13 +65,13 @@ def test_catalog_switch_has_a_live_choice_that_counts_as_loosening_and_is_off_by
     src = (ROOT / "control" / "catalog.py").read_text(encoding="utf-8")
     m = re.search(r'Flag\("SHORT_MODE".*?shipped="([a-z]+)"', src, re.S)
     assert m and m.group(1) == "off"
-    assert re.search(r'Flag\("SHORT_MODE"[^)]*choices=\("off", "shadow", "live"\)', src, re.S)
+    assert re.search(r'Flag\("SHORT_MODE"[^)]*choices=\("off", "live"\)', src, re.S)
     blk = src[src.index('Flag("SHORT_MODE"'):src.index('Flag("SHORT_LIVE_QTY_CAP"')]
     assert 'recommended="live"' in blk                                      # E224: the preset recommends live (the probe / cap rails stay)
-    # enums are classified by the order of `choices` (strictest -> loosest): live is last, so shadow -> live and off -> live LOOSEN and need the confirm
+    # enums are classified by the order of `choices` (strictest -> loosest): live is last, so off -> live LOOSENS and need the confirm
     ch = re.search(r'Flag\("SHORT_MODE".*?choices=\(([^)]*)\)', src, re.S).group(1)
     order = [x.strip().strip('"') for x in ch.split(",")]
-    assert order == ["off", "shadow", "live"]
+    assert order == ["off", "live"]                                         # E285 round 87: no shadow choice
 
 
 def test_short_mode_is_protected_from_the_calibrator():

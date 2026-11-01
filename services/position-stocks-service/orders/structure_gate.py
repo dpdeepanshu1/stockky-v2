@@ -5,10 +5,10 @@ in the DAILY structure (technical service `market_structure` summary, flat `ms_*
 GET /stock/{symbol}/structure): a bearish daily trend, a fresh bearish break of structure, almost no room under the next daily resistance, an
 extreme chase above the nearest demand/imbalance zone or an extreme stretch above the daily EMA20.
 
-LIVE: config.STRUCTURE_GATE_MODE = enforce (default, always live) | log (E72: evaluate + record + store the snapshot, never refuse; only via PS_STRUCTURE_GATE_MODE)
+LIVE: config.STRUCTURE_GATE_MODE = enforce (default, always live) | off (kill switch); E285 round 87: the old log value is gone
 | off (kill switch). It can only ever REFUSE an entry (never create one).
-E72 D-vol: a fresh bullish daily breakout on thin volume (ms_bos_vol_ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO) is an OBSERVATION only (verdict["observations"], the stored
-snapshot, the thin_volume_breakouts counter). It is never a refusal reason in any gate mode.
+E72 D-vol: a fresh bullish daily breakout on thin volume (ms_bos_vol_ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO) is counted (thin_volume_breakouts) and, since E73, a refusal
+reason under STRUCTURE_BREAKOUT_VOLUME_MODE=enforce (E285 round 87: the old log value is gone; off = not checked).
 NO DATA = NO OPINION: a missing / unavailable / insufficient / stale summary, an old last bar, or a live price far from the structure close
 (split / bad data) never blocks and is never bullish - unless STRUCTURE_REQUIRE_DATA=true.
 The scalper buys strength on purpose, so the default limits are looser than real-trade's swing entry gate; every limit is an env var and 0
@@ -53,9 +53,9 @@ def _cfg(name: str, dflt: float) -> float:
 
 
 def mode() -> str:
-    """off | log | enforce. Anything else (a stale "shadow", a typo) is enforce - the safe, live side."""
+    """off | enforce. Anything else (a stale "shadow" or "log", a typo) is enforce - the safe, live side (E285 round 87: no log-only mode)."""
     m = str(getattr(config, "STRUCTURE_GATE_MODE", "enforce") or "enforce").lower()
-    return m if m in ("off", "log") else "enforce"
+    return "off" if m == "off" else "enforce"
 
 
 def _age_days(asof) -> Optional[float]:
@@ -164,10 +164,7 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
         base["reasons"] = reasons
         vol_txt = breakout_volume_note(summary)
         if vol_txt:
-            if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "enforce")).lower() == "enforce":
-                reasons.append(vol_txt)               # E73: live - a thin-volume breakout is a refusal reason
-            else:
-                base["observations"] = [vol_txt]      # E72 log: recorded, counted, never a reason
+            reasons.append(vol_txt)                   # E73: live - a thin-volume breakout is a refusal reason. E285 round 87: no log value; breakout_volume_note() is None when the mode is off
         if reasons:
             base["would_reject"] = True
             base["reason"] = "; ".join(reasons)
@@ -393,8 +390,7 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
 
 
 def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None, penalties: Optional[Dict[str, float]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects AND the mode is enforce; in `log` mode the verdict is
-    evaluated, recorded and snapshotted exactly the same but the reason is always None (never refuses). Never raises (fails open).
+    """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects (E285 round 87: there is no log-only mode; off returns (None, None)). Never raises (fails open).
     `capture` (group372, optional): when a dict is passed it receives `verdict`, `summary`, `gate_mode`, `enforced` of this check so the caller can store a
     structure observation; it stays empty when the gate is off or failed.
     `penalties` (E273 round 32, optional): when a dict is passed and SOFT_GATES_MODE is penalty, a verdict whose reasons are all SOFT (chase / stretch / room, none past its
@@ -416,8 +412,6 @@ def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None, pen
             if not _why and _pens:
                 penalties.update(_pens)                    # E273 round 32: sized down instead of refused
                 block = None
-        if m == "log":
-            block = None                                   # E72: log mode records what the gate WOULD have said; the entry goes on
         enforced = bool(block)
         snap = snapshot(summary, v, m, enforced)
         record(symbol, v, m, enforced, ltp)   # group 355

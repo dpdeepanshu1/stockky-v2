@@ -105,7 +105,7 @@ def env(monkeypatch):
     s.commit()
     se.reset()
     calls = {"evaluate": [], "board": 0, "decide": []}
-    monkeypatch.setattr(config, "SHORT_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "SHORT_MODE", "live", raising=False)
     monkeypatch.setattr(short_gates, "gather_facts", lambda *a, **k: {"live": 100.0, "quote": None})
     monkeypatch.setattr(short_gates, "evaluate", lambda f, now=None, **kw: (calls["evaluate"].append(kw) or None))
     box = {"board": None, "setup": {"id": None, "skip": "NO_SETUP"}}
@@ -196,7 +196,9 @@ def test_the_cycle_checks_off_board_names_and_keeps_only_the_negative_event_ones
     monkeypatch.setattr(quality_gate, "check", _check)
     monkeypatch.setattr(se.tm_gate, "note_picks", lambda *a, **k: None)
     tried = []
-    monkeypatch.setattr(se, "attempt_short_shadow", lambda db, c, q, brow, now=None: (tried.append((c.symbol, brow is not None)) or None))
+    from orders import short_live
+    monkeypatch.setattr(short_live, "automatic_entry_off", lambda db: None)             # live mode asks whether auto entries are on (module, auto-pilot, armed)
+    monkeypatch.setattr(short_live, "attempt_short_live", lambda db, c, q, brow, now=None: (tried.append((c.symbol, brow is not None)) or None))
     out = asyncio.run(se.run_short_cycle(env.db, NOW))
     assert out["recorded"] == 0 and sorted(tried) == [("BEARISH", True), ("OFFNEG", False)]       # OFFPLAIN (no news, no Board) is dropped
     monkeypatch.setattr(config, "SETUP_S4_BOARD_CONFIRM_ENABLED", False, raising=False)

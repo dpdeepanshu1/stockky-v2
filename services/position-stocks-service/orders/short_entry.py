@@ -1,12 +1,9 @@
-"""orders/short_entry.py - the SHADOW short entry (short selling step 5, 2026-10-23). Position Stocks only.
+"""orders/short_entry.py - the short plan and the short cycle (short selling step 5, 2026-10-23; E285 round 89: the shadow recorder is gone). Position Stocks only.
 
-WHAT: when the short mode is `shadow`, every cycle scans for fallers (screening.engine.scan_shorts), walks the mirrored fail-closed gates
-(orders/short_gates.py) and records each short Stockky WOULD have taken as a `scalp_short_shadow` row. Each row is then followed with live ticks to its stop,
-target or the short square-off time, so the shadow result is honest (stop first when both would be hit; a stop is booked at the price actually seen,
-a target at the target level; charges estimated). The result feeds the S2 gate of the plan: 4 weeks and 100 would-be shorts, positive after charges.
-
-WHAT IT NEVER DOES: place or cancel an order, reserve capital, claim a symbol lock or spend order budget. No broker module is touched here, and the long
-`attempt_entry` is not edited. With the mode `off` it only closes rows left over from an earlier switch-on. Everything here swallows its own errors.
+WHAT: with SHORT_MODE=live every cycle scans for fallers (screening.engine.scan_shorts), ranks them, and hands each to orders/short_live.py, which walks the mirrored
+fail-closed gates through `plan_short` (below, orders/short_gates.py) and places the real SELL Super Order. `plan_short` is the shared gate walk, levels and sizing.
+Rows in `scalp_short_shadow` left from the old shadow mode (E105 to E284) are still followed to their stop, target or the short square-off time, summarised and shown
+(`resolve_open`, `summary`), but nothing writes a new one. With the mode `off` the cycle only closes such leftover rows. Everything here swallows its own errors.
 """
 from __future__ import annotations
 
@@ -35,17 +32,12 @@ _last_shortlist: Dict[str, Any] = {"at": None, "mode": None, "enabled": None, "r
 _stats: Dict[str, Any] = {"cycles": 0, "scanned": 0, "recorded": 0, "refused": 0, "by_code": {}}
 
 
-def mode() -> str:
-    """off | shadow. Anything else, including a `live` value, reads as off: nothing here may ever place an order."""
-    m = str(getattr(config, "SHORT_MODE", "off") or "off").strip().lower()
-    return "shadow" if m == "shadow" else "off"
-
-
 def cfg_mode() -> str:
-    """off | shadow | live as configured. mode() above is the SHADOW view (live reads as off there): nothing in this file may ever place an order; only the cycle
-    uses this to hand candidates to orders/short_live.py, which re-checks live itself."""
+    """off | live as configured. E285 round 89: there is no shadow mode (the plan's no-shadow rule): config.py reads a leftover `shadow` as off, and this function does too
+    (a test or an old caller that sets it directly still cannot start a recorder, because the recorder is gone). Only the cycle uses it, to hand candidates to
+    orders/short_live.py, which re-checks live itself. Nothing in this file may ever place an order."""
     m = str(getattr(config, "SHORT_MODE", "off") or "off").strip().lower()
-    return m if m in ("shadow", "live") else "off"
+    return "live" if m == "live" else "off"
 
 
 def stop_mult_for_state(state: Optional[str]) -> float:
@@ -151,53 +143,6 @@ def _short_position_value(db: Session, stop_pct: float, conviction_mult: Optiona
     if value > row.available_capital:
         return None
     return value
-
-
-def attempt_short_shadow(db: Session, cand: Any, quality: Any = None, board_row: Optional[dict] = None,
-                         now: Optional[datetime] = None) -> Optional[ScalpShortShadow]:
-    """Record one would-be short, or refuse it (counted, and logged once per 5 min). Returns the shadow row or None. Never raises, never orders."""
-    if mode() != "shadow":
-        return None
-    try:
-        return _attempt(db, cand, quality, board_row, now)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("short shadow: attempt for %s failed (%s: %s)", getattr(cand, "symbol", "?"), type(e).__name__, e)
-        try:
-            db.rollback()
-        except Exception as _e:  # noqa: BLE001
-            logger.debug("short_entry.py: rollback ignored %s", _e)
-        return None
-
-
-def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], now: Optional[datetime]) -> Optional[ScalpShortShadow]:
-    sym = cand.symbol
-    day = ist_today_str(now)
-
-    def _shadow_only() -> bool:
-        """The two checks that only concern shadow rows. Run at the same point of the gate order as before the split (after the held check)."""
-        if db.query(ScalpShortShadow).filter(ScalpShortShadow.symbol == sym).filter(ScalpShortShadow.day == day).first() is not None:
-            _count("SHORT_ALREADY_RECORDED")                      # one shadow per symbol per day; not worth a log row
-            return True
-        n_open = len(db.query(ScalpShortShadow).filter(ScalpShortShadow.status == "OPEN").filter(ScalpShortShadow.day == day).all())
-        if n_open >= int(config.SHORT_MAX_POSITIONS):
-            _refuse(db, cand, "SHORT_MAX_POSITIONS", f"{n_open} unresolved shadow shorts (max {config.SHORT_MAX_POSITIONS})")
-            return True
-        return False
-
-    plan = plan_short(db, cand, quality, board_row, now, _shadow_only)
-    if plan is None:
-        return None
-    live, levels, qty, conv = plan["live"], plan["levels"], plan["qty"], plan["conv"]
-    row = ScalpShortShadow(day=day, symbol=sym, window_source=str(getattr(cand, "window_label", "") or "")[:8], pct_change=float(cand.pct_change),
-                           entry_price=live, stop_price=float(levels.stop_price), target_price=float(levels.target_price),
-                           stop_pct=float(levels.stop_pct), target_pct=float(levels.target_pct), quantity=int(qty), position_value=round(qty * live, 2),
-                           status="OPEN", low_water=live, high_water=live, board_conviction=(float(conv) if conv is not None else None),
-                           market_state=(_current_profile() or {}).get("market_state"))
-    db.add(row)
-    db.commit()
-    _stats["recorded"] = _stats.get("recorded", 0) + 1
-    _log(db, cand, "SHORT_SHADOW", f"would short {qty} @ {live:.2f} stop {row.stop_price:.2f} target {row.target_price:.2f} (shadow, no order)")
-    return row
 
 
 def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], now: Optional[datetime],
@@ -418,14 +363,14 @@ def _bear_rows() -> Dict[str, dict]:
 
 
 async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[str, Any]:
-    """One short pass: follow the open shadow rows, then (shadow or live mode, inside the entry window, market open) look for new shorts: shadow mode records
-    would-be shorts, live mode hands each candidate to orders/short_live.py (a real SELL Super Order, capped by SHORT_LIVE_QTY_CAP).
+    """One short pass: follow the leftover old shadow rows, then (live mode, inside the entry window, market open) look for new shorts and hand each candidate to
+    orders/short_live.py (a real SELL Super Order, capped by SHORT_LIVE_QTY_CAP).
     Returns {"mode", "resolved", "recorded"} (recorded is None when no scan ran). Never raises, never orders."""
     cm = cfg_mode()
     out: Dict[str, Any] = {"mode": cm, "resolved": 0, "recorded": None}
     try:
         out["resolved"] = await asyncio.to_thread(resolve_open, db, now)     # follows leftover shadow rows in every mode
-        if cm not in ("shadow", "live"):
+        if cm != "live":                                                    # E285 round 89: only live scans; there is no shadow recorder any more
             return out
         from tz_utils import is_market_open_ist
         if not is_market_open_ist(now, honor_session_proof=False) or short_gates.time_window({}, now, early=short_gates.early_open(now)):
@@ -475,11 +420,8 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         _last_shortlist.update(at=time.time(), mode=cm, enabled=bool(getattr(config, "SHORT_SHORTLIST_ENABLED", True)),
                                rows=[dict(r, outcome="NOT_TRIED") for r in _shortlist.public(ranked)])
         for c, q in ((r["cand"], r["quality"]) for r in ranked):
-            if cm == "live":
-                from orders import short_live
-                got = await asyncio.to_thread(short_live.attempt_short_live, db, c, q, bear.get(c.symbol), now)
-            else:
-                got = await asyncio.to_thread(attempt_short_shadow, db, c, q, bear.get(c.symbol), now)
+            from orders import short_live
+            got = await asyncio.to_thread(short_live.attempt_short_live, db, c, q, bear.get(c.symbol), now)
             if got is not None:
                 recorded += 1
             for _r in _last_shortlist["rows"]:

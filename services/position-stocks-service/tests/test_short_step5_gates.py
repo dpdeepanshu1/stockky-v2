@@ -143,7 +143,7 @@ def test_evaluate_stops_at_the_first_refusal_in_order():
 def test_every_short_threshold_is_in_the_catalog_and_read_by_the_short_code():
     root = __import__("pathlib").Path(__file__).resolve().parent.parent
     cat = (root / "control" / "catalog.py").read_text()
-    src = (root / "orders" / "short_gates.py").read_text() + (root / "orders" / "short_entry.py").read_text()
+    src = (root / "orders" / "short_gates.py").read_text() + (root / "orders" / "short_entry.py").read_text() + (root / "orders" / "short_live.py").read_text()      # E285 round 89: the position cap is enforced by short_live now
     for name in ("SHORT_MAX_POSITIONS", "SHORT_ENTRY_START_IST", "SHORT_ENTRY_CUTOFF_IST", "SHORT_SQUAREOFF_TIME_IST", "SHORT_VWAP_TOLERANCE_PCT",
                  "SHORT_MIN_ENTRY_RANGE_POSITION", "SHORT_MAX_DAY_FALL_PCT", "SHORT_UPPER_CIRCUIT_BUFFER_PCT", "SHORT_MIN_BOARD_CONVICTION",
                  "SHORT_GAP_UP_REFUSE_PCT"):

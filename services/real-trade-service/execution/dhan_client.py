@@ -38,6 +38,19 @@ from auth import dhan_credentials
 
 logger = logging.getLogger("real-trade-dhan-client")
 
+def _note_order_call(kind: str) -> None:
+    """E285 round 87: append this Dhan order call to the account-wide one-second window position-stocks-service reads. Counts only, never waits, never raises; a switch
+    (config.ORDER_RATE_SHARED_ENABLED, read at call time) or an unusable file turns it into a no-op."""
+    try:
+        import config
+        if not bool(getattr(config, "ORDER_RATE_SHARED_ENABLED", True)):
+            return
+        from execution import shared_rate_window
+        shared_rate_window.record("rt", kind)
+    except Exception as e:  # noqa: BLE001 - counting must never stop an order
+        logger.debug("shared order window: not recorded (%s)", e)
+
+
 # ── Security master cache (symbol -> Dhan security_id) ─────────────────────
 _SECURITY_CACHE_TTL_SECONDS = 24 * 60 * 60
 _security_cache: dict[str, str] = {}
@@ -1475,6 +1488,7 @@ def place_order(
     # reconstructed from behavior/guesswork again.
     logger.info("place_order: outbound payload -> %s", outbound)
 
+    _note_order_call("place_order")
     resp = client.place_order(
         security_id=security_id,
         exchange_segment=exchange_segment,
@@ -1549,6 +1563,7 @@ def cancel_order(db: Session, *, is_armed: bool, dhan_order_id: str) -> dict:
     """Cancel a pending order. Cancelling is always allowed even when NOT armed."""
     client = _get_sdk_client(db)
     logger.info("Cancelling REAL order %s", dhan_order_id)
+    _note_order_call("cancel_order")
     resp = client.cancel_order(dhan_order_id)
     return _extract_data(resp) or {}
 
@@ -1588,6 +1603,7 @@ def place_forever_order(db: Session, *, is_armed: bool, security_id: str, exchan
         "securityId": str(security_id), "quantity": int(quantity), "disclosedQuantity": 0, "price": px, "triggerPrice": trig,
     }
     logger.info("place_forever_order: outbound payload -> %s", {k: v for k, v in body.items() if k != "dhanClientId"})
+    _note_order_call("place_forever_order")
     resp = httpx.post(f"{_DHAN_REST_BASE}/forever/orders", headers=headers, json=body, timeout=15.0)
     if resp.status_code >= 400:
         raise RuntimeError(f"forever order refused ({resp.status_code}): {resp.text[:300]}")
@@ -1615,6 +1631,7 @@ def get_forever_orders(db: Session) -> list:
 def cancel_forever_order(db: Session, *, dhan_order_id: str) -> dict:
     """E261: DELETE /v2/forever/orders/{id}. Cancelling is always allowed, armed or not (same rule as cancel_order)."""
     _cid, headers = _forever_headers_and_client(db)
+    _note_order_call("cancel_forever_order")
     resp = httpx.delete(f"{_DHAN_REST_BASE}/forever/orders/{dhan_order_id}", headers=headers, timeout=15.0)
     if resp.status_code >= 400:
         raise RuntimeError(f"forever order cancel refused ({resp.status_code}): {resp.text[:300]}")

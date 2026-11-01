@@ -3,6 +3,7 @@
   pool         trade_accounts rows (mode, starting capital, equity, cash, the broker's raw cash): the rupee figure the heat numbers use (plan: "Real Trade's pool figure")
   heat         this service's open risk + gap allowance (REAL), the other service's, and the heat limit
   setup_stamp  how the newest ENTER decisions were stamped (flow_json["setup"]): count per setup id and time slot, and how many carry no stamp
+  order_rate   the account-wide one-second Dhan order window both services append to (E285 round 87): calls in the last second per service, whether the shared file works
 Each part has its own try/except; a part that cannot be read is {"ok": false, "error": ...}.
 """
 from __future__ import annotations
@@ -69,5 +70,15 @@ def stamp_part(db: Any, limit: int = 300) -> Dict[str, Any]:
     return stamp_counts([r[0] for r in rows])
 
 
+def order_rate_part() -> Dict[str, Any]:
+    from execution import shared_rate_window
+    enabled = bool(getattr(config, "ORDER_RATE_SHARED_ENABLED", True))
+    out: Dict[str, Any] = {"enabled": enabled}
+    if enabled:
+        out.update(shared_rate_window.snapshot())
+    return out
+
+
 def snapshot(db: Any) -> Dict[str, Any]:
-    return {"pool": _part(lambda: pool_part(db)), "heat": _part(lambda: heat_part(db)), "setup_stamp": _part(lambda: stamp_part(db))}
+    return {"pool": _part(lambda: pool_part(db)), "heat": _part(lambda: heat_part(db)), "setup_stamp": _part(lambda: stamp_part(db)),
+            "order_rate": _part(order_rate_part)}

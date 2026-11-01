@@ -27,7 +27,7 @@ def db(monkeypatch):
     row.total_allocated_capital, row.available_capital = 100000.0, 100000.0
     s.commit()
     se.reset()
-    monkeypatch.setattr(config, "SHORT_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "SHORT_MODE", "live", raising=False)
     monkeypatch.setattr(short_gates, "gather_facts", lambda *a, **k: {"live": 100.0})
     monkeypatch.setattr(short_gates, "evaluate", lambda f, now=None: None)
     for mod, name in ((se.entry_pause, "all_paused"), (se.stopout_guard, "entry_reason"), (se.calendar_gate, "entry_block_reason"),
@@ -47,39 +47,29 @@ def cand(sym="X"):
     return types.SimpleNamespace(symbol=sym, window_label="5m", pct_change=-1.5, composite_score=3.0, current_ltp=100.0)
 
 
-def test_off_mode_records_nothing(db, monkeypatch):
-    monkeypatch.setattr(config, "SHORT_MODE", "off")
-    assert se.attempt_short_shadow(db, cand(), None, {"conviction": 70}, NOW) is None
-    assert db.query(models.ScalpShortShadow).count() == 0 and db.query(models.ScalpCandidateLog).count() == 0
+def _plan(db, c, q=None, brow=None, now=None):
+    return se.plan_short(db, c, q, brow, now or NOW)
 
 
-def test_a_live_mode_value_also_reads_as_off(db, monkeypatch):
-    monkeypatch.setattr(config, "SHORT_MODE", "live")
-    assert se.mode() == "off"
+def test_cfg_mode_has_no_shadow_value():
+    for raw, want in (("live", "live"), (" LIVE ", "live"), ("off", "off"), ("shadow", "off"), (" SHADOW ", "off"), ("junk", "off"), (None, "off")):
+        config.SHORT_MODE = raw
+        assert se.cfg_mode() == want, raw
+    config.SHORT_MODE = "live"
 
 
-def test_a_clean_candidate_is_recorded_sized_and_logged(db):
-    r = se.attempt_short_shadow(db, cand(), None, {"conviction": 70}, NOW)
-    assert r is not None and r.status == "OPEN" and r.entry_price == 100.0 and r.quantity == 200      # 100000 x 2% x 0.5 / 5 slots / 1% stop
-    assert r.target_price < r.entry_price < r.stop_price
-    log = db.query(models.ScalpCandidateLog).one()
-    assert log.decision == "SHORT_SHADOW" and "no order" in log.reason
-    assert db.query(models.ScalpPosition).count() == 0                                                  # no position row, no capital reserved
+def test_a_clean_candidate_is_planned_and_nothing_is_recorded_or_reserved(db):
+    r = _plan(db, cand(), None, {"conviction": 70})
+    assert r is not None and r["qty"] == 200 and r["live"] == 100.0                                  # 100000 x 2% x 0.5 / 5 slots / 1% stop
+    assert r["levels"].target_price < r["live"] < r["levels"].stop_price
+    assert db.query(models.ScalpShortShadow).count() == 0 and db.query(models.ScalpPosition).count() == 0
     assert ledger._get_or_create(db).available_capital == 100000.0
-
-
-def test_one_shadow_per_symbol_per_day_and_the_max_positions_cap(db):
-    assert se.attempt_short_shadow(db, cand("A"), None, None, NOW) is not None
-    assert se.attempt_short_shadow(db, cand("A"), None, None, NOW) is None
-    assert se.attempt_short_shadow(db, cand("B"), None, None, NOW) is not None
-    assert se.attempt_short_shadow(db, cand("C"), None, None, NOW) is None                              # SHORT_MAX_POSITIONS = 2
-    assert db.query(models.ScalpShortShadow).count() == 2
 
 
 def test_a_gate_refusal_logs_one_skip_row_per_five_minutes(db, monkeypatch):
     monkeypatch.setattr(short_gates, "evaluate", lambda f, now=None: ("VWAP_ABOVE", "buyers in control"))
-    assert se.attempt_short_shadow(db, cand(), None, None, NOW) is None
-    assert se.attempt_short_shadow(db, cand(), None, None, NOW) is None
+    assert _plan(db, cand()) is None
+    assert _plan(db, cand()) is None
     rows = db.query(models.ScalpCandidateLog).all()
     assert len(rows) == 1 and rows[0].decision == "SHORT_SKIP" and rows[0].reason.startswith("VWAP_ABOVE:")
     assert db.query(models.ScalpShortShadow).count() == 0
@@ -89,7 +79,7 @@ def test_a_gate_refusal_logs_one_skip_row_per_five_minutes(db, monkeypatch):
 def test_e269_a_reliable_adverse_tape_refuses_the_shadow_short(db, monkeypatch):
     seen = []
     monkeypatch.setattr(se.flow_gate, "entry_check", lambda sym, side, fj=None: (seen.append((sym, side)) or ("ORDER_FLOW:3_of_6_against_short(delta)", None)))
-    assert se.attempt_short_shadow(db, cand(), None, {"conviction": 70}, NOW) is None
+    assert _plan(db, cand(), None, {"conviction": 70}) is None
     assert seen == [("X", "SHORT")]                                                     # the SHORT checklist, not the long one
     rows = db.query(models.ScalpCandidateLog).all()
     assert len(rows) == 1 and rows[0].decision == "SHORT_SKIP" and rows[0].reason.startswith("SHORT_ORDER_FLOW:")
@@ -101,7 +91,7 @@ def test_e269_no_tape_opinion_leaves_the_shadow_short_untouched_and_plan_carries
     monkeypatch.setattr(se.flow_gate, "entry_check", lambda sym, side, fj=None: (None, '{"tape":{"against":1}}'))
     plan = se.plan_short(db, cand(), None, {"conviction": 70}, NOW)
     assert plan is not None and plan["tape_json"] == '{"tape":{"against":1}}'
-    assert se.attempt_short_shadow(db, cand("Y"), None, {"conviction": 70}, NOW) is not None
+    assert _plan(db, cand("Y"), None, {"conviction": 70}) is not None
 
 
 def test_a_symbol_held_as_a_long_is_refused(db, monkeypatch):
@@ -112,7 +102,7 @@ def test_a_symbol_held_as_a_long_is_refused(db, monkeypatch):
         def all(self): return []
     real = db.query
     monkeypatch.setattr(db, "query", lambda m, *a: _Q(object()) if m is models.ScalpPosition else real(m, *a))
-    assert se.attempt_short_shadow(db, cand(), None, None, NOW) is None
+    assert _plan(db, cand()) is None
     assert real(models.ScalpShortShadow).count() == 0
 
 
@@ -120,7 +110,7 @@ def test_no_capital_is_a_refusal_not_a_guess(db):
     row = ledger._get_or_create(db)
     row.available_capital = 1.0
     db.commit()
-    assert se.attempt_short_shadow(db, cand(), None, None, NOW) is None
+    assert _plan(db, cand()) is None
     assert db.query(models.ScalpCandidateLog).one().reason.startswith("SHORT_NO_CAPITAL")
 
 
@@ -208,19 +198,21 @@ def test_cycle_in_off_mode_still_closes_leftover_rows(db, monkeypatch):
     assert r.status == "STOP"
 
 
-def test_shadow_cycle_records_a_faller_that_the_board_also_ranks_bearish(db, monkeypatch):
+def test_live_cycle_hands_only_the_board_ranked_faller_to_short_live(db, monkeypatch):
     import screening.quality_gate as qg
     from screening import engine
-    from tz_utils import is_market_open_ist  # noqa: F401
+    from orders import short_live
     import tz_utils
     monkeypatch.setattr(tz_utils, "is_market_open_ist", lambda *a, **k: True)
     monkeypatch.setattr(engine, "scan_shorts", lambda held=None: [cand("A"), cand("NOBOARD")])
     monkeypatch.setattr(se, "_bear_rows", lambda: {"A": {"side": "bear", "conviction": 70, "symbol": "A"}})
+    tried = []
+    monkeypatch.setattr(short_live, "automatic_entry_off", lambda db: None)             # live mode asks whether auto entries are on (module, auto-pilot, armed)
+    monkeypatch.setattr(short_live, "attempt_short_live", lambda db, c, q, brow, now=None: (tried.append(c.symbol) or object()))
 
     async def _check(sym, cached=None):
         return types.SimpleNamespace(event_unchecked=False, has_positive_catalyst=False, bulk_deal_flag=False, earnings_date=None)
     monkeypatch.setattr(qg, "check", _check)
     monkeypatch.setattr(qg, "get_cache_batch", lambda *a, **k: {})
     out = asyncio.run(se.run_short_cycle(db, NOW))
-    assert out["recorded"] == 1
-    assert [r.symbol for r in db.query(models.ScalpShortShadow).all()] == ["A"]
+    assert out["recorded"] == 1 and tried == ["A"]

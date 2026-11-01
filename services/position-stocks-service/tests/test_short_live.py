@@ -72,9 +72,9 @@ def test_only_the_cycle_hands_candidates_to_the_live_entry():
     assert users == ["orders/short_entry.py"], users
 
 
-def test_shadow_mode_view_still_reads_live_as_off():
+def test_short_entry_mode_has_no_shadow_value_and_the_recorder_is_gone():
     src = (ROOT / "orders" / "short_entry.py").read_text(encoding="utf-8")
-    assert 'return "shadow" if m == "shadow" else "off"' in src       # attempt_short_shadow can never place an order, whatever the switch says
+    assert 'return "live" if m == "live" else "off"' in src and "def attempt_short_shadow" not in src and "def mode()" not in src      # E285 round 89
 
 
 def test_the_cap_switch_is_in_the_catalog_and_protected_from_the_calibrator():

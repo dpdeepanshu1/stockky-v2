@@ -133,7 +133,7 @@ def env(monkeypatch):
     s.commit()
     se.reset()
     box = {"lv": None, "setup": {"id": None, "skip": "NO_SETUP"}, "tm": [], "adjust": None}
-    monkeypatch.setattr(config, "SHORT_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "SHORT_MODE", "live", raising=False)
     monkeypatch.setattr(short_gates, "gather_facts", lambda *a, **k: {"live": 100.0, "quote": None})
     monkeypatch.setattr(short_gates, "evaluate", lambda f, now=None, **kw: None)
     monkeypatch.setattr(short_gates, "board_gate_short", lambda f, now=None: None)

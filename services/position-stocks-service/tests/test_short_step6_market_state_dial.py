@@ -107,7 +107,7 @@ def test_reserve_capital_refuses_a_short_when_the_dial_is_zero():
 
 def test_short_entry_refuses_first_and_sizes_with_the_dial():
     src = (ROOT / "orders" / "short_entry.py").read_text(encoding="utf-8")
-    a = src.index("def _attempt(")
+    a = src.index("def plan_short(")      # E285 round 89: the shadow _attempt is gone; plan_short is the shared walk
     body = src[a:]
     assert body.index("_market_state_short_mult() <= 0.0") < body.index("short_gates.gather_facts") < body.index("compute_levels(")
     assert '"SHORT_MARKET_STATE_OFF"' in body

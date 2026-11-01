@@ -1,5 +1,6 @@
-"""B15 (2026-10-22): enforce needs evidence. structure_gate.mode_for(mode, db) downgrades enforce -> log until enough
-structure_observations rows have a measured outcome; the offline A/B verdict and G2 check have a hard floor of 15 signals.
+"""B15 (2026-10-22) -> E285 round 88: the evidence downgrade is GONE. structure_gate.mode_for(mode, db) no longer turns enforce into log until
+structure_observations rows have a measured outcome: the gate is live the moment it is on. The offline A/B verdict and G2 check keep their hard floor of 15 signals
+(those are reports, not the entry path).
 
 Run from services/real-trade-service:  python3 -m pytest tests/test_b15_enforce_guard.py -q
 """
@@ -26,7 +27,6 @@ def db(monkeypatch):
     eng = create_engine("sqlite:///:memory:")
     models.Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()
-    monkeypatch.setattr(config, "STRUCTURE_ENFORCE_MIN_OOS", 15, raising=False)   # conftest turns the guard off; these tests turn it on
     monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "enforce")
     monkeypatch.setattr(config, "STRUCTURE_GATE_DEMO_MODE", "enforce")
     sg._OOS_CACHE.clear()
@@ -35,53 +35,32 @@ def db(monkeypatch):
     s.close()
 
 
-def _obs(db, n, mode="REAL", measured=True):
-    for i in range(n):
-        db.add(models.StructureObservation(symbol=f"S{i}", source="real_trade", mode=mode, obs_day="2026-10-01", obs_ts=float(i),
-                                           price=100.0, verdict="passed", ret_5d=(1.0 if measured else None)))
+def test_enforce_is_live_with_no_outcomes_at_all(db):
+    assert sg.mode_for("REAL", db) == "enforce" and sg.mode_for("DEMO", db) == "enforce"
+
+
+def test_enforce_stays_live_with_few_unmeasured_or_other_mode_rows(db):
+    for i in range(3):
+        db.add(models.StructureObservation(symbol=f"S{i}", source="real_trade", mode="DEMO", obs_day="2026-10-01", obs_ts=float(i), price=100.0, verdict="passed", ret_5d=None))
     db.commit()
-
-
-def test_enforce_is_downgraded_with_too_few_outcomes(db):
-    _obs(db, 14)
-    assert sg.mode_for("REAL", db) == "log"
-
-
-def test_enforce_allowed_at_the_floor(db):
-    _obs(db, 15)
     assert sg.mode_for("REAL", db) == "enforce"
 
 
-def test_unmeasured_rows_and_other_modes_do_not_count(db):
-    _obs(db, 20, measured=False)
-    _obs(db, 20, mode="DEMO")
-    assert sg.mode_for("REAL", db) == "log"
-
-
-def test_without_a_db_the_configured_mode_is_unchanged(db):
-    assert sg.mode_for("REAL") == "enforce"
-
-
-def test_log_and_off_are_never_changed(db, monkeypatch):
-    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "off")
-    assert sg.mode_for("REAL", db) == "off"
-    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "log")
-    assert sg.mode_for("REAL", db) == "log"
-
-
-def test_guard_can_be_disabled(db, monkeypatch):
-    monkeypatch.setattr(config, "STRUCTURE_ENFORCE_MIN_OOS", 0, raising=False)
-    assert sg.mode_for("REAL", db) == "enforce"
-
-
-def test_unreadable_table_counts_as_no_evidence(db):
+def test_an_unreadable_table_does_not_downgrade_it(db):
     class Boom:
         def query(self, *a, **k):
             raise RuntimeError("db down")
 
         def rollback(self):
             pass
-    assert sg.mode_for("REAL", Boom()) == "log"
+    assert sg.mode_for("REAL", Boom()) == "enforce"
+
+
+def test_off_stays_off_and_a_leftover_log_is_enforce(db, monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "off")
+    assert sg.mode_for("REAL", db) == "off"
+    monkeypatch.setattr(config, "STRUCTURE_GATE_MODE", "log")
+    assert sg.mode_for("REAL", db) == "enforce"
 
 
 def test_g2_hard_floor_beats_a_low_min_n():

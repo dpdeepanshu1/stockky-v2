@@ -384,6 +384,9 @@ DEFAULT_MAX_PORTFOLIO_RISK_PCT = float(((os.getenv("DEFAULT_MAX_PORTFOLIO_RISK_P
 PORTFOLIO_HEAT_SHARED_ENABLED = (os.getenv("PORTFOLIO_HEAT_SHARED_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 HEAT_GAP_DEFAULT_PCT = float(((os.getenv("HEAT_GAP_DEFAULT_PCT") or "").strip() or "1.5"))   # allowance for a carried stock with no cached p95 gap
 HEAT_PEER_MAX_AGE_S = float(((os.getenv("HEAT_PEER_MAX_AGE_S") or "").strip() or "900"))     # peer row older than this reads as none (fail-open)
+# E285 round 87: every Dhan order call this service makes (entry, cancel, resting stop, resting stop cancel) is appended to the account-wide one-second window (a file on the shared-runtime volume, execution/shared_rate_window.py) so
+# position-stocks-service can hold its stop / target modifies back while the account is near Dhan's 10 requests a second. This service only RECORDS: it never waits, and a file that cannot be used changes nothing here.
+ORDER_RATE_SHARED_ENABLED = (os.getenv("ORDER_RATE_SHARED_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 # E276 round 53: a carried stock's allowance uses its OWN 95th-percentile overnight gap (daily bars, cached 12 h, fetched in the background), never below
 # HEAT_GAP_MIN_PCT; until it is known, or when it cannot be fetched, the flat HEAT_GAP_DEFAULT_PCT applies. HEAT_GAP_P95_ENABLED off = always the flat default.
 # E276 round 59: the Real Trade risk ladder. A setup with 100+ closed REAL trades (setup stamp readable) and a positive 90 % lower bound of its average R (stage 1), or 300+ and a bound above
@@ -592,11 +595,11 @@ OVERNIGHT_HOLD_EXTRA_GAIN_PER_CLOSED_DAY_PCT = _og_float("OVERNIGHT_HOLD_EXTRA_G
 # gate has proven benefit out-of-sample (gate_check G2); autocalib still moves it to enforce on a G2 PASS.
 def _sg_mode(name, default):
     v = (os.getenv(name) or "").strip().lower()
-    if v in ("off", "log", "enforce"):
+    if v in ("off", "enforce"):
         return v
     if not v:
-        return default if default in ("off", "log", "enforce") else "enforce"
-    return "enforce"   # a stale "shadow" in an old .env stays live
+        return default if default in ("off", "enforce") else "enforce"
+    return "enforce"   # E285 round 88: no log value; a stale "shadow" or "log" in an old .env is enforce (live)
 STRUCTURE_GATE_MODE = _sg_mode("STRUCTURE_GATE_MODE", "enforce")
 STRUCTURE_GATE_DEMO_MODE = _sg_mode("STRUCTURE_GATE_DEMO_MODE", STRUCTURE_GATE_MODE)
 # B15 (2026-10-22): enforce needs evidence. While fewer than this many structure_observations rows with a measured outcome (ret_5d) exist for
@@ -614,7 +617,7 @@ STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() 
 # the breakout bar's volume / its 20-bar mean as ms_bos_vol_ratio; below STRUCTURE_BREAKOUT_MIN_VOL_RATIO it is a "breakout without volume".
 #   STRUCTURE_BREAKOUT_VOLUME_MODE  enforce (default since E73: counts as a gate reason, so the entry WAITs) | log (record it as an observation on the decision, never blocks) | off.
 # 0 for the ratio switches the test off. A summary without ms_bos_vol_ratio (older engine copy / no volume) is no opinion on this test, never a block.
-STRUCTURE_BREAKOUT_VOLUME_MODE = (lambda v: v if v in ("off", "log", "enforce") else "enforce")((os.getenv("STRUCTURE_BREAKOUT_VOLUME_MODE") or "enforce").strip().lower())
+STRUCTURE_BREAKOUT_VOLUME_MODE = (lambda v: v if v in ("off", "enforce") else "enforce")((os.getenv("STRUCTURE_BREAKOUT_VOLUME_MODE") or "enforce").strip().lower())      # E285 round 88: no log value
 STRUCTURE_BREAKOUT_MIN_VOL_RATIO = _og_float("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2)    # same 1.2 x average as the candle `volume_confirmed` flag
 STRUCTURE_BREAKOUT_BARS = int(_og_float("STRUCTURE_BREAKOUT_BARS", 5.0))
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts

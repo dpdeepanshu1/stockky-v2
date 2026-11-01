@@ -31,6 +31,18 @@ def test_listed_switches_read_shadow_and_log_as_live():
             assert "M" + want in got, (svc.name, var, old, got)
 
 
+def test_structure_gate_and_breakout_volume_read_log_as_enforce():
+    """E285 round 88: the A9 log mode and the B15 evidence downgrade are gone from Real Trade's structure gate."""
+    for var in ("STRUCTURE_GATE_MODE", "STRUCTURE_GATE_DEMO_MODE", "STRUCTURE_BREAKOUT_VOLUME_MODE"):
+        for old in ("shadow", "log", "record", "junk"):
+            assert "Menforce" in _run(RT, var, old), (var, old)
+        assert "Moff" in _run(RT, var, "off"), var
+    cat = (RT / "control" / "catalog.py").read_text()
+    for var in ("STRUCTURE_GATE_MODE", "STRUCTURE_GATE_DEMO_MODE", "STRUCTURE_BREAKOUT_VOLUME_MODE"):
+        seg = cat.split(f'Flag("{var}"', 1)[1].split("Flag(", 1)[0]
+        assert '"log"' not in seg.split("choices=", 1)[1].split(")", 1)[0], var
+
+
 def test_swing_mode_shadow_reads_as_off_not_live():
     assert "Moff" in _run(RT, "SWING_MODE", "shadow")      # shadow never bought, so a leftover value must not start buying
     assert "Mlive" in _run(RT, "SWING_MODE", "live")

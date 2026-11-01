@@ -1586,7 +1586,7 @@ async def _trading_loop() -> None:
             async with _cycle_lock:
                 with factory() as db:
                     await _run_cycle(db, trigger="AUTO")
-                    # Short selling step 5/8: the short switch in shadow records would-be shorts (no order); in live it also places capped real shorts via orders/short_live.py. Never raises
+                    # Short selling step 5/8 (E285 round 89: the shadow recorder is gone): the short cycle follows leftover old shadow rows and, in live mode, hands candidates to orders/short_live.py
                     # (run_short_cycle swallows its own errors). With the short switch off it only closes rows left over from an earlier switch-on.
                     try:
                         from orders import short_entry as _short_entry

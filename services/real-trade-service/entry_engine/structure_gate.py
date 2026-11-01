@@ -72,19 +72,11 @@ def oos_count(db: Any, trade_mode: str) -> Optional[int]:
 
 
 def mode_for(trade_mode: str, db: Any = None) -> str:
-    """enforce | log | off for REAL / DEMO. log = evaluate and record only (A9); anything else is enforce."""
+    """enforce | off for REAL / DEMO; anything else (a stale log / shadow) is enforce. E285 round 88: the A9 log mode and the B15 downgrade of enforce to log until
+    STRUCTURE_ENFORCE_MIN_OOS measured rows exist are gone, so the gate is live the moment it is on. `db` is accepted for the old callers and no longer read."""
     try:
         m = config.STRUCTURE_GATE_MODE if str(trade_mode).upper() == "REAL" else config.STRUCTURE_GATE_DEMO_MODE
-        m = m if m in ("off", "log") else "enforce"
-        # B15: enforce only with evidence. Callers that pass a db get the guard; without one the configured mode is returned unchanged.
-        floor = int(getattr(config, "STRUCTURE_ENFORCE_MIN_OOS", 15) or 0)
-        if m == "enforce" and db is not None and floor > 0:
-            n = oos_count(db, trade_mode)
-            if n is None or n < floor:
-                logger.info("structure gate: enforce downgraded to log for %s (%s out-of-sample observations, need %d)", trade_mode,
-                            "unreadable" if n is None else n, floor)
-                return "log"
-        return m
+        return "off" if m == "off" else "enforce"
     except Exception:  # noqa: BLE001
         return "enforce"
 
@@ -167,7 +159,7 @@ def breakout_volume_note(summary: Optional[Dict[str, Any]]) -> Optional[str]:
     """D-vol: text when the latest bullish break of structure is fresh, not failed and came on thin volume (ratio < STRUCTURE_BREAKOUT_MIN_VOL_RATIO);
     None when the test is off, there is no fresh bullish breakout, or the summary has no volume ratio (no opinion). Pure, never raises."""
     try:
-        if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "log")) == "off" or not isinstance(summary, dict):
+        if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "enforce")) == "off" or not isinstance(summary, dict):
             return None
         lim = float(getattr(config, "STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 0.0) or 0.0)
         ratio, bars = _f(summary.get("ms_bos_vol_ratio")), _f(summary.get("ms_bos_bars"))
@@ -223,10 +215,7 @@ def evaluate(summary: Optional[Dict[str, Any]], live_price) -> Dict[str, Any]:
                     reasons.append(f"fresh bearish break of structure {int(bars)} bar(s) ago")
         vol_txt = breakout_volume_note(summary)
         if vol_txt:
-            if str(getattr(config, "STRUCTURE_BREAKOUT_VOLUME_MODE", "log")) == "enforce":
-                reasons.append(vol_txt)
-            else:
-                base["observations"] = [vol_txt]          # log: recorded on the decision, never a reason, never a WAIT
+            reasons.append(vol_txt)                       # E285 round 88: no log value; breakout_volume_note() is None when the mode is off
         base["reasons"] = reasons
         if reasons:
             base["would_reject"] = True

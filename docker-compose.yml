@@ -407,6 +407,8 @@ services:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       # group442: switches changed on the Real Money Calibration page (control/kit.py) are saved here and re-applied at boot; survives rebuilds
       - control-state-rt:/data/control
+      # E285 round 87: the account-wide Dhan order-call window both trading services append to (execution/shared_rate_window.py)
+      - shared-runtime:/data/shared
       # task 4: shared bar-records volume. real-trade writes ONLY under its own subfolder (BAR_RECORDS_DIR=/data/bars/rt); position-stocks owns /data/bars/<day>/.
       - bar-records:/data/bars
     # depends_on intentionally removed (2026-09-03 durability upgrade):
@@ -672,6 +674,8 @@ services:
       - bar-records:/data/bars
       # group442: switches changed on the Real Money Calibration page (control/kit.py) are saved here and re-applied at boot; survives rebuilds
       - control-state-ps:/data/control
+      # E285 round 87: same volume as real-trade-service: the account-wide Dhan order-call window
+      - shared-runtime:/data/shared
     depends_on:
       - real-trade-service
       - analysis-intelligence-service
@@ -780,6 +784,8 @@ volumes:
   # group442: Real Money Calibration page state
   control-state-rt:
   control-state-ps:
+  # E285 round 87: small files both trading services share (the account-wide Dhan order-call window)
+  shared-runtime:
   runner-data:
   tsfm-hf-cache:
   tsfm-cache:

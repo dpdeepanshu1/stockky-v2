@@ -385,3 +385,12 @@ def e277_restore_after_each_test():
     snap = _e277_snapshot()
     yield
     _e277_restore(snap)
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e285_shared_order_window_off_by_default(monkeypatch):
+    """E285 round 87: execution/dhan_client appends every Dhan order call to a file on the shared-runtime volume. Older tests stub the broker and must not touch the file
+    system; tests/test_e285_shared_order_window.py turns it on with a temp file."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "ORDER_RATE_SHARED_ENABLED", False, raising=False)
+    yield

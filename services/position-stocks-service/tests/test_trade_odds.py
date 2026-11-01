@@ -110,7 +110,7 @@ def _feed(sym, bars):
 
 
 def test_attach_merges_under_odds_and_keeps_other_keys(monkeypatch):
-    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "live", raising=False)
     to._reset_for_tests(); _feed("ABC", falling(60))
     out = to.attach(json.dumps({"orb": {"x": 1}, "spread": 0.1}), "abc", "SHORT", 1.0, 2.0)
     d = json.loads(out)
@@ -119,7 +119,7 @@ def test_attach_merges_under_odds_and_keeps_other_keys(monkeypatch):
 
 
 def test_attach_with_no_flow_creates_it(monkeypatch):
-    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "live", raising=False)
     _feed("ABC", falling(60))
     assert "odds" in json.loads(to.attach(None, "ABC", "LONG", 1.0, 2.0))
 
@@ -128,14 +128,14 @@ def test_attach_leaves_input_alone_when_off_no_bars_or_bad_levels(monkeypatch):
     _feed("ABC", falling(60))
     monkeypatch.setattr(config, "TRADE_ODDS_MODE", "off", raising=False)
     assert to.attach("keep", "ABC", "LONG", 1.0, 2.0) == "keep"
-    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "live", raising=False)
     assert to.attach("keep", "NOPE", "LONG", 1.0, 2.0) == "keep"
     assert to.attach(None, "ABC", "LONG", 0.0, 2.0) is None
     assert to.attach("{bad json", "ABC", "LONG", 1.0, 2.0) is not None      # unreadable flow text is replaced by a fresh record
 
 
 def test_attach_never_raises(monkeypatch):
-    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "TRADE_ODDS_MODE", "live", raising=False)
     monkeypatch.setattr(bar_store, "get_bars", lambda s: (_ for _ in ()).throw(RuntimeError("boom")))
     assert to.attach("keep", "ABC", "LONG", 1.0, 2.0) == "keep"
     assert to.stats()["errors"] >= 1

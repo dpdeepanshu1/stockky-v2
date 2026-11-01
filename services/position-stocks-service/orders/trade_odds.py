@@ -39,7 +39,7 @@ def _f(v) -> Optional[float]:
 
 
 def _off() -> bool:
-    return str(getattr(config, "TRADE_ODDS_MODE", "shadow") or "shadow").lower() == "off"
+    return str(getattr(config, "TRADE_ODDS_MODE", "live") or "live").lower() == "off"      # E285 round 87: only an explicit off stops it (a leftover shadow reads as live)
 
 
 def _clean(bars: Sequence[Any]) -> List[tuple]:

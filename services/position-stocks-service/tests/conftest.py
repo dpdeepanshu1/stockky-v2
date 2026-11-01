@@ -21,6 +21,7 @@ def _e282_order_rate_limit_off_by_default(monkeypatch):
     well under a second and must not sleep; tests/test_e282_order_rate.py turns it on explicitly (with a fake clock)."""
     import config as _config
     monkeypatch.setattr(_config, "ORDER_RATE_LIMIT_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "ORDER_RATE_SHARED_ENABLED", False, raising=False)     # E285 round 87: no shared file in older tests; tests/test_e285_shared_order_rate.py turns it on with a temp file
     from execution import order_rate as _orr
     _orr.reset()
     yield

@@ -210,12 +210,12 @@ MARKET_STATE_MODE = _ms_mode()
 MARKET_STATE_RISK_MULT = _ms_float("MARKET_STATE_RISK_MULT", 1.0, 0.1, 1.0)
 
 # ── Short selling (Part 2 step 2, 2026-10-23) ──────────────────────────────────────────────────────────────────────────────────────────
-# SHORT_MODE: off | shadow | live (ships off). shadow = orders/short_entry.py records would-be shorts, no order. live (short selling step 8) = orders/short_live.py places
+# SHORT_MODE: off | live (ships off). E285 round 87: there is no shadow value any more (the plan's no-shadow rule); a leftover `shadow` reads as off, never live. live (short selling step 8) = orders/short_live.py places
 # a real SELL Super Order WITH its broker stop leg, sized to at most SHORT_LIVE_QTY_CAP shares. Read by the short cycle, capital/ledger.py and the live entry.
 # Anything else reads as `off`. A short that cannot be closed cleanly must never exist, so the exit side (orders/side.py, eod_squareoff, reconcile) came first.
 def _short_mode(name: str = "SHORT_MODE", default: str = "off") -> str:
     v = _get_str(name, default).strip().lower()
-    return v if v in ("off", "shadow", "live") else default
+    return v if v in ("off", "live") else default      # E285 round 87: shadow is not a value any more; it falls to the default (off)
 
 
 SHORT_MODE = _short_mode()
@@ -275,6 +275,8 @@ SHORT_TARGET_MIN_PCT = max(0.0, _get_float("SHORT_TARGET_MIN_PCT", 0.5))        
 LEARNED_STOP_ENABLED = _get_bool("LEARNED_STOP_ENABLED", True)                           # E282 round 76: a stop from the setup's own winners (90th percentile of how far they went against the entry x1.10), tighter only, plan stop until 30 closed trades (orders/learned_stop.py)
 LEARNED_STOP_MIN_PCT = max(0.0, _get_float("LEARNED_STOP_MIN_PCT", 0.5))                 # E282 round 76: a learned stop is never tighter than this % (on top of the stock's own noise floor)
 ORDER_RATE_LIMIT_ENABLED = _get_bool("ORDER_RATE_LIMIT_ENABLED", True)                   # E282 round 77: a stop / target modify waits (at most ~1 s, hard cap 2 s) when the last second already holds ORDER_RATE_PER_S Dhan order calls; every other order call is counted, never delayed (execution/order_rate.py)
+ORDER_RATE_SHARED_ENABLED = _get_bool("ORDER_RATE_SHARED_ENABLED", True)                 # E285 round 87: both services append every Dhan order call to one account-wide one-second window (a file on the shared-runtime volume); a stop / target modify here also waits while that window is full. An unusable file = this process's own window only (execution/shared_rate_window.py)
+ORDER_RATE_ACCOUNT_PER_S = max(2, min(10, _get_int("ORDER_RATE_ACCOUNT_PER_S", 8)))    # E285 round 87: the most order calls ALL services together may have in one second before a stop / target modify waits (Dhan's limit is 10; 2 are left for calls nothing counts)
 ORDER_RATE_PER_S = max(1, min(9, _get_int("ORDER_RATE_PER_S", 4)))                       # E282 round 77: this service's share of Dhan's 10 order requests a second (real-trade-service keeps the rest)
 SHORT_ENTRY_CUTOFF_IST = _get_str("SHORT_ENTRY_CUTOFF_IST", "13:30")                    # a late short has little time to work and a lot of time to be squeezed
 SHORT_SQUAREOFF_TIME_IST = _get_str("SHORT_SQUAREOFF_TIME_IST", "14:55")                # shadow shorts are closed and live shorts covered here (orders/eod_squareoff.run_short_squareoff; 5 min before the long square-off)
@@ -1391,7 +1393,7 @@ if BOARD_GATE_MODE != "off":
 # insufficient structure = no opinion, never a block). LIVE by default; the scalper buys strength on purpose, so the defaults block only the
 # clear daily-structure no-gos (bearish daily structure, a fresh bearish BOS, almost no room under the next daily resistance, an extreme
 # stretch / chase). Set a limit to 0 to switch that single test off.
-#   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | log (E72: evaluate + record, never refuses; ONLY via PS_STRUCTURE_GATE_MODE) | off (kill switch); a stale "shadow" = enforce
+#   STRUCTURE_GATE_MODE   enforce (default, always live: refuse with STRUCTURE_* reason) | off (kill switch); a stale "shadow" or "log" = enforce (E285 round 87)
 def _ps(name: str) -> str:
     """group365/372: the scalper may stay looser than real-trade on the SHARED structure names. `PS_<name>` wins when it is set (a blank one is ignored),
     otherwise the shared `<name>` is read as before."""
@@ -1402,14 +1404,14 @@ def _ps(name: str) -> str:
 # name `STRUCTURE_GATE_MODE` is Real Trade's switch (shipped `log`), so a shared `STRUCTURE_GATE_MODE=log` must NOT quietly loosen the scalper: through
 # the shared name anything but "off" still means enforce, exactly as before. Default stays enforce.
 _gate_mode_raw = _get_str(_ps("STRUCTURE_GATE_MODE"), "enforce").lower()
-STRUCTURE_GATE_MODE = "off" if _gate_mode_raw == "off" else ("log" if _gate_mode_raw == "log" and _ps("STRUCTURE_GATE_MODE").startswith("PS_") else "enforce")
+STRUCTURE_GATE_MODE = "off" if _gate_mode_raw == "off" else "enforce"          # E285 round 87: enforce | off only; a stale `log` / `shadow` / typo is enforce
 STRUCTURE_REQUIRE_DATA = _get_bool(_ps("STRUCTURE_REQUIRE_DATA"), True)                     # true = refuse (STRUCTURE_NODATA) when no usable daily structure
 STRUCTURE_BEARISH_BLOCK = _get_bool(_ps("STRUCTURE_BEARISH_BLOCK"), True)                    # bearish daily trend / fresh (not failed) bearish BOS
 STRUCTURE_BEARISH_BOS_BARS = max(1, _get_int("STRUCTURE_BEARISH_BOS_BARS", 5))
 # E72/E73 (D-vol, Real Trade parity): a fresh bullish daily breakout on thin volume. enforce (default since E73) = a refusal reason (STRUCTURE_* skip); log = only an OBSERVATION on the verdict / snapshot / counters; off. Needs ms_bos_vol_ratio in the structure summary; without it = no opinion.
 _bv_raw = _get_str(_ps("STRUCTURE_BREAKOUT_VOLUME_MODE"), "enforce").lower()
 # E73: enforce is the shipped default (everything live). Same rule as the gate itself: `log` only through the explicit PS_ name, so Real Trade's shared name cannot loosen the scalper.
-STRUCTURE_BREAKOUT_VOLUME_MODE = "off" if _bv_raw == "off" else ("log" if _bv_raw == "log" and _ps("STRUCTURE_BREAKOUT_VOLUME_MODE").startswith("PS_") else "enforce")
+STRUCTURE_BREAKOUT_VOLUME_MODE = "off" if _bv_raw == "off" else "enforce"      # E285 round 87: no `log` value; anything except off is enforce
 STRUCTURE_BREAKOUT_MIN_VOL_RATIO = max(0.0, _get_float(_ps("STRUCTURE_BREAKOUT_MIN_VOL_RATIO"), 1.2))   # same 1.2 x average as the candle volume_confirmed flag; 0 = off
 STRUCTURE_BREAKOUT_BARS = max(1, _get_int("STRUCTURE_BREAKOUT_BARS", 5))                                # "fresh" = the breakout was at most this many daily bars ago
 STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
@@ -1587,11 +1589,11 @@ ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))
 # E273 round 6: ENTRY_MIN_QTY_MODE cost (default) = the floor is the smallest quantity (up to ENTRY_MIN_QTY) at which the cost gate passes, so a small pool
 # buying a mid / high priced name with 1-2 shares is no longer dropped when its edge pays for its costs; fixed = the old flat floor. Read at call time.
 ENTRY_MIN_QTY_MODE = _get_str("ENTRY_MIN_QTY_MODE", "cost")
-# Trade-odds recorder (orders/trade_odds.py, E103): RECORD ONLY. flow_json["odds"] on every new long and short says how often this trade's own
+# Trade-odds recorder (orders/trade_odds.py, E103): informational (nothing reads it to decide). flow_json["odds"] on every new long and short says how often this trade's own
 # stop % / target % pair had the target come first when replayed on the stock's 1-minute bars so far today. Nothing is blocked, sized or ordered.
-TRADE_ODDS_MODE = _get_str("TRADE_ODDS_MODE", "shadow").lower()      # shadow | off
-if TRADE_ODDS_MODE not in ("shadow", "off"):
-    TRADE_ODDS_MODE = "shadow"
+TRADE_ODDS_MODE = _get_str("TRADE_ODDS_MODE", "live").lower()        # live | off. E285 round 87: there is no shadow value; a leftover `shadow` (or a typo) reads as live, only an explicit `off` stops it
+if TRADE_ODDS_MODE not in ("live", "off"):
+    TRADE_ODDS_MODE = "live"
 # Time Machine (timemachine/, E111): EVIDENCE ONLY. Replays one stock's recent 5-minute sessions and thousands of made-up sessions with a given entry time,
 # stop % and target %, and says how often the target comes first, after charges. It places, sizes and blocks nothing; off stops the routes answering.
 TIME_MACHINE_ENABLED = _get_bool("TIME_MACHINE_ENABLED", True)

@@ -7,7 +7,7 @@ One picture of the morning, built before any order is possible:
   * India VIX against its own recent range (percentile of today's reading in the daily closes vix_gate already fetches): a regime label, not a fixed level.
   * event records from the typed feed (analysis-intelligence GET /events/active) for the watchlist: type, polarity (+1 / -1 only), strength, age, whether results are out.
   * sector strength: average pre-open gap of each sector's names (preopen snapshot) and the rank, top and bottom third (feeds the S1 / S4 confirmation).
-Cadence: first build 08:30, rebuilt 09:05, then refreshed every minute until 09:20 (PREMARKET_PLAN_*). In memory, one plan per IST day, nothing raises. Fail-safe: any source down leaves
+Cadence: first build 08:30, rebuilt 09:05, then refreshed every minute until 09:20 (PREMARKET_PLAN_*), then (E283) every PREMARKET_REFRESH_MIN minutes (default 5, 0 = stop at 09:20) until 10:30 so a filing or a sector turn after the open reaches S2 / S3. In memory, one plan per IST day, nothing raises. Fail-safe: any source down leaves
 its part empty and the rest still builds; an empty event list means no S1 / S4 trigger from this plan (the normal setups run as usual). Off with PREMARKET_PLAN_ENABLED=0.
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ RISK_OFF_AVG_PCT = -0.9
 RISK_OFF_US_FUT_PCT = -1.2
 MIN_MINUTES = (8 * 60 + 30, 9 * 60 + 5)          # first build, rebuild
 EVERY_MINUTE_FROM, UNTIL = 9 * 60 + 5, 9 * 60 + 20
+REFRESH_UNTIL = 10 * 60 + 30                      # E283: after 09:20 the plan is rebuilt every PREMARKET_REFRESH_MIN minutes until here (S2 09:30 and S3 09:45 read it)
 
 _plan: Dict[str, Any] = {"day": None, "built_at": None, "builds": 0, "last_minute": None, "plan": None}
 
@@ -190,8 +191,18 @@ def build_plan(*, today, cues_body: Any = None, vix_now: Any = None, vix_closes:
             "event_counts": {"positive": sum(1 for r in ev.values() if r["polarity"] == 1), "negative": sum(1 for r in ev.values() if r["polarity"] == -1)}}
 
 
+def refresh_minutes() -> int:
+    """E283: minutes between rebuilds after 09:20 (0 = the plan stops at the 09:20 picture, the old behaviour). Bounded 0..30; junk gives the default 5."""
+    try:
+        v = int(getattr(config, "PREMARKET_REFRESH_MIN", 5))
+    except (TypeError, ValueError):
+        return 5
+    return max(0, min(30, v))
+
+
 def due(now: Optional[datetime] = None) -> bool:
-    """True when a (re)build is due: 08:30 and 09:05 once each, then once per minute from 09:05 to 09:20, on a trading day. Never raises."""
+    """True when a (re)build is due: 08:30 and 09:05 once each, then once per minute from 09:05 to 09:20, then (E283) every PREMARKET_REFRESH_MIN minutes
+    from 09:20 to 10:30, on a trading day. Never raises."""
     try:
         if not getattr(config, "PREMARKET_PLAN_ENABLED", True):
             return False
@@ -201,8 +212,11 @@ def due(now: Optional[datetime] = None) -> bool:
         if _plan["day"] != ist_today_str(now):
             _plan.update({"day": ist_today_str(now), "built_at": None, "builds": 0, "last_minute": None, "plan": None})
         m = n.hour * 60 + n.minute
-        if m < MIN_MINUTES[0] or m >= UNTIL or _plan["last_minute"] == m:
+        if m < MIN_MINUTES[0] or m >= REFRESH_UNTIL or _plan["last_minute"] == m:
             return False
+        if m >= UNTIL:                                   # after the 09:20 picture: slow refresh, anchored on 09:20 so the minutes are the same every day
+            step = refresh_minutes()
+            return step > 0 and (m - UNTIL) % step == 0
         if _plan["builds"] == 0:
             return True
         return m >= EVERY_MINUTE_FROM

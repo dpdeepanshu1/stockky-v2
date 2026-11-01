@@ -266,6 +266,8 @@ SHORT_EARLY_S4_START_IST = _get_str("SHORT_EARLY_S4_START_IST", "09:21")        
 SHORT_SQUEEZE_GUARD_ENABLED = _get_bool("SHORT_SQUEEZE_GUARD_ENABLED", True)              # E274 round 41: no non-S4 short at / above the opening-range high with rising volume and tape buying (orders/squeeze_guard.py)
 SETUP_S2_S3_SHORT_ENABLED = _get_bool("SETUP_S2_S3_SHORT_ENABLED", True)         # E274 round 44: S2 (weak stock breaking the opening-range low) and S3 (exhaustion after an up-spike) may match a short, behind SETUP_S2_ENABLED / SETUP_S3_ENABLED
 SETUP_S4_BOARD_CONFIRM_ENABLED = _get_bool("SETUP_S4_BOARD_CONFIRM_ENABLED", True)    # E274 round 42: a negative-event short is no longer refused for a Board that has not caught up; "Board says bearish with conviction" becomes a 4th S4 confirmation (2 needed)
+LONG_TARGET_LEARNED_ENABLED = _get_bool("LONG_TARGET_LEARNED_ENABLED", True)           # E283: a long's target = its setup cell's typical favourable move when nearer than the plan's and the 1:2 floor holds; 30 closed trades needed
+LONG_TARGET_MIN_PCT = _get_float("LONG_TARGET_MIN_PCT", 0.8)                                 # E283: the smallest learned long target, % above the entry
 SHORT_TARGET_LEARNED_ENABLED = _get_bool("SHORT_TARGET_LEARNED_ENABLED", True)           # E274 round 43: an S4 short's target = its setup cell's typical favourable move when that is nearer (30+ closed trades, 10+ winners)
 SHORT_TARGET_HVN_ENABLED = _get_bool("SHORT_TARGET_HVN_ENABLED", True)                   # E274 round 43: a short's target is trimmed to one tick above the next high-volume node below (reliable tape), when nearer
 SHORT_TARGET_MIN_PCT = max(0.0, _get_float("SHORT_TARGET_MIN_PCT", 0.5))                 # E274 round 43: a trimmed short target must still pay this % from the entry
@@ -817,6 +819,7 @@ PREOPEN_SNAPSHOT_ENABLED = _get_bool("PREOPEN_SNAPSHOT_ENABLED", True)
 EVENT_CANDIDATES_ENABLED = _get_bool("EVENT_CANDIDATES_ENABLED", True)           # E272: list typed-event names (premarket plan) as S1 / S4 candidates
 EVENT_CANDIDATE_MIN_STRENGTH = _get_float("EVENT_CANDIDATE_MIN_STRENGTH", 0.3)   # same floor as the negative-event veto
 EVENT_CANDIDATE_MAX_AGE_MIN = _get_float("EVENT_CANDIDATE_MAX_AGE_MIN", 1080.0)  # 18 h: an overnight filing still counts at the open
+PREMARKET_REFRESH_MIN = _get_int("PREMARKET_REFRESH_MIN", 5)   # E283: minutes between plan rebuilds from 09:20 to 10:30 (0 = stop at 09:20)
 PREMARKET_PLAN_ENABLED = _get_bool("PREMARKET_PLAN_ENABLED", True)   # E272: 08:30 to 09:20 plan (overseas cues, VIX range, typed events, sector strength); live, no veto
 PREOPEN_SNAPSHOT_TIME_IST = _get_str("PREOPEN_SNAPSHOT_TIME_IST", "09:10")   # group 399: was 09:08
 PREOPEN_GAP_GATE_UNTIL_IST = _get_str("PREOPEN_GAP_GATE_UNTIL_IST", "10:00")

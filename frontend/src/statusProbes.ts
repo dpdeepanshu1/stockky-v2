@@ -14,6 +14,8 @@ export const STATUS_PROBES: StatusProbe[] = [
   { svc: "rt", id: "timesfm", path: "/timesfm/status", title: "TimesFM gate (Gate 4g)", what: "Config, counters since boot and the last verdicts (log only)." },
   { svc: "rt", id: "write-behind", path: "/write-behind/status", title: "Write-behind queue", what: "Queue depth, rows written or dropped and the back-off left for evidence rows." },
   { svc: "rt", id: "db-latency", path: "/ops/db-latency", title: "Database latency", what: "Connect and execute times, the last slow statement and the pool state." },
+  { svc: "rt", id: "live-state", path: "/live/state", title: "Pool, heat and setup stamps", what: "The pool rupees per mode, own and peer open risk against the heat limit, and how the newest entries were stamped by setup." },
+  { svc: "ps", id: "live-state", path: "/live/state", title: "Order rate, momentum exit, heat, ladder", what: "Dhan order calls this process counted (waits, per-second budget), momentum-exit mode and counters, the other service's heat, and every setup's ladder stage." },
   { svc: "ps", id: "short-plain", path: "/short/plain", title: "Plain-order short fallback", what: "The switch, the day breaker, counters and SELLs under watch. Places nothing." },
   { svc: "ps", id: "short-probe", path: "/short/probe", title: "Last Dhan SELL probe", what: "The last probe on record (the probe itself is started from the Run tab with its confirm box)." },
   { svc: "ps", id: "board-status", path: "/board/status", title: "Market board status", what: "Board switches, bar recorder and parity counters." },

@@ -94,7 +94,7 @@ def learned_stop_pct(plan_pct: float, adverse: Dict[str, Any], now_ts: Optional[
             lim, _hit = learned_limit.limit(f"{(adverse or {}).get('cell', '?')}|stop|adverse_pct", learned, None, now_ts)    # at most 25 % a week
             learned = float(lim) if lim is not None else learned
         except Exception:  # noqa: BLE001
-            logger.debug("learned_stop: ignored failure (E283: no silent except on an order path)", exc_info=True)
+            pass
         from orders.adaptive_params import shrink_weight
         w = shrink_weight(n)
         return w * learned + (1.0 - w) * plan
@@ -141,7 +141,7 @@ def _tick(live: float, tick: Optional[float]) -> float:
         if t > 0:
             return t
     except Exception:  # noqa: BLE001
-        logger.debug("learned_stop: ignored failure (E283: no silent except on an order path)", exc_info=True)
+        pass
     return 0.05
 
 

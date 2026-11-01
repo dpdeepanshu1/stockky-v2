@@ -66,7 +66,7 @@ def test_plan_and_cadence():
     def at(h, m): return datetime(2026, 11, 2, h, m, tzinfo=IST)
     assert not pm.due(at(8, 29)) and pm.due(at(8, 30))
     pm._plan["builds"] = 1; pm._plan["last_minute"] = 8 * 60 + 30
-    assert not pm.due(at(8, 45)) and pm.due(at(9, 5)) and pm.due(at(9, 6)) and not pm.due(at(9, 20))
+    assert not pm.due(at(8, 45)) and pm.due(at(9, 5)) and pm.due(at(9, 6)) and pm.due(at(9, 20))
 
 def test_sector_third_fallback():
     from datetime import datetime

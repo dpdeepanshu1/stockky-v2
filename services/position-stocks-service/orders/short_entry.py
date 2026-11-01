@@ -98,7 +98,7 @@ def _log(db: Session, cand: Any, decision: str, reason: str) -> None:
         from feed import bar_recorder as _br
         _br.note_symbols([cand.symbol])
     except Exception:  # noqa: BLE001
-        logger.debug("short_entry: ignored failure (E283: no silent except on an order path)", exc_info=True)
+        pass
     try:
         db.add(ScalpCandidateLog(symbol=cand.symbol, window_source=str(getattr(cand, "window_label", "") or "")[:8],
                                  pct_change=float(getattr(cand, "pct_change", 0.0) or 0.0),

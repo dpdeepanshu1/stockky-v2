@@ -13,9 +13,6 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from orders import setup_engine
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 def _num(v) -> Optional[float]:
@@ -98,7 +95,7 @@ def facts_long(*, symbol: str, price: Optional[float], now: Optional[datetime], 
         if isinstance(inputs, dict):                                          # E273 round 5: the S2 / S3 facts and S1's sector third / priced_in (orders/setup_inputs.py)
             f.update({k: v for k, v in inputs.items() if k in INPUT_KEYS})
     except Exception:  # noqa: BLE001
-        logger.debug("setup_live: ignored failure (E283: no silent except on an order path)", exc_info=True)
+        pass
     return f
 
 

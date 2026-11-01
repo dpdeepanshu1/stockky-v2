@@ -27,9 +27,8 @@ models.ScalpCandidateLog = mk("ScalpCandidateLog"); models.ScalpShortShadow = mk
 sys.modules["models"] = models
 cap = types.ModuleType("capital"); cap.__path__ = []
 ledger = types.ModuleType("capital.ledger"); sso = types.ModuleType("capital.shared_order_budget"); ssl = types.ModuleType("capital.shared_symbol_lock")
-hg = types.ModuleType("capital.heat_gate"); hg.reject_reason = lambda *a, **k: None       # E283: short_live imports the heat gate (E276); no heat limit in this script
-sys.modules.update({"capital": cap, "capital.ledger": ledger, "capital.shared_order_budget": sso, "capital.shared_symbol_lock": ssl, "capital.heat_gate": hg})
-cap.ledger, cap.shared_order_budget, cap.shared_symbol_lock, cap.heat_gate = ledger, sso, ssl, hg
+sys.modules.update({"capital": cap, "capital.ledger": ledger, "capital.shared_order_budget": sso, "capital.shared_symbol_lock": ssl})
+cap.ledger, cap.shared_order_budget, cap.shared_symbol_lock = ledger, sso, ssl
 ex = types.ModuleType("execution"); ex.__path__ = []; dc = types.ModuleType("execution.dhan_client")
 class SecurityNotResolvedError(Exception): pass
 dc.SecurityNotResolvedError = SecurityNotResolvedError
@@ -62,7 +61,7 @@ def reset(mode="live", cap=1, qty=200):
     config.SCALP_EXCHANGE_SEGMENT = "NSE_EQ"; config.ENTRY_MARGIN_PAUSE_MINUTES = 5; config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = 5
     af.active = lambda: False; ec.entry_reason = lambda db: None; op.pause_reason = lambda db: None
     ssl.try_claim = lambda db, s: True; ssl.release = lambda db, s: calls["lock_rel"].append(s)
-    ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None, risk_mult=None: (calls["reserved"].append(side) or 20000.0)
+    ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None: (calls["reserved"].append(side) or 20000.0)
     ledger.release_capital = lambda db, position_value, realized_pnl: calls["released"].append(position_value)
     ledger.reserve_additional = lambda db, x: True
     sob.check_and_reserve = lambda db: True
@@ -140,7 +139,7 @@ reset(); ssl.try_claim = lambda db, s: False; r = sl.attempt_short_live(DB(gate(
 # 5 failures after claiming: all released
 def undo_ok(): return calls["lock_rel"] == ["X"]
 reset(); se.plan_short = lambda *a, **k: None; r = sl.attempt_short_live(DB(gate()), cand); check("plan refused: lock released, no capital taken", r is None and undo_ok() and not calls["reserved"])
-reset(); ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None, risk_mult=None: None; r = sl.attempt_short_live(DB(gate()), cand); check("ledger refuses: lock released, no order", r is None and undo_ok() and not calls["orders"])
+reset(); ledger.reserve_capital = lambda db, adaptive_stop_pct, side, conviction_mult=None: None; r = sl.attempt_short_live(DB(gate()), cand); check("ledger refuses: lock released, no order", r is None and undo_ok() and not calls["orders"])
 reset(); sob.check_and_reserve = lambda db: False; r = sl.attempt_short_live(DB(gate()), cand); check("shared budget: capital + lock released", r is None and undo_ok() and calls["released"] and not calls["orders"])
 reset(); dc.get_security_id = lambda db, s: (_ for _ in ()).throw(dc.SecurityNotResolvedError("x")); r = sl.attempt_short_live(DB(gate()), cand); check("no security id: capital + lock released", r is None and undo_ok() and calls["released"])
 # 6 Dhan refuses the SELL Super Order: NO fallback order, everything released

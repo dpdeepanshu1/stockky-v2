@@ -90,7 +90,6 @@ def test_typo_mode_is_off():
 
 
 def test_unreachable_market_data_is_no_opinion_and_cached_short():
-    fg._reset_for_tests()                 # E283: the error counter is module-level; earlier tests in the same run may already have bumped it
     old = fg.fetch_verdict
     def boom(*a, **k):
         raise RuntimeError("down")

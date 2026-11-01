@@ -2940,6 +2940,17 @@ def premarket_plan_route(admin: str = Depends(require_admin)):
         return {"ok": False, "enabled": None, "error": f"{type(e).__name__}: {str(e)[:120]}"}
 
 
+@app.get("/live/state")
+def live_state_route(db: Session = Depends(get_db), admin: str = Depends(require_admin)):
+    """E283: the live safety state for the Calibration tab in one read: Dhan order-call counters (E282 round 77), momentum-exit mode and counters, the other service's heat
+    figures, and the risk-ladder stage of every setup. Read-only; each part answers on its own (ok false + error text when it cannot be read)."""
+    try:
+        from orders import live_state as _ls
+        return {"ok": True, "service": "position-stocks", "since_restart": True, **_ls.snapshot(db)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 @app.get("/flow/stats")
 def flow_stats_route(admin: str = Depends(require_admin)):
     """E271: order-flow tape health for the calibration card: this service's entry-gate and exit counters (in-process, since the last restart), both

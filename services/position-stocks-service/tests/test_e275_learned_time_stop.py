@@ -55,8 +55,7 @@ def test_a_failing_read_is_the_fixed_numbers(monkeypatch):
     assert ea.learned_time_stop(None, POS)["source"] == "fixed"
 
 
-def test_stagnation_decision_uses_the_learned_hard_maximum(monkeypatch):
-    monkeypatch.setattr(config, "EXIT_ADAPTIVE_ENABLED", True, raising=False)       # E283: tests/conftest.py switches adaptive exits off
+def test_stagnation_decision_uses_the_learned_hard_maximum():
     assert ea.stagnation_decision(age_min=45, fading=False, pressure=None)[0] is False
     assert ea.stagnation_decision(age_min=45, fading=False, pressure=None, hard_max_min=40.0) == (True, "hard maximum 45m")
     assert ea.stagnation_decision(age_min=45, fading=False, pressure=None, hard_max_min=None)[0] is False       # old call shape unchanged

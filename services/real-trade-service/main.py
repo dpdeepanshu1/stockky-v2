@@ -2900,6 +2900,17 @@ async def entry_guard_stats(admin: Optional[str] = Depends(require_admin)):
     return {"since_restart": True, "spike_mode": _dsg._spike_mode(), "range_mode": _dsg._range_mode(), **_dsg.guard_stats()}
 
 
+@app.get("/live/state")
+async def live_state_route(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
+    """E283: Real Trade's live state for the Calibration tab in one read: the pool figures (trade_accounts), the heat numbers (own + the other service's) and how the newest
+    ENTER decisions were stamped by setup. Read-only; each part answers on its own."""
+    try:
+        from execution import live_state as _ls
+        return {"ok": True, "service": "real-trade", **_ls.snapshot(db)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 @app.get("/swing/status")
 async def swing_status(admin: Optional[str] = Depends(require_admin), db: Session = Depends(get_db)):
     """E132 (swing plan S3-S5): the swing lane at a glance. Read-only."""

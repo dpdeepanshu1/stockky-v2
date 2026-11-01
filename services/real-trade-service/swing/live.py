@@ -31,6 +31,15 @@ def _cfg(name: str, default: Any = None) -> Any:
     return getattr(config, name, default)
 
 
+def hold_days(db: Any = None) -> int:
+    """E283: the sessions a swing position may be held now: SWING_MAX_HOLD_DAYS, or a shorter hold the ledger's own closed winners support (swing/learned_hold.py). Never raises."""
+    try:
+        from swing import learned_hold
+        return int(learned_hold.hold_days(db))
+    except Exception:  # noqa: BLE001
+        return int(_cfg("SWING_MAX_HOLD_DAYS", 5))
+
+
 def is_swing(position: Any) -> bool:
     return (getattr(position, "entry_decision_label", None) or "").upper() == lane.LABEL
 
@@ -119,7 +128,7 @@ def maybe_extend(db: Any, position: Any, ltp: Any, sessions: int) -> int:
     (SWING_EVENT_EXTEND_MAX times in all). Records one SWING_EVENT_EXTEND row (the only state; no column). Returns the sessions now added (0 = none). Never raises."""
     try:
         have = extra_sessions(position)
-        if not bool(_cfg("SWING_EVENT_EXTEND_ENABLED", True)) or sessions < int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + have:
+        if not bool(_cfg("SWING_EVENT_EXTEND_ENABLED", True)) or sessions < hold_days(db) + have:
             return have
         if have >= int(_cfg("SWING_EVENT_EXTEND_MAX", 1)) * int(_cfg("SWING_EVENT_EXTEND_SESSIONS", 1)):
             return have
@@ -159,7 +168,8 @@ def overdue(position: Any, now: Optional[datetime] = None) -> Optional[str]:
             return None
         od = date.fromisoformat(opened)
         sessions = lane.count_sessions(od, today, cg._is_trading_day)
-        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + extra_sessions(position), opened_day=od, today=today,
+        from sqlalchemy.orm import object_session
+        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=hold_days(object_session(position)) + extra_sessions(position), opened_day=od, today=today,
                                           past_cutoff=n.time() >= backstop_cutoff(), swing_live=lane.norm_mode(_cfg("SWING_MODE", "live")) == "live")
         return why if sell else None
     except Exception:  # noqa: BLE001
@@ -364,7 +374,7 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
                 if sec:
                     sectors.append(sec)
                 await _notify(f"🌱 *Swing entry — {mode}* {sym}\n{approved} @ ₹{limit:.2f} (CNC) | stop ₹{stop:.2f} ({sp:.1f}%) | rank {pk.get('rank')} | "
-                              f"max {int(_cfg('SWING_MAX_HOLD_DAYS', 5))} sessions\n{res.get('status')}"
+                              f"max {hold_days(db)} sessions\n{res.get('status')}"
                               + (f"\nEvent: {_backed[sym].get('type')} (strength {float(_backed[sym].get('strength') or 0):.2f})" if isinstance(_backed.get(sym), dict) else ""))
             else:
                 skip(f"{res.get('reason')}: {str(res.get('detail') or res.get('check_name') or '')[:100]}")
@@ -440,7 +450,7 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
                 pass
             row = rows.get(p.symbol) or {}
             _ext = maybe_extend(db, p, getattr(tick, "price", None), sessions)
-            ok, why = lane.hold_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + _ext, ltp=getattr(tick, "price", None), stop=p.current_stop,
+            ok, why = lane.hold_verdict(sessions=sessions, max_hold=hold_days(db) + _ext, ltp=getattr(tick, "price", None), stop=p.current_stop,
                                         sma10=row.get("sma10"), pct_rank=row.get("pct_rank"), keep_min_pct_rank=float(_cfg("SWING_KEEP_MIN_PCT_RANK", 50.0)),
                                         require_above_sma10=bool(_cfg("SWING_KEEP_ABOVE_SMA10", True)), vetoes=vetoes)
             if ok and len(keep) >= cap:

@@ -50,6 +50,7 @@ data/prediction-model/model.pkl.backup-2026-10-30
 deploy/deploy.sh
 deploy/nginx-stockky.conf
 docker-compose.yml
+docs/E283_HALF_SELL_PROBE_PROTOCOL.md
 docs/ENV_REFERENCE.txt
 docs/FILE_MANIFEST.txt
 docs/ROUTE_AUTH_TRIAGE.json
@@ -1334,6 +1335,8 @@ services/position-stocks-service/orders/learned_limit.py
 services/position-stocks-service/orders/learned_stop.py
 services/position-stocks-service/orders/liquidity_gate.py
 services/position-stocks-service/orders/live_anchor.py
+services/position-stocks-service/orders/live_state.py
+services/position-stocks-service/orders/long_target.py
 services/position-stocks-service/orders/manual_buy_window.py
 services/position-stocks-service/orders/momentum_health.py
 services/position-stocks-service/orders/momentum_hook.py
@@ -1533,6 +1536,9 @@ services/position-stocks-service/tests/test_e277_module_isolation_b.py
 services/position-stocks-service/tests/test_e277_premarket_route.py
 services/position-stocks-service/tests/test_e282_learned_stop.py
 services/position-stocks-service/tests/test_e282_order_rate.py
+services/position-stocks-service/tests/test_e283_live_state.py
+services/position-stocks-service/tests/test_e283_long_target.py
+services/position-stocks-service/tests/test_e283_premarket_refresh.py
 services/position-stocks-service/tests/test_e30_journal_notes.py
 services/position-stocks-service/tests/test_e37_catalog_coverage.py
 services/position-stocks-service/tests/test_e39_entry_cap.py
@@ -1775,6 +1781,7 @@ services/real-trade-service/execution/equity_sync.py
 services/real-trade-service/execution/gap_cache.py
 services/real-trade-service/execution/heat_state.py
 services/real-trade-service/execution/hourly_reconcile.py
+services/real-trade-service/execution/live_state.py
 services/real-trade-service/execution/lock_sweep.py
 services/real-trade-service/execution/reconcile.py
 services/real-trade-service/execution/shared_daily_pnl.py
@@ -1867,6 +1874,7 @@ services/real-trade-service/stockky_ms/wyckoff.py
 services/real-trade-service/swing/__init__.py
 services/real-trade-service/swing/engine.py
 services/real-trade-service/swing/lane.py
+services/real-trade-service/swing/learned_hold.py
 services/real-trade-service/swing/live.py
 services/real-trade-service/swing/momentum.py
 services/real-trade-service/swing/probe.py
@@ -1980,6 +1988,8 @@ services/real-trade-service/tests/test_e276_rt_setups_s2_s3.py
 services/real-trade-service/tests/test_e276_sector_heat.py
 services/real-trade-service/tests/test_e277_module_isolation_a.py
 services/real-trade-service/tests/test_e277_module_isolation_b.py
+services/real-trade-service/tests/test_e283_learned_hold.py
+services/real-trade-service/tests/test_e283_live_state.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

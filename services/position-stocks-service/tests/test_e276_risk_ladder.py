@@ -42,10 +42,7 @@ def test_heat_gate_limit_rises_with_stage():
     with hg._Stub(own=(500.0, 0.0, 7288.0), peer=(0.0, 0.0, 0.0)) as st:             # own pool alone, 500 open
         fake = types.ModuleType("orders.risk_stage")
         saved = sys.modules.get("orders.risk_stage")
-        import orders as _orders
-        _saved_attr = _orders.__dict__.get("risk_stage")
         try:
-            _orders.risk_stage = fake            # E283: `from orders import risk_stage` reads the package attribute first, which an earlier test has already set to the real module
             fake.stage_for = lambda db, sid, side="LONG": 0
             sys.modules["orders.risk_stage"] = fake
             r0 = st.gate.reject_reason(None, 100.0, 98.0, 0, "LONG", "S1_CATALYST_UP")      # new risk 0: 500 > cap 364 at stage 0
@@ -55,10 +52,6 @@ def test_heat_gate_limit_rises_with_stage():
             assert st.gate.reject_reason(None, 100.0, 98.0, 6, "LONG", "S1_CATALYST_UP") is not None  # 512 > 510
             assert st.gate.reject_reason(None, 100.0, 98.0, 5, "LONG", None) is not None              # no setup id: base limit
         finally:
-            if _saved_attr is None:
-                _orders.__dict__.pop("risk_stage", None)
-            else:
-                _orders.risk_stage = _saved_attr
             if saved is None:
                 sys.modules.pop("orders.risk_stage", None)
             else:

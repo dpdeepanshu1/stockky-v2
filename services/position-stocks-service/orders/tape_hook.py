@@ -119,6 +119,6 @@ def run_tape_exit(db: Session) -> int:
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
-                logger.debug("tape_hook: ignored failure (E283: no silent except on an order path)", exc_info=True)
+                pass
             logger.warning("tape-exit: %s failed: %s", getattr(pos, "symbol", "?"), e)
     return moved

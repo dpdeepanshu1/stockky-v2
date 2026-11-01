@@ -18,13 +18,9 @@ if not hasattr(sys.modules["sqlalchemy.orm"], "Session"):
     sys.modules["sqlalchemy.orm"].Session = object
 
 if "models" not in sys.modules:
-    try:
-        import models  # noqa: F401  E283: use the real models when sqlalchemy is installed; a module-level stub leaked into the whole pytest run (conftest imports orders.*)
-    except Exception:  # noqa: BLE001
-        sys.modules.pop("models", None)
-        _mm = types.ModuleType("models")
-        _mm.ScalpQualityCache = type("ScalpQualityCache", (), {})
-        sys.modules["models"] = _mm
+    _mm = types.ModuleType("models")
+    _mm.ScalpQualityCache = type("ScalpQualityCache", (), {})
+    sys.modules["models"] = _mm
 
 import config
 from screening import preopen, quality_gate as qg
@@ -42,16 +38,11 @@ def _row(sym, price, prev, age=10):
 # ── final pre-open read ──────────────────────────────────────────────────────────────────────────────────────────────────────
 def test_final_read_window():
     preopen.reset()
-    saved = getattr(config, "PREOPEN_SNAPSHOT_ENABLED", True)
-    config.PREOPEN_SNAPSHOT_ENABLED = True                         # E283: tests/conftest.py switches the pre-open snapshot off for every test (group330)
-    try:
-        assert not preopen.due_final(ist(9, 11, 59))
-        assert preopen.due_final(ist(9, 12))
-        assert preopen.due_final(ist(9, 14, 59))
-        assert not preopen.due_final(ist(9, 15))                      # the bell
-        assert not preopen.due_final(ist(9, 12, day=(2026, 11, 1)))   # Sunday
-    finally:
-        config.PREOPEN_SNAPSHOT_ENABLED = saved
+    assert not preopen.due_final(ist(9, 11, 59))
+    assert preopen.due_final(ist(9, 12))
+    assert preopen.due_final(ist(9, 14, 59))
+    assert not preopen.due_final(ist(9, 15))                      # the bell
+    assert not preopen.due_final(ist(9, 12, day=(2026, 11, 1)))   # Sunday
 
 
 def test_final_read_runs_once_per_day_and_replaces_the_indicative_gap():

@@ -70,7 +70,7 @@ def build_rows(positions, opened: Dict[int, Any], decisions: Dict[int, Any]) -> 
 def _load(db) -> Dict[str, Any]:
     import models
     pos = (db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.status == "CLOSED",
-                                                 models.TradePosition.broker_imported == False)  # noqa: E712  (E283: Oracle-safe `= 0` form)
+                                                 models.TradePosition.broker_imported.is_(False))
            .order_by(models.TradePosition.opened_at.desc()).limit(1000).all())
     ids = [p.id for p in pos]
     opened: Dict[int, Any] = {}

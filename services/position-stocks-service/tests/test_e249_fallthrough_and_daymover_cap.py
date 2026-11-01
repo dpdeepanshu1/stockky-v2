@@ -37,7 +37,6 @@ def test_day_mover_cap_follows_entry_guards(monkeypatch):
     monkeypatch.setattr(config, "DAY_MOVER_MAX_PCT", 20.0)
     monkeypatch.setattr(config, "MAX_DAY_GAIN_PCT", 7.0)
     monkeypatch.setattr(config, "SHORT_MAX_DAY_FALL_PCT", 5.0)
-    monkeypatch.setattr(config, "SHORT_DAY_FALL_RANGE_MULT", 0.0)     # E283: E276 round 67 lists shorts up to the hard ceiling when the per-stock range rule is on; 0 = the flat guard this test pins
     assert engine._day_mover_max("LONG") == 7.0
     assert engine._day_mover_max("SHORT") == 5.0
     monkeypatch.setattr(config, "MAX_DAY_GAIN_PCT", 0.0)       # guard off -> only DAY_MOVER_MAX_PCT
@@ -52,8 +51,6 @@ def test_a_six_percent_faller_is_not_listed_as_a_day_mover_short():
     mp = _p.MonkeyPatch()
     try:
         _feed(mp, {"SLIDE": _flat(94.0)}, {"SLIDE": (100.0, 100.0, 93.0, 100.0)})
-        mp.setattr(config, "SHORT_DAY_FALL_RANGE_MULT", 0.0)          # E283: flat guard (see above); with the range rule on, a 6 % fall is decided per stock by the gate
-        mp.setattr(config, "SHORT_MAX_DAY_FALL_PCT", 5.0)
         assert engine.scan_shorts() == []
     finally:
         mp.undo()

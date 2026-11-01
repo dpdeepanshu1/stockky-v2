@@ -76,7 +76,7 @@ def stage_for(db, setup_id: Optional[str], side: str = "LONG") -> int:
                 if risk_ladder.slot_blocked((d.get("cells") or {}).get(slot_key)):
                     return 0
             except Exception:  # noqa: BLE001 - the slot check only ever lowers; a failure keeps the setup's stage
-                logger.debug("risk_stage: ignored failure (E283: no silent except on an order path)", exc_info=True)
+                pass
         return stg
     except Exception:  # noqa: BLE001
         logger.debug("risk stage: read failed (stage 0)", exc_info=True)

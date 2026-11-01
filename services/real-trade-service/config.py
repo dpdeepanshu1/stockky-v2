@@ -1835,6 +1835,8 @@ SWING_MAX_POSITIONS = max(0, _bs_int("SWING_MAX_POSITIONS", 3))   # E276 round 6
 SWING_MAX_EXPOSURE_PCT = max(0.0, _bs_float("SWING_MAX_EXPOSURE_PCT", 40.0))   # all swing positions together, % of equity
 SWING_MAX_PER_SECTOR = max(1, _bs_int("SWING_MAX_PER_SECTOR", 1))
 SWING_MAX_HOLD_DAYS = max(1, _bs_int("SWING_MAX_HOLD_DAYS", 5))                # sessions, the entry session counts as 1; the last one is sold at 15:00
+SWING_LEARNED_HOLD_ENABLED = _bs_bool("SWING_LEARNED_HOLD_ENABLED", "true")        # E283: a shorter hold from the ledger's own closed winners (30 closed trades, 10 winners); never longer than SWING_MAX_HOLD_DAYS
+SWING_LEARNED_HOLD_MIN_DAYS = max(1, _bs_int("SWING_LEARNED_HOLD_MIN_DAYS", 3))       # E283: the learned hold never goes below this many sessions
 SWING_TOP_PCT = min(99.0, max(50.0, _bs_float("SWING_TOP_PCT", 80.0)))          # the screen: percentile rank at or above this AND above the 200-day average
 SWING_STOP_ATR_MULT = max(0.5, _bs_float("SWING_STOP_ATR_MULT", 1.5))           # stop = ATR14 x this, clamped SWING_STOP_MIN_PCT..SWING_STOP_MAX_PCT (same as the replay)
 SWING_STOP_MIN_PCT = max(0.5, _bs_float("SWING_STOP_MIN_PCT", 2.0))

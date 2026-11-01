@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -450,7 +450,7 @@ def _log_candidate(
         from feed import bar_recorder as _br
         _br.note_symbols([candidate.symbol])
     except Exception:  # noqa: BLE001
-        logger.debug("entry: ignored failure (E283: no silent except on an order path)", exc_info=True)
+        pass
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,
@@ -948,6 +948,20 @@ def attempt_entry(
             logger.info("position-stocks entry: %s learned stop %s", candidate.symbol, _ls_note)
     except Exception:  # noqa: BLE001
         logger.debug("entry: learned stop failed (entry unaffected)", exc_info=True)
+
+    # E283: a target learned from the setup's own winners (orders/long_target.py). Only ever NEARER than the plan's target, only when the 1:2 floor still holds against the stop
+    # above, the plan's target until the cell has 30 closed trades. Stop, size and budget are untouched. Stamped in flow_json["long_target"] (record only). Fails open.
+    try:
+        import dataclasses as _dc3
+        _lt_levels = _dc3.replace(levels)
+        _lt_note = long_target.adjust(_lt_levels, candidate.current_ltp, setup=_setup_res, now=_now_ist, db=db)
+        if _lt_note:
+            if "target_pct" in _lt_note:
+                levels = _lt_levels
+                logger.info("position-stocks entry: %s learned target %s", candidate.symbol, _lt_note)
+            _flow_snap = long_target.stamp(_flow_snap, _lt_note)
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: learned target failed (entry unaffected)", exc_info=True)
 
     # E115: Time Machine gate (orders/tm_gate.py). Replays THIS trade's own stop % / target % at this time of day on the stock's recent 5-minute sessions and on
     # made-up sessions; AGAINST (both negative after charges and slippage) refuses the entry. It can only say NO; no data / slow data = no opinion and the

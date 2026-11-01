@@ -78,3 +78,50 @@ def previous_day(days: Dict[str, Any], date: str, max_gap: int = 6) -> Optional[
     if best is None:
         return None
     return best if (d0 - datetime.strptime(best, "%Y-%m-%d")).days <= max_gap else None
+
+
+def _day_dirs(root: Path) -> List[Path]:
+    try:
+        return sorted(p for p in root.iterdir() if p.is_dir() and _DAY.match(p.name))
+    except OSError:
+        return []
+
+
+def inventory(path: str, data: Dict[str, Dict[str, Dict[str, Any]]], stats: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """E284: what load_dir() found, and WHY it found nothing when it did. Pure reading, never raises.
+
+    {path, exists, day_folders, files, bad_files, symbols, days_found, days_complete, per_day {date: {files, complete}}, nested [child folders that hold day folders], reason}
+    `reason` is "" when there is data to work with; otherwise one plain sentence a person on the VM can act on.
+    """
+    st = stats or {}
+    root = Path(path)
+    per_day: Dict[str, Dict[str, int]] = {}
+    for days in data.values():
+        for d, v in days.items():
+            c = per_day.setdefault(d, {"files": 0, "complete": 0})
+            c["files"] += 1
+            c["complete"] += 1 if v.get("complete") else 0
+    exists = root.is_dir()
+    day_folders = len(_day_dirs(root)) if exists else 0
+    nested: List[str] = []
+    if exists and day_folders == 0:
+        try:
+            nested = sorted(p.name for p in root.iterdir() if p.is_dir() and _day_dirs(p))
+        except OSError:
+            nested = []
+    inv: Dict[str, Any] = {"path": str(path), "exists": exists, "day_folders": day_folders, "files": int(st.get("files", 0)), "bad_files": int(st.get("bad_files", 0)),
+                           "symbols": len(data), "days_found": len(per_day), "days_complete": sum(1 for c in per_day.values() if c["complete"]),
+                           "per_day": dict(sorted(per_day.items())), "nested": nested, "reason": ""}
+    if not exists:
+        inv["reason"] = f"{path} is not a folder"
+    elif day_folders == 0 and nested:
+        inv["reason"] = f"no YYYY-MM-DD folders directly in {path}, but {', '.join(nested)} holds them: pass --bars {path.rstrip('/')}/{nested[0]}"
+    elif day_folders == 0:
+        inv["reason"] = (f"no YYYY-MM-DD folders in {path}: the copy is empty or position-stocks recorded nothing "
+                         "(BAR_RECORD_ENABLED, the bar-records volume mount, BAR_RECORD_DIR)")
+    elif inv["files"] == 0:
+        inv["reason"] = f"{day_folders} day folder(s) but no readable .json file in them ({inv['bad_files']} unreadable)"
+    elif inv["days_complete"] == 0:
+        inv["reason"] = (f"{inv['files']} file(s) over {inv['days_found']} day(s), but none is a COMPLETE day (it must start within 5 minutes of 09:15 and cover 80% of the 375 "
+                         "session minutes); the recorder was restarted or started late on every recorded day")
+    return inv

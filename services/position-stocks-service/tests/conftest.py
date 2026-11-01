@@ -169,6 +169,7 @@ def _bar_record_off_by_default(monkeypatch):
     """group441: feed/bar_recorder.py writes files under BAR_RECORD_DIR; no older test may touch the disk (test_group441_bar_recorder.py turns it on in a temp dir)."""
     import config as _config
     monkeypatch.setattr(_config, "BAR_RECORD_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "VOLUME_PROFILE_LEARNED_ENABLED", False, raising=False)     # E284: no older test starts the profile's background read
     from feed import bar_recorder as _br
     _br.reset()
     yield

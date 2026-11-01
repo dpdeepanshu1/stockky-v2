@@ -378,6 +378,116 @@ def test_part_b_counts_and_insufficient_label():
         assert rep["verdict"] == "insufficient_sample"                                  # one event is a count, never an edge
 
 
+# ----------------------------------------------------------------------------------------------------------------- E284: the study explains its zeros
+def test_zero_files_says_why_not_just_zero():
+    with tempfile.TemporaryDirectory() as td:
+        rep = ss.run_part_b(Path(td), 30)
+        assert rep["symbol_days_scanned"] == 0 and "no YYYY-MM-DD folders" in rep["why_empty"], rep["why_empty"]
+        repc = ss.run_part_c(Path(td), 0.15, 50, 30)
+        assert "no YYYY-MM-DD folders" in repc["why_empty"]
+        md = ss.to_markdown({"variants_tried": 2, "B": rep, "C": repc})
+        assert md.count("WHY EMPTY") == 2 and "data read from" in md and "0 file(s)" in md
+    assert "is not a folder" in ss.run_part_b(Path("/does/not/exist_e284"), 30)["why_empty"]
+
+
+def test_nested_recorder_folder_gets_a_pass_this_path_hint():
+    with tempfile.TemporaryDirectory() as td:
+        _write_day(Path(td) / "ps", "2026-10-01", "A", _or_day("2026-10-01", "failed", -0.02))
+        rep = ss.run_part_c(Path(td), 0.15, 50, 30)
+        assert "--bars" in rep["why_empty"] and "/ps" in rep["why_empty"], rep["why_empty"]
+
+
+def test_files_that_are_not_complete_days_are_named_as_the_reason():
+    with tempfile.TemporaryDirectory() as td:
+        short = _or_day("2026-10-01", "failed", -0.02)[:60]                         # 60 minutes only: not a complete day
+        _write_day(td, "2026-10-01", "A", short)
+        rep = ss.run_part_b(Path(td), 30)
+        assert rep["data"]["files"] == 1 and rep["data"]["days_complete"] == 0
+        assert "COMPLETE" in rep["why_empty"], rep["why_empty"]
+
+
+def test_complete_days_are_counted_per_day_and_no_reason_is_given():
+    with tempfile.TemporaryDirectory() as td:
+        for d in ("2026-10-01", "2026-10-02"):
+            _write_day(td, d, "A", _or_day(d, "failed", -0.02))
+            _write_day(td, d, "B", _or_day(d, "held", 0.0))
+        rep = ss.run_part_c(Path(td), 0.15, 50, 30)
+        assert rep["data"]["per_day"] == {"2026-10-01": {"files": 2, "complete": 2}, "2026-10-02": {"files": 2, "complete": 2}}
+        assert rep["data"]["symbols"] == 2 and rep["data"]["days_complete"] == 2 and rep["why_empty"] == ""
+        assert "2026-10-01 2/2" in ss.to_markdown({"variants_tried": 1, "C": rep})
+
+
+def test_a_part_that_could_not_run_is_named_in_the_report():
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "o"
+        assert ss.main(["--parts", "A,B", "--out", str(out)]) == 1
+        md = (out / "sweep_study.md").read_text()
+        assert "Part A did NOT run" in md and "Part B did NOT run" in md and "e278_run.sh" in md
+
+
+def test_fetcher_defaults_to_the_published_market_data_port():
+    import fetch_history_for_backtest as fh
+    assert fh.resolve_base(None) == "http://127.0.0.1:8001"
+    assert fh.resolve_base(" http://10.0.0.5:9000/ ") == "http://10.0.0.5:9000"
+    assert fh.resolve_base("") == ""                                              # an explicit empty --base is still refused by main()
+    compose = (SCRIPTS.parent / "docker-compose.yml").read_text()
+    assert '"127.0.0.1:8001:8001"' in compose                                    # the default is the port the compose file publishes
+
+
+def _fake_repo(td, bars_src):
+    """A throw-away repo folder: .env, scripts -> the real scripts, and a stub `docker` that 'copies the volume' from bars_src."""
+    import os
+    import stat
+    root = Path(td) / "repo"
+    (root / "bin").mkdir(parents=True)
+    os.symlink(SCRIPTS, root / "scripts")
+    (root / ".env").write_text('FOO=1\r\nSWING_UNIVERSE_SYMBOLS="SYM0, SYM1"\r\n')
+    dk = root / "bin" / "docker"
+    dk.write_text('#!/usr/bin/env bash\nif [ "$1" = volume ]; then echo stockky-v2_bar-records; exit 0; fi\n'
+                  'if [ "$1" = run ]; then for a in "$@"; do case "$a" in *:/out) out="${a%:/out}";; esac; done; cp -a "$FAKE_BARS"/. "$out"/; exit 0; fi\nexit 1\n')
+    dk.chmod(dk.stat().st_mode | stat.S_IEXEC)
+    env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}", HIST=str(Path(td) / "hist"), BARS=str(Path(td) / "bars"), OUT=str(Path(td) / "out"), FAKE_BARS=str(bars_src))
+    env.pop("MARKET_DATA_URL", None)
+    return root, env
+
+
+def test_e278_run_script_copies_the_volume_runs_the_study_and_shows_what_it_read():
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "volume"
+        for d in ("2026-10-01", "2026-10-02"):
+            _write_day(src, d, "SYM0", _or_day(d, "failed", -0.02))
+        root, env = _fake_repo(td, src)
+        hist = Path(td) / "hist"
+        hist.mkdir()
+        for s_ in range(2):
+            bars = _history(s_ + 1, 400, 11 + s_, 3.0)
+            (hist / f"SYM{s_}.json").write_text(json.dumps({"candles": [{"date": float(b[0]), "open": b[1], "high": b[2], "low": b[3], "close": b[4], "volume": 1000} for b in bars]}))
+        r = subprocess.run(["bash", str(root / "scripts" / "e278_run.sh"), "--skip-fetch"], cwd=td, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "2 symbols" in r.stdout and "2 day folder(s), 2 file(s)" in r.stdout, r.stdout
+        assert "data read from" in r.stdout and "2026-10-01 1/1" in r.stdout
+        assert (Path(td) / "out" / "sweep_study.json").exists() and "## A. Daily sweeps" in r.stdout
+
+
+def test_e278_run_script_stops_with_a_plain_message_when_market_data_is_down():
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        root, env = _fake_repo(td, Path(td))
+        env["MARKET_DATA_URL"] = "http://127.0.0.1:9"                             # nothing listens on port 9
+        r = subprocess.run(["bash", str(root / "scripts" / "e278_run.sh")], cwd=td, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 1 and "market-data is not answering at http://127.0.0.1:9" in r.stderr, r.stdout + r.stderr
+        bad = subprocess.run(["bash", str(root / "scripts" / "e278_run.sh"), "--nope"], cwd=td, env=env, capture_output=True, text=True, timeout=30)
+        assert bad.returncode == 2 and "unknown option" in bad.stdout
+
+
+def test_e278_run_script_has_no_placeholder_left_to_fill_in():
+    src = (SCRIPTS / "e278_run.sh").read_text()
+    assert "<port>" not in src and "<PORT>" not in src                                   # the placeholder that broke the first run
+    assert "http://127.0.0.1:8001" in src and "bar-records" in src and "set -x" not in src
+    assert "docker compose" not in src.replace("docker compose ps market-data-service", "")        # it only reads the volume; it never starts, stops or execs a service
+
+
 def test_no_study_function_reaches_into_live_trading():
     src = (SCRIPTS / "sweep_study.py").read_text()
     for banned in ("requests", "urllib.request", "httpx", "services/", "os.environ", "getenv", "sqlalchemy"):

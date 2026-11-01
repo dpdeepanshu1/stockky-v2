@@ -140,6 +140,7 @@ PROTECTED: Dict[str, str] = {
     "LEARNED_STOP_MIN_PCT": "money safety (E282): the tightest a learned stop may be is a threshold decided by you; no test measures it yet",
     "SHORT_TARGET_HVN_ENABLED": "short selling (E274): how a short's target is trimmed to the next volume wall is decided by you; no test measures it yet",
     "LONG_TARGET_LEARNED_ENABLED": "learned target (E283): taken from the setup's own closed winners with a 30-trade minimum, a weekly limit and the 1:2 floor; the switch is yours",
+    "VOLUME_PROFILE_LEARNED_ENABLED": "learned volume pace (E284): measured from the recorded bars with a 5-day minimum and a +-25 % band around the old curve; the switch is yours",
     "LONG_TARGET_MIN_PCT": "cost safety (E283): the smallest learned target keeps the trade above its charges; set by you, no test measures it",
     "SHORT_TARGET_LEARNED_ENABLED": "short selling (E274): a short's target taken from its setup's own winners learns by itself from closed trades; a report never switches it",
     "SHORT_TARGET_MIN_PCT": "short selling (E274): the smallest short target after a trim is a threshold decided by you; no test measures it yet",

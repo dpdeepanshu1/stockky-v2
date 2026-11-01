@@ -184,3 +184,22 @@ if __name__ == "__main__":
         if k.startswith("test_") and callable(f):
             f(); n += 1; print("ok", k)
     print(n, "passed")
+
+
+def test_e284_a_feed_with_only_old_items_is_stale_not_healthy_and_polled_less():
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if url.endswith("a"):
+            return ([_entry("ABC wins order", minutes_ago=60 * 24 * 900)], 200)       # a dead URL still answering 200 with 900-day-old items
+        return ([_entry("ABC profit jumps in Q2")], 200)
+    col = _collector(fetch)
+    col.poll_once()
+    col.poll_once()
+    r = col.response()
+    assert calls.count("http://a") == 1 and calls.count("http://b") == 2               # parked for the cooldown
+    assert r["healthy_sources"] == ["B"] and r["sources"]["A"]["ok"] is False
+    only_stale = ef.FeedCollector(lambda: ["ABC"], lambda url: ([_entry("ABC wins order", minutes_ago=60 * 24 * 900)], 200), feeds=[("A", "http://a")], now_fn=lambda: NOW, cooldown_s=1800)
+    only_stale.poll_once()
+    assert only_stale.response()["ok"] is False and only_stale.response()["events"] == []

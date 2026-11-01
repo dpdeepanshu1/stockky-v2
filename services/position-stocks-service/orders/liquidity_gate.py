@@ -51,7 +51,11 @@ def elapsed_fraction(now: Optional[datetime] = None) -> float:
     """Share of the normal day's volume expected to have traded by now (front-loaded, 0..1)."""
     n = ist_now(now)
     mins = (n.hour * 60 + n.minute + n.second / 60.0) - (9 * 60 + 15)
-    return 0.0 if mins <= 0 else min(_MAX_ELAPSED, mins / _SESSION_MINUTES) ** 0.6
+    old = 0.0 if mins <= 0 else min(_MAX_ELAPSED, mins / _SESSION_MINUTES) ** 0.6
+    if mins <= 0:
+        return old
+    from orders import volume_profile      # E284: the share measured from the recorded minute bars, within +-25 % of the old curve; the old value when not ready
+    return volume_profile.adjust(old, mins)
 
 
 def decide(price, day_volume, avg_volume, avg_turnover, now: Optional[datetime] = None) -> Optional[str]:

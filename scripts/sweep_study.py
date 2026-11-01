@@ -441,12 +441,14 @@ def run_part_b(bar_dir: Path, min_events: int) -> Dict[str, Any]:
                 e["sym"] = sym
                 events.append(e)
     n_days = len(dates)
+    inv = idata.inventory(str(bar_dir), data, st)
+    note_b = inv["reason"] or ("" if sym_days else "complete days exist, but no symbol has three recorded complete days in a row (part B needs the two days before, for the daily bias)")
     per_dir = {"long": sum(1 for e in events if e["bias"] > 0), "short": sum(1 for e in events if e["bias"] < 0)}
     ok = all(v >= min_events for v in per_dir.values())
     return {"files": st.get("files", 0), "bad_files": st.get("bad_files", 0), "symbol_days_scanned": sym_days, "symbol_days_with_bias": bias_days,
             "trading_days": n_days, "events": len(events), "events_by_side": per_dir, "events_per_day": round(len(events) / n_days, 2) if n_days else None,
             "days_with_an_event": len({e["date"] for e in events}),
-            "verdict": "counts_only" if ok else "insufficient_sample",
+            "verdict": "counts_only" if ok else "insufficient_sample", "data": inv, "why_empty": note_b,
             "note": "counts only: this says whether a 3-step rule (S5) would fire often enough to matter, never whether it pays"}
 
 
@@ -552,7 +554,9 @@ def run_part_c(bar_dir: Path, cost: float, n_boot: int, min_events: int) -> Dict
     data = idata.load_dir(str(bar_dir), stats=st)
     rows = ic_observations(data, cost)
     days = len({r["date"] for r in rows})
-    return {"files": st.get("files", 0), "bad_files": st.get("bad_files", 0), "break_days": len(rows), "days": days, "cost_pct": cost,
+    inv = idata.inventory(str(bar_dir), data, st)
+    why = inv["reason"] or ("" if rows else "complete days were read, but no stock has all five 09:15-09:19 bars and a close outside that range before 09:55")
+    return {"files": st.get("files", 0), "bad_files": st.get("bad_files", 0), "data": inv, "why_empty": why, "break_days": len(rows), "days": days, "cost_pct": cost,
             "failed": sum(1 for r in rows if r["kind"] == "failed"), "held": sum(1 for r in rows if r["kind"] == "held"),
             "primary_horizon": "10:00", "tables": [summarize_c(rows, h, cost, n_boot, min_events) for h in IC_HORIZONS]}
 
@@ -564,10 +568,21 @@ def _fmt(v: Any) -> str:
     return "-" if v is None else str(v)
 
 
+def _data_line(inv: Optional[Dict[str, Any]]) -> str:
+    """One line of what the loader read from BAR_DIR (E284): without it a zero says nothing about WHY."""
+    if not inv:
+        return "- data read: unknown"
+    days = ", ".join(f"{d} {c['complete']}/{c['files']}" for d, c in list(inv.get("per_day", {}).items())[-12:]) or "none"
+    return (f"- data read from {inv.get('path')}: {inv.get('files', 0)} file(s) ({inv.get('bad_files', 0)} unreadable), {inv.get('symbols', 0)} symbol(s), {inv.get('days_found', 0)} day(s), "
+            f"{inv.get('days_complete', 0)} with a complete file; complete/files per day: {days}")
+
+
 def to_markdown(rep: Dict[str, Any]) -> str:
     L_: List[str] = ["# Sweep study (E278): reversal, continuation or neither", "",
                      "Every event is scored as a long and as a short. `insufficient_sample` means ONLY counts are shown and nothing may be concluded.",
                      f"Variants tried (counted, only the first of each is used for a verdict): {rep['variants_tried']}", ""]
+    for part, why in (rep.get("skipped") or {}).items():
+        L_ += [f"> Part {part} did NOT run: {why}", ""]
     a = rep.get("A")
     if a:
         L_ += [f"## A. Daily sweeps ({a['symbols']} symbols, skipped {a['skipped']}, friction {a['friction_pct']}% per round trip, benchmark: {'yes' if a['benchmark'] else 'no'})", ""]
@@ -586,13 +601,13 @@ def to_markdown(rep: Dict[str, Any]) -> str:
             L_.append("")
     b = rep.get("B")
     if b:
-        L_ += ["## B. 30-minute sweep + 5-minute push (counts only)", "",
-               f"- verdict: `{b['verdict']}` ({b['note']})", f"- symbol-days scanned {b['symbol_days_scanned']}, with a daily bias {b['symbol_days_with_bias']}, over {b['trading_days']} recorded trading days",
+        L_ += ["## B. 30-minute sweep + 5-minute push (counts only)", "", _data_line(b.get("data")),
+               f"- verdict: `{b['verdict']}` ({b['note']})", f"- symbol-days scanned {b['symbol_days_scanned']}, with a daily bias {b['symbol_days_with_bias']}, over {b['trading_days']} recorded trading days" + (f" - WHY EMPTY: {b['why_empty']}" if b.get("why_empty") else ""),
                f"- full 3-step events: {b['events']} (long {b['events_by_side']['long']}, short {b['events_by_side']['short']}); {_fmt(b['events_per_day'])} a day; days with at least one: {b['days_with_an_event']}", ""]
     c = rep.get("C")
     if c:
-        L_ += ["## C. Failed opening-range break", "",
-               f"- break days {c['break_days']} over {c['days']} days: failed {c['failed']}, held {c['held']}; cost {c['cost_pct']}% round trip; primary horizon {c['primary_horizon']}", "",
+        L_ += ["## C. Failed opening-range break", "", _data_line(c.get("data")),
+               f"- break days {c['break_days']} over {c['days']} days: failed {c['failed']}, held {c['held']}; cost {c['cost_pct']}% round trip; primary horizon {c['primary_horizon']}" + (f" - WHY EMPTY: {c['why_empty']}" if c.get("why_empty") else ""), "",
                "| horizon | failed n | held n | net % fade (failed) | CI90 net fade | CI90 excess fade | net % follow (failed) | verdict |", "|---|---|---|---|---|---|---|---|"]
         for t in c["tables"]:
             if "fade" not in t:
@@ -639,6 +654,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if "A" in parts:
         if not a.daily or not Path(a.daily).is_dir():
             print("part A needs --daily HIST_DIR", file=sys.stderr)
+            rep.setdefault("skipped", {})["A"] = ("--daily HIST_DIR is missing or not a folder" if not a.daily else f"{a.daily} is not a folder") + \
+                " (scripts/e278_run.sh fetches the history and passes it)"
         else:
             rep["A"] = run_part_a(Path(a.daily), depths, horizons, a.cost_pct, a.slip_pct, a.boot, min_events, a.sample, a.seed)
             rep["variants_tried"] += len(depths) * len(horizons)
@@ -646,6 +663,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if parts & {"B", "C"}:
         if not a.bars or not Path(a.bars).is_dir():
             print("parts B and C need --bars BAR_DIR", file=sys.stderr)
+            for pt in sorted(parts & {"B", "C"}):
+                rep.setdefault("skipped", {})[pt] = "--bars BAR_DIR is missing or not a folder"
         else:
             if "B" in parts:
                 rep["B"] = run_part_b(Path(a.bars), min_events)

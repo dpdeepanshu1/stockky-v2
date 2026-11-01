@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """fetch_history_for_backtest.py - download daily candles into one JSON per symbol, for scripts/ms_ab_report.py and scripts/structure_backtest.py.
 
-  MARKET_DATA_URL=https://... python3 scripts/fetch_history_for_backtest.py OUT_DIR [--symbols RELIANCE,TCS | --symbols-file f.txt | --universe-url URL]
+  [MARKET_DATA_URL=http://host:port] python3 scripts/fetch_history_for_backtest.py OUT_DIR [--symbols RELIANCE,TCS | --symbols-file f.txt | --universe-url URL]
         [--period 5y] [--sample 400 | --limit 0] [--seed 7] [--manifest sample.json] [--sleep 1.0] [--retries 3] [--min-bars 250] [--benchmark ^NSEI]
         [--max-failures-pct 60]
 
+Base URL (E284): --base, else $MARKET_DATA_URL, else http://127.0.0.1:8001, the market-data port docker-compose.yml publishes on the VM host
+(loopback only), so on the VM the command needs no URL at all. An explicit empty --base is still an error.
 Symbols come from (first that is given): --symbols, --symbols-file (one per line, '#' comments), --universe-url (the gateway's /api/universe: a JSON list).
 The benchmark (default ^NSEI) is always fetched first and saved as ^NSEI.json; the A/B report needs it to tag regimes. Existing files with >= --min-bars
 candles are kept (re-run to resume) unless --refresh.
@@ -25,6 +27,14 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, List, Optional
+
+
+DEFAULT_BASE = "http://127.0.0.1:8001"      # docker-compose.yml: market-data-service publishes 127.0.0.1:8001:8001
+
+
+def resolve_base(arg: Optional[str]) -> str:
+    """The market-data base URL: the explicit value (an explicit empty string stays empty so the caller refuses it), else DEFAULT_BASE."""
+    return DEFAULT_BASE if arg is None else str(arg).strip().rstrip("/")
 
 
 def _get_json(url: str, timeout: float) -> Any:
@@ -116,7 +126,7 @@ def fetch_one(base: str, sym: str, period: str, retries: int, sleep: float, time
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("out_dir")
-    ap.add_argument("--base", default=os.getenv("MARKET_DATA_URL", ""))
+    ap.add_argument("--base", default=(os.getenv("MARKET_DATA_URL") or "").strip() or None)
     ap.add_argument("--symbols", default="")
     ap.add_argument("--symbols-file", default="")
     ap.add_argument("--universe-url", default="")
@@ -136,9 +146,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--benchmark-only", action="store_true", help="fetch / refresh just the benchmark (^NSEI.json, the exchange calendar the entry-rules backtest needs) and stop")
     a = ap.parse_args(argv)
-    base = a.base.rstrip("/")
+    base = resolve_base(a.base)
     if not base.startswith(("http://", "https://")):
-        print("MARKET_DATA_URL (or --base) must be set and start with https://", file=sys.stderr)
+        print("--base / MARKET_DATA_URL must start with http:// or https:// (or leave both unset to use " + DEFAULT_BASE + ")", file=sys.stderr)
         return 2
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)

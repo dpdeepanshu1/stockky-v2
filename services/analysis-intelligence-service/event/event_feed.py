@@ -332,7 +332,7 @@ class FeedCollector:
                 self._blocked_until[name] = mono + self.cooldown_s
                 sources[name] = {"ok": False, "status": status, "items": 0, "blocked_until": int(self.cooldown_s)}
                 continue
-            n_items, newest = 0, None
+            n_items, newest, n_old = 0, None, 0
             for en in entries or []:
                 try:
                     get = en.get if hasattr(en, "get") else (lambda k, d=None, _e=en: getattr(_e, k, d))
@@ -341,6 +341,7 @@ class FeedCollector:
                     if not title or pub is None:
                         continue
                     if (now - pub).total_seconds() > self.max_age_h * 3600.0 or pub > now + timedelta(minutes=5):
+                        n_old += 1 if pub <= now else 0
                         continue
                     n_items += 1
                     newest = pub if newest is None or pub > newest else newest
@@ -350,6 +351,12 @@ class FeedCollector:
                 except Exception:  # noqa: BLE001 - one bad item never drops the poll
                     continue
             ok = bool(entries) and (status is None or status == 200 or isinstance(status, int) and 200 <= status < 300)
+            if ok and n_items == 0 and n_old > 0:
+                # E284: a feed whose every readable item is older than the age limit (a dead RSS URL still answers 200 with years-old items) is NOT a healthy
+                # source, and is polled again only after the block cooldown instead of every cycle.
+                self._blocked_until[name] = mono + self.cooldown_s
+                sources[name] = {"ok": False, "status": "stale", "items": 0, "last_delay_s": None, "blocked_until": int(self.cooldown_s)}
+                continue
             sources[name] = {"ok": ok, "status": status if status is not None else ("ok" if ok else "empty"), "items": n_items,
                              "last_delay_s": int((now - newest).total_seconds()) if newest else None}
         with self._lock:

@@ -54,7 +54,16 @@ def py_in(service, snippet):
     return run(["docker", "compose", "exec", "-T", service, "python", "-"], stdin=snippet)
 
 
+def _need_docker() -> None:
+    """E277: this script drives `docker compose` from the VM host. Inside a container there is no docker, and every check died with FileNotFoundError."""
+    import shutil
+    if shutil.which("docker") is None:
+        sys.exit("e276_check.py must run on the VM host (next to docker-compose.yml), not inside a container: `docker` was not found.\n"
+                 "  cd ~/stockky-v2 && python3 scripts/e276_check.py")
+
+
 def main() -> int:
+    _need_docker()
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default="24h")
     a = ap.parse_args()

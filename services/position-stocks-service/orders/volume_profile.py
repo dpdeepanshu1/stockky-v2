@@ -70,7 +70,7 @@ def _day_curve(bars: Any, date: str) -> Optional[List[float]]:
         if first is None or first > 5 or seen < 0.8 * SESSION_MIN:
             return None
         total = sum(vol)
-        if total <= 0:
+        if total <= 0 or sum(1 for v in vol if v > 0) < 0.5 * SESSION_MIN:        # a file with no real minute volumes (e.g. a backfill that carried none) says nothing
             return None
         run, out = 0.0, []
         for v in vol:
@@ -89,6 +89,7 @@ def build(root: str) -> Optional[Dict[str, Any]]:
         days = sorted((p for p in os.listdir(root) if _DAY.match(p) and os.path.isdir(os.path.join(root, p))), reverse=True)[:MAX_DAYS_READ]
         per_off: List[List[float]] = [[] for _ in range(SESSION_MIN)]
         used_days, sym_days = 0, 0
+        skipped = {"unreadable": 0, "index": 0, "not_complete_or_no_volume": 0, "backfilled_used": 0}
         for d in days:
             got = 0
             for fn in os.listdir(os.path.join(root, d)):
@@ -97,13 +98,17 @@ def build(root: str) -> Optional[Dict[str, Any]]:
                 try:
                     with open(os.path.join(root, d, fn)) as fh:
                         doc = json.load(fh)
-                    if unquote(fn[:-5]).startswith("^") or doc.get("backfilled"):
+                    if unquote(fn[:-5]).startswith("^"):
+                        skipped["index"] += 1
                         continue
                     c = _day_curve(doc["bars"], d)
                 except Exception:  # noqa: BLE001
+                    skipped["unreadable"] += 1
                     continue
                 if c is None:
+                    skipped["not_complete_or_no_volume"] += 1
                     continue
+                skipped["backfilled_used"] += 1 if doc.get("backfilled") else 0
                 for k in range(SESSION_MIN):
                     per_off[k].append(c[k])
                 got += 1
@@ -111,12 +116,12 @@ def build(root: str) -> Optional[Dict[str, Any]]:
                 used_days += 1
                 sym_days += got
         if used_days < MIN_DAYS or sym_days < MIN_SYMBOL_DAYS:
-            return {"curve": None, "days": used_days, "symbol_days": sym_days}
+            return {"curve": None, "days": used_days, "symbol_days": sym_days, "files": skipped}
         curve, last = [], 0.0
         for k in range(SESSION_MIN):
             last = max(last, _median(per_off[k]))           # a cumulative share never falls
             curve.append(min(1.0, last))
-        return {"curve": curve, "days": used_days, "symbol_days": sym_days}
+        return {"curve": curve, "days": used_days, "symbol_days": sym_days, "files": skipped}
     except Exception as e:  # noqa: BLE001
         logger.debug("volume profile build failed: %s", e)
         return None
@@ -166,5 +171,5 @@ def adjust(old_fraction: float, minutes_since_open: float) -> float:
 def snapshot() -> Dict[str, Any]:
     with _lock:
         p = _state["profile"] or {}
-        return {"ready": bool(p.get("curve")), "days": p.get("days"), "symbol_days": p.get("symbol_days"), "built_age_s": round(time.time() - _state["built_at"]) if _state["built_at"] else None,
+        return {"ready": bool(p.get("curve")), "days": p.get("days"), "symbol_days": p.get("symbol_days"), "files": p.get("files"), "built_age_s": round(time.time() - _state["built_at"]) if _state["built_at"] else None,
                 "error": _state["error"]}

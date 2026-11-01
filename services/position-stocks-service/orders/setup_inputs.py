@@ -29,9 +29,13 @@ Nothing is guessed: a window that is too short, a zero deviation or an unreadabl
 """
 from __future__ import annotations
 
+import logging
+
 import math
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger("position-stocks-setup-inputs")
 
 PRICED_IN_ATR_MULT = 2.0
 PULLBACK_TOUCH_PCT = 0.10
@@ -274,7 +278,7 @@ def s3_facts_long(rows: Sequence[Tuple[float, ...]], *, price: Any, vwap: Any, a
         out["climax_volume"] = bool(mean_v > 0 and around and max(around) >= CLIMAX_VOL_MULT * mean_v)
         out["wall_close"] = wall_close_long(tape, price)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -290,7 +294,7 @@ def s2_facts_long(rows: Sequence[Tuple[float, ...]], *, or_high: Any, range_end_
             out["vol_vs_norm"] = v
         out["candle"] = candle_signal(rows)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -307,7 +311,7 @@ def range_end_for(now_ts: float) -> float:
         parts = str(getattr(config, "ORB_RANGE_END_IST", "09:20")).split(":")
         hh, mm = int(parts[0]), int(parts[1])
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return float(int((now_ts + 19800.0) // 86400) * 86400 - 19800 + hh * 3600 + mm * 60)
 
 
@@ -353,7 +357,7 @@ def gather_long(*, symbol: str, price: Any, now_ts: float, flow_json_orb: Any, q
             out["sector_third"] = st
         board_payload = payload
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     try:
         atr = prev_atr_pct
         if atr is None:
@@ -370,7 +374,7 @@ def gather_long(*, symbol: str, price: Any, now_ts: float, flow_json_orb: Any, q
             out["event_priced_in"] = pi
         prev_atr_pct = atr
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     if not (want_s2 or want_s3):
         return out
     try:
@@ -397,7 +401,7 @@ def gather_long(*, symbol: str, price: Any, now_ts: float, flow_json_orb: Any, q
             if gap_pct is not None:
                 out["gap_pct"] = float(gap_pct)
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     if want_s3:
         try:
             lq = liquid if liquid is not None else is_liquid(symbol, top_n)
@@ -406,7 +410,7 @@ def gather_long(*, symbol: str, price: Any, now_ts: float, flow_json_orb: Any, q
                 d_open = rows[0][1]                                # the bar store saw the session from the open: its first bar stands in for the day open
             out.update(s3_facts_long(rows, price=price, vwap=q.get("avg_price"), atr_pct=prev_atr_pct, gap_pct=gap_pct, day_open=d_open, tape=tape, liquid=lq))
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -486,7 +490,7 @@ def s3_facts_short(rows: Sequence[Tuple[float, ...]], *, price: Any, vwap: Any, 
         out["climax_volume"] = bool(mean_v > 0 and around and max(around) >= CLIMAX_VOL_MULT * mean_v)
         out["wall_close"] = wall_close_short(tape, price)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -502,7 +506,7 @@ def s2_facts_short(rows: Sequence[Tuple[float, ...]], *, or_low: Any, range_end_
             out["vol_vs_norm"] = v
         out["candle"] = candle_signal(rows)                                              # -1 = shooting star / bearish engulfing = the short's rejection candle
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -540,7 +544,7 @@ def gather_short(*, symbol: str, price: Any, now_ts: float, orb: Any, quote: Any
             if gap_pct is not None:
                 out["gap_pct"] = float(gap_pct)
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     if want_s3:
         try:
             atr = prev_atr_pct
@@ -550,5 +554,5 @@ def gather_short(*, symbol: str, price: Any, now_ts: float, orb: Any, quote: Any
                 atr = getattr(pdv, "atr_pct", None) if pdv is not None else None
             out.update(s3_facts_short(rows, price=price, vwap=q.get("avg_price"), atr_pct=atr, tape=tape))
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("setup_inputs: ignored error (fail-open)", exc_info=True)
     return out

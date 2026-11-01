@@ -153,7 +153,7 @@ class TestRejectReason:
     def test_error_holds_the_candidate_back(self, monkeypatch):
         at(monkeypatch, "09:30")
         monkeypatch.setattr(config, "OPENING_GATE_MIN_CHANGE_PCT", "bad")   # forces a TypeError inside the comparison
-        assert opening_gate.reject_reason("REAL", tk()) == "OPENING_GATE:ERROR:TypeError"
+        assert opening_gate.reject_reason("REAL", tk()).startswith("OPENING_GATE:ERROR:")   # E284: any error holds the candidate back (the type depends on which comparison meets the bad value first)
 
 
 def _approve_all(monkeypatch):

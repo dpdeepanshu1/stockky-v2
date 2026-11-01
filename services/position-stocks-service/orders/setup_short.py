@@ -79,7 +79,7 @@ def facts_short(*, symbol: str, price: Optional[float], now: Optional[datetime],
         if isinstance(inputs, dict):
             f.update({k: v for k, v in inputs.items() if k in setup_live.INPUT_KEYS})          # E274 round 44: S2 / S3 short facts ride in the same dict
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_short: ignored error (fail-open)", exc_info=True)
     return f
 
 
@@ -103,7 +103,7 @@ def gather(*, symbol: str, price: Any, quote: Any, board_payload: Any = None, se
         if st:
             out["sector_third"] = st
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_short: ignored error (fail-open)", exc_info=True)
     try:
         atr = prev_atr_pct
         if atr is None:
@@ -115,7 +115,7 @@ def gather(*, symbol: str, price: Any, quote: Any, board_payload: Any = None, se
         if pi is not None:
             out["event_priced_in"] = pi
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("setup_short: ignored error (fail-open)", exc_info=True)
     return out
 
 
@@ -161,7 +161,7 @@ def decide(*, symbol: str, price: float, now: Optional[datetime], quality: Any, 
                 inputs.update(setup_inputs.gather_short(symbol=symbol, price=price, now_ts=(now.timestamp() if isinstance(now, datetime) else _t.time()), orb=orb, quote=quote,
                                                         gap_pct=gap_pct, tape=tape, want_s2=setup_engine.S2 in extra, want_s3=setup_engine.S3 in extra))
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("setup_short: ignored error (fail-open)", exc_info=True)
         ladder = None
         try:
             from orders import slot_ladder

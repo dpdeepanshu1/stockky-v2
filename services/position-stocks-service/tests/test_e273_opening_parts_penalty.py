@@ -46,6 +46,7 @@ def _setup(mode="penalty"):
     prev_day.peek = lambda s: pdv
     prev_day.get = lambda s: pdv
     config.OPENING_PARTS_MODE = mode
+    config.OPENING_BELOW_OPEN_MODE = "penalty"      # E284: conftest pins the older BELOW_OPEN refusal (veto); these tests are about what comes after it (conftest restores it)
     config.MARKET_GATE_ENABLED = True
     config.SOFT_GATE_MAX_PENALTY = 3.0
     config.OPENING_NIFTY_FULL_PENALTY_PCT = 0.5

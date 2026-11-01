@@ -72,7 +72,7 @@ def learned_gain(setup: Any, now: Any, db: Any, plan_target_pct: float) -> Optio
                     lim, _hit = learned_limit.limit(f"{key}|long_target|gain_pct", g, None, None)    # at most 25 % a week
                     g = float(lim) if lim is not None else g
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug("long_target: ignored error (fail-open)", exc_info=True)
                 return {"gain_pct": g, "source": num["gain_source"], "cell": key}
         return None
     except Exception as e:  # noqa: BLE001

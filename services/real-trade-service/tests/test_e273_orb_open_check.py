@@ -93,7 +93,8 @@ def test_orb_record_says_live_and_no_record_only_wording():
     assert "RECORD ONLY" not in (HERE / "config.py").read_text().split("ORB_MODE =")[0].rsplit("# group 470", 1)[-1]
 
 
-def test_fetch_now_caches_and_fails_soft():
+def test_fetch_now_caches_and_fails_soft(monkeypatch):
+    monkeypatch.setattr(OB, "FETCH_ON", True)        # E284: conftest turns the bar fetch off for every older test
     OB._reset_for_tests()
     import stockky_ms.timeframes as TF  # noqa: F401
     OB._fetch = lambda s: (_ for _ in ()).throw(RuntimeError("down"))

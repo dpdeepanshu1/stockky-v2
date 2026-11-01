@@ -450,7 +450,7 @@ def _log_candidate(
         from feed import bar_recorder as _br
         _br.note_symbols([candidate.symbol])
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("entry: ignored error (fail-open)", exc_info=True)
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,

@@ -37,8 +37,12 @@ def test_day_mover_cap_follows_entry_guards(monkeypatch):
     monkeypatch.setattr(config, "DAY_MOVER_MAX_PCT", 20.0)
     monkeypatch.setattr(config, "MAX_DAY_GAIN_PCT", 7.0)
     monkeypatch.setattr(config, "SHORT_MAX_DAY_FALL_PCT", 5.0)
+    monkeypatch.setattr(config, "SHORT_DAY_FALL_RANGE_MULT", 0.0)       # E284: 0 = the fixed limit (E276 round 67 made the limit follow the stock's own range)
     assert engine._day_mover_max("LONG") == 7.0
     assert engine._day_mover_max("SHORT") == 5.0
+    monkeypatch.setattr(config, "SHORT_DAY_FALL_RANGE_MULT", 1.0)       # per-stock limit on: list up to the hard ceiling, the gate decides per stock
+    monkeypatch.setattr(config, "SHORT_DAY_FALL_HARD_CEILING_PCT", 8.0)
+    assert engine._day_mover_max("SHORT") == 8.0
     monkeypatch.setattr(config, "MAX_DAY_GAIN_PCT", 0.0)       # guard off -> only DAY_MOVER_MAX_PCT
     assert engine._day_mover_max("LONG") == 20.0
     monkeypatch.setattr(config, "MAX_DAY_GAIN_PCT", 30.0)      # guard looser than the scan cap -> scan cap
@@ -51,6 +55,7 @@ def test_a_six_percent_faller_is_not_listed_as_a_day_mover_short():
     mp = _p.MonkeyPatch()
     try:
         _feed(mp, {"SLIDE": _flat(94.0)}, {"SLIDE": (100.0, 100.0, 93.0, 100.0)})
+        mp.setattr(config, "SHORT_DAY_FALL_RANGE_MULT", 0.0)            # E284: with the fixed 5 % limit a 6 % faller is not listed (E249); with the per-stock limit it is (E276 round 67)
         assert engine.scan_shorts() == []
     finally:
         mp.undo()

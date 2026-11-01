@@ -1522,7 +1522,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             from entry_engine import risk_stage as _rs
             account_state.max_portfolio_risk_pct = _rs.heat_limit_pct(db, (_setup_res or {}).get("id"), float(account_state.max_portfolio_risk_pct))
         except Exception:  # noqa: BLE001 - the ladder only loosens; a failure leaves the base limit
-            pass
+            logger.debug("entry: ignored error (fail-open)", exc_info=True)
         result = risk_evaluate(intent, account_state)
 
         decision.proposed_qty        = result.approved_qty or proposed_qty
@@ -2514,7 +2514,7 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 try:
                     db.rollback()
                 except Exception:
-                    pass
+                    logger.debug("entry: ignored error (fail-open)", exc_info=True)
                 fill_check_unresolved = str(_bfe)[:200]
             if fill_check_unresolved and _quiet_unresolved:
                 logger.warning("expire_stale_orders: %s order left open for reconcile (no alert, transient): %s", order.symbol, fill_check_unresolved)
@@ -2977,7 +2977,7 @@ def _log_watchlist_summary(mode: str, verb: str, note: str, items: list) -> None
         logger.info("watchlist trigger[%s]: %s %d row(s) %s — %s%s", mode, verb, len(items), note, shown,
                     f"; +{more} more (DEBUG logs list them all)" if more > 0 else "")
     except Exception:  # logging must never stop the trigger pass
-        pass
+        logger.debug("entry: ignored error (fail-open)", exc_info=True)
 
 
 # ── group344 (item 6 of the 13 Oct review): park rows that are price-blocked ───────────────────────────────────────

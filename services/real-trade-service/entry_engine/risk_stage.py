@@ -70,7 +70,7 @@ def build_rows(positions, opened: Dict[int, Any], decisions: Dict[int, Any]) -> 
 def _load(db) -> Dict[str, Any]:
     import models
     pos = (db.query(models.TradePosition).filter(models.TradePosition.mode == "REAL", models.TradePosition.status == "CLOSED",
-                                                 models.TradePosition.broker_imported.is_(False))
+                                                 models.TradePosition.broker_imported == False)       # noqa: E712 - the SQLAlchemy is-False form renders IS 0 on Oracle (ORA-00908)
            .order_by(models.TradePosition.opened_at.desc()).limit(1000).all())
     ids = [p.id for p in pos]
     opened: Dict[int, Any] = {}

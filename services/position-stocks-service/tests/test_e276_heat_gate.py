@@ -32,6 +32,11 @@ class _Stub:
         self.ledger = types.ModuleType("capital.ledger")
         self.ledger.own_heat = lambda db: self.own
         sys.modules["capital.ledger"] = self.ledger
+        # E284: `from capital import ledger` inside the gate returns the PACKAGE attribute, not sys.modules. Where the real sqlalchemy is installed (Docker, CI) the
+        # real capital.ledger is already an attribute of the package, so the stub was bypassed and the gate called the real own_heat(None): put the stub there too.
+        import capital as _cap
+        self._cap_attrs = {k: _cap.__dict__.get(k) for k in ("ledger", "shared_heat", "heat_gate")}
+        _cap.ledger = self.ledger
         for k in ("capital.shared_heat", "capital.heat_gate"):
             sys.modules.pop(k, None)
         from capital import heat_gate, shared_heat
@@ -40,6 +45,12 @@ class _Stub:
         return self
 
     def __exit__(self, *a):
+        import capital as _cap
+        for k, v in getattr(self, "_cap_attrs", {}).items():
+            if v is None:
+                _cap.__dict__.pop(k, None)
+            else:
+                setattr(_cap, k, v)
         for k, v in self._orig.items():
             if v is None:
                 sys.modules.pop(k, None)

@@ -17,6 +17,7 @@ DN = int((NOW + br.IST_OFFSET_S) // 86400)
 def _run(root, syms, noted=None, max_syms=2):
     br.reset()
     config.BAR_RECORD_DIR, config.BAR_RECORD_MAX_SYMBOLS = root, max_syms
+    config.BAR_RECORD_ENABLED = True            # E284: conftest switches the recorder off for every older test; this one is about the recorder (conftest restores it)
     if noted is not None:
         br.note_symbols(noted, NOW)
     bars = {s: [[NOW - 60 * (30 - i), 10.0, 11.0, 9.0, 10.0, 5] for i in range(30)] for s in syms}

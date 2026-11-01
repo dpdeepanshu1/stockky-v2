@@ -40,6 +40,15 @@ def hold_days(db: Any = None) -> int:
         return int(_cfg("SWING_MAX_HOLD_DAYS", 5))
 
 
+def _session_of(position: Any) -> Any:
+    """The database session a loaded position belongs to, or None (a detached / plain object): the learned hold then falls back to the constant. Never raises."""
+    try:
+        from sqlalchemy.orm import object_session
+        return object_session(position)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_swing(position: Any) -> bool:
     return (getattr(position, "entry_decision_label", None) or "").upper() == lane.LABEL
 
@@ -168,8 +177,7 @@ def overdue(position: Any, now: Optional[datetime] = None) -> Optional[str]:
             return None
         od = date.fromisoformat(opened)
         sessions = lane.count_sessions(od, today, cg._is_trading_day)
-        from sqlalchemy.orm import object_session
-        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=hold_days(object_session(position)) + extra_sessions(position), opened_day=od, today=today,
+        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=hold_days(_session_of(position)) + extra_sessions(position), opened_day=od, today=today,
                                           past_cutoff=n.time() >= backstop_cutoff(), swing_live=lane.norm_mode(_cfg("SWING_MODE", "live")) == "live")
         return why if sell else None
     except Exception:  # noqa: BLE001

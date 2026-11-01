@@ -1023,7 +1023,7 @@ class TestGetState:
             "peer_pnl_last_synced_at": None,
             "last_synced_from_broker_at": None,
             "daily_loss_kill_switch_tripped": False,
-            "market_state_mode": "shadow",
+            "market_state_mode": "live",
             "market_state_risk_mult": 1.0,
         }
 

@@ -38,6 +38,7 @@ def _row(sym, price, prev, age=10):
 # ── final pre-open read ──────────────────────────────────────────────────────────────────────────────────────────────────────
 def test_final_read_window():
     preopen.reset()
+    config.PREOPEN_SNAPSHOT_ENABLED = True       # E284: conftest switches it off for older tests and restores it after each test
     assert not preopen.due_final(ist(9, 11, 59))
     assert preopen.due_final(ist(9, 12))
     assert preopen.due_final(ist(9, 14, 59))

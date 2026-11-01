@@ -48,6 +48,18 @@ def test_late_started_and_thin_files_are_not_complete_days(tmp_path):
     assert vp.build(str(tmp_path))["symbol_days"] == 350
 
 
+def test_backfilled_files_count_when_they_carry_volume_and_not_when_they_do_not(tmp_path):
+    _fill(tmp_path, days=5, syms=70)
+    for d in range(5):                                          # mark every file of every day as backfilled: they still count
+        for f in (tmp_path / f"2026-10-{d + 1:02d}").glob("*.json"):
+            doc = json.loads(f.read_text()); doc["backfilled"] = True; f.write_text(json.dumps(doc))
+    prof = vp.build(str(tmp_path))
+    assert prof["symbol_days"] == 350 and prof["files"]["backfilled_used"] == 350
+    _write(tmp_path, "2026-10-01", "ZERO", vol=lambda k: 0.0)   # a complete-looking file with no volume at all
+    prof = vp.build(str(tmp_path))
+    assert prof["symbol_days"] == 350 and prof["files"]["not_complete_or_no_volume"] == 1
+
+
 def _ready(monkeypatch, curve, symbol_days=350):
     vp.reset()
     monkeypatch.setattr(config, "VOLUME_PROFILE_LEARNED_ENABLED", True, raising=False)
@@ -89,6 +101,8 @@ def test_liquidity_gate_uses_the_learned_pace(monkeypatch):
 
 
 def test_switch_is_in_config_and_catalog():
-    assert config.VOLUME_PROFILE_LEARNED_ENABLED is True
-    src = open(__import__("os").path.join(__import__("os").path.dirname(__file__), "..", "control", "catalog.py")).read()
+    import os
+    here = os.path.dirname(__file__)
+    assert '_get_bool("VOLUME_PROFILE_LEARNED_ENABLED", True)' in open(os.path.join(here, "..", "config.py")).read()      # ships on (conftest pins it off for older tests)
+    src = open(os.path.join(here, "..", "control", "catalog.py")).read()
     assert "VOLUME_PROFILE_LEARNED_ENABLED" in src

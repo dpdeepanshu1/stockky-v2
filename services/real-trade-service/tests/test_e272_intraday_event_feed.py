@@ -102,6 +102,20 @@ class Q2:
         return self.rows
 
 
+try:
+    import pytest as _pytest
+
+    @_pytest.fixture(autouse=True)
+    def _snapshot_store(monkeypatch):
+        """E284: with the real packages installed (Docker, CI) the stub above is not used, so the DB-backed snapshot store must be replaced here, per test."""
+        import resilience.local_cache as _lcm
+        monkeypatch.setattr(_lcm, "load_snapshot", lambda db, key: _SNAP.get(key))
+        monkeypatch.setattr(_lcm, "save_snapshot", lambda db, key, data: _SNAP.__setitem__(key, data))
+        yield
+except ImportError:      # plain runner
+    pass
+
+
 def _fresh_state():
     _SNAP.clear()
     inews.reset_state_for_tests()

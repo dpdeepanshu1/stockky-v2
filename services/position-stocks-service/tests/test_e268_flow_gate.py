@@ -97,8 +97,9 @@ def test_unreachable_market_data_is_no_opinion_and_cached_short():
     old_mode = config.FLOW_GATE_MODE
     config.FLOW_GATE_MODE = "live"
     try:
+        _before = fg.stats()["errors"]            # E284: the counter is module-wide; other tests in the same run add to it
         assert fg.entry_check("ABC", "LONG", None) == (None, None)
-        assert fg.stats()["errors"] == 1
+        assert fg.stats()["errors"] == _before + 1
     finally:
         fg.fetch_verdict, config.FLOW_GATE_MODE = old, old_mode
 

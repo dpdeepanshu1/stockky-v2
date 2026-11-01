@@ -11,7 +11,10 @@ Run it INSIDE the position-stocks container (it needs the DB models and /data/ba
 
     docker compose exec -T position-stocks-service python - --days 15 < scripts/gate_scorecard.py
 
-Options (after the lone "-"): --days N (default 15)   --target 1.5   --stop 1.0   --cost 0.15   --min-n 30
+Options (after the lone "-"): --days N (default 15)   --target 1.5   --stop 1.0   --cost 0.15   --min-n 30   --direction long|short|auto
+  --direction long (default): every row is measured as a long, as before. SHORT_* rows then read INVERTED (a negative number means the short would have worked).
+  --direction short: every row is measured as a short (the move is flipped: positive = the short would have gained; target / stop are on the short's side).
+  --direction auto: rows whose reason starts with SHORT_ are measured as shorts, all others as longs, so one run reads both sides correctly.
 Read-only. Rows are de-duplicated to one per (symbol, gate, 30-minute bucket) so a stock re-skipped every 10 s does
 not count as 200 samples. A bar file is [[epoch_s, open, high, low, close, ...], ...].
 """
@@ -29,6 +32,7 @@ ap.add_argument("--stop", type=float, default=1.0)
 ap.add_argument("--cost", type=float, default=0.15, help="round-trip cost %% assumed")
 ap.add_argument("--min-n", type=int, default=30)
 ap.add_argument("--bars-dir", default="/data/bars")
+ap.add_argument("--direction", choices=("long", "short", "auto"), default="long", help="E272: measure rows as longs (default), as shorts, or auto (SHORT_* rows as shorts)")
 args = ap.parse_args()
 
 import db        # noqa: E402  (available inside the service container)
@@ -69,8 +73,17 @@ def gate_key(reason, decision):
     return parts[0][:40] if parts[0].isupper() else "OTHER:" + r.split(" ")[0][:30]
 
 
-def forward(bars, t0):
-    """(entry, r30, r60, rclose, target_first) as % from the last bar closing at/before t0; None when not measurable."""
+def side_sign(reason, direction):
+    """+1 = measure as a long, -1 = as a short (the move is flipped so positive always means the trade would have gained)."""
+    if direction == "short":
+        return -1
+    if direction == "auto" and str(reason or "").strip().upper().startswith("SHORT_"):
+        return -1
+    return 1
+
+
+def forward(bars, t0, sign=1):
+    """(r30, r60, rclose, target_first) as % from the last bar closing at/before t0, flipped for a short (sign -1); None when not measurable."""
     idx = None
     for i, b in enumerate(bars):
         if b[0] <= t0:
@@ -90,15 +103,16 @@ def forward(bars, t0):
                 j = k
             else:
                 break
-        return (float(bars[j][4]) / entry - 1) * 100
+        return sign * (float(bars[j][4]) / entry - 1) * 100
 
     tgt = stp = None
     outcome = "neither"
     for k in range(idx + 1, len(bars)):
         if bars[k][0] > t0 + 3600:
             break
-        hi = (float(bars[k][2]) / entry - 1) * 100
-        lo = (float(bars[k][3]) / entry - 1) * 100
+        up = (float(bars[k][2]) / entry - 1) * 100
+        dn = (float(bars[k][3]) / entry - 1) * 100
+        hi, lo = (up, dn) if sign > 0 else (-dn, -up)        # a short gains when price falls
         if lo <= -args.stop and hi >= args.target:
             outcome = "stop"          # same bar touches both: assume the worse
             break
@@ -108,7 +122,7 @@ def forward(bars, t0):
         if hi >= args.target:
             outcome = "target"
             break
-    return at(1800), at(3600), (float(bars[-1][4]) / entry - 1) * 100, outcome
+    return at(1800), at(3600), sign * (float(bars[-1][4]) / entry - 1) * 100, outcome
 
 
 groups = defaultdict(list)
@@ -120,7 +134,7 @@ for r in rows:
     gk = gate_key(r.reason, r.decision)
     t0 = calendar.timegm(r.created_at.timetuple())
     day = (r.created_at + IST).strftime("%Y-%m-%d")
-    bucket = (r.symbol, gk, day, t0 // 1800)
+    bucket = (r.symbol, gk, day, t0 // 1800, side_sign(r.reason, args.direction))
     if bucket in seen:
         continue
     seen.add(bucket)
@@ -133,11 +147,11 @@ for r in rows:
         else:
             nobars_days[day] += 1
         continue
-    f = forward(bars, t0)
+    f = forward(bars, t0, side_sign(r.reason, args.direction))
     if f:
         groups[gk].append(f)
 
-print(f"\nGate scorecard - last {args.days} days, target +{args.target}% / stop -{args.stop}% within 60 min, cost {args.cost}% round trip")
+print(f"\nGate scorecard ({args.direction}) - last {args.days} days, target +{args.target}% / stop -{args.stop}% within 60 min, cost {args.cost}% round trip")
 print(f"rows read: {len(rows)}   de-duplicated samples with bars: {sum(len(v) for v in groups.values())}   no-bars (skipped): {skipped_nobars}")
 if skipped_nobars:
     nd = sum(nobars_days.values())

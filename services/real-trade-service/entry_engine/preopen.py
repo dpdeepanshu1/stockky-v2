@@ -116,6 +116,18 @@ def status() -> dict:
                 "warmed": _snap["warmed"], "passes_done": list(_snap["passes"]), "coverage": list(_snap["coverage"]), "gaps": dict(sorted(_snap["gaps"].items(), key=lambda kv: -abs(kv[1]))[:15])}
 
 
+def gap_for(symbol: str, now: Optional[datetime] = None) -> Optional[float]:
+    """E273 round 19: today's pre-open gap % (indicative open vs previous close) for `symbol`, or None. Never raises."""
+    try:
+        with _lock:
+            if _snap["day"] != ist_today_str(now):
+                return None
+            g = _snap["gaps"].get(str(symbol or "").upper().replace(".NS", "").strip())
+        return None if g is None else float(g)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
     """A "PREOPEN_GAP_UP/DOWN:..." reason while the gate window is open, else None. Never raises."""
     try:

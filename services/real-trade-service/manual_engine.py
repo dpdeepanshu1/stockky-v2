@@ -48,12 +48,12 @@ from sqlalchemy.orm import Session
 import config
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
 from exit_engine.exit import _send_real_sell
 from intraday_eligibility import is_restricted as is_intraday_restricted
 from market_feed.feed import get_quotes
 from portfolio.portfolio import close_position, get_account, held_exposure_positions, record_real_order_sent, try_fill_entry, working_buy_symbols
-from risk_engine.effective_risk import effective_risk_pct
+from risk_engine.effective_risk import effective_max_positions, effective_risk_pct
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
 from tz_utils import is_market_open_ist
 
@@ -88,7 +88,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         equity=account.current_equity,
         risk_per_trade_pct=effective_risk_pct(risk),
         max_daily_loss_pct=risk.max_daily_loss_pct,
-        max_concurrent_positions=risk.max_concurrent_positions,
+        max_concurrent_positions=effective_max_positions(risk),
         max_portfolio_risk_pct=risk.max_portfolio_risk_pct,
         stale_data_seconds=risk.stale_data_seconds,
         max_tick_volatility_mult=risk.max_tick_volatility_mult,
@@ -153,6 +153,12 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
             if mode == "REAL" else 0.0
         ),
         other_service_exposure_age_s=_peer_age,
+        # E276 round 50: shared portfolio heat (gap allowance on carried holds + position-stocks-service's open risk); zeros when DEMO / off / peer stale.
+        open_positions_gap_allowance=heat_state.own_heat(db, mode, positions)[1],
+        other_service_open_risk=heat_state.peer_heat(db, mode)[0],
+        other_service_capital_base=heat_state.peer_heat(db, mode)[1],
+        open_positions_sector_risk=heat_state.own_sector_risk(db, mode, positions),
+        other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
         # as entry_engine/entry.py's _account_state — DB override first,
         # config.py default second.

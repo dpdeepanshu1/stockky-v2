@@ -1,6 +1,6 @@
 """orders/guard_stats.py - E257: in-process counters for the entry guards (spike chase, gain room), read through GET /entry/guard-stats.
 
-outcome: held (entry refused) | log_only (would have been refused, mode=log) | passed | no_data (an input was missing, the guard had no opinion) | error.
+outcome: held (entry refused) | penalised (E273 round 9: past its limit, a size penalty was added instead of a refusal) | log_only (would have been refused, mode=log) | passed | no_data (an input was missing, the guard had no opinion) | error.
 Without this a guard that never gets its inputs (cold ATR cache, no day range, too few bars) silently allows every entry and nothing shows it. Never raises.
 """
 from __future__ import annotations

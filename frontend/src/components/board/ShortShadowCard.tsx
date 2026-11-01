@@ -27,7 +27,7 @@ export default function ShortShadowCard({ active, fetcher }: { active: boolean; 
 
   const v = shortShadowView(doc);
   return (
-    <Card title={doc?.mode === "live" ? "Short selling · LIVE (shadow records)" : "Short selling · shadow only"} right={<span className="text-[9px] uppercase tracking-widest text-signal-hold">{doc?.mode === "live" ? "live orders: see Positions" : "no order is placed"}</span>}>
+    <Card title={doc?.mode === "live" ? "Short selling · LIVE" : "Short selling · shadow only"} right={<span className="text-[9px] uppercase tracking-widest text-signal-hold">{doc?.mode === "live" ? "live orders: see Positions" : "no order is placed"}</span>}>
       <div className="space-y-2 text-[11px]" data-testid="short-shadow">
         {err && <div className="text-signal-hold">{err}</div>}
         {!doc && !err && <div className="text-mist">Loading…</div>}

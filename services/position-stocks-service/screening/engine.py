@@ -280,10 +280,11 @@ class Candidate:
 
     def __post_init__(self):
         # E232: window_minutes 1440 is the day-mover path (move since the previous close), labelled "day".
-        self.window_label = "day" if self.window_minutes == DAY_WINDOW_MINUTES else f"{self.window_minutes}m"
+        self.window_label = "event" if self.window_minutes == EVENT_WINDOW_MINUTES else ("day" if self.window_minutes == DAY_WINDOW_MINUTES else f"{self.window_minutes}m")
 
 
 DAY_WINDOW_MINUTES = 1440
+EVENT_WINDOW_MINUTES = 1441      # E272: a name listed because of a typed event (window label "event"), not because a rolling window moved
 
 
 def _day_change_pct(symbol: str, ltp: float) -> Optional[float]:
@@ -304,6 +305,8 @@ def _day_mover_max(side: str = "LONG") -> float:
     try:
         cap = float(config.DAY_MOVER_MAX_PCT)
         guard = float(getattr(config, "SHORT_MAX_DAY_FALL_PCT", 0.0) if str(side).upper() == "SHORT" else getattr(config, "MAX_DAY_GAIN_PCT", 0.0))
+        if str(side).upper() == "SHORT" and guard > 0 and float(getattr(config, "SHORT_DAY_FALL_RANGE_MULT", 0.0) or 0.0) > 0:
+            guard = max(guard, float(getattr(config, "SHORT_DAY_FALL_HARD_CEILING_PCT", guard)))      # E276 round 67: the gate decides per stock; list up to the hard ceiling
         return min(cap, guard) if guard > 0 else cap
     except Exception:  # noqa: BLE001
         return float(getattr(config, "DAY_MOVER_MAX_PCT", 20.0))
@@ -515,6 +518,41 @@ def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False)
 
     candidates.sort(key=lambda c: c.composite_score, reverse=True)
     return candidates
+
+
+def scan_event_candidates(side: str = "LONG", open_symbols: Optional[Set[str]] = None, events: Optional[Dict[str, dict]] = None) -> List[Candidate]:
+    """E272: S1 / S4 candidates straight from the premarket plan's typed event list, so an event-backed name does not have to wait for a rolling window (which needs
+    five minutes of ticks and +1 %). side LONG lists polarity +1 events, SHORT lists -1 (S4). A name is listed only when the event is strong enough
+    (EVENT_CANDIDATE_MIN_STRENGTH), not older than EVENT_CANDIDATE_MAX_AGE_MIN, not already held, and a live price is known. It is only a candidate: every hard veto, the
+    opening guard, the setup engine (closed-bar trigger, 2 of 3 confirmations, priced_in) and the cost gate still run, so listing a name never buys it.
+    Feed down or no plan = empty list (fail-safe). `events` is for tests. Never raises."""
+    out: List[Candidate] = []
+    try:
+        if not getattr(config, "EVENT_CANDIDATES_ENABLED", True):
+            return out
+        if events is None:
+            from screening import premarket_plan
+            plan = premarket_plan.current()
+            events = (plan or {}).get("events") or {}
+        want = -1 if str(side).upper() == "SHORT" else 1
+        held = {_bare_symbol(x) for x in (open_symbols or set())}
+        min_st, max_age = float(config.EVENT_CANDIDATE_MIN_STRENGTH), float(config.EVENT_CANDIDATE_MAX_AGE_MIN)
+        for sym, ev in events.items():
+            if not isinstance(ev, dict) or int(ev.get("polarity") or 0) != want or _bare_symbol(sym) in held:
+                continue
+            st, age = float(ev.get("strength") or 0.0), float(ev.get("age_min") or 0.0)
+            if st < min_st or age > max_age:
+                continue
+            ltp = ws_client.get_last_ltp(sym)
+            if not ltp or ltp <= 0:
+                continue
+            dm = _day_change_pct(sym, ltp)
+            out.append(Candidate(symbol=sym, window_minutes=EVENT_WINDOW_MINUTES, pct_change=round(dm if dm is not None else 0.0, 4), current_ltp=ltp,
+                                 tick_activity=len(ws_client.get_tick_buffer(sym) or []), composite_score=round(st * 10.0, 4), rvol=None))
+        out.sort(key=lambda c: c.composite_score, reverse=True)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
 
 
 # ── Short selling step 5: the mirrored scan ─────────────────────────────────────────────────────────────────────────────────────────────

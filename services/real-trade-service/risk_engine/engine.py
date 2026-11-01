@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
@@ -260,6 +260,14 @@ class AccountState:
     # in the capital_share_cap reject message so a missing or stale peer figure
     # can be told apart from a genuinely full account. It never changes the maths.
     other_service_exposure_age_s: Optional[float] = None
+    # E276 round 50: shared portfolio heat. Gap allowance on this service's carried positions, position-stocks-service's published open risk (its gap
+    # allowance included) and its capital base. All default 0.0 = the old own-pool-only cap for any construction site that does not populate them.
+    open_positions_gap_allowance: float = 0.0
+    other_service_open_risk: float = 0.0
+    other_service_capital_base: float = 0.0
+    # E276 round 60: open stop risk by "<sector>:LONG" for this service and the peer's published split ({} = no same-sector surcharge, the old maths).
+    open_positions_sector_risk: dict = field(default_factory=dict)
+    other_service_sector_risk: dict = field(default_factory=dict)
     # ADDED (2026-09-21, session79): flat rupee ceiling on a single trade's
     # position value — see config.MAX_TRADE_VALUE / TradeRiskConfig.
     # max_trade_value. None (the default) means "no cap" — matches the
@@ -287,6 +295,18 @@ class RiskResult:
     check_name:   str
     reason:       str
     approved_qty: Optional[int] = None  # risk engine may downsize, never upsize
+
+
+def _sector_heat_enabled() -> bool:
+    """E276 round 60: blank-safe switch, default on (engine.py reads env directly rather than importing config.py)."""
+    return (os.getenv("SECTOR_HEAT_ENABLED") or "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _sector_heat_mult() -> float:
+    try:
+        return float((os.getenv("SECTOR_HEAT_MULT") or "").strip() or 1.5)
+    except ValueError:
+        return 1.5
 
 
 def _cap_trade_risk_at_daily_loss() -> bool:
@@ -687,14 +707,34 @@ def evaluate(
 
     # ── 6. Portfolio-level risk cap ───────────────────────────────────────────
     if intent.side == "BUY":
-        prospective_total = account.open_positions_total_risk + order_risk
-        max_portfolio_risk = account.equity * (account.max_portfolio_risk_pct / 100.0)
-        if prospective_total > max_portfolio_risk:
+        from risk_engine import portfolio_heat as _ph
+        _sector_extra, _sector = 0.0, None
+        try:
+            if _sector_heat_enabled() and (account.open_positions_sector_risk or account.other_service_sector_risk):
+                from risk_engine import sector_map as _sm
+                _sector = _sm.sector_of(intent.symbol)
+                if _sector != "Other":
+                    _both = _ph.merge_sector_risk(account.open_positions_sector_risk, account.other_service_sector_risk)
+                    _sector_extra = _ph.sector_surcharge(_both.get(_ph.sector_key(_sector, "LONG"), 0.0), order_risk, _sector_heat_mult())
+        except Exception:  # noqa: BLE001 - the sector surcharge only ever tightens; a failure leaves the plain heat check
+            _sector_extra = 0.0
+        _ok, _heat_after, max_portfolio_risk = _ph.check(
+            account.open_positions_total_risk, account.open_positions_gap_allowance, account.other_service_open_risk, order_risk,
+            account.equity, account.other_service_capital_base, account.max_portfolio_risk_pct, _sector_extra)
+        prospective_total = (account.open_positions_total_risk + account.open_positions_gap_allowance + account.other_service_open_risk + order_risk + _sector_extra)
+        if not _ok:
+            _extra = ""
+            if account.open_positions_gap_allowance > 0 or account.other_service_open_risk > 0:
+                _extra = (f" (this service ₹{account.open_positions_total_risk:.2f} + gap allowance ₹{account.open_positions_gap_allowance:.2f} + "
+                          f"position-stocks-service ₹{account.other_service_open_risk:.2f} + this order ₹{order_risk:.2f}; pool "
+                          f"₹{account.equity + account.other_service_capital_base:.2f})")
+            if _sector_extra > 0:
+                _extra += f" + same-sector surcharge ₹{_sector_extra:.2f} ({_sector} already open)"
             return RiskResult(
                 RiskVerdict.REJECTED, "max_portfolio_risk",
                 f"Adding this position would bring total open risk to "
                 f"₹{prospective_total:.2f} "
-                f"(>{account.max_portfolio_risk_pct:.2f}% cap = ₹{max_portfolio_risk:.2f}). "
+                f"(>{account.max_portfolio_risk_pct:.2f}% cap = ₹{max_portfolio_risk:.2f}){_extra}. "
                 "Wait for an existing position to be stopped/targeted before adding more.",
             )
 

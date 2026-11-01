@@ -57,3 +57,16 @@ def effective_risk_pct(risk_row: Any):
     except Exception:  # noqa: BLE001
         return stored
     return live if live > 0 else stored
+
+
+def effective_max_positions(risk_row: Any):
+    """E273 round 22: the open-position cap the engine really uses. Same rule as effective_risk_pct: an admin-saved row wins; a system-owned row follows
+    config.DEFAULT_MAX_CONCURRENT_POSITIONS read at call time (1 .. 10; anything else falls back to the stored number). The total open-risk cap is untouched."""
+    stored = getattr(risk_row, "max_concurrent_positions", None)
+    if not is_system_owned(risk_row):
+        return stored
+    try:
+        live = int(config.DEFAULT_MAX_CONCURRENT_POSITIONS)
+    except Exception:  # noqa: BLE001
+        return stored
+    return live if 1 <= live <= 10 else stored

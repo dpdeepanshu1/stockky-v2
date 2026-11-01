@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 LABEL = "SWING_MOMENTUM"            # TradeOrder / TradePosition.entry_decision_label of a swing entry
 SOURCE_TAB = "swing"                # TradeOrder / TradePosition.source_tab of a swing entry
-MODES = ("off", "shadow", "live")
+MODES = ("off", "live")                # E273 round 13: no shadow mode (plan ground rule); the paper ledger rows keep their stored kind name "SHADOW"
 EXIT_REASONS = ("stop", "time")
 
 
@@ -36,9 +36,10 @@ def _f(v: Any) -> Optional[float]:
 
 
 def norm_mode(v: Any) -> str:
-    """off | shadow | live; anything else is shadow (the safe default: records, orders nothing)."""
+    """live | off. E273 round 13: there is no shadow mode any more; "shadow" (an old .env value), blank and anything unknown read as off, so a value that used to mean
+    "do not buy" never starts buying. (config.SWING_MODE itself falls back to live on junk, its shipped default.)"""
     s = str(v or "").strip().lower()
-    return s if s in MODES else "shadow"
+    return s if s in MODES else "off"
 
 
 def live_allowed(swing_mode: Any, trade_mode: str, real_enabled: bool) -> bool:
@@ -272,3 +273,16 @@ def ratcheted_stop(current_stop: Any, close: Any, stop_pct: Any) -> Optional[flo
         return None
     cand = round(c * (1.0 - sp / 100.0), 2)
     return cand if cur is None else max(round(cur, 2), cand)
+
+
+def order_event_first(picks: list, backed: dict) -> list:
+    """E274 round 47: planned picks with a typed positive event first (stronger event first), then the rest; inside each group the scan rank decides. `backed` = {symbol: event dict or None}.
+    Pure, stable, never raises (any problem returns the picks unchanged)."""
+    try:
+        def key(t: dict):
+            ev = backed.get(t.get("symbol"))
+            st = float(ev.get("strength") or 0.0) if isinstance(ev, dict) else 0.0
+            return (0 if isinstance(ev, dict) else 1, -st if isinstance(ev, dict) else 0.0, t.get("rank") or 1e9)
+        return sorted(picks, key=key)
+    except Exception:  # noqa: BLE001
+        return list(picks)

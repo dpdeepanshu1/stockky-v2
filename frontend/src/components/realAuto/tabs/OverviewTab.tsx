@@ -6,6 +6,7 @@ import { fmtDate, fmtHms, fmtInr, fmtTime, pickNum, pnlColor } from "../format";
 import { OrderFlowDiagram } from "../panels";
 import { Dot, SectionHdr, StatCard } from "../parts";
 import type { Mode } from "../types";
+import SessionRail from "../../session/SessionRail";   // E277: the trading-day rail
 
 // E66 - E31 step 10: the "overview" tab, moved out of RealAutoTrade.tsx (JSX unchanged). PortfolioSummary and GateStep moved with it
 // (only this tab used them). State and handlers stay in RealAutoTrade and arrive as props.
@@ -187,6 +188,8 @@ export function OverviewTab({
 }: OverviewTabProps) {
   return (
             <div className="space-y-4">
+              {/* E277: where IST time stands against the plan's morning timeline (display only) */}
+              <SessionRail service="rt" />
               {/* Gate sequence */}
               <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <SectionHdr>Arming sequence — {mode} mode</SectionHdr>

@@ -1,4 +1,4 @@
-"""2026-10-23: rules that switch by market regime are LOG ONLY: a hypothetical verdict per candidate, no enforce mode, never a WAIT."""
+"""2026-10-23 verdict maths of the regime rules (evaluate / table / record). Since E273 round 7 the mode is live (a soft penalty, see test_e273_regime_rules_soft_penalty.py); there is no log or enforce mode."""
 import json
 
 import pytest
@@ -9,7 +9,7 @@ from entry_engine import regime_rules as rr
 
 @pytest.fixture(autouse=True)
 def _defaults(monkeypatch):
-    for k, v in (("REGIME_RULES_MODE", "log"), ("REGIME_RULES_STRONG_SCORE", 60.0), ("REGIME_RULES_TABLE_JSON", ""), ("ENTRY_MIN_REWARD_RISK", 2.0),
+    for k, v in (("REGIME_RULES_MODE", "live"), ("REGIME_RULES_STRONG_SCORE", 60.0), ("REGIME_RULES_TABLE_JSON", ""), ("ENTRY_MIN_REWARD_RISK", 2.0),
                  ("CANDIDATE_MIN_CONVICTION", 55.0)):
         monkeypatch.setattr(config, k, v, raising=False)
     rr.reset_stats()
@@ -49,12 +49,13 @@ def test_table_override_and_junk_override():
     assert rr.table()["weak"]["min_rr"] == 2.5
 
 
-def test_there_is_no_enforce_mode_and_record_counts():
-    config.REGIME_RULES_MODE = "enforce"
-    assert rr.mode_for("REAL") == "log"
+def test_there_is_no_log_or_enforce_mode_and_record_counts():
+    for raw in ("enforce", "log"):
+        config.REGIME_RULES_MODE = raw
+        assert rr.mode_for("REAL") == "live"
     config.REGIME_RULES_MODE = "off"
     assert rr.mode_for("DEMO") == "off"
-    config.REGIME_RULES_MODE = "log"
+    config.REGIME_RULES_MODE = "live"
     rr.record("infy", "REAL", rr.evaluate(30, 38, 60, 2.2), 1500.0)
     rr.record("tcs", "REAL", rr.evaluate(70, 38, 80, 3.0), 3500.0)
     s = rr.stats()

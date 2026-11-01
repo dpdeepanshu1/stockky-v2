@@ -8,7 +8,7 @@ import type { SwingLedgerRow, SwingStatusDoc } from "./realTradeApi";
 export const SWING_MIN_TRADES = 30;
 export const SWING_MIN_DAYS = 20;
 
-export type SwingKind = "unavailable" | "off" | "shadow" | "live";
+export type SwingKind = "unavailable" | "off" | "live";
 export type Tone = "good" | "warn" | "bad" | undefined;
 
 export interface SwingView {
@@ -78,12 +78,12 @@ export function swingView(doc: SwingStatusDoc | null | undefined): SwingView {
   const verdict = sh && !sh.error ? verdictView(sh.verdict, sh.reasons) : verdictView(undefined, undefined);
 
   const mode = String(doc.mode || "").toLowerCase();
-  const kind: SwingKind = mode === "off" ? "off" : mode === "live" ? "live" : "shadow";
+  const kind: SwingKind = mode === "off" ? "off" : mode === "live" ? "live" : "off";
   const headline = kind === "off"
-    ? "Off. SWING_MODE is off: no scan runs and nothing is recorded. Switch it to shadow on the Switches page to start recording."
+    ? "Off. SWING_MODE is off (a leftover shadow value reads as off too): no new swing is bought. Set SWING_MODE=live on the Switches page to buy again."
     : kind === "live"
       ? `LIVE. Real CNC swing orders are allowed in DEMO${doc.live_real_enabled ? " and REAL" : " (REAL is blocked while SWING_LIVE_REAL_ENABLED is false)"}, at most ${isNum(doc.max_positions) ? doc.max_positions : "?"} positions of ${inr(doc.max_trade_value)} each, held up to ${isNum(doc.max_hold_days) ? doc.max_hold_days : "?"} sessions.`
-      : "Shadow. The lane records the picks it WOULD have taken. No order is placed.";
+      : "Swing lane data is not available.";
 
   const pauses = Object.entries(doc.pause || {}).filter(([, v]) => v && v.paused).map(([m, v]) => ({ mode: m, why: String(v.why || "paused") }));
   const by = sh?.by_status && typeof sh.by_status === "object" ? sh.by_status : {};

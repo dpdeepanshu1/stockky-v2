@@ -999,6 +999,35 @@ class SharedDailyPnl(Base):
 #   - market_date is the IST trading date this row targets (tomorrow's date
 #     at scan time). _prepick only reads rows where market_date == today
 #     and consumed=False.
+
+
+class SharedHeat(Base):
+    """E276 round 50 - shared portfolio heat. Each service publishes ITS OWN open risk (sum of stop distance x qty over open positions), the gap allowance on
+    positions carried overnight, and its capital base, for the IST day in `trade_date` (an old row is ignored). Either service adds the peer's figures to its own
+    before an entry. NEW table, same shape in both services (either may boot first); fail-open on any DB error - see capital/shared_heat.py (position-stocks)
+    and execution/shared_heat.py (real-trade)."""
+    __tablename__ = "stockky_shared_heat"
+
+    service_name = Column(String(32), primary_key=True)  # "real-trade-service" | "position-stocks-service"
+    trade_date = Column(String(10), nullable=False)
+    open_risk = Column(Float, nullable=False, default=0.0)
+    gap_allowance = Column(Float, nullable=False, default=0.0)
+    capital_base = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
+class SharedHeatSectors(Base):
+    """E276 round 60 - the sector split of each service's open risk, for the same-sector rule (two open positions in one sector count 1.5x). One row per service:
+    `sector_json` is {"Banks:LONG": rupees at stop, ...} for the IST day in `trade_date` (an old row is ignored). NEW table (create_all() adds it, no ALTER), same
+    shape in both services; fail-open on any DB error - see capital/shared_heat.py (position-stocks) and execution/shared_heat.py (real-trade)."""
+    __tablename__ = "stockky_shared_heat_sectors"
+
+    service_name = Column(String(32), primary_key=True)
+    trade_date = Column(String(10), nullable=False)
+    sector_json = Column(String(2000), nullable=False, default="{}")
+    updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
+
+
 class NextDayWatchlistEntry(Base):
     __tablename__ = "trade_nextday_watchlist"
 

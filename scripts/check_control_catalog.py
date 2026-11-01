@@ -2,7 +2,7 @@
 """check_control_catalog.py - group 442: static guard for the Real Money Calibration switches (services/*/control/catalog.py).
 
   python3 scripts/check_control_catalog.py                       # check both catalogs (CI)
-  python3 scripts/check_control_catalog.py --probe real-trade-service config:KRONOS_GATE_MODE candidate_engine.candidates:RANGE_52W_LOG_ONLY
+  python3 scripts/check_control_catalog.py --probe real-trade-service config:KRONOS_GATE_MODE candidate_engine.candidates:FRESH_HIGH_EXEMPT
                                                                  # how is this attribute consumed? (use while writing a catalog entry)
 
 A switch can only take effect immediately when every consumer reads the value at CALL time (`config.X` inside a function, or the defining

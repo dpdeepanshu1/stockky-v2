@@ -51,7 +51,7 @@ def test_boot_loop_is_switchable_isolated_and_cancelled_on_shutdown():
 
 def test_entry_records_after_the_gate_and_before_any_return():
     assert "structure_observation" in ENTRY_SRC.split("from orders.adaptive", 1)[0]
-    i = ENTRY_SRC.index("structure_gate.check(candidate.symbol, candidate.current_ltp, capture=_struct_cap)")
+    i = ENTRY_SRC.index("structure_gate.check(candidate.symbol, candidate.current_ltp, capture=_struct_cap,")   # E273 round 32: the call also passes penalties=
     j = ENTRY_SRC.index("structure_observation.record(db, candidate.symbol", i)
     k = ENTRY_SRC.index("if _struct_reject:", i)
     assert i < j < k   # recorded for passed AND rejected verdicts, before the reject return

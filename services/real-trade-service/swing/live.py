@@ -95,6 +95,56 @@ def backstop_cutoff(now: Optional[datetime] = None) -> Any:
     return _t(mins // 60, mins % 60)
 
 
+EXTEND_EVENT = "SWING_EVENT_EXTEND"
+
+
+def extra_sessions(position: Any) -> int:
+    """E274 round 49: sessions added to this swing position's last session by a positive event (one SWING_EVENT_EXTEND row each, at most SWING_EVENT_EXTEND_MAX). 0 on any doubt."""
+    try:
+        if not bool(_cfg("SWING_EVENT_EXTEND_ENABLED", True)):
+            return 0
+        from sqlalchemy.orm import object_session
+        import models
+        db = object_session(position)
+        if db is None or getattr(position, "id", None) is None:
+            return 0
+        n = db.query(models.TradePositionEvent).filter_by(position_id=position.id, event_type=EXTEND_EVENT).count()
+        return max(0, min(int(n), int(_cfg("SWING_EVENT_EXTEND_MAX", 1)) * int(_cfg("SWING_EVENT_EXTEND_SESSIONS", 1))))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def maybe_extend(db: Any, position: Any, ltp: Any, sessions: int) -> int:
+    """E274 round 49: on the LAST session, a position in profit with a fresh typed POSITIVE event of at least SWING_EVENT_EXTEND_MIN_STRENGTH gets SWING_EVENT_EXTEND_SESSIONS more session(s), once
+    (SWING_EVENT_EXTEND_MAX times in all). Records one SWING_EVENT_EXTEND row (the only state; no column). Returns the sessions now added (0 = none). Never raises."""
+    try:
+        have = extra_sessions(position)
+        if not bool(_cfg("SWING_EVENT_EXTEND_ENABLED", True)) or sessions < int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + have:
+            return have
+        if have >= int(_cfg("SWING_EVENT_EXTEND_MAX", 1)) * int(_cfg("SWING_EVENT_EXTEND_SESSIONS", 1)):
+            return have
+        px = float(ltp) if ltp is not None else 0.0
+        if px <= float(position.avg_entry_price or 0.0):
+            return have
+        from watchlist_engine.intraday_news import positive_event_any
+        ev = positive_event_any(db, position.symbol)
+        if not ev or float(ev.get("strength") or 0.0) < float(_cfg("SWING_EVENT_EXTEND_MIN_STRENGTH", 0.6)):
+            return have
+        import models
+        add = int(_cfg("SWING_EVENT_EXTEND_SESSIONS", 1))
+        for _ in range(add):
+            db.add(models.TradePositionEvent(position_id=position.id, event_type=EXTEND_EVENT,
+                                             detail=f"Last session extended by a positive {ev.get('type')} event (strength {float(ev.get('strength') or 0):.2f}, {ev.get('source')}); position in profit"[:400]))
+        db.commit()
+        return have + add
+    except Exception:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 def overdue(position: Any, now: Optional[datetime] = None) -> Optional[str]:
     """Reason to sell this swing position NOW (exit-engine backstop, see lane.backstop_verdict), or None. Never raises; any doubt = None."""
     try:
@@ -109,8 +159,8 @@ def overdue(position: Any, now: Optional[datetime] = None) -> Optional[str]:
             return None
         od = date.fromisoformat(opened)
         sessions = lane.count_sessions(od, today, cg._is_trading_day)
-        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)), opened_day=od, today=today,
-                                          past_cutoff=n.time() >= backstop_cutoff(), swing_live=lane.norm_mode(_cfg("SWING_MODE", "shadow")) == "live")
+        sell, why = lane.backstop_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + extra_sessions(position), opened_day=od, today=today,
+                                          past_cutoff=n.time() >= backstop_cutoff(), swing_live=lane.norm_mode(_cfg("SWING_MODE", "live")) == "live")
         return why if sell else None
     except Exception:  # noqa: BLE001
         logger.debug("swing backstop check failed (no sale)", exc_info=True)
@@ -126,7 +176,7 @@ def wiring(db: Any, repo: Any, now: Optional[datetime] = None) -> Dict[str, Any]
         from tz_utils import ist_now
         from entry_engine import calendar_gate as cg
         n = ist_now(now)
-        sw_mode = lane.norm_mode(_cfg("SWING_MODE", "shadow"))
+        sw_mode = lane.norm_mode(_cfg("SWING_MODE", "live"))
         out["swing_mode"] = sw_mode
         try:
             from execution import auto_pilot as _ap
@@ -170,18 +220,31 @@ def wiring(db: Any, repo: Any, now: Optional[datetime] = None) -> Dict[str, Any]
 
 # ───────────────────────────── entries ─────────────────────────────
 
+def _open_check(symbol: str) -> Dict[str, Any]:
+    """E273 round 15: the opening check for one swing pick (blocking: runs in a thread). Fresh bars are fetched now (this pass runs once a day, so the
+    background cache is not enough); no bars / stale bars / too few range bars = {"ok": None}, i.e. buy as before. Never raises."""
+    try:
+        from entry_engine import orb_bars
+        bars = orb_bars.fetch_now(symbol) or orb_bars.get_bars(symbol)
+        return orb_bars.open_check(bars, max_drop_pct=float(_cfg("SWING_OPEN_MAX_DROP_PCT", 0.15)), min_bars=int(_cfg("SWING_OPEN_MIN_BARS", 3)))
+    except Exception:  # noqa: BLE001
+        return {"ok": None, "why": "error"}
+
+
 async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, Any]:
     """The morning pass for one mode. At most once per IST day per mode (the run row is written BEFORE any order). Never raises."""
     out: Dict[str, Any] = {"mode": mode, "placed": 0, "skipped": []}
     try:
-        if not lane.live_allowed(_cfg("SWING_MODE", "shadow"), mode, bool(_cfg("SWING_LIVE_REAL_ENABLED", False))):
+        if not lane.live_allowed(_cfg("SWING_MODE", "live"), mode, bool(_cfg("SWING_LIVE_REAL_ENABLED", False))):
             return {**out, "status": "not_live"}
         if not gate_armed:
             return {**out, "status": "not_armed"}
         if not eod_squareoff_on(db, mode):      # E138: no 15:00 hold decision without this switch, so no new carried position either (the run row is NOT used up)
             return {**out, "status": "eod_squareoff_off", "detail": "the gate's EOD square-off switch is off or unreadable: it runs the daily 15:00 hold decision, so no swing entry"}
         from tz_utils import ist_now, ist_today_str, ist_time_at_or_after, parse_hhmm, is_market_open_ist
-        if not is_market_open_ist() or not ist_time_at_or_after(parse_hhmm(str(_cfg("SWING_ENTRY_TIME_IST", "09:25")), 9, 25)):
+        _t_cfg = parse_hhmm(str(_cfg("SWING_ENTRY_TIME_IST", "09:25")), 9, 25)
+        _t_floor = parse_hhmm(str(_cfg("SWING_ENTRY_FLOOR_IST", "09:21")), 9, 21)
+        if not is_market_open_ist() or not ist_time_at_or_after(max(_t_cfg, _t_floor)):     # E273 round 13: never before the floor, whatever the entry time says
             return {**out, "status": "too_early"}
         today = ist_today_str()
         if ist_time_at_or_after(parse_hhmm(str(_cfg("SWING_ENTRY_LAST_TIME_IST", "10:30")), 10, 30)):
@@ -209,7 +272,15 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
         picks = sorted(repo.trades(kind="SHADOW", status="PLANNED", signal_day=scan["asof"]), key=lambda t: t.get("rank") or 1e9)
         open_pos = swing_positions(db, mode)
         held = {p.symbol for p in open_pos}
-        slots = lane.entry_slots(int(_cfg("SWING_MAX_POSITIONS", 2)), len(open_pos), int(_cfg("SWING_PICKS_PER_DAY", 2)))
+        _backed: Dict[str, Any] = {}
+        if picks and bool(_cfg("SWING_EVENT_FIRST_ENABLED", True)):      # E274 round 47: event-backed picks first
+            try:
+                from watchlist_engine.intraday_news import positive_event_any
+                _backed = {p["symbol"]: await asyncio.to_thread(positive_event_any, db, p["symbol"]) for p in picks}
+                picks = lane.order_event_first(picks, _backed)
+            except Exception as _be:  # noqa: BLE001 - ordering is a preference, never a blocker
+                logger.debug("swing: event-first ordering skipped: %s", _be)
+        slots = lane.entry_slots(int(_cfg("SWING_MAX_POSITIONS", 3)), len(open_pos), int(_cfg("SWING_PICKS_PER_DAY", 3)))
         if slots <= 0 or not picks:
             return {**out, "status": "no_slots_or_picks", "detail": f"slots {slots}, picks {len(picks)}"}
         from market_feed.feed import get_quotes
@@ -252,10 +323,24 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
             if lane.gap_too_big(getattr(tick, "open_price", None) or tick.price, pk.get("signal_close"), float(_cfg("SWING_MAX_GAP_UP_PCT", 5.0))):
                 skip("gapped up too far over the signal close")
                 continue
+            if bool(_cfg("SWING_EVENT_VETO_ENABLED", True)):      # E274 round 47: a fresh negative typed event on the candidate (market hours or the after-hours veto row) refuses the buy
+                try:
+                    from watchlist_engine.intraday_news import event_veto_reason
+                    _evr = event_veto_reason(db, mode, sym)      # cached snapshot + one indexed query: run inline, the session is not thread-safe
+                except Exception:  # noqa: BLE001
+                    _evr = None
+                if _evr:
+                    skip(f"EVENT_VETO: {_evr}")
+                    continue
             veto = await asyncio.to_thread(engine.entry_vetoes, sym, td)
             if veto:
                 skip("; ".join(veto))
                 continue
+            if bool(_cfg("SWING_OPEN_CONFIRM_ENABLED", True)) and str(_cfg("ORB_MODE", "live")).lower() != "off":      # E273 round 15: skip a pick whose first 5 minutes reversed
+                oc = await asyncio.to_thread(_open_check, sym)
+                if oc.get("ok") is False:
+                    skip(f"OPEN_REVERSAL: {oc.get('detail') or oc.get('why')}")
+                    continue
             limit = dhan_client.round_to_tick(float(tick.price) * (1.0 + slip / 100.0))
             sp = float(pk.get("stop_pct") or 3.0)
             stop = dhan_client.round_stop_to_tick(limit * (1.0 - sp / 100.0)) if hasattr(dhan_client, "round_stop_to_tick") else round(limit * (1 - sp / 100.0), 2)
@@ -279,7 +364,8 @@ async def entries(db: Any, repo: Any, mode: str, gate_armed: bool) -> Dict[str, 
                 if sec:
                     sectors.append(sec)
                 await _notify(f"🌱 *Swing entry — {mode}* {sym}\n{approved} @ ₹{limit:.2f} (CNC) | stop ₹{stop:.2f} ({sp:.1f}%) | rank {pk.get('rank')} | "
-                              f"max {int(_cfg('SWING_MAX_HOLD_DAYS', 5))} sessions\n{res.get('status')}")
+                              f"max {int(_cfg('SWING_MAX_HOLD_DAYS', 5))} sessions\n{res.get('status')}"
+                              + (f"\nEvent: {_backed[sym].get('type')} (strength {float(_backed[sym].get('strength') or 0):.2f})" if isinstance(_backed.get(sym), dict) else ""))
             else:
                 skip(f"{res.get('reason')}: {str(res.get('detail') or res.get('check_name') or '')[:100]}")
         out["status"] = "done"
@@ -313,7 +399,7 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
             return keep, reasons
         import models
         from tz_utils import ist_today_str
-        if lane.norm_mode(_cfg("SWING_MODE", "shadow")) != "live":
+        if lane.norm_mode(_cfg("SWING_MODE", "live")) != "live":
             for p in mine:
                 db.add(models.TradePositionEvent(position_id=p.id, event_type="SWING_EXIT_DECISION", detail="SWING_MODE is not live: swing position is not carried"))
             db.commit()
@@ -332,7 +418,7 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
             except Exception:  # noqa: BLE001
                 ctx = None
         ledger = {t["position_id"]: t for t in repo.trades(kind="LIVE", mode=mode) if t.get("position_id")}
-        cap = cg.carry_max_positions(int(_cfg("SWING_MAX_POSITIONS", 2)))
+        cap = cg.carry_max_positions(int(_cfg("SWING_MAX_POSITIONS", 3)))
         for p in sorted(mine, key=lambda x: x.opened_at or datetime.now(timezone.utc)):
             tick = ticks.get(p.symbol)
             opened = _day(p.opened_at) or ist_today_str()
@@ -353,7 +439,8 @@ async def eod_holds(db: Any, repo: Any, mode: str, positions: List[Any]) -> Tupl
             except Exception:  # noqa: BLE001 - unknown is not a veto (same rule as the overnight selector)
                 pass
             row = rows.get(p.symbol) or {}
-            ok, why = lane.hold_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)), ltp=getattr(tick, "price", None), stop=p.current_stop,
+            _ext = maybe_extend(db, p, getattr(tick, "price", None), sessions)
+            ok, why = lane.hold_verdict(sessions=sessions, max_hold=int(_cfg("SWING_MAX_HOLD_DAYS", 5)) + _ext, ltp=getattr(tick, "price", None), stop=p.current_stop,
                                         sma10=row.get("sma10"), pct_rank=row.get("pct_rank"), keep_min_pct_rank=float(_cfg("SWING_KEEP_MIN_PCT_RANK", 50.0)),
                                         require_above_sma10=bool(_cfg("SWING_KEEP_ABOVE_SMA10", True)), vetoes=vetoes)
             if ok and len(keep) >= cap:

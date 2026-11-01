@@ -36,7 +36,7 @@ def _load_mult():
 
 
 def test_defaults_change_nothing():
-    assert config.MARKET_STATE_MODE == "shadow" and config.MARKET_STATE_RISK_MULT == 1.0
+    assert config.MARKET_STATE_MODE == "live" and config.MARKET_STATE_RISK_MULT == 1.0
     assert _load_mult()() == 1.0
 
 
@@ -54,7 +54,7 @@ def test_config_parsing_is_blank_safe_and_clamped():
             assert config._ms_float("MARKET_STATE_RISK_MULT", 1.0, 0.1, 1.0) == mult, env
         finally:
             os.environ.pop("MARKET_STATE_RISK_MULT", None)
-    for env, mode in (("", "shadow"), ("LIVE", "live"), (" off ", "off"), ("weird", "shadow")):
+    for env, mode in (("", "live"), ("LIVE", "live"), (" off ", "off"), ("weird", "live"), ("shadow", "live")):
         os.environ["MARKET_STATE_MODE"] = env
         try:
             assert config._ms_mode() == mode, env

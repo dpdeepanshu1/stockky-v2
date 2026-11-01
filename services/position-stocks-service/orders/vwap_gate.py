@@ -36,23 +36,33 @@ def _pos(v) -> Optional[float]:
     return f if math.isfinite(f) and f > 0 else None
 
 
-def decide(price, vwap) -> Optional[str]:
-    """Pure decision from numbers: a "VWAP_BELOW:..." / "VWAP_EXTENDED:..." reason or None. Never raises."""
+def decide_scored(price, vwap):
+    """(reason, penalty) from numbers. E273 round 9: the penalty is the distance over its own limit: for VWAP_BELOW the % under the VWAP divided by the tolerance
+    (ENTRY_VWAP_TOLERANCE_PCT, floor 0.05), for VWAP_EXTENDED the % over divided by ENTRY_VWAP_MAX_EXTENSION_PCT; capped (orders/soft_gates.py). (None, None) = fine. Never raises."""
     try:
+        from orders import soft_gates
         p, v = _pos(price), _pos(vwap)
         if p is None or v is None or abs(p - v) / v > _MAX_SANE_DISTANCE:
-            return None
+            return None, None
         tol = max(0.0, float(getattr(config, "ENTRY_VWAP_TOLERANCE_PCT", 0.15) or 0.0))
         if p < v * (1.0 - tol / 100.0):
-            return (f"VWAP_BELOW:price {p:.2f} is {(v - p) / v * 100:.2f}% under the day's VWAP {v:.2f} "
-                    "(sellers in control) - not a long entry")
+            gap = (v - p) / v * 100.0
+            return (f"VWAP_BELOW:price {p:.2f} is {gap:.2f}% under the day's VWAP {v:.2f} (sellers in control) - not a long entry",
+                    soft_gates.ratio_penalty(gap, max(tol, 0.05)) or 1.0)
         ext = max(0.0, float(getattr(config, "ENTRY_VWAP_MAX_EXTENSION_PCT", 0.0) or 0.0))
         if ext > 0 and p > v * (1.0 + ext / 100.0):
-            return f"VWAP_EXTENDED:price {p:.2f} is {(p - v) / v * 100:.2f}% over the day's VWAP {v:.2f} (> {ext:.1f}%) - extended, not chasing"
-        return None
+            over = (p - v) / v * 100.0
+            return (f"VWAP_EXTENDED:price {p:.2f} is {over:.2f}% over the day's VWAP {v:.2f} (> {ext:.1f}%) - extended, not chasing",
+                    soft_gates.ratio_penalty(over, ext) or 1.0)
+        return None, None
     except Exception as e:  # noqa: BLE001
         logger.debug("vwap gate decide failed (allowing): %s", e)
-        return None
+        return None, None
+
+
+def decide(price, vwap) -> Optional[str]:
+    """Pure decision from numbers: a "VWAP_BELOW:..." / "VWAP_EXTENDED:..." reason or None. Never raises."""
+    return decide_scored(price, vwap)[0]
 
 
 def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[str]:
@@ -66,4 +76,19 @@ def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[
         return decide(ltp, q.get("avg_price")) if q else None
     except Exception as e:  # noqa: BLE001
         logger.debug("vwap gate %s failed (allowing): %s", symbol, e)
+        return None
+
+
+def penalty(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[dict]:
+    """E273 round 9: {"penalty": float, "why": reason} when the price is past the VWAP limits (same switch, time and quote rules as reject_reason), else None. Never raises."""
+    try:
+        if not getattr(config, "ENTRY_VWAP_GATE_ENABLED", True):
+            return None
+        if not ist_time_at_or_after(parse_hhmm(str(getattr(config, "ENTRY_VWAP_MIN_TIME_IST", "09:45")), 9, 45), now):
+            return None
+        q = depth_gate._fresh_quote(symbol)
+        why, pen = decide_scored(ltp, q.get("avg_price")) if q else (None, None)
+        return {"penalty": float(pen), "why": why} if why and pen else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("vwap gate penalty %s failed (no opinion): %s", symbol, e)
         return None

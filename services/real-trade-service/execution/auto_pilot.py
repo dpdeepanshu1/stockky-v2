@@ -913,6 +913,13 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
         for row in rows:
             # Rows that don't meet the bar are still marked consumed so they
             # don't re-appear on a hypothetical second pre-pick run today.
+            if _decode_event_tag(row.catalyst_source).get("polarity") == -1:
+                # E272 round 6: a negative event is a VETO for the session: never injected, whatever its stored score
+                logger.info("[schedule] pre-pick %s: %s vetoed by a negative after-hours event (%s)", mode, row.symbol, row.catalyst_source)
+                row.consumed = True
+                row.consumed_at = now
+                db.commit()
+                continue
             if row.priority_score < config.AFTERHOURS_SCAN_MIN_INJECT_SCORE:
                 row.consumed = True
                 row.consumed_at = now
@@ -942,6 +949,8 @@ async def _inject_nextday_watchlist_candidates(db, mode: str) -> int:
                         "catalyst_type": row.catalyst_type,
                         "source": row.catalyst_source,
                         "headline": row.headline,
+                        # E272 round 6: the typed event behind the row (type, polarity, strength), None for a keyword-only row
+                        "event": {k: v for k, v in _decode_event_tag(row.catalyst_source).items() if k != "source"},
                     }),
                     overnight_priority=True,
                 ))
@@ -1666,14 +1675,14 @@ async def _swing_step(db, mode: str, armed: bool) -> None:
     """E132 swing lane tick. The evening scan (shadow ledger, record only) starts once a day on a background thread from the DEMO tick; live entries run only when
     SWING_MODE=live (swing/live.entries checks that, the mode, the arming, the window and once-per-day itself). Never raises."""
     try:
-        if str(getattr(config, "SWING_MODE", "shadow")).lower() == "off":
+        if str(getattr(config, "SWING_MODE", "live")).lower() == "off":
             return
         from swing import engine as _se, live as _sl
         from swing.repo import SqlRepo
         repo = SqlRepo(db)
         if mode == "DEMO" and _se.scan_due(ist_now(), repo):
             _se.scan_in_thread(get_session_factory(), _sl.held_symbols)
-        if str(getattr(config, "SWING_MODE", "shadow")).lower() == "live":
+        if str(getattr(config, "SWING_MODE", "live")).lower() == "live":
             await _sl.entries(db, repo, mode, armed)
     except Exception:
         logger.exception("[schedule] swing step failed for %s (non-fatal)", mode)
@@ -2093,13 +2102,27 @@ async def _totp_refresh_loop() -> None:
 # finalize pass fires once per day at AFTERHOURS_FINALIZE_TIME_IST.
 # ══════════════════════════════════════════════════════════════════════════
 
+def _decode_event_tag(catalyst_source) -> dict:
+    """E272 round 6: {source, type, polarity, strength} from a stored catalyst_source tag (None values for a keyword-only row). Never raises."""
+    try:
+        from watchlist_engine import event_reader
+        return event_reader.decode_tag(catalyst_source)
+    except Exception:  # noqa: BLE001
+        return {"source": None, "type": None, "polarity": None, "strength": None}
+
+
+def _afterhours_start_str() -> str:
+    """E272 round 6: the scan window opens at AFTERHOURS_V2_START_IST (15:30) with the new cadence, else at AFTERHOURS_SCAN_START_IST (15:45)."""
+    return config.AFTERHOURS_V2_START_IST if getattr(config, "AFTERHOURS_CADENCE_V2", False) else config.AFTERHOURS_SCAN_START_IST
+
+
 def _is_afterhours_window_active() -> bool:
     """True if current IST time is in the after-hours scan window
     (15:45–08:45 next morning). The window spans midnight, so we check:
     time >= START (15:45) OR time < END (08:45)."""
     from tz_utils import ist_now, parse_hhmm
     now_t = ist_now().time()
-    start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+    start_t = parse_hhmm(_afterhours_start_str(), 15, 45)
     end_t   = parse_hhmm(config.AFTERHOURS_SCAN_END_IST, 8, 45)
     # Window spans midnight: active from start until end (next day)
     return now_t >= start_t or now_t < end_t
@@ -2125,7 +2148,7 @@ def _compute_afterhours_market_date(now_t=None):
 
     if now_t is None:
         now_t = ist_now().time()
-    start_t = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+    start_t = parse_hhmm(_afterhours_start_str(), 15, 45)
     if now_t >= start_t:
         tomorrow = datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(days=1)
         while tomorrow.weekday() >= 5 or is_nse_holiday(tomorrow):
@@ -2327,9 +2350,16 @@ def _afterhours_next_sleep_seconds(now=None) -> float:
     ramp_start = parse_hhmm(config.AFTERHOURS_SCAN_RAMP_START_IST, 8, 0)
     ramp_end   = parse_hhmm(config.AFTERHOURS_SCAN_RAMP_END_IST, 9, 0)
     finalize_t = parse_hhmm(config.AFTERHOURS_FINALIZE_TIME_IST, 8, 45)
-    scan_start = parse_hhmm(config.AFTERHOURS_SCAN_START_IST, 15, 45)
+    scan_start = parse_hhmm(_afterhours_start_str(), 15, 45)
 
-    if ramp_start <= now_t < ramp_end:
+    if getattr(config, "AFTERHOURS_CADENCE_V2", False):
+        # E272 round 6: 15:30-20:00 every 30 min, 20:00-08:00 every 2 h, 08:00-09:00 every 10 min (watchlist_engine/event_reader.cadence_seconds)
+        from watchlist_engine import event_reader
+        evening_end = parse_hhmm(config.AFTERHOURS_V2_EVENING_END_IST, 20, 0)
+        base = event_reader.cadence_seconds(now_t, scan_start, evening_end, ramp_start, ramp_end,
+                                            float(config.AFTERHOURS_V2_EVENING_INTERVAL_SECONDS), float(config.AFTERHOURS_V2_NIGHT_INTERVAL_SECONDS),
+                                            float(config.AFTERHOURS_V2_RAMP_INTERVAL_SECONDS))
+    elif ramp_start <= now_t < ramp_end:
         base = float(config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS)
     elif ramp_end <= now_t < scan_start:
         base = 86400.0   # market hours: nothing to scan - the boundary cap below wakes us at 15:45
@@ -2342,7 +2372,10 @@ def _afterhours_next_sleep_seconds(now=None) -> float:
             target += _td(days=1)
         return (target - now).total_seconds()
 
-    nearest = min(_until(ramp_start), _until(finalize_t), _until(ramp_end), _until(scan_start))
+    _bounds = [_until(ramp_start), _until(finalize_t), _until(ramp_end), _until(scan_start)]
+    if getattr(config, "AFTERHOURS_CADENCE_V2", False):
+        _bounds.append(_until(parse_hhmm(config.AFTERHOURS_V2_EVENING_END_IST, 20, 0)))   # wake at 20:00 so the night interval starts on time
+    nearest = min(_bounds)
     return max(30.0, min(base, nearest))
 
 
@@ -2392,32 +2425,50 @@ def _is_trading_day_ist(now=None) -> bool:
     return n.weekday() < 5 and not is_nse_holiday(n)
 
 
+def _intraday_v2() -> bool:
+    """E272 round 7: the market-hours cadence follows AFTERHOURS_CADENCE_V2 (one switch for the whole news cadence)."""
+    return bool(getattr(config, "AFTERHOURS_CADENCE_V2", False))
+
+
+def _intraday_end_str() -> str:
+    return config.INTRADAY_V2_END_IST if _intraday_v2() else config.INTRADAY_NEWS_END_IST
+
+
 def _intraday_news_window_active(now=None) -> bool:
-    """True on a trading day between INTRADAY_NEWS_START_IST and INTRADAY_NEWS_END_IST (IST)."""
+    """True on a trading day between INTRADAY_NEWS_START_IST and the window end (IST): 15:30 with the v2 cadence, else INTRADAY_NEWS_END_IST (15:45)."""
     from tz_utils import ist_now, parse_hhmm
     n = now or ist_now()
     if not _is_trading_day_ist(n):
         return False
     start_t = parse_hhmm(config.INTRADAY_NEWS_START_IST, 9, 0)
-    end_t = parse_hhmm(config.INTRADAY_NEWS_END_IST, 15, 45)
+    end_t = parse_hhmm(_intraday_end_str(), 15, 45)
     return start_t <= n.time() < end_t
 
 
 def _intraday_news_next_sleep_seconds(now=None) -> float:
-    """Seconds to sleep before the next market-hours news tick. Inside the window: the configured
-    interval, capped at the window end. Outside it (evening, night, weekend, holiday): straight to
-    the next window start, capped at 6 h so a config/holiday-table change is picked up. Min 30 s."""
+    """Seconds to sleep before the next market-hours news tick. v2 cadence: every INTRADAY_V2_FAST_INTERVAL_SECONDS (60) from the window start to
+    INTRADAY_V2_FAST_END_IST (09:20), then every INTRADAY_V2_SLOW_INTERVAL_SECONDS (180) to the window end (15:30), the sleep capped at the next boundary so the
+    09:05 rebuild and the 09:20 switch are not slept through. Old cadence: INTRADAY_NEWS_INTERVAL_SECONDS (15 min) to 15:45. Outside the window (evening, night,
+    weekend, holiday): straight to the next window start, capped at 6 h so a config/holiday-table change is picked up. Min 30 s."""
     from datetime import timedelta as _td
     from tz_utils import ist_now, parse_hhmm
     n = now or ist_now()
     start_t = parse_hhmm(config.INTRADAY_NEWS_START_IST, 9, 0)
-    end_t = parse_hhmm(config.INTRADAY_NEWS_END_IST, 15, 45)
+    end_t = parse_hhmm(_intraday_end_str(), 15, 45)
 
     def _at(t, day_offset=0):
         return n.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0) + _td(days=day_offset)
 
     if _intraday_news_window_active(n):
-        wait = min(float(config.INTRADAY_NEWS_INTERVAL_SECONDS), (_at(end_t) - n).total_seconds())
+        if _intraday_v2():
+            fast_end = parse_hhmm(config.INTRADAY_V2_FAST_END_IST, 9, 20)
+            if n.time() < fast_end:
+                wait = min(float(config.INTRADAY_V2_FAST_INTERVAL_SECONDS), (_at(fast_end) - n).total_seconds())
+            else:
+                wait = float(config.INTRADAY_V2_SLOW_INTERVAL_SECONDS)
+        else:
+            wait = float(config.INTRADAY_NEWS_INTERVAL_SECONDS)
+        wait = min(wait, (_at(end_t) - n).total_seconds())
         return max(30.0, wait)
     target = _at(start_t)
     if target <= n:
@@ -2474,8 +2525,10 @@ async def _intraday_news_loop() -> None:
     """Market-hours news loop. Runs 24/7; cheap no-op outside the window or while the toggle is off."""
     await asyncio.sleep(_STARTUP_DELAY_SECONDS + 40)
     logger.info(
-        "Auto-pilot INTRADAY NEWS loop running (every %ss, %s-%s IST, trading days)",
-        config.INTRADAY_NEWS_INTERVAL_SECONDS, config.INTRADAY_NEWS_START_IST, config.INTRADAY_NEWS_END_IST,
+        "Auto-pilot INTRADAY NEWS loop running (%s, %s-%s IST, trading days, source=%s)",
+        (f"every {config.INTRADAY_V2_FAST_INTERVAL_SECONDS}s to {config.INTRADAY_V2_FAST_END_IST}, then every {config.INTRADAY_V2_SLOW_INTERVAL_SECONDS}s"
+         if _intraday_v2() else f"every {config.INTRADAY_NEWS_INTERVAL_SECONDS}s"),
+        config.INTRADAY_NEWS_START_IST, _intraday_end_str(), config.INTRADAY_EVENT_SOURCE,
     )
     while True:
         try:

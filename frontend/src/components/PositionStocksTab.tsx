@@ -14,6 +14,7 @@ import { KpiStrip, type Kpi } from "./ui/KpiStrip";   // design v6
 import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { signedInr } from "./realAuto/history";   // design v6 (shared signed-rupee text)
 import { setVisibleInterval } from "../visibleInterval";
+import { entryReason } from "../setupView";   // E272: the Entry reason column / line
 import {
   positionStocksApi, getPositionStocksApiUrl, setPositionStocksApiUrl,
   type ScalpCumulativeCharges, type ScalpChargesPeriod, type ScalpChargeTrades,
@@ -44,6 +45,8 @@ import ShortShadowCard from "./board/ShortShadowCard";
 import SellOrdersCard from "./board/SellOrdersCard";
 import TopPicks from "./board/TopPicks";
 import SessionHealthPanel from "./board/SessionHealthPanel";
+import SessionRail from "./session/SessionRail";   // E277: the trading-day rail
+import PremarketPlanCard from "./session/PremarketPlanCard";   // E277: the 08:30 pre-market plan
 import TimeMachinePanel from "./TimeMachinePanel";   // E111: odds of one trade (evidence only)
 import StructurePanel from "./StructurePanel";
 import StructureGateCard from "./StructureGateCard";
@@ -107,6 +110,8 @@ function statusColor(status: string): string {
   // own color so it's visually distinguishable from a true manual exit,
   // not just a hold-orange lookalike.
   if (status === "STAGNATION_EXIT") return "text-signal-prepare";
+  // E275: the momentum-health exit booked the trade (in profit by construction): a win, same colour as a target
+  if (status === "MOMENTUM_EXIT") return "text-signal-buy";
   // group 340: price sat under the stored stop and the watchdog closed it at market - a stop failure, loss colour.
   if (status === "STOP_BREACH_EXIT") return "text-signal-sell";
   // group 466: Close-all-and-disarm exit (plain MARKET SELL, reconcile resolves the fill)
@@ -891,6 +896,9 @@ export default function PositionStocksTab() {
       )}
 
       {/* ── Sub-tab nav ── */}
+      {/* E277: where IST time stands against the plan's morning timeline (display only) */}
+      <SessionRail service="ps" />
+
       <SubTabs<SubTab>
         label="Position Stocks sections"
         value={subTab}
@@ -909,13 +917,14 @@ export default function PositionStocksTab() {
         ]}
       />
 
-      {/* group306: Market Board (display + shadow logging only; places no order) */}
+      {/* group306: Market Board (display only; places no order) */}
       {subTab === "board" && (
         <div className="space-y-4">
           <TopPicks active={subTab === "board"} fetcher={() => positionStocksApi.topPicks()}
             title="Top picks · best 3 to 5 for the scalp pool" note="Display only. The same ranking drives which stock the scalper tries first; every entry gate still decides. Board-preview cards have not been through those gates." />
           <ShortlistPanel active={subTab === "board"} kind="scalp" fetcher={() => positionStocksApi.shortlist()}
             title="Best picks · next entries (scalp pool)" note="Display only. The entry gates still decide; a pick that fails one is skipped and the next pick is tried." />
+          <PremarketPlanCard active={subTab === "board"} fetcher={() => positionStocksApi.premarketPlan()} />
           <ShortShadowCard active={subTab === "board"} fetcher={() => positionStocksApi.shortShadow()} />
           <SessionHealthPanel active={subTab === "board"} />
           <MarketBoard active={subTab === "board"} title="Position Stocks · Market Board" />
@@ -1843,6 +1852,7 @@ export default function PositionStocksTab() {
                     <tr className="text-mist text-left border-b border-slate">
                       <th className="py-1 pr-3">Symbol</th>
                       <th className="py-1 pr-3">Window</th>
+                      <th className="py-1 pr-3">Entry reason</th>
                       <th className="py-1 pr-3">Qty</th>
                       <th className="py-1 pr-3">Buy ₹</th>
                       <th className="py-1 pr-3">Sell ₹</th>
@@ -1865,6 +1875,11 @@ export default function PositionStocksTab() {
                       <tr key={t.id} className="border-b border-slate/50">
                         <td className="py-1 pr-3 text-paper font-bold">{t.symbol}{isShort(t) && <span className="ml-1 text-[9px] text-signal-sell" title="Short trade">{sideBadge(t)}</span>}</td>
                         <td className="py-1 pr-3 text-mist">{t.window_source}</td>
+                        {/* E272: the rule that took the trade, from the setup stamp stored on the trade (hover for trigger, confirmations, penalties, size) */}
+                        {(() => { const er = entryReason(t.setup); return (
+                          <td className={`py-1 pr-3 ${er.known ? "text-paper" : "text-mist"}`} title={er.title} data-testid="entry-reason">
+                            {er.label}{er.known && <span className="ml-1 text-[9px] text-mist">{er.slot}</span>}
+                          </td>); })()}
                         <td className="py-1 pr-3 text-mist">{t.quantity}</td>
                         <td className="py-1 pr-3 text-paper">₹{t.entry_price.toFixed(2)}</td>
                         <td className="py-1 pr-3 text-paper">{t.exit_price != null ? `₹${t.exit_price.toFixed(2)}` : "—"}</td>
@@ -2304,6 +2319,10 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
         <div><span className="text-mist">Total </span><span className="tabular-nums text-paper">
           {fmtInr(p.entry_price * p.quantity)}{p.exit_price != null ? ` → ${fmtInr(p.exit_price * p.quantity)}` : ""}
         </span></div>
+        {/* E272: why this trade was taken (setup stamp); "-" for a trade opened before entries were stamped */}
+        {(() => { const er = entryReason(p.setup); return (
+          <div title={er.title} data-testid="entry-reason"><span className="text-mist">Entry reason </span>
+            <span className={`tabular-nums ${er.known ? "text-paper" : "text-mist"}`}>{er.label}{er.known && <span className="ml-1 text-[9px] text-mist">{er.slot}</span>}</span></div>); })()}
         <div>
           <span className="text-mist">Target </span>
           {p.overnight_converted_to_cnc ? (

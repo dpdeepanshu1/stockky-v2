@@ -148,6 +148,40 @@ def evaluate_entry_cost_gate(
     )
 
 
+def min_qty_mode() -> str:
+    """E273 round 23: ENTRY_MIN_QTY_MODE read at call time, `cost` (default) or `fixed`; anything else reads as cost."""
+    m = str(getattr(config, "ENTRY_MIN_QTY_MODE", "cost") or "cost").strip().lower()
+    return m if m in ("cost", "fixed") else "cost"
+
+
+def effective_min_qty(
+    entry_price: float,
+    target_pct: float,
+    fixed_floor: int,
+    min_trade_value: Optional[float] = None,
+    min_edge_to_cost_ratio: Optional[float] = None,
+) -> int:
+    """E273 round 23: the minimum shares for a REAL entry. `fixed` (or an unusable input, or the cost model switched off) = the flat ENTRY_MIN_QTY floor, as before.
+    `cost` = the smallest quantity from 1 up to that floor at which the SAME cost gate the entry runs next (Gate 5.6: minimum trade value and edge-to-cost
+    ratio) passes; when none does, the floor itself (the cost gate then judges it as before). It is judged as a CNC entry that may be carried (the dearer
+    product with the DP charge), so a quantity that passes here also passes the real gate whichever product is chosen. Never raises; never above the flat
+    floor, so it can only let a smaller trade through, and only one whose own edge pays for its costs."""
+    try:
+        floor = int(fixed_floor or 0)
+        if floor <= 1 or min_qty_mode() != "cost" or not config.COST_MODEL_ENABLED:
+            return floor
+        px, tp = float(entry_price), float(target_pct)
+        if px <= 0 or tp <= 0:
+            return floor
+        for q in range(1, floor):
+            if evaluate_entry_cost_gate(px, q, tp, product_type="CNC", min_trade_value=min_trade_value,
+                                        min_edge_to_cost_ratio=min_edge_to_cost_ratio, include_dp=True).passes:
+                return q
+        return floor
+    except Exception:  # noqa: BLE001 - a maths / config problem must never block or crash an entry
+        return int(fixed_floor or 0)
+
+
 def estimate_delivery_sell_cost(price: float, qty: int, carried: bool = True) -> float:
     """group 264: Rs cost of ONE delivery (CNC) SELL leg of `qty` shares at `price`: STT + exchange + SEBI + GST on those,
     plus the flat DP charge (Rs 12.50 + GST) when `carried` (shares settled in demat from an earlier day - a same-day

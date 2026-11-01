@@ -510,6 +510,17 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
     return expired
 
 
+def _event_exit_order_pending(db: Session, position: models.TradePosition) -> bool:
+    """E274 round 46: True when an event_exit SELL for this symbol is still PLACED / PARTIAL at Dhan (so the next cycle does not send a second one). Fail-safe: False on error."""
+    try:
+        return db.query(models.TradeOrder).filter(
+            models.TradeOrder.mode == "REAL", models.TradeOrder.symbol == position.symbol, models.TradeOrder.side == "SELL",
+            models.TradeOrder.exit_reason == "event_exit", models.TradeOrder.status.in_(("PLACED", "PARTIAL")),
+        ).first() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _should_skip_exit_this_cycle(position: models.TradePosition) -> bool:
     """Return True if this position is still inside its exponential backoff
     cooldown after consecutive broker rejections.  Extracted from
@@ -1617,6 +1628,104 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         held += 1
                 continue
 
+            # ── 1a (moved before the swing branch in round 49 so it reaches swing positions): a negative typed event on the stock we hold (E274 round 45; exit_engine/event_exit.py) ───────────────────────────────────
+            # S4 is never an entry here (long only): it is the reason to get out of, or protect, an open position. Reads the cached event snapshot / the after-hours veto row
+            # (fail-open: no event = nothing happens). Strong = sell, weak = stop to just under the price (ratchet only). Never before 09:20. EVENT_EXIT_MODE: off | tighten | exit.
+            try:
+                from exit_engine import event_exit as _ee
+                if _ee.mode() != "off":
+                    from watchlist_engine.intraday_news import negative_event as _neg_event
+                    _ee_ev = _neg_event(db, position.symbol, position.opened_at, now)
+                    if _ee_ev:
+                        _ee_v = _ee.evaluate(_ee_ev, entry_price=position.avg_entry_price, ltp=ltp, current_stop=position.current_stop, atr=tick.atr,
+                                             now_ist=now.astimezone(IST), tick=dhan_client.tick_size_for_price(ltp))
+                        _ee_applied = False
+                        if _ee_v.get("action") == "tighten" and _ee_v.get("new_stop") is not None:
+                            _old_ee = position.current_stop
+                            if _old_ee is None or float(_ee_v["new_stop"]) > float(_old_ee):
+                                position.current_stop = float(_ee_v["new_stop"])
+                                db.add(models.TradePositionEvent(
+                                    position_id=position.id, event_type="EVENT_TIGHTEN",
+                                    detail=(f"Stop raised to ₹{position.current_stop:.2f} (was ₹{_old_ee}) by a negative {_ee_ev.get('type')} event "
+                                            f"(strength {float(_ee_ev.get('strength') or 0):.2f}, {_ee_ev.get('source')}): {str(_ee_ev.get('headline') or '')[:120]}"),
+                                ))
+                                db.commit()
+                                _write_exit_decision(db, position, "TRAIL_STOP",
+                                                     f"Negative event: stop ₹{position.current_stop:.2f} (was ₹{_old_ee}). " + "; ".join(_ee_v.get("reasons") or [])[:200], ltp)
+                                _ee_applied = True
+                                trailed += 1
+                        elif _ee_v.get("action") == "exit":
+                            _ee_applied = True
+                        _ee.record(position.symbol, _ee_v, _ee_applied, ltp)
+                        if _ee_applied and _ee_v.get("action") == "exit":
+                            _write_exit_decision(db, position, "FULL_EXIT",
+                                                 f"Negative event exit: {_ee_ev.get('type')} event (strength {float(_ee_ev.get('strength') or 0):.2f}, {_ee_ev.get('source')}): "
+                                                 f"{str(_ee_ev.get('headline') or '')[:120]}", ltp)
+                            if mode == "DEMO":
+                                close_position(db, position, tick, position.qty_open, "event_exit")
+                                full_exits += 1
+                            else:
+                                _ee_lp = _ee.limit_price_for(ltp, _ee_ev, dhan_client.tick_size_for_price(ltp))
+                                if _ee_lp is not None and _event_exit_order_pending(db, position):
+                                    held += 1      # the limit sell is already working at Dhan; the expiry pass resends it as MARKET if it does not fill
+                                elif _send_real_sell(db, position, position.qty_open, "event_exit",
+                                                     **({"order_type": "LIMIT", "limit_price": _ee_lp} if _ee_lp is not None else {})):
+                                    full_exits += 1
+                                else:
+                                    held += 1
+                            continue
+                        if _ee_applied:
+                            continue
+            except Exception as _ee_exc:  # noqa: BLE001 - the event is advisory; never stop the exit loop
+                try:
+                    db.rollback()
+                except Exception as _ee_rb:  # noqa: BLE001
+                    logger.debug("exit event step rollback failed for %s (ignored): %s", position.symbol, _ee_rb)
+                logger.debug("exit event step failed for %s (ignored): %s", position.symbol, _ee_exc)
+
+            # ── 1a2 (same move): momentum health on 5-minute bars for a SWING position (E274 round 48; exit_engine/swing_momentum.py) ───────────────────────
+            # Reads the cached 1-minute bars only (never waits), at most once a minute per position, in profit only, 09:45-15:00 IST. Raises the stop or sells; never lowers a stop.
+            try:
+                from exit_engine import swing_momentum as _sm
+                if (_sm.mode() != "off" and ltp > position.avg_entry_price and (position.entry_decision_label or "").upper() == "SWING_MOMENTUM"
+                        and 9 * 60 + 45 <= now.astimezone(IST).hour * 60 + now.astimezone(IST).minute < 15 * 60
+                        and _sm.due(int(position.id), time.monotonic())):
+                    from entry_engine import orb_bars as _ob
+                    _sm_v = _sm.evaluate(bars_1m=_ob.get_bars(position.symbol), entry=position.avg_entry_price, stop=position.current_stop, ltp=ltp, qty=position.qty_open,
+                                         opened_at=as_aware(position.opened_at), now=now, tick=dhan_client.tick_size_for_price(ltp))
+                    _sm_applied = False
+                    if _sm_v["action"] == "TIGHTEN" and _sm_v.get("new_stop") is not None:
+                        _old_sm = position.current_stop
+                        if _old_sm is None or float(_sm_v["new_stop"]) > float(_old_sm):
+                            position.current_stop = float(_sm_v["new_stop"])
+                            db.add(models.TradePositionEvent(position_id=position.id, event_type="MOMENTUM_TIGHTEN",
+                                                             detail=f"Stop raised to ₹{position.current_stop:.2f} (was ₹{_old_sm}) by 5-minute momentum health: {_sm_v.get('reason')}"[:400]))
+                            db.commit()
+                            _write_exit_decision(db, position, "TRAIL_STOP", f"Momentum health: stop ₹{position.current_stop:.2f} (was ₹{_old_sm}). {_sm_v.get('reason')}"[:300], ltp)
+                            _sm_applied = True
+                            trailed += 1
+                    elif _sm_v["action"] == "BOOK":
+                        _sm_applied = True
+                    _sm.record(position.symbol, _sm_v, _sm_applied, ltp)
+                    if _sm_applied and _sm_v["action"] == "BOOK":
+                        _write_exit_decision(db, position, "FULL_EXIT", f"Momentum exit (5-minute bars): {_sm_v.get('reason')}"[:300], ltp)
+                        if mode == "DEMO":
+                            close_position(db, position, tick, position.qty_open, "momentum_exit")
+                            full_exits += 1
+                        elif _send_real_sell(db, position, position.qty_open, "momentum_exit"):
+                            full_exits += 1
+                        else:
+                            held += 1
+                        continue
+                    if _sm_applied:
+                        continue
+            except Exception as _sm_exc:  # noqa: BLE001 - advisory; never stop the exit loop
+                try:
+                    db.rollback()
+                except Exception as _sm_rb:  # noqa: BLE001
+                    logger.debug("exit swing-momentum step rollback failed for %s (ignored): %s", position.symbol, _sm_rb)
+                logger.debug("exit swing-momentum step failed for %s (ignored): %s", position.symbol, _sm_exc)
+
             # ── 1b. E132 swing lane: its positions are exited by the stop above (ratcheted up every evening by swing/live.after_scan), the 15:00 session
             # check (swing/live.eod_holds via _eod_squareoff) and the emergency check above. NO target, partial exit, breakeven, ATR trail, structure step
             # or calendar time-stop applies: the replay (scripts/swing_backtest.py) tested exactly stop + last-session exit, and extra rules would run something else.
@@ -1806,7 +1915,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             # ── 3b. Daily market structure while the position is open (group365) ─────────────────────────────
             # Reads ONLY the structure cache (a miss starts a background fetch), so a slow gateway can never delay a stop
             # check. Ratchet only: the stop is raised, never lowered; a losing position is never touched. Any error is
-            # swallowed and the checks below run exactly as before. STRUCTURE_EXIT_MODE: off | log | tighten | exit.
+            # swallowed and the checks below run exactly as before. STRUCTURE_EXIT_MODE: off | tighten | exit.
             try:
                 from exit_engine import structure_exit as _sx
                 from entry_engine import structure_gate as _sgate

@@ -567,7 +567,8 @@ def verdict(symbol: str, side: str = "LONG", min_against: Optional[int] = None, 
     base.update({"against": cl["against"], "for_count": cl["for_count"], "checks": cl["checks"], "buy_pct_10m": sig.get("buy_pct_10m"),
                  "delta_agrees": sig.get("delta_agrees"), "aggressor": sig.get("aggressor"), "location": prof.get("location"),
                  "node": prof.get("node"), "price": snap.get("price"),
-                 "hvn_above": prof.get("hvn_above"), "hvn_below": prof.get("hvn_below")})
+                 "hvn_above": prof.get("hvn_above"), "hvn_below": prof.get("hvn_below"),
+                 "absorption": sig.get("absorption"), "exhaustion": sig.get("exhaustion")})      # E273 round 5: S3 reads these (additive keys)
     if snap["reliable"] and cl["against"] >= n_min:
         base["block"] = True
         base["reason"] = f"ORDER_FLOW:{cl['against']}_of_6_against_{s}({','.join(cl['against_names'])})"

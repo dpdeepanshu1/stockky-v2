@@ -91,3 +91,17 @@ def reject_reason_tick(tick, now: Optional[datetime] = None) -> Optional[str]:
     except Exception as e:  # noqa: BLE001
         logger.debug("liquidity gate failed (allowing): %s", e)
         return None
+
+
+def rvol_ratio(tick, now: Optional[datetime] = None) -> Optional[float]:
+    """E273 round 29: today's volume as a multiple of the normal pace for this time (the number test 3 above compares with ENTRY_MIN_RVOL), or None when it cannot be read. Never raises."""
+    try:
+        from entry_engine import prev_day
+        sym = str(getattr(tick, "symbol", "") or "").upper().replace(".NS", "").strip()
+        pdv = prev_day.get(sym) if sym else None
+        dv, av = _pos(getattr(tick, "volume", None)), _pos(getattr(pdv, "avg_volume", None))
+        frac = elapsed_fraction(now)
+        return None if dv is None or av is None or frac <= 0 else dv / (av * frac)
+    except Exception:  # noqa: BLE001
+        return None
+

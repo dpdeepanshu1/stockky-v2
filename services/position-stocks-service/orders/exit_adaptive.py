@@ -185,6 +185,39 @@ def is_fading(symbol: str, ltp: float, short: bool = False, now_ts: Optional[flo
         return None
 
 
+def learned_time_stop(db: Any, pos: Any) -> dict:
+    """E275 round 38: the time-stop minutes for one open trade. {"nft_min", "stag_min", "hard_max_min", "source"}.
+
+    The flat 20 / 30 / 90 minute numbers (NO_FOLLOWTHROUGH_EXIT_MINUTES, STAGNATION_EXIT_MINUTES, EXIT_HARD_MAX_MINUTES) stay the fallback. When the trade's own setup cell
+    (setup id x time slot, setup_stats via slot_ladder.cells) has 30+ closed trades and 10+ winners with a recorded peak time, the median minutes to the peak (shrunk n / (n + 30)
+    toward the fixed 20) replace them: no-follow-through = peak time + margin (the larger of 5 minutes and a quarter of it), flat band = 1.5 x that, hard maximum = twice the flat
+    band. Bounds: no-follow-through 10..40, flat band 15..60, hard maximum 30..EXIT_HARD_MAX_MINUTES (the configured hard maximum is a ceiling and never learns). TIME_STOP_LEARNED_ENABLED
+    off, no setup stamp, a thin cell or any error = the fixed numbers. Never raises."""
+    fixed = {"nft_min": float(_cfg("NO_FOLLOWTHROUGH_EXIT_MINUTES", 20.0)), "stag_min": float(_cfg("STAGNATION_EXIT_MINUTES", 30.0)),
+             "hard_max_min": float(_cfg("EXIT_HARD_MAX_MINUTES", 90.0)), "source": "fixed"}
+    try:
+        if not bool(_cfg("TIME_STOP_LEARNED_ENABLED", True)):
+            return fixed
+        from orders import setup_stamp, setup_stats, slot_ladder
+        st = setup_stamp.read(getattr(pos, "flow_json", None))
+        if not st:
+            return fixed
+        cell = (slot_ladder.cells(db) or {}).get(setup_stats.cell_key(st))
+        num = setup_stats.exit_numbers(cell, ttp_fallback_min=fixed["nft_min"])
+        if num.get("ttp_source") == "fallback":
+            return fixed
+        from orders import learned_limit
+        num = learned_limit.limit_exit_numbers(setup_stats.cell_key(st), "time_stop", num, fixed["nft_min"])      # E275 round 39: at most 25 % a week
+        ttp = float(num["ttp_min"])
+        nft = _clamp(ttp + max(5.0, 0.25 * ttp), 10.0, 40.0)
+        stag = _clamp(1.5 * nft, 15.0, 60.0)
+        hard = _clamp(2.0 * stag, 30.0, max(30.0, fixed["hard_max_min"]))
+        return {"nft_min": round(nft, 1), "stag_min": round(stag, 1), "hard_max_min": round(hard, 1), "source": f"learned ttp={ttp:.1f}m ({num.get('ttp_source')})"}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("exit-adaptive: learned time stop failed: %s", e)
+        return fixed
+
+
 def slot_pressure(db: Any, now: Optional[datetime] = None) -> Optional[str]:
     """The skip reason of a candidate refused for capital or slots within EXIT_SLOT_PRESSURE_WINDOW_MIN minutes, else None. Read-only; None on any error."""
     try:
@@ -211,7 +244,7 @@ def slot_pressure_min_age_min() -> float:
         return 45.0
 
 
-def stagnation_decision(*, age_min: float, fading: Optional[bool], pressure: Optional[str]) -> Tuple[bool, str]:
+def stagnation_decision(*, age_min: float, fading: Optional[bool], pressure: Optional[str], hard_max_min: Optional[float] = None) -> Tuple[bool, str]:
     """(close_now, why) for a trade that one of the two rules has already flagged. Adaptive off -> always close (old behaviour).
 
     E263: each slot is capped at pool / MAX_CONCURRENT x SCALP_SLOT_NOTIONAL_CAP_MULT (30 % of the pool with the defaults), so only about three of the five slots
@@ -220,7 +253,7 @@ def stagnation_decision(*, age_min: float, fading: Optional[bool], pressure: Opt
     trade only once it is EXIT_SLOT_PRESSURE_MIN_AGE_MIN old; a fading trade can still be closed from the first timer."""
     if not enabled():
         return True, "adaptive exits off"
-    if age_min >= float(_cfg("EXIT_HARD_MAX_MINUTES", 90.0)):
+    if age_min >= float(hard_max_min if hard_max_min else _cfg("EXIT_HARD_MAX_MINUTES", 90.0)):      # E275 round 38: the setup's own hard maximum when learned
         return True, f"hard maximum {age_min:.0f}m"
     if pressure and age_min >= slot_pressure_min_age_min():
         return True, f"slot wanted ({pressure})"

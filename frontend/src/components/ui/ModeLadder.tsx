@@ -5,12 +5,12 @@ import { ladderView } from "../../v7View";
 
 const SYMBOL = { past: "✓", current: "●", future: "○" } as const;
 
-export function ModeLadder({ mode, lane }: { mode: unknown; lane: string }) {
-  const v = ladderView(mode, lane);
+export function ModeLadder({ mode, lane, twoStep = false }: { mode: unknown; lane: string; twoStep?: boolean }) {
+  const v = ladderView(mode, lane, twoStep);
   // mode classes are prefixed (v7m-) on purpose: a bare "shadow" class is a Tailwind box-shadow utility
   return (
     <div className={`v7-ladder v7m-${v.mode}`}>
-      <ol className="v7-ladder-steps" aria-label={`${lane} mode`}>
+      <ol className="v7-ladder-steps" aria-label={`${lane} mode`} style={twoStep ? { gridTemplateColumns: "repeat(2, 1fr)" } : undefined}>
         {v.steps.map((s) => (
           <li key={s.id} className={`step v7m-${s.id} ${s.state}`} aria-current={s.state === "current" ? "step" : undefined}>
             <span className="dot" aria-hidden="true">{SYMBOL[s.state]}</span>

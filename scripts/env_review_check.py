@@ -64,7 +64,9 @@ def _cutoff(default: str, note: str) -> Callable[[str], Optional[Tuple[str, str]
 
 def _orb(v: str):
     x = v.strip().lower()
-    return None if x == "shadow" else (("OVERRIDE", "off = the opening-range shadow record is not written") if x == "off" else ("OVERRIDE", "unknown value, falls back to shadow"))
+    if x in ("live", "shadow"):                       # E273 round 8: Position Stocks reads shadow as live; Real Trade still records only (shadow)
+        return None
+    return ("OVERRIDE", "off = the opening-range record is not written (Position Stocks S1 / S2 then have no range)") if x == "off" else ("OVERRIDE", "unknown value, falls back to the default")
 
 
 # name -> (shown default, classifier)
@@ -77,7 +79,7 @@ RULES: Dict[str, Tuple[str, Callable[[str], Optional[Tuple[str, str]]]]] = {
     "STOPOUT_SYMBOL_BLOCK": ("true", _bool(True, "group471: no same-day re-buy after a stop-out")),
     "STOPOUT_DAY_PAUSE_N": ("3", lambda v: (None if v.strip() == "3" else _num_min_pause(v))),
     "BROKER_STOP_ENABLED": ("true", _bool(True, "no resting broker stop: only the 8 s software loop guards REAL positions")),
-    "ORB_MODE": ("shadow", _orb),
+    "ORB_MODE": ("live", _orb),
 }
 
 

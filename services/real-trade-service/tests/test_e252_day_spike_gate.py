@@ -72,7 +72,8 @@ def test_gate_is_wired_into_entry_and_on_the_calibration_page():
     from pathlib import Path
     from control.catalog import CATALOG
     src = (Path(__file__).resolve().parent.parent / "entry_engine" / "entry.py").read_text(encoding="utf-8")
-    assert "day_spike_gate.spike_reason_tick(tick)" in src and "day_spike_gate.range_reason_tick(tick, target_pct)" in src
+    assert "soft_gates.spike(tick)" in src and "soft_gates.gain_room(tick, target_pct)" in src      # E273 round 24: reached through entry_engine/soft_gates.py, which calls the two gates
+    assert "day_spike_gate.spike_reason_tick(tick)" in (Path(__file__).resolve().parent.parent / "entry_engine" / "soft_gates.py").read_text(encoding="utf-8")
     flags = {f.key: f for f in CATALOG}
     # conftest.py forces both modes "off" for every test, so the shipped default is read from a fresh copy of config.py (env unset in CI)
     import importlib.util

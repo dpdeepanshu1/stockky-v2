@@ -287,6 +287,17 @@ def b_intraday(ctx, p):
                 title="VWAP gate and opening gate on recorded bars", attention=())]
 
 
+def b_setup_backtest(ctx, p):
+    """E276 round 72: replay of the setups S1 to S4 on the recorded 1-minute bars (day-clustered bootstrap). Evidence for the S2 / S3 off-only rules in autocalib."""
+    return [_py(ctx, "setup_backtest.py", ctx["bars"], "--out", os.path.join(ctx["run"], "setup_backtest"), "--days", p.get("days", 20), "--hold", p.get("hold", 60),
+                "--cost-pct", p.get("cost_pct", 0.15), title="Setups S1 to S4 replay on recorded bars (net of cost)", attention=())]
+
+
+def b_no_setup_readiness(ctx, p):
+    """E276 round 72: applies the plan's rule for NO_SETUP_MODE=live to position-stocks' own setup stamps. Read-only; exit 1 = NOT_READY (attention)."""
+    return [_py(ctx, "no_setup_readiness.py", "--service", ctx["ps"], title="NO_SETUP_MODE readiness (setup stamps vs shortlist entries)", env={"TOKEN": "{token}"}, attention=(1,))]
+
+
 def b_tsfm_probe(ctx, p):
     s = int(p.get("seed", 7))
     return [_py(ctx, "tsfm_probe.py", "--out", os.path.join(ctx["cal"], f"tsfm_{s}"), "--seed", s, "--tsfm-url", ctx["tsfm"], "--max-forecasts", p.get("max_forecasts", 400),
@@ -513,6 +524,12 @@ JOB_LIST = [
          heavy=True, window="closed", timeout_s=HEAVY_S, resumable=True, needs=["fetch_history"]),
     _job("intraday_gates", "Intraday VWAP / opening gates", "monthly", "Monthly, after >= 10 recorded sessions", "Backtests the VWAP gate and the opening gate on the 1-minute bars position-stocks recorded.", b_intraday, [P("horizon", "Horizon (min)", "choice", "30", choices=["15", "30", "60"])],
          heavy=True, window="closed", timeout_s=3600),
+    _job("setup_backtest", "Setup replay S1 to S4 on recorded bars", "monthly", "Monthly, after >= 10 recorded sessions", "Replays each entry setup on the 1-minute bars position-stocks recorded and reports, per setup, the mean net result with a day-clustered 90 % interval. S1 / S4 need typed events, which bars do not hold, so they report n = 0. Evidence only: it can switch S2 / S3 OFF through the calibrator, never on.", b_setup_backtest,
+          [P("days", "Last N recorded days", "int", 20, 5, 60), P("hold", "Hold after entry (min)", "int", 60, 15, 240), P("cost_pct", "Round-trip cost (%)", "float", 0.15, 0.0, 1.0)],
+         heavy=True, window="closed", timeout_s=3600,
+         after="Verdict `no_edge` on S2_RS_BREAKOUT_LONG or S3_EXHAUSTION_LONG on two different runs switches that setup off (autocalib). `insufficient_sample` changes nothing."),
+    _job("no_setup_readiness", "NO_SETUP_MODE readiness", "weekly", "Weekly, until NO_SETUP_MODE is live", "Are there 10 sessions and 30 stamped entries, did S1 to S4 matches do at least as well as shortlist entries, and are fewer than half of the entries unmatched? Read-only: it never sets the switch.", b_no_setup_readiness, timeout_s=120,
+         after="READY: set NO_SETUP_MODE=live in the position-stocks .env and restart it outside market hours. NOT_READY: change nothing."),
     _job("tsfm_nightly", "TimesFM nightly cache", "daily", "Every day after 16:30 IST (daily bars in)", "Fills the TimesFM forecast cache. Needs the timesfm compose profile.", b_tsfm_nightly, [P("max_failed_pct", "Max failed %", "int", 40, 1, 100)], heavy=True, window="closed", timeout_s=3600),
     _job("tsfm_probe", "TimesFM Gate A probe (one seed)", "monthly", "Monthly, one seed at a time", "Does TimesFM predict the 5-day range / volume better than ATR / HAR? Out of sample.", b_tsfm_probe,
          [SEED, P("max_forecasts", "Max forecasts", "int", 400, 20, 5000), P("per_symbol", "Days per symbol", "int", 20, 5, 100)], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
@@ -614,8 +631,8 @@ PACKS: List[Dict[str, Any]] = [
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},
     {"id": "monthly_evidence", "title": "Monthly evidence pack", "when": "First Saturday of the month (market closed, several hours)",
-     "what": "Legacy gates, entry rules, P8 retest, ML V2, intraday gates, TimesFM probe + combine, Kronos backtest. Needs a finished weekly calibration (history on disk).",
-     "jobs": [["legacy_gate", {}], ["entry_rules", {}], ["p8_retest", {}], ["ml_v2", {}], ["intraday_gates", {}], ["tsfm_probe", {}], ["tsfm_combine", {}], ["kronos_backtest", {}]], "stop_on_failure": False},
+     "what": "Legacy gates, entry rules, P8 retest, ML V2, intraday gates, setup replay (S1 to S4), TimesFM probe + combine, Kronos backtest. Needs a finished weekly calibration (history on disk).",
+     "jobs": [["legacy_gate", {}], ["entry_rules", {}], ["p8_retest", {}], ["ml_v2", {}], ["intraday_gates", {}], ["setup_backtest", {}], ["tsfm_probe", {}], ["tsfm_combine", {}], ["kronos_backtest", {}]], "stop_on_failure": False},
 ]
 PACK_MAP = {p["id"]: p for p in PACKS}
 

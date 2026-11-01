@@ -52,10 +52,23 @@ def _cfg(name: str, dflt: float) -> float:
         return dflt
 
 
-def time_window(f: Dict[str, Any], now: Optional[datetime]) -> Verdict:
+def early_open(now: Optional[datetime]) -> bool:
+    """E274 round 41: True from SHORT_EARLY_S4_START_IST (09:21, the first closed bar after the opening range) until SHORT_ENTRY_START_IST (09:45) while
+    SHORT_EARLY_S4_ENABLED. Inside it ONLY an S4_CATALYST_DOWN short may go on (short_entry.plan_short decides that); the day-VWAP gate is skipped (it rests on too few trades)."""
+    try:
+        if not getattr(config, "SHORT_EARLY_S4_ENABLED", True):
+            return False
+        start = parse_hhmm(str(getattr(config, "SHORT_ENTRY_START_IST", "09:45")), 9, 45)
+        early = parse_hhmm(str(getattr(config, "SHORT_EARLY_S4_START_IST", "09:21")), 9, 21)
+        return ist_time_at_or_after(early, now) and not ist_time_at_or_after(start, now)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def time_window(f: Dict[str, Any], now: Optional[datetime], early: bool = False) -> Verdict:
     start = parse_hhmm(str(getattr(config, "SHORT_ENTRY_START_IST", "09:45")), 9, 45)
     cut = parse_hhmm(str(getattr(config, "SHORT_ENTRY_CUTOFF_IST", "13:30")), 13, 30)
-    if not ist_time_at_or_after(start, now):
+    if not early and not ist_time_at_or_after(start, now):
         return ("SHORT_TOO_EARLY", f"no short before {start.strftime('%H:%M')} IST (VWAP rests on too few trades)")
     if ist_time_at_or_after(cut, now):
         return ("SHORT_CUTOFF", f"no new short after {cut.strftime('%H:%M')} IST (squeeze risk, little time to work)")
@@ -76,7 +89,7 @@ def price_guard(f: Dict[str, Any], now: Optional[datetime]) -> Verdict:
         slip = (sig - live) / sig * 100.0
         if slip > slip_max:
             return ("SHORT_SLIPPAGE", f"live {live:.2f} is {slip:.2f}% below signal {sig:.2f} (max {slip_max:.2f}%)")
-    fall_max = _cfg("SHORT_MAX_DAY_FALL_PCT", 0.0)
+    fall_max = day_fall_limit(_cfg("SHORT_MAX_DAY_FALL_PCT", 0.0), f.get("avg_range_pct"))
     if fall_max > 0:
         pc = _pos(f.get("prev_close"))
         if pc is None:
@@ -85,6 +98,21 @@ def price_guard(f: Dict[str, Any], now: Optional[datetime]) -> Verdict:
         if fall > fall_max:
             return ("SHORT_DAY_FALL", f"already down {fall:.2f}% on the day (max {fall_max:.2f}%)")
     return None
+
+
+def day_fall_limit(base: float, avg_range_pct: Any) -> float:
+    """E276 round 67: the day-fall limit in %. base = SHORT_MAX_DAY_FALL_PCT (0 = off, stays off). With a known average daily range the limit is
+    max(base, SHORT_DAY_FALL_RANGE_MULT x range), capped at SHORT_DAY_FALL_HARD_CEILING_PCT, so it is never tighter than the fixed number and a normally
+    volatile stock is not refused for a move that is ordinary for it. Unknown range or mult 0 = the fixed number. Never raises."""
+    try:
+        base = float(base)
+        mult = _cfg("SHORT_DAY_FALL_RANGE_MULT", 0.0)
+        r = _pos(avg_range_pct)
+        if base <= 0 or mult <= 0 or r is None:
+            return base
+        return min(max(base, mult * r), max(base, _cfg("SHORT_DAY_FALL_HARD_CEILING_PCT", base)))
+    except Exception:  # noqa: BLE001
+        return base
 
 
 def range_gate(f: Dict[str, Any], now: Optional[datetime]) -> Verdict:
@@ -254,11 +282,15 @@ GATES: Tuple[Tuple[str, Callable[[Dict[str, Any], Optional[datetime]], Verdict]]
 )
 
 
-def evaluate(facts: Dict[str, Any], now: Optional[datetime] = None) -> Verdict:
-    """(code, reason) of the first refusing gate, or None. A gate that raises refuses (fail closed). Never raises."""
+def evaluate(facts: Dict[str, Any], now: Optional[datetime] = None, early: bool = False, skip_board: bool = False) -> Verdict:
+    """(code, reason) of the first refusing gate, or None. A gate that raises refuses (fail closed). Never raises.
+    `early` (E274 round 41, the 09:21-09:45 S4 window): the too-early refusal and the day-VWAP gate are skipped; every other gate stays, cut-off included.
+    `skip_board` (E274 round 42, a negative-event short): the Board gate is left out HERE; short_entry.plan_short runs board_gate_short itself when the short turns out not to be an S4 match."""
     for name, fn in GATES:
+        if (early and name == "vwap") or (skip_board and name == "board"):
+            continue
         try:
-            v = fn(facts, now)
+            v = time_window(facts, now, early=True) if (early and name == "time") else fn(facts, now)
         except Exception as e:  # noqa: BLE001
             logger.warning("short gate %s failed (refusing): %s", name, e)
             return ("SHORT_GATE_ERROR", f"{name}: {type(e).__name__}")
@@ -302,6 +334,12 @@ def gather_facts(symbol: str, ltp: float, board_row: Optional[dict] = None, qual
             f["vwap"] = q.get("avg_price")
     except Exception as e:  # noqa: BLE001
         logger.debug("short facts: quote read failed for %s: %s", symbol, e)
+    try:
+        from screening import prev_day
+        _pd = prev_day.get(symbol)
+        f["avg_range_pct"] = getattr(_pd, "avg_range_pct", None) if _pd else None      # E276 round 67: the stock's own mean daily range for the day-fall limit
+    except Exception as e:  # noqa: BLE001
+        logger.debug("short facts: prev-day range read failed for %s: %s", symbol, e)
     try:
         from orders import structure_gate
         f["structure"] = structure_gate.fetch_summary(symbol)

@@ -1,12 +1,8 @@
 """group379 (Group E1 + E2 of the structure group378 report)
 
-E1  the 52-week "top 12%" rule
-    * applies only while the market is actually weak (market score below CANDIDATE_52W_WEAK_REGIME_SCORE); a missing
-      or stale score keeps the rule on, CANDIDATE_52W_REGIME_GATE=0 restores "every regime",
-    * does not reject a stock AT a fresh, volume-confirmed 52-week high (and the near-resistance check does not
-      reject that same breakout), CANDIDATE_52W_FRESH_HIGH_EXEMPT=0 restores the old behaviour,
-    * CANDIDATE_52W_RULE_ENABLED=0 switches the rule off,
-    * the reject reason quotes the real market score.
+E1  (task 4, 31 Oct 2026: the 52-week "top 12%" rejection rule itself is removed; only the fresh-high exemption is left)
+    * a stock AT a fresh, volume-confirmed 52-week high is not rejected by the near-resistance check,
+      CANDIDATE_52W_FRESH_HIGH_EXEMPT=0 restores the old behaviour,
 E2  ETFs / index funds (ITBEES, ITIETF ...) are dropped by name before any quote / history / market-cap call, in both
     candidate tracks; one shared name test (watchlist_engine/symbol_filter.is_etf_symbol).
 
@@ -54,11 +50,7 @@ def db():
 
 @pytest.fixture(autouse=True)
 def _reset_52w_state(monkeypatch):
-    """Every test starts from the shipped defaults with no market score."""
-    monkeypatch.setattr(cd, "_cycle_market_score", None)
-    monkeypatch.setattr(cd, "RANGE_52W_ENABLED", True)
-    monkeypatch.setattr(cd, "RANGE_52W_REGIME_GATE", True)
-    monkeypatch.setattr(cd, "RANGE_52W_WEAK_REGIME_SCORE", 50.0)
+    """Every test starts from the shipped fresh-high defaults."""
     monkeypatch.setattr(cd, "FRESH_HIGH_EXEMPT", True)
     monkeypatch.setattr(cd, "FRESH_HIGH_PCT", 1.0)
     monkeypatch.setattr(cd, "FRESH_HIGH_DAYS", 10.0)
@@ -66,13 +58,6 @@ def _reset_52w_state(monkeypatch):
 
 
 # ── data builders ───────────────────────────────────────────────────────────────────────────────────────────
-
-def _overextended_by_tf():
-    """Quote price is 100 (set by _history_router); 52w low 50, high 101 -> position 98% of the range, in the top 12%.
-    No dates on these bars, so it can never count as a fresh high."""
-    by_tf = _happy_by_tf()
-    by_tf["1y"] = [_c(96, open_=96, high=101, low=50), _c(100, open_=96, high=101, low=60)]
-    return by_tf
 
 
 def _dated(date, close, high, low, volume=1000.0):
@@ -107,116 +92,34 @@ def _analyse(by_tf):
     return run(cd._multi_tf_analysis(_RoutedAsyncClient(get_router=_history_router(by_tf)), "TCS"))
 
 
-# ── E1: regime gate ─────────────────────────────────────────────────────────────────────────────────────────
-
-class TestRegimeGate:
-    def test_unknown_score_keeps_the_rule_and_says_so(self):
-        r = _analyse(_overextended_by_tf())
-        assert r["reject_kind"] == "range_52w"
-        assert "market score unavailable" in r["reject_reason"]
-
-    def test_weak_market_applies_and_quotes_the_real_score(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 32.0)
-        r = _analyse(_overextended_by_tf())
-        assert r["reject_kind"] == "range_52w"
-        assert "market score 32" in r["reject_reason"] and "weak market" in r["reject_reason"]
-        assert "choppy" not in r["reject_reason"]
-
-    def test_strong_market_skips_the_rule(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 70.0)
-        r = _analyse(_overextended_by_tf())
-        assert r["reject_reason"] is None
-
-    def test_score_equal_to_threshold_is_not_weak(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 50.0)
-        assert cd._range_52w_applies() == (False, 50.0)
-        monkeypatch.setattr(cd, "_cycle_market_score", 49.9)
-        assert cd._range_52w_applies() == (True, 49.9)
-
-    def test_gate_off_applies_in_every_regime(self, monkeypatch):
-        monkeypatch.setattr(cd, "RANGE_52W_REGIME_GATE", False)
-        monkeypatch.setattr(cd, "_cycle_market_score", 90.0)
-        r = _analyse(_overextended_by_tf())
-        assert r["reject_kind"] == "range_52w"
-        assert "market score 90" in r["reject_reason"] and "weak market" not in r["reject_reason"]
-
-    def test_rule_switched_off(self, monkeypatch):
-        monkeypatch.setattr(cd, "RANGE_52W_ENABLED", False)
-        r = _analyse(_overextended_by_tf())
-        assert r["reject_reason"] is None
-
-    def test_not_overextended_is_unaffected_by_regime(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 10.0)
-        assert _analyse(_happy_by_tf())["reject_reason"] is None
-
-
-# ── E1: the per-cycle market score ──────────────────────────────────────────────────────────────────────────
-
-class TestCycleMarketScore:
-    def test_newest_recent_row_is_used(self, db):
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        db.add(models.MarketRegimeHistory(score=61.0, recorded_at=now - timedelta(minutes=20)))
-        db.add(models.MarketRegimeHistory(score=34.0, recorded_at=now - timedelta(minutes=2)))
-        db.commit()
-        cd._refresh_cycle_market_score(db)
-        assert cd._cycle_market_score == 34.0
-
-    def test_stale_row_counts_as_unknown(self, db):
-        old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
-        db.add(models.MarketRegimeHistory(score=80.0, recorded_at=old))
-        db.commit()
-        cd._cycle_market_score = 99.0          # a previous cycle's value must not survive
-        cd._refresh_cycle_market_score(db)
-        assert cd._cycle_market_score is None
-
-    def test_empty_table_is_unknown(self, db):
-        cd._cycle_market_score = 99.0
-        cd._refresh_cycle_market_score(db)
-        assert cd._cycle_market_score is None
-
-    def test_read_failure_is_unknown_not_an_error(self):
-        class Broken:
-            def query(self, *a, **k):
-                raise RuntimeError("db down")
-        cd._cycle_market_score = 99.0
-        cd._refresh_cycle_market_score(Broken())
-        assert cd._cycle_market_score is None
-
-
 # ── E1: fresh-high exemption ────────────────────────────────────────────────────────────────────────────────
 
 class TestFreshHighExemption:
-    def test_fresh_confirmed_high_passes_both_52w_and_resistance_checks(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 20.0)       # weak market: the old rule would reject
+    def test_fresh_confirmed_high_passes_the_resistance_check(self, monkeypatch):
         r = _analyse(_breakout_by_tf())
         assert r["reject_reason"] is None
         assert "fresh-high breakout" in r["market_note"] and "4d old" in r["market_note"]
 
     def test_without_the_exemption_the_same_stock_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 20.0)
         monkeypatch.setattr(cd, "FRESH_HIGH_EXEMPT", False)
-        assert _analyse(_breakout_by_tf())["reject_kind"] == "range_52w"
+        assert _analyse(_breakout_by_tf())["reject_kind"] == "resistance"
 
     def test_exemption_also_lifts_the_near_resistance_reject(self, monkeypatch):
-        monkeypatch.setattr(cd, "RANGE_52W_ENABLED", False)         # only check 7 is left to reject it
         monkeypatch.setattr(cd, "FRESH_HIGH_EXEMPT", False)
         assert _analyse(_breakout_by_tf())["reject_kind"] == "resistance"
         monkeypatch.setattr(cd, "FRESH_HIGH_EXEMPT", True)
         assert _analyse(_breakout_by_tf())["reject_reason"] is None
 
     def test_stale_high_is_not_exempt(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 20.0)
         r = _analyse(_breakout_by_tf(high_date="2026-08-01"))      # 74 days before the last bar
-        assert r["reject_kind"] == "range_52w"
+        assert r["reject_kind"] == "resistance"
 
     def test_no_volume_confirmation_is_not_exempt(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 20.0)
         r = _analyse(_breakout_by_tf(volume_spike=1000.0))         # ratio 1.0 < 1.2
-        assert r["reject_kind"] == "range_52w"
+        assert r["reject_kind"] == "resistance"
 
     def test_undated_bars_are_not_exempt(self, monkeypatch):
-        monkeypatch.setattr(cd, "_cycle_market_score", 20.0)
-        assert _analyse(_breakout_by_tf(dated=False))["reject_kind"] == "range_52w"
+        assert _analyse(_breakout_by_tf(dated=False))["reject_kind"] == "resistance"
 
     def test_helper_edges(self, monkeypatch):
         bars = _breakout_by_tf()["1y"]

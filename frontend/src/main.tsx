@@ -9,6 +9,7 @@ import "./design-v4.css"; // group 460: fresh-green tokens + motion toolkit (loa
 import "./design-v5.css"; // design v5: calmer finance look, AI orb + AI Insights deck (loads after v4; delete this line to roll back)
 import "./design-v6.css"; // design v6 (E122): finance + AI hero, KPI tiles, tabs, Trade History, switches for Real Trade / Position Stocks / Calibration (loads after v5; delete this line to roll back)
 import "./design-v7.css"; // design v7: risk rail, exposure strip, capital ring, mode ladder, evidence meter, drift beat, armed glow (loads after v6; delete this line to roll back)
+import "./design-v8.css"; // design v8 (E277): trading-day rail, pre-market plan tiles, setup ladder (loads after v7; delete this line to roll back)
 import "./auth-login.css"; // group 460: login page, re-login overlay, session chip
 import "./light-contrast.css"; // group 464: light-theme button/colour contrast (delete this line to roll back)
 import "./alignment.css"; // group 465: layout alignment fixes (loads last; delete this line to roll back)

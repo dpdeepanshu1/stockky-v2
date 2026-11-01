@@ -55,6 +55,18 @@ def odds_reason(bars: Optional[Sequence[Any]], stop_pct: float, target_pct: floa
     return None
 
 
+def odds_penalty(bars: Optional[Sequence[Any]], stop_pct: float, target_pct: float) -> Optional[float]:
+    """E273 round 9: penalty for the odds test: how many margins (GAIN_ROOM_ODDS_MARGIN_PTS) under the refusal line the replayed target-first rate sits, plus 1.0
+    (1.0 = just under the line); capped (orders/soft_gates.py). None when odds_reason() would not fire. Pure."""
+    if odds_reason(bars, stop_pct, target_pct) is None:
+        return None
+    from orders import soft_gates, trade_odds
+    v = trade_odds.evaluate(bars, "LONG", stop_pct, target_pct) or {}
+    margin = max(0.01, float(_cfg("GAIN_ROOM_ODDS_MARGIN_PTS", 8.0)) / 100.0)
+    under = (float(v["be_win"]) - margin) - float(v["p_target"])
+    return round(min(soft_gates.cap(), 1.0 + max(0.0, under) / margin), 4)
+
+
 def range_reason(day_low: Optional[float], ltp: float, avg_range_pct: Optional[float], target_pct: float) -> Optional[str]:
     """Reason when the stock has little of its normal day left above the current price, else None. Pure."""
     frac = float(_cfg("GAIN_ROOM_MIN_TARGET_FRAC", 0.5))
@@ -68,6 +80,18 @@ def range_reason(day_low: Optional[float], ltp: float, avg_range_pct: Optional[f
         return (f"GAIN_ROOM:RANGE:only {max(room, 0.0):.2f}% left to {mult:g}x its normal daily range ({avg_range_pct:.2f}%) from today's low "
                 f"{day_low:.2f}; the {target_pct:.2f}% target needs at least {need:.2f}%")
     return None
+
+
+def range_penalty(day_low: Optional[float], ltp: float, avg_range_pct: Optional[float], target_pct: float) -> Optional[float]:
+    """E273 round 9: penalty for the range test = the room needed divided by the room left (1.0 = just short, capped at SOFT_GATE_MAX_PENALTY; no room left = the cap).
+    None when range_reason() would not fire. Pure."""
+    if range_reason(day_low, ltp, avg_range_pct, target_pct) is None:
+        return None
+    from orders import soft_gates
+    frac, mult = float(_cfg("GAIN_ROOM_MIN_TARGET_FRAC", 0.5)), float(_cfg("GAIN_ROOM_RANGE_MULT", 2.0))
+    room = (day_low * (1.0 + mult * avg_range_pct / 100.0) - ltp) / ltp * 100.0
+    need = frac * target_pct
+    return round(soft_gates.cap() if room <= 0 else min(soft_gates.cap(), need / room), 4)
 
 
 def reject_reason(symbol: str, ltp: float, stop_pct: float, target_pct: float) -> Optional[str]:
@@ -106,5 +130,43 @@ def reject_reason(symbol: str, ltp: float, stop_pct: float, target_pct: float) -
         return why
     except Exception as e:  # noqa: BLE001
         logger.debug("gain-room: check failed for %s (no opinion): %s", symbol, e)
+        guard_stats.bump("gain_room", "error")
+        return None
+
+
+def penalty(symbol: str, ltp: float, stop_pct: float, target_pct: float) -> Optional[dict]:
+    """E273 round 9: {"penalty": float, "why": reason} when the odds or range test fires (the larger penalty, the odds reason first) and GAIN_ROOM_MODE is live, else None
+    (log, off, no data, any error). Same inputs as reject_reason(); the entry uses this one unless SOFT_GATES_MODE=veto. Never raises."""
+    try:
+        if mode() != "live":
+            return None
+        found = []
+        try:
+            from feed import bar_store
+            bars = bar_store.get_bars(str(symbol or "").strip().upper())
+            why, pen = odds_reason(bars, float(stop_pct), float(target_pct)), odds_penalty(bars, float(stop_pct), float(target_pct))
+            if why and pen:
+                found.append((pen, why))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("gain-room: odds penalty failed for %s (no opinion): %s", symbol, e)
+        try:
+            from feed import ws_client
+            from screening import prev_day
+            rng = ws_client.get_day_range(symbol)
+            pdv = prev_day.get(symbol)
+            _avg = getattr(pdv, "avg_range_pct", None) if pdv else None
+            low = rng[0] if rng else None
+            why, pen = range_reason(low, float(ltp), _avg, float(target_pct)), range_penalty(low, float(ltp), _avg, float(target_pct))
+            if why and pen:
+                found.append((pen, why))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("gain-room: range penalty failed for %s (no opinion): %s", symbol, e)
+        guard_stats.bump("gain_room", "penalised" if found else "passed")
+        if not found:
+            return None
+        found.sort(key=lambda x: -x[0])
+        return {"penalty": float(found[0][0]), "why": found[0][1]}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("gain-room: penalty failed for %s (no opinion): %s", symbol, e)
         guard_stats.bump("gain_room", "error")
         return None

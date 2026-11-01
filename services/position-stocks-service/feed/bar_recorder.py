@@ -29,7 +29,8 @@ IST_OFFSET_S = 330 * 60
 _DAY_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _lock = threading.Lock()
 _written: Dict[str, Tuple[str, int, float, float, float]] = {}
-_state: Dict[str, Any] = {"last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
+_priority: Dict[str, Any] = {"day": None, "syms": set()}      # E272: scan candidates and premarket watchlist names noted today
+_state: Dict[str, Any] = {"priority_noted": 0, "wanted_read": 0, "priority_missing": 0, "last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
                           "symbols_last": 0, "skipped_unchanged": 0, "merged_existing": 0, "errors": 0, "last_error": None, "disabled_reason": None}
 
 
@@ -44,8 +45,48 @@ def _cfg(name: str, default: Any) -> Any:
 def reset() -> None:
     with _lock:
         _written.clear()
-        _state.update(last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
+        _priority.update(day=None, syms=set())
+        _state.update(priority_noted=0, wanted_read=0, priority_missing=0, last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
                       skipped_unchanged=0, merged_existing=0, errors=0, last_error=None, disabled_reason=None)
+
+
+def _note_locked(symbols: Any, now: Optional[float] = None) -> int:
+    """note_symbols without taking the lock (the caller holds `_lock`; it is not re-entrant)."""
+    import time as _t
+    today = ist_date(now if now is not None else _t.time())
+    if _priority["day"] != today:
+        _priority.update(day=today, syms=set())
+    cap = int(_cfg("BAR_RECORD_PRIORITY_MAX", 400))
+    for sym in (symbols or []):
+        sym = str(sym or "").upper().replace(".NS", "").strip()
+        if sym and len(_priority["syms"]) < cap:
+            _priority["syms"].add(sym)
+    _state["priority_noted"] = len(_priority["syms"])
+    return len(_priority["syms"])
+
+
+def note_symbols(symbols: Any, now: Optional[float] = None) -> int:
+    """E272: mark symbols (scan candidates, premarket watchlist names) so the next recorder passes write their bars even when they fall outside the top
+    BAR_RECORD_MAX_SYMBOLS by turnover. Cleared each IST day, capped at BAR_RECORD_PRIORITY_MAX. Returns how many are noted today. Never raises."""
+    try:
+        if not _cfg("BAR_RECORD_PRIORITY_ENABLED", True):
+            return 0
+        with _lock:
+            return _note_locked(symbols, now)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def read_wanted(root: str, date: str) -> List[str]:
+    """E272 round 8: the symbols real-trade-service asked for today, from <root>/rt/wanted/<date>.json ({"day", "symbols": [...]}). Missing / unreadable = []."""
+    try:
+        with open(os.path.join(root, "rt", "wanted", f"{date}.json"), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get("day") in (None, date) and isinstance(d.get("symbols"), list):
+            return [str(x).upper().replace(".NS", "").strip() for x in d["symbols"] if str(x or "").strip()]
+    except (OSError, ValueError):
+        pass
+    return []
 
 
 def ist_date(ts: float) -> str:
@@ -220,7 +261,22 @@ def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any
                 did["skipped"] = "no_day"
                 return did
             date = ist_date(int(dn) * 86400 - IST_OFFSET_S + 43200)
-            syms = sorted(symbols_fn() or [], key=lambda s: turn(s), reverse=True)[: int(_cfg("BAR_RECORD_MAX_SYMBOLS", 250))]
+            all_syms = list(symbols_fn() or [])
+            syms = sorted(all_syms, key=lambda s: turn(s), reverse=True)[: int(_cfg("BAR_RECORD_MAX_SYMBOLS", 250))]
+            if _cfg("BAR_RECORD_PRIORITY_ENABLED", True) and _cfg("BAR_WANTED_ENABLED", True):      # E272 round 8: Real Trade's candidates are noted too
+                try:
+                    wanted = read_wanted(root, ist_date(now))
+                    if wanted:
+                        _note_locked(wanted, now)
+                        _state["wanted_read"] = len(wanted)
+                except Exception as e:  # noqa: BLE001
+                    _err("read wanted", e)
+            if _priority["day"] == ist_date(now) and _cfg("BAR_RECORD_PRIORITY_ENABLED", True):      # E272: noted candidates are always written
+                have = set(all_syms)
+                noted = _priority["syms"]
+                _state["priority_missing"] = len(noted - have)                  # noted but the store never saw a tick for them
+                have_set = set(syms)
+                syms = syms + sorted(x for x in noted if x in have and x not in have_set)
             _state["symbols_last"] = len(syms)
             for sym in syms:
                 try:

@@ -37,7 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
-from capital import conviction_sizing, shared_daily_pnl, shared_exposure
+from capital import conviction_sizing, portfolio_heat, shared_daily_pnl, shared_exposure, shared_heat
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -327,6 +327,51 @@ def publish_daily_pnl(db: Session) -> None:
         logger.warning("ledger.publish_daily_pnl failed (non-fatal): %s", e)
 
 
+def own_heat(db: Session) -> tuple:
+    """E276 round 51: (open risk, gap allowance on carried positions, capital base) of this pool, in rupees. Stop distance x qty over OPEN / EXIT_LEGS_REJECTED
+    positions; the allowance only on those converted to carry-over. Raises on a DB error (callers decide fail-open)."""
+    from models import ScalpPosition as _SP  # local to avoid circular import
+    risk = gap = 0.0
+    for p in db.query(_SP).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).all():
+        r, g = portfolio_heat.position_heat(p.entry_price, p.stop_price, p.quantity, getattr(p, "side", None) or "LONG",
+                                            bool(getattr(p, "overnight_converted_to_cnc", False)), float(config.HEAT_GAP_DEFAULT_PCT))
+        risk += r
+        gap += g
+    return risk, gap, float(_get_or_create(db).total_allocated_capital or 0.0)
+
+
+def own_sector_risk(db: Session) -> dict:
+    """E276 round 60: this pool's open stop risk split by "<sector>:<side>" (rupees, no gap allowance), for the same-sector rule. The unlisted "Other" bucket is
+    not a sector and is left out. Raises on a DB error (callers decide fail-open)."""
+    from models import ScalpPosition as _SP  # local to avoid circular import
+    from feed import sector_map
+    out: dict = {}
+    for p in db.query(_SP).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).all():
+        sec = sector_map.sector_of(p.symbol)
+        if sec == "Other":
+            continue
+        side = getattr(p, "side", None) or "LONG"
+        r = portfolio_heat.stop_risk(p.entry_price, p.stop_price, p.quantity, side)
+        if r > 0:
+            k = portfolio_heat.sector_key(sec, side)
+            out[k] = out.get(k, 0.0) + r
+    return out
+
+
+def publish_heat(db: Session) -> None:
+    """E276 round 50: publish this pool's open risk (stop distance x qty), the gap allowance on positions converted to carry-over and the capital base,
+    for real-trade-service's shared heat check. Fail-open, never raises."""
+    try:
+        if not bool(getattr(config, "PORTFOLIO_HEAT_SHARED_ENABLED", True)):
+            return
+        risk, gap, base = own_heat(db)
+        shared_heat.publish_own(db, risk, gap, base)
+        if bool(getattr(config, "SECTOR_HEAT_ENABLED", True)):
+            shared_heat.publish_sectors(db, own_sector_risk(db))   # E276 round 60
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ledger.publish_heat failed (non-fatal): %s", e)
+
+
 def publish_exposure(db: Session, force: bool = False) -> None:
     """Publish this pool's open-position value to the shared exposure table without touching Dhan.
     Writes when the figure changed or at most every _EXPOSURE_PUBLISH_MIN_INTERVAL_S (a heartbeat so
@@ -340,6 +385,7 @@ def publish_exposure(db: Session, force: bool = False) -> None:
             return
         shared_exposure.publish_own_exposure(db, value)
         publish_daily_pnl(db)   # A11: same heartbeat cadence
+        publish_heat(db)        # E276 round 50: same heartbeat cadence
         last["value"] = value
         last["ts"] = now
     except Exception as e:  # noqa: BLE001
@@ -594,14 +640,24 @@ def conviction_budget(row: ScalpCapitalLedger, base_value: float, requested: Opt
         return base_value
 
 
+def _ladder_risk_mult(v) -> float:
+    """E276 round 56: the ladder's per-trade risk multiple, never below 1.0 and never above 2.0; junk = 1.0."""
+    try:
+        x = float(v)
+        return min(2.0, x) if x == x and x >= 1.0 else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def reserve_capital(
     db: Session,
     *,
     adaptive_stop_pct: float,
     side: str = "LONG",
     conviction_mult: Optional[float] = None,
+    risk_mult: float = 1.0,
 ) -> Optional[float]:
-    """Gate check + decrement. Returns position_value (₹) if OK, None if
+    """Gate check + decrement. E276 round 56: risk_mult (>= 1.0, from the setup's risk-ladder stage, orders/risk_stage.risk_mult_for) multiplies the per-trade risk; 1.0 = unchanged, a value below 1 or junk is read as 1.0. Returns position_value (₹) if OK, None if
     insufficient capital or kill-switch tripped. side="SHORT" (short selling step 4) risks config.SHORT_RISK_MULT of a long's risk and is
     refused unless config.SHORT_MODE is "live" (read at call time; accepted since step 8, orders/short_live.py is the only caller); the daily-loss kill switch and the
     account-wide cap below count longs and shorts together."""
@@ -681,6 +737,7 @@ def reserve_capital(
         * (config.RISK_PER_TRADE_PCT / 100.0)
         * _market_state_risk_mult()     # Market Weather: 1.0 unless the layer is live and has lowered it (only ever reduces)
         * _side_mult                    # short selling: 1.0 for a long, SHORT_RISK_MULT (<= 1.0) for a short
+        * _ladder_risk_mult(risk_mult)  # E276 round 56: 1.0 unless the setup earned a ladder stage (only ever raises)
         / config.MAX_CONCURRENT_SCALP_POSITIONS
     )
     position_value = risk_rupees / (adaptive_stop_pct / 100.0)
@@ -935,7 +992,7 @@ def get_state(db: Session) -> dict:
         "last_synced_from_broker_at": iso_utc(row.last_synced_from_broker_at),
         "daily_loss_kill_switch_tripped": row.daily_loss_kill_switch_tripped,
         # Market Weather (display): the layer's mode and the risk multiplier actually in force right now.
-        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "shadow"),
+        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "live"),
         "market_state_risk_mult": _market_state_risk_mult(),
     }
 

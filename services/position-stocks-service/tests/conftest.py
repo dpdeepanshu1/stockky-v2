@@ -33,6 +33,10 @@ def _opening_gate_off_by_default(monkeypatch):
     turns it back on and pins the clock explicitly."""
     import config as _config
     monkeypatch.setattr(_config, "OPENING_GATE_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "ENTRY_MIN_QTY_MODE", "fixed", raising=False)   # E273: older tests pin the flat floor
+    monkeypatch.setattr(_config, "OPENING_BELOW_OPEN_MODE", "veto", raising=False)   # E273: older tests pin the old refusal
+    monkeypatch.setattr(_config, "OPENING_PARTS_MODE", "veto", raising=False)         # E273 round 12: older tests pin the old opening-gate refusals
+    monkeypatch.setattr(_config, "SOFT_GATES_MODE", "veto", raising=False)           # E273 round 9: older tests pin the old one-gate-one-refusal walk
     from screening import prev_day as _pd
     _pd.reset()
     yield
@@ -120,6 +124,15 @@ def _event_shared_fetch_off_by_default(monkeypatch):
     yield
     _qg._event_late.clear()
     _qg._event_inflight.clear()
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _typed_event_fetch_off_by_default(monkeypatch):
+    """E272: the quality check also asks the typed event feed (one more GET per symbol). Older tests fake the httpx client and count its calls, so they run
+    without it; test_e272_typed_event_veto.py tests the parser and the veto directly."""
+    import config as _config
+    monkeypatch.setattr(_config, "TYPED_EVENT_ENABLED", False, raising=False)
+    yield
 
 
 @_pytest_entry_pause.fixture(autouse=True)
@@ -221,3 +234,16 @@ def _circuit_band_lookup_off_by_default(request, monkeypatch):
         return
     from orders import circuit_gate
     monkeypatch.setattr(circuit_gate, "band_for", lambda symbol: (None, None, None))
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e275_learned_limit_off_and_private(monkeypatch, tmp_path):
+    """E275 round 39: the weekly limit on learned exit numbers is off by default in tests (older tests assert the shrunk values) and never touches the real volume;
+    tests/test_e275_learned_weekly_limit.py turns it on explicitly."""
+    import config as _config
+    from orders import learned_limit as _ll
+    monkeypatch.setattr(_config, "LEARNED_WEEKLY_LIMIT_ENABLED", False, raising=False)
+    monkeypatch.setattr(_config, "LEARNED_LIMIT_FILE", str(tmp_path / "learned_limits.json"), raising=False)
+    _ll.reset()
+    yield
+    _ll.reset()

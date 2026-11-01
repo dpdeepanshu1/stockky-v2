@@ -67,6 +67,24 @@ RT = A.RT
 PS = A.PS
 
 
+# Task 4: the real 52-week rule was removed, so these engine tests use a test-only rule with the same shape (legacy_gate evidence, tighten / loosen by verdict).
+TEST_RULE_KEY = "TEST_RULE_KEY"
+
+
+def r_test_rule(evs, cur, ctx):
+    rep = evs["legacy_gate"].json("gate_report.json") or {}
+    g = ((rep.get("gates") or {}).get("range_52w_legacy")) or {}
+    v = g.get("verdict_robust") or g.get("verdict")
+    if v == "hurts":
+        return A.Decision("true", "test rule: verdict hurts -> loosen", 2)
+    if v == "helps":
+        return A.Decision("false", "test rule: verdict helps -> tighten", 1)
+    return A.Decision(None, f"test rule verdict is {v or 'missing'}: no change")
+
+
+TEST_RULES = [A.Rule(TEST_RULE_KEY, A.RT, "Test rule", ("legacy_gate",), "legacy gate test verdict", r_test_rule)]
+
+
 def legacy(v):
     return {"gates": {"range_52w_legacy": {"verdict": "x", "verdict_robust": v}}}
 
@@ -97,7 +115,7 @@ def test_loss_review_guards_are_protected():
 
 
 def test_a_protected_switch_can_never_get_a_rule():
-    bad = A.Rule("BROKER_STOP_ENABLED", RT, "x", ("legacy_gate",), "x", A.r_52w_log_only)
+    bad = A.Rule("BROKER_STOP_ENABLED", RT, "x", ("legacy_gate",), "x", r_test_rule)
     try:
         A.AutoCalibrator(os.path.join(tempfile.mkdtemp(), "a.json"), FakeControl({}), FakeEvidence(), rules=[bad])
         raise AssertionError("accepted a protected rule")
@@ -108,11 +126,11 @@ def test_a_protected_switch_can_never_get_a_rule():
 def test_tightening_applies_at_once_and_sends_one_telegram():
     ev = FakeEvidence()
     ev.put("legacy_gate", "run1", files={"gate_report.json": legacy("helps")})
-    ac, sent, _ = make({RT: [row("CANDIDATE_52W_LOG_ONLY", effective="true", looser="on")], PS: []}, ev,
-                       rules=[r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"])
+    ac, sent, _ = make({RT: [row("TEST_RULE_KEY", effective="true", looser="on")], PS: []}, ev,
+                       rules=TEST_RULES)
     rep = ac.evaluate("t")
-    assert rep["changed"] == 1 and ac.control.sets[0][:3] == (RT, "CANDIDATE_52W_LOG_ONLY", "false") and ac.control.sets[0][4].startswith("autocalib:")
-    assert len(sent) == 1 and "CANDIDATE_52W_LOG_ONLY: true → false" in sent[0][1] and "legacy_gate" in sent[0][1]
+    assert rep["changed"] == 1 and ac.control.sets[0][:3] == (RT, "TEST_RULE_KEY", "false") and ac.control.sets[0][4].startswith("autocalib:")
+    assert len(sent) == 1 and "TEST_RULE_KEY: true → false" in sent[0][1] and "legacy_gate" in sent[0][1]
     ac.evaluate("t")                                            # already at the value: nothing more, no second message
     assert len(sent) == 1 and len(ac.control.sets) == 1
 
@@ -120,8 +138,8 @@ def test_tightening_applies_at_once_and_sends_one_telegram():
 def test_loosening_needs_two_different_test_runs():
     ev = FakeEvidence()
     ev.put("legacy_gate", "run1", files={"gate_report.json": legacy("hurts")})
-    ac, sent, clock = make({RT: [row("CANDIDATE_52W_LOG_ONLY", effective="false", looser="on")], PS: []}, ev,
-                            rules=[r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"])
+    ac, sent, clock = make({RT: [row("TEST_RULE_KEY", effective="false", looser="on")], PS: []}, ev,
+                            rules=TEST_RULES)
     r1 = ac.evaluate("t")
     assert r1["rows"][0]["status"] == "waiting" and not ac.control.sets and not sent
     ac.evaluate("t")                                            # same run again must not count twice
@@ -134,19 +152,19 @@ def test_loosening_needs_two_different_test_runs():
 
 def test_a_disagreeing_run_resets_the_count():
     ev = FakeEvidence()
-    ac, _, _ = make({RT: [row("CANDIDATE_52W_LOG_ONLY", effective="false", looser="on")], PS: []}, ev, rules=[r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"])
+    ac, _, _ = make({RT: [row("TEST_RULE_KEY", effective="false", looser="on")], PS: []}, ev, rules=TEST_RULES)
     ev.put("legacy_gate", "run1", files={"gate_report.json": legacy("hurts")})
     ac.evaluate("t")
     ev.put("legacy_gate", "run2", files={"gate_report.json": legacy("no_edge")})
     ac.evaluate("t")
-    assert "CANDIDATE_52W_LOG_ONLY" not in ac.state["pending"]
+    assert "TEST_RULE_KEY" not in ac.state["pending"]
     ev.put("legacy_gate", "run3", files={"gate_report.json": legacy("hurts")})
     assert ac.evaluate("t")["rows"][0]["status"] == "waiting" and not ac.control.sets
 
 
 def test_no_evidence_or_unclear_verdict_changes_nothing():
     ev = FakeEvidence()
-    ac, sent, _ = make({RT: [row("CANDIDATE_52W_LOG_ONLY", effective="false", looser="on")], PS: []}, ev, rules=[r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"])
+    ac, sent, _ = make({RT: [row("TEST_RULE_KEY", effective="false", looser="on")], PS: []}, ev, rules=TEST_RULES)
     assert ac.evaluate("t")["rows"][0]["status"] == "no_evidence"
     ev.put("legacy_gate", "r", files={"gate_report.json": legacy("insufficient_sample")})
     assert ac.evaluate("t")["rows"][0]["status"] == "hold"
@@ -178,19 +196,19 @@ def test_walk_forward_lines_are_ignored_unless_every_ab_verdict_passes():
 def test_master_switch_dry_run_pin_and_cooldown():
     ev = FakeEvidence()
     ev.put("legacy_gate", "run1", files={"gate_report.json": legacy("helps")})
-    rules = [r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"]
-    fl = {RT: [row("CANDIDATE_52W_LOG_ONLY", effective="true", looser="on")], PS: []}
+    rules = TEST_RULES
+    fl = {RT: [row("TEST_RULE_KEY", effective="true", looser="on")], PS: []}
     ac, sent, clock = make(fl, ev, rules=rules, enabled=False)
     assert ac.evaluate("t")["ran"] is False and not ac.control.sets
     f = ac.evaluate("t", force=True)                                         # forced while off = report only
     assert f["dry_run"] is True and f["rows"][0]["status"] == "would_change" and not ac.control.sets
     ac.configure(enabled=True, dry_run=True)
     assert ac.evaluate("t")["rows"][0]["status"] == "would_change" and not ac.control.sets
-    ac.configure(dry_run=False, pinned=["CANDIDATE_52W_LOG_ONLY"])
+    ac.configure(dry_run=False, pinned=["TEST_RULE_KEY"])
     assert ac.evaluate("t")["rows"][0]["status"] == "pinned" and not ac.control.sets
     ac.configure(pinned=[])
     assert ac.evaluate("t")["changed"] == 1
-    ac.control.f[RT]["CANDIDATE_52W_LOG_ONLY"]["effective"] = "true"         # somebody flipped it back by hand
+    ac.control.f[RT]["TEST_RULE_KEY"]["effective"] = "true"         # somebody flipped it back by hand
     ev.put("legacy_gate", "run2", files={"gate_report.json": legacy("helps")})
     assert ac.evaluate("t")["rows"][0]["status"] == "cooldown" and len(ac.control.sets) == 1
     clock["t"] += 25 * 3600
@@ -208,12 +226,12 @@ def test_master_switch_dry_run_pin_and_cooldown():
 def test_service_down_and_apply_errors_are_reported_once():
     ev = FakeEvidence()
     ev.put("legacy_gate", "run1", files={"gate_report.json": legacy("helps")})
-    rules = [r for r in A.RULES if r.key == "CANDIDATE_52W_LOG_ONLY"]
-    ac, sent, _ = make({RT: [row("CANDIDATE_52W_LOG_ONLY", effective="true", looser="on")], PS: []}, ev, rules=rules)
+    rules = TEST_RULES
+    ac, sent, _ = make({RT: [row("TEST_RULE_KEY", effective="true", looser="on")], PS: []}, ev, rules=rules)
     ac.control.down.add(RT)
     assert ac.evaluate("t")["rows"][0]["status"] == "service_unreachable" and not sent
     ac.control.down.clear()
-    ac.control.fail["CANDIDATE_52W_LOG_ONLY"] = "HTTP 500 boom"
+    ac.control.fail["TEST_RULE_KEY"] = "HTTP 500 boom"
     assert ac.evaluate("t")["rows"][0]["status"] == "error" and len(sent) == 1 and "Could not change" in sent[0][1]
     ac.evaluate("t")
     assert len(sent) == 1                                                    # same error is not repeated every evaluation
@@ -230,7 +248,7 @@ def test_decision_helpers_for_every_test():
     assert A.r_tsfm({"tsfm_combine": sec("SKIPPED: not running")}, "off", {}).value is None
     g = sec("Market-structure promotion gates\n\nG2: FAIL\n   - x\nG3: PASS\n   - y\nG4: NOT_ENOUGH_DATA\n")
     assert A.r_g3_stop({"gate_check": g}, "off", {}).value == "on" and A.r_g2_gate({"gate_check": g}, "enforce", {}).value is None
-    assert A.r_g2_exit({"gate_check": g}, "tighten", {}).value == "log" and A.r_g2_exit({"gate_check": g}, "log", {}).value is None
+    assert A.r_g2_exit({"gate_check": g}, "exit", {}).value == "tighten" and A.r_g2_exit({"gate_check": g}, "tighten", {}).value is None and A.r_g2_exit({"gate_check": g}, "log", {}).value is None
     ok = sec("G2: PASS\nG3: FAIL\n")
     assert A.r_g2_gate({"gate_check": ok}, "off", {}).value == "enforce" and A.r_g3_stop({"gate_check": ok}, "on", {}).value == "off"
     hb = lambda s: A.r_overnight({"hold_bucket": sec("VERDICT: " + s)}, "true", {})  # noqa: E731
@@ -240,6 +258,39 @@ def test_decision_helpers_for_every_test():
     ig = A.r_intraday("vwap_gate", "VWAP gate")
     assert ig({"intraday_gates": A.Ev("i", "r", NOW, "", lambda n: {"vwap_gate": {"verdict": "hurts"}})}, "true", {}).value == "false"
     assert ig({"intraday_gates": A.Ev("i", "r", NOW, "", lambda n: {"vwap_gate": {"verdict": "insufficient_sample"}})}, "true", {}).value is None
+
+
+def test_setup_backtest_job_is_registered_and_in_the_monthly_pack():
+    j = J.JOBS["setup_backtest"]
+    assert j["heavy"] is True and j["window"] == "closed" and any(p["name"] == "days" for p in j["params"]), j
+    argv = j["builder"]({"python": "py", "scripts": "/s", "bars": "/data/bars", "run": "/r"}, {})[0]["argv"]
+    assert argv[1].endswith("setup_backtest.py") and "/data/bars" in argv and "/r/setup_backtest" in argv
+    assert ["setup_backtest", {}] in J.PACK_MAP["monthly_evidence"]["jobs"]
+    assert "setup_backtest" in A.EVIDENCE_JOBS
+
+
+def test_setup_rules_only_ever_switch_a_setup_off():
+    rules = [r for r in A.RULES if r.key.startswith("SETUP_")]
+    assert {(r.key, r.service) for r in rules} == {("SETUP_S2_ENABLED", PS), ("SETUP_S3_ENABLED", PS)}   # the replay is intraday: never evidence for real-trade's multi-day holds
+    ev = lambda v: {"setup_backtest": A.Ev("b", "r", NOW, "", lambda n: {"S2_RS_BREAKOUT_LONG": {"verdict": v}})}   # noqa: E731
+    f = A.r_setup("S2_RS_BREAKOUT_LONG", "S2 long")
+    d = f(ev("no_edge"), "true", {})
+    assert (d.value, d.confirms) == ("false", 2)
+    assert f(ev("no_edge"), "false", {}).value is None                     # already off
+    for v in ("edge", "unclear", "insufficient_sample", None):
+        assert f(ev(v), "true", {}).value is None and f(ev(v), "false", {}).value is None   # a report never switches a setup ON
+    assert f({"setup_backtest": A.Ev("b", "r", NOW, "")}, "true", {}).value is None         # no file = no change
+
+
+def test_setup_rule_reads_what_setup_backtest_really_writes():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sb", str(HERE.parent.parent / "scripts" / "setup_backtest.py"))
+    sb = importlib.util.module_from_spec(spec); spec.loader.exec_module(sb)
+    trades = [{"setup": sb.se.S2, "side": "LONG", "date": f"2026-10-{d:02d}", "net": -1.0 - i * 0.01} for d in range(1, 9) for i in range(5)]
+    rep = sb.summarize(trades, min_n=30, min_days=5, n_boot=300)
+    assert rep["S2_RS_BREAKOUT_LONG"]["verdict"] == "no_edge", rep
+    d = A.r_setup("S2_RS_BREAKOUT_LONG", "S2 long")({"setup_backtest": A.Ev("b", "r", NOW, "", lambda n: json.loads(json.dumps(rep)))}, "true", {})
+    assert d.value == "false"
 
 
 def test_section_splits_a_pack_output():
@@ -289,8 +340,8 @@ def test_on_run_finished_only_reacts_to_evidence_runs():
     ev = FakeEvidence()
     ac, _, _ = make({RT: [], PS: []}, ev)
     assert ac.on_run_finished({"status": "success", "kind": "job", "target": "services_health"}, J.PACK_MAP) is None
-    assert ac.on_run_finished({"status": "failed", "kind": "job", "target": "legacy_gate"}, J.PACK_MAP) is None
-    assert ac.on_run_finished({"status": "success", "kind": "job", "target": "legacy_gate"}, J.PACK_MAP)["ran"] is True
+    assert ac.on_run_finished({"status": "failed", "kind": "job", "target": "kronos_backtest"}, J.PACK_MAP) is None
+    assert ac.on_run_finished({"status": "success", "kind": "job", "target": "kronos_backtest"}, J.PACK_MAP)["ran"] is True
     assert ac.on_run_finished({"status": "success", "kind": "pack", "target": "monthly_evidence"}, J.PACK_MAP)["ran"] is True
     assert ac.on_run_finished({"status": "success", "kind": "pack", "target": "monday_open"}, J.PACK_MAP) is None
 

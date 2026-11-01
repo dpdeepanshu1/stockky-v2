@@ -125,9 +125,10 @@ export function ladderMode(raw: unknown): LadderMode {
 }
 
 /** `lane` names the thing being laddered ("Short selling", "Swing lane") so the sentence is specific. Anything unknown reads as off (the safe step). */
-export function ladderView(raw: unknown, lane = "This lane"): LadderView {
-  const mode = ladderMode(raw);
-  const order: LadderMode[] = ["off", "shadow", "live"];
+export function ladderView(raw: unknown, lane = "This lane", twoStep = false): LadderView {
+  const mode0 = ladderMode(raw);
+  const mode: LadderMode = twoStep && mode0 === "shadow" ? "off" : mode0;   // E277: lanes with no record-only rung (swing) read a leftover shadow as off, like the service
+  const order: LadderMode[] = twoStep ? ["off", "live"] : ["off", "shadow", "live"];
   const at = order.indexOf(mode);
   const notes: Record<LadderMode, string> = { off: "does nothing", shadow: "records, no order", live: "real orders" };
   const labels: Record<LadderMode, string> = { off: "OFF", shadow: "SHADOW", live: "LIVE" };

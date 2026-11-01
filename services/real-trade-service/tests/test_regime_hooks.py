@@ -60,7 +60,7 @@ def _qty(**acct):
 
 
 def test_defaults_change_nothing():
-    assert config.MARKET_STATE_MODE == "shadow" and config.MARKET_STATE_RISK_MULT == 1.0 and config.MARKET_STATE_CONVICTION_ADD == 0.0
+    assert config.MARKET_STATE_MODE == "live" and config.MARKET_STATE_RISK_MULT == 1.0 and config.MARKET_STATE_CONVICTION_ADD == 0.0
     assert effective_risk.market_state_risk_mult() == 1.0
 
 

@@ -51,7 +51,7 @@ export function WatchlistTab({ mode, loggedIn, candidates, candidatesLoading, ex
                     const cov = coveragePct(t);
                     return (
                       <p className="font-display tabular-nums text-[10px] text-mist" data-testid="structure-tally">
-                        Daily structure: {t.blocked} blocked · {t.shadow} would reject (shadow) · {t.noOpinion} no data
+                        Daily structure: {t.blocked} blocked · {t.shadow} would reject (old rows, not applied) · {t.noOpinion} no data
                         {cov != null ? ` · coverage ${cov}%` : ""}
                       </p>
                     );

@@ -58,12 +58,12 @@ def test_shipped_defaults():
     assert '"OVERNIGHT_HOLD_ENABLED") or "").strip() or "false"' in src
     assert '_cal_str("ENTRY_LAST_TIME_IST", "14:00")' in src
     assert '_og_float("STOP_OVERSHOOT_ALLOWANCE_PCT", 1.0)' in src
-    assert config.ORB_MODE in ("off", "shadow")
+    assert config.ORB_MODE in ("off", "live")
 
 
 def test_orb_range_then_breakout(monkeypatch):
     orb_shadow._reset_for_tests()
-    monkeypatch.setattr(config, "ORB_MODE", "shadow")
+    monkeypatch.setattr(config, "ORB_MODE", "live")
     d = _dec()
     assert orb_shadow.record(d, _tick(), at(WED, 9, 21)) is True          # captures range 100-101 (1.0% wide)
     v = json.loads(d.flow_json)["orb"]
@@ -99,7 +99,7 @@ def test_orb_no_range_late_off_weekend_and_merge(monkeypatch):
     assert orb_shadow.record(_dec(), _tick(), at(SAT, 9, 40)) is False
     monkeypatch.setattr(config, "ORB_MODE", "off")
     assert orb_shadow.record(_dec(), _tick(), at(WED, 9, 40)) is False
-    monkeypatch.setattr(config, "ORB_MODE", "shadow")
+    monkeypatch.setattr(config, "ORB_MODE", "live")
     y = _dec(); y.flow_json = json.dumps({"v": 1, "spread_pct": 0.1})
     orb_shadow.record(y, _tick(), at(WED, 9, 40))
     j = json.loads(y.flow_json)

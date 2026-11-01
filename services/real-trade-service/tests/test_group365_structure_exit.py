@@ -111,11 +111,10 @@ def test_new_stop_is_strictly_below_price():
 
 
 # ---- modes ----
-def test_off_and_log_modes_change_nothing():
+def test_off_changes_nothing_and_log_is_gone():
     s = _sum(ms_asof="2026-10-09", ms_choch_dir="bearish", ms_choch_bars=0)
     assert _ev(s, opened=OPENED, mode="off")["opinion"] == "off"
-    v = _ev(s, opened=OPENED, mode="log")
-    assert v["opinion"] == "ok" and v["signals"] and v["action"] == "none" and v["new_stop"] is None
+    assert "log" not in sx.MODES      # E273 round 16: no record-only mode
 
 
 def test_exit_mode_sells_only_in_profit_on_a_signal():
@@ -127,7 +126,7 @@ def test_exit_mode_sells_only_in_profit_on_a_signal():
 
 def test_unknown_mode_falls_back_to_the_configured_one(monkeypatch):
     monkeypatch.setattr(config, "STRUCTURE_EXIT_MODE", "bogus", raising=False)
-    assert sx.mode() == "log"           # group415: the fallback default is log (record only; it was exit from group 399 to 414)
+    assert sx.mode() == "tighten"       # E273: the fallback default is tighten (log from group 415 to E272, exit from group 399 to 414)
     monkeypatch.setattr(config, "STRUCTURE_EXIT_MODE", "exit", raising=False)
     assert sx.mode() == "exit"
 
@@ -174,7 +173,7 @@ def test_record_counts_and_ring():
     v = _ev(s, ltp=110.0, opened=OPENED)
     sx.record("TCS", "REAL", v, applied=True, ltp=110.0)
     sx.record("INFY", "DEMO", _ev(None), applied=False)
-    sx.record("WIPRO", "DEMO", _ev(s, opened=OPENED, mode="log"), applied=False, ltp=110.0)
+    sx.record("WIPRO", "DEMO", _ev(s, ltp=110.0, opened=OPENED), applied=False, ltp=110.0)      # a verdict that was not applied counts as log_only
     st = sx.stats()
     c = st["counters"]
     assert c["evaluated"] == 3 and c["no_opinion"] == 1 and c["tightened"] == 1 and c["bearish"] == 2 and c["log_only"] == 1

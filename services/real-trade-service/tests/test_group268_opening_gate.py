@@ -31,6 +31,7 @@ _REAL_PREV_DAY = (prev_day.get, prev_day.peek, prev_day.prefetch)    # the autou
 
 @pytest.fixture(autouse=True)
 def gate_on(monkeypatch):
+    monkeypatch.setattr(config, "OPENING_GATE_PENALTY_ENABLED", False)   # E273 round 17: this file tests the refusals (penalty switch off); tests/test_e273_opening_gate_penalty.py tests the penalties
     monkeypatch.setattr(config, "OPENING_GATE_ENABLED", True)
     monkeypatch.setattr(config, "OPENING_ENTRY_GUARD_ENABLED", True)
     monkeypatch.setattr(config, "OPENING_ENTRY_NOT_BEFORE_IST", "09:15")

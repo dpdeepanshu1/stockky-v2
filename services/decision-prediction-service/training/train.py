@@ -17,7 +17,7 @@ import gc
 import time
 import random
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional
 
@@ -447,7 +447,7 @@ def _bootstrap_rows_from_history(
                             continue
                         try:
                             if isinstance(d, (int, float)):
-                                dt = datetime.utcfromtimestamp(d if d < 1e12 else d / 1000).date()
+                                dt = datetime.fromtimestamp(d if d < 1e12 else d / 1000, timezone.utc).date()
                             else:
                                 dt = datetime.fromisoformat(str(d).replace("Z", "").split("T")[0]).date()
                         except Exception:

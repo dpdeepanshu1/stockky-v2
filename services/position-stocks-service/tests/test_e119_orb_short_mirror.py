@@ -33,7 +33,7 @@ def range_bars(vol=1000):
 
 
 def setup(monkeypatch, bars):
-    monkeypatch.setattr(config, "ORB_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "ORB_MODE", "live", raising=False)
     orb._reset_for_tests()
     bar_store.reset()
     with bar_store._lock:

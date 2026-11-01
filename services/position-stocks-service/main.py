@@ -166,7 +166,7 @@ from capital import ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition, ScalpTradeJournal
-from orders import breakeven, eod_squareoff, overnight_stop, reconcile, stop_watchdog, tape_hook, trailing
+from orders import breakeven, eod_squareoff, event_hook, momentum_hook, overnight_stop, reconcile, stop_watchdog, tape_hook, trailing
 from orders import adaptive, plain_short, pullback_rearm
 from orders import calendar_gate, charges_ledger, excursion, journal_notes, review_stats, trade_stats, window_health
 from orders.entry import (
@@ -534,6 +534,20 @@ async def _fast_reconcile_loop() -> None:
                         logger.info("position-stocks: tape-exit tightened %d position(s)", n_tape)
                 except Exception as e:
                     logger.error("position-stocks: tape-exit error: %s", e, exc_info=True)
+                try:
+                    # E275: momentum-health exit - 2 of 5 signals pull the stop in, 3 close a trade in profit (orders/momentum_hook.py); MOMENTUM_EXIT_MODE live | off.
+                    n_mom = await asyncio.to_thread(momentum_hook.run_momentum_exit, db)
+                    if n_mom:
+                        logger.info("position-stocks: momentum-exit acted on %d position(s)", n_mom)
+                except Exception as e:
+                    logger.error("position-stocks: momentum-exit error: %s", e, exc_info=True)
+                try:
+                    # E272 round 11: a fresh typed event against an open Super Order trade pulls its stop in (orders/event_hook.py); EVENT_HELD_TIGHTEN_ENABLED.
+                    n_ev = await asyncio.to_thread(event_hook.run_event_tighten, db)
+                    if n_ev:
+                        logger.info("position-stocks: event-tighten moved %d stop(s)", n_ev)
+                except Exception as e:
+                    logger.error("position-stocks: event-tighten error: %s", e, exc_info=True)
                 try:
                     # group 340: close a position whose own stop did not fire (orders/stop_watchdog.py)
                     n_breach = await asyncio.to_thread(stop_watchdog.run_stop_watchdog, db)
@@ -1123,6 +1137,12 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
 
     _t = time.perf_counter()
     candidates = scan(open_symbols=open_syms, under_preferred=under_preferred)
+    try:                                   # E272: event-backed names (premarket plan) join the list so S1 does not wait for a rolling window; already-listed symbols keep their own row
+        from screening.engine import scan_event_candidates
+        _listed = {c.symbol for c in candidates}
+        candidates = candidates + [c for c in scan_event_candidates("LONG", open_syms) if c.symbol not in _listed]
+    except Exception:
+        logger.exception("event candidate scan failed (non-fatal)")
     scan_hits.record_scan(candidates)      # E232: every symbol the scan listed, not only the top-N that reach the quality gate (record only, never raises)
     summary["candidates_seen"] = len(candidates)
     summary["under_preferred_positions"] = under_preferred
@@ -1538,8 +1558,17 @@ async def _trading_loop() -> None:
                 from screening import preopen as _preopen
                 if _preopen.due():
                     await _preopen.run()
+                if _preopen.due_final():                 # E272: final read after NSE matching ends (09:12)
+                    await _preopen.run_final()
             except Exception:
                 logger.exception("pre-open snapshot failed (non-fatal)")
+            # E272: 08:30 to 09:20 pre-market plan (overseas cues, VIX range, typed events, sector strength); best-effort, never blocks the loop.
+            try:
+                from screening import premarket_plan as _pmp
+                if _pmp.due():
+                    await _pmp.run()
+            except Exception:
+                logger.exception("premarket plan failed (non-fatal)")
             # group391: 09:10 opening plan (previous-day volatility per symbol, cache reads only; once per IST day, best-effort).
             try:
                 from screening import opening_plan as _oplan, preopen as _pre2
@@ -2224,6 +2253,7 @@ def positions(db: Session = Depends(get_db)):
             "side": _row_side(r),                                                     # E99: LONG | SHORT (legacy NULL reads as LONG)
             "structure": _structure_view(getattr(r, "structure_json", None)),   # group354
             "order_flow": (__import__("orders.order_flow", fromlist=["parse"]).parse(getattr(r, "flow_json", None)) or None),   # group427
+            "setup": _row_setup(r),                                                   # E272: the setup stamp (entry reason), else null
             "entry_price": r.entry_price,
             "exit_price": r.exit_price,
             "quantity": r.quantity,
@@ -2359,7 +2389,7 @@ def trades_report(days: int = 1, db: Session = Depends(get_db)):
 
 @app.get("/review-fixes/status", dependencies=[Depends(require_admin)])
 def review_fixes_status(db: Session = Depends(get_db)):
-    """group479 (read-only): the effective settings of the loss-review guards (14:00 cut-off, whole-day stop-out pause, minimum shares, ORB recorder),
+    """group479 (read-only): the effective settings of the loss-review guards (14:00 cut-off, whole-day stop-out pause, minimum shares, opening-range input),
     today's losing stop-outs and whether the pause is in force. Use it on the VM to confirm the new defaults really are live. No trading change."""
     from orders import stopout_guard, orb_shadow, trade_odds, reconcile as _rc_over
     return {
@@ -2368,10 +2398,12 @@ def review_fixes_status(db: Session = Depends(get_db)):
         "trade_odds_counters": trade_odds.stats(),
         "entry_cutoff_ist": config.SCALP_ENTRY_CUTOFF_IST,
         "entry_min_qty": config.ENTRY_MIN_QTY,
+        "entry_min_qty_mode": getattr(config, "ENTRY_MIN_QTY_MODE", "cost"),
         "entry_min_reward_risk": config.ENTRY_MIN_REWARD_RISK,
         "stopout_guard": stopout_guard.status(db),
         "orb_mode": config.ORB_MODE,
-        "orb_counters": orb_shadow.stats(),
+        "orb_bar_range_enabled": config.ORB_BAR_RANGE_ENABLED,
+        "orb_counters": orb_shadow.stats(),                  # E273 round 8: bar_ranges = ranges built from the recorded bars, ranges = quote-window fallbacks, no_range = records without a range
         "loss_brake_enabled": config.LOSS_BRAKE_ENABLED,
         "opening_pause_stopouts": config.OPENING_PAUSE_STOPOUTS,
         "stagnation_exit_minutes": config.STAGNATION_EXIT_MINUTES,
@@ -2401,6 +2433,22 @@ def _row_tape(r):
         return (t if isinstance(t, dict) else None), (x if isinstance(x, list) and x else None)
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def _row_setup(r):
+    """E272: the setup stamp of one trade (flow_json["setup"]: id, trigger, confirmations, penalties, size multiplier, slot, side) for the Entry reason
+    column; None when the trade carries no stamp (opened before E272) or the JSON is unreadable. Never raises."""
+    try:
+        from orders import setup_stamp as _stamp
+        st = _stamp.read(getattr(r, "flow_json", None))
+        if not st:
+            return None
+        conf, pen = st.get("confirmations"), st.get("penalties")
+        return {"id": st.get("id"), "trigger": st.get("trigger") or "", "confirmations": list(conf)[:10] if isinstance(conf, list) else [],
+                "penalties": dict(pen) if isinstance(pen, dict) else {}, "size_mult": st.get("size_mult"), "slot": st.get("slot") or "later",
+                "side": st.get("side") or "LONG"}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _row_charges(r):
@@ -2505,6 +2553,7 @@ def trades_history(
                 "exit_rule": _row_exit_rule(r),   # E231: which stagnation rule closed it (flat_band | no_followthrough), else null
                 "tape": _row_tape(r)[0],          # E271: the order-flow tape verdict seen at entry (record only), else null
                 "tape_exit": _row_tape(r)[1],     # E271: the stop / target moves the tape made while the trade was open, else null
+                "setup": _row_setup(r),           # E272: the rule that took the trade (setup stamp), else null for a trade opened before the stamp
                 "opened_at": iso_utc(r.opened_at),
                 "closed_at": iso_utc(r.closed_at),
                 "dhan_super_order_id": r.dhan_super_order_id,
@@ -2858,7 +2907,37 @@ def _board_open_symbols() -> list:
 def entry_guard_stats(admin: str = Depends(require_admin)):
     """E257: how often the spike-chase and gain-room guards held, only logged, passed, or had no data (in-process, since the last restart). Read-only."""
     from orders import entry_timing, gain_room, guard_stats
-    return {"since_restart": True, "spike_mode": entry_timing.mode(), "gain_room_mode": gain_room.mode(), **guard_stats.snapshot()}
+    from orders import soft_gates
+    return {"since_restart": True, "spike_mode": entry_timing.mode(), "gain_room_mode": gain_room.mode(), "soft_gates_mode": soft_gates.mode(), **guard_stats.snapshot()}
+
+
+@app.get("/setup/stats")
+def setup_stats_route(db: Session = Depends(get_db), limit: int = 1000, admin: str = Depends(require_admin)):
+    """E272: win rate, average R and a 90 % lower bound per setup and time slot, from the setup stamps (flow_json["setup"]) of the settled trades still
+    held (position rows are deleted after TRADE_HISTORY_RETENTION_DAYS, so this is a short window - keep the numbers elsewhere to grow a cell).
+    A cell under 30 trades says NOT_ENOUGH_DATA. Read-only; never raises."""
+    try:
+        from orders import setup_stats as _ss
+        rows = (db.query(ScalpPosition).filter(ScalpPosition.realized_pnl.isnot(None))
+                .order_by(ScalpPosition.opened_at.desc()).limit(max(1, min(int(limit), 1000))).all())
+        from orders import slot_ladder as _sl
+        data = _sl.rows_from_positions(rows)
+        _lad = _sl.from_rows(data)      # E273 round 35: the cells the entry sizes up (promoted) or down (demoted) right now
+        return {"ok": True, "rows_read": len(data), "min_trades": _ss.MIN_TRADES, "cells": _lad["cells"], "ladder_enabled": _sl.enabled(),
+                "promoted": sorted(_lad["promoted"]), "demoted": sorted(_lad["demoted"])}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}", "cells": {}}
+
+
+@app.get("/premarket/plan")
+def premarket_plan_route(admin: str = Depends(require_admin)):
+    """E277: the 08:30 pre-market plan's own status for the Position Stocks page (day, when it was last built, how many builds, overseas risk-off flag,
+    India VIX label, how many positive / negative typed events, notes). Read-only; never raises. `ok` false with an error text when it cannot be read."""
+    try:
+        from screening import premarket_plan as _pmp
+        return {"ok": True, "enabled": bool(getattr(config, "PREMARKET_PLAN_ENABLED", True)), **_pmp.status()}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "enabled": None, "error": f"{type(e).__name__}: {str(e)[:120]}"}
 
 
 @app.get("/flow/stats")

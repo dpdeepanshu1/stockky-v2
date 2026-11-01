@@ -528,11 +528,18 @@ class TestAttemptEntrySkips:
         b.stop_pct = 2.0
         assert entry.attempt_entry(db, cand(ltp=20.0)) is not None
 
-    def test_range_gate_rejects_entry_at_the_high(self, env):
+    def test_range_gate_rejects_entry_at_the_high(self, env, monkeypatch):
+        monkeypatch.setattr(config, "SOFT_GATES_MODE", "veto", raising=False)      # E273 round 9: the old one-gate-one-refusal walk
         db, b, _ = env
         b.ticks["ABC"] = [100.0, 200.0] + [150.0] * 8
         assert entry.attempt_entry(db, cand(ltp=200.0)) is None
         assert_clean_skip(env, "ABC", "RANGE_GATE:NEAR_DAY_HIGH")
+
+    def test_range_gate_is_a_penalty_by_default_entry_at_the_high_goes_through(self, env, monkeypatch):
+        monkeypatch.setattr(config, "SOFT_GATES_MODE", "penalty", raising=False)   # E273 round 9 (needs SQLAlchemy; not run in the build sandbox)
+        db, b, _ = env
+        b.ticks["ABC"] = [100.0, 200.0] + [150.0] * 8
+        assert entry.attempt_entry(db, cand(ltp=200.0)) is not None
 
     def test_range_gate_allows_entry_lower_in_the_range(self, env):
         db, b, _ = env
@@ -1100,6 +1107,35 @@ class TestScalpReviewGuards:
         assert entry._price_guard_reject("ABC", 100.0) is None
         self.live([(3, 100.5)])
         assert entry._price_guard_reject("ABC", 100.0) is None          # 0.5% is not > 0.5%
+
+    # E273 round 33: an up-chase between the limit and DRIFT_HARD_MULT x it is a size penalty when the caller passes a `soft` dict
+    def test_round33_slippage_between_limit_and_ceiling_is_a_penalty_only_with_a_soft_dict(self, env):
+        self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.25)
+        self.mp.setattr(config, "SOFT_GATES_MODE", "penalty")
+        self.live([(3, 100.30)])                                              # 0.30% over a 0.25% limit; ceiling 0.4375%
+        assert entry._price_guard_reject("ABC", 100.0).startswith("ENTRY_SLIPPAGE:")      # no dict = the old refusal
+        soft: dict = {}
+        assert entry._price_guard_reject("ABC", 100.0, soft=soft) is None
+        pen, why = soft["entry_slippage"]
+        assert 1.0 <= pen <= 3.0 and why.startswith("ENTRY_SLIPPAGE:")
+        self.live([(3, 100.50)])                                              # past the ceiling: refused even with a dict
+        assert entry._price_guard_reject("ABC", 100.0, soft={}).startswith("ENTRY_SLIPPAGE:")
+        self.mp.setattr(config, "SOFT_GATES_MODE", "veto")
+        self.live([(3, 100.30)])
+        assert entry._price_guard_reject("ABC", 100.0, soft={}).startswith("ENTRY_SLIPPAGE:")
+
+    # E273 round 34: a day gain between MAX_DAY_GAIN_PCT and DAY_GAIN_HARD_MULT x it is a size penalty when the caller passes a `soft` dict
+    def test_round34_day_gain_between_limit_and_ceiling_is_a_penalty_only_with_a_soft_dict(self, env):
+        self.mp.setattr(config, "SOFT_GATES_MODE", "penalty")
+        self.live([(3, 108.0)])
+        self.day(prev_close=100.0)                                            # +8% over a 7% limit; ceiling 12.25%
+        self.mp.setattr(config, "ENTRY_MAX_SLIPPAGE_PCT", 0.0)
+        assert entry._price_guard_reject("ABC", 108.0).startswith("DAY_GAIN_TOO_HIGH:")
+        soft: dict = {}
+        assert entry._price_guard_reject("ABC", 108.0, soft=soft) is None
+        assert 1.0 <= soft["day_gain"][0] <= 3.0 and soft["day_gain"][1].startswith("DAY_GAIN_TOO_HIGH:")
+        self.live([(3, 113.0)])                                               # +13%: past the ceiling
+        assert entry._price_guard_reject("ABC", 113.0, soft={}).startswith("DAY_GAIN_TOO_HIGH:")
 
     def test_price_dropped_since_signal_is_not_slippage(self, env):
         self.live([(3, 98.0)])

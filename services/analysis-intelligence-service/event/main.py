@@ -1256,6 +1256,8 @@ def root():
             "/events/{symbol}/categorized": "GET upcoming/recent events + changes",
             "/events/{symbol}?force=true": "GET bypass cache",
             "/events/raw-feed?hours=24": "GET pre-scoring raw feed (Short-Term Trading Upgrade Tier 2)",
+            "/events/active": "GET typed event feed (all subscribed symbols)",
+            "/events/{symbol}/active": "GET typed event feed (one symbol)",
             "/subscribe": "POST",
             "/subscriptions": "GET",
             "/check": "GET",
@@ -1324,6 +1326,50 @@ def raw_feed(hours: int = 24):
             })
 
     return {"items": items, "hours": hours, "checked_at": _utcnow().isoformat()}
+
+
+# ── Typed event feed (event_feed.py) ─────────────────────────────────────────────────────────
+# NOTE: these literal routes MUST stay above "/events/{symbol}" or FastAPI reads "active" as a symbol (same trap as /events/raw-feed, group152).
+# The module is loaded by file path (each mounted sub-app hides the others' folders from sys.path). The collector thread starts at import
+# (skipped under pytest, because mounted sub-apps never fire startup events); EVENT_FEED_ENABLED=0 disables it.
+def _load_event_feed():
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("event_feed", os.path.join(os.path.dirname(os.path.abspath(__file__)), "event_feed.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as e:  # noqa: BLE001 - the feed is optional; the rest of the service must boot without it
+        logger.warning("event feed: module could not be loaded (%s)", e)
+        return None
+
+
+_ef = _load_event_feed()
+if _ef is not None and "pytest" not in __import__("sys").modules:
+    try:
+        _ef.start_collector(lambda: (_load_state().get("subscriptions") or []))
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("event feed: collector did not start (%s)", _e)
+
+
+def _feed_answer(symbol: Optional[str] = None) -> dict:
+    col = _ef.get_collector() if _ef is not None else None
+    if col is None:
+        return {"ok": False, "symbol": symbol, "count": 0, "events": [], "healthy_sources": [], "last_delay_s": None, "sources": {},
+                "error": "event feed not running"}
+    return col.response(symbol)
+
+
+@app.get("/events/active")
+def events_active():
+    """Typed, timestamped events (type, polarity, strength, age) for every subscribed symbol. ok:false with no events while no source is healthy."""
+    return _feed_answer()
+
+
+@app.get("/events/{symbol}/active")
+def events_symbol_active(symbol: str):
+    """Same feed, one symbol."""
+    return _feed_answer(symbol)
 
 
 @app.get("/events/{symbol}")

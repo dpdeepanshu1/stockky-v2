@@ -36,6 +36,15 @@ from sqlalchemy.orm import Session
 
 import config
 import models
+
+
+def _decision_tag(order) -> str:
+    """E276 round 59: " [decision=<id>]" for the OPENED event detail so the risk ladder can tie a closed position back to its entry decision's setup stamp. Never raises."""
+    try:
+        d = getattr(order, "decision_id", None)
+        return f" [decision={int(d)}]" if d else ""
+    except Exception:  # noqa: BLE001
+        return ""
 from audit.logger import log_action
 from execution import shared_symbol_lock
 from market_feed.feed import Tick
@@ -1304,7 +1313,7 @@ def try_fill_entry(db: Session, order: models.TradeOrder, tick: Tick, stop_price
         db.add(position)
         db.flush()
         db.add(models.TradePositionEvent(position_id=position.id, event_type="OPENED",
-                                          detail=f"{order.qty} @ {fill_price}, stop {stop_price}, target {target_price}"))
+                                          detail=f"{order.qty} @ {fill_price}, stop {stop_price}, target {target_price}" + _decision_tag(order)))
     else:
         # Pyramiding case — only reachable if risk_engine's check #6 was
         # configured to allow it; recompute a volume-weighted average.
@@ -1478,7 +1487,7 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
         db.add(position)
         db.flush()
         db.add(models.TradePositionEvent(position_id=position.id, event_type="OPENED",
-                                          detail=f"{filled_qty} @ {fill_price}, stop {stop_price}, target {target_price} (broker-confirmed)"))
+                                          detail=f"{filled_qty} @ {fill_price}, stop {stop_price}, target {target_price} (broker-confirmed)" + _decision_tag(order)))
     else:
         total_cost = position.avg_entry_price * position.qty_open + fill_price * filled_qty
         position.qty_open += filled_qty

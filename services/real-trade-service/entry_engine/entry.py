@@ -36,21 +36,22 @@ import cost_model
 import entry_product
 import models
 from audit.logger import log_action
-from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
+from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
 from portfolio.portfolio import get_account, held_exposure_positions, record_real_order_sent, today_entry_count, today_loss_streak, working_buy_symbols
-from risk_engine.effective_risk import effective_risk_pct
+from risk_engine.effective_risk import effective_max_positions, effective_risk_pct
 from risk_engine.engine import AccountState, OrderIntent, RiskVerdict, evaluate as risk_evaluate
-from tz_utils import is_market_open_ist
+from tz_utils import ist_now, is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
+from entry_engine import gap_event, setup_live, setup_stamp, approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, soft_gates, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
 from entry_engine import day_spike_gate, flow_gate
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
 from entry_engine import size_ladder
+from entry_engine import setup_inputs as _setup_inputs   # E276 round 68
 from entry_engine import conviction_size as _conviction_size   # E266
 
 # §6 — corporate-action clamp for ATR inputs (return_sanity.py in service root)
@@ -452,7 +453,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         equity=account.current_equity,
         risk_per_trade_pct=effective_risk_pct(risk),
         max_daily_loss_pct=risk.max_daily_loss_pct,
-        max_concurrent_positions=risk.max_concurrent_positions,
+        max_concurrent_positions=effective_max_positions(risk),
         max_portfolio_risk_pct=risk.max_portfolio_risk_pct,
         stale_data_seconds=risk.stale_data_seconds,
         max_tick_volatility_mult=risk.max_tick_volatility_mult,
@@ -509,6 +510,12 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         # and the age of the peer figure (shown in the reject message).
         in_flight_buy_value=shared_exposure.get_in_flight_buy_value(db, mode),
         other_service_exposure_age_s=_peer_age,
+        # E276 round 50: shared portfolio heat (gap allowance on carried holds + position-stocks-service's open risk); zeros when DEMO / off / peer stale.
+        open_positions_gap_allowance=heat_state.own_heat(db, mode, positions)[1],
+        other_service_open_risk=heat_state.peer_heat(db, mode)[0],
+        other_service_capital_base=heat_state.peer_heat(db, mode)[1],
+        open_positions_sector_risk=heat_state.own_sector_risk(db, mode, positions),
+        other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
         loss_streak=_streak,
         entries_today=_entries_today,
         # A11: combined loss of both engines today (REAL only; DEMO has no peer).
@@ -626,12 +633,39 @@ async def _rearm_requeue(db: Session, mode: str) -> int:
         return 0
 
 
+def _preopen_gap_or_waive(symbol: str, db, waived: list, pen: Optional[dict] = None) -> Optional[str]:
+    """preopen.gap_reason, except that a gap-UP refusal explained by a fresh typed positive event (gap_event) is waived and noted in `waived` (S1 must confirm later). Never raises."""
+    reason = preopen.gap_reason(symbol)
+    try:
+        if reason and gap_event.gap_kind(reason) in ("up", "down") and gap_event.enabled():
+            from watchlist_engine.intraday_news import positive_event
+            ev = positive_event(db, symbol)
+            if gap_event.explains_gap(ev):
+                if gap_event.gap_kind(reason) == "down":
+                    return gap_event.against_reason(reason, ev)          # E273 round 21: good news, the market gaps down: skipped under its own name
+                waived.append(reason)
+                return None
+    except Exception:  # noqa: BLE001
+        pass
+    if reason and pen is not None:        # E273 round 25: an unexplained gap shrinks the size; only a gap at twice its limit is still refused (soft_gates.preopen_gap)
+        _why, _m = soft_gates.preopen_gap(symbol, reason)
+        if _why is None and _m < 1.0:
+            pen["preopen_gap"] = _m
+        return _why
+    return reason
+
+
 async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     await _rearm_requeue(db, mode)
     candidates = _fetch_candidates(db, mode)
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
     candidates = _order_candidates_for_capital(candidates)
+    try:                                       # E272 round 8: tell position-stocks which symbols to record bars for (record only, never raises)
+        from entry_engine import candidate_outcomes as _co_wanted
+        _co_wanted.note_candidates(candidates)
+    except Exception:  # noqa: BLE001
+        pass
 
     # group 220 (review item 6): no automatic entries in the first minutes after the open. Returns BEFORE the loop
     # below, so no candidate is consumed or rejected: they stay queued and are evaluated normally once the guard lifts.
@@ -783,6 +817,32 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception:
             _og_stop = None
         _og_reason = opening_gate.reject_reason(mode, _og_tick, stop_pct=_og_stop)
+        _gap_waived: list = []                      # E273 round 20: gap-up refusals waived for a positive typed event; S1 must confirm below (gap_event.unconfirmed_reason)
+        _gap_ev = None
+        _gap_against = None                         # E273 round 21: a gap DOWN against a positive event is skipped (GAP_AGAINST_EVENT), not held and retried
+        if _og_reason and gap_event.gap_kind(_og_reason) in ("up", "down") and gap_event.enabled():
+            try:
+                from watchlist_engine.intraday_news import positive_event as _pos_ev
+                _gap_ev = _pos_ev(db, cand.symbol)
+                if gap_event.explains_gap(_gap_ev):
+                    if gap_event.gap_kind(_og_reason) == "up":
+                        _gap_waived.append(_og_reason)
+                        _og_reason = opening_gate.reject_reason(mode, _og_tick, stop_pct=_og_stop, waive_gap_up=True)      # the other opening checks still apply
+                    else:
+                        _gap_against = gap_event.against_reason(_og_reason, _gap_ev)
+                        _og_reason = None
+            except Exception:  # noqa: BLE001
+                logger.debug("entry_engine: gap-event check failed for %s (gap refusal stands)", cand.symbol, exc_info=True)
+        if not _og_reason and not _gap_against and gap_event.enabled():     # E273 round 27: a SIZED-DOWN gap down against a positive event is still skipped (round 21 rule)
+            try:
+                _soft_down = opening_gate.soft_down_reason(mode, _og_tick)
+                if _soft_down:
+                    from watchlist_engine.intraday_news import positive_event as _pos_ev2
+                    _gap_ev2 = _pos_ev2(db, cand.symbol)
+                    if gap_event.explains_gap(_gap_ev2):
+                        _gap_against = gap_event.against_reason(_soft_down, _gap_ev2)
+            except Exception:  # noqa: BLE001
+                logger.debug("entry_engine: gap-down event check failed for %s (size penalty stands)", cand.symbol, exc_info=True)
         if _og_reason:
             _og_held += 1
             waited += 1
@@ -790,6 +850,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 logger.info("entry_engine: %s %s %s (candidate left queued)", mode, cand.symbol, _og_reason)
             continue
         # (group370: the group 269 opening-gate shadow branch was removed; the gate above is always live.)
+        _og_pen = opening_gate.penalty(mode, _og_tick)          # E273 round 17: near-day-high / weak previous close shrink the size instead of refusing (1.0 = none)
 
         cand.consumed = True
         tick     = ticks.get(cand.symbol)
@@ -803,6 +864,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             decision.reasoning = reason
             decision._wb_divertable = True      # A3: a plain WAIT row is evidence only; write_behind.divert_pending_waits moves it off this cycle's commit
             waited += 1
+
+        if _gap_against:                                           # E273 round 21: from the opening gate above (the pre-open gap down is named in Gate 4d)
+            _wait(_gap_against)
+            decision.gate_tag = "gap_against_event"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _gap_against, "risk_verdict": None, "gate_tag": "gap_against_event"})
+            continue
 
         # ── Gate 1: actionable decision label ─────────────────────────────────
         _label_upper = (cand.decision_label or "").upper()
@@ -917,7 +985,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         stop_pct, target_pct = _atr_stop_target_pct(atr_pct)
         decision.stop_basis = _atr_stop_basis(atr_pct)                  # group 396: stop source tag (evidence only)
         order_flow.record(decision, tick)                               # group 427: order-flow numbers, record only (never raises)
-        orb_shadow.record(decision, tick)                               # group 470: opening-range-breakout verdict, record only (never raises)
+        orb_shadow.record(decision, tick)                               # group 470: opening range and breakout verdict onto flow_json (E273 round 15: live input, orders nothing itself; never raises)
         # 2026-09-01 fix: entry_price is the actual LIMIT price sent to Dhan —
         # must be a valid NSE tick (₹0.05 multiple) or the broker rejects the
         # order outright. See execution/dhan_client.py's TICK_SIZE comment —
@@ -994,6 +1062,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             logger.info("pullback-rearm[%s]: %s drift chase check waived (re-armed after a pullback)", mode, cand.symbol)
             drift_ok = True
             drift_pct = 0.0     # the pullback was confirmed: score it as "not extended" so the 50-point composite floor does not silently re-block it
+        _drift_pen = None       # E273 round 28: an up-chase between the drift limit and DRIFT_HARD_MULT x it is sized down, not refused (soft_gates.drift)
+        if not drift_ok and drift_pct > 0 and _rearm.is_chase_reason(drift_reason):
+            _dr_why, _dr_m = soft_gates.drift(drift_reason, drift_pct, max_drift_pct)
+            if not _dr_why and _dr_m < 1.0:
+                drift_ok, _drift_pen = True, _dr_m
+                logger.info("entry_engine: %s %s drift +%.1f%% over the %.1f%% limit sized down instead of refused (x%.2f)", mode, cand.symbol, drift_pct, max_drift_pct, _dr_m)
         if not drift_ok:
             if drift_pct > 0 and _rearm.is_chase_reason(drift_reason):
                 _rearm.arm(mode, cand.symbol, drift_reason, float(tick.price), _tick_day_change_pct(tick) or 0.0,
@@ -1055,15 +1129,22 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # Every one fails open on missing data. See entry_engine/vix_gate.py, vwap_gate.py, preopen.py.
         _vix_snap = await asyncio.to_thread(vix_gate.snapshot)
         _g4d_reason, _g4d_tag = None, None
+        _soft_pen = {"drift_chase": _drift_pen} if _drift_pen else {}          # E273 round 24 (+ round 28 drift chase): VWAP-below / spike chase / gain room size multipliers (soft_gates.py); a refusal only past a hard ceiling
+
+        def _soft(name, fn):
+            _why, _m = fn()
+            if not _why and _m < 1.0:
+                _soft_pen[name] = _m
+            return _why
         for _fn, _tag in ((lambda: vix_gate.entry_block_reason(_vix_snap), "vix_high"),
-                          (lambda: vwap_gate.reject_reason_tick(tick), "vwap_below"),
-                          (lambda: day_spike_gate.spike_reason_tick(tick), "spike_chase"),                    # E252: no market buy at the top of a day spike
-                          (lambda: day_spike_gate.range_reason_tick(tick, target_pct), "gain_room"),         # E252: the day's normal range is not already used up
-                          (lambda: preopen.gap_reason(cand.symbol), "preopen_gap"),
+                          (lambda: _soft("vwap", lambda: soft_gates.vwap(tick)), "vwap_below"),
+                          (lambda: _soft("spike_chase", lambda: soft_gates.spike(tick)), "spike_chase"),     # E252 / round 24: no market buy at the top of a day spike (penalty below the ceiling)
+                          (lambda: _soft("gain_room", lambda: soft_gates.gain_room(tick, target_pct)), "gain_room"),   # E252 / round 24: the day's normal range is not already used up
+                          (lambda: _preopen_gap_or_waive(cand.symbol, db, _gap_waived, _soft_pen), "preopen_gap"),
                           (lambda: stopout_guard.symbol_reason(cand.symbol, _so_syms), "stopout_symbol"),   # group471: no same-day re-buy after a stop-out
                           (lambda: calendar_gate.late_entry_block_reason(), "late_day"),           # group470: one cut-off every day (ENTRY_LAST_TIME_IST)
                           (lambda: calendar_gate.entry_block_reason(), "calendar"),                # group336: expiry / pre-holiday / Friday cut-off
-                          (lambda: liquidity_gate.reject_reason_tick(tick), "liquidity")):      # group333: volume / turnover floor
+                          (lambda: _soft("rvol", lambda: soft_gates.liquidity(tick)), "liquidity")):      # group333: volume / turnover floor; E273 round 29: the relative-volume test is a size penalty
             _g4d_reason = _fn()
             if _g4d_reason:
                 _g4d_tag = _tag
@@ -1112,6 +1193,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 if _sg_enforced and _sg_chase_only and _rearm.has_waiver(mode, cand.symbol):
                     logger.info("pullback-rearm[%s]: %s structure chase/stretch check waived (re-armed after a pullback)", mode, cand.symbol)
                     _sg_enforced = False
+                if _sg_enforced and _sg_ver.get("would_reject"):
+                    # E273 round 26: chase / stretch / room / R:R are size penalties, refused only past a ceiling or together with a hard reason (soft_gates.structure)
+                    _sg_why, _sg_pens = soft_gates.structure(_sg_ver)
+                    if _sg_why is None and _sg_pens:
+                        _sg_enforced = False
+                        _soft_pen.update(_sg_pens)
+                        logger.info("entry_engine: %s %s structure verdict sized down instead of refused (%s)", mode, cand.symbol, ", ".join(f"{k} x{v:.2f}" for k, v in _sg_pens.items()))
                 decision.structure_json = structure_gate.snapshot(_sg_sum, _sg_ver, _sg_mode, _sg_enforced, _sg_lv, _sg_src)
                 structure_gate.record(cand.symbol, mode, _sg_ver, _sg_mode, _sg_enforced, tick.price, _sg_src)   # group 355: counters + recent ring
                 try:                                                                                              # group356: what did the stock do next?
@@ -1209,13 +1297,26 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                    "reasoning": decision.reasoning, "risk_verdict": None})
             continue
 
-        # ── Regime rules (2026-10-23): LOG ONLY. A hypothetical verdict of "would a stricter weak-market rule set have turned this away?" for the evidence
-        # tools; it never blocks, resizes or changes a stop / target (no enforce mode exists). Never raises. See entry_engine/regime_rules.py.
-        if regime_rules.mode_for(mode) == "log":
+        # ── Regime rules (E273 round 7): LIVE soft penalty. A candidate that passes the live floors but misses the stricter weak-market floors is sized
+        # down (the multiplier is applied to adj_risk_pct below); one that misses by a lot is refused. Neutral / strong markets never change a size. A failure
+        # here never stops an entry (no penalty). See entry_engine/regime_rules.py.
+        _regime_mode = regime_rules.mode_for(mode)
+        _regime_pen_mult, _regime_skip, _regime_reason = 1.0, False, ""
+        if _regime_mode == "live":
             try:
-                regime_rules.record(cand.symbol, mode, regime_rules.evaluate(market_score, threshold, cand.conviction_score, rr), tick.price)
-            except Exception as _rr_err:  # noqa: BLE001 - a record-only check must never stop an entry
-                logger.debug("entry_engine: regime rules failed for %s (ignored): %s", cand.symbol, _rr_err)
+                _rv = regime_rules.evaluate(market_score, threshold, cand.conviction_score, rr)
+                _rp = regime_rules.penalty(_rv)
+                _rv["penalty_mult"], _rv["skipped"] = _rp["mult"], _rp["skip"]
+                regime_rules.record(cand.symbol, mode, _rv, tick.price)
+                _regime_pen_mult, _regime_skip, _regime_reason = _rp["mult"], _rp["skip"], _rp["reason"]
+            except Exception as _rr_err:  # noqa: BLE001 - a penalty bug must never stop an entry
+                _regime_pen_mult, _regime_skip = 1.0, False
+                logger.debug("entry_engine: regime rules failed for %s (no penalty): %s", cand.symbol, _rr_err)
+        if _regime_skip:
+            _wait_with_preview(f"Regime rules: {_regime_reason}. The weak-market floors are missed by too much to trade this one. Skip.")
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": decision.reasoning, "risk_verdict": None})
+            continue
 
         # ── Conviction-adjusted sizing ─────────────────────────────────────────
         account_state  = _account_state(db, mode, gate_armed, reserved_cash)
@@ -1236,6 +1337,94 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         _cal_mult = calendar_gate.size_mult()
         if _cal_mult < 1.0:
             adj_risk_pct *= _cal_mult
+        # E273 round 7: weak-market soft penalty (regime_rules.penalty); 1.0 in every other case
+        if _regime_pen_mult < 1.0:
+            adj_risk_pct *= _regime_pen_mult
+            logger.info("entry_engine: %s %s sized x%.2f by the regime rules (%s)", mode, cand.symbol, _regime_pen_mult, _regime_reason)
+        # E273 round 17 / 27: opening-gate soft tests (day-high position, weak previous close, price under the previous close) as a size penalty
+        if _og_pen["mult"] < 1.0:
+            adj_risk_pct *= _og_pen["mult"]
+            logger.info("entry_engine: %s %s sized x%.2f by the opening gate (%s)", mode, cand.symbol, _og_pen["mult"], "; ".join(_og_pen["reasons"]))
+        # E273 round 24: VWAP-below / spike chase / gain room as a size penalty (soft_gates.py), floor SOFT_GATE_FLOOR
+        _soft_mult = soft_gates.combine(_soft_pen.values()) if _soft_pen else 1.0
+        if _soft_mult < 1.0:
+            adj_risk_pct *= _soft_mult
+            logger.info("entry_engine: %s %s sized x%.2f by soft gates (%s)", mode, cand.symbol, _soft_mult, ", ".join(f"{k} x{v:.2f}" for k, v in _soft_pen.items()))
+        # E273 round 19 / E276 round 68: the setup walk (entry_engine/setup_live.py). S1_CATALYST_UP: a fresh typed positive event + price over the pre-open price + a closed bar above
+        # the opening-range high + two confirmations. S2_RS_BREAKOUT (from 09:30) and S3_EXHAUSTION long (from 09:45) need no event: they read the Market Board rank, the daily structure,
+        # the closed 1-minute bars and the book / tape (entry_engine/setup_inputs.py). A match is stamped with its id and sets the size multiplier (0.25 in the 09:20 slot, 0.5 later);
+        # no match keeps the legacy stamp and full size. A candidate with no event only costs a cached bar read (non-blocking), and only from 09:30. Never raises, never blocks an entry.
+        _setup_res, _setup_mult = None, None
+        _ns_all_ran = False                       # E276 round 70: True only when the walk ran with S1, S2 and S3 all able to fire (NO_SETUP refusal below)
+        _s1_on = bool(config.SETUP_S1_ENABLED)
+        if config.SETUP_ENGINE_ENABLED and (_s1_on or config.SETUP_S2_ENABLED or config.SETUP_S3_ENABLED):
+            try:
+                from watchlist_engine.intraday_news import positive_event
+                from entry_engine import orb_bars, order_flow as _of
+                _now_ist = ist_now()
+                _mnt = _now_ist.hour * 60 + _now_ist.minute
+                _s2_on = bool(config.SETUP_S2_ENABLED) and _mnt >= 9 * 60 + 30
+                _s3_on = bool(config.SETUP_S3_ENABLED) and _mnt >= 9 * 60 + 45
+                _pev = positive_event(db, cand.symbol) if _s1_on else None
+                if tick is not None and (_pev is not None or _s2_on or _s3_on):
+                    if _pev is not None:
+                        _bars = await asyncio.to_thread(lambda s=cand.symbol: orb_bars.fetch_now(s) or orb_bars.get_bars(s))
+                    else:
+                        _bars = orb_bars.get_bars(cand.symbol)               # cached, never blocks; the next cycle has it
+                    _orb = orb_bars.range_trigger(_bars)
+                    _flow = _of.parse(getattr(decision, "flow_json", None))
+                    _gap_now = preopen.gap_for(cand.symbol)
+                    _inputs = None
+                    if _bars:
+                        _pd = prev_day.peek(cand.symbol)
+                        _board = await _board_client.get_payload()
+                        _ssum, _sreason = None, None
+                        if _s2_on:
+                            _ssum, _ = await structure_gate.get_summary(cand.symbol, getattr(cand, "raw_payload", None))
+                            _sreason = structure_gate.no_data_reason(_ssum, tick.price)
+                        try:
+                            from risk_engine import sector_map as _sector_map
+                            _sector = _sector_map.sector_of(cand.symbol)
+                        except Exception:  # noqa: BLE001
+                            _sector = None
+                        _inputs = _setup_inputs.gather_long(
+                            symbol=cand.symbol, price=tick.price, now_ts=_now_ist.timestamp(), bars=_bars, board_payload=_board, structure_summary=_ssum, structure_reason=_sreason,
+                            prev_close=getattr(tick, "prev_close", None), atr_pct=getattr(_pd, "atr_pct", None) if _pd is not None else None, gap_pct=_gap_now,
+                            day_open=getattr(tick, "open_price", None), vwap=_orb.get("vwap") if isinstance(_orb, dict) and _orb.get("vwap") else getattr(tick, "vwap", None),
+                            orb=_orb, tape=_flow.get("tape"), imbalance_5=_flow.get("imbalance_5"),
+                            avg_turnover=getattr(_pd, "avg_turnover", None) if _pd is not None else None, sector=_sector,
+                            liquid_min_cr=getattr(config, "SETUP_S3_LIQUID_MIN_TURNOVER_CR", 100.0), want_s2=_s2_on, want_s3=_s3_on)
+                    _setup_res = setup_live.classify_long(
+                        price=tick.price, prev_close=getattr(tick, "prev_close", None), gap_pct=_gap_now, event=_pev,
+                        bars_facts=_orb, imbalance_5=_flow.get("imbalance_5"), inputs=_inputs,
+                        allowed=setup_live.allowed_set(s1=_s1_on, s2=_s2_on, s3=_s3_on),
+                        now=_now_ist, penalties={k: v for k, v in (("opening_gate", 1.0 - _og_pen["mult"]), ("regime", 1.0 - _regime_pen_mult),
+                                                                    (gap_event.LARGE_KEY, (gap_event.large_gap_penalty(_gap_now) or 0.0) if _gap_waived else 0.0),
+                                                                    *((k, 1.0 - v) for k, v in _soft_pen.items())) if v > 0})
+                    _ns_all_ran = bool(_s1_on and _s2_on and _s3_on)
+                    if _setup_res.get("id"):
+                        _setup_mult = float(_setup_res.get("size_mult") or 1.0)
+                        adj_risk_pct *= _setup_mult
+                        logger.info("entry_engine: %s %s matched %s (%s), sized x%.2f", mode, cand.symbol, _setup_res["id"], "; ".join(_setup_res.get("confirmations") or []), _setup_mult)
+            except Exception:  # noqa: BLE001 - the setup walk must never stop an entry
+                _setup_res, _setup_mult = None, None
+                logger.debug("entry_engine: setup walk failed for %s (legacy stamp, full size)", cand.symbol, exc_info=True)
+        # E273 round 20: a gap-up refusal that was waived for a positive event stands unless S1 matched (closed bar above the opening-range high, price over the pre-open price).
+        _gu_reject = gap_event.unconfirmed_reason(_gap_waived, (_setup_res or {}).get("id"))
+        if _gu_reject:
+            _wait_with_preview(_gu_reject)
+            decision.gate_tag = "gap_unconfirmed"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _gu_reject, "risk_verdict": None, "gate_tag": "gap_unconfirmed"})
+            continue
+        # E276 round 70: "no setup, no trade" (NO_SETUP_MODE live; ships off). A WAIT, not a rejection: the candidate is looked at again next cycle. See setup_live.no_setup_refusal.
+        _ns_reject = setup_live.no_setup_refusal(_setup_res, mode=getattr(config, "NO_SETUP_MODE", "off"), exempt=bool(_rearm.has_waiver(mode, cand.symbol)), all_ran=_ns_all_ran)
+        if _ns_reject:
+            _wait_with_preview(_ns_reject)
+            decision.gate_tag = "no_setup"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _ns_reject, "risk_verdict": None, "gate_tag": "no_setup"})
+            continue
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
         # group470: size on the risk a stop-out REALLY costs (stop distance + the usual fill beyond the stop). Floor of 1 share, so a trade
@@ -1268,6 +1457,21 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                             mode, cand.symbol, proposed_qty, _oq, _open_mult)
                 proposed_qty = _oq
 
+        # E273 round 18: the rule that took this entry, stamped into flow_json["setup"] (entry_engine/setup_stamp.py). Real Trade has no setup walk yet, so this is the
+        # legacy shortlist stamp: trigger = the shortlist label, confirmations = what was true, penalties = every size factor below 1. Record only; never blocks.
+        try:
+            _stp_pen = {k: v for k, v in (("vix", _vix_mult), ("calendar", _cal_mult), ("regime", _regime_pen_mult), ("opening_gate", _og_pen["mult"]), ("opening_window", _open_mult), *_soft_pen.items()) if v < 1.0}
+            _stp_mult = 1.0
+            for _v in _stp_pen.values():
+                _stp_mult *= _v
+            if isinstance(_setup_res, dict) and _setup_res.get("id") and isinstance(_setup_res.get("stamp"), dict):      # E273 round 19: a matched setup is the stamped reason
+                decision.flow_json = setup_stamp.attach(getattr(decision, "flow_json", None), _setup_res["stamp"])
+            decision.flow_json = setup_stamp.attach(getattr(decision, "flow_json", None), setup_stamp.build(
+                trigger=str(cand.decision_label or "shortlist"), confirmations=setup_stamp.confirmations_from(getattr(decision, "flow_json", None), tick),
+                penalties=_stp_pen, size_mult=_stp_mult, now=ist_now(), side="LONG"))
+        except Exception:  # noqa: BLE001 - a stamp bug must never stop an entry
+            logger.debug("entry_engine: setup stamp failed for %s (entry unaffected)", cand.symbol, exc_info=True)
+
         # ── Risk engine ───────────────────────────────────────────────────────
         # §5 — pass avg_traded_value for liquidity floor check in risk_engine
         # Try to get from tick, then from candidate raw payload, fail-open to None
@@ -1286,7 +1490,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             try:
                 _cv_hold = _conviction_size.hold_reasons(
                     realized_pnl_today=account_state.realized_pnl_today, regime_override=bool(is_regime_override),
-                    vix_mult=_vix_mult, calendar_mult=_cal_mult, opening_mult=_open_mult)
+                    vix_mult=_vix_mult, calendar_mult=_cal_mult, opening_mult=_open_mult, regime_rules_mult=_regime_pen_mult)
                 _cv = _conviction_size.long_decision(
                     cand, rr=rr, rr_floor=MIN_REWARD_RISK_RATIO, market_score=market_score, threshold=threshold,
                     regime_override=bool(is_regime_override), drift_pct=drift_pct, max_drift_pct=max_drift_pct,
@@ -1314,6 +1518,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # conviction upsize we just computed above.
             adj_risk_pct=adj_risk_pct,
         )
+        try:                                                                  # E276 round 59: a setup that proved itself has the total open-risk limit raised (entry_engine/risk_stage.py)
+            from entry_engine import risk_stage as _rs
+            account_state.max_portfolio_risk_pct = _rs.heat_limit_pct(db, (_setup_res or {}).get("id"), float(account_state.max_portfolio_risk_pct))
+        except Exception:  # noqa: BLE001 - the ladder only loosens; a failure leaves the base limit
+            pass
         result = risk_evaluate(intent, account_state)
 
         decision.proposed_qty        = result.approved_qty or proposed_qty
@@ -1371,6 +1580,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         # group 472: minimum shares per REAL entry (ENTRY_MIN_QTY, 0 = off). Too few shares cannot be scaled out or trailed.
         _min_q = int(getattr(config, "ENTRY_MIN_QTY", 0) or 0)
         _fq = int(result.approved_qty or proposed_qty or 0)
+        if mode == "REAL" and _min_q > 1:
+            # E273 round 23: the floor follows the cost gate (ENTRY_MIN_QTY_MODE cost), same knobs and target as Gate 5.6 below; never above the flat floor
+            _mq_tv, _mq_ratio = _resolve_cost_gate_knobs(db, mode)
+            _min_q = cost_model.effective_min_qty(
+                entry_price, kronos_gate.effective_target_pct(target_pct, _kg_verdict, _kg_mode), _min_q,
+                min_trade_value=_mq_tv, min_edge_to_cost_ratio=_mq_ratio)
         if mode == "REAL" and _min_q > 0 and _fq < _min_q:
             _mq_reason = (f"MIN_QTY: only {_fq} share(s) fit the risk cap (minimum {_min_q}) - too few to take a partial profit or trail; "
                           "waiting for a cheaper stock or a tighter stop.")
@@ -1458,6 +1673,25 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 db.add(decision)
                 entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _news_reason,
                                        "risk_verdict": decision.risk_verdict, "gate_tag": "negative_news"})
+                continue
+
+        # -- Gate 5.9 (E272 round 7): fresh NEGATIVE typed event -------------------------------------------------------
+        # watchlist_engine/intraday_news.event_veto_reason: the typed event feed (probe, downgrade, results miss...) seen today, or a veto row kept from the
+        # after-hours / 09:05 scan. A hard veto on a new long; unknown polarity never vetoes; unreadable = fail-open. Switch: INTRADAY_EVENT_VETO.
+        if config.INTRADAY_EVENT_VETO:
+            try:
+                from watchlist_engine.intraday_news import event_veto_reason
+                _ev_reason = event_veto_reason(db, mode, cand.symbol)   # cached snapshot + one indexed query: run inline, the session is not thread-safe
+            except Exception:  # noqa: BLE001
+                _ev_reason = None
+            if _ev_reason:
+                decision.action = "WAIT"
+                decision.reasoning = _ev_reason
+                decision.gate_tag = "event_veto"
+                waited += 1
+                db.add(decision)
+                entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _ev_reason,
+                                       "risk_verdict": decision.risk_verdict, "gate_tag": "event_veto"})
                 continue
 
         # ── Gate 5.5: same-symbol duplicate guard (within this cycle) ──────────

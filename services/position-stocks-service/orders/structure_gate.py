@@ -392,11 +392,13 @@ def snapshot(summary: Optional[Dict[str, Any]], verdict: Dict[str, Any], gate_mo
         return "{}"
 
 
-def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[str]]:
+def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None, penalties: Optional[Dict[str, float]] = None) -> Tuple[Optional[str], Optional[str]]:
     """(refuse_reason_or_None, snapshot_json_or_None). A reason is returned whenever the gate rejects AND the mode is enforce; in `log` mode the verdict is
     evaluated, recorded and snapshotted exactly the same but the reason is always None (never refuses). Never raises (fails open).
     `capture` (group372, optional): when a dict is passed it receives `verdict`, `summary`, `gate_mode`, `enforced` of this check so the caller can store a
-    structure observation; it stays empty when the gate is off or failed."""
+    structure observation; it stays empty when the gate is off or failed.
+    `penalties` (E273 round 32, optional): when a dict is passed and SOFT_GATES_MODE is penalty, a verdict whose reasons are all SOFT (chase / stretch / room, none past its
+    ceiling) is not refused: the size penalties are written into the dict (soft_gates.structure_penalties) and the entry goes on at a smaller size."""
     m = mode()
     if m == "off":
         return None, None
@@ -408,6 +410,12 @@ def check(symbol: str, ltp: float, capture: Optional[Dict[str, Any]] = None) -> 
             block = f"{PREFIX}BAD_LOCATION:{v['reason']}"
         elif v["opinion"] == "no_opinion" and getattr(config, "STRUCTURE_REQUIRE_DATA", False):
             block = f"{PREFIX}NODATA:{v.get('no_data')}"
+        if block and isinstance(penalties, dict) and v["would_reject"] and m == "enforce":
+            from orders import soft_gates
+            _why, _pens = soft_gates.structure_penalties(v)
+            if not _why and _pens:
+                penalties.update(_pens)                    # E273 round 32: sized down instead of refused
+                block = None
         if m == "log":
             block = None                                   # E72: log mode records what the gate WOULD have said; the entry goes on
         enforced = bool(block)

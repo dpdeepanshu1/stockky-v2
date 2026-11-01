@@ -55,6 +55,9 @@ def _clean(monkeypatch):
     monkeypatch.setattr(config, "INTRADAY_NEWS_BONUS_CAP", 8.0)
     monkeypatch.setattr(config, "INTRADAY_NEWS_PENALTY_CAP", 10.0)
     monkeypatch.setattr(config, "INTRADAY_NEWS_ALERT_MIN_SCORE", 45.0)
+    # E272 round 7: this file covers the ORIGINAL RSS pass and the old 15-minute cadence; the typed-feed pass and the v2 cadence are in test_e272_intraday_event_feed.py
+    monkeypatch.setattr(config, "INTRADAY_EVENT_SOURCE", "legacy")
+    monkeypatch.setattr(config, "AFTERHOURS_CADENCE_V2", False)
     yield
     inews.reset_state_for_tests()
 

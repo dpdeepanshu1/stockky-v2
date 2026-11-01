@@ -119,19 +119,34 @@ def thrust_limit_pct(m1_range_pct: Optional[float]) -> float:
     return fixed
 
 
-def judge(day_pct: Optional[float], range_pos: Optional[float], stats: Optional[dict],
-          atr_pct: Optional[float] = None, m1_range_pct: Optional[float] = None) -> Optional[str]:
-    """The decision on plain numbers. Reason string or None. The limits adapt to the stock's own daily ATR % / 1-minute range when given. Pure."""
+def judge_scored(day_pct: Optional[float], range_pos: Optional[float], stats: Optional[dict],
+                 atr_pct: Optional[float] = None, m1_range_pct: Optional[float] = None) -> Tuple[Optional[str], Optional[float]]:
+    """(reason, penalty) on plain numbers. E273 round 9: penalty = how many times over its own limit the day gain (day spike) or the thrust (mid-thrust) is
+    (value / limit, capped; the larger of the two when both fire), the unit the soft gates share (orders/soft_gates.py). (None, None) = no spike. Pure."""
+    from orders import soft_gates
+    why, pens = None, []
     day_lim, pos_lim = day_limit_pct(atr_pct), float(_cfg("SPIKE_RANGE_POS", 0.85))
     if day_lim > 0 and day_pct is not None and range_pos is not None and day_pct >= day_lim and range_pos >= pos_lim:
-        return (f"SPIKE_CHASE:DAY_SPIKE:up {day_pct:.1f}% on the day (limit {day_lim:.1f}%) and at range position {range_pos:.2f} "
-                f"(limit {pos_lim:.2f}) - wait for a pullback")
+        why = (f"SPIKE_CHASE:DAY_SPIKE:up {day_pct:.1f}% on the day (limit {day_lim:.1f}%) and at range position {range_pos:.2f} "
+               f"(limit {pos_lim:.2f}) - wait for a pullback")
+        pens.append(soft_gates.ratio_penalty(day_pct, day_lim))
     th_lim, near_lim = thrust_limit_pct(m1_range_pct), float(_cfg("SPIKE_NEAR_HIGH_PCT", 0.25))
     if th_lim > 0 and stats is not None and stats["thrust_pct"] >= th_lim and stats["off_high_pct"] <= near_lim:
         win = int(float(_cfg("SPIKE_THRUST_WINDOW_S", 180.0)))
-        return (f"SPIKE_CHASE:THRUST:+{stats['thrust_pct']:.2f}% inside {win}s (limit {th_lim:.2f}%) and only {stats['off_high_pct']:.2f}% under "
-                f"the {win}s high (limit {near_lim:.2f}%) - wait for it to settle")
-    return None
+        if why is None:
+            why = (f"SPIKE_CHASE:THRUST:+{stats['thrust_pct']:.2f}% inside {win}s (limit {th_lim:.2f}%) and only {stats['off_high_pct']:.2f}% under "
+                   f"the {win}s high (limit {near_lim:.2f}%) - wait for it to settle")
+        pens.append(soft_gates.ratio_penalty(stats["thrust_pct"], th_lim))
+    if why is None:
+        return None, None
+    pens = [x for x in pens if x]
+    return why, (max(pens) if pens else 1.0)
+
+
+def judge(day_pct: Optional[float], range_pos: Optional[float], stats: Optional[dict],
+          atr_pct: Optional[float] = None, m1_range_pct: Optional[float] = None) -> Optional[str]:
+    """The decision on plain numbers. Reason string or None. The limits adapt to the stock's own daily ATR % / 1-minute range when given. Pure."""
+    return judge_scored(day_pct, range_pos, stats, atr_pct=atr_pct, m1_range_pct=m1_range_pct)[0]
 
 
 def _day_numbers(symbol: str, ltp: float) -> Tuple[Optional[float], Optional[float]]:
@@ -151,6 +166,33 @@ def _day_numbers(symbol: str, ltp: float) -> Tuple[Optional[float], Optional[flo
         if hi > lo and ltp > 0:
             range_pos = max(0.0, min(1.0, (ltp - lo) / (hi - lo)))
     return day_pct, range_pos
+
+
+def spike_penalty(symbol: str, ltp: float, now: Optional[float] = None) -> Optional[dict]:
+    """E273 round 9: {"penalty": float, "why": reason} when the stock is in a day spike / mid-thrust and SPIKE_GUARD_MODE is live, else None (no spike, log, off, no data, any error).
+    Same inputs and limits as spike_reason(); the entry uses this one unless SOFT_GATES_MODE=veto. Never raises."""
+    try:
+        if mode() != "live" or ltp <= 0:
+            return None
+        from feed import ws_client
+        t = time.time() if now is None else now
+        day_pct, range_pos = _day_numbers(symbol, ltp)
+        ticks = ws_client.get_tick_buffer(symbol)
+        stats = window_stats(ticks, t, float(_cfg("SPIKE_THRUST_WINDOW_S", 180.0)), min_ticks=int(_cfg("SPIKE_MIN_TICKS", 8)))
+        atr_pct = None
+        try:
+            from screening import prev_day
+            pdv = prev_day.peek(symbol)
+            atr_pct = getattr(pdv, "atr_pct", None) if pdv else None
+        except Exception as e:  # noqa: BLE001 - no daily ATR = the fixed day limit
+            logger.debug("entry-timing: daily ATR for %s unavailable: %s", symbol, e)
+        why, pen = judge_scored(day_pct, range_pos, stats, atr_pct=atr_pct, m1_range_pct=avg_1m_range_pct(ticks, t))
+        guard_stats.bump("spike", "penalised" if why else "no_data" if (day_pct is None or range_pos is None or atr_pct is None) else "passed")
+        return {"penalty": float(pen), "why": why} if why and pen else None
+    except Exception as e:  # noqa: BLE001
+        logger.debug("entry-timing: spike penalty failed for %s (no opinion): %s", symbol, e)
+        guard_stats.bump("spike", "error")
+        return None
 
 
 def spike_reason(symbol: str, ltp: float, now: Optional[float] = None) -> Optional[str]:

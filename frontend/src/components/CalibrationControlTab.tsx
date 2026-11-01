@@ -22,12 +22,13 @@ import ShortSellingPanel from "./calibration/ShortSellingPanel";
 import SwingPanel from "./calibration/SwingPanel";
 import ReconcilePanel from "./calibration/ReconcilePanel";
 import TapePanel from "./calibration/TapePanel";
+import SetupScorecardPanel from "./calibration/SetupScorecardPanel";
 import StatusProbesPanel from "./calibration/StatusProbesPanel";
 import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
-type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "tape" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
+type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "tape" | "setups" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
 
 const SVC_ITEMS: { id: Svc; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }];
 const SECTIONS: { id: Section; label: string }[] = [
@@ -37,6 +38,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "weather", label: "Market Weather" },
   { id: "short", label: "Short selling" },
   { id: "tape", label: "Order-flow tape" },
+  { id: "setups", label: "Setup scorecard" },
   { id: "swing", label: "Swing lane" },
   { id: "reconcile", label: "Reconciliation" },
   { id: "probes", label: "Status probes" },
@@ -129,13 +131,14 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
       <SessionNotice />
-      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "swing" && section !== "reconcile" && section !== "tape" && section !== "probes" && <RunAllBar svc={svc} />}
+      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "swing" && section !== "reconcile" && section !== "tape" && section !== "setups" && section !== "probes" && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "alerts" && <SwitchesPanel svc="sch" />}
       {section === "auto" && <AutoCalibPanel />}
       {section === "weather" && <WeatherPanel />}
       {section === "short" && <ShortSellingPanel />}
       {section === "tape" && <TapePanel svc={svc} />}
+      {section === "setups" && <SetupScorecardPanel svc={svc} />}
       {section === "swing" && <SwingPanel />}
       {section === "reconcile" && <ReconcilePanel svc={svc} />}
       {section === "probes" && <StatusProbesPanel svc={svc} />}

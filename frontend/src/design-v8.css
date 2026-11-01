@@ -1,0 +1,71 @@
+/* ═══════════════════════════════════════════════════════════
+   STOCKKY — DESIGN LAYER v8 (E277): the trading-day rail, the pre-market plan tiles and the setup ladder  (loads AFTER design-v7.css)
+   Roll back by deleting the design-v8.css import in main.tsx (the pages keep working, minus these visuals' styling).
+     · Presentation only. RGB tokens only, so dark and light both work.
+     · Motion: a one-time rail sweep, a soft rise of the plan tiles and setup cards, and ONE loop (a ring on the slot running now). Transform / opacity only.
+       No price or money number animates. All of it is OFF under reduced-motion, TV mode and "Animations: Off" (html.v6-calm); the loop pauses on a hidden tab.
+       design-v8.test.mjs checks every `animation:` in this file against those lists.
+     · State is always in words and symbols too (check, dot, circle), never colour only.
+   ═══════════════════════════════════════════════════════════ */
+
+/* -- 1. trading-day rail ------------------------------------------------------------------------------------------ */
+.v8-day { margin: 0 0 0.75rem; padding: 0.75rem 0.9rem 0.65rem; border-radius: 14px; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-rgb) / 0.35); }
+.v8-day-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
+.v8-day-head h3 { margin: 0; font-size: 0.82rem; font-weight: 700; }
+.v8-day-clock { font-size: 0.68rem; color: rgb(var(--fg-rgb) / 0.6); }
+.v8-day-scroll { overflow-x: auto; padding-bottom: 0.2rem; }
+.v8-slots { position: relative; list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(var(--n, 8), minmax(4.4rem, 1fr)); }
+.v8-track { position: absolute; left: calc(100% / var(--n, 8) / 2); right: calc(100% / var(--n, 8) / 2); top: 14px; height: 3px; border-radius: 3px; background: rgb(var(--border-strong-rgb)); overflow: hidden; pointer-events: none; }
+.v8-fill { display: block; height: 100%; width: 100%; border-radius: 3px; transform-origin: 0 50%; transform: scaleX(calc(var(--p, 0) / 100)); background: rgb(var(--accent-rgb)); transition: transform var(--dur-slow) var(--ease-out); animation: v8-sweep 900ms var(--ease-out) backwards; }
+.v8-slot { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 0.12rem; text-align: center; padding: 0 0.15rem; cursor: help; }
+.v8-slot .dot { position: relative; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 0.75rem; font-weight: 800; background: rgb(var(--bg-rgb)); border: 2px solid rgb(var(--border-strong-rgb)); color: rgb(var(--fg-rgb) / 0.55); }
+.v8-slot b { font-size: 0.72rem; font-weight: 700; line-height: 1.15; }
+.v8-slot small { font-size: 0.66rem; font-variant-numeric: tabular-nums; color: rgb(var(--fg-rgb) / 0.6); }
+.v8-slot.done .dot { border-color: rgb(var(--accent-rgb) / 0.7); color: rgb(var(--accent-rgb)); }
+.v8-slot.now .dot { border-color: rgb(var(--accent-rgb)); color: rgb(var(--accent-rgb)); background: rgb(var(--accent-rgb) / 0.14); }
+.v8-slot.now .dot::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid rgb(var(--accent-rgb) / 0.55); animation: v8-ring 2.4s ease-out infinite; }
+.v8-slot.next .dot { border-color: rgb(var(--info-rgb) / 0.8); color: rgb(var(--info-rgb)); }
+.v8-slot.later { opacity: 0.7; }
+.v8-day.off .v8-fill { transform: scaleX(0); }
+.v8-day-words { margin: 0.45rem 0 0; font-size: 0.74rem; line-height: 1.4; max-width: 72ch; color: rgb(var(--fg-rgb) / 0.8); }
+
+/* -- 2. pre-market plan tiles -------------------------------------------------------------------------------------- */
+.v8-tiles { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(6.2rem, 1fr)); gap: 0.5rem; }
+.v8-tiles li { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.45rem 0.55rem; border-radius: 10px; border: 1px solid rgb(var(--border-rgb)); cursor: help; animation: v8-rise var(--dur-med) var(--ease-out) backwards; }
+.v8-tiles li:nth-child(2) { animation-delay: 60ms; } .v8-tiles li:nth-child(3) { animation-delay: 120ms; } .v8-tiles li:nth-child(4) { animation-delay: 180ms; } .v8-tiles li:nth-child(5) { animation-delay: 240ms; }
+.v8-tiles small { font-size: 0.66rem; color: rgb(var(--fg-rgb) / 0.6); }
+.v8-tiles b { font-size: 0.9rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* -- 3. setup ladder ----------------------------------------------------------------------------------------------- */
+.v8-setups { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.6rem; }
+.v8-setup { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.55rem 0.65rem; border-radius: 12px; border: 1px solid rgb(var(--border-rgb)); cursor: help; animation: v8-rise var(--dur-med) var(--ease-out) backwards; }
+.v8-setup:nth-child(2) { animation-delay: 70ms; } .v8-setup:nth-child(3) { animation-delay: 140ms; } .v8-setup:nth-child(4) { animation-delay: 210ms; }
+.v8-setup-id { display: grid; place-items: center; flex: none; width: 2.1rem; height: 2.1rem; border-radius: 10px; font-size: 0.8rem; font-weight: 800; border: 2px solid rgb(var(--border-strong-rgb)); }
+.v8-setup-body { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.v8-setup-body b { font-size: 0.8rem; }
+.v8-setup-body small { font-size: 0.68rem; color: rgb(var(--fg-rgb) / 0.65); }
+.v8-setup-stage { font-weight: 600; color: rgb(var(--fg-rgb) / 0.85) !important; }
+.v8-setup.promoted { border-color: rgb(var(--buy-rgb) / 0.6); }
+.v8-setup.promoted .v8-setup-id { border-color: rgb(var(--buy-rgb)); color: rgb(var(--buy-rgb)); }
+.v8-setup.demoted { border-color: rgb(var(--warn-rgb) / 0.6); }
+.v8-setup.demoted .v8-setup-id { border-color: rgb(var(--warn-rgb)); color: rgb(var(--warn-rgb)); }
+
+@keyframes v8-sweep { from { transform: scaleX(0); } to { transform: scaleX(calc(var(--p, 0) / 100)); } }
+@keyframes v8-ring { 0% { transform: scale(0.9); opacity: 0.8; } 100% { transform: scale(1.35); opacity: 0; } }
+@keyframes v8-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* -- off switches: ONE list, repeated for reduced-motion, TV mode, "Animations: Off" (html.v6-calm) and the hidden tab ------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .v8-slot.now .dot::after, .v8-fill, .v8-tiles li, .v8-setup { animation: none !important; }
+  .v8-fill { transition: none !important; }
+}
+html.tv .v8-slot.now .dot::after,
+html.tv .v8-fill,
+html.tv .v8-tiles li,
+html.tv .v8-setup { animation: none !important; }
+html.v6-calm .v8-slot.now .dot::after,
+html.v6-calm .v8-fill,
+html.v6-calm .v8-tiles li,
+html.v6-calm .v8-setup { animation: none !important; }
+html.v6-calm .v8-fill, html.tv .v8-fill { transition: none !important; }
+html[data-hidden="true"] .v8-slot.now .dot::after { animation-play-state: paused; }

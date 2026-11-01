@@ -21,11 +21,11 @@ from tz_utils import ist_now, ist_time_at_or_after, ist_today_str, is_nse_holida
 
 logger = logging.getLogger("position-stocks-preopen")
 
-_snap: dict = {"day": None, "gaps": {}, "captured_at": None, "warmed": 0}
+_snap: dict = {"day": None, "gaps": {}, "captured_at": None, "warmed": 0, "final_day": None, "final_updated": 0, "final_at": None}
 
 
 def reset() -> None:
-    _snap.update({"day": None, "gaps": {}, "captured_at": None, "warmed": 0})
+    _snap.update({"day": None, "gaps": {}, "captured_at": None, "warmed": 0, "final_day": None, "final_updated": 0, "final_at": None})
 
 
 def gap_pct(price, prev_close) -> Optional[float]:
@@ -84,8 +84,49 @@ def record(rows, now: Optional[datetime] = None) -> int:
         return 0
 
 
+def due_final(now: Optional[datetime] = None) -> bool:
+    """E272: True from PREOPEN_FINAL_TIME_IST (09:12, after NSE matching ends) until the 09:15 bell on a trading day while today's final read has not
+    been taken. Never raises."""
+    try:
+        if not (config.PREOPEN_SNAPSHOT_ENABLED and getattr(config, "PREOPEN_FINAL_READ_ENABLED", True)):
+            return False
+        n = ist_now(now)
+        if n.weekday() >= 5 or is_nse_holiday(n) or _snap.get("final_day") == ist_today_str(now):
+            return False
+        return (ist_time_at_or_after(parse_hhmm(getattr(config, "PREOPEN_FINAL_TIME_IST", "09:12"), 9, 12), now)
+                and not ist_time_at_or_after(parse_hhmm("09:15", 9, 15), now))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def record_final(rows, now: Optional[datetime] = None) -> int:
+    """E272: merge the gap of every FRESH row into today's snapshot (a final gap replaces the 09:10 one; a symbol without a fresh final price keeps
+    its 09:10 gap); marks the final read done for the day. Returns how many gaps were replaced or added. Never raises."""
+    try:
+        today = ist_today_str(now)
+        if _snap["day"] != today:
+            _snap.update({"day": today, "gaps": {}, "captured_at": (now or datetime.now(timezone.utc)).isoformat()})
+        max_age = float(config.PREOPEN_MAX_PRICE_AGE_S)
+        changed = 0
+        for row in rows or []:
+            g = _row_gap(row, max_age)
+            sym = str((row or {}).get("symbol") or "").upper().replace(".NS", "").strip() if isinstance(row, dict) else ""
+            if g is not None and sym:
+                _snap["gaps"][sym] = g
+                changed += 1
+        _snap.update({"final_day": today, "final_updated": changed, "final_at": (now or datetime.now(timezone.utc)).isoformat()})
+        return changed
+    except Exception as e:  # noqa: BLE001
+        logger.debug("preopen.record_final failed (ignored): %s", e)
+        try:
+            _snap["final_day"] = ist_today_str(now)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 def status() -> dict:
-    return {"day": _snap["day"], "symbols_with_gap": len(_snap["gaps"]), "captured_at": _snap["captured_at"],
+    return {"day": _snap["day"], "final_day": _snap.get("final_day"), "final_updated": _snap.get("final_updated", 0), "final_at": _snap.get("final_at"), "symbols_with_gap": len(_snap["gaps"]), "captured_at": _snap["captured_at"],
             "warmed": _snap["warmed"], "gaps": dict(sorted(_snap["gaps"].items(), key=lambda kv: -abs(kv[1]))[:15])}
 
 
@@ -106,30 +147,60 @@ def atr_gap_threshold(symbol: str) -> Optional[float]:
         return None
 
 
-def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
-    """A "PREOPEN_GAP_UP/DOWN:..." reason while the gate window is open, else None. Never raises."""
+def gap_of(symbol: str, now: Optional[datetime] = None) -> Optional[float]:
+    """E273: today's stored pre-open gap % for `symbol` (the 09:12 final read where there is one), or None. Never raises."""
     try:
-        if not config.PREOPEN_SNAPSHOT_ENABLED or _snap["day"] != ist_today_str(now):
+        if _snap["day"] != ist_today_str(now):
             return None
         g = _snap["gaps"].get(str(symbol or "").upper().replace(".NS", "").strip())
+        return float(g) if g is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def gap_scored(symbol: str, now: Optional[datetime] = None):
+    """(reason, penalty) for the pre-open gap while the gate window is open, else (None, None). E273 round 10: the penalty is the gap divided by the limit that
+    fired (the stock's own ATR limit or the fixed block %, whichever blocked), 1.0 = just at the limit, capped by orders/soft_gates.py. Never raises."""
+    try:
+        if not config.PREOPEN_SNAPSHOT_ENABLED or _snap["day"] != ist_today_str(now):
+            return None, None
+        g = _snap["gaps"].get(str(symbol or "").upper().replace(".NS", "").strip())
         if g is None:
-            return None
+            return None, None
         if ist_time_at_or_after(parse_hhmm(config.PREOPEN_GAP_GATE_UNTIL_IST, 10, 0), now):
-            return None
+            return None, None
+        from orders import soft_gates
         up, dn = float(config.PREOPEN_GAP_UP_BLOCK_PCT or 0), float(config.PREOPEN_GAP_DOWN_BLOCK_PCT or 0)
+
+        def _pen(size: float, limit: float) -> float:
+            return soft_gates.ratio_penalty(size, limit) or 1.0
+
         atr_thr = atr_gap_threshold(symbol)                  # E107: the stock's own ATR test; the LOWER of it and the fixed % blocks (it can only block more)
         if atr_thr is not None:
             if g >= atr_thr and (up <= 0 or atr_thr < up):
-                return f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= {atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not chasing a big gap-up"
+                return (f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= {atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not chasing a big gap-up",
+                        _pen(g, atr_thr))
             if g <= -atr_thr and (dn <= 0 or atr_thr < dn):
-                return f"PREOPEN_GAP_DOWN:indicative open {g:+.1f}% vs previous close <= -{atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not catching a gap-down"
+                return (f"PREOPEN_GAP_DOWN:indicative open {g:+.1f}% vs previous close <= -{atr_thr:.1f}% ({config.PREOPEN_GAP_ATR_MULT:g} x its daily ATR) - not catching a gap-down",
+                        _pen(-g, atr_thr))
         if up > 0 and g >= up:
-            return f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= +{up:.1f}% - not chasing a big gap-up"
+            return f"PREOPEN_GAP_UP:indicative open {g:+.1f}% vs previous close >= +{up:.1f}% - not chasing a big gap-up", _pen(g, up)
         if dn > 0 and g <= -dn:
-            return f"PREOPEN_GAP_DOWN:indicative open {g:+.1f}% vs previous close <= -{dn:.1f}% - not catching a gap-down"
-        return None
+            return f"PREOPEN_GAP_DOWN:indicative open {g:+.1f}% vs previous close <= -{dn:.1f}% - not catching a gap-down", _pen(-g, dn)
+        return None, None
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
+
+
+def gap_reason(symbol: str, now: Optional[datetime] = None) -> Optional[str]:
+    """A "PREOPEN_GAP_UP/DOWN:..." reason while the gate window is open, else None. Never raises."""
+    return gap_scored(symbol, now)[0]
+
+
+def gap_penalty(symbol: str, now: Optional[datetime] = None) -> Optional[dict]:
+    """E273 round 10: {"penalty": float, "why": reason} when the pre-open gap is past its limit inside the gate window, else None. Never raises."""
+    why, pen = gap_scored(symbol, now)
+    return {"penalty": float(pen), "why": why} if why and pen else None
 
 
 def _universe() -> list:
@@ -160,6 +231,11 @@ async def run(symbols: Optional[list] = None) -> dict:
     """Warm the caches and take the gap snapshot. Never raises; marks the day even when nothing priced so it runs once."""
     try:
         syms = list(symbols) if symbols is not None else _universe()
+        try:                                                # E272: the premarket watchlist is recorded from the open
+            from feed import bar_recorder
+            bar_recorder.note_symbols(syms)
+        except Exception:  # noqa: BLE001
+            pass
         warmed = 0
         try:
             from screening import prev_day, trade_gates, vix_gate
@@ -179,4 +255,17 @@ async def run(symbols: Optional[list] = None) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("[preopen] snapshot failed (ignored): %s", e)
         _snap["day"] = ist_today_str()
+        return status()
+
+
+async def run_final(symbols: Optional[list] = None) -> dict:
+    """E272: the final pre-open read (after NSE matching, 09:12). Never raises; marks the day even when nothing priced so it runs once."""
+    try:
+        syms = list(symbols) if symbols is not None else _universe()
+        n = record_final(await _fetch_rows(syms)) if syms else record_final([])
+        logger.info("[preopen] final read: %d symbols asked, %d gaps replaced or added", len(syms), n)
+        return status()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[preopen] final read failed (ignored): %s", e)
+        _snap["final_day"] = ist_today_str()
         return status()

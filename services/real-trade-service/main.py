@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 import config
 import models
 import journal_notes
-from risk_engine.effective_risk import effective_risk_pct, effective_risk_pct_in_force, market_state_risk_mult
+from risk_engine.effective_risk import effective_max_positions, effective_risk_pct, effective_risk_pct_in_force, market_state_risk_mult
 from auth.admin_auth import (
     require_admin, require_admin_if_real, verify_admin_password, issue_session_token, AdminAuthError,
 )
@@ -48,7 +48,7 @@ from portfolio.portfolio import (
 # already import these same three names from the same place for the same
 # purpose; mirrored here.
 from risk_engine.engine import AccountState, OrderIntent, evaluate as risk_evaluate
-from execution import dhan_client, shared_daily_pnl, shared_exposure, shared_symbol_lock
+from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure, shared_symbol_lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("real-trade-service")
@@ -702,8 +702,12 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
                 "offhours_interval_seconds": config.AFTERHOURS_SCAN_OFFHOURS_INTERVAL_SECONDS,
                 "ramp_window_ist": f"{config.AFTERHOURS_SCAN_RAMP_START_IST}–{config.AFTERHOURS_SCAN_RAMP_END_IST}",
                 "ramp_interval_seconds": config.AFTERHOURS_SCAN_RAMP_INTERVAL_SECONDS,
-                "intraday_news_window_ist": f"{config.INTRADAY_NEWS_START_IST}–{config.INTRADAY_NEWS_END_IST}",
-                "intraday_news_interval_seconds": config.INTRADAY_NEWS_INTERVAL_SECONDS,
+                "intraday_news_window_ist": f"{config.INTRADAY_NEWS_START_IST}–{config.INTRADAY_V2_END_IST if config.AFTERHOURS_CADENCE_V2 else config.INTRADAY_NEWS_END_IST}",
+                "intraday_news_interval_seconds": config.INTRADAY_V2_SLOW_INTERVAL_SECONDS if config.AFTERHOURS_CADENCE_V2 else config.INTRADAY_NEWS_INTERVAL_SECONDS,
+                "intraday_news_fast_interval_seconds": config.INTRADAY_V2_FAST_INTERVAL_SECONDS if config.AFTERHOURS_CADENCE_V2 else None,   # E272 round 7: 09:00-09:20
+                "intraday_event_source": config.INTRADAY_EVENT_SOURCE,
+                "intraday_event_veto": config.INTRADAY_EVENT_VETO,
+                "intraday_event_trigger": config.INTRADAY_EVENT_TRIGGER,
                 "finalize_time_ist": config.AFTERHOURS_FINALIZE_TIME_IST,
                 "max_candidates": config.AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES,
                 # 2026-09-17 (session58, user request): manual-trigger
@@ -750,7 +754,7 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
         "risk_config": {
             "risk_per_trade_pct": effective_risk_pct_in_force(risk) if risk else None,
             "max_daily_loss_pct": risk.max_daily_loss_pct if risk else None,
-            "max_concurrent_positions": risk.max_concurrent_positions if risk else None,
+            "max_concurrent_positions": effective_max_positions(risk) if risk else None,
             "max_portfolio_risk_pct": risk.max_portfolio_risk_pct if risk else None,
             # Previously computed server-side but never sent to the frontend,
             # so these three were configurable only via a raw API call —
@@ -1061,11 +1065,11 @@ async def get_risk_config(mode: str, db: Session = Depends(get_db)):
     return {
         "mode": mode,
         # Market Weather (display): the layer's mode and the multiplier folded into the number below.
-        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "shadow"),
+        "market_state_mode": getattr(config, "MARKET_STATE_MODE", "live"),
         "market_state_risk_mult": market_state_risk_mult(),
         "risk_per_trade_pct": effective_risk_pct_in_force(risk),
         "max_daily_loss_pct": risk.max_daily_loss_pct,
-        "max_concurrent_positions": risk.max_concurrent_positions,
+        "max_concurrent_positions": effective_max_positions(risk),
         "max_portfolio_risk_pct": risk.max_portfolio_risk_pct,
         "stale_data_seconds": risk.stale_data_seconds,
         "max_tick_volatility_mult": risk.max_tick_volatility_mult,
@@ -1313,7 +1317,7 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         equity=account_row.current_equity,
         risk_per_trade_pct=effective_risk_pct(risk_row),
         max_daily_loss_pct=risk_row.max_daily_loss_pct,
-        max_concurrent_positions=risk_row.max_concurrent_positions,
+        max_concurrent_positions=effective_max_positions(risk_row),
         max_portfolio_risk_pct=risk_row.max_portfolio_risk_pct,
         stale_data_seconds=risk_row.stale_data_seconds,
         max_tick_volatility_mult=risk_row.max_tick_volatility_mult,
@@ -1363,6 +1367,12 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
             if mode == "REAL" else 0.0
         ),
         other_service_exposure_age_s=_peer_age,
+        # E276 round 50: shared portfolio heat (gap allowance on carried holds + position-stocks-service's open risk); zeros when DEMO / off / peer stale.
+        open_positions_gap_allowance=heat_state.own_heat(db, mode, open_positions)[1],
+        other_service_open_risk=heat_state.peer_heat(db, mode)[0],
+        other_service_capital_base=heat_state.peer_heat(db, mode)[1],
+        open_positions_sector_risk=heat_state.own_sector_risk(db, mode, open_positions),
+        other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
         loss_streak=_streak,
         loss_streak_last_close_at=_streak_at,
         # 2026-09-21 (session79): same flat max-trade-value cap resolution
@@ -2852,23 +2862,6 @@ async def kronos_status(admin: Optional[str] = Depends(require_admin)):
     return _kg.stats()
 
 
-@app.get("/range52w/status")
-async def range52w_status(admin: Optional[str] = Depends(require_admin)):
-    """group440: 52-week "top 12%" candidate rule - is it live or log-only, how many candidates it WOULD have rejected since boot, and the last 50
-    symbols (with their range position and the market score). Read-only; nothing in the entry path reads it. Counters reset on restart."""
-    from candidate_engine import candidates as _cd
-    try:
-        out = dict(_cd.range_52w_log_only_stats())
-        out.update({
-            "regime_gate": bool(_cd.RANGE_52W_REGIME_GATE), "weak_regime_score": _cd.RANGE_52W_WEAK_REGIME_SCORE,
-            "fresh_high_exempt": bool(_cd.FRESH_HIGH_EXEMPT), "top_pct": _cd.OVEREXTENDED_52W_TOP_PCT,
-            "current_market_score": _cd._cycle_market_score,
-        })
-        return out
-    except Exception as e:  # noqa: BLE001 - status route must never 500
-        return {"error": str(e)[:200]}
-
-
 @app.get("/swing/rank")
 async def swing_rank(symbols: str = "", benchmark: str = "", limit: int = 30, screen_only: bool = False,
                      admin: Optional[str] = Depends(require_admin)):
@@ -3023,6 +3016,7 @@ async def review_fixes_status(admin: Optional[str] = Depends(require_admin), db:
             "late_entry_blocked_now": calendar_gate.late_entry_block_reason(),
             "stop_overshoot_allowance_pct": config.STOP_OVERSHOOT_ALLOWANCE_PCT,
             "entry_min_qty": config.ENTRY_MIN_QTY,
+            "entry_min_qty_mode": getattr(config, "ENTRY_MIN_QTY_MODE", "cost"),
             "broker_stop_enabled": bool(config.BROKER_STOP_ENABLED),
             "orb": {"mode": config.ORB_MODE, **orb_shadow.stats(), "bars": orb_bars.stats()},          # E113: bars.hit / miss / stale = how many decisions carried the close-trigger fields
             "stopout_guard": {"enabled": bool(config.STOPOUT_GUARD_ENABLED), "day_pause_n": config.STOPOUT_DAY_PAUSE_N,
@@ -3048,7 +3042,7 @@ async def timesfm_status(admin: Optional[str] = Depends(require_admin)):
 
 @app.get("/regime-rules/status")
 async def regime_rules_status(admin: Optional[str] = Depends(require_admin)):
-    """2026-10-23: rules that switch by market regime (log only) - config, the rule table, counters since boot and the last verdicts. Read-only; nothing in the entry path reads it."""
+    """E273 round 7: rules that switch by market regime (live soft penalty) - config, the rule table, counters since boot (penalised / skipped included) and the last verdicts. Read-only."""
     from entry_engine import regime_rules as _rr
     return _rr.stats()
 

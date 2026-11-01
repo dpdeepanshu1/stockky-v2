@@ -78,7 +78,7 @@ def test_entry_reason_fails_open_on_db_error(monkeypatch):
 # ---- ORB recorder ---------------------------------------------------------------------------------------------------
 @pytest.fixture
 def orb_on(monkeypatch):
-    monkeypatch.setattr(config, "ORB_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "ORB_MODE", "live", raising=False)
     orb_shadow._reset_for_tests()
     yield
     orb_shadow._reset_for_tests()
@@ -139,7 +139,7 @@ def test_shipped_defaults_in_clean_interpreter():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SCALP_", "ENTRY_", "STOPOUT_", "ORB_"))}
     r = subprocess.run([sys.executable, "-I", "-c", code], cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60)
     line = next(x for x in r.stdout.splitlines() if x.startswith("R"))
-    assert json.loads(line[1:]) == ["14:00", 3, True, 3, True, "shadow"]
+    assert json.loads(line[1:]) == ["14:00", 3, True, 3, True, "live"]
 
 
 def test_cutoff_blocks_after_1400_by_default_value(monkeypatch):

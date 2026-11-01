@@ -94,3 +94,28 @@ def reject_reason(entry_price: float, qty: int, target_pct: float) -> Optional[s
         f"edge=Rs{r.expected_edge:.2f} cost=Rs{r.cost:.2f}({r.cost_pct:.2f}%) "
         f"qty={qty} value=Rs{r.trade_value:.2f} target={target_pct:.2f}%"
     )
+
+
+def min_qty_mode() -> str:
+    m = str(getattr(config, "ENTRY_MIN_QTY_MODE", "cost") or "cost").strip().lower()
+    return m if m in ("cost", "fixed") else "cost"
+
+
+def effective_min_qty(entry_price: float, target_pct: float, fixed_floor: int) -> int:
+    """E273 round 6: the minimum shares for an entry. `fixed` (or an unusable input, or the cost gate switched off) = the flat ENTRY_MIN_QTY floor, as before.
+    `cost` = the smallest quantity from 1 up to that floor at which the cost gate passes; when none does, the floor itself (the cost gate then judges it as
+    before). Never raises; never above the flat floor, so it can only let a smaller trade through, and only one whose own edge pays for its costs."""
+    try:
+        floor = int(fixed_floor or 0)
+        if floor <= 1 or min_qty_mode() != "cost" or not config.SCALP_COST_GATE_ENABLED:
+            return floor
+        px, tp = float(entry_price), float(target_pct)
+        if px <= 0 or tp <= 0:
+            return floor
+        for q in range(1, floor):
+            if evaluate(px, q, tp).passes:
+                return q
+        return floor
+    except Exception as e:  # noqa: BLE001
+        logger.debug("cost gate: effective_min_qty failed, flat floor kept: %s", e)
+        return int(fixed_floor or 0)

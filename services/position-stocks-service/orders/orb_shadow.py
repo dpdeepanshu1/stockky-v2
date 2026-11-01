@@ -1,15 +1,17 @@
-"""orders/orb_shadow.py - opening-range-breakout recorder for position-stocks (group 479). RECORD ONLY, no live mode.
+"""orders/orb_shadow.py - opening-range breakout for position-stocks (group 479; LIVE input since E273 round 8).
 
-Same verdict as real-trade-service entry_engine/orb_shadow.py (group 470), computed from the cached market-data /quote row (day high / low, avg price
-= VWAP, spread) at the moment a position is opened. Stored in scalp_positions.flow_json["orb"]. Nothing is ordered, blocked or resized.
-RANGE: the first quote seen between ORB_RANGE_END_IST (09:20) and ORB_CAPTURE_UNTIL_IST (09:26) fixes range_high / range_low from the quote's day high / low.
-A symbol first seen after the capture window has no range (reason "no_range"). The recorder is fed by record_quote() (called for every entry candidate)
-so the range exists even for a symbol that is only bought later.
+Same verdict shape as real-trade-service entry_engine/orb_shadow.py (group 470; that copy is still the old record-only one), computed from the cached market-data /quote row (day high / low, avg price
+= VWAP, spread) at the moment a position is opened. Stored in scalp_positions.flow_json["orb"]; setup_engine reads range_high and the closed-bar trigger as the
+S1 / S2 trigger (orders/setup_live.py, orders/setup_inputs.py). This module itself orders, blocks and resizes nothing: it measures.
+RANGE (E273 round 8): the 09:15 to ORB_RANGE_END_IST (09:20) 1-minute bars from feed/bar_store give the exact range ("range_src": "bars"; at least ORB_BAR_RANGE_MIN_BARS
+bars, ORB_BAR_RANGE_ENABLED). Fallback: the first quote seen between ORB_RANGE_END_IST and ORB_CAPTURE_UNTIL_IST (09:26) fixes range_high / range_low from the quote's
+day high / low ("range_src": "quote"). Before E273 round 8 only that window existed, so a symbol first seen after 09:26 had no range (reason "no_range") and S1 / S2 could not fire;
+now it has one whenever its range bars were recorded. record_quote() is still called for every entry candidate.
 VERDICT: price above range_high, above VWAP, spread <= ORB_MAX_SPREAD_PCT, range width inside [ORB_MIN_RANGE_PCT, ORB_MAX_RANGE_PCT], time <= ORB_LATEST_ENTRY_IST.
 limit = range_high x (1 + ORB_LIMIT_BUFFER_PCT %), stop = range_low.
 E119: SHORT mirror (side="SHORT", used for a live short only): price BELOW range_low and below-not-above VWAP count, limit = range_low x (1 - buffer), stop = range_high, and the close-based trigger is the first completed bar
-that closes BELOW range_low. A long record is byte-for-byte what it was (no "side" key); a short record carries "side": "SHORT". Record only, nothing is ordered, blocked or resized.
-E104: bar_fields() adds a close-based trigger and the trigger bar's volume against the opening-range bars' average (record only). Every function never raises. ORB_MODE=off stops all recording.
+that closes BELOW range_low. A long record has no "side" key; a short record carries "side": "SHORT".
+E104: bar_fields() adds a close-based trigger and the trigger bar's volume against the opening-range bars' average. Every function never raises. ORB_MODE=off stops all recording (then S1 / S2 have no range).
 """
 from __future__ import annotations
 
@@ -24,7 +26,8 @@ from tz_utils import ist_now, ist_time_at_or_after, parse_hhmm
 logger = logging.getLogger("position-stocks-orb-shadow")
 
 _ranges: Dict[Tuple[str, str], Dict[str, float]] = {}
-_stats: Dict[str, int] = {"recorded": 0, "would_enter": 0, "no_range": 0, "ranges": 0}
+_bar_ranges: Dict[Tuple[str, str], Dict[str, float]] = {}   # E273 round 8: ranges built from the recorded 1-minute bars (final once the range end has passed)
+_stats: Dict[str, int] = {"recorded": 0, "would_enter": 0, "no_range": 0, "ranges": 0, "bar_ranges": 0}
 
 
 def _f(v) -> Optional[float]:
@@ -42,7 +45,8 @@ def _t(name: str, dh: int, dm: int):
 
 
 def _off() -> bool:
-    return str(getattr(config, "ORB_MODE", "shadow") or "shadow").lower() == "off"
+    """ORB_MODE is live | off; every other value (including the old shadow) reads as live."""
+    return str(getattr(config, "ORB_MODE", "live") or "live").strip().lower() == "off"
 
 
 def record_quote(symbol: str, quote: Any, now: Optional[datetime] = None) -> None:
@@ -69,6 +73,56 @@ def record_quote(symbol: str, quote: Any, now: Optional[datetime] = None) -> Non
                     _ranges.pop(k, None)
     except Exception as e:  # noqa: BLE001
         logger.debug("orb record_quote failed: %s", e)
+
+
+def bar_range(symbol: str, now: Optional[datetime] = None, bars: Optional[Any] = None) -> Optional[Dict[str, float]]:
+    """E273 round 8: the opening range from today's recorded 1-minute bars: highest high and lowest low of the bars that START in [09:15, ORB_RANGE_END_IST).
+    {"high", "low", "n"} once the range end has passed and at least ORB_BAR_RANGE_MIN_BARS usable bars exist; None otherwise (before the range end, switch off, too few
+    bars, unusable rows, high <= low). A found range is cached for the day: its bars are all complete after the range end. Never raises."""
+    try:
+        if not bool(getattr(config, "ORB_BAR_RANGE_ENABLED", True)):
+            return None
+        n = ist_now(now)
+        sym = str(symbol or "").strip().upper()
+        key = (sym, n.date().isoformat())
+        hit = _bar_ranges.get(key)
+        if hit is not None:
+            return hit
+        re_t = _t("ORB_RANGE_END_IST", 9, 20)
+        end_ts = n.replace(hour=re_t.hour, minute=re_t.minute, second=0, microsecond=0).timestamp()
+        if n.timestamp() < end_ts:
+            return None
+        if bars is None:
+            from feed import bar_store
+            bars = bar_store.get_bars(sym)
+        if not bars:
+            return None
+        open_ts = n.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
+        hi = lo = None
+        used = 0
+        for b in bars:                                                           # one unreadable row must not hide the rest
+            try:
+                t, h, l = _f(b[0]), _f(b[2]), _f(b[3])
+            except (TypeError, IndexError, KeyError):
+                continue
+            if t is None or h is None or l is None or h <= 0 or l <= 0 or h < l or t < open_ts or t >= end_ts:
+                continue
+            hi = h if hi is None else max(hi, h)
+            lo = l if lo is None else min(lo, l)
+            used += 1
+        if used < max(1, int(getattr(config, "ORB_BAR_RANGE_MIN_BARS", 3) or 3)) or hi is None or lo is None or not hi > lo:
+            return None
+        rng = {"high": hi, "low": lo, "n": float(used)}
+        _bar_ranges[key] = rng
+        _stats["bar_ranges"] += 1
+        if len(_bar_ranges) > 3000:
+            day = n.date().isoformat()
+            for k in [k for k in _bar_ranges if k[1] != day]:
+                _bar_ranges.pop(k, None)
+        return rng
+    except Exception as e:  # noqa: BLE001
+        logger.debug("orb bar_range failed: %s", e)
+        return None
 
 
 def bar_fields(symbol: str, rh: float, now: Optional[datetime] = None, bars: Optional[Any] = None, side: str = "LONG") -> Dict[str, Any]:
@@ -133,9 +187,12 @@ def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional
         if n.time() > _t("ORB_LATEST_ENTRY_IST", 10, 30):
             return None
         key = (str(symbol or "").strip().upper(), n.date().isoformat())
-        rng = _ranges.get(key)
+        rng = bar_range(symbol, now)                                   # E273 round 8: the exact 09:15-09:20 range from the recorded bars first ...
+        src = "bars" if rng is not None else "quote"
+        if rng is None:
+            rng = _ranges.get(key)                                     # ... the quote capture window (09:20-09:26) as the fallback
         px = _f(ltp) or _f(q.get("price"))
-        out: Dict[str, Any] = {"v": 1, "mode": "shadow", "at": n.strftime("%H:%M:%S")}
+        out: Dict[str, Any] = {"v": 1, "mode": "live", "at": n.strftime("%H:%M:%S")}
         if rng is None or px is None:
             out.update(would_enter=False, reason="no_range" if rng is None else "no_price")
             return out
@@ -163,15 +220,15 @@ def evaluate(symbol: str, quote: Any, ltp: Optional[float] = None, now: Optional
         if max_w > 0 and width > max_w:
             reasons.append("range_too_wide")
         buf = float(getattr(config, "ORB_LIMIT_BUFFER_PCT", 0.0) or 0.0)
-        out.update(range_high=round(rh, 2), range_low=round(rl, 2), range_pct=round(width, 3), would_enter=not reasons, reasons=reasons)
+        out.update(range_high=round(rh, 2), range_low=round(rl, 2), range_pct=round(width, 3), range_src=src, would_enter=not reasons, reasons=reasons)
         if short:
             out.update(side="SHORT", limit_price=round(rl * (1 - buf / 100.0), 2), stop_price=round(rh, 2),
                        stop_pct=round((rh - px) / px * 100.0, 3) if rh > px else None)
-            out.update(bar_fields(symbol, rl, now, side="SHORT"))    # E119: close BELOW the range low + trigger-bar volume (record only)
+            out.update(bar_fields(symbol, rl, now, side="SHORT"))    # E119: close BELOW the range low + trigger-bar volume
         else:
             out.update(limit_price=round(rh * (1 + buf / 100.0), 2), stop_price=round(rl, 2),
                        stop_pct=round((px - rl) / px * 100.0, 3) if px > rl else None)
-            out.update(bar_fields(symbol, rh, now))      # E104: close-based trigger + trigger-bar volume (record only)
+            out.update(bar_fields(symbol, rh, now))      # E104: close-based trigger + trigger-bar volume 
         return out
     except Exception as e:  # noqa: BLE001
         logger.debug("orb evaluate failed: %s", e)
@@ -209,5 +266,6 @@ def stats() -> Dict[str, int]:
 
 def _reset_for_tests() -> None:
     _ranges.clear()
+    _bar_ranges.clear()
     for k in _stats:
         _stats[k] = 0

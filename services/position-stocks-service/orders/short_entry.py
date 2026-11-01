@@ -22,9 +22,10 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
+from orders import setup_short, short_target, squeeze_guard
 from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
-from tz_utils import ist_time_at_or_after, ist_today_str, parse_hhmm
+from tz_utils import ist_now, ist_time_at_or_after, ist_today_str, parse_hhmm
 
 logger = logging.getLogger("position-stocks-short-entry")
 
@@ -93,6 +94,11 @@ def _count(code: str) -> None:
 
 
 def _log(db: Session, cand: Any, decision: str, reason: str) -> None:
+    try:                                                   # E272: record this candidate's bars even when it is outside the turnover top list
+        from feed import bar_recorder as _br
+        _br.note_symbols([cand.symbol])
+    except Exception:  # noqa: BLE001
+        pass
     try:
         db.add(ScalpCandidateLog(symbol=cand.symbol, window_source=str(getattr(cand, "window_label", "") or "")[:8],
                                  pct_change=float(getattr(cand, "pct_change", 0.0) or 0.0),
@@ -222,7 +228,10 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         return None
 
     facts = short_gates.gather_facts(sym, ltp, board_row, quality, now)
-    verdict = short_gates.evaluate(facts, now)
+    early = short_gates.early_open(now)                       # E274 round 41: 09:21-09:45, only an S4 short may go on (the plain call below keeps the old signature)
+    _skip_board = _board_defers(quality)                       # E274 round 42: a negative-event short is judged by S4 (Board = a confirmation), not refused for a Board that is behind
+    _kw = {k: v for k, v in (("early", True), ("skip_board", True)) if (early if k == "early" else _skip_board)}
+    verdict = short_gates.evaluate(facts, now, **_kw)           # the plain call keeps the old signature
     if verdict:
         _refuse(db, cand, verdict[0], verdict[1])
         return None
@@ -235,11 +244,34 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         return None
 
     live = float(facts.get("live") or ltp)
+    # E274 round 40/41: setup_engine classifies the short (S4_CATALYST_DOWN: negative event, completed bar closed below the opening-range low, 2 of 3 confirmations). A match is
+    # stamped (short_live) and sized by the engine; no match = the legacy stamp and the normal size. Before 09:45 ONLY an S4 short may go on. The squeeze guard
+    # (orders/squeeze_guard.py) refuses a non-S4 short while price is at or above the opening-range high with rising volume and buyers on the tape.
+    _setup = setup_short.decide(symbol=sym, price=live, now=ist_now(now), quality=quality, tape_json=_tape_json, db=db, quote=facts.get("quote"), board_row=board_row)
+    _is_s4 = _setup.get("id") == "S4_CATALYST_DOWN"            # E274 round 44: S2 / S3 shorts may match too, but only S4 earns the early window, the Board skip and the squeeze exemption
+    if _skip_board and not _is_s4:                             # no S4: the old shortlist path keeps the Board as a hard rule
+        try:
+            _bv = short_gates.board_gate_short(facts, now)
+        except Exception as _e:  # noqa: BLE001
+            _bv = ("SHORT_GATE_ERROR", f"board: {type(_e).__name__}")
+        if _bv:
+            _refuse(db, cand, _bv[0], _bv[1])
+            return None
+    if early and not _is_s4:
+        _refuse(db, cand, "SHORT_TOO_EARLY", f"before {getattr(config, 'SHORT_ENTRY_START_IST', '09:45')} IST only a negative-event (S4) short may go on")
+        return None
+    _sq = squeeze_guard.reason(symbol=sym, price=live, now=now, tape_json=_tape_json, s4=_is_s4)
+    if _sq:
+        _refuse(db, cand, "SHORT_SQUEEZE", _sq)
+        return None
     levels = compute_levels(cand.pct_change, live, symbol=sym, side="SHORT")
     budget_stop_pct = float(levels.stop_pct)                 # size is worked out from the NORMAL stop (step 12): a tighter stop lowers risk, never grows the position
     mult = stop_mult_for_state((_current_profile() or {}).get("market_state"))
     if mult < 1.0:
         tighten_short_levels(levels, live, mult)
+    _tnote = short_target.adjust(levels, live, symbol=sym, setup=_setup, now=ist_now(now), db=db)      # E274 round 43: a reachable target (nearer only); the checks below judge the NEW target
+    if _tnote:
+        logger.info("short plan: %s target moved %s", sym, _tnote)
     why = rr_floor.geometry_reason(levels, live) or rr_floor.reject_reason(levels)
     if why:
         _refuse(db, cand, "SHORT_LEVELS", why)
@@ -263,6 +295,10 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     if value is None:
         _refuse(db, cand, "SHORT_NO_CAPITAL", "the short budget does not fit the available pool")
         return None
+    _setup_mult = _setup.get("size_mult") if _setup.get("id") else None
+    if _setup_mult is not None:
+        value = value * max(0.0, min(1.0, float(_setup_mult)))
+        logger.info("short plan: %s matches %s (%s) size x%s", sym, _setup["id"], ",".join(_setup.get("confirmations") or []), _setup_mult)
     qty = sizing.compute_quantity(value, live, "SHORT")
     if qty is None:
         _refuse(db, cand, "SHORT_ONE_SHARE_TOO_BIG", f"one share at {live:.2f} exceeds the budget {value:.2f}")
@@ -279,7 +315,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
     return {"live": live, "levels": levels, "qty": int(qty), "conv": conv, "budget_stop_pct": budget_stop_pct, "tm_ev": _tm_ev,
             "conv_mult": _cv_mult, "conv_note": conviction.note(sym, "SHORT", _cv),
-            "tape_json": _tape_json}
+            "tape_json": _tape_json, "setup": _setup, "early": early, "target_note": _tnote}
 
 
 def _close(r: ScalpShortShadow, status: str, exit_price: float, now: Optional[datetime]) -> None:
@@ -357,6 +393,14 @@ def summary(db: Session, recent: int = 50) -> Dict[str, Any]:
             "gate_counters": {k: v for k, v in _stats.items()}, "shortlist": dict(_last_shortlist), "recent": [_row_dict(r) for r in rows[:max(1, int(recent))]]}
 
 
+def _board_defers(quality: Any) -> bool:
+    """E274 round 42: True when the Board gate is left to S4 - the switch is on and the quality answer carries a NEGATIVE typed event. Never raises."""
+    try:
+        return bool(getattr(config, "SETUP_S4_BOARD_CONFIRM_ENABLED", True) and quality is not None and getattr(quality, "event_polarity", None) == -1)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _bear_rows() -> Dict[str, dict]:
     """symbol -> Market Board bearish row (best effort, cached by the board itself)."""
     try:
@@ -381,7 +425,7 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         if cm not in ("shadow", "live"):
             return out
         from tz_utils import is_market_open_ist
-        if not is_market_open_ist(now, honor_session_proof=False) or short_gates.time_window({}, now):
+        if not is_market_open_ist(now, honor_session_proof=False) or short_gates.time_window({}, now, early=short_gates.early_open(now)):
             return out
         if cm == "live":
             # E222: live shorts are automatic entries - while the module is off, auto-pilot is off or the service is not armed, skip the scan and the quality-gate calls too.
@@ -395,17 +439,26 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         from screening.engine import scan_shorts
         held = {p.symbol for p in db.query(ScalpPosition).filter(ScalpPosition.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).all()}
         cands = await asyncio.to_thread(scan_shorts, held)
+        try:                               # E272: negative-event names (premarket plan) join the short list so S4 does not wait for a rolling window
+            from screening.engine import scan_event_candidates
+            _listed = {c.symbol for c in cands}
+            cands = list(cands) + [c for c in scan_event_candidates("SHORT", held) if c.symbol not in _listed]
+        except Exception:
+            logger.exception("short event candidate scan failed (non-fatal)")
         from screening import scan_hits as _scan_hits
         _scan_hits.record_scan(cands, side="short")       # E232: every faller the short scan listed (record only)
         bear = await asyncio.to_thread(_bear_rows)
         best: Dict[str, Any] = {}
+        off_board: Dict[str, Any] = {}
         for c in cands:
             if c.symbol in bear and c.symbol not in best:     # only names the board also ranks bearish can pass the board gate; skip the rest cheaply
                 best[c.symbol] = c
+            elif c.symbol not in bear and c.symbol not in off_board and getattr(config, "SETUP_S4_BOARD_CONFIRM_ENABLED", True):
+                off_board[c.symbol] = c                       # E274 round 42: kept only if its news check finds a NEGATIVE event (S4 may take it; the Board is a confirmation there)
         pool = max(1, int(config.QUALITY_GATE_TOP_N))
         if getattr(config, "SHORT_SHORTLIST_ENABLED", True):
             pool = max(pool, int(config.SHORT_SHORTLIST_MAX))      # E107: look at up to SHORT_SHORTLIST_MAX names so the best can be picked
-        top = list(best.values())[:pool]
+        top = (list(best.values()) + list(off_board.values()))[:pool]      # Board-bearish names first, the others only fill what is left
         _scan_hits.mark_checked([c.symbol for c in top], side="short")
         _stats["scanned"] = _stats.get("scanned", 0) + len(cands)
         cache = quality_gate.get_cache_batch(db, [c.symbol for c in top]) if top else {}
@@ -413,7 +466,9 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
         recorded = 0
         from screening import shortlist as _shortlist
         tm_gate.note_picks([(c, None) for c in top], "SHORT")           # E115: trigger - warm the Time Machine verdicts of the names about to be ranked (background, never waits)
-        ranked = _shortlist.build_short([(c, (None if isinstance(q, BaseException) else q)) for c, q in zip(top, quals)], bear)
+        _pairs = [(c, (None if isinstance(q, BaseException) else q)) for c, q in zip(top, quals)]
+        _pairs = [(c, q) for c, q in _pairs if c.symbol in bear or _board_defers(q)]      # an off-Board name stays only with a negative typed event (the old path keeps the Board rule)
+        ranked = _shortlist.build_short(_pairs, bear)
         _last_shortlist.update(at=time.time(), mode=cm, enabled=bool(getattr(config, "SHORT_SHORTLIST_ENABLED", True)),
                                rows=[dict(r, outcome="NOT_TRIED") for r in _shortlist.public(ranked)])
         for c, q in ((r["cand"], r["quality"]) for r in ranked):

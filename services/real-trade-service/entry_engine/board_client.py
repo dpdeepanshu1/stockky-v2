@@ -13,7 +13,7 @@ import config
 
 logger = logging.getLogger("real-trade-board-client")
 
-_cache: dict = {"at": float("-inf"), "rows": {}}
+_cache: dict = {"at": float("-inf"), "rows": {}, "payload": {}}
 
 
 def index_rows(payload) -> Dict[str, dict]:
@@ -35,6 +35,7 @@ async def get_rows() -> Dict[str, dict]:
     if now - _cache["at"] < float(config.ENTRY_BOARD_CACHE_TTL_S):
         return _cache["rows"]
     rows: Dict[str, dict] = {}
+    payload: dict = {}
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(config.ENTRY_BOARD_URL, params={"limit": 60}, timeout=float(config.ENTRY_BOARD_TIMEOUT_S))
@@ -42,11 +43,20 @@ async def get_rows() -> Dict[str, dict]:
             body = r.json()
             if not body.get("stale"):            # yesterday's closing board must not rank today's entries
                 rows = index_rows(body)
+                payload = body if isinstance(body, dict) else {}
     except Exception as e:  # noqa: BLE001
         logger.debug("board client: fetch failed (no nudge): %s", e)
-    _cache.update(at=now, rows=rows)             # failures cached too, so a dead service is retried every TTL
+    _cache.update(at=now, rows=rows, payload=payload)   # failures cached too, so a dead service is retried every TTL
     return rows
 
 
+async def get_payload() -> dict:
+    """E276 round 68: the whole board body (bullish / bearish rows with percentiles, sectors) of the same cached read, for the S2 relative-strength rank and the
+    S1 / S2 sector third. {} when the board is off, stale or down (a missing fact is never true)."""
+    await get_rows()
+    p = _cache.get("payload")
+    return p if isinstance(p, dict) else {}
+
+
 def reset() -> None:
-    _cache.update(at=float("-inf"), rows={})
+    _cache.update(at=float("-inf"), rows={}, payload={})

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 NIFTY = "^NSEI"
@@ -27,7 +27,7 @@ def _day(v: Any) -> Optional[str]:
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         ts = float(v) / 1000.0 if float(v) > 1e11 else float(v)
         try:
-            return datetime.utcfromtimestamp(ts).date().isoformat()
+            return datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(v, datetime):

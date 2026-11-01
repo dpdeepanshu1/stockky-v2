@@ -229,18 +229,6 @@ class TestMultiTfAnalysisChecks:
         assert result["bullish_count"] == 0.0
         assert not result.get("data_incomplete")
 
-    def test_overextended_52w_rejects(self):
-        by_tf = _happy_by_tf()
-        # quote price is fixed at 100 by _history_router; 52w low=50, high=101
-        # -> pos_pct = (100-50)/(101-50)*100 = 98% > 88% (top 12%) -> rejects
-        by_tf["1y"] = [
-            _c(96, open_=96, high=101, low=50),
-            _c(100, open_=96, high=101, low=60),
-        ]
-        client = _RoutedAsyncClient(get_router=_history_router(by_tf))
-        result = run(cd._multi_tf_analysis(client, "TCS"))
-        assert "top" in result["reject_reason"] and "52w range" in result["reject_reason"]
-
     def test_atr_cap_exceeded_rejects(self, monkeypatch):
         by_tf = _happy_by_tf()
         by_tf["1m"] = _rising(20, start=100.0, step=1.0)  # >=15 candles -> ATR computable

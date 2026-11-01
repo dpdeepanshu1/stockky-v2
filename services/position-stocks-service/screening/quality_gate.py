@@ -62,6 +62,102 @@ from tz_utils import ist_today_str
 logger = logging.getLogger("position-stocks-quality-gate")
 
 
+def _parse_utc(raw) -> Optional[datetime]:
+    try:
+        if not raw:
+            return None
+        d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def earnings_split_reason(result_out_at, now: Optional[datetime] = None) -> Optional[str]:
+    """E272 results-day split for a stock whose results are dated TODAY. None = do not block; otherwise the reason text.
+    - EARNINGS_SPLIT_ENABLED off, or no publication time known -> blocked (the old rule: gap risk a stop cannot cover);
+    - published before EARNINGS_KNOWN_BEFORE_IST (09:00) -> a KNOWN event, not blocked (the open already prices it);
+    - published later in the session -> blocked until EARNINGS_REACTION_WAIT_MIN minutes after publication (the first reaction bar).
+    Never raises (an error blocks)."""
+    try:
+        base = "gap risk a stop cannot cover"
+        if not getattr(config, "EARNINGS_SPLIT_ENABLED", True):
+            return base
+        out = _parse_utc(result_out_at)
+        if out is None:
+            return base + " (publication time unknown)"
+        from tz_utils import IST, ist_now, parse_hhmm
+        out_ist = out.astimezone(IST)
+        n = ist_now(now)
+        if out_ist.date() != n.date():
+            return base + " (publication time not from today)"
+        kt = parse_hhmm(getattr(config, "EARNINGS_KNOWN_BEFORE_IST", "09:00"), 9, 0)
+        if (out_ist.hour, out_ist.minute) < (kt.hour, kt.minute):
+            return None
+        wait = float(getattr(config, "EARNINGS_REACTION_WAIT_MIN", 5.0) or 0.0)
+        left = out_ist.timestamp() + wait * 60.0 - n.timestamp()
+        if left > 0:
+            return f"results published {out_ist.strftime('%H:%M')} IST, waiting {left / 60.0:.1f} more min for the first reaction"
+        return None
+    except Exception:  # noqa: BLE001
+        return "gap risk a stop cannot cover"
+
+
+def _result_out_from(body) -> Optional[str]:
+    """Earliest published time (ISO) of a type "results" event in a GET /events/{symbol}/active body, or None. Never raises."""
+    try:
+        times = []
+        for e in ((body or {}).get("events") or []) if isinstance(body, dict) else []:
+            if isinstance(e, dict) and e.get("type") == "results" and _parse_utc(e.get("published")) is not None:
+                times.append(_parse_utc(e.get("published")))
+        return min(times).isoformat() if times else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _typed_event_from(body) -> Optional[dict]:
+    """The strongest typed event with a KNOWN polarity (+1 / -1) in a GET /events/{symbol}/active body: {type, polarity, strength, age_min, announced_at}, or None
+    (no event, polarity 0 = unknown, feed not ok). Never raises."""
+    try:
+        if not isinstance(body, dict) or not body.get("ok"):
+            return None
+        best = None
+        for e in body.get("events") or []:
+            if not isinstance(e, dict):
+                continue
+            pol = int(float(e.get("polarity") or 0))
+            if pol not in (1, -1):
+                continue
+            st = float(e.get("strength") or 0.0)
+            if best is None or st > best["strength"]:
+                best = {"type": str(e.get("type") or "other"), "polarity": pol, "strength": round(st, 4),
+                        "age_min": round(float(e.get("age_s") or 0.0) / 60.0, 1), "announced_at": e.get("published")}
+        return best
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _fetch_typed_event(symbol: str) -> Optional[dict]:
+    """E272: the symbol's strongest typed event from the feed (analysis-intelligence GET /events/{symbol}/active). None on any failure: the feed being down
+    never vetoes and never triggers (fail-safe direction in the plan)."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/active", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        return _typed_event_from(r.json()) if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _fetch_result_out_at(symbol: str) -> Optional[str]:
+    """E272: ask the typed event feed (analysis-intelligence GET /events/{symbol}/active) when today's results were first published. Only called for a
+    symbol whose results are dated today. None on any failure (the block stays)."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{config.EVENT_URL}/events/{quote(symbol, safe='&')}/active", timeout=config.QUALITY_GATE_TIMEOUT_S)
+        return _result_out_from(r.json()) if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @dataclass
 class QualitySignal:
     symbol: str
@@ -77,15 +173,28 @@ class QualitySignal:
     negative_news: Optional[str] = None
     # group344: the event service did not answer (twice) and nothing is remembered for this symbol - no news / earnings check was possible.
     event_unchecked: bool = False
+    # E272: ISO time (UTC) the typed event feed first saw a results headline for this symbol today; None = not found / feed down (stays blocked).
+    result_out_at: Optional[str] = None
+    # E272: the strongest typed event (polarity +1 / -1 only) from the event feed: type, polarity, strength (0..1, decays with age), age in minutes, announce time.
+    event_type: Optional[str] = None
+    event_polarity: Optional[int] = None
+    event_strength: Optional[float] = None
+    event_age_min: Optional[float] = None
+    announced_at: Optional[str] = None
 
     def passes(self) -> tuple[bool, str]:
         """Lenient pass/fail: only reject on data that IS present and below
         floor. Missing data always passes through with a reason noting so."""
         # group329: a stock reporting results TODAY can gap 5-10 % through a stop either way - not a scalp setup. Unknown date passes.
         if config.EARNINGS_DAY_BLOCK and self.earnings_date and self.earnings_date == ist_today_str():
-            return False, f"EARNINGS_TODAY: results dated {self.earnings_date} (today) - gap risk a stop cannot cover"
+            _why = earnings_split_reason(self.result_out_at)        # E272: known before 09:00 = no block; in-session = wait; unknown = block
+            if _why is not None:
+                return False, f"EARNINGS_TODAY: results dated {self.earnings_date} (today) - {_why}"
         if config.NEWS_NEGATIVE_BLOCK_ENABLED and self.negative_news:
             return False, self.negative_news
+        # E272: a fresh NEGATIVE typed event is a hard veto on a long (positive events never override a veto; unknown polarity never gets here)
+        if (getattr(config, "NEG_EVENT_VETO_ENABLED", True) and self.event_polarity == -1 and (self.event_strength or 0.0) >= float(getattr(config, "NEG_EVENT_VETO_MIN_STRENGTH", 0.3))):
+            return False, f"NEG_EVENT: {self.event_type or 'event'} (strength {float(self.event_strength or 0.0):.2f}, {float(self.event_age_min or 0.0):.0f} min old)"
         if self.event_unchecked and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
             return False, "EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer - not entering without a news check (retried next cycle)"
         if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
@@ -673,6 +782,13 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
         earnings_date=_earn,
         negative_news=_neg,
     ), cached)
+    if _earn and _earn == ist_today_str() and config.EARNINGS_DAY_BLOCK and getattr(config, "EARNINGS_SPLIT_ENABLED", True):
+        _sig.result_out_at = await _fetch_result_out_at(symbol)       # E272: results-day split; None keeps the block
+    if getattr(config, "TYPED_EVENT_ENABLED", True):
+        _te = await _fetch_typed_event(symbol)                        # E272: typed event for the setups (S1 / S4) and the negative-event veto
+        if _te:
+            _sig.event_type, _sig.event_polarity, _sig.event_strength = _te["type"], _te["polarity"], _te["strength"]
+            _sig.event_age_min, _sig.announced_at = _te["age_min"], _te["announced_at"]
     # only a complete LIVE answer is reused; anything that fell back to the cache or lost the event call is fetched again next time
     if _ttl > 0 and not _ev_failed and None not in (fund_score, tech_score, market_cap_cr):
         if len(_result_cache) > 2000:

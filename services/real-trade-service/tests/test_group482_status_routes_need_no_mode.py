@@ -1,4 +1,4 @@
-"""group 482c: GET /review-fixes/status (and kronos / range52w / timesfm status) answered 422 'query.mode Field required' on the VM, because they used
+"""group 482c: GET /review-fixes/status (and kronos / timesfm status) answered 422 'query.mode Field required' on the VM, because they used
 require_admin_if_real(mode, ...) on a path with no {mode}: FastAPI turned `mode` into a required query parameter nobody sends. They use require_admin now
 (read-only status, admin session needed). This guard reads main.py's source (no fastapi needed) so the same mistake cannot come back on any route."""
 import ast
@@ -32,8 +32,8 @@ def test_no_route_uses_require_admin_if_real_without_a_mode():
     assert bad == [], f"routes whose require_admin_if_real needs a mode that the route does not carry: {bad}"
 
 
-def test_the_four_status_routes_use_plain_admin():
-    want = {"/review-fixes/status", "/kronos/status", "/range52w/status", "/timesfm/status"}
+def test_the_three_status_routes_use_plain_admin():
+    want = {"/review-fixes/status", "/kronos/status", "/timesfm/status"}
     got = {}
     for path, fn in _routes():
         if path in want:

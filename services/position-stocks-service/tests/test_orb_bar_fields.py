@@ -40,7 +40,7 @@ def feed(sym, bars):
 
 
 def setup(monkeypatch, bars):
-    monkeypatch.setattr(config, "ORB_MODE", "shadow", raising=False)
+    monkeypatch.setattr(config, "ORB_MODE", "live", raising=False)
     orb._reset_for_tests()
     feed("ABC", bars)
     orb.record_quote("ABC", q(), at(9, 22))                                    # range 98..100

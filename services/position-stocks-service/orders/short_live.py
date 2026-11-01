@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 import config
 import notifier
-from capital import ledger, shared_order_budget, shared_symbol_lock
+from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from control.kit import current_profile as _current_profile
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
@@ -120,9 +120,28 @@ def _live_guards(db: Session, cand: Any) -> Optional[tuple]:
     n_open, n_short = _open_counts(db)
     if n_open >= config.MAX_CONCURRENT_SCALP_POSITIONS:
         return ("SHORT_MAX_POSITIONS", f"MAX_POSITIONS:{n_open}")
-    if n_short >= int(config.SHORT_MAX_POSITIONS):
-        return ("SHORT_MAX_POSITIONS", f"{n_short} live shorts open (max {config.SHORT_MAX_POSITIONS})")
+    cap = _short_cap(db, None)                                   # E276 round 55: the highest cap any short setup has earned; the setup's own cap is checked after the plan
+    if n_short >= cap:
+        return ("SHORT_MAX_POSITIONS", f"{n_short} live shorts open (max {cap})")
     return None
+
+
+def _short_risk_mult(db: Session, setup_id: Optional[str]) -> float:
+    """E276 round 56: the setup's ladder per-trade risk multiple for a short (1.0 on any error or at stage 0)."""
+    try:
+        from orders import risk_stage
+        return float(risk_stage.risk_mult_for(db, setup_id, "SHORT"))
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def _short_cap(db: Session, setup_id: Optional[str]) -> int:
+    """E276 round 55: the live short cap (SHORT_MAX_POSITIONS at stage 0, 3 / 5 for a proven setup). Falls back to the base on any error."""
+    try:
+        from orders import risk_stage
+        return int(risk_stage.short_cap_for(db, setup_id))
+    except Exception:  # noqa: BLE001
+        return int(config.SHORT_MAX_POSITIONS)
 
 
 def attempt_short_live(db: Session, cand: Any, quality: Any = None, board_row: Optional[dict] = None,
@@ -183,7 +202,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             return None
 
         position_value = ledger.reserve_capital(db, adaptive_stop_pct=float(plan.get("budget_stop_pct") or levels.stop_pct), side="SHORT",
-                                                conviction_mult=plan.get("conv_mult"))
+                                                conviction_mult=plan.get("conv_mult"), risk_mult=_short_risk_mult(db, (plan.get("setup") or {}).get("id")))
         if position_value is None:
             _skip(db, cand, "SHORT_NO_CAPITAL", "ledger refused the short (mode, kill switch, dial or pool)")
             _undo()
@@ -207,6 +226,21 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             return None
         if not security_id:
             _skip(db, cand, "SHORT_SECURITY_NOT_FOUND", f"no Dhan security id for {sym}")
+            _undo()
+            return None
+
+        # E276 round 55: this setup's own short cap (a proven setup may hold 3 or 5 shorts; an unproven one stays at SHORT_MAX_POSITIONS).
+        _sid = (plan.get("setup") or {}).get("id")
+        _cap = _short_cap(db, _sid)
+        if _sid and _open_counts(db)[1] >= _cap:
+            _skip(db, cand, "SHORT_MAX_POSITIONS", f"{_open_counts(db)[1]} live shorts open (max {_cap} for {_sid})")
+            _undo()
+            return None
+
+        # E276 round 52: the shared open-risk limit applies to a short too (stop above entry x qty), checked before the order budget is spent. Fail-open.
+        _heat_reject = heat_gate.reject_reason(db, live, float(levels.stop_price), int(qty), "SHORT", (plan.get("setup") or {}).get("id"), getattr(cand, "symbol", None))
+        if _heat_reject:
+            _skip(db, cand, "SHORT_HEAT_LIMIT", _heat_reject)
             _undo()
             return None
 
@@ -341,6 +375,17 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             logger.debug("short live: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
         pos.flow_json = flow_gate.merge_tape(pos.flow_json, plan.get("tape_json"))   # E269: the order-flow tape verdict seen at entry, record only, never raises
         pos.flow_json = tm_gate.stamp(pos.flow_json, plan.get("tm_ev"))      # E115: the Time Machine verdict, record only, never raises
+        try:
+            from orders import setup_short as _ss
+            from tz_utils import ist_now as _ist_now
+            pos.flow_json = _ss.stamp(pos.flow_json, plan.get("setup"), _ist_now())          # E274 round 40: S4_CATALYST_DOWN or the legacy shortlist stamp (side SHORT), record only
+        except Exception:  # noqa: BLE001
+            logger.debug("short live: setup stamp failed (record only, entry unaffected)", exc_info=True)
+        try:
+            from orders import short_target as _st
+            pos.flow_json = _st.stamp(pos.flow_json, plan.get("target_note"))                # E274 round 43: how the target was moved (learned gain / HVN wall), record only
+        except Exception:  # noqa: BLE001
+            logger.debug("short live: target stamp failed (record only, entry unaffected)", exc_info=True)
         db.add(pos)
         db.commit()
         db.refresh(pos)

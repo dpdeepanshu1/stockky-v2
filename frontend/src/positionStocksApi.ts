@@ -11,6 +11,8 @@
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
 import type { FlowStatsDoc } from "./tapeView";
 import type { SymbolTapeDoc } from "./tapeSymbolView";
+import type { SetupStamp, SetupStatsDoc } from "./setupView";
+import type { PremarketPlanDoc } from "./sessionView";
 
 const STORAGE_URL_KEY = "stockky:position_stocks_api_url";
 // Deliberately a SEPARATE localStorage key from real-trade-service's
@@ -168,7 +170,7 @@ export interface DhanAccountStatus {
 export interface ScalpPositionRow {
   id: number;
   symbol: string;
-  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "STOP_BREACH_EXIT" | "CLOSE_ALL" | "TARGET_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
+  status: "OPEN" | "TARGET_HIT" | "STOP_HIT" | "EOD_SQUAREOFF" | "MANUAL_EXIT" | "STAGNATION_EXIT" | "MOMENTUM_EXIT" | "STOP_BREACH_EXIT" | "CLOSE_ALL" | "TARGET_EXIT" | "EXIT_LEGS_REJECTED" | "ERROR";
   window_source: "1m" | "5m" | "15m" | "60m" | "MANUAL";
   side?: "LONG" | "SHORT" | string | null;   // E99: absent / LONG on every long; SHORT on a live short (sell first, cover later)
   entry_price: number;
@@ -186,6 +188,8 @@ export interface ScalpPositionRow {
   stop_moved_to_breakeven: boolean;
   // group354: daily market-structure gate snapshot taken at entry (null for older rows / gate off)
   structure?: StructureSnapshotDoc | null;
+  // E272: the rule that took this trade (setup stamp); null / absent on a trade opened before entries were stamped
+  setup?: SetupStamp | null;
   realized_pnl: number | null;
   realized_pnl_pct: number | null;
   // AUDIT FIX (session60): live fields, OPEN positions only — None/absent
@@ -350,6 +354,7 @@ export interface ScalpTradeRow {
   dhan_super_order_id: string | null;
   dhan_entry_order_id: string | null;
   dhan_exit_order_id: string | null;
+  setup?: SetupStamp | null;   // E272: the rule that took the trade (Entry reason column)
 }
 
 // E30: trade journal notes (backend orders/journal_notes.py)
@@ -586,6 +591,10 @@ export const positionStocksApi = {
   // E271: order-flow tape health + entry-gate / exit counters of this service (GET /flow/stats, admin, read-only).
   flowStats: () => psRequest<FlowStatsDoc>("/flow/stats", undefined, true),
   // E271: the tape of one symbol (GET /flow/symbol/{symbol}, admin, read-only): profile levels, signals and the six checks for LONG and SHORT.
+  // E272: win rate, average R and a 90 % lower bound per setup and entry slot (GET /setup/stats, admin, read-only).
+  setupStats: () => psRequest<SetupStatsDoc>("/setup/stats", undefined, true),
+  /** E277: status of the 08:30 pre-market plan (GET /premarket/plan, admin). */
+  premarketPlan: () => psRequest<PremarketPlanDoc>("/premarket/plan", undefined, true),
   flowSymbol: (symbol: string) => psRequest<SymbolTapeDoc>(`/flow/symbol/${encodeURIComponent(symbol.trim().toUpperCase())}`, undefined, true),
 
   // ADDED (this session — "manual control to buy... and manual exit if

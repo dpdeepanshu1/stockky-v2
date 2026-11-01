@@ -125,6 +125,7 @@ file's best-effort checks.
 """
 from __future__ import annotations
 
+import asyncio
 import html as _html
 import logging
 import re
@@ -984,6 +985,21 @@ def _should_notify_scan(mode: str, market_date: str, written: int, failed: int, 
     return False
 
 
+def _upsert_wins(hit: dict, existing_row) -> bool:
+    """E272 round 6: does `hit` replace the stored row? A veto (typed negative event) always replaces a row that is not already a veto; a row that is a
+    veto is never replaced by a positive (negative news wins for that market date); otherwise the higher score wins, as before. Never raises."""
+    try:
+        from watchlist_engine import event_reader
+        stored_veto = event_reader.is_veto(getattr(existing_row, "catalyst_source", None))
+        if int(hit.get("polarity", 0) or 0) < 0:
+            return not stored_veto
+        if stored_veto:
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return hit["score"] > existing_row.priority_score
+
+
 async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = False) -> int:
     """Run one after-hours scan pass for `mode`.
 
@@ -1013,7 +1029,27 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
     # already stored at best score / upsert failed) instead of ending silently.
     funnel: list[dict] = []
 
-    for feed in _RSS_FEEDS:
+    # E272 round 6: typed events from the shared feed (reader). In "feed" mode the old keyword scan below runs only when the feed is down; in "both" it
+    # always runs and the typed hits are put over its hits; in "legacy" the feed is not asked.
+    feed_mode = str(getattr(config, "AFTERHOURS_EVENT_FEED_MODE", "legacy") or "legacy")
+    feed_hits: dict[str, dict] = {}
+    feed_ok = False
+    if feed_mode in ("both", "feed"):
+        try:
+            from watchlist_engine import event_reader
+            doc = await asyncio.to_thread(event_reader.fetch_active, config.EVENT_URL, getattr(config, "AFTERHOURS_EVENT_FEED_TIMEOUT_S", 4.0))
+            if doc is not None:
+                feed_ok = True
+                feed_hits = event_reader.hits_from_events(doc.get("events") or [], known_symbols or None)
+                logger.info("afterhours-scan [%s %s]: event feed %d event(s) -> %d typed hit(s), %d veto(es)", mode, market_date,
+                            len(doc.get("events") or []), len(feed_hits), sum(1 for h in feed_hits.values() if h.get("polarity", 0) < 0))
+            else:
+                logger.info("afterhours-scan [%s %s]: event feed not available - keyword scan only this pass", mode, market_date)
+        except Exception:  # noqa: BLE001 - the feed is an extra input; a failure never fails the scan
+            logger.warning("afterhours-scan [%s %s]: event feed read failed (non-fatal)", mode, market_date, exc_info=True)
+    funnel.append({"source": "event-feed", "items": len(feed_hits), "stale": 0, "no_symbol": 0, "score0": sum(1 for h in feed_hits.values() if h.get("polarity", 0) < 0), "scored": sum(1 for h in feed_hits.values() if h.get("polarity", 0) > 0)} if feed_mode != "legacy" else {"source": "event-feed (off)", "items": 0, "stale": 0, "no_symbol": 0, "score0": 0, "scored": 0})
+
+    for feed in ([] if (feed_mode == "feed" and feed_ok) else _RSS_FEEDS):
         items = await _fetch_rss_items(feed)
         stale_dropped = 0
         no_symbol = 0
@@ -1109,6 +1145,9 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
         existing = best.get(symbol)
         if existing is None or hit["score"] > existing["score"]:
             best[symbol] = hit
+    if feed_hits:
+        from watchlist_engine import event_reader
+        event_reader.merge_into(best, feed_hits)   # typed hits over the keyword and bulk hits; a veto replaces them
 
     if not best:
         logger.info(
@@ -1165,7 +1204,7 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
                 ))
                 db.commit()
                 written += 1
-            elif hit["score"] > existing_row.priority_score:
+            elif _upsert_wins(hit, existing_row):
                 existing_row.priority_score = hit["score"]
                 existing_row.catalyst_type = hit["catalyst_type"]
                 existing_row.catalyst_source = hit["source"]
@@ -1232,9 +1271,12 @@ async def run_afterhours_scan(db, mode: str, market_date: str, manual: bool = Fa
             cat_icon = {"results": "📊", "bulk_block": "🏦", "board": "🗂️", "insider": "👤", "news": "📰"}.get(
                 hit["catalyst_type"], "📰"
             )
-            lines.append(
-                f"{cat_icon} *{sym}* · score {hit['score']:.0f} · {hit['catalyst_type']} · {hit['source']}"
-            )
+            if hit.get("polarity", 0) < 0:
+                lines.append(f"⛔ *{sym}* · VETO (negative {hit.get('event_type', 'news')}, strength {hit.get('strength', 0):.2f}) · no buy on the next session")
+            else:
+                lines.append(
+                    f"{cat_icon} *{sym}* · score {hit['score']:.0f} · {hit['catalyst_type']} · {hit['source']}"
+                )
             # 2026-10-04: full headline (was cut at 80 chars + '…'). Telegram's 4096
             # limit is handled by the notification service, which splits long
             # messages into numbered parts, so no truncation is needed here.
@@ -1262,10 +1304,16 @@ async def finalize_nextday_watchlist(db, mode: str, market_date: str) -> list[st
         logger.info("afterhours-scan finalize [%s %s]: nothing to finalize", mode, market_date)
         return []
 
-    rows.sort(key=lambda r: r.priority_score, reverse=True)
+    # E272 round 7: a veto row (typed negative event, score 0) is never trimmed. It does not count toward the top-N either, so a big evening of negative news
+    # cannot push a real candidate out, and the row is still there at 09:00 (pre-pick logs and consumes it) and for the 09:20 exit rule in E274.
+    from watchlist_engine import event_reader
+    vetoes = [r for r in rows if event_reader.is_veto(getattr(r, "catalyst_source", None))]
+    tradable = [r for r in rows if r not in vetoes]
+    tradable.sort(key=lambda r: r.priority_score, reverse=True)
+    vetoes.sort(key=lambda r: str(r.symbol))
     max_picks = config.AFTERHOURS_SCAN_MAX_NEXTDAY_CANDIDATES
-    keep = rows[:max_picks]
-    discard = rows[max_picks:]
+    keep = tradable[:max_picks]
+    discard = tradable[max_picks:]
 
     now = datetime.now(timezone.utc)
     for r in discard:
@@ -1275,8 +1323,8 @@ async def finalize_nextday_watchlist(db, mode: str, market_date: str) -> list[st
 
     shortlist = [r.symbol for r in keep]
     logger.info(
-        "afterhours-scan finalize [%s %s]: keeping top %d → %s (discarded %d)",
-        mode, market_date, len(keep), shortlist, len(discard),
+        "afterhours-scan finalize [%s %s]: keeping top %d → %s (discarded %d, vetoes kept %d → %s)",
+        mode, market_date, len(keep), shortlist, len(discard), len(vetoes), [r.symbol for r in vetoes],
     )
 
     # ── Telegram finalize notification (2026-09-18 fix, session67) ───────────
@@ -1299,6 +1347,13 @@ async def finalize_nextday_watchlist(db, mode: str, market_date: str) -> list[st
             )
             if r.headline:
                 lines.append(f"   _{r.headline[:_NOTIFY_MAX_HEADLINE]}_")
+        if vetoes:
+            lines.append("")
+            for r in vetoes:
+                _t = event_reader.decode_tag(r.catalyst_source)
+                lines.append(f"⛔ *{r.symbol}* · VETO (negative {_t.get('type') or 'news'}, strength {(_t.get('strength') or 0):.2f}) · no buy today")
+                if r.headline:
+                    lines.append(f"   _{r.headline[:_NOTIFY_MAX_HEADLINE]}_")
         lines.append("\n_These will be injected as overnight-priority candidates at 09:00 IST._")
         await notify_async("\n".join(lines))
     except Exception:

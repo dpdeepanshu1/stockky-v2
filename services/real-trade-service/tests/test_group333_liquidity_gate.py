@@ -96,5 +96,6 @@ def test_reject_reason_tick_never_raises(monkeypatch):
 
 def test_entry_wiring():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "entry_engine", "entry.py"), encoding="utf-8").read()
-    assert "liquidity_gate.reject_reason_tick(tick)" in src and '"liquidity"' in src and "liquidity_gate," in src
+    assert "soft_gates.liquidity(tick)" in src      # E273 round 29: the relative-volume test goes through soft_gates, which calls liquidity_gate.reject_reason_tick
+    assert '"liquidity"' in src and "liquidity_gate," in src
     assert config.ENTRY_MIN_AVG_TURNOVER_CR == 3.0 and config.ENTRY_LIQ_MIN_TIME_IST == "10:00"

@@ -294,3 +294,12 @@ def _reset_security_load_throttle():
     _clear()
     yield
     _clear()
+
+
+@_pytest_g172.fixture(autouse=True)
+def _e272_afterhours_event_reader_off_by_default(monkeypatch):
+    """E272 round 6: the after-hours scan reads the typed event feed and uses the new cadence by default; older tests predate both. tests/test_e272_afterhours_*.py turn them on."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "AFTERHOURS_EVENT_FEED_MODE", "legacy", raising=False)
+    monkeypatch.setattr(_cfg, "AFTERHOURS_CADENCE_V2", False, raising=False)
+    yield

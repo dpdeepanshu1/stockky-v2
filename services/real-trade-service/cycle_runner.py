@@ -309,6 +309,11 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
             reconcile_result = await reconcile_real_orders(db)
             fills = reconcile_result["entries_filled"]  # REAL "fills" only ever means broker-confirmed, never sent-only
             _mark_reconciled(mode)  # see auto_pilot.py's REAL_RECONCILE_MIN_INTERVAL_SECONDS comment
+            try:   # task 4: free REAL symbol locks that no position / swing row / order / Dhan holding backs any more (throttled, fail-safe, LOCK_SWEEP switch)
+                from execution.lock_sweep import maybe_sweep
+                maybe_sweep(db, mode)
+            except Exception:  # noqa: BLE001 - the sweep must never break a cycle
+                logger.debug("cycle: lock sweep skipped", exc_info=True)
     finally:
         exit_lock.release()
 

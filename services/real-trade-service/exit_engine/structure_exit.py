@@ -14,7 +14,7 @@ position SAFER:
 Ratchet only: a stop is never lowered. A losing position is never touched (its own stop already protects it). No / stale / insufficient /
 split-affected structure = no opinion (same rules as the entry gate). Pure, never raises; the caller applies the verdict.
 
-STRUCTURE_EXIT_MODE: off | log (record only; default since group 415) | tighten | exit (the default from group 399 to 414).
+STRUCTURE_EXIT_MODE: off | tighten (default since E273) | exit. (E273 round 16: the record-only log mode is gone; an old log value reads as tighten.)
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ import config
 
 logger = logging.getLogger("real-trade-structure-exit")
 
-MODES = ("off", "log", "tighten", "exit")
+MODES = ("off", "tighten", "exit")      # E273 round 16: no log (record-only) mode; an old "log" value reads as tighten
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 _stats: Dict[str, Any] = {"evaluated": 0, "no_opinion": 0, "bearish": 0, "tightened": 0, "trailed": 0, "exited": 0, "log_only": 0, "errors": 0}
@@ -49,8 +49,8 @@ def _pos(v) -> Optional[float]:
 
 
 def mode() -> str:
-    m = str(getattr(config, "STRUCTURE_EXIT_MODE", "log") or "log").strip().lower()
-    return m if m in MODES else "log"
+    m = str(getattr(config, "STRUCTURE_EXIT_MODE", "tighten") or "tighten").strip().lower()
+    return m if m in MODES else "tighten"
 
 
 def _to_date(v) -> Optional[date]:

@@ -91,3 +91,17 @@ def reject_reason(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[
     except Exception as e:  # noqa: BLE001
         logger.debug("liquidity gate %s failed (allowing): %s", symbol, e)
         return None
+
+
+def rvol_ratio(symbol: str, ltp, now: Optional[datetime] = None) -> Optional[float]:
+    """E273 round 31: today's volume as a multiple of the normal pace for this time (the number test 3 compares with ENTRY_MIN_RVOL), or None when it cannot be read. Never raises."""
+    try:
+        from screening import prev_day
+        pdv = prev_day.get(str(symbol or "").upper().replace(".NS", "").strip())
+        q = depth_gate._fresh_quote(symbol)
+        dv, av = _pos((q or {}).get("volume")), _pos(getattr(pdv, "avg_volume", None))
+        frac = elapsed_fraction(now)
+        return None if dv is None or av is None or frac <= 0 else dv / (av * frac)
+    except Exception:  # noqa: BLE001
+        return None
+

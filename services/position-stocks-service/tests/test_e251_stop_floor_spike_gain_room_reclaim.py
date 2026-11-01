@@ -291,7 +291,7 @@ def test_entry_reason_allow_symbol_lifts_the_symbol_block_but_not_the_day_pause(
 def test_entry_wiring_order():
     i = ENTRY_SRC.index
     assert i("_reclaim = stopout_guard.reclaim_allowed(") < i("stopout_guard.entry_reason(db, candidate.symbol, allow_symbol=bool(_reclaim))")
-    assert i("range_reject = None if rearm") < i("spike_reject = None if rearm else entry_timing.spike_reason(") < i("opening_reject = opening_gate.reject_reason(")
+    assert i("range_reject = _range_gate_reject(") < i("spike_reject = entry_timing.spike_reason(") < i("opening_reject = opening_gate.reject_reason(")   # E273 round 9: veto branch
     assert "_arm_pullback(candidate, spike_reject)" in ENTRY_SRC
     assert i("_rr_reject = rr_floor.reject_reason(levels)") < i("gain_room.reject_reason(candidate.symbol") < i("_depth_reject = depth_gate.reject_reason(")
     assert "reclaim=bool(_reclaim)" in ENTRY_SRC

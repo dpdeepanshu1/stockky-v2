@@ -2,7 +2,7 @@
 
 Gate G2 (benefit) is not met - the A/B verdict is `no_edge` - and G3 (stability) is not started, so until there is evidence:
   * STRUCTURE_STOP_MODE    off   (the ATR stop is used; no structural levels are computed)
-  * STRUCTURE_EXIT_MODE    log   (record only; nothing is raised or sold on a structure signal)
+  * STRUCTURE_EXIT_MODE    tighten (E273: was log; a structure break raises the stop of a trade in profit, nothing is sold)
   * STRUCTURE_MAX_AGE_DAYS 5.0   (was 7; the plan said 3, but Friday's daily bar is ~3.2-3.4 days old at Monday 09:15 IST, which would make
                                   every Monday entry WAIT while STRUCTURE_REQUIRE_DATA is on)
 Each is switched back with one env value. `config` reads the environment at import, so it is loaded here as a private copy.
@@ -31,7 +31,7 @@ def _load(monkeypatch, **env):
 def test_defaults_are_the_evidence_gated_ones(monkeypatch):
     c = _load(monkeypatch)
     assert c.STRUCTURE_STOP_MODE == "off"
-    assert c.STRUCTURE_EXIT_MODE == "log"
+    assert c.STRUCTURE_EXIT_MODE == "tighten"
     assert c.STRUCTURE_MAX_AGE_DAYS == 5.0
 
 
@@ -40,7 +40,7 @@ def test_stop_mode_is_opt_in(monkeypatch, v, expect):
     assert _load(monkeypatch, STRUCTURE_STOP_MODE=v).STRUCTURE_STOP_MODE == expect
 
 
-@pytest.mark.parametrize("v,expect", [("exit", "exit"), ("Tighten", "tighten"), ("off", "off"), ("log", "log"), ("junk", "log"), ("", "log")])
+@pytest.mark.parametrize("v,expect", [("exit", "exit"), ("Tighten", "tighten"), ("off", "off"), ("log", "tighten"), ("junk", "tighten"), ("", "tighten")])
 def test_exit_mode_values(monkeypatch, v, expect):
     assert _load(monkeypatch, STRUCTURE_EXIT_MODE=v).STRUCTURE_EXIT_MODE == expect
 
@@ -87,5 +87,5 @@ def test_five_days_clears_every_2026_trading_day():
 
 def test_env_example_documents_the_new_defaults():
     env = open(os.path.join(HERE, "..", "..", ".env.example"), encoding="utf-8").read()
-    assert "# STRUCTURE_STOP_MODE=off" in env and "# STRUCTURE_EXIT_MODE=log" in env
+    assert "# STRUCTURE_STOP_MODE=off" in env and "# STRUCTURE_EXIT_MODE=tighten" in env
     assert "# STRUCTURE_MAX_AGE_DAYS=5 " in env and "# STRUCTURE_PREPARE_UPGRADE=0" in env

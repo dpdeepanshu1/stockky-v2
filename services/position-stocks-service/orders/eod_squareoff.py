@@ -1391,7 +1391,11 @@ def run_stagnation_exit(db: Session) -> int:
         _tp = exit_adaptive.target_pct_of(pos.entry_price, pos.target_price)
         nft_gain = exit_adaptive.nft_min_gain_pct(_tp)
         band_pct = exit_adaptive.flat_band_pct(_tp)
-        stag_age_ok = age_min >= config.STAGNATION_EXIT_MINUTES
+        # E275 round 38: the minutes come from the trade's own setup cell once it has learned them (orders/exit_adaptive.learned_time_stop); else the fixed numbers above
+        _ts = exit_adaptive.learned_time_stop(db, pos)
+        nft_min = _ts["nft_min"]
+        stag_min = _ts["stag_min"]
+        stag_age_ok = age_min >= stag_min
         nft_age_ok = nft_on and age_min >= nft_min
         if not (stag_age_ok or nft_age_ok):
             continue
@@ -1428,13 +1432,13 @@ def run_stagnation_exit(db: Session) -> int:
         if exit_adaptive.enabled():
             _fading = exit_adaptive.is_fading(pos.symbol, ltp, short=_side.is_short(pos), entry=pos.entry_price)
             _close, _why = exit_adaptive.stagnation_decision(
-                age_min=age_min, fading=_fading, pressure=exit_adaptive.slot_pressure(db, now))
+                age_min=age_min, fading=_fading, pressure=exit_adaptive.slot_pressure(db, now), hard_max_min=_ts["hard_max_min"])
             if not _close:
                 if pos.id not in _held_logged:      # once per position, not on every reconcile tick
                     _held_logged.add(pos.id)
                     logger.info("STAGNATION_EXIT: %s (id=%d) held - %s (%s)", pos.symbol, pos.id, _why, reason)
                 continue
-            reason = f"{reason}; {_why}"
+            reason = f"{reason}; {_why}" + ("" if _ts["source"] == "fixed" else f"; time stop {_ts['source']}")
 
         # E231: both rules close as STAGNATION_EXIT; record which one fired (flow_json["exit_rule"]) so the reports can tell them apart.
         _stamp_exit_rule(pos, "flat_band" if (stag_age_ok and pct_move < band_pct) else "no_followthrough")

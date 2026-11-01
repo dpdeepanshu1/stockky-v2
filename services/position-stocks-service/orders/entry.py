@@ -37,10 +37,10 @@ from sqlalchemy.orm import Session
 import config
 import notifier
 from control.kit import current_profile as _ms_current_profile
-from capital import ledger, shared_order_budget, shared_symbol_lock
+from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -67,25 +67,10 @@ def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
     Returns a skip reason string, or None if the entry is allowed.
     """
     try:
-        from feed import ws_client
-        # 2026-10-05: prefer the exchange's own day high/low (mode-3 feed). The
-        # tick buffer only spans ~65 minutes, so the range computed from it is the
-        # last hour's range, not the day's. Falls back to the buffer (needing
-        # MIN_TICKS_FOR_RANGE_GATE ticks) when the exchange range is unknown.
-        _rng_fn = getattr(ws_client, "get_day_range", None)
-        _rng = _rng_fn(symbol) if _rng_fn else None
-        if _rng:
-            day_low, day_high = _rng
-        else:
-            buf = ws_client.get_tick_buffer(symbol)
-            prices = [p for _t, p in buf if p > 0]
-            if len(prices) < config.MIN_TICKS_FOR_RANGE_GATE:
-                return None
-            day_low, day_high = min(prices), max(prices)
-        span = day_high - day_low
-        if span <= 1e-6:
+        pos = _range_gate_pos(symbol, current_ltp)
+        if pos is None:
             return None
-        range_pos = max(0.0, min(1.0, (current_ltp - day_low) / span))
+        range_pos, day_low, day_high = pos
         if range_pos >= config.MAX_ENTRY_RANGE_POSITION:
             return (
                 f"NEAR_DAY_HIGH:range_pos={range_pos:.2f} "
@@ -95,6 +80,44 @@ def _range_gate_reject(symbol: str, current_ltp: float) -> Optional[str]:
         return None
     except Exception as e:
         logger.debug("entry: range gate check failed for %s: %s", symbol, e)
+        return None
+
+
+def _range_gate_pos(symbol: str, current_ltp: float):
+    """(range position 0..1, day low, day high) the near-day-high gate judges by, or None when there is no usable range (thin / early data fails OPEN). Shared by
+    _range_gate_reject() and _range_gate_penalty()."""
+    from feed import ws_client
+    # 2026-10-05: prefer the exchange's own day high/low (mode-3 feed). The tick buffer only spans ~65 minutes, so the range computed from it is the
+    # last hour's range, not the day's. Falls back to the buffer (needing MIN_TICKS_FOR_RANGE_GATE ticks) when the exchange range is unknown.
+    _rng_fn = getattr(ws_client, "get_day_range", None)
+    _rng = _rng_fn(symbol) if _rng_fn else None
+    if _rng:
+        day_low, day_high = _rng
+    else:
+        buf = ws_client.get_tick_buffer(symbol)
+        prices = [p for _t, p in buf if p > 0]
+        if len(prices) < config.MIN_TICKS_FOR_RANGE_GATE:
+            return None
+        day_low, day_high = min(prices), max(prices)
+    span = day_high - day_low
+    if span <= 1e-6:
+        return None
+    return max(0.0, min(1.0, (current_ltp - day_low) / span)), day_low, day_high
+
+
+def _range_gate_penalty(symbol: str, current_ltp: float) -> Optional[dict]:
+    """E273 round 9: the near-day-high gate as a soft factor. {"penalty": float, "why": reason} when the price sits at or above MAX_ENTRY_RANGE_POSITION of today's
+    range, else None. penalty = 1.0 at the floor rising to SOFT_GATE_MAX_PENALTY at the day high (linear in the range position). Fails open. Never raises."""
+    try:
+        floor = float(config.MAX_ENTRY_RANGE_POSITION)
+        pos = _range_gate_pos(symbol, current_ltp)
+        if pos is None or pos[0] < floor:
+            return None
+        range_pos, day_low, day_high = pos
+        return {"penalty": soft_gates.range_penalty(range_pos, floor),
+                "why": f"NEAR_DAY_HIGH:range_pos={range_pos:.2f} >= floor={floor:.2f} (day_low={day_low:.2f} day_high={day_high:.2f})"}
+    except Exception as e:  # noqa: BLE001
+        logger.debug("entry: range gate penalty failed for %s (no opinion): %s", symbol, e)
         return None
 
 
@@ -129,7 +152,7 @@ def _stale_tick_reject(symbol: str) -> Optional[str]:
         return None
 
 
-def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
+def _price_guard_reject(symbol: str, signal_ltp: float, soft: Optional[dict] = None) -> Optional[str]:
     """Pre-order price guards (2026-10-05, scalp review). Returns a skip reason
     or None.
 
@@ -143,7 +166,11 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
        exchange's previous close.
 
     Every check fails OPEN (returns None) on missing data or an error, like the
-    other gates here. A setting of 0 disables that check."""
+    other gates here. A setting of 0 disables that check.
+
+    E273 round 33: when `soft` (a dict) is passed and SOFT_GATES_MODE is penalty, a slippage between ENTRY_MAX_SLIPPAGE_PCT and DRIFT_HARD_MULT x it is not a refusal:
+    soft["entry_slippage"] = (penalty, reason text) and the entry goes on at a smaller size. E273 round 34: the same for DAY_GAIN_TOO_HIGH (soft["day_gain"]) between
+    MAX_DAY_GAIN_PCT and DAY_GAIN_HARD_MULT x it. Stale / missing tick stay hard."""
     try:
         from feed import ws_client
         buf = ws_client.get_tick_buffer(symbol)
@@ -163,10 +190,14 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
         if live is not None and signal_ltp > 0 and config.ENTRY_MAX_SLIPPAGE_PCT > 0:
             slip = (live - signal_ltp) / signal_ltp * 100.0
             if slip > config.ENTRY_MAX_SLIPPAGE_PCT:
-                return (
-                    f"ENTRY_SLIPPAGE:live ₹{live:.2f} is {slip:.2f}% above signal "
-                    f"₹{signal_ltp:.2f} (max {config.ENTRY_MAX_SLIPPAGE_PCT:.2f}%)"
-                )
+                _dp = soft_gates.drift_penalty(slip, config.ENTRY_MAX_SLIPPAGE_PCT) if isinstance(soft, dict) else None
+                if _dp:
+                    soft["entry_slippage"] = (_dp, f"ENTRY_SLIPPAGE:live ₹{live:.2f} is {slip:.2f}% above signal ₹{signal_ltp:.2f} (max {config.ENTRY_MAX_SLIPPAGE_PCT:.2f}%)")
+                else:
+                    return (
+                        f"ENTRY_SLIPPAGE:live ₹{live:.2f} is {slip:.2f}% above signal "
+                        f"₹{signal_ltp:.2f} (max {config.ENTRY_MAX_SLIPPAGE_PCT:.2f}%)"
+                    )
         if config.MAX_DAY_GAIN_PCT > 0:
             _ds_fn = getattr(ws_client, "get_day_stats", None)
             _ds = _ds_fn(symbol) if _ds_fn else None
@@ -175,10 +206,13 @@ def _price_guard_reject(symbol: str, signal_ltp: float) -> Optional[str]:
             if prev_close and prev_close > 0 and ref > 0:
                 gain = (ref - prev_close) / prev_close * 100.0
                 if gain > config.MAX_DAY_GAIN_PCT:
-                    return (
-                        f"DAY_GAIN_TOO_HIGH:up {gain:.2f}% vs prev close ₹{prev_close:.2f} "
-                        f"(max {config.MAX_DAY_GAIN_PCT:.2f}%)"
-                    )
+                    _gp = soft_gates.day_gain_penalty(gain, config.MAX_DAY_GAIN_PCT) if isinstance(soft, dict) else None
+                    _gtxt = (f"DAY_GAIN_TOO_HIGH:up {gain:.2f}% vs prev close ₹{prev_close:.2f} "
+                             f"(max {config.MAX_DAY_GAIN_PCT:.2f}%)")
+                    if _gp:
+                        soft["day_gain"] = (_gp, _gtxt)           # E273 round 34: sized down, not refused
+                    else:
+                        return _gtxt
         return None
     except Exception as e:
         logger.debug("entry: price guard check failed for %s: %s", symbol, e)
@@ -380,6 +414,10 @@ _SYMBOL_SPECIFIC_SKIP_PREFIXES = (
     "MIN_QTY", "RR_FLOOR", "STOP_ATR_FLOOR", "MIN_PRICE",
     # E251: spike-chase / gain-room refusals concern only the symbol just tried; the next shortlisted pick is still tried this cycle.
     "SPIKE_CHASE", "GAIN_ROOM",
+    # E273 round 9: the total of the soft penalties reached the skip limit for this symbol only.
+    "SOFT_PENALTIES_TOO_HIGH",
+    # E273 round 11: event-aware gap rule (orders/gap_event.py): a gap against / not confirmed for the news concerns this symbol only.
+    "GAP_AGAINST_EVENT", "GAP_UP_NOT_CONFIRMED",
 )
 
 
@@ -408,6 +446,11 @@ def _log_candidate(
 ) -> None:
     if decision == "SKIPPED":
         _skip_state.reason = str(reason)
+    try:                                                   # E272: record this candidate's bars even when it is outside the turnover top list
+        from feed import bar_recorder as _br
+        _br.note_symbols([candidate.symbol])
+    except Exception:  # noqa: BLE001
+        pass
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,
@@ -575,7 +618,22 @@ def attempt_entry(
     # is committed. See _range_gate_reject()'s docstring.
     # 2026-10-19: a pullback re-arm entry (orders/pullback_rearm.py) was already refused once for being at its high and has since
     # pulled back and bounced - the NEAR_DAY_HIGH / EXTENDED_ABOVE_OR gates that armed it are waived, every other gate still applies.
-    range_reject = None if rearm else _range_gate_reject(candidate.symbol, candidate.current_ltp)
+    # E273 round 9: near the day high, spike chase, gain room and VWAP distance are SIZE PENALTIES now (orders/soft_gates.py): collected in `_penalties` (stamped on the
+    # trade, shrinking the size through setup_engine); their TOTAL at setup_engine.PENALTY_SKIP is the only refusal. SOFT_GATES_MODE=veto = the old one-gate-one-refusal walk.
+    _penalties: dict = {}
+    _soft_why: dict = {}
+    _soft = soft_gates.penalty_mode()
+    range_reject = None
+    if not rearm:
+        if _soft:
+            try:
+                _rp = _range_gate_penalty(candidate.symbol, candidate.current_ltp)
+                if _rp:
+                    _penalties["near_day_high"], _soft_why["near_day_high"] = _rp["penalty"], f"RANGE_GATE:{_rp['why']}"
+            except Exception:  # noqa: BLE001
+                logger.debug("entry: near-day-high penalty failed (entry unaffected)", exc_info=True)
+        else:
+            range_reject = _range_gate_reject(candidate.symbol, candidate.current_ltp)
     if range_reject:
         _arm_pullback(candidate, f"RANGE_GATE:{range_reject}")
         shared_symbol_lock.release(db, candidate.symbol)
@@ -590,7 +648,17 @@ def attempt_entry(
     # E251: spike-chase guard (orders/entry_timing.py). The entry is a MARKET order, so a buy at the top of a day spike / mid-thrust fills at the top
     # and the ordinary give-back (ARVIND 28 Oct: stopped inside a minute, then ran to the target) is bigger than the stop. Refused here, armed for the
     # pullback re-arm (buy after a real pullback and bounce). A re-arm entry has already waited for that pullback. Fails open.
-    spike_reject = None if rearm else entry_timing.spike_reason(candidate.symbol, candidate.current_ltp)
+    spike_reject = None
+    if not rearm:
+        if _soft:
+            try:
+                _sp = entry_timing.spike_penalty(candidate.symbol, candidate.current_ltp)
+                if _sp:
+                    _penalties["spike_chase"], _soft_why["spike_chase"] = _sp["penalty"], _sp["why"]
+            except Exception:  # noqa: BLE001
+                logger.debug("entry: spike-chase penalty failed (entry unaffected)", exc_info=True)
+        else:
+            spike_reject = entry_timing.spike_reason(candidate.symbol, candidate.current_ltp)
     if spike_reject:
         _arm_pullback(candidate, spike_reject)
         shared_symbol_lock.release(db, candidate.symbol)
@@ -601,6 +669,22 @@ def attempt_entry(
     opening_reject = opening_gate.reject_reason(candidate.symbol, candidate.current_ltp)
     if opening_reject and rearm and pullback_rearm.is_waived_opening_reason(opening_reject):
         opening_reject = None
+    # E273 round 11: event-aware gap rule. A positive typed event explains a gap-up (refusal waived, S1 must confirm below; a very large gap keeps a half-size penalty)
+    # and contradicts a gap-down (skipped). No event = unchanged.
+    _gap_waived: list = []
+    _pos_event = gap_event.positive_event(quality)
+    if opening_reject and _pos_event:
+        _gk = gap_event.gap_kind(opening_reject)
+        if _gk == "down":
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(opening_reject, quality), quality=quality)
+            return None
+        if _gk == "up":
+            _gap_waived.append(opening_reject)
+            # E273 round 12: the gap test returned first, so the other opening-gate tests never ran. Run them again without the gap (hard refusals only; the soft parts are penalties below).
+            opening_reject = opening_gate.reject_reason(candidate.symbol, candidate.current_ltp, ignore_gap=True)
+            if opening_reject and rearm and pullback_rearm.is_waived_opening_reason(opening_reject):
+                opening_reject = None
     if opening_reject:
         if not rearm:
             _arm_pullback(candidate, opening_reject)
@@ -609,12 +693,53 @@ def attempt_entry(
         return None
     # (group370: the group 269 opening-gate shadow branch was removed; the gate above is always live.)
 
+    # E273 round 3: soft penalties (z-units in the stock's own noise). BELOW_OPEN no longer refuses: it shrinks the size; far enough under the open (total at or
+    # above setup_engine.PENALTY_SKIP) still ends in a skip. Collected here, applied with the setup size below, stamped on the trade.
+    try:
+        _bo = opening_gate.below_open_penalty(candidate.symbol, candidate.current_ltp)
+        if _bo:
+            _penalties["below_open"] = _bo["penalty"]
+            if _bo["penalty"] >= setup_engine.PENALTY_SKIP:
+                shared_symbol_lock.release(db, candidate.symbol)
+                _log_candidate(db, candidate, "SKIPPED", f"OPENING_GATE:BELOW_OPEN_TOO_FAR:{_bo['pct']:.2f}% under the open (penalty {_bo['penalty']:.1f} >= {setup_engine.PENALTY_SKIP:g})", quality=quality)
+                return None
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: below-open penalty failed (entry unaffected)", exc_info=True)
+
+    # E273 round 12: the rest of the opening gate (day-high position, opening-range position, previous-day close, Nifty) are SIZE PENALTIES too (OPENING_PARTS_MODE, default
+    # penalty). A re-arm entry has waived NEAR_DAY_HIGH / EXTENDED_ABOVE_OR already, so those two give it no penalty. The day-high part joins the round 9 near-day-high penalty
+    # as ONE factor (the larger of the two), not two. Missing data still refuses inside reject_reason.
+    try:
+        for _k, _v in opening_gate.parts_penalties(candidate.symbol, candidate.current_ltp).items():
+            if rearm and _k in ("near_day_high", "extended_or"):
+                continue
+            _penalties[_k] = max(float(_penalties.get(_k) or 0.0), float(_v["penalty"])) if _k == "near_day_high" else float(_v["penalty"])
+            _soft_why[_k] = _v["why"]
+        if not _soft:                                           # SOFT_GATES_MODE=veto skips the total check further down: do it here
+            _pt_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+            if _pt_reject:
+                shared_symbol_lock.release(db, candidate.symbol)
+                _log_candidate(db, candidate, "SKIPPED", _pt_reject, quality=quality)
+                return None
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: opening-gate parts penalties failed (entry unaffected)", exc_info=True)
+
     # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
-    price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp)
+    _drift_soft: dict = {}     # E273 round 33 / 34: an up-chase past ENTRY_MAX_SLIPPAGE_PCT or a day gain past MAX_DAY_GAIN_PCT (each up to its HARD_MULT x the limit) is a size penalty, not a refusal
+    price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp, soft=_drift_soft if _soft else None)
     if price_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"PRICE_GUARD:{price_reject}", quality=quality)
         return None
+    if _drift_soft:
+        for _dk, (_dv, _dwhy) in _drift_soft.items():      # entry_slippage (round 33), day_gain (round 34)
+            _penalties[_dk], _soft_why[_dk] = _dv, _dwhy
+        _dr_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        if _dr_reject:
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _dr_reject, quality=quality)
+            return None
+        logger.info("position-stocks entry: %s price-guard soft reasons sized down instead of refused (%s)", candidate.symbol, "; ".join(f"{k}: {_soft_why[k]}" for k in _drift_soft))
 
     # AUDIT FIX (this session): same-symbol re-entry guard — reject buying
     # back into a symbol we just closed at/above the price we exited at,
@@ -661,11 +786,53 @@ def attempt_entry(
 
     # E251: gain-room gate (orders/gain_room.py): the final stop / target must be realistically reachable today (replayed odds on the stock's own bars and
     # the share of its normal day range left above the price). Fails open.
-    _gr_reject = gain_room.reject_reason(candidate.symbol, candidate.current_ltp, levels.stop_pct, levels.target_pct)
+    _gr_reject = None
+    if _soft:
+        try:
+            _gp = gain_room.penalty(candidate.symbol, candidate.current_ltp, levels.stop_pct, levels.target_pct)
+            if _gp:
+                _penalties["gain_room"], _soft_why["gain_room"] = _gp["penalty"], _gp["why"]
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: gain-room penalty failed (entry unaffected)", exc_info=True)
+    else:
+        _gr_reject = gain_room.reject_reason(candidate.symbol, candidate.current_ltp, levels.stop_pct, levels.target_pct)
     if _gr_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _gr_reject, quality=quality)
         return None
+
+    # E273 round 9: VWAP distance as a soft factor (same cached /quote row, same 09:45 start), then the one refusal left for the four soft gates: the TOTAL of every
+    # penalty so far (below the open included) reaching setup_engine.PENALTY_SKIP. A refused chase is still armed for the pullback re-arm, as before.
+    if _soft:
+        try:
+            _vp = vwap_gate.penalty(candidate.symbol, candidate.current_ltp)
+            if _vp:
+                _penalties["vwap"], _soft_why["vwap"] = _vp["penalty"], _vp["why"]
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: vwap penalty failed (entry unaffected)", exc_info=True)
+        try:        # E273 round 10: the pre-open gap block (gap up or down past its own ATR limit / the fixed %) is a penalty too, same window
+            _pg = preopen.gap_penalty(candidate.symbol)
+            if _pg and _pos_event and gap_event.gap_kind(_pg["why"]) == "down":
+                shared_symbol_lock.release(db, candidate.symbol)
+                _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_pg["why"], quality), quality=quality)
+                return None
+            if _pg and _pos_event and gap_event.gap_kind(_pg["why"]) == "up":
+                _gap_waived.append(_pg["why"])                  # explained by the news: no gap penalty, S1 must confirm below
+                _pg = None
+            if _pg:
+                _penalties["preopen_gap"], _soft_why["preopen_gap"] = _pg["penalty"], _pg["why"]
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: pre-open gap penalty failed (entry unaffected)", exc_info=True)
+        _tot_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        if _tot_reject:
+            if not rearm:
+                for _k in ("spike_chase", "near_day_high", "extended_or"):
+                    if _k in _soft_why:
+                        _arm_pullback(candidate, _soft_why[_k])
+                        break
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _tot_reject, quality=quality)
+            return None
 
     # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.
     _depth_reject = depth_gate.reject_reason(candidate.symbol)
@@ -676,16 +843,96 @@ def attempt_entry(
 
     # group427: order-flow numbers for the record (spread, best-5 imbalance, 20-level book). Record only; never raises, never blocks.
     _flow_snap = order_flow.snapshot_json(candidate.symbol, candidate.current_ltp, None)
-    # group479: opening-range-breakout verdict for the record (orders/orb_shadow.py). Record only; never raises, never blocks.
+    # group479 / E273 round 8: opening-range-breakout record (orders/orb_shadow.py): the range, the closed-bar trigger and its volume. LIVE input: setup_engine reads
+    # it below as the S1 / S2 trigger. attach() itself never raises and never blocks.
     try:
         _flow_snap = orb_shadow.attach(_flow_snap, candidate.symbol, depth_gate._fresh_quote(candidate.symbol), candidate.current_ltp)
     except Exception:  # noqa: BLE001
-        logger.debug("entry: orb_shadow.attach failed (record only, entry unaffected)", exc_info=True)
+        logger.debug("entry: orb_shadow.attach failed (no ORB record, so no S1 / S2 range; entry otherwise unaffected)", exc_info=True)
     # E103: odds of this trade's own stop / target on today's bars (orders/trade_odds.py). Record only; never raises, never blocks.
     try:
         _flow_snap = trade_odds.attach(_flow_snap, candidate.symbol, "LONG", levels.stop_pct, levels.target_pct)
     except Exception:  # noqa: BLE001
         logger.debug("entry: trade_odds.attach failed (record only, entry unaffected)", exc_info=True)
+
+    # E272: the rule that took this entry, stamped into flow_json["setup"] (orders/setup_stamp.py). Until setup_engine exists (E273) every entry is the
+    # legacy shortlist path. Record only; never raises, never blocks.
+    # E273 round 11: an explained gap-up that is very large keeps a half-size penalty; it must be in `_penalties` before the setup engine reads them.
+    if _gap_waived:
+        try:
+            _lp = gap_event.large_gap_penalty(preopen.gap_of(candidate.symbol))
+            if _lp:
+                _penalties[gap_event.LARGE_KEY] = _lp
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: large-gap penalty failed (entry unaffected)", exc_info=True)
+
+    # E273 round 2: setup_engine classifies the entry first (SETUP_ENGINE_ENABLED / SETUP_S1_ENABLED). A match (S1_CATALYST_UP) is the stamped reason and sets
+    # `_setup_mult`, which shrinks the size below; no match = the legacy stamp and full size (the NO_SETUP refusal waits until S2 / S3 / S4 can fire).
+    _setup_mult = None
+    _setup_res = None
+    _pen_early = dict(_penalties)          # E273 round 32: penalties known when the setup engine sizes; later ones (rvol, structure) rescale it below
+    try:
+        from tz_utils import ist_now as _ist_now
+        _now_ist = _ist_now()
+        _s1_on, _s2_on, _s3_on = (bool(getattr(config, "SETUP_S1_ENABLED", True)), bool(getattr(config, "SETUP_S2_ENABLED", True)),
+                                  bool(getattr(config, "SETUP_S3_ENABLED", True)))
+        _allowed = setup_live.allowed_set(s1=_s1_on, s2=_s2_on, s3=_s3_on)
+        if getattr(config, "SETUP_ENGINE_ENABLED", True) and _allowed:
+            from screening import preopen as _preopen
+            _quote = depth_gate._fresh_quote(candidate.symbol)
+            _gap = _preopen.gap_of(candidate.symbol)
+            _tape = flow_gate.fetch_verdict(candidate.symbol, "LONG")
+            # E273 round 5: S2 / S3 facts, S1's sector third and priced_in. Each source is read on its own; a missing fact is never true.
+            _inputs = setup_inputs.gather_long(
+                symbol=candidate.symbol, price=candidate.current_ltp, now_ts=_now_ist.timestamp(), flow_json_orb=setup_live._load(_flow_snap).get("orb"),
+                quote=_quote, gap_pct=_gap, tape=_tape, want_s2=_s2_on, want_s3=_s3_on, top_n=int(getattr(config, "BOARD_LIQUID_TOP_N", 100)))
+            # E273 round 35: the slot size ladder (orders/slot_ladder.py): cells with proven results are sized at full size (`promoted`, read by the engine), losing cells are cut below.
+            _ladder = slot_ladder.get(db)
+            if isinstance(_inputs, dict) and _ladder.get("promoted"):
+                _inputs["promoted"] = _ladder["promoted"]
+            _setup_res = setup_live.classify_long(
+                symbol=candidate.symbol, price=candidate.current_ltp, now=_now_ist,
+                event_polarity=getattr(quality, "event_polarity", None) if quality else None, flow_json=_flow_snap,
+                quote=_quote, gap_pct=_gap, tape=_tape, penalties=_penalties, allowed=_allowed, inputs=_inputs)
+            if _setup_res and _setup_res.get("id") and _setup_res.get("size_mult") is not None:
+                _df = slot_ladder.demote_factor(_setup_res["id"], setup_stamp.time_slot(_now_ist), _ladder)
+                if _df < 1.0:
+                    _setup_res["size_mult"] = round(max(setup_engine.SIZE_FLOOR, float(_setup_res["size_mult"]) * _df), 4)
+                    logger.info("position-stocks entry: %s slot ladder cut the size (%s|%s averages below zero): x%.2f", candidate.symbol, _setup_res["id"], setup_stamp.time_slot(_now_ist), _df)
+        if getattr(config, "SETUP_STAMP_ENABLED", True):
+            if _setup_res and _setup_res.get("id"):
+                _flow_snap = setup_stamp.attach(_flow_snap, setup_stamp.build(
+                    setup_id=_setup_res["id"], trigger=_setup_res.get("trigger", ""), confirmations=_setup_res.get("confirmations"),
+                    penalties=(_setup_res.get("stamp") or {}).get("penalties"), size_mult=_setup_res.get("size_mult"), now=_now_ist, side="LONG"))
+            else:
+                _flow_snap = setup_stamp.attach(_flow_snap, setup_stamp.build(trigger="shortlist", now=_now_ist, side="LONG", penalties=_penalties,
+                                                                              size_mult=setup_live.penalty_size(_penalties)))
+        if _setup_res and _setup_res.get("id"):
+            _setup_mult = _setup_res.get("size_mult")
+            logger.info("position-stocks entry: %s matches %s (%s) size x%s", candidate.symbol, _setup_res["id"], ",".join(_setup_res.get("confirmations") or []), _setup_mult)
+        elif _penalties:
+            _setup_mult = setup_live.penalty_size(_penalties)           # no setup matched: the penalties alone shrink the size
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: setup engine / stamp failed (entry unaffected)", exc_info=True)
+
+    # E273 round 11: a gap-up waived for its news is only allowed through S1 (the closed-bar trigger). Any other outcome - another setup, none, or an engine error - refuses
+    # with the original gap reason, i.e. exactly what happened before the rule.
+    _gu_reject = gap_event.unconfirmed_reason(_gap_waived, (_setup_res or {}).get("id"))
+    if _gu_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _gu_reject, quality=quality)
+        return None
+
+    # E273 round 5: "no setup, no trade" for longs (NO_SETUP_MODE live; ships off). Only when S1, S2 and S3 can all fire, never for a pullback re-arm or reclaim
+    # entry (they carry their own trigger), and an engine error is not a verdict (setup_live.no_setup_refusal). Refused before any capital moves.
+    _ns_reject = setup_live.no_setup_refusal(
+        _setup_res, mode=getattr(config, "NO_SETUP_MODE", "off"), exempt=bool(rearm) or bool(_reclaim),
+        all_enabled=bool(getattr(config, "SETUP_ENGINE_ENABLED", True) and getattr(config, "SETUP_S1_ENABLED", True)
+                         and getattr(config, "SETUP_S2_ENABLED", True) and getattr(config, "SETUP_S3_ENABLED", True)))
+    if _ns_reject:
+        shared_symbol_lock.release(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _ns_reject, quality=quality)
+        return None
 
     # E115: Time Machine gate (orders/tm_gate.py). Replays THIS trade's own stop % / target % at this time of day on the stock's recent 5-minute sessions and on
     # made-up sessions; AGAINST (both negative after charges and slippage) refuses the entry. It can only say NO; no data / slow data = no opinion and the
@@ -705,7 +952,17 @@ def attempt_entry(
         return None
 
     # group330: pre-open gap (09:08 snapshot) - do not chase a big gap-up / catch a big gap-down until the gate window ends. Fails open.
-    _gap_reject = preopen.gap_reason(candidate.symbol)
+    _gap_reject = None if _soft else preopen.gap_reason(candidate.symbol)   # E273 round 10: a penalty (collected before the total check above) unless SOFT_GATES_MODE=veto
+    if _gap_reject and _pos_event:                                           # E273 round 11: veto mode follows the same event-aware rule
+        if gap_event.gap_kind(_gap_reject) == "down":
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_gap_reject, quality), quality=quality)
+            return None
+        if gap_event.gap_kind(_gap_reject) == "up" and not gap_event.large_gap_penalty(preopen.gap_of(candidate.symbol)):
+            # veto mode runs after the setup engine: S1 has to have matched already, and a very large gap (half-size case) stays refused (no penalty can be added here)
+            if not gap_event.unconfirmed_reason([_gap_reject], (_setup_res or {}).get("id")):
+                _gap_waived.append(_gap_reject)
+                _gap_reject = None
     if _gap_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _gap_reject, quality=quality)
@@ -713,7 +970,7 @@ def attempt_entry(
 
     # group333: VWAP confirmation - no long below the day's VWAP (or, when ENTRY_VWAP_MAX_EXTENSION_PCT is set, a chase far above it). Same cached /quote
     # row as the depth / circuit gates; fails open.
-    _vwap_reject = vwap_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    _vwap_reject = None if _soft else vwap_gate.reject_reason(candidate.symbol, candidate.current_ltp)   # E273 round 9: a penalty above unless SOFT_GATES_MODE=veto
     if _vwap_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _vwap_reject, quality=quality)
@@ -729,6 +986,15 @@ def attempt_entry(
 
     # group333: volume / turnover floor - normal daily turnover, today's turnover so far, relative volume (orders/liquidity_gate.py). Cached data only; fails open.
     _liq_reject = liquidity_gate.reject_reason(candidate.symbol, candidate.current_ltp)
+    if _liq_reject and str(_liq_reject).startswith("LIQUIDITY_RVOL") and soft_gates.penalty_mode():       # E273 round 31: low relative volume is a size penalty down to LIQUIDITY_RVOL_HARD_FRAC x its floor
+        try:
+            _rv = liquidity_gate.rvol_ratio(candidate.symbol, candidate.current_ltp)
+            _rvp = soft_gates.rvol_penalty(_rv, getattr(config, "ENTRY_MIN_RVOL", 0.35), getattr(config, "LIQUIDITY_RVOL_HARD_FRAC", 0.5))
+            if _rvp:
+                _penalties["rvol"], _soft_why["rvol"] = _rvp, _liq_reject
+                _liq_reject = None
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: rvol penalty failed (the refusal stands)", exc_info=True)
     if _liq_reject:
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _liq_reject, quality=quality)
@@ -772,7 +1038,9 @@ def attempt_entry(
     # group354: daily market-structure gate (orders/structure_gate.py). Live by default; refuses only a clear daily-structure no-go,
     # no / stale data is "no opinion"; fails open. The snapshot is stored on the position.
     _struct_cap: dict = {}
-    _struct_reject, _struct_snap = structure_gate.check(candidate.symbol, candidate.current_ltp, capture=_struct_cap)
+    _struct_pen: dict = {}     # E273 round 32: chase / stretch / room are size penalties (soft_gates.structure_penalties); a bearish or deep-overshoot verdict still refuses
+    _struct_reject, _struct_snap = structure_gate.check(candidate.symbol, candidate.current_ltp, capture=_struct_cap,
+                                                        penalties=_struct_pen if soft_gates.penalty_mode() else None)
     if _struct_cap:   # group372 (WS-6): one observation row per symbol / IST day (passed + rejected); added to this session, never raises, never changes the entry
         structure_observation.record(db, candidate.symbol, candidate.current_ltp, _struct_cap.get("verdict") or {}, _struct_cap.get("summary"),
                                      _struct_cap.get("gate_mode") or "", bool(_struct_cap.get("enforced")))
@@ -780,6 +1048,23 @@ def attempt_entry(
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _struct_reject, quality=quality)
         return None
+    if _struct_pen:
+        _penalties.update(_struct_pen)
+        for _k, _pv in _struct_pen.items():
+            _soft_why[_k] = f"STRUCTURE:{_k.replace('structure_', '')} penalty {_pv:.2f}"
+        logger.info("position-stocks entry: %s structure verdict sized down instead of refused (%s)", candidate.symbol, ", ".join(f"{k} {v:.2f}" for k, v in _struct_pen.items()))
+    # E273 round 32: penalties added after the setup engine ran (round 31 rvol, round 32 structure) were not in its size. Skip on a high total, else rescale the size and the stamp.
+    _late_pen = {k: v for k, v in _penalties.items() if k not in _pen_early}
+    if _late_pen:
+        _late_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        if _late_reject:
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _late_reject, quality=quality)
+            return None
+        _new_mult = soft_gates.late_size(_setup_mult, _pen_early, _late_pen, setup_engine.SIZE_FLOOR)
+        if _new_mult is not None and _new_mult != _setup_mult:
+            _setup_mult = _new_mult
+            _flow_snap = setup_stamp.restamp(_flow_snap, _penalties, _setup_mult)
 
     # group469: approve-first mode. OFF unless APPROVE_FIRST_N > 0. While a round is open (the gate settings changed) each automatic entry
     # waits for your approval (POST /approvals/{symbol}/approve). Checked after EVERY other gate (so only an entry that would really go out asks you) and before capital is
@@ -809,7 +1094,12 @@ def attempt_entry(
         logger.info("position-stocks entry: %s %s parts=%s", candidate.symbol, _cv_note, _cv.get("detail"))
 
     # Reserve capital (also checks kill switch again in the ledger)
-    position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct, conviction_mult=(_cv or {}).get("mult"))
+    try:
+        from orders import risk_stage as _rs                               # E276 round 56: a proven setup risks more per trade (1.0 = unchanged)
+        _risk_mult = _rs.risk_mult_for(db, (_setup_res or {}).get("id"), "LONG")
+    except Exception:  # noqa: BLE001
+        _risk_mult = 1.0
+    position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
         # FIX (session70): raise instead of returning None so _run_cycle()
@@ -907,6 +1197,19 @@ def attempt_entry(
                 position_value = _onew
             quantity = _oq
 
+    # E273 round 2: a matched setup's own size (S1: 0.25 in the 09:20 slot, 0.5 later). The LOWER of it and the opening-window multiplier applies; they do not stack.
+    if _setup_mult is not None and quantity > 1:
+        _sf = setup_live.extra_factor(_setup_mult, _open_mult)
+        if _sf < 1.0:
+            _sq = max(1, int(quantity * _sf + 0.5))
+            if _sq < quantity:
+                logger.info("position-stocks entry: %s sized down %d -> %d shares (setup x%.2f)", candidate.symbol, quantity, _sq, _setup_mult)
+                _snew = _sq * candidate.current_ltp
+                if _snew < position_value:
+                    ledger.release_capital(db, position_value=position_value - _snew, realized_pnl=0.0)
+                    position_value = _snew
+                quantity = _sq
+
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:
         logger.warning(
@@ -918,7 +1221,7 @@ def attempt_entry(
     else:
         # group479: minimum whole shares (ENTRY_MIN_QTY, default 3, 0 = off), judged after every sizing step above. 1-2 shares cannot scale out or
         # trail and pay the same fixed costs for less edge. The forced 1-share first live order (branch above) is a probe and is never gated.
-        _min_q = int(getattr(config, "ENTRY_MIN_QTY", 0) or 0)
+        _min_q = cost_gate.effective_min_qty(candidate.current_ltp, levels.target_pct, int(getattr(config, "ENTRY_MIN_QTY", 0) or 0))   # E273 round 6: by cost gate
         if _min_q > 0 and quantity < _min_q:
             ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
             shared_symbol_lock.release(db, candidate.symbol)
@@ -965,6 +1268,16 @@ def attempt_entry(
                 f"{candidate.symbol}: INSUFFICIENT_CAPITAL_FOR_MIN_QTY shortfall=₹{shortfall:.2f}"
             )
         position_value = actual_cost
+
+    # E276 round 51: total open risk (this pool + real-trade-service + gap allowance on carried positions) must stay under HEAT_LIMIT_PCT of the combined pool.
+    # Fail-open; the forced 1-share first live order is a probe and is not gated. Not symbol-specific: it ends the cycle like the other capital refusals.
+    if not (is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE):
+        _heat_reject = heat_gate.reject_reason(db, candidate.current_ltp, levels.stop_price, quantity, "LONG", (_setup_res or {}).get("id"), candidate.symbol)
+        if _heat_reject:
+            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            shared_symbol_lock.release(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _heat_reject, quality=quality)
+            return None
 
     # Shared cross-service Dhan account-wide order-rate guard (tracking doc
     # §3.8) — checked here, right before the real Dhan call, not earlier:

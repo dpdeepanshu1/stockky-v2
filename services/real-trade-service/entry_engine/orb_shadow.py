@@ -1,16 +1,16 @@
-"""entry_engine/orb_shadow.py - opening-range-breakout recorder (group 470). RECORD ONLY, no live mode.
+"""entry_engine/orb_shadow.py - opening-range-breakout range and verdict (group 470; LIVE since E273 round 15, no record-only mode).
 
 WHY: the 20 Oct review found entries in the 09:xx hour win 18% of the time (45 trades, gross -866) when made by a quality check alone.
 The opening-range-breakout literature enters only AFTER a 5-minute range has formed, on a break of its high, with price above VWAP, a tight
-spread and a limit order. Nothing here tests that on this account's data, so it is recorded first: for every entry decision the bot
-evaluates, flow_json["orb"] says what an opening-range entry would have done. Nothing is ordered, blocked or resized.
+spread and a limit order. For every entry decision the bot evaluates, flow_json["orb"] carries the opening range and what an opening-range entry would do; the swing
+lane reads the first 5 minutes of the same 1-minute bars as an entry check (swing/live.py, orb_bars.open_check). This module itself orders, blocks and resizes nothing.
 
 RANGE: the first tick seen between ORB_RANGE_END_IST and ORB_CAPTURE_UNTIL_IST fixes range_high / range_low from the tick's day high / low
 (the session so far = the opening range). A symbol first seen after the capture window has no range (reason "no_range").
 VERDICT (orb.would_enter): price above range_high, above VWAP, spread <= ORB_MAX_SPREAD_PCT, range width inside
 [ORB_MIN_RANGE_PCT, ORB_MAX_RANGE_PCT], time <= ORB_LATEST_ENTRY_IST. limit = range_high x (1 + ORB_LIMIT_BUFFER_PCT %), stop = range_low.
-Every function never raises. ORB_MODE=off stops all recording.
-E113: flow_json["orb"] also carries close_trigger / volume_ratio fields from entry_engine/orb_bars.py when 1-minute bars are cached (record only).
+Every function never raises. ORB_MODE is live | off; off stops all recording and the swing open check.
+E113: flow_json["orb"] also carries close_trigger / volume_ratio fields from entry_engine/orb_bars.py when 1-minute bars are cached .
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _t(name: str, dh: int, dm: int):
 def evaluate(symbol: str, tick, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """The ORB verdict dict for this tick, or None when off / outside 09:15-ORB_LATEST_ENTRY_IST / unusable. Updates the range store."""
     try:
-        if getattr(config, "ORB_MODE", "shadow") == "off":
+        if getattr(config, "ORB_MODE", "live") == "off":
             return None
         n = ist_now(now)
         if n.weekday() >= 5 or n.time() < _t("OPENING_ENTRY_NOT_BEFORE_IST", 9, 15):
@@ -64,7 +64,7 @@ def evaluate(symbol: str, tick, now: Optional[datetime] = None) -> Optional[Dict
         if n.time() > _t("ORB_LATEST_ENTRY_IST", 10, 30):
             return None
         rng = _ranges.get(key)
-        out: Dict[str, Any] = {"v": 1, "mode": "shadow", "at": n.strftime("%H:%M:%S")}
+        out: Dict[str, Any] = {"v": 1, "mode": "live", "at": n.strftime("%H:%M:%S")}
         if rng is None or px is None:
             out.update(would_enter=False, reason="no_range" if rng is None else "no_price")
             return out
@@ -89,7 +89,7 @@ def evaluate(symbol: str, tick, now: Optional[datetime] = None) -> Optional[Dict
                    would_enter=not reasons, reasons=reasons,
                    limit_price=round(rh * (1 + buf / 100.0), 2), stop_price=round(rl, 2),
                    stop_pct=round((px - rl) / px * 100.0, 3) if px > rl else None)
-        # E113: close-based trigger + trigger-bar volume from 1-minute bars (cached, never waits for the network). Record only: would_enter / reasons above are final.
+        # E113: close-based trigger + trigger-bar volume from 1-minute bars (cached, never waits for the network). would_enter / reasons above are final.
         try:
             from entry_engine import orb_bars
             out.update(orb_bars.fields_for(sym, rh, now))

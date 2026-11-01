@@ -75,7 +75,8 @@ def _board_part(board_row: Any) -> Optional[float]:
     return cs.scale(board_row.get("conviction"), 40.0, 90.0)
 
 
-def hold_reasons(*, realized_pnl_today: Any = 0.0, regime_override: bool = False, vix_mult: float = 1.0, calendar_mult: float = 1.0, opening_mult: float = 1.0) -> List[str]:
+def hold_reasons(*, realized_pnl_today: Any = 0.0, regime_override: bool = False, vix_mult: float = 1.0, calendar_mult: float = 1.0, opening_mult: float = 1.0,
+                 regime_rules_mult: float = 1.0) -> List[str]:
     """Why an UPSIZE must stay at 1.0 right now (empty list = no reason). Pure; never raises."""
     out: List[str] = []
     try:
@@ -84,7 +85,8 @@ def hold_reasons(*, realized_pnl_today: Any = 0.0, regime_override: bool = False
             out.append("losing day")
         if regime_override:
             out.append("regime override")
-        for label, v in (("VIX size-down", vix_mult), ("calendar size-down", calendar_mult), ("opening-window size-down", opening_mult)):
+        for label, v in (("VIX size-down", vix_mult), ("calendar size-down", calendar_mult), ("opening-window size-down", opening_mult),
+                           ("regime-rules size-down", regime_rules_mult)):
             f = cs._num(v)
             if f is not None and f < 1.0:
                 out.append(label)

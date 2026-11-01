@@ -136,21 +136,13 @@ DOWNTREND_6M_THRESHOLD = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").
 # stocks near yearly highs face heavy profit-booking.
 OVEREXTENDED_52W_TOP_PCT = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0"))
 
-# group379 (E1): the 52-week "top 12%" rule used to say "choppy/weak market" without ever looking at the market, and it
-# rejected stocks that had JUST made a new high (8 of 13 rejections in the 13-Oct log). Now:
-#   CANDIDATE_52W_RULE_ENABLED=0         the rule is off entirely (no 52w rejection at all)
-#   CANDIDATE_52W_REGIME_GATE=0          the rule applies in every regime (the old behaviour)
-#   CANDIDATE_52W_WEAK_REGIME_SCORE=50   with the gate on, the rule applies only while the market score (the same
-#                                        score the dashboard shows) is BELOW this. A missing / stale score = rule applies.
-#   CANDIDATE_52W_REGIME_MAX_AGE_MIN=30  a market score older than this counts as missing
-#   CANDIDATE_52W_FRESH_HIGH_EXEMPT=0    a fresh high is judged like any other price again (old behaviour)
+# Task 4 (31 Oct 2026): the 52-week "top 12%" rejection rule, its log-only mode, its regime gate and the market-score refresh are REMOVED
+# (the horizon check showed the rule hurts at 5, 10 and 20 days). What stays is the fresh-high exemption below: a stock AT a fresh,
+# volume-confirmed 52-week high is a breakout, so it is also exempt from the near-resistance check (check 7).
+#   CANDIDATE_52W_FRESH_HIGH_EXEMPT=0    a fresh high is judged like any other price again
 #   CANDIDATE_52W_FRESH_HIGH_PCT=1.0     "at the high" = price within this % of the 52w high (or above it)
 #   CANDIDATE_52W_FRESH_HIGH_DAYS=10     ... and that high was set within this many calendar days of the last bar
 #   CANDIDATE_52W_FRESH_HIGH_VOL_RATIO=1.2  ... and the 5-day average volume is at least this x the 20-day average
-#   CANDIDATE_52W_LOG_ONLY=1             group434: the rule is evaluated and logged ("52W_LOG_ONLY would reject ...", counted in
-#                                        range_52w_log_only_stats()) but the candidate is NOT rejected. Default 0 = today's behaviour.
-#                                        THIS LOOSENS an entry rule: it lets near-52w-high stocks through, so run it deliberately.
-# None of these numbers has been backtested (Group E3 / F): they are conservative starting points, not tuned values.
 def _env_flag_on(name: str, default: str = "1") -> bool:
     return ((os.getenv(name) or "").strip() or default).lower() not in ("0", "false", "no", "off")
 
@@ -162,38 +154,6 @@ def _env_float_or(name: str, default: float) -> float:
         return float(default)
 
 
-RANGE_52W_ENABLED = _env_flag_on("CANDIDATE_52W_RULE_ENABLED")
-RANGE_52W_LOG_ONLY = _env_flag_on("CANDIDATE_52W_LOG_ONLY", "0")      # group434: default OFF (rule rejects as before)
-_R52_LOG_ONLY_N = {"would_reject": 0}
-_R52_LOG_ONLY_RECENT: list = []          # group440: newest last, capped; lets GET /range52w/status show WHICH symbols the rule would have blocked
-_R52_RECENT_MAX = 50
-
-
-def _r52_record_would_reject(symbol: str, pos_pct: float, score: Optional[float]) -> None:
-    """group440: counter + short in-memory history for the log-only mode. Never raises (it sits in the candidate path)."""
-    try:
-        _R52_LOG_ONLY_N["would_reject"] += 1
-        _R52_LOG_ONLY_RECENT.append({
-            "symbol": str(symbol), "pos_pct": round(float(pos_pct), 1),
-            "market_score": None if score is None else round(float(score), 1),
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        })
-        if len(_R52_LOG_ONLY_RECENT) > _R52_RECENT_MAX:
-            del _R52_LOG_ONLY_RECENT[: len(_R52_LOG_ONLY_RECENT) - _R52_RECENT_MAX]
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def range_52w_log_only_stats() -> dict:
-    """group434: how many candidates the 52-week rule WOULD have rejected while CANDIDATE_52W_LOG_ONLY=1 (since boot, per process).
-    group440: plus the config in force and the last <=50 would-reject symbols (`recent`)."""
-    return {
-        "log_only": bool(RANGE_52W_LOG_ONLY), "rule_enabled": bool(RANGE_52W_ENABLED),
-        "would_reject": _R52_LOG_ONLY_N["would_reject"], "recent": list(_R52_LOG_ONLY_RECENT),
-    }
-RANGE_52W_REGIME_GATE = _env_flag_on("CANDIDATE_52W_REGIME_GATE")
-RANGE_52W_WEAK_REGIME_SCORE = _env_float_or("CANDIDATE_52W_WEAK_REGIME_SCORE", 50.0)
-RANGE_52W_REGIME_MAX_AGE_MIN = _env_float_or("CANDIDATE_52W_REGIME_MAX_AGE_MIN", 30.0)
 FRESH_HIGH_EXEMPT = _env_flag_on("CANDIDATE_52W_FRESH_HIGH_EXEMPT")
 FRESH_HIGH_PCT = _env_float_or("CANDIDATE_52W_FRESH_HIGH_PCT", 1.0)
 FRESH_HIGH_DAYS = _env_float_or("CANDIDATE_52W_FRESH_HIGH_DAYS", 10.0)
@@ -313,32 +273,6 @@ def _refresh_cycle_adaptive_params(db: Session) -> None:
         )
     except Exception as e:
         logger.warning("candidate_engine: adaptive param refresh failed (%s), keeping prior values", e)
-
-# group379 (E1): this cycle's market score, for the 52-week rule. entry_engine records every score it fetches from
-# GET /market/indices into MarketRegimeHistory, so the newest row IS the dashboard's market score; no extra network
-# call. None = no recent reading (the rule then applies exactly as before - missing data never relaxes a rule).
-_cycle_market_score: Optional[float] = None
-
-
-def _refresh_cycle_market_score(db: Session) -> None:
-    """Called once per refresh_candidates() cycle. Best-effort: any failure leaves the score unknown (None)."""
-    global _cycle_market_score
-    _cycle_market_score = None
-    try:
-        row = (
-            db.query(models.MarketRegimeHistory)
-            .order_by(models.MarketRegimeHistory.recorded_at.desc())
-            .first()
-        )
-        if row is None or row.score is None:
-            return
-        age_min = (datetime.now(timezone.utc) - as_aware(row.recorded_at)).total_seconds() / 60.0
-        if age_min <= RANGE_52W_REGIME_MAX_AGE_MIN:
-            _cycle_market_score = float(row.score)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("candidate_engine: market score read failed (%s), 52w rule applies as before", e)
-        _cycle_market_score = None
-
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
 MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "10.0"))
@@ -1368,17 +1302,6 @@ def _near_resistance(candles: list[dict], current_price: float) -> bool:
     return current_price >= recent_high * 0.98  # within 2% of 20-period high
 
 
-def _range_52w_applies() -> tuple[bool, Optional[float]]:
-    """(rule applies, market score used). With the regime gate on, the 52-week rule applies only in a weak market;
-    an unknown score keeps the rule on (fail toward the old, stricter behaviour)."""
-    score = _cycle_market_score
-    if not RANGE_52W_REGIME_GATE:
-        return True, score
-    if score is None:
-        return True, None
-    return score < RANGE_52W_WEAK_REGIME_SCORE, score
-
-
 def _volume_ratio_5_20(candles: Any) -> Optional[float]:
     """5-bar average volume / 20-bar average volume, or None when there is not enough volume data (needs 10 bars)."""
     if not isinstance(candles, list):
@@ -1643,48 +1566,9 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
             "reject_kind": "bullish_score",
         }
 
-    # ── Check 4: 52-week range position (overextension) ──────────────────────
-    # group379 (E1): (a) a stock AT a fresh, volume-confirmed 52-week high is a breakout, not an overextension, and is
-    # not rejected here (nor by check 7 below); (b) otherwise the rule applies only while the market is actually weak
-    # (see _range_52w_applies), and the reason now quotes the real market score instead of assuming "choppy".
+    # ── Check 4: (removed, task 4) the 52-week range rule. The fresh-high note below still exempts a breakout from check 7. ──
     candles_1y = fetched.get("1y")
     breakout_note: Optional[str] = _fresh_high_breakout(candles_1y, fetched.get("1m"), current_price)
-    _r52_would_note: str = ""            # group440: set only in log-only mode when the rule would have rejected this candidate
-    if RANGE_52W_ENABLED and not breakout_note and isinstance(candles_1y, list) and candles_1y and current_price > 0:
-        highs = [float(c.get("high", 0)) for c in candles_1y if c.get("high")]
-        lows  = [float(c.get("low",  0)) for c in candles_1y if c.get("low")]
-        if highs and lows:
-            h52, l52 = max(highs), min(lows)
-            rng = h52 - l52
-            if rng > 0:
-                pos_pct = (current_price - l52) / rng * 100
-                _applies, _mscore = _range_52w_applies()
-                if pos_pct > (100 - OVEREXTENDED_52W_TOP_PCT) and _applies:
-                    if _mscore is None:
-                        _ctx = "market score unavailable, so the rule is applied as a precaution"
-                    else:
-                        _ctx = f"market score {_mscore:.0f}"
-                        if RANGE_52W_REGIME_GATE:
-                            _ctx += f" is below {RANGE_52W_WEAK_REGIME_SCORE:.0f} (weak market)"
-                    _r52_reason = (
-                        f"Price in top {OVEREXTENDED_52W_TOP_PCT}% of 52w range "
-                        f"({pos_pct:.1f}%), not a fresh volume-confirmed high; {_ctx}. "
-                        "Buying near yearly highs invites profit-booking from existing "
-                        "holders. Poor R:R."
-                    )
-                    if RANGE_52W_LOG_ONLY:       # group434: measure the rule without letting it cost entries
-                        _r52_record_would_reject(symbol, pos_pct, _mscore)
-                        _r52_would_note = (
-                            f"52w log-only: rule would have rejected (at {pos_pct:.1f}% of 52w range, "
-                            f"market score {'n/a' if _mscore is None else format(_mscore, '.0f')})"
-                        )
-                        logger.info("52W_LOG_ONLY would reject %s: %s", symbol, _reject_log_text(_r52_reason))
-                    else:
-                        return {
-                            "reject_reason": _r52_reason,
-                            "tf_returns": tf_returns, "bullish_count": bullish_count, "atr_pct": None,
-                            "reject_kind": "range_52w",
-                        }
 
     # ── Check 5: ATR volatility cap ───────────────────────────────────────────
     # ATR is computed from the 1m (1mo/1d) candles already fetched above —
@@ -1750,7 +1634,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         "bullish_count": bullish_count,
         "atr_pct":       atr_pct,
         "current_price": current_price,
-        "market_note":   breakout_note or _r52_would_note or "",
+        "market_note":   breakout_note or "",
         "log_ctx":       _log_ctx,
     }
 
@@ -3078,7 +2962,6 @@ async def refresh_candidates(db: Session, mode: str) -> int:
     # is a global refresh rather than threading `db` through every nested
     # analysis function.
     _refresh_cycle_adaptive_params(db)
-    _refresh_cycle_market_score(db)   # group379: for the 52-week rule
 
     # Standard track: 6h dedupe cooldown (avoids duplicate cards for slow-moving signals)
     cooldown_syms = _recently_candidated_symbols(db, mode)

@@ -19,10 +19,10 @@ const failed = swingView({ error: "boom" });
 assert.equal(failed.kind, "unavailable");
 assert.match(failed.headline, /failed: boom/);
 
-// shadow, nothing closed: the normal first weeks
+// a legacy shadow value (off), nothing closed
 const first = swingView(doc());
-assert.equal(first.kind, "shadow");
-assert.match(first.headline, /No order is placed/);
+assert.equal(first.kind, "off", "E273 round 13: a legacy shadow mode value reads as off, as the service reads it");
+assert.match(first.headline, /no new swing is bought/);
 assert.equal(first.verdict.code, "NOT_ENOUGH_DATA");
 assert.equal(first.verdict.tone, "warn");
 assert.equal(first.progress.needed, SWING_MIN_TRADES);
@@ -102,7 +102,8 @@ assert.deepEqual(pos.planned[1], { symbol: "DDD", rank: "-", signalDay: "-", sto
 
 // malformed pieces never throw
 assert.doesNotThrow(() => swingView({ mode: "shadow", shadow: null, pause: null, open_positions: null, planned: null, wiring: null, scan: null }));
-assert.equal(swingView({ mode: "shadow" }).kind, "shadow");
+assert.equal(swingView({ mode: "shadow" }).kind, "off");
+assert.equal(swingView({ mode: "live" }).kind, "live");
 
 // ledger table lines
 const lines = ledgerLines([

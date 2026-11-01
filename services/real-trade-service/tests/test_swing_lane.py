@@ -154,7 +154,7 @@ def test_sizing_and_slots():
 def test_live_is_demo_only_until_real_is_enabled():
     assert lane.live_allowed("live", "DEMO", False) and not lane.live_allowed("live", "REAL", False) and lane.live_allowed("live", "REAL", True)
     assert not lane.live_allowed("shadow", "DEMO", True) and not lane.live_allowed("off", "DEMO", True) and not lane.live_allowed("bogus", "DEMO", True)
-    assert lane.norm_mode("LIVE ") == "live" and lane.norm_mode("x") == "shadow"
+    assert lane.norm_mode("LIVE ") == "live" and lane.norm_mode("x") == "off" and lane.norm_mode("shadow") == "off"   # E273 round 13: no shadow mode
 
 
 def test_ratchet_never_lowers_and_pick_needs_screen_rank_atr():
@@ -292,7 +292,7 @@ def test_manual_engine_default_behaviour_is_unchanged_without_swing():
 
 def test_switches_ship_live_in_demo_and_real_by_default():
     assert config.SWING_MODE == "live" and config.SWING_LIVE_REAL_ENABLED is True and config.SWING_BROKER_STOP_ENABLED is False   # E233: REAL is on by default
-    assert config.SWING_MAX_HOLD_DAYS == 5 and config.SWING_MAX_POSITIONS == 2 and config.SWING_PAUSE_AFTER_LOSSES == 3
+    assert config.SWING_MAX_HOLD_DAYS == 5 and config.SWING_MAX_POSITIONS == 3 and config.SWING_PAUSE_AFTER_LOSSES == 3
 
 
 def test_models_and_routes_exist():

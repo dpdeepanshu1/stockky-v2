@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """swing_universe.py - E132: print the swing lane's universe from the history folder the replays validated (so the lane ranks the SAME stocks S2 tested).
 
-  python3 scripts/swing_universe.py HIST_DIR [--max N]   prints  SWING_UNIVERSE_SYMBOLS=A,B,C,...  and  SWING_UNIVERSE_MAX=<count>   (paste BOTH lines into .env, set SWING_MODE=shadow)
+  python3 scripts/swing_universe.py HIST_DIR [--max N]   prints  SWING_UNIVERSE_SYMBOLS=A,B,C,...  and  SWING_UNIVERSE_MAX=<count>   (paste BOTH lines into .env, leave SWING_MODE=live, or off to stop buying)
 
 E139: the default is now ALL symbols in the folder. It used to keep the first 450 ALPHABETICALLY, so on a 744-symbol history folder the lane would have ranked only A..K while the replay tested all 744. A --max below the folder size now prints a TRUNCATED warning.
 

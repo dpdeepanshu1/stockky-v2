@@ -192,7 +192,7 @@ RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 2.0)
 RISK_PER_TRADE_PCT_CONFIRMED = _get_bool("RISK_PER_TRADE_PCT_CONFIRMED", True)
 
 # ── Market Weather (market-state layer, 2026-10-23) ──────────────────────────────────────────────────────────────────────────────────
-# MARKET_STATE_MODE: off | shadow | live (ships shadow). The calibration-runner may only TIGHTEN, for one day, through control/kit.py overlays,
+# MARKET_STATE_MODE: off | live (ships live; a stale "shadow" value now reads as live). The calibration-runner may only TIGHTEN, for one day, through control/kit.py overlays,
 # and only while the mode is `live`. MARKET_STATE_RISK_MULT (0.1 .. 1.0, ships 1.0) multiplies RISK_PER_TRADE_PCT in capital/ledger.py at call time.
 def _ms_float(name: str, default: float, lo: float, hi: float) -> float:
     v = _get_float(name, default)
@@ -201,9 +201,9 @@ def _ms_float(name: str, default: float, lo: float, hi: float) -> float:
     return min(hi, max(lo, v))
 
 
-def _ms_mode(name: str = "MARKET_STATE_MODE", default: str = "shadow") -> str:
+def _ms_mode(name: str = "MARKET_STATE_MODE", default: str = "live") -> str:
     v = _get_str(name, default).lower()
-    return v if v in ("off", "shadow", "live") else default
+    return v if v in ("off", "live") else default
 
 
 MARKET_STATE_MODE = _ms_mode()
@@ -261,11 +261,23 @@ SHORT_STOP_MULT_PANIC = _ms_float("SHORT_STOP_MULT_PANIC", 0.6, 0.3, 1.0)
 # None touches a long rule, and with the short mode off none is read at all.
 SHORT_MAX_POSITIONS = max(1, min(5, _get_int("SHORT_MAX_POSITIONS", 2)))               # would-be shorts unresolved at once (later: real shorts)
 SHORT_ENTRY_START_IST = _get_str("SHORT_ENTRY_START_IST", "09:45")                      # the day's VWAP rests on too few trades before this
+SHORT_EARLY_S4_ENABLED = _get_bool("SHORT_EARLY_S4_ENABLED", True)                      # E274 round 41: a negative-event (S4) short may start at SHORT_EARLY_S4_START_IST instead of SHORT_ENTRY_START_IST; no other short does
+SHORT_EARLY_S4_START_IST = _get_str("SHORT_EARLY_S4_START_IST", "09:21")                  # the first closed 1-minute bar after the 09:15-09:20 opening range
+SHORT_SQUEEZE_GUARD_ENABLED = _get_bool("SHORT_SQUEEZE_GUARD_ENABLED", True)              # E274 round 41: no non-S4 short at / above the opening-range high with rising volume and tape buying (orders/squeeze_guard.py)
+SETUP_S2_S3_SHORT_ENABLED = _get_bool("SETUP_S2_S3_SHORT_ENABLED", True)         # E274 round 44: S2 (weak stock breaking the opening-range low) and S3 (exhaustion after an up-spike) may match a short, behind SETUP_S2_ENABLED / SETUP_S3_ENABLED
+SETUP_S4_BOARD_CONFIRM_ENABLED = _get_bool("SETUP_S4_BOARD_CONFIRM_ENABLED", True)    # E274 round 42: a negative-event short is no longer refused for a Board that has not caught up; "Board says bearish with conviction" becomes a 4th S4 confirmation (2 needed)
+SHORT_TARGET_LEARNED_ENABLED = _get_bool("SHORT_TARGET_LEARNED_ENABLED", True)           # E274 round 43: an S4 short's target = its setup cell's typical favourable move when that is nearer (30+ closed trades, 10+ winners)
+SHORT_TARGET_HVN_ENABLED = _get_bool("SHORT_TARGET_HVN_ENABLED", True)                   # E274 round 43: a short's target is trimmed to one tick above the next high-volume node below (reliable tape), when nearer
+SHORT_TARGET_MIN_PCT = max(0.0, _get_float("SHORT_TARGET_MIN_PCT", 0.5))                 # E274 round 43: a trimmed short target must still pay this % from the entry
 SHORT_ENTRY_CUTOFF_IST = _get_str("SHORT_ENTRY_CUTOFF_IST", "13:30")                    # a late short has little time to work and a lot of time to be squeezed
 SHORT_SQUAREOFF_TIME_IST = _get_str("SHORT_SQUAREOFF_TIME_IST", "14:55")                # shadow shorts are closed and live shorts covered here (orders/eod_squareoff.run_short_squareoff; 5 min before the long square-off)
 SHORT_VWAP_TOLERANCE_PCT = _ms_float("SHORT_VWAP_TOLERANCE_PCT", 0.15, 0.0, 2.0)        # refuse when price is MORE than this % above the day's VWAP
 SHORT_MIN_ENTRY_RANGE_POSITION = _ms_float("SHORT_MIN_ENTRY_RANGE_POSITION", 0.08, 0.0, 0.5)  # refuse at / below this place in the day range (0 = the low)
 SHORT_MAX_DAY_FALL_PCT = _ms_float("SHORT_MAX_DAY_FALL_PCT", 5.0, 0.0, 20.0)            # mirror of MAX_DAY_GAIN_PCT; 0 = off
+# E276 round 67: the day-fall limit follows the stock's own daily range. limit = max(SHORT_MAX_DAY_FALL_PCT, SHORT_DAY_FALL_RANGE_MULT x its average daily range %), never above
+# SHORT_DAY_FALL_HARD_CEILING_PCT (the hard ceiling never learns). A quiet stock keeps the fixed 5 %; a stock that normally moves 4 % a day may be shorted down to 6 %. 0 = the old fixed number.
+SHORT_DAY_FALL_RANGE_MULT = _ms_float("SHORT_DAY_FALL_RANGE_MULT", 1.5, 0.0, 5.0)
+SHORT_DAY_FALL_HARD_CEILING_PCT = _ms_float("SHORT_DAY_FALL_HARD_CEILING_PCT", 8.0, 1.0, 20.0)
 SHORT_UPPER_CIRCUIT_BUFFER_PCT = _ms_float("SHORT_UPPER_CIRCUIT_BUFFER_PCT", 3.0, 0.5, 20.0)  # a locked-up stock cannot be bought back
 SHORT_MIN_BOARD_CONVICTION = _ms_float("SHORT_MIN_BOARD_CONVICTION", 50.0, 0.0, 100.0)  # Market Board bearish conviction needed
 SHORT_GAP_UP_REFUSE_PCT = _ms_float("SHORT_GAP_UP_REFUSE_PCT", 1.0, 0.0, 10.0)          # gapped up this much and still above the open: no short; 0 = off
@@ -730,6 +742,48 @@ CIRCUIT_GATE_ENABLED = _get_bool("CIRCUIT_GATE_ENABLED", True)
 CIRCUIT_UPPER_BUFFER_PCT = _get_float("CIRCUIT_UPPER_BUFFER_PCT", 1.0)
 CIRCUIT_LOWER_BUFFER_PCT = _get_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
 EARNINGS_DAY_BLOCK = _get_bool("EARNINGS_DAY_BLOCK", True)
+# E272: results-day split. With EARNINGS_SPLIT_ENABLED a stock whose results were published (typed event feed, type "results") before
+# EARNINGS_KNOWN_BEFORE_IST is a KNOWN event and no longer blocked; results published during the session are blocked for EARNINGS_REACTION_WAIT_MIN
+# minutes after publication (the first reaction bar); results dated today with no publication time found stay blocked, as before.
+EARNINGS_SPLIT_ENABLED = _get_bool("EARNINGS_SPLIT_ENABLED", True)
+# E272: typed event fields on every quality check (event_type / polarity / strength / age / announce time) from the event feed, and the live veto: a fresh
+# NEGATIVE event of at least NEG_EVENT_VETO_MIN_STRENGTH refuses a long (NEG_EVENT:...). Feed down or polarity unknown = no veto, no trigger.
+TYPED_EVENT_ENABLED = _get_bool("TYPED_EVENT_ENABLED", True)
+NEG_EVENT_VETO_ENABLED = _get_bool("NEG_EVENT_VETO_ENABLED", True)
+NEG_EVENT_VETO_MIN_STRENGTH = max(0.0, min(1.0, _get_float("NEG_EVENT_VETO_MIN_STRENGTH", 0.3)))
+# E273 round 11: event-aware gap rule (orders/gap_event.py). A gap-up past its limit with a positive typed event of at least GAP_EVENT_MIN_STRENGTH is waived if S1 matches
+# afterwards; a gap-down past its limit against a positive event is skipped (GAP_AGAINST_EVENT). 0 / false = the old gap handling for every stock.
+GAP_EVENT_RULE_ENABLED = _get_bool("GAP_EVENT_RULE_ENABLED", True)
+GAP_EVENT_MIN_STRENGTH = max(0.0, min(1.0, _get_float("GAP_EVENT_MIN_STRENGTH", 0.3)))
+# E272 round 11: a fresh typed event AGAINST an OPEN Super Order trade (announced after it opened, strength >= EVENT_HELD_MIN_STRENGTH) pulls its stop in so only
+# (1 - EVENT_HELD_TIGHTEN_FRAC) of the distance behind the live price remains. Tightens only; never exits, never touches a plain short's broker stop (E114).
+EVENT_HELD_TIGHTEN_ENABLED = _get_bool("EVENT_HELD_TIGHTEN_ENABLED", True)
+EVENT_HELD_MIN_STRENGTH = max(0.0, min(1.0, _get_float("EVENT_HELD_MIN_STRENGTH", 0.4)))
+EVENT_HELD_TIGHTEN_FRAC = max(0.1, min(0.9, _get_float("EVENT_HELD_TIGHTEN_FRAC", 0.5)))
+EVENT_HELD_CACHE_S = max(5.0, _get_float("EVENT_HELD_CACHE_S", 60.0))
+# E273 round 2: setup_engine feeds the LONG entry. A positive typed event + price holding the pre-open price + a closed bar above the opening range + 2 of 3
+# confirmations (tape buying, above VWAP, sector) is S1_CATALYST_UP: stamped as the reason and sized by the engine (quarter size at 09:20, half later).
+# An entry matching no setup keeps the legacy stamp and full size until S2 / S3 / S4 can fire (later rounds).
+SETUP_ENGINE_ENABLED = _get_bool("SETUP_ENGINE_ENABLED", True)
+SETUP_S1_ENABLED = _get_bool("SETUP_S1_ENABLED", True)
+# E273 round 5: S2_RS_BREAKOUT (top-decile relative strength, gap not against, daily structure agrees, closed-bar range break or pullback hold; half size) and
+# S3_EXHAUSTION long (down-spike beyond the stock's own volatility + failure candle + tape exhaustion: gap-down reversal, below-open pullback, panic dump in
+# liquid names; probation size) join S1. NO_SETUP_MODE live = "no setup, no trade" for longs; it ships OFF until a few sessions show S2 / S3 firing (and the short
+# path with S4 exists), because turning it on first would refuse almost every entry. S1 also gets its sector third and priced_in (SETUP_PRICED_IN_ATR_MULT).
+SETUP_S2_ENABLED = _get_bool("SETUP_S2_ENABLED", True)
+SETUP_S3_ENABLED = _get_bool("SETUP_S3_ENABLED", True)
+SETUP_S4_ENABLED = _get_bool("SETUP_S4_ENABLED", True)   # E274 round 40: S4_CATALYST_DOWN on a short (negative event, closed bar below the opening-range low, 2 of 3 confirmations)
+NO_SETUP_MODE = _get_str("NO_SETUP_MODE", "off")      # off | live; read at call time by setup_live.no_setup_refusal (anything but "live" = off)
+SETUP_PRICED_IN_ATR_MULT = max(0.5, min(10.0, _get_float("SETUP_PRICED_IN_ATR_MULT", 2.0)))
+EARNINGS_KNOWN_BEFORE_IST = _get_str("EARNINGS_KNOWN_BEFORE_IST", "09:00")
+EARNINGS_REACTION_WAIT_MIN = max(0.0, _get_float("EARNINGS_REACTION_WAIT_MIN", 5.0))
+# E272: stamp every entry with the rule that took it (flow_json["setup"], orders/setup_stamp.py). Record only; no database column.
+SETUP_STAMP_ENABLED = _get_bool("SETUP_STAMP_ENABLED", True)
+# E273 round 35: the slot size ladder (orders/slot_ladder.py). A setup x time-slot cell with 30+ closed trades and a positive 90 % lower bound of its average R is promoted
+# to full size; one that averages below zero without proof is cut by SLOT_LADDER_DEMOTE_FACTOR; others keep their starting size. Off = starting sizes only.
+SLOT_LADDER_ENABLED = _get_bool("SLOT_LADDER_ENABLED", True)
+SLOT_LADDER_DEMOTE_FACTOR = max(0.05, min(1.0, _get_float("SLOT_LADDER_DEMOTE_FACTOR", 0.5)))
+SLOT_LADDER_CACHE_S = max(0.0, _get_float("SLOT_LADDER_CACHE_S", 300.0))
 
 # group 330 (2026-10-12): India VIX, negative news and a 09:08 pre-market plan for the scalper. All FAIL OPEN, each with its own switch.
 #   VIX_GATE_ENABLED     master switch (VIX read from market-data /quote/INDIAVIX, cached VIX_CACHE_TTL_S)
@@ -756,6 +810,10 @@ VIX_FETCH_TIMEOUT_S = _get_float("VIX_FETCH_TIMEOUT_S", 3.0)
 NEWS_NEGATIVE_BLOCK_ENABLED = _get_bool("NEWS_NEGATIVE_BLOCK_ENABLED", True)
 NEWS_NEGATIVE_BLOCK_SCORE = _get_float("NEWS_NEGATIVE_BLOCK_SCORE", 35.0)
 PREOPEN_SNAPSHOT_ENABLED = _get_bool("PREOPEN_SNAPSHOT_ENABLED", True)
+EVENT_CANDIDATES_ENABLED = _get_bool("EVENT_CANDIDATES_ENABLED", True)           # E272: list typed-event names (premarket plan) as S1 / S4 candidates
+EVENT_CANDIDATE_MIN_STRENGTH = _get_float("EVENT_CANDIDATE_MIN_STRENGTH", 0.3)   # same floor as the negative-event veto
+EVENT_CANDIDATE_MAX_AGE_MIN = _get_float("EVENT_CANDIDATE_MAX_AGE_MIN", 1080.0)  # 18 h: an overnight filing still counts at the open
+PREMARKET_PLAN_ENABLED = _get_bool("PREMARKET_PLAN_ENABLED", True)   # E272: 08:30 to 09:20 plan (overseas cues, VIX range, typed events, sector strength); live, no veto
 PREOPEN_SNAPSHOT_TIME_IST = _get_str("PREOPEN_SNAPSHOT_TIME_IST", "09:10")   # group 399: was 09:08
 PREOPEN_GAP_GATE_UNTIL_IST = _get_str("PREOPEN_GAP_GATE_UNTIL_IST", "10:00")
 PREOPEN_GAP_UP_BLOCK_PCT = _get_float("PREOPEN_GAP_UP_BLOCK_PCT", 6.0)
@@ -765,6 +823,10 @@ PREOPEN_GAP_DOWN_BLOCK_PCT = _get_float("PREOPEN_GAP_DOWN_BLOCK_PCT", 3.0)
 PREOPEN_MAX_PRICE_AGE_S = _get_float("PREOPEN_MAX_PRICE_AGE_S", 420.0)   # group 399: was 180 (no order updates in the 09:08-09:15 buffer)
 PREOPEN_MAX_SYMBOLS = _get_int("PREOPEN_MAX_SYMBOLS", 150)
 PREOPEN_FETCH_TIMEOUT_S = _get_float("PREOPEN_FETCH_TIMEOUT_S", 6.0)
+# E272: NSE matches the pre-open book between 09:10 and 09:12 (rules from 7 Sep 2026), so the 09:10 read can be an indicative price. One more read at
+# PREOPEN_FINAL_TIME_IST (before the 09:15 bell) replaces the gaps with the final ones; a symbol without a fresh final price keeps its 09:10 gap.
+PREOPEN_FINAL_READ_ENABLED = _get_bool("PREOPEN_FINAL_READ_ENABLED", True)
+PREOPEN_FINAL_TIME_IST = _get_str("PREOPEN_FINAL_TIME_IST", "09:12")
 
 # group 391 (2026-10-15): 09:10 opening plan (screening/opening_plan.py). At 09:15 a symbol has no 5-minute bars yet, so adaptive.compute() fell to the
 # legacy path whose stop floor is MIN_STOP_PCT (2%) and target ~4.4%. The plan turns each symbol's previous-session daily ATR (screening/prev_day.py,
@@ -800,6 +862,7 @@ ENTRY_MIN_DAY_TURNOVER_CR = _get_float("ENTRY_MIN_DAY_TURNOVER_CR", 1.0)
 ENTRY_LIQ_MIN_TIME_IST = _get_str("ENTRY_LIQ_MIN_TIME_IST", "10:00")
 ENTRY_RVOL_MIN_TIME_IST = _get_str("ENTRY_RVOL_MIN_TIME_IST", "09:45")
 ENTRY_MIN_RVOL = _get_float("ENTRY_MIN_RVOL", 0.35)
+LIQUIDITY_RVOL_HARD_FRAC = max(0.05, min(0.95, _get_float("LIQUIDITY_RVOL_HARD_FRAC", 0.5)))   # E273 round 31: relative volume between this fraction of ENTRY_MIN_RVOL and the floor is a size penalty; under it the entry is still refused
 
 # group 336 (2026-10-12): expiry / Friday / pre-holiday rules (orders/calendar_gate.py), catalyst check (orders/catalyst_gate.py), losing-window
 # auto-disable + stop/target width advice (orders/window_health.py). All fail open; each has a switch.
@@ -966,6 +1029,7 @@ MIN_TICKS_FOR_RANGE_GATE = _get_int("MIN_TICKS_FOR_RANGE_GATE", 10)
 # 2026-10-07 (group216): default 0.5 -> 0.25. The adaptive stop is only 0.8-2.0%, so a 0.5% tolerance let one entry
 # give away up to ~60% of the tightest stop before the trade started. Set ENTRY_MAX_SLIPPAGE_PCT=0.5 to restore.
 ENTRY_MAX_SLIPPAGE_PCT = _get_float("ENTRY_MAX_SLIPPAGE_PCT", 0.25)
+DRIFT_HARD_MULT = max(1.05, _get_float("DRIFT_HARD_MULT", 1.75))   # E273 round 33: a live price above the signal by this many times ENTRY_MAX_SLIPPAGE_PCT is still refused (ENTRY_SLIPPAGE); between the limit and that the entry is only sized down (SOFT_GATES_MODE penalty)
 ENTRY_MAX_TICK_AGE_S = _get_float("ENTRY_MAX_TICK_AGE_S", 45.0)
 # group389: the checks above fail open when the symbol has NO tick at all, so a MARKET entry could go out with no live price
 # to compare against (no stale-tick, no slippage check). ENTRY_REQUIRE_LIVE_TICK (default on) makes the automatic entry skip
@@ -1016,6 +1080,25 @@ if FLOW_GATE_MODE not in ("live", "log", "off"):
 FLOW_GATE_MIN_AGAINST = min(6, max(1, _get_int("FLOW_GATE_MIN_AGAINST", 2)))
 FLOW_GATE_TIMEOUT_S = max(0.2, _get_float("FLOW_GATE_TIMEOUT_S", 1.0))
 
+# ── E275: momentum-health exit (orders/momentum_health.py + orders/momentum_hook.py) ───────────────────────────────────────────────────────
+#   MOMENTUM_EXIT_MODE             live | off   (E276 round 66: ships live; a stale "log" reads as live - the plan has no log-only mode) live = 2 of 5 momentum signals pull the stop in / cut the target, 3 or more close the trade in profit
+#                                                     (exit status MOMENTUM_EXIT); off = nothing runs
+#   MOMENTUM_BOOK_N                signals needed to close the trade (default 3, 2..5)
+#   MOMENTUM_BOOK_MIN_PROFIT_PCT   the trade must be at least this % in profit to be closed by it (default 0.2); less only tightens
+#   MOMENTUM_NO_NEW_BEST_MIN       minutes without a new best price before signal 2 is on (default 20; the setup's own time-to-peak replaces it once learned)
+#   MOMENTUM_EXIT_MIN_INTERVAL_S   per-position minimum seconds between checks (default 20)
+#   MOMENTUM_LEARNED_ENABLED       1 (default) | 0   use the setup's own median time-to-peak and winners' typical gain once its cell has 30+ closed trades (shrunk n / (n + 30) toward the fixed numbers)
+MOMENTUM_EXIT_MODE = "off" if (_get_str("MOMENTUM_EXIT_MODE", "live")).strip().lower() == "off" else "live"   # E276 round 66: live | off only; "log" (decide and record only) is gone
+MOMENTUM_BOOK_N = min(5, max(2, _get_int("MOMENTUM_BOOK_N", 3)))
+MOMENTUM_BOOK_MIN_PROFIT_PCT = max(0.0, _get_float("MOMENTUM_BOOK_MIN_PROFIT_PCT", 0.2))
+MOMENTUM_NO_NEW_BEST_MIN = max(1.0, _get_float("MOMENTUM_NO_NEW_BEST_MIN", 20.0))
+MOMENTUM_EXIT_MIN_INTERVAL_S = max(0.0, _get_float("MOMENTUM_EXIT_MIN_INTERVAL_S", 20.0))
+TIME_STOP_LEARNED_ENABLED = _get_bool("TIME_STOP_LEARNED_ENABLED", True)   # E275 round 38: flat-band / no-follow-through / hard-maximum minutes from the trade's own setup cell (30+ closed trades, 10+ peak times), else the fixed numbers
+MOMENTUM_LEARNED_ENABLED = _get_bool("MOMENTUM_LEARNED_ENABLED", True)   # E275 round 37: signal 2's minutes and signal 4's gain from the trade's own setup cell (30+ closed trades), else the fixed numbers
+LEARNED_WEEKLY_LIMIT_ENABLED = _get_bool("LEARNED_WEEKLY_LIMIT_ENABLED", True)   # E275 round 39: a learned exit number (time-to-peak minutes, typical gain) changes by at most LEARNED_WEEKLY_LIMIT_PCT a week (orders/learned_limit.py)
+LEARNED_WEEKLY_LIMIT_PCT = max(1.0, min(100.0, _get_float("LEARNED_WEEKLY_LIMIT_PCT", 25.0)))
+LEARNED_LIMIT_FILE = _get_str("LEARNED_LIMIT_FILE", "")                          # "" = <BAR_RECORD_DIR>/_learned_limits.json
+
 # ── E270: order-flow tape on EXITS (tape_exit.py; same tape as the entry gate) ──────────────────────────────────────────────────────────────
 #   FLOW_EXIT_MODE           live (default) | log | off   live = a RELIABLE adverse tape pulls an open trade's stop in and trims its target to the next
 #                            HVN wall; log = decide and log only; off = nothing runs. Only ever tightens (stop never loosened, target never raised).
@@ -1049,6 +1132,7 @@ RECONCILE_USE_ORDER_EVENTS = _get_bool("RECONCILE_USE_ORDER_EVENTS", False)
 # Reject stocks already up more than this % on the day vs the exchange's
 # previous close (mode-3 feed). 0 disables. Fails open when no previous close.
 MAX_DAY_GAIN_PCT = _get_float("MAX_DAY_GAIN_PCT", 7.0)
+DAY_GAIN_HARD_MULT = max(1.05, _get_float("DAY_GAIN_HARD_MULT", 1.75))   # E273 round 34: a stock up this many times MAX_DAY_GAIN_PCT is still refused (DAY_GAIN_TOO_HIGH); between the limit and that the entry is only sized down (SOFT_GATES_MODE penalty)
 # Log + Telegram alert when the real entry fill differs from the signal price
 # by more than this % (stale tick, wrong order matched). 0 disables.
 # group216: alert default 1.0 -> 0.5 so a fill that cost more than half the tightest stop is visible. 0 disables.
@@ -1226,6 +1310,20 @@ OPENING_GATE_SETTLE_IST = _get_str("OPENING_GATE_SETTLE_IST", "10:00")
 OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _get_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.0)   # group 399: 0 = entries from 09:15:00 (group 390: 0.5, group 268: 5 min)
 OPENING_GATE_MAX_GAP_UP_PCT = _get_float("OPENING_GATE_MAX_GAP_UP_PCT", 3.0)       # open vs previous close; 0 disables
 OPENING_GATE_MAX_GAP_DOWN_PCT = _get_float("OPENING_GATE_MAX_GAP_DOWN_PCT", 1.0)   # gap DOWN larger than this is skipped; 0 disables
+# E273 round 3: BELOW_OPEN (price under the day's open) is a soft penalty by default: it shrinks the size (penalty z-units x the stock's own noise) instead of
+# refusing. The 31 Oct scorecard: skipped BELOW_OPEN rows did better than the entered baseline. "veto" = the old refusal. Under the PREVIOUS close still refuses.
+# E273 round 9: near day high / spike chase / VWAP distance / gain room are SIZE PENALTIES (orders/soft_gates.py), not refusals. penalty (default) | veto = the old
+# one-gate-one-refusal behaviour for all four. Each penalty is value / limit, capped at SOFT_GATE_MAX_PENALTY; only the TOTAL at PENALTY_SKIP (4.0) skips.
+SOFT_GATES_MODE = (lambda v: "veto" if v == "veto" else "penalty")(_get_str("SOFT_GATES_MODE", "penalty").strip().lower())
+SOFT_GATE_MAX_PENALTY = max(0.5, min(3.9, _get_float("SOFT_GATE_MAX_PENALTY", 3.0)))
+OPENING_BELOW_OPEN_MODE = _get_str("OPENING_BELOW_OPEN_MODE", "penalty")
+OPENING_BELOW_OPEN_UNIT_ATR_FRAC = max(0.01, _get_float("OPENING_BELOW_OPEN_UNIT_ATR_FRAC", 0.1))
+OPENING_BELOW_OPEN_FALLBACK_UNIT_PCT = max(0.05, _get_float("OPENING_BELOW_OPEN_FALLBACK_UNIT_PCT", 0.3))
+# E273 round 12: the day-high position, opening-range position, previous-day close and Nifty parts of the opening gate shrink the size (penalty) instead of refusing (veto = the old refusals).
+OPENING_PARTS_MODE = (lambda v: "veto" if v == "veto" else "penalty")(_get_str("OPENING_PARTS_MODE", "penalty").strip().lower())
+OPENING_NIFTY_FULL_PENALTY_PCT = max(0.05, _get_float("OPENING_NIFTY_FULL_PENALTY_PCT", 0.5))   # Nifty this many points under its minimum = the largest penalty
+# E273 round 30: price under the PREVIOUS close is a size penalty (OPENING_PARTS_MODE penalty) down to this many percent under it (1.0 just under, SOFT_GATE_MAX_PENALTY at this depth); below it the entry is still refused.
+OPENING_GATE_HARD_BELOW_PREV_PCT = max(0.05, _get_float("OPENING_GATE_HARD_BELOW_PREV_PCT", 2.0))
 OPENING_GATE_MAX_RANGE_POS = _get_float("OPENING_GATE_MAX_RANGE_POS", 0.88)        # stricter than MAX_ENTRY_RANGE_POSITION; 0 disables
 OPENING_GATE_OR_MINUTES = _get_int("OPENING_GATE_OR_MINUTES", 15)                  # opening range = first N minutes from 09:15
 OPENING_GATE_MIN_OR_POS = _get_float("OPENING_GATE_MIN_OR_POS", 0.5)               # after the OR is built: price in its upper half or above it
@@ -1309,6 +1407,7 @@ STRUCTURE_BREAKOUT_BARS = max(1, _get_int("STRUCTURE_BREAKOUT_BARS", 5))        
 STRUCTURE_MAX_CHASE_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_CHASE_ATR"), 4.0))          # live price above the nearest daily demand/imbalance zone top, in daily ATR
 STRUCTURE_MAX_STRETCH_ATR = max(0.0, _get_float(_ps("STRUCTURE_MAX_STRETCH_ATR"), 5.0))      # live price above the daily EMA20, in daily ATR
 STRUCTURE_MIN_ROOM_ATR = max(0.0, _get_float(_ps("STRUCTURE_MIN_ROOM_ATR"), 0.3))            # room to the next daily resistance, in daily ATR
+STRUCTURE_HARD_MULT = max(1.05, _get_float("STRUCTURE_HARD_MULT", 1.75))   # E273 round 32: a structure chase / stretch this many times its limit is still refused (room: under a quarter of its floor); between the limit and that, the entry is only sized down (SOFT_GATES_MODE penalty)
 STRUCTURE_MAX_AGE_DAYS = max(0.0, _get_float("STRUCTURE_MAX_AGE_DAYS", 5.0))            # (group415: was 7) last structure bar older than this = stale = no opinion
 STRUCTURE_MAX_PRICE_DEV_PCT = max(0.0, _get_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)) # live price vs structure close further apart = split / bad data = no opinion
 STRUCTURE_FETCH_TIMEOUT_S = max(0.5, _get_float("STRUCTURE_FETCH_TIMEOUT_S", 2.0))
@@ -1354,6 +1453,11 @@ BAR_RECORD_EVERY_S = max(60, _get_int("BAR_RECORD_EVERY_S", 300))
 BAR_RECORD_MAX_SYMBOLS = max(10, _get_int("BAR_RECORD_MAX_SYMBOLS", 250))
 BAR_RECORD_MIN_BARS = max(1, _get_int("BAR_RECORD_MIN_BARS", 20))
 BAR_RECORD_KEEP_DAYS = max(2, _get_int("BAR_RECORD_KEEP_DAYS", 45))
+# E272: every scan candidate and premarket watchlist name is also recorded (beyond the turnover cut), so each skipped candidate can be labelled later.
+BAR_RECORD_PRIORITY_ENABLED = _get_bool("BAR_RECORD_PRIORITY_ENABLED", True)
+BAR_RECORD_PRIORITY_MAX = max(0, _get_int("BAR_RECORD_PRIORITY_MAX", 400))
+# E272 round 8: also note the symbols real-trade-service evaluated today (its wanted list at <BAR_RECORD_DIR>/rt/wanted/<day>.json).
+BAR_WANTED_ENABLED = _get_bool("BAR_WANTED_ENABLED", True)
 
 # ---- E232 (2026-10-27): why a mover was not picked -------------------------------------------------------------------------------
 # The scan ranks every symbol that clears a rolling 5m / 60m move, but only the top SHORTLIST_MAX names per cycle reach the quality gate and
@@ -1472,6 +1576,9 @@ MANUAL_BUY_WINDOW_GUARD = _get_bool("MANUAL_BUY_WINDOW_GUARD", True)
 # Minimum whole shares per automatic entry, checked after every sizing step (VIX / calendar / opening half-size). Below it = SKIPPED (MIN_QTY).
 # 1-2 share trades cannot scale out or trail and pay the same fixed costs. 0 = off. The forced 1-share first live order is never gated.
 ENTRY_MIN_QTY = max(0, _get_int("ENTRY_MIN_QTY", 3))
+# E273 round 6: ENTRY_MIN_QTY_MODE cost (default) = the floor is the smallest quantity (up to ENTRY_MIN_QTY) at which the cost gate passes, so a small pool
+# buying a mid / high priced name with 1-2 shares is no longer dropped when its edge pays for its costs; fixed = the old flat floor. Read at call time.
+ENTRY_MIN_QTY_MODE = _get_str("ENTRY_MIN_QTY_MODE", "cost")
 # Trade-odds recorder (orders/trade_odds.py, E103): RECORD ONLY. flow_json["odds"] on every new long and short says how often this trade's own
 # stop % / target % pair had the target come first when replayed on the stock's 1-minute bars so far today. Nothing is blocked, sized or ordered.
 TRADE_ODDS_MODE = _get_str("TRADE_ODDS_MODE", "shadow").lower()      # shadow | off
@@ -1511,9 +1618,13 @@ TM_AUTO_LAST_IST = _get_str("TM_AUTO_LAST_IST", "14:30")                      # 
 TM_AUTO_INTERVAL_MIN = min(120, max(5, _get_int("TM_AUTO_INTERVAL_MIN", 15)))  # minutes between timed scans
 TM_AUTO_MAX_SYMBOLS = min(40, max(1, _get_int("TM_AUTO_MAX_SYMBOLS", 12)))    # picks re-checked per scan
 TM_AUTO_ACTIVE_MIN = min(600.0, max(5.0, _get_float("TM_AUTO_ACTIVE_MIN", 60.0)))   # a pick stays on the timer this long after it was last seen
-# Opening-range-breakout recorder (orders/orb_shadow.py): RECORD ONLY. flow_json["orb"] on every new position says what a 5-minute opening-range
-# entry (price above the 09:15-09:20 range high and above VWAP, tight spread, limit just above the high, stop = range low) would have done.
-ORB_MODE = _get_str("ORB_MODE", "shadow").lower()                   # shadow | off
+# Opening-range breakout (orders/orb_shadow.py), E273 round 8: LIVE input. flow_json["orb"] on every new position carries the 09:15-09:20 range (high / low), the
+# first completed 1-minute bar that closes beyond it and that bar's volume against the range bars; setup_engine reads them as the S1 / S2 trigger (orders/setup_live.py,
+# orders/setup_inputs.py). live (default) | off (nothing recorded, so S1 / S2 have no range and cannot fire). There is no shadow / record-only mode: any value
+# other than off reads as live. The range is built from the recorded 1-minute bars (ORB_BAR_RANGE_ENABLED); the quote capture window is the fallback.
+ORB_MODE = (lambda v: "off" if v == "off" else "live")(_get_str("ORB_MODE", "live").strip().lower())   # live | off
+ORB_BAR_RANGE_ENABLED = _get_bool("ORB_BAR_RANGE_ENABLED", True)     # range from the 09:15-09:20 bars (exact); false = quote day high / low captured 09:20-09:26 only
+ORB_BAR_RANGE_MIN_BARS = max(1, _get_int("ORB_BAR_RANGE_MIN_BARS", 3))  # fewest range bars that fix a range (the recorder may have started late)
 ORB_RANGE_END_IST = _get_str("ORB_RANGE_END_IST", "09:20")
 ORB_CAPTURE_UNTIL_IST = _get_str("ORB_CAPTURE_UNTIL_IST", "09:26")
 ORB_LATEST_ENTRY_IST = _get_str("ORB_LATEST_ENTRY_IST", "10:30")
@@ -1530,3 +1641,36 @@ ENTRY_MIN_REWARD_RISK = max(0.0, _get_float("ENTRY_MIN_REWARD_RISK", 2.0))
 # between the signal and the MARKET fill is not a hidden tight (or wide) stop. IONEXCHANG: signal 354.60, fill 352.30, stop 0.15 % under the fill, out in
 # 21 s. Fails open (no fresh tick -> unchanged). 0 = old behaviour. orders/live_anchor.py.
 ENTRY_ANCHOR_TO_LIVE = _get_bool("ENTRY_ANCHOR_TO_LIVE", True)
+
+# E276 round 50 / 51: shared portfolio heat. Heat = rupees lost if every open stop is hit (this pool + real-trade-service's published figure, plus a gap
+# allowance on positions carried overnight) as a % of the COMBINED pool. Round 50 publishes this pool's figure for real-trade-service; round 51 enforces the
+# limit at a Position Stocks entry (capital/heat_gate.py), the same 5 % real-trade-service uses. HEAT_LIMIT_PCT 0 = no limit. A missing / stale peer row reads
+# as none (fail-open). The allowance is a flat % of position value here (no per-stock p95 yet).
+PORTFOLIO_HEAT_SHARED_ENABLED = _get_bool("PORTFOLIO_HEAT_SHARED_ENABLED", True)
+HEAT_GAP_DEFAULT_PCT = _get_float("HEAT_GAP_DEFAULT_PCT", 1.5)
+HEAT_GATE_ENABLED = _get_bool("HEAT_GATE_ENABLED", True)
+# E276 round 61 (decision): the stage 0 base stays 5 % (not 4 %, not 6 to 8 %). 5 to 6 % is the usual ceiling on total open risk, the edge is not yet proven, and the daily-loss
+# cap must stay below the heat limit. Five positions are open only at smaller per-trade risk; the ladder raises the limit one point per stage with evidence.
+HEAT_LIMIT_PCT = _get_float("HEAT_LIMIT_PCT", 5.0)
+HEAT_PEER_MAX_AGE_S = _get_float("HEAT_PEER_MAX_AGE_S", 900.0)
+# E276 round 60: same-sector rule. A new entry in a sector that already holds an open position on the same side (this pool or real-trade-service, from the
+# published split) counts SECTOR_HEAT_MULT x its own risk plus that sector's open risk. Unlisted ("Other") names are not a sector. Off = no surcharge.
+SECTOR_HEAT_ENABLED = _get_bool("SECTOR_HEAT_ENABLED", True)
+SECTOR_HEAT_MULT = _get_float("SECTOR_HEAT_MULT", 1.5)
+
+# E276 round 54: risk ladder (orders/risk_ladder.py). A setup with >= 100 closed trades and a positive 90 % lower bound of its average R (stage 1), or >= 300 and a lower
+# bound above +0.05R (stage 2), gets the heat limit raised by RISK_LADDER_HEAT_STEP_PCT per stage; the last 20 closed trades net negative drops it one stage. Stage 0 =
+# HEAT_LIMIT_PCT, never lower. Off = every setup stays at stage 0. Read from the closed trades, cached RISK_LADDER_CACHE_S seconds; any error = stage 0.
+RISK_LADDER_ENABLED = _get_bool("RISK_LADDER_ENABLED", True)
+RISK_LADDER_HEAT_STEP_PCT = _get_float("RISK_LADDER_HEAT_STEP_PCT", 1.0)
+RISK_LADDER_CACHE_S = _get_float("RISK_LADDER_CACHE_S", 300.0)
+# E276 round 55: the same ladder also steps the LIVE short-position cap (SHORT_MAX_POSITIONS at stage 0, 3 at stage 1, 5 at stage 2, per short setup), and the daily loss limit
+# lost on 2 of the last 5 trading days drops a stage like the 20-trade brake. Off = the cap stays SHORT_MAX_POSITIONS (the daily-loss brake follows RISK_LADDER_ENABLED).
+RISK_LADDER_SHORT_CAP_ENABLED = _get_bool("RISK_LADDER_SHORT_CAP_ENABLED", True)
+# E276 round 56: per-trade risk rises with the stage: RISK_PER_TRADE_PCT x (1 + stage x RISK_LADDER_RISK_STEP) = 2 % -> 2.5 % (stage 1) -> 3 % (stage 2). Stage 0 = today's size.
+# The heat limit, the slot notional cap, the daily-loss caps and the free capital still bound it. Off = per-trade risk stays RISK_PER_TRADE_PCT.
+RISK_LADDER_RISK_ENABLED = _get_bool("RISK_LADDER_RISK_ENABLED", True)
+# E276 round 58: per time slot (09:20 / 09:30 / 10:00 / later, setup_stamp.time_slot): a setup whose own cell for the CURRENT slot has 30+ closed trades and an average R below 0 is held at
+# stage 0 in that slot (base heat limit, base risk, base short cap), whatever its overall stage. Only ever lowers. Off = the stage is the setup's overall stage.
+RISK_LADDER_SLOT_ENABLED = _get_bool("RISK_LADDER_SLOT_ENABLED", True)
+RISK_LADDER_RISK_STEP = _get_float("RISK_LADDER_RISK_STEP", 0.25)

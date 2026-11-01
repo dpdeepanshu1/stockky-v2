@@ -34,7 +34,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
-from execution import dhan_client, shared_daily_pnl, shared_exposure
+from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure
 from portfolio.portfolio import _open_positions_market_value, get_account
 
 logger = logging.getLogger("real-trade-equity-sync")
@@ -190,4 +190,6 @@ def sync_real_equity(db: Session) -> Optional[float]:
     shared_exposure.publish_own_exposure(db, market_value)
     # A11: publish today's realized P&L + capital base for position-stocks-service's account-wide cap check.
     shared_daily_pnl.publish_own(db, account.realized_pnl_today, account.current_equity)
+    # E276 round 50: publish open risk + gap allowance + capital base for position-stocks-service's heat gate (REAL only inside heat_state). Fail-open.
+    heat_state.publish(db, account.current_equity)
     return account.current_equity

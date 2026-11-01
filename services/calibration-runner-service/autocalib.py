@@ -91,7 +91,7 @@ PROTECTED: Dict[str, str] = {
     "ENTRY_MIN_REWARD_RISK": "risk rule (1:2 reward:risk, 2026-10-22): decided by you, not by a report",
     "ENTRY_ANCHOR_TO_LIVE": "order safety rule (2026-10-22): stop / target follow the real price, never switched by a report",
     "STOP_OVERSHOOT_ALLOWANCE_PCT": "loss-review guard (group 470): decided by you, not by a report",
-    "ORB_MODE": "evidence recorder (shadow verdict): always on so the report has data",
+    "ORB_MODE": "opening-range input of the setup engine (E273 round 8): always on, a report never switches it",
     "SWING_MODE": "money safety (swing lane, E132): whether the swing lane may buy anything, decided by you after the replay, shadow and probe evidence, never by a report",
     "SWING_LIVE_REAL_ENABLED": "money safety (swing lane, E132): whether the swing lane may use real money, decided by you after the replay, shadow and probe evidence, never by a report",
     "SWING_MAX_TRADE_VALUE": "money safety (swing lane, E132): how much goes into one swing stock, decided by you after the replay, shadow and probe evidence, never by a report",
@@ -128,6 +128,12 @@ PROTECTED: Dict[str, str] = {
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "STRUCTURE_OBS_WRITE_BEHIND": "evidence recorder plumbing (E253): how the observation row reaches the database; a report never decides it",
     "SHORT_ENTRY_CUSHION_PCT": "money safety (short selling): how far below the last price a short's SELL limit sits is your decision, never a report's",
+    "SHORT_DAY_FALL_RANGE_MULT": "money safety (short selling, E276 round 67): how far a stock may already have fallen before a short is refused is a threshold of a gate, decided by you",
+    "SHORT_DAY_FALL_HARD_CEILING_PCT": "money safety (short selling, E276 round 67): the ceiling of the day-fall limit is a threshold of a gate, decided by you, never a report's",
+    "SHORT_SQUEEZE_GUARD_ENABLED": "money safety (short selling, E274): the squeeze guard protects a short from a buyer-driven spike; whether it exists is your decision, never a report's",
+    "SHORT_TARGET_HVN_ENABLED": "short selling (E274): how a short's target is trimmed to the next volume wall is decided by you; no test measures it yet",
+    "SHORT_TARGET_LEARNED_ENABLED": "short selling (E274): a short's target taken from its setup's own winners learns by itself from closed trades; a report never switches it",
+    "SHORT_TARGET_MIN_PCT": "short selling (E274): the smallest short target after a trim is a threshold decided by you; no test measures it yet",
     "ORDER_FLOW_RECORD": "evidence recorder: always on so tests have data",
     "ORDER_FLOW_DEPTH20": "evidence recorder: always on so tests have data",
     "FLOW_RECORD": "evidence recorder: always on so tests have data",
@@ -265,17 +271,6 @@ def _gate_status(ev: Ev, gate: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def r_52w_log_only(evs, cur, ctx):
-    rep = evs["legacy_gate"].json("gate_report.json") or {}
-    g = ((rep.get("gates") or {}).get("range_52w_legacy")) or {}
-    v = g.get("verdict_robust") or g.get("verdict")
-    if v == "hurts":
-        return Decision("true", "legacy gate test: the 52-week rule removed the BETTER entries (verdict hurts, robust) -> evaluate it but do not reject", 2)
-    if v == "helps":
-        return Decision("false", "legacy gate test: the 52-week rule helps (verdict helps, robust) -> it rejects again", 1)
-    return Decision(None, f"52-week rule verdict is {v or 'missing'}: no change")
-
-
 def r_kronos(evs, cur, ctx):
     m = re.search(r"^VERDICT: (.+)$", evs["kronos_backtest"].text, re.M)
     v = (m.group(1) if m else "").strip()
@@ -314,8 +309,10 @@ def r_g3_stop(evs, cur, ctx):
 
 def r_g2_exit(evs, cur, ctx):
     st = _gate_status(evs["gate_check"], "G2")
-    if st == "FAIL" and cur in ("exit", "tighten"):
-        return Decision("log", "G2 benefit failed: structure exits only record, they do not act", 1)
+    # E273: `tighten` is the plan's live default (it only ratchets a stop up on a trade in profit and never sells), so a failed G2 no longer switches it off.
+    # Only the SELLING mode is stepped down, to tighten.
+    if st == "FAIL" and cur == "exit":
+        return Decision("tighten", "G2 benefit failed: structure exits only tighten the stop, they do not sell", 1)
     return Decision(None, f"G2 is {st or 'missing'}: exit mode stays {cur} (it is never promoted automatically)")
 
 
@@ -379,12 +376,23 @@ def r_intraday(gate_key: str, what: str):
     return fn
 
 
+def r_setup(setup_id: str, what: str):
+    """E276 round 72: a setup is only ever switched OFF by a replay, never on. `no_edge` = the whole day-clustered 90 % interval is below zero.
+    Two runs must agree (the replay's tape / sector facts are bar proxies, so one run is not enough to switch a setup off)."""
+    def fn(evs, cur, ctx):
+        rep = evs["setup_backtest"].json("setup_backtest.json") or {}
+        v = ((rep.get(setup_id)) or {}).get("verdict")
+        if v == "no_edge" and str(cur).lower() in ("true", "on", "1"):
+            return Decision("false", f"setup replay: {what} lost money net of cost with the whole 90 % interval below zero (no_edge)", 2)
+        return Decision(None, f"{what} verdict is {v or 'missing'}: no change (a setup is only ever switched off by a report, never on)")
+    return fn
+
+
 RULES: List[Rule] = [
-    Rule("CANDIDATE_52W_LOG_ONLY", RT, "52-week rule LOG ONLY", ("legacy_gate",), "legacy_gate: gates.range_52w_legacy verdict (robust)", r_52w_log_only),
     Rule("KRONOS_GATE_MODE", RT, "Kronos gate 4f (REAL)", ("kronos_backtest",), "kronos_backtest: VERDICT line", r_kronos),
     Rule("TIMESFM_GATE_MODE", RT, "TimesFM gate 4g (REAL)", ("tsfm_combine",), "tsfm_combine: Gate A over all seeds", r_tsfm),
     Rule("STRUCTURE_STOP_MODE", RT, "Structural stop", ("gate_check",), "gate_check: G3 stability", r_g3_stop),
-    Rule("STRUCTURE_EXIT_MODE", RT, "Structure exit", ("gate_check",), "gate_check: G2 benefit (only ever steps DOWN to log)", r_g2_exit),
+    Rule("STRUCTURE_EXIT_MODE", RT, "Structure exit", ("gate_check",), "gate_check: G2 benefit (only ever steps exit DOWN to tighten)", r_g2_exit),
     Rule("STRUCTURE_GATE_MODE", RT, "Structure gate (REAL)", ("gate_check",), "gate_check: G2 benefit", r_g2_gate),
     Rule("PS_STRUCTURE_GATE_MODE", PS, "Structure gate (position-stocks)", ("gate_check",), "gate_check: G2 benefit", r_g2_gate),
     Rule("STRUCTURE_MAX_CHASE_ATR", RT, "Max chase above zone (ATR)", ("calibration_pack",), "calibration_pack: walk-forward `chase` suggestion", r_threshold("chase")),
@@ -394,6 +402,8 @@ RULES: List[Rule] = [
     Rule("OVERNIGHT_HOLD_ENABLED", RT, "Overnight hold allowed", ("hold_bucket",), "hold_bucket: multi-day worse than same-day -> OFF (never switched ON automatically)", r_overnight),
     Rule("ENTRY_VWAP_GATE_ENABLED", PS, "VWAP entry gate (position-stocks)", ("intraday_gates",), "intraday_gates: vwap_gate verdict on recorded bars", r_intraday("vwap_gate", "VWAP gate")),
     Rule("OPENING_GATE_ENABLED", PS, "Opening quality gate (position-stocks)", ("intraday_gates",), "intraday_gates: opening_gate verdict on recorded bars", r_intraday("opening_gate", "opening gate")),
+    Rule("SETUP_S2_ENABLED", PS, "Setup S2 (position-stocks)", ("setup_backtest",), "setup_backtest: S2_RS_BREAKOUT_LONG verdict (only ever switches the setup OFF)", r_setup("S2_RS_BREAKOUT_LONG", "S2 long")),
+    Rule("SETUP_S3_ENABLED", PS, "Setup S3 (position-stocks)", ("setup_backtest",), "setup_backtest: S3_EXHAUSTION_LONG verdict (only ever switches the setup OFF)", r_setup("S3_EXHAUSTION_LONG", "S3 long")),
 ]
 EVIDENCE_JOBS = sorted({t for r in RULES for t in r.tests})
 

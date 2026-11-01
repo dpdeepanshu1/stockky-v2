@@ -3,7 +3,7 @@
 Every evening (after SWING_SCAN_TIME_IST, once a NEW daily bar exists) `run_scan` does, in this order and idempotently (a crash in the middle and a retry is safe):
   1. settle   every open SHADOW trade gets the new daily bar (swing/lane.advance = the exact rules scripts/swing_backtest.py replayed) and a PLANNED one gets its
               entry: the open of the entry session + slippage, then the same bar's stop check;
-  2. plan     the day's best screened stocks (up to SWING_SHADOW_PICKS_PER_DAY) become PLANNED shadow rows, minus the ones a veto refuses (results inside the
+  2. plan     the day's best screened stocks (SWING_PICKS_PER_DAY plus SWING_BACKUP_PICKS) become PLANNED shadow rows, minus the ones a veto refuses (results inside the
               window, negative news): those are recorded as SKIPPED with the reason, so the report shows what the vetoes did;
   3. save     the compact ranking of the day (the 15:00 re-check, the live entries and scripts/swing_shadow_report.py read it back).
 `scan_in_thread` is how the schedule tick starts it: the fetch of a few hundred daily histories takes minutes and must never sit inside the trading locks.
@@ -59,7 +59,7 @@ def compact_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _builtin_universe() -> List[str]:
     """E133: the stocks the service already knows by name (market_context.sector_signal.NSE_SECTOR_MAP: the liquid sector-index names, ~118). Used only when
-    neither SWING_UNIVERSE_SYMBOLS nor SWING_RANK_DEFAULT_SYMBOLS is set, so a fresh deploy in `shadow` records evidence from the first evening instead of
+    neither SWING_UNIVERSE_SYMBOLS nor SWING_RANK_DEFAULT_SYMBOLS is set, so a fresh deploy records evidence from the first evening instead of
     stopping at `no_universe`. Smaller than the 300+ the plan wants and not the S2 replay's folder: set SWING_UNIVERSE_SYMBOLS (scripts/swing_universe.py) to
     rank the same stocks S2 tested. Empty list when the map cannot be read."""
     try:
@@ -117,6 +117,29 @@ def entry_vetoes(symbol: str, today: date) -> List[str]:
     except Exception as e:  # noqa: BLE001 - a veto lookup must never stop the scan
         logger.debug("swing: veto lookup for %s failed (no objection): %s", symbol, e)
     return out
+
+
+def scan_vetoes(db: Any, untradable_fn: Optional[Callable[[Any, str], Optional[str]]] = None) -> Callable[[str, date], List[str]]:
+    """E273 round 14: the veto function the evening scan uses = entry_vetoes + "Dhan cannot trade this symbol" (series BE / not listed). Before this the scan ranked
+    names the REAL morning pass could never buy (9 signals, 27-29 Oct, all skipped for no NSE_EQ security_id) and they filled the day's picks. A refused name is recorded
+    SKIPPED with the reason, like a result-date veto, and the plan moves to the next candidate. Only when REAL may trade (SWING_LIVE_REAL_ENABLED), the order path's own
+    tradable gate is on (ENTRY_TRADABLE_GATE_ENABLED) and SWING_SCAN_TRADABLE_FILTER is on. Fails open (a list that is not loaded says nothing); never raises."""
+    def fn(symbol: str, today: date) -> List[str]:
+        out = entry_vetoes(symbol, today)
+        try:
+            if not (bool(_cfg("SWING_SCAN_TRADABLE_FILTER", True)) and bool(_cfg("SWING_LIVE_REAL_ENABLED", True)) and bool(_cfg("ENTRY_TRADABLE_GATE_ENABLED", True))):
+                return out
+            fn_u = untradable_fn
+            if fn_u is None:
+                from execution import dhan_client
+                fn_u = dhan_client.untradable_reason
+            why = fn_u(db, symbol)
+            if why:
+                out.append(str(why))
+        except Exception as e:  # noqa: BLE001 - a lookup that fails is no objection
+            logger.debug("swing: tradable check for %s failed (no objection): %s", symbol, e)
+        return out
+    return fn
 
 
 def calendar_fns():
@@ -222,7 +245,7 @@ def _store(repo: Any, tid: int, st: Dict[str, Any], base: Dict[str, Any], cost_f
 def plan_shadow(repo: Any, rows: Sequence[Dict[str, Any]], asof: str, vetoes_fn: Callable[[str, date], List[str]],
                 picks_n: Optional[int] = None) -> Dict[str, int]:
     """Record the day's picks as PLANNED shadow rows (idempotent for one signal day). Returns counters."""
-    picks_n = int(picks_n if picks_n is not None else _cfg("SWING_SHADOW_PICKS_PER_DAY", 3))
+    picks_n = int(picks_n if picks_n is not None else int(_cfg("SWING_PICKS_PER_DAY", 3)) + int(_cfg("SWING_BACKUP_PICKS", 1)))   # E273 round 13: the morning buys SWING_PICKS_PER_DAY; the rest are backups
     asof_d = date.fromisoformat(asof)
     live_syms = {t["symbol"] for t in repo.trades(kind="SHADOW") if t["status"] in ("PLANNED", "OPEN")}
     today_rows = repo.trades(kind="SHADOW", signal_day=asof)
@@ -232,7 +255,7 @@ def plan_shadow(repo: Any, rows: Sequence[Dict[str, Any]], asof: str, vetoes_fn:
     need = picks_n - have
     if need <= 0:
         return out
-    cands = lane.pick_candidates(rows, exclude=live_syms | done_syms, n=picks_n * 4, asof=asof)
+    cands = lane.pick_candidates(rows, exclude=live_syms | done_syms, n=max(picks_n * 4, 20), asof=asof)   # E273 round 14: a deeper pool, the tradable filter can refuse many of the top names
     out["candidates"] = len(cands)
     mult = float(_cfg("SWING_STOP_ATR_MULT", 1.5))
     lo, hi = float(_cfg("SWING_STOP_MIN_PCT", 2.0)), float(_cfg("SWING_STOP_MAX_PCT", 6.0))
@@ -309,7 +332,7 @@ _state: Dict[str, Any] = {"running": False, "last_attempt": 0.0, "last_result": 
 def scan_due(now_ist: datetime, repo: Any, now_mono: Optional[float] = None) -> bool:
     """True when an evening scan should be started now: lane on, a weekday trading day, past SWING_SCAN_TIME_IST, no successful scan stored for a bar date
     of today yet, nothing running, and the last attempt at least SWING_SCAN_RETRY_MIN minutes ago."""
-    if lane.norm_mode(_cfg("SWING_MODE", "shadow")) == "off":
+    if lane.norm_mode(_cfg("SWING_MODE", "live")) == "off":
         return False
     from tz_utils import parse_hhmm
     hh = parse_hhmm(str(_cfg("SWING_SCAN_TIME_IST", "16:00")), 16, 0)
@@ -348,7 +371,7 @@ def scan_in_thread(session_factory: Callable[[], Any], held_symbols_fn: Optional
                 res = {"ok": False, "status": "no_universe", "detail": "no built-in list could be read: set SWING_UNIVERSE_SYMBOLS (python3 scripts/swing_universe.py HIST_DIR prints it)"}
             else:
                 snap = ranker.build_snapshot(syms, None, None, float(_cfg("SWING_TOP_PCT", 80.0)), max_symbols=len(syms))
-                res = run_scan(repo, snap, universe={"source": universe_source(), "size": len(syms)})
+                res = run_scan(repo, snap, vetoes_fn=scan_vetoes(db), universe={"source": universe_source(), "size": len(syms)})
                 if res.get("status") == "scanned":
                     try:
                         from swing import live

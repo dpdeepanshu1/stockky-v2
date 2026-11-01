@@ -118,6 +118,18 @@ tail -15 "../../$OUT/coverage/calibration-runner-service.log"
 popd >/dev/null
 
 note "PART 1 — offline unit + coverage: real-trade-service"
+# E285: on the VM's newest system Python the pinned real-trade requirements do not build (psycopg2-binary needs pg_config; pydantic 2.5.3 dies with
+# "ForwardRef._evaluate() missing recursive_guard"), so this suite showed [FAIL] although the Docker suite (the interpreter the service ships with) is green.
+# With Docker present it now runs through scripts/docker_test.sh (python:3.11, no coverage HTML); FULLTEST_HOST_VENV=1 keeps the old host-venv run with coverage.
+if [ "${FULLTEST_HOST_VENV:-0}" != "1" ] && command -v docker >/dev/null 2>&1; then
+  if bash scripts/docker_test.sh real-trade-service -q > "$OUT/coverage/real-trade-service.log" 2>&1; then
+    ok "real-trade-service test suite (Docker, the service's own Python)"
+  else
+    bad "real-trade-service test suite (Docker) — see $OUT/coverage/real-trade-service.log"
+    grep -E "^(FAILED|ERROR) " "$OUT/coverage/real-trade-service.log" | head -10
+  fi
+  tail -5 "$OUT/coverage/real-trade-service.log"
+else
 prep_pytest real-trade-service pytest pytest-cov
 pushd services/real-trade-service >/dev/null
 if "$PYT" -m pytest tests -q --cov=. --cov-report=term-missing \
@@ -130,6 +142,7 @@ else
 fi
 tail -25 "../../$OUT/coverage/real-trade-service.log"
 popd >/dev/null
+fi
 
 note "PART 1 — offline unit + coverage: position-stocks-service"
 prep_pytest position-stocks-service pytest pytest-cov

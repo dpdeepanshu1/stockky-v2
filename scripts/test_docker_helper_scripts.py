@@ -21,10 +21,20 @@ def test_runner_requirements_do_not_list_httpx_so_the_script_must():
     assert "httpx" not in req and "fastapi==0.104" in req
 
 
-def test_frontend_check_mounts_the_one_file_calibration_test_reads():
+def test_frontend_check_mounts_the_whole_repo_so_the_tests_see_the_files_they_read():
+    """E285: swing / statusProbes / reconcile / calibration tests read services/*/ and frontend/src/ files through new URL("../../", import.meta.url).
+    With only frontend/ mounted at /app that root is "/" and they died with ENOENT; the repo is mounted at /repo and the tests run from /repo/frontend."""
     s = _t("docker_frontend_check.sh")
-    assert "services/calibration-runner-service/jobs.py\":/services/calibration-runner-service/jobs.py:ro" in s
-    assert "../../services/calibration-runner-service/jobs.py" in open(os.path.join(HERE, "..", "frontend", "src", "calibration.test.mjs"), encoding="utf-8").read()
+    assert '-v "$root":/repo' in s and "-w /repo/frontend" in s
+    assert "-w /app \"$test_tag\"" not in s
+    front = os.path.join(HERE, "..", "frontend", "src")
+    reads = set()
+    for name in os.listdir(front):
+        if name.endswith(".test.mjs"):
+            reads.update(re.findall(r'new URL\("(services/[^"]+)", root\)', open(os.path.join(front, name), encoding="utf-8").read()))
+    assert reads, "no test reads a service file any more: this guard can go"
+    for rel in reads:
+        assert os.path.exists(os.path.join(HERE, "..", rel)), rel      # every file a test reads exists in the repo, so a mounted repo satisfies it
 
 
 def test_scripts_are_valid_bash():

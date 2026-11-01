@@ -252,7 +252,7 @@ def test_real_catalogs_declare_the_market_state_switches_correctly():
         by = {f.key: f for f in cat.CATALOG}
         assert all(k.validate_flag(f) == [] for f in cat.CATALOG), svc
         mode, mult = by["MARKET_STATE_MODE"], by["MARKET_STATE_RISK_MULT"]
-        assert mode.shipped == "shadow" and not mode.overlay and mode.live
+        assert mode.shipped == "live" and not mode.overlay and mode.live   # E272 changed the shipped default to live
         assert mult.shipped == "1.0" and mult.overlay and mult.looser == "higher" and (mult.lo, mult.hi) == (0.1, 1.0)
         over = {f.key for f in cat.CATALOG if f.overlay}
         # a gate / safety switch must never be an overlay dial

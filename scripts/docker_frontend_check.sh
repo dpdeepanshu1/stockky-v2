@@ -10,7 +10,9 @@ test_tag="${FRONTEND_TEST_NODE_IMAGE:-node:22-slim}"
 echo ">> frontend type-check + build on $tag (same as frontend/Dockerfile)"
 docker run --rm -v "$root/frontend":/app -w /app "$tag" sh -c 'npm ci && npx tsc --noEmit && npm run build'
 echo ">> frontend unit tests on $test_tag (needs --experimental-strip-types)"
-# E127: calibration.test.mjs checks the plan against ../../services/calibration-runner-service/jobs.py; only frontend/ was mounted, so it died with ENOENT
-# (/services/calibration-runner-service/jobs.py). The one file it reads is now mounted read-only at the path the test resolves.
-docker run --rm -v "$root/frontend":/app -v "$root/services/calibration-runner-service/jobs.py":/services/calibration-runner-service/jobs.py:ro -w /app "$test_tag" sh -c \
+# E285: several unit tests read files OUTSIDE frontend/ through new URL("../../", import.meta.url): services/*/main.py, swing/*.py, jobs.py, hourly_reconcile.py
+# and frontend/src/*.ts. With only frontend/ mounted at /app that root is "/" and the reads died with ENOENT (first /services/..., then /frontend/...). The WHOLE repo is
+# now mounted read-only at /repo and the tests run from /repo/frontend, so "../../" is the repo root exactly as on a checkout (node_modules from the build step above
+# sits in frontend/ on the host, so it is there too).
+docker run --rm -v "$root":/repo:ro -w /repo/frontend "$test_tag" sh -c \
   'for t in riskCap treemapLayout journalStats flowGeometry; do echo "-- $t"; node --experimental-strip-types src/components/board/$t.test.mjs; done; echo "-- npm test (all src tests)"; npm test'

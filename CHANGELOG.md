@@ -1,3 +1,10 @@
+## 2 Nov 2026 - E285 round 125: the runner image copies `setup_engine.py`, so the monthly evidence pack no longer ends FAILED (calibration-runner Dockerfile)
+
+ * **Your request (2 Nov):** check the VM log and the latest test results, say whether all is good, and fix any code issue.
+ * **Found:** `monthly_evidence` (Position Stocks tab, run 20261102-080957) finished FAILED because its job `setup_backtest` died with `FileNotFoundError: /app/services/position-stocks-service/orders/setup_engine.py`. `scripts/setup_backtest.py` loads that stdlib-only module by file path, but the runner Dockerfile never copied it. The other nine jobs of the pack succeeded.
+ * **Fix:** `services/calibration-runner-service/Dockerfile` now COPYs `services/position-stocks-service/orders/setup_engine.py`. New guard test `tests/test_group479_runner_image_has_script_files.py` (file is copied, stays stdlib-only, path in the script matches) and a CI line. No trading service is touched.
+ * **Rebuild:** `docker compose build calibration-runner-service && docker compose up -d calibration-runner-service`, then run `setup_backtest` (or the monthly pack) again.
+
 ## 2 Nov 2026 - E285 round 124: `--verify` compares only what git tracks; the E283 note is gone; kronos tests use CPU torch; the service probe waits for boot; old history is fetched again (scripts)
 
  * **Your request (2 Nov):** "do all the code fix in one go and give me updated zip" for the five code changes found in the round 123 VM log. Scripts only; no trading code, no service code.

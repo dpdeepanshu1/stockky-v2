@@ -224,6 +224,7 @@ jobs:
           (cd services/calibration-runner-service && python tests/test_notify.py)   # group447: Telegram for automatic runs, last-automatic timestamp, latest result only (stdlib only)
           (cd services/calibration-runner-service && python tests/test_autocalib.py)   # group476: auto-calibration decisions, safety rules, Telegram (stdlib only)
           (cd services/calibration-runner-service && python -m pytest -q tests/test_group478_dockerfile_copies_modules.py)   # group478: every runner module is COPY'd into the image
+          (cd services/calibration-runner-service && python -m pytest -q tests/test_group479_runner_image_has_script_files.py)   # group479: files of other services that runner scripts load by path are COPY'd
 
   test:
     name: ${{ matrix.service }} (py${{ matrix.python-version }})

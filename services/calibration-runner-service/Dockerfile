@@ -28,6 +28,9 @@ COPY services/real-trade-service/config.py /app/services/real-trade-service/conf
 # E131: scripts/swing_backtest.py scores with the SAME pure module the live /swing/rank uses (stdlib only)
 COPY services/real-trade-service/swing/__init__.py services/real-trade-service/swing/momentum.py services/real-trade-service/swing/stats.py /app/services/real-trade-service/swing/
 COPY services/real-trade-service/entry_engine/__init__.py services/real-trade-service/entry_engine/kronos_gate.py /app/services/real-trade-service/entry_engine/
+# group 479: scripts/setup_backtest.py loads the position-stocks setup engine by file path (pure stdlib module); without this COPY the
+# setup_backtest job (inside monthly_evidence) died with FileNotFoundError and the whole pack ended FAILED
+COPY services/position-stocks-service/orders/setup_engine.py /app/services/position-stocks-service/orders/setup_engine.py
 
 RUN python -m compileall -q -x '(^|/)(tests?|\.venv[^/]*|venv|node_modules)(/|$)' . /app/scripts /app/shared \
     && mkdir -p /data/runner

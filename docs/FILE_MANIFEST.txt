@@ -914,6 +914,7 @@ services/calibration-runner-service/tests/test_group469_new_jobs.py
 services/calibration-runner-service/tests/test_group470_fixes.py
 services/calibration-runner-service/tests/test_group471_latest_zip.py
 services/calibration-runner-service/tests/test_group478_dockerfile_copies_modules.py
+services/calibration-runner-service/tests/test_group479_runner_image_has_script_files.py
 services/calibration-runner-service/tests/test_main_routes.py
 services/calibration-runner-service/tests/test_notify.py
 services/calibration-runner-service/tests/test_regime_learner.py

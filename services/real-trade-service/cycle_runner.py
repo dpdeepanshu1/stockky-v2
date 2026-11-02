@@ -38,7 +38,7 @@ def _heal_session(db: Session, where: str) -> bool:
     error, say) and a stage running concurrently keep their pending work. CYCLE_SESSION_HEAL=false turns it off. Never raises.
     Returns True when it rolled back."""
     try:
-        if os.getenv("CYCLE_SESSION_HEAL", "true").strip().lower() in ("0", "false", "no", "off"):
+        if ((os.getenv("CYCLE_SESSION_HEAL") or "").strip() or "true").lower() in ("0", "false", "no", "off"):
             return False
         if db.is_active:
             return False

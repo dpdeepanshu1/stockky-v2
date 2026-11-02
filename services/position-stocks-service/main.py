@@ -844,7 +844,7 @@ def _heal_session(db: Session, where: str) -> bool:
     rolled back due to a previous exception during flush". Acts only when db.is_active is False, so a stage that failed for another reason keeps its
     pending work. CYCLE_SESSION_HEAL=false turns it off. Never raises; True when it rolled back."""
     try:
-        if os.getenv("CYCLE_SESSION_HEAL", "true").strip().lower() in ("0", "false", "no", "off"):
+        if ((os.getenv("CYCLE_SESSION_HEAL") or "").strip() or "true").lower() in ("0", "false", "no", "off"):
             return False
         if db.is_active:
             return False

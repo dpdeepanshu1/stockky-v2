@@ -35,6 +35,17 @@ def _ltp(symbol: str):
         return None
 
 
+def _atr(pos):
+    """Daily ATR (price terms) for the E285 stop floor, from the prev-day cache (never a fetch). None = unknown: the floor then blocks a stop move
+    (the target trim still works) instead of guessing."""
+    try:
+        from screening import prev_day
+        pd = prev_day.peek(pos.symbol)
+        return float(pd.atr) if pd is not None and pd.atr else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_tape_exit(db: Session) -> int:
     """Returns the number of positions whose stop and/or target were moved this pass."""
     if flow_gate.exit_mode() == "off":
@@ -61,7 +72,8 @@ def run_tape_exit(db: Session) -> int:
                 continue                                   # nothing we can move
             tick = dhan_client.tick_size_for_price(ltp)
             d = flow_gate.exit_check(pos.symbol, "SHORT" if short else "LONG", entry=pos.entry_price, stop=pos.stop_price,
-                                     target=pos.target_price, ltp=ltp, tick=tick)
+                                     target=pos.target_price, ltp=ltp, tick=tick,
+                                     atr=_atr(pos), r_dist=abs(float(pos.entry_price) - float(pos.stop_price)) if pos.stop_price else None, key=key)
             if not d or d.get("action") != "TIGHTEN":
                 continue
             new_stop, new_target = d.get("new_stop"), d.get("new_target")

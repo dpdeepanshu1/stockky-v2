@@ -141,6 +141,7 @@ def init_tables() -> None:
     if dialect() == "oracle":
         _ensure_oracle_autoincrement(engine, models.Base)
     _ensure_hot_path_indexes(engine, dialect())
+    _ensure_candidate_log_index(engine, dialect())
     logger.info("position-stocks-service: scalp_* tables ensured.")
 
 
@@ -359,6 +360,17 @@ def _ensure_columns(engine) -> None:
 # swallowed by exec_ddl_safe on a re-run.
 def _ensure_hot_path_indexes(engine, dialect_name: str) -> None:
     index_name, table, cols = "ix_scalp_positions_opened_at", "scalp_positions", "opened_at"
+    sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
+    if _oc.exec_ddl_safe(engine, sql, dialect_name) is False:
+        logger.warning("position-stocks-service: could NOT ensure index %s on %s (see exec_ddl_safe warning)", index_name, table)
+    else:
+        logger.info("position-stocks-service: ensured index %s on %s", index_name, table)
+
+
+# Batch 1 (2026-11-02): every candidate-log read (reasons / scorecard / outcomes / /candidates/log) filters on created_at and often on
+# symbol; the 10-day read took 3 s with only the single-column indexes. Separate from _ensure_hot_path_indexes so that one stays as it was.
+def _ensure_candidate_log_index(engine, dialect_name: str) -> None:
+    index_name, table, cols = "ix_scalp_cand_log_created_sym", "scalp_candidate_log", "created_at, symbol"
     sql = _oc.create_index_sql(dialect_name, index_name, table, cols)
     if _oc.exec_ddl_safe(engine, sql, dialect_name) is False:
         logger.warning("position-stocks-service: could NOT ensure index %s on %s (see exec_ddl_safe warning)", index_name, table)

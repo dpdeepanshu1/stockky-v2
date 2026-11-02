@@ -410,3 +410,29 @@ def _e285_own_norms_off_by_default(monkeypatch):
     except Exception:  # noqa: BLE001
         pass
     yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _batch1_candidate_log_async_off_by_default(monkeypatch):
+    """Batch 1 (2026-11-02): orders/candidate_log_writer.py moves SKIPPED audit rows to a background batch writer. Older tests read the
+    rows straight off a fake session, so they run the synchronous path; tests/test_batch1_candidate_log_writer.py turns it on explicitly."""
+    import config as _config
+    monkeypatch.setattr(_config, "CANDIDATE_LOG_ASYNC", False, raising=False)
+    from orders import candidate_log_writer as _clw
+    _clw._seen.clear()
+    yield
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _e285_batch5_gate_policy_reset(monkeypatch):
+    """E285 batch 5: the adaptive gate policy keeps a process-wide cache and a once-a-day marker; no test may inherit another's. Every gate follows its own config unless a test sets a row."""
+    import config as _config
+    from orders import gate_policy as _gp, gate_policy_job as _gpj
+    monkeypatch.setattr(_config, "GATE_POLICY_MODE", "adaptive", raising=False)
+    _gp.clear_cache()
+    _gpj._last_run_day = None
+    _gpj._retry_after = 0.0
+    yield
+    _gp.clear_cache()
+    _gpj._last_run_day = None
+    _gpj._retry_after = 0.0

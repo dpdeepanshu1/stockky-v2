@@ -22,6 +22,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -704,6 +705,30 @@ class ScalpTradeJournal(Base):
     created_at = Column(DateTime, nullable=False, default=_now)
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
+
+
+class ScalpGatePolicy(Base):
+    """E285 batch 5: the adaptive gate policy (orders/gate_policy.py), one row per (gate, side), written nightly by orders/gate_policy_job.py. New table (create_all, no column
+    migration). `state` HARD | SOFT | OFF. A row only OVERRIDES the gate once it was moved (last_change_day set, by the job or an operator); until then it just holds the
+    evidence and the gate follows its own config. The scalp_ prefix keeps the name clear of the other services' tables in the same schema."""
+    __tablename__ = "scalp_gate_policy"
+    __table_args__ = (UniqueConstraint("gate", "side", name="uq_scalp_gate_policy"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    gate = Column(String(64), nullable=False)                      # a gate_scorecard.py key, e.g. OPENING_GATE:GAP_DOWN
+    side = Column(String(5), nullable=False, default="LONG")
+    state = Column(String(4), nullable=False, default="HARD")
+    since_day = Column(String(10), nullable=True)                  # IST day this state began
+    last_change_day = Column(String(10), nullable=True)            # IST day of the last step (None = never moved)
+    last_eval_day = Column(String(10), nullable=True)              # IST day the job last evaluated it
+    n_samples = Column(Integer, nullable=True)
+    n_days = Column(Integer, nullable=True)
+    n_symbols = Column(Integer, nullable=True)
+    mean_net60 = Column(Float, nullable=True)                      # % after the round-trip cost
+    lb_net60 = Column(Float, nullable=True)                        # bootstrap lower bound of the mean
+    loo_min_net60 = Column(Float, nullable=True)                   # lowest mean with any one day removed
+    note = Column(Text, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=_now)
 
 
 class ScalpShortShadow(Base):

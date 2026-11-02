@@ -11,6 +11,8 @@ RULES (LONG and SHORT are mirrored with one sign s: +1 long, -1 short; "better" 
     below it, a short's at or above it), moves only in the protective direction by at least two ticks and never past the target;
   * the TARGET is only ever trimmed NEARER: one tick before the next HVN wall on the live-price side (`hvn_above` for a long, `hvn_below` for a short),
     and only when it still pays `min_target_pct` from entry and stays beyond the live price. A target is never raised and a stop is never loosened;
+  * E285 batch 2 (all optional, off by default in decide, ON through the config flags): `min_stop_atr` = the new stop stays at least that x ATR from the live price;
+    `min_profit_r` = the stop is tightened only once the trade is at least that many R in profit (R = r_dist, else the current entry-stop distance);
   * unreliable / missing tape, a bad number or any error = HOLD (no opinion). It can only make an exit sooner, never later, and never raises.
 """
 from __future__ import annotations
@@ -48,7 +50,8 @@ def _hold(reason: str, against: int = 0, zone: Optional[str] = None) -> dict:
 
 def decide(*, side: str, entry, stop, target, ltp, tape, tick,
            min_against: int = 3, min_profit_pct: float = 0.3, near_stop_frac: float = 0.5,
-           gap_pct: float = 0.25, min_target_pct: float = 0.5) -> dict:
+           gap_pct: float = 0.25, min_target_pct: float = 0.5,
+           atr=None, min_stop_atr: float = 0.0, r_dist=None, min_profit_r: float = 0.0) -> dict:
     """{"action": "HOLD"|"TIGHTEN", "new_stop", "new_target", "reason", "against", "zone"}. Never raises."""
     try:
         s = -1 if str(side or "").strip().upper() in ("SHORT", "SELL") else 1
@@ -69,6 +72,10 @@ def decide(*, side: str, entry, stop, target, ltp, tape, tick,
             return _hold("needs_delta_or_imbalance", against)
 
         profit_pct = s * (ltp / entry - 1.0) * 100.0
+        atr = _num(atr)
+        r_dist = _num(r_dist)
+        if r_dist is None and stop is not None and s * (entry - stop) > 0:
+            r_dist = s * (entry - stop)                          # fall back to the current stop's distance (1R)
         zone = None
         new_stop = None
         if stop is not None:
@@ -78,12 +85,25 @@ def decide(*, side: str, entry, stop, target, ltp, tape, tick,
             used = s * (ltp - entry) / (s * (entry - stop)) if s * (entry - stop) > 0 else None
             # near_stop: price moved AGAINST the trade and used up near_stop_frac of the entry->stop room
             near = used is not None and (-used) >= float(near_stop_frac)
-            if profit_pct >= float(min_profit_pct):
+            # E285 batch 2 profit gate: with min_profit_r > 0 a stop is tightened only once the trade is at least that many R in profit; a losing or flat
+            # trade keeps its original stop (the near_stop zone is off). min_profit_r = 0 restores the old behaviour.
+            r_ok = True
+            if float(min_profit_r) > 0:
+                r_ok = r_dist is not None and s * (ltp - entry) >= float(min_profit_r) * r_dist - 1e-9
+            if not r_ok:
+                zone = None
+            elif profit_pct >= float(min_profit_pct):
                 zone = "profit"
-            elif near:
+            elif near and float(min_profit_r) <= 0:
                 zone = "near_stop"
             if zone:
                 cand = _toward_price(ltp * (1.0 - s * float(gap_pct) / 100.0), s, tick)
+                # E285 batch 2 ATR floor: the new stop never sits closer than min_stop_atr x ATR to the live price (ADANIPORTS ratcheted to ~0.25% under LTP)
+                if float(min_stop_atr) > 0:
+                    if atr is None:
+                        cand = stop                              # no ATR known = cannot prove the floor: no stop move (target trim still allowed)
+                    else:
+                        cand = _toward_price(min(ltp - float(min_stop_atr) * atr, cand) if s > 0 else max(ltp + float(min_stop_atr) * atr, cand), s, tick)
                 better = s * (cand - stop) >= 2 * tick - 1e-9
                 inside = s * (ltp - cand) > 0
                 ok_target = target is None or s * (target - cand) > 0

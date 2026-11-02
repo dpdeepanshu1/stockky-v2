@@ -79,6 +79,7 @@ def test_widen_is_off_unknown_atr_or_short(monkeypatch):
     assert adaptive.widen_to_atr_floor(lv, 100.0, "X") is lv
     _atr(monkeypatch, 7.67)
     short = adaptive.AdaptiveLevels(target_pct=4.0, stop_pct=2.0, target_price=96.0, stop_price=102.0, side="SHORT")
+    monkeypatch.setattr(config, "SHORT_OPENING_GATE_WIDEN_STOP", False)       # E285 batch 3: shorts widen only behind their own switch
     assert adaptive.widen_to_atr_floor(short, 100.0, "X") is short
 
 

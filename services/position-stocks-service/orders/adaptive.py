@@ -63,6 +63,7 @@ WHAT THIS MODULE NOW DOES:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -579,7 +580,8 @@ def apply_stop_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optiona
         target_price, stop_price = _levels_to_prices(current_ltp, target_pct, floor, side)
         logger.info("adaptive: %s stop floor %.2f%% -> %.2f%% (%s), target %.2f%% -> %.2f%%", symbol, levels.stop_pct, floor, why, levels.target_pct, target_pct)
         return AdaptiveLevels(
-            target_pct=round(target_pct, 4), stop_pct=round(floor, 4), target_price=target_price, stop_price=stop_price,
+            target_pct=round(target_pct, 4), stop_pct=math.ceil(floor * 1e4 - 1e-9) / 1e4,      # rounded UP: a 4-dp round-down could land under the floor and be refused again
+            target_price=target_price, stop_price=stop_price,
             breakeven_trigger_pct=_breakeven_trigger(target_pct), range_regime=levels.range_regime, range_position=levels.range_position,
             atr_proxy_pct=levels.atr_proxy_pct, basis=(str(levels.basis or "legacy") + "+f")[:16], side=side,
         )
@@ -589,14 +591,17 @@ def apply_stop_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optiona
 
 
 def widen_to_atr_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optional[str], now=None) -> AdaptiveLevels:
-    """E285 round 126: a LONG whose stop is under OPENING_GATE_MIN_STOP_ATR_FRAC x the stock's daily ATR % (the opening gate's STOP_TOO_TIGHT refusal) is widened to
+    """E285 round 126 (shorts: E285 batch 3, SHORT_OPENING_GATE_WIDEN_STOP): a LONG (or SHORT) whose stop is under OPENING_GATE_MIN_STOP_ATR_FRAC x the stock's daily ATR % (the opening gate's STOP_TOO_TIGHT refusal) is widened to
     that floor, and the target moves to the min reward:risk x the floor, when that target is within SCALP_TARGET_CAP_MAX_PCT. Otherwise the levels come back unchanged
     (the gate then refuses as before). Same window rule as opening_gate.stop_reject. OPENING_GATE_WIDEN_STOP false = off. Never raises."""
     try:
         if not getattr(config, "OPENING_GATE_WIDEN_STOP", False) or not symbol or current_ltp <= 0:
             return levels
         frac = float(getattr(config, "OPENING_GATE_MIN_STOP_ATR_FRAC", 0.0) or 0.0)
-        if frac <= 0 or normalize_side(getattr(levels, "side", "LONG")) != "LONG":
+        side = normalize_side(getattr(levels, "side", "LONG"))
+        if frac <= 0:
+            return levels
+        if side == "SHORT" and not getattr(config, "SHORT_OPENING_GATE_WIDEN_STOP", False):     # E285 batch 3: a short is widened only behind its own switch
             return levels
         from screening import opening_gate, prev_day
         if not opening_gate.is_active(now) and not getattr(config, "STOP_ATR_FLOOR_AFTER_WINDOW", True):
@@ -613,11 +618,11 @@ def widen_to_atr_floor(levels: AdaptiveLevels, current_ltp: float, symbol: Optio
         ceiling = float(getattr(config, "SCALP_TARGET_CAP_MAX_PCT", 0.0) or 0.0)
         if ceiling > 0 and target_pct > ceiling + 1e-9:
             return levels
-        side = "LONG"
         target_price, stop_price = _levels_to_prices(current_ltp, target_pct, floor, side)
         logger.info("adaptive: %s stop widened %.2f%% -> %.2f%% (%.2f x daily ATR %.2f%%), target %.2f%% -> %.2f%%", symbol, levels.stop_pct, floor, frac, float(atr), levels.target_pct, target_pct)
         return AdaptiveLevels(
-            target_pct=round(target_pct, 4), stop_pct=round(floor, 4), target_price=target_price, stop_price=stop_price,
+            target_pct=round(target_pct, 4), stop_pct=math.ceil(floor * 1e4 - 1e-9) / 1e4,      # rounded UP: a 4-dp round-down could land under the floor and be refused again
+            target_price=target_price, stop_price=stop_price,
             breakeven_trigger_pct=_breakeven_trigger(target_pct), range_regime=levels.range_regime, range_position=levels.range_position,
             atr_proxy_pct=levels.atr_proxy_pct, basis=(str(levels.basis or "legacy") + "+w")[:16], side=side,
         )

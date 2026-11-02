@@ -26,6 +26,30 @@ import pipeline_status as pstat
 logger = logging.getLogger("real-trade-cycle")
 
 
+def _heal_session(db: Session, where: str) -> bool:
+    """Batch 1 (2026-11-02): roll the shared cycle session back when an earlier stage left it in the failed-flush state.
+
+    Root cause of the 15:03 alert ("This Session's transaction has been rolled back due to a previous exception during
+    flush ... first issue Session.rollback()"): several stages catch their own exception as "non-fatal" and carry on with the
+    SAME session. When that exception was a failed flush (for example a DPY-4024 call timeout inside an INSERT), the session
+    stays unusable, so the NEXT stage (entry / fills / exit) died with PendingRollbackError and was reported as a DB timeout.
+
+    Only acts when `db.is_active` is False (the failed-flush state), so a stage that failed for another reason (an HTTP
+    error, say) and a stage running concurrently keep their pending work. CYCLE_SESSION_HEAL=false turns it off. Never raises.
+    Returns True when it rolled back."""
+    try:
+        if os.getenv("CYCLE_SESSION_HEAL", "true").strip().lower() in ("0", "false", "no", "off"):
+            return False
+        if db.is_active:
+            return False
+        db.rollback()
+        logger.warning("run_cycle_core: session was in a failed-flush state before '%s' - rolled back so the stage can run", where)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("run_cycle_core: session heal before '%s' failed", where, exc_info=True)
+        return False
+
+
 async def run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str = "manual") -> dict:
     mode = mode.upper()
 
@@ -227,6 +251,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
                 })
         except Exception as exc:
             logger.warning("run_cycle_core: dynamic universe refresh failed (non-fatal): %s", exc)
+            _heal_session(db, "dynamic_universe")
         finally:
             _timer_stop("dynamic_universe")
 
@@ -243,6 +268,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
             return await evaluate_watchlist_entries(db, mode)
         except Exception as exc:
             logger.warning("run_cycle_core: watchlist stage failed (non-fatal): %s", exc)
+            _heal_session(db, "watchlist")
             return {"error": str(exc)}
         finally:
             _timer_stop("watchlist")
@@ -260,10 +286,13 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
         _bounded("candidates", _candidates(), 0),
     )
 
+    _heal_session(db, "entry")           # the two stages above run side by side and swallow their own errors
     _stage("entry")
     entry_result = await entry_evaluate(db, mode, gate_armed)
+    _heal_session(db, "fills")
     _stage("fills")
     fills = await check_pending_fills(db, mode)
+    _heal_session(db, "expire")
     _stage("expire")
     expired = await expire_stale_orders(db, mode)
 
@@ -281,6 +310,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
         snapshot_open_positions(db, mode, open_positions(db, mode))
     except Exception as exc:
         logger.warning("run_cycle_core: position snapshot failed (non-fatal): %s", exc)
+    _heal_session(db, "exit")
 
     _stage("exit")
     # BUG FIX (session47): exit evaluation + reconcile now run inside the
@@ -314,6 +344,7 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
                 maybe_sweep(db, mode)
             except Exception:  # noqa: BLE001 - the sweep must never break a cycle
                 logger.debug("cycle: lock sweep skipped", exc_info=True)
+                _heal_session(db, "lock_sweep")
     finally:
         exit_lock.release()
 

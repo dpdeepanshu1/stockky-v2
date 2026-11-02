@@ -10,7 +10,9 @@ from __future__ import annotations
 import calendar
 import json
 import os
+import random
 from datetime import datetime, timezone
+from urllib.parse import quote, unquote
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 HORIZONS_MIN = (5, 15, 30, 60)
@@ -97,6 +99,62 @@ def label_rows(rows: Iterable[Dict[str, Any]], load_bars: Callable[[str, str], O
     return {"rows": out, "counts": c}
 
 
+def bar_path(bars_dir: str, day: str, sym: str) -> str:
+    """Where feed/bar_recorder.py writes a symbol's day file: <dir>/<day>/<quote(SYMBOL, safe="")>.json. E285 batch 6: the readers used `<SYM>.json` unquoted, so every symbol the
+    recorder had to quote (M&M -> M%26M.json) was reported as "no bars"."""
+    return os.path.join(bars_dir, day, quote(str(sym), safe="") + ".json")
+
+
+def file_symbols(bars_dir: str) -> Callable[[str], Optional[List[str]]]:
+    """day -> the symbols that have a bar file that day (sorted), or None when the day has no folder at all. Never raises."""
+    def _list(day: str):
+        try:
+            d = os.path.join(bars_dir, day)
+            if not os.path.isdir(d):
+                return None
+            return sorted(unquote(n[:-5]) for n in os.listdir(d) if n.endswith(".json"))
+        except OSError:
+            return None
+    return _list
+
+
+def no_bar_reason(bars: Optional[List[list]], t0: float, horizon_s: float = 3600.0) -> str:
+    """Why a sample cannot be measured: ok | no_bars (nothing recorded) | starts_after (the first recorded bar is after t0: the symbol was noted late) |
+    ends_before (the recording ends before t0 + horizon: a late skip or the recorder stopped). Same test label() uses for r60. Never raises."""
+    try:
+        if not bars:
+            return "no_bars"
+        if float(bars[0][0]) > t0:
+            return "starts_after"
+        if float(bars[-1][0]) + 60 < t0 + horizon_s or _bar_idx(bars, t0) is None or _bar_idx(bars, t0) >= len(bars) - 1:
+            return "ends_before"
+        return "ok"
+    except Exception:  # noqa: BLE001
+        return "no_bars"
+
+
+def baseline_values(day: str, ts: float, sym: str, side: str, symbols: Optional[List[str]], load_bars: Callable[[str, str], Optional[List[list]]], k: int,
+                    cost_pct: float, rng: "random.Random") -> List[float]:
+    """E285 batch 6: net60 of up to `k` RANDOM entries at the same time `ts` on the same day, other symbols that have bars, same side. The yardstick for "is this gate's net60
+    the stock picking or just the market that day". Deterministic given `rng`. Never raises."""
+    out: List[float] = []
+    try:
+        pool = [s for s in (symbols or []) if s != sym]
+        if k <= 0 or not pool:
+            return out
+        for _ in range(max(k, 1) * 3):
+            if len(out) >= k:
+                break
+            other = pool[rng.randrange(len(pool))]
+            lab = label(load_bars(other, day), ts, side)
+            r60 = lab.get("r60") if lab.get("status") == "ok" else None
+            if r60 is not None:
+                out.append(round(float(r60) - cost_pct, 4))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def file_loader(bars_dir: str) -> Callable[[str, str], Optional[List[list]]]:
     cache: Dict[tuple, Any] = {}
 
@@ -104,7 +162,7 @@ def file_loader(bars_dir: str) -> Callable[[str, str], Optional[List[list]]]:
         k = (sym, day)
         if k not in cache:
             try:
-                with open(os.path.join(bars_dir, day, f"{sym}.json"), encoding="utf-8") as f:
+                with open(bar_path(bars_dir, day, sym), encoding="utf-8") as f:
                     cache[k] = json.load(f)["bars"]
             except Exception:  # noqa: BLE001
                 cache[k] = None
@@ -138,6 +196,6 @@ def rows_from_log(session: Any, models: Any, day: str) -> List[Dict[str, Any]]:
     from datetime import timedelta
     d0 = datetime.strptime(day, "%Y-%m-%d") - timedelta(hours=5, minutes=30)
     M = models.ScalpCandidateLog
-    q = session.query(M).filter(M.created_at >= d0, M.created_at < d0 + timedelta(days=1)).order_by(M.id)
+    q = session.query(M.symbol, M.decision, M.reason, M.created_at).filter(M.created_at >= d0, M.created_at < d0 + timedelta(days=1)).order_by(M.id)   # Batch 1 item 5: four columns, not whole rows
     return [{"symbol": x.symbol, "decision": x.decision, "reason": x.reason, "created_ts": calendar.timegm(x.created_at.timetuple()),
              "side": "SHORT" if str(x.reason or "").upper().startswith("SHORT_") else "LONG"} for x in q.all()]

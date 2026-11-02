@@ -2097,7 +2097,9 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         not config.FLOW_EXIT_SAME_DAY_ONLY
                         or as_aware(position.opened_at).astimezone(IST).date() == datetime.now(IST).date()):
                     _tx = await _fg.exit_check(position.symbol, "LONG", entry=position.avg_entry_price, stop=position.current_stop,
-                                               target=position.current_target, ltp=ltp, tick=0.05)
+                                               target=position.current_target, ltp=ltp, tick=0.05,
+                                               atr=getattr(tick, "atr", None), r_dist=getattr(position, "initial_stop_distance", None),
+                                               key=("rt", mode, position.id))
                     if _tx and _tx.get("action") == "TIGHTEN":
                         _n_stop, _n_tgt = _tx.get("new_stop"), _tx.get("new_target")
                         if _n_stop is not None and float(_n_stop) <= float(position.current_stop):

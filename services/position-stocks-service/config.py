@@ -1019,6 +1019,10 @@ SCALP_TARGET_CAP_MAX_PCT = max(0.0, _get_float("SCALP_TARGET_CAP_MAX_PCT", 5.0))
 # E285 round 126: an entry whose stop is under OPENING_GATE_MIN_STOP_ATR_FRAC x daily ATR is no longer refused (STOP_TOO_TIGHT) when a stop at that floor still gives
 # the min reward:risk inside SCALP_TARGET_CAP_MAX_PCT: the stop is widened to the floor, the target moves to MIN_RR x it, and the share count follows the wider stop.
 OPENING_GATE_WIDEN_STOP = _get_bool("OPENING_GATE_WIDEN_STOP", True)
+# E285 batch 3: the same widening for a SHORT (it was refused SHORT_OPENING_STOP / STOP_ATR_FLOOR when its stop, often tightened by market weather or the learned stop, sat under the ATR
+# floor). The stop goes to the floor, the target to MIN_RR x it (inside SCALP_TARGET_CAP_MAX_PCT), the share count is worked out from the WIDER stop so the rupee risk stays the
+# same, and the short is still refused when the quantity falls under the minimum or the widened levels break RR_FLOOR. false = refuse as before.
+SHORT_OPENING_GATE_WIDEN_STOP = _get_bool("SHORT_OPENING_GATE_WIDEN_STOP", True)
 
 # ── Pullback re-arm entries (2026-10-19, orders/pullback_rearm.py) ────────────────────────────────────────────────
 # A stock skipped for being at / extended above its high is re-checked on a pullback + bounce instead of being forgotten.
@@ -1059,6 +1063,17 @@ RECONCILE_LOG_ONCE = _get_bool("RECONCILE_LOG_ONCE", True)
 # loop + ScalpGateState.retention_cleanup_last_run_date). A manual
 # POST /trades/cleanup is also available for an on-demand run.
 TRADE_HISTORY_RETENTION_DAYS = _get_float("TRADE_HISTORY_RETENTION_DAYS", 3.0)
+
+# ── Candidate log, Batch 1 (2026-11-02) ──────────────────────────────────────────────────────────────────────────────
+# orders/candidate_log_writer.py: SKIPPED rows are de-duplicated per (symbol, reason head) inside CANDIDATE_LOG_DEDUPE_S and
+# written in batches by one background thread instead of one Oracle commit per skip. CANDIDATE_LOG_ASYNC=false = old path.
+CANDIDATE_LOG_ASYNC = _get_bool("CANDIDATE_LOG_ASYNC", True)
+CANDIDATE_LOG_DEDUPE_S = _get_float("CANDIDATE_LOG_DEDUPE_S", 300.0)
+CANDIDATE_LOG_BATCH_MAX = _get_int("CANDIDATE_LOG_BATCH_MAX", 200)
+CANDIDATE_LOG_QUEUE_MAX = _get_int("CANDIDATE_LOG_QUEUE_MAX", 5000)
+CANDIDATE_LOG_BACKOFF_S = _get_float("CANDIDATE_LOG_BACKOFF_S", 30.0)
+# rows older than this are deleted once a day (0 = keep forever)
+CANDIDATE_LOG_RETENTION_DAYS = _get_float("CANDIDATE_LOG_RETENTION_DAYS", 30.0)
 
 # ── Cumulative brokerage ledger (2026-10-08, group 258) ──────────────────────
 # orders/charges_ledger.py books every settled closed position into scalp_charges_ledger (never purged by the
@@ -1176,6 +1191,9 @@ LEARNED_LIMIT_FILE = _get_str("LEARNED_LIMIT_FILE", "")                         
 #   FLOW_EXIT_STOP_GAP_PCT   new stop sits this % behind the live price (default 0.25)
 #   FLOW_EXIT_MIN_TARGET_PCT a trimmed target must still pay this % from entry (default 0.5)
 #   FLOW_EXIT_MIN_INTERVAL_S per-position minimum seconds between tape moves (default 20)
+#   FLOW_EXIT_MIN_STOP_ATR   E285 batch 2: a tape tighten never puts the stop closer than this x ATR to the live price (default 0.5; 0 = off, no ATR = no stop move)
+#   FLOW_EXIT_CONSEC         E285 batch 2: the tighten must be decided on this many consecutive checks (default 3; 1 = off)
+#   FLOW_EXIT_MIN_PROFIT_R   E285 batch 2: tighten the stop only once the trade is at least this many R in profit (default 0.5; 0 = off, old near-stop zone back)
 #   FLOW_EXIT_TIMEOUT_S      longest wait for the one market-data call (default 0.6 s; slower = no opinion)
 #   FLOW_EXIT_SAME_DAY_ONLY  1 (default) | 0   real-trade only: the tape is today's session, so a position bought on an earlier day is left alone
 FLOW_EXIT_MODE = (_get_str("FLOW_EXIT_MODE", "live")).strip().lower()
@@ -1186,7 +1204,10 @@ FLOW_EXIT_MIN_PROFIT_PCT = max(0.0, _get_float("FLOW_EXIT_MIN_PROFIT_PCT", 0.3))
 FLOW_EXIT_NEAR_STOP_FRAC = min(1.0, max(0.05, _get_float("FLOW_EXIT_NEAR_STOP_FRAC", 0.5)))
 FLOW_EXIT_STOP_GAP_PCT = max(0.05, _get_float("FLOW_EXIT_STOP_GAP_PCT", 0.25))
 FLOW_EXIT_MIN_TARGET_PCT = max(0.0, _get_float("FLOW_EXIT_MIN_TARGET_PCT", 0.5))
-FLOW_EXIT_MIN_INTERVAL_S = max(0.0, _get_float("FLOW_EXIT_MIN_INTERVAL_S", 20.0))
+FLOW_EXIT_MIN_INTERVAL_S = max(0.0, _get_float("FLOW_EXIT_MIN_INTERVAL_S", 300.0))
+FLOW_EXIT_MIN_STOP_ATR = max(0.0, _get_float("FLOW_EXIT_MIN_STOP_ATR", 0.5))
+FLOW_EXIT_CONSEC = min(10, max(1, _get_int("FLOW_EXIT_CONSEC", 3)))
+FLOW_EXIT_MIN_PROFIT_R = max(0.0, _get_float("FLOW_EXIT_MIN_PROFIT_R", 0.5))
 FLOW_EXIT_TIMEOUT_S = max(0.2, _get_float("FLOW_EXIT_TIMEOUT_S", 0.6))
 FLOW_EXIT_SAME_DAY_ONLY = _get_float("FLOW_EXIT_SAME_DAY_ONLY", 1.0) != 0.0
 FLOW_RECORD = _get_bool("FLOW_RECORD", True)
@@ -1619,6 +1640,48 @@ QUALITY_GATE_EVENT_SHARED_FETCH = _get_bool("QUALITY_GATE_EVENT_SHARED_FETCH", T
 QUALITY_GATE_EVENT_BG_TIMEOUT_S = max(5.0, _get_float("QUALITY_GATE_EVENT_BG_TIMEOUT_S", 45.0))
 QUALITY_GATE_EVENT_LATE_TTL_S = max(0.0, _get_float("QUALITY_GATE_EVENT_LATE_TTL_S", 300.0))
 QUALITY_GATE_EVENT_PREWARM_EXTRA = max(0, _get_int("QUALITY_GATE_EVENT_PREWARM_EXTRA", 3))   # E229: also start the event check of this many names ranked just below the quality-gate batch (0 = off)
+# E285 batch 4 (2 Nov: RELIABLE and LATENTVIEW-type names at 09:15 were skipped as EVENT_CHECK_UNAVAILABLE while the news service was still cold):
+#  QUALITY_GATE_PREOPEN_WARM         true: between QUALITY_GATE_PREOPEN_WARM_START_IST and 09:14 the event check of the F&O universe (first QUALITY_GATE_PREOPEN_WARM_MAX) and of the
+#                                    strongest movers of the last 3 days in the candidate log (QUALITY_GATE_PREOPEN_WARM_MOVERS) is started in the background, QUALITY_GATE_PREOPEN_WARM_CHUNK
+#                                    names per loop tick, so the 24 h event memory is full when the bell rings (it is lost on every restart). false = no pre-warm.
+#  QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE  true: when the event service still did not answer and nothing is remembered for the symbol (no known negative event), a LONG is no longer
+#                                    refused EVENT_CHECK_UNAVAILABLE; it goes on at a size penalty of QUALITY_GATE_EVENT_UNCHECKED_PENALTY (1.0 = half size). A remembered or typed negative
+#                                    event, negative news or results today still refuse first. Shorts keep refusing (no news check = no short). false = refuse as before.
+#  QUALITY_GATE_TYPED_NEG_MEMORY_H   hours a NEGATIVE typed event seen for a symbol still counts when the event service fails (0 = off): an outage never lets a known negative event through.
+QUALITY_GATE_PREOPEN_WARM = _get_bool("QUALITY_GATE_PREOPEN_WARM", True)
+QUALITY_GATE_PREOPEN_WARM_START_IST = _get_str("QUALITY_GATE_PREOPEN_WARM_START_IST", "08:45")
+QUALITY_GATE_PREOPEN_WARM_CHUNK = max(1, _get_int("QUALITY_GATE_PREOPEN_WARM_CHUNK", 15))
+QUALITY_GATE_PREOPEN_WARM_MAX = max(0, _get_int("QUALITY_GATE_PREOPEN_WARM_MAX", 150))
+QUALITY_GATE_PREOPEN_WARM_MOVERS = max(0, _get_int("QUALITY_GATE_PREOPEN_WARM_MOVERS", 60))
+QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE = _get_bool("QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE", True)
+QUALITY_GATE_EVENT_UNCHECKED_PENALTY = max(0.0, _get_float("QUALITY_GATE_EVENT_UNCHECKED_PENALTY", 1.0))
+QUALITY_GATE_TYPED_NEG_MEMORY_H = max(0.0, _get_float("QUALITY_GATE_TYPED_NEG_MEMORY_H", 2.0))
+# E285 batch 5 (adaptive gate policy, orders/gate_policy.py + gate_policy_job.py): four gates (opening GAP_DOWN, BELOW_OPEN, opening NEAR_DAY_HIGH, EVENT_CHECK_UNAVAILABLE) move
+# between HARD (refuse) and SOFT (half size) from a nightly rolling 15-day scorecard. Safety gates (circuit, liquidity, spread / depth, stale tick, capital, max positions,
+# SHORT_TOO_EARLY, the day-gain cap) and known-negative-event refusals are never adapted.
+#  GATE_POLICY_MODE            adaptive (default: the rows the job wrote; a gate never moved follows its own config) | static (rows ignored = every gate as its config says; the
+#                              rollback) | all_hard (every adaptable gate refuses)
+#  GATE_POLICY_SOFT_PENALTY    size penalty of a SOFT gate (1.0 = half size)
+#  GATE_POLICY_LOG_SOFT_ROWS   true: a gate that fires but lets the entry go on (SOFT) writes a SOFT row in the candidate log, so the scorecard keeps measuring it (needed for SOFT -> HARD)
+#  GATE_POLICY_JOB_ENABLED / _AT_IST   the nightly job and its time (after the close, bars complete); GATE_POLICY_REFRESH_S   how often the entry cache reloads the table
+#  GATE_POLICY_DAYS / _COST_PCT        scorecard window (days) and the round-trip cost taken off every sample
+#  GATE_POLICY_MIN_N / _MIN_DAYS / _MIN_SYMBOLS / _BOOT_N / _CONFIDENCE   HARD -> SOFT needs this much evidence and a bootstrap lower bound of net60 above 0
+#  GATE_POLICY_HYST_PCT        SOFT -> HARD only when mean net60 is under minus this (the hysteresis band);  GATE_POLICY_STEP_DAYS   one step per gate per this many days
+GATE_POLICY_MODE = _get_str("GATE_POLICY_MODE", "adaptive").strip().lower()
+GATE_POLICY_SOFT_PENALTY = max(0.0, _get_float("GATE_POLICY_SOFT_PENALTY", 1.0))
+GATE_POLICY_LOG_SOFT_ROWS = _get_bool("GATE_POLICY_LOG_SOFT_ROWS", True)
+GATE_POLICY_JOB_ENABLED = _get_bool("GATE_POLICY_JOB_ENABLED", True)
+GATE_POLICY_JOB_AT_IST = _get_str("GATE_POLICY_JOB_AT_IST", "16:30")
+GATE_POLICY_REFRESH_S = max(5.0, _get_float("GATE_POLICY_REFRESH_S", 60.0))
+GATE_POLICY_DAYS = max(1, _get_int("GATE_POLICY_DAYS", 15))
+GATE_POLICY_COST_PCT = max(0.0, _get_float("GATE_POLICY_COST_PCT", 0.15))
+GATE_POLICY_MIN_N = max(1, _get_int("GATE_POLICY_MIN_N", 30))
+GATE_POLICY_MIN_DAYS = max(1, _get_int("GATE_POLICY_MIN_DAYS", 5))
+GATE_POLICY_MIN_SYMBOLS = max(1, _get_int("GATE_POLICY_MIN_SYMBOLS", 20))
+GATE_POLICY_BOOT_N = max(200, _get_int("GATE_POLICY_BOOT_N", 2000))
+GATE_POLICY_CONFIDENCE = min(0.999, max(0.5, _get_float("GATE_POLICY_CONFIDENCE", 0.95)))
+GATE_POLICY_HYST_PCT = max(0.0, _get_float("GATE_POLICY_HYST_PCT", 0.10))
+GATE_POLICY_STEP_DAYS = max(1, _get_int("GATE_POLICY_STEP_DAYS", 7))
 # Price floor applied BEFORE the quality gate (HATHWAY at Rs10.6 used the gate's three calls although entry.py would reject it as PENNY_STOCK).
 # Uses MIN_STOCK_PRICE and ENTRY_MIN_PRICE; PRICE_FLOOR_BEFORE_GATE=0 turns this pre-filter off (entry.py still enforces the floor).
 PRICE_FLOOR_BEFORE_GATE = _get_bool("PRICE_FLOOR_BEFORE_GATE", True)

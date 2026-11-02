@@ -32,6 +32,7 @@ def _fakes(monkeypatch, *, event_ok, retry_ok=False, calls=None):
 
 @pytest.fixture()
 def gate(monkeypatch):
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE", False)      # E285 batch 4: these tests cover the refuse-as-before path
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True)
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 6.0)
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_FAIL_OPEN_AFTER_S", 900.0)

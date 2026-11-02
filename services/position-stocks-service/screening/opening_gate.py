@@ -38,6 +38,7 @@ from datetime import datetime, time as _time
 from typing import Optional
 
 import config
+from orders import gate_policy
 from screening import prev_day
 from tz_utils import ist_now, is_market_open_ist, parse_hhmm
 
@@ -75,8 +76,10 @@ def _opening_range(symbol: str, now_ist: datetime):
 
 
 def below_open_mode() -> str:
-    m = str(getattr(config, "OPENING_BELOW_OPEN_MODE", "penalty") or "penalty").strip().lower()
-    return m if m in ("penalty", "veto") else "penalty"
+    """veto | penalty | off. E285 batch 5: the adaptive gate policy (orders/gate_policy.py) decides it - HARD = veto, SOFT = penalty, OFF = no test; with no policy row it is
+    OPENING_BELOW_OPEN_MODE as before (anything else there reads as penalty)."""
+    st = gate_policy.state(gate_policy.BELOW_OPEN)
+    return "veto" if st == gate_policy.HARD else ("off" if st == gate_policy.OFF else "penalty")
 
 
 def below_open_penalty(symbol: str, ltp: float, now: Optional[datetime] = None) -> Optional[dict]:
@@ -138,7 +141,10 @@ def parts_penalties(symbol: str, ltp: float, now: Optional[datetime] = None) -> 
     here (reject_reason still refuses on missing data). Empty in veto mode or when the gate is not active. Never raises."""
     out: dict = {}
     try:
-        if parts_mode() != "penalty" or not ltp or ltp <= 0 or not is_active(now):
+        pm = parts_mode() == "penalty"
+        ndh_soft = gate_policy.state(gate_policy.NEAR_DAY_HIGH) == gate_policy.SOFT        # E285 batch 5: this part's own state (the policy may differ from the other parts)
+        gd_soft = gate_policy.state(gate_policy.GAP_DOWN) == gate_policy.SOFT
+        if (not pm and not ndh_soft and not gd_soft) or not ltp or ltp <= 0 or not is_active(now):
             return out
         n = ist_now(now)
         from feed import ws_client
@@ -147,14 +153,23 @@ def parts_penalties(symbol: str, ltp: float, now: Optional[datetime] = None) -> 
         or_settled = minutes_open >= config.OPENING_GATE_OR_MINUTES
         top = _cap()
         ds = ws_client.get_day_stats(symbol)
-        if ds and or_settled and config.OPENING_GATE_MAX_RANGE_POS > 0:
+        if ds and gd_soft and config.OPENING_GATE_MAX_GAP_DOWN_PCT > 0 and ds[0] and ds[3]:
+            # E285 batch 5: the policy moved the gap-down gate to SOFT: it no longer refuses (reject_reason), the entry trades at the SOFT size penalty instead.
+            gap = (ds[0] - ds[3]) / ds[3] * 100.0
+            if gap < -config.OPENING_GATE_MAX_GAP_DOWN_PCT:
+                out["gap_down"] = {"penalty": gate_policy.soft_penalty(), "why": f"OPENING_GATE:GAP_DOWN:{gap:+.2f}% < -{config.OPENING_GATE_MAX_GAP_DOWN_PCT:.2f}%", "policy": True}
+        if ds and ndh_soft and or_settled and config.OPENING_GATE_MAX_RANGE_POS > 0:
             _o, hi, lo, _pc = ds
             if hi and lo and hi > lo:
                 rpos = max(0.0, min(1.0, (ltp - lo) / (hi - lo)))
                 fl = config.OPENING_GATE_MAX_RANGE_POS
                 if rpos >= fl:
-                    out["near_day_high"] = {"penalty": round(min(top, 1.0 + (top - 1.0) * (rpos - fl) / max(1.0 - fl, 0.01)), 4),
-                                            "why": f"OPENING_GATE:NEAR_DAY_HIGH:range_pos={rpos:.2f} >= {fl:.2f}"}
+                    # static SOFT (penalty mode): the usual linear penalty; a gate the policy moved from HARD to SOFT: the flat SOFT size penalty (half size)
+                    _static_soft = gate_policy.static_state(gate_policy.NEAR_DAY_HIGH) == gate_policy.SOFT
+                    out["near_day_high"] = {"penalty": round(min(top, 1.0 + (top - 1.0) * (rpos - fl) / max(1.0 - fl, 0.01)), 4) if _static_soft else gate_policy.soft_penalty(),
+                                            "why": f"OPENING_GATE:NEAR_DAY_HIGH:range_pos={rpos:.2f} >= {fl:.2f}", "policy": True}
+        if not pm:
+            return out
         if ds and ds[3] and ltp < ds[3]:                      # E273 round 30: under the previous close (down to OPENING_GATE_HARD_BELOW_PREV_PCT) is a penalty, not a refusal
             chg = (ltp - ds[3]) / ds[3] * 100.0
             p = shortfall_penalty(chg, 0.0, _hard_below_prev())
@@ -247,7 +262,8 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None, ignor
         _gap_up_lim = gap_up_limit(symbol)
         if not ignore_gap and _gap_up_lim > 0 and gap > _gap_up_lim:
             return f"OPENING_GATE:GAP_UP:{gap:+.2f}% > +{_gap_up_lim:.2f}%"
-        if not ignore_gap and config.OPENING_GATE_MAX_GAP_DOWN_PCT > 0 and gap < -config.OPENING_GATE_MAX_GAP_DOWN_PCT:
+        if (not ignore_gap and config.OPENING_GATE_MAX_GAP_DOWN_PCT > 0 and gap < -config.OPENING_GATE_MAX_GAP_DOWN_PCT
+                and gate_policy.state(gate_policy.GAP_DOWN) == gate_policy.HARD):        # E285 batch 5: SOFT / OFF = no refusal here (SOFT is a size penalty in parts_penalties)
             return f"OPENING_GATE:GAP_DOWN:{gap:+.2f}% < -{config.OPENING_GATE_MAX_GAP_DOWN_PCT:.2f}%"
         if ltp < day_open and below_open_mode() == "veto":     # E273: default "penalty" - the scorecard showed this gate blocks winners; see below_open_penalty()
             return f"OPENING_GATE:BELOW_OPEN:ltp {ltp:.2f} < open {day_open:.2f}"
@@ -258,7 +274,7 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None, ignor
             if not day_high or not day_low or day_high <= day_low:
                 return "OPENING_GATE:NO_DAY_RANGE"
             rpos = max(0.0, min(1.0, (ltp - day_low) / (day_high - day_low)))
-            if rpos >= config.OPENING_GATE_MAX_RANGE_POS and not soft:
+            if rpos >= config.OPENING_GATE_MAX_RANGE_POS and gate_policy.state(gate_policy.NEAR_DAY_HIGH) == gate_policy.HARD:      # E285 batch 5: was `not soft`; same with no policy row
                 return (f"OPENING_GATE:NEAR_DAY_HIGH:range_pos={rpos:.2f} >= {config.OPENING_GATE_MAX_RANGE_POS:.2f} "
                         f"(day_low={day_low:.2f} day_high={day_high:.2f})")
 

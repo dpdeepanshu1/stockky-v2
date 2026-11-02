@@ -1,15 +1,10 @@
 """E272 round 9: gate_scorecard.py --direction. The script needs the DB, so side_sign and forward are lifted out of its source and run on fixed bars.
 Run: python3 scripts/test_gate_scorecard_direction.py"""
-import ast
 import os
-import types
+import sys
 
-src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "gate_scorecard.py"), encoding="utf-8").read()
-tree = ast.parse(src)
-fns = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("side_sign", "forward")]
-ns = {"args": types.SimpleNamespace(target=1.5, stop=1.0)}
-exec(compile(ast.Module(body=fns, type_ignores=[]), "gs", "exec"), ns)
-side_sign, forward = ns["side_sign"], ns["forward"]
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services", "position-stocks-service"))
+from orders.scorecard import forward, side_sign      # E285 batch 6: the logic moved out of the script into orders/scorecard.py (the script is a thin wrapper)
 T0 = 1_793_000_000.0 - (1_793_000_000 % 60)
 
 

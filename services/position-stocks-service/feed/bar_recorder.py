@@ -30,7 +30,7 @@ _DAY_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _lock = threading.Lock()
 _written: Dict[str, Tuple[str, int, float, float, float]] = {}
 _priority: Dict[str, Any] = {"day": None, "syms": set()}      # E272: scan candidates and premarket watchlist names noted today
-_state: Dict[str, Any] = {"priority_noted": 0, "wanted_read": 0, "priority_missing": 0, "last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
+_state: Dict[str, Any] = {"priority_missing_names": [], "priority_missing_not_subscribed": [], "priority_missing_no_tick": [], "priority_missing_cause_known": False, "priority_noted": 0, "wanted_read": 0, "priority_missing": 0, "last_run": 0.0, "last_write": 0.0, "final_day": None, "pruned_day": None, "files_written": 0, "bytes_written": 0,
                           "symbols_last": 0, "skipped_unchanged": 0, "merged_existing": 0, "errors": 0, "last_error": None, "disabled_reason": None}
 
 
@@ -46,7 +46,7 @@ def reset() -> None:
     with _lock:
         _written.clear()
         _priority.update(day=None, syms=set())
-        _state.update(priority_noted=0, wanted_read=0, priority_missing=0, last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
+        _state.update(priority_missing_names=[], priority_missing_not_subscribed=[], priority_missing_no_tick=[], priority_missing_cause_known=False, priority_noted=0, wanted_read=0, priority_missing=0, last_run=0.0, last_write=0.0, final_day=None, pruned_day=None, files_written=0, bytes_written=0, symbols_last=0,
                       skipped_unchanged=0, merged_existing=0, errors=0, last_error=None, disabled_reason=None)
 
 
@@ -218,7 +218,7 @@ def _is_backfilled(symbol: str) -> bool:
         return False
 
 
-def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any = None, day_fn: Any = None, backfilled_fn: Any = None) -> Dict[str, Any]:
+def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any = None, day_fn: Any = None, backfilled_fn: Any = None, subscribed_fn: Any = None) -> Dict[str, Any]:
     """One recorder pass. The *_fn arguments exist for tests; production reads feed.bar_store."""
     did: Dict[str, Any] = {"wrote": 0, "unchanged": 0, "skipped": None, "final": False, "pruned": 0}
     try:
@@ -275,6 +275,18 @@ def run_once(now: float, market_open: bool, bars_fn: Any = None, symbols_fn: Any
                 have = set(all_syms)
                 noted = _priority["syms"]
                 _state["priority_missing"] = len(noted - have)                  # noted but the store never saw a tick for them
+                _state["priority_missing_names"] = sorted(noted - have)[:30]    # E285 batch 6: WHICH names (first 30), so the scorecard's no-bar gap can be traced to them
+                try:        # E285 batch 6 follow-up: WHY. Not in the feed's subscription list (not NSE-EQ, or dropped as an ETF / fund) needs a different fix than subscribed-but-never-traded
+                    if subscribed_fn is None:
+                        from feed import ws_client
+                        subscribed_fn = lambda: set(getattr(ws_client, "_token_to_symbol", {}).values())  # noqa: E731
+                    subd = set(subscribed_fn() or [])
+                    miss = sorted(noted - have)
+                    _state["priority_missing_cause_known"] = bool(subd)        # empty list = market-data poller mode or feed not up: no claim
+                    _state["priority_missing_not_subscribed"] = [x for x in miss if subd and x not in subd][:30]
+                    _state["priority_missing_no_tick"] = [x for x in miss if x in subd][:30]
+                except Exception as e:  # noqa: BLE001
+                    _err("missing cause", e)
                 have_set = set(syms)
                 syms = syms + sorted(x for x in noted if x in have and x not in have_set)
             _state["symbols_last"] = len(syms)

@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -451,6 +451,23 @@ def _log_candidate(
         _br.note_symbols([candidate.symbol])
     except Exception:  # noqa: BLE001
         logger.debug("entry: ignored error (fail-open)", exc_info=True)
+    if decision == "SKIPPED" and candidate_log_writer.enabled():
+        # Batch 1 (2026-11-02): the SKIPPED audit row is de-duplicated and written by a background batch writer on its own
+        # session. The commit below stays, so anything else this session had pending is committed exactly as before.
+        if candidate_log_writer.submit(dict(
+            symbol=candidate.symbol, window_source=candidate.window_label, pct_change=candidate.pct_change,
+            composite_score=composite_score or candidate.composite_score, decision=decision, reason=reason,
+            fundamental_score=quality.fundamental_score if quality else None,
+            technical_score=quality.technical_score if quality else None,
+            market_cap_cr=quality.market_cap_cr if quality else None,
+            has_positive_catalyst=quality.has_positive_catalyst if quality else None,
+        )):
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            return
     log = ScalpCandidateLog(
         symbol=candidate.symbol,
         window_source=candidate.window_label,
@@ -469,6 +486,21 @@ def _log_candidate(
     except Exception:
         db.rollback()
         raise
+
+
+def _log_policy_soft(candidate: Candidate, reason: str, quality: Optional[QualitySignal] = None) -> None:
+    """E285 batch 5: a policy gate fired but the entry goes on at reduced size (SOFT). Writes a SOFT row (same reason text a refusal would have had) through the batch
+    writer, so gate_scorecard / the nightly policy job keep measuring the gate. Best-effort: no commit on the entry session, no row when the writer is off. Never raises."""
+    try:
+        if not gate_policy.log_soft_rows() or not candidate_log_writer.enabled():
+            return
+        candidate_log_writer.submit(dict(
+            symbol=candidate.symbol, window_source=candidate.window_label, pct_change=candidate.pct_change, composite_score=candidate.composite_score,
+            decision="SOFT", reason=str(reason)[:1000],
+            fundamental_score=quality.fundamental_score if quality else None, technical_score=quality.technical_score if quality else None,
+            market_cap_cr=quality.market_cap_cr if quality else None, has_positive_catalyst=quality.has_positive_catalyst if quality else None))
+    except Exception:  # noqa: BLE001
+        logger.debug("entry: SOFT row not written", exc_info=True)
 
 
 def log_quality_reject(db: Session, candidate: Candidate, quality: QualitySignal, reason: str) -> None:
@@ -707,6 +739,8 @@ def attempt_entry(
         _bo = opening_gate.below_open_penalty(candidate.symbol, candidate.current_ltp)
         if _bo:
             _penalties["below_open"] = _bo["penalty"]
+            if _bo["penalty"] < setup_engine.PENALTY_SKIP:
+                _log_policy_soft(candidate, f"OPENING_GATE:BELOW_OPEN:{_bo['pct']:.2f}% under the open (size penalty {_bo['penalty']:.1f}, SOFT)", quality)
             if _bo["penalty"] >= setup_engine.PENALTY_SKIP:
                 shared_symbol_lock.release(db, candidate.symbol)
                 _log_candidate(db, candidate, "SKIPPED", f"OPENING_GATE:BELOW_OPEN_TOO_FAR:{_bo['pct']:.2f}% under the open (penalty {_bo['penalty']:.1f} >= {setup_engine.PENALTY_SKIP:g})", quality=quality)
@@ -721,8 +755,14 @@ def attempt_entry(
         for _k, _v in opening_gate.parts_penalties(candidate.symbol, candidate.current_ltp).items():
             if rearm and _k in ("near_day_high", "extended_or"):
                 continue
+            if _k == "gap_down" and _pos_event:          # E285 batch 5: a SOFT gap-down gate still obeys the event rule - a positive event contradicts a gap-down: skipped, as when the gate refused
+                shared_symbol_lock.release(db, candidate.symbol)
+                _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_v["why"], quality), quality=quality)
+                return None
             _penalties[_k] = max(float(_penalties.get(_k) or 0.0), float(_v["penalty"])) if _k == "near_day_high" else float(_v["penalty"])
             _soft_why[_k] = _v["why"]
+            if _k in ("gap_down", "near_day_high"):      # the two parts the adaptive policy measures: a SOFT row keeps their scorecard alive
+                _log_policy_soft(candidate, f"{_v['why']} (size penalty {float(_v['penalty']):.1f}, SOFT)", quality)
         if not _soft:                                           # SOFT_GATES_MODE=veto skips the total check further down: do it here
             _pt_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
             if _pt_reject:
@@ -880,6 +920,12 @@ def attempt_entry(
     # `_setup_mult`, which shrinks the size below; no match = the legacy stamp and full size (the NO_SETUP refusal waits until S2 / S3 / S4 can fire).
     _setup_mult = None
     _setup_res = None
+    # E285 batch 4: the news / earnings check could not be completed and no negative event is known (every negative check already ran in the quality gate) = half size, not a refusal.
+    if quality is not None and getattr(quality, "event_unverified", False) and gate_policy.event_half_size():      # E285 batch 5: the policy (or, with no row, the switch) decides
+        _eu = float(getattr(config, "QUALITY_GATE_EVENT_UNCHECKED_PENALTY", 1.0) or 0.0)
+        if _eu > 0:
+            _penalties["event_unchecked"] = _eu
+            _log_policy_soft(candidate, "QUALITY_GATE:EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer, nothing negative known (half size, SOFT)", quality)
     _pen_early = dict(_penalties)          # E273 round 32: penalties known when the setup engine sizes; later ones (rvol, structure) rescale it below
     try:
         from tz_utils import ist_now as _ist_now

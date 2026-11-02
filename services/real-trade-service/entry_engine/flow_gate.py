@@ -115,6 +115,7 @@ def _exit_cfg(name, default):
 
 _exit_stats = {"calls": 0, "tighten": 0, "hold": 0, "errors": 0, "applied": 0}
 _last_exit_move: dict = {}
+_exit_streak: dict = {}      # E285 batch 2: key -> consecutive checks that decided TIGHTEN
 
 
 def exit_mode() -> str:
@@ -126,7 +127,7 @@ def exit_throttled(key) -> bool:
     """True when a tape move for `key` happened less than FLOW_EXIT_MIN_INTERVAL_S ago."""
     import time as _t
     last = _last_exit_move.get(key)
-    return bool(last is not None and _t.monotonic() - last < float(_exit_cfg("FLOW_EXIT_MIN_INTERVAL_S", 20.0)))
+    return bool(last is not None and _t.monotonic() - last < float(_exit_cfg("FLOW_EXIT_MIN_INTERVAL_S", 300.0)))
 
 
 def exit_mark(key) -> None:
@@ -136,15 +137,35 @@ def exit_mark(key) -> None:
     _last_exit_move[key] = _t.monotonic()
 
 
-def _decide_exit(verdict, side, entry, stop, target, ltp, tick):
+def _decide_exit(verdict, side, entry, stop, target, ltp, tick, atr=None, r_dist=None):
     from exit_engine import tape_exit
     return tape_exit.decide(
         side=side, entry=entry, stop=stop, target=target, ltp=ltp, tape=verdict, tick=tick,
         min_against=int(config.FLOW_EXIT_MIN_AGAINST), min_profit_pct=float(_exit_cfg("FLOW_EXIT_MIN_PROFIT_PCT", 0.3)),
         near_stop_frac=float(_exit_cfg("FLOW_EXIT_NEAR_STOP_FRAC", 0.5)), gap_pct=float(_exit_cfg("FLOW_EXIT_STOP_GAP_PCT", 0.25)),
-        min_target_pct=float(_exit_cfg("FLOW_EXIT_MIN_TARGET_PCT", 0.5)))
+        min_target_pct=float(_exit_cfg("FLOW_EXIT_MIN_TARGET_PCT", 0.5)),
+        atr=atr, min_stop_atr=float(_exit_cfg("FLOW_EXIT_MIN_STOP_ATR", 0.5)), r_dist=r_dist, min_profit_r=float(_exit_cfg("FLOW_EXIT_MIN_PROFIT_R", 0.5)))
 
-async def exit_check(symbol: str, side: str, *, entry, stop, target, ltp, tick: float = 0.05) -> Optional[dict]:
+
+def _persist(key, d: dict) -> dict:
+    """E285 batch 2: a TIGHTEN must be decided on FLOW_EXIT_CONSEC consecutive checks of the same position (not 3 of 6 on one tick). Any HOLD resets the streak.
+    key None or FLOW_EXIT_CONSEC <= 1 = off."""
+    need = int(_exit_cfg("FLOW_EXIT_CONSEC", 3))
+    if key is None or need <= 1:
+        return d
+    if d.get("action") != "TIGHTEN":
+        _exit_streak.pop(key, None)
+        return d
+    if len(_exit_streak) > 2000:
+        _exit_streak.clear()
+    n = _exit_streak.get(key, 0) + 1
+    _exit_streak[key] = n
+    if n < need:
+        return {**d, "action": "HOLD", "new_stop": None, "new_target": None, "reason": f"persistence_{n}_of_{need}"}
+    _exit_streak.pop(key, None)                                  # applied: the next move needs a fresh run of checks
+    return d
+
+async def exit_check(symbol: str, side: str, *, entry, stop, target, ltp, tick: float = 0.05, atr=None, r_dist=None, key=None) -> Optional[dict]:
     """E270: tape decision for an OPEN trade (side = the trade's own side). Returns the tape_exit decision dict (action HOLD|TIGHTEN), or None when the
     switch is off / no verdict. In `log` mode the caller must only log. Never raises."""
     try:
@@ -154,7 +175,7 @@ async def exit_check(symbol: str, side: str, *, entry, stop, target, ltp, tick: 
         verdict = await _fetch_exit_verdict(symbol, side)
         if verdict is None:
             return None
-        d = _decide_exit(verdict, side, entry, stop, target, ltp, tick)
+        d = _persist(key, _decide_exit(verdict, side, entry, stop, target, ltp, tick, atr, r_dist))
         _exit_stats["tighten" if d.get("action") == "TIGHTEN" else "hold"] += 1
         return d
     except Exception:  # noqa: BLE001
@@ -190,6 +211,7 @@ def stats() -> dict:
 def _reset_for_tests() -> None:
     _cache.clear()
     _last_exit_move.clear()
+    _exit_streak.clear()
     for k in _exit_stats:
         _exit_stats[k] = 0
     for k in _stats:

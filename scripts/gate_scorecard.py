@@ -1,29 +1,27 @@
-"""Gate scorecard (2026-10-19): did the position-stocks gates block winners or losers?
+"""Gate scorecard (2026-10-19; E285 batch 6 rewrite): did the position-stocks gates block winners or losers?
 
-For every SKIPPED row in scalp_candidate_log, look up the recorded bars (/data/bars/<date>/<SYM>.json) and measure
-what the stock did AFTER the skip: +30 min, +60 min, close of day, and whether a +TARGET% move came before a -STOP%
-move inside 60 minutes. Results are grouped by gate (RANGE_GATE:NEAR_DAY_HIGH, OPENING_GATE:EXTENDED_ABOVE_OR, ...).
-
-  * mean forward return clearly > costs, with a high target-first rate over 30+ samples  -> the gate blocks winners: LOOSEN
-  * mean forward return <= 0 or target-first rate low                                    -> the gate saves money: KEEP
+For every SKIPPED / SOFT row in scalp_candidate_log, look up the recorded bars (/data/bars/<date>/<quote(SYM)>.json) and measure what the stock did AFTER the skip: +30 min, +60 min,
+close of day, and whether a +TARGET% move came before a -STOP% move inside 60 minutes. Results are grouped by gate (RANGE_GATE:NEAR_DAY_HIGH, OPENING_GATE:EXTENDED_ABOVE_OR, ...).
+The logic lives in services/position-stocks-service/orders/scorecard.py (the same samples and the same LOOSEN / KEEP rule as the nightly adaptive-policy job); this file only reads the DB and prints.
 
 Run it INSIDE the position-stocks container (it needs the DB models and /data/bars). From ~/stockky-v2:
 
     docker compose exec -T position-stocks-service python - --days 15 < scripts/gate_scorecard.py
 
-Options (after the lone "-"): --days N (default 15)   --target 1.5   --stop 1.0   --cost 0.15   --min-n 30   --direction long|short|auto
+Options (after the lone "-"): --days N (default 15)   --target 1.5   --stop 1.0   --cost 0.15   --min-n 30 (per-day lines only; the verdict uses GATE_POLICY_MIN_N)
+  --direction long|short|auto   --by-day (a per-day line under every gate with enough samples)   --baseline-k 3 (random entries per sample for rand60 / edge; 0 = off)   --bars-dir /data/bars
   --direction long (default): every row is measured as a long, as before. SHORT_* rows then read INVERTED (a negative number means the short would have worked).
   --direction short: every row is measured as a short (the move is flipped: positive = the short would have gained; target / stop are on the short's side).
-  --direction auto: rows whose reason starts with SHORT_ are measured as shorts, all others as longs, so one run reads both sides correctly.
-Read-only. Rows are de-duplicated to one per (symbol, gate, 30-minute bucket) so a stock re-skipped every 10 s does
-not count as 200 samples. A bar file is [[epoch_s, open, high, low, close, ...], ...].
+  --direction auto: rows whose reason starts with SHORT_ are measured as shorts, all others as longs; a gate with both sides gets one row per side (never averaged).
+Read-only. Rows are de-duplicated to one per (symbol, gate, side, day, 30-minute bucket) so a stock re-skipped every 10 s does not count as 200 samples.
 """
 import argparse
 import calendar
-import json
 import os
-from collections import defaultdict
+import sys
 from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.getcwd())
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--days", type=int, default=15)
@@ -33,151 +31,27 @@ ap.add_argument("--cost", type=float, default=0.15, help="round-trip cost %% ass
 ap.add_argument("--min-n", type=int, default=30)
 ap.add_argument("--bars-dir", default="/data/bars")
 ap.add_argument("--direction", choices=("long", "short", "auto"), default="long", help="E272: measure rows as longs (default), as shorts, or auto (SHORT_* rows as shorts)")
+ap.add_argument("--by-day", action="store_true", help="E285 batch 6: a per-day line under every gate with at least --min-n samples")
+ap.add_argument("--baseline-k", type=int, default=3, help="E285 batch 6: random entries per sample at the same time (rand60 / edge); 0 = off")
 args = ap.parse_args()
 
 import db        # noqa: E402  (available inside the service container)
 import models    # noqa: E402
+from orders import candidate_outcomes as co, gate_policy as gp, scorecard as sc  # noqa: E402
 
 S = db.get_session_factory()()
 since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=args.days)
-rows = (S.query(models.ScalpCandidateLog)
-        .filter(models.ScalpCandidateLog.created_at >= since)
-        .order_by(models.ScalpCandidateLog.id).all())
+q = (S.query(models.ScalpCandidateLog).filter(models.ScalpCandidateLog.created_at >= since).order_by(models.ScalpCandidateLog.id).all())
+rows = [{"symbol": r.symbol, "decision": r.decision, "reason": r.reason, "created_ts": calendar.timegm(r.created_at.timetuple())} for r in q]
 
-IST = timedelta(hours=5, minutes=30)
-_bars_cache = {}
+states = {}
+try:        # the state in force for the four adaptable gates: a row the job / an operator MOVED, else what the gate's own config gives
+    moved = {(p.gate): p.state for p in S.query(models.ScalpGatePolicy).all() if p.last_change_day}
+    states = {g: str(moved.get(g) or gp.static_state(g)).upper() for g in gp.GATES}
+except Exception:
+    S.rollback()
+    states = {g: gp.static_state(g) for g in gp.GATES}
 
-
-def load_bars(sym, day):
-    key = (sym, day)
-    if key not in _bars_cache:
-        try:
-            _bars_cache[key] = json.load(open(os.path.join(args.bars_dir, day, f"{sym}.json")))["bars"]
-        except Exception:
-            _bars_cache[key] = None
-    return _bars_cache[key]
-
-
-def gate_key(reason, decision):
-    if decision == "ENTERED":
-        return "ENTERED (baseline)"
-    r = (reason or "").strip()
-    if not r:
-        return "SKIPPED:(no reason)"
-    parts = r.split(":")
-    if parts[0] == "QUALITY_GATE" and len(parts) > 1:
-        # one bucket per metric ("technical_score 35 < floor 40" and "... 33 < floor 40" are the same gate), so samples add up
-        return "QUALITY_GATE:" + (parts[1].strip().split(" ")[0] or "other")
-    if parts[0] in ("RANGE_GATE", "OPENING_GATE", "PRICE_GUARD", "QUALITY_GATE", "BOARD_GATE"):
-        return ":".join(parts[:2]) if len(parts) > 1 else parts[0]
-    return parts[0][:40] if parts[0].isupper() else "OTHER:" + r.split(" ")[0][:30]
-
-
-def side_sign(reason, direction):
-    """+1 = measure as a long, -1 = as a short (the move is flipped so positive always means the trade would have gained)."""
-    if direction == "short":
-        return -1
-    if direction == "auto" and str(reason or "").strip().upper().startswith("SHORT_"):
-        return -1
-    return 1
-
-
-def forward(bars, t0, sign=1):
-    """(r30, r60, rclose, target_first) as % from the last bar closing at/before t0, flipped for a short (sign -1); None when not measurable."""
-    idx = None
-    for i, b in enumerate(bars):
-        if b[0] <= t0:
-            idx = i
-        else:
-            break
-    if idx is None or idx >= len(bars) - 1:
-        return None
-    entry = float(bars[idx][4])
-    if entry <= 0:
-        return None
-
-    def at(sec):
-        j = idx
-        for k in range(idx, len(bars)):
-            if bars[k][0] <= t0 + sec:
-                j = k
-            else:
-                break
-        return sign * (float(bars[j][4]) / entry - 1) * 100
-
-    tgt = stp = None
-    outcome = "neither"
-    for k in range(idx + 1, len(bars)):
-        if bars[k][0] > t0 + 3600:
-            break
-        up = (float(bars[k][2]) / entry - 1) * 100
-        dn = (float(bars[k][3]) / entry - 1) * 100
-        hi, lo = (up, dn) if sign > 0 else (-dn, -up)        # a short gains when price falls
-        if lo <= -args.stop and hi >= args.target:
-            outcome = "stop"          # same bar touches both: assume the worse
-            break
-        if lo <= -args.stop:
-            outcome = "stop"
-            break
-        if hi >= args.target:
-            outcome = "target"
-            break
-    return at(1800), at(3600), sign * (float(bars[-1][4]) / entry - 1) * 100, outcome
-
-
-groups = defaultdict(list)
-seen = set()
-skipped_nobars = 0
-nobars_symbol = 0
-nobars_days = defaultdict(int)
-for r in rows:
-    gk = gate_key(r.reason, r.decision)
-    t0 = calendar.timegm(r.created_at.timetuple())
-    day = (r.created_at + IST).strftime("%Y-%m-%d")
-    bucket = (r.symbol, gk, day, t0 // 1800, side_sign(r.reason, args.direction))
-    if bucket in seen:
-        continue
-    seen.add(bucket)
-    bars = load_bars(r.symbol, day)
-    if not bars:
-        skipped_nobars += 1
-        # group 482b: tell "no bar folder for that day at all" (recorder not running yet / not persisted) from "folder exists, this symbol was not recorded"
-        if os.path.isdir(os.path.join(args.bars_dir, day)):
-            nobars_symbol += 1
-        else:
-            nobars_days[day] += 1
-        continue
-    f = forward(bars, t0, side_sign(r.reason, args.direction))
-    if f:
-        groups[gk].append(f)
-
-print(f"\nGate scorecard ({args.direction}) - last {args.days} days, target +{args.target}% / stop -{args.stop}% within 60 min, cost {args.cost}% round trip")
-print(f"rows read: {len(rows)}   de-duplicated samples with bars: {sum(len(v) for v in groups.values())}   no-bars (skipped): {skipped_nobars}")
-if skipped_nobars:
-    nd = sum(nobars_days.values())
-    print(f"  of those: {nd} sit on {len(nobars_days)} day(s) with NO bar folder ({', '.join(sorted(nobars_days)[:6])}{' ...' if len(nobars_days) > 6 else ''}); {nobars_symbol} are on recorded days but the symbol was not recorded")
-print()
-hdr = f"{'gate':<46}{'n':>5}{'avg30':>8}{'avg60':>8}{'avgEOD':>8}{'tgt1st%':>9}{'stop1st%':>10}{'net60':>8}  verdict"
-print(hdr)
-print("-" * len(hdr))
-for gk, vals in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-    n = len(vals)
-    a30 = sum(v[0] for v in vals) / n
-    a60 = sum(v[1] for v in vals) / n
-    ae = sum(v[2] for v in vals) / n
-    tf = 100.0 * sum(1 for v in vals if v[3] == "target") / n
-    sf = 100.0 * sum(1 for v in vals if v[3] == "stop") / n
-    net60 = a60 - args.cost
-    if gk.startswith("ENTERED"):
-        verdict = "baseline"
-    elif n < args.min_n:
-        verdict = "too few samples"
-    elif net60 > 0.3 and tf > sf:
-        verdict = "LOOSEN? blocks winners"
-    elif net60 <= 0 or sf > tf:
-        verdict = "KEEP - saves money"
-    else:
-        verdict = "neutral"
-    print(f"{gk:<46}{n:>5}{a30:>8.2f}{a60:>8.2f}{ae:>8.2f}{tf:>9.1f}{sf:>10.1f}{net60:>8.2f}  {verdict}")
-print("\nReading it: compare each gate with the ENTERED baseline. Only act on gates with n >= %d over several different days;"
-      " one trending day can make every gate look wrong." % args.min_n)
+res = sc.build(rows, co.file_loader(args.bars_dir), co.file_symbols(args.bars_dir), cost=args.cost, target=args.target, stop=args.stop,
+               direction=args.direction, baseline_k=args.baseline_k, policy_states=states)
+print(sc.render(res, args.days, args.min_n, by_day=args.by_day))

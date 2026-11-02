@@ -57,7 +57,8 @@ from sqlalchemy.orm import Session
 
 import config
 from models import ScalpQualityCache
-from tz_utils import ist_today_str
+from orders import gate_policy
+from tz_utils import ist_today_str, ist_now, is_nse_holiday, parse_hhmm, ist_time_at_or_after
 
 logger = logging.getLogger("position-stocks-quality-gate")
 
@@ -178,6 +179,8 @@ class QualitySignal:
     negative_news: Optional[str] = None
     # group344: the event service did not answer (twice) and nothing is remembered for this symbol - no news / earnings check was possible.
     event_unchecked: bool = False
+    # E285 batch 4: the event check could not be completed (service silent, nothing remembered, or the fail-open valve) - a LONG then trades at a size penalty, not refused.
+    event_unverified: bool = False
     # E272: ISO time (UTC) the typed event feed first saw a results headline for this symbol today; None = not found / feed down (stays blocked).
     result_out_at: Optional[str] = None
     # E272: the strongest typed event (polarity +1 / -1 only) from the event feed: type, polarity, strength (0..1, decays with age), age in minutes, announce time.
@@ -200,7 +203,8 @@ class QualitySignal:
         # E272: a fresh NEGATIVE typed event is a hard veto on a long (positive events never override a veto; unknown polarity never gets here)
         if (getattr(config, "NEG_EVENT_VETO_ENABLED", True) and self.event_polarity == -1 and (self.event_strength or 0.0) >= float(getattr(config, "NEG_EVENT_VETO_MIN_STRENGTH", 0.3))):
             return False, f"NEG_EVENT: {self.event_type or 'event'} (strength {float(self.event_strength or 0.0):.2f}, {float(self.event_age_min or 0.0):.0f} min old)"
-        if self.event_unchecked and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
+        if (self.event_unchecked and getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True)
+                and not gate_policy.event_half_size()):         # E285 batch 4 / 5: half size instead (entry.py) when the policy (no row = the switch) says SOFT, after every negative check above
             return False, "EVENT_CHECK_UNAVAILABLE: the news / earnings service did not answer - not entering without a news check (retried next cycle)"
         if self.fundamental_score is not None and self.fundamental_score < config.MIN_FUNDAMENTAL_SCORE:
             return False, f"fundamental_score {self.fundamental_score:.0f} < floor {config.MIN_FUNDAMENTAL_SCORE:.0f}"
@@ -356,6 +360,8 @@ _result_cache: dict = {}
 # group341: symbol -> (wall ts, earnings_date, negative_news) from the last event call that worked, so a later timeout does not
 # silently switch the EARNINGS_TODAY / NEWS_NEGATIVE blocks off.
 _event_memory: dict = {}
+# E285 batch 4: symbol -> (wall ts, typed event dict) of the last NEGATIVE typed event seen, so an event-service outage never lets a known negative event through.
+_typed_neg_seen: dict = {}
 
 
 # group356: symbol -> the ONE in-flight event request (asyncio task) shared by every waiter, and symbol -> the answer of a request that
@@ -369,6 +375,8 @@ def reset_runtime_state() -> None:
     _event_failed.clear()
     _result_cache.clear()
     _event_memory.clear()
+    _typed_neg_seen.clear()
+    _preopen_warm.update(day=None, pending=None, started=0)
     _event_late.clear()
     _event_inflight.clear()
     _ft_late.clear()
@@ -532,6 +540,80 @@ def prewarm_events(symbols) -> int:
     except Exception:  # noqa: BLE001
         logger.debug("quality_gate: event pre-warm skipped", exc_info=True)
     return started
+
+
+_preopen_warm: dict = {"day": None, "pending": None, "started": 0}
+
+
+def preopen_warm_due(now: Optional[datetime] = None) -> bool:
+    """E285 batch 4: True on a trading day from QUALITY_GATE_PREOPEN_WARM_START_IST until the 09:15 bell while names are still waiting to be warmed (or the day's list is not
+    built yet). Never raises."""
+    try:
+        if not getattr(config, "QUALITY_GATE_PREOPEN_WARM", False) or not _shared_fetch_enabled():
+            return False
+        n = ist_now(now)
+        if n.weekday() >= 5 or is_nse_holiday(n):
+            return False
+        if not ist_time_at_or_after(parse_hhmm(str(getattr(config, "QUALITY_GATE_PREOPEN_WARM_START_IST", "08:45")), 8, 45), now):
+            return False
+        if ist_time_at_or_after(parse_hhmm("09:15", 9, 15), now):
+            return False
+        return _preopen_warm["day"] != ist_today_str(now) or bool(_preopen_warm["pending"])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def preopen_warm_symbols(db: Session, now: Optional[datetime] = None) -> list:
+    """E285 batch 4: the names whose event check is worth having before 09:15: the F&O universe (first QUALITY_GATE_PREOPEN_WARM_MAX) plus the strongest movers of the last
+    3 days in the candidate log (QUALITY_GATE_PREOPEN_WARM_MOVERS), movers first, de-duplicated. Never raises."""
+    out: list = []
+    try:
+        from models import ScalpCandidateLog
+        n_mov = int(getattr(config, "QUALITY_GATE_PREOPEN_WARM_MOVERS", 0) or 0)
+        if n_mov > 0 and db is not None:
+            since = (datetime.now(timezone.utc) - timedelta(days=3)).replace(tzinfo=None)   # the column is naive UTC
+            # Batch 1 item 5: aggregate in the database (one row per symbol, top n_mov only) instead of reading every candidate-log row of 3 days into Python.
+            from sqlalchemy import desc, func
+            _mx = func.max(func.abs(ScalpCandidateLog.pct_change))
+            rows = (db.query(ScalpCandidateLog.symbol, _mx).filter(ScalpCandidateLog.created_at >= since, ScalpCandidateLog.pct_change.isnot(None))
+                    .group_by(ScalpCandidateLog.symbol).order_by(desc(_mx)).limit(n_mov).all())
+            best: dict = {}
+            for sym, pct in rows:
+                try:
+                    best[sym] = max(best.get(sym, 0.0), abs(float(pct or 0.0)))
+                except (TypeError, ValueError):
+                    continue
+            out.extend(sym for sym, _ in sorted(best.items(), key=lambda kv: -kv[1])[:n_mov])
+    except Exception:  # noqa: BLE001
+        logger.debug("quality_gate: pre-open mover list failed", exc_info=True)
+    try:
+        from screening import preopen
+        out.extend(preopen._universe()[: max(0, int(getattr(config, "QUALITY_GATE_PREOPEN_WARM_MAX", 0) or 0))])
+    except Exception:  # noqa: BLE001
+        logger.debug("quality_gate: pre-open universe failed", exc_info=True)
+    seen: set = set()
+    return [x for x in out if x and not (x in seen or seen.add(x))]
+
+
+def preopen_warm_step(symbols_fn, now: Optional[datetime] = None) -> int:
+    """E285 batch 4: one loop tick of the pre-open warm-up. The first call of the IST day builds the list with `symbols_fn()`, every call starts the event check of the next
+    QUALITY_GATE_PREOPEN_WARM_CHUNK names (prewarm_events skips names already answered or in flight), so the slow news service is never hit with 200 requests at once. Needs a
+    running loop. Returns how many requests it started. Never raises."""
+    try:
+        if not preopen_warm_due(now):
+            return 0
+        today = ist_today_str(now)
+        if _preopen_warm["day"] != today:
+            _preopen_warm.update(day=today, pending=list(symbols_fn() or []), started=0)
+            logger.info("quality_gate: pre-open event warm-up of %d names", len(_preopen_warm["pending"]))
+        chunk = int(getattr(config, "QUALITY_GATE_PREOPEN_WARM_CHUNK", 15) or 15)
+        batch, _preopen_warm["pending"] = _preopen_warm["pending"][:chunk], _preopen_warm["pending"][chunk:]
+        started = prewarm_events(batch)
+        _preopen_warm["started"] += started
+        return started
+    except Exception:  # noqa: BLE001
+        logger.debug("quality_gate: pre-open warm step skipped", exc_info=True)
+        return 0
 
 
 # group356b: the same one-request-per-symbol + keep-the-late-answer treatment for the fundamental / technical calls (they stay fail-open:
@@ -761,6 +843,7 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
             _event_memory[symbol] = (_time.time(), _earn, _neg)
     # group344: event unknown (failed twice, nothing remembered) -> unchecked, unless the service has been down so long that blocking would just stop trading.
     _unchecked = False
+    _unverified = False
     if getattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True):
         if not _ev_failed:
             _event_fail_since[0] = None
@@ -773,11 +856,14 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
                 if _open_after > 0 and _time.monotonic() - _event_fail_since[0] >= _open_after:
                     logger.warning("quality_gate: the event service has failed for %.0fs - letting %s through without a news check (fail-open valve)",
                                    _time.monotonic() - _event_fail_since[0], symbol)
+                    _unverified = True
                 else:
                     _unchecked = True
+                    _unverified = True
     _sig = _apply_cache_fallback(QualitySignal(
         symbol=symbol,
         event_unchecked=_unchecked,
+        event_unverified=_unverified,
         fundamental_score=fund_score,
         technical_score=tech_score,
         market_cap_cr=market_cap_cr,
@@ -791,6 +877,15 @@ async def check(symbol: str, cached: Optional[QualitySignal] = None) -> QualityS
         _sig.result_out_at = await _fetch_result_out_at(symbol)       # E272: results-day split; None keeps the block
     if getattr(config, "TYPED_EVENT_ENABLED", True):
         _te = await _fetch_typed_event(symbol)                        # E272: typed event for the setups (S1 / S4) and the negative-event veto
+        _tmem_h = float(getattr(config, "QUALITY_GATE_TYPED_NEG_MEMORY_H", 0.0) or 0.0)
+        if _te and _te.get("polarity") == -1 and _tmem_h > 0:
+            if len(_typed_neg_seen) > 1000:
+                _typed_neg_seen.clear()
+            _typed_neg_seen[symbol] = (_time.time(), dict(_te))
+        elif not _te and _ev_failed and _tmem_h > 0:        # E285 batch 4: the service is failing - a negative typed event seen earlier still stands (never fail open on it)
+            _kept = _typed_neg_seen.get(symbol)
+            if _kept is not None and _time.time() - _kept[0] < _tmem_h * 3600.0:
+                _te = dict(_kept[1])
         if _te:
             _sig.event_type, _sig.event_polarity, _sig.event_strength = _te["type"], _te["polarity"], _te["strength"]
             _sig.event_age_min, _sig.announced_at = _te["age_min"], _te["announced_at"]

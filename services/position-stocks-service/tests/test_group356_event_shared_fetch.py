@@ -12,6 +12,7 @@ from screening import quality_gate as qg
 @pytest.fixture()
 def gate(monkeypatch):
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_SHARED_FETCH", True)
+    monkeypatch.setattr(config, "QUALITY_GATE_EVENT_UNCHECKED_HALF_SIZE", False)      # E285 batch 4: these tests cover the refuse-as-before path
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_FAIL_BLOCK", True)
     monkeypatch.setattr(config, "QUALITY_GATE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(config, "QUALITY_GATE_EVENT_RETRY_TIMEOUT_S", 0.15)

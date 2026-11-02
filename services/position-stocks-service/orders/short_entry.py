@@ -21,7 +21,7 @@ from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
 from orders import learned_stop, setup_short, short_refusals, short_target, squeeze_guard
 from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
-from orders.adaptive import compute as compute_levels
+from orders.adaptive import compute as compute_levels, widen_to_atr_floor
 from tz_utils import ist_now
 
 logger = logging.getLogger("position-stocks-short-entry")
@@ -222,6 +222,13 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     _tnote = short_target.adjust(levels, live, symbol=sym, setup=_setup, now=ist_now(now), db=db)      # E274 round 43: a reachable target (nearer only); the checks below judge the NEW target
     if _tnote:
         logger.info("short plan: %s target moved %s", sym, _tnote)
+    _widened = False
+    if getattr(config, "SHORT_OPENING_GATE_WIDEN_STOP", False):
+        # E285 batch 3: a short under the ATR floor is widened to it (target 2:1 with it) instead of refused SHORT_OPENING_STOP; size follows the wider stop below
+        _wl = widen_to_atr_floor(levels, live, sym)
+        if _wl is not levels:
+            levels, _widened = _wl, True
+            budget_stop_pct = max(budget_stop_pct, float(levels.stop_pct))     # same rupee risk: a wider stop means fewer shares, never more risk
     why = rr_floor.geometry_reason(levels, live) or rr_floor.reject_reason(levels)
     if why:
         _refuse(db, cand, "SHORT_LEVELS", why)
@@ -261,6 +268,11 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     if why:
         _refuse(db, cand, "SHORT_COST_GATE", str(why))
         return None
+    if _widened:
+        _min_q = cost_gate.effective_min_qty(live, levels.target_pct, int(getattr(config, "ENTRY_MIN_QTY", 0) or 0))
+        if _min_q > 0 and qty < _min_q:
+            _refuse(db, cand, "SHORT_MIN_QTY", f"widened stop {levels.stop_pct:.2f}% leaves {qty} share(s), under the minimum {_min_q}")
+            return None
 
     conv = (board_row or {}).get("conviction") if isinstance(board_row, dict) else None
     try:

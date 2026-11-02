@@ -1318,6 +1318,7 @@ services/position-stocks-service/orders/approve_first.py
 services/position-stocks-service/orders/board_gate.py
 services/position-stocks-service/orders/breakeven.py
 services/position-stocks-service/orders/calendar_gate.py
+services/position-stocks-service/orders/candidate_log_writer.py
 services/position-stocks-service/orders/candidate_outcomes.py
 services/position-stocks-service/orders/catalyst_gate.py
 services/position-stocks-service/orders/charges_ledger.py
@@ -1473,6 +1474,7 @@ services/position-stocks-service/tests/test_adaptive.py
 services/position-stocks-service/tests/test_admin_auth.py
 services/position-stocks-service/tests/test_admin_auth_e2e.py
 services/position-stocks-service/tests/test_angelone_session.py
+services/position-stocks-service/tests/test_batch1_candidate_log_writer.py
 services/position-stocks-service/tests/test_boot_forensics.py
 services/position-stocks-service/tests/test_breakeven.py
 services/position-stocks-service/tests/test_config_api_gateway_url.py
@@ -1560,6 +1562,9 @@ services/position-stocks-service/tests/test_e283_live_state.py
 services/position-stocks-service/tests/test_e283_long_target.py
 services/position-stocks-service/tests/test_e283_premarket_refresh.py
 services/position-stocks-service/tests/test_e284_volume_profile.py
+services/position-stocks-service/tests/test_e285_batch2_tape_tighten.py
+services/position-stocks-service/tests/test_e285_batch3_short_stop_widen.py
+services/position-stocks-service/tests/test_e285_batch4_event_outage_open.py
 services/position-stocks-service/tests/test_e285_ip_guard.py
 services/position-stocks-service/tests/test_e285_no_shadow_modes.py
 services/position-stocks-service/tests/test_e285_round100_long_limit_entry.py
@@ -1962,6 +1967,7 @@ services/real-trade-service/tests/test_audit_logger.py
 services/real-trade-service/tests/test_auto_pilot_helpers.py
 services/real-trade-service/tests/test_auto_pilot_orchestration.py
 services/real-trade-service/tests/test_b15_enforce_guard.py
+services/real-trade-service/tests/test_batch1_cycle_session_heal.py
 services/real-trade-service/tests/test_blank_flag_env.py
 services/real-trade-service/tests/test_boot_forensics.py
 services/real-trade-service/tests/test_candidates_analysis.py
@@ -2044,6 +2050,7 @@ services/real-trade-service/tests/test_e277_module_isolation_a.py
 services/real-trade-service/tests/test_e277_module_isolation_b.py
 services/real-trade-service/tests/test_e283_learned_hold.py
 services/real-trade-service/tests/test_e283_live_state.py
+services/real-trade-service/tests/test_e285_batch2_tape_tighten.py
 services/real-trade-service/tests/test_e285_round103_gap_rank.py
 services/real-trade-service/tests/test_e285_round104_entry_reason.py
 services/real-trade-service/tests/test_e285_round111_rt_own_norms.py

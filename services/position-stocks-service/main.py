@@ -69,6 +69,9 @@ API endpoints:
   GET  /candidates/log                — recent ScalpCandidateLog rows (why a
                                           candidate was entered/skipped, incl.
                                           quality-gate scores) — audit trail
+  GET  /gate-policy                  — E285 batch 5: adaptive gate policy (state per gate + the evidence behind it)
+  POST /gate-policy/run              — run the policy evaluation now (admin)
+  POST /gate-policy/set              — operator override of one gate (admin)
   GET  /candidates/restricted        — learned intraday-restricted symbol list
                                           (seeded from live Dhan SELL rejections,
                                           filtered out of candidates every cycle)
@@ -604,6 +607,9 @@ async def _fast_reconcile_loop() -> None:
                         db.commit()
                         if n_deleted:
                             logger.info("position-stocks: retention-cleanup deleted %d row(s)", n_deleted)
+                        # Batch 1 (2026-11-02): same once-a-day slot also trims scalp_candidate_log (CANDIDATE_LOG_RETENTION_DAYS).
+                        from orders import candidate_log_writer as _clw
+                        await asyncio.to_thread(_clw.purge_old, db)
                 except Exception as e:
                     logger.error("position-stocks: retention-cleanup error: %s", e, exc_info=True)
         except asyncio.CancelledError:
@@ -830,6 +836,26 @@ def _open_slots_full(db: Session) -> int | None:
     return n if n >= config.MAX_CONCURRENT_SCALP_POSITIONS else None
 
 
+def _heal_session(db: Session, where: str) -> bool:
+    """Batch 1 (2026-11-02): roll the cycle session back when an earlier stage left it in the failed-flush state.
+
+    Several stages of _run_cycle catch their own exception as non-fatal and carry on with the SAME session. When that exception was a failed flush
+    (for example a DPY-4024 call timeout inside an INSERT) the session stays unusable and the NEXT stage dies with "This Session's transaction has been
+    rolled back due to a previous exception during flush". Acts only when db.is_active is False, so a stage that failed for another reason keeps its
+    pending work. CYCLE_SESSION_HEAL=false turns it off. Never raises; True when it rolled back."""
+    try:
+        if os.getenv("CYCLE_SESSION_HEAL", "true").strip().lower() in ("0", "false", "no", "off"):
+            return False
+        if db.is_active:
+            return False
+        db.rollback()
+        logger.warning("position-stocks: session was in a failed-flush state before '%s' - rolled back so the stage can run", where)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("position-stocks: session heal before '%s' failed", where, exc_info=True)
+        return False
+
+
 def _release_db_connection(db: Session, where: str) -> None:
     """E229: hand the pooled connection back before a slow network wait. A Session that has read anything keeps its connection checked out until
     commit/rollback, so awaiting news / VIX / Nifty calls with it open held one of the 4+4 pool slots for seconds while Oracle was slow
@@ -946,6 +972,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     except Exception as e:
         logger.error("position-stocks: reconciliation error: %s", e, exc_info=True)
         _stage("reconcile_exits", "Reconcile Exits", _t, detail=f"Error: {e}")
+    _heal_session(db, "gate read")   # Batch 1: the next line reads the gate row outside any try; a failed reconcile flush must not poison it
 
     gate = db.query(ScalpGateState).filter_by(mode="REAL").first()
     today = ist_today_str()
@@ -1016,6 +1043,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # service_enabled/is_armed/auto_pilot_enabled, same reasoning as exit
     # reconciliation above (tracking doc §3.7: "no exceptions").
     eod_fired = gate and gate.eod_squareoff_fired_date == today
+    _heal_session(db, "EOD squareoff")   # Batch 1: a swallowed failed flush earlier in this cycle must not kill this stage
     _t = time.perf_counter()
     if ist_time_at_or_after(_EOD_SQUAREOFF_TIME) and not eod_fired:
         logger.info("position-stocks: EOD squareoff time reached — running sweep")
@@ -1107,6 +1135,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     # (dhan_client.get_funds is a blocking network call) — same event-loop-
     # isolation fix already applied to every other Dhan call in this
     # function (reconcile_exits, eod_squareoff above).
+    _heal_session(db, "capital sync")   # Batch 1: a swallowed failed flush earlier in this cycle must not kill this stage
     _t = time.perf_counter()
     try:
         new_total = await asyncio.to_thread(ledger.sync_from_broker, db)
@@ -1143,6 +1172,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
     if await _pullback_rearm_step(db, trigger, gate, summary, _stage):
         return _finalize()
 
+    _heal_session(db, "scan")   # Batch 1: a swallowed failed flush earlier in this cycle must not kill this stage
     _t = time.perf_counter()
     candidates = scan(open_symbols=open_syms, under_preferred=under_preferred)
     try:                                   # E272: event-backed names (premarket plan) join the list so S1 does not wait for a rolling window; already-listed symbols keep their own row
@@ -1238,6 +1268,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
 
     # Quality-gate the top few ranked candidates (fast, best-effort, fail-
     # open — see screening/quality_gate.py) and enter the first that passes.
+    _heal_session(db, "quality gate")   # Batch 1: a swallowed failed flush earlier in this cycle must not kill this stage
     _t = time.perf_counter()
     # DECISION (session46): under-preferred widens how many ranked candidates
     # get checked against quality_gate.py — never lowers quality_gate's own
@@ -1375,6 +1406,7 @@ async def _run_cycle(db: Session, trigger: str) -> dict:
            checked=checked)
 
     if entered_candidate:
+        _heal_session(db, "entry attempt")   # Batch 1: a swallowed failed flush earlier in this cycle must not kill this stage
         _t = time.perf_counter()
         # AUDIT FIX (session 30): circuit_breaker.is_open() now gates right
         # here — the actual real-money Dhan call — instead of gating the
@@ -1570,6 +1602,24 @@ async def _trading_loop() -> None:
                     await _preopen.run_final()
             except Exception:
                 logger.exception("pre-open snapshot failed (non-fatal)")
+            # E285 batch 4: 08:45-09:14 background warm-up of the news / earnings check (fills the 24 h event memory before the bell; best-effort, chunked, never blocks the loop).
+            try:
+                if quality_gate.preopen_warm_due():
+                    _wf = _db.get_session_factory()
+                    if _wf is not None:
+                        with _wf() as _wdb:
+                            quality_gate.preopen_warm_step(lambda: quality_gate.preopen_warm_symbols(_wdb))
+            except Exception:
+                logger.debug("pre-open event warm-up failed (non-fatal)", exc_info=True)
+            # E285 batch 5: adaptive gate policy - reload the policy table into the entry cache when stale, and run the nightly evaluation (GATE_POLICY_JOB_AT_IST) once per trading day.
+            try:
+                from orders import gate_policy_job as _gpj
+                if _gpj.tick_due():
+                    _gpf = _db.get_session_factory()
+                    if _gpf is not None:
+                        await asyncio.to_thread(_gpj.tick, _gpf)
+            except Exception:
+                logger.debug("gate policy tick failed (non-fatal)", exc_info=True)
             # E272: 08:30 to 09:20 pre-market plan (overseas cues, VIX range, typed events, sector strength); best-effort, never blocks the loop.
             try:
                 from screening import premarket_plan as _pmp
@@ -1596,6 +1646,7 @@ async def _trading_loop() -> None:
                     await _run_cycle(db, trigger="AUTO")
                     # Short selling step 5/8 (E285 round 89: the shadow recorder is gone): the short cycle follows leftover old shadow rows and, in live mode, hands candidates to orders/short_live.py
                     # (run_short_cycle swallows its own errors). With the short switch off it only closes rows left over from an earlier switch-on.
+                    _heal_session(db, "short cycle")
                     try:
                         from orders import short_entry as _short_entry
                         await _short_entry.run_short_cycle(db)
@@ -2797,6 +2848,48 @@ def candidates_log(
         }
         for r in rows
     ]
+
+
+@app.get("/gate-policy")
+def gate_policy_state(db: Session = Depends(get_db)):
+    """E285 batch 5: the adaptive gate policy. Per gate: the state its own config gives (`static`), the state in force now (`effective`) and the evidence the nightly job
+    last wrote (samples, days, symbols, mean net60 after costs, bootstrap lower bound, lowest leave-one-day-out mean, the reason it stayed or moved). Pure read."""
+    from orders import gate_policy as _gp
+    from models import ScalpGatePolicy
+    rows = {(r.gate, r.side or "LONG"): r for r in db.query(ScalpGatePolicy).all()}
+    out = []
+    for gate, info in _gp.snapshot().items():
+        r = rows.get((gate, "LONG"))
+        out.append({"gate": gate, "label": info["label"], "static": info["static"], "effective": info["effective"],
+                    "moved": bool(r and r.last_change_day), "state_row": r.state if r else None, "since_day": r.since_day if r else None,
+                    "last_change_day": r.last_change_day if r else None, "last_eval_day": r.last_eval_day if r else None,
+                    "n": r.n_samples if r else None, "days": r.n_days if r else None, "symbols": r.n_symbols if r else None,
+                    "mean_net60": r.mean_net60 if r else None, "lb_net60": r.lb_net60 if r else None, "loo_min_net60": r.loo_min_net60 if r else None,
+                    "note": r.note if r else None})
+    return {"mode": _gp.mode(), "soft_penalty": _gp.soft_penalty(), "gates": out}
+
+
+@app.post("/gate-policy/run")
+async def gate_policy_run(admin: str = Depends(require_admin)):
+    """E285 batch 5: run the policy evaluation now (the first run seeds the table from the candidate log + recorded bars). Same rules as the nightly run; one step per gate per week still applies."""
+    from orders import gate_policy_job as _gpj
+    return await asyncio.to_thread(_gpj.run, _db.get_session_factory(), None, True)
+
+
+class GatePolicySetRequest(BaseModel):
+    gate: str
+    state: str
+    side: str = "LONG"
+
+
+@app.post("/gate-policy/set")
+async def gate_policy_set(req: GatePolicySetRequest, admin: str = Depends(require_admin)):
+    """E285 batch 5: operator override of one gate (HARD | SOFT | OFF; the news-check gate has no OFF). Counts as the gate's step for today."""
+    from orders import gate_policy_job as _gpj
+    res = await asyncio.to_thread(_gpj.set_state, _db.get_session_factory(), req.gate, req.state, req.side.upper())
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "failed"))
+    return res
 
 
 @app.get("/candidates/restricted")

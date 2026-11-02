@@ -1,3 +1,13 @@
+## 2 Nov 2026 - E285 round 137: the 14:00 entry cut-off is checked before the Time Machine replay (position-stocks longs)
+
+ * **Your request (2 Nov):** "check the log and today trades, mostly we make loss, check why, do not overfit anything".
+ * **Found (VM log, 2 Nov 14:05-14:25 IST):** 77 `TIME_MACHINE gate refused` lines, but only 9 stocks (RKFORGE 43, MWL 13, JYOTHYLAB 12, ZUARI 7, HPL 7), every one "simulated target first 0% vs 36-38% needed". That is the gate working: at 14:20 a 2-4% target has no time left. The real fault was the ORDER of the checks: `SCALP_ENTRY_CUTOFF_IST` (14:00) is a plain clock check that refuses every candidate, but in `orders/entry.py::attempt_entry` it sat AFTER the Time Machine gate and every other data-reading gate, so each cycle from 14:00 replayed the stock's recent sessions first and was refused anyway. Real Trade already checks `ENTRY_LAST_TIME_IST` before its Time Machine gate (group 470); only Position Stocks longs had it the other way round.
+ * **Change:** the same cut-off check now also runs right after the order-budget and daily-cap checks, before any gate that reads data. Same refusal, same outcome (no position after 14:00 either way); the check further down stays for the re-armed path. The skip reason in the candidate log after 14:00 is now `SCALP_ENTRY_CUTOFF:...` instead of whichever gate fired first, and the Time Machine counters stop counting refusals that the clock would have made.
+ * **Not changed:** no gate threshold, size, stop, target or exit; shorts (their window ends 13:30); Real Trade.
+ * **About "mostly loss" today (no code change, see the reply):** one day of about a dozen trades is not evidence for a rule change. The numbers to judge rules by are the multi-day expectancy tables that already exist: `GET /trades/report?days=14` (Position Stocks) and `GET /positions/REAL/breakdown?days=14` (Real Trade).
+ * **Tests:** `tests/test_group_e285_round137_cutoff_before_time_machine.py` (3: after the cut-off the replay is never asked and the skip is logged as SCALP_ENTRY_CUTOFF, before it the walk goes on to the next gate, source order; the first fails if the early check is removed). Full position-stocks suite 5,351 passed.
+ * **Rebuild:** `docker compose build position-stocks-service && docker compose up -d position-stocks-service` (before 09:15 or after 15:30 IST; the in-memory short counters restart from zero, so do it after you have read them).
+
 ## 2 Nov 2026 - E285 round 136: the calibrator may not tune STRUCTURE_ROOM_BEYOND_PENALTY (calibration-runner, test fix)
 
  * **Your request (2 Nov):** "do the next fix" - after round 135, which named this failing test.

@@ -566,6 +566,14 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _cap_reject, quality=quality)
         return None
 
+    # E285 round 137: the ordinary-day cut-off (SCALP_ENTRY_CUTOFF_IST, 14:00) is a clock check that refuses every candidate, so it runs here, before any gate that reads data.
+    # It used to sit after the Time Machine gate (a replay of the stock's recent sessions), so from 14:00 every cycle paid that replay only to be refused anyway (77 refusals in 25
+    # minutes on 2 Nov, one stock 43 times). Same refusal, same outcome; the check further down stays (it also covers the re-armed path). Fails open like the original.
+    _cut_early = calendar_gate.scalp_cutoff_reason()
+    if _cut_early:
+        _log_candidate(db, candidate, "SKIPPED", _cut_early, quality=quality)
+        return None
+
     # Max concurrent positions
     open_count = _count_open_positions(db)
     if open_count >= config.MAX_CONCURRENT_SCALP_POSITIONS:

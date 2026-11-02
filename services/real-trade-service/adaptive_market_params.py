@@ -104,7 +104,19 @@ def record_metric(db: Session, name: str, value: float) -> None:
     writing, never actually called anywhere — exactly the kind of gap
     that quietly turns "adaptive" into "whatever got recorded once."
     Best-effort — never raises, mirrors
-    adaptive_thresholds.record_market_score."""
+    adaptive_thresholds.record_market_score.
+
+    E285 round 131: with CYCLE_AUDIT_WRITE_BEHIND on (default) the reading is queued for the write-behind worker (insert, then this same prune, on the
+    worker's own session) so the two commits never wait inside the candidate cycle; queue off / unavailable = the in-cycle write below."""
+    try:
+        import config as _cfg
+        if getattr(_cfg, "CYCLE_AUDIT_WRITE_BEHIND", True):
+            import write_behind
+            from models import _now as _models_now          # the same clock the column default uses
+            if write_behind.submit("metric", {"metric_name": name, "value": float(value), "recorded_at": _models_now()}):
+                return
+    except Exception as e:  # noqa: BLE001
+        logger.debug("record_metric(%s) write-behind unavailable, writing in-cycle: %s", name, e)
     try:
         db.add(AdaptiveMetricSnapshot(metric_name=name, value=float(value)))
         db.commit()

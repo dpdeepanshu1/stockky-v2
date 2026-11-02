@@ -149,7 +149,7 @@ def test_compute_keeps_the_wide_stop_through_the_target_cap():
     base = _levels(0.8, 1.6)
     common = dict(ADAPTIVE_STOP_FLOOR_ENABLED=True, ADAPTIVE_STOP_DAILY_ATR_FRAC=0.45, ADAPTIVE_STOP_M1_MULT=2.0, ADAPTIVE_STOP_FLOOR_MAX_PCT=1.5,
                   SCALP_TARGET_CAP_MIN_RR=2.0, SCALP_TARGET_CAP_MIN_STOP_PCT=1.2, SCALP_TARGET_CAP_MIN_STOP_ATR_MULT=1.0,
-                  ADAPTIVE_BAR_TARGET_RR=2.0, ADAPTIVE_BAR_TARGET_MAX_PCT=3.5, ENTRY_MIN_REWARD_RISK=2.0)
+                  ADAPTIVE_BAR_TARGET_RR=2.0, ADAPTIVE_BAR_TARGET_MAX_PCT=3.5, ENTRY_MIN_REWARD_RISK=2.0, SCALP_TARGET_CAP_KEEP_RR=False)   # round 126: this test pins the hard cap
     def run(cap):
         patches = [mock.patch.object(config, k, v, create=True) for k, v in dict(common, SCALP_TARGET_CAP_PCT=cap).items()]
         patches += [mock.patch.object(adaptive, "_compute_levels", return_value=base), mock.patch("screening.prev_day.peek", return_value=pdv),

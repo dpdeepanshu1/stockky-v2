@@ -8,7 +8,9 @@ What goes through the queue (plain dict payloads, never ORM objects, so nothing 
   exit_hold       TradeExitDecision rows with action HOLD
   entry_wait      TradeDecision rows with action WAIT (no order, no position hangs off them)
   structure_obs   StructureObservation rows (evidence only; 29 Oct 2026: its INSERT timed out inside the entry cycle's transaction)
-  audit           the EXIT_CYCLE summary row of trade_audit_log (29 Oct 2026: its commit stalled the exit tick for the 8 s call timeout)
+  audit           the EXIT_CYCLE summary row of trade_audit_log (29 Oct 2026: its commit stalled the exit tick for the 8 s call timeout); E285 round 131 adds ENTRY_CYCLE,
+                  ORDERS_EXPIRED and EXIT_ORDERS_EXPIRED (audit.logger.log_action_behind; switch CYCLE_AUDIT_WRITE_BEHIND)
+  metric          trade_adaptive_metric_history readings (E285 round 131) and the prune of that metric's old rows, both on the worker's session
 What stays synchronous: orders, fills, positions, cash, every non-HOLD exit decision, every other audit row (log_action commits the caller's session).
 
 Behaviour
@@ -320,11 +322,42 @@ def _write_audit(db, payloads: list) -> None:
     db.bulk_insert_mappings(models.TradeAuditLog, payloads)
 
 
+def _write_metric(db, payloads: list) -> None:
+    """E285 round 131: adaptive-metric history readings (adaptive_market_params.record_metric). The rows are inserted and committed, then each metric's old rows are
+    pruned, as record_metric did in-cycle. A prune failure never loses the readings (they are committed first)."""
+    import models
+    from datetime import timedelta
+    rows = []
+    for p in payloads:
+        r = {"metric_name": p["metric_name"], "value": p["value"]}
+        if p.get("recorded_at") is not None:               # an explicit None would be inserted as NULL; leave the key out so the column default applies
+            r["recorded_at"] = p["recorded_at"]
+        rows.append(r)
+    db.bulk_insert_mappings(models.AdaptiveMetricSnapshot, rows)
+    db.commit()
+    try:
+        import adaptive_market_params as _amp
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_amp.ADAPTIVE_HISTORY_DAYS + 5)
+        for name in sorted({p["metric_name"] for p in payloads}):
+            db.query(models.AdaptiveMetricSnapshot).filter(
+                models.AdaptiveMetricSnapshot.metric_name == name,
+                models.AdaptiveMetricSnapshot.recorded_at < cutoff,
+            ).delete(synchronize_session=False)
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("metric history prune skipped: %s", e)
+        try:
+            db.rollback()                                  # the readings are already committed; leave the session clean so the worker's commit is not a retry of them
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def register_defaults() -> None:
     register("exit_hold", _write_exit_hold)
     register("entry_wait", _write_entry_wait)
     register("structure_obs", _write_structure_obs)
     register("audit", _write_audit)
+    register("metric", _write_metric)
 
 
 register_defaults()

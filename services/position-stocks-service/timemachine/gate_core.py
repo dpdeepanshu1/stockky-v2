@@ -238,7 +238,7 @@ def compute(symbol: str, side: str, stop_pct: float, target_pct: float, slot: in
     hist = E.summarize_rows(E.replay_history(sessions, rule, [slot]), rule)
     sim = E.simulate(sessions, [(rule, [slot])], slot, sims_n, seed)
     sim_sum = E.summarize_acc(sim["per_plan"][0][slot], rule)
-    vd = E.verdict(sim_sum, hist, rule, len(sessions))
+    vd = E.verdict(sim_sum, hist, rule, len(sessions), hist_se_mult=_num(_cfg("TM_GATE_HIST_SE_MULT", 0.0), 0.0, 0.0, 3.0))   # E285 round 130: absent / 0 = the fixed band
 
     def r4(x: Any) -> Optional[float]:
         return round(float(x), 4) if isinstance(x, (int, float)) and x == x else None
@@ -246,7 +246,7 @@ def compute(symbol: str, side: str, stop_pct: float, target_pct: float, slot: in
             "target_pct": round(rule.target_pct, 3), "rr": round(rule.rr, 3), "sessions": len(sessions), "sims": sim["sessions"],
             "sim_p_target": r4(sim_sum.get("p_target")) if sim_sum.get("n") else None, "sim_avg_r_net": r4(sim_sum.get("avg_r_net")) if sim_sum.get("n") else None,
             "hist_n": int(hist.get("n", 0) or 0), "hist_p_target": r4(hist.get("p_target")) if hist.get("n") else None,
-            "hist_avg_r_net": r4(hist.get("avg_r_net")) if hist.get("n") else None, "be_win_net": r4(vd.get("be_win_net")),
+            "hist_avg_r_net": r4(hist.get("avg_r_net")) if hist.get("n") else None, "be_win_net": r4(vd.get("be_win_net")), "hist_margin_r": r4(vd.get("hist_margin_r")),
             "computed_at": _now_ist().isoformat(timespec="seconds"), "elapsed_ms": int((time.monotonic() - started) * 1000)}
 
 

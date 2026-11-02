@@ -174,7 +174,7 @@ def test_entry_collects_the_four_penalties_and_skips_only_on_the_total():
         assert key in src, key
     assert src.count("_penalties: dict = {}") == 1                                  # one dict, declared before the first of them
     assert src.index("_penalties: dict = {}") < src.index('_penalties["near_day_high"]') < src.index('_penalties["below_open"]')
-    assert "soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)" in src
+    assert "soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())" in src          # E285 round 129: the skip total is SOFT_PENALTY_SKIP_AT
     assert "_vwap_reject = None if _soft else vwap_gate.reject_reason" in src      # veto mode keeps the old refusal
     assert "range_reject = _range_gate_reject(" in src and "spike_reject = entry_timing.spike_reason(" in src and "_gr_reject = gain_room.reject_reason(" in src
     # the penalties must all be known BEFORE the setup engine classifies (it reads them) - the vwap one included

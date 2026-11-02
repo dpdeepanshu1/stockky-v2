@@ -132,6 +132,8 @@ PROTECTED: Dict[str, str] = {
     "TM_AUTO_INTERVAL_MIN": "Time Machine timer (E115): a calibrator never changes it",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "STRUCTURE_OBS_WRITE_BEHIND": "evidence recorder plumbing (E253): how the observation row reaches the database; a report never decides it",
+    "SIZE_STACK_FLOOR": "money safety (sizing): the smallest share of the base risk a stack of size penalties may leave is your decision, never a report's",
+    "CYCLE_AUDIT_WRITE_BEHIND": "evidence recorder plumbing (E285 round 131): how the cycle summary rows reach the database; a report never decides it",
     "SHORT_ENTRY_CUSHION_PCT": "money safety (short selling): how far below the last price a short's SELL limit sits is your decision, never a report's",
     "SHORT_DAY_FALL_RANGE_MULT": "money safety (short selling, E276 round 67): how far a stock may already have fallen before a short is refused is a threshold of a gate, decided by you",
     "SHORT_DAY_FALL_HARD_CEILING_PCT": "money safety (short selling, E276 round 67): the ceiling of the day-fall limit is a threshold of a gate, decided by you, never a report's",

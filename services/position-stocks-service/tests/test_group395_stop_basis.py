@@ -64,6 +64,7 @@ class TestAdaptiveBasis:
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_PCT", 1.0)
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_MIN_RR", 1.2)
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_MIN_STOP_PCT", 0.5)
+        monkeypatch.setattr(config, "SCALP_TARGET_CAP_KEEP_RR", False)       # E285 round 126 made KEEP_RR the default (the cap keeps the min R:R); this test pins the tag, so it uses the plain cap
         lv = adaptive.compute(0.0, 100.0, symbol="AAA")
         assert lv.target_pct == pytest.approx(1.0) and lv.basis == "opening_plan"
 

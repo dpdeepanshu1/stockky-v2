@@ -109,6 +109,12 @@ CATALOG = (
     Flag("STRUCTURE_OBS_WRITE_BEHIND", "Structure observations off the cycle", "Structure stop, exit, evidence", "bool", looser="neutral",
          help="ON = observation rows are written by a background worker, so a slow Oracle (DPY-4024) cannot fail an entry cycle. OFF = old in-cycle write. Keep ON.",
          targets=((_C, "STRUCTURE_OBS_WRITE_BEHIND"),), live=True, shipped="true", recommended="true", evidence="29 Oct 2026 log: INSERT structure_observations timed out inside the cycle"),
+    Flag("SIZE_STACK_FLOOR", "Floor under stacked size penalties (REAL)", "Entry guards", "float", lo=0, hi=1, looser="higher", zero_off=True,
+         help="The long entry's size penalties (VIX, calendar, weak-market rules, opening gate, soft gates, overseas lead, setup, opening window) multiply; together they left 1-3 shares. The stack may not take the size under this fraction of the base risk. 0 = old unlimited stacking. Never above the base risk; never turns a refusal into an entry.",
+         targets=((_C, "SIZE_STACK_FLOOR"),), live=True, shipped="0.35", recommended="0.35", evidence="2 Nov 2026: Real Trade 1-3 share orders in the opening window"),
+    Flag("CYCLE_AUDIT_WRITE_BEHIND", "Cycle audit rows off the cycle", "Structure stop, exit, evidence", "bool", looser="neutral",
+         help="ON = the ENTRY_CYCLE / ORDERS_EXPIRED / EXIT_ORDERS_EXPIRED audit rows and the adaptive-metric history are written by a background worker, so a slow Oracle INSERT cannot stall an entry or exit tick. OFF = old in-cycle commit. Keep ON.",
+         targets=((_C, "CYCLE_AUDIT_WRITE_BEHIND"),), live=True, shipped="true", recommended="true", evidence="2 Nov 2026 log: trade_audit_log INSERTs of 2.3-4.6 s inside the ticks"),
     # ---------------- forecast gates (Kronos 4f, TimesFM 4g) ----------------
     Flag("KRONOS_GATE_MODE", "Kronos gate 4f (REAL)", "Forecast gates", "enum", choices=("enforce", "log", "off"), same_rank=("log", "off"),
          help="off = nothing is fetched; log = fetch, count and store the verdict, never block; enforce = a veto makes the entry WAIT. Unproven: run kronos_backtest.py first.",

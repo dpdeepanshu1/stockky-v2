@@ -148,7 +148,7 @@ def test_the_follower_is_gone():
 def test_summary_has_no_shadow_history(db):
     _open_row(db, symbol="A", status="TARGET", exit_price=98.0, gross_pnl=20.0, net_pnl=18.0)
     s = se.summary(db)
-    assert set(s) == {"mode", "gate_counters", "shortlist"}                      # E285 round 94: no rows, totals or S2 progress
+    assert set(s) == {"mode", "gate_counters", "shortlist", "symbols_by_code", "last_refusal"}      # E285 round 94: no rows, totals or S2 progress; round 133 adds the two refusal-detail keys
     assert not hasattr(se, "_row_dict")
 
 

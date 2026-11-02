@@ -27,3 +27,20 @@ def log_action(db: Session, *, actor: str, action: str, detail: str = "", mode: 
         # the failure to stderr and let the caller's actual work proceed.
         logger.error("audit log_action failed (action=%s): %s", action, e)
         db.rollback()
+
+
+def log_action_behind(db: Session, *, actor: str, action: str, detail: str = "", mode: Optional[str] = None) -> None:
+    """E285 round 131: log_action for a summary / housekeeping row written from inside a trading cycle (ENTRY_CYCLE, ORDERS_EXPIRED, EXIT_ORDERS_EXPIRED).
+    log_action commits the CALLER'S session, so the 2 Nov VM log showed single trade_audit_log INSERTs of 2.3-4.6 s waiting inside the entry and exit ticks.
+    Here the row is queued for the write-behind worker (its own session, backed off after a timeout) and the cycle moves on. Falls back to the old
+    synchronous log_action when CYCLE_AUDIT_WRITE_BEHIND is off, or the queue is off / unavailable. Rows that decide something (ORDER_PLACED, ARMED, login, ...)
+    keep using log_action. Never raises."""
+    try:
+        import config
+        if getattr(config, "CYCLE_AUDIT_WRITE_BEHIND", True):
+            import write_behind
+            if write_behind.submit("audit", {"mode": mode, "actor": actor, "action": action, "detail": detail}):
+                return
+    except Exception as e:  # noqa: BLE001
+        logger.debug("audit write-behind unavailable, writing synchronously: %s", e)
+    log_action(db, actor=actor, action=action, detail=detail, mode=mode)

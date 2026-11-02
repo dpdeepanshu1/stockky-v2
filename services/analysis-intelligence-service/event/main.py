@@ -1347,7 +1347,8 @@ def _load_event_feed():
 _ef = _load_event_feed()
 if _ef is not None and "pytest" not in __import__("sys").modules:
     try:
-        _ef.start_collector(lambda: (_load_state().get("subscriptions") or []))
+        _ef.start_collector(lambda: (_load_state().get("subscriptions") or []),
+                            names_fn=lambda: dict(_company_name_cache))      # E285 round 127: read-only view of the long names the per-symbol fetch already cached
     except Exception as _e:  # noqa: BLE001
         logger.warning("event feed: collector did not start (%s)", _e)
 

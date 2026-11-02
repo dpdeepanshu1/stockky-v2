@@ -656,6 +656,12 @@ STRUCTURE_FAIL_TTL_S = _og_float("STRUCTURE_FAIL_TTL_S", 60.0)
 STRUCTURE_OBS_ENABLED = ((os.getenv("STRUCTURE_OBS_ENABLED") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
 # E-structure-obs (29 Oct 2026): true = the observation row is written by the write-behind worker, never inside the entry cycle's transaction.
 STRUCTURE_OBS_WRITE_BEHIND = ((os.getenv("STRUCTURE_OBS_WRITE_BEHIND") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+# E285 round 131 (2 Nov 2026): true = the per-cycle summary audit rows (ENTRY_CYCLE, ORDERS_EXPIRED, EXIT_ORDERS_EXPIRED) and the adaptive-metric history rows are written by the
+# write-behind worker, never by a commit inside the entry / exit tick. false = the old in-cycle write.
+CYCLE_AUDIT_WRITE_BEHIND = ((os.getenv("CYCLE_AUDIT_WRITE_BEHIND") or "").strip() or "true").lower() in ("1", "true", "yes", "on")
+# E285 round 132 (2 Nov 2026): the stack of long-entry size penalties (VIX, calendar, regime rules, opening gate, soft gates, overseas lead, setup, opening window) may not take the
+# size under this fraction of the base risk (entry_engine/size_floor.py). 0 = off (the old unlimited stacking).
+SIZE_STACK_FLOOR = max(0.0, min(1.0, _og_float("SIZE_STACK_FLOOR", 0.35)))
 STRUCTURE_OBS_EVAL_INTERVAL_S =max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
 STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))

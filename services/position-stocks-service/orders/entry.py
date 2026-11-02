@@ -41,7 +41,7 @@ from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
 from orders import long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
-from orders.adaptive import AdaptiveLevels, compute as compute_levels
+from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
 from screening.quality_gate import QualitySignal
@@ -716,7 +716,7 @@ def attempt_entry(
             _penalties[_k] = max(float(_penalties.get(_k) or 0.0), float(_v["penalty"])) if _k == "near_day_high" else float(_v["penalty"])
             _soft_why[_k] = _v["why"]
         if not _soft:                                           # SOFT_GATES_MODE=veto skips the total check further down: do it here
-            _pt_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+            _pt_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
             if _pt_reject:
                 shared_symbol_lock.release(db, candidate.symbol)
                 _log_candidate(db, candidate, "SKIPPED", _pt_reject, quality=quality)
@@ -734,7 +734,7 @@ def attempt_entry(
     if _drift_soft:
         for _dk, (_dv, _dwhy) in _drift_soft.items():      # entry_slippage (round 33), day_gain (round 34)
             _penalties[_dk], _soft_why[_dk] = _dv, _dwhy
-        _dr_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        _dr_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _dr_reject:
             shared_symbol_lock.release(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _dr_reject, quality=quality)
@@ -771,6 +771,8 @@ def attempt_entry(
             logger.debug("entry: re-arm stop override failed for %s: %s", candidate.symbol, _e)
 
     # group 270: inside the opening-gate window a stop tighter than a share of the daily ATR is noise-sized - skip.
+    if not rearm:       # E285 round 126: widen a too-tight stop to the stock's own ATR floor (target 2:1 with it) instead of refusing, when it fits SCALP_TARGET_CAP_MAX_PCT
+        levels = widen_to_atr_floor(levels, candidate.current_ltp, candidate.symbol)
     _stop_reject = opening_gate.stop_reject(candidate.symbol, levels.stop_pct)
     if _stop_reject:
         shared_symbol_lock.release(db, candidate.symbol)
@@ -823,7 +825,7 @@ def attempt_entry(
                 _penalties["preopen_gap"], _soft_why["preopen_gap"] = _pg["penalty"], _pg["why"]
         except Exception:  # noqa: BLE001
             logger.debug("entry: pre-open gap penalty failed (entry unaffected)", exc_info=True)
-        _tot_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        _tot_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _tot_reject:
             if not rearm:
                 for _k in ("spike_chase", "near_day_high", "extended_or"):
@@ -897,7 +899,7 @@ def attempt_entry(
             _setup_res = setup_live.classify_long(
                 symbol=candidate.symbol, price=candidate.current_ltp, now=_now_ist,
                 event_polarity=getattr(quality, "event_polarity", None) if quality else None, flow_json=_flow_snap,
-                quote=_quote, gap_pct=_gap, tape=_tape, penalties=_penalties, allowed=_allowed, inputs=_inputs)
+                quote=_quote, gap_pct=_gap, tape=_tape, penalties=_penalties, allowed=_allowed, inputs=_inputs, penalty_skip=soft_gates.skip_limit())
             if _setup_res and _setup_res.get("id") and _setup_res.get("size_mult") is not None:
                 _df = slot_ladder.demote_factor(_setup_res["id"], setup_stamp.time_slot(_now_ist), _ladder)
                 if _df < 1.0:
@@ -1090,7 +1092,7 @@ def attempt_entry(
     # E273 round 32: penalties added after the setup engine ran (round 31 rvol, round 32 structure) were not in its size. Skip on a high total, else rescale the size and the stamp.
     _late_pen = {k: v for k, v in _penalties.items() if k not in _pen_early}
     if _late_pen:
-        _late_reject = soft_gates.total_skip_reason(_penalties, setup_engine.PENALTY_SKIP)
+        _late_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _late_reject:
             shared_symbol_lock.release(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _late_reject, quality=quality)

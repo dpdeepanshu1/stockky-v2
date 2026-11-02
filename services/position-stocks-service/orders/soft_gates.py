@@ -102,9 +102,13 @@ def structure_penalties(ver) -> tuple:
         room, lim = m.get("room_atr"), float(getattr(config, "STRUCTURE_MIN_ROOM_ATR", 0.0) or 0.0)
         if room is not None and lim > 0 and room < lim:
             hard = lim * 0.25
-            if room <= hard:
+            beyond = float(getattr(config, "STRUCTURE_ROOM_BEYOND_PENALTY", 0.0) or 0.0)
+            if room < 0 and beyond > 0:
+                pens["structure_room"] = round(min(cap(), beyond), 4)      # E285 round 129: price is already past the cached resistance (a breakout), not short of room
+            elif room <= hard:
                 return full, {}
-            pens["structure_room"] = _lin((lim - room) / (lim - hard))
+            else:
+                pens["structure_room"] = _lin((lim - room) / (lim - hard))
         if len(pens) < len(reasons):          # a soft reason we could not score: keep the gate's own refusal
             return full, {}
         return None, pens
@@ -160,6 +164,14 @@ def late_size(setup_mult: Optional[float], early: Optional[Dict[str, float]], la
         return round(max(floor, base_x / (1.0 + max(0.0, et) + lt)), 4)
     except (TypeError, ValueError):
         return setup_mult
+
+
+def skip_limit() -> float:
+    """E285 round 129: the penalty total at or above which an entry is skipped. SOFT_PENALTY_SKIP_AT (6.0), never under the engine's own 4.0. Read at call time. Never raises."""
+    try:
+        return max(4.0, float(getattr(config, "SOFT_PENALTY_SKIP_AT", 4.0)))
+    except (TypeError, ValueError):
+        return 4.0
 
 
 def total_skip_reason(penalties: Optional[Dict[str, float]], skip_at: float) -> Optional[str]:

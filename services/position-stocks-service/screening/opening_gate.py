@@ -198,6 +198,24 @@ def parts_penalties(symbol: str, ltp: float, now: Optional[datetime] = None) -> 
     return out
 
 
+def gap_up_limit(symbol: str) -> float:
+    """E285 round 128: the largest gap-up (open vs previous close, %) an entry may follow. The fixed OPENING_GATE_MAX_GAP_UP_PCT, or - with OPENING_GATE_GAP_ADAPTIVE - the
+    larger of it and the stock's own PREOPEN_GAP_ATR_MULT x daily ATR % (preopen.atr_gap_threshold), never above OPENING_GATE_GAP_UP_HARD_PCT. 0 = the gate is off. Never raises."""
+    try:
+        fixed = float(config.OPENING_GATE_MAX_GAP_UP_PCT or 0.0)
+        if fixed <= 0 or not getattr(config, "OPENING_GATE_GAP_ADAPTIVE", False):
+            return fixed
+        from screening import preopen
+        thr = preopen.atr_gap_threshold(symbol)
+        lim = max(fixed, float(thr)) if thr else fixed
+        hard = float(getattr(config, "OPENING_GATE_GAP_UP_HARD_PCT", 0.0) or 0.0)
+        if hard > 0:
+            lim = min(lim, max(hard, fixed))
+        return lim
+    except Exception:  # noqa: BLE001
+        return float(getattr(config, "OPENING_GATE_MAX_GAP_UP_PCT", 0.0) or 0.0)
+
+
 def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None, ignore_gap: bool = False) -> Optional[str]:
     """None when the entry may go ahead (or the gate is not active), else a skip reason starting with a stable code.
     E273 round 12: in OPENING_PARTS_MODE=penalty (default) the day-high position, opening-range position, previous-day close and Nifty tests no longer refuse (see parts_penalties());
@@ -226,8 +244,9 @@ def reject_reason(symbol: str, ltp: float, now: Optional[datetime] = None, ignor
 
         or_settled = minutes_open >= config.OPENING_GATE_OR_MINUTES     # group 390: range-based checks need a built-up range
         gap = (day_open - prev_close) / prev_close * 100.0
-        if not ignore_gap and config.OPENING_GATE_MAX_GAP_UP_PCT > 0 and gap > config.OPENING_GATE_MAX_GAP_UP_PCT:
-            return f"OPENING_GATE:GAP_UP:{gap:+.2f}% > +{config.OPENING_GATE_MAX_GAP_UP_PCT:.2f}%"
+        _gap_up_lim = gap_up_limit(symbol)
+        if not ignore_gap and _gap_up_lim > 0 and gap > _gap_up_lim:
+            return f"OPENING_GATE:GAP_UP:{gap:+.2f}% > +{_gap_up_lim:.2f}%"
         if not ignore_gap and config.OPENING_GATE_MAX_GAP_DOWN_PCT > 0 and gap < -config.OPENING_GATE_MAX_GAP_DOWN_PCT:
             return f"OPENING_GATE:GAP_DOWN:{gap:+.2f}% < -{config.OPENING_GATE_MAX_GAP_DOWN_PCT:.2f}%"
         if ltp < day_open and below_open_mode() == "veto":     # E273: default "penalty" - the scorecard showed this gate blocks winners; see below_open_penalty()

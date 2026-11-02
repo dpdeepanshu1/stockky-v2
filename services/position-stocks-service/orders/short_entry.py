@@ -19,7 +19,7 @@ import config
 from control.kit import current_profile as _current_profile
 from capital import ledger
 from models import ScalpCandidateLog, ScalpPosition, ScalpShortShadow
-from orders import learned_stop, setup_short, short_target, squeeze_guard
+from orders import learned_stop, setup_short, short_refusals, short_target, squeeze_guard
 from orders import calendar_gate, conviction, cost_gate, depth_gate, entry_pause, flow_gate, rr_floor, short_gates, sizing, stopout_guard, tm_gate
 from orders.adaptive import compute as compute_levels
 from tz_utils import ist_now
@@ -29,7 +29,7 @@ logger = logging.getLogger("position-stocks-short-entry")
 _SKIP_LOG_EVERY_S = 300.0
 _skip_logged: Dict[str, float] = {}
 _last_shortlist: Dict[str, Any] = {"at": None, "mode": None, "enabled": None, "rows": []}     # E107: the latest ranked short shortlist, for GET /short/shadow
-_stats: Dict[str, Any] = {"cycles": 0, "scanned": 0, "recorded": 0, "refused": 0, "by_code": {}}
+_stats: Dict[str, Any] = {"cycles": 0, "scanned": 0, "recorded": 0, "refused": 0, "by_code": {}, "book_full_skips": 0, "last_book_full": None}
 
 
 def cfg_mode() -> str:
@@ -76,13 +76,15 @@ def tighten_short_levels(levels: Any, live: float, mult: float) -> Any:
 def reset() -> None:
     _skip_logged.clear()
     _stats.clear()
-    _stats.update(cycles=0, scanned=0, recorded=0, refused=0, by_code={})
+    _stats.update(cycles=0, scanned=0, recorded=0, refused=0, by_code={}, book_full_skips=0, last_book_full=None)
+    short_refusals.reset()
 
 
-def _count(code: str) -> None:
+def _count(code: str, symbol: Optional[str] = None, reason: str = "") -> None:
     _stats["refused"] = _stats.get("refused", 0) + 1
     bc = _stats.setdefault("by_code", {})
     bc[code] = bc.get(code, 0) + 1
+    short_refusals.note(code, symbol, reason)              # E285 round 133: distinct symbols per code + the latest reason per symbol (never raises)
 
 
 def _log(db: Session, cand: Any, decision: str, reason: str) -> None:
@@ -106,7 +108,7 @@ def _log(db: Session, cand: Any, decision: str, reason: str) -> None:
 
 def _refuse(db: Session, cand: Any, code: str, reason: str) -> None:
     """Count every refusal; write one SHORT_SKIP row per symbol per 5 minutes so the candidate log is not flooded."""
-    _count(code)
+    _count(code, getattr(cand, "symbol", None), reason)
     now = time.monotonic()
     last = _skip_logged.get(cand.symbol)
     if last is not None and now - last < _SKIP_LOG_EVERY_S:
@@ -294,7 +296,8 @@ def expire_open(db: Session, now: Optional[datetime] = None) -> int:
 def summary(db: Session = None, recent: int = 0) -> Dict[str, Any]:
     """Read-only: the mode, the gate refusal counters and the latest shortlist. E285 round 94: the shadow history (rows, totals, S2 progress) is gone - nothing writes a
     shadow-short row any more and old rows are only ever expired; the table stays in the database untouched. `db` and `recent` are accepted and ignored."""
-    return {"mode": cfg_mode(), "gate_counters": {k: v for k, v in _stats.items()}, "shortlist": dict(_last_shortlist)}
+    return {"mode": cfg_mode(), "gate_counters": {k: v for k, v in _stats.items()}, "shortlist": dict(_last_shortlist),
+            **short_refusals.snapshot()}                                                          # E285 round 133: symbols_by_code + last_refusal (by_code counts attempts)
 
 
 def _board_defers(quality: Any) -> bool:
@@ -351,6 +354,14 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
             logger.exception("short event candidate scan failed (non-fatal)")
         from screening import scan_hits as _scan_hits
         _scan_hits.record_scan(cands, side="short")       # E232: every faller the short scan listed (record only)
+        from orders import short_live as _sl_full
+        _full = await asyncio.to_thread(_sl_full.book_full, db)      # E285 round 134: no slot free = no short can enter. The scan above still ran and was recorded (local, no HTTP); skip the quality-gate calls and the attempts, count the pass once
+        if _full:
+            _stats["book_full_skips"] = _stats.get("book_full_skips", 0) + 1
+            _stats["last_book_full"] = _full
+            out["skipped"] = "SHORT_BOOK_FULL"
+            _stats["scanned"] = _stats.get("scanned", 0) + len(cands)
+            return out
         bear = await asyncio.to_thread(_bear_rows)
         best: Dict[str, Any] = {}
         off_board: Dict[str, Any] = {}
@@ -383,6 +394,8 @@ async def run_short_cycle(db: Session, now: Optional[datetime] = None) -> Dict[s
             for _r in _last_shortlist["rows"]:
                 if _r["symbol"] == c.symbol:
                     _r["outcome"] = "ENTERED" if got is not None else "REFUSED"
+                    if got is None:                                                    # E285 round 133: say WHY the pick was refused
+                        _r.update(short_refusals.why(c.symbol))
         out["recorded"] = recorded
     except Exception as e:  # noqa: BLE001
         logger.warning("short shadow cycle failed (%s: %s)", type(e).__name__, e)

@@ -187,6 +187,60 @@ def extract_symbol(headline: str, known: Iterable[str]) -> Optional[str]:
     return None
 
 
+def bare_symbol(sym: Any) -> str:
+    """E285 round 127: 'BANKINDIA.NS' / 'bankindia.bo' -> 'BANKINDIA'. The event tracker stores every subscription with its .NS suffix, a headline token can never contain a dot."""
+    t = str(sym or "").strip().upper()
+    for suf in (".NS", ".BO"):
+        if t.endswith(suf):
+            return t[: -len(suf)]
+    return t
+
+
+_NAME_SUFFIX = re.compile(r"\b(limited|ltd|ltd\.|corporation|corp|company|co|inc|plc|pvt|private)\b\.?", re.I)
+_NAME_STOP = frozenset({"the", "of", "and", "&", "india", "indian", "bank", "industries", "global", "limited"})
+
+
+def name_aliases(names: Dict[str, str]) -> List[Tuple[str, str]]:
+    """[(lower-case company name, SYMBOL)] longest first, from {symbol: long company name}. The name is cut of Ltd / Limited / Corp ...; a name equal to the ticker, shorter
+    than 5 letters, or a single generic word is dropped (a wrong tag moves a trade, a missed one only loses an event). Never raises."""
+    out: List[Tuple[str, str]] = []
+    try:
+        for sym, nm in (names or {}).items():
+            b = bare_symbol(sym)
+            n = re.sub(r"\s+", " ", _NAME_SUFFIX.sub(" ", str(nm or ""))).strip(" .,-").lower()
+            if not b or not n or n == b.lower() or len(n) < 5:
+                continue
+            words = n.split()
+            if len(words) == 1 and (words[0] in _NAME_STOP or len(words[0]) < 6):
+                continue
+            out.append((n, b))
+    except Exception:  # noqa: BLE001
+        return []
+    return sorted(set(out), key=lambda t: -len(t[0]))
+
+
+def extract_symbol_by_name(headline: str, aliases: List[Tuple[str, str]]) -> Optional[str]:
+    """The symbol whose full company name appears in the headline (longest name wins). Skipped when the name is glued to a capitalised word before it
+    ('State Bank of India' must not tag 'Bank of India'). None when nothing matches. Never raises."""
+    try:
+        text = str(headline or "")
+        low = text.lower()
+        for alias, sym in aliases or []:
+            i = low.find(alias)
+            while i != -1:
+                j = i + len(alias)
+                before_ok = i == 0 or not low[i - 1].isalnum()
+                after_ok = j >= len(low) or not low[j].isalnum()
+                if before_ok and after_ok:
+                    prev = text[:i].rstrip().split(" ")[-1] if text[:i].strip() else ""
+                    if not (prev[:1].isupper() and prev.lower() not in ("shares", "stock", "stocks", "of", "in", "on", "for", "at", "by", "as", "buy", "sell", "hold")):
+                        return sym
+                i = low.find(alias, i + 1)
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── time ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 def parse_published(entry: Any) -> Optional[datetime]:
     """UTC datetime of a feed entry (struct_time or a date string), or None when unreadable."""
@@ -342,8 +396,10 @@ def _default_fetch(url: str) -> Tuple[List[Any], Optional[int]]:
 class FeedCollector:
     def __init__(self, symbols_fn: Callable[[], Iterable[str]], fetch_fn: Optional[FetchFn] = None, feeds: Optional[List[Tuple[str, str]]] = None,
                  now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc), cooldown_s: Optional[float] = None,
-                 max_age_h: float = 24.0, snapshot_fn: Optional[Callable[[dict], None]] = None):
+                 max_age_h: float = 24.0, snapshot_fn: Optional[Callable[[dict], None]] = None,
+                 names_fn: Optional[Callable[[], Dict[str, str]]] = None):
         self.symbols_fn = symbols_fn
+        self.names_fn = names_fn                 # E285 round 127: {symbol: company name}; headlines name the company far more often than the ticker
         self.fetch_fn = fetch_fn or _default_fetch
         self.feeds = list(feeds if feeds is not None else FEEDS)
         self.now_fn = now_fn
@@ -356,15 +412,26 @@ class FeedCollector:
         self._lock = threading.Lock()
 
     def known_symbols(self) -> set:
-        syms = {str(s).strip().upper() for s in (self.symbols_fn() or []) if s}
+        syms = {bare_symbol(s) for s in (self.symbols_fn() or []) if s}        # E285 round 127: subscriptions are stored as 'X.NS'; a headline token has no dot
         extra = (os.getenv("EVENT_FEED_EXTRA_SYMBOLS") or "").replace(";", ",").split(",")
-        syms |= {x.strip().upper() for x in extra if x.strip()}
+        syms |= {bare_symbol(x) for x in extra if x.strip()}
+        syms.discard("")
         return syms
+
+    def _aliases(self, known: set) -> List[Tuple[str, str]]:
+        if self.names_fn is None:
+            return []
+        try:
+            return [(a, s) for a, s in name_aliases(self.names_fn() or {}) if s in known]
+        except Exception:  # noqa: BLE001
+            return []
 
     def poll_once(self) -> Dict[str, Any]:
         now = self.now_fn()
         mono = time.monotonic()
         known = self.known_symbols()
+        aliases = self._aliases(known)
+        by_ticker = by_name = 0
         fresh: List[Dict[str, Any]] = []
         sources: Dict[str, Dict[str, Any]] = {}
         for name, url in self.feeds:
@@ -396,6 +463,11 @@ class FeedCollector:
                     newest = pub if newest is None or pub > newest else newest
                     sym = extract_symbol(title, known)
                     if sym:
+                        by_ticker += 1
+                    else:
+                        sym = extract_symbol_by_name(title, aliases)
+                        by_name += 1 if sym else 0
+                    if sym:
                         fresh.append(make_event(sym, title, pub, name, now))
                 except Exception:  # noqa: BLE001 - one bad item never drops the poll
                     continue
@@ -413,6 +485,8 @@ class FeedCollector:
             cutoff = now.timestamp() - self.max_age_h * 3600.0
             self.events = [e for e in merged if _f(e.get("published_ts")) >= cutoff]
             self.sources = sources
+        logger.info("event feed: %d subscribed symbols (%d with a company name), tagged %d by ticker + %d by name, %d events kept",
+                    len(known), len({s for _, s in aliases}), by_ticker, by_name, len(self.events))
         if self.snapshot_fn:
             try:
                 self.snapshot_fn({"events": self.events[-500:], "sources": sources, "at": now.isoformat()})
@@ -438,14 +512,14 @@ def get_collector() -> Optional[FeedCollector]:
 
 
 def start_collector(symbols_fn: Callable[[], Iterable[str]], fetch_fn: Optional[FetchFn] = None, interval_s: Optional[float] = None,
-                    snapshot_fn: Optional[Callable[[dict], None]] = None) -> Optional[FeedCollector]:
+                    snapshot_fn: Optional[Callable[[dict], None]] = None, names_fn: Optional[Callable[[], Dict[str, str]]] = None) -> Optional[FeedCollector]:
     """Start the one polling thread (daemon). None when EVENT_FEED_ENABLED=0. Calling it twice returns the running collector."""
     global _collector
     if not enabled():
         return None
     if _collector is not None:
         return _collector
-    _collector = FeedCollector(symbols_fn, fetch_fn, snapshot_fn=snapshot_fn)
+    _collector = FeedCollector(symbols_fn, fetch_fn, snapshot_fn=snapshot_fn, names_fn=names_fn)
     every = max(60.0, _f(os.getenv("EVENT_FEED_POLL_S"), 300.0) if interval_s is None else float(interval_s))
     scheduled = interval_s is None and cadence_v2_enabled()      # an explicit interval (tests) or CADENCE_V2=0 keeps the flat interval
 

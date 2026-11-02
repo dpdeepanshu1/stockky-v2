@@ -77,8 +77,10 @@ def no_setup_refusal(res: Optional[Dict[str, Any]], *, mode: str, exempt: bool, 
 
 def facts_long(*, symbol: str, price: Optional[float], now: Optional[datetime], event_polarity: Optional[int], flow_json: Any, quote: Optional[dict],
                gap_pct: Optional[float], tape: Any = None, penalties: Optional[Dict[str, float]] = None,
-               allowed: Optional[set] = None, inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               allowed: Optional[set] = None, inputs: Optional[Dict[str, Any]] = None, penalty_skip: Optional[float] = None) -> Dict[str, Any]:
     f: Dict[str, Any] = {"side": "LONG", "service": "PS", "now": now, "allowed": set(allowed) if allowed else {setup_engine.S1}, "penalties": dict(penalties or {})}
+    if penalty_skip is not None:
+        f["penalty_skip"] = penalty_skip                       # E285 round 129: the skip total (soft_gates.skip_limit()); absent = the engine's own 4.0
     try:
         f["price"] = _num(price)
         f["event_polarity"] = int(event_polarity) if event_polarity in (1, -1) else 0

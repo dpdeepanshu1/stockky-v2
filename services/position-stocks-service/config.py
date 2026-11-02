@@ -1007,6 +1007,14 @@ SCALP_TARGET_CAP_PCT = _get_float("SCALP_TARGET_CAP_PCT", 3.0)   # E251: 2.5 -> 
 SCALP_TARGET_CAP_MIN_RR = _get_float("SCALP_TARGET_CAP_MIN_RR", 2.0)   # 2026-10-22: 1.5 -> 2.0 (reward:risk 1:2)
 SCALP_TARGET_CAP_MIN_STOP_PCT = _get_float("SCALP_TARGET_CAP_MIN_STOP_PCT", 1.2)   # E251: 0.8 -> 1.2
 SCALP_TARGET_CAP_MIN_STOP_ATR_MULT = _get_float("SCALP_TARGET_CAP_MIN_STOP_ATR_MULT", 1.0)   # 2026-10-19: stop floor after a target cap = this x the symbol ATR proxy %; 0 = off
+# E285 round 126 (2 Nov VM log: RR_FLOOR 26 + STOP_TOO_TIGHT 20 skips in 2 h, no entry since 30 Oct): the fixed 3 % target cap squeezed the stop back under the stock's own
+# noise floor, so any stock wider than ~1.5 % ATR landed at 1.5:1 and RR_FLOOR refused it. KEEP_RR: the cap never takes the min reward:risk away from a stop the stock's
+# own noise needs - the target may rise to SCALP_TARGET_CAP_MIN_RR x the stop, up to SCALP_TARGET_CAP_MAX_PCT (above that the entry is still refused as RR_FLOOR).
+SCALP_TARGET_CAP_KEEP_RR = _get_bool("SCALP_TARGET_CAP_KEEP_RR", True)
+SCALP_TARGET_CAP_MAX_PCT = max(0.0, _get_float("SCALP_TARGET_CAP_MAX_PCT", 5.0))
+# E285 round 126: an entry whose stop is under OPENING_GATE_MIN_STOP_ATR_FRAC x daily ATR is no longer refused (STOP_TOO_TIGHT) when a stop at that floor still gives
+# the min reward:risk inside SCALP_TARGET_CAP_MAX_PCT: the stop is widened to the floor, the target moves to MIN_RR x it, and the share count follows the wider stop.
+OPENING_GATE_WIDEN_STOP = _get_bool("OPENING_GATE_WIDEN_STOP", True)
 
 # ── Pullback re-arm entries (2026-10-19, orders/pullback_rearm.py) ────────────────────────────────────────────────
 # A stock skipped for being at / extended above its high is re-checked on a pullback + bounce instead of being forgotten.
@@ -1377,6 +1385,12 @@ OPENING_GATE_ENABLED = _get_bool("OPENING_GATE_ENABLED", True)
 OPENING_GATE_SETTLE_IST = _get_str("OPENING_GATE_SETTLE_IST", "10:00")
 OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _get_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.0)   # group 399: 0 = entries from 09:15:00 (group 390: 0.5, group 268: 5 min)
 OPENING_GATE_MAX_GAP_UP_PCT = _get_float("OPENING_GATE_MAX_GAP_UP_PCT", 3.0)       # open vs previous close; 0 disables
+# E285 round 128 (2 Nov VM tally: OPENING_GATE:GAP_UP was the largest refusal, 48 in 2 h): a fixed +3 % limit refused every stock whose normal day is wider than that
+# (ATR 6-10 %) and let nothing explain it. ADAPTIVE: the limit is the larger of the fixed % and the stock's own PREOPEN_GAP_ATR_MULT x daily ATR (the same number the
+# pre-open gap penalty already uses), never above OPENING_GATE_GAP_UP_HARD_PCT (a gap that large is refused for every stock; 0 = no ceiling). A calm stock gapping past
+# 3 % is still refused; the pre-open gap penalty (size-down / total-penalty skip) still judges a gap past its own limit. false = the fixed % alone, as before.
+OPENING_GATE_GAP_ADAPTIVE = _get_bool("OPENING_GATE_GAP_ADAPTIVE", True)
+OPENING_GATE_GAP_UP_HARD_PCT = max(0.0, _get_float("OPENING_GATE_GAP_UP_HARD_PCT", 8.0))
 OPENING_GATE_MAX_GAP_DOWN_PCT = _get_float("OPENING_GATE_MAX_GAP_DOWN_PCT", 1.0)   # gap DOWN larger than this is skipped; 0 disables
 # E273 round 3: BELOW_OPEN (price under the day's open) is a soft penalty by default: it shrinks the size (penalty z-units x the stock's own noise) instead of
 # refusing. The 31 Oct scorecard: skipped BELOW_OPEN rows did better than the entered baseline. "veto" = the old refusal. Under the PREVIOUS close still refuses.
@@ -1384,6 +1398,13 @@ OPENING_GATE_MAX_GAP_DOWN_PCT = _get_float("OPENING_GATE_MAX_GAP_DOWN_PCT", 1.0)
 # one-gate-one-refusal behaviour for all four. Each penalty is value / limit, capped at SOFT_GATE_MAX_PENALTY; only the TOTAL at PENALTY_SKIP (4.0) skips.
 SOFT_GATES_MODE = (lambda v: "veto" if v == "veto" else "penalty")(_get_str("SOFT_GATES_MODE", "penalty").strip().lower())
 SOFT_GATE_MAX_PENALTY = max(0.5, min(3.9, _get_float("SOFT_GATE_MAX_PENALTY", 3.0)))
+# E285 round 129: the size already reaches its floor (SIZE_FLOOR 0.25) at a penalty total of 3, so refusing at the old fixed total of 4 turned away entries that were already at
+# the smallest size (SOFT_PENALTIES_TOO_HIGH: 34 in the 2 Nov 2 h tally). The total that still skips is now SOFT_PENALTY_SKIP_AT (6.0 = two factors both at the SOFT_GATE_MAX_PENALTY cap); between 4 and that the
+# entry goes on at the floor size. A value at or under 4 = the old total of 4.
+SOFT_PENALTY_SKIP_AT = max(4.0, _get_float("SOFT_PENALTY_SKIP_AT", 6.0))
+# E285 round 129: a live price already ABOVE the cached resistance (raw room < 0: a breakout / gap through it) is not "no room". With STRUCTURE_ROOM_BEYOND_PENALTY > 0 it is a size penalty of that many z-units
+# (the thin-volume breakout and bearish-structure refusals still apply); 0 = the old refusal. A price still UNDER the resistance by less than a quarter of the room floor is refused as before.
+STRUCTURE_ROOM_BEYOND_PENALTY = max(0.0, min(3.0, _get_float("STRUCTURE_ROOM_BEYOND_PENALTY", 1.5)))
 OPENING_BELOW_OPEN_MODE = _get_str("OPENING_BELOW_OPEN_MODE", "penalty")
 OPENING_BELOW_OPEN_UNIT_ATR_FRAC = max(0.01, _get_float("OPENING_BELOW_OPEN_UNIT_ATR_FRAC", 0.1))
 OPENING_BELOW_OPEN_FALLBACK_UNIT_PCT = max(0.05, _get_float("OPENING_BELOW_OPEN_FALLBACK_UNIT_PCT", 0.3))
@@ -1615,7 +1636,7 @@ STOPOUT_SYMBOL_BLOCK = _get_bool("STOPOUT_SYMBOL_BLOCK", True)
 ADAPTIVE_STOP_FLOOR_ENABLED = _get_bool("ADAPTIVE_STOP_FLOOR_ENABLED", True)
 ADAPTIVE_STOP_DAILY_ATR_FRAC = _get_float("ADAPTIVE_STOP_DAILY_ATR_FRAC", 0.45)
 ADAPTIVE_STOP_M1_MULT = _get_float("ADAPTIVE_STOP_M1_MULT", 2.0)
-ADAPTIVE_STOP_FLOOR_MAX_PCT = _get_float("ADAPTIVE_STOP_FLOOR_MAX_PCT", 1.5)
+ADAPTIVE_STOP_FLOOR_MAX_PCT = _get_float("ADAPTIVE_STOP_FLOOR_MAX_PCT", 2.5)   # E285 round 126: 1.5 -> 2.5 (a 1.5 % ceiling made every stock with a daily ATR above ~5 % fail STOP_TOO_TIGHT / RR_FLOOR on 2 Nov)
 # 2. Spike-chase guard (orders/entry_timing.py): no MARKET buy at the top of a day spike / mid-thrust; the symbol is armed for the pullback re-arm instead.
 #    The day-spike and thrust limits scale with the stock's own daily ATR / 1-minute range (the fixed numbers are the fallback when those are unknown).
 SPIKE_GUARD_MODE = _get_str("SPIKE_GUARD_MODE", "live")                  # live (refuse) | log | off
@@ -1680,6 +1701,10 @@ if TM_GATE_MODE not in ("live", "log", "off"):
 TM_GATE_BLOCK = _get_str("TM_GATE_BLOCK", "against").lower()                  # against | against_or_near (also refuse a near-break-even verdict)
 if TM_GATE_BLOCK not in ("against", "against_or_near"):
     TM_GATE_BLOCK = "against"
+# E285 round 130 (2 Nov VM tally: TIME_MACHINE refusals 41 in 2 h): the real history votes AGAINST once its average net R is under a fixed -0.10 R, but a month of 5-minute sessions is only 10-20 trades,
+# whose average has a standard error near 0.3 R: noise decided. The history's band is now the larger of 0.10 R and TM_GATE_HIST_SE_MULT x the standard error of ITS OWN average (its trades' spread / sqrt(n)),
+# so a noisy history needs a clearer result before it can say AGAINST (an undecided history = MIXED = the entry goes on). 0 = the fixed band. Position Stocks only; Real Trade's copy of the gate reads 0 (unchanged).
+TM_GATE_HIST_SE_MULT = min(3.0, max(0.0, _get_float("TM_GATE_HIST_SE_MULT", 1.0)))
 TM_GATE_SIMS = min(20000, max(1000, _get_int("TM_GATE_SIMS", 3000)))          # made-up sessions per gate verdict (3,000 takes about a quarter of a second)
 TM_GATE_INLINE_BUDGET_S = min(15.0, max(0.0, _get_float("TM_GATE_INLINE_BUDGET_S", 2.5)))   # an uncached entry waits at most this long; 0 = cache only
 TM_GATE_WINDOW_BUDGET_S = min(120.0, max(0.0, _get_float("TM_GATE_WINDOW_BUDGET_S", 8.0)))   # total seconds entries may wait inline in any one minute (0 = no cap); beyond it checks are queued, no opinion

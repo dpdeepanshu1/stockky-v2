@@ -331,7 +331,9 @@ def summarize_rows(rows: Sequence[Dict[str, Any]], rule: Rule) -> Dict[str, Any]
     s = sum(1 for r in rows if r["outcome"] == "stop")
     f = n - t - s
     lo, hi = wilson(t, n)
-    return {"n": n, "sessions": len({r["day"] for r in rows}), "target": t, "stop": s, "flat": f, "p_target": t / n, "p_stop": s / n, "p_flat": f / n,
+    mean_r = sum(r["r_net"] for r in rows) / n
+    sd_r = math.sqrt(sum((r["r_net"] - mean_r) ** 2 for r in rows) / (n - 1)) if n >= 2 else None      # spread of the real trades' net R (E285 round 130: the history's own noise)
+    return {"n": n, "sessions": len({r["day"] for r in rows}), "target": t, "stop": s, "flat": f, "p_target": t / n, "p_stop": s / n, "p_flat": f / n, "sd_r_net": sd_r,
             "ci_low": lo, "ci_high": hi, "avg_r_gross": sum(r["r_gross"] for r in rows) / n, "avg_r_net": sum(r["r_net"] for r in rows) / n,
             "avg_net_pct": sum(r["net_pct"] for r in rows) / n, "win_rate_net": sum(1 for r in rows if r["net_pct"] > 0) / n}
 
@@ -355,7 +357,20 @@ def _sgn(x: float, margin: float) -> int:
     return 1 if x > margin else (-1 if x < -margin else 0)
 
 
-def verdict(sim: Dict[str, Any], hist: Dict[str, Any], rule: Rule, sessions_n: int) -> Dict[str, Any]:
+def hist_margin(hist: Dict[str, Any], se_mult: float = 0.0) -> float:
+    """E285 round 130: the +/- R band inside which the real history does not vote. The fixed MARGIN_R_HIST, or - with se_mult > 0 - the larger of it and
+    se_mult x the standard error of the history's own average net R (spread of its trades / sqrt(n)). A noisy history of a few trades therefore needs a clearer
+    result before it can say AGAINST; a steady one keeps the fixed band. Pure."""
+    try:
+        n, sd = int(hist.get("n", 0) or 0), hist.get("sd_r_net")
+        if se_mult > 0 and n >= 2 and isinstance(sd, (int, float)) and sd == sd and sd > 0:
+            return max(MARGIN_R_HIST, float(se_mult) * float(sd) / math.sqrt(n))
+    except (TypeError, ValueError):
+        pass
+    return MARGIN_R_HIST
+
+
+def verdict(sim: Dict[str, Any], hist: Dict[str, Any], rule: Rule, sessions_n: int, hist_se_mult: float = 0.0) -> Dict[str, Any]:
     """The one-line answer. Code is FAVOURS | AGAINST | NEAR_BREAKEVEN | MIXED | NOT_ENOUGH_DATA. Break-even aware (a 2R target needs 1 win in 3, more after charges).
     The simulation votes with a +/-0.05 R band; the history votes only with at least 10 real sessions and a wider +/-0.10 R band; disagreement is MIXED. Pure."""
     be, be_net = rule.be_win(), rule.be_win_net()
@@ -364,7 +379,8 @@ def verdict(sim: Dict[str, Any], hist: Dict[str, Any], rule: Rule, sessions_n: i
                 "be_win": be, "be_win_net": be_net}
     s = _sgn(sim["avg_r_net"], MARGIN_R_SIM)
     h_vote = hist.get("n", 0) >= MIN_HISTORY_SESSIONS
-    h = _sgn(hist["avg_r_net"], MARGIN_R_HIST) if h_vote else s
+    hm = hist_margin(hist, hist_se_mult) if h_vote else MARGIN_R_HIST
+    h = _sgn(hist["avg_r_net"], hm) if h_vote else s
     if s == h:
         code = "FAVOURS" if s > 0 else ("AGAINST" if s < 0 else "NEAR_BREAKEVEN")
     else:
@@ -375,4 +391,6 @@ def verdict(sim: Dict[str, Any], hist: Dict[str, Any], rule: Rule, sessions_n: i
     word = {"FAVOURS": "the odds favour this trade", "AGAINST": "the odds are against this trade", "NEAR_BREAKEVEN": "near break-even",
             "MIXED": "simulation and real history disagree"}[code]
     tail = "" if h_vote else f" (history has under {MIN_HISTORY_SESSIONS} trades, so it does not vote)"
-    return {"code": code, "line": f"{word}: {sim_txt}; {hist_txt}{tail}. A reality check, not a forecast.", "be_win": be, "be_win_net": be_net}
+    if h_vote and hm > MARGIN_R_HIST + 1e-9:
+        tail += f" (history is noisy: it needs more than {hm:.2f} R either way to vote)"
+    return {"code": code, "line": f"{word}: {sim_txt}; {hist_txt}{tail}. A reality check, not a forecast.", "be_win": be, "be_win_net": be_net, "hist_margin_r": hm}

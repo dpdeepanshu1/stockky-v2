@@ -35,7 +35,7 @@ from control.kit import current_profile as _ms_current_profile
 import cost_model
 import entry_product
 import models
-from audit.logger import log_action
+from audit.logger import log_action, log_action_behind
 from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure, shared_order_budget, shared_symbol_lock
 from market_feed.feed import get_quotes, get_preview_quotes, MARKET_DATA_URL
 from notifier import notify_async
@@ -46,7 +46,7 @@ from tz_utils import ist_now, is_market_open_ist
 import pipeline_status as pstat
 from watchlist_engine import symbol_filter as _symbol_filter
 from execution.dhan_client import round_to_tick
-from entry_engine import gap_event, setup_live, setup_stamp, approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, soft_gates, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
+from entry_engine import size_floor, gap_event, setup_live, setup_stamp, approve_first, calendar_gate, circuit_gate, event_risk, kronos_gate, liquidity_gate, soft_gates, opening_gate, order_flow, opening_guard, opening_protect, orb_shadow, preopen, prev_day, regime_rules, stopout_guard, structure_gate, timesfm_gate, tm_gate, vix_gate, vwap_gate
 from entry_engine import day_spike_gate, flow_gate, gap_rank, open_cues
 from entry_engine import board_client as _board_client, shortlist as _shortlist
 from entry_engine import pullback_rearm as _rearm
@@ -1329,6 +1329,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             # a smaller slice of equity than the same candidate would on a
             # healthy regime day.
             adj_risk_pct *= config.ENTRY_REGIME_OVERRIDE_RISK_SCALE
+        _risk_base_pct = adj_risk_pct          # E285 round 132: the size penalties below stack on this; size_floor.py keeps the stack from taking the size under SIZE_STACK_FLOOR of it
         # group330: elevated / spiking India VIX -> smaller position (config.VIX_CAUTION_SIZE_MULT). 1.0 when VIX is unknown or calm.
         _vix_mult = vix_gate.size_mult(_vix_snap)
         if _vix_mult < 1.0:
@@ -1447,6 +1448,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             db.add(decision)
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _ns_reject, "risk_verdict": None, "gate_tag": "no_setup"})
             continue
+        adj_risk_pct, _floor_lifted = size_floor.floored_risk_pct(_risk_base_pct, adj_risk_pct)
+        if _floor_lifted:
+            logger.info("entry_engine: %s %s size penalties stacked below x%.2f of the base risk; lifted to the floor (%.2f%% of equity)",
+                        mode, cand.symbol, size_floor.floor(), adj_risk_pct)
         max_trade_risk = account_state.equity * (adj_risk_pct / 100.0)
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
         # group470: size on the risk a stop-out REALLY costs (stop distance + the usual fill beyond the stop). Floor of 1 share, so a trade
@@ -1471,7 +1476,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # group 394: half size (OPENING_SIZE_MULT) inside the opening window; unchanged outside it. Applied to the quantity, after the risk cap
         # check above, so a 1-share trade that fits the full cap is not turned into a WAIT (same rule as position-stocks group 392).
-        _open_mult = opening_protect.size_mult(mode)
+        _open_mult = size_floor.open_window_mult(_risk_base_pct, adj_risk_pct, opening_protect.size_mult(mode))      # E285 round 132: eased when the stack is already at the floor
         if _open_mult < 1.0 and proposed_qty > 1:
             _oq = opening_protect.scaled_qty(proposed_qty, _open_mult)
             if _oq < proposed_qty:
@@ -2268,7 +2273,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
     _write_behind.divert_pending_waits(db)                     # A3: WAIT rows go behind the cycle; the commit below carries orders / ENTER rows only
     db.commit()
-    log_action(db, actor="system", action="ENTRY_CYCLE", mode=mode,
+    log_action_behind(db, actor="system", action="ENTRY_CYCLE", mode=mode,
                detail=(
                    f"evaluated={len(candidates)} entered={entered} waited={waited} "
                    f"rejected={rejected} market_score={market_score} "
@@ -2608,7 +2613,7 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 logger.debug("expire_stale_orders: rollback after the failure above also failed", exc_info=True)
     if expired:
         db.commit()
-        log_action(db, actor="system", action="ORDERS_EXPIRED", mode=mode,
+        log_action_behind(db, actor="system", action="ORDERS_EXPIRED", mode=mode,
                    detail=f"count={expired}")
     return expired
 

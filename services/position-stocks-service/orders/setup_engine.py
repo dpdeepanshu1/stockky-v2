@@ -177,7 +177,11 @@ def classify(facts: Dict[str, Any]) -> Dict[str, Any]:
         win, extra = found[0], [x["id"] for x in found[1:]]
         pens = {str(k): float(v) for k, v in (f.get("penalties") or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
         pen_total = sum(pens.values())
-        if pen_total >= PENALTY_SKIP:
+        skip_at = PENALTY_SKIP
+        ps = f.get("penalty_skip")                                    # optional: a caller may raise (never lower) the skip total; absent = PENALTY_SKIP
+        if isinstance(ps, (int, float)) and not isinstance(ps, bool) and ps == ps and ps > PENALTY_SKIP:
+            skip_at = float(ps)
+        if pen_total >= skip_at:
             return {"id": None, "skip": "PENALTY_TOO_HIGH", "penalty_total": round(pen_total, 4)}
         mult = _size(win["id"], sl, f, pen_total)
         conf = win["met"] + extra                                     # an extra setup that fired is stored as a confirmation

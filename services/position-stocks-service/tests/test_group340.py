@@ -109,6 +109,7 @@ class TestTargetCap:
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_PCT", 2.5)
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_MIN_RR", 1.5)
         monkeypatch.setattr(config, "SCALP_TARGET_CAP_MIN_STOP_PCT", 0.8)
+        monkeypatch.setattr(config, "SCALP_TARGET_CAP_KEEP_RR", False, raising=False)   # E285 round 126: these cases pin the old hard cap
 
     def test_target_above_cap_is_cut_and_stop_tightened_for_rr(self):
         out = adaptive.apply_target_cap(_levels(4.0, 2.0), 100.0)

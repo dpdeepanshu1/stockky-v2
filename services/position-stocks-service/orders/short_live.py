@@ -67,6 +67,24 @@ def _open_counts(db: Session) -> tuple:
     return len(rows), len(shorts)
 
 
+def book_full(db: Session) -> Optional[str]:
+    """E285 round 134: why NO short can be entered right now, before any scan, else None. The same two counts `_live_guards` ends on (every open position, longs + shorts, against
+    MAX_CONCURRENT_SCALP_POSITIONS; open shorts against the highest cap any short setup has earned), so a pass that is skipped here could only have ended in SHORT_MAX_POSITIONS.
+    Mirrors the long side's `_open_slots_full` (ENTRY_PRECHECK off = never skip). Fail-open: any error returns None and the normal pass runs."""
+    try:
+        if not getattr(config, "ENTRY_PRECHECK", True):
+            return None
+        n_open, n_short = _open_counts(db)
+        if n_open >= config.MAX_CONCURRENT_SCALP_POSITIONS:
+            return f"MAX_POSITIONS:{n_open}"
+        cap = _short_cap(db, None)
+        if n_short >= cap:
+            return f"{n_short} live shorts open (max {cap})"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("short live: book_full check failed (%s) - scanning as usual", e)
+    return None
+
+
 def _real_gate(db: Session) -> Any:
     """The REAL gate row, the one the long cycle (main._run_cycle) and every switch on the dashboard use. None when it does not exist."""
     return db.query(ScalpGateState).filter_by(mode="REAL").first()

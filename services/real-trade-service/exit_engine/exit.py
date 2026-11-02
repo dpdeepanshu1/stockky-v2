@@ -55,7 +55,7 @@ import config
 import cost_model
 
 import models
-from audit.logger import log_action
+from audit.logger import log_action, log_action_behind
 from execution import dhan_client, shared_order_budget
 from market_feed.feed import get_quotes
 from exit_engine import excursion as _excursion   # group 397
@@ -505,7 +505,7 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
             )
 
     if expired:
-        log_action(db, actor="system", action="EXIT_ORDERS_EXPIRED", mode=mode,
+        log_action_behind(db, actor="system", action="EXIT_ORDERS_EXPIRED", mode=mode,
                    detail=f"count={expired}")
     return expired
 

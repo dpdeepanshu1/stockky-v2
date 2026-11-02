@@ -77,7 +77,7 @@ def test_entry_wiring():
     assert i("_gap_waived: list = []") < i("gap_event.gap_kind(_pg[") < i("gap_event.large_gap_penalty(preopen.gap_of(candidate.symbol))") < i("setup_live.classify_long(")
     assert i("setup_live.classify_long(") < i("gap_event.unconfirmed_reason(_gap_waived") < i("setup_live.no_setup_refusal(")
     assert '"GAP_AGAINST_EVENT", "GAP_UP_NOT_CONFIRMED"' in src                           # per-symbol skips
-    assert src.count("gap_event.against_reason(") == 3                                    # opening gate, pre-open penalty, veto-mode pre-open
+    assert src.count("gap_event.against_reason(") == 4                                    # opening gate, SOFT gap-down part (E285 batch 5), pre-open penalty, veto-mode pre-open
 
 
 def test_catalog_has_both_flags():

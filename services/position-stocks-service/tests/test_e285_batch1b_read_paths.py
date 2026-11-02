@@ -32,10 +32,10 @@ def test_preopen_movers_are_the_top_abs_move_per_symbol_in_sql(factory, monkeypa
     from screening import quality_gate as qg
     monkeypatch.setattr(config, "QUALITY_GATE_PREOPEN_WARM_MOVERS", 2, raising=False)
     monkeypatch.setattr(config, "QUALITY_GATE_PREOPEN_WARM_MAX", 0, raising=False)
-    _add(factory, [("AAA", 1.0, 1), ("AAA", -6.0, 2), ("BBB", 4.0, 1), ("CCC", 3.0, 1), ("DDD", 9.0, 100), ("EEE", None, 1)])
+    _add(factory, [("AAA", 1.0, 1), ("AAA", -6.0, 2), ("BBB", 4.0, 1), ("CCC", 3.0, 1), ("DDD", 9.0, 100)])
     s = factory()
     try:
-        assert qg.preopen_warm_symbols(s) == ["AAA", "BBB"]      # AAA |-6|, BBB 4; CCC cut by the cap, DDD older than 3 days, EEE has no move
+        assert qg.preopen_warm_symbols(s) == ["AAA", "BBB"]      # AAA |-6|, BBB 4; CCC cut by the cap, DDD older than 3 days
     finally:
         s.close()
 

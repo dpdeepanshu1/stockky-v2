@@ -305,14 +305,14 @@ def run(session_factory: Any, now_utc: Optional[datetime] = None, force: bool = 
             if s is not None:
                 s.rollback()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("gate_policy_job: session rollback failed (ignored)", exc_info=True)
         return {"ok": False, "day": today, "error": f"{type(e).__name__}: {str(e)[:200]}", "gates": {}}
     finally:
         try:
             if s is not None:
                 s.close()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("gate_policy_job: session close failed (ignored)", exc_info=True)
 
 
 def set_state(session_factory: Any, gate: str, state: str, side: str = gate_policy.LONG, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
@@ -341,14 +341,14 @@ def set_state(session_factory: Any, gate: str, state: str, side: str = gate_poli
             if s is not None:
                 s.rollback()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("gate_policy_job: session rollback failed (ignored)", exc_info=True)
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
     finally:
         try:
             if s is not None:
                 s.close()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("gate_policy_job: session close failed (ignored)", exc_info=True)
 
 
 def tick_due() -> bool:

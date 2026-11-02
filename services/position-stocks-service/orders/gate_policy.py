@@ -151,7 +151,7 @@ def refresh(session_factory: Any) -> bool:
             if s is not None:
                 s.close()
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("gate_policy: session close failed (ignored)", exc_info=True)
 
 
 def refresh_due() -> bool:

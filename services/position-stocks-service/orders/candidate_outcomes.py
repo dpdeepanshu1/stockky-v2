@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import calendar
 import json
+import logging
 import os
 import random
 from datetime import datetime, timezone
 from urllib.parse import quote, unquote
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+logger = logging.getLogger("position-stocks.candidate_outcomes")
 
 HORIZONS_MIN = (5, 15, 30, 60)
 DEDUPE_BUCKET_S = 300
@@ -150,8 +153,8 @@ def baseline_values(day: str, ts: float, sym: str, side: str, symbols: Optional[
             r60 = lab.get("r60") if lab.get("status") == "ok" else None
             if r60 is not None:
                 out.append(round(float(r60) - cost_pct, 4))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 - the baseline is a reference number; a failure leaves what was drawn so far
+        logger.debug("candidate_outcomes: random baseline draw failed (partial result kept)", exc_info=True)
     return out
 
 

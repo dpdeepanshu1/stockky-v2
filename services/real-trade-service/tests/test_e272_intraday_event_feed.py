@@ -458,7 +458,7 @@ def _wire_pass(monkeypatch_doc, now_ist):
     return calls
 
 
-def test_whole_feed_pass_stores_vetoes_and_queues_a_trigger():
+def test_whole_feed_pass_stores_vetoes_and_queues_a_trigger(monkeypatch):
     now = _at_ist(9, 30)
     doc = _feed_doc(now, [("ABC", "order", 1, "Moneycontrol", "ABC bags Rs 900 crore order", 4), ("BAD", "regulatory", -1, "LiveMint", "BAD faces SEBI probe", 3),
                           ("DEF", "other", 0, "LiveMint", "DEF holds AGM", 2)])
@@ -470,7 +470,9 @@ def test_whole_feed_pass_stores_vetoes_and_queues_a_trigger():
     assert set(snap["symbols"]) == {"ABC", "BAD"} and snap["triggered"] == {"REAL": ["ABC"]}
     cands = db.rows["TradeCandidate"]
     assert len(cands) == 1 and cands[0].symbol == "ABC" and cands[0].source_tab == "intraday_event"
-    assert inews.event_veto_reason(db, "REAL", "BAD") and inews.event_veto_reason(db, "REAL", "ABC") is None
+    with monkeypatch.context() as _m:       # the veto reader judges "today" and the event age by the clock: pin both to the pass's own day and time, so the test does not depend on when it runs
+        _m.setattr("tz_utils.ist_today_str", lambda now=None: "2026-11-02")
+        assert inews.event_veto_reason(db, "REAL", "BAD", now=now + timedelta(minutes=1)) and inews.event_veto_reason(db, "REAL", "ABC", now=now + timedelta(minutes=1)) is None
     # the same feed on the next tick changes nothing and triggers nothing again
     res2 = asyncio.run(inews.run_intraday_news_check(db, now=now + timedelta(minutes=3)))
     assert res2["new"] == 0 and res2["triggered"] == 0 and len(db.rows["TradeCandidate"]) == 1

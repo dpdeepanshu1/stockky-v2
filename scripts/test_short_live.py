@@ -43,7 +43,7 @@ for m in ("calendar_gate", "cost_gate", "depth_gate", "entry_pause", "rr_floor",
     mod = types.ModuleType("orders." + m); sys.modules["orders." + m] = mod; setattr(orders, m, mod)
 sys.modules["orders.conviction"].short_decision = lambda *a, **k: None; sys.modules["orders.conviction"].note = lambda *a, **k: ""   # E266: sizing by conviction is tested in tests/test_e266_conviction_sizing.py
 sp = types.ModuleType("orders.sell_probe"); sp.passed = lambda: True; sys.modules["orders.sell_probe"] = sp; setattr(orders, "sell_probe", sp)   # E108: the T6 PASS is on record in this script (its own tests: tests/test_sell_probe.py)
-ad = types.ModuleType("orders.adaptive"); ad.compute = lambda *a, **k: None; ad.round_to_tick = lambda x: round(round(x / 0.05) * 0.05, 2); sys.modules["orders.adaptive"] = ad
+ad = types.ModuleType("orders.adaptive"); ad.compute = lambda *a, **k: None; ad.round_to_tick = lambda x: round(round(x / 0.05) * 0.05, 2); ad.widen_to_atr_floor = lambda levels, ltp, sym, now=None: levels; sys.modules["orders.adaptive"] = ad   # E285 batch 3: short_entry imports it; unchanged = the "no widening" case
 
 import config, types
 from unittest import mock

@@ -227,7 +227,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
         _refuse(db, cand, "SHORT_LEVELS", why)
         return None
     from screening import opening_gate
-    why = opening_gate.stop_reject(sym, levels.stop_pct, now)
+    why = opening_gate.stop_reject(sym, budget_stop_pct if getattr(config, "SHORT_STOP_FLOOR_ON_NORMAL_STOP", False) else levels.stop_pct, now)      # E285 round 135: switch = judge the normal stop
     if why:
         _refuse(db, cand, "SHORT_OPENING_STOP", why)
         return None

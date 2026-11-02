@@ -1677,6 +1677,7 @@ services/position-stocks-service/tests/test_group483_tm_gate_history_noise.py
 services/position-stocks-service/tests/test_group488_scrip_master_stagger.py
 services/position-stocks-service/tests/test_group_e285_round133_short_refusal_detail.py
 services/position-stocks-service/tests/test_group_e285_round134_short_book_full_skip.py
+services/position-stocks-service/tests/test_group_e285_round135_short_floor_on_normal_stop.py
 services/position-stocks-service/tests/test_half_sell_probe.py
 services/position-stocks-service/tests/test_ledger_coverage.py
 services/position-stocks-service/tests/test_ledger_stale_sync_e186.py

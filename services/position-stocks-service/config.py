@@ -262,6 +262,10 @@ MARKET_STATE_SHORT_MULT = _ms_float("MARKET_STATE_SHORT_MULT", 1.0, 0.0, 1.0)
 # "tighter stop" rows). 0.3 .. 1.0, 1.0 = off. Position size is still worked out from the NORMAL stop, so a tighter stop lowers the rupee risk, never raises the size.
 SHORT_STOP_MULT_STRESSED = _ms_float("SHORT_STOP_MULT_STRESSED", 0.8, 0.3, 1.0)
 SHORT_STOP_MULT_PANIC = _ms_float("SHORT_STOP_MULT_PANIC", 0.6, 0.3, 1.0)
+# E285 round 135: the opening / ATR-floor stop check (screening/opening_gate.stop_reject) judges a short's stop AFTER the stressed / panic / learned tightening, so a deliberate
+# tightening can push it under the floor and the short is refused (SHORT_OPENING_STOP). true = judge the NORMAL stop (before those tightenings); the stop actually sent is still the
+# tightened one and the size still comes from the normal stop. false (ships) = the old check. Short only; no long trade changes.
+SHORT_STOP_FLOOR_ON_NORMAL_STOP = _get_bool("SHORT_STOP_FLOOR_ON_NORMAL_STOP", False)
 
 # Short selling step 5 (shadow entry, 2026-10-23): the mirrored entry rules, read at call time by orders/short_gates.py and orders/short_entry.py.
 # None touches a long rule, and with the short mode off none is read at all.

@@ -1,3 +1,21 @@
+## 2 Nov 2026 - E285 round 136: the calibrator may not tune STRUCTURE_ROOM_BEYOND_PENALTY (calibration-runner, test fix)
+
+ * **Your request (2 Nov):** "do the next fix" - after round 135, which named this failing test.
+ * **Found:** `calibration-runner-service/tests/test_regime_shadow_report.py::test_every_structure_and_market_state_key_is_either_a_rule_or_protected` failed: round 129 added `STRUCTURE_ROOM_BEYOND_PENALTY` (Position Stocks: a price already above the resistance is sized down instead of refused) to the catalog, but it was neither a calibration rule nor on the protected list.
+ * **Change (`autocalib.py` PROTECTED):** the switch is protected, with the reason. It decides whether a breakout through resistance is refused or sized down, which is a gate setting for you, not for a report. Nothing was calibrating it, so no behaviour changes; the guard test is green again.
+ * **Tests:** calibration-runner suite 282 passed (SQLite-free, real pytest). Position Stocks suite unchanged from round 135 (5,348 passed).
+ * **Rebuild:** `docker compose build calibration-runner-service && docker compose up -d calibration-runner-service`.
+
+## 2 Nov 2026 - E285 round 135: switch to judge a short's ATR-floor stop on the normal stop, ships OFF (position-stocks)
+
+ * **Your request (2 Nov):** "do the next fix" - after round 134; the code-only short refusals left were `SHORT_OPENING_STOP` (12) and `SHORT_STRUCTURE_NODATA` (10).
+ * **Found (code):** a long whose stop is under the stock's daily-ATR floor is first widened (`widen_to_atr_floor`, round 126) and only refused if that does not fit. A short has no widening, and its stop is judged AFTER the stressed / panic tightening (`SHORT_STOP_MULT_STRESSED` 0.8, `SHORT_STOP_MULT_PANIC` 0.6) and the learned-stop tightening. A deliberate tightening can therefore push it under the floor, and `opening_gate.stop_reject` refuses it as `SHORT_OPENING_STOP`.
+ * **Change (`SHORT_STOP_FLOOR_ON_NORMAL_STOP`, default false, live, on the Short selling page and on the calibrator's protected list):** true = the floor is checked on the NORMAL stop (the one before those tightenings). The stop sent to Dhan is still the tightened one and the size still comes from the normal stop, so the rupee risk per trade does not rise. false = exactly the old check.
+ * **Not changed:** nothing ships different. No long trade, no other short gate, no limit, no size. `SHORT_STRUCTURE_NODATA` is left as it is (fail closed); `last_refusal` from round 133 now says which of its three causes applies.
+ * **Risk note:** with the switch on, a short may go out with a stop under the ATR floor (a stop that normal noise can reach) in stressed / panic weather. That is what the tightening already asked for; the floor check used to veto it. Turn it on only after `symbols_by_code` shows `SHORT_OPENING_STOP` hit several different names.
+ * **Tests:** `tests/test_group_e285_round135_short_floor_on_normal_stop.py` (3: default off, off judges the tightened stop and refuses, on judges the normal stop and keeps the tightened stop and the size). Full position-stocks suite: 5,348 passed (SQLite, real pytest).
+ * **Rebuild:** `docker compose build position-stocks-service && docker compose up -d position-stocks-service` (before 09:15 or after 15:30 IST).
+
 ## 2 Nov 2026 - E285 round 134: the short cycle no longer runs the quality-gate calls while no slot is free (position-stocks)
 
  * **Your request (2 Nov):** "do the next fix" - after the round 133 zip; your counters had `SHORT_MAX_POSITIONS` at 369 of 484 refusals with 1 short entered.

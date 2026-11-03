@@ -1256,6 +1256,7 @@ def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
             logger.warning("reconcile: exit-fill lookup — failed to fetch order list: %s", e)
             return None
     found: list[float] = []
+    found_vtt: list[float] = []
     for r in orders or []:
         if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != _side.exit_transaction_type(pos):
             continue
@@ -1275,6 +1276,11 @@ def _exit_fill_from_orderbook(db: Session, pos: ScalpPosition, ref_price: float,
         if ref_price and abs(avg - ref_price) / ref_price > 0.10:
             continue
         found.append(avg)
+        if str(r.get("correlationId") or r.get("tag") or "").upper().startswith("VTT"):
+            found_vtt.append(avg)
+    if len(found) > 1 and len(found_vtt) == 1:
+        # E285 round 169 (RATNAVEER): two SELLs matched (Dhan's own VTT leg order and the app's later exit). Only the Dhan-made one is the leg fill.
+        found = found_vtt
     if len(found) == 1:
         # group344: the 5-minute auto-repair re-reads the same row and used to log this line again every time (it looked like a
         # reconcile loop). Logged once per position and fill per process; the repair passes quiet=True for rows it only re-confirms.
@@ -1998,6 +2004,32 @@ def run_exit_reconciliation(db: Session) -> int:
         elif stop_leg and str(stop_leg.get("orderStatus", "")).upper() in _FILLED_STATUSES:
             hit_leg, hit_kind = stop_leg, "STOP_HIT"
 
+        # E285 round 169 (RATNAVEER, 3 Nov): the leg can fire (Dhan makes its own VTT order) and fill while the Super Order list still does not
+        # read the leg TRADED, and the leg dict has no fill price. The row then stayed OPEN for 12 minutes and the app sent a second exit.
+        # The filled VTT order in the plain order book is the proof: book from it (price = its real fill).
+        _child_px: Optional[float] = None
+        if (hit_kind is None and pos.status in ("OPEN", "EXIT_LEGS_REJECTED") and getattr(config, "RECONCILE_CHILD_FILL", True)
+                and (_entry_filled_qty(row) > 0 or str(row.get("orderStatus", "")).upper() in _FILLED_STATUSES)):
+            try:
+                from orders import leg_child_guard
+                _kid = leg_child_guard.filled_child_exit(_cached_order_list(db), pos, _side.exit_transaction_type(pos))
+            except Exception as e:  # noqa: BLE001
+                _kid = None
+                logger.warning("reconcile: %s (id=%s) child-fill check failed: %s", pos.symbol, pos.id, e)
+            if _kid is not None:
+                _px = _kid["price"]
+                _trig = [l for l in (target_leg, stop_leg) if l and str(l.get("orderStatus", "")).upper() == "TRIGGERED"]
+                if len(_trig) == 1:
+                    hit_kind = "TARGET_HIT" if _trig[0] is target_leg else "STOP_HIT"
+                else:
+                    _dt = abs(_px - float(pos.target_price or 0.0)) if pos.target_price else float("inf")
+                    _ds = abs(_px - float(pos.stop_price or 0.0)) if pos.stop_price else float("inf")
+                    hit_kind = "TARGET_HIT" if _dt < _ds else "STOP_HIT"
+                hit_leg = {"orderId": _kid["order_id"]}
+                _child_px = _px
+                logger.warning("reconcile: %s (id=%d) the Super Order list does not show a filled leg, but Dhan's own leg order %s filled at Rs%.2f - booking %s from it",
+                               pos.symbol, pos.id, _kid["order_id"], _px, hit_kind)
+
         # 2026-09-15 fix (session41b — DATAMATICS/ZENSARTECH rejection storm):
         # When BOTH exit legs (TARGET_LEG and STOP_LOSS_LEG) are REJECTED by
         # Dhan — circuit-limit, surveillance restriction, or similar — the
@@ -2218,7 +2250,9 @@ def run_exit_reconciliation(db: Session) -> int:
         _trigger_price = pos.target_price if hit_kind == "TARGET_HIT" else pos.stop_price
         exit_price = None
         _confirmed = _leg_has_fill_price(hit_leg)
-        if not _confirmed:
+        if _child_px is not None:
+            exit_price, _confirmed = _child_px, True
+        elif not _confirmed:
             # 2026-10-05: the leg dict has no traded-price key, so the old chain
             # would book the leg's static trigger price as the "fill". Try the
             # real SELL fill in today's order book first (unique-match guarded).

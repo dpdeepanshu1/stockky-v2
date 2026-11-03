@@ -991,6 +991,8 @@ TRAIL_ACTIVATE_MAX_PCT = _get_float("TRAIL_ACTIVATE_MAX_PCT", 2.0)
 # E285 round 167 (JYOTICNC, 3 Nov): before an exit order is sent for a Super Order position, a leftover leg order that Dhan created itself (tag VTT...) is cancelled
 # and read back (orders/leg_child_guard.py). LEG_CHILD_GUARD=false = the old behaviour.
 LEG_CHILD_GUARD = _get_bool("LEG_CHILD_GUARD", True)
+# E285 round 169 (RATNAVEER, 3 Nov): reconcile books an exit from Dhan's own filled VTT leg order when the Super Order list does not yet show the leg TRADED. false = old behaviour.
+RECONCILE_CHILD_FILL = _get_bool("RECONCILE_CHILD_FILL", True)
 # E285 round 167: alert-only check that Dhan's net INTRADAY position of a stock this service traded today matches what the app believes it holds (orders/residual_guard.py).
 RESIDUAL_GUARD_ENABLED = _get_bool("RESIDUAL_GUARD_ENABLED", True)
 RESIDUAL_GUARD_INTERVAL_S = _get_float("RESIDUAL_GUARD_INTERVAL_S", 60.0)     # at most one Dhan positions read per this many seconds

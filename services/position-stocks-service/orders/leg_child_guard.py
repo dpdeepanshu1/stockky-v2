@@ -101,6 +101,26 @@ def find_children(rows: list, pos: Any, exit_side: str) -> list:
     return out
 
 
+def filled_child_exit(rows: list, pos: Any, exit_side: str) -> Optional[dict]:
+    """Pure. E285 round 169 (RATNAVEER, 3 Nov): the ONE Dhan-made leg order (tag VTT...) of this position that already filled its whole quantity, as
+    {"order_id", "price"}, or None. None also when there are two or more such orders (cannot tell which is the exit) or when the fill has no traded price.
+    Dhan's Super Order list can lag or carry no fill price on a triggered leg; this order in the plain order book is the real exit."""
+    qty = int(getattr(pos, "quantity", 0) or 0)
+    hits = []
+    for r in find_children(rows, pos, exit_side):
+        if _status(r) not in FILLED or qty <= 0:
+            continue
+        if _filled(r) not in (0, qty) and _filled(r) < qty:
+            continue
+        try:
+            px = float(r.get("averageTradedPrice") or r.get("average_traded_price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            hits.append({"order_id": _oid(r), "price": px})
+    return hits[0] if len(hits) == 1 else None
+
+
 def _alert(text: str) -> None:
     try:
         import notifier

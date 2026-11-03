@@ -66,6 +66,7 @@ PROBLEMS FOUND IN DEEP AUDIT:
 """
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 from collections import defaultdict, deque
@@ -327,6 +328,20 @@ def _bare_symbol(sym) -> str:
     return t
 
 
+def _bulk(fn):
+    """Round 151: run an all-symbol scan inside ws_client.bulk_scan(), so reading every symbol's buffer does not mark all of them
+    'in use' for the tick budget. A feed stand-in without bulk_scan (tests) just runs the function."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        ctx = getattr(ws_client, "bulk_scan", None)
+        if ctx is None:
+            return fn(*a, **k)
+        with ctx():
+            return fn(*a, **k)
+    return wrapper
+
+
+@_bulk
 def scan(open_symbols: Optional[Set[str]] = None, under_preferred: bool = False) -> List[Candidate]:
     """Run a full scan across all subscribed symbols and all four windows.
     Returns a list of Candidate objects sorted by composite_score descending.
@@ -577,6 +592,7 @@ def _momentum_consistency_down(buf, window_minutes: int) -> float:
     return sum(1 for p in prices if p <= mid) / len(prices)
 
 
+@_bulk
 def scan_shorts(open_symbols: Optional[Set[str]] = None) -> List[Candidate]:
     """The mirror of scan(): stocks whose rolling move over 1m/5m/15m/60m is a FALL of at least the same threshold as the long scan's. Same real-volume floor,
     spread cap and (caller-side) price floors. Candidate.pct_change is NEGATIVE; composite_score is positive, best first. Never raises on one bad symbol.

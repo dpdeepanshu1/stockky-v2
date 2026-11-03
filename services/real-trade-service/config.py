@@ -502,7 +502,7 @@ def _og_float(name, default):
 
 OPENING_GATE_ENABLED = ((os.getenv("OPENING_GATE_ENABLED") or "").strip() or "true").lower() == "true"
 OPENING_GATE_SETTLE_IST = (os.getenv("OPENING_GATE_SETTLE_IST") or "").strip() or "10:00"
-OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.0)   # group 399: 0 = no wait, entries from 09:15:00 (group 390: 0.5, group 268: 5)
+OPENING_GATE_MIN_MINUTES_AFTER_OPEN = _og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 15.0)   # E285 round 154 (plan item 8): 15 = first Real Trade entry at 09:30 (09:xx entries lost 280 net on 9 trades). 0 = entries from 09:15:00 (group 399 default), 45 = nothing before 10:00. Candidates stay queued and are re-checked.
 OPENING_GATE_RANGE_AFTER_MIN = _og_float("OPENING_GATE_RANGE_AFTER_MIN", 15.0)   # group 390: the day-range-position check applies only once the range has built up
 OPENING_GATE_MIN_CHANGE_PCT = _og_float("OPENING_GATE_MIN_CHANGE_PCT", -0.5)   # price vs previous close, lower bound
 OPENING_GATE_MAX_CHANGE_PCT = _og_float("OPENING_GATE_MAX_CHANGE_PCT", 3.0)    # upper bound; chasing a bigger move at the open is skipped
@@ -662,6 +662,9 @@ CYCLE_AUDIT_WRITE_BEHIND = ((os.getenv("CYCLE_AUDIT_WRITE_BEHIND") or "").strip(
 # E285 round 132 (2 Nov 2026): the stack of long-entry size penalties (VIX, calendar, regime rules, opening gate, soft gates, overseas lead, setup, opening window) may not take the
 # size under this fraction of the base risk (entry_engine/size_floor.py). 0 = off (the old unlimited stacking).
 SIZE_STACK_FLOOR = max(0.0, min(1.0, _og_float("SIZE_STACK_FLOOR", 0.35)))
+# E285 round 152 (plan item 7): when this many soft size penalties (structure, VWAP, drift, spike, gain room, liquidity ...) are stacked on one entry AND the stack
+# would take the size under SIZE_STACK_FLOOR, the entry is a WAIT instead of a lift to the floor (about 20 entries hit the floor in 30 minutes on 2 Nov). 0 = off (always lift).
+SIZE_STACK_SKIP_MIN_PENALTIES = max(0, int(_og_float("SIZE_STACK_SKIP_MIN_PENALTIES", 3)))
 STRUCTURE_OBS_EVAL_INTERVAL_S =max(60.0, _og_float("STRUCTURE_OBS_EVAL_INTERVAL_S", 3600.0))
 STRUCTURE_OBS_BATCH = max(1, int(_og_float("STRUCTURE_OBS_BATCH", 25)))
 STRUCTURE_OBS_HISTORY_TIMEOUT_S = max(1.0, _og_float("STRUCTURE_OBS_HISTORY_TIMEOUT_S", 8.0))
@@ -918,6 +921,10 @@ ENTRY_LAST_TIME_IST = _cal_str("ENTRY_LAST_TIME_IST", "14:00")
 # trade sized to lose exactly (entry - stop) x qty really lost more. Size is now worked out on (entry - stop) + entry x this % per share.
 # 0 = old sizing. A 1-share trade that fits the plain cap still goes through.
 STOP_OVERSHOOT_ALLOWANCE_PCT = max(0.0, _og_float("STOP_OVERSHOOT_ALLOWANCE_PCT", 1.0))
+# E285 round 152 (3 Nov, plan item 9): since 19 Oct 1 of 10 same-day stops filled beyond the stop (by 0.24 points; exits within 0.06%), because the
+# broker stop is live. When OVERNIGHT_HOLD_ENABLED is false every position is same-day, so sizing uses this smaller allowance instead of the 1% one
+# (about 20% fewer shares were being cut). 0 = same-day sizing uses no allowance. Set it equal to STOP_OVERSHOOT_ALLOWANCE_PCT for the old behaviour.
+STOP_OVERSHOOT_SAMEDAY_PCT = max(0.0, _og_float("STOP_OVERSHOOT_SAMEDAY_PCT", 0.25))
 
 # group 470 / E273 round 15: the opening range (entry_engine/orb_shadow.py + orb_bars.py). ORB_MODE is live (default) | off. Live = the range and the closed-bar
 # trigger are written onto flow_json["orb"] AND the swing entry reads the first 5 minutes of the 1-minute bars (SWING_OPEN_CONFIRM_ENABLED). off = nothing
@@ -1289,6 +1296,11 @@ ENTRY_MAX_DRIFT_ATR                 = float(((os.getenv("ENTRY_MAX_DRIFT_ATR") o
 ENTRY_CONVICTION_MIDPOINT           = float(((os.getenv("ENTRY_CONVICTION_MIDPOINT") or "").strip() or "65.0"))
 ENTRY_CONVICTION_MAX_SCALE          = float(((os.getenv("ENTRY_CONVICTION_MAX_SCALE") or "").strip() or "0.25"))
 EXIT_BREAKEVEN_ATR_TRIGGER          = float(((os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER") or "").strip() or "1.0"))
+# E285 round 156 (plan item 11): the breakeven stop sat at the exact entry price, which is a NET loss once charges are paid (one breakeven fired at +1.28% and
+# exited at +0.10%). The stop now goes to entry + the estimated round-trip charges per share + BREAKEVEN_BUFFER_PCT of entry (default 0.05 %), so a stop-out at
+# "breakeven" is about zero net. BREAKEVEN_COVER_CHARGES=false = the old exact-entry stop. Never placed at or above the current price (then the old entry level is used).
+BREAKEVEN_COVER_CHARGES = ((os.getenv("BREAKEVEN_COVER_CHARGES") or "").strip() or "true").lower() == "true"
+BREAKEVEN_BUFFER_PCT = max(0.0, _og_float("BREAKEVEN_BUFFER_PCT", 0.05))
 EXIT_EMERGENCY_LOSS_MULT            = float(((os.getenv("EXIT_EMERGENCY_LOSS_MULT") or "").strip() or "1.5"))
 EXIT_PARTIAL_FRACTION               = float(((os.getenv("EXIT_PARTIAL_FRACTION") or "").strip() or "0.60"))
 EXIT_MAX_HOLD_DAYS                  = int(((os.getenv("EXIT_MAX_HOLD_DAYS") or "").strip() or "10"))
@@ -1570,6 +1582,30 @@ CHARGES_DELIVERY_BROKERAGE_RS = float(((os.getenv("CHARGES_DELIVERY_BROKERAGE_RS
 # a sizing constraint.
 MIN_TRADE_VALUE          = float(((os.getenv("MIN_TRADE_VALUE") or "").strip() or "20.0"))
 MIN_EDGE_TO_COST_RATIO   = float(((os.getenv("MIN_EDGE_TO_COST_RATIO") or "").strip() or "3.0"))
+# E285 round 153 (plan item 6): Gate 5.6 compared the edge IF THE FULL TARGET IS HIT with the round-trip cost, but a target is hit in about 1 trade of 3
+# (real win rate 33-41%, break-even at 1:2 is 33%). The edge is now weighted by this win chance before it is compared with MIN_EDGE_TO_COST_RATIO x cost
+# (0.40 x full edge >= 3 x cost, i.e. the full target must clear 7.5x the charges). 1.0 = the old full-target comparison. Blank / junk / out of (0, 1] = 0.40.
+def _cost_gate_win_prob() -> float:
+    try:
+        v = float(((os.getenv("COST_GATE_WIN_PROB") or "").strip() or "0.40"))
+        return v if 0.0 < v <= 1.0 else 0.40
+    except ValueError:
+        return 0.40
+
+
+COST_GATE_WIN_PROB = _cost_gate_win_prob()
+# E285 round 153: charges scale with trade value, so the ratio above is nearly the same at every size (about 5.6x for a 1.5 % target) and cannot refuse a tiny order.
+# This floor is in rupees: win-chance-weighted gain MINUS estimated charges must reach it (1 share of a Rs 300 stock at a 1.5 % target = Rs 1.5, refused;
+# 2 shares of a Rs 500 stock = Rs 5, passes). 0 = off. Blank / junk / negative = 3.0.
+def _min_net_edge_rs() -> float:
+    try:
+        v = float(((os.getenv("MIN_NET_EDGE_RS") or "").strip() or "3.0"))
+        return v if v >= 0.0 else 3.0
+    except ValueError:
+        return 3.0
+
+
+MIN_NET_EDGE_RS = _min_net_edge_rs()
 
 # 2026-09-21 NEW (session79): flat rupee ceiling on a single trade's
 # position value (entry_price × final_qty), separate from and in addition

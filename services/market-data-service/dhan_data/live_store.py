@@ -19,6 +19,8 @@ from typing import List, Optional
 
 from . import config
 
+import live_write_retry as _lwr
+
 logger = logging.getLogger("dhan-data.live-store")
 
 _q: "queue.Queue[List[dict]]" = queue.Queue(maxsize=3)
@@ -248,6 +250,82 @@ def _warn_throttled(msg: str, *args) -> None:
     logger.warning(msg, *args)
 
 
+# E285 round 159 (plan item 17): a chunk that fails for good (not a timeout that the half-split then saves, or one of the halves failing again,
+# or the held-position chunk) used to lose its rows until the symbol's next poll. Those rows now go to _RETRY and are sent ONCE more, in smaller
+# transactions (LIVE_QUOTES_RETRY_CHUNK rows), right after that write in the same writer pass - see live_write_retry.py for the rules (once, newer wins, not older than
+# LIVE_QUOTES_RETRY_MAX_AGE_S, held-position rows only while the Oracle back-off is open). LIVE_QUOTES_RETRY_MAX_AGE_S=0 turns it off.
+_RETRY = _lwr.RetryBox()
+
+
+def _merge_sql(dialect: str) -> str:
+    """The upsert statement for the live_quotes table (Oracle MERGE / Postgres ON CONFLICT), source 'dhan'."""
+    if dialect == "oracle":
+        return ("MERGE INTO live_quotes d USING ("
+                "SELECT :s AS symbol, :l AS ltp, :o AS ohlc_json, :v AS volume FROM dual"
+                ") s ON (d.symbol = s.symbol) "
+                "WHEN MATCHED THEN UPDATE SET d.ltp = s.ltp, d.ohlc_json = s.ohlc_json, "
+                "d.volume = s.volume, d.source = 'dhan', d.updated_at = SYSTIMESTAMP "
+                "WHEN NOT MATCHED THEN INSERT (symbol, ltp, ohlc_json, volume, source, updated_at) "
+                "VALUES (s.symbol, s.ltp, s.ohlc_json, s.volume, 'dhan', SYSTIMESTAMP)")
+    return ("INSERT INTO live_quotes (symbol, ltp, ohlc_json, volume, source, updated_at) "
+            "VALUES (:s, :l, :o, :v, 'dhan', now()) "
+            "ON CONFLICT (symbol) DO UPDATE "
+            "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
+            "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()")
+
+
+def retry_failed() -> int:
+    """Send the rows of earlier failed chunks once more, LIVE_QUOTES_RETRY_CHUNK rows per transaction. A retry that fails is dropped (the poller
+    supplies a fresh row next cycle). Returns the number of rows written. Never raises."""
+    global _backoff_until
+    try:
+        if len(_RETRY) == 0:
+            return 0
+        prio = priority_symbols()
+        backoff = in_backoff()
+
+        def _superseded(key, ts) -> bool:
+            prev = _last_sent.get(key)
+            return prev is not None and prev[1] >= ts
+
+        def _hold(key) -> bool:
+            return backoff and _clean(key) not in prio
+
+        due = _RETRY.take_due(_superseded, _hold)
+        if not due:
+            return 0
+        from angelone_ws_feed import _get_live_quotes_engine, _ensure_schema
+        engine, dialect = _get_live_quotes_engine()
+        if engine is None:
+            return 0
+        _ensure_schema(engine, dialect)
+        from sqlalchemy import text
+        stmt = text(_merge_sql(dialect))
+        written = 0
+        for chunk in _lwr.chunks(due, _lwr.chunk_size()):
+            params = [p for _, p in chunk]
+            try:
+                with engine.begin() as conn:
+                    conn.execute(stmt, params)
+                written += len(params)
+                _RETRY.note(written=len(params))
+                _now_m = time.monotonic()
+                with _lock:
+                    for p in params:
+                        _last_sent[p["s"]] = (p["l"], _now_m)
+            except Exception as e:  # noqa: BLE001 - once only: dropped, not queued again
+                _RETRY.note(failed=len(params))
+                with _lock:
+                    _stats["last_error"] = f"{type(e).__name__}: {str(e)[:100]}"
+                    if _is_timeout(e):
+                        _stats["timeouts"] += 1
+                        if backoff_s() > 0:
+                            _backoff_until = time.monotonic() + backoff_s()
+        return written
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _write_sync(rows: List[dict]) -> int:
     """Upsert `rows` in chunks of DHAN_LIVE_WRITE_CHUNK, each in its own transaction. A chunk that fails (for
     example an Oracle call timeout) is counted and skipped; the remaining chunks are still written. Returns the
@@ -268,20 +346,7 @@ def _write_sync(rows: List[dict]) -> int:
         return 0
     _ensure_schema(engine, dialect)
     from sqlalchemy import text
-    if dialect == "oracle":
-        sql = ("MERGE INTO live_quotes d USING ("
-               "SELECT :s AS symbol, :l AS ltp, :o AS ohlc_json, :v AS volume FROM dual"
-               ") s ON (d.symbol = s.symbol) "
-               "WHEN MATCHED THEN UPDATE SET d.ltp = s.ltp, d.ohlc_json = s.ohlc_json, "
-               "d.volume = s.volume, d.source = 'dhan', d.updated_at = SYSTIMESTAMP "
-               "WHEN NOT MATCHED THEN INSERT (symbol, ltp, ohlc_json, volume, source, updated_at) "
-               "VALUES (s.symbol, s.ltp, s.ohlc_json, s.volume, 'dhan', SYSTIMESTAMP)")
-    else:
-        sql = ("INSERT INTO live_quotes (symbol, ltp, ohlc_json, volume, source, updated_at) "
-               "VALUES (:s, :l, :o, :v, 'dhan', now()) "
-               "ON CONFLICT (symbol) DO UPDATE "
-               "SET ltp=EXCLUDED.ltp, ohlc_json=EXCLUDED.ohlc_json, "
-               "volume=EXCLUDED.volume, source=EXCLUDED.source, updated_at=now()")
+    sql = _merge_sql(dialect)
     written = 0
     last_exc = None
     stmt = text(sql)
@@ -316,6 +381,7 @@ def _write_sync(rows: List[dict]) -> int:
                 _write_chunk(chunk[mid:], False)
             else:
                 last_exc = e
+                _RETRY.add((p["s"], p) for p in chunk)      # round 159: sent once more, in smaller batches
 
     if n_prio:
         _write_chunk(params[:n_prio], False)        # held positions: own small transaction, written before the rest
@@ -344,6 +410,7 @@ def _loop() -> None:
                 with _lock:
                     _stats["coalesced_batches"] += len(pending) - 1
             n = _write_sync(rows)
+            n += retry_failed()           # round 159: rows of chunks that failed for good, once more
             with _lock:
                 _stats["batches_written"] += 1
                 _stats["rows_written"] += n
@@ -384,4 +451,4 @@ def status() -> dict:
     except Exception:  # noqa: BLE001
         _eng = None
     with _lock:
-        return {**_stats, "write_mode": write_mode(), "writing": should_write(), "engine": _eng}
+        return {**_stats, "write_mode": write_mode(), "writing": should_write(), "engine": _eng, "retry": _RETRY.snapshot()}

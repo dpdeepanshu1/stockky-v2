@@ -104,6 +104,7 @@ import models
 import trade_records
 from db import get_session_factory
 from notifier import notify_async
+from execution import stop_check_gap
 from tz_utils import (
     is_market_open_ist,
     ist_today_str,
@@ -510,6 +511,7 @@ async def _exit_only_tick_body(mode: str) -> None:
         gate = db.query(models.TradeGateState).filter_by(mode=mode).first()
         # group321: protective exits use the calendar + clock only; the price-based "closed" verdict gates entries, never stops.
         if not is_market_open_ist(honor_session_proof=False):
+            stop_check_gap.reset(mode)          # round 158: no stop-check gap is counted across the close
             return
 
         # ── Protective exits: always run during market hours ─────────────────
@@ -521,6 +523,12 @@ async def _exit_only_tick_body(mode: str) -> None:
         _t_exit0 = _time_mod.monotonic()
         exit_result = await exit_evaluate(db, mode)
         _exit_s = _time_mod.monotonic() - _t_exit0
+        _gap_s = stop_check_gap.note_done(mode, (exit_result or {}).get("evaluated"))        # round 158: a late stop check is alerted
+        if _gap_s is not None:
+            try:
+                await notify_async(f"⚠️ *Stop check late — {mode}*\nNo completed stop check for {_gap_s:.0f}s while positions were open (limit {stop_check_gap.warn_s():.0f}s).")
+            except Exception:  # noqa: BLE001
+                logger.debug("late stop-check alert could not be sent", exc_info=True)
 
         # Reconcile: only needed for REAL; also unconditional (same pre-fix
         # pattern — reconcile already ran regardless of armed state).

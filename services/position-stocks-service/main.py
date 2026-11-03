@@ -3376,7 +3376,16 @@ def board_status():
             "market_open": is_market_open_ist(), "bar_store": bar_store.stats(), "fno": fno_list.status(),
             "log": board_log.stats(), "runner": board_runner.state(), "sectors": len(sector_map.sectors()),
             "backfill": bar_backfill.state(), "sector_coverage": sector_map.coverage_report(bar_store.symbols(), bar_store.turnover),
-            "ms_engine": _ms_engine_status(), "bar_record": _bar_record_status(), "spread_record": _spread_record_status()}
+            "ms_engine": _ms_engine_status(), "bar_record": _bar_record_status(), "spread_record": _spread_record_status(),
+            "memory": _memory_status()}
+
+
+def _memory_status() -> dict:
+    """Round 151: tick buffer size, tick budget state and process / container memory (feed/ws_client.tick_stats). Never raises."""
+    try:
+        return ws_client.tick_stats()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:120]}
 
 
 def _bar_record_status() -> dict:

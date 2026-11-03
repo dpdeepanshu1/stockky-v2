@@ -74,7 +74,7 @@ def forward(bars: List[list], t0: float, sign: int = 1, target: float = 1.5, sto
 def build(rows: Iterable[Dict[str, Any]], load_bars: Callable[[str, str], Optional[List[list]]], list_symbols: Callable[[str], Optional[List[str]]], *, cost: float = 0.15,
           target: float = 1.5, stop: float = 1.0, direction: str = "long", baseline_k: int = 3, seed: int = 285, policy_states: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """rows: dicts with symbol, decision, reason, created_ts (UTC epoch s). Returns {coverage, groups, notes}; render() prints it."""
-    cov: Dict[str, Any] = {"rows": 0, "deduped": 0, "unique": 0, "measured": 0, "no_day_folder": defaultdict(int), "no_file": 0, "starts_after": 0, "ends_before": 0, "no_bars": 0}
+    cov: Dict[str, Any] = {"rows": 0, "deduped": 0, "unique": 0, "measured": 0, "no_day_folder": defaultdict(int), "no_file": 0, "starts_after": 0, "ends_before": 0, "no_bars": 0, "no_file_symbols": defaultdict(int)}
     G: Dict[Tuple[str, str], Dict[str, Any]] = {}
     seen = set()
     short_rows_as_long = 0
@@ -105,6 +105,7 @@ def build(rows: Iterable[Dict[str, Any]], load_bars: Callable[[str, str], Option
                     cov["no_day_folder"][day] += 1
                 else:
                     cov["no_file"] += 1
+                    cov["no_file_symbols"][sym] += 1          # E285 round 155: WHICH symbols have no bar file, so the blind spot can be traced to names
                 continue
             why = co.no_bar_reason(bars, ts)
             if why != "ok":
@@ -165,6 +166,7 @@ def build(rows: Iterable[Dict[str, Any]], load_bars: Callable[[str, str], Option
         if x["verdict"].startswith("LOOSEN") and (x["edge"] is None or x["edge"] <= 0):
             notes.append(f"{x['gate']} ({x['side']}) passes LOOSEN but its edge over random entries at the same times is {'unknown' if x['edge'] is None else format(x['edge'], '+.2f') + '%'}: the day's market may explain the gain")
     cov["no_day_folder"] = dict(cov["no_day_folder"])
+    cov["no_file_symbols"] = dict(sorted(cov["no_file_symbols"].items(), key=lambda kv: (-kv[1], kv[0]))[:15])      # top 15 by samples
     return {"coverage": cov, "groups": out_groups, "notes": notes, "cost": cost, "target": target, "stop": stop, "direction": direction}
 
 
@@ -176,6 +178,9 @@ def coverage_lines(cov: Dict[str, Any]) -> List[str]:
         L.append(f"  not measured because: no bar folder for the day {nd} ({', '.join(sorted(cov['no_day_folder'])[:6])}{' ...' if len(cov['no_day_folder']) > 6 else ''}); "
                  f"folder exists but no file for the symbol {cov['no_file']} (symbol never got ticks or was not noted); bars start after the skip {cov['starts_after']}; "
                  f"bars end before +60 min {cov['ends_before']}; other {cov['no_bars']}")
+    top = cov.get("no_file_symbols") or {}
+    if top:
+        L.append("  symbols with the most samples and no bar file: " + ", ".join(f"{k} {v}" for k, v in top.items()))
     return L
 
 

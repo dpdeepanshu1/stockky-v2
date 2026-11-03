@@ -600,6 +600,8 @@ services/analysis-intelligence-service/tests/test_e27_intraday_chart_payload.py
 services/analysis-intelligence-service/tests/test_e280_event_feed.py
 services/analysis-intelligence-service/tests/test_e285_round105_event_feed_cadence.py
 services/analysis-intelligence-service/tests/test_e285_round127_event_feed_tags.py
+services/analysis-intelligence-service/tests/test_e285_round161_news_hf_state.py
+services/analysis-intelligence-service/tests/test_e285_round162_dead_feed_ttl.py
 services/analysis-intelligence-service/tests/test_env_url_blank_fallback.py
 services/analysis-intelligence-service/tests/test_event_depth.py
 services/analysis-intelligence-service/tests/test_event_main.py
@@ -1098,6 +1100,7 @@ services/kronos-forecast-service/tests/test_forecast_stats.py
 services/market-data-service/.dockerignore
 services/market-data-service/.python-version
 services/market-data-service/Dockerfile
+services/market-data-service/angelone_batch_404.py
 services/market-data-service/angelone_budget.py
 services/market-data-service/angelone_client.py
 services/market-data-service/angelone_scrip_master.py
@@ -1119,6 +1122,7 @@ services/market-data-service/dhan_data/scrip_master.py
 services/market-data-service/dhan_data/ws_feed.py
 services/market-data-service/instrument_filter.py
 services/market-data-service/kv_cache.py
+services/market-data-service/live_write_retry.py
 services/market-data-service/main.py
 services/market-data-service/market_hours.py
 services/market-data-service/migrations/fundamentals_cache.sql
@@ -1150,6 +1154,8 @@ services/market-data-service/tests/test_e268_order_flow_tape.py
 services/market-data-service/tests/test_e271_tape_status_health.py
 services/market-data-service/tests/test_e273_tape_verdict_keys.py
 services/market-data-service/tests/test_e27_intraday_row_cap.py
+services/market-data-service/tests/test_e285_round159_live_quotes_retry.py
+services/market-data-service/tests/test_e285_round163_angelone_404_batch.py
 services/market-data-service/tests/test_fallback_universe_has_no_delisted.py
 services/market-data-service/tests/test_feed_universe_drops_delisted.py
 services/market-data-service/tests/test_feed_universe_fetch_error_detail.py
@@ -1585,6 +1591,7 @@ services/position-stocks-service/tests/test_e285_round112_own_spread.py
 services/position-stocks-service/tests/test_e285_round113_event_weights.py
 services/position-stocks-service/tests/test_e285_round115_event_stamps.py
 services/position-stocks-service/tests/test_e285_round119_slot_0920_switch.py
+services/position-stocks-service/tests/test_e285_round151_tick_budget_and_sell_stop.py
 services/position-stocks-service/tests/test_e285_round96_live_state.py
 services/position-stocks-service/tests/test_e285_round99_opening_caps.py
 services/position-stocks-service/tests/test_e285_shared_order_rate.py
@@ -1854,6 +1861,7 @@ services/real-trade-service/execution/shared_heat.py
 services/real-trade-service/execution/shared_order_budget.py
 services/real-trade-service/execution/shared_rate_window.py
 services/real-trade-service/execution/shared_symbol_lock.py
+services/real-trade-service/execution/stop_check_gap.py
 services/real-trade-service/exit_engine/__init__.py
 services/real-trade-service/exit_engine/event_exit.py
 services/real-trade-service/exit_engine/excursion.py
@@ -2063,6 +2071,13 @@ services/real-trade-service/tests/test_e285_round104_entry_reason.py
 services/real-trade-service/tests/test_e285_round111_rt_own_norms.py
 services/real-trade-service/tests/test_e285_round114_rt_own_spread.py
 services/real-trade-service/tests/test_e285_round115_rt_event_stamp.py
+services/real-trade-service/tests/test_e285_round152_stack_skip.py
+services/real-trade-service/tests/test_e285_round153_cost_win_prob.py
+services/real-trade-service/tests/test_e285_round154_opening_wait.py
+services/real-trade-service/tests/test_e285_round156_breakeven_charges.py
+services/real-trade-service/tests/test_e285_round157_planned_vs_real.py
+services/real-trade-service/tests/test_e285_round158_stop_check_gap.py
+services/real-trade-service/tests/test_e285_round160_orb_stats_log.py
 services/real-trade-service/tests/test_e285_rt_ladder_risk.py
 services/real-trade-service/tests/test_e285_rt_open_cues.py
 services/real-trade-service/tests/test_e285_rt_results_split.py

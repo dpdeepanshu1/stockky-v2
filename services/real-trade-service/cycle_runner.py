@@ -330,6 +330,11 @@ async def _run_cycle_core(db: Session, mode: str, gate_armed: bool, trigger: str
     exit_lock.acquire()  # blocking wait — this section is fast (seconds), unlike the entry-side screening phase
     try:
         exit_result = await exit_evaluate(db, mode)
+        try:
+            from execution import stop_check_gap as _scg        # round 158: the full cycle's exit stage is a completed stop check too
+            _scg.note_done(mode, (exit_result or {}).get("evaluated"))
+        except Exception:  # noqa: BLE001
+            pass
 
         reconcile_result = None
         if mode == "REAL":

@@ -125,7 +125,8 @@ class TestRejectReason:
         assert opening_gate.reject_reason("REAL", tk(price=101.0, hi=None, lo=None)) == "OPENING_GATE:NO_DAY_RANGE"
 
     def test_group390_defaults(self):
-        assert config.OPENING_GATE_MIN_MINUTES_AFTER_OPEN == 0.0   # group 399: was 0.5
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.py"), encoding="utf-8").read()
+        assert '_og_float("OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 15.0)' in src   # round 154: was 0.0 (group 399); conftest sets 0 for these older tests
         assert config.ENTER_AT_OPEN_TIME_IST == "09:15"
 
     def test_change_vs_prev_close_band(self, monkeypatch):

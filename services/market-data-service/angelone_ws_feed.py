@@ -33,6 +33,7 @@ from typing import Dict, Optional
 
 from market_hours import is_feed_window_ist
 import session_proof
+import live_write_retry as _lwr
 
 
 _UNRESOLVED_NAMES_MAX = 20
@@ -223,16 +224,64 @@ def _ao_prepare_rows(rows: list) -> list:
         return rows
 
 
+# E285 round 159 (plan item 17): a batch that failed to write used to be dropped here (it was already popped from _DB_PENDING), so a symbol polled
+# only every FEED_COLD_INTERVAL_S had no fresh live_quotes row until its next poll. The rows of a failed write now go to _RETRY and are sent ONCE more,
+# in smaller transactions, when the writer is idle (see live_write_retry.py for the rules: once, newer wins, not older than
+# LIVE_QUOTES_RETRY_MAX_AGE_S, held-position rows only while the Oracle back-off is open). LIVE_QUOTES_RETRY_MAX_AGE_S=0 turns it off.
+_RETRY = _lwr.RetryBox()
+
+
+def _ao_retry_pass() -> None:
+    """Send the rows of earlier failed writes once more, LIVE_QUOTES_RETRY_CHUNK rows per transaction. A retry that fails is dropped. Never raises."""
+    try:
+        if len(_RETRY) == 0:
+            return
+        from dhan_data import live_store as _ls
+        prio = _ls.priority_symbols()
+        backoff = _ls.in_backoff()
+
+        def _superseded(key, ts) -> bool:
+            prev = _AO_LAST_SENT.get(key)
+            return key in _DB_PENDING or (prev is not None and prev[1] >= ts)
+
+        def _hold(key) -> bool:
+            return backoff and str(key).upper() not in prio
+
+        due = _RETRY.take_due(_superseded, _hold)
+        for chunk in _lwr.chunks(due, _lwr.chunk_size()):
+            rows = [p for _, p in chunk]
+            if _upsert_ticks_batch_sync(rows) is False:
+                _RETRY.note(failed=len(rows))          # second failure: dropped, the next poll supplies a fresh row
+                continue
+            _RETRY.note(written=len(rows))
+            _now_m = time.monotonic()
+            with _DB_PENDING_LOCK:
+                for r in rows:
+                    _AO_LAST_SENT[r[0]] = (r[1], _now_m)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("live_quotes retry pass skipped: %s", e)
+
+
 def _db_writer_drain() -> None:
     global _db_writer_busy
+    retried_idle = False
     try:
         while True:
             with _DB_PENDING_LOCK:
                 if not _DB_PENDING:
-                    _db_writer_busy = False
-                    return
-                chunk_syms = list(_DB_PENDING.keys())[:BATCH_SIZE]
-                rows = [_DB_PENDING.pop(k) for k in chunk_syms]
+                    if retried_idle:
+                        _db_writer_busy = False
+                        return
+                    go_retry = True
+                else:
+                    go_retry = False
+                    chunk_syms = list(_DB_PENDING.keys())[:BATCH_SIZE]
+                    rows = [_DB_PENDING.pop(k) for k in chunk_syms]
+            if go_retry:
+                _ao_retry_pass()        # idle: one more try for rows an earlier write failed; then look at the queue again
+                retried_idle = True
+                continue
+            retried_idle = False
             rows = _ao_prepare_rows(rows)    # group356: unchanged rows / Oracle back-off
             if not rows:
                 continue
@@ -242,6 +291,7 @@ def _db_writer_drain() -> None:
                 with _DB_PENDING_LOCK:
                     for r in rows:
                         _AO_LAST_SENT.pop(r[0], None)     # a failed row must be sent again, not skipped as unchanged
+                _RETRY.add((r[0], r) for r in rows)       # round 159: ... and sent once more in smaller batches
                 continue
             if ok is True:
                 _now_m = time.monotonic()
@@ -303,6 +353,16 @@ def _trip_on_http_denied(exc: BaseException) -> bool:
         if _b.in_global_cooldown("quote"):
             return False
         return bool(_b.trip("quote(batch)"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_background_lane(lane) -> bool:
+    """E285 round 163: True only for the BACKGROUND (cold, whole-universe) lane. The unlaned old plan (lane None), held-position and
+    candidate batches are never paused after a 404 (angelone_batch_404.py). Never raises."""
+    try:
+        import angelone_budget as _b
+        return lane is not None and lane == _b.BACKGROUND
     except Exception:  # noqa: BLE001
         return False
 
@@ -645,6 +705,7 @@ def feed_status() -> dict:
         "in_market_window": is_feed_window_ist(),
         "last_cycle_s": _last_cycle_s,
         "db_async": {"enabled": DB_ASYNC_WRITES, "pending_rows": len(_DB_PENDING), **_db_async_stats},
+        "retry": _RETRY.snapshot(),
     }
 
 
@@ -781,6 +842,14 @@ def start_feed_background(symbols: list) -> None:
                     pass
                 async def _run_batch(batch, lane, start_i, end_i):
                     try:
+                        # E285 round 163: a BACKGROUND batch that answered HTTP 404 a moment ago is not sent again until its pause ends
+                        # (ANGELONE_BATCH_404_BACKOFF_S, 0 = never); held-position / candidate / unlaned batches are always sent.
+                        try:
+                            import angelone_batch_404 as _b404
+                            if _b404.BOX.should_skip(batch, _is_background_lane(lane)):
+                                return
+                        except Exception:  # noqa: BLE001
+                            pass
                         # group230: ONE quick retry when the connection itself could not be made (a single
                         # "quote batch (1-11) failed: ConnectError" left that batch stale for a whole cycle)
                         for _attempt in (1, 2):
@@ -798,6 +867,11 @@ def start_feed_background(symbols: list) -> None:
                                 raise
                         if not _current():
                             return   # superseded/stopped while the request was in flight: drop the stale ticks
+                        try:
+                            import angelone_batch_404 as _b404
+                            _b404.BOX.note_ok(batch)
+                        except Exception:  # noqa: BLE001
+                            pass
                         db_rows = []
                         for row in fetched:
                             tok = str(row.get("symbolToken") or "")
@@ -823,12 +897,33 @@ def start_feed_background(symbols: list) -> None:
                             else:
                                 await asyncio.to_thread(_upsert_ticks_batch_sync, db_rows)
                     except Exception as e:
-                        # BUG FIX (2026-09-17): httpx timeout exceptions stringify to "" - fall back to the
-                        # exception's class name when str(e) is empty.
-                        logger.warning(
-                            "AngelOne quote batch (%d-%d) failed: %s",
-                            start_i, end_i, str(e) or type(e).__name__,
-                        )
+                        # E285 round 163: an HTTP 404 answer is logged once per window with the response body (what says WHY) and the
+                        # count since the last line; a BACKGROUND batch that 404s is paused. Any other failure logs as before.
+                        _nf_logged = False
+                        try:
+                            import angelone_batch_404 as _b404
+                            if _b404.is_not_found(e):
+                                _log_now, _n = _b404.BOX.note_not_found(batch, _is_background_lane(lane))
+                                if _log_now:
+                                    logger.warning(
+                                        "AngelOne quote batch (%d-%d) answered HTTP 404 - body: %s | %d such failure(s) since the last "
+                                        "line (this line is logged at most once per %.0fs); BACKGROUND batches that 404 are not "
+                                        "re-sent for %.0fs",
+                                        start_i, end_i, _b404.response_body(e) or "(empty)", _n,
+                                        _b404.log_every_s(), _b404.backoff_s(),
+                                    )
+                                else:
+                                    logger.debug("AngelOne quote batch (%d-%d) answered HTTP 404 (suppressed)", start_i, end_i)
+                                _nf_logged = True
+                        except Exception:  # noqa: BLE001
+                            _nf_logged = False
+                        if not _nf_logged:
+                            # BUG FIX (2026-09-17): httpx timeout exceptions stringify to "" - fall back to the
+                            # exception's class name when str(e) is empty.
+                            logger.warning(
+                                "AngelOne quote batch (%d-%d) failed: %s",
+                                start_i, end_i, str(e) or type(e).__name__,
+                            )
                         _trip_on_http_denied(e)   # group225: a 403/429 that no body check recognised still backs the feed off
 
                 plan = list(_plan_batches(tokens, token_map))

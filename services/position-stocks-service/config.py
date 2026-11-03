@@ -1617,6 +1617,16 @@ QUALITY_GATE_RESULT_TTL_S = _get_float("QUALITY_GATE_RESULT_TTL_S", 90.0)
 QUALITY_GATE_EVENT_MEMORY_H = _get_float("QUALITY_GATE_EVENT_MEMORY_H", 24.0)
 # Tick buffer: per-symbol cap (was a fixed 50,000 ticks x 2,600 subscribed symbols; the service grew 63 -> 364 MB of 400 in 20 minutes).
 WS_MAX_TICKS_PER_SYMBOL = _get_int("WS_MAX_TICKS_PER_SYMBOL", 4000)
+# E285 round 151: total tick budget across all symbols (0 = off). Over it, symbols no trade-decision caller read in the last
+# WS_TICK_PROTECT_S seconds keep one tick per WS_TICK_THIN_S seconds. Estimated 112 bytes per tick, so 1.5M ticks is about 160 MB.
+WS_TICK_BUDGET = _get_int("WS_TICK_BUDGET", 1_500_000)
+WS_TICK_THIN_S = _get_float("WS_TICK_THIN_S", 5.0)
+WS_TICK_PROTECT_S = _get_float("WS_TICK_PROTECT_S", 900.0)
+# E285 round 151: the half-sell probe refuses to start above this share of the container memory limit (0 = guard off).
+PROBE_MAX_MEMORY_PCT = _get_float("PROBE_MAX_MEMORY_PCT", 80.0)
+# E285 round 151: Dhan rejected the probe's SELL STOP_LOSS_MARKET (price 0) with "Trigger Price should be greater than Price" (3 Nov, ONGC).
+# place_intraday_sell_stop now retries ONCE as a stop-limit: STOP_LOSS with a limit this far (percent) below the trigger. Probe only.
+SELL_STOP_LIMIT_BUFFER_PCT = _get_float("SELL_STOP_LIMIT_BUFFER_PCT", 0.5)
 
 
 # group344 (13 Oct log: RAMRAT entered after "event fetch failed (ReadTimeout)", i.e. with no news / earnings check).

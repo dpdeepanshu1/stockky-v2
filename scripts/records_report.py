@@ -186,6 +186,23 @@ def exit_slippage_pct(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     return {"n": len(vals), "mean": round(st.mean(vals), 3), "worst": round(min(vals), 3), "best": round(max(vals), 3)}
 
 
+def entry_minute_bucket(r: Dict[str, Any]) -> str:
+    """E285 round 154 (plan item 8): the 15-minute IST slot of opened_at, so the opening minutes show on their own (09:15-09:29, 09:30-09:44, ...).
+    opened_at without a zone is read as UTC (how the records are exported). Broker-imported rows carry the import time, not the buy time: use --origin system."""
+    raw = r.get("opened_at")
+    if not raw:
+        return "unknown"
+    try:
+        from datetime import datetime, timedelta, timezone
+        t = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        t = t.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        return f"{t.hour:02d}:{(t.minute // 15) * 15:02d}"
+    except (ValueError, TypeError):
+        return "unknown"
+
+
 def orb_trigger_bucket(v: Any) -> str:
     """E113: orb_close_trigger as exported (True / False / None). None = the recorder had no bars: never counted as 'no trigger'."""
     return "no_orb_record" if not isinstance(v, bool) else ("close_trigger" if v else "no_close_trigger")
@@ -213,6 +230,7 @@ GROUPS: List[tuple] = [
     ("source_tab", lambda r: r.get("source_tab")),
     ("tier_name", lambda r: r.get("tier_name")),
     ("entry hour IST", lambda r: r.get("entry_hour_ist")),
+    ("entry minute IST (15-min slots, use --origin system)", entry_minute_bucket),
     ("exit_reason", lambda r: r.get("exit_reason")),
     ("hold_bucket", lambda r: r.get("hold_bucket")),
     ("stop_basis", lambda r: r.get("stop_basis")),
@@ -229,7 +247,44 @@ GROUPS: List[tuple] = [
 ]
 
 
-def build_report(records: List[Dict[str, Any]], since: str = "", until: str = "", min_n: int = 10, outlier_pct: float = 15.0) -> Dict[str, Any]:
+def planned_vs_real(rows: List[Dict[str, Any]], planned_rr: float = 2.0, min_n: int = 10) -> List[Dict[str, Any]]:
+    """E285 round 157 (plan item 14 / F14): per exit reason, what the plan promised against what the trade did. The record stores the initial stop distance
+    (stop_pct) but not the target, so the planned target is assumed to be planned_rr x stop_pct (ENTRY_MIN_REWARD_RISK, 2.0). Per group: mean stop %, mean planned
+    target %, mean best gain before the exit (MFE), mean price move actually taken (exit vs entry), MFE as a share of the planned target (how far trades ran),
+    taken as a share of MFE (how much of the run was kept) and the realised reward:risk (mean move taken on winners / mean move taken on losers, as a positive ratio).
+    Only trades with stop_pct, max_gain_pct, entry and exit price count. Sorted by trades; groups under min_n are marked few."""
+    use = []
+    for r in rows:
+        sp, mg, e, x = num(r.get("stop_pct")), num(r.get("max_gain_pct")), num(r.get("entry_price")), num(r.get("exit_price"))
+        if sp and sp > 0 and mg is not None and e and e > 0 and x and x > 0:
+            use.append((str(r.get("exit_reason") or "unknown"), sp, mg, (x - e) / e * 100.0))
+    by: Dict[str, List[tuple]] = defaultdict(list)
+    for t in use:
+        by[t[0]].append(t)
+    by["ALL"] = list(use)
+    out = []
+    for reason, g in sorted(by.items(), key=lambda kv: (kv[0] != "ALL", -len(kv[1]), kv[0])):
+        if not g:
+            continue
+        stop = st.mean(t[1] for t in g)
+        tgt = stop * planned_rr
+        mfe = st.mean(t[2] for t in g)
+        mv = st.mean(t[3] for t in g)
+        wins = [t[3] for t in g if t[3] > 0]
+        loss = [-t[3] for t in g if t[3] < 0]
+        out.append({
+            "exit_reason": reason, "n": len(g), "few": len(g) < min_n,
+            "mean_stop_pct": round(stop, 2), "planned_target_pct": round(tgt, 2), "mean_mfe_pct": round(mfe, 2), "mean_move_taken_pct": round(mv, 2),
+            "mfe_vs_target_pct": round(100.0 * mfe / tgt, 0) if tgt > 0 else None,
+            "taken_vs_mfe_pct": round(100.0 * mv / mfe, 0) if mfe > 0 else None,
+            "mean_win_move_pct": round(st.mean(wins), 2) if wins else None, "mean_loss_move_pct": round(-st.mean(loss), 2) if loss else None,
+            "real_rr": round(st.mean(wins) / st.mean(loss), 2) if wins and loss else None,
+            "planned_rr": planned_rr,
+        })
+    return out
+
+
+def build_report(records: List[Dict[str, Any]], since: str = "", until: str = "", min_n: int = 10, outlier_pct: float = 15.0, planned_rr: float = 2.0) -> Dict[str, Any]:
     rows = [r for r in records if (not since or _day(r) >= since) and (not until or _day(r) <= until)]
     rep: Dict[str, Any] = {"since": since or None, "until": until or None, "min_n": min_n, "outlier_pct": outlier_pct, "trades": len(rows), "groups": {}}
     if not rows:
@@ -257,6 +312,7 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
         "charges_share_of_gross_profit_pct": (round(100.0 * rep["all"]["charges"] / rep["all"]["gross"], 0) if rep["all"]["gross"] > 0 and len(rows) >= min_n else None),
     }
     rep["performance"] = performance_block(rows)
+    rep["planned_vs_real"] = planned_vs_real(rows, planned_rr, min_n)
     rep["exit_slippage_pct"] = exit_slippage_pct(rows)
     rep["exit_slippage"] = exit_slippage_stored(rows)
     sl = [v for v in (num(r.get("entry_slippage_pct")) for r in rows) if v is not None]
@@ -314,6 +370,13 @@ def to_markdown(rep: Dict[str, Any]) -> str:
             part += "; no stop distance recorded on them"
         part += (f"; mean best gain before the stop {f(sh['mean_max_gain_pct_before_stop'])}% ({sh['with_max_gain']} trades)." if sh["with_max_gain"] else "; no max-gain recorded on them.")
         L.append(part)
+    pv = rep.get("planned_vs_real") or []
+    if pv:
+        L += ["", f"## Planned vs real reward:risk (planned target assumed {pv[0]['planned_rr']:g} x the initial stop; the record has no target field)", "",
+              "| exit reason | n | stop % | planned target % | best gain (MFE) % | move taken % | MFE / target | taken / MFE | win % / loss % | real R:R |", "|---|---|---|---|---|---|---|---|---|---|"]
+        for g in pv:
+            L.append(f"| {g['exit_reason']}{' (few)' if g['few'] else ''} | {g['n']} | {f(g['mean_stop_pct'])} | {f(g['planned_target_pct'])} | {f(g['mean_mfe_pct'])} | {f(g['mean_move_taken_pct'])} | "
+                     f"{f(g['mfe_vs_target_pct'], 0)}% | {f(g['taken_vs_mfe_pct'], 0)}% | {f(g['mean_win_move_pct'])} / {f(g['mean_loss_move_pct'])} | {f(g['real_rr'])} |")
     perf = rep.get("performance") or {}
     if perf.get("days"):
         L += ["", "## Whole-book performance (daily net P&L)", "", f"Days traded: {perf['days']}, total net {f(perf['total_net'])}."]
@@ -387,6 +450,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--origin", default="all", choices=["all", "system", "imported"], help="system = only entries the bot made itself, imported = only broker-imported positions (their opened_at is the import time, not the buy time); default all")
     ap.add_argument("--min-n", type=int, default=10, help="groups under this many trades are marked (few)")
     ap.add_argument("--outlier-pct", type=float, default=15.0, help="a trade whose |return| is above this %% is an outlier in the robust totals")
+    ap.add_argument("--planned-rr", type=float, default=2.0, help="planned reward:risk used to derive the planned target from the initial stop (default 2.0 = ENTRY_MIN_REWARD_RISK)")
     ap.add_argument("--json", default="", help="also write the full report to this JSON file")
     a = ap.parse_args(argv)
     paths = [p for pat in (a.files or ["rt_*.json"]) for p in (sorted(glob.glob(pat)) or [pat])]
@@ -394,7 +458,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not recs:
         print(f"no records found in {len(paths)} file(s) (mode {a.mode or 'any'}); export them first - see docs/GROUP430_RECORDS_REPORT.md", file=sys.stderr)
         return 1
-    rep = build_report(recs, a.since, a.until, a.min_n, a.outlier_pct)
+    rep = build_report(recs, a.since, a.until, a.min_n, a.outlier_pct, a.planned_rr)
     print(to_markdown(rep))
     from datetime import date
     note = stale_note(max((str(r.get("closed_at") or "")[:10] for r in recs), default=None), date.today().isoformat())

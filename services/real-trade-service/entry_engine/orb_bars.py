@@ -179,8 +179,59 @@ def _newest_bar_end(bars: Any) -> Optional[float]:
     return None if best is None else best + 60.0
 
 
+_log_state: Dict[str, Any] = {"at": None, "base": {}}
+
+
+def log_every_s() -> float:
+    """ORB_STATS_LOG_EVERY_S (default 300; 0 = never log; blank / bad -> 300)."""
+    try:
+        raw = (os.getenv("ORB_STATS_LOG_EVERY_S") or "").strip()
+        v = float(raw) if raw else 300.0
+        return v if math.isfinite(v) and v >= 0 else 300.0
+    except ValueError:
+        return 300.0
+
+
+def log_stats_if_due(now_mono: Optional[float] = None) -> Optional[str]:
+    """E285 round 160 (plan item 20): one INFO line with how many ORB decisions carried the close-trigger fields (hit), had none (miss) or had a cache too old
+    (stale), and how many bar fetches worked or failed, counted since the previous line. At most every ORB_STATS_LOG_EVERY_S (default 300; 0 = off); no line
+    when nothing happened in the window (before the open, after the close). Returns the line (tests) or None. Never raises."""
+    try:
+        every = log_every_s()
+        if every <= 0:
+            return None
+        mono = time.monotonic() if now_mono is None else now_mono
+        with _lock:
+            if _log_state["at"] is None:
+                _log_state["at"], _log_state["base"] = mono, dict(_stats)       # first call: start the window, nothing to say yet
+                return None
+            if mono - _log_state["at"] < every:
+                return None
+            base = _log_state["base"]
+            d = {k: _stats[k] - base.get(k, 0) for k in _stats}
+            window = mono - _log_state["at"]
+            _log_state["at"], _log_state["base"] = mono, dict(_stats)
+        if not any(d.get(k) for k in ("hit", "miss", "stale", "ok", "failed")):
+            return None
+        seen = d["hit"] + d["miss"] + d["stale"]
+        line = (f"ORB bars, last {window:.0f}s: {seen} decision(s): hit {d['hit']}, miss {d['miss']}, stale {d['stale']}"
+                f" ({(100.0 * d['hit'] / seen) if seen else 0.0:.0f}% carried the close-trigger fields); bar fetches ok {d['ok']}, failed {d['failed']}")
+        logger.info(line)
+        return line
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fields_for(symbol: str, rh: float, now: Optional[datetime] = None, bars: Optional[Any] = None) -> Dict[str, Any]:
-    """What orb_shadow merges into the verdict: the bar fields, or {} (no cache yet, stale cache, nothing readable). Counts hit / miss / stale. Never raises."""
+    """What orb_shadow merges into the verdict: the bar fields, or {} (no cache yet, stale cache, nothing readable). Counts hit / miss / stale and logs the
+    counts at INFO every ORB_STATS_LOG_EVERY_S (log_stats_if_due). Never raises."""
+    try:
+        return _fields_for(symbol, rh, now, bars)
+    finally:
+        log_stats_if_due()
+
+
+def _fields_for(symbol: str, rh: float, now: Optional[datetime] = None, bars: Optional[Any] = None) -> Dict[str, Any]:
     try:
         if bars is None:
             bars = get_bars(symbol, now=now)
@@ -323,4 +374,5 @@ def _reset_for_tests() -> None:
         _cache.clear(); _last_try.clear(); _inflight.clear()
         for k in _stats:
             _stats[k] = 0
+        _log_state["at"], _log_state["base"] = None, {}
     _fetch = _fetch_rows

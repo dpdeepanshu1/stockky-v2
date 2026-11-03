@@ -67,6 +67,17 @@ def _hf_error_backoff_sec() -> float:
         return 1800.0
     return v if v >= 0 else 1800.0
 HF_API_KEY = (os.getenv("HF_API_KEY") or "").strip() or None
+_HF_KEY_WARNED = False
+
+
+def _hf_state() -> str:
+    """E285 round 161 (plan item 20): is Hugging Face sentiment really scoring headlines right now? 'on', 'no_key' (HF_API_KEY not set) or 'paused' (the
+    call is backed off after an error). When it is not 'on' every headline scores the neutral 0.0 fallback, so news_score is exactly 50 and says nothing."""
+    if not HF_API_KEY:
+        return "no_key"
+    if time.monotonic() < _HF_BACKOFF_UNTIL:
+        return "paused"
+    return "on"
 
 # Optional NewsAPI key (free tier)
 NEWSAPI_KEY = (os.getenv("NEWSAPI_KEY") or "").strip() or None
@@ -667,8 +678,11 @@ def _summarize_headlines(headlines: List[dict], symbol: str) -> str:
 def _score_headline(title: str) -> float:
     """Call Hugging Face Inference Providers (router, chat-completions) to get a sentiment score."""
     global _HF_BACKOFF_UNTIL
+    global _HF_KEY_WARNED
     if not HF_API_KEY:
-        logger.warning("HF_API_KEY not set; using neutral fallback")
+        if not _HF_KEY_WARNED:          # round 161: once, not once per headline
+            _HF_KEY_WARNED = True
+            logger.warning("HF_API_KEY not set; headline sentiment is the neutral fallback (news_score 50) - set it or ignore the sentiment part of the news score")
         return 0.0
     if time.monotonic() < _HF_BACKOFF_UNTIL:
         return 0.0
@@ -807,7 +821,7 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
             "data_quality": {
                 "level": "none",
                 "sources_used": [],
-                "hf_sentiment": bool(HF_API_KEY),
+                "hf_sentiment": _hf_state() == "on",
                 "note": "No headline matched from any source - score is a neutral placeholder, not a reading",
             },
         }
@@ -827,7 +841,12 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     if most_positive[0] > 0.3:
         reasons.append(f"Notably positive: \"{most_positive[1]['title'][:90]}\"")
     tone = "positive" if avg_sentiment > 0.1 else "negative" if avg_sentiment < -0.1 else "neutral"
-    reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}")
+    _hf = _hf_state()
+    if _hf == "on" or any(sc != 0.0 for sc, _ in scored):
+        reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}")
+    else:       # round 161: do not present the neutral fallback as a measured sentiment
+        reasons.append(f"{len(headlines)} relevant headlines; sentiment not scored ("
+                       + ("HF_API_KEY not set" if _hf == "no_key" else "Hugging Face paused after errors") + "), score is the neutral 50")
 
     return {
         "symbol": symbol.upper().replace(".NS", "").replace(".BO", ""),
@@ -841,7 +860,8 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
                 else "none"
             ),
             "sources_used": list({(h.get("publisher") or "unknown") for h in headlines}),
-            "hf_sentiment": bool(HF_API_KEY),
+            "hf_sentiment": _hf == "on",
+            "hf_state": _hf,
             "note": (
                 "Multiple corroborating headlines"
                 if len(headlines) >= 4

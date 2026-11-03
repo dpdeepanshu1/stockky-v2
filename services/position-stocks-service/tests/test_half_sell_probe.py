@@ -184,6 +184,7 @@ def env(monkeypatch, tmp_path):
     db.commit()
     monkeypatch.setenv("CONTROL_DIR", str(tmp_path))
     monkeypatch.setattr(config, "USE_SUPER_ORDER", True, raising=False)
+    monkeypatch.setattr(config, "PROBE_MAX_MEMORY_PCT", 0.0, raising=False)   # round 151: the memory guard reads the real container, not the fake Dhan
     monkeypatch.setattr(hs, "_mem", {})
     alerts = []
     clock = Clock()

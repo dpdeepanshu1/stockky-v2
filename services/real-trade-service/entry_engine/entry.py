@@ -1449,6 +1449,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _ns_reject, "risk_verdict": None, "gate_tag": "no_setup"})
             continue
         adj_risk_pct, _floor_lifted = size_floor.floored_risk_pct(_risk_base_pct, adj_risk_pct)
+        _stack_reject = size_floor.stacked_refusal(_soft_pen, _floor_lifted)      # E285 round 152 (plan item 7): stacked soft penalties skip, they are not lifted
+        if _stack_reject:
+            _wait_with_preview(_stack_reject)
+            decision.gate_tag = "soft_stack"
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _stack_reject, "risk_verdict": None, "gate_tag": "soft_stack"})
+            continue
         if _floor_lifted:
             logger.info("entry_engine: %s %s size penalties stacked below x%.2f of the base risk; lifted to the floor (%.2f%% of equity)",
                         mode, cand.symbol, size_floor.floor(), adj_risk_pct)
@@ -1456,7 +1463,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         proposed_qty   = max(0, int(max_trade_risk // per_share_risk))
         # group470: size on the risk a stop-out REALLY costs (stop distance + the usual fill beyond the stop). Floor of 1 share, so a trade
         # that fits the plain cap is never turned into a WAIT by this.
-        _ovs_pct = float(getattr(config, "STOP_OVERSHOOT_ALLOWANCE_PCT", 0.0) or 0.0)
+        _ovs_pct = size_floor.overshoot_pct()      # E285 round 152 (plan item 9): same-day book uses the measured, smaller allowance
         if _ovs_pct > 0 and proposed_qty > 0:
             _ovs_qty = max(1, int(max_trade_risk // (per_share_risk + entry_price * _ovs_pct / 100.0)))
             if _ovs_qty < proposed_qty:
@@ -1651,6 +1658,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                 min_trade_value=min_trade_value, min_edge_to_cost_ratio=min_edge_to_cost_ratio,
                 include_dp=_carry_overnight,
             )
+            logger.info("entry_engine: %s %s cost gate: qty %d, target edge Rs%.2f x %.0f%% win chance = Rs%.2f vs estimated charges Rs%.2f (%s)",
+                        mode, cand.symbol, final_qty_for_cost, cost_check.expected_edge, 100.0 * cost_check.win_prob, cost_check.weighted_edge,
+                        cost_check.estimated_cost, "pass" if cost_check.passes else "refused")      # round 153: expected charges recorded for every candidate
             if not cost_check.passes:
                 if not cost_check.passes_min_value:
                     cost_reason = (
@@ -1658,9 +1668,14 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         f"₹{min_trade_value:,.0f} minimum — too small for fixed/"
                         "percentage transaction costs to make sense against."
                     )
+                elif not cost_check.passes_min_net:
+                    cost_reason = (
+                        f"Expected edge ₹{cost_check.weighted_edge:,.2f} (target ₹{cost_check.expected_edge:,.2f} x {cost_check.win_prob:.0%} win chance) minus "
+                        f"charges ₹{cost_check.estimated_cost:,.2f} is under the ₹{config.MIN_NET_EDGE_RS:,.0f} minimum net gain — too small an order to be worth taking."
+                    )
                 else:
                     cost_reason = (
-                        f"Expected edge ₹{cost_check.expected_edge:,.0f} is only "
+                        f"Expected edge ₹{cost_check.weighted_edge:,.0f} (target ₹{cost_check.expected_edge:,.0f} x {cost_check.win_prob:.0%} win chance) is only "
                         f"{cost_check.ratio:.1f}x the estimated round-trip cost "
                         f"₹{cost_check.estimated_cost:,.0f} (floor {min_edge_to_cost_ratio:.1f}x). "
                         "Not enough real edge left after brokerage/STT/charges/slippage."

@@ -217,6 +217,22 @@ _install_ws_secret_filter()
 _MAX_TICKS = max(500, int(getattr(config, "WS_MAX_TICKS_PER_SYMBOL", 4000) or 4000))
 _MAX_BUFFER_AGE_S = 65 * 60  # slightly over the longest screening window (60m)
 _tick_buffers: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_MAX_TICKS))
+
+# E285 round 151 (3 Nov 2026, P0 memory): ONE total tick budget on top of the per-symbol cap. Position Stocks peaked at 900 MB
+# at 10:51 IST (549 MB ten minutes earlier). Every tick is a Python (ts, ltp) tuple (~112 bytes), the feed delivers 600-700
+# ticks/s, and ~2,600 buffers each hold up to 65 minutes. When the TOTAL buffered ticks pass WS_TICK_BUDGET the symbols that
+# no caller has read for a trade decision recently (not an open position, not an entry / exit / stop reader) are thinned to
+# one stored tick per WS_TICK_THIN_S seconds. Symbols a non-bulk caller read in the last WS_TICK_PROTECT_S seconds are never
+# thinned, so stops, breakeven, trailing, entry timing and excursion keep full tick resolution. The bulk scan (`with bulk_scan():`)
+# does not count as a read. WS_TICK_BUDGET=0 switches the budget off (old behaviour).
+_TICK_BUDGET = int(getattr(config, "WS_TICK_BUDGET", 1_500_000) or 0)
+_TICK_THIN_S = float(getattr(config, "WS_TICK_THIN_S", 5.0) or 5.0)
+_TICK_PROTECT_S = float(getattr(config, "WS_TICK_PROTECT_S", 900.0) or 900.0)
+_TICK_BYTES_EST = 112          # (float, float) tuple + two float objects + deque slot, measured on CPython 3.11
+_last_read_ts: Dict[str, float] = {}      # symbol -> monotonic time of the last get_tick_buffer read made outside bulk_scan()
+_budget_state = {"total": 0, "symbols": 0, "over": False, "thinned_skips": 0, "thinned_rewrites": 0, "last_check": 0.0,
+                 "last_log": 0.0, "ingests": 0, "peak_total": 0, "warned_mem": False}
+_MAINT_EVERY = 5000            # ingests between maintenance checks (a cheap counter test per tick)
 _last_volume:  Dict[str, int]   = {}   # latest volume per symbol from feed
 _exchange_vwap: Dict[str, float] = {}   # group304: exchange day average price (VWAP) per symbol, market-data poller only
 # 2026-10-05: exchange-reported day stats (open, high, low, previous close) from the
@@ -284,18 +300,56 @@ def get_best_bid_ask(symbol: str) -> Optional[tuple]:
     return (bid, ask)
 
 
+_bulk_tls = threading.local()
+
+
+class bulk_scan:
+    """Context manager for the all-symbol scan (screening/engine.scan / scan_shorts): get_tick_buffer() reads made on THIS thread inside it
+    do not mark a symbol "in use" for the tick budget (see _TICK_BUDGET). Thread-local, so an exit / stop / entry reader on another thread
+    still protects its symbol. Re-entrant."""
+    def __enter__(self):
+        _bulk_tls.depth = getattr(_bulk_tls, "depth", 0) + 1
+        return self
+
+    def __exit__(self, *exc):
+        _bulk_tls.depth = max(0, getattr(_bulk_tls, "depth", 1) - 1)
+        return False
+
+
 def get_tick_buffer(symbol: str) -> list:
     """Returns an immutable snapshot list of (ts, ltp) tuples for the
     symbol. Previously returned the live deque directly (see BUG FIX above
     for why that raced with the WS ingestion loop) — now returns a plain
     list copied under the symbol's lock, safe to iterate/index/reverse
-    from any thread with no risk of a concurrent-mutation crash."""
+    from any thread with no risk of a concurrent-mutation crash.
+
+    Round 151: a read marks the symbol "in use" for _TICK_PROTECT_S seconds (its ticks are then never thinned by the tick budget),
+    except a read inside `with bulk_scan():` (the all-symbol scan)."""
     # group341: do not create an empty deque (and lock) for every symbol that is merely asked about.
     _buf = _tick_buffers.get(symbol)
     if _buf is None:
         return []
+    if not getattr(_bulk_tls, "depth", 0):
+        _last_read_ts[symbol] = time.monotonic()
     with _buffer_locks[symbol]:
         return list(_buf)
+
+
+def tick_count(symbol: str) -> int:
+    """Number of buffered ticks, without copying the buffer (round 151). 0 when the symbol has none."""
+    _buf = _tick_buffers.get(symbol)
+    return len(_buf) if _buf else 0
+
+
+def last_tick(symbol: str) -> Optional[tuple]:
+    """Newest (ts, ltp) tick, without copying the buffer (round 151), or None."""
+    _buf = _tick_buffers.get(symbol)
+    if not _buf:
+        return None
+    try:
+        return _buf[-1]
+    except IndexError:   # emptied by the age prune between the truth test and the index
+        return None
 
 
 def get_last_ltp(symbol: str) -> Optional[float]:
@@ -504,6 +558,120 @@ _reconnect_attempts = 0
 _last_tick_at: Optional[float] = None  # unix seconds of the most recent parsed tick, any symbol
 
 
+def _is_protected(symbol: str) -> bool:
+    t = _last_read_ts.get(symbol)
+    return t is not None and (time.monotonic() - t) < _TICK_PROTECT_S
+
+
+def _proc_memory() -> dict:
+    """Process RSS / peak RSS / threads and the cgroup limit, read from /proc and /sys (Linux only; empty dict elsewhere)."""
+    out: dict = {}
+    try:
+        with open("/proc/self/status") as f:
+            for ln in f:
+                if ln.startswith("VmRSS:"):
+                    out["rss_mb"] = round(int(ln.split()[1]) / 1024.0, 1)
+                elif ln.startswith("VmHWM:"):
+                    out["rss_peak_mb"] = round(int(ln.split()[1]) / 1024.0, 1)
+                elif ln.startswith("Threads:"):
+                    out["threads"] = int(ln.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    for cur, lim in (("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+                     ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        try:
+            with open(cur) as f:
+                out["cgroup_mb"] = round(int(f.read().strip()) / 1048576.0, 1)
+            with open(lim) as f:
+                raw = f.read().strip()
+            if raw.isdigit() and int(raw) < (1 << 50):
+                out["cgroup_limit_mb"] = round(int(raw) / 1048576.0, 1)
+            break
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _count_ticks() -> tuple:
+    total = 0
+    syms = 0
+    for b in list(_tick_buffers.values()):
+        n = len(b)
+        if n:
+            total += n
+            syms += 1
+    return total, syms
+
+
+def _thin_idle_buffers(limit: int = 40) -> int:
+    """Rewrite up to `limit` of the largest NON-protected buffers to one tick per _TICK_THIN_S. Returns how many were rewritten."""
+    cand = [(len(b), s) for s, b in list(_tick_buffers.items()) if len(b) > 200 and not _is_protected(s)]
+    cand.sort(reverse=True)
+    done = 0
+    for _n, sym in cand[:limit]:
+        with _buffer_locks[sym]:
+            buf = _tick_buffers.get(sym)
+            if not buf:
+                continue
+            kept, last = [], None
+            for t in buf:
+                if last is None or t[0] - last >= _TICK_THIN_S:
+                    kept.append(t)
+                    last = t[0]
+            if kept and kept[-1] is not buf[-1]:
+                kept.append(buf[-1])          # the newest tick always survives
+            buf.clear()
+            buf.extend(kept)
+        done += 1
+    return done
+
+
+def _maintain() -> None:
+    """Every _MAINT_EVERY ingests: refresh the total, flip the over-budget flag, thin idle buffers, log RSS once a minute, warn near the limit."""
+    now = time.monotonic()
+    st = _budget_state
+    if now - st["last_check"] >= 10.0:
+        st["last_check"] = now
+        total, syms = _count_ticks()
+        st["total"], st["symbols"] = total, syms
+        st["peak_total"] = max(st["peak_total"], total)
+        was = st["over"]
+        if _TICK_BUDGET > 0:
+            # hysteresis: switch on above the budget, off below 85% of it
+            st["over"] = total > _TICK_BUDGET if not was else total > int(_TICK_BUDGET * 0.85)
+        else:
+            st["over"] = False
+        if st["over"] and not was:
+            logger.warning("position-stocks tick budget: %d ticks buffered > %d: idle symbols now keep one tick per %.0fs", total, _TICK_BUDGET, _TICK_THIN_S)
+        elif was and not st["over"]:
+            logger.info("position-stocks tick budget: back under budget (%d ticks): full resolution again", total)
+        if st["over"]:
+            st["thinned_rewrites"] += _thin_idle_buffers()
+    if now - st["last_log"] >= 60.0:
+        st["last_log"] = now
+        m = _proc_memory()
+        logger.info("position-stocks memory: rss=%s MB peak=%s MB cgroup=%s/%s MB threads=%s ticks=%d symbols=%d over_budget=%s",
+                    m.get("rss_mb"), m.get("rss_peak_mb"), m.get("cgroup_mb"), m.get("cgroup_limit_mb"), m.get("threads"),
+                    st["total"], st["symbols"], st["over"])
+        cur, lim = m.get("cgroup_mb"), m.get("cgroup_limit_mb")
+        if cur and lim and cur >= 0.7 * lim and not st["warned_mem"]:
+            st["warned_mem"] = True
+            logger.warning("position-stocks memory: %.0f MB is %.0f%% of the %.0f MB container limit", cur, 100.0 * cur / lim, lim)
+        elif cur and lim and cur < 0.6 * lim:
+            st["warned_mem"] = False
+
+
+def tick_stats() -> dict:
+    """Round 151 telemetry for /ws-status and /board/status: buffered ticks, estimated bytes, budget state, process memory."""
+    total, syms = _count_ticks()
+    st = _budget_state
+    prot = sum(1 for s in list(_last_read_ts) if _is_protected(s))
+    return {"ticks_buffered": total, "symbols_with_ticks": syms, "est_buffer_mb": round(total * _TICK_BYTES_EST / 1048576.0, 1),
+            "budget": _TICK_BUDGET, "over_budget": st["over"], "protected_symbols": prot, "thin_seconds": _TICK_THIN_S,
+            "thinned_skips": st["thinned_skips"], "thinned_rewrites": st["thinned_rewrites"], "peak_ticks_buffered": max(st["peak_total"], total),
+            "ingested_ticks": st["ingests"], **_proc_memory()}
+
+
 _OFFHOURS_RECHECK_S = 60.0
 
 
@@ -520,10 +688,19 @@ def _ingest_tick(symbol: str, ltp: float, ts: float, volume, best_bid, best_ask,
     """
     with _buffer_locks[symbol]:
         buf = _tick_buffers[symbol]
-        buf.append((ts, ltp))
+        if _budget_state["over"] and buf and ts - buf[-1][0] < _TICK_THIN_S and not _is_protected(symbol):
+            _budget_state["thinned_skips"] += 1      # over the total budget: this idle symbol keeps one tick per _TICK_THIN_S
+        else:
+            buf.append((ts, ltp))
         cutoff = ts - _MAX_BUFFER_AGE_S
         while buf and buf[0][0] < cutoff:
             buf.popleft()
+    _budget_state["ingests"] += 1
+    if _budget_state["ingests"] % _MAINT_EVERY == 0:
+        try:
+            _maintain()
+        except Exception as e:  # noqa: BLE001 - housekeeping must never drop a tick
+            logger.debug("tick budget maintenance failed: %s", e)
     if volume:
         _last_volume[symbol] = volume
     if day_stats is not None:
@@ -874,6 +1051,7 @@ def ws_status() -> dict:
         "subscribed_symbols": _extra["md_poller"]["universe"] if _md else len(_token_to_symbol),
         "task_done": _ws_task.done() if _ws_task else True,
         "reconnect_attempts": _reconnect_attempts,
+        "ticks": tick_stats(),
         "day_stats_symbols": len(_day_stats),
         "day_stats_accepted": _day_stats_accepted,
         "day_stats_rejected": _day_stats_rejected,

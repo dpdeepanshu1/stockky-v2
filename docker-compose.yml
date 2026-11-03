@@ -554,6 +554,8 @@ services:
       - PORT=8006
       # group 270: previous-day daily candles for the opening gate (screening/prev_day.py)
       - MARKET_DATA_URL=http://market-data-service:8001
+      # round 151: glibc keeps one malloc arena per thread and holds freed memory after a burst; two arenas let RSS fall back. Compare VmHWM before / after (/board/status memory).
+      - MALLOC_ARENA_MAX=${PS_MALLOC_ARENA_MAX:-2}
       # Inherits DATABASE_URL, ORACLE_DSN/USER/PASSWORD, DHAN_CREDENTIAL_ENC_KEY,
       # ANGELONE_CLIENT_ID/MPIN/API_KEY/TOTP_SECRET/STATIC_IP from .env (same
       # mechanism market-data-service already relies on for its own ANGELONE_*
@@ -690,7 +692,7 @@ services:
     # Separate from real-trade-service's CPU/mem budget — runs its own
     # event loop and WS connection independently.
     cpus: "0.30"
-    mem_limit: 700m  # group341: was 400m - tick buffers took it to 91% within 20 min of the open (log 2026-10-13); see WS_MAX_TICKS_PER_SYMBOL
+    mem_limit: 2400m  # round 151: was 700m (VM ran 1600m; 3 Nov 09:34 OOM kill, 900 MB peak at 10:51). Steady state ~550-700 MB; the headroom is for the opening burst. See WS_TICK_BUDGET
     mem_reservation: 128m
 
   # group 442: Real Money Calibration runner. Runs the repo's calibration / evidence / report scripts one at a time (nice'd, capped) for the page's Run buttons

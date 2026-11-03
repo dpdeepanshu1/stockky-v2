@@ -1855,6 +1855,7 @@ services/real-trade-service/execution/broker_stop.py
 services/real-trade-service/execution/close_all.py
 services/real-trade-service/execution/dhan_client.py
 services/real-trade-service/execution/dhan_client.py,cover
+services/real-trade-service/execution/eod_retry.py
 services/real-trade-service/execution/equity_sync.py
 services/real-trade-service/execution/gap_cache.py
 services/real-trade-service/execution/heat_state.py
@@ -2089,6 +2090,7 @@ services/real-trade-service/tests/test_e285_round160_orb_stats_log.py
 services/real-trade-service/tests/test_e285_round165_broker_dup_guard.py
 services/real-trade-service/tests/test_e285_round166_symbol_exposure_cap.py
 services/real-trade-service/tests/test_e285_round168_exit_booking_heal.py
+services/real-trade-service/tests/test_e285_round170_eod_retry.py
 services/real-trade-service/tests/test_e285_rt_ladder_risk.py
 services/real-trade-service/tests/test_e285_rt_open_cues.py
 services/real-trade-service/tests/test_e285_rt_results_split.py

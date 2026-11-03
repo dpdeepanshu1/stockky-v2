@@ -133,6 +133,8 @@ PROTECTED: Dict[str, str] = {
     "TM_AUTO_INTERVAL_MIN": "Time Machine timer (E115): a calibrator never changes it",
     "STRUCTURE_OBS_ENABLED": "evidence recorder: always on so tests have data",
     "STRUCTURE_OBS_WRITE_BEHIND": "evidence recorder plumbing (E253): how the observation row reaches the database; a report never decides it",
+    "COST_GATE_WIN_PROB": "money safety (charges gate): how much of the target a trade is credited with is your decision, never a report's",
+    "MIN_NET_EDGE_RS": "money safety (charges gate): the smallest net rupee gain worth an order is your decision, never a report's",
     "SIZE_STACK_FLOOR": "money safety (sizing): the smallest share of the base risk a stack of size penalties may leave is your decision, never a report's",
     "CYCLE_AUDIT_WRITE_BEHIND": "evidence recorder plumbing (E285 round 131): how the cycle summary rows reach the database; a report never decides it",
     "SHORT_ENTRY_CUSHION_PCT": "money safety (short selling): how far below the last price a short's SELL limit sits is your decision, never a report's",

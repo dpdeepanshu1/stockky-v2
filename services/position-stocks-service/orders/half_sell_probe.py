@@ -299,6 +299,24 @@ def run_probe(db, symbol: Optional[str] = None, confirm: str = "", *,
         _lock.release()
 
 
+def _memory_refusal() -> Optional[str]:
+    """Round 151 (3 Nov: the 09:34 memory kill came during a busy morning; the probe holds real shares while it runs): refuse to start when the
+    container is above PROBE_MAX_MEMORY_PCT of its limit (default 80), so an OOM kill cannot land between the BUY and the cleanup SELL.
+    Unreadable memory (no cgroup files, not Linux) never blocks the probe. PROBE_MAX_MEMORY_PCT=0 switches the guard off."""
+    try:
+        pct = float(getattr(config, "PROBE_MAX_MEMORY_PCT", 80.0) or 0.0)
+        if pct <= 0:
+            return None
+        from feed import ws_client
+        m = ws_client._proc_memory()
+        cur, lim = m.get("cgroup_mb"), m.get("cgroup_limit_mb")
+        if cur and lim and cur >= lim * pct / 100.0:
+            return f"the container uses {cur:.0f} MB of its {lim:.0f} MB limit ({100.0 * cur / lim:.0f}%), above the {pct:.0f}% memory guard: an out-of-memory kill mid-probe could leave shares open"
+    except Exception as e:  # noqa: BLE001 - a broken guard must not decide for the probe
+        logger.debug("half-sell probe memory guard unreadable: %s", e)
+    return None
+
+
 def _run(db, sym, broker, price_fn, now, sleep, clock, poll_s, notify) -> Dict[str, Any]:  # noqa: C901 - one straight line of steps, each with its own refusal
     from capital import shared_order_budget, shared_symbol_lock
     from execution import order_rate
@@ -320,6 +338,9 @@ def _run(db, sym, broker, price_fn, now, sleep, clock, poll_s, notify) -> Dict[s
         return _skip(sym or "-", "USE_SUPER_ORDER is off: the probe tests a position that sits under a Super Order", clock)
     if approve_first.active():
         return _skip(sym or "-", "an approve-first round is open", clock)
+    why_mem = _memory_refusal()
+    if why_mem:
+        return _skip(sym or "-", why_mem, clock)
     t = ist_now(now)
     if not is_market_open_ist(now) or not (_hhmm(PROBE_FROM_IST) <= t.time() <= _hhmm(PROBE_UNTIL_IST)):
         return _skip(sym or "-", f"outside the probe window ({PROBE_FROM_IST}-{PROBE_UNTIL_IST} IST on a trading day)", clock)
@@ -554,13 +575,15 @@ def _run(db, sym, broker, price_fn, now, sleep, clock, poll_s, notify) -> Dict[s
         except Exception as e:  # noqa: BLE001
             logger.warning("half-sell probe: stop row read failed (%s)", e)
         q["Q4_stop_accepted"] = True
-        q["Q4_order_type"] = str((row_stop or {}).get("orderType") or "STOP_LOSS_MARKET")
+        q["Q4_order_type"] = str((row_stop or {}).get("orderType") or (stop_res or {}).get("order_type_sent") or "STOP_LOSS_MARKET")
+        q["Q4_form_sent"] = (stop_res or {}).get("order_type_sent") or "STOP_LOSS_MARKET"
+        q["Q4_limit_price"] = (stop_res or {}).get("limit_price") or 0.0
         q["Q4_trigger_price"] = (row_stop or {}).get("triggerPrice") or trig
         q["Q4_status"] = _status(row_stop)
         q["Q5_unprotected_window_s"] = round(window, 2)
         run.res["answers"]["t4_stop_row"] = _compact_order(row_stop or {})
         run.step(f"T4: SELL stop accepted, id {stop_id}, type {q['Q4_order_type']}, trigger {q['Q4_trigger_price']} (Q4); the unprotected window T2 -> T4 was {window:.1f}s (Q5)")
-        run.rule(f"Q4: Dhan accepted a {q['Q4_order_type']} SELL order, INTRADAY, price 0, trigger {q['Q4_trigger_price']}, for the kept share.")
+        run.rule(f"Q4: Dhan accepted a {q['Q4_order_type']} SELL order (sent as {q['Q4_form_sent']}), INTRADAY, limit {q['Q4_limit_price']}, trigger {q['Q4_trigger_price']}, for the kept share.")
         run.rule(f"Q5: the unprotected window (stop cancelled -> new stop accepted) was {window:.1f}s, target under {WINDOW_TARGET_S:.0f}s.")
         if window > WINDOW_FAIL_S:
             problems.append(f"the unprotected window was {window:.1f}s, above the {WINDOW_FAIL_S:.0f}s limit")
@@ -575,6 +598,7 @@ def _run(db, sym, broker, price_fn, now, sleep, clock, poll_s, notify) -> Dict[s
             waited += 1.0
             pos5 = _read_positions(db, broker)
         long5 = _long_beyond(pos5, security_id, base) if pos5 is not None else None
+        q["Q5b_sell_fill_wait_s"] = round(waited, 1)      # round 151: how long after the stop was in until positions showed the SELL filled
         try:
             row5 = _row_for(broker.get_super_order_list(db), oid)
         except Exception as e:  # noqa: BLE001

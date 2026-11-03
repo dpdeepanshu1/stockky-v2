@@ -199,3 +199,10 @@ def test_recorder_says_why_a_noted_symbol_has_no_bars():
         assert not s["priority_missing_cause_known"] and s["priority_missing_not_subscribed"] == [] and s["priority_missing_no_tick"] == []
         br.reset()
 
+
+
+def test_round155_scorecard_names_the_symbols_with_no_bar_file():
+    load, lst = _env()
+    c = sc.build(_rows(), load, lst, cost=0.15, direction="auto", baseline_k=3)["coverage"]
+    assert c["no_file_symbols"] and sum(c["no_file_symbols"].values()) == c["no_file"] == 1
+    assert any(l.strip().startswith("symbols with the most samples and no bar file") for l in sc.coverage_lines(c))

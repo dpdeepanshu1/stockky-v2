@@ -127,6 +127,11 @@ _lock = threading.Lock()
 PRIMARY_DEAD_TTL_SEC = _env_int("NEWS_FEED_PRIMARY_DEAD_TTL_SEC", 1800, 0, 86400)
 _primary_dead_until: Dict[str, float] = {}
 _DEAD_STATUSES = frozenset({404, 410})
+# E285 round 162 (plan item 20, dead news feeds): the dead-primary memory above only covers the three feeds that HAVE a fallback. Any other feed that
+# answers 404 / 410 (retired URL) and has no fallback was downloaded again every _FAIL_TTL_SEC (60 s), one wasted request a minute per dead feed, for as
+# long as the service ran. Its "nothing served" answer is now remembered for NEWS_FEED_DEAD_TTL_SEC (default 1800 s; 0 = the old 60 s). The same
+# 404 / 410 only: timeouts, 5xx and bot-gate statuses keep their own rules. GET /news/feed-health still shows the feed as empty.
+DEAD_TTL_SEC = _env_int("NEWS_FEED_DEAD_TTL_SEC", 1800, 0, 86400)
 
 
 def _primary_is_dead(url: str) -> bool:
@@ -350,7 +355,8 @@ def fetch_feed_ex(url: str, source: str = "feed", max_age_s: Optional[float] = N
             parsed = _empty_parsed()
             info["entries"] = 0
             blocked = info.get("status") in _BLOCK_STATUSES
-            keep = (_BLOCKED_TTL_SEC if blocked else min(ttl, _FAIL_TTL_SEC)) if ttl > 0 else 0
+            dead = DEAD_TTL_SEC > 0 and info.get("status") in _DEAD_STATUSES
+            keep = (_BLOCKED_TTL_SEC if blocked else DEAD_TTL_SEC if dead else min(ttl, _FAIL_TTL_SEC)) if ttl > 0 else 0
     else:
         parsed = feedparser.parse(raw)          # exceptions propagate, as with the old direct call
         info["entries"] = len(getattr(parsed, "entries", None) or [])

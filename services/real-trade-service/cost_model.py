@@ -101,10 +101,13 @@ class EdgeVsCostResult:
     ratio: Optional[float]  # None when estimated_cost == 0
     passes_min_value: bool
     passes_min_ratio: bool
+    win_prob: float = 1.0          # round 153: the win chance the edge was weighted by (1.0 = full target)
+    weighted_edge: float = 0.0     # round 153: expected_edge x win_prob, the number compared with the cost
+    passes_min_net: bool = True    # round 153: weighted_edge - cost >= config.MIN_NET_EDGE_RS (0 = off)
 
     @property
     def passes(self) -> bool:
-        return self.passes_min_value and self.passes_min_ratio
+        return self.passes_min_value and self.passes_min_ratio and self.passes_min_net
 
 
 def evaluate_entry_cost_gate(
@@ -115,6 +118,7 @@ def evaluate_entry_cost_gate(
     min_trade_value: Optional[float] = None,
     min_edge_to_cost_ratio: Optional[float] = None,
     include_dp: bool = False,
+    win_prob: Optional[float] = None,
 ) -> EdgeVsCostResult:
     """Gate 5.6 helper (entry_engine/entry.py): compares a candidate's own
     expected ₹ edge (position value * target_pct) against its estimated
@@ -135,7 +139,14 @@ def evaluate_entry_cost_gate(
         entry_price, qty, exit_price=target_price,
         product_type=product_type, is_delivery_sell=bool(include_dp) and (product_type or "CNC").upper() == "CNC",
     )
-    ratio = (expected_edge / cost.total) if cost.total > 0 else None
+    wp = win_prob if win_prob is not None else getattr(config, "COST_GATE_WIN_PROB", 1.0)      # round 153: realistic win chance, not "the full target is hit"
+    try:
+        wp = float(wp)
+        wp = wp if 0.0 < wp <= 1.0 else 1.0
+    except (TypeError, ValueError):
+        wp = 1.0
+    weighted_edge = expected_edge * wp
+    ratio = (weighted_edge / cost.total) if cost.total > 0 else None
     effective_min_trade_value = min_trade_value if min_trade_value is not None else config.MIN_TRADE_VALUE
     effective_min_ratio = min_edge_to_cost_ratio if min_edge_to_cost_ratio is not None else config.MIN_EDGE_TO_COST_RATIO
     return EdgeVsCostResult(
@@ -145,6 +156,9 @@ def evaluate_entry_cost_gate(
         ratio=round(ratio, 2) if ratio is not None else None,
         passes_min_value=trade_value >= effective_min_trade_value,
         passes_min_ratio=(ratio is None) or (ratio >= effective_min_ratio),
+        win_prob=wp,
+        weighted_edge=round(weighted_edge, 2),
+        passes_min_net=(weighted_edge - cost.total) >= float(getattr(config, "MIN_NET_EDGE_RS", 0.0) or 0.0),
     )
 
 
@@ -193,3 +207,18 @@ def estimate_delivery_sell_cost(price: float, qty: int, carried: bool = True) ->
     gst = (exchange + sebi) * (config.GST_PCT / 100.0)
     dp = config.DP_CHARGE_FLAT * (1 + config.GST_PCT / 100.0) if carried else 0.0
     return round(stt + exchange + sebi + gst + dp, 2)
+
+
+def breakeven_level(entry: float, qty, ltp: float, carried: bool = False) -> float:
+    """E285 round 156 (plan item 11): the stop level for the breakeven rule: entry + estimated round-trip charges per share + BREAKEVEN_BUFFER_PCT of entry, so
+    being stopped there is about zero NET. Falls back to the plain entry price when BREAKEVEN_COVER_CHARGES is off, the quantity / price is unusable, or the
+    covered level would not sit below the current price (a stop at or above the market would fire at once). Never raises; never returns less than entry."""
+    try:
+        if not getattr(config, "BREAKEVEN_COVER_CHARGES", True) or not entry or entry <= 0 or not qty or int(qty) <= 0:
+            return entry
+        q = int(qty)
+        cost = estimate_round_trip_cost(entry, q, exit_price=entry, product_type="CNC" if carried else "MIS", is_delivery_sell=bool(carried))
+        level = round(entry + cost.total / q + entry * float(getattr(config, "BREAKEVEN_BUFFER_PCT", 0.0)) / 100.0, 2)
+        return level if entry <= level < float(ltp) else entry
+    except Exception:  # noqa: BLE001
+        return entry

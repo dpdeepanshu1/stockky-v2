@@ -222,6 +222,12 @@ def _stop_overshoot_allowance_off_for_older_tests(monkeypatch):
     """group 470: older sizing tests assert exact share counts from the plain risk cap; the allowance is tested in test_group470_review_fixes.py."""
     import config as _cfg
     monkeypatch.setattr(_cfg, "STOP_OVERSHOOT_ALLOWANCE_PCT", 0.0, raising=False)
+    monkeypatch.setattr(_cfg, "OPENING_GATE_MIN_MINUTES_AFTER_OPEN", 0.0, raising=False)   # round 154: older opening tests run at 09:15-09:29
+    monkeypatch.setattr(_cfg, "BREAKEVEN_COVER_CHARGES", False, raising=False)       # round 156: older exit tests assert the stop at the exact entry price
+    monkeypatch.setattr(_cfg, "MIN_NET_EDGE_RS", 0.0, raising=False)               # round 153: older tests size 1-share orders
+    monkeypatch.setattr(_cfg, "COST_GATE_WIN_PROB", 1.0, raising=False)             # round 153: older cost-gate tests use the full-target comparison
+    monkeypatch.setattr(_cfg, "STOP_OVERSHOOT_SAMEDAY_PCT", 0.0, raising=False)      # round 152: older tests assert exact share counts
+    monkeypatch.setattr(_cfg, "SIZE_STACK_SKIP_MIN_PENALTIES", 0, raising=False)     # round 152: stacked-penalty skip is tested in test_e285_round152_stack_skip.py
 
 
 @_pytest_g172.fixture(autouse=True)

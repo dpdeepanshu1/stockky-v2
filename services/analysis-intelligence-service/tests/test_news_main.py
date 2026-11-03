@@ -1041,6 +1041,8 @@ class TestAnalyze:
     def test_neutral_scoring_single_headline_is_low_quality(self, monkeypatch):
         monkeypatch.setattr(nm, "build_news_response", None)
         monkeypatch.setattr(nm, "_fetch_headlines", lambda s, max_items=15: self._h(1))
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")          # round 161: with a key and HF running, a 0.0 average really is a neutral reading
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
         monkeypatch.setattr(nm, "_score_headline", lambda t: 0.0)
         out = nm.analyze("INFY")
         assert out["news_score"] == 50

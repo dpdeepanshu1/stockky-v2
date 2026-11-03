@@ -1540,18 +1540,40 @@ def place_intraday_sell_stop(db: Session, *, is_armed: bool, security_id: str, e
                              tag: Optional[str] = None) -> dict:
     """E285 round 98 (half-sell probe only): SELL STOP_LOSS_MARKET, INTRADAY - the broker stop of a LONG whose Super Order legs were cancelled (a long's stop sits BELOW the price;
     Dhan fires the SELL when the LTP falls to the trigger). The mirror of place_intraday_buy_stop with the same blocking read-back: raises when Dhan gives no order id, the order is
-    not in the book, the book says another order type, or its status is not live - the caller treats any raise as 'no stop exists'. Nothing in the live entry or exit path calls this."""
+    not in the book, the book says another order type, or its status is not live - the caller treats any raise as 'no stop exists'. Nothing in the live entry or exit path calls this.
+
+    Round 151 (3 Nov, ONGC probe): Dhan REJECTED the SELL STOP_LOSS_MARKET with price 0.0: "Trigger Price should be greater than Price" (a SELL stop is checked against its price field).
+    When that exact refusal comes back, the stop is sent ONCE more as a stop-limit: order_type STOP_LOSS with a limit price SELL_STOP_LIMIT_BUFFER_PCT below the trigger (at least one tick
+    below, so the rule holds). The returned dict carries `order_type_sent` and `limit_price` so the probe records which form Dhan accepts. Any other refusal still raises at once."""
     if not is_armed:
         raise DhanNotArmedError("position-stocks-service is not armed - refusing to place a protective SELL stop order.")
     trig = round_stop_to_tick(float(trigger_price))
     if trig <= 0:
         raise ValueError(f"place_intraday_sell_stop: trigger_price must be > 0 (got {trigger_price!r} -> {trig!r}).")
     client = _get_sdk_client(db)
-    logger.warning("position-stocks: placing REAL protective stop: STOP_LOSS_MARKET SELL %s x%d trigger=\u20b9%.2f (INTRADAY)", security_id, quantity, trig)
-    order_rate.acquire("place_order")
-    resp = client.place_order(security_id=security_id, exchange_segment=exchange_segment, transaction_type="SELL", quantity=int(quantity),
-                              order_type="STOP_LOSS_MARKET", product_type="INTRADAY", price=0.0, trigger_price=trig, validity="DAY", tag=tag)
-    result = _extract_data(resp) or {}
+
+    def _send(order_type: str, price: float) -> dict:
+        logger.warning("position-stocks: placing REAL protective stop: %s SELL %s x%d trigger=\u20b9%.2f price=%.2f (INTRADAY)", order_type, security_id, quantity, trig, price)
+        order_rate.acquire("place_order")
+        resp = client.place_order(security_id=security_id, exchange_segment=exchange_segment, transaction_type="SELL", quantity=int(quantity),
+                                  order_type=order_type, product_type="INTRADAY", price=price, trigger_price=trig, validity="DAY", tag=tag)
+        return _extract_data(resp) or {}
+
+    sent_type, limit_price = "STOP_LOSS_MARKET", 0.0
+    try:
+        result = _send(sent_type, 0.0)
+    except Exception as e:  # noqa: BLE001
+        if "trigger price should be greater than price" not in str(e).lower():
+            raise
+        buf = float(getattr(config, "SELL_STOP_LIMIT_BUFFER_PCT", 0.5) or 0.5)
+        limit_price = round_to_tick(trig * (1.0 - buf / 100.0))
+        if limit_price >= trig:                       # a tiny price on a coarse tick: step one tick down
+            limit_price = round_to_tick(trig - tick_size_for_price(trig))
+        if limit_price <= 0 or limit_price >= trig:
+            raise
+        sent_type = "STOP_LOSS"
+        logger.warning("position-stocks: Dhan refused the SELL STOP_LOSS_MARKET (%s); retrying once as STOP_LOSS limit %.2f under trigger %.2f", str(e)[:120], limit_price, trig)
+        result = _send(sent_type, limit_price)
     oid = str(result.get("orderId") or result.get("order_id") or "")
     if not oid:
         raise RuntimeError(f"place_intraday_sell_stop: Dhan did not return an orderId (raw: {result!r}) - treating as placement failure.")
@@ -1565,11 +1587,14 @@ def place_intraday_sell_stop(db: Session, *, is_armed: bool, security_id: str, e
         raise RuntimeError(f"place_intraday_sell_stop: placed {oid} but it is not in the order list - treating as placement failure.")
     otype = str(row.get("orderType") or row.get("order_type") or "").upper()
     status = str(row.get("orderStatus") or row.get("status") or "").upper()
-    if otype not in ("STOP_LOSS_MARKET", "SL-M", "SLM"):
-        raise RuntimeError(f"place_intraday_sell_stop: ORDER TYPE MISMATCH for {oid}: sent STOP_LOSS_MARKET, Dhan reports {otype!r} (row: {row!r})")
+    ok_types = ("STOP_LOSS_MARKET", "SL-M", "SLM") if sent_type == "STOP_LOSS_MARKET" else ("STOP_LOSS", "SL", "STOP_LOSS_LIMIT")
+    if otype not in ok_types:
+        raise RuntimeError(f"place_intraday_sell_stop: ORDER TYPE MISMATCH for {oid}: sent {sent_type}, Dhan reports {otype!r} (row: {row!r})")
     if status and status not in ("PENDING", "TRANSIT", "OPEN"):
         raise RuntimeError(f"place_intraday_sell_stop: order {oid} status {status!r} is not a live pending state (row: {row!r})")
     result["orderId"] = oid
+    result["order_type_sent"] = sent_type
+    result["limit_price"] = limit_price
     return result
 
 

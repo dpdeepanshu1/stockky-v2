@@ -43,3 +43,29 @@ def open_window_mult(base_pct, adj_pct, open_mult) -> float:
         return max(m, min(1.0, need))
     except (TypeError, ValueError, ZeroDivisionError):
         return open_mult
+
+
+def stacked_refusal(soft_pen, lifted) -> str:
+    """E285 round 152: '' normally; a reason when the floor WOULD lift the size (`lifted`) and at least SIZE_STACK_SKIP_MIN_PENALTIES soft penalties (values under 1.0)
+    are stacked: several independent soft tests all disliked the entry, so lifting it back to the floor undoes them. Pure; never raises."""
+    try:
+        n_min = int(getattr(config, "SIZE_STACK_SKIP_MIN_PENALTIES", 3) or 0)
+        if n_min <= 0 or not lifted or not soft_pen:
+            return ""
+        hit = sorted(k for k, v in dict(soft_pen).items() if float(v) < 1.0)
+        if len(hit) < n_min:
+            return ""
+        return f"{len(hit)} soft size penalties stacked ({', '.join(hit)}) and together push the size under {floor():.2f} of the base risk: skipped instead of lifted to the floor"
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
+def overshoot_pct() -> float:
+    """E285 round 152: the stop-overshoot allowance (percent of price) used for SIZING. Same-day book (OVERNIGHT_HOLD_ENABLED false) -> STOP_OVERSHOOT_SAMEDAY_PCT;
+    otherwise STOP_OVERSHOOT_ALLOWANCE_PCT. Never raises."""
+    try:
+        if not bool(getattr(config, "OVERNIGHT_HOLD_ENABLED", False)):
+            return max(0.0, float(getattr(config, "STOP_OVERSHOOT_SAMEDAY_PCT", 0.25) or 0.0))
+        return max(0.0, float(getattr(config, "STOP_OVERSHOOT_ALLOWANCE_PCT", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0

@@ -1999,7 +1999,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         _range_note = f" [range-pos={_rpos:.2f}≥0.65 — extended: BE trigger at 80%]"
 
                 if gain_per_share >= (_be_trigger * _be_mult) * tick.atr:
-                    be_level = position.avg_entry_price
+                    be_level = cost_model.breakeven_level(position.avg_entry_price, position.qty_open, ltp, carried=(held_days or 0) >= 1)   # round 156: entry + charges + buffer
                     if position.current_stop is None or position.current_stop < be_level:
                         old_stop = position.current_stop
                         position.current_stop = be_level

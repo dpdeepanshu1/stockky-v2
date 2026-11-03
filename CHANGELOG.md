@@ -10,6 +10,7 @@
  * **Log line to look for:** `entry_engine: BUY <SYMBOL> refused - Dhan ...` at CRITICAL. If it never appears, the database guard is doing its job.
  * **Not done:** ITC showed 14 shares in Dhan while the log sized 10; this round does not explain it. Holdings from earlier days are not read (overnight holds are off).
  * **Tests:** `real-trade-service/tests/test_e285_round165_broker_dup_guard.py` (12: long position, flat after a sell, short, each live status, dead / traded / sell orders, other symbols, security id and `-EQ` match, fake Dhan block / allow, unreadable Dhan both modes, switch off, wiring and lock rule). Run here with a small runner because pytest is not installed in my sandbox: 12 passed. The service's other tests were NOT run. Please run `bash scripts/docker_test.sh real-trade-service` on the VM.
+ * **Test fix (VM run 3 Nov):** `tests/test_group321_exits_ignore_price_proof.py::test_auto_pilot_exit_paths_do_not_use_the_price_verdict` was already failing before this round (round 158 added a `stop_check_gap.reset(mode)` line between the `if` and the `return` in `auto_pilot.py`; the test regex did not allow it). The trading code is unchanged and correct; only the test pattern was widened. VM result before this fix: 1 failed, 6044 passed, 1 skipped (all 12 round 165 tests pass).
 
 ## 3 Nov 2026 - Round 164: momentum half-sell exit, MOMENTUM_SCALEOUT (plan item 12), default OFF
 

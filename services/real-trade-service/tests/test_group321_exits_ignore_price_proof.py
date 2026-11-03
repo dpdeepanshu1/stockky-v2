@@ -40,7 +40,8 @@ def test_auto_pilot_exit_paths_do_not_use_the_price_verdict():
     import os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = open(os.path.join(here, "execution", "auto_pilot.py"), encoding="utf-8").read()
-    assert re.search(r"if not is_market_open_ist\(honor_session_proof=False\):\s*\n\s*return\s*\n\s*\n?\s*# .*Protective exits", src)
+    # round 165: round 158 put a `stop_check_gap.reset(mode)` line between the `if` and the `return`; allow up to 3 such lines.
+    assert re.search(r"if not is_market_open_ist\(honor_session_proof=False\):\s*\n(?:[^\n]*\n){0,3}?\s*return\s*\n\s*\n?\s*# .*Protective exits", src)
     assert re.search(r'eod_squareoff_last_run", None\) != today\s*\n\s*and is_market_open_ist\(honor_session_proof=False\)', src)
 
 

@@ -1356,6 +1356,7 @@ services/position-stocks-service/orders/ip_guard.py
 services/position-stocks-service/orders/journal_notes.py
 services/position-stocks-service/orders/learned_limit.py
 services/position-stocks-service/orders/learned_stop.py
+services/position-stocks-service/orders/leg_child_guard.py
 services/position-stocks-service/orders/liquidity_gate.py
 services/position-stocks-service/orders/live_anchor.py
 services/position-stocks-service/orders/live_state.py
@@ -1372,6 +1373,7 @@ services/position-stocks-service/orders/own_spread.py
 services/position-stocks-service/orders/plain_short.py
 services/position-stocks-service/orders/pullback_rearm.py
 services/position-stocks-service/orders/reconcile.py
+services/position-stocks-service/orders/residual_guard.py
 services/position-stocks-service/orders/review_stats.py
 services/position-stocks-service/orders/risk_ladder.py
 services/position-stocks-service/orders/risk_stage.py
@@ -1594,6 +1596,7 @@ services/position-stocks-service/tests/test_e285_round115_event_stamps.py
 services/position-stocks-service/tests/test_e285_round119_slot_0920_switch.py
 services/position-stocks-service/tests/test_e285_round151_tick_budget_and_sell_stop.py
 services/position-stocks-service/tests/test_e285_round164_scaleout.py
+services/position-stocks-service/tests/test_e285_round167_leg_child_guard.py
 services/position-stocks-service/tests/test_e285_round96_live_state.py
 services/position-stocks-service/tests/test_e285_round99_opening_caps.py
 services/position-stocks-service/tests/test_e285_shared_order_rate.py
@@ -1795,6 +1798,7 @@ services/real-trade-service/entry_engine/__init__.py
 services/real-trade-service/entry_engine/adaptive_params.py
 services/real-trade-service/entry_engine/approve_first.py
 services/real-trade-service/entry_engine/board_client.py
+services/real-trade-service/entry_engine/broker_dup_guard.py
 services/real-trade-service/entry_engine/calendar_gate.py
 services/real-trade-service/entry_engine/candidate_outcomes.py
 services/real-trade-service/entry_engine/carry_context.py
@@ -2080,6 +2084,8 @@ services/real-trade-service/tests/test_e285_round156_breakeven_charges.py
 services/real-trade-service/tests/test_e285_round157_planned_vs_real.py
 services/real-trade-service/tests/test_e285_round158_stop_check_gap.py
 services/real-trade-service/tests/test_e285_round160_orb_stats_log.py
+services/real-trade-service/tests/test_e285_round165_broker_dup_guard.py
+services/real-trade-service/tests/test_e285_round166_symbol_exposure_cap.py
 services/real-trade-service/tests/test_e285_rt_ladder_risk.py
 services/real-trade-service/tests/test_e285_rt_open_cues.py
 services/real-trade-service/tests/test_e285_rt_results_split.py

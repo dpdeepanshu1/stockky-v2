@@ -418,6 +418,18 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
         if _state == "error":
             raise RuntimeError(f"{pos.symbol} (id={pos.id}) cover BUY NOT sent: {_why}")
 
+    if pos.dhan_super_order_id and not pos.overnight_converted_to_cnc and not getattr(pos, "plain_stop_order_id", None):
+        # E285 round 167 (JYOTICNC, 3 Nov): cancelling the Super Order legs does nothing to a leg that already TRIGGERED - Dhan turns it into its own order (tag VTT...),
+        # which can rest unfilled and fill after this exit, leaving the opposite position. Cancel it and read it back BEFORE the exit; if it already filled the position, no exit.
+        from orders import leg_child_guard
+        _lc_state, _lc_why = leg_child_guard.release_children(db, pos)
+        if _lc_state == "filled":
+            raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) already exited by a Dhan leg order: {_lc_why}")
+        if _lc_state == "error":
+            raise RuntimeError(f"{pos.symbol} (id={pos.id}) exit NOT sent: {_lc_why}")
+        if _lc_state == "cancelled":
+            logger.warning("flat exit: %s (id=%s) %s", pos.symbol, pos.id, _lc_why)
+
     exit_side = _side.exit_transaction_type(pos)   # SELL closes a long, BUY closes a short
     if _side.is_short(pos) and pos.overnight_converted_to_cnc:
         # A short can never be a CNC holding; a CNC BUY here would open a long on top of the short.

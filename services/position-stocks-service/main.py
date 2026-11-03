@@ -581,6 +581,14 @@ async def _fast_reconcile_loop() -> None:
                 except Exception as e:
                     logger.error("position-stocks: scale-out guard error: %s", e, exc_info=True)
                 try:
+                    # E285 round 167: alert-only - Dhan's net INTRADAY position of a stock traded today vs what the app holds (orders/residual_guard.py); RESIDUAL_GUARD_ENABLED
+                    from orders import residual_guard
+                    n_res = await asyncio.to_thread(residual_guard.run_residual_guard, db)
+                    if n_res:
+                        logger.warning("position-stocks: residual guard raised %d position-mismatch alert(s)", n_res)
+                except Exception as e:
+                    logger.error("position-stocks: residual guard error: %s", e, exc_info=True)
+                try:
                     # short selling (E102): live shorts are covered at SHORT_SQUAREOFF_TIME_IST (14:55), before the 15:00 sweep
                     n_short_cover = await asyncio.to_thread(eod_squareoff.run_short_squareoff, db)
                     if n_short_cover:

@@ -988,6 +988,13 @@ TRAIL_ACTIVATE_MAX_PCT = _get_float("TRAIL_ACTIVATE_MAX_PCT", 2.0)
 # Stop-breach watchdog (orders/stop_watchdog.py): FEDDERSHOL's stop was trailed to 58.85 yet the trade ended at 58.41 - nothing noticed the
 # price sitting under its own stop. Price under an OPEN position's stored stop for STOP_WATCHDOG_GRACE_S seconds = the broker stop did not
 # fire: close at market (status STOP_BREACH_EXIT) and alert. STOP_WATCHDOG_ENABLED=0 = off.
+# E285 round 167 (JYOTICNC, 3 Nov): before an exit order is sent for a Super Order position, a leftover leg order that Dhan created itself (tag VTT...) is cancelled
+# and read back (orders/leg_child_guard.py). LEG_CHILD_GUARD=false = the old behaviour.
+LEG_CHILD_GUARD = _get_bool("LEG_CHILD_GUARD", True)
+# E285 round 167: alert-only check that Dhan's net INTRADAY position of a stock this service traded today matches what the app believes it holds (orders/residual_guard.py).
+RESIDUAL_GUARD_ENABLED = _get_bool("RESIDUAL_GUARD_ENABLED", True)
+RESIDUAL_GUARD_INTERVAL_S = _get_float("RESIDUAL_GUARD_INTERVAL_S", 60.0)     # at most one Dhan positions read per this many seconds
+RESIDUAL_GUARD_CONFIRM_S = _get_float("RESIDUAL_GUARD_CONFIRM_S", 90.0)       # a mismatch must last this long before the alert (fills settle, reconcile catches up)
 STOP_WATCHDOG_ENABLED = _get_bool("STOP_WATCHDOG_ENABLED", True)
 STOP_WATCHDOG_GRACE_S = _get_float("STOP_WATCHDOG_GRACE_S", 20.0)
 STOP_WATCHDOG_MIN_BREACH_TICKS = _get_int("STOP_WATCHDOG_MIN_BREACH_TICKS", 1)   # price must be this many ticks UNDER the stop

@@ -400,7 +400,7 @@ def test_script_and_service_share_the_confirm_phrase_and_the_route_exists():
 def test_nothing_in_the_live_paths_calls_the_probe_or_the_sell_stop():
     root = Path(__file__).resolve().parents[1]
     for p in list(root.glob("orders/*.py")) + list(root.glob("execution/*.py")) + [root / "main.py"]:
-        if p.name in ("half_sell_probe.py", "dhan_client.py"):
+        if p.name in ("half_sell_probe.py", "dhan_client.py", "scaleout.py"):      # round 164: scaleout.py (MOMENTUM_SCALEOUT, default off) is the one live user of the SELL stop
             continue
         txt = p.read_text(encoding="utf-8")
         assert "place_intraday_sell_stop" not in txt, f"{p.name} must not place the probe's SELL stop"

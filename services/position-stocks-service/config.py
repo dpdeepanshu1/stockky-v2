@@ -1178,6 +1178,20 @@ MOMENTUM_NO_NEW_BEST_MIN = max(1.0, _get_float("MOMENTUM_NO_NEW_BEST_MIN", 20.0)
 MOMENTUM_EXIT_MIN_INTERVAL_S = max(0.0, _get_float("MOMENTUM_EXIT_MIN_INTERVAL_S", 20.0))
 TIME_STOP_LEARNED_ENABLED = _get_bool("TIME_STOP_LEARNED_ENABLED", True)   # E275 round 38: flat-band / no-follow-through / hard-maximum minutes from the trade's own setup cell (30+ closed trades, 10+ peak times), else the fixed numbers
 MOMENTUM_LEARNED_ENABLED = _get_bool("MOMENTUM_LEARNED_ENABLED", True)   # E275 round 37: signal 2's minutes and signal 4's gain from the trade's own setup cell (30+ closed trades), else the fixed numbers
+# E285 round 164 (plan item 12): the half-sell. OFF by default: nothing below runs and a trade that qualifies for a momentum BOOK is closed in full, exactly as before.
+#   MOMENTUM_SCALEOUT              false (default) | true   when 3+ momentum signals fire on a LONG Super Order trade of MOMENTUM_SCALEOUT_MIN_QTY shares or more, sell half at market and put a plain
+#                                                          SELL stop under the rest (orders/scaleout.py). The Dhan sequence was proven by the ONGC probe on 3 Nov (unprotected window 1.7 s).
+#   MOMENTUM_SCALEOUT_MIN_QTY      smallest position that is split (default 4, 2..100); smaller ones are closed in full
+#   MOMENTUM_SCALEOUT_UNTIL_IST    no half-sell after this time, HH:MM (default 14:30); later signals close in full
+#   SCALEOUT_STOP_GAP_PCT          the new stop sits this far under the price when the signal gives no range of its own (default 1.0, 0.3..3.0); never below the trade's current stop
+#   SCALEOUT_FILL_WAIT_S           seconds to wait for the half-sell's fill price before booking it (default 6); an unconfirmed sell is booked later by the guard
+#   SCALEOUT_STOP_GRACE_S          seconds the price may sit under the kept share's stop before it is sold at market (default 15; the broker stop normally fires first)
+MOMENTUM_SCALEOUT = _get_bool("MOMENTUM_SCALEOUT", False)
+MOMENTUM_SCALEOUT_MIN_QTY = min(100, max(2, _get_int("MOMENTUM_SCALEOUT_MIN_QTY", 4)))
+MOMENTUM_SCALEOUT_UNTIL_IST = (_get_str("MOMENTUM_SCALEOUT_UNTIL_IST", "14:30") or "14:30").strip()
+SCALEOUT_STOP_GAP_PCT = min(3.0, max(0.3, _get_float("SCALEOUT_STOP_GAP_PCT", 1.0)))
+SCALEOUT_FILL_WAIT_S = min(30.0, max(0.0, _get_float("SCALEOUT_FILL_WAIT_S", 6.0)))
+SCALEOUT_STOP_GRACE_S = min(120.0, max(0.0, _get_float("SCALEOUT_STOP_GRACE_S", 15.0)))
 LEARNED_WEEKLY_LIMIT_ENABLED = _get_bool("LEARNED_WEEKLY_LIMIT_ENABLED", True)   # E275 round 39: a learned exit number (time-to-peak minutes, typical gain) changes by at most LEARNED_WEEKLY_LIMIT_PCT a week (orders/learned_limit.py)
 LEARNED_WEEKLY_LIMIT_PCT = max(1.0, min(100.0, _get_float("LEARNED_WEEKLY_LIMIT_PCT", 25.0)))
 LEARNED_LIMIT_FILE = _get_str("LEARNED_LIMIT_FILE", "")                          # "" = <BAR_RECORD_DIR>/_learned_limits.json

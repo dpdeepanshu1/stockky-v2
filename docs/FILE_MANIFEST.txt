@@ -1376,6 +1376,7 @@ services/position-stocks-service/orders/review_stats.py
 services/position-stocks-service/orders/risk_ladder.py
 services/position-stocks-service/orders/risk_stage.py
 services/position-stocks-service/orders/rr_floor.py
+services/position-stocks-service/orders/scaleout.py
 services/position-stocks-service/orders/scorecard.py
 services/position-stocks-service/orders/sell_orders.py
 services/position-stocks-service/orders/sell_probe.py
@@ -1592,6 +1593,7 @@ services/position-stocks-service/tests/test_e285_round113_event_weights.py
 services/position-stocks-service/tests/test_e285_round115_event_stamps.py
 services/position-stocks-service/tests/test_e285_round119_slot_0920_switch.py
 services/position-stocks-service/tests/test_e285_round151_tick_budget_and_sell_stop.py
+services/position-stocks-service/tests/test_e285_round164_scaleout.py
 services/position-stocks-service/tests/test_e285_round96_live_state.py
 services/position-stocks-service/tests/test_e285_round99_opening_caps.py
 services/position-stocks-service/tests/test_e285_shared_order_rate.py

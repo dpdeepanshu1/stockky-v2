@@ -177,7 +177,7 @@ def test_status_config_and_loop_are_wired():
     assert "momentum_hook.run_momentum_exit" in main_src
     assert main_src.index("tape_hook.run_tape_exit") < main_src.index("momentum_hook.run_momentum_exit") < main_src.index("stop_watchdog.run_stop_watchdog")
     hook_src = (ROOT / "orders" / "momentum_hook.py").read_text(encoding="utf-8")
-    assert 'exit_reason="MOMENTUM_EXIT"' in hook_src and "scaleout=False" in hook_src
+    assert 'exit_reason="MOMENTUM_EXIT"' in hook_src and "scaleout=_scaleout_ok(pos)" in hook_src       # round 164: the half-sell is built, gated by MOMENTUM_SCALEOUT (default off)
 
 
 def test_default_mode_is_live_and_old_log_reads_live(monkeypatch):

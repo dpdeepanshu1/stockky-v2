@@ -171,7 +171,7 @@ from execution import dhan_client
 from feed import ws_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpIntradayRestrictedSecurity, ScalpPosition, ScalpTradeJournal
 from orders import breakeven, eod_squareoff, event_hook, momentum_hook, overnight_stop, reconcile, stop_watchdog, tape_hook, trailing
-from orders import adaptive, plain_short, pullback_rearm
+from orders import adaptive, plain_short, pullback_rearm, scaleout
 from orders import calendar_gate, charges_ledger, excursion, journal_notes, review_stats, trade_stats, window_health
 from orders.entry import (
     attempt_entry, attempt_manual_entry, log_quality_reject,
@@ -573,6 +573,13 @@ async def _fast_reconcile_loop() -> None:
                         logger.warning("position-stocks: plain-short guard closed or resolved %d item(s)", n_plain)
                 except Exception as e:
                     logger.error("position-stocks: plain-short guard error: %s", e, exc_info=True)
+                try:
+                    # E285 round 164: the kept half of a MOMENTUM_SCALEOUT split (plain long + stamp): book its half-sell, its stop fill, re-place a dead stop, target / breach exits (orders/scaleout.py)
+                    n_so = await asyncio.to_thread(scaleout.run_scaleout_guard, db)
+                    if n_so:
+                        logger.warning("position-stocks: scale-out guard closed or resolved %d item(s)", n_so)
+                except Exception as e:
+                    logger.error("position-stocks: scale-out guard error: %s", e, exc_info=True)
                 try:
                     # short selling (E102): live shorts are covered at SHORT_SQUAREOFF_TIME_IST (14:55), before the 15:00 sweep
                     n_short_cover = await asyncio.to_thread(eod_squareoff.run_short_squareoff, db)

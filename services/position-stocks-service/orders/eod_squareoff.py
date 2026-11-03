@@ -394,6 +394,19 @@ def _fire_flat_sell(db: Session, pos: ScalpPosition) -> dict:
             raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) fully sold by its overnight stop during cancel")
         overnight_stop.assign_stop_order(pos, None)  # caller commits pos shortly after
 
+    if not _side.is_short(pos) and getattr(pos, "plain_stop_order_id", None) and not pos.dhan_super_order_id and not pos.overnight_converted_to_cnc:
+        # E285 round 164: the kept half of a MOMENTUM_SCALEOUT split is a plain long with a resting SELL stop. Book an unconfirmed half-sell first (so pos.quantity is what is really
+        # left), then cancel the stop and read it back BEFORE this SELL, so the two never both exist (a filled stop plus this SELL would sell shares twice). Only rows carrying the stamp.
+        from orders import scaleout
+        if scaleout.is_remainder(pos):
+            scaleout.settle_before_flat_sell(db, pos)
+            from orders import plain_short
+            _state, _why = plain_short.release_stop_before_cover(db, pos)
+            if _state == "filled":
+                raise PositionAlreadyFlat(f"{pos.symbol} (id={pos.id}) kept half already sold by its broker stop: {_why}")
+            if _state == "error":
+                raise RuntimeError(f"{pos.symbol} (id={pos.id}) flat SELL NOT sent: {_why}")
+
     if _side.is_short(pos) and getattr(pos, "plain_stop_order_id", None):
         # E114: a plain-order short rests a BUY stop-loss-market at the broker. Cancel it and read it back BEFORE the cover BUY, so the two never both exist
         # (a filled stop plus a cover would open a LONG). A stop that already filled means the short is flat: no BUY; plain_short's guard books the STOP_HIT.

@@ -6,8 +6,8 @@ order-flow verdict and the fade check, then acts:
   * TIGHTEN: Super Order stop / target legs through dhan_client.modify_super_order (stop read back with verify_stop_leg); a plain short only moves its
     software target (E114: a plain short's broker stop is fixed by design). A stop is never loosened, a target never raised.
   * BOOK: the whole position is closed through eod_squareoff.close_position_now(exit_reason="MOMENTUM_EXIT") - the same cancel-legs-then-SELL path the
-    stagnation exit uses. The half-sell (MOMENTUM_SCALEOUT) is NOT built: it needs a Dhan Super Order leg resize that has not been probed, so a trade
-    that qualifies is closed in full and the record says "FULL".
+    stagnation exit uses. With MOMENTUM_SCALEOUT on (default off, round 164) an eligible long Super Order trade is split instead (orders/scaleout.py: half sold,
+    half kept under a new stop); any failure there falls back to this full close, and the record says "HALF" or "FULL".
   * MOMENTUM_EXIT_MODE live | off (default live since E276 round 66; the old log-only mode is gone). Live stamps flow_json["momentum"]. Per-position MOMENTUM_EXIT_MIN_INTERVAL_S.
 Never raises; a trade carried overnight (CNC) is left alone.
 """
@@ -163,6 +163,28 @@ def _apply_tighten(db: Session, pos, d: dict, ltp: float, plain: bool, short: bo
     return changed
 
 
+def _scaleout_ok(pos) -> bool:
+    try:
+        from orders import scaleout
+        return scaleout.eligible(pos)[0]
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _apply_half(db: Session, pos, d: dict, ltp: float) -> Optional[bool]:
+    """MOMENTUM_SCALEOUT: split the position. True = split (or the rest closed), False = nothing to do this pass, None = close in full the old way. Never raises."""
+    try:
+        from orders import scaleout
+        r = scaleout.run_half_sell(db, pos, ltp=ltp, decision=d)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MOMENTUM_EXIT: %s (id=%d) scale-out failed (%s) - closing in full", pos.symbol, pos.id, e)
+        return None
+    if r.get("fallback") == "FULL":
+        logger.warning("MOMENTUM_EXIT: %s (id=%d) scale-out not done (%s) - closing in full", pos.symbol, pos.id, r.get("reason"))
+        return None
+    return bool(r.get("ok")) or r.get("fallback") == "HALF_THEN_FULL"
+
+
 def _apply_book(db: Session, pos, d: dict, ltp: float) -> bool:
     from orders import eod_squareoff
     pos.flow_json = stamp_momentum(getattr(pos, "flow_json", None), {
@@ -219,7 +241,7 @@ def run_momentum_exit(db: Session) -> int:
                 side=side, entry=pos.entry_price, stop=pos.stop_price, target=pos.target_price, ltp=ltp, qty=pos.quantity, bars=bars,
                 tick=dhan_client.tick_size_for_price(ltp), age_min=(now - opened).total_seconds() / 60.0, tape=_tape_verdict(pos.symbol, side),
                 fading=exit_adaptive.is_fading(pos.symbol, ltp, short=short, entry=pos.entry_price),
-                no_new_best_min=learned["ttp_min"], typical_gain_pct=learned["typical_gain_pct"], scaleout=False,
+                no_new_best_min=learned["ttp_min"], typical_gain_pct=learned["typical_gain_pct"], scaleout=_scaleout_ok(pos),
                 book_n=int(getattr(config, "MOMENTUM_BOOK_N", 3)), min_book_profit_pct=float(getattr(config, "MOMENTUM_BOOK_MIN_PROFIT_PCT", 0.2)))
             d["learned"] = {k: learned.get(k) for k in ("ttp_min", "typical_gain_pct", "ttp_source", "gain_source")}
             act = d.get("action")
@@ -228,6 +250,14 @@ def run_momentum_exit(db: Session) -> int:
             _stats["tighten" if act == "TIGHTEN" else "book"] += 1
             if act == "TIGHTEN":
                 if _apply_tighten(db, pos, d, ltp, plain, short):
+                    acted += 1
+            elif d.get("book_mode") == "HALF" and _scaleout_ok(pos):
+                _h = _apply_half(db, pos, d, ltp)
+                if _h:
+                    _stats["booked"] += 1
+                    acted += 1
+                elif _h is None and _apply_book(db, pos, d, ltp):
+                    _stats["booked"] += 1
                     acted += 1
             elif _apply_book(db, pos, d, ltp):
                 _stats["booked"] += 1

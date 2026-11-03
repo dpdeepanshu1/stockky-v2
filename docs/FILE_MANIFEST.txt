@@ -416,12 +416,14 @@ scripts/resilience_check.py
 scripts/retire_legacy_board.py
 scripts/robustness.py
 scripts/rt_candidate_outcomes_job.py
+scripts/run_6m.sh
 scripts/secrets_allowlist.txt
 scripts/service_onoff_advice.py
 scripts/setup-secrets.html
 scripts/setup_backtest.py
 scripts/shared_copies_baseline.json
 scripts/short_history_replay.py
+scripts/six_month_backtest.py
 scripts/stats_loop.sh
 scripts/strategy_readout.py
 scripts/structure_backtest.py

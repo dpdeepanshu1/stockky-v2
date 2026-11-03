@@ -11,6 +11,8 @@ Rules (REAL only, a BUY only):
   * a symbol that was bought and fully sold today has net quantity 0 and is NOT blocked.
   * Dhan unreadable: allowed with a WARNING by default (same fail-open shape as the shared order budget); ENTRY_BROKER_DUP_CHECK_FAIL_CLOSED=true
     blocks instead.
+  * NOT applied when the REAL risk config has allow_pyramiding = true: adding to a held symbol is then allowed on purpose (the 3 Nov JSW Energy 2+2
+    and ITC 6+8 buys were such adds). The check only backs up the "no pyramiding" rule against Dhan's own data when that rule is on.
 Switches: ENTRY_BROKER_DUP_CHECK (default true), ENTRY_BROKER_DUP_CHECK_FAIL_CLOSED (default false). Never raises.
 """
 from __future__ import annotations
@@ -79,6 +81,19 @@ def find_conflict(positions: list, orders: list, symbol: str, security_id: Optio
     return None
 
 
+def _pyramiding_allowed(db: Any) -> bool:
+    """True only when the REAL risk config says allow_pyramiding. Any doubt (no db, no row, error) = False, so the check runs."""
+    if db is None:
+        return False
+    try:
+        import models
+        rc = db.query(models.TradeRiskConfig).filter_by(mode="REAL").first()
+        return bool(rc is not None and rc.allow_pyramiding)
+    except Exception:  # noqa: BLE001
+        logger.warning("broker dup check: could not read allow_pyramiding; treating pyramiding as off", exc_info=True)
+        return False
+
+
 def _dhan() -> Any:
     from execution import dhan_client
     return dhan_client
@@ -87,6 +102,8 @@ def _dhan() -> Any:
 def check(db: Any, symbol: str, security_id: Optional[str] = None) -> Tuple[bool, str]:
     """(blocked, reason). Reads Dhan; never raises."""
     if not enabled():
+        return False, ""
+    if _pyramiding_allowed(db):
         return False, ""
     try:
         dhan = _dhan()

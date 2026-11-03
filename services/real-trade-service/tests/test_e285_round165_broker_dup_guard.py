@@ -92,3 +92,40 @@ def test_entry_wires_the_guard_and_keeps_the_existing_lock_on_a_block():
     src = (HERE / "entry_engine" / "entry.py").read_text()
     assert "broker_dup_guard.check(db, cand.symbol, security_id)" in src
     assert "_uncertain or _blocked_uncertain or _blocked_dup" in src   # a refused duplicate must NOT release the symbol lock of the real position
+
+
+def test_pyramiding_allowed_skips_the_check_and_off_or_unknown_keeps_it(monkeypatch):
+    monkeypatch.setattr(G, "_dhan", lambda: _Fake([_pos("JSWENERGY", 2)]))
+    monkeypatch.setattr(G, "_pyramiding_allowed", lambda db: True)
+    assert G.check(None, "JSWENERGY", "1") == (False, "")          # pyramiding on: an add is allowed on purpose
+    monkeypatch.setattr(G, "_pyramiding_allowed", lambda db: False)
+    blocked, why = G.check(None, "JSWENERGY", "1")
+    assert blocked and "net long" in why                           # pyramiding off: Dhan's own data blocks the repeat BUY
+    assert G._pyramiding_allowed(None) is False                    # no db / unreadable config = treated as off
+
+
+def test_pyramiding_flag_is_read_from_the_real_risk_config():
+    class _Row:
+        allow_pyramiding = True
+    class _Q:
+        def __init__(s, row): s.row = row
+        def filter_by(s, **kw):
+            assert kw == {"mode": "REAL"}
+            return s
+        def first(s): return s.row
+    class _Db:
+        def __init__(s, row): s.row = row
+        def query(s, model): return _Q(s.row)
+    import types
+    real_models = sys.modules.get("models")
+    sys.modules["models"] = types.SimpleNamespace(TradeRiskConfig=object)   # the lookup only passes the class to db.query
+    try:
+        assert G._pyramiding_allowed(_Db(_Row())) is True
+        off = _Row(); off.allow_pyramiding = False
+        assert G._pyramiding_allowed(_Db(off)) is False
+        assert G._pyramiding_allowed(_Db(None)) is False
+    finally:
+        if real_models is None:
+            sys.modules.pop("models", None)
+        else:
+            sys.modules["models"] = real_models

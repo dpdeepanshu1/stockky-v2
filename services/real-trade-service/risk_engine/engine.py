@@ -76,6 +76,10 @@ def _conviction_cap(base_cap: float, intent: "OrderIntent", equity: float) -> fl
 # ── New caps from market research ─────────────────────────────────────────────
 # Single position cannot be > 25% of equity. Forces diversification and caps
 # damage if one holding gaps down in a weak market environment.
+# E285 round 166: with pyramiding ON, the single-position caps (5c percent of equity, 5c-ii flat rupee ceiling) also count what the symbol already holds,
+# so an add can no longer take the symbol past the cap a single entry is held to (ITC 6 + 8 = 14 shares on 3 Nov). false = the old maths.
+SYMBOL_EXPOSURE_CAP = ((os.getenv("RISK_SYMBOL_EXPOSURE_CAP") or "").strip().lower() or "true") in ("1", "true", "yes", "on")
+
 MAX_POSITION_CONCENTRATION_PCT = float(
     ((os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT") or "").strip() or "25.0")
 )
@@ -277,6 +281,9 @@ class AccountState:
     # (entry_engine/entry.py, manual_engine.py, main.py's dry-run endpoint)
     # all resolve and populate this.
     max_trade_value: Optional[float] = None
+    # ADDED (E285 round 166): rupee value (avg entry x qty) this service already holds in the symbol being bought. 0.0 (the default) = nothing held / not
+    # populated = the old behaviour. Only read when allow_pyramiding is on (see 5c-iii).
+    symbol_held_value: float = 0.0
     # ADDED (group 289): consecutive realized losses among today's closed positions, newest first, and the time of
     # the latest losing close (see portfolio.today_loss_streak). The defaults (0 / None) mean "no brake", so any
     # construction site that does not populate them behaves exactly as before.
@@ -704,6 +711,37 @@ def evaluate(
                     f"(max trade value cap ₹{_mtv:.0f})."
                 )
                 order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
+
+    # ── 5c-iii. Per-symbol exposure cap (BUY only, pyramiding ON only) — E285 round 166 ─────────────────
+    # 5c and 5c-ii only look at the NEW order's value, so with pyramiding on every add could take the full cap again (ITC 6 + 8 = 14 shares). Here
+    # what the symbol already holds counts too: held + new value must stay within the smaller of the two caps that already apply to a single entry.
+    # Downsizes the add to the room left; rejects when there is none. Not applied when pyramiding is off (step 7 rejects first, same reason as before).
+    if (
+        intent.side == "BUY"
+        and SYMBOL_EXPOSURE_CAP
+        and account.allow_pyramiding
+        and account.symbol_held_value > 0
+        and intent.entry_price > 0
+    ):
+        _sym_cap = _conviction_cap(account.equity * (MAX_POSITION_CONCENTRATION_PCT / 100.0), intent, account.equity)
+        if account.max_trade_value is not None and account.max_trade_value > 0:
+            _sym_cap = min(_sym_cap, _conviction_cap(account.max_trade_value, intent, account.equity))
+        _room = _sym_cap - account.symbol_held_value
+        if account.symbol_held_value + intent.entry_price * final_qty > _sym_cap:
+            _add_qty = int(_room // intent.entry_price) if _room > 0 else 0
+            if _add_qty <= 0:
+                return RiskResult(
+                    RiskVerdict.REJECTED, "symbol_exposure_cap",
+                    f"{intent.symbol} already holds ₹{account.symbol_held_value:.0f}; the per-symbol cap is ₹{_sym_cap:.0f}, so there is no room to add "
+                    f"(1 share = ₹{intent.entry_price:.2f}).",
+                )
+            prev_qty  = final_qty
+            final_qty = _add_qty
+            downsize_reason = (
+                f"Qty {prev_qty} → {final_qty} "
+                f"(per-symbol cap ₹{_sym_cap:.0f}, already holds ₹{account.symbol_held_value:.0f})."
+            )
+            order_risk = abs(intent.entry_price - intent.stop_price) * final_qty
 
     # ── 6. Portfolio-level risk cap ───────────────────────────────────────────
     if intent.side == "BUY":

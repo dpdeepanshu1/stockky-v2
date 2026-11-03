@@ -1561,6 +1561,12 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             account_state.max_portfolio_risk_pct = _rs.heat_limit_pct(db, (_setup_res or {}).get("id"), float(account_state.max_portfolio_risk_pct))
         except Exception:  # noqa: BLE001 - the ladder only loosens; a failure leaves the base limit
             logger.debug("entry: ignored error (fail-open)", exc_info=True)
+        try:                                                                  # E285 round 166: value already held in this symbol, for the per-symbol exposure cap (pyramiding on)
+            account_state.symbol_held_value = float(sum(
+                (p.avg_entry_price or 0.0) * (p.qty_open or 0) for p in held_exposure_positions(db, mode) if p.symbol == cand.symbol
+            ))
+        except Exception:  # noqa: BLE001 - fail open: 0 = the old maths
+            logger.debug("entry: held value lookup failed (fail-open)", exc_info=True)
         result = risk_evaluate(intent, account_state)
 
         decision.proposed_qty        = result.approved_qty or proposed_qty

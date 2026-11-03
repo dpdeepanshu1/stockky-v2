@@ -1,3 +1,14 @@
+## 3 Nov 2026 - Round 166: with pyramiding ON, an add also counts what the symbol already holds (per-symbol exposure cap, after the JSW Energy 2+2 and ITC 6+8 buys)
+
+ * **Your decision (3 Nov):** keep `allow_pyramiding` ON, and bound it ("what you suggest"). VM data had shown the REAL risk config with `allow_pyramiding = True` since 22 Oct, and the repeat buys were allowed adds (see round 165).
+ * **What I read:** `risk_engine/engine.py` 5c (percent-of-equity concentration cap) and 5c-ii (flat rupee max trade value) compare only the NEW order's value with the cap. Held shares in the same symbol were not counted, so each add could use the full cap again (ITC reached 14 shares).
+ * **Change:** new step 5c-iii in `evaluate()`. For a BUY with `allow_pyramiding` on and shares already held, held value + new value must stay within the smaller of the 5c cap and the 5c-ii cap (both with the conviction multiple, as before). If the add is too big it is sized down to the room left (`sized_down`); if there is no room it is rejected as `symbol_exposure_cap`. New field `AccountState.symbol_held_value` (default 0.0 = old maths); `entry_engine/entry.py` fills it from `held_exposure_positions` (average entry x open qty for this symbol) right before the risk check, and a failed lookup leaves 0 (fail-open = old behaviour).
+ * **Not touched:** pyramiding OFF (step 7 still rejects first, same reason text), SELLs, manual orders (manual_engine does not set the new field), the Dhan check from round 165 (still skipped while pyramiding is on).
+ * **Switch:** `RISK_SYMBOL_EXPOSURE_CAP` (default true; false = the old maths, no restart of anything else needed).
+ * **Effect to expect:** a symbol is limited to the same total as a single entry already was (25% of equity by default, or the flat rupee cap if smaller). An add that would pass it is shrunk or refused; look for `symbol_exposure_cap` or `per-symbol cap` in the decision reason.
+ * **Held value uses average entry price**, not the live price, so a rising stock has slightly more room than its market value suggests.
+ * **Tests:** `tests/test_e285_round166_symbol_exposure_cap.py` (9: sized down, no room, fits, nothing held, pyramiding off, switch off, smaller rupee cap wins, SELL, wiring). Ran here with a small runner (pytest is not installed in my sandbox): 9 passed, plus the 14 round 165 tests. The rest of the suite, including `test_risk_engine.py`, was NOT run here; please run `bash scripts/docker_test.sh real-trade-service`.
+
 ## 3 Nov 2026 - Round 165: Real Trade asks Dhan itself before a BUY, so a symbol that is already held (or has a BUY still working) is not bought again (plan item 1, JSW Energy 4 shares)
 
  * **Your request (3 Nov):** "do the next round change", after the check of the 3 Nov files. Dhan's Open P&L showed JSW Energy with 4 shares; the log shows two BUY 2 orders (stk1189 at about 09:17, stk1194 at about 09:40 IST).

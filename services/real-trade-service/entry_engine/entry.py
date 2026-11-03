@@ -2075,11 +2075,19 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             _order_tag = f"stk{order.id}"                       # A1b: correlation tag sent to Dhan, used to find the order again after an error
             _broker_call_started = False
             _blocked_uncertain = _uncertain_buy_active(mode, cand.symbol)
+            _blocked_dup = False
             _uncertain = False
             try:
                 if _blocked_uncertain:
                     raise RuntimeError(f"{cand.symbol}: an earlier BUY today could not be verified at Dhan - not buying it again until checked.")
                 security_id   = dhan_client.get_security_id(db, cand.symbol)
+                # E285 round 165: ask Dhan itself (positions + live BUY orders) before sending. The database guard missed JSW Energy's second BUY.
+                from entry_engine import broker_dup_guard
+                _dup, _dup_why = broker_dup_guard.check(db, cand.symbol, security_id)
+                if _dup:
+                    _blocked_dup = True
+                    logger.critical("entry_engine: BUY %s refused - %s (not sent; the database guard did not see it)", cand.symbol, _dup_why)
+                    raise RuntimeError(f"{cand.symbol}: duplicate BUY refused - {_dup_why}.")
                 # AUDIT FIX (this session): the shared cross-service Dhan
                 # account-wide order-rate guard (execution/shared_order_budget.py)
                 # was wired into manual_engine.py's manual BUY path and into
@@ -2189,7 +2197,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     # which is a harmless no-op release since try_claim never
                     # actually gave us that row) — otherwise a rejected order
                     # permanently locks this symbol out for this service.
-                    if not (_uncertain or _blocked_uncertain):
+                    if not (_uncertain or _blocked_uncertain or _blocked_dup):
                         shared_symbol_lock.release(db, cand.symbol)
                     db.add(models.TradeOrderEvent(
                         order_id=order.id, event_type="REJECTED",

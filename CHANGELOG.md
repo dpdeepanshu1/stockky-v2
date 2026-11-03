@@ -1,3 +1,16 @@
+## 3 Nov 2026 - Round 165: Real Trade asks Dhan itself before a BUY, so a symbol that is already held (or has a BUY still working) is not bought again (plan item 1, JSW Energy 4 shares)
+
+ * **Your request (3 Nov):** "do the next round change", after the check of the 3 Nov files. Dhan's Open P&L showed JSW Energy with 4 shares; the log shows two BUY 2 orders (stk1189 at about 09:17, stk1194 at about 09:40 IST).
+ * **What I read:** the no-pyramiding rule (`risk_engine/engine.py`, step 7) uses `held_exposure_positions` plus `working_buy_symbols` - both come from this service's own database. `ENTRY_VALIDITY_MINUTES` is 15, so an unfilled entry order is expired after about 15 minutes and the symbol is released. If the database label is wrong or late (an order marked EXPIRED that still filled, a fill not booked yet), that rule sees nothing.
+ * **What I do not know:** WHY the database guard missed it. I had no order history for stk1189 / stk1194. This round does not fix that cause; it adds a second check that does not depend on it.
+ * **Change:** new `entry_engine/broker_dup_guard.py`, called in `entry.py` right after the security id is read and before the order budget / symbol lock / Dhan call. It reads Dhan's positions and order book and refuses the BUY when Dhan shows (a) a net long position in the symbol, or (b) a BUY order for it that is still live (TRANSIT, PENDING, OPEN, PART_TRADED...). A symbol bought and fully sold today has net quantity 0 and is not blocked. Matches by security id or by symbol (a `-EQ` suffix is ignored).
+ * **Lock safety:** a refused duplicate does NOT release the symbol lock (`_blocked_dup` joins `_uncertain` / `_blocked_uncertain` in the release condition), because that lock belongs to the real position.
+ * **Switches:** `ENTRY_BROKER_DUP_CHECK` (default true; false = old behaviour), `ENTRY_BROKER_DUP_CHECK_FAIL_CLOSED` (default false: when Dhan cannot be read the BUY is allowed with a WARNING, like the shared order budget; true = refuse).
+ * **Cost:** two read-only Dhan calls per BUY attempt (positions and order list), not per cycle.
+ * **Log line to look for:** `entry_engine: BUY <SYMBOL> refused - Dhan ...` at CRITICAL. If it never appears, the database guard is doing its job.
+ * **Not done:** ITC showed 14 shares in Dhan while the log sized 10; this round does not explain it. Holdings from earlier days are not read (overnight holds are off).
+ * **Tests:** `real-trade-service/tests/test_e285_round165_broker_dup_guard.py` (12: long position, flat after a sell, short, each live status, dead / traded / sell orders, other symbols, security id and `-EQ` match, fake Dhan block / allow, unreadable Dhan both modes, switch off, wiring and lock rule). Run here with a small runner because pytest is not installed in my sandbox: 12 passed. The service's other tests were NOT run. Please run `bash scripts/docker_test.sh real-trade-service` on the VM.
+
 ## 3 Nov 2026 - Round 164: momentum half-sell exit, MOMENTUM_SCALEOUT (plan item 12), default OFF
 
  * **Your request (3 Nov):** "do the fix" / "complete it", after the Dhan half-sell probe passed (cancel target leg, cancel stop leg, MARKET SELL half, new stop for the rest, 1.7 s unprotected).

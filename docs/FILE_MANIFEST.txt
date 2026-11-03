@@ -446,6 +446,7 @@ scripts/test_charges_split.py
 scripts/test_check_ms_package.py
 scripts/test_check_requirements_drift.py
 scripts/test_check_secrets.py
+scripts/test_compose_runner_cpu_shares.py
 scripts/test_control_kit.py
 scripts/test_control_snapshot.py
 scripts/test_daily_trade_report.py

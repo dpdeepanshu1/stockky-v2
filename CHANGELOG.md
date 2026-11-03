@@ -1,3 +1,10 @@
+## 4 Nov 2026 - Round 171: the calibration runner gets a low CPU weight, so live services win on the 2-vCPU VM
+
+ * **Problem:** the VM has 2 vCPUs and the runner container is capped at 1.5 cores (`cpus: "1.50"`) with the same CPU weight as every live service. A heavy replay (3 pool processes) kept it near 150% CPU, so a deploy or a manual heavy run at the open could slow the trading services. A cgroup OOM kill of the position-stocks service at 13:39 IST on 2 Nov and 09:33 IST on 3 Nov was already fixed in round 151 (mem_limit 2400m); nothing else in the logs pointed to a code fault.
+ * **Change:** `docker-compose.yml` - `calibration-runner-service` gets `cpu_shares: 128` (default 1024). The cap is unchanged. When the box is idle the runner still uses up to 1.5 cores; when the live services need CPU they win.
+ * **Tests:** `scripts/test_compose_runner_cpu_shares.py` (3: low weight on the runner, cap unchanged, live services keep the default).
+ * **Housekeeping:** `docs/FILE_MANIFEST.txt` (adds this test and the two 6-month scripts that CI flagged).
+
 ## 4 Nov 2026 - Round 170 (C1): a 15:00 square-off sell that Dhan cancels or rejects is sent again, and one alert names what is still open
 
  * **Problem (28 and 29 Oct):** `eod_squareoff_last_run` is saved before `_eod_squareoff` sends anything, so the square-off ran once. A MARKET sell that Dhan cancelled or rejected was never repeated and the position could still be open at 15:30.

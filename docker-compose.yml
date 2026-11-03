@@ -776,6 +776,7 @@ services:
     logging: *default-logging
     # trading containers keep their own caps; runs here are nice 10, and data locks + the heavy cap + the memory guard bound the load (E235)
     cpus: "1.50"   # E235: was 0.50
+    cpu_shares: 128   # round 171: the default is 1024 like every other service; when the 2-vCPU VM is busy (market hours, deploy right after open) the live services win the CPU and this runner only gets what is left
     mem_limit: 6000m  # E235: was 2200m (E229: one replay = parent + workers at ~780 MB each, OOM-killed at 2200m). Two heavy runs may now overlap (RUNNER_MAX_HEAVY=2, 3 pool processes each); RUNNER_MIN_FREE_MB holds the 2nd back when memory is short. VM had ~9 GB free: lower RUNNER_MAX_HEAVY / RUNNER_POOL_JOBS if the kernel log shows OOM kills.
     mem_reservation: 128m
 

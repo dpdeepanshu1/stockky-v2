@@ -1894,6 +1894,7 @@ services/real-trade-service/oracle_compat.py
 services/real-trade-service/pipeline_status.py
 services/real-trade-service/portfolio/__init__.py
 services/real-trade-service/portfolio/broker_view.py
+services/real-trade-service/portfolio/exit_booking_heal.py
 services/real-trade-service/portfolio/portfolio.py
 services/real-trade-service/portfolio/portfolio.py,cover
 services/real-trade-service/requirements.txt
@@ -2086,6 +2087,7 @@ services/real-trade-service/tests/test_e285_round158_stop_check_gap.py
 services/real-trade-service/tests/test_e285_round160_orb_stats_log.py
 services/real-trade-service/tests/test_e285_round165_broker_dup_guard.py
 services/real-trade-service/tests/test_e285_round166_symbol_exposure_cap.py
+services/real-trade-service/tests/test_e285_round168_exit_booking_heal.py
 services/real-trade-service/tests/test_e285_rt_ladder_risk.py
 services/real-trade-service/tests/test_e285_rt_open_cues.py
 services/real-trade-service/tests/test_e285_rt_results_split.py

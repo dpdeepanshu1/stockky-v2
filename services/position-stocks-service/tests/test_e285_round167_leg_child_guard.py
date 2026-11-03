@@ -214,3 +214,31 @@ def test_expected_net_signs_and_unreadable_dhan(monkeypatch):
 def test_main_loop_runs_the_residual_guard():
     src = (HERE / "main.py").read_text()
     assert "residual_guard.run_residual_guard" in src
+
+
+# ------------------------------------------------------------------ round 168: Dhan flat while the app is open
+def test_app_open_but_dhan_flat_alerts_once_when_the_position_is_old_enough(monkeypatch):
+    sent = []
+    _setup(monkeypatch, [_pos(status="OPEN")], [_dhan_pos(0)], sent)
+    monkeypatch.setattr(config, "RESIDUAL_GUARD_FLAT_MIN_AGE_S", 300.0, raising=False)
+    assert R.run_residual_guard(None, NOW, mono=1000.0) == 0
+    assert R.run_residual_guard(None, NOW, mono=1100.0) == 1
+    assert R.run_residual_guard(None, NOW, mono=1200.0) == 0
+    assert len(sent) == 1 and "FLAT" in sent[0] and "JYOTICNC" in sent[0]
+
+
+def test_app_open_and_no_dhan_row_at_all_also_alerts(monkeypatch):
+    sent = []
+    _setup(monkeypatch, [_pos(status="OPEN")], [], sent)
+    monkeypatch.setattr(config, "RESIDUAL_GUARD_FLAT_MIN_AGE_S", 300.0, raising=False)
+    R.run_residual_guard(None, NOW, mono=1000.0)
+    assert R.run_residual_guard(None, NOW, mono=1100.0) == 1 and "FLAT" in sent[0]
+
+
+def test_a_fresh_open_position_with_dhan_flat_is_not_alerted(monkeypatch):
+    sent = []
+    fresh = _pos(status="OPEN", opened_at=NOW.replace(tzinfo=None) - timedelta(seconds=60))
+    _setup(monkeypatch, [fresh], [_dhan_pos(0)], sent)
+    monkeypatch.setattr(config, "RESIDUAL_GUARD_FLAT_MIN_AGE_S", 300.0, raising=False)
+    R.run_residual_guard(None, NOW, mono=1000.0)
+    assert R.run_residual_guard(None, NOW, mono=1100.0) == 0 and sent == []

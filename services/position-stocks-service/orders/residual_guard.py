@@ -3,6 +3,9 @@
 WHY (JYOTICNC, 3 Nov 2026): the app booked a short as closed while Dhan showed LONG 1 (a leftover leg order filled after the exit). Nothing compared the two, so the extra
 share sat unmanaged, with no stop, until Dhan's own square-off. This check finds that kind of difference whatever its cause.
 
+E285 round 168 also alerts the opposite case: the app has an OPEN position but Dhan shows the security flat (an exit filled at Dhan and was not booked), once the app's
+position is at least RESIDUAL_GUARD_FLAT_MIN_AGE_S old (default 300 s, so a fresh entry still resting unfilled is not mistaken for it).
+
 WHAT: at most once per RESIDUAL_GUARD_INTERVAL_S, when this service traded any stock today, read Dhan's positions once. For each INTRADAY row of a security this service
 traded today with netQty != 0, compare it with the app's expectation: the sum of its OPEN / EXIT_LEGS_REJECTED positions in that security (+ quantity for a long, - for a short).
 Different for RESIDUAL_GUARD_CONFIRM_S in a row -> ONE critical Telegram alert per (security, Dhan net, expected). A security with an exit still settling (a *_PENDING_RECONCILE row,
@@ -72,6 +75,17 @@ def _settling(positions: list, sid: str, now: datetime) -> bool:
     return False
 
 
+def _youngest_open_age(positions: list, sid: str, now: datetime) -> float:
+    """Pure. Seconds since the most recently opened OPEN position of this security was opened (0 when unknown, so it counts as young)."""
+    ages = []
+    for p in positions:
+        if str(getattr(p, "dhan_security_id", "") or "") != sid or getattr(p, "status", None) not in _OPEN_STATUSES:
+            continue
+        o = _aware(getattr(p, "opened_at", None))
+        ages.append((now - o).total_seconds() if o is not None else 0.0)
+    return min(ages) if ages else 0.0
+
+
 def _dhan() -> Any:
     from execution import dhan_client
     return dhan_client
@@ -109,9 +123,10 @@ def _run(db: Any, now: datetime, mono: float) -> int:
         logger.warning("residual guard: Dhan positions unreadable (%s)", e)
         return 0
     confirm = float(_cfg("RESIDUAL_GUARD_CONFIRM_S", 90.0))
+    flat_age = float(_cfg("RESIDUAL_GUARD_FLAT_MIN_AGE_S", 300.0))
     names = {str(p.dhan_security_id): p.symbol for p in positions}
-    alerts = 0
-    live_keys = set()
+    dhan_net: Dict[str, int] = {}
+    dhan_row: Dict[str, dict] = {}
     for r in rows or []:
         if not isinstance(r, dict):
             continue
@@ -119,22 +134,35 @@ def _run(db: Any, now: datetime, mono: float) -> int:
         if sid not in sids or str(r.get("productType") or r.get("product_type") or "").upper() != "INTRADAY":
             continue
         try:
-            net = int(float(r.get("netQty", r.get("net_qty")) or 0))
+            n = int(float(r.get("netQty", r.get("net_qty")) or 0))
         except (TypeError, ValueError):
             continue
+        dhan_net[sid] = dhan_net.get(sid, 0) + n
+        dhan_row[sid] = r
+    alerts = 0
+    live_keys = set()
+    for sid in sorted(sids):
+        net = dhan_net.get(sid, 0)
         exp = expected_net(positions, sid)
-        if net == 0 or net == exp or _settling(positions, sid, now):
+        if net == exp or _settling(positions, sid, now):
             continue
+        if net == 0 and _youngest_open_age(positions, sid, now) < flat_age:
+            continue            # E285 round 168: Dhan flat, app open - a fresh entry may still be resting unfilled, so it must be old enough first
         key = (sid, net, exp)
         live_keys.add(key)
         first = _seen.setdefault(key, mono)
         if mono - first >= confirm and key not in _alerted:
             _alerted.add(key)
             alerts += 1
+            r = dhan_row.get(sid, {})
             sym = r.get("tradingSymbol") or names.get(sid) or sid
-            what = "no open position" if exp == 0 else f"an open position of {exp:+d}"
-            _notify(f"POSITION MISMATCH: Dhan shows {sym} net {net:+d} (INTRADAY, buy avg {r.get('buyAvg')}, sell avg {r.get('sellAvg')}) but this app has {what}. "
-                    f"Nothing is managing the difference (no stop, no target). Check Dhan and close it by hand if it is not wanted.")
+            if net == 0:
+                _notify(f"POSITION MISMATCH: this app has {sym} open ({exp:+d}) but Dhan shows it FLAT (INTRADAY). The app's record is probably stale: an exit filled at Dhan and was not booked. "
+                        f"Check Dhan; if the position is gone there, the app should close it on its next pass, and if it stays open, close the row from the app after checking.")
+            else:
+                what = "no open position" if exp == 0 else f"an open position of {exp:+d}"
+                _notify(f"POSITION MISMATCH: Dhan shows {sym} net {net:+d} (INTRADAY, buy avg {r.get('buyAvg')}, sell avg {r.get('sellAvg')}) but this app has {what}. "
+                        f"Nothing is managing the difference (no stop, no target). Check Dhan and close it by hand if it is not wanted.")
     for k in [k for k in _seen if k not in live_keys]:     # a mismatch that cleared is forgotten, so it can alert again later
         _seen.pop(k, None)
         _alerted.discard(k)

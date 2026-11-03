@@ -996,10 +996,10 @@ def holdings_sync_reconcile(db: Session) -> dict:
         # positiveQty/buyQty is the alternate spelling seen on some SDK
         # versions) — any of these being > 0 means the account currently
         # has exposure in this symbol, which is all this check needs.
-        qty = max(
-            _qty(row, "netQty", "net_qty"),
-            _qty(row, "positiveQty", "positive_qty", "buyQty", "buy_qty"),
-        )
+        # E285 round 168 (CHOICEIN, 3 Nov): a closed same-day CNC row (netQty 0, buyQty 1) read as "still held" through the buy-side max and the stale OPEN row was
+        # never closed. A readable netQty is now the answer (HOLDINGS_SYNC_NET_QTY=false restores the old max()).
+        from portfolio import exit_booking_heal
+        qty = exit_booking_heal.broker_row_qty(row, net_authoritative=bool(getattr(config, "HOLDINGS_SYNC_NET_QTY", True)))
         if sym and qty > 0:
             key = _sym_key(sym)
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
@@ -1171,11 +1171,27 @@ def holdings_sync_reconcile(db: Session) -> dict:
             continue  # too recent — broker feed may just not have caught up yet
 
         qty_open = position.qty_open or 0
-        refund = round((position.avg_entry_price or 0.0) * qty_open, 2)
+        # E285 round 168 (CHOICEIN): the row shows no exit booked (realized_pnl 0) but broker-confirmed exit events exist for it - the row lost its own decrement.
+        # Those exits' cash was credited in the same commit as their events, so only the shares NOT covered by them are refunded, and their P&L is put back on the row.
+        _lost_q, _lost_pnl = 0, 0.0
+        if not (position.realized_pnl or 0.0):
+            try:
+                from portfolio import exit_booking_heal as _ebh
+                _evs = db.query(models.TradePositionEvent).filter(
+                    models.TradePositionEvent.position_id == position.id,
+                    models.TradePositionEvent.event_type.in_(("PARTIAL_EXIT", "CLOSED")),
+                ).all()
+                _lost_q, _lost_pnl = _ebh.booked_exit_totals([(e.event_type, e.detail) for e in _evs])
+            except Exception as _heal_err:  # noqa: BLE001 - never block the cycle; falls back to the old full refund
+                logger.warning("holdings_sync_reconcile: exit-event lookup for %s failed (%s)", symbol, _heal_err)
+                _lost_q, _lost_pnl = 0, 0.0
+        refund = round((position.avg_entry_price or 0.0) * max(0, qty_open - _lost_q), 2)
 
         position.qty_open = 0
         position.status = "CLOSED"
         position.closed_at = now
+        if _lost_q:
+            position.realized_pnl = _lost_pnl
         if externally_sold:
             _sa = pos_sell_avg_by_symbol.get(symbol)
             _why = (
@@ -1195,6 +1211,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
                 f"holdings_sync_reconcile: {symbol} {_why} — force-closed "
                 f"{qty_open} shares as a ghost/never-actually-held position, cash refunded "
                 f"₹{refund:,.2f} at avg entry ₹{position.avg_entry_price}"
+                + (f"; {_lost_q} share(s) were already sold and booked (pnl {_lost_pnl:+.2f}), no cash refunded for them" if _lost_q else "")
             ),
         ))
         logger.warning(

@@ -207,6 +207,10 @@ ENTRY_NO_CHASE = True  # never re-price an unfilled entry upward; re-evaluate ne
 # next cycle instead of being force-closed on its very first pass.
 HOLDINGS_SYNC_GUARD_MINUTES = int(((os.getenv("HOLDINGS_SYNC_GUARD_MINUTES") or "").strip() or "30"))
 
+# E285 round 168 (CHOICEIN, 3 Nov): holdings_sync_reconcile reads a Dhan positions row's netQty as the shares held (a closed same-day row has netQty 0 and buyQty > 0 and used
+# to read as "still held", so a stale OPEN row was never closed). false = the old max(netQty, buyQty) reading.
+HOLDINGS_SYNC_NET_QTY = ((os.getenv("HOLDINGS_SYNC_NET_QTY") or "").strip() or "true").lower() == "true"
+
 # E172: when Dhan's holdings AND positions both come back empty while this book has open REAL positions, the empty answer must be
 # seen again after this many seconds before anything is force-closed (an empty reply during an outage would otherwise close every
 # position older than the guard above). 0 = old behaviour (close on the first empty read).

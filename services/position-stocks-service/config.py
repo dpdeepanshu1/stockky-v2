@@ -995,6 +995,7 @@ LEG_CHILD_GUARD = _get_bool("LEG_CHILD_GUARD", True)
 RESIDUAL_GUARD_ENABLED = _get_bool("RESIDUAL_GUARD_ENABLED", True)
 RESIDUAL_GUARD_INTERVAL_S = _get_float("RESIDUAL_GUARD_INTERVAL_S", 60.0)     # at most one Dhan positions read per this many seconds
 RESIDUAL_GUARD_CONFIRM_S = _get_float("RESIDUAL_GUARD_CONFIRM_S", 90.0)       # a mismatch must last this long before the alert (fills settle, reconcile catches up)
+RESIDUAL_GUARD_FLAT_MIN_AGE_S = _get_float("RESIDUAL_GUARD_FLAT_MIN_AGE_S", 300.0)   # E285 round 168: Dhan flat + app open alerts only once the app position is this old
 STOP_WATCHDOG_ENABLED = _get_bool("STOP_WATCHDOG_ENABLED", True)
 STOP_WATCHDOG_GRACE_S = _get_float("STOP_WATCHDOG_GRACE_S", 20.0)
 STOP_WATCHDOG_MIN_BREACH_TICKS = _get_int("STOP_WATCHDOG_MIN_BREACH_TICKS", 1)   # price must be this many ticks UNDER the stop

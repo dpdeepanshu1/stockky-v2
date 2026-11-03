@@ -455,9 +455,11 @@ services:
     mem_limit: 1000m
     mem_reservation: 400m
 
+  # E285 round 170: NOT started by a plain `docker compose up` (profile "kronos"); to run it: `docker compose --profile kronos up -d --build kronos-forecast-service`.
   # group 425: Kronos-small forecast worker for entry Gate 4f. Safe to leave running with the gate off: it is only called when
   # KRONOS_GATE_MODE / KRONOS_GATE_DEMO_MODE is log or enforce. One forecast at a time; first start downloads ~100 MB of model files into the hf-cache volume.
   kronos-forecast-service:
+    profiles: ["kronos"]
     build: ./services/kronos-forecast-service
     environment:
       MARKET_DATA_URL: http://market-data-service:8001

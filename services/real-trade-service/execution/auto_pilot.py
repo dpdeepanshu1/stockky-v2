@@ -96,6 +96,7 @@ import json
 import logging
 import os
 import threading
+import time as _time_mod
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -1407,6 +1408,15 @@ async def _eod_squareoff(db, mode: str) -> None:
                 ))
         db.commit()
     positions = [p for p in positions if p.id not in hold_ids]
+    if mode == "REAL" and positions:
+        # E285 round 170 (C1): store which positions THIS run meant to sell, in the database, so the retry pass sells only those and a restart
+        # between 15:00 and the cut-off loses nothing. A failure here only means no retry today; the first run itself is untouched.
+        try:
+            from execution import eod_retry as _eod_retry
+            from resilience.local_cache import save_snapshot as _save_snap
+            _save_snap(db, _eod_retry.plan_key(mode, ist_today_str()), _eod_retry.new_plan([p.id for p in positions], _time_mod.time()))
+        except Exception:
+            logger.exception("[schedule] EOD square-off %s: could not store the retry plan (no retry today)", mode)
 
     closed, sent, failed, skipped = 0, 0, 0, 0
     if not positions:
@@ -1485,6 +1495,38 @@ async def _eod_squareoff(db, mode: str) -> None:
         + (f" {skipped} skipped — SELL already pending broker confirmation (will settle on its own)." if skipped else "")
         + (f" 🌙 {held} held overnight (high-conviction, in-profit, not near-high — see logs)." if held else "")
     )
+
+
+async def _eod_squareoff_retry(db, mode: str) -> None:
+    """E285 round 170 (C1): send the EOD sell again for positions the 15:00 run meant to sell that are still open (a MARKET sell Dhan cancelled or
+    rejected; reconcile puts such a row back to OPEN). The caller holds the exit lock. The decisions live in execution/eod_retry.py.
+    REAL only. Same guards as the first run: only the stored plan's positions (never an overnight hold), nothing while a SELL is already working at
+    the broker. No plan stored for today (the 15:00 run had nothing to sell, or could not store it) = nothing happens."""
+    if mode != "REAL" or not config.EOD_RETRY_ENABLED:
+        return
+    from portfolio.portfolio import open_positions as _pf_open_positions
+    from exit_engine.exit import _send_real_sell, _has_pending_real_sell
+    from execution import eod_retry
+    from resilience.local_cache import load_snapshot as _load_snap, save_snapshot as _save_snap
+
+    key = eod_retry.plan_key(mode, ist_today_str())
+    plan = _load_snap(db, key)
+    if not plan or not plan.get("ids"):
+        return
+    new = await eod_retry.run_pass(
+        mode=mode, plan=plan,
+        load_open=lambda: _pf_open_positions(db, mode),
+        has_pending=lambda sym: _has_pending_real_sell(db, sym),
+        send_sell=lambda p, qty: _send_real_sell(db, p, qty, "eod_squareoff", full=True),
+        notify=notify_async,
+        now_ts=_time_mod.time(), now_ist=ist_now().time(),
+        interval_s=float(config.EOD_RETRY_INTERVAL_SEC), max_tries=int(config.EOD_RETRY_MAX_TRIES),
+        until=parse_hhmm(config.EOD_RETRY_UNTIL_IST, 15, 20),
+    )
+    if new != plan:
+        _save_snap(db, key, new)
+        logger.info("[schedule] EOD retry %s: attempt %s/%s result=%s alerted=%s", mode, new.get("tries"), config.EOD_RETRY_MAX_TRIES,
+                    new.get("last_result"), new.get("alerted"))
 
 
 _EOD_SCAN_POSITIVE_LABELS = {
@@ -1855,6 +1897,23 @@ async def _schedule_tick_body(mode: str) -> None:
             except Exception:
                 logger.exception("[schedule] EOD square-off failed for %s", mode)
                 await notify_async(f"⚠️ *EOD square-off error — {mode}* — see server logs.")
+
+        # ── EOD square-off retry (E285 round 170, C1): the block above runs once a day; a sell Dhan cancelled or rejected is sent again here ──
+        if (
+            mode == "REAL"
+            and getattr(gate, "eod_squareoff_enabled", False)
+            and getattr(gate, "eod_squareoff_last_run", None) == today
+            and config.EOD_RETRY_ENABLED
+            and is_market_open_ist(honor_session_proof=False)
+        ):
+            _retry_lock = _get_exit_lock(mode)
+            if _retry_lock.acquire(blocking=False):   # never wait: another exit-side action is running, the next tick tries again
+                try:
+                    await _eod_squareoff_retry(db, mode)
+                except Exception:
+                    logger.exception("[schedule] EOD square-off retry failed for %s", mode)
+                finally:
+                    _retry_lock.release()
 
         # ── EOD signal scan (during hours, right after square-off) ────────
         # 2026-09-10 (session22, user request). Independent toggle from

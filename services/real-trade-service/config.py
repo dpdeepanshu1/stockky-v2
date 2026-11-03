@@ -1006,6 +1006,20 @@ CARRY_GLOBAL_US_FUT_MIN_PCT = _og_float("CARRY_GLOBAL_US_FUT_MIN_PCT", -1.2)
 # without any risk of re-entering something square-off just flattened.
 EOD_SQUAREOFF_TIME_IST = os.getenv("EOD_SQUAREOFF_TIME_IST", "15:00")
 EOD_SIGNAL_SCAN_TIME_IST = os.getenv("EOD_SIGNAL_SCAN_TIME_IST", "15:05")
+# E285 round 170 (C1): the 15:00 square-off runs once; a MARKET sell that Dhan cancels or rejects (28 and 29 Oct) used to be left alone, so a position could stay open
+# past 15:30. A retry pass (execution/eod_retry.py, auto_pilot._eod_squareoff_retry) sends the sell again every EOD_RETRY_INTERVAL_SEC until EOD_RETRY_UNTIL_IST, at most
+# EOD_RETRY_MAX_TRIES times, then ONE Telegram alert names what is still open. REAL only, and only the positions the 15:00 run itself meant to sell (never an overnight hold).
+# Real Money Calibration page switches, read at call time; EOD_RETRY_ENABLED=false turns the pass off.
+EOD_RETRY_ENABLED = ((os.getenv("EOD_RETRY_ENABLED") or "").strip() or "true").lower() == "true"
+try:
+    EOD_RETRY_INTERVAL_SEC = min(600, max(30, int(((os.getenv("EOD_RETRY_INTERVAL_SEC") or "").strip() or "120"))))
+except ValueError:
+    EOD_RETRY_INTERVAL_SEC = 120
+try:
+    EOD_RETRY_MAX_TRIES = min(10, max(1, int(((os.getenv("EOD_RETRY_MAX_TRIES") or "").strip() or "5"))))
+except ValueError:
+    EOD_RETRY_MAX_TRIES = 5
+EOD_RETRY_UNTIL_IST = ((os.getenv("EOD_RETRY_UNTIL_IST") or "").strip() or "15:20")
 # group292: once per IST trading day, from this time on, store today's per-trade expectancy report (trade_records.py) as a
 # snapshot and push a short summary to Telegram. After the EOD square-off and the 15:30 close; sells that fill later still
 # have their charges estimated until the ledger books them. DAILY_REPORT_ENABLED=0 turns the step off.

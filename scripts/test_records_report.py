@@ -72,6 +72,19 @@ def test_stop_overshoot_and_late_eod_listing():
     assert [r["position_id"] for r in rep["late_eod_squareoff"]] == [3]
 
 
+def test_round150_overshoot_uses_the_gross_price_move_not_the_net_return():
+    # net return -1.4% on a 1.0% stop looks like a 0.4 overshoot, but the price only moved 0.9% (charges made up the rest): inside the stop
+    a = rec(1, -1.4, exit_reason="stop_hit", stop_pct=1.0)
+    a.update(entry_price=100.0, exit_price=99.1, held_days=0)
+    # a real gap: price moved 4.0% on a 1.0% stop, held overnight
+    b = rec(2, -4.5, exit_reason="stop_hit", stop_pct=1.0)
+    b.update(entry_price=100.0, exit_price=96.0, held_days=1)
+    sh = rr.build_report([a, b])["stop_hits"]
+    assert sh["n_beyond"] == 1 and sh["n_inside"] == 1 and sh["max_overshoot_pct"] == 3.0
+    assert sh["n_overnight"] == 1 and sh["n_beyond_overnight"] == 1
+    assert "held overnight" in rr.to_markdown(rr.build_report([a, b]))
+
+
 def test_few_marker_and_empty_and_missing_fields():
     rows = [rec(i, 1.0, source_tab="a") for i in range(1, 4)]
     md = rr.to_markdown(rr.build_report(rows, min_n=10))

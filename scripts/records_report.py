@@ -262,10 +262,19 @@ def build_report(records: List[Dict[str, Any]], since: str = "", until: str = ""
     sl = [v for v in (num(r.get("entry_slippage_pct")) for r in rows) if v is not None]
     rep["entry_slippage_pct"] = {"n": len(sl), "mean": round(st.mean(sl), 3), "max": round(max(sl), 3)} if sl else None
     stops = [r for r in rows if r.get("exit_reason") == "stop_hit"]
-    over = [(-num(r["return_pct"]) - num(r["stop_pct"])) for r in stops if num(r.get("return_pct")) is not None and num(r.get("stop_pct")) is not None]
+    def _loss_pct(r):
+        """round 150: the price move against the entry. return_pct is NET of charges (~0.5-1% on a 2-3 share position), so comparing it with the planned stop
+        distance made every small stop-out look like an overshoot; the gross price move is the like-for-like number. Falls back to return_pct when no prices."""
+        e, x = num(r.get("entry_price")), num(r.get("exit_price"))
+        if e and e > 0 and x and x > 0:
+            return (e - x) / e * 100.0
+        rp = num(r.get("return_pct"))
+        return None if rp is None else -rp
+    over = [(_loss_pct(r) - num(r["stop_pct"])) for r in stops if _loss_pct(r) is not None and num(r.get("stop_pct")) is not None]
+    over_overnight = [(_loss_pct(r) - num(r["stop_pct"])) for r in stops if _loss_pct(r) is not None and num(r.get("stop_pct")) is not None and (num(r.get("held_days")) or 0) >= 1]
     mg = [v for v in (num(r.get("max_gain_pct")) for r in stops) if v is not None]
     beyond = [o for o in over if o > 0.05]                                  # lost MORE than the planned initial stop (a gap / slow fill)
-    rep["stop_hits"] = {"n": len(stops), "with_stop_pct": len(over), "n_beyond": len(beyond), "n_inside": len(over) - len(beyond),
+    rep["stop_hits"] = {"n": len(stops), "with_stop_pct": len(over), "n_beyond": len(beyond), "n_inside": len(over) - len(beyond), "n_beyond_overnight": len([o for o in over_overnight if o > 0.05]), "n_overnight": len(over_overnight),
                         "mean_overshoot_pct": round(st.mean(beyond), 2) if beyond else None, "max_overshoot_pct": round(max(beyond), 2) if beyond else None,
                         "with_max_gain": len(mg), "mean_max_gain_pct_before_stop": round(st.mean(mg), 2) if mg else None}
     rep["late_eod_squareoff"] = [{"position_id": r.get("position_id"), "symbol": r.get("symbol"), "opened_at": r.get("opened_at"), "closed_at": r.get("closed_at"),
@@ -299,6 +308,8 @@ def to_markdown(rep: Dict[str, Any]) -> str:
         if sh["with_stop_pct"]:
             part += (f"; {sh['n_beyond']} lost MORE than the planned initial stop (on average {f(sh['mean_overshoot_pct'])} points more, worst {f(sh['max_overshoot_pct'])}); " if sh["n_beyond"] else "; none lost more than the planned initial stop; ")
             part += f"{sh['n_inside']} closed inside it (a trailed / ratcheted stop)"
+            if sh.get("n_overnight"):
+                part += f"; {sh['n_beyond_overnight']} of the {sh['n_beyond']} overshoots were positions held overnight (a gap, not a slow fill)"
         else:
             part += "; no stop distance recorded on them"
         part += (f"; mean best gain before the stop {f(sh['mean_max_gain_pct_before_stop'])}% ({sh['with_max_gain']} trades)." if sh["with_max_gain"] else "; no max-gain recorded on them.")

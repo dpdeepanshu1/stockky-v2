@@ -68,7 +68,10 @@ def _fetch_rows(symbol: str) -> list:
     from market_feed.feed import MARKET_DATA_URL
     sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     with httpx.Client(timeout=TIMEOUT_S) as client:
-        r = client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": "5d", "interval": "1m"})
+        # force=true: market-data caches intraday history for 900 s while the market is open, so without it the newest bar is up to 15 min old
+        # and every decision counts as "stale" (live 2026-11-02: hit 0, miss 32, stale 25). market-data reuses a forced fetch for
+        # HISTORY_FORCE_REUSE_S (60 s) = REFRESH_S, so this costs at most one upstream call per symbol per minute.
+        r = client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": "5d", "interval": "1m", "force": "true"})
     if r.status_code != 200:
         raise RuntimeError(f"history HTTP {r.status_code}")
     return (r.json() or {}).get("candles") or []

@@ -51,14 +51,14 @@ def num(v: Any) -> Optional[float]:
         return None
 
 
-def _row(service: str, tid: Any, sym: Any, opened: Any, closed: Any, pnl: Any, ret: Any, reason: Any, qty: Any = None, origin: str = "system") -> Optional[Dict[str, Any]]:
+def _row(service: str, tid: Any, sym: Any, opened: Any, closed: Any, pnl: Any, ret: Any, reason: Any, qty: Any = None, origin: str = "system", ret_basis: Optional[str] = None) -> Optional[Dict[str, Any]]:
     o, c = parse_ts(opened), parse_ts(closed)
     p = num(pnl)
     if o is None or c is None or p is None:
         return None
     o, c = o.astimezone(IST), c.astimezone(IST)
     return {"service": service, "id": tid, "symbol": str(sym or "?"), "entry": o, "exit": c, "day": c.date().isoformat(),
-            "held_min": max(0.0, (c - o).total_seconds() / 60.0), "pnl": p, "ret": num(ret), "reason": str(reason or "-"), "qty": num(qty), "origin": origin}
+            "held_min": max(0.0, (c - o).total_seconds() / 60.0), "pnl": p, "ret": num(ret), "reason": str(reason or "-"), "qty": num(qty), "origin": origin, "ret_basis": ret_basis}
 
 
 def is_unbooked(r: Dict[str, Any]) -> bool:
@@ -81,7 +81,7 @@ def rows_from_rt(doc: Any, origin: str = "all") -> List[Dict[str, Any]]:
             continue
         pnl = r.get("net_pnl") if r.get("net_pnl") is not None else r.get("gross_pnl")
         x = _row("real-trade", r.get("position_id"), r.get("symbol"), r.get("opened_at"), r.get("closed_at"), pnl, r.get("return_pct"), r.get("exit_reason"),
-                 r.get("quantity"), og)
+                 r.get("quantity"), og, r.get("return_basis"))
         if x:
             out.append(x)
     return out
@@ -191,6 +191,12 @@ def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: 
     by_svc = group(rows, lambda r: r["service"])
     for svc, s in sorted(by_svc.items()):
         L.append(f"  {svc:<16} {s['n']:>4} trades  win {s['win_pct']}%  net {money(s['net'])}")
+    imp = [r for r in rows if r.get("origin") == "imported"]
+    if imp:
+        # round 150: --origin all mixes the bot's own entries with broker-imported holdings (their entry time is the import time, their P&L is not a bot decision);
+        # service_advice judges system entries only, so the two reports disagree by exactly these rows. Say so, and give the number without them.
+        sysr = [r for r in rows if r.get("origin") != "imported"]
+        L.append(f"  of the above, {len(imp)} broker-imported trade(s) (net {money(sum(r['pnl'] for r in imp))}); without them: {len(sysr)} trades, net {money(sum(r['pnl'] for r in sysr))}  (service_advice counts system entries only)")
     L.append("")
     days_sorted = sorted({r["day"] for r in rows}, reverse=True)
     L.append("=" * 100)
@@ -203,8 +209,10 @@ def build_report(rows: List[Dict[str, Any]], days: int, min_n: int = 8, header: 
         L.append(f"  {'service':<16}{'symbol':<14}{'entry':>6}{'exit':>7}{'held':>7}{'P&L':>10}{'ret %':>8}  reason")
         for r in dr:
             e_day = "" if r["entry"].date() == r["exit"].date() else f" ({r['entry'].strftime('%d %b')})"
+            # a gross price move next to a NET P&L can have the opposite sign (no entry fill = no size = no net basis): say so; flag broker-imported rows
+            tag = (" [ret = gross price move, not net]" if r.get("ret_basis") == "gross_price" else "") + (" [imported]" if r.get("origin") == "imported" else "")
             L.append(f"  {r['service']:<16}{r['symbol']:<14}{r['entry'].strftime('%H:%M'):>6}{r['exit'].strftime('%H:%M'):>7}{fmt_hold(r['held_min']):>7}"
-                     f"{money(r['pnl']):>10}{pct(r['ret']):>8}  {r['reason']}{e_day}")
+                     f"{money(r['pnl']):>10}{pct(r['ret']):>8}  {r['reason']}{e_day}{tag}")
     L += ["", "=" * 100, "OVER THE WHOLE WINDOW", "=" * 100, ""]
     g = group(rows, lambda r: r["entry"].hour)
     L += _table("By ENTRY hour (IST)", {f"{h:02d}:00": v for h, v in g.items()}, [f"{h:02d}:00" for h in sorted(g)], min_n, "hour")

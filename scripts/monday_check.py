@@ -85,7 +85,8 @@ def check_session(label: str, fetch=get_json, now: datetime | None = None):
     if not isinstance(js, dict):
         return [("FAIL", f"market-data /market/session unreadable ({code or err})")]
     status = str(js.get("status") or js.get("phase") or "?")
-    detail = (f"day={js.get('day')} observed={js.get('observed_symbols')} moved={js.get('moved_symbols')} "
+    late = js.get("late_baseline_symbols")   # after a mid-day restart observed=0 and the baseline is the late one: show it, or moved=2611 next to observed=0 reads as a bug
+    detail = (f"day={js.get('day')} observed={js.get('observed_symbols')}{f' (late baseline {late})' if late else ''} moved={js.get('moved_symbols')} "
               f"nifty_seen={js.get('nifty_seen')} nifty_moved={js.get('nifty_moved')}")
     line = f"session verdict = {status} ({detail})"
     if label == "1015":

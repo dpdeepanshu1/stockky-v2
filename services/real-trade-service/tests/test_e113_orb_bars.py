@@ -218,6 +218,40 @@ def test_records_report_groups_match_and_never_call_old_trades_no_trigger():
     assert g["opening range: would an ORB entry have taken it"]["orb_would_enter"]["n"] == 2
 
 
+def test_round149_history_fetch_is_forced_so_the_newest_bar_is_not_15_minutes_old():
+    """market-data caches intraday /history for 900 s while open; without force=true every decision read stale bars (live 2026-11-02: hit 0, miss 32, stale 25)."""
+    import httpx
+    seen = {}
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"candles": []}
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            seen["url"], seen["params"] = url, params
+            return _R()
+
+    real = httpx.Client
+    httpx.Client = _C
+    try:
+        OB._fetch_rows("RELIANCE.NS")
+    finally:
+        httpx.Client = real
+    assert seen["params"].get("force") == "true" and seen["params"]["interval"] == "1m" and seen["url"].endswith("/history/RELIANCE")
+
+
 def test_static_rails():
     src = (HERE / "entry_engine" / "orb_bars.py").read_text(encoding="utf-8")
     assert "def get_bars" in src and "threading.Thread(" in src and src.count("_fetch(key[0])") == 1       # the network call is inside the worker only

@@ -144,3 +144,14 @@ def test_stagnation_row_without_a_rule_keeps_the_plain_reason():
                        "quantity": 10, "opened_at": "2026-10-26T06:20:00Z", "closed_at": "2026-10-26T06:51:00Z"}]}
     r = d.rows_from_ps(doc)[0]
     assert r["reason"] == "stagnation_exit" and r["pnl"] == -2.0
+
+
+def test_round150_imported_split_line_and_gross_tag():
+    rows = d.rows_from_rt(RT, "all")
+    txt = d.build_report(rows, 10)
+    assert "broker-imported trade(s)" in txt and "without them: 3 trades" in txt
+    only_sys = d.build_report([r for r in rows if r["origin"] != "imported"], 10)
+    assert "broker-imported" not in only_sys
+    r = d._row("real-trade", 9, "ITC", "2026-10-29T07:00:00Z", "2026-10-30T09:30:00Z", -11.0, 1.5, "eod_squareoff", None, "imported", "gross_price")
+    t = d.build_report([r], 10)
+    assert "[ret = gross price move, not net]" in t and "[imported]" in t

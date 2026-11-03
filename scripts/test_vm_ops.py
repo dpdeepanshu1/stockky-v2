@@ -328,3 +328,13 @@ def test_main_writes_live_log_and_returns_exit_code():
 def test_scripts_are_executable_and_have_valid_syntax():
     for p in ("vm_ops.sh", "stats_loop.sh"):
         assert subprocess.run(["bash", "-n", os.path.join(HERE, p)]).returncode == 0
+
+
+def test_session_verdict_shows_the_late_baseline_after_a_restart():
+    now = datetime(2026, 10, 12, 5, 0, tzinfo=timezone.utc)
+    js = {"status": "open", "day": "d", "observed_symbols": 0, "moved_symbols": 2611, "late_baseline_symbols": 2600}
+    line = M.check_session("1015", _fake({"/market/session": (200, js, "")}), now)[0][1]
+    assert "observed=0 (late baseline 2600)" in line
+    js2 = {"status": "open", "day": "d", "observed_symbols": 1327, "moved_symbols": 1289, "late_baseline_symbols": 0}
+    assert "late baseline" not in M.check_session("1015", _fake({"/market/session": (200, js2, "")}), now)[0][1]
+

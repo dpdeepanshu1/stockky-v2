@@ -627,7 +627,7 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
                 {"step": "filter_due", "ok": True, "detail": f"{len(due)} calendar-due (≥{min_days}d), {waiting} waiting"},
                 {"step": "fetch_bars", "ok": True, "detail": "market-data 3mo → yfinance/bhavcopy-style history"},
                 {"step": "backfill", "ok": True, "detail": f"history_backfill labels={backfilled} (when next session missing)"},
-                {"step": "score_outcomes", "ok": done > 0, "detail": f"{done}/{len(queue)} labeled; reasons={reasons}"},
+                {"step": "score_outcomes", "ok": done > 0 or not queue, "detail": f"{done}/{len(queue)} labeled; reasons={reasons}"},
             ],
             "message": (
                 f"{period}: labeled {done}/{len(queue)} "
@@ -635,7 +635,7 @@ def evaluate_pending_predictions(period: str = 'T+1', max_batch: int = 50):
                 + (
                     "Used previous session pairs from upstream/history where T+1 bar was not available yet."
                     if backfilled
-                    else ("No labels written — check MARKET_DATA_URL / bars." if done == 0 else "Realtime session labels written.")
+                    else ("Nothing is due for a label yet (no snapshot is old enough): nothing to do." if not queue else "No labels written — check MARKET_DATA_URL / bars." if done == 0 else "Realtime session labels written.")
                 )
             ),
         }

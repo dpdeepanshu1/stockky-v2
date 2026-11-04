@@ -45,7 +45,8 @@ FEEDS: List[Tuple[str, str]] = [
     ("Moneycontrol-business", "https://www.moneycontrol.com/rss/business.xml"),
     ("Moneycontrol-google", "https://news.google.com/rss/search?q=site:moneycontrol.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en"),
     ("LiveMint", "https://www.livemint.com/rss/markets"),
-    ("NDTVProfit", "https://www.ndtvprofit.com/rss/markets"),
+    # Round 200: ("NDTVProfit", "https://www.ndtvprofit.com/rss/markets") answered HTTP 403 on every read (4 Nov log); the Google News search below
+    # reads the same site, so the dead entry is gone. Put it back if a VM check shows the feed answering 200 again.
     ("NDTVProfit-google", "https://news.google.com/rss/search?q=site:ndtvprofit.com+when:1d&hl=en-IN&gl=IN&ceid=IN:en"),
     ("BusinessStandard", "https://www.business-standard.com/rss/markets-106.rss"),
 ]

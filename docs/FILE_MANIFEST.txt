@@ -653,7 +653,10 @@ services/analysis-intelligence-service/tests/test_peers.py
 services/analysis-intelligence-service/tests/test_rate_limit_report.py
 services/analysis-intelligence-service/tests/test_rate_limiter.py
 services/analysis-intelligence-service/tests/test_round187_news_sources.py
+services/analysis-intelligence-service/tests/test_round192_hf_model_fallback.py
 services/analysis-intelligence-service/tests/test_round197_check_breakdown.py
+services/analysis-intelligence-service/tests/test_round198_market_feeds.py
+services/analysis-intelligence-service/tests/test_round201_check_workers.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py
@@ -893,6 +896,8 @@ services/api-gateway/tests/test_refill_additional.py
 services/api-gateway/tests/test_requirements_pins.py
 services/api-gateway/tests/test_round185_surprise_cache_snapshot.py
 services/api-gateway/tests/test_round189_nse_backoff_and_fallback_memory.py
+services/api-gateway/tests/test_round199_nse_fallback_escalation.py
+services/api-gateway/tests/test_round202_antala_not_on_nse.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1756,6 +1761,7 @@ services/position-stocks-service/tests/test_repair_closed_entry_prices.py
 services/position-stocks-service/tests/test_review_stats.py
 services/position-stocks-service/tests/test_round186_entry_fill_now.py
 services/position-stocks-service/tests/test_round188_conviction_known_inputs.py
+services/position-stocks-service/tests/test_round194_window_pause_log_throttle.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -2303,6 +2309,7 @@ services/real-trade-service/tests/test_regime_overlay_routes.py
 services/real-trade-service/tests/test_regime_rules_log_only.py
 services/real-trade-service/tests/test_return_sanity.py
 services/real-trade-service/tests/test_risk_engine.py
+services/real-trade-service/tests/test_round195_cnc_part_sold_log_throttle.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

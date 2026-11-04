@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
@@ -114,7 +115,12 @@ SYMBOL_RENAMES = {
 KNOWN_NOT_ON_NSE = {
     "CISCO", "CSCO", "GOOGL", "GOOG", "AAPL", "MSFT", "AMZN", "META", "TSLA",
     "NVDA", "NFLX", "INTC", "AMD", "IBM", "ORCL",
+    # Round 202: Antala Industries is a BSE-SME-only IPO (listing 5 Nov 2026). It is not an NSE instrument, so AngelOne / Dhan (NSE cash) have no token
+    # for it - the 4 Nov feed log's "resolved 499/500 ... unresolved: ANTALA" - and Yahoo can only answer through BSE. Remove it here if NSE ever lists it.
+    "ANTALA",
 }
+# Round 202: further names without a code change: KNOWN_NOT_ON_NSE_EXTRA=SYM1,SYM2 (read once at start).
+KNOWN_NOT_ON_NSE |= {x.strip().upper() for x in (os.getenv("KNOWN_NOT_ON_NSE_EXTRA") or "").split(",") if x.strip()}
 
 # Genuinely delisted/merged-away symbols — NOT a rename. A rename means
 # "same company, new ticker, 1:1" (safe to substitute in resolve_ns_ticker).

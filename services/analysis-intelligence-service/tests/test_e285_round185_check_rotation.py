@@ -27,6 +27,7 @@ def _clean(monkeypatch, tmp_path):
     monkeypatch.setattr(em, "_redis", None)
     monkeypatch.setattr(em, "_STATE_FILE", str(tmp_path / "state.json"))   # never touch the real /data volume
     monkeypatch.delenv("CHECK_MAX_SECONDS", raising=False)
+    monkeypatch.setenv("CHECK_WORKERS", "1")      # round 201: these cases pin the one-at-a-time loop (fake clock)
     yield
     for d in (em._mem, em._mem_exp):
         d.clear()

@@ -1130,18 +1130,37 @@ def _filter_equities(symbols) -> List[str]:
 # Round 189 (issue #4): five callers ask for the NSE securities list. While NSE answers with 0 rows or blocks us, each call re-asked NSE, re-called
 # market-data's /bhavcopy/universe and logged the same fallback warning again (the log showed it twice per scan). A non-empty bhavcopy fallback is now
 # remembered for NSE_SECURITIES_FALLBACK_TTL_S (default 120; 0 = off), and NSE is not asked again in that window.
-_nse_securities_fallback: dict = {"ts": 0.0, "symbols": []}
+# Round 199: while NSE keeps answering with 0 rows (4 Nov: the same warning four times in 15 minutes, all day) the window now doubles with every fallback
+# in a row, 120 -> 240 -> 480 -> 960 -> NSE_SECURITIES_FALLBACK_MAX_S (default 1800); a real answer from NSE resets it. The universe changes once a day,
+# so asking NSE every two minutes for a list it keeps answering empty bought nothing. NSE_SECURITIES_FALLBACK_TTL_S=0 still means "ask every call".
+_nse_securities_fallback: dict = {"ts": 0.0, "symbols": [], "streak": 0}
 
 
 def _nse_securities_fallback_ttl() -> float:
-    return _nse_endpoint_env("NSE_SECURITIES_FALLBACK_TTL_S", 120.0)
+    base = _nse_endpoint_env("NSE_SECURITIES_FALLBACK_TTL_S", 120.0)
+    if base <= 0:
+        return 0.0
+    try:
+        streak = int(_nse_securities_fallback.get("streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    cap = max(base, _nse_endpoint_env("NSE_SECURITIES_FALLBACK_MAX_S", 1800.0))
+    return min(cap, base * (2 ** max(0, min(streak, 10) - 1)))
 
 
 def _get_all_nse_securities() -> List[str]:
     _ttl = _nse_securities_fallback_ttl()
     if _ttl > 0 and _nse_securities_fallback["symbols"] and time.time() - _nse_securities_fallback["ts"] < _ttl:
         return _filter_equities(list(_nse_securities_fallback["symbols"]))
-    data = _fetch_from_nse_api("equity-stock-indices?index=SECURITIES%20IN%20NSE", "nse:all_securities")
+    # Round 200: the index name is now an env switch (NSE_SECURITIES_INDEX, default unchanged). On 4 Nov NSE answered this index with HTTP 200 and no rows
+    # all day, so the bhavcopy list (2970 symbols) did the work. Pointing it at a smaller real index (e.g. "NIFTY TOTAL MARKET") would shrink the scan
+    # universe, so the default is not changed without a live check; "off" skips the NSE ask and uses bhavcopy directly.
+    _idx = ((os.getenv("NSE_SECURITIES_INDEX") or "").strip() or "SECURITIES IN NSE")
+    if _idx.lower() == "off":
+        data = None
+    else:
+        data = _fetch_from_nse_api("equity-stock-indices?index=" + _idx.replace("&", "%26").replace(" ", "%20"),
+                                   "nse:all_securities" if _idx == "SECURITIES IN NSE" else "nse:all_securities:" + _idx)
     symbols = []
     if data and "data" in data and isinstance(data["data"], list):
         for item in data["data"]:
@@ -1153,6 +1172,8 @@ def _get_all_nse_securities() -> List[str]:
     # when NSE answered 200 with zero rows.
     _nse_reachable = isinstance(data, dict)
     logger.info(f"Fetched {len(symbols)} securities from NSE")
+    if symbols:
+        _nse_securities_fallback["streak"] = 0      # round 199: NSE answered for real - the next empty answer starts at the base window again
     if not symbols:
         # §3: NSE live API unreachable — use bhavcopy universe (real EQ/BE/BZ
         # symbols that actually traded, independent of the live JSON API).
@@ -1166,6 +1187,7 @@ def _get_all_nse_securities() -> List[str]:
             if symbols and _ttl > 0:
                 _nse_securities_fallback["symbols"] = list(symbols)
                 _nse_securities_fallback["ts"] = time.time()
+                _nse_securities_fallback["streak"] = int(_nse_securities_fallback.get("streak") or 0) + 1
             if _nse_reachable:
                 logger.warning(
                     "NSE live API answered but returned 0 securities rows — using "
@@ -1896,16 +1918,23 @@ def _get_bulk_deal_symbols() -> List[str]:
         out.append(s)
 
     # 1) NSE official bulk-deals board
+    # Round 199: 4 Nov log - "equity-stockIndices?index=SECURITIES IN F&O" answered 404 while every other equity-stock-indices call in this file (hyphenated)
+    # answers 200, and "historical/bulk-deals" / "historical/block-deals" answered 503. The F&O seed now uses the hyphenated path like its working siblings;
+    # the two dead history boards are replaced by NSE's one large-deals snapshot (bulk + block + short in one document, rows carry "symbol").
     for endpoint, key in (
-        ("equity-stockIndices?index=SECURITIES%20IN%20F%26O", "nse:fo_bulk_seed"),
-        ("historical/bulk-deals", "nse:bulk_deals"),
-        ("historical/block-deals", "nse:block_deals"),
+        ("equity-stock-indices?index=SECURITIES%20IN%20F%26O", "nse:fo_bulk_seed"),
+        ("snapshot-capital-market-largedeal", "nse:large_deals"),
     ):
         try:
             data = _fetch_from_nse_api(endpoint, key, ttl=1800)
             rows = []
             if isinstance(data, dict):
                 rows = data.get("data") or data.get("bulkDeals") or data.get("blockDeals") or []
+                if not rows:
+                    for _k in ("BULK_DEALS_DATA", "BLOCK_DEALS_DATA", "SHORT_DEALS_DATA"):
+                        _part = data.get(_k)
+                        if isinstance(_part, list):
+                            rows = list(rows) + _part[:80]
             elif isinstance(data, list):
                 rows = data
             if isinstance(rows, list):
@@ -1982,7 +2011,7 @@ def _get_52w_extreme_symbols() -> List[str]:
     # NSE gainers already partially covered; add all-time/52w boards if present
     for endpoint, key in (
         ("live-analysis-variations?index=gainers", "nse:gainers52"),
-        ("liveEquity-market?index=gainers", "nse:live_gainers"),
+        # Round 199: "liveEquity-market?index=gainers" answered 404 on 4 Nov (retired path) and added nothing beyond the board above - removed.
     ):
         try:
             data = _fetch_from_nse_api(endpoint, key, ttl=900)
@@ -3135,6 +3164,28 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
         logger.warning(f"Events fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None
 
+# Round 200: when a downstream's circuit is open every symbol in a scan used to log its own "<thing> fetch failed ... circuit open ... retry after 30s"
+# warning (20 lines in one 15-minute log). The breaker already logged the one line that matters when it opened, so a symbol that is only being refused
+# by an open circuit logs at debug, and one summary warning per downstream per NEWS_CIRCUIT_LOG_EVERY_S (default 60) says how many were skipped.
+_circuit_skip_log: dict = {}   # name -> [last_warning_epoch, skipped_since_then]
+
+
+def _log_circuit_skip(name: str, symbol: str, err: Exception) -> None:
+    try:
+        every = float((os.getenv("NEWS_CIRCUIT_LOG_EVERY_S") or "").strip() or 60.0)
+    except ValueError:
+        every = 60.0
+    ent = _circuit_skip_log.setdefault(name, [0.0, 0])
+    ent[1] += 1
+    now = time.time()
+    if every <= 0 or now - ent[0] >= every:
+        logger.warning("%s fetch skipped for %s: %s (%d symbol(s) skipped since the last line; further ones logged at debug for %ds)",
+                       name, symbol, err, ent[1], int(every))
+        ent[0], ent[1] = now, 0
+    else:
+        logger.debug("%s fetch skipped for %s: %s", name, symbol, err)
+
+
 async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
     cache_key = f"{NEWS_CACHE_PREFIX}{symbol}"
     cached = _redis_get(cache_key)
@@ -3150,6 +3201,8 @@ async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional
                 ttl = 3600 if _is_market_open_ist() else STATIC_PARAM_TTL
                 _redis_set(cache_key, data, ttl=ttl)
                 return data
+    except CircuitOpenError as e:
+        _log_circuit_skip("News", symbol, e)
     except Exception as e:
         logger.warning(f"News fetch failed for {symbol}: {str(e) or type(e).__name__}")
     return None

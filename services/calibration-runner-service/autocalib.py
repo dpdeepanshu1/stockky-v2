@@ -43,6 +43,7 @@ PROTECTED: Dict[str, str] = {
     "SHORT_LIVE_QTY_CAP": "money safety (short selling): how many shares a live short may have is your decision, never a report's",
     "SHORT_ENTRY_MARKETABLE_LIMIT": "money safety (short selling): how a short's SELL entry is priced is your decision, never a report's",
     "SHORT_STOP_FLOOR_ON_NORMAL_STOP": "money safety (short selling): whether a tightened short stop may sit under the ATR floor is your decision, never a report's",
+    "SHORT_OPENING_GATE_WIDEN_STOP": "money safety (short selling, E285 batch 3): whether a too-tight short stop is widened (and the share count cut to keep the risk) instead of refused is your decision, never a report's",
     "SHORT_PLAIN_FALLBACK": "money safety (short selling): whether a short may open as a plain order with a broker stop order instead of a Super Order is your decision, never a report's",
     "SHORT_LIVE_REQUIRES_PROBE": "money safety (short selling): whether a live short needs the Dhan SELL probe first is your decision, never a report's",
     "SHORT_SHORTLIST_ENABLED": "short selling (E107): which shorts are tried first decides where capital goes; it is your decision, never a report's",

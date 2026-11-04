@@ -998,6 +998,97 @@ def _fetch_cnbc_tv18(symbol: str, max_items: int = 5) -> List[Dict[str, Any]]:
         return []
 
 
+# Round 198: Moneycontrol's RSS is dead (4 Nov feed test on the VM: every Moneycontrol feed answers 200 but its newest entry is ~22,000 h old),
+# NDTV Profit / Financial Express / Zee Business answer 403, and CNBC TV18 404s now and then. These nine feeds answered 200 with entries 0.1-0.7 h
+# old in the same test. Like the three readers above, each feed is ONE general document filtered by keyword, so this adds coverage for the day's
+# headlines (it cannot find a quiet stock; the publisher search does that). Each feed goes through _parse_site_feed (shared TTL cache, a failure is
+# remembered, the frozen-feed warning and GET /news-sources "feeds" apply). EVENT_MARKET_FEEDS = comma list of feed URLs (blank = default list,
+# "off" = this source asks nothing).
+_MARKET_FEEDS_DEFAULT = (
+    "https://www.business-standard.com/rss/markets-106.rss",
+    "https://www.business-standard.com/rss/companies-101.rss",
+    "https://www.thehindubusinessline.com/markets/feeder/default.rss",
+    "https://www.thehindubusinessline.com/markets/stock-markets/feeder/default.rss",
+    "https://www.thehindubusinessline.com/companies/feeder/default.rss",
+    "https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms",
+    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "https://www.livemint.com/rss/markets",
+    "https://www.livemint.com/rss/companies",
+)
+_MARKET_FEED_PUBLISHERS = (
+    ("business-standard.com", "Business Standard"),
+    ("thehindubusinessline.com", "Business Line"),
+    ("economictimes.indiatimes.com", "Economic Times"),
+    ("livemint.com", "Mint"),
+)
+
+
+def _market_feed_urls() -> List[str]:
+    raw = (os.getenv("EVENT_MARKET_FEEDS") or "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "none"):
+        return []
+    if not raw:
+        return list(_MARKET_FEEDS_DEFAULT)
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _market_feed_publisher(url: str) -> str:
+    low = (url or "").lower()
+    for dom, name in _MARKET_FEED_PUBLISHERS:
+        if dom in low:
+            return name
+    return "Market feed"
+
+
+def _fetch_market_feeds(symbol: str, max_items: int = 8) -> List[Dict[str, Any]]:
+    urls = _market_feed_urls()
+    if not urls:
+        return []
+    keywords = _get_keywords(symbol)
+    cutoff = _utcnow() - timedelta(days=30)
+
+    def _one(feed_url: str) -> List[Dict[str, Any]]:
+        try:
+            parsed = _parse_site_feed(feed_url)
+        except Exception as e:  # noqa: BLE001 - one dead feed never loses the others (its failure is cached by _parse_site_feed)
+            logger.debug("market feed %s failed for %s: %s", feed_url, symbol, e)
+            return []
+        out: List[Dict[str, Any]] = []
+        pub = _market_feed_publisher(feed_url)
+        for entry in (getattr(parsed, "entries", None) or [])[:60]:
+            title = getattr(entry, "title", "") or ""
+            desc = getattr(entry, "description", "") or ""
+            if not title or not _text_matches_keywords((title + " " + desc).lower(), keywords):
+                continue
+            published = None
+            pp = getattr(entry, "published_parsed", None)
+            if pp:
+                published = datetime(*pp[:6])
+            if published and published < cutoff:
+                continue
+            out.append({"title": title, "publisher": pub, "published": published.isoformat() if published else None,
+                        "url": getattr(entry, "link", None)})
+        return out
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(5, len(urls))) as pool:
+            per_feed = list(pool.map(_one, urls))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Market feeds fetch failed for %s: %s", symbol, e)
+        return []
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    for lst in per_feed:
+        for it in lst:
+            k = it["title"].strip().lower()
+            if k not in seen:
+                seen.add(k)
+                items.append(it)
+    items.sort(key=lambda x: x.get("published") or "", reverse=True)
+    return items[:max_items]
+
+
 # group195: on 2026-10-06 the "Yahoo Finance" news source returned 0 items for every one of 40+ symbols in a row
 # (ABB, BSE, CGPOWER, ANGELONE ... - names that always have headlines), yet each lookup still made a Yahoo request.
 # After EVENT_YF_NEWS_EMPTY_PAUSE_AFTER (default 30; 0 = never pause) empty answers in a row the source is skipped
@@ -1080,6 +1171,7 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
         ("Economic Times", lambda: _fetch_economic_times(symbol, max_items=5)),
         ("CNBC TV18", lambda: _fetch_cnbc_tv18(symbol, max_items=5)),
         ("Publisher search", lambda: _fetch_publisher_search(symbol, max_items=8)),   # round 187: this symbol's own stories, no 50-entry feed limit
+        ("Market feeds", lambda: _fetch_market_feeds(symbol, max_items=8)),           # round 198: nine live Business Standard / BusinessLine / ET / Mint feeds
     )
     _yahoo_paused = _yf_news_paused()   # round 187: read BEFORE the lookups so a paused source is not logged as "0 items"
 
@@ -1794,42 +1886,104 @@ def check_for_changes():
     # round 197: where the pass spends its budget (evidence only, nothing reads it). 4 Nov VM log: 60 of 469 symbols in 241 s = ~4 s each, and
     # the pass cannot say whether that is the fresh fetch, the 1 s stagger or the yield to live requests.
     _tm = {"fresh": 0, "cached": 0, "fresh_s": 0.0, "cached_s": 0.0, "stagger_s": 0.0, "yield_s": 0.0, "yielded": 0}
-    for symbol in order:
-        if _need_sleep:
-            _ts = time.monotonic()
-            time.sleep(1)
-            _tm["stagger_s"] += time.monotonic() - _ts
-        _y = 0
-        _ty = time.monotonic()
-        while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
-            time.sleep(0.5)
-            _y += 1
-        if _y:
-            _tm["yielded"] += 1
-            _tm["yield_s"] += time.monotonic() - _ty
-        if _budget > 0 and time.monotonic() - _t0 > _budget:
-            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d). %s",
-                           time.monotonic() - _t0, done, total, _budget, (start + done) % total, _check_breakdown(_tm))
-            break
+    # Round 201: the 4 Nov breakdown was 42 fresh fetches = 180 s of a 243 s pass (4.3 s each), run one after another. CHECK_WORKERS (default 3) lets that many
+    # fresh fetches overlap while the 1 s spacing between fresh-fetch STARTS (the Yahoo protection) and the yield to live requests stay. Results are taken in
+    # the order the symbols were started, so `done` is still a contiguous prefix and the rotating cursor stays right. CHECK_WORKERS=1 = the old one-at-a-time loop.
+    try:
+        _workers = int((os.getenv("CHECK_WORKERS") or "").strip() or 3)
+    except ValueError:
+        _workers = 3
+    if _workers > 1:
+        from collections import deque
+        from concurrent.futures import ThreadPoolExecutor
 
-        try:
-            _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
-        except Exception:  # noqa: BLE001 - only decides whether to stagger
-            _was_cached = False
-        _tf = time.monotonic()
-        current = _fetch_events(symbol)
-        _dt = time.monotonic() - _tf
-        _tm["cached" if _was_cached else "fresh"] += 1
-        _tm["cached_s" if _was_cached else "fresh_s"] += _dt
-        _need_sleep = not _was_cached
-        previous = state["last_known"].get(symbol, {})
-        diff_reasons = _diff_events(previous, current)
+        def _job(sym, was_cached):
+            _tf = time.monotonic()
+            cur = _fetch_events(sym)
+            return cur, time.monotonic() - _tf
 
-        if diff_reasons:
-            changes.append({"symbol": symbol, "changes": diff_reasons, "current": current})
+        def _absorb(sym, was_cached, cur, dt):
+            _tm["cached" if was_cached else "fresh"] += 1
+            _tm["cached_s" if was_cached else "fresh_s"] += dt
+            diff_reasons = _diff_events(state["last_known"].get(sym, {}), cur)
+            if diff_reasons:
+                changes.append({"symbol": sym, "changes": diff_reasons, "current": cur})
+            state["last_known"][sym] = cur
 
-        state["last_known"][symbol] = current
-        done += 1
+        inflight = deque()
+        _last_fresh_start = 0.0
+        with ThreadPoolExecutor(max_workers=_workers, thread_name_prefix="event-check") as pool:
+            for symbol in order:
+                _y = 0
+                _ty = time.monotonic()
+                while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
+                    time.sleep(0.5)
+                    _y += 1
+                if _y:
+                    _tm["yielded"] += 1
+                    _tm["yield_s"] += time.monotonic() - _ty
+                if _budget > 0 and time.monotonic() - _t0 > _budget:
+                    logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f, %d workers); the rest are next pass (resumes at index %d). %s",
+                                   time.monotonic() - _t0, done + len(inflight), total, _budget, _workers, (start + done + len(inflight)) % total, _check_breakdown(_tm))
+                    break
+                try:
+                    _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
+                except Exception:  # noqa: BLE001 - only decides whether to stagger
+                    _was_cached = False
+                if not _was_cached:
+                    _gap = 1.0 - (time.monotonic() - _last_fresh_start)
+                    if _gap > 0:
+                        time.sleep(_gap)
+                        _tm["stagger_s"] += _gap
+                    _last_fresh_start = time.monotonic()
+                inflight.append((symbol, _was_cached, pool.submit(_job, symbol, _was_cached)))
+                while len(inflight) >= _workers:
+                    _s, _c, _f = inflight.popleft()
+                    _cur, _dt = _f.result()
+                    _absorb(_s, _c, _cur, _dt)
+                    done += 1
+            while inflight:                                  # everything started is finished and kept: the cursor moves past it
+                _s, _c, _f = inflight.popleft()
+                _cur, _dt = _f.result()
+                _absorb(_s, _c, _cur, _dt)
+                done += 1
+    else:
+        for symbol in order:
+            if _need_sleep:
+                _ts = time.monotonic()
+                time.sleep(1)
+                _tm["stagger_s"] += time.monotonic() - _ts
+            _y = 0
+            _ty = time.monotonic()
+            while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
+                time.sleep(0.5)
+                _y += 1
+            if _y:
+                _tm["yielded"] += 1
+                _tm["yield_s"] += time.monotonic() - _ty
+            if _budget > 0 and time.monotonic() - _t0 > _budget:
+                logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d). %s",
+                               time.monotonic() - _t0, done, total, _budget, (start + done) % total, _check_breakdown(_tm))
+                break
+
+            try:
+                _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
+            except Exception:  # noqa: BLE001 - only decides whether to stagger
+                _was_cached = False
+            _tf = time.monotonic()
+            current = _fetch_events(symbol)
+            _dt = time.monotonic() - _tf
+            _tm["cached" if _was_cached else "fresh"] += 1
+            _tm["cached_s" if _was_cached else "fresh_s"] += _dt
+            _need_sleep = not _was_cached
+            previous = state["last_known"].get(symbol, {})
+            diff_reasons = _diff_events(previous, current)
+
+            if diff_reasons:
+                changes.append({"symbol": symbol, "changes": diff_reasons, "current": current})
+
+            state["last_known"][symbol] = current
+            done += 1
 
     state["check_cursor"] = (start + done) % total if total else 0
     _save_state(state)

@@ -39,8 +39,14 @@ import main as em  # noqa: E402  (event/main.py)
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    """Isolate every module-level cache / flag for each test."""
+def _clean(monkeypatch, tmp_path):
+    """Isolate every module-level cache / flag for each test.
+
+    Round 203: since round 179 _load_state() falls back to a JSON file (EVENT_STATE_FILE, default
+    /data/event/state.json) and _save_state() writes it. Without redirecting it, the first test that
+    subscribed a symbol left it on disk and every later test (and every later pytest run) saw it, so
+    seven tests failed depending on order. Each test now gets its own empty file path."""
+    monkeypatch.setattr(em, "_STATE_FILE", str(tmp_path / "event" / "state.json"))
     for d in (em._yf_cache, em._company_name_cache, em._company_name_fallback_until, em._yf_ticker_cache, em._mem, em._mem_exp):
         d.clear()
     monkeypatch.setattr(em, "_redis", None)
@@ -963,7 +969,7 @@ class TestYfNews:
 
 class TestMultiSource:
     SOURCES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
-               "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"]
+               "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search", "_fetch_market_feeds"]
 
     def _set(self, monkeypatch, **by_name):
         for name in self.SOURCES:
@@ -1000,14 +1006,15 @@ class TestMultiSource:
         monkeypatch.setattr(em, "_fetch_economic_times", lambda s, max_items: seen.setdefault("e", max_items) and [])
         monkeypatch.setattr(em, "_fetch_cnbc_tv18", lambda s, max_items: seen.setdefault("c", max_items) and [])
         monkeypatch.setattr(em, "_fetch_publisher_search", lambda s, max_items: seen.setdefault("p", max_items) and [])
+        monkeypatch.setattr(em, "_fetch_market_feeds", lambda s, max_items: seen.setdefault("f", max_items) and [])
         em._fetch_news_from_multiple_sources("A.NS")
-        assert seen == {"g": 8, "m": 5, "e": 5, "c": 5, "p": 8}
+        assert seen == {"g": 8, "m": 5, "e": 5, "c": 5, "p": 8, "f": 8}
 
 
 class TestMultiSourceParallel:
     """group 176: the five news sources are fetched at the same time, merged in the fixed order."""
     NAMES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
-             "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"]
+             "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search", "_fetch_market_feeds"]
 
     def _slow(self, monkeypatch, delay, raise_in=()):
         for i, name in enumerate(self.NAMES):
@@ -1024,7 +1031,7 @@ class TestMultiSourceParallel:
         t0 = time.monotonic()
         out = em._fetch_news_from_multiple_sources("A.NS")
         assert time.monotonic() - t0 < 0.9          # sequential would take >= 1.8 s
-        assert [n["title"] for n in out] == ["T5", "T4", "T3", "T2", "T1", "T0"]
+        assert [n["title"] for n in out] == ["T6", "T5", "T4", "T3", "T2", "T1", "T0"]
 
     def test_switch_off_is_sequential(self, monkeypatch):
         monkeypatch.setenv("EVENT_NEWS_PARALLEL", "0")
@@ -1032,13 +1039,13 @@ class TestMultiSourceParallel:
         t0 = time.monotonic()
         out = em._fetch_news_from_multiple_sources("A.NS")
         assert time.monotonic() - t0 >= 0.6
-        assert len(out) == 6
+        assert len(out) == 7
 
     def test_a_failing_source_does_not_lose_the_others(self, monkeypatch):
         monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
         self._slow(monkeypatch, 0.0, raise_in=("_fetch_google_news",))
         out = em._fetch_news_from_multiple_sources("A.NS")
-        assert sorted(n["title"] for n in out) == ["T0", "T2", "T3", "T4", "T5"]
+        assert sorted(n["title"] for n in out) == ["T0", "T2", "T3", "T4", "T5", "T6"]
 
     def test_duplicate_title_keeps_the_earlier_source_in_fixed_order(self, monkeypatch):
         monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
@@ -1763,6 +1770,7 @@ class TestCheck:
         datetime.fromisoformat(out["checked_at"])
 
     def test_first_check_reports_and_stores_snapshot_then_quiet(self, monkeypatch):
+        monkeypatch.setenv("CHECK_WORKERS", "1")   # round 201: pins the one-at-a-time loop (exact 1 s stagger)
         sleeps = []
         monkeypatch.setattr(em.time, "sleep", lambda s: sleeps.append(s))
         snaps = {

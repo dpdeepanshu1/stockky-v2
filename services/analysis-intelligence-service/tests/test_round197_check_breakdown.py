@@ -27,6 +27,7 @@ def _clean(monkeypatch, tmp_path):
     monkeypatch.setattr(em, "_redis", None)
     monkeypatch.setattr(em, "_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.delenv("CHECK_MAX_SECONDS", raising=False)
+    monkeypatch.setenv("CHECK_WORKERS", "1")      # round 201: these cases pin the one-at-a-time loop (fake clock)
     em._live_requests[0] = 0
     yield
     em._live_requests[0] = 0

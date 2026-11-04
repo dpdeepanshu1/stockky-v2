@@ -1027,34 +1027,34 @@ def test_event_symbols_capped_at_80(http):
 
 # ── _get_bulk_deal_symbols ───────────────────────────────────────────────────
 
-FO_EP = "equity-stockIndices?index=SECURITIES%20IN%20F%26O"
+FO_EP = "equity-stock-indices?index=SECURITIES%20IN%20F%26O"
+LD_EP = "snapshot-capital-market-largedeal"
 
 
-def test_bulk_deals_queries_three_endpoints_with_30_minute_ttl(nse_api):
+def test_bulk_deals_queries_two_endpoints_with_30_minute_ttl(nse_api):
     gw._get_bulk_deal_symbols()
     assert nse_api.calls == [
         (FO_EP, "nse:fo_bulk_seed", 1800),
-        ("historical/bulk-deals", "nse:bulk_deals", 1800),
-        ("historical/block-deals", "nse:block_deals", 1800)]
+        (LD_EP, "nse:large_deals", 1800)]
 
 
 def test_bulk_deals_row_shapes_and_keys(nse_api):
     nse_api.responses[FO_EP] = {"data": [{"symbol": "fo1"}, {"symbolName": "fo2"}, {"scm": "fo3"}, "fo4", 5, {}]}
-    nse_api.responses["historical/bulk-deals"] = {"bulkDeals": [{"symbol": "bd1"}, {"symbol": "FO1"}]}
-    nse_api.responses["historical/block-deals"] = [{"symbol": "bk1"}, {"symbol": "x"}, {"symbol": "NIFTY 50"}]
-    assert gw._get_bulk_deal_symbols() == ["FO1", "FO2", "FO3", "FO4", "BD1", "BK1"]
+    nse_api.responses[LD_EP] = {"BULK_DEALS_DATA": [{"symbol": "bd1"}, {"symbol": "FO1"}],
+                                "BLOCK_DEALS_DATA": [{"symbol": "bk1"}, {"symbol": "x"}, {"symbol": "NIFTY 50"}],
+                                "SHORT_DEALS_DATA": [{"symbol": "sh1"}]}
+    assert gw._get_bulk_deal_symbols() == ["FO1", "FO2", "FO3", "FO4", "BD1", "BK1", "SH1"]
 
 
-def test_bulk_deals_blockdeals_key_and_odd_payloads(nse_api):
+def test_bulk_deals_odd_payloads(nse_api):
     nse_api.responses[FO_EP] = {"blockDeals": [{"symbol": "bl1"}]}
-    nse_api.responses["historical/bulk-deals"] = {"data": "not a list"}
-    nse_api.responses["historical/block-deals"] = 5
+    nse_api.responses[LD_EP] = {"BULK_DEALS_DATA": "not a list", "BLOCK_DEALS_DATA": 5}
     assert gw._get_bulk_deal_symbols() == ["BL1"]
 
 
 def test_bulk_deals_reads_at_most_80_rows_per_endpoint_and_returns_at_most_100(nse_api):
     nse_api.responses[FO_EP] = {"data": [{"symbol": s} for s in S(200, "F")]}
-    nse_api.responses["historical/bulk-deals"] = {"data": [{"symbol": s} for s in S(200, "B")]}
+    nse_api.responses[LD_EP] = {"BULK_DEALS_DATA": [{"symbol": s} for s in S(200, "B")]}
     out = gw._get_bulk_deal_symbols()
     assert len(out) == 100
     assert out[:80] == S(80, "F") and out[80:] == S(20, "B")
@@ -1062,9 +1062,9 @@ def test_bulk_deals_reads_at_most_80_rows_per_endpoint_and_returns_at_most_100(n
 
 def test_bulk_deals_endpoint_error_does_not_stop_the_rest(nse_api, log):
     nse_api.raises[FO_EP] = RuntimeError("blocked")
-    nse_api.responses["historical/block-deals"] = [{"symbol": "ok1"}]
+    nse_api.responses[LD_EP] = {"BLOCK_DEALS_DATA": [{"symbol": "ok1"}]}
     assert gw._get_bulk_deal_symbols() == ["OK1"]
-    assert log.any("debug", "bulk deals equity-stockIndices")
+    assert log.any("debug", "bulk deals equity-stock-indices")
 
 
 # ── _get_52w_extreme_symbols ─────────────────────────────────────────────────
@@ -1100,22 +1100,20 @@ def test_52w_nse_boards_filter_and_cap_rows(w52):
     w52.nse.responses["live-analysis-variations?index=gainers"] = {"data": (
         [{"symbol": "n_hi", "pChange": 3}, {"symbol": "n_lo", "pChange": 2.99}, {"symbolName": "n_alt", "perChange": -4},
          {"symbol": "n_none"}, {"symbol": "n_bad", "pChange": "zzz"}, "junk"] + [{"symbol": s, "pChange": 5} for s in S(60, "P")])}
-    w52.nse.responses["liveEquity-market?index=gainers"] = {"data": [{"symbol": "live1", "pChange": 6}]}
     out = gw._get_52w_extreme_symbols()
-    assert "N_HI" in out and "N_ALT" in out and "N_NONE" in out and "N_BAD" in out and "LIVE1" in out
+    assert "N_HI" in out and "N_ALT" in out and "N_NONE" in out and "N_BAD" in out
     assert "N_LO" not in out
     assert "P033" in out and "P034" not in out                    # only the first 40 rows are read
     assert w52.nse.calls == [
-        ("live-analysis-variations?index=gainers", "nse:gainers52", 900),
-        ("liveEquity-market?index=gainers", "nse:live_gainers", 900)]
+        ("live-analysis-variations?index=gainers", "nse:gainers52", 900)]
 
 
 def test_52w_nse_odd_payloads_and_errors_are_tolerated(w52):
     w52.nse.responses["live-analysis-variations?index=gainers"] = ["a", "list"]
-    w52.nse.raises["liveEquity-market?index=gainers"] = RuntimeError("blocked")
+    w52.nse.raises["live-analysis-variations?index=gainers"] = RuntimeError("blocked")
     assert gw._get_52w_extreme_symbols() == []
     w52.nse.raises.clear()
-    w52.nse.responses["liveEquity-market?index=gainers"] = {"data": None}
+    w52.nse.responses["live-analysis-variations?index=gainers"] = {"data": None}
     assert gw._get_52w_extreme_symbols() == []
 
 

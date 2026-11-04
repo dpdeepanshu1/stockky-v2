@@ -74,7 +74,7 @@ def test_fetch_uses_google_parse_with_the_query(monkeypatch):
 
 
 def test_aggregator_includes_publisher_items_and_dedupes_against_google(monkeypatch):
-    for n in ("_fetch_yf_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18"):
+    for n in ("_fetch_yf_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_market_feeds"):
         monkeypatch.setattr(em, n, lambda s, *a, **k: [])
     monkeypatch.setattr(em, "_fetch_google_news", lambda s, *a, **k: [{"title": "Same story", "publisher": "G", "published": "2026-11-04T05:00:00"}])
     monkeypatch.setattr(em, "_fetch_publisher_search", lambda s, *a, **k: [
@@ -87,7 +87,7 @@ def test_aggregator_includes_publisher_items_and_dedupes_against_google(monkeypa
 # ── paused / tally ───────────────────────────────────────────────────────────
 
 def _quiet_sources(monkeypatch, **by_name):
-    for n in ("_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"):
+    for n in ("_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news", "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search", "_fetch_market_feeds"):
         data = by_name.get(n, [])
         monkeypatch.setattr(em, n, lambda s, *a, _d=data, **k: list(_d))
 

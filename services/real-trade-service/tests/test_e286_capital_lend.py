@@ -52,8 +52,20 @@ def test_never_below_fixed_share_and_never_above_free_cash():
             assert 5000.0 - 1e-6 <= c <= 10000.0 + 1e-6
 
 
-def test_config_defaults():
+def _fresh_config(monkeypatch, *names):
+    """tests/conftest.py switches several modes off on the shared config module, so the SHIPPED defaults are read from a fresh copy of config.py with these env vars cleared."""
+    import importlib.util
     import config
+    for k in names:
+        monkeypatch.delenv(k, raising=False)
+    spec = importlib.util.spec_from_file_location("config_fresh_e286", config.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
+
+
+def test_config_defaults(monkeypatch):
+    config = _fresh_config(monkeypatch, "CAPITAL_LEND_MODE", "CAPITAL_LEND_RESERVE_FRAC", "CAPITAL_LEND_PEER_MAX_AGE_S")
     assert config.CAPITAL_LEND_MODE == "live" and config.CAPITAL_LEND_RESERVE_FRAC == 0.5 and config.CAPITAL_LEND_PEER_MAX_AGE_S == 900.0
 
 

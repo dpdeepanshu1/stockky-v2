@@ -187,7 +187,9 @@ class TestCheckThresholdStaleness:
     def test_everything_stale_when_threshold_zero(self, monkeypatch):
         monkeypatch.setattr(at, "STALE_THRESHOLD_DAYS", 0)
         stale = at.check_threshold_staleness()
-        assert {item["constant"] for item in stale} == set(at._REGIME_CONSTANTS.keys())
+        import regime_adaptive as _ra       # round 206: constants the market re-sets every 15 minutes (or retired ones) are not reported as stale
+        expected = {n for n in at._REGIME_CONSTANTS if not (_ra.is_managed(n) or n in _ra.RETIRED)}
+        assert {item["constant"] for item in stale} == expected
         for item in stale:
             assert item["constant"] in item["warning"]
             assert "current_value" in item and "age_days" in item

@@ -76,8 +76,20 @@ def test_profit_lock_bad_data_never_raises():
     assert ig.profit_lock(100, 103, 103, 100, 0.1, 0) is None
 
 
-def test_config_defaults():
+def _fresh_config(monkeypatch, *names):
+    """tests/conftest.py switches several modes off on the shared config module, so the SHIPPED defaults are read from a fresh copy of config.py with these env vars cleared."""
+    import importlib.util
     import config
+    for k in names:
+        monkeypatch.delenv(k, raising=False)
+    spec = importlib.util.spec_from_file_location("config_fresh_e286", config.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
+
+
+def test_config_defaults(monkeypatch):
+    config = _fresh_config(monkeypatch, "FAILED_ENTRY_EXIT_MODE", "PROFIT_LOCK_MODE", "FAILED_ENTRY_LOSS_FRAC", "PROFIT_LOCK_RANGE_MULT")
     assert config.FAILED_ENTRY_EXIT_MODE == "live" and config.PROFIT_LOCK_MODE == "live"
     assert config.FAILED_ENTRY_LOSS_FRAC == 0.35 and config.PROFIT_LOCK_RANGE_MULT == 3.0
 

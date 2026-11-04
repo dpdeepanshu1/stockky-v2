@@ -543,6 +543,8 @@ def test_slice_key_is_stable_for_an_unchanged_pool(cursor):
 GAINERS = "live-analysis-variations?index=gainers"
 LOSERS = "live-analysis-variations?index=losers"
 VOLG = "live-analysis-variations?index=volume-gainers"
+LOSERS_ALT = "live-analysis-variations?index=loosers"      # round 211: NSE's own spelling, tried when the first losers path holds no rows
+VOLG_ALT = "live-analysis-volume-gainers"                  # round 211: the second path of the volume board
 N500 = "equity-stock-indices?index=NIFTY%20500"
 
 
@@ -611,7 +613,7 @@ def test_movers_returns_cached_list_without_recomputing(mm):
 def test_movers_ignores_empty_or_non_list_cache(mm, cached):
     mm.cache = cached
     gw._get_momentum_movers()
-    assert len(mm.nse.calls) == 4
+    assert len(mm.nse.calls) == 6          # empty stub boards: round 211 also tries the losers and volume alternatives (4 boards + 2 alternatives)
 
 
 def _fill_boards(mm, n=45):
@@ -620,6 +622,17 @@ def _fill_boards(mm, n=45):
 
 def test_movers_nse_boards_are_queried_with_15_minute_ttl(mm):
     _fill_boards(mm)
+    gw._get_momentum_movers()
+    # only the gainers board has rows here, so (round 211) the losers and volume boards go on to their alternative paths, each cached under its own key
+    assert mm.nse.calls == [
+        (GAINERS, "nse:gainers", 900), (LOSERS, "nse:losers", 900), (LOSERS_ALT, "nse:losers:alt1", 900),
+        (VOLG, "nse:vol_gainers", 900), (VOLG_ALT, "nse:vol_gainers:alt1", 900), (N500, "nse:nifty500_idx", 900)]
+
+
+def test_movers_alternative_path_is_skipped_when_the_first_one_has_rows(mm):
+    _fill_boards(mm)
+    mm.nse.responses[LOSERS] = {"data": [{"symbol": s, "pChange": -5} for s in S(45, "L")]}
+    mm.nse.responses[VOLG] = {"data": [{"symbol": s, "pChange": 3} for s in S(45, "V")]}
     gw._get_momentum_movers()
     assert mm.nse.calls == [
         (GAINERS, "nse:gainers", 900), (LOSERS, "nse:losers", 900),

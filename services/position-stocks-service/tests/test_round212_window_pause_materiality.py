@@ -30,8 +30,14 @@ def test_breakeven_low_win_rate_is_not_paused():
 
 
 def test_material_loss_still_pauses():
-    out = wh.evaluate(_rows([10, 10, -40, -40, -40, -40, -40, -40]))      # 25% wins, net -220 on an average trade of ~35
-    assert out["day"]["disabled"] is True and "2/8 wins" in out["day"]["reason"]
+    # a second, profitable window so the "at least one window trades" spare-the-best rule (window_health.evaluate) does not un-pause the only window
+    out = wh.evaluate(_rows([10, 10, -40, -40, -40, -40, -40, -40]) + _rows([30, 30, 10, 10, 10, 10, 10, 10], "5m"))      # day: 25% wins, net -220 on an average trade of ~33
+    assert out["day"]["disabled"] is True and "2/8 wins" in out["day"]["reason"] and out["5m"]["disabled"] is False
+
+
+def test_the_only_window_is_spared_even_when_it_loses_materially():
+    out = wh.evaluate(_rows([10, 10, -40, -40, -40, -40, -40, -40]))      # same losing window alone: the spare rule keeps one window trading
+    assert out["day"]["disabled"] is False
 
 
 def test_zero_setting_restores_old_rule(monkeypatch):

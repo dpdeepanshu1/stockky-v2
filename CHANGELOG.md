@@ -1,3 +1,11 @@
+## 4 Nov 2026 - Round 221: six CI test failures fixed in api-gateway and position-stocks (tests only, no trading change)
+
+ * **Why (CI run on the round 220 commit):** api-gateway 5 failed / 9125 passed (`test_main_universe.py`, four `test_movers_ignores_empty_or_non_list_cache[...]` cases and `test_movers_nse_boards_are_queried_with_15_minute_ttl`); position-stocks 1 failed / 5516 passed on Python 3.11 and 3.12 (`test_round212_window_pause_materiality.py::test_material_loss_still_pauses`). Production code was right in both; the tests were older than the code they check.
+ * **api-gateway:** since round 211 `_fetch_nse_board` goes on to NSE's other path when a board answers with no rows (losers `...index=loosers`, volume `live-analysis-volume-gainers`, each cached under its own `:alt1` key). The tests still expected exactly 4 board calls. With empty stub boards there are now 6, and with only gainers filled the call list names both alternatives. New test `test_movers_alternative_path_is_skipped_when_the_first_one_has_rows` pins that an alternative is NOT asked when the first path has rows.
+ * **position-stocks:** `window_health.evaluate` never pauses the only window (documented: at least one window always trades), so a test with a single losing window could not see `disabled=True`. The material-loss test now adds a second, profitable window (like its neighbour already did); `test_the_only_window_is_spared_even_when_it_loses_materially` pins the spare rule.
+ * **Checked (sandbox, Python 3.12, clean venvs from each requirements.txt):** api-gateway 9131 passed; position-stocks 5518 passed. real-trade stayed green on the VM after round 220 (all dots, no failures).
+ * **Deploy:** nothing to deploy, no service code changed.
+
 ## 4 Nov 2026 - Round 220: the audit rows after a REAL fill / close / holdings sync no longer wait on Oracle inside the tick (real-trade)
 
  * **Why (4 Nov log, open since round 196):** a single `trade_audit_log` INSERT took 2.7 s on Oracle (2.3-4.6 s on 2 Nov). `log_action` commits the caller's session, and five REAL rows in `portfolio/portfolio.py` still used it from inside the exit / reconcile path: `ORDER_FILLED`, `POSITION_CLOSED` / `POSITION_PARTIAL_EXIT` (broker-confirmed exit), `POSITION_CLOSED` (ghost close), `HOLDINGS_SYNC_CLOSED`, `HOLDINGS_SYNC_QTY_CAPPED`.

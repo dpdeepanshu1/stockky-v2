@@ -246,6 +246,8 @@ frontend/src/design-v7.css
 frontend/src/design-v7.test.mjs
 frontend/src/design-v8.css
 frontend/src/design-v8.test.mjs
+frontend/src/eventChips.test.mjs
+frontend/src/eventChips.ts
 frontend/src/feedView.test.mjs
 frontend/src/gatewayAuth.test.mjs
 frontend/src/gatewayAuth.ts
@@ -392,6 +394,7 @@ scripts/hold_bucket_check.py
 scripts/intraday_gate_backtest.py
 scripts/intraday_state_check.py
 scripts/kronos_backtest.py
+scripts/label_headlines.py
 scripts/legacy_gate_backtest.py
 scripts/live_vs_backtest.py
 scripts/ma_baseline.py
@@ -466,6 +469,7 @@ scripts/test_group470_tooling.py
 scripts/test_hold_bucket_check.py
 scripts/test_intraday_gate_backtest.py
 scripts/test_intraday_state_check.py
+scripts/test_label_headlines.py
 scripts/test_legacy_gate_backtest.py
 scripts/test_live_vs_backtest.py
 scripts/test_ma_baseline.py
@@ -524,8 +528,10 @@ services/analysis-intelligence-service/event/.dockerignore
 services/analysis-intelligence-service/event/Dockerfile
 services/analysis-intelligence-service/event/event_depth.py
 services/analysis-intelligence-service/event/event_feed.py
+services/analysis-intelligence-service/event/event_lite.py
 services/analysis-intelligence-service/event/main.py
 services/analysis-intelligence-service/event/requirements.txt
+services/analysis-intelligence-service/event_lite.py
 services/analysis-intelligence-service/fundamental/.dockerignore
 services/analysis-intelligence-service/fundamental/Dockerfile
 services/analysis-intelligence-service/fundamental/indianapi_fallback.py
@@ -542,6 +548,7 @@ services/analysis-intelligence-service/main.py
 services/analysis-intelligence-service/md_guard.py
 services/analysis-intelligence-service/news/.dockerignore
 services/analysis-intelligence-service/news/Dockerfile
+services/analysis-intelligence-service/news/event_lite.py
 services/analysis-intelligence-service/news/feed_fetch.py
 services/analysis-intelligence-service/news/main.py
 services/analysis-intelligence-service/news/news_quality.py
@@ -597,6 +604,7 @@ services/analysis-intelligence-service/tests/__init__.py
 services/analysis-intelligence-service/tests/_analyze_harness.py
 services/analysis-intelligence-service/tests/_ms_bars.py
 services/analysis-intelligence-service/tests/conftest.py
+services/analysis-intelligence-service/tests/event_lite_data.py
 services/analysis-intelligence-service/tests/golden/technical_baseline.json
 services/analysis-intelligence-service/tests/test_e247_yf_slots.py
 services/analysis-intelligence-service/tests/test_e27_intraday_chart_payload.py
@@ -607,6 +615,8 @@ services/analysis-intelligence-service/tests/test_e285_round161_news_hf_state.py
 services/analysis-intelligence-service/tests/test_e285_round162_dead_feed_ttl.py
 services/analysis-intelligence-service/tests/test_env_url_blank_fallback.py
 services/analysis-intelligence-service/tests/test_event_depth.py
+services/analysis-intelligence-service/tests/test_event_feed_lite.py
+services/analysis-intelligence-service/tests/test_event_lite.py
 services/analysis-intelligence-service/tests/test_event_main.py
 services/analysis-intelligence-service/tests/test_feed_fetch.py
 services/analysis-intelligence-service/tests/test_feed_fetch_fallback.py

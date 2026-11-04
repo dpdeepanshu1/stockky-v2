@@ -510,13 +510,51 @@ def _text_matches_keywords(text: str, keywords: List[str]) -> bool:
     return pat.search(text or "") is not None
 
 
-def _classify_event_title(title: str) -> Optional[str]:
-    """Classify a news title into an event category using keyword groups."""
+def _classify_event_title_keywords(title: str) -> Optional[str]:
+    """The old classifier: plain substring keyword groups (kept as the fallback and for EVENT_CLASSIFIER_MODE=keyword)."""
     t = (title or "").lower()
     for etype, kws in _EVENT_TYPE_KEYWORDS.items():
         if any(k in t for k in kws):
             return etype
     return None
+
+
+# E285 round 172: offline classifier (event_lite.py, standard library only, no network, no LLM, nothing to rate-limit or pay for).
+# EVENT_CLASSIFIER_MODE: lite (default) = event_lite decides; keyword = the old substring groups only;
+#                        both = event_lite first, the old keyword groups for a title it calls "other / none".
+try:
+    import event_lite as _event_lite
+except Exception:  # noqa: BLE001 - a missing copy must never stop the service; the keyword groups still work
+    _event_lite = None  # type: ignore[assignment]
+
+
+def _classifier_mode() -> str:
+    m = (os.getenv("EVENT_CLASSIFIER_MODE") or "").strip().lower()
+    return m if m in ("lite", "keyword", "both") else "lite"
+
+
+def _classify_event_title(title: str) -> Optional[str]:
+    """Classify a news title into an event category (see EVENT_CLASSIFIER_MODE above)."""
+    mode = _classifier_mode()
+    if mode == "keyword" or _event_lite is None:
+        return _classify_event_title_keywords(title)
+    cat = _event_lite.event_category(title or "")
+    if cat is None and mode == "both":
+        return _classify_event_title_keywords(title)
+    return cat
+
+
+def _event_reading(title: str) -> Dict[str, Any]:
+    """Polarity of a title from event_lite: {event_polarity: -1/0/+1, event_confidence: 0..1}; {} when event_lite is off or unsure."""
+    if _event_lite is None or _classifier_mode() == "keyword":
+        return {}
+    try:
+        r = _event_lite.classify(title or "")
+        if r["type"] == "none" or float(r["confidence"]) < 0.5:
+            return {}
+        return {"event_polarity": int(r["pol"]), "event_confidence": round(float(r["confidence"]), 2)}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _summarize_events(events: dict) -> str:
@@ -557,7 +595,8 @@ def _summarize_events(events: dict) -> str:
         if cat:
             classified.setdefault(cat, []).append(n.get("title"))
     # Prefer important categories first
-    priority = ["results", "bulk_block", "insider", "board_meeting", "dividend", "corporate_action", "guidance"]
+    priority = ["results", "bulk_block", "insider", "board_meeting", "dividend", "corporate_action", "guidance",
+                "regulatory", "legal", "management_change", "rating_change"]
     for cat in priority:
         titles = classified.get(cat) or []
         if not titles:
@@ -570,6 +609,10 @@ def _summarize_events(events: dict) -> str:
             "dividend": "Dividend",
             "corporate_action": "Corporate action",
             "guidance": "Guidance/Orders",
+            "regulatory": "Regulator",
+            "legal": "Legal",
+            "management_change": "Management",
+            "rating_change": "Rating",
         }.get(cat, cat.replace("_", " ").title())
         parts.append(f"{label}: {titles[0][:100]}")
     if not parts:
@@ -1107,7 +1150,7 @@ def _fetch_events_impl(symbol: str, force: bool = False) -> dict:
     classified_events = []
     for n in recent_news:
         cat = _classify_event_title(n.get("title") or "")
-        item = {**n, "event_type": cat or "general"}
+        item = {**n, "event_type": cat or "general", **_event_reading(n.get("title") or "")}
         if cat:
             classified_events.append(item)
         if cat == "bulk_block":
@@ -1269,6 +1312,22 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "event-tracker-service", "redis": bool(_redis)}
+
+
+@app.get("/lite-stats")
+def lite_stats():
+    """Round 173: how the offline classifier is doing since this process started (calls / none / unsure / errors) and which mode is on."""
+    st = {}
+    try:
+        st = _event_lite.stats() if _event_lite is not None else {}
+    except Exception:  # noqa: BLE001
+        st = {}
+    feed = {}
+    try:
+        feed = _ef.feed_lite_stats() if _ef is not None and hasattr(_ef, "feed_lite_stats") else {}
+    except Exception:  # noqa: BLE001
+        feed = {}
+    return {"available": _event_lite is not None, "mode": _classifier_mode(), "stats": st, "feed": feed}
 
 
 # NOTE (group152): this literal route MUST be registered before "/events/{symbol}" below, otherwise

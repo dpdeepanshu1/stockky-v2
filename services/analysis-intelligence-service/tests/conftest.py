@@ -97,3 +97,14 @@ def _g341_feed_warning_throttle_reset():
     except Exception:  # noqa: BLE001
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _legacy_news_sentiment_mode(request, monkeypatch):
+    """E285 round 172: the production default NEWS_SENTIMENT_MODE is 'auto' (Hugging Face, then the offline event_lite scorer). The older
+    tests pin the HF-only behaviour (a failed call scores 0.0, the keyword proxy), so they run in 'hf' mode; test_event_lite.py sets its own."""
+    if not request.module.__name__.endswith("test_event_lite"):
+        monkeypatch.setenv("NEWS_SENTIMENT_MODE", "hf")
+        monkeypatch.setenv("EVENT_CLASSIFIER_MODE", "keyword")
+        monkeypatch.setenv("EVENT_FEED_CLASSIFIER", "legacy")
+    yield

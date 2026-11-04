@@ -127,8 +127,8 @@ def _negative_hits(h: str) -> List[str]:
     return hits
 
 
-def classify(headline: str) -> Dict[str, Any]:
-    """-> {type, polarity, hits}. polarity is +1 / 0 / -1. Never raises."""
+def _classify_legacy(headline: str) -> Dict[str, Any]:
+    """The keyword classifier: -> {type, polarity, hits}. polarity is +1 / 0 / -1. Never raises."""
     h = " ".join(str(headline or "").lower().split())
     if not h:
         return {"type": "other", "polarity": 0, "hits": []}
@@ -169,6 +169,116 @@ def classify(headline: str) -> Dict[str, Any]:
     else:
         polarity = 0
     return {"type": etype, "polarity": polarity, "hits": pos if polarity > 0 else neg}
+
+
+# ── round 173: the offline classifier (event_lite.py) next to the keyword rules ─────────────────────────────────
+# This feed decides real entries and vetoes. Since round 177 it runs LIVE in assist mode (the keyword rules stand; event_lite only fills unknowns and neutralises a contested sign).
+# EVENT_FEED_CLASSIFIER: assist (default, live) = see below
+#                        shadow = the keyword rules decide exactly as before; event_lite only reads the same headline and the agreement is counted
+#                                          (GET /lite-stats -> feed) so the switch can be decided on your own headlines
+#                        legacy = the keyword rules, event_lite not even called
+#                        assist (default) = keyword rules stand, with two safe changes: (1) keyword polarity 0 and event_lite sure (confidence >= EVENT_FEED_LITE_FILL_CONF, 0.75)
+#                                 -> event_lite's polarity; (2) keyword polarity +1/-1 and event_lite sure of the OPPOSITE sign (>= EVENT_FEED_LITE_VETO_CONF, 0.8)
+#                                 -> polarity 0 (contested, no entry and no veto). It never flips a sign and never raises a strength by itself.
+#                        lite   = event_lite decides polarity and type (below 0.5 confidence = 0)
+try:
+    import event_lite as _event_lite
+except Exception:  # noqa: BLE001
+    try:
+        import importlib.util as _ilu2
+        import os as _os2
+        _sp = _ilu2.spec_from_file_location("event_lite", _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), "event_lite.py"))
+        _event_lite = _ilu2.module_from_spec(_sp)
+        _sp.loader.exec_module(_event_lite)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - a missing copy must never stop the feed
+        _event_lite = None  # type: ignore[assignment]
+
+_LITE_TYPE_TO_FEED = {"results": "results", "guidance": "order", "dividend": "deal", "corporate_action": "deal", "bulk_block": "deal", "insider": "deal",
+                      "regulatory": "regulatory", "legal": "regulatory", "management_change": "management", "rating_change": "rating",
+                      "board_meeting": "other", "other": "other", "none": "other"}
+def _feed_type(lite_type: str, pol: int) -> str:
+    """event_lite type -> feed type. TYPE_WEIGHT gives `regulatory` 0.9 because it exists to veto bad news; a POSITIVE regulator / court item
+    (approval, restrictions lifted, tax demand quashed) is an order-sized piece of good news, not a 0.9 one, so it is typed `order` (0.65)."""
+    t = _LITE_TYPE_TO_FEED.get(lite_type, "other")
+    if t == "regulatory" and pol > 0:
+        return "order"
+    return t
+
+
+_FEED_LITE = {"seen": 0, "agree": 0, "fills": 0, "contested": 0, "applied": 0, "errors": 0}
+_FEED_LITE_LOCK = threading.Lock()
+
+
+def feed_classifier_mode() -> str:
+    m = (os.getenv("EVENT_FEED_CLASSIFIER") or "").strip().lower()
+    return m if m in ("shadow", "legacy", "assist", "lite") else "assist"
+
+
+def feed_lite_stats() -> Dict[str, Any]:
+    with _FEED_LITE_LOCK:
+        return {"mode": feed_classifier_mode(), "available": _event_lite is not None, **dict(_FEED_LITE)}
+
+
+def reset_feed_lite_stats() -> None:
+    with _FEED_LITE_LOCK:
+        for k in _FEED_LITE:
+            _FEED_LITE[k] = 0
+
+
+def _conf_env(name: str, default: float) -> float:
+    try:
+        v = float((os.getenv(name) or "").strip() or default)
+        return v if 0.0 <= v <= 1.0 else default
+    except ValueError:
+        return default
+
+
+def _bump_feed(key: str) -> None:
+    with _FEED_LITE_LOCK:
+        _FEED_LITE[key] += 1
+
+
+def classify(headline: str) -> Dict[str, Any]:
+    """-> {type, polarity, hits}. polarity is +1 / 0 / -1. Never raises. See EVENT_FEED_CLASSIFIER above (default assist: keyword rules + event_lite fills / contested)."""
+    base = _classify_legacy(headline)
+    mode = feed_classifier_mode()
+    if mode == "legacy" or _event_lite is None or not str(headline or "").strip():
+        return base
+    try:
+        r = _event_lite.classify(str(headline))
+        lp, lc = int(r["pol"]), float(r["confidence"])
+        if r["type"] == "none":
+            lp, lc = 0, 0.0
+        bp = int(base["polarity"])
+        _bump_feed("seen")
+        if lp == bp:
+            _bump_feed("agree")
+        elif bp == 0 and lp != 0 and lc >= _conf_env("EVENT_FEED_LITE_FILL_CONF", 0.75):
+            _bump_feed("fills")
+        elif bp != 0 and lp == -bp and lc >= _conf_env("EVENT_FEED_LITE_VETO_CONF", 0.8):
+            _bump_feed("contested")
+        if mode == "shadow":
+            return base
+        out = dict(base)
+        if mode == "lite":
+            if lc < 0.5:
+                lp = 0
+            out.update(polarity=lp, type=_feed_type(r["type"], lp), hits=["lite:" + str(r["reason"])[:60]])
+            _bump_feed("applied")
+            return out
+        # assist
+        if bp == 0 and lp != 0 and lc >= _conf_env("EVENT_FEED_LITE_FILL_CONF", 0.75):
+            out.update(polarity=lp, hits=["lite:" + str(r["reason"])[:60]])
+            if base["type"] == "other":
+                out["type"] = _feed_type(r["type"], lp)
+            _bump_feed("applied")
+        elif bp != 0 and lp == -bp and lc >= _conf_env("EVENT_FEED_LITE_VETO_CONF", 0.8):
+            out.update(polarity=0, hits=list(base.get("hits") or []) + ["lite:contested"])
+            _bump_feed("applied")
+        return out
+    except Exception:  # noqa: BLE001 - the keyword answer always stands
+        _bump_feed("errors")
+        return base
 
 
 # ── symbols ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────

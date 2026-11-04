@@ -1,3 +1,4 @@
+import { eventChips } from "../eventChips";
 import { useState, useEffect } from "react";
 import { ScoreRing } from "./ui/ScoreRing";          // design v5
 import { TradePlanBar } from "./ui/TradePlanBar";      // design v5
@@ -1089,6 +1090,11 @@ function EventDataView({ data }: { data: Record<string, unknown> }) {
                   <div className="mt-1 flex flex-wrap gap-2 text-[10px] font-display tabular-nums text-mist/50">
                     {publisher && <span>{String(publisher)}</span>}
                     {pubLabel && <span>{pubLabel}</span>}
+                    {eventChips(o).map((c, ci) => (
+                      <span key={ci} className={c.tone === "buy" ? "text-signal-buy" : c.tone === "sell" ? "text-signal-sell" : "uppercase tracking-wider"}>
+                        {c.text}
+                      </span>
+                    ))}
                     {url && (
                       <a
                         href={url}

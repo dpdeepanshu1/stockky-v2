@@ -15,7 +15,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from urllib.parse import quote
 
 import feedparser
@@ -675,17 +675,20 @@ def _summarize_headlines(headlines: List[dict], symbol: str) -> str:
     return f"{name}: {theme_line}{len(headlines)} relevant item(s).\n{joined}"
 
 
-def _score_headline(title: str) -> float:
-    """Call Hugging Face Inference Providers (router, chat-completions) to get a sentiment score."""
+def _score_headline_hf(title: str) -> Optional[float]:
+    """Call Hugging Face Inference Providers (router, chat-completions) to get a sentiment score.
+
+    E285 round 172: None = Hugging Face gave NO reading (no key, paused, HTTP error, network error); a float (0.0 = HF said neutral) = it did.
+    The caller can then tell 'neutral' from 'no answer' and use the offline scorer for the second case."""
     global _HF_BACKOFF_UNTIL
     global _HF_KEY_WARNED
     if not HF_API_KEY:
         if not _HF_KEY_WARNED:          # round 161: once, not once per headline
             _HF_KEY_WARNED = True
             logger.warning("HF_API_KEY not set; headline sentiment is the neutral fallback (news_score 50) - set it or ignore the sentiment part of the news score")
-        return 0.0
+        return None
     if time.monotonic() < _HF_BACKOFF_UNTIL:
-        return 0.0
+        return None
     try:
         payload = {
             "model": HF_MODEL,
@@ -712,7 +715,7 @@ def _score_headline(title: str) -> float:
             elif "negative" in result:
                 return -0.8
             else:
-                return 0.0
+                return None   # HF answered "neutral": a real reading
         else:
             if resp.status_code in HF_CONFIG_ERROR_STATUSES and _hf_error_backoff_sec() > 0:
                 _pause = _hf_error_backoff_sec()
@@ -742,7 +745,7 @@ def _score_headline(title: str) -> float:
                     )
                 except Exception:
                     pass
-            return 0.0
+            return None
     except Exception as e:
         if isinstance(e, httpx.TransportError):
             _HF_BACKOFF_UNTIL = time.monotonic() + HF_FAILURE_BACKOFF_SEC
@@ -756,7 +759,63 @@ def _score_headline(title: str) -> float:
             report_if_rate_limited(e, provider="analysis", path="news/huggingface")
         except Exception:
             pass
+        return None
+
+
+# ── E285 round 172: offline sentiment fallback (event_lite.py: standard library only, no network, no LLM, no key, no quota) ─────────────
+# NEWS_SENTIMENT_MODE: auto (default) = Hugging Face first; every headline HF gave no reading for is scored by the lite scorer
+#                      lite = the lite scorer only, Hugging Face is never called
+#                      hf   = the old behaviour (a failed HF call scores the neutral 0.0)
+try:
+    import event_lite as _event_lite
+except Exception:  # noqa: BLE001 - a missing copy must never stop the service
+    _event_lite = None  # type: ignore[assignment]
+
+
+def _sentiment_mode() -> str:
+    m = (os.getenv("NEWS_SENTIMENT_MODE") or "").strip().lower()
+    return m if m in ("auto", "lite", "hf") else "auto"
+
+
+def _score_headline_lite(title: str) -> Optional[float]:
+    """Lite score in [-0.8, 0.8]; None when the lite scorer is not available."""
+    if _event_lite is None:
+        return None
+    try:
+        return float(_event_lite.sentiment(title))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_LITE_USED = {"n": 0}   # headlines scored by the lite scorer since start (for /analyze data_quality)
+
+
+def _score_headline(title: str) -> float:
+    """Sentiment of one headline: see NEWS_SENTIMENT_MODE above. Never raises."""
+    mode = _sentiment_mode()
+    if mode != "lite":
+        v = _score_headline_hf(title)
+        if v is not None:
+            return v
+    if mode == "hf":
         return 0.0
+    lite = _score_headline_lite(title)
+    if lite is None:
+        return 0.0
+    _LITE_USED["n"] += 1
+    return lite
+
+
+def _sentiment_source() -> str:
+    """'hf', 'lite' or 'hf+lite' / 'none' for the payload: which scorer(s) produced this reading."""
+    mode = _sentiment_mode()
+    if mode == "hf":
+        return "hf" if _hf_state() == "on" else "none"
+    if mode == "lite":
+        return "lite" if _event_lite is not None else "none"
+    if _event_lite is None:
+        return "hf" if _hf_state() == "on" else "none"
+    return "hf+lite" if _hf_state() == "on" else "lite"
 
 
 @app.get("/")
@@ -777,6 +836,18 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "news-intelligence-service"}
+
+
+@app.get("/lite-stats")
+def lite_stats():
+    """Round 173: which scorer is working (`sentiment_source`), the mode, headlines the offline scorer read since start, and its own counters."""
+    st = {}
+    try:
+        st = _event_lite.stats() if _event_lite is not None else {}
+    except Exception:  # noqa: BLE001
+        st = {}
+    return {"available": _event_lite is not None, "mode": _sentiment_mode(), "sentiment_source": _sentiment_source(),
+            "headlines_scored_by_lite": _LITE_USED["n"], "stats": st}
 
 
 @app.get("/feed-health")
@@ -842,8 +913,9 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
         reasons.append(f"Notably positive: \"{most_positive[1]['title'][:90]}\"")
     tone = "positive" if avg_sentiment > 0.1 else "negative" if avg_sentiment < -0.1 else "neutral"
     _hf = _hf_state()
-    if _hf == "on" or any(sc != 0.0 for sc, _ in scored):
-        reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}")
+    _src = _sentiment_source()
+    if _hf == "on" or _src in ("lite", "hf+lite") or any(sc != 0.0 for sc, _ in scored):
+        reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}" + (" (offline scorer)" if _src == "lite" else ""))
     else:       # round 161: do not present the neutral fallback as a measured sentiment
         reasons.append(f"{len(headlines)} relevant headlines; sentiment not scored ("
                        + ("HF_API_KEY not set" if _hf == "no_key" else "Hugging Face paused after errors") + "), score is the neutral 50")
@@ -862,6 +934,7 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
             "sources_used": list({(h.get("publisher") or "unknown") for h in headlines}),
             "hf_sentiment": _hf == "on",
             "hf_state": _hf,
+            "sentiment_source": _src,
             "note": (
                 "Multiple corroborating headlines"
                 if len(headlines) >= 4

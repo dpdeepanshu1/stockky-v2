@@ -18,6 +18,11 @@ import feedparser
 import httpx
 
 try:
+    import event_lite as _event_lite
+except Exception:  # noqa: BLE001 - optional; the keyword proxy still works without it
+    _event_lite = None  # type: ignore[assignment]
+
+try:
     # 2026-10-04 (item 9): shared downloader - browser User-Agent, timeout, status logging, per-URL cache.
     from feed_fetch import fetch_feed_ex
 except Exception:  # pragma: no cover - degrade to the old direct feedparser call
@@ -230,6 +235,35 @@ def summarize_headlines(
     return f"Recent news for {symbol}: " + " | ".join(bullets)
 
 
+def _keyword_verdict(title: str) -> int:
+    """The original crude keyword proxy: +1 / -1 / 0 (positive words win ties, as before)."""
+    t = (title or "").lower()
+    if any(w in t for w in ("profit", "growth", "surge", "rally", "beat", "win", "deal", "expand", "order")):
+        return 1
+    if any(w in t for w in ("loss", "fall", "drop", "probe", "fraud", "ban", "delay", "miss", "cut")):
+        return -1
+    return 0
+
+
+def _lite_verdict(title: str) -> Optional[int]:
+    """+1 / -1 / 0 from event_lite when it has an opinion; None = unsure, off or unavailable (the keyword proxy decides then).
+    NEWS_SENTIMENT_MODE=hf restores the keyword proxy for every headline (Hugging Face is not used on this path either way)."""
+    import os as _os
+    if _event_lite is None or (_os.getenv("NEWS_SENTIMENT_MODE") or "").strip().lower() == "hf":
+        return None
+    try:
+        r = _event_lite.classify(title)
+        try:
+            floor = float((_os.getenv("EVENT_LITE_MIN_CONF") or "").strip() or 0.5)
+        except ValueError:
+            floor = 0.5
+        if r["type"] == "none" or float(r["confidence"]) < floor:
+            return None
+        return int(r["pol"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_news_response(
     symbol: str,
     company_name: Optional[str] = None,
@@ -239,13 +273,19 @@ def build_news_response(
     stats: Dict[str, Any] = {}
     items = fetch_multi_source(symbol, company_name, stats=stats)
     summary = summarize_headlines(items, symbol, llm_summarizer=llm_summarizer)
-    # Simple sentiment proxy from keywords
-    pos = sum(1 for it in items if any(w in (it.get("title") or "").lower() for w in (
-        "profit", "growth", "surge", "rally", "beat", "win", "deal", "expand", "order"
-    )))
-    neg = sum(1 for it in items if any(w in (it.get("title") or "").lower() for w in (
-        "loss", "fall", "drop", "probe", "fraud", "ban", "delay", "miss", "cut"
-    )))
+    # Sentiment: event_lite reads each headline; the old keyword proxy only decides the headlines it is unsure about (round 172).
+    pos = neg = n_lite = 0
+    for it in items:
+        title = it.get("title") or ""
+        verdict = _lite_verdict(title)
+        if verdict is None:
+            verdict = _keyword_verdict(title)
+        else:
+            n_lite += 1
+        if verdict > 0:
+            pos += 1
+        elif verdict < 0:
+            neg += 1
     score = 50.0
     if items:
         score = 50.0 + (pos - neg) * (25.0 / max(len(items), 1))
@@ -264,4 +304,5 @@ def build_news_response(
         "sources_status": stats,
         "sources_failed": sorted(k for k, v in stats.items() if v.get("error")),
         "keywords_used": expand_keywords(symbol, company_name)[:12],
+        "sentiment_source": ("lite+keywords" if n_lite else "keywords"),
     }

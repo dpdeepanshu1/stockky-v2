@@ -653,6 +653,8 @@ class TestKeywords:
 
 
 class TestClassify:
+    """The OLD keyword classifier (EVENT_CLASSIFIER_MODE=keyword / fallback). The default lite classifier is covered in test_event_lite.py."""
+
     @pytest.mark.parametrize("title,expected", [
         ("Acme Q3 earnings beat", "results"),
         ("Acme reports profit jumps", "results"),
@@ -668,17 +670,17 @@ class TestClassify:
         (None, None),
     ])
     def test_categories(self, title, expected):
-        assert em._classify_event_title(title) == expected
+        assert em._classify_event_title_keywords(title) == expected
 
     def test_first_matching_group_wins(self):
         # 'results' is checked before 'board_meeting'
-        assert em._classify_event_title("Board meeting to consider results") == "results"
+        assert em._classify_event_title_keywords("Board meeting to consider results") == "results"
 
     def test_QUIRK_keywords_are_plain_substrings(self):
         """No word boundaries: 'egm' in 'segment', 'agm' in 'Magma', 'mou' in 'amount'."""
-        assert em._classify_event_title("Segment update") == "board_meeting"
-        assert em._classify_event_title("Magma share price") == "board_meeting"
-        assert em._classify_event_title("Amount raised") == "guidance"
+        assert em._classify_event_title_keywords("Segment update") == "board_meeting"
+        assert em._classify_event_title_keywords("Magma share price") == "board_meeting"
+        assert em._classify_event_title_keywords("Amount raised") == "guidance"
 
 
 class TestSummarize:

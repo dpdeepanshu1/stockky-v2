@@ -2082,10 +2082,15 @@ def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk") -> dict:
     return payload
 
 
-def get_cached_quote(symbol: str) -> Optional[dict]:
-    """Single-symbol lookup from bulk cache (avoids /quote when warm)."""
+def get_cached_quote(symbol: str, cache: Optional[dict] = None) -> Optional[dict]:
+    """Single-symbol lookup from bulk cache (avoids /quote when warm).
+
+    round 185: `cache` (optional) is a map already read with get_bulk_quote_cache(). A caller that looks up
+    hundreds of symbols in a row on the event loop (the surprise scan) reads the map once and passes it in,
+    instead of paying one kv_get per symbol (each miss could park the loop for KV_LOOP_READ_TIMEOUT_S)."""
     base = _norm_sym(symbol)
-    cache = get_bulk_quote_cache()
+    if cache is None:
+        cache = get_bulk_quote_cache()
     quotes = cache.get("quotes") if isinstance(cache, dict) else {}
     if isinstance(quotes, dict):
         row = quotes.get(base)

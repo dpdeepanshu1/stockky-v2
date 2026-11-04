@@ -723,6 +723,66 @@ def _fetch_google_news(symbol: str, max_items: int = 10) -> List[Dict[str, Any]]
     return items
 
 
+# Round 187 (issue #3): per-symbol news came from Google News alone. On 4 Nov Yahoo gave nothing 308/308 times, the Moneycontrol feed
+# 309/309 (frozen), CNBC TV18 and ET almost nothing: those three are ONE general "latest news" document that is filtered by keyword over its
+# newest 50 entries only, so a stock that is not in the newest 50 never matches. A per-symbol search does not have that limit. One extra Google News
+# search asks for the company by name restricted to the big Indian business publishers (site: filters; Google is not bot-gated and its entries
+# carry the real publisher), so the symbol's own Moneycontrol / ET / CNBC TV18 / Business Standard / LiveMint / NDTV Profit stories are found
+# whatever the feeds do. EVENT_PUBLISHER_SITES = comma list of domains (blank = default list, "off" = no publisher search);
+# EVENT_PUBLISHER_SEARCH_DAYS (default 7) = how far back.
+_PUBLISHER_SITES_DEFAULT = ("moneycontrol.com", "economictimes.indiatimes.com", "cnbctv18.com", "business-standard.com",
+                            "livemint.com", "ndtvprofit.com")
+
+
+def _publisher_sites() -> List[str]:
+    raw = (os.getenv("EVENT_PUBLISHER_SITES") or "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "none"):
+        return []
+    if not raw:
+        return list(_PUBLISHER_SITES_DEFAULT)
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
+def _publisher_search_query(symbol: str, company: str) -> str:
+    base = symbol.replace(".NS", "").replace(".BO", "").upper()
+    short = company or ""
+    for _ in range(2):  # "Foo Private Limited" -> "Foo"
+        short = _LEGAL_SUFFIX_RE.sub("", short).strip()
+    sites = _publisher_sites()
+    try:
+        days = max(1, int(float((os.getenv("EVENT_PUBLISHER_SEARCH_DAYS") or "").strip() or "7")))
+    except ValueError:
+        days = 7
+    name = f'"{short}"' if short and short.lower() != base.lower() else f'"{base}" NSE'
+    return f"{name} ({' OR '.join('site:' + x for x in sites)}) when:{days}d"
+
+
+def _fetch_publisher_search(symbol: str, max_items: int = 8) -> List[Dict[str, Any]]:
+    """Round 187: this symbol's own stories from the main Indian business publishers (see the note above). [] when switched off or on any failure."""
+    if not _publisher_sites():
+        return []
+    items, _ok = _google_news_parse(symbol, _publisher_search_query(symbol, _get_company_name(symbol)), max_items)
+    return items
+
+
+# Round 187: what each news source did since this process started, so a dead source is visible without reading the log (GET /news-sources).
+# asked = lookups made, items = lookups that returned something, empty = asked but nothing, paused = not asked because the source is paused.
+import threading as _src_threading
+
+_NEWS_SRC_LOCK = _src_threading.Lock()
+_NEWS_SRC_STATS: Dict[str, Dict[str, int]] = {}
+
+
+def _note_news_source(name: str, n_items: int, paused: bool) -> None:
+    with _NEWS_SRC_LOCK:
+        st = _NEWS_SRC_STATS.setdefault(name, {"asked": 0, "items": 0, "empty": 0, "paused": 0})
+        if paused:
+            st["paused"] += 1
+        else:
+            st["asked"] += 1
+            st["items" if n_items else "empty"] += 1
+
+
 # ── Shared site-wide feed cache (group 144) ───────────────────────────────────
 # Moneycontrol, Economic Times and CNBC TV18 are ONE document each that every symbol filters by
 # keyword, yet each symbol lookup used to download all three again (a 97-symbol scan = ~290
@@ -783,6 +843,36 @@ def _site_feed_parse(feed_url: str):
     return feedparser.parse(feed_url)
 
 
+# Round 187: a feed can answer HTTP 200 with entries and still be dead because the site stopped updating it (Moneycontrol's latest-news feed on 4 Nov:
+# 309 lookups, 0 matches, no warning). When the newest entry is older than EVENT_FEED_STALE_HOURS (default 72; 0 = off) one WARNING per feed per hour
+# says so, and GET /news-sources lists it as frozen.
+_FEED_AGE: Dict[str, Dict[str, Any]] = {}
+
+
+def _note_feed_age(feed_url: str, parsed) -> None:
+    try:
+        raw = (os.getenv("EVENT_FEED_STALE_HOURS") or "").strip()
+        limit_h = float(raw) if raw else 72.0
+        entries = getattr(parsed, "entries", None) or []
+        stamps = []
+        for e in entries:
+            pp = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+            if pp:
+                stamps.append(datetime(*pp[:6]))
+        newest = max(stamps) if stamps else None
+        age_h = (_utcnow() - newest).total_seconds() / 3600.0 if newest else None
+        frozen = bool(limit_h > 0 and age_h is not None and age_h > limit_h)
+        prev = _FEED_AGE.get(feed_url) or {}
+        _FEED_AGE[feed_url] = {"entries": len(entries), "newest_age_hours": None if age_h is None else round(age_h, 1), "frozen": frozen,
+                               "warned_at": prev.get("warned_at", 0.0)}
+        if frozen and time.time() - prev.get("warned_at", 0.0) > 3600:
+            _FEED_AGE[feed_url]["warned_at"] = time.time()
+            logger.warning("event feed FROZEN: %s answered with %d entries but the newest is %.0f h old (limit %.0f h) - it adds nothing; "
+                           "the publisher search covers this site per symbol", feed_url, len(entries), age_h, limit_h)
+    except Exception as e:  # noqa: BLE001 - diagnostics never break a fetch
+        logger.debug("feed age check failed for %s: %s", feed_url, e)
+
+
 def _parse_site_feed(feed_url: str):
     """feedparser.parse(feed_url) behind a small shared TTL cache. Exceptions propagate to the
     caller exactly as before (the caller's own except clause logs them); a failure is cached as a
@@ -806,6 +896,7 @@ def _parse_site_feed(feed_url: str):
             _FEED_CACHE[feed_url] = (now + empty_ttl, None, e)
             raise
         n = len(getattr(parsed, "entries", None) or [])
+        _note_feed_age(feed_url, parsed)
         _FEED_CACHE[feed_url] = (now + (ttl if n else empty_ttl), parsed, None)
         return parsed
 
@@ -930,6 +1021,11 @@ def _yf_news_paused() -> bool:
         return time.time() < _YF_NEWS_STATE["pause_until"]
 
 
+def _yf_news_pause_left() -> float:
+    with _YF_NEWS_LOCK:
+        return max(0.0, _YF_NEWS_STATE["pause_until"] - time.time())
+
+
 def _yf_news_note(found: bool) -> None:
     limit = int(_yf_news_cfg("EVENT_YF_NEWS_EMPTY_PAUSE_AFTER", 30))
     if limit <= 0:
@@ -983,7 +1079,9 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
         ("Moneycontrol", lambda: _fetch_moneycontrol_news(symbol, max_items=5)),
         ("Economic Times", lambda: _fetch_economic_times(symbol, max_items=5)),
         ("CNBC TV18", lambda: _fetch_cnbc_tv18(symbol, max_items=5)),
+        ("Publisher search", lambda: _fetch_publisher_search(symbol, max_items=8)),   # round 187: this symbol's own stories, no 50-entry feed limit
     )
+    _yahoo_paused = _yf_news_paused()   # round 187: read BEFORE the lookups so a paused source is not logged as "0 items"
 
     def _safe(fn, name):
         try:
@@ -1001,7 +1099,12 @@ def _fetch_news_from_multiple_sources(symbol: str, max_total: int = 15) -> List[
         results = [_safe(fn, name) for name, fn in sources]
 
     for (name, _), items in zip(sources, results):
-        logger.info(f"{name} for {symbol}: {len(items)} items")
+        _was_paused = name == "Yahoo Finance" and _yahoo_paused
+        _note_news_source(name, len(items), _was_paused)
+        if _was_paused:
+            logger.info("%s for %s: PAUSED (%.0fs left), not asked", name, symbol, _yf_news_pause_left())
+        else:
+            logger.info(f"{name} for {symbol}: {len(items)} items")
         if items:
             all_news.extend(items)
 
@@ -1340,6 +1443,18 @@ def health():
     return {"status": "ok", "service": "event-tracker-service", "redis": bool(_redis)}
 
 
+@app.get("/news-sources")
+def news_sources():
+    """Round 187: per-source tally since this process started (asked / items / empty / paused), Yahoo's pause state, and the site feeds the age check
+    found frozen. A source with many `empty` and no `items` is dead, whatever the per-symbol log lines say."""
+    with _NEWS_SRC_LOCK:
+        sources = {k: dict(v) for k, v in _NEWS_SRC_STATS.items()}
+    return {"sources": sources,
+            "yahoo": {"paused": _yf_news_paused(), "seconds_left": round(_yf_news_pause_left(), 0)},
+            "feeds": {u: {k: v for k, v in d.items() if k != "warned_at"} for u, d in _FEED_AGE.items()},
+            "publisher_sites": _publisher_sites()}
+
+
 @app.get("/lite-stats")
 def lite_stats():
     """Round 173: how the offline classifier is doing since this process started (calls / none / unsure / errors) and which mode is on."""
@@ -1641,27 +1756,46 @@ def check_for_changes():
     """Diff each subscribed symbol against last known snapshot.
     Staggered with 1s delay between symbols to avoid Yahoo rate limits.
     Uses the shared _diff_events function.
-    """
+
+    round 185: the pass is ROTATING. It starts where the previous pass stopped (`check_cursor` in the saved state), so a
+    pass cut short by CHECK_MAX_SECONDS no longer re-checks the same first symbols forever. 4 Nov log: "stopped after 242s at
+    73/462 symbols ... the rest are next pass" - but every pass began at index 0, and with the 1 s stagger at most ~240 of 462
+    symbols fit in the budget even when all are cached, so the tail was never diffed. A symbol already in the event cache
+    needs no network call, so its 1 s stagger is skipped (the stagger protects Yahoo, which a cache hit does not touch)."""
     state = _load_state()
     changes = []
+    subs = list(state["subscriptions"])
+    total = len(subs)
+    try:
+        start = int(state.get("check_cursor") or 0) % total if total else 0
+    except (TypeError, ValueError):
+        start = 0
+    order = subs[start:] + subs[:start]
 
     # group345: this warm-up is background work. It yields to live requests (the quality gate's per-entry news check) and stops after
     # CHECK_MAX_SECONDS so one pass cannot hold the event service for 300 s (13 Oct: dynamic_universe /check ran 300 s, 7 gate calls timed out).
     _t0 = time.monotonic()
     _budget = float(os.getenv("CHECK_MAX_SECONDS", "240") or 0)
-    for i, symbol in enumerate(state["subscriptions"]):
-        if i > 0:
+    done = 0
+    _need_sleep = False
+    for symbol in order:
+        if _need_sleep:
             time.sleep(1)
         _y = 0
         while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
             time.sleep(0.5)
             _y += 1
         if _budget > 0 and time.monotonic() - _t0 > _budget:
-            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass",
-                           time.monotonic() - _t0, i, len(state["subscriptions"]), _budget)
+            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d)",
+                           time.monotonic() - _t0, done, total, _budget, (start + done) % total)
             break
 
+        try:
+            _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
+        except Exception:  # noqa: BLE001 - only decides whether to stagger
+            _was_cached = False
         current = _fetch_events(symbol)
+        _need_sleep = not _was_cached
         previous = state["last_known"].get(symbol, {})
         diff_reasons = _diff_events(previous, current)
 
@@ -1669,10 +1803,15 @@ def check_for_changes():
             changes.append({"symbol": symbol, "changes": diff_reasons, "current": current})
 
         state["last_known"][symbol] = current
+        done += 1
 
+    state["check_cursor"] = (start + done) % total if total else 0
     _save_state(state)
     return {
-        "checked": len(state["subscriptions"]),
+        "checked": done,
+        "total": total,
+        "complete": done >= total,
+        "next_cursor": state["check_cursor"],
         "changes": changes,
         "checked_at": _utcnow().isoformat(),
     }

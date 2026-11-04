@@ -52,6 +52,10 @@ def _reset_nse_api_block_and_movers_warning():
         if mod is not None and hasattr(mod, "_nse_api_block_until"):
             mod._nse_api_block_until = 0.0
             mod._nse_api_block_skipped = 0
+            mod._nse_api_block_streak = 0
+            if hasattr(mod, "_nse_securities_fallback"):
+                mod._nse_securities_fallback["symbols"] = []
+                mod._nse_securities_fallback["ts"] = 0.0
             mod._angelone_movers_warned_at[0] = 0.0
     _clear()
     yield

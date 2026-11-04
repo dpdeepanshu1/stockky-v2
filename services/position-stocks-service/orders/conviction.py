@@ -58,11 +58,27 @@ def _multiplier(score: float, side: str) -> float:
 
 
 def _decide(parts, side: str) -> Optional[Dict[str, Any]]:
-    b = cs.blend(parts, min_known=2)
+    b = cs.blend(parts, min_known=_min_known())
     if b is None:
         return None
     score, detail = b
-    return {"score": score, "mult": round(_multiplier(score, side), 3), "detail": detail, "side": side}
+    known = sum(1 for v in detail.values() if v is not None)
+    return {"score": score, "mult": round(_multiplier(score, side), 3), "detail": detail, "side": side, "known": known, "total": len(detail)}
+
+
+def _min_known() -> int:
+    """Round 188: how many of the inputs must be known before a score is used at all (CONVICTION_MIN_KNOWN, default 2 = the old fixed value)."""
+    try:
+        return max(1, int(getattr(config, "CONVICTION_MIN_KNOWN", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def known_note(decision: Optional[Dict[str, Any]]) -> str:
+    """'2 of 6 inputs known' for the log line, so a score built from thin evidence is visible. Empty when there is no decision."""
+    if not decision or decision.get("total") is None:
+        return ""
+    return f"{decision.get('known')} of {decision.get('total')} inputs known"
 
 
 def long_decision(candidate: Any, quality: Any, levels: Any) -> Optional[Dict[str, Any]]:

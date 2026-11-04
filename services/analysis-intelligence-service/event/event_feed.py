@@ -108,24 +108,61 @@ def _f(v: Any, default: float = 0.0) -> float:
 
 
 # ── classification ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+# Round 184: a FALLING verb whose subject is a cost word ("crude oil falls", "input costs drop") is good news for the headline's company, not bad.
+_FALL_VERBS = frozenset({"falls", "drops", "plunges", "plunge", "slumps", "tanks", "crashes", "cuts"})
+
+
+def _cost_before(toks: List[str], i: int) -> bool:
+    """True when one of the three tokens before position i is (the first word of) a cost word: 'crude oil falls', 'raw material prices drop'."""
+    head = toks[max(0, i - 3):i]
+    return any(c.split()[0] in head for c in COST_WORDS)
+
+
 def _negative_hits(h: str) -> List[str]:
-    """Negative words that count: a negative word followed within three words by a cost word ('fall in input costs') is a good thing, not bad."""
+    """Negative words that count. A negative word followed within three words by a cost word ('fall in input costs') is a good thing, not bad; so is a falling verb
+    whose subject is a cost word ('as crude oil falls', round 184). Every occurrence of the word is checked: one clean occurrence is enough to count it."""
     hits = []
     toks = re.findall(r"[a-z0-9]+", h)
     for w in _any(h, NEGATIVE):
         first = w.split()[0]
-        ok = True
+        ok = False
+        seen = False
         for i, t in enumerate(toks):
-            if t == first:
-                tail = toks[i + 1:i + 4]
-                if tail and tail[0] in COST_CONNECTORS and any(c.split()[0] in tail for c in COST_WORDS):
-                    ok = False
-                elif tail and any(c.split()[0] in tail[:2] for c in COST_WORDS):
-                    ok = False
-                break
-        if ok:
+            if t != first:
+                continue
+            seen = True
+            tail = toks[i + 1:i + 4]
+            if tail and tail[0] in COST_CONNECTORS and any(c.split()[0] in tail for c in COST_WORDS):
+                continue
+            if tail and any(c.split()[0] in tail[:2] for c in COST_WORDS):
+                continue
+            if " " not in w and w in _FALL_VERBS and _cost_before(toks, i):
+                continue
+            ok = True
+            break
+        if ok or not seen:
             hits.append(w)
     return hits
+
+
+# Round 184: Google-News style titles end with " - NDTV Profit" / " | Moneycontrol"; the publisher name must not be read as news ("Profit" made every NDTV Profit line a
+# "results" event). Only a KNOWN publisher (or a bare domain) at the very end is cut; the stored headline is left as it came.
+_PUBLISHER_TAIL = re.compile(
+    r"\s+[-\u2013\u2014|]\s+(?:the\s+)?(?:ndtv\s+profit|ndtv|moneycontrol(?:\.com)?|economic\s+times|et\s+markets|et\s+now|etnow|et\s+prime|business\s+standard|livemint|mint|"
+    r"reuters|cnbc[\s-]?tv18|cnbctv18|zee\s+business|financial\s+express|business\s*today|businessline|hindu\s+businessline|hindu|hindustan\s+times|times\s+of\s+india|"
+    r"bloomberg(?:\s+quint)?|bq\s*prime|bqprime|investing\.com(?:\s+india)?|trendlyne|tipranks|yahoo\s+finance|india\s+today|news18|firstpost|print|scroll\.in|"
+    r"outlook\s+business|forbes\s+india|upstox|groww|angel\s+one|5paisa|motilal\s+oswal|marketscreener|simply\s+wall\s+st|benzinga|"
+    r"(?:www\.)?[a-z0-9][a-z0-9-]*\.(?:com|in|co\.in|net|org))\s*$", re.I)
+
+
+def strip_source(headline: Any) -> str:
+    """The headline without a trailing publisher name (' - NDTV Profit', ' | Moneycontrol', ' - livemint.com'). Never raises; a title that is only a publisher is kept."""
+    try:
+        t = str(headline or "").strip()
+        out = _PUBLISHER_TAIL.sub("", t).strip()
+        return out if out else t
+    except Exception:  # noqa: BLE001
+        return str(headline or "")
 
 
 def _classify_legacy(headline: str) -> Dict[str, Any]:
@@ -241,6 +278,7 @@ def _bump_feed(key: str) -> None:
 
 def classify(headline: str) -> Dict[str, Any]:
     """-> {type, polarity, hits}. polarity is +1 / 0 / -1. Never raises. See EVENT_FEED_CLASSIFIER above (default assist: keyword rules + event_lite fills / contested)."""
+    headline = strip_source(headline)
     base = _classify_legacy(headline)
     mode = feed_classifier_mode()
     if mode == "legacy" or _event_lite is None or not str(headline or "").strip():
@@ -386,21 +424,33 @@ def static_aliases() -> List[Tuple[str, str]]:
     return _STATIC_ALIAS_CACHE[key]
 
 
+# Round 184: a few brands whose lower-case name is ALSO another listed company's name. "IndiGo" (the airline, ticker INDIGO) is matched only in this exact spelling and never
+# before "Paints" (Indigo Paints, INDIGOPNTS); the bare word "indigo" is therefore not in company_names.json.
+_CASE_BRANDS = ((re.compile(r"(?<![A-Za-z0-9])IndiGo(?![A-Za-z0-9])(?!\s+Paints)"), "INDIGO"),)
+
+
+def _brand_symbols(text: str) -> List[str]:
+    return [sym for pat, sym in _CASE_BRANDS if pat.search(text or "")]
+
+
 def count_named_symbols(headline: str, known: Iterable[str], aliases: List[Tuple[str, str]]) -> int:
-    """How many DIFFERENT known symbols the headline names (upper-case ticker tokens plus full company names). Never raises."""
+    """How many DIFFERENT known symbols the headline names (upper-case ticker tokens plus full company names). A matched name is masked before the next (shorter) one
+    is tried, so 'State Bank of India' is one company, not also 'Bank of India' (round 184). Never raises."""
     try:
         text = str(headline or "")
         kn = {str(s).strip().upper() for s in (known or []) if s}
         found = {m.group(1) for m in _SYM_RE.finditer(text) if m.group(1) in kn}
+        found.update(_brand_symbols(text))
         low = text.lower()
-        for alias, sym in aliases or []:
-            if alias in low:
-                i = low.find(alias)
-                while i != -1:
-                    j = i + len(alias)
-                    if (i == 0 or not low[i - 1].isalnum()) and (j >= len(low) or not low[j].isalnum()):
-                        found.add(sym)
-                        break
+        for alias, sym in aliases or []:         # aliases arrive longest first
+            i = low.find(alias)
+            while i != -1:
+                j = i + len(alias)
+                if (i == 0 or not low[i - 1].isalnum()) and (j >= len(low) or not low[j].isalnum()):
+                    found.add(sym)
+                    low = low[:i] + "\x00" * len(alias) + low[j:]
+                    i = low.find(alias, j)
+                else:
                     i = low.find(alias, i + 1)
         return len(found)
     except Exception:  # noqa: BLE001
@@ -424,7 +474,8 @@ def extract_symbol_by_name(headline: str, aliases: List[Tuple[str, str]]) -> Opt
                     if not (prev[:1].isupper() and prev.lower() not in ("shares", "stock", "stocks", "of", "in", "on", "for", "at", "by", "as", "buy", "sell", "hold")):
                         return sym
                 i = low.find(alias, i + 1)
-        return None
+        b = _brand_symbols(text)
+        return b[0] if b else None
     except Exception:  # noqa: BLE001
         return None
 

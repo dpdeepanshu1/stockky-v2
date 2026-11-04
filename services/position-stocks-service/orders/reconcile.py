@@ -1091,14 +1091,15 @@ def _entry_fill_from_orderbook(db: Session, pos: ScalpPosition,
     return chosen
 
 
-def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict) -> bool:
+def _apply_entry_correction(db: Session, pos: ScalpPosition, row: dict, fill_price: Optional[float] = None) -> bool:
     """Replace the scan-time LTP in pos.entry_price (and capital_risked, the
     ledger, the live target/stop legs) with Dhan's real entry fill. Idempotent.
     Returns True when something changed. See the long AUDIT FIX comment above
-    the call site in run_exit_reconciliation for the original reasoning."""
+    the call site in run_exit_reconciliation for the original reasoning.
+    fill_price (round 186): a fill the caller already found (order-update WebSocket, order book); used instead of reading the row."""
     if pos.status not in ("OPEN",) + _FLAT_SELL_PENDING_STATUSES:
         return False
-    real_entry_price = _entry_fill_from_row(row)
+    real_entry_price = fill_price if fill_price and fill_price > 0 else _entry_fill_from_row(row)
     if not real_entry_price and pos.entry_price and not _entry_dead_on_row(row):
         # GROUP 232: the super-order row had no entry price; take the BUY fill from the order book.
         real_entry_price = _entry_fill_from_orderbook(db, pos)
@@ -1607,6 +1608,72 @@ def _entry_fill_from_order_events(pos: ScalpPosition) -> Optional[float]:
     except Exception as e:  # noqa: BLE001
         logger.debug("reconcile: order-event cross-check failed for %s: %s", getattr(pos, "symbol", "?"), e)
         return None
+
+
+def correct_entry_now(db: Session, pos: ScalpPosition, *, wait_s: Optional[float] = None, poll_s: Optional[float] = None) -> bool:
+    """Round 186 (issue #6, POKARNA / HMAAGRO): read the REAL entry fill right after the BUY is placed instead of waiting for the next
+    reconcile pass, so entry_price, capital_risked and both exit legs follow the real fill within ~1-3 s rather than 10-13 s.
+    Dhan's place-order reply holds only an order id, and a super order's legs are sent in the same request, so the first stop / target
+    necessarily come from the estimate; this shortens how long they stay wrong.
+
+    Polls up to ENTRY_FILL_WAIT_S (0 = off) every ENTRY_FILL_POLL_S. Each try, in order: the order-update WebSocket store (memory, only when
+    DHAN_ORDER_WS_ENABLED=1), the super-order row (parent / ENTRY_LEG average price), today's plain order book (forced fresh). The first real
+    price goes through _apply_entry_correction (quantity-matched order-book rule, 5 % sanity band, ledger, slippage alert, leg re-arm).
+    Stops early on a dead entry (rejected / cancelled) or a position no longer OPEN. A partial fill is left to the reconcile loop.
+    Returns True when the entry price was corrected. Never raises; on any failure the reconcile loop does the correction as before."""
+    try:
+        wait = float(config.ENTRY_FILL_WAIT_S if wait_s is None else wait_s)
+        poll = max(0.2, float(config.ENTRY_FILL_POLL_S if poll_s is None else poll_s))
+        if wait <= 0 or pos is None or pos.status != "OPEN" or not pos.entry_price or not pos.quantity:
+            return False
+        order_id = pos.dhan_super_order_id
+        if not order_id and not pos.dhan_security_id:
+            return False
+        stored = float(pos.entry_price)
+        deadline = time.monotonic() + wait
+        tries = 0
+        while True:
+            tries += 1
+            row: dict = {}
+            price: Optional[float] = None
+            source = ""
+            ws_px = _entry_fill_from_order_events(pos)
+            if ws_px and abs(ws_px - stored) / stored <= 0.05:
+                price, source = ws_px, "order-update WebSocket"
+            if order_id and config.USE_SUPER_ORDER:
+                try:
+                    rows = dhan_client.get_super_order_list(db, release_db=True) or []
+                    row = next((r for r in rows if str(r.get("orderId") or "") == str(order_id)), {}) or {}
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("reconcile: instant entry-fill read - super-order list failed for %s: %s", pos.symbol, e)
+            if row and _entry_dead_on_row(row):
+                return False
+            if price is None and row:
+                price = _entry_fill_from_row(row)
+                source = "super-order row" if price else source
+            if price is None and pos.dhan_security_id:
+                book, readable = _order_book_read(db, force=True)
+                if readable:
+                    price = _entry_fill_from_orderbook(db, pos, orders=book)
+                    source = "order book" if price else source
+            if price is not None:
+                changed = _apply_entry_correction(db, pos, row, fill_price=price)
+                logger.info("reconcile: %s (id=%d) real entry fill ₹%.2f read %d time(s) after the BUY from the %s%s",
+                            pos.symbol, pos.id, price, tries, source, "" if changed else " (already the stored price)")
+                return changed
+            if time.monotonic() + poll >= deadline:
+                break
+            time.sleep(poll)
+        logger.info("reconcile: %s (id=%d) no entry fill price from Dhan within %.1fs (%d tries) - the reconcile loop will correct it",
+                    pos.symbol, pos.id, wait, tries)
+        return False
+    except Exception as e:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("reconcile: instant entry-fill read failed for %s: %s", getattr(pos, "symbol", "?"), e)
+        return False
 
 
 def _filled_entry_behind_dead_parent(db: Session, pos: ScalpPosition, row: dict,

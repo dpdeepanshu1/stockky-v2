@@ -3121,6 +3121,14 @@ def _global_cue_cfg():
     return _f("GLOBAL_CUE_TTL_S", 300.0), _f("GLOBAL_CUE_MAX_BAR_AGE_DAYS", 1.0)
 
 
+def _global_cue_error_ttl() -> float:
+    """GLOBAL_CUE_ERROR_TTL_S (default 30; blank / bad -> 30; 0 = retry on every call). How long a FAILED fetch of one cue is remembered."""
+    try:
+        return max(0.0, float((os.getenv("GLOBAL_CUE_ERROR_TTL_S") or "").strip() or 30.0))
+    except ValueError:
+        return 30.0
+
+
 def _global_cue_fetch_one(symbol: str, max_bar_age_days: float) -> Optional[dict]:
     """The day's move of one overseas symbol from Yahoo's daily bars (last bar = today's, in progress, when that market is trading).
     None when nothing usable or the last bar is older than max_bar_age_days (a market on holiday has no 'today' move)."""
@@ -3163,16 +3171,21 @@ def get_global_cues(symbols: str = ""):
     with _GLOBAL_CUE_STATE["lock"]:               # single flight: concurrent callers wait for one fetch round, then read the cache
         for sym in wanted:
             hit = _GLOBAL_CUE_STATE["rows"].get(sym)
-            if hit and now - hit[0] < ttl:
+            if hit and now - hit[0] < (hit[2] if len(hit) > 2 and hit[2] is not None else ttl):
                 row = hit[1]
             else:
                 row = None
+                errored = False
                 if not _in_cooldown("yfinance"):
                     try:
                         row = _global_cue_fetch_one(sym, max_bar_age)
                     except Exception as e:  # noqa: BLE001
+                        errored = True
                         logger.info("global-cues %s failed (%s: %s)", sym, type(e).__name__, e)
-                _GLOBAL_CUE_STATE["rows"][sym] = (time.monotonic(), row)   # a miss is cached too, so a dead symbol is not retried every call
+                # A miss is cached too, so a dead symbol is not retried every call. Round 190: but a FAILED fetch (Yahoo hiccup, timeout) is a
+                # different thing from "no usable bar" (holiday, one bar) and is only remembered GLOBAL_CUE_ERROR_TTL_S (30 s), so one blip on
+                # ES=F at 09:00 does not leave the carry decision without its US-futures cue for the full 5 minutes.
+                _GLOBAL_CUE_STATE["rows"][sym] = (time.monotonic(), row, _global_cue_error_ttl() if errored else None)
             if row:
                 rows[sym] = {**row, "age_s": None}
             else:

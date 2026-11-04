@@ -1251,6 +1251,14 @@ DAY_GAIN_HARD_MULT = max(1.05, _get_float("DAY_GAIN_HARD_MULT", 1.75))   # E273 
 # group216: alert default 1.0 -> 0.5 so a fill that cost more than half the tightest stop is visible. 0 disables.
 ENTRY_FILL_SLIPPAGE_ALERT_PCT = _get_float("ENTRY_FILL_SLIPPAGE_ALERT_PCT", 0.5)
 
+# Round 186 (issue #6): Dhan's place-order response carries only an order id, never the fill price, so a new entry's stop / target were
+# armed off an estimate and corrected by the reconcile loop 10-13 s later (POKARNA: estimate 705.90, real fill 707.00). Right after the BUY
+# is placed, the entry now polls Dhan for up to ENTRY_FILL_WAIT_S seconds (every ENTRY_FILL_POLL_S) for the real average fill price - order-update
+# WebSocket first (memory only), then the super-order row, then today's order book - and corrects entry_price and re-arms both legs at once.
+# 0 disables the wait (the reconcile loop still does the correction, as before). The cycle is held for at most this long per entry.
+ENTRY_FILL_WAIT_S = _get_float("ENTRY_FILL_WAIT_S", 3.0)
+ENTRY_FILL_POLL_S = _get_float("ENTRY_FILL_POLL_S", 0.5)
+
 
 def _parse_int_set(raw) -> frozenset:
     out = set()
@@ -1336,6 +1344,7 @@ CONVICTION_MAX_MULT = min(5.0, max(1.0, _get_float("CONVICTION_MAX_MULT", 3.0)))
 CONVICTION_SHORT_MAX_MULT = min(5.0, max(1.0, _get_float("CONVICTION_SHORT_MAX_MULT", 2.0)))
 CONVICTION_MAX_POOL_PCT = min(100.0, max(0.0, _get_float("CONVICTION_MAX_POOL_PCT", 50.0)))
 CONVICTION_NO_UPSIZE_ON_LOSS_DAY = _get_bool("CONVICTION_NO_UPSIZE_ON_LOSS_DAY", True)
+CONVICTION_MIN_KNOWN = min(6, max(1, _get_int("CONVICTION_MIN_KNOWN", 2)))   # round 188: inputs that must be known before the score sizes a trade (2 = unchanged; 3 stops a 2-input score from upsizing)
 ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINUTES", 5)
 
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────

@@ -29,13 +29,13 @@ class _Client:
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
-    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0, "streak": 0})
     monkeypatch.setattr(m, "_waterfall_equity_base", lambda s: "TESTCO")
     monkeypatch.setattr(m, "_in_cooldown", lambda name: False)
     monkeypatch.setattr(m, "_set_cooldown", lambda *a, **k: None)
     monkeypatch.delenv("NSE_QUOTE_BLOCK_SECONDS", raising=False)
     yield
-    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0, "streak": 0})
 
 
 def _use(monkeypatch, client):

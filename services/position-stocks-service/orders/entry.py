@@ -1181,7 +1181,7 @@ def attempt_entry(
     _cv = conviction.long_decision(candidate, quality, levels)
     _cv_note = conviction.note(candidate.symbol, "LONG", _cv)
     if _cv:
-        logger.info("position-stocks entry: %s %s parts=%s", candidate.symbol, _cv_note, _cv.get("detail"))
+        logger.info("position-stocks entry: %s %s (%s) parts=%s", candidate.symbol, _cv_note, conviction.known_note(_cv), _cv.get("detail"))
 
     # Reserve capital (also checks kill switch again in the ledger)
     try:
@@ -1293,7 +1293,7 @@ def attempt_entry(
         if _sf < 1.0:
             _sq = max(1, int(quantity * _sf + 0.5))
             if _sq < quantity:
-                logger.info("position-stocks entry: %s sized down %d -> %d shares (setup x%.2f)", candidate.symbol, quantity, _sq, _setup_mult)
+                logger.info("position-stocks entry: %s sized down %d -> %d shares (setup x%.2f, extra x%.2f on top of opening x%.2f)", candidate.symbol, quantity, _sq, _setup_mult, _sf, _open_mult)
                 _snew = _sq * candidate.current_ltp
                 if _snew < position_value:
                     ledger.release_capital(db, position_value=position_value - _snew, realized_pnl=0.0)
@@ -1621,7 +1621,18 @@ def attempt_entry(
         + (f"\n{_cv_note}" if _cv_note else "")
     )
     approve_first.mark_entered(candidate.symbol, {"qty": quantity, "price": candidate.current_ltp})   # group469
+    _correct_entry_fill_now(db, pos)   # round 186
     return pos
+
+
+def _correct_entry_fill_now(db: Session, pos: ScalpPosition) -> None:
+    """Round 186 (issue #6): right after a BUY is placed, read Dhan's real average fill and move entry_price / both legs to it (reconcile.correct_entry_now).
+    The estimate the legs were armed from stays wrong for ~1-3 s instead of 10-13 s. Never raises; the reconcile loop is the fallback."""
+    try:
+        from orders import reconcile
+        reconcile.correct_entry_now(db, pos)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("entry: instant fill read failed for %s (reconcile will correct it): %s", getattr(pos, "symbol", "?"), e)
 
 
 class InsufficientCapitalSkip(Exception):
@@ -1946,4 +1957,5 @@ def attempt_manual_entry(
         f"({levels.target_pct:.2f}%) | Stop ₹{levels.stop_price:.2f} ({levels.stop_pct:.2f}%)\n"
         f"Capital ₹{position_value:,.2f} | Super Order {dhan_super_order_id or 'N/A'}"
     )
+    _correct_entry_fill_now(db, pos)   # round 186
     return pos

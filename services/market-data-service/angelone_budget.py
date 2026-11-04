@@ -246,6 +246,12 @@ def trip(endpoint: str) -> float:
                     "(%d call(s) sent since it ended)" % after_cd)
         else:
             tail = "no earlier candle cooldown to compare with"
+        if total <= 1:
+            # Round 190 (issue #5): the very first candle call this process ever sent was refused, so nothing this process sent can have
+            # used the limit up. The other holders of these credentials are position-stocks-service (its own login, WebSocket feed only),
+            # a previous market-data container that was stopped a moment ago, or anything else on the same client id / API key / IP.
+            tail += ("; this was the FIRST candle call since this process started, so the limit was used up by something outside it "
+                     "(another login on the same client id / API key / IP, or the previous container's calls just before a restart)")
         logger.warning(
             "AngelOne budget: candle 403 context - candle calls sent: %d in the last 10s, %d in the last 60s, "
             "%d since start; quote calls sent: %d in the last 10s, %d in the last 60s; %s",

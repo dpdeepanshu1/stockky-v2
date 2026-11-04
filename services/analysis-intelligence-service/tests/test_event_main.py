@@ -963,7 +963,7 @@ class TestYfNews:
 
 class TestMultiSource:
     SOURCES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
-               "_fetch_economic_times", "_fetch_cnbc_tv18"]
+               "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"]
 
     def _set(self, monkeypatch, **by_name):
         for name in self.SOURCES:
@@ -999,14 +999,15 @@ class TestMultiSource:
         monkeypatch.setattr(em, "_fetch_moneycontrol_news", lambda s, max_items: seen.setdefault("m", max_items) and [])
         monkeypatch.setattr(em, "_fetch_economic_times", lambda s, max_items: seen.setdefault("e", max_items) and [])
         monkeypatch.setattr(em, "_fetch_cnbc_tv18", lambda s, max_items: seen.setdefault("c", max_items) and [])
+        monkeypatch.setattr(em, "_fetch_publisher_search", lambda s, max_items: seen.setdefault("p", max_items) and [])
         em._fetch_news_from_multiple_sources("A.NS")
-        assert seen == {"g": 8, "m": 5, "e": 5, "c": 5}
+        assert seen == {"g": 8, "m": 5, "e": 5, "c": 5, "p": 8}
 
 
 class TestMultiSourceParallel:
     """group 176: the five news sources are fetched at the same time, merged in the fixed order."""
     NAMES = ["_fetch_yf_news", "_fetch_google_news", "_fetch_moneycontrol_news",
-             "_fetch_economic_times", "_fetch_cnbc_tv18"]
+             "_fetch_economic_times", "_fetch_cnbc_tv18", "_fetch_publisher_search"]
 
     def _slow(self, monkeypatch, delay, raise_in=()):
         for i, name in enumerate(self.NAMES):
@@ -1022,22 +1023,22 @@ class TestMultiSourceParallel:
         self._slow(monkeypatch, 0.3)
         t0 = time.monotonic()
         out = em._fetch_news_from_multiple_sources("A.NS")
-        assert time.monotonic() - t0 < 0.9          # sequential would take >= 1.5 s
-        assert [n["title"] for n in out] == ["T4", "T3", "T2", "T1", "T0"]
+        assert time.monotonic() - t0 < 0.9          # sequential would take >= 1.8 s
+        assert [n["title"] for n in out] == ["T5", "T4", "T3", "T2", "T1", "T0"]
 
     def test_switch_off_is_sequential(self, monkeypatch):
         monkeypatch.setenv("EVENT_NEWS_PARALLEL", "0")
         self._slow(monkeypatch, 0.1)
         t0 = time.monotonic()
         out = em._fetch_news_from_multiple_sources("A.NS")
-        assert time.monotonic() - t0 >= 0.5
-        assert len(out) == 5
+        assert time.monotonic() - t0 >= 0.6
+        assert len(out) == 6
 
     def test_a_failing_source_does_not_lose_the_others(self, monkeypatch):
         monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)
         self._slow(monkeypatch, 0.0, raise_in=("_fetch_google_news",))
         out = em._fetch_news_from_multiple_sources("A.NS")
-        assert sorted(n["title"] for n in out) == ["T0", "T2", "T3", "T4"]
+        assert sorted(n["title"] for n in out) == ["T0", "T2", "T3", "T4", "T5"]
 
     def test_duplicate_title_keeps_the_earlier_source_in_fixed_order(self, monkeypatch):
         monkeypatch.delenv("EVENT_NEWS_PARALLEL", raising=False)

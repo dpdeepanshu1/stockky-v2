@@ -27,10 +27,10 @@ def _clean():
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0
     bh._denied_last_logged = {} if hasattr(bh, "_denied_last_logged") else {}
-    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0, "streak": 0})
     bh.MAX_STOCK_PRICE = 0.0
     yield
-    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0})
+    bh._QUOTE_BLOCK.update({"until": 0.0, "status": None, "skipped": 0, "streak": 0})
     bh._BHAV_DAY_CACHE.clear()
     bh._NSE_SESSION_CACHE["client"] = None
     bh._NSE_SESSION_CACHE["ts"] = 0.0

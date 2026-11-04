@@ -131,7 +131,9 @@ def _nse_client(force_new: bool = False) -> httpx.Client:
 # logs ONE line when the pause starts instead of nothing or one per symbol.
 # Other statuses (404 for an unknown symbol, 5xx) never start a pause.
 _QUOTE_BLOCK_STATUSES = frozenset({401, 403, 429})
-_QUOTE_BLOCK: Dict[str, Any] = {"until": 0.0, "status": None, "skipped": 0}
+# Round 189 (issue #4): a 403 straight after the pause ended (no 200 in between) doubles the next pause: NSE_QUOTE_BLOCK_SECONDS, x2, x4 ... up to
+# NSE_QUOTE_BLOCK_MAX_S (default 3600). A 200 resets it.
+_QUOTE_BLOCK: Dict[str, Any] = {"until": 0.0, "status": None, "skipped": 0, "streak": 0}
 _QUOTE_BLOCK_LOCK = threading.Lock()
 
 
@@ -140,6 +142,23 @@ def _quote_block_seconds() -> float:
         return max(0.0, float(_os.getenv("NSE_QUOTE_BLOCK_SECONDS", "600") or 0))
     except (TypeError, ValueError):
         return 600.0
+
+
+def _quote_block_max_seconds() -> float:
+    try:
+        return max(0.0, float(_os.getenv("NSE_QUOTE_BLOCK_MAX_S", "3600") or 0))
+    except (TypeError, ValueError):
+        return 3600.0
+
+
+def _quote_pause_for(base: float, streak: int) -> float:
+    """Pause for the `streak`-th block in a row (1 = base), capped at NSE_QUOTE_BLOCK_MAX_S but never below base. Never raises."""
+    try:
+        if base <= 0:
+            return 0.0
+        return min(max(base, _quote_block_max_seconds()), base * (2 ** max(0, int(streak) - 1)))
+    except Exception:  # noqa: BLE001
+        return base
 
 
 def nse_quote_blocked() -> bool:
@@ -156,6 +175,7 @@ def _note_quote_status(status: int) -> None:
     if status == 200:
         with _QUOTE_BLOCK_LOCK:
             _QUOTE_BLOCK["until"] = 0.0
+            _QUOTE_BLOCK["streak"] = 0
         return
     if status not in _QUOTE_BLOCK_STATUSES:
         return
@@ -164,9 +184,15 @@ def _note_quote_status(status: int) -> None:
         return
     with _QUOTE_BLOCK_LOCK:
         already = time.time() < _QUOTE_BLOCK["until"]
+        if not already:
+            _QUOTE_BLOCK["streak"] = int(_QUOTE_BLOCK.get("streak") or 0) + 1
+            secs = _quote_pause_for(secs, _QUOTE_BLOCK["streak"])
+        else:
+            secs = max(secs, _QUOTE_BLOCK["until"] - time.time())      # an in-flight 403 never shortens an escalated pause
         _QUOTE_BLOCK["until"] = time.time() + secs
         _QUOTE_BLOCK["status"] = status
         skipped = _QUOTE_BLOCK["skipped"]
+        streak_now = int(_QUOTE_BLOCK.get("streak") or 0)
         _QUOTE_BLOCK["skipped"] = 0
     if already:
         return
@@ -181,9 +207,9 @@ def _note_quote_status(status: int) -> None:
         except Exception:
             pass
     logger.warning(
-        "NSE quote-equity returned %s; skipping it for %.0fs and using bhavcopy "
+        "NSE quote-equity returned %s; skipping it for %.0fs (block #%d in a row) and using bhavcopy "
         "for delivery %% (%s call(s) skipped during the previous pause)",
-        status, secs, skipped,
+        status, secs, streak_now, skipped,
     )
 
 

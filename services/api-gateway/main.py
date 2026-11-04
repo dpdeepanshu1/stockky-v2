@@ -896,6 +896,9 @@ def _get_nse_client(force_new: bool = False) -> httpx.Client:
 # marks the start. A 200 ends the pause. 404/5xx/exceptions never start one.
 _nse_api_block_until = 0.0
 _nse_api_block_skipped = 0
+# Round 189 (issue #4): a block that comes straight back after the pause (the next call is 403 again, no 200 in between) doubles the pause:
+# NSE_API_BLOCK_SECONDS, then x2, x4 ... up to NSE_API_BLOCK_MAX_S (default 3600; never below the base). A 200 resets it.
+_nse_api_block_streak = 0
 
 
 def _nse_api_block_seconds() -> float:
@@ -940,8 +943,19 @@ def _nse_endpoint_note_failure(endpoint: str, why: str) -> None:
                    endpoint, why, int(pause), ent[0])
 
 
+def _nse_api_block_pause_s(base: float, streak: int) -> float:
+    """Pause length for the `streak`-th block in a row (1 = the base). Never raises; base <= 0 stays 0."""
+    try:
+        if base <= 0:
+            return 0.0
+        cap = max(base, _nse_endpoint_env("NSE_API_BLOCK_MAX_S", 3600.0))
+        return min(cap, base * (2 ** max(0, int(streak) - 1)))
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
-    global _nse_api_block_until, _nse_api_block_skipped
+    global _nse_api_block_until, _nse_api_block_skipped, _nse_api_block_streak
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, dict):
         return cached
@@ -963,6 +977,7 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
             resp = client.get(url)
         if resp.status_code == 200:
             _nse_api_block_until = 0.0
+            _nse_api_block_streak = 0
             _nse_endpoint_fail.pop(endpoint, None)
             data = resp.json()
             if isinstance(data, dict):
@@ -971,11 +986,13 @@ def _fetch_from_nse_api(endpoint: str, cache_key: str, ttl: int = 21600):
         else:
             _pause = _nse_api_block_seconds()
             if resp.status_code in (401, 403, 429) and _pause > 0:
+                _nse_api_block_streak += 1
+                _pause = _nse_api_block_pause_s(_pause, _nse_api_block_streak)
                 _nse_api_block_until = time.time() + _pause
                 logger.warning(
-                    "NSE API %s returned %s after a session refresh — pausing all NSE api fetches for %ds "
+                    "NSE API %s returned %s after a session refresh — pausing all NSE api fetches for %ds, block #%d in a row "
                     "(skipped %d calls during the previous pause)",
-                    endpoint, resp.status_code, int(_pause), _nse_api_block_skipped,
+                    endpoint, resp.status_code, int(_pause), _nse_api_block_streak, _nse_api_block_skipped,
                 )
                 _nse_api_block_skipped = 0
             elif resp.status_code == 404 or resp.status_code >= 500:
@@ -1110,7 +1127,20 @@ def _filter_equities(symbols) -> List[str]:
     return out
 
 
+# Round 189 (issue #4): five callers ask for the NSE securities list. While NSE answers with 0 rows or blocks us, each call re-asked NSE, re-called
+# market-data's /bhavcopy/universe and logged the same fallback warning again (the log showed it twice per scan). A non-empty bhavcopy fallback is now
+# remembered for NSE_SECURITIES_FALLBACK_TTL_S (default 120; 0 = off), and NSE is not asked again in that window.
+_nse_securities_fallback: dict = {"ts": 0.0, "symbols": []}
+
+
+def _nse_securities_fallback_ttl() -> float:
+    return _nse_endpoint_env("NSE_SECURITIES_FALLBACK_TTL_S", 120.0)
+
+
 def _get_all_nse_securities() -> List[str]:
+    _ttl = _nse_securities_fallback_ttl()
+    if _ttl > 0 and _nse_securities_fallback["symbols"] and time.time() - _nse_securities_fallback["ts"] < _ttl:
+        return _filter_equities(list(_nse_securities_fallback["symbols"]))
     data = _fetch_from_nse_api("equity-stock-indices?index=SECURITIES%20IN%20NSE", "nse:all_securities")
     symbols = []
     if data and "data" in data and isinstance(data["data"], list):
@@ -1133,6 +1163,9 @@ def _get_all_nse_securities() -> List[str]:
             )
             resp.raise_for_status()
             symbols = resp.json().get("symbols") or []
+            if symbols and _ttl > 0:
+                _nse_securities_fallback["symbols"] = list(symbols)
+                _nse_securities_fallback["ts"] = time.time()
             if _nse_reachable:
                 logger.warning(
                     "NSE live API answered but returned 0 securities rows — using "

@@ -319,8 +319,6 @@ frontend/vite.config.ts
 oracle_wallet/.gitkeep
 package-lock.json
 package.json
-production_fixes_round2.patch
-production_fixes_round3.patch
 requirements.txt
 scripts/_intraday_data.py
 scripts/_progress.py
@@ -526,6 +524,7 @@ services/analysis-intelligence-service/.dockerignore
 services/analysis-intelligence-service/Dockerfile
 services/analysis-intelligence-service/event/.dockerignore
 services/analysis-intelligence-service/event/Dockerfile
+services/analysis-intelligence-service/event/company_names.json
 services/analysis-intelligence-service/event/event_depth.py
 services/analysis-intelligence-service/event/event_feed.py
 services/analysis-intelligence-service/event/event_lite.py
@@ -613,6 +612,8 @@ services/analysis-intelligence-service/tests/test_e285_round105_event_feed_caden
 services/analysis-intelligence-service/tests/test_e285_round127_event_feed_tags.py
 services/analysis-intelligence-service/tests/test_e285_round161_news_hf_state.py
 services/analysis-intelligence-service/tests/test_e285_round162_dead_feed_ttl.py
+services/analysis-intelligence-service/tests/test_e285_round184_feed_fixes.py
+services/analysis-intelligence-service/tests/test_e285_round185_check_rotation.py
 services/analysis-intelligence-service/tests/test_env_url_blank_fallback.py
 services/analysis-intelligence-service/tests/test_event_depth.py
 services/analysis-intelligence-service/tests/test_event_feed_lite.py
@@ -651,6 +652,7 @@ services/analysis-intelligence-service/tests/test_peer_ranking.py
 services/analysis-intelligence-service/tests/test_peers.py
 services/analysis-intelligence-service/tests/test_rate_limit_report.py
 services/analysis-intelligence-service/tests/test_rate_limiter.py
+services/analysis-intelligence-service/tests/test_round187_news_sources.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py
@@ -664,6 +666,8 @@ services/analysis-intelligence-service/tests/test_stockky_ms_patterns.py
 services/analysis-intelligence-service/tests/test_stockky_ms_timeframes.py
 services/analysis-intelligence-service/tests/test_technical_main.py
 services/analysis-intelligence-service/tests/test_wire_peer_multi_quarter.py
+services/analysis-intelligence-service/tools/build_company_names.py
+services/analysis-intelligence-service/tools/event_feed_check.py
 services/api-gateway/.coveragerc
 services/api-gateway/.dockerignore
 services/api-gateway/.python-version
@@ -886,6 +890,8 @@ services/api-gateway/tests/test_rate_limiter_reserve_zone.py
 services/api-gateway/tests/test_redis_rate_limit.py
 services/api-gateway/tests/test_refill_additional.py
 services/api-gateway/tests/test_requirements_pins.py
+services/api-gateway/tests/test_round185_surprise_cache_snapshot.py
+services/api-gateway/tests/test_round189_nse_backoff_and_fallback_memory.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1234,6 +1240,9 @@ services/market-data-service/tests/test_premarket_default_symbols.py
 services/market-data-service/tests/test_provider_key_redaction.py
 services/market-data-service/tests/test_rate_limiter.py
 services/market-data-service/tests/test_rate_limiter_fail_closed.py
+services/market-data-service/tests/test_round189_quote_block_escalation.py
+services/market-data-service/tests/test_round190_first_candle_call_403.py
+services/market-data-service/tests/test_round191_global_cue_error_ttl.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1744,6 +1753,8 @@ services/position-stocks-service/tests/test_reconcile_partial_entry.py
 services/position-stocks-service/tests/test_regime_hooks.py
 services/position-stocks-service/tests/test_repair_closed_entry_prices.py
 services/position-stocks-service/tests/test_review_stats.py
+services/position-stocks-service/tests/test_round186_entry_fill_now.py
+services/position-stocks-service/tests/test_round188_conviction_known_inputs.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -1867,7 +1878,6 @@ services/real-trade-service/execution/auto_pilot.py
 services/real-trade-service/execution/broker_stop.py
 services/real-trade-service/execution/close_all.py
 services/real-trade-service/execution/dhan_client.py
-services/real-trade-service/execution/dhan_client.py,cover
 services/real-trade-service/execution/eod_retry.py
 services/real-trade-service/execution/equity_sync.py
 services/real-trade-service/execution/gap_cache.py
@@ -1887,7 +1897,6 @@ services/real-trade-service/exit_engine/__init__.py
 services/real-trade-service/exit_engine/event_exit.py
 services/real-trade-service/exit_engine/excursion.py
 services/real-trade-service/exit_engine/exit.py
-services/real-trade-service/exit_engine/exit.py,cover
 services/real-trade-service/exit_engine/momentum_health.py
 services/real-trade-service/exit_engine/structure_exit.py
 services/real-trade-service/exit_engine/swing_momentum.py
@@ -1911,7 +1920,6 @@ services/real-trade-service/portfolio/__init__.py
 services/real-trade-service/portfolio/broker_view.py
 services/real-trade-service/portfolio/exit_booking_heal.py
 services/real-trade-service/portfolio/portfolio.py
-services/real-trade-service/portfolio/portfolio.py,cover
 services/real-trade-service/requirements.txt
 services/real-trade-service/resilience/__init__.py
 services/real-trade-service/resilience/circuit_breaker.py
@@ -2406,5 +2414,4 @@ shared/market_structure/wyckoff.py
 shared/pyproject.toml
 shared/return_sanity.py
 stockky_full_test.sh
-tier_breakdown.csv
 vercel.json

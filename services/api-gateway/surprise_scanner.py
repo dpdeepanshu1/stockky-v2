@@ -445,6 +445,8 @@ class SurpriseStockEngine:
         self._cv_bulk = contextvars.ContextVar("surprise_bulk_ticks", default=None)
         self._cv_deadline = contextvars.ContextVar("surprise_single_deadline", default=None)
         self._cv_counts = contextvars.ContextVar("surprise_scan_counts", default=None)
+        # round 185: the shared bulk-quote map, read ONCE per scan (off the event loop) instead of once per symbol.
+        self._cv_cache_snap = contextvars.ContextVar("surprise_cache_snap", default=None)
         self._bulk_ticks = {}
         self._single_deadline = None     # group344: monotonic end of the per-symbol fallback budget
         self._scan_counts = {}           # group344: per-scan source counters
@@ -965,10 +967,38 @@ class SurpriseStockEngine:
     def _tick_from_bulk_cache(self, symbol: str) -> Optional[dict]:
         try:
             from data_feed import get_cached_quote
-            row = get_cached_quote(symbol)
+            snap = self._cv_cache_snap.get()
+            # round 185: with a per-scan snapshot loaded there is NO kv read here. Without one (a caller that did not
+            # load it) the old per-symbol read still runs, exactly as before.
+            row = get_cached_quote(symbol, cache=snap) if snap is not None else get_cached_quote(symbol)
         except Exception:
             row = None
         return self._row_to_tick(row)
+
+    async def _load_cache_snapshot(self) -> None:
+        """round 185: read the shared bulk-quote map once, on a worker thread, and keep it for this scan's tasks.
+        3-4 Nov log: the scan called get_bulk_quote_cache() -> kv_get() once per symbol FROM the event loop; a memory
+        miss made kv_cache._guarded_read wait up to 1.5 s on the loop thread ("event loop blocked for 3.3 s / 3.7 s"),
+        the scan took 34-38 s against the 20 s deadline and real-trade-service was served a 258-383 s old result.
+        Never raises: on a failure or SURPRISE_CACHE_SNAPSHOT_TIMEOUT_S (default 5) an empty map is used, which is
+        what a failed per-symbol read gave before (the bulk prefetch / single-quote path answers instead)."""
+        try:
+            from data_feed import get_bulk_quote_cache
+        except Exception as e:  # noqa: BLE001 - no snapshot support in this data_feed: keep the old per-symbol path
+            logger.debug("surprise bulk-cache snapshot unavailable (non-fatal): %s", e)
+            return
+        snap: dict = {}
+        try:
+            try:
+                _t = float((os.getenv("SURPRISE_CACHE_SNAPSHOT_TIMEOUT_S") or "").strip() or 5.0)
+            except ValueError:
+                _t = 5.0
+            got = await asyncio.wait_for(asyncio.to_thread(get_bulk_quote_cache), timeout=max(0.5, _t))
+            if isinstance(got, dict):
+                snap = got
+        except Exception as e:  # noqa: BLE001  (includes asyncio.TimeoutError)
+            logger.debug("surprise bulk-cache snapshot failed (non-fatal): %s", e)
+        self._cv_cache_snap.set(snap)
 
     @staticmethod
     def _bulk_row_fresh(row: dict, max_age_s: float) -> bool:
@@ -1049,6 +1079,7 @@ class SurpriseStockEngine:
         prefetch for these symbols are dropped (they would otherwise be served as if fresh), and ticks other
         symbols already have (a running scan()) are left alone. Never raises; returns the number priced."""
         fresh: Dict[str, dict] = {}
+        await self._load_cache_snapshot()
         try:
             priced = await self._prefetch_bulk(client, market_data_url, symbols, store=fresh)
         except Exception as e:  # noqa: BLE001
@@ -1218,6 +1249,7 @@ class SurpriseStockEngine:
         self._bulk_ticks = {}
         self._scan_counts = {}
         self._single_deadline = None
+        await self._load_cache_snapshot()
         await self._prefetch_bulk(client, market_data_url, keys)
         if SINGLE_BUDGET_S > 0:
             self._single_deadline = _monotonic() + SINGLE_BUDGET_S

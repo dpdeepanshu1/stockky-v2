@@ -36,6 +36,10 @@ def pin(monkeypatch):
                      ENTRY_VALIDITY_MINUTES=15, ENTRY_ORDER_TYPE="LIMIT", ENTRY_ZONE_UPPER_PCT=0.1,
                      ENTRY_REGIME_OVERRIDE_TOP_N=0).items():
         monkeypatch.setattr(config, k, v)
+    # round 219: these tests stub the risk engine to APPROVED, so cash never limits them - but the round 209 early cash gate reads the real account row minus the
+    # cash earlier staged candidates reserved, and with four candidates the last one (DDD) saw 0 left and was WAITed before it reached the shortlist.
+    # The gate has its own tests (test_round209_early_cash_gate.py); here it is switched off so the shortlist tests stay about the shortlist.
+    monkeypatch.setenv("ENTRY_EARLY_CASH_GATE", "0")
     for k, v in dict(MIN_REWARD_RISK_RATIO=2.0, MAX_ENTRY_DRIFT_ATR=0.75, CONVICTION_MIDPOINT=65.0,
                      CONVICTION_MAX_SCALE=0.25, REGIME_MIN_SCORE_STATIC=38).items():
         monkeypatch.setattr(entry, k, v)

@@ -45,7 +45,7 @@ def _decision_tag(order) -> str:
         return f" [decision={int(d)}]" if d else ""
     except Exception:  # noqa: BLE001
         return ""
-from audit.logger import log_action
+from audit.logger import log_action, log_action_behind
 from execution import shared_symbol_lock
 from market_feed.feed import Tick
 from tz_utils import IST, ist_today_str
@@ -1245,13 +1245,13 @@ def holdings_sync_reconcile(db: Session) -> dict:
             account.updated_at = now
         db.commit()
         if closed_symbols:
-            log_action(
+            log_action_behind(
                 db, actor="system", action="HOLDINGS_SYNC_CLOSED", mode="REAL",
                 detail=f"force-closed {len(closed_symbols)} ghost position(s) not found at broker: "
                        f"{', '.join(closed_symbols)}",
             )
         if synced_symbols:
-            log_action(
+            log_action_behind(
                 db, actor="system", action="HOLDINGS_SYNC_QTY_CAPPED", mode="REAL",
                 detail=f"capped qty_open for {len(synced_symbols)} position(s) with partial "
                        f"external sells: {', '.join(synced_symbols)}",
@@ -1531,7 +1531,7 @@ def record_real_fill(db: Session, order: models.TradeOrder, fill_price: float, f
     account.cash_available -= fill_price * filled_qty
     account.updated_at = now
     db.commit()
-    log_action(db, actor="system", action="ORDER_FILLED", mode="REAL",
+    log_action_behind(db, actor="system", action="ORDER_FILLED", mode="REAL",
                detail=f"{order.symbol} BUY {filled_qty} @ {fill_price} (broker-confirmed)")
 
 
@@ -1613,7 +1613,7 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
     account.updated_at = now
     db.commit()
-    log_action(db, actor="system",
+    log_action_behind(db, actor="system",
                action="POSITION_CLOSED" if position.status == "CLOSED" else "POSITION_PARTIAL_EXIT",
                mode="REAL", detail=f"{position.symbol} {reason} qty={qty_closed} pnl={pnl:+.2f} (broker-confirmed)")
     return pnl
@@ -1678,7 +1678,7 @@ def force_close_real_position(db: Session, position: models.TradePosition, note:
     account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
     account.updated_at = now
     db.commit()
-    log_action(db, actor="system", action="POSITION_CLOSED", mode="REAL",
+    log_action_behind(db, actor="system", action="POSITION_CLOSED", mode="REAL",
                detail=f"{position.symbol} {note} qty={qty_open} (ghost-close, no broker fill/P&L)")
     return 0.0
 

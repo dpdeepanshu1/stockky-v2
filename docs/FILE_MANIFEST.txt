@@ -2326,6 +2326,7 @@ services/real-trade-service/tests/test_round206_regime_adaptive.py
 services/real-trade-service/tests/test_round207_regime_write_behind.py
 services/real-trade-service/tests/test_round208_write_behind_timeout_log.py
 services/real-trade-service/tests/test_round209_early_cash_gate.py
+services/real-trade-service/tests/test_round220_fill_audit_rows_behind.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

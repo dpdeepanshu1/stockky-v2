@@ -107,7 +107,7 @@ def _load_min_conviction():
     src = (ROOT / "candidate_engine" / "candidates.py").read_text(encoding="utf-8")
     fn = [n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_min_conviction"]
     assert len(fn) == 1
-    ns = {"config": config, "MIN_CONVICTION": 55.0}
+    ns = {"config": config, "MIN_CONVICTION": 55.0, "_adapted": lambda name, base: base}      # round 206: the floor goes through candidates._adapted (market-managed value); a plain base keeps this test about the Market Weather add only
     exec(compile(ast.Module(body=[fn[0]], type_ignores=[]), "candidates._min_conviction", "exec"), ns)
     return ns["_min_conviction"]
 

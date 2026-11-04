@@ -8,6 +8,7 @@ import pytest
 
 import models
 from entry_engine import entry
+from risk_engine.engine import RiskVerdict
 from tests.test_entry_evaluate_mode import (  # noqa: F401
     pin, db, make_candidate, tick, quotes, approve_all, run,
 )
@@ -65,13 +66,13 @@ class TestEvaluateMode:
         spy = _fetch_spy(monkeypatch)
         tally = run(entry.evaluate_mode(db, "DEMO", gate_armed=True))
         d = tally["entry_details"][0]
-        assert d["action"] == "WAIT" and d["gate_tag"] == "cash_below_one_share" and d["risk_verdict"] == "REJECTED"
+        assert d["action"] == "WAIT" and d["gate_tag"] == "cash_below_one_share" and d["risk_verdict"] == RiskVerdict.REJECTED.value
         assert "not enough for even 1 share" in d["reasoning"]
         assert tally["entered"] == 0 and spy == []
         ev = db.query(models.TradeRiskEvent).filter_by(symbol="MRFLIKE").one()
-        assert ev.check_name == "cash_available_cap" and ev.verdict == "REJECTED"
+        assert ev.check_name == "cash_available_cap" and ev.verdict == RiskVerdict.REJECTED.value
         dec = db.query(models.TradeDecision).filter_by(symbol="MRFLIKE").one()
-        assert dec.action == "WAIT" and dec.gate_tag == "cash_below_one_share" and dec.risk_verdict == "REJECTED"
+        assert dec.action == "WAIT" and dec.gate_tag == "cash_below_one_share" and dec.risk_verdict == RiskVerdict.REJECTED.value
 
     def test_affordable_share_is_not_stopped_by_the_gate(self, db, monkeypatch):
         _low_cash(db, 100000.0)

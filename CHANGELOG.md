@@ -1,3 +1,20 @@
+## 4 Nov 2026 - Round 220: the audit rows after a REAL fill / close / holdings sync no longer wait on Oracle inside the tick (real-trade)
+
+ * **Why (4 Nov log, open since round 196):** a single `trade_audit_log` INSERT took 2.7 s on Oracle (2.3-4.6 s on 2 Nov). `log_action` commits the caller's session, and five REAL rows in `portfolio/portfolio.py` still used it from inside the exit / reconcile path: `ORDER_FILLED`, `POSITION_CLOSED` / `POSITION_PARTIAL_EXIT` (broker-confirmed exit), `POSITION_CLOSED` (ghost close), `HOLDINGS_SYNC_CLOSED`, `HOLDINGS_SYNC_QTY_CAPPED`.
+ * **Fix:** those five now call `audit.logger.log_action_behind` (the round 131 write-behind queue, own DB session, 20 s back-off after a timeout). Safe because in every one of them the position / cash change is already committed on the line before the row is written, and nothing reads these rows back for a decision (`GET /audit` only lists them for the Recent Activity panel). `CYCLE_AUDIT_WRITE_BEHIND=false`, a disabled or full queue falls back to the old synchronous write; no new setting.
+ * **Not changed:** DEMO rows, ARMED / DISARMED, login and password rows, risk config, every manual order / close row, `RECONCILE_MISMATCH`, and the `EXIT_CYCLE` summary (already behind since round 131) stay on `log_action`. A crash can lose only the rows still queued (about a second of evidence), never a fill or a position.
+ * **Tests:** `tests/test_round220_fill_audit_rows_behind.py` (3: the row is queued after the cash commit and not written synchronously; switch off writes it synchronously; only the five REAL rows moved, DEMO untouched). real-trade suite 6182 passed, 1 skipped in the sandbox (Python 3.12).
+ * **Deploy:** rebuild `real-trade-service`. After the next fill, `ORDER_FILLED` / `POSITION_CLOSED` appear in Recent Activity about a second later than before.
+ * **Still open:** the AngelOne feed 21.2 s cycle vs 15 s (round 196 breakdown, waits for the next slow-cycle log line); the 6 stale regime constants are already muted by round 206 and need only your decision.
+
+## 4 Nov 2026 - Round 219: three failing real-trade tests fixed (tests only, no trading change)
+
+ * **Why (VM run):** `test_regime_hooks::test_conviction_floor_default_and_clamp`, `test_round209_early_cash_gate::test_unaffordable_share_waits_before_any_fetch_gate` and `test_group337_shortlist_visibility::test_failed_best_pick_is_recorded_and_next_pick_enters` failed. Production code was right in all three; the tests were out of date.
+ * **`test_regime_hooks.py`:** the floor now goes through `candidates._adapted` (round 206), and the test executes `_min_conviction` on its own, so its namespace lacked `_adapted`. The stub returns the base value, so the test stays about the Market Weather add only.
+ * **`test_round209_early_cash_gate.py`:** `RiskVerdict.REJECTED.value` is `"rejected"` (lower case); the test compared with `"REJECTED"`. It now imports `RiskVerdict` and uses the constant.
+ * **`test_group335_shortlist_fallthrough.py` (`pin`, also used by test_group337):** these tests stub the risk engine to APPROVED, so cash never limits them. The round 209 early cash gate reads the real account row minus the cash earlier staged candidates reserved; with four candidates the last one (DDD) saw 0 left and was WAITed before reaching the shortlist (correct production behaviour, wrong for a shortlist test). `ENTRY_EARLY_CASH_GATE=0` is set in the fixture; the gate keeps its own tests.
+ * **Checked:** real-trade suite 6179 passed, 1 skipped (Python 3.12 here; run `bash scripts/docker_test.sh real-trade-service` on the VM as usual).
+
 ## 4 Nov 2026 - Round 218: the Entry reason of an old-rule trade says what happened, not "Shortlist (old rule) later" (frontend)
 
  * **Why (4 Nov log):** COFORGE, CARERATING and MRPL showed `Shortlist (old rule) later`. No new setup (S1 / S2 / S3) matched them, so they were stamped `LEGACY_SHORTLIST`; the name read like a rule and the slot word `later` read like part of it.

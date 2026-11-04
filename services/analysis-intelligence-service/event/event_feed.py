@@ -356,6 +356,27 @@ def static_aliases() -> List[Tuple[str, str]]:
     return _STATIC_ALIAS_CACHE[key]
 
 
+def count_named_symbols(headline: str, known: Iterable[str], aliases: List[Tuple[str, str]]) -> int:
+    """How many DIFFERENT known symbols the headline names (upper-case ticker tokens plus full company names). Never raises."""
+    try:
+        text = str(headline or "")
+        kn = {str(s).strip().upper() for s in (known or []) if s}
+        found = {m.group(1) for m in _SYM_RE.finditer(text) if m.group(1) in kn}
+        low = text.lower()
+        for alias, sym in aliases or []:
+            if alias in low:
+                i = low.find(alias)
+                while i != -1:
+                    j = i + len(alias)
+                    if (i == 0 or not low[i - 1].isalnum()) and (j >= len(low) or not low[j].isalnum()):
+                        found.add(sym)
+                        break
+                    i = low.find(alias, i + 1)
+        return len(found)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def extract_symbol_by_name(headline: str, aliases: List[Tuple[str, str]]) -> Optional[str]:
     """The symbol whose full company name appears in the headline (longest name wins). Skipped when the name is glued to a capitalised word before it
     ('State Bank of India' must not tag 'Bank of India'). None when nothing matches. Never raises."""
@@ -612,7 +633,14 @@ class FeedCollector:
                         sym = extract_symbol_by_name(title, aliases)
                         by_name += 1 if sym else 0
                     if sym:
-                        fresh.append(make_event(sym, title, pub, name, now))
+                        ev = make_event(sym, title, pub, name, now)
+                        if count_named_symbols(title, known, aliases) >= 2 and ev.get("polarity"):
+                            # Round 181: a headline naming several tracked companies ("Steel Prices Rise: Tata Steel, JSW Steel, SAIL ...") is a sector story,
+                            # not one company's event. It stays visible but with no sign, so it can neither veto nor trigger a trade.
+                            ev["polarity"] = 0
+                            ev["strength"] = strength(ev["type"], 0, ev["age_s"])
+                            ev["multi"] = True
+                        fresh.append(ev)
                 except Exception:  # noqa: BLE001 - one bad item never drops the poll
                     continue
             ok = bool(entries) and (status is None or status == 200 or isinstance(status, int) and 200 <= status < 300)

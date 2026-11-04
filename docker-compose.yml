@@ -107,6 +107,7 @@ services:
       ORACLE_WALLET_DIR: /oracle_wallet
       TNS_ADMIN: /oracle_wallet
       EVENT_STATE_FILE: /data/event/state.json
+      EVENT_FEED_NAMES_FILE: /data/event/names_extra.json   # round 181: optional full NSE name list, built by tools/build_company_names.py
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
       # round 179: event subscriptions survive container recreates (USE_REDIS=0 kept them in memory only)

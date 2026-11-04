@@ -497,9 +497,30 @@ def _classify(headline: str, aliases: Iterable[str]) -> Dict[str, Any]:
     return _out(etype, pol, strength, ab, new, conf, why)
 
 
+# Round 181: a trailing publisher tag such as " - NDTV Profit" is not part of the headline. The word "Profit" in it made
+# "Steel Prices Rise: Tata Steel, JSW Steel, SAIL Raise Rates ... - NDTV Profit" a positive RESULTS event (0.86) on SAIL.
+_PUBLISHER_TAIL = re.compile(
+    r"\s+[-\u2013\u2014|]\s+(?:ndtv\s*profit|ndtv|moneycontrol(?:\.com)?|livemint|mint|business\s*standard|the\s*economic\s*times|economic\s*times|et\s*now|"
+    r"et\s*markets|et\s*prime|times\s*of\s*india|the\s*hindu\s*businessline|hindu\s*businessline|business\s*line|financial\s*express|cnbc[\s-]*tv18|"
+    r"cnbctv18|zee\s*business|business\s*today|reuters|bloomberg(?:\s*quint)?|bq\s*prime|news18|india\s*today|outlook\s*business|trendlyne|"
+    r"marketsmojo|upstox|groww|angel\s*one|investing\.com(?:\s*india)?|the\s*print|theprint|firstpost|hindustan\s*times|yahoo\s*finance|"
+    r"google\s*news|msn|tipranks|scanx|stockinsights|the\s*indian\s*express|indian\s*express|pti|ians)\s*$", re.I)
+
+
+def _strip_publisher(headline: str) -> str:
+    s = str(headline or "")
+    for _ in range(2):
+        t = _PUBLISHER_TAIL.sub("", s).rstrip()
+        if t == s or not t:
+            break
+        s = t
+    return s
+
+
 def classify(headline: str, aliases: Iterable[str] = ()) -> Dict[str, Any]:
     """Classify one headline. Never raises. See the module docstring for the fields."""
     try:
+        headline = _strip_publisher(headline)
         r = _classify(headline, aliases or ())
         _bump("calls")
         if r["type"] == "none":

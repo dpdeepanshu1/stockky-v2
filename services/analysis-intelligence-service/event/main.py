@@ -1446,6 +1446,18 @@ def _feed_answer(symbol: Optional[str] = None) -> dict:
     return col.response(symbol)
 
 
+@app.post("/events/poll-now")
+def events_poll_now():
+    """Round 181: poll every RSS source right now (instead of waiting for the 5-10 minute cadence) and return a short summary. Read-mostly: it only refreshes the feed."""
+    col = _ef.get_collector() if _ef is not None else None
+    if col is None:
+        return {"ok": False, "error": "event feed not running"}
+    res = col.poll_once()
+    ans = col.response()
+    return {"ok": bool(ans.get("ok")), "polled": res, "events": ans.get("count"), "healthy_sources": ans.get("healthy_sources"),
+            "subscribed": len(col.known_symbols())}
+
+
 @app.get("/events/active")
 def events_active():
     """Typed, timestamped events (type, polarity, strength, age) for every subscribed symbol. ok:false with no events while no source is healthy."""

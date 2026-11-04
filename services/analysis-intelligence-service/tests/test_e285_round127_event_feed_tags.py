@@ -88,3 +88,28 @@ def test_bad_names_function_never_breaks_a_poll():
 def test_main_passes_the_cached_names_to_the_collector():
     src = open(os.path.join(_HERE, "..", "event", "main.py")).read()
     assert "names_fn=lambda: dict(_company_name_cache)" in src
+
+
+def test_publisher_tail_does_not_make_a_sector_headline_a_results_event():
+    import event_lite as el
+    r = el.classify("Steel Prices Rise: Tata Steel, JSW Steel, SAIL Raise Rates Across Key Products - NDTV Profit")
+    assert not (r["type"] == "results" and r["pol"] != 0)
+
+
+def test_publisher_tail_is_stripped_but_a_real_results_headline_still_counts():
+    import event_lite as el
+    assert el.classify("Tata Steel Q2 profit rises 30% - NDTV Profit")["type"] == "results"
+
+
+def test_multi_company_headline_keeps_no_sign():
+    col = _col(["Steel Prices Rise: Tata Steel, JSW Steel, SAIL Raise Rates Across Key Products - NDTV Profit"], ["TATASTEEL.NS", "SAIL.NS", "JSWSTEEL.NS"])
+    col.poll_once()
+    evs = col.response()["events"]
+    assert evs and all(e["polarity"] == 0 for e in evs)
+
+
+def test_single_company_results_headline_keeps_its_sign():
+    col = _col(["Tata Steel Q2 profit jumps 40%"], ["TATASTEEL.NS", "SAIL.NS"])
+    col.poll_once()
+    evs = col.response()["events"]
+    assert evs and evs[0]["symbol"] == "TATASTEEL" and evs[0]["polarity"] == 1

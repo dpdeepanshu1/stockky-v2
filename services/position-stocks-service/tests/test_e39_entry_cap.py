@@ -59,3 +59,11 @@ def test_counts_today_only_and_skips_error_rows(monkeypatch):
     assert entry_cap.entries_today(db, now) == 2
     monkeypatch.setattr(config, "MAX_ENTRIES_PER_DAY", 2, raising=False)
     assert entry_cap.entry_reason(db, now).startswith("ENTRY_CAP:")
+
+
+def test_round210_default_cap_is_50():
+    """Round 210: the daily entries cap ships at 50 (10 stopped every new entry from 10:28 on 4 Nov). The catalog's shipped value must match config."""
+    from control.catalog import CATALOG
+    import config
+    flag = next(f for f in CATALOG if f.key == "POSITION_STOCKS_MAX_ENTRIES_PER_DAY")
+    assert flag.shipped == "50" and config.MAX_ENTRIES_PER_DAY == 50

@@ -103,6 +103,21 @@ def _prune_old_scores(db: Session) -> None:
 # ── Adaptive regime gate ──────────────────────────────────────────────────────
 
 def adaptive_regime_threshold(db: Session) -> tuple[int, str]:
+    """Round 206: the history-based threshold (see _history_regime_threshold) shifted by the multi-horizon market
+    picture from regime_adaptive.py (yesterday .. 1 year, volatility, recent results). No fresh snapshot or
+    REGIME_ADAPTIVE_MODE=off -> shift 0 -> exactly the old value and source string."""
+    threshold, source = _history_regime_threshold(db)
+    try:
+        import regime_adaptive
+        d = regime_adaptive.score_delta()
+        if d:
+            return max(20, min(60, int(threshold) + d)), f"{source}{d:+d}tone"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("regime_adaptive shift skipped: %s", e)
+    return threshold, source
+
+
+def _history_regime_threshold(db: Session) -> tuple[int, str]:
     """
     Returns (threshold, source) where source is one of:
       'adaptive_Nd_p20' — computed from N days of history at 20th percentile
@@ -178,7 +193,13 @@ def check_threshold_staleness() -> list[dict]:
     Called at startup and by the dashboard's /adaptive/status endpoint.
     """
     stale = []
+    try:
+        import regime_adaptive as _ra
+    except Exception:  # noqa: BLE001
+        _ra = None
     for name, (value, reviewed_date) in _REGIME_CONSTANTS.items():
+        if _ra is not None and (_ra.is_managed(name) or name in _ra.RETIRED):
+            continue        # round 206: this constant is re-set from the market every 15 minutes; a review date means nothing
         age_days = _days_since(reviewed_date)
         if age_days >= STALE_THRESHOLD_DAYS:
             stale.append({
@@ -337,6 +358,7 @@ def adaptive_status(db: Session) -> dict:
         "static_fallback":            config.ENTRY_REGIME_MIN_SCORE,
         "latest_market_score":        latest_score,
         "stale_constants":            stale,
+        "regime_adaptive":            _regime_adaptive_status(),
         "regime_constants": {
             name: {"value": val, "last_reviewed": reviewed, "age_days": _days_since(reviewed)}
             for name, (val, reviewed) in _REGIME_CONSTANTS.items()
@@ -350,3 +372,11 @@ def adaptive_status(db: Session) -> dict:
                  f"Using static fallback {config.ENTRY_REGIME_MIN_SCORE} until then."
         ),
     }
+
+
+def _regime_adaptive_status() -> dict:
+    try:
+        import regime_adaptive
+        return regime_adaptive.status()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}

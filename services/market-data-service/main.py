@@ -1103,7 +1103,13 @@ def feed_coverage(req: FeedCoverageRequest):
         ao = dh = cached = None
         try:
             if _asm is not None:
-                ao = bool(_asm.get_token(base))
+                # round 205: a miss only means "not in the master" once a master is loaded; while none is
+                # (cold start / failed download) get_token() is None for every symbol, which used to read as
+                # False and made held symbols look like they had no primary feed.
+                if _asm.get_token(base):
+                    ao = True
+                else:
+                    ao = None if _asm.is_listed(base) is None else False
         except Exception:  # noqa: BLE001
             ao = None
         try:
@@ -1119,7 +1125,9 @@ def feed_coverage(req: FeedCoverageRequest):
         delisted = is_known_delisted(base)
         out.append({"symbol": base, "angelone_token": ao, "dhan_security_id": dh, "dhan_fresh_quote": cached,
                     "known_delisted": delisted,
-                    "primary_feed": bool((ao or dh) and not delisted) if (ao is not None or dh is not None) else None})
+                    # round 205: False if delisted; True when a feed can price it; False when no feed can and at least
+                    # one loaded master said no; None only while every answer is still unknown.
+                    "primary_feed": (False if delisted else True if (ao or dh) else False if (ao is False or dh is False) else None)})
     return {"ok": True, "symbols": out}
 
 

@@ -286,6 +286,17 @@ async def startup() -> None:
                 _struct_obs.run_loop(_get_session_factory_obs()))
     except Exception as _e:
         logger.debug("startup structure observation loop not started (non-fatal): %s", _e)
+    # round 206: the regime constants re-set themselves from the index over 7 horizons, volatility and recent closed trades.
+    # Worker-thread refresh every REGIME_ADAPTIVE_REFRESH_S; REGIME_ADAPTIVE_MODE=off = the static values, never raises into boot.
+    try:
+        import asyncio as _aio_ra
+        from db import get_session_factory as _get_session_factory_ra
+        import regime_adaptive as _regime_adaptive
+        if _regime_adaptive.mode() == "live":
+            globals()["_REGIME_ADAPTIVE_TASK"] = _aio_ra.get_running_loop().create_task(
+                _regime_adaptive.run_loop(_get_session_factory_ra()))
+    except Exception as _e:
+        logger.debug("startup regime adaptive loop not started (non-fatal): %s", _e)
     from execution import auto_pilot
     auto_pilot.start()
     # Adaptive threshold staleness check — logs + Telegram warning if any
@@ -2639,6 +2650,16 @@ async def get_adaptive_status(db: Session = Depends(get_db)):
     except Exception as e:
         return {"error": str(e), "adaptive_active": False,
                 "static_fallback": config.ENTRY_REGIME_MIN_SCORE}
+
+@app.get("/adaptive/regime")
+async def get_adaptive_regime():
+    """Round 206: the five self-adjusting regime constants - static value, value in force now, the market picture
+    (returns over 1d/7d/1m/2m/3m/6m/1y, volatility ratio, tone/stress) and the closed-trade feedback behind them. Read-only."""
+    try:
+        import regime_adaptive
+        return regime_adaptive.status()
+    except Exception as e:
+        return {"error": str(e), "active": False}
 
 @app.get("/adaptive/market-params/status")
 async def get_adaptive_market_params_status(db: Session = Depends(get_db)):

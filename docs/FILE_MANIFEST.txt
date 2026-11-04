@@ -898,6 +898,7 @@ services/api-gateway/tests/test_round185_surprise_cache_snapshot.py
 services/api-gateway/tests/test_round189_nse_backoff_and_fallback_memory.py
 services/api-gateway/tests/test_round199_nse_fallback_escalation.py
 services/api-gateway/tests/test_round202_antala_not_on_nse.py
+services/api-gateway/tests/test_round211_nse_board_rows.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1249,6 +1250,7 @@ services/market-data-service/tests/test_rate_limiter_fail_closed.py
 services/market-data-service/tests/test_round189_quote_block_escalation.py
 services/market-data-service/tests/test_round190_first_candle_call_403.py
 services/market-data-service/tests/test_round191_global_cue_error_ttl.py
+services/market-data-service/tests/test_round205_feed_coverage_unknown.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1296,6 +1298,7 @@ services/notification-scheduler-service/tests/test_pattern_alerts.py
 services/notification-scheduler-service/tests/test_rate_limiter_env.py
 services/notification-scheduler-service/tests/test_rate_limiter_oversized_weight.py
 services/notification-scheduler-service/tests/test_regime_constants_drift.py
+services/notification-scheduler-service/tests/test_round206_stale_muted.py
 services/notification-scheduler-service/tests/test_session_proof_is_holiday.py
 services/notification-scheduler-service/tests/test_telegram_long_message_split.py
 services/notification-scheduler-service/tests/test_telegram_token_redaction.py
@@ -1927,6 +1930,7 @@ services/real-trade-service/portfolio/__init__.py
 services/real-trade-service/portfolio/broker_view.py
 services/real-trade-service/portfolio/exit_booking_heal.py
 services/real-trade-service/portfolio/portfolio.py
+services/real-trade-service/regime_adaptive.py
 services/real-trade-service/requirements.txt
 services/real-trade-service/resilience/__init__.py
 services/real-trade-service/resilience/circuit_breaker.py
@@ -2310,6 +2314,10 @@ services/real-trade-service/tests/test_regime_rules_log_only.py
 services/real-trade-service/tests/test_return_sanity.py
 services/real-trade-service/tests/test_risk_engine.py
 services/real-trade-service/tests/test_round195_cnc_part_sold_log_throttle.py
+services/real-trade-service/tests/test_round206_regime_adaptive.py
+services/real-trade-service/tests/test_round207_regime_write_behind.py
+services/real-trade-service/tests/test_round208_write_behind_timeout_log.py
+services/real-trade-service/tests/test_round209_early_cash_gate.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

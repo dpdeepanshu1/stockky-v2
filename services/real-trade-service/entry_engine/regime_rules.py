@@ -41,6 +41,16 @@ _stats: Dict[str, Any] = {}
 _recent: "Deque[Dict[str, Any]]" = deque(maxlen=100)
 
 
+def _live_floor(name: str):
+    """Round 206: the live floor = the owner's config value as adapted by regime_adaptive (== the config value when off / no snapshot)."""
+    base = getattr(config, name, None)
+    try:
+        import regime_adaptive
+        return regime_adaptive.effective(name, base)
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def _f(v) -> Optional[float]:
     try:
         x = float(v)
@@ -100,8 +110,8 @@ def evaluate(score: Any, gate: Any, conviction: Any, rr: Any) -> Dict[str, Any]:
         if reg is None:
             return out
         rules = table()[reg]
-        min_rr = _f(rules.get("min_rr")) if rules.get("min_rr") is not None else _f(getattr(config, "ENTRY_MIN_REWARD_RISK", None))
-        min_cv = _f(rules.get("min_conviction")) if rules.get("min_conviction") is not None else _f(getattr(config, "CANDIDATE_MIN_CONVICTION", None))
+        min_rr = _f(rules.get("min_rr")) if rules.get("min_rr") is not None else _f(_live_floor("ENTRY_MIN_REWARD_RISK"))
+        min_cv = _f(rules.get("min_conviction")) if rules.get("min_conviction") is not None else _f(_live_floor("CANDIDATE_MIN_CONVICTION"))
         out.update(regime=reg, opinion="ok", min_rr=min_rr, min_conviction=min_cv, risk_scale=_f(rules.get("risk_scale")))
         reasons = []
         if min_rr is not None and out["rr"] is not None and out["rr"] < min_rr:
@@ -132,7 +142,7 @@ def penalty(verdict: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if not isinstance(verdict, dict) or verdict.get("opinion") != "ok" or not verdict.get("would_reject"):
             return _no_penalty()
-        live = {"rr": _f(getattr(config, "ENTRY_MIN_REWARD_RISK", None)), "conviction": _f(getattr(config, "CANDIDATE_MIN_CONVICTION", None))}
+        live = {"rr": _f(_live_floor("ENTRY_MIN_REWARD_RISK")), "conviction": _f(_live_floor("CANDIDATE_MIN_CONVICTION"))}
         depth, reasons = 0.0, []
         for key, floor_key, label in (("rr", "min_rr", "R:R"), ("conviction", "min_conviction", "conviction")):
             val, floor = _f(verdict.get(key)), _f(verdict.get(floor_key))

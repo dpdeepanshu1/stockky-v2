@@ -591,7 +591,7 @@ CATALOG = (
          targets=(("config", "DAILY_ORDER_BUDGET"),), live=True, shipped="300"),
     Flag("POSITION_STOCKS_MAX_ENTRIES_PER_DAY", "Max new entries per day", "Risk caps", "int", lo=0, hi=200, looser="higher", zero_off=True,
          help="E39: once this many positions were opened today, no new automatic entry until the next session (ENTRY_CAP). The real over-trading limit; the daily order budget is not. 0 = off.",
-         targets=(("config", "MAX_ENTRIES_PER_DAY"),), live=True, shipped="10", evidence="E39/E46 (audit: 300 orders = no cap)"),
+         targets=(("config", "MAX_ENTRIES_PER_DAY"),), live=True, shipped="50", evidence="E39/E46, raised 10 -> 50 in round 210 (the 10 cap stopped all entries at 10:28 on 4 Nov)"),
     Flag("MAX_CONCURRENT_SCALP_POSITIONS", "Max open positions", "Risk caps", "int", lo=1, hi=50, looser="higher", overlay=True,
          help="Entries stop while this many scalp positions are open.",
          targets=(("config", "MAX_CONCURRENT_SCALP_POSITIONS"),), live=True, shipped="5"),    Flag("JOURNAL_NOTES_ENABLED", "Trade journal notes (reason + feeling)", "Journal", "bool", looser="neutral",

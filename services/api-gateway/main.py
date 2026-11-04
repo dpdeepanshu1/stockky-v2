@@ -1463,6 +1463,53 @@ def _get_momentum_movers() -> List[str]:
         flight.done.set()
 
 
+def _nse_board_rows(data) -> list:
+    """Round 211: the dict rows of an NSE live-analysis board, whatever shape it came in. A board is either {"data": [...]} or a set of groups
+    {"NIFTY": {"data": [...]}, "allSec": {"data": [...]}, ...}; the old read took only "data" / "NIFTY", so a groups-shaped board gave just the NIFTY
+    group (20 rows) and a board whose groups were named otherwise gave 0. All groups are merged, one row per symbol. Never raises."""
+    try:
+        if not isinstance(data, dict):
+            return []
+        def _rows_of(v):
+            if isinstance(v, list):
+                return [r for r in v if isinstance(r, dict)]
+            if isinstance(v, dict):
+                inner = v.get("data")
+                return [r for r in inner if isinstance(r, dict)] if isinstance(inner, list) else []
+            return []
+        out = _rows_of(data.get("data"))
+        if not out:
+            out = []
+            seen: set = set()
+            for k, v in data.items():
+                if k in ("timestamp", "legends", "status"):
+                    continue
+                for r in _rows_of(v):
+                    sym = str(r.get("symbol") or r.get("symbolName") or "")
+                    if sym and sym in seen:
+                        continue
+                    seen.add(sym)
+                    out.append(r)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _fetch_nse_board(spec: str, key: str):
+    """Round 211: fetch an NSE board; `spec` is one endpoint or several alternatives joined by "|" (NSE spells its losers board "loosers" on some
+    paths and the volume board has two paths). The first alternative that returns rows wins; if none does, the first answer that arrived is
+    returned. Returns (data, endpoint_used). Each alternative is cached under its own key."""
+    alts = [a for a in spec.split("|") if a]
+    first_data, first_ep = None, alts[0] if alts else ""
+    for i, ep in enumerate(alts):
+        data = _fetch_from_nse_api(ep, key if i == 0 else f"{key}:alt{i}", ttl=900)
+        if data is not None and first_data is None:
+            first_data, first_ep = data, ep
+        if _nse_board_rows(data):
+            return data, ep
+    return first_data, first_ep
+
+
 def _compute_momentum_movers() -> List[str]:
     """Real-time movers: NSE gainers/losers/most-active + ≥5% day/week moves.
 
@@ -1506,23 +1553,22 @@ def _compute_momentum_movers() -> List[str]:
     nse_live_before = len(movers)
     for endpoint, key in (
         ("live-analysis-variations?index=gainers", "nse:gainers"),
-        ("live-analysis-variations?index=losers", "nse:losers"),
-        ("live-analysis-variations?index=volume-gainers", "nse:vol_gainers"),
+        ("live-analysis-variations?index=losers|live-analysis-variations?index=loosers", "nse:losers"),          # round 211: NSE's own spelling is "loosers"
+        ("live-analysis-variations?index=volume-gainers|live-analysis-volume-gainers", "nse:vol_gainers"),
         ("equity-stock-indices?index=NIFTY%20500", "nse:nifty500_idx"),
     ):
         pre = len(movers)
         n_rows = 0          # group202: rows the board returned
         n_small = 0         # ... of which a real move under 2% (valid, just not a mover)
         try:
-            data = _fetch_from_nse_api(endpoint, key, ttl=900)
+            data, endpoint = _fetch_nse_board(endpoint, key)
             if data is None:
                 logger.warning("NSE movers %s: no data (blocked/unreachable?)", endpoint)
-            rows = []
-            if isinstance(data, dict):
-                rows = data.get("data") or data.get("NIFTY") or []
-                if isinstance(rows, dict):
-                    rows = rows.get("data") or []
-            if isinstance(rows, list):
+            rows = _nse_board_rows(data)
+            if isinstance(data, dict) and not rows and "equity-stock-indices" not in endpoint:
+                # round 211: an answer that arrived but held no rows - say what it held, so the next log shows the real shape instead of a bare "rows=0"
+                logger.warning("NSE movers %s: answered but 0 rows (keys=%s, head=%s)", endpoint, list(data.keys())[:8], str(data)[:160])
+            if rows:
                 for item in rows:
                     if not isinstance(item, dict):
                         continue

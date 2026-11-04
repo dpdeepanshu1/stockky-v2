@@ -11,6 +11,8 @@ What goes through the queue (plain dict payloads, never ORM objects, so nothing 
   audit           the EXIT_CYCLE summary row of trade_audit_log (29 Oct 2026: its commit stalled the exit tick for the 8 s call timeout); E285 round 131 adds ENTRY_CYCLE,
                   ORDERS_EXPIRED and EXIT_ORDERS_EXPIRED (audit.logger.log_action_behind; switch CYCLE_AUDIT_WRITE_BEHIND)
   metric          trade_adaptive_metric_history readings (E285 round 131) and the prune of that metric's old rows, both on the worker's session
+  regime_score    market_regime_history readings (round 207): the entry cycle wrote one row per ~120 s inside its own loop (4 Nov log: 3.2 s for the
+                  insert, plus a delete and a 90-day read); the row and its once-an-hour prune now go through this worker
 What stays synchronous: orders, fills, positions, cash, every non-HOLD exit decision, every other audit row (log_action commits the caller's session).
 
 Behaviour
@@ -78,7 +80,11 @@ _session_factory: Optional[Callable] = None
 _worker: Optional[threading.Thread] = None
 _stop = threading.Event()
 _backoff_until = 0.0
-_stats = {"submitted": 0, "written": 0, "dropped_full": 0, "dropped_failed": 0, "timeouts": 0, "batches": 0, "last_error": None}
+_stats = {"submitted": 0, "written": 0, "dropped_full": 0, "dropped_failed": 0, "timeouts": 0, "batches": 0, "last_error": None,
+          "requeued_timeout": 0}   # round 208: rows put back after a DB call timeout (never dropped for that reason)
+_TIMEOUT_LOG_EVERY_S = 60.0
+_last_timeout_log = 0.0
+_timeouts_since_log = 0
 
 
 def register(kind: str, fn: Callable) -> None:
@@ -141,6 +147,28 @@ def _new_session():
     return _dbmod.get_session_factory()()
 
 
+def _log_timeout(n: int, kind: str) -> None:
+    """Round 208 (4 Nov log: "write-behind batch of 1 audit row(s) failed (... DPY-4024 call timeout of 8000 ms exceeded"): a timed-out batch is NOT
+    lost - it goes back to the head of the queue and waits out the back-off - but the line said "failed". It now says what happened and is logged at
+    most once per _TIMEOUT_LOG_EVERY_S, with the number of timeouts since the last line. Never raises."""
+    global _last_timeout_log, _timeouts_since_log
+    try:
+        with _lock:
+            _timeouts_since_log += 1
+            now = time.monotonic()
+            if _last_timeout_log > 0 and now - _last_timeout_log < _TIMEOUT_LOG_EVERY_S:
+                return
+            _last_timeout_log = now
+            count, _timeouts_since_log = _timeouts_since_log, 0
+            queued = len(_q)
+        logger.warning(
+            "write-behind: DB call timed out writing %d %s row(s) - the rows were kept and are retried after the %.0f s back-off "
+            "(%d row(s) queued; %d timeout(s) since the last line, logged at most once per %.0f s)",
+            n, kind, backoff_s(), queued, count, _TIMEOUT_LOG_EVERY_S)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def drain_once(limit: Optional[int] = None) -> int:
     """Write up to `limit` queued rows (one batch per kind). Returns rows written. Honors the back-off. Never raises."""
     if in_backoff():
@@ -178,6 +206,7 @@ def drain_once(limit: Optional[int] = None) -> int:
             for k, p, tries in batch:
                 if timed_out:
                     keep.append((k, p, tries))           # DB pressure, not a bad row: wait out the back-off
+                    _stats["requeued_timeout"] += 1
                 elif tries + 1 < _MAX_TRIES:
                     keep.append((k, p, tries + 1))
                 else:
@@ -189,6 +218,8 @@ def drain_once(limit: Optional[int] = None) -> int:
                     _stats["dropped_full"] += 1
         if timed_out:
             note_timeout()
+            _log_timeout(len(batch), kind)
+            return 0
         logger.warning("write-behind batch of %d %s row(s) failed (%s)", len(batch), kind, _stats["last_error"])
         return 0
     finally:
@@ -248,6 +279,8 @@ def reset_for_tests() -> None:
             _stats[k] = None if k == "last_error" else 0
     _backoff_until = 0.0
     _session_factory = None
+    global _last_timeout_log, _timeouts_since_log
+    _last_timeout_log, _timeouts_since_log = 0.0, 0
     _handlers.clear()
     register_defaults()
 
@@ -352,12 +385,41 @@ def _write_metric(db, payloads: list) -> None:
             pass
 
 
+_last_regime_prune = 0.0
+_REGIME_PRUNE_EVERY_S = 3600.0
+
+
+def _write_regime_score(db, payloads: list) -> None:
+    """Round 207: market_regime_history readings (adaptive_thresholds.record_market_score used to insert + commit + delete + commit in the entry cycle).
+    The rows are inserted and committed first; the prune of old rows runs at most once an hour and never loses the readings."""
+    global _last_regime_prune
+    import models
+    rows = [{"score": float(p["score"])} for p in payloads if p.get("score") is not None]
+    if not rows:
+        return
+    db.bulk_insert_mappings(models.MarketRegimeHistory, rows)
+    db.commit()
+    if _last_regime_prune > 0 and time.monotonic() - _last_regime_prune < _REGIME_PRUNE_EVERY_S:
+        return
+    _last_regime_prune = time.monotonic()
+    try:
+        import adaptive_thresholds as _at
+        _at._prune_old_scores(db)                          # commits (or rolls back) itself and never raises
+    except Exception as e:  # noqa: BLE001
+        logger.debug("regime score prune skipped: %s", e)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def register_defaults() -> None:
     register("exit_hold", _write_exit_hold)
     register("entry_wait", _write_entry_wait)
     register("structure_obs", _write_structure_obs)
     register("audit", _write_audit)
     register("metric", _write_metric)
+    register("regime_score", _write_regime_score)
 
 
 register_defaults()

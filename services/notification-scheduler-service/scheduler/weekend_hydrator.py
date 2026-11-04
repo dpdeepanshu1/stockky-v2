@@ -70,6 +70,9 @@ def _check_regime_constant_staleness() -> None:
         "CANDIDATE_MIN_CONVICTION":   ("55",   "2026-10-04"),
         "CANDIDATE_DOWNTREND_6M_PCT": ("-10.0","2026-10-04"),
     }
+    import os as _os
+    if ((_os.getenv("REGIME_ADAPTIVE_MODE") or "").strip().lower() or "live") != "off":
+        return          # round 206: real-trade-service re-sets these from the market every 15 minutes; a review date means nothing
     now = datetime.now(timezone.utc)
     for name, (val, reviewed) in REGIME_CONSTANTS.items():
         try:

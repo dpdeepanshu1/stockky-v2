@@ -93,9 +93,16 @@ def _send_telegram(msg: str) -> None:
         logger.warning("Telegram send failed: %s", e)
 
 
+def _adaptive_live() -> bool:
+    """Round 206: real-trade-service re-sets these constants from the market every 15 minutes unless REGIME_ADAPTIVE_MODE=off."""
+    return ((os.getenv("REGIME_ADAPTIVE_MODE") or "").strip().lower() or "live") != "off"
+
+
 def check_stale_constants() -> list:
     stale = []
     for name, (val, reviewed, guardrail_min, guardrail_max) in REGIME_CONSTANTS.items():
+        if _adaptive_live():
+            continue        # round 206: self-adjusting, a review date means nothing; the guardrail bands below still apply
         age = _days_since(reviewed)
         if age >= STALE_DAYS:
             stale.append({

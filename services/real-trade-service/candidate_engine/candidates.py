@@ -109,6 +109,15 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 MIN_CONVICTION = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55"))
 
 
+def _adapted(name: str, base):
+    """Round 206: the owner's value as adapted by regime_adaptive (== `base` when off / no fresh snapshot / any error)."""
+    try:
+        import regime_adaptive
+        return regime_adaptive.effective(name, base)
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def _min_conviction() -> float:
     """The conviction floor in force now: MIN_CONVICTION plus today's Market Weather add (config.MARKET_STATE_CONVICTION_ADD, 0 by default, read at
     call time, clamped 0..20 so it can only RAISE the bar). Used at every `score < floor` comparison below. Not used where a score is ASSIGNED
@@ -119,7 +128,7 @@ def _min_conviction() -> float:
         add = 0.0
     if add != add:
         add = 0.0
-    return MIN_CONVICTION + min(20.0, max(0.0, add))
+    return _adapted("CANDIDATE_MIN_CONVICTION", MIN_CONVICTION) + min(20.0, max(0.0, add))
 
 # Raised from 3 → 4: need stronger multi-TF alignment when the index itself
 # is in a correction. A single-day event alone is not enough.
@@ -1527,10 +1536,11 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
     # The index itself is −7% in 6m; a stock down −10%+ in 6m has negative
     # relative strength AND a broken macro trend.
     ret_6m = tf_returns.get("6m")
-    if ret_6m is not None and ret_6m < DOWNTREND_6M_THRESHOLD:
+    _down6m = _adapted("CANDIDATE_DOWNTREND_6M_PCT", DOWNTREND_6M_THRESHOLD)
+    if ret_6m is not None and ret_6m < _down6m:
         return {
             "reject_reason": (
-                f"6m return {ret_6m:.1f}% < {DOWNTREND_6M_THRESHOLD}%. "
+                f"6m return {ret_6m:.1f}% < {_down6m}%. "
                 "Macro trend is broken. "
                 "Context: Nifty itself is −7% in 6m — a stock down "
                 f"{ret_6m:.1f}% has no relative strength to trade off."
@@ -1542,13 +1552,14 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
     # ── Check 3: Weighted multi-timeframe alignment (§10) ───────────────────────
     # 1-day down-weighted 0.5× — single-day pop is mean-reversion risk.
     bullish_count = _weighted_bullish_score(tf_returns)
-    if bullish_count < MIN_BULLISH_TIMEFRAMES:
+    _min_tf = _adapted("CANDIDATE_MIN_BULLISH_TF", MIN_BULLISH_TIMEFRAMES)
+    if bullish_count < _min_tf:
         _missing = [tf for tf in periods if tf_returns.get(tf) is None]
-        if _missing and bullish_count + _missing_horizon_weight(tf_returns) >= MIN_BULLISH_TIMEFRAMES:
+        if _missing and bullish_count + _missing_horizon_weight(tf_returns) >= _min_tf:
             return {
                 "reject_reason": (
                     f"Incomplete history, cannot judge: no return for {', '.join(_missing)} "
-                    f"(weighted bullish score {bullish_count:.1f} of the {MIN_BULLISH_TIMEFRAMES} "
+                    f"(weighted bullish score {bullish_count:.1f} of the {_min_tf} "
                     "needed; the missing horizons could still reach it). "
                     f"Returns: {tf_returns}. Retried next cycle."
                 ),
@@ -1558,7 +1569,7 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
         return {
             "reject_reason": (
                 f"Weighted bullish score {bullish_count:.1f} "
-                f"(need ≥{MIN_BULLISH_TIMEFRAMES}, threshold >{BULLISH_THRESHOLD_PCT}%). "
+                f"(need ≥{_min_tf}, threshold >{BULLISH_THRESHOLD_PCT}%). "
                 f"Returns: {tf_returns}. "
                 "1-day down-weighted (0.5x) — single-day pop is mean-reversion risk."
             ),

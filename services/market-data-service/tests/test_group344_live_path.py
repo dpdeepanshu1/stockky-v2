@@ -133,6 +133,7 @@ def test_feed_coverage_endpoint_shape(monkeypatch):
     import angelone_scrip_master as asm
     from dhan_data import scrip_master as dsm
     monkeypatch.setattr(asm, "get_token", lambda s: "123" if s == "GOOD" else None)
+    monkeypatch.setattr(asm, "is_listed", lambda s: s == "GOOD")   # a master is loaded and does not list the others
     monkeypatch.setattr(dsm, "ensure_loaded", lambda block=False: True)
     monkeypatch.setattr(dsm, "security_id", lambda s: ("1", 1) if s == "GOOD" else None)
     out = main.feed_coverage(main.FeedCoverageRequest(symbols=["good.ns", "BIRET", "AAKASH", ""]))["symbols"]

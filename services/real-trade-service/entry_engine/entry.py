@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading
 from datetime import datetime, timedelta, timezone
 import write_behind as _write_behind   # A3
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from sqlalchemy.orm import Session
@@ -135,6 +136,33 @@ _REGIME_TTL_S = 120.0
 _regime_cache_lock = threading.Lock()
 
 
+def _early_cash_gate_enabled() -> bool:
+    """Round 209: ENTRY_EARLY_CASH_GATE (default on) - skip, before any fetch, a candidate whose single share costs more than the spendable cash."""
+    return ((os.getenv("ENTRY_EARLY_CASH_GATE") or "").strip() or "1").lower() not in ("0", "false", "no", "off")
+
+
+def _one_share_cash_reason(price, cash) -> Optional[str]:
+    """Round 209: the risk engine's check 5b (cash // entry_price <= 0 -> REJECTED "cash_available_cap") asked early, on the live price, which is never
+    above the entry price. Same wording as that check. None = one share fits, or the price / cash is unknown (fail open). Never raises."""
+    try:
+        p, c = float(price), float(cash)
+    except (TypeError, ValueError):
+        return None
+    if not (p > 0) or c != c:                       # no price, or NaN cash
+        return None
+    if c >= p:
+        return None
+    return f"\u20b9{c:.2f} available is not enough for even 1 share at \u20b9{p:.2f}."
+
+
+def _regime_threshold_ttl_s() -> float:
+    """Round 207: how long the history-based regime threshold is reused (REGIME_THRESHOLD_CACHE_S, default 600 s, 0 = read every time)."""
+    try:
+        return max(0.0, float(((os.getenv("REGIME_THRESHOLD_CACHE_S") or "").strip() or "600")))
+    except ValueError:
+        return 600.0
+
+
 async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
     """
     Returns (regime_ok, market_score, threshold_used, threshold_source).
@@ -178,16 +206,29 @@ async def _get_market_regime(db: Session) -> tuple[bool, int, int, str]:
     except Exception as e:
         logger.debug("regime fetch failed (fail-open): %s", e)
 
-    # Persist score for adaptive learning (non-blocking, best-effort)
+    # Persist score for adaptive learning (non-blocking, best-effort).
+    # Round 207 (4 Nov log: "oracle slow exec 3174 ms INSERT INTO market_regime_history" inside this cycle): the reading goes through the write-behind
+    # queue (the old synchronous insert + commit + delete + commit stays when write-behind is off), and the 90-day history read that gives the threshold
+    # is repeated only every REGIME_THRESHOLD_CACHE_S (default 600 s; 0 = every time, as before). The score is still fetched every 2 minutes.
+    thr_ttl = _regime_threshold_ttl_s()
+    with _regime_cache_lock:
+        _cached_thr = (_regime_cache.get("threshold"), _regime_cache.get("source"), float(_regime_cache.get("thr_ts") or 0.0))
+    _reuse_thr = thr_ttl > 0 and _cached_thr[0] is not None and (now - _cached_thr[2]) < thr_ttl
+    _thr_ts = _cached_thr[2] if _reuse_thr else 0.0
     try:
         from adaptive_thresholds import record_market_score, adaptive_regime_threshold
-        record_market_score(db, score)
-        threshold, source = adaptive_regime_threshold(db)
+        if not _write_behind.submit("regime_score", {"score": float(score)}):
+            record_market_score(db, score)
+        if _reuse_thr:
+            threshold, source = _cached_thr[0], _cached_thr[1]
+        else:
+            threshold, source = adaptive_regime_threshold(db)
+            _thr_ts = now
     except Exception as e:
         logger.debug("adaptive threshold fetch failed (using static): %s", e)
 
     with _regime_cache_lock:
-        _regime_cache.update({"score": score, "threshold": threshold, "source": source, "ts": _t.time()})
+        _regime_cache.update({"score": score, "threshold": threshold, "source": source, "ts": _t.time(), "thr_ts": _thr_ts})
     return score >= threshold, score, threshold, source
 
 
@@ -218,6 +259,21 @@ def _resolve_cost_gate_knobs(db: Session, mode: str) -> tuple[float, float]:
     return min_trade_value, min_edge_to_cost_ratio
 
 
+def _rr_floor(base=None) -> float:
+    """Round 206: the reward:risk floor in force now - the owner's value (`base`; default config.ENTRY_MIN_REWARD_RISK; the gate and the composite
+    pass MIN_REWARD_RISK_RATIO, the same env variable) raised, never lowered, by regime_adaptive. Round 207: a `base` above the adapted value is the
+    floor, so a caller that sets the module floor higher still gets that floor."""
+    try:
+        b = float(config.ENTRY_MIN_REWARD_RISK if base is None else base)
+    except (TypeError, ValueError):
+        b = 2.0
+    try:
+        import regime_adaptive
+        return max(b, float(regime_adaptive.effective("ENTRY_MIN_REWARD_RISK", b)))
+    except Exception:  # noqa: BLE001
+        return b
+
+
 def _atr_stop_target_pct(atr_pct: Optional[float]) -> tuple[float, float]:
     if atr_pct is None or atr_pct <= 0:
         return FLAT_STOP_PCT, FLAT_TARGET_PCT
@@ -234,7 +290,7 @@ def _atr_stop_basis(atr_pct: Optional[float]) -> str:
         return "flat"
 
 
-def _range_adjusted_stop_target(
+def _range_adjusted_stop_target_core(
     stop_pct: float,
     target_pct: float,
     tick,                      # market_feed.Tick — may have day_high/day_low
@@ -256,29 +312,45 @@ def _range_adjusted_stop_target(
         return stop_pct, target_pct
 
     rpos = max(0.0, min(1.0, (entry_price - dl) / (dh - dl)))
+    _rr = _rr_floor()
 
     if rpos >= 0.80:
-        target_pct = max(MIN_STOP_PCT * config.ENTRY_MIN_REWARD_RISK,
-                         min(target_pct * 0.75, MAX_STOP_PCT * config.ENTRY_MIN_REWARD_RISK))
+        target_pct = max(MIN_STOP_PCT * _rr,
+                         min(target_pct * 0.75, MAX_STOP_PCT * _rr))
         stop_pct   = max(MIN_STOP_PCT, min(stop_pct * 0.80, MAX_STOP_PCT))
         logger.debug(
             "entry range-adjust: near-high (pos=%.2f) → stop=%.2f%% target=%.2f%%",
             rpos, stop_pct, target_pct,
         )
     elif rpos <= 0.20:
-        target_pct = max(MIN_STOP_PCT * config.ENTRY_MIN_REWARD_RISK,
-                         min(target_pct * 1.10, MAX_STOP_PCT * config.ENTRY_MIN_REWARD_RISK))
+        target_pct = max(MIN_STOP_PCT * _rr,
+                         min(target_pct * 1.10, MAX_STOP_PCT * _rr))
         logger.debug(
             "entry range-adjust: near-low (pos=%.2f) → target=%.2f%%",
             rpos, target_pct,
         )
 
     # Re-enforce R:R floor after adjustment
-    min_rr = config.ENTRY_MIN_REWARD_RISK
+    min_rr = _rr
     if stop_pct > 0 and (target_pct / stop_pct) < min_rr:
         target_pct = round(stop_pct * min_rr, 2)
         target_pct = min(target_pct, MAX_STOP_PCT * min_rr)
 
+    return round(stop_pct, 2), round(target_pct, 2)
+
+
+def _range_adjusted_stop_target(stop_pct: float, target_pct: float, tick: Any, entry_price: float) -> tuple[float, float]:
+    """Round 206: the old range adjustment, then - only when regime_adaptive has RAISED the reward:risk floor above the owner's
+    value - the target is moved out so the setup still carries that floor (the ATR setup is exactly 2:1 by design, so a raised
+    floor with the target left alone would refuse every trade). Floor == owner's value -> returns the old result untouched."""
+    stop_pct, target_pct = _range_adjusted_stop_target_core(stop_pct, target_pct, tick, entry_price)
+    try:
+        floor = _rr_floor()
+        if floor > float(config.ENTRY_MIN_REWARD_RISK) + 1e-9 and stop_pct > 0 and (target_pct / stop_pct) < floor:
+            target_pct = math.ceil(stop_pct * floor * 100.0) / 100.0
+            target_pct = min(target_pct, MAX_STOP_PCT * floor)
+    except Exception:  # noqa: BLE001
+        pass
     return round(stop_pct, 2), round(target_pct, 2)
 
 
@@ -374,8 +446,9 @@ def _composite_quality_score(
     """
     conviction_norm = max(0.0, min(100.0, float(conviction_score) if conviction_score is not None else 50.0))
 
-    rr_span = max(config.ENTRY_COMPOSITE_RR_CEILING - MIN_REWARD_RISK_RATIO, 0.01)
-    rr_norm = max(0.0, min(100.0, (rr - MIN_REWARD_RISK_RATIO) / rr_span * 100.0))
+    _floor = _rr_floor(MIN_REWARD_RISK_RATIO)
+    rr_span = max(config.ENTRY_COMPOSITE_RR_CEILING - _floor, 0.01)
+    rr_norm = max(0.0, min(100.0, (rr - _floor) / rr_span * 100.0))
 
     if max_drift_pct > 0:
         drift_safety_norm = max(0.0, min(100.0, (1.0 - abs(drift_pct) / max_drift_pct) * 100.0))
@@ -767,6 +840,29 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     entered = waited = rejected = 0
     entry_details: list[dict] = []
     reserved_cash = 0.0
+    _cash_synced = False
+
+    def _early_cash_reason(price) -> Optional[str]:
+        """Round 209 (4 Nov log: MRF at about \u20b91.4 lakh and MARUTI at \u20b911.9k went through flow, 1-year history and structure fetches against about
+        \u20b94.8k of spendable cash, then died on the risk engine's cash cap). The cash is the account row minus what earlier candidates of this cycle
+        reserved - the figure _account_state hands the risk engine. A row that says a share is unaffordable may be stale, so for REAL it is confirmed
+        ONCE per cycle with Dhan (equity_sync is not throttled); an unreadable figure fails open. Never raises."""
+        nonlocal _cash_synced
+        try:
+            if not _early_cash_gate_enabled():
+                return None
+            cash = max(0.0, float(get_account(db, mode).cash_available) - reserved_cash)
+            if _one_share_cash_reason(price, cash) is None:
+                return None
+            if mode == "REAL" and not _cash_synced:
+                _cash_synced = True
+                from execution.equity_sync import sync_real_equity
+                sync_real_equity(db)
+                cash = max(0.0, float(get_account(db, mode).cash_available) - reserved_cash)
+            return _one_share_cash_reason(price, cash)
+        except Exception:  # noqa: BLE001 - fail open: the risk engine still has the last word
+            logger.debug("entry: early cash check skipped (fail-open)", exc_info=True)
+            return None
     # 2026-09-08 fix: candidates that clear every individual gate + risk_engine
     # are staged here instead of being placed immediately — see config.py's
     # ENTRY_CYCLE_QUALITY_FILTER_ENABLED docstring. Ranked against each other
@@ -1123,6 +1219,22 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                                        "risk_verdict": None, "gate_tag": "depth_at_entry"})
                 continue
 
+        # -- Gate 4c-2 (round 209): can even ONE share be paid for? Before the first fetch-based gate (4d: VIX; then order flow, structure, forecasts). --
+        # Recorded exactly as the risk engine's own cash rejection would be later (WAIT, verdict REJECTED, a TradeRiskEvent "cash_available_cap"),
+        # so the dashboard and the no-trade diagnosis read the same; only the wasted fetches are gone. ENTRY_EARLY_CASH_GATE=0 turns it off.
+        _cash_reason = _early_cash_reason(tick.price)
+        if _cash_reason:
+            _wait_with_preview(_cash_reason)
+            decision.gate_tag = "cash_below_one_share"
+            decision.risk_verdict = RiskVerdict.REJECTED.value
+            decision.risk_verdict_reason = _cash_reason
+            db.add(models.TradeRiskEvent(mode=mode, symbol=cand.symbol, check_name="cash_available_cap",
+                                         verdict=RiskVerdict.REJECTED.value, detail=_cash_reason))
+            db.add(decision)
+            entry_details.append({"symbol": cand.symbol, "action": "WAIT", "reasoning": _cash_reason,
+                                   "risk_verdict": RiskVerdict.REJECTED.value, "gate_tag": "cash_below_one_share"})
+            continue
+
         # -- Gate 4d (group 330; liquidity floor group 333): India VIX, VWAP, pre-open gap, volume / turnover -------------------------------------------------------
         # VIX: no new BUY while fear is high (and a smaller position while it is elevated, applied at sizing below). VWAP: no long under
         # the day's volume-weighted average. Pre-open gap: no chasing a big gap-up / catching a big gap-down recorded at 09:08.
@@ -1287,9 +1399,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
 
         # ── Gate 5: reward:risk floor ─────────────────────────────────────────
         rr = _reward_risk_ratio(entry_price, stop_price, target_price)
-        if rr < MIN_REWARD_RISK_RATIO:
+        _rr_gate = _rr_floor(MIN_REWARD_RISK_RATIO)
+        _rr_gate_txt = f"{_rr_gate:.1f}" if abs(_rr_gate * 10 - round(_rr_gate * 10)) < 1e-9 else f"{_rr_gate:.2f}"   # "2.0" as before until the floor is raised to e.g. 2.25
+        if rr < _rr_gate:
             _wait_with_preview(
-                f"R:R {rr:.2f}:1 below floor {MIN_REWARD_RISK_RATIO:.1f}:1 — "
+                f"R:R {rr:.2f}:1 below floor {_rr_gate_txt}:1 — "
                 "setup does not offer enough reward for the risk. Skip."
             )
             db.add(decision)
@@ -1530,7 +1644,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     realized_pnl_today=account_state.realized_pnl_today, regime_override=bool(is_regime_override),
                     vix_mult=_vix_mult, calendar_mult=_cal_mult, opening_mult=_open_mult, regime_rules_mult=_regime_pen_mult)
                 _cv = _conviction_size.long_decision(
-                    cand, rr=rr, rr_floor=MIN_REWARD_RISK_RATIO, market_score=market_score, threshold=threshold,
+                    cand, rr=rr, rr_floor=_rr_gate, market_score=market_score, threshold=threshold,
                     regime_override=bool(is_regime_override), drift_pct=drift_pct, max_drift_pct=max_drift_pct,
                     board_row=_board_rows.get(cand.symbol), hold=_cv_hold)
                 _cv_note = _conviction_size.note(_cv)

@@ -1101,6 +1101,21 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         stop_pct, target_pct = _range_adjusted_stop_target(
             stop_pct, target_pct, tick, entry_price
         )
+        # E286 round 214: an old-rule shortlist entry (BUY NOW / PREPARE TO BUY) that is sold today does not get a multi-day 4-6 % stop / 10-12 % target; width is capped to
+        # INTRADAY_WIDTH_ATR_FRAC x the daily ATR % (R:R ratio kept). INTRADAY_WIDTH_MODE live | log | off. A label that may be carried overnight keeps its width. Never raises.
+        try:
+            if (config.INTRADAY_WIDTH_MODE != "off" and mode == "REAL" and atr_pct is not None
+                    and (cand.decision_label or "").strip().upper() in config.INTRADAY_WIDTH_LABELS
+                    and not entry_product.may_hold_overnight(db, mode, cand.decision_label)):
+                from entry_engine import intraday_width as _iw
+                _iw_s, _iw_t, _iw_note = _iw.cap_for_intraday(stop_pct, target_pct, atr_pct, config.INTRADAY_WIDTH_ATR_FRAC, config.INTRADAY_WIDTH_FLOOR_PCT)
+                if _iw_note:
+                    logger.info("entry_engine: %s %s %s%s", mode, cand.symbol, _iw_note, " (log only)" if config.INTRADAY_WIDTH_MODE == "log" else "")
+                    if config.INTRADAY_WIDTH_MODE == "live":
+                        stop_pct, target_pct = _iw_s, _iw_t
+                        decision.stop_basis = "atr_intraday_cap"
+        except Exception:  # noqa: BLE001 - width is advisory; the old width stands
+            logger.debug("entry_engine: intraday width cap failed for %s (ignored)", cand.symbol, exc_info=True)
         # 2026-09-01 fix (R:R-floor false-reject bug): stop_price/target_price
         # used to be computed off tick.price (raw current LTP) while
         # entry_price is tick.price PLUS the ENTRY_ZONE_UPPER_PCT/2 premium

@@ -637,6 +637,19 @@ def evaluate(
             + account.other_service_open_positions_market_value
         )
         share_cap = total_shared_account_value * (CAPITAL_SHARE_PCT / 100.0)
+        # E286 round 217: the part of position-stocks-service's half that it is not using may be lent (execution/capital_lend.py; CAPITAL_LEND_MODE live | off). Only with a
+        # FRESH peer figure; the fixed share is the floor. Any failure = the fixed share.
+        try:
+            import config as _cfg_cl
+            if (getattr(_cfg_cl, "CAPITAL_LEND_MODE", "off") == "live" and account.other_service_exposure_age_s is not None
+                    and account.other_service_exposure_age_s <= float(_cfg_cl.CAPITAL_LEND_PEER_MAX_AGE_S)):
+                from execution import capital_lend as _cl
+                _lent_cap = _cl.exposure_cap(total_shared_account_value, account.other_service_open_positions_market_value, CAPITAL_SHARE_PCT,
+                                             _cfg_cl.CAPITAL_LEND_RESERVE_FRAC)
+                if _lent_cap is not None and _lent_cap > share_cap:
+                    share_cap = _lent_cap
+        except Exception:  # noqa: BLE001
+            logger.debug("risk_engine: capital lend skipped (fixed share used)", exc_info=True)
         projected_exposure = own_exposure + order_cost
         if total_shared_account_value > 0 and projected_exposure > share_cap:
             if account.other_service_exposure_age_s is None:

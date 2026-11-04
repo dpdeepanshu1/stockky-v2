@@ -195,9 +195,13 @@ def structure(ver) -> Tuple[Optional[str], dict]:
         room, lim = m.get("room_atr"), float(getattr(config, "STRUCTURE_MIN_ROOM_ATR", 0.0) or 0.0)
         if room is not None and lim > 0 and room < lim:
             hard = lim * 0.25
-            if room <= hard:
+            beyond = _cfg("STRUCTURE_ROOM_BEYOND_MULT", 0.0)
+            if room < 0 and 0 < beyond < 1.0:
+                pens["structure_room"] = round(max(END, beyond), 4)     # E286 round 216: the price is already PAST the cached resistance (a breakout), not short of room: a fixed size cut
+            elif room <= hard:
                 return full, {}
-            pens["structure_room"] = ramp((lim - room) / (lim - hard))
+            else:
+                pens["structure_room"] = ramp((lim - room) / (lim - hard))
         rr, lim = m.get("rr"), float(getattr(config, "STRUCTURE_MIN_RR", 0.0) or 0.0)
         if rr is not None and lim > 0 and rr < lim:
             hard = lim * 0.5

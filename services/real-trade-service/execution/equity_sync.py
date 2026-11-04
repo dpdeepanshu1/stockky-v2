@@ -158,6 +158,21 @@ def sync_real_equity(db: Session) -> Optional[float]:
     # config.py's CAPITAL_SHARE_PCT comment for the full incident writeup.
     account.broker_cash_available = round(balance, 2)
     capped_cash = balance * (config.CAPITAL_SHARE_PCT / 100.0)
+    # E286 round 217: use the part of position-stocks-service's half that is idle (execution/capital_lend.py; CAPITAL_LEND_MODE live | off). Needs a FRESH peer figure,
+    # otherwise the fixed share above stays. Never raises; any failure = the fixed share.
+    try:
+        if config.CAPITAL_LEND_MODE == "live":
+            from execution import capital_lend
+            _peer_age = shared_exposure.get_other_service_exposure_age(db)
+            _lent = capital_lend.spendable_cash(
+                balance, market_value, shared_exposure.get_other_service_exposure(db), config.CAPITAL_SHARE_PCT, config.CAPITAL_LEND_RESERVE_FRAC,
+                peer_fresh=_peer_age is not None and _peer_age <= config.CAPITAL_LEND_PEER_MAX_AGE_S)
+            if _lent is not None and _lent > capped_cash:
+                logger.info("equity_sync: capital lend - spendable cash Rs%.2f instead of the fixed %.0f%% share Rs%.2f (Dhan free Rs%.2f)",
+                            _lent, config.CAPITAL_SHARE_PCT, capped_cash, balance)
+                capped_cash = _lent
+    except Exception as _cl_exc:  # noqa: BLE001
+        logger.debug("equity_sync: capital lend skipped (fixed share used): %s", _cl_exc)
     account.cash_available = round(capped_cash, 2)
     account.current_equity = round(capped_cash + market_value, 2)
     # BUG FIX (Issue #3): original condition `if not account.starting_capital`

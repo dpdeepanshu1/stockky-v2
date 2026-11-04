@@ -1755,6 +1755,62 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 held += 1
                 continue
 
+            # ── 1c. E286 round 214: two intraday rules for a LONG bought TODAY (exit_engine/intraday_guard.py; FAILED_ENTRY_EXIT_MODE / PROFIT_LOCK_MODE live | log | off) ──────────
+            # (a) failed entry: never followed through and already down a fraction of its stop distance -> sell now, not at the 4-5 % stop (COFORGE / CARERATING).
+            # (b) profit lock: the stop trails the best price by the stock's own 1-minute range, so a +3 % winner is not left on a breakeven stop (MRPL). Only ever raises the
+            # stop; falls through to the target / ATR trail below (they still run). A carried or swing position is left alone (swing already `continue`d above). Never raises.
+            try:
+                _ig_today = as_aware(position.opened_at).astimezone(IST).date() == now.astimezone(IST).date()
+                if _ig_today and position.status == "OPEN" and (config.FAILED_ENTRY_EXIT_MODE != "off" or config.PROFIT_LOCK_MODE != "off"):
+                    from exit_engine import intraday_guard as _ig
+                    _ig_best = getattr(position, "max_price_seen", None)
+                    _ig_best = max(float(_ig_best), ltp) if _ig_best else None
+                    if config.FAILED_ENTRY_EXIT_MODE != "off" and _ig_best is not None:
+                        _ig_age = (now - as_aware(position.opened_at)).total_seconds() / 60.0
+                        _ig_v = _ig.failed_entry(position.avg_entry_price, position.current_stop, ltp, _ig_best, _ig_age, position.initial_stop_distance,
+                                                 min_age_min=config.FAILED_ENTRY_MIN_AGE_MIN, loss_frac=config.FAILED_ENTRY_LOSS_FRAC,
+                                                 follow_frac=config.FAILED_ENTRY_FOLLOW_FRAC)
+                        if _ig_v["action"] == "EXIT":
+                            if config.FAILED_ENTRY_EXIT_MODE == "log":
+                                logger.info("FAILED_ENTRY_EXIT (log only) %s: %s", position.symbol, _ig_v["reason"])
+                            else:
+                                db.add(models.TradePositionEvent(position_id=position.id, event_type="FAILED_ENTRY_EXIT", detail=_ig_v["reason"][:400]))
+                                _write_exit_decision(db, position, "FULL_EXIT", f"Failed-entry exit: {_ig_v['reason']}"[:300], ltp)
+                                logger.info("FAILED_ENTRY_EXIT %s: %s", position.symbol, _ig_v["reason"])
+                                if mode == "DEMO":
+                                    close_position(db, position, tick, position.qty_open, "failed_entry_exit")
+                                    full_exits += 1
+                                elif _send_real_sell(db, position, position.qty_open, "failed_entry_exit"):
+                                    full_exits += 1
+                                else:
+                                    held += 1
+                                continue
+                    if config.PROFIT_LOCK_MODE != "off" and _ig_best is not None and ltp > position.avg_entry_price:
+                        from entry_engine import orb_bars as _ob_pl
+                        from exit_engine import momentum_health as _mh_pl
+                        _pl_rng = _mh_pl.avg_range_pct(_ob_pl.get_bars(position.symbol), 10)
+                        _pl_v = _ig.profit_lock(position.avg_entry_price, _ig_best, ltp, position.current_stop, _pl_rng, dhan_client.tick_size_for_price(ltp),
+                                                range_mult=config.PROFIT_LOCK_RANGE_MULT, min_gap_pct=config.PROFIT_LOCK_MIN_GAP_PCT,
+                                                max_gap_pct=config.PROFIT_LOCK_MAX_GAP_PCT, fallback_gap_pct=config.PROFIT_LOCK_FALLBACK_GAP_PCT,
+                                                min_gain_pct=config.PROFIT_LOCK_MIN_GAIN_PCT, min_lock_pct=config.PROFIT_LOCK_MIN_LOCK_PCT)
+                        if _pl_v:
+                            if config.PROFIT_LOCK_MODE == "log":
+                                logger.info("PROFIT_LOCK (log only) %s: %s", position.symbol, _pl_v["reason"])
+                            else:
+                                _old_pl = position.current_stop
+                                position.current_stop = float(_pl_v["new_stop"])
+                                db.add(models.TradePositionEvent(position_id=position.id, event_type="PROFIT_LOCK",
+                                                                 detail=f"Stop raised to ₹{position.current_stop:.2f} (was ₹{_old_pl}): {_pl_v['reason']}"[:400]))
+                                db.commit()
+                                _write_exit_decision(db, position, "TRAIL_STOP", f"Profit lock: stop ₹{position.current_stop:.2f} (was ₹{_old_pl}). {_pl_v['reason']}"[:300], ltp)
+                                trailed += 1
+            except Exception as _ig_exc:  # noqa: BLE001 - advisory; never stop the exit loop
+                try:
+                    db.rollback()
+                except Exception as _ig_rb:  # noqa: BLE001
+                    logger.debug("exit intraday-guard rollback failed for %s (ignored): %s", position.symbol, _ig_rb)
+                logger.debug("exit intraday-guard step failed for %s (ignored): %s", position.symbol, _ig_exc)
+
             # ── 2. First target hit — partial exit (60%) ──────────────────────────
             if (
                 position.current_target is not None

@@ -31,6 +31,16 @@ def _e266_conviction_sizing_off_by_default(monkeypatch):
 
 
 @_pytest_g172.fixture(autouse=True)
+def _e286_intraday_rules_off_by_default(monkeypatch):
+    """E286 round 214: the same-day width cap, the failed-entry exit, the profit-lock trail and the capital lend change stops / exits that older tests assert exactly; they are off here
+    and the new tests (test_e286_*.py) call the pure functions or switch them on themselves."""
+    import config as _cfg
+    for _k in ("INTRADAY_WIDTH_MODE", "FAILED_ENTRY_EXIT_MODE", "PROFIT_LOCK_MODE", "CAPITAL_LEND_MODE"):
+        monkeypatch.setattr(_cfg, _k, "off", raising=False)
+    yield
+
+
+@_pytest_g172.fixture(autouse=True)
 def _e252_day_spike_gates_off_by_default(monkeypatch):
     """E252: the day-spike guard and range check read the tick's day stats and previous-day ATR; older tests predate them. tests/test_e252_*.py turn them on."""
     import config as _cfg

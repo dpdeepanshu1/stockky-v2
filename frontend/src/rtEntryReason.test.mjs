@@ -30,7 +30,7 @@ test("the History row shows the entry reason under the exit reason and in the de
   assert.ok(/entryReason\(r\.setup\)/.test(tab) && /data-testid="entry-reason"/.test(tab) && /data-testid="entry-reason-detail"/.test(tab));
   assert.ok(/<dt>Entry reason<\/dt>/.test(tab));
   const er = entryReason(stamp);
-  assert.equal(er.known, true); assert.equal(er.label, "Shortlist (old rule)"); assert.equal(er.slot, "09:30");
+  assert.equal(er.known, true); assert.equal(er.label, "BUY NOW (no setup)"); assert.equal(er.slot, "09:30");
 });
 
 test("the history CSV gains the entry setup and slot columns at the end; a trade without a stamp leaves them empty", () => {

@@ -24,8 +24,11 @@ assert.equal(entryReason({}).known, false, "a stamp without an id is not a stamp
 assert.equal(entryReason("x").known, false);
 const legacy = entryReason({ id: LEGACY_ID, trigger: "", confirmations: [], penalties: {}, size_mult: null, slot: "0930", side: "LONG" });
 assert.equal(legacy.known, true);
-assert.equal(legacy.label, "Shortlist (old rule)");
+assert.equal(legacy.label, "No setup matched");
 assert.equal(legacy.slot, "09:30");
+assert.equal(entryReason({ id: LEGACY_ID, trigger: "BUY NOW", slot: "later" }).label, "BUY NOW (no setup)");
+assert.equal(entryReason({ id: LEGACY_ID, trigger: "BUY NOW", slot: "later" }).slot, "after 10:30");
+assert.match(entryReason({ id: LEGACY_ID }).title, /No new setup/);
 assert.match(legacy.title, /baseline/);
 assert.ok(!/Size x/.test(legacy.title), "no size line when the multiplier is unknown");
 const s2 = entryReason({ id: "S2_PULLBACK", trigger: "VWAP reclaim", confirmations: ["volume", "nifty"], penalties: { gap: -0.1 }, size_mult: 0.5, slot: "0920", side: "SHORT" });

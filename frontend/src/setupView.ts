@@ -40,17 +40,22 @@ export function entryReason(stamp: SetupStamp | null | undefined): EntryReason {
   if (!stamp || typeof stamp !== "object" || typeof stamp.id !== "string" || !stamp.id) {
     return { known: false, label: "-", slot: "", title: "No setup stamp: this trade was opened before entries were stamped." };
   }
-  const slot = slotLabel(stamp.slot);
+  const slot0 = slotLabel(stamp.slot);
+  const slot = slot0 === "later" ? "after 10:30" : slot0;      // round 218: "later" alone read like part of the label
   const conf = Array.isArray(stamp.confirmations) ? stamp.confirmations.filter((c) => typeof c === "string" && c) : [];
   const pen = stamp.penalties && typeof stamp.penalties === "object" ? Object.entries(stamp.penalties).filter(([, v]) => isNum(v)) : [];
   const parts: string[] = [];
-  parts.push(stamp.id === LEGACY_ID ? "Taken by the old shortlist rule (the baseline the new setups are compared with)." : `Setup ${setupName(stamp.id)}.`);
+  const legacy = stamp.id === LEGACY_ID;
+  parts.push(legacy ? "No new setup (S1 / S2 / S3) matched, so the old shortlist rule took this trade (the baseline the new setups are compared with)." : `Setup ${setupName(stamp.id)}.`);
   if (stamp.trigger) parts.push(`Trigger: ${stamp.trigger}.`);
   if (conf.length) parts.push(`Confirmations: ${conf.join(", ")}.`);
   if (pen.length) parts.push(`Penalties: ${pen.map(([k, v]) => `${k} ${v}`).join(", ")}.`);
   if (isNum(stamp.size_mult)) parts.push(`Size x${stamp.size_mult}.`);
   parts.push(`Entry slot ${slot}${stamp.side ? `, ${String(stamp.side).toLowerCase()}` : ""}.`);
-  return { known: true, label: setupName(stamp.id), slot, title: parts.join(" ") };
+  // round 218: an old-rule trade reads "<its shortlist label> (no setup)", not "Shortlist (old rule)"; the scorecard keeps the baseline name via setupName
+  const trig = typeof stamp.trigger === "string" ? stamp.trigger.trim() : "";
+  const label = legacy ? (trig ? `${trig} (no setup)` : "No setup matched") : setupName(stamp.id);
+  return { known: true, label, slot, title: parts.join(" ") };
 }
 
 export type Tone = "good" | "warn" | "bad" | undefined;

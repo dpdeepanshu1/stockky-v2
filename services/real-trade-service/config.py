@@ -638,6 +638,10 @@ STRUCTURE_BEARISH_BLOCK = ((os.getenv("STRUCTURE_BEARISH_BLOCK") or "").strip() 
 STRUCTURE_BREAKOUT_VOLUME_MODE = (lambda v: v if v in ("off", "enforce") else "enforce")((os.getenv("STRUCTURE_BREAKOUT_VOLUME_MODE") or "enforce").strip().lower())      # E285 round 88: no log value
 STRUCTURE_BREAKOUT_MIN_VOL_RATIO = _og_float("STRUCTURE_BREAKOUT_MIN_VOL_RATIO", 1.2)    # same 1.2 x average as the candle `volume_confirmed` flag
 STRUCTURE_BREAKOUT_BARS = int(_og_float("STRUCTURE_BREAKOUT_BARS", 5.0))
+# E286 round 216: a live price already ABOVE the cached resistance (raw room < 0: a breakout or a gap through it) is not "no room" (4 Nov: 11 of 25 WAITs were refused as
+# "0.0 ATR of room"). With STRUCTURE_ROOM_BEYOND_MULT between 0 and 1 the entry goes on at that size multiplier (0.6 = 60 % size) instead of a refusal. The chase / stretch ceilings, the thin-volume breakout
+# refusal, a bearish structure and SOFT_GATES_MODE=veto still refuse; a price still UNDER the resistance by less than a quarter of the room floor is refused as before. 0 = the old refusal.
+STRUCTURE_ROOM_BEYOND_MULT = min(1.0, max(0.0, _og_float("STRUCTURE_ROOM_BEYOND_MULT", 0.6)))
 STRUCTURE_BEARISH_BOS_BARS = int(_og_float("STRUCTURE_BEARISH_BOS_BARS", 5.0))                                 # a bearish BOS this recent (and not failed) counts
 STRUCTURE_MAX_AGE_DAYS = _og_float("STRUCTURE_MAX_AGE_DAYS", 5.0)         # last structure bar older than this = stale = no opinion (group415: was 7)
 STRUCTURE_MAX_PRICE_DEV_PCT = _og_float("STRUCTURE_MAX_PRICE_DEV_PCT", 15.0)  # live entry vs structure close further apart = split/bad data = no opinion
@@ -822,6 +826,44 @@ FLOW_EXIT_MIN_PROFIT_R = max(0.0, _og_float("FLOW_EXIT_MIN_PROFIT_R", 0.5))
 FLOW_EXIT_TIMEOUT_S = max(0.2, _og_float("FLOW_EXIT_TIMEOUT_S", 0.6))
 FLOW_EXIT_SAME_DAY_ONLY = _og_float("FLOW_EXIT_SAME_DAY_ONLY", 1.0) != 0.0
 FLOW_RECORD = _of_on("FLOW_RECORD")
+
+# ── E286 round 214: two intraday exit rules for a LONG bought TODAY (exit_engine/intraday_guard.py; real-trade only; a carried / swing position is left alone) ──
+#   FAILED_ENTRY_EXIT_MODE     live (default) | log | off   sell early a trade that never worked and has lost a fraction of its stop distance (COFORGE / CARERATING)
+#   FAILED_ENTRY_MIN_AGE_MIN   the trade must be at least this many minutes old (default 20)
+#   FAILED_ENTRY_LOSS_FRAC     ... and be at least this fraction of its initial stop distance (R) below entry (default 0.35)
+#   FAILED_ENTRY_FOLLOW_FRAC   "never worked" = best price gained no more than this many R above entry (default 0.15)
+#   PROFIT_LOCK_MODE           live (default) | log | off   trail a winner's stop behind its BEST price by the stock's own 1-minute range (MRPL stayed at breakeven at +3.3 %)
+#   PROFIT_LOCK_RANGE_MULT     trail gap = this x the average 1-minute range % (default 3.0), at least PROFIT_LOCK_MIN_GAP_PCT (0.35) and at most PROFIT_LOCK_MAX_GAP_PCT (1.5)
+#   PROFIT_LOCK_FALLBACK_GAP_PCT gap used when there are no 1-minute bars (default 0.6)
+#   PROFIT_LOCK_MIN_GAIN_PCT   starts once the best gain reaches this % (default 0.8); the stop never goes below entry + PROFIT_LOCK_MIN_LOCK_PCT (0.1 %)
+FAILED_ENTRY_EXIT_MODE = (os.getenv("FAILED_ENTRY_EXIT_MODE") or "live").strip().lower()
+if FAILED_ENTRY_EXIT_MODE not in ("live", "log", "off"):
+    FAILED_ENTRY_EXIT_MODE = "off"                                           # a typo must not switch it on
+FAILED_ENTRY_MIN_AGE_MIN = max(1.0, _og_float("FAILED_ENTRY_MIN_AGE_MIN", 20.0))
+FAILED_ENTRY_LOSS_FRAC = min(1.0, max(0.1, _og_float("FAILED_ENTRY_LOSS_FRAC", 0.35)))
+FAILED_ENTRY_FOLLOW_FRAC = min(1.0, max(0.0, _og_float("FAILED_ENTRY_FOLLOW_FRAC", 0.15)))
+PROFIT_LOCK_MODE = (os.getenv("PROFIT_LOCK_MODE") or "live").strip().lower()
+if PROFIT_LOCK_MODE not in ("live", "log", "off"):
+    PROFIT_LOCK_MODE = "off"
+PROFIT_LOCK_RANGE_MULT = max(0.5, _og_float("PROFIT_LOCK_RANGE_MULT", 3.0))
+PROFIT_LOCK_MIN_GAP_PCT = max(0.05, _og_float("PROFIT_LOCK_MIN_GAP_PCT", 0.35))
+PROFIT_LOCK_MAX_GAP_PCT = max(PROFIT_LOCK_MIN_GAP_PCT, _og_float("PROFIT_LOCK_MAX_GAP_PCT", 1.5))
+PROFIT_LOCK_FALLBACK_GAP_PCT = max(0.1, _og_float("PROFIT_LOCK_FALLBACK_GAP_PCT", 0.6))
+PROFIT_LOCK_MIN_GAIN_PCT = max(0.1, _og_float("PROFIT_LOCK_MIN_GAIN_PCT", 0.8))
+PROFIT_LOCK_MIN_LOCK_PCT = max(0.0, _og_float("PROFIT_LOCK_MIN_LOCK_PCT", 0.1))
+
+# ── E286 round 214: stop / target width of an old-rule shortlist entry sold the same day (entry_engine/intraday_width.py; REAL only) ──
+#   INTRADAY_WIDTH_MODE        live (default) | log | off   live = the stop is capped at max(INTRADAY_WIDTH_FLOOR_PCT, INTRADAY_WIDTH_ATR_FRAC x the daily ATR %) and the target keeps
+#                              the same reward:risk ratio; log = say what it would do; off = the old 1.5 x ATR (2-6 %) stop and 3 x ATR target
+#   INTRADAY_WIDTH_ATR_FRAC    share of the daily ATR % a same-day trade may risk (default 0.6)
+#   INTRADAY_WIDTH_FLOOR_PCT   the cap is never tighter than this % of the price (default 1.2)
+#   INTRADAY_WIDTH_LABELS      comma list of candidate decision labels the cap applies to (default "BUY NOW,PREPARE TO BUY" = the shortlist). A label that may be held overnight is left alone.
+INTRADAY_WIDTH_MODE = (os.getenv("INTRADAY_WIDTH_MODE") or "live").strip().lower()
+if INTRADAY_WIDTH_MODE not in ("live", "log", "off"):
+    INTRADAY_WIDTH_MODE = "off"                                              # a typo must not switch it on
+INTRADAY_WIDTH_ATR_FRAC = min(2.0, max(0.2, _og_float("INTRADAY_WIDTH_ATR_FRAC", 0.6)))
+INTRADAY_WIDTH_FLOOR_PCT = min(6.0, max(0.5, _og_float("INTRADAY_WIDTH_FLOOR_PCT", 1.2)))
+INTRADAY_WIDTH_LABELS = frozenset(x.strip().upper() for x in ((os.getenv("INTRADAY_WIDTH_LABELS") or "").strip() or "BUY NOW,PREPARE TO BUY").split(",") if x.strip())
 
 # group 330 (2026-10-12): six more pre-buy / pre-carry checks. ALL fail open (no reading = no opinion) and every one has its own off switch.
 #  * India VIX (market fear), read from market-data GET /quote/INDIAVIX:
@@ -1520,6 +1562,14 @@ SHARED_GATES_FAIL_CLOSED = ((os.getenv("SHARED_GATES_FAIL_CLOSED") or "true").st
 # risk_engine/engine.py's new "capital_share_cap" check (caps this
 # service's TOTAL exposure — cash + open positions — not just new cash).
 CAPITAL_SHARE_PCT = float(((os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT") or "").strip() or "50.0"))
+# E286 round 217: Real Trade may use the part of Position Stocks' half that is idle (execution/capital_lend.py). CAPITAL_LEND_MODE live (default) | off (the fixed 50 % cash and exposure caps).
+# CAPITAL_LEND_RESERVE_FRAC = the share of the peer's idle allowance that stays free for it (default 0.5; 1 = all of it stays reserved, 0 = none; CAPITAL_LEND_MODE=off is the exact old fixed split). The peer's exposure must have been
+# published within CAPITAL_LEND_PEER_MAX_AGE_S (default 900 s), otherwise the fixed share applies.
+CAPITAL_LEND_MODE = (os.getenv("CAPITAL_LEND_MODE") or "live").strip().lower()
+if CAPITAL_LEND_MODE not in ("live", "off"):
+    CAPITAL_LEND_MODE = "off"                                                # a typo must not switch it on
+CAPITAL_LEND_RESERVE_FRAC = min(1.0, max(0.0, _og_float("CAPITAL_LEND_RESERVE_FRAC", 0.5)))
+CAPITAL_LEND_PEER_MAX_AGE_S = max(60.0, _og_float("CAPITAL_LEND_PEER_MAX_AGE_S", 900.0))
 
 # ── Transaction-cost model (2026-09-18 — user audit finding) ─────────────────
 # Codebase audit found ZERO awareness of brokerage/STT/exchange charges/GST/

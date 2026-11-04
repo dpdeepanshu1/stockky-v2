@@ -106,8 +106,11 @@ services:
       ORACLE_WALLET_PASSWORD: ${ORACLE_WALLET_PASSWORD:-}
       ORACLE_WALLET_DIR: /oracle_wallet
       TNS_ADMIN: /oracle_wallet
+      EVENT_STATE_FILE: /data/event/state.json
     volumes:
       - ${ORACLE_WALLET_HOST_DIR:-./oracle_wallet}:/oracle_wallet:ro
+      # round 179: event subscriptions survive container recreates (USE_REDIS=0 kept them in memory only)
+      - event-state:/data/event
     depends_on:
       - market-data-service
     restart: unless-stopped
@@ -783,6 +786,8 @@ services:
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
   bar-records:
+  # round 179: event service subscription state
+  event-state:
   # 2026-10-21: parsed AngelOne scrip-master snapshots (one per service) so a recreate warm-starts
   scrip-cache-md:
   scrip-cache-ps:

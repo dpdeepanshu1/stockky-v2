@@ -190,8 +190,33 @@ def _redis_set(key: str, value, ttl: int = None):
         logger.debug("Redis set failed for %s: %s", key, e)
 
 
+_STATE_FILE = os.getenv("EVENT_STATE_FILE", "/data/event/state.json")
+
+
+def _file_state_load():
+    """Round 179: with USE_REDIS=0 the subscription list lived only in memory and was lost on every container recreate
+    (feed then matched 0 symbols -> 0 events). Fall back to the small JSON file on the mounted volume."""
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) and isinstance(d.get("subscriptions"), list) else None
+    except Exception:
+        return None
+
+
+def _file_state_save(state: dict):
+    try:
+        os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+        tmp = _STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, default=str)
+        os.replace(tmp, _STATE_FILE)
+    except Exception as e:  # noqa: BLE001 - persistence is best-effort, never break the request
+        logger.debug("event state file save failed: %s", e)
+
+
 def _load_state() -> dict:
-    state = _redis_get(STATE_KEY) or {"subscriptions": [], "last_known": {}}
+    state = _redis_get(STATE_KEY) or _file_state_load() or {"subscriptions": [], "last_known": {}}
     # subscription_meta (2026-09-03 dynamic watchlist upgrade): tracks how
     # each symbol got onto the list — "user" (added via the notification
     # watchlist, never auto-pruned) vs "auto" (added by real-trade-service's
@@ -207,6 +232,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict):
     _redis_set(STATE_KEY, state)
+    _file_state_save(state)
 
 
 class SubscribeRequest(BaseModel):

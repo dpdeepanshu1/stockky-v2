@@ -187,3 +187,26 @@ def test_slow_cycle_logs_one_rate_limited_warning(feed, caplog):
     msgs = [r.getMessage() for r in caplog.records if "poll cycle" in r.getMessage()]
     assert len(msgs) == 1 and "491 symbols" in msgs[0] and "22.5s" in msgs[0]
     assert feed._last_cycle_s == 30.0
+
+
+def test_round196_slow_cycle_warning_carries_a_breakdown(feed, caplog):
+    feed._last_slow_cycle_log = 0.0
+    feed._cycle_stats_reset()
+    feed._cycle_stats_note(4.0)
+    feed._cycle_stats_note(9.5)
+    feed._cycle_stats_note(1.0, failed=True)
+    with caplog.at_level(logging.WARNING):
+        feed._note_cycle(22.5, 491)
+    msg = [r.getMessage() for r in caplog.records if "poll cycle" in r.getMessage()][0]
+    assert "Breakdown: 3 batch(es)" in msg and "14.5s summed" in msg and "slowest 9.5s" in msg and "1 failed" in msg
+
+
+def test_round196_breakdown_without_timings_says_so(feed):
+    feed._cycle_stats_reset()
+    assert "no batch timings" in feed._cycle_breakdown(20.0)
+
+
+def test_round196_reset_clears_the_counters(feed):
+    feed._cycle_stats_note(3.0, failed=True)
+    feed._cycle_stats_reset()
+    assert feed._cycle_stats == {"batches": 0, "request_s": 0.0, "slowest_s": 0.0, "failed": 0}

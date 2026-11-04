@@ -18,6 +18,7 @@ def _long(board=90, rvol=None, tech=None, zone=None, catalyst=False):
 
 def _force(monkeypatch, board, zone=None):
     from screening import shortlist
+    monkeypatch.setattr(config, "CONVICTION_SIZING_ENABLED", True, raising=False)   # conftest turns it off for older tests
     monkeypatch.setattr(shortlist, "recent", lambda s, side: {"board_conviction": board, "zone_score": zone})
     monkeypatch.setattr(conviction.rr_floor, "reward_risk", lambda levels: None)
 

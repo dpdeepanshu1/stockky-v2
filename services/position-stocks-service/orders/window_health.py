@@ -26,10 +26,26 @@ logger = logging.getLogger("position-stocks-window-health")
 
 _CACHE_TTL_S = 300.0
 _cache: dict = {"at": 0.0, "disabled": {}}
+# Round 194: the "window(s) paused for losing" line was written on EVERY cycle (about every 10 s all session, the same text each time). It is now INFO when the
+# set of paused windows / their reasons changes and then at most once per WINDOW_PAUSE_LOG_EVERY_S (default 600 s); other cycles log at DEBUG. Pausing itself is unchanged.
+_log_state: dict = {"key": None, "at": 0.0}
+
+
+def _log_every_s() -> float:
+    raw = getattr(config, "WINDOW_PAUSE_LOG_EVERY_S", None)
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return 600.0
+    try:
+        v = float(text)
+    except ValueError:
+        return 600.0
+    return v if v >= 0 else 600.0
 
 
 def reset() -> None:
     _cache.update({"at": 0.0, "disabled": {}})
+    _log_state.update(key=None, at=0.0)
 
 
 def _closed(rows: Iterable) -> list:
@@ -108,8 +124,14 @@ def filter_candidates(db, candidates: list) -> Tuple[list, List[str]]:
             else:
                 kept.append(c)
         if dropped:
-            logger.info("position-stocks: window(s) paused for losing - %s; %d candidate(s) left out (%s)",
-                        "; ".join(f"{w} {r}" for w, r in dis.items()), len(dropped), ", ".join(dropped[:8]))
+            key = tuple(sorted(dis.items()))
+            now = time.monotonic()
+            loud = key != _log_state["key"] or now - _log_state["at"] >= _log_every_s()
+            if loud:
+                _log_state.update(key=key, at=now)
+            (logger.info if loud else logger.debug)(
+                "position-stocks: window(s) paused for losing - %s; %d candidate(s) left out (%s)",
+                "; ".join(f"{w} {r}" for w, r in dis.items()), len(dropped), ", ".join(dropped[:8]))
         return kept, dropped
     except Exception:  # noqa: BLE001
         return candidates, []

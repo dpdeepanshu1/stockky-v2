@@ -117,6 +117,31 @@ DB_BATCH_WRITES = ((os.getenv("ANGELONE_FEED_DB_BATCH") or "").strip() or "1") n
 SLOW_CYCLE_WARN_S = float(((os.getenv("ANGELONE_FEED_SLOW_CYCLE_WARN_S") or "").strip() or "15.0"))
 SLOW_CYCLE_LOG_EVERY_S = 300.0
 _last_cycle_s: Optional[float] = None
+# Round 196: per-cycle breakdown for the slow-cycle warning, so one log line says WHERE the time went (AngelOne request time vs waiting between batches vs failed
+# batches) instead of asking you to guess. Evidence only: nothing reads it to change polling.
+_cycle_stats: Dict[str, float] = {"batches": 0, "request_s": 0.0, "slowest_s": 0.0, "failed": 0}
+
+
+def _cycle_stats_reset() -> None:
+    _cycle_stats.update(batches=0, request_s=0.0, slowest_s=0.0, failed=0)
+
+
+def _cycle_stats_note(request_s: float, failed: bool = False) -> None:
+    _cycle_stats["batches"] += 1
+    _cycle_stats["request_s"] += request_s
+    _cycle_stats["slowest_s"] = max(_cycle_stats["slowest_s"], request_s)
+    if failed:
+        _cycle_stats["failed"] += 1
+
+
+def _cycle_breakdown(elapsed_s: float) -> str:
+    st = _cycle_stats
+    n = int(st["batches"])
+    if n <= 0:
+        return "no batch timings recorded"
+    gaps = n * float(BATCH_GAP_S)
+    return (f"{n} batch(es): AngelOne request time {st['request_s']:.1f}s summed (slowest {st['slowest_s']:.1f}s, run {int(FEED_BATCH_CONCURRENCY)} at a time), "
+            f"{gaps:.1f}s of waiting between batches, {int(st['failed'])} failed; rest of the {elapsed_s:.1f}s is session refresh / DB hand-off")
 _last_slow_cycle_log = 0.0
 
 # group211: the poll no longer sends the whole universe every cycle. Symbols held in an open position and
@@ -722,8 +747,8 @@ def _note_cycle(elapsed_s: float, n_symbols: int) -> None:
             logger.warning(
                 "AngelOne feed: a poll cycle over %d symbols took %.1fs (> %.0fs) - live_quotes rows "
                 "polled early in the cycle go stale before the next pass; check DB write latency "
-                "(ANGELONE_FEED_DB_BATCH) and AngelOne batch latency",
-                n_symbols, elapsed_s, SLOW_CYCLE_WARN_S,
+                "(ANGELONE_FEED_DB_BATCH) and AngelOne batch latency. Breakdown: %s",
+                n_symbols, elapsed_s, SLOW_CYCLE_WARN_S, _cycle_breakdown(elapsed_s),
             )
 
 
@@ -825,6 +850,7 @@ def start_feed_background(symbols: list) -> None:
                 # position-stocks-service. Skipping just this cycle on a
                 # session-refresh failure (and retrying next cycle) keeps
                 # one bad refresh from taking the whole feed down.
+                _cycle_stats_reset()
                 try:
                     await session.ensure_session()
                 except Exception as e:
@@ -852,18 +878,21 @@ def start_feed_background(symbols: list) -> None:
                             pass
                         # group230: ONE quick retry when the connection itself could not be made (a single
                         # "quote batch (1-11) failed: ConnectError" left that batch stale for a whole cycle)
+                        _t_req = time.monotonic()
                         for _attempt in (1, 2):
                             try:
                                 if lane is None:
                                     fetched = await session.get_quotes_batch("NSE", batch)
                                 else:
                                     fetched = await session.get_quotes_batch("NSE", batch, lane=lane)
+                                _cycle_stats_note(time.monotonic() - _t_req)
                                 break
                             except Exception as _ce:  # noqa: BLE001
                                 if (_attempt == 1 and type(_ce).__name__ in ("ConnectError", "ConnectTimeout")
                                         and _current() and not _cooldown_running()):
                                     await asyncio.sleep(0.5)
                                     continue
+                                _cycle_stats_note(time.monotonic() - _t_req, failed=True)
                                 raise
                         if not _current():
                             return   # superseded/stopped while the request was in flight: drop the stale ticks

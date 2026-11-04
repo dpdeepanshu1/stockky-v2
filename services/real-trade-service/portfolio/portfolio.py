@@ -52,6 +52,24 @@ from tz_utils import IST, ist_today_str
 
 logger = logging.getLogger("real-trade-portfolio")
 
+# Round 195: the holdings sync runs about every 20 s and wrote the same "same-day CNC row MRPL - bought 6 but net qty is 3" INFO line each time.
+# It is INFO the first time a (symbol, bought, net) combination is seen and then at most once per _CNC_PART_SOLD_LOG_EVERY_S; DEBUG in between.
+_CNC_PART_SOLD_LOG_EVERY_S = 3600.0
+_cnc_part_sold_logged: dict = {}
+
+
+def _log_cnc_part_sold(sym: str, bought: int, net: int) -> None:
+    key = (sym, bought, net)
+    now = time.monotonic()
+    last = _cnc_part_sold_logged.get(key)
+    loud = last is None or now - last >= _CNC_PART_SOLD_LOG_EVERY_S
+    if loud:
+        _cnc_part_sold_logged[key] = now
+    (logger.info if loud else logger.debug)(
+        "import_broker_holdings: same-day CNC row %s — bought %d but net qty is %d (part sold "
+        "today); importing the net quantity.", sym, bought, net,
+    )
+
 
 def _accumulate_net_cost(position: "models.TradePosition", qty_closed: int,
                           exit_price: float, pnl_leg: float, now: datetime) -> None:
@@ -582,10 +600,7 @@ async def import_broker_holdings(db: Session) -> int:
                     )
                     continue
                 if _net_int < _qty_int:
-                    logger.info(
-                        "import_broker_holdings: same-day CNC row %s — bought %d but net qty is %d (part sold "
-                        "today); importing the net quantity.", _sym, _qty_int, _net_int,
-                    )
+                    _log_cnc_part_sold(_sym, _qty_int, _net_int)
                     _qty_int = _net_int
         # Re-shape to match the holdings row schema so the common candidate
         # loop below needs no branching.

@@ -47,7 +47,23 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # was always the neutral 0.0 fallback). Inference Providers are reached through the OpenAI-compatible router.
 # Both are overridable; the model must be one your HF token can use through Inference Providers.
 HF_API_URL = (os.getenv("HF_API_URL") or "").strip() or "https://router.huggingface.co/v1/chat/completions"
-HF_MODEL = (os.getenv("HF_MODEL") or "").strip() or "mistralai/Mistral-7B-Instruct-v0.2"
+HF_MODEL = (os.getenv("HF_MODEL") or "").strip() or "meta-llama/Llama-3.1-8B-Instruct"
+# Round 192: the old default (Mistral-7B-Instruct-v0.2) is no longer served by any Inference Provider, so every call got
+# "model not supported" and sentiment was off for 6 h at a time. When HF says a model is not supported, the next one in
+# HF_MODEL_FALLBACKS (comma list, blank = default list, "none" = no fallback) is tried in the same call and a model that
+# was refused is not asked again until the service restarts.
+_HF_DEFAULT_FALLBACKS = "Qwen/Qwen2.5-7B-Instruct,mistralai/Mistral-7B-Instruct-v0.3"
+_HF_BAD_MODELS: set = set()
+
+
+def _hf_models() -> list:
+    raw = (os.getenv("HF_MODEL_FALLBACKS") or "").strip() or _HF_DEFAULT_FALLBACKS
+    extra = [] if raw.lower() == "none" else [m.strip() for m in raw.split(",") if m.strip()]
+    out: list = []
+    for m in [HF_MODEL] + extra:
+        if m not in out and m not in _HF_BAD_MODELS:
+            out.append(m)
+    return out
 # After a network-level failure (DNS/connect/timeout) skip the call for a while instead of retrying per headline.
 HF_FAILURE_BACKOFF_SEC = 300.0
 _HF_BACKOFF_UNTIL = 0.0
@@ -690,23 +706,31 @@ def _score_headline_hf(title: str) -> Optional[float]:
     if time.monotonic() < _HF_BACKOFF_UNTIL:
         return None
     try:
-        payload = {
-            "model": HF_MODEL,
-            "messages": [{
-                "role": "user",
-                "content": (
-                    "Classify the sentiment of this stock news headline as positive, negative, "
-                    f"or neutral. Answer with one word: {title}"
-                ),
-            }],
-            "max_tokens": 10,
-            "temperature": 0.1,
-        }
         headers = {
             "Authorization": f"Bearer {HF_API_KEY}",
             "Content-Type": "application/json"
         }
-        resp = httpx.post(HF_API_URL, json=payload, headers=headers, timeout=5)
+        _tried: list = []
+        resp = None
+        for _model in (_hf_models() or [HF_MODEL]):
+            payload = {
+                "model": _model,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Classify the sentiment of this stock news headline as positive, negative, "
+                        f"or neutral. Answer with one word: {title}"
+                    ),
+                }],
+                "max_tokens": 10,
+                "temperature": 0.1,
+            }
+            resp = httpx.post(HF_API_URL, json=payload, headers=headers, timeout=5)
+            _tried.append(_model)
+            if resp.status_code == 400 and "not supported" in str(getattr(resp, "text", "") or "").lower():
+                _HF_BAD_MODELS.add(_model)          # refused: do not ask again; try the next candidate
+                continue
+            break
         if resp.status_code == 200:
             data = resp.json()
             result = str(data["choices"][0]["message"]["content"]).strip().lower()
@@ -729,9 +753,9 @@ def _score_headline_hf(title: str) -> Optional[float]:
                     _pause = max(_pause, 6 * 3600.0)
                 _HF_BACKOFF_UNTIL = time.monotonic() + _pause
                 logger.warning(
-                    "HF API error: %s%s - check HF_MODEL (%s) is served to your token through Inference "
+                    "HF API error: %s%s - check HF_MODEL / HF_MODEL_FALLBACKS (tried: %s) is served to your token through Inference "
                     "Providers and the token may call them; skipping Hugging Face sentiment for %ds",
-                    resp.status_code, f" ({_detail})" if _detail else "", HF_MODEL, int(_pause),
+                    resp.status_code, f" ({_detail})" if _detail else "", ", ".join(_tried), int(_pause),
                 )
             else:
                 logger.warning(f"HF API error: {resp.status_code}")

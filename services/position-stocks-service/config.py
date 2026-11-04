@@ -944,6 +944,7 @@ WINDOW_AUTODISABLE_DAYS = _get_int("WINDOW_AUTODISABLE_DAYS", 7)
 WINDOW_AUTODISABLE_MIN_TRADES = _get_int("WINDOW_AUTODISABLE_MIN_TRADES", 8)
 WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT = _get_float("WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT", 35.0)
 WINDOW_TUNING_MIN_TRADES = _get_int("WINDOW_TUNING_MIN_TRADES", 20)
+WINDOW_PAUSE_LOG_EVERY_S = _get_float("WINDOW_PAUSE_LOG_EVERY_S", 600.0)   # round 194: repeat the "window(s) paused for losing" INFO line at most this often while nothing changed
 BROKERAGE_PER_ORDER = _get_float("BROKERAGE_PER_ORDER", 0.0)              # flat Rs per executed leg
 STT_INTRADAY_SELL_PCT = _get_float("STT_INTRADAY_SELL_PCT", 0.025)         # SELL leg only
 # group 262: Dhan's published NSE equity card = 0.00297 % exchange transaction charge (since 1 Oct 2024; was 0.00325 here,

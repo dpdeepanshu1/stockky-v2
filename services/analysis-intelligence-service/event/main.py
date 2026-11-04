@@ -1751,6 +1751,19 @@ def list_subscriptions(source: Optional[str] = None):
     return {"subscriptions": state["subscriptions"]}
 
 
+def _check_breakdown(tm: dict) -> str:
+    """round 197: one sentence on where a cut-short /check pass spent its time. Never raises (it is only a log suffix)."""
+    try:
+        n_f, n_c = int(tm.get("fresh", 0)), int(tm.get("cached", 0))
+        per = (tm.get("fresh_s", 0.0) / n_f) if n_f else 0.0
+        return ("Breakdown: %d fresh fetch(es) %.0fs summed (%.1fs each), %d cached %.1fs, %.0fs of 1 s stagger, "
+                "%.0fs waiting for live requests (%d symbol(s) had to wait); the rest is state load / save"
+                % (n_f, tm.get("fresh_s", 0.0), per, n_c, tm.get("cached_s", 0.0), tm.get("stagger_s", 0.0),
+                   tm.get("yield_s", 0.0), int(tm.get("yielded", 0))))
+    except Exception:  # noqa: BLE001 - a log suffix must never break the pass
+        return "Breakdown: unavailable"
+
+
 @app.get("/check")
 def check_for_changes():
     """Diff each subscribed symbol against last known snapshot.
@@ -1778,23 +1791,36 @@ def check_for_changes():
     _budget = float(os.getenv("CHECK_MAX_SECONDS", "240") or 0)
     done = 0
     _need_sleep = False
+    # round 197: where the pass spends its budget (evidence only, nothing reads it). 4 Nov VM log: 60 of 469 symbols in 241 s = ~4 s each, and
+    # the pass cannot say whether that is the fresh fetch, the 1 s stagger or the yield to live requests.
+    _tm = {"fresh": 0, "cached": 0, "fresh_s": 0.0, "cached_s": 0.0, "stagger_s": 0.0, "yield_s": 0.0, "yielded": 0}
     for symbol in order:
         if _need_sleep:
+            _ts = time.monotonic()
             time.sleep(1)
+            _tm["stagger_s"] += time.monotonic() - _ts
         _y = 0
+        _ty = time.monotonic()
         while _live_requests[0] > 0 and _y < 20:     # up to ~10 s per symbol
             time.sleep(0.5)
             _y += 1
+        if _y:
+            _tm["yielded"] += 1
+            _tm["yield_s"] += time.monotonic() - _ty
         if _budget > 0 and time.monotonic() - _t0 > _budget:
-            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d)",
-                           time.monotonic() - _t0, done, total, _budget, (start + done) % total)
+            logger.warning("check_for_changes: stopped after %.0fs at %d/%d symbols (CHECK_MAX_SECONDS=%.0f); the rest are next pass (resumes at index %d). %s",
+                           time.monotonic() - _t0, done, total, _budget, (start + done) % total, _check_breakdown(_tm))
             break
 
         try:
             _was_cached = bool(_redis_get(f"{EVENT_CACHE_PREFIX}{_normalize(symbol)}"))
         except Exception:  # noqa: BLE001 - only decides whether to stagger
             _was_cached = False
+        _tf = time.monotonic()
         current = _fetch_events(symbol)
+        _dt = time.monotonic() - _tf
+        _tm["cached" if _was_cached else "fresh"] += 1
+        _tm["cached_s" if _was_cached else "fresh_s"] += _dt
         _need_sleep = not _was_cached
         previous = state["last_known"].get(symbol, {})
         diff_reasons = _diff_events(previous, current)

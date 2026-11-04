@@ -653,6 +653,7 @@ services/analysis-intelligence-service/tests/test_peers.py
 services/analysis-intelligence-service/tests/test_rate_limit_report.py
 services/analysis-intelligence-service/tests/test_rate_limiter.py
 services/analysis-intelligence-service/tests/test_round187_news_sources.py
+services/analysis-intelligence-service/tests/test_round197_check_breakdown.py
 services/analysis-intelligence-service/tests/test_sentiment_main.py
 services/analysis-intelligence-service/tests/test_sentiment_market_data.py
 services/analysis-intelligence-service/tests/test_service_main.py

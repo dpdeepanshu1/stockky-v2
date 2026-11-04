@@ -177,6 +177,8 @@ _DIVIDEND = _rx(r"\bdividends?\b", r"\bex-dividend\b", r"\bpayout\b")
 _CORP = _rx(r"\bbuy-?\s?back\b", r"\bbonus\b", r"\b(?:stock|share)s? split\b|\bsplit\b", r"\brights? issue\b", r"\bqip\b", r"\bpreferential (?:issue|allotment)\b", r"\b(?:de)?merger\b|\bdemerger\b|\bamalgamat\w+", r"\bfpo\b|\bofs\b|\boffer for sale\b",
             r"\bncds?\b|\bnon-convertible\b", r"\bfund[- ]?raising\b|\braise[sd]? (?:rs|funds|capital)\b|\braises? rs\b", r"\bdelist\w*", r"\btakeover\b|\bopen offer\b", r"\bwarrants?\b", r"\bconvertible\b", r"\bdilution\b",
             r"\bcompletes?\s+(?:the\s+)?(?:acquisition|merger|takeover|buyout)\b", r"\bacquisition of\b", r"\bacqui(?:res?|sition)\b.*\b(?:stake|company|firm|business)\b|\b(?:stake|company|business)\b.*\bacqui\w+", r"\bdemerg\w+", r"\brecord date\b")
+_IPO_MOVE = _rx(r"\b(?:surge[sd]?|jump(?:s|ed)?|rall(?:y|ies|ied)|soar(?:s|ed)?|zoom(?:s|ed)?|gain(?:s|ed)?|tumbl(?:e|es|ed)|plunge[sd]?|slump(?:s|ed)?|fall(?:s|en)?|drop(?:s|ped)?|slide[sd]?|debut|lists?|listed|listing|from (?:the )?ipo price|ipo price)\b")
+_IPO_CUE = _rx(r"\bipo\b", r"\bipos\b", r"\bofs\b", r"\bfpo\b", r"\boffer for sale\b")
 _GUIDE_EXPLICIT = _rx(r"\bguidance\b", r"\boutlook\b", r"\bforecast\b", r"\bprojection\b", r"\bexpects?\b.*\b(?:growth|sales|revenue|margins?|volumes?)\b", r"\btargets?\b.*\b(?:revenue|sales|growth|capacity)\b")
 _GUIDE = _rx(r"\borders?\b", r"\bcontracts?\b", r"\bmou\b", r"\bcapex\b", r"\bcapital expenditure\b", r"\bexpansions?\b", r"\bnew (?:project|plant|facility|unit|launch|product|capacity)\b", r"\blaunch(?:es|ed)?\b",
              r"\binvest(?:s|ment)?\b", r"\bcapacity\b", r"\bwins?\b.*\b(?:deal|bid|tender|project)\b", r"\b(?:deal|bid|tender|project|ppa|power purchase agreement|partnership|tie-?up|pact)\b", r"\bbags?\b", r"\bsecures?\b",
@@ -447,6 +449,12 @@ def _classify(headline: str, aliases: Iterable[str]) -> Dict[str, Any]:
         etype = "insider"
         pol, conf = _pol_flow(t)
         why = "promoter / insider"
+    elif _IPO_CUE.search(t) and not strong_result and not _IPO_MOVE.search(t):
+        # Round 182: "Coal India's Mahanadi Coalfields IPO may launch in November, raise up to $1 billion" matched the launch / raise cues (+1 order,
+        # then -1 corporate action for a similar one). An IPO / OFS / FPO story is a fund-raise or listing item, not an order win or a bad corporate action: no sign.
+        etype = "corporate_action"
+        pol, conf = 0, 0.5
+        why = "ipo / offer for sale"
     elif _DIVIDEND.search(t) and not (strong_result and q_term):
         etype = "dividend"
         pol, conf = _pol_div(t, m)

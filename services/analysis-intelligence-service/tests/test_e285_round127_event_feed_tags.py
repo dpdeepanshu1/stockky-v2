@@ -113,3 +113,17 @@ def test_single_company_results_headline_keeps_its_sign():
     col.poll_once()
     evs = col.response()["events"]
     assert evs and evs[0]["symbol"] == "TATASTEEL" and evs[0]["polarity"] == 1
+
+
+def test_ipo_story_has_no_sign_and_is_not_an_order():
+    import event_lite as el
+    for h in ["Coal India's Mahanadi Coalfields IPO may launch in November, raise up to $1 billion - Moneycontrol",
+              "Coal India arm plans IPO to raise Rs 5,000 crore"]:
+        r = el.classify(h)
+        assert r["pol"] == 0, (h, r)
+
+
+def test_a_real_order_win_is_still_positive():
+    import event_lite as el
+    r = el.classify("Coal India wins order worth Rs 500 crore")
+    assert r["pol"] == 1

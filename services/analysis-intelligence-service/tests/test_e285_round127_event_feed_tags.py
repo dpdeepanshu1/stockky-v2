@@ -54,7 +54,25 @@ def test_unsubscribed_company_and_generic_names_never_tag():
 
 
 def test_no_names_function_behaves_as_before():
+    # round 179: with the bundled name list switched off, no names function still means no name tagging
+    import os
+    os.environ["EVENT_FEED_STATIC_NAMES"] = "0"
+    try:
+        col = _col(["Tata Steel Q2 profit jumps 40%"], ["TATASTEEL.NS"])
+        col.poll_once()
+        assert col.response()["events"] == []
+    finally:
+        os.environ.pop("EVENT_FEED_STATIC_NAMES", None)
+
+
+def test_bundled_names_tag_a_subscribed_company_without_a_names_function():
     col = _col(["Tata Steel Q2 profit jumps 40%"], ["TATASTEEL.NS"])
+    col.poll_once()
+    assert [e["symbol"] for e in col.response()["events"]] == ["TATASTEEL"]
+
+
+def test_bundled_names_never_tag_an_unsubscribed_symbol():
+    col = _col(["Tata Steel Q2 profit jumps 40%"], ["SBIN.NS"])
     col.poll_once()
     assert col.response()["events"] == []
 

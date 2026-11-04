@@ -26,6 +26,7 @@ EVENT_FEED_CADENCE_V2=0), EVENT_FEED_CADENCE_V2 (1), EVENT_FEED_OPEN_S / _SESSIO
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -329,6 +330,32 @@ def name_aliases(names: Dict[str, str]) -> List[Tuple[str, str]]:
     return sorted(set(out), key=lambda t: -len(t[0]))
 
 
+_STATIC_ALIAS_CACHE: Dict[str, List[Tuple[str, str]]] = {}
+
+
+def static_aliases() -> List[Tuple[str, str]]:
+    """[(lower-case name, SYMBOL)] from company_names.json next to this file ({SYMBOL: [name, ...]}) and the optional EVENT_FEED_NAMES_FILE. Cached; never raises."""
+    if (os.getenv("EVENT_FEED_STATIC_NAMES") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return []
+    key = os.getenv("EVENT_FEED_NAMES_FILE") or ""
+    if key in _STATIC_ALIAS_CACHE:
+        return _STATIC_ALIAS_CACHE[key]
+    out: List[Tuple[str, str]] = []
+    for path in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "company_names.json"), key):
+        if not path:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for sym, names in (data or {}).items():
+                for nm in ([names] if isinstance(names, str) else list(names or [])):
+                    out.extend(name_aliases({sym: nm}))
+        except Exception:  # noqa: BLE001
+            continue
+    _STATIC_ALIAS_CACHE[key] = sorted(set(out), key=lambda t: -len(t[0]))
+    return _STATIC_ALIAS_CACHE[key]
+
+
 def extract_symbol_by_name(headline: str, aliases: List[Tuple[str, str]]) -> Optional[str]:
     """The symbol whose full company name appears in the headline (longest name wins). Skipped when the name is glued to a capitalised word before it
     ('State Bank of India' must not tag 'Bank of India'). None when nothing matches. Never raises."""
@@ -529,12 +556,19 @@ class FeedCollector:
         return syms
 
     def _aliases(self, known: set) -> List[Tuple[str, str]]:
-        if self.names_fn is None:
-            return []
+        # Round 179: Yahoo answers 429 from the VM, so the live name cache stays empty; a bundled name list (company_names.json,
+        # plus optional EVENT_FEED_NAMES_FILE) gives headline-name matching without any network call. A symbol is still only tagged when subscribed.
+        out: List[Tuple[str, str]] = []
         try:
-            return [(a, s) for a, s in name_aliases(self.names_fn() or {}) if s in known]
+            out.extend((a, s) for a, s in static_aliases() if s in known)
         except Exception:  # noqa: BLE001
-            return []
+            pass
+        if self.names_fn is not None:
+            try:
+                out.extend((a, s) for a, s in name_aliases(self.names_fn() or {}) if s in known)
+            except Exception:  # noqa: BLE001
+                pass
+        return sorted(set(out), key=lambda t: -len(t[0]))
 
     def poll_once(self) -> Dict[str, Any]:
         now = self.now_fn()

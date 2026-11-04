@@ -24,7 +24,7 @@ def _rows(rows):
 
 @pytest.mark.parametrize("name,min_pol,min_type", [
     ("DEV", 0.99, 0.99), ("HOLDOUT", 0.97, 0.95), ("HOLDOUT2", 0.97, 0.97), ("HOLD", 0.95, 0.97),
-    ("HOLDOUT_R171", 0.97, 0.97), ("BLIND_R172", 0.97, 0.97), ("ALERT_R177", 0.99, 0.95),
+    ("HOLDOUT_R171", 0.97, 0.97), ("BLIND_R172", 0.97, 0.97), ("ALERT_R177", 0.99, 0.95), ("REAL_R178", 0.95, 0.80),
 ])
 def test_accuracy_gates(name, min_pol, min_type):
     n = ok = tc = tt = 0
@@ -243,6 +243,7 @@ _BRANCH_HEADLINES = [
     "Acme Q2 revenue beats, profit misses", "Acme dividend record date", "Acme declares dividend",
     "Acme record date for split", "Acme to hold results and dividend meeting",
     "Jefferies turns more bearish on Acme", "Jefferies turns more bullish on Acme", "Brokerages retain buy on Acme", "Goldman Sachs turns less bearish on Acme, Sell stays",
+    "Acme shares fail to lift on expansion", "Acme shares decline despite loan growth", "Acme faces DOJ investigation", "Senior executive of Acme departs", "No striking impact of RBI curbs on Acme",
     "Acme in talks to raise funds", "Kacholia Q2 portfolio: what's in, what's out", "Rupee settles higher against dollar", "Acme shows technical recovery signs",
 ]
 

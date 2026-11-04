@@ -74,7 +74,13 @@ _GUIDE_RAISE = re.compile(r"\b(?:raises?|lifts?|hikes?|boosts?|ups|increases?)\s
 _WEAK_GROWTH = re.compile(r"\b(?:growth|sales|revenue|volumes?|demand)\s+(?:is\s+|remains?\s+|stays?\s+)?(?:flat|muted|sluggish|subdued|weak|slows?|slowed|slowdown|stagnant)\b|\bflat (?:growth|sales|revenue|volumes?)\b")
 
 
+_FAILS_TO = re.compile(r"\b(?:fails?|failed|unable|struggles?) to (?:\w+ )?(?:lift|boost|impress|excite|cheer|help|inspire|support)\w*\b")
+_PAST_MOVE = re.compile(r"\bafter (?:a |an )?\d+(?:\.\d+)?%\s+(?:[\w-]+\s+)?(?:fall|drop|decline|slump|slide|correction|decline)\b|\b(?:is )?the worst (?:over|behind)\b|\bworst is over\b")
+
+
 def _mask(t: str) -> str:
+    t = _PAST_MOVE.sub(" ", t)
+    t = _FAILS_TO.sub(" failslift ", t)
     t = _LOSS_NARROW.sub(" lossnarrows ", t)
     t = _LOSS_WIDEN.sub(" losswidens ", t)
     t = _COST_UP.sub(" costup ", t)
@@ -97,7 +103,7 @@ _POS: Tuple[Tuple["re.Pattern[str]", float], ...] = (
          r"\bbullish\b", r"\bupbeat\b", r"\bback in operations?\b", r"\bresum(?:es|ed) (?:production|operations)\b", r"\bnet interest margin (?:expands?|widens?)\b", r"\bhigher\b", r"\brecover\w*", r"\brebound\w*", r"\bgood\b", r"\bbetter\b"), 1.0),
 )
 _NEG: Tuple[Tuple["re.Pattern[str]", float], ...] = (
-    (_rx(r"\blosswidens\b", r"\bcostup\b", r"\bguidecut\b", r"\bmiss(?:es|ed)?\b(?= (?:the )?(?:street|estimates?|expectations?|forecasts?|views?|consensus))", r"\bnet loss\b", r"\bplunge[sd]?\b", r"\bcrash\w*", r"\btank(?:s|ed)?\b",
+    (_rx(r"\bfailslift\b", r"\blosswidens\b", r"\bcostup\b", r"\bguidecut\b", r"\bmiss(?:es|ed)?\b(?= (?:the )?(?:street|estimates?|expectations?|forecasts?|views?|consensus))", r"\bnet loss\b", r"\bplunge[sd]?\b", r"\bcrash\w*", r"\btank(?:s|ed)?\b",
          r"\bfraud\b", r"\bdefault(?:s|ed)?\b", r"\bdowngrade[sd]?\b", r"\bwarning letter\b", r"\bform 483\b", r"\bimport alert\b", r"\bslump\w*", r"\bcollapse[sd]?\b", r"\bscam\b",
          r"\bbankrupt\w*", r"\binsolvency (?:petition|plea|proceedings?)\b", r"\bnuksan\b"), 2.0),
     (_rx(r"\bcuts?\b", r"\blowers?\b", r"\blowered\b", r"\bslash(?:es|ed)?\b", r"\bloses\b", r"\blost\b", r"\bcancel\w*", r"\bdenied\b", r"\bsuspend\w*", r"\bgrounds?\b", r"\bgrounded\b",
@@ -132,7 +138,11 @@ _NONE = _rx(r"\bstocks? to (?:watch|buy|bet|focus|track)\b", r"\b(?:trading|mark
             r"^(?:nifty|sensex|bank nifty)\b", r"\bhow to trade\b", r"\b(?:nifty|sensex|bank ?nifty)\b.*\b(?:prediction|forecast|levels?|technical|outlook)\b", r"\b(?:prediction|technical outlook|key levels|what to expect|trading strategy|trade setup)\b",
             r"\bstocks? to (?:buy|sell) today\b", r"\bipo (?:gmp|allotment status|listing)\b", r"\bsgx nifty\b|\bgift nifty\b",
             r"^(?:rupee|dollar|us dollar|brent|crude|gold|silver)\b", r"\brupee\b.*\b(?:dollar|settles?|ends?|closes?|opens?)\b",
-            r"\btechnical (?:recovery|breakout|view|picks?|signs?|setup|chart|analysis)\b", r"\bshould you\b.*\b(?:buy|sell|hold|invest|bet)\b", r"\bbuy,? sell,? or hold\b")
+            r"\btechnical (?:recovery|breakout|view|picks?|signs?|setup|chart|analysis)\b",
+            r"\bstock picks?\b", r"\bstock recommendations?\b", r"\bmuhurat\b|\bsamvat\b", r"\bon brokerages' radar\b", r"\b(?:weekly|monthly) (?:recap|wrap|roundup|outlook)\b", r"\boutlook for the (?:week|day|month)\b",
+            r"\bstock price,? news\b", r"\bshare price\s*-\s*live\b", r"\bshare price today\b", r"\bstock price (?:&|and) chart\b", r"\blive streaming\b|\b(?:odi|t20|ipl)\b", r"\bmidterms?\b",
+            r"\bwinners? and (?:potential |likely )?losers?\b|\blikely winners\b", r"\banalysts'? views?\b", r"^(?:sugar|cotton|wheat|palm oil|copper|aluminium|zinc|nickel|natural gas)\s+(?!stocks?\b|shares?\b)",
+            r"\bshould you\b.*\b(?:buy|sell|hold|invest|bet)\b", r"\bbuy,? sell,? or hold\b")
 # a bare "key levels" / "trade setup" tail on a results headline does not make it a market wrap (Kanohar: "surge 17% after Q2 results ... | Check key levels")
 _NONE_SOFT = _rx(r"\bkey levels\b", r"\btrade setup\b", r"\bwhat to expect\b")
 _RUMOUR = _rx(r"\b(?:rumou?rs?|reports?|speculation|buzz)\b.*\b(?:false|baseless|untrue|incorrect|misleading|denies?|denied|clarif\w+|dismiss\w+|no truth)\b",
@@ -143,7 +153,7 @@ _INVESTOR_BOOK = _rx(r"\b(?:kacholia|jhunjhunwala|damani|kedia|dolly khanna|sing
 _BOARD = _rx(r"\bboard (?:meeting|meets?|to (?:consider|meet|discuss))\b", r"\bboard of [a-z][a-z\' .&-]{1,30}? (?:to meet|meets|meeting)\b", r"\bagm\b", r"\begm\b", r"\bannual general meeting\b", r"\bextra-?ordinary general meeting\b", r"\bpostal ballot\b")
 _MGMT_ROLE = r"(?:ceo|cfo|coo|cto|cio|md|chairman|chairperson|chairwoman|auditors?|directors?|managing director|chief (?:executive|financial|operating|technology|risk|business)(?: officer)?|president|company secretary|head)"
 _MGMT = _rx(rf"\b{_MGMT_ROLE}\b.*\b(?:resign\w*|quits?|steps? down|stepping down|appoint\w*|names?|named|replac\w+|exits?|exit|ousted|removed|sacked|istifa|hired|elevated|promoted|taken? charge)\b",
-            rf"\b(?:resign\w*|steps? down|quits?|appoints?|appointed|names?|named|hires?|exits?|replaces?)\b.*\b{_MGMT_ROLE}\b", rf"\bnew {_MGMT_ROLE}\b", rf"\b{_MGMT_ROLE}\b.*\b(?:ne|ka|ke)\b.*\bistifa\b")
+            rf"\b(?:resign\w*|steps? down|quits?|appoints?|appointed|names?|named|hires?|exits?|replaces?)\b.*\b{_MGMT_ROLE}\b", rf"\bnew {_MGMT_ROLE}\b", r"\b(?:senior|top|key)\s+(?:executive|official|management|leader)s?\b.*\b(?:departs?|leaves?|quits?|exits?|resigns?)\b|\b(?:departure|exit) of (?:a |another )?(?:senior|top|key)\b", rf"\b{_MGMT_ROLE}\b.*\b(?:ne|ka|ke)\b.*\bistifa\b")
 _RATING = _rx(r"\b(?:upgrade[sd]?|downgrade[sd]?)\b", r"\b(?:raises?|cuts?|lowers?|hikes?|slashes|boosts?|revises?|keeps?|retains?|maintains?|trims?)\s+(?:its\s+|the\s+)?(?:[a-z&.']+\s+){0,3}?target\b", r"\btarget (?:price )?(?:raised|cut|lowered|hiked|to|of)\b",
               r"\b(?:initiates?|reiterates?|resumes?|assumes?)\s+(?:coverage|buy|sell|hold)\b", r"\b(?:crisil|icra|care ratings|care|moody'?s|fitch|s&p|india ratings|ind-ra|brickwork|acuite)\b.*\b(?:rat(?:ing|es|ed)|outlook|affirms?|assigns?|upgrades?|downgrades?|reaffirms?)\b",
               r"\brating (?:is )?(?:cut|lowered|raised|upgrade[sd]?|downgrade[sd]?|affirmed|reaffirmed)\b", r"\b(?:outlook|rating)\b.*\b(?:negative|stable|positive|watch)\b.*\b(?:rating|outlook)\b", r"\b(?:overweight|underweight|outperform|underperform|top pick|accumulate)\b",
@@ -159,7 +169,8 @@ _USFDA_APPROVAL = _rx(r"\b(?:gets?|receives?|secures?|bags?|wins?)\s+(?:a\s+|the
 _LEGAL = _rx(r"\bsebi\b.*\b(?:order|penalty|fine|ban|bars?|barred|probe|notice|show-cause|investigat\w+|adjudicat\w+)\b", r"\bshow[- ]cause\b", r"\b(?:ed|cbi|income[- ]tax(?: department)?|it department|gst|dri|sfio|enforcement directorate)\b.*\b(?:raid\w*|search\w*|probe|notice|summons?|chh?ap\w*|books?|arrests?|attach\w*|charges?|investigat\w+)\b",
              r"\braid(?:s|ed)?\b", r"\bfraud\b", r"\bpenalt(?:y|ies)\b", r"\bcourt\b", r"\bnclt\b|\bnclat\b|\bnclt\b", r"\binsolvency\b", r"\blawsuit\b|\blitigation\b|\bsued?\b", r"\bcompetition commission\b|\bcci\b",
              r"\bdefault(?:s|ed)?\b", r"\bchh?ap[ae]\w*", r"\barbitration\b", r"\btribunal\b", r"\bbribery\b|\bmoney laundering\b|\bcorruption\b", r"\bcharge-?sheet\b", r"\bsc\b.*\b(?:order|verdict)\b", r"\bsupreme court\b|\bhigh court\b",
-             r"\bpetition\b", r"\bnotice\b.*\b(?:tax|authorit\w+|sebi|ed|cbi)\b|\b(?:tax|authority)\b.*\bnotice\b", r"\bcbi\b|\benforcement directorate\b")
+             r"\bpetition\b", r"\bnotice\b.*\b(?:tax|authorit\w+|sebi|ed|cbi)\b|\b(?:tax|authority)\b.*\bnotice\b", r"\bcbi\b|\benforcement directorate\b",
+             r"\b(?:department of justice|doj|sec|ftc)\b.*\b(?:investigations?|probe|subpoena|inquiry|charges?)\b", r"\bfacing (?:an? )?(?:investigation|probe)\b")
 _BULK = _rx(r"\bbulk deals?\b", r"\bblock deals?\b", r"\bblock trades?\b", r"\bbulk (?:buy|purchase|sell|sale)\b")
 _INSIDER = _rx(r"\b(?:raises?|hikes?|increases?|lifts?|cuts?|reduces?|trims?|pares?|boosts?)\s+stake\b", r"\bpromoters?\b", r"\binsiders?\b", r"\bpledg\w+", r"\bsast\b", r"\bopen[- ]market (?:purchase|sale|buy)\b", r"\bshareholding pattern\b", r"\bdirector\b.*\b(?:picks? up|buys?|sells?|acquires?)\b\s*(?:shares|stake)", r"\bkey managerial\b", r"\bpromoter group\b")
 _DIVIDEND = _rx(r"\bdividends?\b", r"\bex-dividend\b", r"\bpayout\b")
@@ -173,7 +184,7 @@ _GUIDE = _rx(r"\borders?\b", r"\bcontracts?\b", r"\bmou\b", r"\bcapex\b", r"\bca
 _RESULT_STRONG = _rx(r"\bq[1-4]\b", r"\b[1-4]q\b", r"\bq[1-4]fy\d*\b", r"\bh[12]\b", r"\bquarter(?:ly)?\b", r"\bresults?\b", r"\bearnings?\b", r"\bpat\b", r"\bnet profit\b", r"\bnet loss\b", r"\bfy\d{2}\b.*\b(?:profit|loss|pat)\b",
                      r"\b(?:profit|loss)\b.*\b(?:rises?|falls?|jumps?|declines?|surges?|doubles?|narrows?|widens?|slumps?|climbs?|up|down|drops?|dips?|grows?|soars?|plunges?)\b",
                      r"\b(?:rises?|falls?|jumps?|declines?|surges?|doubles?|narrows?|widens?|slumps?|climbs?|drops?|dips?|grows?|soars?|plunges?)\b.*\b(?:profit|loss|pat|ebitda)\b",
-                     r"\bswings? to (?:a )?(?:profit|loss)\b", r"\bebitda\b", r"\bnet income\b", r"\bmunafa\b", r"\bnateeje\b|\bnatije\b", r"\bprofit\b.*\b(?:slump|surge|crash)\b", r"\bposts? (?:a )?(?:profit|loss)\b|\breports? (?:a )?(?:profit|loss)\b")
+                     r"\bswings? to (?:a )?(?:profit|loss)\b", r"\bnet\s+(?:rises?|rose|jumps?|surges?|falls?|fell|declines?|drops?|slumps?|climbs?|grows?|up|down)\b", r"\bebitda\b", r"\bnet income\b", r"\bmunafa\b", r"\bnateeje\b|\bnatije\b", r"\bprofit\b.*\b(?:slump|surge|crash)\b", r"\bposts? (?:a )?(?:profit|loss)\b|\breports? (?:a )?(?:profit|loss)\b")
 _ACCIDENT = _rx(r"\bfire\b", r"\bblaze\b", r"\bexplosion\b", r"\baccident\b", r"\bgrounds?\b", r"\bgrounded\b", r"\bhalts? (?:production|operations)\b", r"\bstrike\b", r"\bshutdown\b|\bshut down\b", r"\bplant (?:shut|closed|closure)\b", r"\bcasualt\w+", r"\bflood\b")
 _MOVE = _rx(r"\b(?:shares?|stock|scrip|stocks)\b.*\b(?:falls?|slides?|jumps?|rall(?:y|ies)|gains?|surges?|tumbles?|slips?|drops?|sinks?|soars?|climbs?|rises?|plunges?|dips?|girawat|gire|tezi|uchh?al\w*)\b",
             r"\b(?:falls?|slides?|jumps?|rall(?:y|ies)|gains?|surges?|tumbles?|slips?|drops?|sinks?|soars?|climbs?|rises?|plunges?)\s+\d")
@@ -219,7 +230,7 @@ def _pol_flow(t: str) -> Tuple[int, float]:
 
 
 def _pol_mgmt(t: str) -> Tuple[int, float]:
-    if re.search(r"\b(?:resign\w*|quits?|steps? down|stepping down|exits?|ousted|removed|sacked|istifa|replaced|replaces|resignation)\b", t):
+    if re.search(r"\b(?:resign\w*|quits?|steps? down|stepping down|exits?|departs?|departure|leaves|ousted|removed|sacked|istifa|replaced|replaces|resignation)\b", t):
         return -1, 0.8
     if re.search(r"\b(?:appoint\w*|names?|named|hires?|elevated|promoted|taken? charge|new (?:ceo|cfo|md|chairman))\b", t):
         return 0, 0.7
@@ -250,7 +261,7 @@ def _pol_rating(t: str, m: str) -> Tuple[int, float]:
 def _pol_reg(t: str, m: str) -> Tuple[int, float]:
     if re.search(r"\b(?:lifts?|lifted|removes?|removed|eases?|eased|relaxes?|relaxed|revokes?|revoked|withdraws?|withdrew)\s+(?:the\s+|its\s+|all\s+)?(?:\w+\s+)?(?:restrictions?|curbs?|ban|bar|penalt\w+|embargo|prohibition|sanctions?)\b", t):
         return 1, 0.8
-    if re.search(r"\bno (?:impact|effect|material impact)\b|\bunaffected\b|\bnot affected\b", t):
+    if re.search(r"\bno (?:\w+ )?(?:impact|effect)\b|\bunaffected\b|\bnot affected\b", t):
         return 0, 0.65
     if re.search(r"\b(?:clearance|clears?|cleared|eir (?:issued|received)|eir\b|lifts?|lifted|revokes?|withdraws?|relaxes?|relief|nod)\b", t) and not re.search(r"\b(?:warning|483|import alert|penalt|fine|ban|curb|restrict|suspend|cancel)\w*", t):
         return 1, 0.8
@@ -313,6 +324,8 @@ def _pol_results(t: str, m: str) -> Tuple[int, float]:
         return 1, 0.82
     if re.search(r"\b(?:beats?|tops?|surpass\w*)\b", t) and re.search(r"\bmiss(?:es|ed)?\b", t):
         return 0, 0.6        # one line beats, another misses: mixed
+    if pol != 0 and re.search(r"\bdespite\b", t) and pos > 0 and neg > 0:
+        return 0, 0.6        # "shares decline despite loan growth": one line good, one bad = mixed
     if pol == 0:
         return 0, 0.5
     return pol, min(0.92, 0.62 + 0.12 * margin)

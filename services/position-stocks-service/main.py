@@ -2380,6 +2380,7 @@ def windows_health(days: int = 0, db: Session = Depends(get_db)):
     rows = db.query(ScalpPosition).filter(ScalpPosition.opened_at >= cutoff.replace(tzinfo=None)).all()
     return {"days": days, "enabled": config.WINDOW_AUTODISABLE_ENABLED,
             "rule": {"min_trades": config.WINDOW_AUTODISABLE_MIN_TRADES, "max_win_rate_pct": config.WINDOW_AUTODISABLE_MAX_WIN_RATE_PCT,
+                     "min_net_loss_avg_trades": config.WINDOW_AUTODISABLE_MIN_NET_LOSS_AVG_TRADES,
                      "lookback_days_used_for_pausing": config.WINDOW_AUTODISABLE_DAYS},
             "windows": window_health.evaluate(rows)}
 

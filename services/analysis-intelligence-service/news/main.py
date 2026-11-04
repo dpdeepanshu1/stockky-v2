@@ -72,7 +72,9 @@ _HF_BACKOFF_UNTIL = 0.0
 # answer and logged "HF API error: 400" again. The call now pauses for HF_ERROR_BACKOFF_SEC (default 1800 s,
 # 0 = never pause, blank/invalid = default) and ONE warning carries the first part of HF's own message.
 # 429/503 handling is unchanged.
-HF_CONFIG_ERROR_STATUSES = (400, 401, 403, 404, 410)
+# 2026-11-04 (live log): 402 Payment Required = the Hugging Face Inference credits are used up; every headline got the same 402 and logged again.
+# It is paused like the others, for 6 h (credits only come back on a top-up or the monthly reset).
+HF_CONFIG_ERROR_STATUSES = (400, 401, 402, 403, 404, 410)
 
 
 def _hf_error_backoff_sec() -> float:
@@ -751,6 +753,8 @@ def _score_headline_hf(title: str) -> Optional[float]:
                 # retrying every 30 minutes just repeats the 400 and the warning. Back off 6 h for that one.
                 if resp.status_code == 400 and "not supported" in _detail.lower():
                     _pause = max(_pause, 6 * 3600.0)
+                elif resp.status_code == 402:
+                    _pause = max(_pause, 6 * 3600.0)
                 _HF_BACKOFF_UNTIL = time.monotonic() + _pause
                 logger.warning(
                     "HF API error: %s%s - check HF_MODEL / HF_MODEL_FALLBACKS (tried: %s) is served to your token through Inference "
@@ -787,9 +791,12 @@ def _score_headline_hf(title: str) -> Optional[float]:
 
 
 # ── E285 round 172: offline sentiment fallback (event_lite.py: standard library only, no network, no LLM, no key, no quota) ─────────────
-# NEWS_SENTIMENT_MODE: auto (default) = Hugging Face first; every headline HF gave no reading for is scored by the lite scorer
-#                      lite = the lite scorer only, Hugging Face is never called
-#                      hf   = the old behaviour (a failed HF call scores the neutral 0.0)
+# NEWS_SENTIMENT_MODE: smart (default, round 213) = event_lite reads every headline; Hugging Face is asked ONLY for the headlines event_lite is unsure about
+#                      (a company headline it can give no direction for), inside a rate budget (HF_MAX_CALLS_PER_HOUR / HF_MAX_CALLS_PER_DAY) and with a
+#                      per-headline cache, so the HF credits go where they add something
+#                      auto  = the older behaviour: Hugging Face first for every headline; every headline HF gave no reading for is scored by the lite scorer
+#                      lite  = the lite scorer only, Hugging Face is never called
+#                      hf    = the oldest behaviour (a failed HF call scores the neutral 0.0)
 try:
     import event_lite as _event_lite
 except Exception:  # noqa: BLE001 - a missing copy must never stop the service
@@ -798,7 +805,7 @@ except Exception:  # noqa: BLE001 - a missing copy must never stop the service
 
 def _sentiment_mode() -> str:
     m = (os.getenv("NEWS_SENTIMENT_MODE") or "").strip().lower()
-    return m if m in ("auto", "lite", "hf") else "auto"
+    return m if m in ("smart", "auto", "lite", "hf") else "smart"
 
 
 def _score_headline_lite(title: str) -> Optional[float]:
@@ -814,10 +821,86 @@ def _score_headline_lite(title: str) -> Optional[float]:
 _LITE_USED = {"n": 0}   # headlines scored by the lite scorer since start (for /analyze data_quality)
 
 
+# Round 213: Hugging Face only where event_lite cannot decide, inside a rate budget.
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int((os.getenv(name) or "").strip())
+        return v if v >= 0 else default
+    except ValueError:
+        return default
+
+
+_HF_CALL_TIMES: List[float] = []                 # monotonic times of real HF calls (this process), pruned to the last 24 h
+_HF_CACHE: Dict[str, tuple] = {}                  # normalised headline -> (monotonic time, score)
+_HF_CACHE_TTL_SEC = 6 * 3600.0
+_HF_CACHE_MAX = 500
+_HF_SMART = {"asked": 0, "cache_hits": 0, "skipped_budget": 0, "skipped_not_needed": 0}
+_HF_LOCK = threading.Lock()
+
+
+def _hf_budget_ok(now: float) -> bool:
+    """True when one more HF call fits both caps (HF_MAX_CALLS_PER_HOUR default 20, HF_MAX_CALLS_PER_DAY default 100; 0 = never call HF)."""
+    hour, day = _env_int("HF_MAX_CALLS_PER_HOUR", 20), _env_int("HF_MAX_CALLS_PER_DAY", 100)
+    with _HF_LOCK:
+        _HF_CALL_TIMES[:] = [t for t in _HF_CALL_TIMES if now - t < 86400.0]
+        return sum(1 for t in _HF_CALL_TIMES if now - t < 3600.0) < hour and len(_HF_CALL_TIMES) < day
+
+
+def _lite_is_unsure(title: str) -> bool:
+    """True for a headline event_lite thinks is about a company / event but cannot give a direction for (the 'unsure' bucket): the only kind HF is asked."""
+    if _event_lite is None:
+        return False
+    try:
+        r = _event_lite.classify(title)
+        return r.get("type") != "none" and r.get("pol", 0) == 0 and float(r.get("confidence", 0.0)) < float(_event_lite._min_conf())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hf_for_unsure(title: str) -> Optional[float]:
+    """HF reading for one headline event_lite could not read, or None (not needed / cached miss / over budget / HF paused / HF gave no answer)."""
+    now = time.monotonic()
+    if _hf_state() != "on":
+        return None
+    key = " ".join(title.lower().split())[:200]
+    with _HF_LOCK:
+        hit = _HF_CACHE.get(key)
+        if hit and now - hit[0] < _HF_CACHE_TTL_SEC:
+            _HF_SMART["cache_hits"] += 1
+            return hit[1]
+    if not _lite_is_unsure(title):
+        _HF_SMART["skipped_not_needed"] += 1
+        return None
+    if not _hf_budget_ok(now):
+        _HF_SMART["skipped_budget"] += 1
+        return None
+    with _HF_LOCK:
+        _HF_CALL_TIMES.append(now)
+        _HF_SMART["asked"] += 1
+    v = _score_headline_hf(title)
+    if v is not None:
+        with _HF_LOCK:
+            if len(_HF_CACHE) >= _HF_CACHE_MAX:
+                _HF_CACHE.pop(next(iter(_HF_CACHE)), None)
+            _HF_CACHE[key] = (now, v)
+    return v
+
+
 def _score_headline(title: str) -> float:
     """Sentiment of one headline: see NEWS_SENTIMENT_MODE above. Never raises."""
     mode = _sentiment_mode()
-    if mode != "lite":
+    if mode == "smart" and _event_lite is not None:
+        lite = _score_headline_lite(title)
+        if lite is not None:
+            if lite != 0.0:
+                _LITE_USED["n"] += 1
+                return lite
+            v = _hf_for_unsure(title)
+            if v is not None:
+                return v
+            _LITE_USED["n"] += 1
+            return lite
+    if mode != "lite":                      # auto / hf (and smart when event_lite is missing): Hugging Face first
         v = _score_headline_hf(title)
         if v is not None:
             return v
@@ -839,6 +922,8 @@ def _sentiment_source() -> str:
         return "lite" if _event_lite is not None else "none"
     if _event_lite is None:
         return "hf" if _hf_state() == "on" else "none"
+    if mode == "smart":
+        return "lite+hf" if _hf_state() == "on" else "lite"          # lite reads everything, HF only the unsure ones
     return "hf+lite" if _hf_state() == "on" else "lite"
 
 
@@ -871,7 +956,10 @@ def lite_stats():
     except Exception:  # noqa: BLE001
         st = {}
     return {"available": _event_lite is not None, "mode": _sentiment_mode(), "sentiment_source": _sentiment_source(),
-            "headlines_scored_by_lite": _LITE_USED["n"], "stats": st}
+            "headlines_scored_by_lite": _LITE_USED["n"], "stats": st,
+            "hf_smart": dict(_HF_SMART, calls_last_hour=sum(1 for t in _HF_CALL_TIMES if time.monotonic() - t < 3600.0),
+                             calls_last_24h=len(_HF_CALL_TIMES), max_per_hour=_env_int("HF_MAX_CALLS_PER_HOUR", 20),
+                             max_per_day=_env_int("HF_MAX_CALLS_PER_DAY", 100), hf_state=_hf_state())}
 
 
 @app.get("/feed-health")
@@ -938,7 +1026,7 @@ def analyze(symbol: str, company_name: str | None = None, force: bool = False):
     tone = "positive" if avg_sentiment > 0.1 else "negative" if avg_sentiment < -0.1 else "neutral"
     _hf = _hf_state()
     _src = _sentiment_source()
-    if _hf == "on" or _src in ("lite", "hf+lite") or any(sc != 0.0 for sc, _ in scored):
+    if _hf == "on" or _src in ("lite", "hf+lite", "lite+hf") or any(sc != 0.0 for sc, _ in scored):
         reasons.append(f"{len(headlines)} relevant headlines, average sentiment {tone}" + (" (offline scorer)" if _src == "lite" else ""))
     else:       # round 161: do not present the neutral fallback as a measured sentiment
         reasons.append(f"{len(headlines)} relevant headlines; sentiment not scored ("

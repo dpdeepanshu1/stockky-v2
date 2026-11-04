@@ -153,7 +153,8 @@ def test_event_service_error_in_lite_is_swallowed(monkeypatch):
 def test_news_modes(monkeypatch):
     nm = _load("news", "main")
     monkeypatch.delenv("NEWS_SENTIMENT_MODE", raising=False)
-    assert nm._sentiment_mode() == "auto"
+    assert nm._sentiment_mode() == "smart"                                           # round 213: event_lite first, HF only for unsure headlines
+    monkeypatch.setenv("NEWS_SENTIMENT_MODE", "auto")                                # the older HF-first mode is still available
     calls = []
     monkeypatch.setattr(nm, "_score_headline_hf", lambda t: calls.append(t) or None)     # HF has no answer
     assert nm._score_headline("Wipro Q2 profit jumps 30%") > 0.4                       # auto: lite takes over

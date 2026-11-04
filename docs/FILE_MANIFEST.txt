@@ -899,6 +899,7 @@ services/api-gateway/tests/test_round189_nse_backoff_and_fallback_memory.py
 services/api-gateway/tests/test_round199_nse_fallback_escalation.py
 services/api-gateway/tests/test_round202_antala_not_on_nse.py
 services/api-gateway/tests/test_round211_nse_board_rows.py
+services/position-stocks-service/tests/test_round212_window_pause_materiality.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py

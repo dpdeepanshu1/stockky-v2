@@ -70,7 +70,12 @@ def evaluate(rows: Iterable) -> Dict[str, dict]:
             wins = sum(1 for p in pnls if p > 0)
             wr = 100.0 * wins / len(g)
             total = sum(pnls)
-            bad = len(g) >= min_trades and wr < max_wr and total < 0
+            # 2026-11-04 (live log: the whole "day" window was paused on 2/8 wins and a net of Rs -8, 155 candidates dropped): a low win rate with a
+            # tiny net is breakeven (the wins were bigger than the losses), not a losing window. The net loss must also be at least
+            # WINDOW_AUTODISABLE_MIN_NET_LOSS_AVG_TRADES x the window's average trade size (mean |P&L|). 0 = the old rule (any negative net).
+            avg_size = sum(abs(p) for p in pnls) / len(pnls)
+            material = total < -(float(getattr(config, "WINDOW_AUTODISABLE_MIN_NET_LOSS_AVG_TRADES", 1.0) or 0.0) * avg_size)
+            bad = len(g) >= min_trades and wr < max_wr and total < 0 and material
             out[w] = {"trades": len(g), "wins": wins, "win_rate_pct": round(wr, 1), "total_pnl": round(total, 2), "disabled": bad,
                       "reason": (f"{wins}/{len(g)} wins ({wr:.0f}% < {max_wr:.0f}%), net Rs {total:,.0f}" if bad else None)}
         if out and all(v["disabled"] for v in out.values()):      # at least one window always trades: spare the least-bad one

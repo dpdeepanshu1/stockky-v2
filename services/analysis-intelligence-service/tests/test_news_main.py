@@ -747,6 +747,7 @@ class TestScoreHeadline:
     @pytest.fixture(autouse=True)
     def _reset_hf_backoff(self, monkeypatch):
         monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
+        monkeypatch.setenv("NEWS_SENTIMENT_MODE", "auto")      # round 213: these test the HF-first path; the default is now "smart"
 
     def test_default_endpoint_is_the_router_not_the_retired_host(self):
         assert "api-inference.huggingface.co" not in nm.HF_API_URL
@@ -864,6 +865,7 @@ class TestScoreHeadlineConfigErrorPause:
         monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
         monkeypatch.setattr(nm, "HF_API_KEY", "K")
         monkeypatch.delenv("HF_ERROR_BACKOFF_SEC", raising=False)
+        monkeypatch.setenv("NEWS_SENTIMENT_MODE", "auto")
 
     @pytest.mark.parametrize("status", [400, 401, 403, 404, 410])
     def test_config_error_pauses_after_one_call(self, monkeypatch, status):
@@ -1337,3 +1339,86 @@ class TestNameLookupEnvIsBlankSafe:
         g = runpy.run_path(nm.__file__, run_name="news_main_explicit_env")
         assert g["_NAME_LOOKUP_ENABLED"] is False
         assert g["_NAME_HIT_TTL_S"] == 60.0 and g["_NAME_MISS_TTL_S"] == 5.0
+
+
+class TestScoreHeadlineCreditsExhausted402:
+    """2026-11-04 live log: HF answered 402 (credits used up) for every headline. It now pauses the call for 6 h after the first answer."""
+
+    def test_402_pauses_six_hours(self, monkeypatch):
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        monkeypatch.delenv("HF_ERROR_BACKOFF_SEC", raising=False)
+        monkeypatch.setenv("NEWS_SENTIMENT_MODE", "auto")
+        calls = []
+
+        def post(*a, **k):
+            calls.append(1)
+            return _Resp(402)
+
+        monkeypatch.setattr(nm.httpx, "post", post)
+        assert [nm._score_headline(f"h{i}") for i in range(5)] == [0.0] * 5
+        assert len(calls) == 1
+        assert nm._HF_BACKOFF_UNTIL > nm.time.monotonic() + 21000
+
+
+class TestSmartSentimentHfOnlyWhereNeeded:
+    """Round 213: event_lite reads every headline; Hugging Face is asked only for a company headline event_lite cannot give a direction for,
+    inside HF_MAX_CALLS_PER_HOUR / HF_MAX_CALLS_PER_DAY, with a per-headline cache."""
+
+    SURE = "Wipro Q2 profit jumps 30%"                    # event_lite: results +1, confident
+    UNSURE = "Infosys shares: what analysts say"          # event_lite: type other, no direction, confidence 0.3
+    WRAP = "Sensex ends higher"                           # market wrap: type none, never worth an HF call
+
+    @pytest.fixture(autouse=True)
+    def _smart(self, monkeypatch):
+        monkeypatch.delenv("NEWS_SENTIMENT_MODE", raising=False)
+        monkeypatch.delenv("HF_MAX_CALLS_PER_HOUR", raising=False)
+        monkeypatch.delenv("HF_MAX_CALLS_PER_DAY", raising=False)
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", 0.0)
+        monkeypatch.setattr(nm, "HF_API_KEY", "K")
+        nm._HF_CALL_TIMES.clear()
+        nm._HF_CACHE.clear()
+        for k in nm._HF_SMART:
+            nm._HF_SMART[k] = 0
+        self.calls = []
+        monkeypatch.setattr(nm, "_score_headline_hf", lambda t: self.calls.append(t) or 0.8)
+
+    def test_default_mode_is_smart(self):
+        assert nm._sentiment_mode() == "smart"
+
+    def test_sure_headline_never_reaches_hf(self):
+        assert nm._score_headline(self.SURE) > 0.4
+        assert self.calls == []
+
+    def test_market_wrap_never_reaches_hf(self):
+        assert nm._score_headline(self.WRAP) == 0.0
+        assert self.calls == []
+
+    def test_unsure_company_headline_asks_hf_once_then_uses_the_cache(self):
+        assert nm._score_headline(self.UNSURE) == 0.8
+        assert nm._score_headline(self.UNSURE) == 0.8
+        assert nm._score_headline("  infosys SHARES: what analysts say ") == 0.8
+        assert len(self.calls) == 1 and nm._HF_SMART["cache_hits"] == 2
+
+    def test_hourly_budget_caps_hf_calls(self, monkeypatch):
+        monkeypatch.setenv("HF_MAX_CALLS_PER_HOUR", "1")
+        assert nm._score_headline(self.UNSURE) == 0.8
+        assert nm._score_headline("TCS shares: what analysts say") == 0.0       # over budget: lite's 0.0 stands
+        assert len(self.calls) == 1 and nm._HF_SMART["skipped_budget"] == 1
+
+    def test_zero_budget_means_hf_is_never_called(self, monkeypatch):
+        monkeypatch.setenv("HF_MAX_CALLS_PER_DAY", "0")
+        assert nm._score_headline(self.UNSURE) == 0.0
+        assert self.calls == []
+
+    def test_hf_paused_is_not_called(self, monkeypatch):
+        monkeypatch.setattr(nm, "_HF_BACKOFF_UNTIL", nm.time.monotonic() + 1000)
+        assert nm._score_headline(self.UNSURE) == 0.0
+        assert self.calls == []
+
+    def test_hf_no_answer_falls_back_to_lite_zero(self, monkeypatch):
+        monkeypatch.setattr(nm, "_score_headline_hf", lambda t: None)
+        assert nm._score_headline(self.UNSURE) == 0.0
+
+    def test_source_label(self):
+        assert nm._sentiment_source() == "lite+hf"

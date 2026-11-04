@@ -899,7 +899,6 @@ services/api-gateway/tests/test_round189_nse_backoff_and_fallback_memory.py
 services/api-gateway/tests/test_round199_nse_fallback_escalation.py
 services/api-gateway/tests/test_round202_antala_not_on_nse.py
 services/api-gateway/tests/test_round211_nse_board_rows.py
-services/position-stocks-service/tests/test_round212_window_pause_materiality.py
 services/api-gateway/tests/test_searched_list_selfclean.py
 services/api-gateway/tests/test_surprise_last_result_expiry_real_kv.py
 services/api-gateway/tests/test_surprise_premarket.py
@@ -1766,6 +1765,7 @@ services/position-stocks-service/tests/test_review_stats.py
 services/position-stocks-service/tests/test_round186_entry_fill_now.py
 services/position-stocks-service/tests/test_round188_conviction_known_inputs.py
 services/position-stocks-service/tests/test_round194_window_pause_log_throttle.py
+services/position-stocks-service/tests/test_round212_window_pause_materiality.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -1848,6 +1848,7 @@ services/real-trade-service/entry_engine/flow_gate.py
 services/real-trade-service/entry_engine/gap_event.py
 services/real-trade-service/entry_engine/gap_rank.py
 services/real-trade-service/entry_engine/global_cues.py
+services/real-trade-service/entry_engine/intraday_width.py
 services/real-trade-service/entry_engine/kronos_gate.py
 services/real-trade-service/entry_engine/ladder_stats.py
 services/real-trade-service/entry_engine/liquidity_gate.py
@@ -1887,6 +1888,7 @@ services/real-trade-service/event_depth_local.py
 services/real-trade-service/execution/__init__.py
 services/real-trade-service/execution/auto_pilot.py
 services/real-trade-service/execution/broker_stop.py
+services/real-trade-service/execution/capital_lend.py
 services/real-trade-service/execution/close_all.py
 services/real-trade-service/execution/dhan_client.py
 services/real-trade-service/execution/eod_retry.py
@@ -1908,6 +1910,7 @@ services/real-trade-service/exit_engine/__init__.py
 services/real-trade-service/exit_engine/event_exit.py
 services/real-trade-service/exit_engine/excursion.py
 services/real-trade-service/exit_engine/exit.py
+services/real-trade-service/exit_engine/intraday_guard.py
 services/real-trade-service/exit_engine/momentum_health.py
 services/real-trade-service/exit_engine/structure_exit.py
 services/real-trade-service/exit_engine/swing_momentum.py
@@ -2130,6 +2133,10 @@ services/real-trade-service/tests/test_e285_rt_results_split.py
 services/real-trade-service/tests/test_e285_shared_order_window.py
 services/real-trade-service/tests/test_e285_swing_target.py
 services/real-trade-service/tests/test_e285_tg_style.py
+services/real-trade-service/tests/test_e286_capital_lend.py
+services/real-trade-service/tests/test_e286_intraday_guard.py
+services/real-trade-service/tests/test_e286_intraday_width.py
+services/real-trade-service/tests/test_e286_room_beyond.py
 services/real-trade-service/tests/test_e37_catalog_coverage.py
 services/real-trade-service/tests/test_e47_effective_risk.py
 services/real-trade-service/tests/test_e75_journal_notes.py

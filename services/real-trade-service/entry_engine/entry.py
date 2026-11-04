@@ -900,8 +900,8 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     for idx, cand in enumerate(candidates):
         try:
             pstat.set_symbol_progress(mode, cand.symbol, idx, len(candidates))
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - a dashboard progress note must never stop an entry cycle
+            logger.debug("entry: progress note failed for %s (ignored)", cand.symbol, exc_info=True)
 
         # group 268: opening-quality gate (09:15 until OPENING_GATE_SETTLE_IST). A held-back candidate stays queued
         # (consumed stays False, nothing logged as a decision) and is checked again next cycle. Fails closed while active.

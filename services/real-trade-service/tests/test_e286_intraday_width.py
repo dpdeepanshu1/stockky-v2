@@ -32,10 +32,17 @@ def test_no_atr_or_bad_data_is_no_change_and_never_raises():
         assert cap(*args)[2] is None and cap(*args)[:2] == args[:2]
 
 
-def test_config_defaults():
+def test_config_defaults(monkeypatch):
+    """tests/conftest.py switches INTRADAY_WIDTH_MODE off on the shared config module, so the shipped defaults are read from a fresh copy of config.py with the env cleared."""
+    import importlib.util
     import config
-    assert config.INTRADAY_WIDTH_MODE == "live" and config.INTRADAY_WIDTH_ATR_FRAC == 0.6 and config.INTRADAY_WIDTH_FLOOR_PCT == 1.2
-    assert config.INTRADAY_WIDTH_LABELS == frozenset({"BUY NOW", "PREPARE TO BUY"})
+    for k in ("INTRADAY_WIDTH_MODE", "INTRADAY_WIDTH_ATR_FRAC", "INTRADAY_WIDTH_FLOOR_PCT", "INTRADAY_WIDTH_LABELS"):
+        monkeypatch.delenv(k, raising=False)
+    spec = importlib.util.spec_from_file_location("config_fresh_e286", config.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    assert fresh.INTRADAY_WIDTH_MODE == "live" and fresh.INTRADAY_WIDTH_ATR_FRAC == 0.6 and fresh.INTRADAY_WIDTH_FLOOR_PCT == 1.2
+    assert fresh.INTRADAY_WIDTH_LABELS == frozenset({"BUY NOW", "PREPARE TO BUY"})
 
 
 if __name__ == "__main__":

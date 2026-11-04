@@ -5,6 +5,8 @@
  * **Not changed:** the Setup scorecard still names its baseline row `Shortlist (old rule)` (`setupName`), and the stamp id stays `LEGACY_SHORTLIST`, so history, CSV and scorecard numbers are unchanged.
  * **Tests:** `setupView.test.mjs` and `rtEntryReason.test.mjs` updated (new labels, `after 10:30`, tooltip); all frontend `*.test.mjs` pass in the sandbox.
  * **Deploy:** rebuild the frontend only. The 4 Nov list (items 1-7) is now complete; round 217's call sites still need `pytest services/real-trade-service/tests -q` on the VM.
+ * **Docs regenerated (same round):** `docs/ENV_REFERENCE.txt` had drifted behind the round 214-217 settings (`gen_env_reference.py --check` failed); regenerated, and `docs/FILE_MANIFEST.txt` refreshed (2441 files).
+ * **Test fixes (same round, from the VM run: 8 failed / 6171 passed):** `test_e286_intraday_width.py::test_config_defaults` now reads the shipped defaults from a fresh copy of `config.py` (conftest switches the shared module's mode off, so it passed alone but failed in the suite); the one new silent `except Exception: pass` in `entry.py` (the dashboard progress note) now logs at debug level, which keeps `test_group322_no_new_silent_excepts` at its pinned 3. The other 3 failures are being traced from the VM output.
 
 ## 4 Nov 2026 - Round 217: Real Trade may use the part of Position Stocks' half that sits idle (real-trade)
 

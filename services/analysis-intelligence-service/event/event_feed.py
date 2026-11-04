@@ -286,9 +286,39 @@ def classify(headline: str) -> Dict[str, Any]:
 _SYM_RE = re.compile(r"\b([A-Z][A-Z0-9&\-]{1,19})\b")
 
 
+# Round 183: with hundreds of subscribed symbols, plain words and index / exchange names that are also listed tickers must never tag a headline by themselves
+# (they can still be tagged by full company name).
+_GENERIC_TICKER_TOKENS = frozenset({"IT", "BSE", "NSE", "ENERGY", "INDIA", "BANK", "AUTO", "GOLD", "SILVER", "FMCG", "PHARMA", "METAL", "REALTY", "NIFTY", "SENSEX",
+                                    "IPO", "GMP", "FPO", "OFS", "FII", "DII", "RBI", "SEBI", "GDP", "CPI", "USD", "EV", "AI", "US", "UK", "GST", "MTF", "SIP", "ETF",
+                                    "FD", "EPS", "PAT", "ROE", "AUM", "NII", "PSU", "MF", "RIL", "ONE", "ALL", "NEW", "TOP", "BUY", "SELL", "HOLD", "LIVE", "NEWS"})
+# A ticker followed by one of these words is usually a DIFFERENT company ("BLS Polymers" is not BLS International, "LT Foods" is not L&T, "ITC Hotels" is not ITC).
+_NAME_WORDS = frozenset({"polymers", "industries", "infra", "infrastructure", "finance", "financial", "financials", "capital", "power", "energy", "foods", "pharma", "pharmaceuticals",
+                         "chemicals", "textiles", "steel", "steels", "cement", "motors", "services", "international", "technologies", "technology", "tech", "solutions", "systems",
+                         "holdings", "enterprises", "ventures", "realty", "housing", "logistics", "agro", "sugar", "sugars", "paper", "labs", "laboratories", "healthcare", "hospitals",
+                         "hotels", "life", "general", "insurance", "securities", "global", "digital", "media", "entertainment", "retail", "engineering", "electricals", "electronics",
+                         "projects", "constructions", "minerals", "metals", "alloys", "plastics", "environmental", "green", "renewables", "renewable", "petro", "oil", "gas", "mining",
+                         "airlines", "aviation", "shipping", "ports", "telecom", "networks", "software", "biotech", "bio", "foundation", "cables", "tubes", "pipes", "glass", "tyres", "fibres"})
+
+
+def ticker_is_other_company(headline: str, sym: str, aliases: List[Tuple[str, str]]) -> bool:
+    """True when the ticker token in the headline is the start of a longer company name that is not this symbol's own name. Never raises."""
+    try:
+        sym = str(sym).strip().upper()
+        m = re.search(r"(?<![A-Za-z0-9&\-])" + re.escape(sym) + r"(?![A-Za-z0-9&\-])\s+([A-Za-z][A-Za-z&]*)", str(headline or ""))
+        if not m:
+            return False
+        word = m.group(1).lower()
+        if word not in _NAME_WORDS:
+            return False
+        pref = sym.lower() + " " + word
+        return not any(a.startswith(pref) for a, sy in (aliases or []) if sy == sym)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def extract_symbol(headline: str, known: Iterable[str]) -> Optional[str]:
     """The first KNOWN symbol written as an upper-case token in the headline. Never guesses: an unknown token returns None."""
-    kn = {str(s).strip().upper() for s in (known or []) if s}
+    kn = {str(s).strip().upper() for s in (known or []) if s} - _GENERIC_TICKER_TOKENS
     if not kn:
         return None
     for m in _SYM_RE.finditer(str(headline or "")):
@@ -627,6 +657,8 @@ class FeedCollector:
                     n_items += 1
                     newest = pub if newest is None or pub > newest else newest
                     sym = extract_symbol(title, known)
+                    if sym and ticker_is_other_company(title, sym, aliases):
+                        sym = None        # round 183: "BLS Polymers ..." must not become an event on BLS (International)
                     if sym:
                         by_ticker += 1
                     else:

@@ -127,3 +127,22 @@ def test_a_real_order_win_is_still_positive():
     import event_lite as el
     r = el.classify("Coal India wins order worth Rs 500 crore")
     assert r["pol"] == 1
+
+
+def test_ticker_followed_by_another_company_name_is_not_tagged():
+    col = _col(["Listing Today: BLS Polymers Swells 90% On D-Street Debut", "LT Foods Q2 profit jumps 30%"], ["BLS.NS", "LT.NS"])
+    col.poll_once()
+    assert col.response()["events"] == []
+
+
+def test_ticker_followed_by_its_own_name_is_still_tagged():
+    col = _col(["BLS International Q2 results: Record revenue"], ["BLS.NS"])
+    col.names_fn = lambda: {"BLS.NS": "BLS International Services Limited"}
+    col.poll_once()
+    assert [e["symbol"] for e in col.response()["events"]] == ["BLS"]
+
+
+def test_generic_exchange_token_never_tags_by_itself():
+    col = _col(["Sensex, Nifty end higher; BSE midcap index gains 1%"], ["BSE.NS"])
+    col.poll_once()
+    assert col.response()["events"] == []

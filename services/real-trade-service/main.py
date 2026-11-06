@@ -770,6 +770,9 @@ async def gate_status(mode: str, db: Session = Depends(get_db)):
             # (see RealAutoTrade.tsx's PortfolioSummary component).
             "realized_pnl_total": account.realized_pnl_total if account else None,
         },
+        # round 226: today's realized P&L of the whole Dhan account (this engine + position-stocks), display only
+        "account_wide": (shared_daily_pnl.account_wide_today(db, account.realized_pnl_today)
+                         if (mode == "REAL" and account is not None) else None),
         "risk_config": {
             "risk_per_trade_pct": effective_risk_pct_in_force(risk) if risk else None,
             "max_daily_loss_pct": risk.max_daily_loss_pct if risk else None,

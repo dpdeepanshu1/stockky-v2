@@ -215,6 +215,15 @@ export interface GateStatus {
     realized_pnl_today: number | null;
     realized_pnl_total: number | null;
   };
+  /** round 226: today's realized P&L of the whole Dhan account (this engine + position-stocks). REAL mode only; display only. */
+  account_wide?: {
+    realized_today: number;
+    own_realized_today: number;
+    peer_realized_today: number;
+    peer_available: boolean;
+    peer_age_s: number | null;
+    includes_peer_open: boolean;
+  } | null;
   risk_config: {
     risk_per_trade_pct: number | null;
     max_daily_loss_pct: number | null;

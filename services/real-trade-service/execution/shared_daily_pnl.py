@@ -95,3 +95,47 @@ def account_wide_loss_pct(db: Session, own_pnl: float, own_base: float) -> float
     except Exception as e:  # noqa: BLE001 - a bad figure must never become a new way to block (or crash) an entry
         logger.warning("shared-daily-pnl: account-wide loss unavailable, treating as 0: %s", e)
         return 0.0
+
+
+# ── round 226: account-wide "today" figure for the dashboard (read only, display only) ────────────────────────────
+# Dhan's "Today's Positions" covers BOTH engines (real-trade Delivery + position-stocks Intraday), while this service's own
+# numbers cover only its own trades. The two rows in `stockky_shared_daily_pnl` already hold both realized figures for the IST
+# day, so the dashboard can show the account-wide realized total. The peer row is cached for ACCOUNT_WIDE_PEER_CACHE_S (15 s) so
+# the frequently polled /status never adds a DB read each time. Nothing here feeds a risk check, a gate or an order.
+import os as _os
+import time as _time
+
+_PEER_CACHE: dict = {"t": -1e12, "v": None}
+
+
+def _peer_cached(db: Session) -> Tuple[float, float, Optional[float]]:
+    try:
+        ttl = float((_os.getenv("ACCOUNT_WIDE_PEER_CACHE_S") or "").strip() or 15.0)
+    except ValueError:
+        ttl = 15.0
+    now = _time.monotonic()
+    hit = _PEER_CACHE.get("v")
+    if hit is not None and ttl > 0 and now - float(_PEER_CACHE.get("t", -1e12)) < ttl:
+        peer_pnl, peer_base, age = hit
+        return peer_pnl, peer_base, (None if age is None else age + (now - float(_PEER_CACHE["t"])))
+    val = get_peer(db)
+    _PEER_CACHE["t"] = now
+    _PEER_CACHE["v"] = val
+    return val
+
+
+def account_wide_today(db: Session, own_realized_today: float) -> dict:
+    """Realized P&L today for the whole Dhan account: this service's own live figure + the peer's last published row.
+    `peer_available` is False when the peer row is missing / from an earlier IST day / unreadable (the peer part is then 0
+    and the total is this service's figure alone). `includes_peer_open` is always False: the peer's open positions are not
+    known here. Never raises."""
+    own = round(float(own_realized_today or 0.0), 2)
+    try:
+        peer_pnl, _base, age = _peer_cached(db)
+        peer = round(float(peer_pnl or 0.0), 2)
+        return {"realized_today": round(own + peer, 2), "own_realized_today": own, "peer_realized_today": peer,
+                "peer_available": age is not None, "peer_age_s": None if age is None else int(age), "includes_peer_open": False}
+    except Exception as e:  # noqa: BLE001 - a display figure must never break /status
+        logger.warning("shared-daily-pnl: account-wide figure unavailable, showing own only: %s", e)
+        return {"realized_today": own, "own_realized_today": own, "peer_realized_today": 0.0,
+                "peer_available": False, "peer_age_s": None, "includes_peer_open": False}

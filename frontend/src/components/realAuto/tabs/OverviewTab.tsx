@@ -95,7 +95,7 @@ function PortfolioSummary({
           label="Total P&L (realized + unrealized)"
           value={`${totalPnl >= 0 ? "+" : ""}${fmtInr(totalPnl, 0)} (${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%)`}
           color={pnlColor(totalPnl)}
-          sub={`Realized all-time (this engine): ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
+          sub={`Realized all-time, sirf is engine ka: ${realized >= 0 ? "+" : ""}${fmtInr(realized, 0)}`}
         />
         {netOfCharges != null && (
           <StatCard
@@ -506,6 +506,41 @@ export function OverviewTab({
                   )}
                 </div>
               )}
+
+              {/* round 226: today's P&L for the WHOLE Dhan account (both engines). Display only. */}
+              {mode === "REAL" && status?.account_wide && (() => {
+                const aw = status.account_wide;
+                const unrealizedNow = positions.reduce(
+                  (sum, p) => sum + ((p.current_price ?? p.avg_entry_price) - p.avg_entry_price) * p.qty_open, 0
+                );
+                const total = aw.realized_today + unrealizedNow;
+                const sgn = (n: number) => (n >= 0 ? "+" : "");
+                return (
+                  <div className="bg-graphite border border-slate rounded-2xl p-4 mb-4">
+                    <SectionHdr>Aaj ka P&amp;L (poora account — dono engines)</SectionHdr>
+                    <div className="grid grid-cols-2 gap-2">
+                      <StatCard
+                        label="Realized today (account-wide)"
+                        value={`${sgn(aw.realized_today)}${fmtInr(aw.realized_today, 2)}`}
+                        color={pnlColor(aw.realized_today)}
+                        sub={`this engine ${sgn(aw.own_realized_today)}${fmtInr(aw.own_realized_today, 2)} · position-stocks ${sgn(aw.peer_realized_today)}${fmtInr(aw.peer_realized_today, 2)}`}
+                      />
+                      <StatCard
+                        label="Realized + live unrealized"
+                        value={`${sgn(total)}${fmtInr(total, 2)}`}
+                        color={pnlColor(total)}
+                        sub={`unrealized (this engine only): ${sgn(unrealizedNow)}${fmtInr(unrealizedNow, 2)}`}
+                      />
+                    </div>
+                    <div className="mt-2 text-[11px] text-slate-400">
+                      {aw.peer_available
+                        ? `Position-stocks figure last updated ${aw.peer_age_s ?? 0}s ago.`
+                        : "Position-stocks figure not available today — showing this engine only."}
+                      {" "}Position-stocks ke open positions ka unrealized shamil nahi hai, isliye Dhan ke headline se tabhi milega jab wahan koi open position na ho.
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Portfolio summary — invested / current value / P&L, stocks only */}
               <PortfolioSummary

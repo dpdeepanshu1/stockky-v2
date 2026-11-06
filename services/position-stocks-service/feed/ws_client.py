@@ -243,6 +243,7 @@ _day_stats: Dict[str, tuple] = {}   # symbol -> (open, high, low, prev_close)
 # offsets are unverified against a live frame, so every frame is sanity-checked).
 _day_stats_accepted = 0
 _day_stats_rejected = 0
+_day_stats_prev_dropped = 0   # round 222: frames kept with the previous close withdrawn (open / high / low / ltp agree, only prev is off-scale)
 _day_stats_warned = False
 _DAY_STATS_TOL = 0.02       # tick vs. high/low timing slack (2%). 2026-10-12: CPCAP ltp 158.99 vs frame high 157.36 (1.03% on a +8% mover) was rejected
                             # as a bad layout though open/prev were fine; a real layout error is garbage far outside this (see _DAY_STATS_MAX_RATIO)
@@ -416,11 +417,27 @@ def _day_stats_plausible(ds: tuple, ltp: float) -> bool:
 def _accept_day_stats(symbol: str, ds: tuple, ltp: float) -> bool:
     """Store ds for symbol if plausible; otherwise keep the previous value, count it
     and warn once per process (callers fall back to the tick buffer)."""
-    global _day_stats_accepted, _day_stats_rejected, _day_stats_warned
+    global _day_stats_accepted, _day_stats_rejected, _day_stats_warned, _day_stats_prev_dropped
     if _day_stats_plausible(ds, ltp):
         _day_stats[symbol] = ds
         _day_stats_accepted += 1
         return True
+    # round 222 (KMEW 6 Nov: open/high/low/ltp 641/648/606/608 with a previous close of 3143): when everything EXCEPT the previous close
+    # is consistent, the frame layout is fine and the previous close is simply on another price scale (split / bonus / demerger day).
+    # Keep open / high / low (the range gate and VWAP need them) and withdraw only the previous close; day-change readers already
+    # treat a missing previous close as "unknown". A real layout error garbles several fields, so it still fails the check below.
+    if len(ds) >= 4 and ds[3] is not None and any(v is not None for v in ds[:3]):
+        _ds_np = (ds[0], ds[1], ds[2], None)
+        if _day_stats_plausible(_ds_np, ltp):
+            _day_stats[symbol] = _ds_np
+            _day_stats_prev_dropped += 1
+            if not _day_stats_warned:
+                _day_stats_warned = True
+                logger.warning(
+                    "position-stocks WS: previous close for %s (%s) is off the price scale of today's prints (open/high/low=%s, ltp=%.2f); "
+                    "keeping open/high/low, previous close withdrawn (split / bonus day?). See ws_status()['day_stats_prev_dropped'].",
+                    symbol, ds[3], ds[:3], ltp)
+            return True
     _day_stats_rejected += 1
     if not _day_stats_warned:
         _day_stats_warned = True
@@ -1055,6 +1072,7 @@ def ws_status() -> dict:
         "day_stats_symbols": len(_day_stats),
         "day_stats_accepted": _day_stats_accepted,
         "day_stats_rejected": _day_stats_rejected,
+        "day_stats_prev_dropped": _day_stats_prev_dropped,
         "last_tick_at": (
             datetime.fromtimestamp(_last_tick_at, tz=timezone.utc).isoformat()
             if _last_tick_at else None

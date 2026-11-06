@@ -64,6 +64,40 @@ def is_breached(ltp: Optional[float], stop: Optional[float], short: bool = False
         return False
 
 
+def describe_legs(row) -> str:
+    """One log line for a Dhan super-order row: the overall status plus every leg's name / status / price / trigger. Pure; never raises."""
+    try:
+        if not isinstance(row, dict):
+            return "no super-order row found"
+        parts = [f"order status={row.get('orderStatus') or row.get('status')}"]
+        for leg in row.get("legDetails") or []:
+            if not isinstance(leg, dict):
+                continue
+            bits = [f"{k}={leg.get(k)}" for k in ("orderStatus", "price", "triggerPrice", "stopLossPrice", "averageTradedPrice", "filledQty", "remainingQuantity")
+                    if leg.get(k) not in (None, "")]
+            parts.append(f"{leg.get('legName')}: " + (" ".join(bits) or "no detail"))
+        return " | ".join(parts)
+    except Exception as e:  # noqa: BLE001
+        return f"could not describe legs ({e})"
+
+
+def log_leg_state(db: Session, pos: ScalpPosition) -> None:
+    """Round 223: EXCELSOFT / TEXINFRA (5 Nov 2026) - the stop leg showed 'Cancellation Rejected' and a separate leg order was cancelled, but
+    nothing recorded what the leg looked like BEFORE the watchdog cancelled it, so 'triggered but did not fill' stayed a guess. Reads the
+    super-order row once and logs each leg's status and price. Read only: it changes no order. Runs BEFORE close_position_now (which cancels
+    the legs and so destroys the evidence). STOP_WATCHDOG_LEG_LOG=0 turns it off. Never raises."""
+    try:
+        if not getattr(config, "STOP_WATCHDOG_LEG_LOG", True):
+            return
+        rows = dhan_client.get_super_order_list(db)
+        want = str(pos.dhan_super_order_id)
+        row = next((r for r in rows if isinstance(r, dict) and str(r.get("orderId") or r.get("order_id") or "") == want), None)
+        logger.warning("STOP_WATCHDOG leg state before cancel: %s (id=%s) stop=%s super_order=%s -> %s",
+                       pos.symbol, pos.id, pos.stop_price, want, describe_legs(row))
+    except Exception as e:  # noqa: BLE001
+        logger.info("STOP_WATCHDOG: %s (id=%s) leg state not read: %s", pos.symbol, getattr(pos, "id", None), e)
+
+
 def run_stop_watchdog(db: Session) -> int:
     """Returns the number of positions closed this pass."""
     if not getattr(config, "STOP_WATCHDOG_ENABLED", True) or not config.USE_SUPER_ORDER:
@@ -102,6 +136,7 @@ def run_stop_watchdog(db: Session) -> int:
                 pos.symbol, pos.id, ltp, pos.stop_price, held,
             )
             stop_at_breach = pos.stop_price
+            log_leg_state(db, pos)
             try:
                 eod_squareoff.close_position_now(db, pos, exit_reason=STATUS)
             except Exception as e:  # noqa: BLE001  (ManualCloseRejected, cooldown, broker error ...)

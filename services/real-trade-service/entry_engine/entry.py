@@ -1697,6 +1697,13 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
         except Exception:  # noqa: BLE001 - fail open: 0 = the old maths
             logger.debug("entry: held value lookup failed (fail-open)", exc_info=True)
         result = risk_evaluate(intent, account_state)
+        try:                                                                  # round 223: say what cut the quantity (AMBUJACEM 18 -> 7 had no log line)
+            from entry_engine import qty_trace as _qt
+            _cut = _qt.cut_line(mode, cand.symbol, proposed_qty, result.approved_qty, result.check_name, result.reason, (_cv or {}).get("mult"))
+            if _cut:
+                logger.info(_cut)
+        except Exception:  # noqa: BLE001 - a log line must never stop an entry
+            logger.debug("entry: qty cut line failed (ignored)", exc_info=True)
 
         decision.proposed_qty        = result.approved_qty or proposed_qty
         decision.proposed_price      = entry_price

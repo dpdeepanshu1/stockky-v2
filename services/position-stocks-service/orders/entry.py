@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -543,6 +543,24 @@ def attempt_entry(
     quality: Optional[QualitySignal] = None,
     rearm: Optional[dict] = None,
 ) -> Optional[ScalpPosition]:
+    """round 225: times the stages of one entry (log only, see orders/entry_stage_timer.py); the logic is _attempt_entry_impl."""
+    entry_stage_timer.begin(getattr(candidate, "symbol", "?"))
+    _outcome = "ok"
+    try:
+        return _attempt_entry_impl(db, candidate, quality=quality, rearm=rearm)
+    except BaseException as _e:  # noqa: BLE001 - re-raised unchanged
+        _outcome = type(_e).__name__
+        raise
+    finally:
+        entry_stage_timer.end(_outcome)
+
+
+def _attempt_entry_impl(
+    db: Session,
+    candidate: Candidate,
+    quality: Optional[QualitySignal] = None,
+    rearm: Optional[dict] = None,
+) -> Optional[ScalpPosition]:
     """Try to enter a position for the given candidate.
     Returns the ScalpPosition if entered, None otherwise (also logs why).
     `quality` (added session 6) is the best-effort fundamental/technical/
@@ -552,6 +570,7 @@ def attempt_entry(
     audit trail of what was known about a symbol at decision time."""
 
     gate = _get_gate_state(db)
+    entry_stage_timer.mark("gate_state")
 
     if not gate.is_armed:
         _log_candidate(db, candidate, "SKIPPED", "SERVICE_NOT_ARMED", quality=quality)
@@ -1097,6 +1116,7 @@ def attempt_entry(
         _log_candidate(db, candidate, "SKIPPED", _cal_reject, quality=quality)
         return None
 
+    entry_stage_timer.mark("early_gates")
     # group340: cheap-stock floor (ENTRY_MIN_PRICE, 0 = off) and ordinary-day cut-off (SCALP_ENTRY_CUTOFF_IST, blank = off).
     _min_px = float(getattr(config, "ENTRY_MIN_PRICE", 0.0) or 0.0)
     if _min_px > 0 and 0 < candidate.current_ltp < _min_px:
@@ -1124,6 +1144,7 @@ def attempt_entry(
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _board_reject, quality=quality)
         return None
+    entry_stage_timer.mark("floor_catalyst_board")
 
     # group354: daily market-structure gate (orders/structure_gate.py). Live by default; refuses only a clear daily-structure no-go,
     # no / stale data is "no opinion"; fails open. The snapshot is stored on the position.
@@ -1138,6 +1159,7 @@ def attempt_entry(
         shared_symbol_lock.release(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _struct_reject, quality=quality)
         return None
+    entry_stage_timer.mark("structure_gate")
     if _struct_pen:
         _penalties.update(_struct_pen)
         for _k, _pv in _struct_pen.items():
@@ -1156,6 +1178,7 @@ def attempt_entry(
             _setup_mult = _new_mult
             _flow_snap = setup_stamp.restamp(_flow_snap, _penalties, _setup_mult)
 
+    entry_stage_timer.mark("late_penalties")
     # group469: approve-first mode. OFF unless APPROVE_FIRST_N > 0. While a round is open (the gate settings changed) each automatic entry
     # waits for your approval (POST /approvals/{symbol}/approve). Checked after EVERY other gate (so only an entry that would really go out asks you) and before capital is
     # reserved; the symbol claim is released, so a held symbol costs nothing. The skip row is written once per symbol (the first time it is held); later cycles only set the in-memory reason.
@@ -1177,19 +1200,23 @@ def attempt_entry(
                 _skip_state.reason = "APPROVAL_PENDING"
             return None
 
+    entry_stage_timer.mark("approve_first")
     # E266: conviction score of this entry -> size multiple (None = feature off / too little known = the old fixed size). Never raises.
     _cv = conviction.long_decision(candidate, quality, levels)
     _cv_note = conviction.note(candidate.symbol, "LONG", _cv)
     if _cv:
         logger.info("position-stocks entry: %s %s (%s) parts=%s", candidate.symbol, _cv_note, conviction.known_note(_cv), _cv.get("detail"))
 
+    entry_stage_timer.mark("conviction")
     # Reserve capital (also checks kill switch again in the ledger)
     try:
         from orders import risk_stage as _rs                               # E276 round 56: a proven setup risks more per trade (1.0 = unchanged)
         _risk_mult = _rs.risk_mult_for(db, (_setup_res or {}).get("id"), "LONG")
     except Exception:  # noqa: BLE001
         _risk_mult = 1.0
+    entry_stage_timer.mark("risk_mult")
     position_value = ledger.reserve_capital(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)      # E282: sized from the plan's stop, not a learned tighter one
+    entry_stage_timer.mark("reserve_capital")
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
         # FIX (session70): raise instead of returning None so _run_cycle()

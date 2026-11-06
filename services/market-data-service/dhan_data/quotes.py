@@ -20,7 +20,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional
 
-from . import client, config, scrip_master
+from . import client, config, prev_close_guard, scrip_master
 from .errors import DhanError
 
 logger = logging.getLogger("dhan-data.quotes")
@@ -34,7 +34,10 @@ _listeners: List[Callable[[List[dict]], None]] = []
 _thread: Optional[threading.Thread] = None
 _stop = False
 _stats = {"batches": 0, "symbols_last_batch": 0, "last_batch_ms": None, "last_batch_at": None, "rows_cached": 0,
-          "empty_symbols": 0, "prev_close_disagreements": 0, "rows_mapped": 0}
+          "empty_symbols": 0, "prev_close_disagreements": 0, "rows_mapped": 0,
+          "prev_close_corrected": 0, "prev_close_suspect": 0}
+_PREV_WARNED: set = set()       # symbols already logged for a corrected / withdrawn previous close (bounded)
+_PREV_WARNED_MAX = 500
 # group275: WHICH symbols Dhan did not price (status used to give only the count). Kept apart from _stats so the
 # counters stay plain numbers. no_scrip = not in Dhan's scrip master; no_data = sent to Dhan, nothing usable came back.
 _EMPTY_TRACK_MAX = 2000
@@ -144,6 +147,18 @@ def map_item(symbol: str, item: dict, now_mono: Optional[float] = None) -> Optio
     if prev is not None and net is not None and abs((price - net) - prev) > max(0.01, 0.01 * prev):
         # diagnostic for review risk R3: ohlc.close may not be yesterday's close in-session. Counted, never "fixed" silently.
         _stats["prev_close_disagreements"] += 1
+    # round 222: is this previous close the reference today's prices are on? (split / bonus / demerger days carry the raw old close)
+    _open, _hi, _lo = _f(ohlc.get("open")), _f(ohlc.get("high")), _f(ohlc.get("low"))
+    _up, _lw = _f(item.get("upper_circuit_limit")), _f(item.get("lower_circuit_limit"))
+    _pc = prev_close_guard.assess(price, prev, open_=_open, high=_hi, low=_lo, upper=_up, lower=_lw, symbol=symbol)
+    _pc_flag, _pc_raw = None, None
+    if _pc["status"] in ("corrected", "suspect"):
+        _pc_flag, _pc_raw, prev = _pc["status"], _pc["raw"], _pc["prev"]
+        _stats["prev_close_" + _pc_flag] += 1
+        if symbol not in _PREV_WARNED and len(_PREV_WARNED) < _PREV_WARNED_MAX:
+            _PREV_WARNED.add(symbol)
+            logger.warning("dhan quote %s: previous close %s - %s (ltp %.2f); %s", symbol, _pc_flag, _pc["reason"], price,
+                           "using the circuit-band base" if _pc_flag == "corrected" else "withdrawn, day change unknown")
     chg = round((price - prev) / prev * 100.0, 2) if prev else None
     ltt = parse_ltt(item.get("last_trade_time"))
     vol = item.get("volume")
@@ -169,6 +184,8 @@ def map_item(symbol: str, item: dict, now_mono: Optional[float] = None) -> Optio
         "source": "dhan",
         "_mono": time.monotonic() if now_mono is None else now_mono,
     }
+    if _pc_flag:                       # only present on the (rare) rows whose previous close was corrected / withdrawn
+        row["prev_close_flag"], row["previous_close_raw"] = _pc_flag, _pc_raw
     return row
 
 

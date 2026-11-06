@@ -68,6 +68,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -884,6 +885,51 @@ def _reject_log_text(reject) -> str:
     return text[:limit].rstrip() + " ..."
 
 
+# ── round 224: one summary line per cycle for the volume-shock rejections ────────────────────────────────────────
+# 6 Nov 2026 log: about 260 "VOLUME_SHOCK CANDIDATE REJECTED <SYMBOL> | ..." INFO lines every cycle (about 4,000 in 18 minutes), which buried
+# real events. VOLUME_SHOCK_REJECT_LOG=summary (default): the per-symbol line goes to DEBUG and the cycle writes ONE INFO line with the reasons
+# grouped (numbers replaced by #) and a few example symbols. VOLUME_SHOCK_REJECT_LOG=each restores one INFO line per symbol. Log only: no
+# candidate, gate or cache behaviour changes.
+_NUM_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)*")
+
+
+def _vs_reject_log_mode() -> str:
+    raw = ((os.getenv("VOLUME_SHOCK_REJECT_LOG") or "").strip().lower() or "summary")
+    return "each" if raw in ("each", "all", "per_symbol", "0", "off", "false") else "summary"
+
+
+def _vs_reject_category(reason) -> str:
+    """The rejection reason with every number replaced by '#', cut to 90 characters, so the same rule groups together across symbols."""
+    try:
+        txt = _NUM_RE.sub("#", str(reason))
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt if len(txt) <= 90 else txt[:90].rstrip() + " ..."
+    except Exception:  # noqa: BLE001
+        return "unreadable reason"
+
+
+def _vs_reject_summary_line(mode, rejects: list, total: int, top: int = 6, examples: int = 3):
+    """One INFO line for the cycle's volume-shock rejections, or None when there were none. `rejects` = [(symbol, reason), ...]. Never raises."""
+    try:
+        if not rejects:
+            return None
+        groups: dict = {}
+        for sym, reason in rejects:
+            g = groups.setdefault(_vs_reject_category(reason), [])
+            g.append(sym)
+        ranked = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+        parts = []
+        for cat, syms in ranked[:top]:
+            ex = ", ".join(syms[:examples])
+            parts.append(f"[{len(syms)}] {cat} (e.g. {ex})")
+        more = len(ranked) - top
+        tail = f"; +{more} more reason(s)" if more > 0 else ""
+        return (f"VOLUME_SHOCK rejected {len(rejects)} of {total} symbol(s) this cycle (mode={mode}): " + "; ".join(parts) + tail
+                + " - per-symbol lines at DEBUG (VOLUME_SHOCK_REJECT_LOG=each for INFO)")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 _MCAP_LAST_GOOD: dict[str, tuple[float, float]] = {}
 
 
@@ -1497,6 +1543,11 @@ async def _multi_tf_analysis(client: httpx.AsyncClient, symbol: str, quote: Opti
             "data_starved": True,
         }
 
+    _pcr = _prev_close_flag_reject(quote)
+    if _pcr is not None:
+        _pcr.update({"tf_returns": tf_returns, "bullish_count": 0})
+        return _pcr
+
     # ── Check 0: live quote must actually resolve ────────────────────────────
     # Previously, a symbol with a broken/unresolvable quote (bad ticker,
     # ambiguous company-name symbol like "APOLLO" instead of "APOLLOHOSP",
@@ -1805,6 +1856,33 @@ def _today_volume_fraction(candles: list, now_ist: Optional[datetime] = None) ->
         return 1.0
 
 
+# round 222: market-data marks a quote whose previous close was corrected (circuit-band base) or withdrawn (no print near it): a
+# split / bonus / demerger day. The daily history real-trade reads (ATR, 20-day high, 6m return, volume average) is still on the old
+# price scale that day, so every number built from it is wrong too: the name is skipped for the day, not traded on half-right data.
+PREV_CLOSE_FLAG_REJECT = ((os.getenv("CANDIDATE_PREV_CLOSE_FLAG_REJECT") or "").strip() or "1") not in ("0", "false", "False")
+
+
+def _prev_close_flag_reject(quote) -> Optional[dict]:
+    """A reject dict when the quote carries market-data's prev_close_flag (and the switch is on), else None. Never raises."""
+    try:
+        if not PREV_CLOSE_FLAG_REJECT or not isinstance(quote, dict):
+            return None
+        flag = quote.get("prev_close_flag")
+        if flag not in ("corrected", "suspect"):
+            return None
+        raw = quote.get("previous_close_raw")
+        return {
+            "reject_reason": (
+                f"Previous close unreliable today ({flag}; raw previous close {raw}, ltp {quote.get('price') or quote.get('cmp')}): "
+                "looks like a split / bonus / demerger day, so the daily history is on a different price scale. Skipped for today."
+            ),
+            "atr_pct": None,
+            "reject_kind": "prev_close_flag",
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _quote_return_pct(quote: dict) -> Optional[float]:
     """Live return vs previous close from a quote dict, or None when either is missing/unusable."""
     try:
@@ -1883,6 +1961,10 @@ async def _volume_shock_analysis(client: httpx.AsyncClient, symbol: str, quote: 
 
     if isinstance(quote, Exception) or not quote:
         return {"reject_reason": "No quote available for volume-shock check.", "atr_pct": None}
+
+    _pcr = _prev_close_flag_reject(quote)       # round 222
+    if _pcr is not None:
+        return _pcr
 
     # group345 (13 Oct log: HATHWAY, FILATFASH, BHANDARI, KRIDHANINF ... sub-Rs20 stocks cost a /history call every cycle and were only rejected on
     # price afterwards): the price floor is judged on the quote, before any history call.
@@ -2582,6 +2664,7 @@ async def _refresh_volume_shock_candidates(
     # ── First pass: keep only symbols that cleared the price/volume
     # breakout check, same as before. ─────────────────────────────────────
     passed: list[tuple] = []
+    _vs_rejected_now: list = []          # round 224: (symbol, reason) of this cycle's rejections, for the one summary line
     for sym, result in zip(vs_tasks.keys(), vs_results):
         if isinstance(result, Exception):
             logger.warning("volume_shock analysis error for %s: %s", sym, result)
@@ -2597,9 +2680,13 @@ async def _refresh_volume_shock_candidates(
                 _why_now = _HIST_REASON.get(sym) or "unknown"
                 _txt += (f" [history {'missing' if _why_now in _HIST_DEFINITE else 'unavailable'}: {_why_now}"
                          f" - {'no data on record' if _why_now in _HIST_DEFINITE else 'not judged'}]")
-            logger.info(
-                "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _txt
-            )
+            if _vs_reject_log_mode() == "each":
+                logger.info(
+                    "VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _txt
+                )
+            else:
+                logger.debug("VOLUME_SHOCK CANDIDATE REJECTED %s (mode=%s) | %s", sym, mode, _txt)
+                _vs_rejected_now.append((sym, _txt))
             skipped += 1
             if "no quote" in reject.lower() or "insufficient" in reject.lower():
                 no_quote_count += 1
@@ -2612,6 +2699,10 @@ async def _refresh_volume_shock_candidates(
             continue
 
         passed.append((sym, result))
+
+    _vs_line = _vs_reject_summary_line(mode, _vs_rejected_now, len(vs_tasks))     # round 224
+    if _vs_line:
+        logger.info(_vs_line)
 
     # group154: one line per cycle when the daily history was missing for some symbols (it used to
     # surface only as per-symbol INFO rejections).

@@ -47,10 +47,28 @@ class TestDecide:
 
     @pytest.mark.parametrize("price,upper,lower", [
         (100.0, None, None), (100.0, 0, 0), (100.0, "x", None), (100.0, float("nan"), float("nan")),
-        (None, 110.0, 90.0), (0, 110.0, 90.0), (100.0, 90.0, 110.0), (130.0, 110.0, 90.0), (70.0, 110.0, 90.0),
+        (None, 110.0, 90.0), (0, 110.0, 90.0), (100.0, 90.0, 110.0), (111.5, 110.0, 90.0), (88.5, 110.0, 90.0),
     ])
     def test_unknown_or_nonsense_never_blocks(self, price, upper, lower):
         assert circuit_gate.decide(price, upper, lower) is None
+
+    def test_far_outside_a_fresh_band_is_skipped(self):
+        # round 223 (KMEW): price 605 vs band 785.69-1011.95 is 23 % below the band
+        assert circuit_gate.decide(605.0, 1011.95, 785.69).startswith("PRICE_OUTSIDE_BAND")
+        assert circuit_gate.decide(130.0, 110.0, 90.0).startswith("PRICE_OUTSIDE_BAND")
+        assert circuit_gate.decide(70.0, 110.0, 90.0).startswith("PRICE_OUTSIDE_BAND")
+
+    def test_just_outside_the_band_stays_no_opinion(self):
+        assert circuit_gate.decide(112.0, 110.0, 90.0) is None   # 1.8 % above: limits may be a little stale
+        assert circuit_gate.decide(86.0, 110.0, 90.0) is None    # 4.4 % below
+
+    def test_outside_band_switch_off_restores_old_behaviour(self, monkeypatch):
+        monkeypatch.setattr(config, "PRICE_OUTSIDE_BAND_PCT", 0.0)
+        assert circuit_gate.decide(605.0, 1011.95, 785.69) is None
+
+    def test_one_sided_band_far_outside(self):
+        assert circuit_gate.decide(60.0, None, 90.0).startswith("PRICE_OUTSIDE_BAND")
+        assert circuit_gate.decide(130.0, 110.0, None).startswith("PRICE_OUTSIDE_BAND")
 
     def test_zero_buffer_turns_a_side_off(self, monkeypatch):
         monkeypatch.setattr(config, "CIRCUIT_UPPER_BUFFER_PCT", 0.0)

@@ -1692,6 +1692,21 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
     if not isinstance(fetched, str):
         fetched = str(fetched)
 
+    # round 222: a previous close that is not the reference today's prices are on (split / bonus / demerger day: raw old close
+    # against new-scale prices) must not turn into a "-80 % day". Idempotent: a row dhan_data.quotes already fixed passes unchanged.
+    _pcf, _pcr = d.get("prev_close_flag"), _f("previous_close_raw")
+    if px is not None and prev is not None and not _pcf and d.get("source") != "dhan":   # Dhan rows were checked in dhan_data.quotes
+        try:
+            from dhan_data import prev_close_guard as _pcg
+            _a = _pcg.assess(px, prev, open_=_f("open"), high=_f("day_high"), low=_f("day_low"),
+                             upper=_f("upper_circuit"), lower=_f("lower_circuit"), symbol=base)
+            if _a["status"] in ("corrected", "suspect"):
+                _pcf, _pcr, prev = _a["status"], _a["raw"], _a["prev"]
+                chg = _pcg.day_change_pct(px, prev)
+        except Exception:  # noqa: BLE001 - the guard never breaks a quote
+            pass
+    elif _pcf == "suspect":
+        prev, chg = None, None
     out = {
         "symbol": base if not str(sym).endswith((".NS", ".BO")) else str(sym).upper(),
         "name": d.get("name") or base,
@@ -1717,6 +1732,10 @@ def _pad_quote_response(sym: str, data: Optional[dict] = None) -> dict:
         _v = _f(_k)
         if _v is not None and _v > 0:
             out[_k] = _v
+    if _pcf in ("corrected", "suspect"):
+        out["prev_close_flag"] = _pcf
+        if _pcr is not None:
+            out["previous_close_raw"] = _pcr
     _restamp_quote(out)
     return out
 
@@ -2798,6 +2817,14 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
         if price is None or price <= 0:
             return _ao_first_miss(sym, "answer had no positive ltp")
         prev = _safe(q.get("close"))
+        _pcf = _pcr = None
+        try:   # round 222: same previous-close check as every other quote path
+            from dhan_data import prev_close_guard as _pcg
+            _a = _pcg.assess(price, prev, open_=_safe(q.get("open")), high=_safe(q.get("high")), low=_safe(q.get("low")), symbol=base)
+            if _a["status"] in ("corrected", "suspect"):
+                _pcf, _pcr, prev = _a["status"], _a["raw"], _a["prev"]
+        except Exception:  # noqa: BLE001
+            pass
         change_pct = None
         if prev and prev > 0:
             change_pct = round(((price - prev) / prev) * 100, 2)
@@ -2821,6 +2848,7 @@ def _angelone_rest_quote_first(sym: str) -> Optional[dict]:
             "volume": vol,
             "source": "angelone_rest",
             "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            **({"prev_close_flag": _pcf, "previous_close_raw": _pcr} if _pcf else {}),
         }
     except Exception as e:  # noqa: BLE001
         logger.debug("angelone-first quote %s: %s", sym, e)
@@ -2974,6 +3002,8 @@ def _dhan_quote_payload(base: str, row: dict) -> dict:
         # group330: the Dhan fields real-trade's VWAP / circuit / depth checks read. _pad_quote_response keeps only the non-None ones.
         "avg_price": row.get("avg_price"), "upper_circuit": row.get("upper_circuit"), "lower_circuit": row.get("lower_circuit"),
         "spread_pct": row.get("spread_pct"), "book_value_5": row.get("book_value_5"),
+        # round 222: open (only read by the previous-close guard in _pad_quote_response, not emitted) + what dhan_data.quotes decided
+        "open": row.get("open"), "prev_close_flag": row.get("prev_close_flag"), "previous_close_raw": row.get("previous_close_raw"),
     }
 
 
@@ -3746,6 +3776,13 @@ def angelone_movers():
                 continue
             if prev_close <= 0:
                 continue
+            try:   # round 222: a split / bonus day's raw previous close is not a mover (same guard as the quote paths)
+                from dhan_data import prev_close_guard as _pcg
+                _a = _pcg.assess(ltp, prev_close, open_=row.get("open"), high=row.get("high"), low=row.get("low"), symbol=sym)
+                if _a["status"] == "suspect":
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
             pct = (ltp - prev_close) / prev_close * 100.0
             if abs(pct) >= 5.0:
                 rows.append({"symbol": sym, "pct_change": round(pct, 2), "ltp": ltp})
@@ -4171,6 +4208,7 @@ def _get_quotes_bulk_core(req: BulkQuoteRequest, _stale_out: dict):
                         "ltp": _ltp,
                         "day_high": float(_fq.get("high") or 0) or None,
                         "day_low": float(_fq.get("low") or 0) or None,
+                        "open": float(_fq.get("open") or 0) or None,        # round 222: read by the previous-close guard in the pad
                         "volume": _fq.get("tradeVolume"),
                         **_prev_close_fields(_fq.get("close"), _ltp),   # E188: AngelOne's `close` is the previous close
                         "source": "angelone_rest",

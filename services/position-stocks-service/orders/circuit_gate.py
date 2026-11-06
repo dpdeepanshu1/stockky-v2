@@ -10,8 +10,13 @@ RULE (config.CIRCUIT_UPPER_BUFFER_PCT default 1.0, CIRCUIT_LOWER_BUFFER_PCT defa
   ltp <= lower * (1 + lower_buffer/100)  -> skip  (CIRCUIT_LOWER)
 
 The limits are read through depth_gate._fresh_quote(): the same 5 s cached /quote body, with the same age check, so this adds no
-extra network call to the entry path. FAIL OPEN: no body, a quote that is too old, a missing / zero / NaN limit, upper <= lower, or a
-price more than 1 % outside the stated band (stale limits) all mean "no opinion". Never raises. Off with CIRCUIT_GATE_ENABLED=0.
+extra network call to the entry path. FAIL OPEN: no body, a quote that is too old, a missing / zero / NaN limit or upper <= lower all mean "no opinion". Never raises.
+Off with CIRCUIT_GATE_ENABLED=0.
+
+Round 223 (6 Nov 2026, KMEW): a price 1 % to PRICE_OUTSIDE_BAND_PCT (default 5 %) outside the band is still "no opinion" (limits may be a
+little stale), but a price MORE than PRICE_OUTSIDE_BAND_PCT outside a fresh band is skip PRICE_OUTSIDE_BAND. An exchange price can never
+sit that far outside its own band, so either the price or the band is wrong. KMEW: feed LTP 605 vs Dhan band 785.69-1011.95 (23 % below);
+the BUY went to Dhan and was rejected. Skipping is the safe side of that doubt. PRICE_OUTSIDE_BAND_PCT=0 restores the old "no opinion".
 """
 from __future__ import annotations
 
@@ -26,6 +31,13 @@ from orders import depth_gate
 logger = logging.getLogger("position-stocks-circuit-gate")
 
 _BAND_SLACK = 0.01
+
+
+def _outside_pct() -> float:
+    try:
+        return max(0.0, float(getattr(config, "PRICE_OUTSIDE_BAND_PCT", 5.0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _pos(v) -> Optional[float]:
@@ -44,6 +56,14 @@ def decide(price, upper, lower) -> Optional[str]:
             return None
         if up is not None and lo is not None and up <= lo:
             return None
+        far = _outside_pct()
+        if far > 0:
+            if lo is not None and p < lo * (1 - far / 100.0):
+                return (f"PRICE_OUTSIDE_BAND:price {p:.2f} is {(lo - p) / lo * 100:.1f}% below the lower circuit {lo:.2f} "
+                        "(the price or the band is wrong - not sending the order)")
+            if up is not None and p > up * (1 + far / 100.0):
+                return (f"PRICE_OUTSIDE_BAND:price {p:.2f} is {(p - up) / up * 100:.1f}% above the upper circuit {up:.2f} "
+                        "(the price or the band is wrong - not sending the order)")
         if up is not None and p > up * (1 + _BAND_SLACK):
             return None
         if lo is not None and p < lo * (1 - _BAND_SLACK):

@@ -764,6 +764,8 @@ SCALP_COST_GATE_BROKERAGE_CAP_RS = _get_float("SCALP_COST_GATE_BROKERAGE_CAP_RS"
 CIRCUIT_GATE_ENABLED = _get_bool("CIRCUIT_GATE_ENABLED", True)
 CIRCUIT_UPPER_BUFFER_PCT = _get_float("CIRCUIT_UPPER_BUFFER_PCT", 1.0)
 CIRCUIT_LOWER_BUFFER_PCT = _get_float("CIRCUIT_LOWER_BUFFER_PCT", 2.0)
+# Round 223: skip a BUY when the price is more than this % outside a fresh exchange band (KMEW: price 23 % under the band, Dhan rejected it). 0 = off.
+PRICE_OUTSIDE_BAND_PCT = _get_float("PRICE_OUTSIDE_BAND_PCT", 5.0)
 EARNINGS_DAY_BLOCK = _get_bool("EARNINGS_DAY_BLOCK", True)
 # E272: results-day split. With EARNINGS_SPLIT_ENABLED a stock whose results were published (typed event feed, type "results") before
 # EARNINGS_KNOWN_BEFORE_IST is a KNOWN event and no longer blocked; results published during the session are blocked for EARNINGS_REACTION_WAIT_MIN
@@ -1004,6 +1006,10 @@ STOP_WATCHDOG_ENABLED = _get_bool("STOP_WATCHDOG_ENABLED", True)
 STOP_WATCHDOG_GRACE_S = _get_float("STOP_WATCHDOG_GRACE_S", 20.0)
 STOP_WATCHDOG_MIN_BREACH_TICKS = _get_int("STOP_WATCHDOG_MIN_BREACH_TICKS", 1)   # price must be this many ticks UNDER the stop
 STOP_WATCHDOG_MAX_TICK_AGE_S = _get_float("STOP_WATCHDOG_MAX_TICK_AGE_S", 15.0)  # an older price does not count
+STOP_WATCHDOG_LEG_LOG = _get_bool("STOP_WATCHDOG_LEG_LOG", True)   # round 223: log each super-order leg's status / price before the watchdog cancels them (read only)
+ENTRY_STAGE_LOG = _get_bool("ENTRY_STAGE_LOG", True)               # round 225: time the stages of one attempt_entry call (log only)
+ENTRY_STAGE_SLOW_S = _get_float("ENTRY_STAGE_SLOW_S", 1.0)         # one WARNING with the slow stages when a call takes at least this long (0 = never)
+ENTRY_STAGE_MIN_S = _get_float("ENTRY_STAGE_MIN_S", 0.1)           # a stage must take this long to be listed
 STOP_WATCHDOG_RETRY_S = _get_float("STOP_WATCHDOG_RETRY_S", 30.0)                # wait after a rejected watchdog exit
 # Read-back after every stop move (dhan_client.verify_stop_leg): the stop is saved as moved only when Dhan's own leg shows it. Unreadable =
 # fails open (as before). STOP_VERIFY_ENABLED=0 = off.

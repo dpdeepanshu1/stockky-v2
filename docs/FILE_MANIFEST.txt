@@ -1143,6 +1143,7 @@ services/market-data-service/dhan_data/errors.py
 services/market-data-service/dhan_data/history.py
 services/market-data-service/dhan_data/live_poller.py
 services/market-data-service/dhan_data/live_store.py
+services/market-data-service/dhan_data/prev_close_guard.py
 services/market-data-service/dhan_data/quotes.py
 services/market-data-service/dhan_data/scrip_master.py
 services/market-data-service/dhan_data/ws_feed.py
@@ -1251,6 +1252,7 @@ services/market-data-service/tests/test_round189_quote_block_escalation.py
 services/market-data-service/tests/test_round190_first_candle_call_403.py
 services/market-data-service/tests/test_round191_global_cue_error_ttl.py
 services/market-data-service/tests/test_round205_feed_coverage_unknown.py
+services/market-data-service/tests/test_round222_prev_close_guard.py
 services/market-data-service/tests/test_session_proof.py
 services/market-data-service/tests/test_session_proof_nifty_wiring.py
 services/market-data-service/tests/test_surprise_premarket.py
@@ -1367,6 +1369,7 @@ services/position-stocks-service/orders/depth_gate.py
 services/position-stocks-service/orders/entry.py
 services/position-stocks-service/orders/entry_cap.py
 services/position-stocks-service/orders/entry_pause.py
+services/position-stocks-service/orders/entry_stage_timer.py
 services/position-stocks-service/orders/entry_timing.py
 services/position-stocks-service/orders/eod_squareoff.py
 services/position-stocks-service/orders/event_hook.py
@@ -1766,6 +1769,9 @@ services/position-stocks-service/tests/test_round186_entry_fill_now.py
 services/position-stocks-service/tests/test_round188_conviction_known_inputs.py
 services/position-stocks-service/tests/test_round194_window_pause_log_throttle.py
 services/position-stocks-service/tests/test_round212_window_pause_materiality.py
+services/position-stocks-service/tests/test_round222_day_stats_prev_close.py
+services/position-stocks-service/tests/test_round223_watchdog_leg_log.py
+services/position-stocks-service/tests/test_round225_entry_stage_timer.py
 services/position-stocks-service/tests/test_rr_floor_1_2.py
 services/position-stocks-service/tests/test_scalp_review_20261005.py
 services/position-stocks-service/tests/test_screening_engine.py
@@ -1864,6 +1870,7 @@ services/real-trade-service/entry_engine/own_spread.py
 services/real-trade-service/entry_engine/preopen.py
 services/real-trade-service/entry_engine/prev_day.py
 services/real-trade-service/entry_engine/pullback_rearm.py
+services/real-trade-service/entry_engine/qty_trace.py
 services/real-trade-service/entry_engine/regime_rules.py
 services/real-trade-service/entry_engine/risk_ladder.py
 services/real-trade-service/entry_engine/risk_stage.py
@@ -2327,6 +2334,9 @@ services/real-trade-service/tests/test_round207_regime_write_behind.py
 services/real-trade-service/tests/test_round208_write_behind_timeout_log.py
 services/real-trade-service/tests/test_round209_early_cash_gate.py
 services/real-trade-service/tests/test_round220_fill_audit_rows_behind.py
+services/real-trade-service/tests/test_round222_prev_close_flag_reject.py
+services/real-trade-service/tests/test_round223_qty_trace.py
+services/real-trade-service/tests/test_round224_vs_reject_summary.py
 services/real-trade-service/tests/test_rt_circuit_breaker.py
 services/real-trade-service/tests/test_rt_entry_helpers.py
 services/real-trade-service/tests/test_rt_reconcile.py

@@ -1245,6 +1245,7 @@ def _attempt_entry_impl(
         shared_symbol_lock.release(db, candidate.symbol)
         raise
 
+    entry_stage_timer.mark("security_id")
     # Quantity
     # group340: sensible whole-share rounding; skip (not force 1 share) when one share costs far more than the budget.
     quantity = sizing.compute_quantity(position_value, candidate.current_ltp)
@@ -1327,6 +1328,7 @@ def _attempt_entry_impl(
                     position_value = _snew
                 quantity = _sq
 
+    entry_stage_timer.mark("sizing")
     is_first = not gate.first_live_order_done
     if is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE:
         logger.warning(
@@ -1386,6 +1388,7 @@ def _attempt_entry_impl(
             )
         position_value = actual_cost
 
+    entry_stage_timer.mark("cost_checks")
     # E276 round 51: total open risk (this pool + real-trade-service + gap allowance on carried positions) must stay under HEAT_LIMIT_PCT of the combined pool.
     # Fail-open; the forced 1-share first live order is a probe and is not gated. Not symbol-specific: it ends the cycle like the other capital refusals.
     if not (is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE):
@@ -1396,6 +1399,7 @@ def _attempt_entry_impl(
             _log_candidate(db, candidate, "SKIPPED", _heat_reject, quality=quality)
             return None
 
+    entry_stage_timer.mark("heat_gate")
     # Shared cross-service Dhan account-wide order-rate guard (tracking doc
     # §3.8) — checked here, right before the real Dhan call, not earlier:
     # everything above this point (max positions, capital, security
@@ -1411,6 +1415,7 @@ def _attempt_entry_impl(
         _log_candidate(db, candidate, "SKIPPED", "SHARED_ORDER_BUDGET_EXHAUSTED", quality=quality)
         return None
 
+    entry_stage_timer.mark("order_budget")
     # 2026-10-22: the stop / target were built from the scan price; the MARKET order fills at the price NOW. Move both legs to the freshest tick
     # (same stop % / target %) so a fall since the signal is not a hidden tight stop (IONEXCHANG: stop 0.15 % under the fill, out in 21 s).
     _anchor_live = live_anchor.live_price(candidate.symbol)
@@ -1420,6 +1425,7 @@ def _attempt_entry_impl(
         logger.info("entry: %s legs anchored to live ₹%.2f (signal ₹%.2f, %+.2f%%): stop ₹%.2f target ₹%.2f",
                     candidate.symbol, _anchor_live, candidate.current_ltp, _anchor_drift, levels.stop_price, levels.target_price)
 
+    entry_stage_timer.mark("live_anchor")
     # Place the order
     dhan_super_order_id = None
     plain_order_id = None
@@ -1561,6 +1567,7 @@ def _attempt_entry_impl(
             shared_symbol_lock.release(db, candidate.symbol)
             return None
 
+    entry_stage_timer.mark("dhan_order_call")
     # Mark first-live-order done
     if is_first:
         gate.first_live_order_done = True
@@ -1572,6 +1579,7 @@ def _attempt_entry_impl(
     gate.orders_placed_today += 1
     db.commit()
 
+    entry_stage_timer.mark("gate_commit")
     # DB record
     pos = ScalpPosition(
         market_state=_ms_current_profile()["market_state"],      # Market Weather stamp
@@ -1614,6 +1622,7 @@ def _attempt_entry_impl(
     db.commit()
     db.refresh(pos)
 
+    entry_stage_timer.mark("position_commit")
     _nifty = trade_gates.last_nifty_change_pct()
     _log_candidate(db, candidate, "ENTERED",
                    (f"PULLBACK_REARM:{rearm.get('why', '')} " if rearm else "")
@@ -1639,6 +1648,7 @@ def _attempt_entry_impl(
     # BUY it sends. Mirrors that message shape (see entry_engine.py's
     # "📤 BUY sent (auto)" notify_async call), best-effort/non-blocking
     # same as every other notifier.py call in this codebase.
+    entry_stage_timer.mark("log_candidate_entered")
     notifier.notify_fire_and_forget(
         f"📤 <b>BUY placed</b> — {candidate.symbol} x{quantity}\n"
         f"Entry ₹{candidate.current_ltp:.2f} | Target ₹{levels.target_price:.2f} "
@@ -1648,7 +1658,9 @@ def _attempt_entry_impl(
         + (f"\n{_cv_note}" if _cv_note else "")
     )
     approve_first.mark_entered(candidate.symbol, {"qty": quantity, "price": candidate.current_ltp})   # group469
+    entry_stage_timer.mark("notify_and_approve")
     _correct_entry_fill_now(db, pos)   # round 186
+    entry_stage_timer.mark("fill_correction")
     return pos
 
 

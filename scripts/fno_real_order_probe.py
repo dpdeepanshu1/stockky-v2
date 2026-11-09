@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services", "fno-options-service"))
 from fno import execution, provider, realprobe  # noqa: E402
@@ -45,7 +44,7 @@ def main(argv=None) -> int:
     res = realprobe.run(prov, brk, cid, a.und, a.side, a.offset, a.live, a.hold_seconds, a.fill_timeout, a.max_outlay, a.expiry or None)
     if a.live:
         os.makedirs(a.out, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
+        stamp = realprobe.file_stamp()
         body = {k: v for k, v in res.items() if k != "lines"}
         with open(os.path.join(a.out, f"probe_{stamp}.json"), "w", encoding="utf-8") as fh:
             json.dump(body, fh, default=str, indent=1)

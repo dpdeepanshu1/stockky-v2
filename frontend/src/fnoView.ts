@@ -167,6 +167,7 @@ export function probeHeadline(d: FnoProbeDoc | null | undefined): { tone: "off" 
   if (!d.probe) return { tone: "off", text: d.dir_exists ? "No probe result yet. Run scripts/fno_real_order_probe.py (a dry run first), then come back." : "The probe folder does not exist yet: run mkdir -p data/fno_real_probe on the server, restart the service, then run the probe." };
   const p = d.probe;
   if (p.still_open) return { tone: "bad", text: `A POSITION IS STILL OPEN (${p.contract || "see the probe file"}): close it in the Dhan app now.` };
-  if (!p.live) return { tone: "off", text: "The newest probe was a dry run: nothing was sent, so there are no charges to compare." };
-  return { tone: p.exit_code === 0 ? "good" : "warn", text: `Newest probe: ${p.outcome}.` };
+  if (!p.live) return { tone: "off", text: "The latest probe was a dry run: nothing was sent, so there are no charges to compare." };
+  const why = p.exit_code !== 0 && p.reason ? ` ${p.reason}` : "";                      // Round 269: say WHY a run stopped (the refusal text is saved in the result)
+  return { tone: p.exit_code === 0 ? "good" : "warn", text: `Probe: ${p.outcome}.${why}` };
 }

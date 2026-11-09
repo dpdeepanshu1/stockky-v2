@@ -31,6 +31,11 @@ SELL_TRIES = 4                          # the SELL is re-sent this many times at
 FALLBACK_SEGMENT = {"NIFTY": "NSE_FNO", "SENSEX": "BSE_FNO"}
 
 
+def file_stamp(dt: Optional[datetime] = None) -> str:
+    """YYYYMMDD_HHMMSS in IST for the probe_<stamp>.json name. Round 269: the script used the host clock (UTC on the VM), so a file made at 17:58 IST was named 12:28."""
+    return (dt or datetime.now(IST)).astimezone(IST).strftime("%Y%m%d_%H%M%S")
+
+
 def round_tick(x: float, tick: float) -> float:
     return round(round(x / tick) * tick, 2)
 
@@ -118,6 +123,7 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
         res["exit_code"] = code
         if msg:
             say(msg)
+            res["reason"] = " ".join(msg.split())[:400]           # Round 269: keep WHY the run stopped in the saved json (the printed lines are not saved there)
         return res
 
     say("=" * 78)
@@ -157,6 +163,7 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     if q.security_id and int(q.security_id) != sid:
         return done(2, f"  REFUSED: the chain says security id {q.security_id}, the scrip master says {sid}. Not sending anything on a mismatch.")
     label = f"{und} {expiry} {int(strike)} {side}"
+    res.update(contract=label, security_id=sid, lot_size=lot)           # Round 269: known from here on, so a later refusal or in-doubt order still names the contract
     say(f"  nearest expiry at least 1 day away: {expiry} ({(date.fromisoformat(expiry) - today).days} day(s))   spot {chain.spot:.2f}   strike step {step:g}")
     say(f"  contract: {label}   (the ATM strike{'' if offset == 0 else f' {offset:+d} step(s)'})   Dhan security id {sid}   segment {segment}   lot size {lot} units   tick {tick}")
     say("  -> check the LOT SIZE against the exchange circular: it is what 'quantity' means below (quantity is in UNITS, 1 lot = lot-size units).")

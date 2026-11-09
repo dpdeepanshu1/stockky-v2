@@ -42,19 +42,41 @@ def list_files(dir_: str = PROBE_DIR) -> List[str]:
         return []
 
 
-def load(dir_: str = PROBE_DIR, name: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """One saved result by name (only a real probe file name is accepted: no path can be injected), or the newest. (None, None) when there is none or it cannot be read."""
-    if name is not None and not NAME_RE.match(str(name)):
-        return None, None
-    n = name or (list_files(dir_) or [None])[0]
-    if not n:
-        return None, None
+def attempted(probe: Dict[str, Any]) -> bool:
+    """True when the run got as far as sending at least one order. A refused run (wrong time, no token, wide spread ...) and a dry run sent nothing: they are a log, not a result."""
+    return bool(probe.get("live")) and any(isinstance(o, dict) for o in probe.get("orders") or [])
+
+
+def _read(dir_: str, n: str) -> Optional[Dict[str, Any]]:
     try:
         with open(os.path.join(dir_, n), encoding="utf-8") as fh:
             d = json.load(fh)
-        return (n, d) if isinstance(d, dict) else (None, None)
+        return d if isinstance(d, dict) else None
     except (OSError, ValueError):
+        return None
+
+
+def load(dir_: str = PROBE_DIR, name: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """One saved result by name (only a real probe file name is accepted: no path can be injected), or the newest run that SENT an order.
+    Round 269: a later refused or dry run must not hide the real round trip, so with no name the newest `attempted` probe wins; when none ever sent an order the newest file is returned
+    (a refusal and its reason still show). An unreadable NEWEST file gives (None, None), as before; an unreadable older one is skipped. (None, None) when there is none."""
+    if name is not None and not NAME_RE.match(str(name)):
         return None, None
+    if name:
+        d = _read(dir_, name)
+        return (name, d) if d is not None else (None, None)
+    newest: Tuple[Optional[str], Optional[Dict[str, Any]]] = (None, None)
+    for i, n in enumerate(list_files(dir_)[:60]):
+        d = _read(dir_, n)
+        if d is None:
+            if i == 0:
+                return None, None
+            continue
+        if newest[0] is None:
+            newest = (n, d)
+        if attempted(d):
+            return n, d
+    return newest
 
 
 def summarize(probe: Dict[str, Any], name: str = "") -> Dict[str, Any]:
@@ -71,7 +93,7 @@ def summarize(probe: Dict[str, Any], name: str = "") -> Dict[str, Any]:
     code = probe.get("exit_code")
     pnl = probe.get("pnl") if isinstance(probe.get("pnl"), dict) else None
     return {"file": name, "live": bool(probe.get("live")), "underlying": probe.get("underlying"), "side": probe.get("side"), "contract": probe.get("contract"),
-            "exit_code": code, "outcome": EXIT_TEXT.get(code, "unknown outcome") if probe.get("live") else "dry run: nothing was sent",
+            "exit_code": code, "reason": str(probe.get("reason") or "")[:400], "outcome": EXIT_TEXT.get(code, "unknown outcome") if probe.get("live") else "dry run: nothing was sent",
             "orders": orders, "bought": probe.get("bought"), "sold": probe.get("sold"), "dhan_net_position_after": probe.get("dhan_net_position_after"), "pnl": pnl, "dhan_hint": hint,
             "still_open": code == 3}
 

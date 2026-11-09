@@ -44,6 +44,7 @@ export default function FnoProbeCard() {
             <>
               <p className="text-[12px] text-mist">{d.probe.file} · {d.probe.live ? "LIVE" : "dry run"} · {d.probe.contract || `${d.probe.underlying} ${d.probe.side}`}</p>
               {d.probe.dhan_hint && <Msg kind="warn">{d.probe.dhan_hint}</Msg>}
+              {d.probe.live && d.probe.exit_code !== 0 && d.probe.reason && !d.probe.dhan_hint && <Msg kind="warn">{d.probe.reason}</Msg>}
               <ul className="space-y-1">
                 {d.probe.orders.map((o, i) => (
                   <li key={i} className="flex flex-wrap gap-x-3 gap-y-1 rounded-lg border border-slate p-2 text-[12px]">

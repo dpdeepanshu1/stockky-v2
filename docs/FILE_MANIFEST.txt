@@ -545,6 +545,7 @@ scripts/tsfm_probe.py
 scripts/vm_all.sh
 scripts/vm_calibrate.sh
 scripts/vm_docker_recover.sh
+scripts/vm_frontend_check.sh
 scripts/vm_ops.sh
 scripts/vm_review_evidence.sh
 scripts/vm_runjob.sh
@@ -1250,6 +1251,7 @@ services/fno-options-service/tests/test_round262.py
 services/fno-options-service/tests/test_round262_readiness.py
 services/fno-options-service/tests/test_round264_stages.py
 services/fno-options-service/tests/test_round265_probecheck.py
+services/fno-options-service/tests/test_round269_probe_pick.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

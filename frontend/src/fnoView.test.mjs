@@ -99,5 +99,8 @@ assert.match(probeHeadline(PD({ probe: null })).text, /No probe result yet/);
 assert.match(probeHeadline(PD({ probe: null, dir_exists: false })).text, /mkdir -p data\/fno_real_probe/);
 assert.equal(probeHeadline(PD({}, { still_open: true, exit_code: 3 })).tone, "bad"); assert.match(probeHeadline(PD({}, { still_open: true })).text, /NIFTY 24500 CE/);
 assert.match(probeHeadline(PD({}, { live: false })).text, /dry run/);
+// Round 269: a refused run says why (the reason is saved in the result), a good run does not
+assert.match(probeHeadline(PD({}, { exit_code: 2, outcome: "refused, nothing is open", reason: "REFUSED: outside the live window 09:30-14:45 IST on a weekday." })).text, /^Probe: refused, nothing is open\. REFUSED: outside the live window/);
+assert.equal(probeHeadline(PD({}, { exit_code: 0, outcome: "round trip done", reason: "stale" })).text, "Probe: round trip done."); assert.equal(probeHeadline(PD({}, { exit_code: 2, outcome: "refused" })).text, "Probe: refused.");
 assert.equal(probeHeadline(PD({}, {})).tone, "good"); assert.equal(probeHeadline(PD({}, { exit_code: 2, outcome: "refused" })).tone, "warn");
 console.log("fnoView round 265 ok");

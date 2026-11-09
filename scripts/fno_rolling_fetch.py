@@ -6,7 +6,7 @@
 Read-only data calls (no orders). Needs the Dhan Data API plan. Writes one JSON file per (underlying, CALL/PUT, strike label, expiry code): rows of {t, o, h, l, c, v, oi, iv, spot, strike}.
 First run it for ONE week and open the file: check the timestamps are IST market hours, that `spot` matches the index, and that the ATM strike moves with spot. Then widen the range.
 Request / reply shape and its limits (measured live: toDate - fromDate at most 1 day, toDate inclusive; about 5 years back): services/fno-options-service/backtest/rolling.py.
-A six-month run is about 80 calls per (CALL/PUT, strike) series. `--span-days` widens the window once scripts/fno_rolling_probe.py shows Dhan accepts more.
+A six-month run is about 80 calls per (CALL/PUT, strike) series. A run that ended with failed windows is finished with the same command plus --resume (only the failed windows are asked again); the same flag with a later --to adds only the new days to the existing files. `--span-days` widens the window once scripts/fno_rolling_probe.py shows Dhan accepts more.
 
 Round 16 (what a failed run used to do): a 429 / 5xx / timeout on one window was counted, the window was skipped, and the file was written anyway, so a series with a hole looked complete; an
 expired token (every call 401) overwrote yesterday's good file with an empty one. Now: transient errors are retried with a growing pause; every file lists `failed_windows` (a backtest must refuse
@@ -61,12 +61,12 @@ def fetch_window(do_call: Callable[[dict], dict], body: dict, option_type: str, 
 
 
 def fetch_series(do_call: Callable[[dict], dict], und: str, ot: str, strike: str, start: date, end: date, interval: int, flag: str, code: int,
-                 pause: float = 0.5, retries: int = 3, sleep: Callable[[float], None] = time.sleep, say: Callable[[str], None] = print, span_days: int = rolling.MAX_DAYS) -> Dict[str, Any]:
+                 pause: float = 0.5, retries: int = 3, sleep: Callable[[float], None] = time.sleep, say: Callable[[str], None] = print, span_days: int = rolling.MAX_DAYS, only: Optional[List[Tuple[date, date]]] = None) -> Dict[str, Any]:
     """Round 255: every call needed to cover the weekdays of [start, end) for one (CALL/PUT, strike) -> {"rows", "failed_windows", "empty_windows"}; rows are trimmed to [start, end)."""
     chunks: List[List[Dict[str, Any]]] = []
     failed: List[List[str]] = []
     empty: List[List[str]] = []
-    for w0, w1 in rolling.windows(start, end, span_days):
+    for w0, w1 in (only if only is not None else rolling.windows(start, end, span_days)):
         body = rolling.build_request(und, ot, strike, w0, w1, interval, flag, code, span_days)
         got, why = fetch_window(do_call, body, ot, retries, pause, sleep)
         if why:
@@ -79,6 +79,71 @@ def fetch_series(do_call: Callable[[dict], dict], und: str, ot: str, strike: str
             say(f"{und} {ot} {strike} {w0}..{w1}: {len(got)} candles")
         sleep(pause)
     return {"rows": rolling.in_range(rolling.merge_rows(chunks), start, end), "failed_windows": failed, "empty_windows": empty}
+
+
+SAME_KEYS = ("underlying", "type", "strike", "interval", "expiry_flag", "expiry_code", "span_days")      # round 258: the range may differ (--resume extends it)
+
+
+def load_prior(path: Path, meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Round 257 (--resume): the file of an earlier run of THIS series (same underlying, type, strike, interval, expiry, range, span) -> (doc, "complete" | "partial"), else (None, why).
+    The complete file wins; a .partial is used to refetch only its failed windows. A file made for another span, strike or interval is never reused (its windows would not line up). Round 258: its range may differ; plan_extension() says what is missing."""
+    found: Dict[str, Dict[str, Any]] = {}
+    why = "no earlier file: fetching the whole series"
+    for target, kind in ((path, "complete"), (path.with_name(path.name + ".partial"), "partial")):
+        if not target.exists():
+            continue
+        try:
+            doc = json.loads(target.read_text())
+        except (OSError, ValueError):
+            why = f"{target.name} is unreadable: fetching the whole series"
+            continue
+        if any(doc.get(k) != meta.get(k) for k in SAME_KEYS) or not _iso(doc.get("from")) or not _iso(doc.get("to")):
+            why = f"{target.name} was made for another span / strike / interval: fetching the whole series"
+            continue
+        if kind == "complete" and doc.get("complete") is not True:
+            continue
+        found[kind] = doc
+    part, full = found.get("partial"), found.get("complete")
+    if part is not None and (full is None or (part["from"] <= full["from"] and part["to"] >= full["to"])):
+        return part, "partial"                       # a partial of an EXTENSION already holds the complete file's rows plus its own progress
+    if full is not None:
+        return full, "complete"
+    return None, why
+
+
+def _iso(v: Any) -> bool:
+    try:
+        date.fromisoformat(str(v))
+        return True
+    except ValueError:
+        return False
+
+
+def plan_extension(prior: Dict[str, Any], start: date, end: date) -> Tuple[date, date, List[Tuple[date, date]]]:
+    """Round 258: (new_from, new_to, ranges still to fetch). The file will cover the UNION of what it holds and what is asked for, so a gap between them is fetched too (a hole must never hide
+    inside a range the file claims). Nothing to fetch when the file already covers the request."""
+    pf, pt = date.fromisoformat(prior["from"]), date.fromisoformat(prior["to"])
+    lo, hi = min(pf, start), max(pt, end)
+    todo: List[Tuple[date, date]] = []
+    if lo < pf:
+        todo.append((lo, pf))
+    if hi > pt:
+        todo.append((pt, hi))
+    return lo, hi, todo
+
+
+def combine(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Several fetch_series results (one per range) -> one."""
+    return {"rows": rolling.merge_rows([p["rows"] for p in parts]), "failed_windows": [w for p in parts for w in p["failed_windows"]], "empty_windows": [w for p in parts for w in p["empty_windows"]]}
+
+
+def resume_series(prior: Dict[str, Any], redo: Dict[str, Any], start: date, end: date) -> Dict[str, Any]:
+    """The earlier partial's rows + the refetched windows -> one series. Failed windows that failed again stay listed; empty windows are the union."""
+    empty = [list(w) for w in (prior.get("empty_windows") or [])]
+    for w in redo["empty_windows"]:
+        if list(w) not in empty:
+            empty.append(list(w))
+    return {"rows": rolling.in_range(rolling.merge_rows([prior.get("rows") or [], redo["rows"]]), start, end), "failed_windows": redo["failed_windows"], "empty_windows": sorted(empty)}
 
 
 def write_series(path: Path, meta: Dict[str, Any], series: Dict[str, Any]) -> Tuple[Optional[Path], str]:
@@ -111,6 +176,7 @@ def main() -> int:
     ap.add_argument("--out", default="data/fno_rolling")
     ap.add_argument("--pause", type=float, default=0.5, help="seconds between calls (the rate limit is not published)")
     ap.add_argument("--span-days", type=int, default=rolling.MAX_DAYS, help=f"toDate - fromDate per call, 1 to {rolling.MAX_SPAN_CLI} (default {rolling.MAX_DAYS}: the most Dhan accepted on 9 Nov 2026; wider answers HTTP 400 DH-905)")
+    ap.add_argument("--resume", action="store_true", help="skip a series whose complete file already covers the range; extend one that covers less (only the missing days are fetched); for a .partial, refetch only its failed windows")
     ap.add_argument("--retries", type=int, default=3, help="extra tries for a 429 / 5xx / network error on one window")
     ap.add_argument("--base", default=os.getenv("DHAN_BASE_URL", "https://api.dhan.co/v2"))
     a = ap.parse_args()
@@ -139,9 +205,26 @@ def main() -> int:
     bad = 0
     for strike in strikes:
         for ot in ("CALL", "PUT"):
-            series = fetch_series(lambda body: call(a.base, cid, token, body), a.und, ot, strike, start, end, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries, span_days=a.span_days)
             name = out / f"{a.und}_{ot}_{strike.replace('+', 'p').replace('-', 'm')}_{a.expiry_flag}{a.expiry_code}_{a.interval}m.json"
             meta = {"underlying": a.und, "type": ot, "strike": strike, "interval": a.interval, "expiry_flag": a.expiry_flag, "expiry_code": a.expiry_code, "from": a.start, "to": a.end, "span_days": a.span_days}
+            do = lambda body: call(a.base, cid, token, body)
+            prior, kind = (None, "") if not a.resume else load_prior(name, meta)
+            if a.resume and prior is None:
+                print(f"{name.name}: {kind}")
+            if prior is not None:
+                lo, hi, ranges = plan_extension(prior, start, end)
+                todo = [(date.fromisoformat(w[0]), date.fromisoformat(w[1])) for w in prior.get("failed_windows") or []] if kind == "partial" else []
+                if kind == "complete" and not ranges:
+                    print(f"{name.name}: already complete ({len(prior.get('rows') or [])} candles, {prior['from']}..{prior['to']}), skipped")
+                    continue
+                meta = dict(meta, **{"from": lo.isoformat(), "to": hi.isoformat()})
+                print(f"{name.name}: resuming ({prior['from']}..{prior['to']} held, {len(prior.get('rows') or [])} candles): refetching {len(todo)} failed window(s)"
+                      + (f", fetching {', '.join(f'{x}..{y}' for x, y in ranges)}" if ranges else ""))
+                parts = [fetch_series(do, a.und, ot, strike, lo, hi, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries, span_days=a.span_days, only=todo)] if todo else []
+                parts += [fetch_series(do, a.und, ot, strike, x, y, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries, span_days=a.span_days) for x, y in ranges]
+                series = resume_series(prior, combine(parts) if parts else {"rows": [], "failed_windows": [], "empty_windows": []}, lo, hi)
+            else:
+                series = fetch_series(do, a.und, ot, strike, start, end, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries, span_days=a.span_days)
             path, what = write_series(name, meta, series)
             bad += 1 if series["failed_windows"] or path is None else 0
             print(f"{name.name}: {len(series['rows'])} candles, {what}")

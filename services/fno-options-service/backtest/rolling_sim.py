@@ -30,6 +30,8 @@ from . import metrics
 IST = timezone(timedelta(hours=5, minutes=30))
 STEP = {"NIFTY": 50.0, "SENSEX": 100.0}
 LOT = {"NIFTY": 65, "SENSEX": 20}
+MAX_UNMANAGED_PCT = 5.0        # round 258: more held bars than this without a candle for the held strike -> the verdict cannot be better than NOT_PROVEN
+MAX_UNPRICED_PCT = 10.0
 
 
 def _d(t: float) -> date:
@@ -43,6 +45,7 @@ class RollingBook:
         self.by_strike: Dict[Tuple[str, float, float], Dict[str, Any]] = {}
         self.atm: Dict[Tuple[str, float], Dict[str, Any]] = {}
         self.files: List[str] = []
+        self.labels: set = set()                                # round 258: the strike labels fetched (ATM, ATM+1 ...)
         self.interval = 5
 
     def add(self, doc: Dict[str, Any], name: str = "") -> None:
@@ -56,6 +59,8 @@ class RollingBook:
             if doc.get("strike") == "ATM":
                 self.atm[(ot, float(r["t"]))] = r
         self.files.append(name)
+        if doc.get("strike"):
+            self.labels.add(str(doc["strike"]))
 
     def candle(self, ot: str, strike: float, t: float) -> Optional[Dict[str, Any]]:
         return self.by_strike.get((ot, float(strike), float(t)))
@@ -101,7 +106,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
     covered = {_d(k[1]) for k in book.atm}                     # round 256: the days the fetched ATM series has any candle for
     uncovered: List[str] = []
     trades: List[paper.Position] = []
-    days_run = skipped_no_quote = unpriced_exits = skipped_bars = 0
+    days_run = skipped_no_quote = unpriced_exits = skipped_bars = held_bars = 0
     first = last = None
     for day in sorted(by_day):
         if (start and day.isoformat() < start) or (end and day.isoformat() > end) or not gates.is_trading_day(day, holidays):
@@ -128,6 +133,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
             end_dt = datetime.fromtimestamp(bar["t"], IST) + timedelta(minutes=bar_min)
             sq = gates.after_squareoff(end_dt, p, exp) or i == len(bars) - 1
             if pos is not None:
+                held_bars += 1
                 row = book.candle(pos.opt_type, pos.strike, bar["t"])
                 if row is None or None in (row.get("o"), row.get("h"), row.get("l")):
                     if sq:                                              # cannot be priced at the square-off: close at the last known candle, and say so
@@ -181,8 +187,18 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
             state.open_positions = 1
             # the entry bar itself is managed on the next loop pass (its own candle, entered at its open)
     m = metrics.summarize(trades, p.capital)
+    unmanaged_pct = round(100.0 * skipped_bars / held_bars, 1) if held_bars else 0.0
+    unpriced_pct = round(100.0 * unpriced_exits / len(trades), 1) if trades else 0.0
+    dq: List[str] = []                                                  # round 258: a held strike with no candle is not managed (no stop, no target): the result then flatters the strategy
+    if unmanaged_pct > MAX_UNMANAGED_PCT:
+        dq.append(f"the held strike had no candle on {unmanaged_pct}% of held bars (limit {MAX_UNMANAGED_PCT}%): stops / targets were not applied on those bars, so the result is too good to trust; fetch more strikes (ATM+-1, +-2)")
+    if unpriced_pct > MAX_UNPRICED_PCT:
+        dq.append(f"{unpriced_pct}% of exits had no candle at the square-off and used the last known price (limit {MAX_UNPRICED_PCT}%)")
+    verdict = metrics.verdict(m)
+    if dq:
+        verdict = {"status": "NOT_PROVEN", "reasons": dq + [x for x in verdict["reasons"] if not x.startswith("positive net")]}
     return {"kind": "ROLLING", "strategy": strategy, "underlying": und, "from": first, "to": last, "days": days_run, "capital": p.capital, "params": p.to_json(), "metrics": m,
-            "verdict": metrics.verdict(m), "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "uncovered_days": uncovered, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
+            "verdict": verdict, "data_quality": {"held_bars": held_bars, "unmanaged_bars": skipped_bars, "unmanaged_pct": unmanaged_pct, "unpriced_exit_pct": unpriced_pct, "labels": sorted(book.labels), "ok": not dq}, "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "uncovered_days": uncovered, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
             "notes": ["premiums are Dhan's recorded expired-option candles (real prices, 5-minute path); the spread is still synthetic (no bid / ask in the data)",
                       "entry = the open of the bar AFTER the signal, in the ATM contract of that moment; the strike is then held and its candles are found by strike",
                       f"expiry code of the files vs the entry rule (min_days_to_expiry={p.min_days_to_expiry}) must match: the expiry date is not in the reply",

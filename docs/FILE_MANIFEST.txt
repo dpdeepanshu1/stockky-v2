@@ -1225,6 +1225,9 @@ services/fno-options-service/tests/test_round251.py
 services/fno-options-service/tests/test_round252.py
 services/fno-options-service/tests/test_round255.py
 services/fno-options-service/tests/test_round256.py
+services/fno-options-service/tests/test_round257.py
+services/fno-options-service/tests/test_round258.py
+services/fno-options-service/tests/test_round259.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

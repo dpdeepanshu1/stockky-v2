@@ -53,6 +53,7 @@ docker-compose.yml
 docs/ENV_REFERENCE.txt
 docs/FILE_MANIFEST.txt
 docs/FNO_DECISIONS_ROUND236.md
+docs/FNO_GO_LIVE_PLAN.md
 docs/ROUTE_AUTH_TRIAGE.json
 frontend/.dockerignore
 frontend/Dockerfile
@@ -1228,6 +1229,7 @@ services/fno-options-service/tests/test_round256.py
 services/fno-options-service/tests/test_round257.py
 services/fno-options-service/tests/test_round258.py
 services/fno-options-service/tests/test_round259.py
+services/fno-options-service/tests/test_round260.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

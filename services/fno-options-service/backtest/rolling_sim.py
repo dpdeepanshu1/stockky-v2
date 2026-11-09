@@ -32,6 +32,8 @@ STEP = {"NIFTY": 50.0, "SENSEX": 100.0}
 LOT = {"NIFTY": 65, "SENSEX": 20}
 MAX_UNMANAGED_PCT = 5.0        # round 258: more held bars than this without a candle for the held strike -> the verdict cannot be better than NOT_PROVEN
 MAX_UNPRICED_PCT = 10.0
+MAX_VIX_UNKNOWN_PCT = 10.0     # round 260: more tested days than this with no usable India VIX (none, or older than VIX_STALE_DAYS) -> the VIX gate was not applied on them -> NOT_PROVEN
+VIX_STALE_DAYS = 5             # the last VIX close before a day may be at most this many calendar days old (a long weekend plus a holiday fits)
 
 
 def _d(t: float) -> date:
@@ -106,7 +108,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
     covered = {_d(k[1]) for k in book.atm}                     # round 256: the days the fetched ATM series has any candle for
     uncovered: List[str] = []
     trades: List[paper.Position] = []
-    days_run = skipped_no_quote = unpriced_exits = skipped_bars = held_bars = 0
+    days_run = skipped_no_quote = unpriced_exits = skipped_bars = held_bars = vix_unknown_days = 0
     first = last = None
     for day in sorted(by_day):
         if (start and day.isoformat() < start) or (end and day.isoformat() > end) or not gates.is_trading_day(day, holidays):
@@ -125,6 +127,8 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
         dcache = signals.daily_score(hist)
         prev = [k for k in vix_by_day if k < day.isoformat()]
         vix_known = vix_by_day[max(prev)] if prev else None
+        if vix_known is None or (day - date.fromisoformat(max(prev))).days > VIX_STALE_DAYS:       # round 260: the live engine refuses to trade on an unknown VIX; here a missing value is read as 15 below, so count the day
+            vix_unknown_days += 1
         exp = day if is_exp else xp.expiry_for_entry(und, day, p.min_days_to_expiry, p.block_expiry_day, holidays, expiry_weekday)
         state = gates.DayState()
         pos: Optional[paper.Position] = None
@@ -194,15 +198,19 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
         dq.append(f"the held strike had no candle on {unmanaged_pct}% of held bars (limit {MAX_UNMANAGED_PCT}%): stops / targets were not applied on those bars, so the result is too good to trust; fetch more strikes (ATM+-1, +-2)")
     if unpriced_pct > MAX_UNPRICED_PCT:
         dq.append(f"{unpriced_pct}% of exits had no candle at the square-off and used the last known price (limit {MAX_UNPRICED_PCT}%)")
+    vix_unknown_pct = round(100.0 * vix_unknown_days / days_run, 1) if days_run else 0.0
+    if vix_unknown_pct > MAX_VIX_UNKNOWN_PCT:                          # round 260: without a VIX the gate (FNO_VIX_MAX) never blocks, so the high-volatility days are traded and the result flatters the strategy
+        dq.append(f"India VIX was unknown or older than {VIX_STALE_DAYS} days on {vix_unknown_pct}% of the tested days (limit {MAX_VIX_UNKNOWN_PCT}%): the VIX gate was not applied on them (a missing value counts as 15), so volatile days were traded; pass --vix with a daily close for the whole range")
     verdict = metrics.verdict(m)
     if dq:
         verdict = {"status": "NOT_PROVEN", "reasons": dq + [x for x in verdict["reasons"] if not x.startswith("positive net")]}
     return {"kind": "ROLLING", "strategy": strategy, "underlying": und, "from": first, "to": last, "days": days_run, "capital": p.capital, "params": p.to_json(), "metrics": m,
-            "verdict": verdict, "data_quality": {"held_bars": held_bars, "unmanaged_bars": skipped_bars, "unmanaged_pct": unmanaged_pct, "unpriced_exit_pct": unpriced_pct, "labels": sorted(book.labels), "ok": not dq}, "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "uncovered_days": uncovered, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
+            "verdict": verdict, "data_quality": {"held_bars": held_bars, "unmanaged_bars": skipped_bars, "unmanaged_pct": unmanaged_pct, "unpriced_exit_pct": unpriced_pct, "vix_unknown_days": vix_unknown_days, "vix_unknown_pct": vix_unknown_pct, "labels": sorted(book.labels), "ok": not dq}, "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "uncovered_days": uncovered, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
             "notes": ["premiums are Dhan's recorded expired-option candles (real prices, 5-minute path); the spread is still synthetic (no bid / ask in the data)",
                       "entry = the open of the bar AFTER the signal, in the ATM contract of that moment; the strike is then held and its candles are found by strike",
                       f"expiry code of the files vs the entry rule (min_days_to_expiry={p.min_days_to_expiry}) must match: the expiry date is not in the reply",
                       f"{len(uncovered)} trading day(s) of the index data had no fetched option candle at all and were NOT tested" + (f" (first: {uncovered[:3]})" if uncovered else ""),
                       f"{skipped_no_quote} signal(s) had no ATM candle at the fill bar; {skipped_bars} bar(s) of a held strike had no candle; {unpriced_exits} exit(s) closed at the last known candle",
+                      f"{vix_unknown_days} of {days_run} tested day(s) had no usable India VIX (none before the day, or older than {VIX_STALE_DAYS} days); the VIX gate was not applied on them",
                       "timestamps assumed to be the START of each bar: check with the one-week fetch before trusting a result",
                       "the opposite-signal exit and the chain inputs of the live engine are not simulated"]}

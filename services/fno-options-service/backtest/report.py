@@ -48,7 +48,7 @@ def render_text(r: Dict[str, Any]) -> str:
         L.append(f"  fold {f['fold']}: {f['from']}..{f['to']}  trades {f['trades']}  net {f['net']}  win {f['win_rate_pct']}%")
     dq = r.get("data_quality")
     if dq:
-        L.append(f"data quality: strikes fetched {', '.join(dq.get('labels') or [])}   held bars without a candle {dq.get('unmanaged_bars')}/{dq.get('held_bars')} ({dq.get('unmanaged_pct')}%)   exits at last known price {dq.get('unpriced_exit_pct')}%   {'OK' if dq.get('ok') else 'NOT OK'}")
+        L.append(f"data quality: strikes fetched {', '.join(dq.get('labels') or [])}   held bars without a candle {dq.get('unmanaged_bars')}/{dq.get('held_bars')} ({dq.get('unmanaged_pct')}%)   exits at last known price {dq.get('unpriced_exit_pct')}%   days without a usable VIX {dq.get('vix_unknown_days', '-')} ({dq.get('vix_unknown_pct', '-')}%)   {'OK' if dq.get('ok') else 'NOT OK'}")
     L += ["", f"VERDICT: {v.get('status')}"] + [f"  - {x}" for x in v.get("reasons", [])]
     if r.get("notes"):
         L += ["", "NOTES"] + [f"  - {x}" for x in r["notes"]]

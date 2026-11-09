@@ -396,7 +396,9 @@ scripts/flow_tape_report.py
 scripts/fno_eod_backtest.py
 scripts/fno_replay_backtest.py
 scripts/fno_rolling_backtest.py
+scripts/fno_rolling_check.py
 scripts/fno_rolling_fetch.py
+scripts/fno_rolling_probe.py
 scripts/fno_sim_backtest.py
 scripts/freeze_constraints.sh
 scripts/gate_scorecard.py
@@ -1138,6 +1140,7 @@ services/fno-options-service/backtest/portfolio.py
 services/fno-options-service/backtest/replay.py
 services/fno-options-service/backtest/report.py
 services/fno-options-service/backtest/rolling.py
+services/fno-options-service/backtest/rolling_check.py
 services/fno-options-service/backtest/rolling_sim.py
 services/fno-options-service/backtest/sim.py
 services/fno-options-service/capital_board.py
@@ -1220,6 +1223,8 @@ services/fno-options-service/tests/test_round249.py
 services/fno-options-service/tests/test_round250.py
 services/fno-options-service/tests/test_round251.py
 services/fno-options-service/tests/test_round252.py
+services/fno-options-service/tests/test_round255.py
+services/fno-options-service/tests/test_round256.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

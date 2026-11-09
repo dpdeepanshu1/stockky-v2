@@ -6,36 +6,56 @@ Source of the shape: https://dhanhq.co/docs/v2/expired-options-data/ (read 8 Nov
 
     POST https://api.dhan.co/v2/charts/rollingoption        headers: access-token, client-id, Content-Type: application/json
     body: exchangeSegment (NSE_FNO / BSE_FNO), interval (1, 5, 15, 25, 60), securityId (underlying index id), instrument OPTIDX, expiryFlag WEEK | MONTH, expiryCode (1 = nearest; 0 is refused),
-          strike ATM | ATM+n | ATM-n, drvOptionType CALL | PUT, requiredData [open high low close iv volume strike oi spot], fromDate, toDate (NON-inclusive); at most 30 days per call
+          strike ATM | ATM+n | ATM-n, drvOptionType CALL | PUT, requiredData [open high low close iv volume strike oi spot], fromDate, toDate (see LIVE PROBE below: the page says non-inclusive and 30 days; the real API is inclusive and 1 day)
     reply: {"data": {"ce": {open: [], high: [], ..., timestamp: []}, "pe": null | {...}}}   (parallel arrays; timestamp = epoch seconds)
 
-NOT verified by a live call: the index security ids below (NIFTY 13 is the id Dhan's own docs use; SENSEX 51 is from the community and must be checked in the scrip master) and the exact rate limit.
+LIVE PROBE 9 Nov 2026 (round 255). The page above is wrong on three points; the real API behaves like this:
+  * toDate - fromDate may be at most 1 day. 2 days or more answers HTTP 400 DH-905 (tried 2, 3, 4, 5, 6, 7 and 28 days, recent and old, 5 / 15 / 60 minute bars: all refused). The page says 30.
+  * toDate is INCLUSIVE: 5 Nov to 6 Nov returned both days (a Saturday toDate adds nothing). The page says non-inclusive.
+  * One day = 77 five-minute candles stamped 09:15 ... 15:35 (the 15:30 and 15:35 rows come after the close; the sim only looks up bars it has an index bar for).
+  * Accepted: CALL and PUT, ATM and ATM+1, WEEK, expiryCode 1, securityId 13 as a number, interval 5, the full requiredData list, old (21 Sep) and recent days.
+  So `windows()` sends a pair of days per call (from = a day, to = the next day) and steps two days, a pair of only Saturday / Sunday is skipped, and `in_range()` trims the rows to the days asked for.
+
+NOT verified by a live call: SENSEX id 51 (check it in the scrip master) and the exact rate limit.
 """
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 SEGMENT = {"NIFTY": "NSE_FNO", "SENSEX": "BSE_FNO"}
 UNDERLYING_ID = {"NIFTY": 13, "SENSEX": 51}          # VERIFY SENSEX in api-scrip-master-detailed.csv (the docs' sample uses 13 for Nifty)
 REQUIRED = ["open", "high", "low", "close", "iv", "volume", "strike", "oi", "spot"]
-MAX_DAYS = 30
+MAX_DAYS = 1                       # round 255: toDate - fromDate, measured live (the docs say 30; 2 or more is refused with DH-905). Raise only after scripts/fno_rolling_probe.py shows Dhan accepts more.
+MAX_SPAN_CLI = 30                  # the largest value `--span-days` may be given
+IST = timezone(timedelta(hours=5, minutes=30))
 INTERVALS = (1, 5, 15, 25, 60)
 STRIKE_RE = re.compile(r"^ATM(?:[+-](?:10|[1-9]))?$")      # round 16: ATM, ATM+1 ... ATM+10, ATM-1 ... ATM-10 (the docs' range for index options near expiry); anything else would only come back as an API error
 
 
 def windows(start: date, end: date, max_days: int = MAX_DAYS) -> List[tuple]:
-    """[(from, to)] chunks covering [start, end) with `to` non-inclusive, each at most `max_days` long."""
-    out, d = [], start
-    while d < end:
-        e = min(d + timedelta(days=max_days), end)
-        out.append((d, e))
-        d = e
+    """Round 255: [(fromDate, toDate)] calls that cover every WEEKDAY in [start, end) (`end` is not asked for). Dhan's toDate is INCLUSIVE and toDate - fromDate may be at most `max_days`,
+    so one call holds at most max_days + 1 calendar days and the next call starts after it. A call that would hold only Saturday / Sunday is skipped. A lone last day is sent as
+    (day before, day) - never from == to, never a date at or after `end`; the extra day is cut off again by in_range()."""
+    out: List[tuple] = []
+    last = end - timedelta(days=1)
+    d = start
+    while d <= last:
+        e = min(d + timedelta(days=max_days), last)
+        if any((d + timedelta(days=i)).weekday() < 5 for i in range((e - d).days + 1)):
+            out.append((d, e) if e > d else (d - timedelta(days=1), d))
+        d = e + timedelta(days=1)
     return out
 
 
-def build_request(underlying: str, option_type: str, strike: str, start: date, end: date, interval: int = 5, expiry_flag: str = "WEEK", expiry_code: int = 1) -> Dict[str, Any]:
+def in_range(rows: List[Dict[str, Any]], start: date, end: date) -> List[Dict[str, Any]]:
+    """Round 255: keep the candles whose IST day is in [start, end). A call can carry one day more than was asked for (a lone last day is sent with the day before it)."""
+    return [r for r in rows if start <= datetime.fromtimestamp(r["t"], IST).date() < end]
+
+
+def build_request(underlying: str, option_type: str, strike: str, start: date, end: date, interval: int = 5, expiry_flag: str = "WEEK", expiry_code: int = 1, max_days: int = MAX_DAYS) -> Dict[str, Any]:
+    """`start` / `end` are the fromDate / toDate that go on the wire (toDate is inclusive, see the LIVE PROBE note); end - start must be 1 to `max_days` days."""
     u = underlying.upper()
     if u not in SEGMENT:
         raise ValueError("underlying must be NIFTY or SENSEX")
@@ -45,8 +65,8 @@ def build_request(underlying: str, option_type: str, strike: str, start: date, e
         raise ValueError("strike must be ATM, ATM+n or ATM-n with n from 1 to 10")
     if interval not in INTERVALS:
         raise ValueError(f"interval must be one of {INTERVALS}")
-    if (end - start).days > MAX_DAYS or end <= start:
-        raise ValueError(f"the window must be 1 to {MAX_DAYS} days")
+    if (end - start).days > max_days or end <= start:
+        raise ValueError(f"toDate - fromDate must be 1 to {max_days} days")
     if expiry_flag not in ("WEEK", "MONTH") or expiry_code < 1:
         raise ValueError("expiry_flag WEEK|MONTH and expiry_code >= 1")
     return {"exchangeSegment": SEGMENT[u], "interval": interval, "securityId": UNDERLYING_ID[u], "instrument": "OPTIDX", "expiryFlag": expiry_flag, "expiryCode": expiry_code,
@@ -89,8 +109,8 @@ def parse_response(body: Any, option_type: str) -> List[Dict[str, Any]]:
 
 
 def merge_rows(chunks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """Round 16: rows of several windows -> one time-ordered list with each timestamp once (the last window's row wins). The windows do not overlap on paper (toDate is non-inclusive),
-    but if Dhan ever treats it as inclusive the boundary candle would be counted twice and every backtest metric on it would be skewed."""
+    """Round 16: rows of several windows -> one time-ordered list with each timestamp once (the last window's row wins). Since round 255 the windows DO overlap (toDate is inclusive and a lone last day is sent with the day before it),
+    so a candle seen twice must be counted once or every backtest metric on it would be skewed."""
     by_t: Dict[float, Dict[str, Any]] = {}
     for rows in chunks:
         for r in rows:

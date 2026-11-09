@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""fno_rolling_fetch.py - download EXPIRED option candles (Dhan "rolling option" API) so the F&O strategies can be tested on REAL premiums. NEVER RUN YET (round 236: written from Dhan's docs; round 16 audit hardened it).
+"""fno_rolling_fetch.py - download EXPIRED option candles (Dhan "rolling option" API) so the F&O strategies can be tested on REAL premiums. First live run 9 Nov 2026 (round 255): Dhan takes ONE day apart per call, not 30 - see rolling.py.
 
   DHAN_CLIENT_ID=... DHAN_ACCESS_TOKEN=... python3 scripts/fno_rolling_fetch.py --und NIFTY --from 2026-05-01 --to 2026-11-07 --strikes ATM,ATM+1,ATM-1 --out data/fno_rolling
 
 Read-only data calls (no orders). Needs the Dhan Data API plan. Writes one JSON file per (underlying, CALL/PUT, strike label, expiry code): rows of {t, o, h, l, c, v, oi, iv, spot, strike}.
 First run it for ONE week and open the file: check the timestamps are IST market hours, that `spot` matches the index, and that the ATM strike moves with spot. Then widen the range.
-Request / reply shape and its limits (30 days a call, about 5 years back): services/fno-options-service/backtest/rolling.py.
+Request / reply shape and its limits (measured live: toDate - fromDate at most 1 day, toDate inclusive; about 5 years back): services/fno-options-service/backtest/rolling.py.
+A six-month run is about 80 calls per (CALL/PUT, strike) series. `--span-days` widens the window once scripts/fno_rolling_probe.py shows Dhan accepts more.
 
 Round 16 (what a failed run used to do): a 429 / 5xx / timeout on one window was counted, the window was skipped, and the file was written anyway, so a series with a hole looked complete; an
 expired token (every call 401) overwrote yesterday's good file with an empty one. Now: transient errors are retried with a growing pause; every file lists `failed_windows` (a backtest must refuse
@@ -60,13 +61,13 @@ def fetch_window(do_call: Callable[[dict], dict], body: dict, option_type: str, 
 
 
 def fetch_series(do_call: Callable[[dict], dict], und: str, ot: str, strike: str, start: date, end: date, interval: int, flag: str, code: int,
-                 pause: float = 0.5, retries: int = 3, sleep: Callable[[float], None] = time.sleep, say: Callable[[str], None] = print) -> Dict[str, Any]:
-    """Every 30-day window of [start, end) for one (CALL/PUT, strike) -> {"rows", "failed_windows", "empty_windows"}."""
+                 pause: float = 0.5, retries: int = 3, sleep: Callable[[float], None] = time.sleep, say: Callable[[str], None] = print, span_days: int = rolling.MAX_DAYS) -> Dict[str, Any]:
+    """Round 255: every call needed to cover the weekdays of [start, end) for one (CALL/PUT, strike) -> {"rows", "failed_windows", "empty_windows"}; rows are trimmed to [start, end)."""
     chunks: List[List[Dict[str, Any]]] = []
     failed: List[List[str]] = []
     empty: List[List[str]] = []
-    for w0, w1 in rolling.windows(start, end):
-        body = rolling.build_request(und, ot, strike, w0, w1, interval, flag, code)
+    for w0, w1 in rolling.windows(start, end, span_days):
+        body = rolling.build_request(und, ot, strike, w0, w1, interval, flag, code, span_days)
         got, why = fetch_window(do_call, body, ot, retries, pause, sleep)
         if why:
             failed.append([w0.isoformat(), w1.isoformat(), why])
@@ -77,7 +78,7 @@ def fetch_series(do_call: Callable[[dict], dict], und: str, ot: str, strike: str
             chunks.append(got)
             say(f"{und} {ot} {strike} {w0}..{w1}: {len(got)} candles")
         sleep(pause)
-    return {"rows": rolling.merge_rows(chunks), "failed_windows": failed, "empty_windows": empty}
+    return {"rows": rolling.in_range(rolling.merge_rows(chunks), start, end), "failed_windows": failed, "empty_windows": empty}
 
 
 def write_series(path: Path, meta: Dict[str, Any], series: Dict[str, Any]) -> Tuple[Optional[Path], str]:
@@ -109,6 +110,7 @@ def main() -> int:
     ap.add_argument("--expiry-code", type=int, default=1)
     ap.add_argument("--out", default="data/fno_rolling")
     ap.add_argument("--pause", type=float, default=0.5, help="seconds between calls (the rate limit is not published)")
+    ap.add_argument("--span-days", type=int, default=rolling.MAX_DAYS, help=f"toDate - fromDate per call, 1 to {rolling.MAX_SPAN_CLI} (default {rolling.MAX_DAYS}: the most Dhan accepted on 9 Nov 2026; wider answers HTTP 400 DH-905)")
     ap.add_argument("--retries", type=int, default=3, help="extra tries for a 429 / 5xx / network error on one window")
     ap.add_argument("--base", default=os.getenv("DHAN_BASE_URL", "https://api.dhan.co/v2"))
     a = ap.parse_args()
@@ -124,6 +126,9 @@ def main() -> int:
     if end <= start:
         print("--to must be after --from (it is not included)", file=sys.stderr)
         return 2
+    if not 1 <= a.span_days <= rolling.MAX_SPAN_CLI:
+        print(f"--span-days must be 1 to {rolling.MAX_SPAN_CLI}", file=sys.stderr)
+        return 2
     strikes = [s.strip() for s in a.strikes.split(",") if s.strip()]
     for s in strikes:
         if not rolling.STRIKE_RE.match(s):
@@ -134,9 +139,9 @@ def main() -> int:
     bad = 0
     for strike in strikes:
         for ot in ("CALL", "PUT"):
-            series = fetch_series(lambda body: call(a.base, cid, token, body), a.und, ot, strike, start, end, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries)
+            series = fetch_series(lambda body: call(a.base, cid, token, body), a.und, ot, strike, start, end, a.interval, a.expiry_flag, a.expiry_code, a.pause, a.retries, span_days=a.span_days)
             name = out / f"{a.und}_{ot}_{strike.replace('+', 'p').replace('-', 'm')}_{a.expiry_flag}{a.expiry_code}_{a.interval}m.json"
-            meta = {"underlying": a.und, "type": ot, "strike": strike, "interval": a.interval, "expiry_flag": a.expiry_flag, "expiry_code": a.expiry_code, "from": a.start, "to": a.end}
+            meta = {"underlying": a.und, "type": ot, "strike": strike, "interval": a.interval, "expiry_flag": a.expiry_flag, "expiry_code": a.expiry_code, "from": a.start, "to": a.end, "span_days": a.span_days}
             path, what = write_series(name, meta, series)
             bad += 1 if series["failed_windows"] or path is None else 0
             print(f"{name.name}: {len(series['rows'])} candles, {what}")

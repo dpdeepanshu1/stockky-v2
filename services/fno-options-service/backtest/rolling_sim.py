@@ -98,6 +98,8 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
     by_day: Dict[date, List[dict]] = {}
     for b in sorted(intraday, key=lambda x: x["t"]):
         by_day.setdefault(_d(b["t"]), []).append(b)
+    covered = {_d(k[1]) for k in book.atm}                     # round 256: the days the fetched ATM series has any candle for
+    uncovered: List[str] = []
     trades: List[paper.Position] = []
     days_run = skipped_no_quote = unpriced_exits = skipped_bars = 0
     first = last = None
@@ -108,6 +110,9 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
         if len(bars) < 12:
             continue
         if is_exp and xp.next_weekly_expiry(und, day, holidays, expiry_weekday) != day:
+            continue
+        if day not in covered:                                  # round 256: nothing was fetched for this day (outside the fetched range, a holiday, or a hole): it was not tested, so it is not a tested day
+            uncovered.append(day.isoformat())
             continue
         days_run += 1
         first, last = first or day.isoformat(), day.isoformat()
@@ -177,10 +182,11 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
             # the entry bar itself is managed on the next loop pass (its own candle, entered at its open)
     m = metrics.summarize(trades, p.capital)
     return {"kind": "ROLLING", "strategy": strategy, "underlying": und, "from": first, "to": last, "days": days_run, "capital": p.capital, "params": p.to_json(), "metrics": m,
-            "verdict": metrics.verdict(m), "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
+            "verdict": metrics.verdict(m), "trades": [t.to_json() for t in trades], "unpriced_exits": unpriced_exits, "uncovered_days": uncovered, "skipped_no_quote": skipped_no_quote, "unmanaged_bars": skipped_bars,
             "notes": ["premiums are Dhan's recorded expired-option candles (real prices, 5-minute path); the spread is still synthetic (no bid / ask in the data)",
                       "entry = the open of the bar AFTER the signal, in the ATM contract of that moment; the strike is then held and its candles are found by strike",
                       f"expiry code of the files vs the entry rule (min_days_to_expiry={p.min_days_to_expiry}) must match: the expiry date is not in the reply",
+                      f"{len(uncovered)} trading day(s) of the index data had no fetched option candle at all and were NOT tested" + (f" (first: {uncovered[:3]})" if uncovered else ""),
                       f"{skipped_no_quote} signal(s) had no ATM candle at the fill bar; {skipped_bars} bar(s) of a held strike had no candle; {unpriced_exits} exit(s) closed at the last known candle",
                       "timestamps assumed to be the START of each bar: check with the one-week fetch before trusting a result",
                       "the opposite-signal exit and the chain inputs of the live engine are not simulated"]}

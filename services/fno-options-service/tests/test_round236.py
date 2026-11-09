@@ -312,13 +312,13 @@ def test_verified_charge_defaults():
 def test_rolling_request_matches_the_docs_shape():
     from datetime import date as D
     from backtest import rolling
-    r = rolling.build_request("NIFTY", "CALL", "ATM", D(2026, 10, 1), D(2026, 10, 31), 5, "WEEK", 1)
-    assert r["exchangeSegment"] == "NSE_FNO" and r["securityId"] == 13 and r["instrument"] == "OPTIDX" and r["drvOptionType"] == "CALL" and r["toDate"] == "2026-10-31"
+    r = rolling.build_request("NIFTY", "CALL", "ATM", D(2026, 10, 1), D(2026, 10, 2), 5, "WEEK", 1)
+    assert r["exchangeSegment"] == "NSE_FNO" and r["securityId"] == 13 and r["instrument"] == "OPTIDX" and r["drvOptionType"] == "CALL" and r["fromDate"] == "2026-10-01" and r["toDate"] == "2026-10-02"
     assert set(r["requiredData"]) == {"open", "high", "low", "close", "iv", "volume", "strike", "oi", "spot"}
-    for bad in (dict(start=D(2026, 10, 1), end=D(2026, 11, 5)), dict(start=D(2026, 10, 5), end=D(2026, 10, 5)), dict(start=D(2026, 10, 1), end=D(2026, 10, 3), code=0), dict(start=D(2026, 10, 1), end=D(2026, 10, 3), iv=7)):
+    for bad in (dict(start=D(2026, 10, 1), end=D(2026, 11, 5)), dict(start=D(2026, 10, 5), end=D(2026, 10, 5)), dict(start=D(2026, 10, 1), end=D(2026, 10, 3)), dict(start=D(2026, 10, 1), end=D(2026, 10, 2), code=0), dict(start=D(2026, 10, 1), end=D(2026, 10, 2), iv=7)):
         with pytest.raises(ValueError):
             rolling.build_request("NIFTY", "CALL", "ATM", bad["start"], bad["end"], bad.get("iv", 5), "WEEK", bad.get("code", 1))
-    assert rolling.windows(D(2026, 5, 1), D(2026, 7, 5)) == [(D(2026, 5, 1), D(2026, 5, 31)), (D(2026, 5, 31), D(2026, 6, 30)), (D(2026, 6, 30), D(2026, 7, 5))]
+    assert rolling.windows(D(2026, 5, 4), D(2026, 5, 7)) == [(D(2026, 5, 4), D(2026, 5, 5)), (D(2026, 5, 5), D(2026, 5, 6))]      # round 255: pairs of days, a lone last day goes with the day before it
 
 
 def test_rolling_response_parses_parallel_arrays_and_a_null_side():

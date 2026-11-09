@@ -38,10 +38,10 @@ def _http_error(code):
 # ---- request builder: the strike label
 def test_strike_label_is_validated():
     for ok in ("ATM", "ATM+1", "ATM-1", "ATM+10", "ATM-10"):
-        assert rolling.build_request("NIFTY", "CALL", ok, D(2026, 10, 1), D(2026, 10, 5))["strike"] == ok
+        assert rolling.build_request("NIFTY", "CALL", ok, D(2026, 10, 1), D(2026, 10, 2))["strike"] == ok
     for bad in ("atm", "ATM+0", "ATM+11", "ATM++1", "ATM+", "OTM+1", "24500", "", "ATM +1", None, 3):
         with pytest.raises(ValueError):
-            rolling.build_request("NIFTY", "CALL", bad, D(2026, 10, 1), D(2026, 10, 5))
+            rolling.build_request("NIFTY", "CALL", bad, D(2026, 10, 1), D(2026, 10, 2))
 
 
 # ---- parser
@@ -93,7 +93,12 @@ def test_transient_errors_are_retried_and_a_bad_token_is_not():
 
 # ---- fetch script: a hole is recorded, not hidden
 def test_series_records_failed_and_empty_windows():
-    seq = iter([_body([100, 200], [1.0, 2.0]), _http_error(500), _http_error(500), _http_error(500), _http_error(500), {"data": {"ce": None, "pe": None}}, _body([300], [3.0])])   # 4 windows: ok, failed (1 + 3 retries), empty, ok
+    from datetime import datetime
+
+    def at(d, h=9, m=15):
+        return datetime(2026, 1, d, h, m, tzinfo=rolling.IST).timestamp()
+    # 5 Jan (Mon) .. 13 Jan (Tue), `end` not included. Round 255 calls: (5,6) (7,8) (9,10) (11,12); the 10th and 11th are a weekend inside the 9..10 and 11..12 calls
+    seq = iter([_body([at(5), at(6)], [1.0, 2.0]), _http_error(500), _http_error(500), _http_error(500), _http_error(500), {"data": {"ce": None, "pe": None}}, _body([at(12)], [3.0])])   # 4 calls: ok, failed (1 + 3 retries), empty, ok
 
     def do_call(body):
         r = next(seq)
@@ -101,10 +106,10 @@ def test_series_records_failed_and_empty_windows():
             raise r
         return r
 
-    s = F.fetch_series(do_call, "NIFTY", "CALL", "ATM", D(2026, 1, 1), D(2026, 4, 15), 5, "WEEK", 1, pause=0, retries=3, sleep=lambda x: None, say=lambda m: None)
-    assert [r["t"] for r in s["rows"]] == [100.0, 200.0, 300.0]
-    assert len(s["failed_windows"]) == 1 and s["failed_windows"][0][0] == "2026-01-31" and "HTTP 500" in s["failed_windows"][0][2]
-    assert s["empty_windows"] == [["2026-03-02", "2026-04-01"]]
+    s = F.fetch_series(do_call, "NIFTY", "CALL", "ATM", D(2026, 1, 5), D(2026, 1, 13), 5, "WEEK", 1, pause=0, retries=3, sleep=lambda x: None, say=lambda m: None)
+    assert [r["t"] for r in s["rows"]] == [at(5), at(6), at(12)]
+    assert len(s["failed_windows"]) == 1 and s["failed_windows"][0][0] == "2026-01-07" and "HTTP 500" in s["failed_windows"][0][2]
+    assert s["empty_windows"] == [["2026-01-09", "2026-01-10"]]
 
 
 # ---- fetch script: files

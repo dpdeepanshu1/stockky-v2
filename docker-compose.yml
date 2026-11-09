@@ -725,6 +725,7 @@ services:
       NOTIFICATION_URL: http://notification-scheduler-service:8000
       KRONOS_URL: http://kronos-forecast-service:8010
       TIMESFM_URL: http://timesfm-forecast-service:8011
+      FNO_URL: http://fno-options-service:8007
       RUNNER_DATA_DIR: /data/runner
       RUNNER_BAR_DIR: /data/bars
       # the optional timetable (Monday open, daily close, Friday review, ...) is OFF until switched on from the page
@@ -784,6 +785,132 @@ services:
     mem_limit: 6000m  # E235: was 2200m (E229: one replay = parent + workers at ~780 MB each, OOM-killed at 2200m). Two heavy runs may now overlap (RUNNER_MAX_HEAVY=2, 3 pool processes each); RUNNER_MIN_FREE_MB holds the 2nd back when memory is short. VM had ~9 GB free: lower RUNNER_MAX_HEAVY / RUNNER_POOL_JOBS if the kernel log shows OOM kills.
     mem_reservation: 128m
 
+  # F&O options (Nifty / Sensex CE-PE buying). Ships with the engine OFF and mode DEMO: nothing trades until switched on from Real Money Calibration > F&O.
+  fno-options-service:
+    build:
+      context: ./services/fno-options-service
+    ports:
+      - "127.0.0.1:8007:8007"
+    environment:
+      PORT: "8007"
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      # verifies the page's real-trade / position-stocks admin tokens; signs nothing of its own
+      SESSION_SECRET_REAL_TRADE: ${SESSION_SECRET_REAL_TRADE:-}
+      SESSION_SECRET_POSITION_STOCKS: ${SESSION_SECRET_POSITION_STOCKS:-}
+      # the scheduled backtest pack (calibration-runner) may start / read backtests, nothing else
+      SESSION_SECRET_CALIBRATION_RUNNER: ${SESSION_SECRET_CALIBRATION_RUNNER:-}
+      MARKET_DATA_URL: http://market-data-service:8001
+      # REAL only: at ARM time the Dhan token is borrowed (memory only) from here unless FNO_DHAN_* is set
+      REAL_TRADE_URL: http://real-trade-service:8005
+      FNO_DATA_DIR: /data/fno
+      FNO_ENGINE_ENABLED: ${FNO_ENGINE_ENABLED:-false}
+      FNO_MODE: ${FNO_MODE:-DEMO}
+      FNO_REAL_ENABLED: ${FNO_REAL_ENABLED:-false}
+      FNO_UNDERLYINGS: ${FNO_UNDERLYINGS:-BOTH}
+      FNO_DHAN_CLIENT_ID: ${FNO_DHAN_CLIENT_ID:-}
+      FNO_DHAN_ACCESS_TOKEN: ${FNO_DHAN_ACCESS_TOKEN:-}
+      # round 254: every other FNO_* / CAPITAL_ALLOC_* name config.py reads. This service has no env_file (it must not see the Dhan / database secrets of the others), so a name that is not listed
+      # here NEVER reached the container: FNO_EXPIRY_REAL, the FNO_STRAT_* thresholds, FNO_SL_PCT ... set in .env were silently ignored, and CAPITAL_ALLOC_MODE=live moved Real Trade but not F&O.
+      # A blank value falls back to the code default (config.py reads blank-safe), so listing a name with no .env line changes nothing. scripts/check_compose_fno_env.py fails when config.py reads a name that is not here.
+      # (CAPITAL_ALLOC_DIR is left out on purpose: it is the container path /data/shared mounted below.)
+      FNO_BLOCK_EXPIRY_DAY: ${FNO_BLOCK_EXPIRY_DAY:-}
+      FNO_BROKERAGE_PCT_CAP: ${FNO_BROKERAGE_PCT_CAP:-}
+      FNO_BROKERAGE_PER_ORDER: ${FNO_BROKERAGE_PER_ORDER:-}
+      FNO_CHAIN_INTERVAL_S: ${FNO_CHAIN_INTERVAL_S:-}
+      FNO_DELTA_MAX: ${FNO_DELTA_MAX:-}
+      FNO_DELTA_MIN: ${FNO_DELTA_MIN:-}
+      FNO_DEMO_CAPITAL: ${FNO_DEMO_CAPITAL:-}
+      FNO_DHAN_BASE_URL: ${FNO_DHAN_BASE_URL:-}
+      FNO_ENTRY_END: ${FNO_ENTRY_END:-}
+      FNO_ENTRY_START: ${FNO_ENTRY_START:-}
+      FNO_EXCH_TXN_PCT_BSE: ${FNO_EXCH_TXN_PCT_BSE:-}
+      FNO_EXCH_TXN_PCT_NSE: ${FNO_EXCH_TXN_PCT_NSE:-}
+      FNO_EXPIRY_ENTRY_END: ${FNO_EXPIRY_ENTRY_END:-}
+      FNO_EXPIRY_REAL: ${FNO_EXPIRY_REAL:-}
+      FNO_EXPIRY_RISK_MULT: ${FNO_EXPIRY_RISK_MULT:-}
+      FNO_EXPIRY_SQUAREOFF_AT: ${FNO_EXPIRY_SQUAREOFF_AT:-}
+      FNO_GST_PCT: ${FNO_GST_PCT:-}
+      FNO_INDEX_BARS_REFRESH_S: ${FNO_INDEX_BARS_REFRESH_S:-}
+      FNO_LOT_NIFTY: ${FNO_LOT_NIFTY:-}
+      FNO_LOT_SENSEX: ${FNO_LOT_SENSEX:-}
+      FNO_MARKET_DATA_TIMEOUT_S: ${FNO_MARKET_DATA_TIMEOUT_S:-}
+      FNO_MAX_DAILY_LOSS_PCT: ${FNO_MAX_DAILY_LOSS_PCT:-}
+      FNO_MAX_DATA_AGE_S: ${FNO_MAX_DATA_AGE_S:-}
+      FNO_MAX_LOTS: ${FNO_MAX_LOTS:-}
+      FNO_MAX_OPEN_POSITIONS: ${FNO_MAX_OPEN_POSITIONS:-}
+      FNO_MAX_SPREAD_PCT: ${FNO_MAX_SPREAD_PCT:-}
+      FNO_MAX_TRADES_PER_DAY: ${FNO_MAX_TRADES_PER_DAY:-}
+      FNO_MIN_DAYS_TO_EXPIRY: ${FNO_MIN_DAYS_TO_EXPIRY:-}
+      FNO_MIN_OI: ${FNO_MIN_OI:-}
+      FNO_MIN_PREMIUM: ${FNO_MIN_PREMIUM:-}
+      FNO_MIN_VOLUME: ${FNO_MIN_VOLUME:-}
+      FNO_ORDER_TIMEOUT_S: ${FNO_ORDER_TIMEOUT_S:-}
+      FNO_POLL_INTERVAL_S: ${FNO_POLL_INTERVAL_S:-}
+      FNO_RECORD_SNAPSHOTS: ${FNO_RECORD_SNAPSHOTS:-}
+      FNO_RISK_FREE_RATE: ${FNO_RISK_FREE_RATE:-}
+      FNO_RISK_PER_TRADE_PCT: ${FNO_RISK_PER_TRADE_PCT:-}
+      FNO_RUNNER: ${FNO_RUNNER:-}
+      FNO_SEBI_PCT: ${FNO_SEBI_PCT:-}
+      FNO_SIGNAL_MIN_SCORE: ${FNO_SIGNAL_MIN_SCORE:-}
+      FNO_SLIPPAGE_PCT: ${FNO_SLIPPAGE_PCT:-}
+      FNO_SL_PCT: ${FNO_SL_PCT:-}
+      FNO_SNAPSHOT_INTERVAL_S: ${FNO_SNAPSHOT_INTERVAL_S:-}
+      FNO_SQUAREOFF_AT: ${FNO_SQUAREOFF_AT:-}
+      FNO_STAMP_BUY_PCT: ${FNO_STAMP_BUY_PCT:-}
+      FNO_STATE_BACKEND: ${FNO_STATE_BACKEND:-}
+      FNO_STRATEGY_MAX_PER_DAY: ${FNO_STRATEGY_MAX_PER_DAY:-}
+      FNO_STRAT_ALPHA_MOVE: ${FNO_STRAT_ALPHA_MOVE:-}
+      FNO_STRAT_ALPHA_PAUSE: ${FNO_STRAT_ALPHA_PAUSE:-}
+      FNO_STRAT_BEAR_PIVOT: ${FNO_STRAT_BEAR_PIVOT:-}
+      FNO_STRAT_BEAR_SWEEP: ${FNO_STRAT_BEAR_SWEEP:-}
+      FNO_STRAT_CHAIN_VETO: ${FNO_STRAT_CHAIN_VETO:-}
+      FNO_STRAT_CORE: ${FNO_STRAT_CORE:-}
+      FNO_STRAT_DRIFT_CLOSES: ${FNO_STRAT_DRIFT_CLOSES:-}
+      FNO_STRAT_DRIFT_EDGE: ${FNO_STRAT_DRIFT_EDGE:-}
+      FNO_STRAT_DRIFT_SLOPE_PCT: ${FNO_STRAT_DRIFT_SLOPE_PCT:-}
+      FNO_STRAT_DRIFT_TOUCH_PCT: ${FNO_STRAT_DRIFT_TOUCH_PCT:-}
+      FNO_STRAT_EXPIRY_ALPHA: ${FNO_STRAT_EXPIRY_ALPHA:-}
+      FNO_STRAT_EXPIRY_BODY: ${FNO_STRAT_EXPIRY_BODY:-}
+      FNO_STRAT_EXPIRY_MOMENTUM: ${FNO_STRAT_EXPIRY_MOMENTUM:-}
+      FNO_STRAT_EXPIRY_RANGE_MULT: ${FNO_STRAT_EXPIRY_RANGE_MULT:-}
+      FNO_STRAT_MOMENTUM_SURGE: ${FNO_STRAT_MOMENTUM_SURGE:-}
+      FNO_STRAT_OPENER_D: ${FNO_STRAT_OPENER_D:-}
+      FNO_STRAT_PIVOT_BREAK_PCT: ${FNO_STRAT_PIVOT_BREAK_PCT:-}
+      FNO_STRAT_PIVOT_MAX_D: ${FNO_STRAT_PIVOT_MAX_D:-}
+      FNO_STRAT_SURGE_BODY: ${FNO_STRAT_SURGE_BODY:-}
+      FNO_STRAT_SURGE_CLOSE: ${FNO_STRAT_SURGE_CLOSE:-}
+      FNO_STRAT_SURGE_RANGE_MULT: ${FNO_STRAT_SURGE_RANGE_MULT:-}
+      FNO_STRAT_SURGE_VOL_MULT: ${FNO_STRAT_SURGE_VOL_MULT:-}
+      FNO_STRAT_SWEEP_MAX_D: ${FNO_STRAT_SWEEP_MAX_D:-}
+      FNO_STRAT_TREND_D: ${FNO_STRAT_TREND_D:-}
+      FNO_STRAT_TREND_I: ${FNO_STRAT_TREND_I:-}
+      FNO_STRAT_TREND_RIDER: ${FNO_STRAT_TREND_RIDER:-}
+      FNO_STRAT_WEEKLY_OPENER: ${FNO_STRAT_WEEKLY_OPENER:-}
+      FNO_STRIKES_EACH_SIDE: ${FNO_STRIKES_EACH_SIDE:-}
+      FNO_STT_SELL_PCT: ${FNO_STT_SELL_PCT:-}
+      FNO_TARGET_DELTA: ${FNO_TARGET_DELTA:-}
+      FNO_TARGET_PCT: ${FNO_TARGET_PCT:-}
+      FNO_TRAIL_ARM_PCT: ${FNO_TRAIL_ARM_PCT:-}
+      FNO_TRAIL_PCT: ${FNO_TRAIL_PCT:-}
+      FNO_VIX_MAX: ${FNO_VIX_MAX:-}
+      CAPITAL_ALLOC_MAX_AGE_S: ${CAPITAL_ALLOC_MAX_AGE_S:-}
+      CAPITAL_ALLOC_MODE: ${CAPITAL_ALLOC_MODE:-}
+      CAPITAL_ALLOC_WINDOW_DAYS: ${CAPITAL_ALLOC_WINDOW_DAYS:-}
+    volumes:
+      - fno-data:/data/fno
+      - control-state-fno:/data/control
+      # round 242: the capital board folder all three trading services share (capital_board.py): F&O publishes its figures here and, in REAL, sizes from its amount
+      - shared-runtime:/data/shared
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+    mem_limit: 400m
+
 # group 425: Hugging Face cache for the Kronos worker (model files are downloaded once, not on every container rebuild)
 volumes:
   bar-records:
@@ -795,6 +922,8 @@ volumes:
   # group442: Real Money Calibration page state
   control-state-rt:
   control-state-ps:
+  control-state-fno:
+  fno-data:
   # E285 round 87: small files both trading services share (the account-wide Dhan order-call window)
   shared-runtime:
   runner-data:

@@ -24,13 +24,14 @@ import ReconcilePanel from "./calibration/ReconcilePanel";
 import TapePanel from "./calibration/TapePanel";
 import SetupScorecardPanel from "./calibration/SetupScorecardPanel";
 import StatusProbesPanel from "./calibration/StatusProbesPanel";
+import FnoCalibration from "./calibration/FnoCalibration";
 import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
 type Section = "switches" | "alerts" | "auto" | "weather" | "short" | "tape" | "setups" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
 
-const SVC_ITEMS: { id: Svc; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }];
+const SVC_ITEMS: { id: Svc | "fno"; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }, { id: "fno", label: "F&O Options" }];
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "switches", label: "Switches" },
   { id: "alerts", label: "Alert switches" },
@@ -113,6 +114,7 @@ function ConnectionCard() {
 
 function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
   const [section, setSection] = useState<Section>("switches");
+  const [fno, setFno] = useState(false);     // F&O Options tab: its own panel, the equity runner sections do not apply
   const { start, summary } = useRunner();
   // design v6: what the runner is doing, read from the summary the page already polls (nothing new is fetched)
   const running = activeRuns(summary?.state);
@@ -127,7 +129,8 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
         subtitle="Switch the rules of both trading services on or off, check the day's trades, and run tests and training from buttons." />
       <AiPulse title="Calibration runner" working={running.length > 0} chips={pulseChips}
         line={running.length ? `Running: ${running.map((r) => r.title).join(" · ")}${waiting ? ` · ${waiting} waiting` : ""}` : summary?.state ? "Idle · pick a test, or change a switch below" : "Waiting for the runner to answer"} />
-      <SubTabs items={SVC_ITEMS} value={svc} onChange={setSvc} label="Service" />
+      <SubTabs items={SVC_ITEMS} value={fno ? "fno" : svc} onChange={(v) => { if (v === "fno") setFno(true); else { setFno(false); setSvc(v as Svc); } }} label="Service" />
+      {fno ? <FnoCalibration /> : <>
       <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
       <RunnerBanner />
       <SessionNotice />
@@ -146,6 +149,7 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
       {section === "plan" && <RunPlanPanel svc={svc} />}
       {section === "tests" && <TestsPanel svc={svc} />}
       {section === "runs" && <RunsPanel />}
+      </>}
       <ConnectionCard />
       <RunWindow />
     </div>

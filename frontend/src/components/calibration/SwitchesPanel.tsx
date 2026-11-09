@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { ApiError, controlApi, switchUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type SwitchSvc } from "../../calibrationApi";
 import { Btn, Card, Msg } from "./ui";
 
-const SVC_NAME: Record<SwitchSvc, string> = { rt: "real-trade-service", ps: "position-stocks-service", sch: "notification-scheduler-service" };
+const SVC_NAME: Record<SwitchSvc, string> = { rt: "real-trade-service", ps: "position-stocks-service", sch: "notification-scheduler-service", fno: "fno-options-service" };
 
 interface Pending { row: FlagRow; value: string; info: any }
 

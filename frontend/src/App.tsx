@@ -189,6 +189,7 @@ export default function App() {
     { id: "surprise", label: "Surprise Momentum", group: "Navigate", hint: "tab", run: () => setTab("surprise") },
     { id: "ipo", label: "IPO Tracker", group: "Navigate", hint: "tab", keywords: "ipo listing new issue gmp", run: () => setTab("ipo") },
     { id: "positionstocks", label: "Position Stocks", group: "Navigate", hint: "tab", keywords: "scalp scalping momentum 5m 15m 60m", run: () => setTab("positionstocks") },
+    { id: "fno", label: "F&O Options", group: "Navigate", hint: "tab", keywords: "fno options nifty sensex call put ce pe derivatives", run: () => setTab("fno") },
     { id: "calibration", label: "Real Money Calibration", group: "Navigate", hint: "tab", keywords: "switches on off controls tests calibration retrain g1 g2 g3 g4 kronos timesfm daily trades pnl run", run: () => setTab("calibration") },
     { id: "train", label: "Training Lab", group: "Navigate", hint: "tab", run: () => setTab("training") },
 
@@ -212,6 +213,7 @@ export default function App() {
     { id: "dashboard", label: "Dashboard", short: "Home", icon: "home", group: "" },
     { id: "realtrade", label: "Auto Trade", short: "Auto Trade", icon: "bot", group: "Trading" },
     { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "trend", group: "Trading" },
+    { id: "fno", label: "F&O Options", short: "F&O", icon: "trend", group: "Trading" },
     { id: "calibration", label: "Real Money Calibration", short: "Calibrate", icon: "sliders", group: "Trading" },
     { id: "trades", label: "Paper Trades", short: "Paper", icon: "swap", group: "Trading" },
     { id: "hot", label: "Hot Picks", short: "Picks", icon: "flame", group: "Discover" },

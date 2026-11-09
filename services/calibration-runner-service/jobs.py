@@ -27,7 +27,7 @@ def _heavy_timeout() -> int:
     Default 6 h; RUNNER_HEAVY_TIMEOUT_S (seconds) changes it; never below 1 h; an unreadable value falls back to 6 h."""
     try:
         v = int(float(os.environ.get("RUNNER_HEAVY_TIMEOUT_S", "").strip()))
-    except ValueError:
+    except (ValueError, OverflowError):      # round 16: "inf" raised OverflowError, which was not caught, so the whole service failed to import
         return 6 * 3600
     return max(3600, v)
 
@@ -326,6 +326,22 @@ def b_train_model(ctx, p):
             _http("Wait for the training to finish", "GET", d + "/train/status", poll={"key": "status", "until_not": ["running", "in_progress", "started", "loading_data"], "every_s": 20, "max_s": 1500}) | {"soft": True}]
 
 
+def b_fno_backtests(ctx, p):
+    """F&O: recorded-chain replay (skipped while no day is recorded) and the Black-Scholes simulation, each run inside fno-options-service and waited for. The simulation runs ONE index per
+    job, so it is started once per chosen index (round 233: SENSEX used to be left out), with the chosen strategy (ALL = every strategy side by side). Soft steps: a missing service never blocks the pack."""
+    f = ctx.get("fno") or ""
+    unds = p.get("underlyings", "NIFTY,SENSEX")
+    strat = p.get("strategy", "ALL")
+    jobs = [("replay", unds, "F&O replay of recorded chains")] + [("sim", u.strip(), f"F&O quick simulation of {u.strip()} (Black-Scholes, SIMULATED, strategy {strat})") for u in unds.split(",") if u.strip()]
+    steps = []
+    for kind, u, title in jobs:
+        q = f"kind={kind}&underlyings={u}" + (f"&strategy={strat}" if kind == "sim" else "")
+        steps.append(_http(f"Start: {title}", "POST", f"{f}/fno/backtests/run-scheduled?{q}", auth=True, expect=(200, 409)) | {"soft": True})
+        steps.append(_http(f"Wait: {title}", "GET", f + "/fno/backtests/latest-job", auth=True, poll={"key": "state", "until_not": ["running"], "every_s": 10, "max_s": 900, "attention_on": ["failed"], "fresh_key": "started"}) | {"soft": True})
+    steps.append(_http("Save the F&O backtest list", "GET", f + "/fno/backtests", auth=True, save="fno_backtests.json") | {"soft": True})
+    return steps
+
+
 def b_evaluate(ctx, p):
     d = ctx["decision"] + "/training"
     n = p.get("max_batch", 80)
@@ -524,6 +540,9 @@ JOB_LIST = [
          after="Verdict `no_edge` on S2_RS_BREAKOUT_LONG or S3_EXHAUSTION_LONG on two different runs switches that setup off (autocalib). `insufficient_sample` changes nothing."),
     _job("no_setup_readiness", "NO_SETUP_MODE readiness", "weekly", "Weekly, until NO_SETUP_MODE is live", "Are there 10 sessions and 30 stamped entries, did S1 to S4 matches do at least as well as shortlist entries, and are fewer than half of the entries unmatched? Read-only: it never sets the switch.", b_no_setup_readiness, timeout_s=120,
          after="READY: set NO_SETUP_MODE=live in the position-stocks .env and restart it outside market hours. NOT_READY: change nothing."),
+    _job("fno_backtests", "F&O backtests (replay + simulation)", "weekly", "Friday after close", "Runs the F&O recorded-chain replay (needs recorded days; skipped until then) and the Black-Scholes simulation inside fno-options-service. Results: F&O Options > Backtests. The end-of-day test on real NSE prices is scripts/fno_eod_backtest.py.", b_fno_backtests,
+         [P("underlyings", "Indices", "choice", "NIFTY,SENSEX", choices=["NIFTY,SENSEX", "NIFTY", "SENSEX"]),
+          P("strategy", "Simulation strategy (ALL = every strategy side by side)", "choice", "ALL", choices=["ALL", "CORE", "TREND_RIDER", "MOMENTUM_SURGE", "BEAR_SWEEP", "BEAR_PIVOT", "DRIFT_EDGE", "WEEKLY_OPENER"])], timeout_s=3600),
     _job("tsfm_nightly", "TimesFM nightly cache", "daily", "Every day after 16:30 IST (daily bars in)", "Fills the TimesFM forecast cache. Needs the timesfm compose profile.", b_tsfm_nightly, [P("max_failed_pct", "Max failed %", "int", 40, 1, 100)], heavy=True, window="closed", timeout_s=3600),
     _job("tsfm_probe", "TimesFM Gate A probe (one seed)", "monthly", "Monthly, one seed at a time", "Does TimesFM predict the 5-day range / volume better than ATR / HAR? Out of sample.", b_tsfm_probe,
          [SEED, P("max_forecasts", "Max forecasts", "int", 400, 20, 5000), P("per_symbol", "Days per symbol", "int", 20, 5, 100)], heavy=True, window="closed", timeout_s=HEAVY_S, needs=["fetch_history"]),
@@ -615,7 +634,7 @@ PACKS: List[Dict[str, Any]] = [
      "jobs": [["daily_trades", {"days": 10}], ["service_advice", {"days": 10}], ["export_records", {}], ["opening_replay", {}], ["evaluate_outcomes", {}], ["structure_refresh", {}], ["tsfm_nightly", {}]], "stop_on_failure": False},
     {"id": "friday_review", "title": "Friday review pack", "when": "Friday after close",
      "what": "Closed-trade report, entry slippage review, hold buckets, opening-window verdict, board parity, swing shadow report (E138: a weekly job that no pack ran), switch snapshot of changes.",
-     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["swing_shadow_report", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
+     "jobs": [["export_records", {}], ["records_report", {}], ["entry_slippage", {}], ["hold_bucket", {}], ["strategy_readout", {}], ["board_parity", {}], ["swing_shadow_report", {}], ["fno_backtests", {}], ["control_snapshot", {"only_changes": True}]], "stop_on_failure": False},
     {"id": "weekly_calibration", "title": "Weekly calibration pack", "when": "Saturday 08:00 IST (market closed, 1-3 hours)",
      "what": "The full calibration (history, A/B, G1, walk-forward, G2-G4, parity), the completeness check, then a snapshot of the switches + metrics and its comparison with the previous run.",
      "jobs": [["calibration_full", {}], ["calibration_status", {}], ["calibration_snapshot", {}], ["calibration_compare", {}]], "stop_on_failure": False},
@@ -654,11 +673,24 @@ def coerce_params(job: Dict[str, Any], given: Optional[Dict[str, Any]]) -> Dict[
         k = p["kind"]
         if k == "int":
             try:
+                if isinstance(v, float) and v != int(v):
+                    raise ValueError("fraction")
                 v = int(v)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):      # round 16: 3.7 became 3 silently and inf was an unhandled OverflowError (a 500)
                 raise ValueError(f"{name}: must be a whole number")
             if p["min"] is not None and v < p["min"] or p["max"] is not None and v > p["max"]:
                 raise ValueError(f"{name}: must be between {p['min']} and {p['max']}")
+        elif k == "float":
+            # round 16: "float" parameters (stop %, target %, charges %, cost %) fell into the free-text branch below: no bound was checked, so a cost of -5, a stop of 0 or "nan"
+            # went straight onto the script's command line. Now typed and bounded like the int ones.
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name}: must be a number")
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ValueError(f"{name}: must be a finite number")
+            if p["min"] is not None and v < p["min"] or p["max"] is not None and v > p["max"]:
+                raise ValueError(f"{name}: must be between {p['min']:g} and {p['max']:g}")
         elif k == "bool":
             v = v in (True, 1, "1", "true", "True", "yes", "on")
         elif k == "choice":

@@ -166,6 +166,7 @@ PROTECTED: Dict[str, str] = {
     "INTRADAY_WIDTH_MODE": "same-day stop / target width (E286): an entry-logic switch, decided by you, not by a report",
     "INTRADAY_WIDTH_ATR_FRAC": "same-day stop cap (E286): share of the daily ATR a same-day trade may risk; decided by you, no test measures it yet",
     "CAPITAL_LEND_MODE": "capital split (E286 round 217): how the shared Dhan account is divided between the two services is decided by you, never by a report",
+    "CAPITAL_ALLOC_MODE": "capital split (round 15): shadow to live changes the sizing of every service on the shared Dhan account; it is decided by you after a week of the shadow board, never by a report",
     "CAPITAL_LEND_RESERVE_FRAC": "capital split (E286 round 217): how much idle Position Stocks capital stays free for it; decided by you, no test measures it",
     "FAILED_ENTRY_EXIT_MODE": "failed-entry early exit (E286): a money-safety exit rule, decided by you, not by a report",
     "FAILED_ENTRY_LOSS_FRAC": "failed-entry early exit (E286): how much of the stop distance a never-worked trade may lose; decided by you, no test measures it yet",

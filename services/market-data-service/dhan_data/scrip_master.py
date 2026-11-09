@@ -137,6 +137,11 @@ def load(force: bool = False) -> bool:
             r.raise_for_status()
             text = r.text
         eq, ix = parse_csv(text)
+        try:                                   # F&O round 1: the same file also carries the NIFTY / SENSEX option rows (best effort, never fails the load)
+            from . import options as _options
+            _options.ingest(text)
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("option contracts not ingested: %s", type(_e).__name__)
         if len(eq) < 100:
             raise ValueError(f"scrip master parsed only {len(eq)} NSE equities - header names changed?")
         with _lock:

@@ -636,7 +636,14 @@ def evaluate(
             + own_exposure
             + account.other_service_open_positions_market_value
         )
-        share_cap = total_shared_account_value * (CAPITAL_SHARE_PCT / 100.0)
+        # Round 242: the share is the three-way board's percentage in live mode (execution/capital_alloc.py), else the fixed CAPITAL_SHARE_PCT. Any failure = the fixed one.
+        _share_pct = CAPITAL_SHARE_PCT
+        try:
+            from execution import capital_alloc as _ca
+            _share_pct = _ca.effective_share_pct(CAPITAL_SHARE_PCT)
+        except Exception:  # noqa: BLE001
+            logger.debug("risk_engine: capital board share skipped (fixed share used)", exc_info=True)
+        share_cap = total_shared_account_value * (_share_pct / 100.0)
         # E286 round 217: the part of position-stocks-service's half that it is not using may be lent (execution/capital_lend.py; CAPITAL_LEND_MODE live | off). Only with a
         # FRESH peer figure; the fixed share is the floor. Any failure = the fixed share.
         try:
@@ -644,7 +651,7 @@ def evaluate(
             if (getattr(_cfg_cl, "CAPITAL_LEND_MODE", "off") == "live" and account.other_service_exposure_age_s is not None
                     and account.other_service_exposure_age_s <= float(_cfg_cl.CAPITAL_LEND_PEER_MAX_AGE_S)):
                 from execution import capital_lend as _cl
-                _lent_cap = _cl.exposure_cap(total_shared_account_value, account.other_service_open_positions_market_value, CAPITAL_SHARE_PCT,
+                _lent_cap = _cl.exposure_cap(total_shared_account_value, account.other_service_open_positions_market_value, _share_pct,
                                              _cfg_cl.CAPITAL_LEND_RESERVE_FRAC)
                 if _lent_cap is not None and _lent_cap > share_cap:
                     share_cap = _lent_cap
@@ -661,7 +668,7 @@ def evaluate(
                 f"This service's exposure (₹{own_exposure:,.2f} = ₹{account.open_positions_market_value:,.2f} "
                 f"open + ₹{account.in_flight_buy_value:,.2f} in-flight BUYs, "
                 f"+ ₹{order_cost:,.2f} proposed = ₹{projected_exposure:,.2f}) would exceed its "
-                f"{CAPITAL_SHARE_PCT:.0f}% share (₹{share_cap:,.2f}) of the shared Dhan account "
+                f"{_share_pct:.0f}% share (₹{share_cap:,.2f}) of the shared Dhan account "
                 f"(₹{total_shared_account_value:,.2f} total = ₹{account.broker_cash_available:,.2f} free cash "
                 f"+ ₹{own_exposure:,.2f} this service "
                 f"+ ₹{account.other_service_open_positions_market_value:,.2f} position-stocks-service "

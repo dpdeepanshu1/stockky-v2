@@ -307,6 +307,15 @@ SHORT_GAP_UP_REFUSE_PCT = _ms_float("SHORT_GAP_UP_REFUSE_PCT", 1.0, 0.0, 10.0)  
 
 # ── Capital split with real-trade-service ───────────────────────────────────
 SCALP_POOL_CAPITAL_SHARE_PCT = _get_float("SCALP_POOL_CAPITAL_SHARE_PCT", 50.0)
+# Round 242: three-way split of the one Dhan account (capital_board.py; Real Trade decides the board, this service publishes its figures and reads its percentage back).
+# off = nothing written or read | shadow (default) = board written and shown, sizing unchanged | live = this pool uses its board percentage instead of SCALP_POOL_CAPITAL_SHARE_PCT.
+CAPITAL_ALLOC_MODE = _get_str("CAPITAL_ALLOC_MODE", "shadow").strip().lower()
+if CAPITAL_ALLOC_MODE not in ("off", "shadow", "live"):
+    CAPITAL_ALLOC_MODE = "off"                                              # a typo must not switch it on
+CAPITAL_ALLOC_DIR = _get_str("CAPITAL_ALLOC_DIR", "/data/shared").strip()
+CAPITAL_ALLOC_WINDOW_DAYS = max(5, min(180, _get_int("CAPITAL_ALLOC_WINDOW_DAYS", 30)))
+CAPITAL_ALLOC_MAX_AGE_S = max(300.0, _get_float("CAPITAL_ALLOC_MAX_AGE_S", 21600.0))   # a board older than this is ignored (the fixed share applies)
+CAPITAL_ALLOC_PEER_MAX_AGE_S = max(60.0, _get_float("CAPITAL_ALLOC_PEER_MAX_AGE_S", 900.0))   # F&O's exposure figure must be this fresh to be counted
 
 # ── Order execution ──────────────────────────────────────────────────────────
 SCALP_PRODUCT_TYPE = _get_str("SCALP_PRODUCT_TYPE", "INTRADAY")  # NOT "CNC"

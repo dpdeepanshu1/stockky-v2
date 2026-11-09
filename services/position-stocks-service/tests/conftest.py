@@ -436,3 +436,11 @@ def _e285_batch5_gate_policy_reset(monkeypatch):
     _gp.clear_cache()
     _gpj._last_run_day = None
     _gpj._retry_after = 0.0
+
+
+@_pytest_entry_pause.fixture(autouse=True)
+def _round242_capital_board_off_by_default(monkeypatch):
+    """Round 242: the three-way capital board writes small files under CAPITAL_ALLOC_DIR. Older tests run with it OFF (nothing written, fixed share); the round 242 tests turn it on with a temp dir."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "CAPITAL_ALLOC_MODE", "off", raising=False)
+    yield

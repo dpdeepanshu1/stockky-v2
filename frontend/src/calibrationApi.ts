@@ -9,6 +9,7 @@
 import { getRealTradeApiUrl, setRealTradeApiUrl, getSessionToken as getRtToken, setSessionToken as setRtToken, realTradeApi } from "./realTradeApi";
 import { getPositionStocksApiUrl, setPositionStocksApiUrl, getSessionToken as getPsToken, setSessionToken as setPsToken, positionStocksApi } from "./positionStocksApi";
 import { getApiUrl } from "./api";
+import { getFnoApiUrl, fnoToken } from "./fnoApi";
 import type { OverlayRevertResult, OverlayView, WeatherLogRow, WeatherSettings, WeatherStage, WeatherStatus } from "./weatherView";
 
 import { tradesFromPositionStocks, tradesFromRealTrade } from "./calibrationTrades";
@@ -16,7 +17,7 @@ export * from "./calibrationTrades";
 
 export type Svc = "rt" | "ps";
 // E51: the scheduler's alert switches are reached through the gateway (/scheduler-control/*), never directly
-export type SwitchSvc = Svc | "sch";
+export type SwitchSvc = Svc | "sch" | "fno";   // "fno" = fno-options-service (nginx /fno-api/)
 
 const RUNNER_URL_KEY = "stockky:calibration_api_url";
 
@@ -306,12 +307,14 @@ function gatewayBase(): string {
   try { return (getApiUrl() || "").replace(/\/$/, ""); } catch { return ""; }
 }
 /** URL a Switches tab talks to (for messages). */
-export function switchUrl(svc: SwitchSvc): string { return svc === "sch" ? gatewayBase() : serviceUrl(svc); }
+export function switchUrl(svc: SwitchSvc): string { return svc === "sch" ? gatewayBase() : svc === "fno" ? getFnoApiUrl() : serviceUrl(svc); }
 
 const C = <T,>(svc: SwitchSvc, path: string, init?: RequestInit) =>
   svc === "sch"
     ? call<T>(gatewayBase(), serviceToken("rt"), `/scheduler-control${path}`, init)
-    : call<T>(serviceUrl(svc), serviceToken(svc), `/control${path}`, init);
+    : svc === "fno"
+      ? call<T>(getFnoApiUrl(), fnoToken(), `/control${path}`, init)
+      : call<T>(serviceUrl(svc), serviceToken(svc), `/control${path}`, init);
 
 export const controlApi = {
   flags: (svc: SwitchSvc) => C<FlagsDoc>(svc, "/flags"),

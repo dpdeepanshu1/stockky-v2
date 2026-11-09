@@ -15,6 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 import auth
 import config
@@ -47,7 +48,7 @@ def _token() -> str:
 def _ctx_base() -> Dict[str, Any]:
     return {"python": config.PYTHON, "scripts": str(config.SCRIPTS_DIR), "bars": str(config.BAR_DIR), "rt": config.REAL_TRADE_URL, "ps": config.POSITION_STOCKS_URL,
             "md": config.MARKET_DATA_URL, "gw": config.GATEWAY_URL, "analysis": config.ANALYSIS_URL, "decision": config.DECISION_URL, "notify": config.NOTIFICATION_URL,
-            "kronos": config.KRONOS_URL, "tsfm": config.TIMESFM_URL}
+            "kronos": config.KRONOS_URL, "tsfm": config.TIMESFM_URL, "fno": config.FNO_URL}
 
 
 runner: Optional[Runner] = None
@@ -245,24 +246,39 @@ def download(rid: str, file: str = "output.txt", _: Dict[str, Any] = Depends(req
     return FileResponse(p, filename=f"{rid}_{os.path.basename(file)}", media_type="text/plain" if p.endswith((".txt", ".md", ".csv", ".json")) else "application/octet-stream")
 
 
-@app.get("/runs/{rid}/zip")
-def download_zip(rid: str, _: Dict[str, Any] = Depends(require_admin)):
+def _rm(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _zip_response(build, filename: str):
+    """Round 16: the zip is built in a temp file that was never deleted: every click of "Download all latest results" (every run's artifacts, tens of MB) left a copy in /tmp for good,
+    in a container with a small disk. The file is now removed once the response has been sent (and at once when building it fails or finds nothing)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
-    if not _r().zip_run(rid, tmp.name):
-        os.unlink(tmp.name)
+    try:
+        found = build(tmp.name)
+    except Exception:
+        _rm(tmp.name)
+        raise
+    if found is None:
+        _rm(tmp.name)
         raise HTTPException(404, "no such run")
-    return FileResponse(tmp.name, filename=f"{rid}.zip", media_type="application/zip")
+    return FileResponse(tmp.name, filename=filename, media_type="application/zip", background=BackgroundTask(_rm, tmp.name))
+
+
+@app.get("/runs/{rid}/zip")
+def download_zip(rid: str, _: Dict[str, Any] = Depends(require_admin)):
+    return _zip_response(lambda dest: _r().zip_run(rid, dest), f"{rid}.zip")
 
 
 @app.get("/results/latest.zip")
 def download_latest_zip(service: str = "", _: Dict[str, Any] = Depends(require_admin)):
     """group 471: the latest result of every test in one zip (the 'Download all latest results' button)."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    tmp.close()
     sv = _svc(service)
-    _r().zip_latest(tmp.name, service=sv)
-    return FileResponse(tmp.name, filename=(f"latest_results_{sv}.zip" if sv else "latest_results.zip"), media_type="application/zip")
+    return _zip_response(lambda dest: (_r().zip_latest(dest, service=sv), True)[1], f"latest_results_{sv}.zip" if sv else "latest_results.zip")
 
 
 @app.get("/latest/{target}")

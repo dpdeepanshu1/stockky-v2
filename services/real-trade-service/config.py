@@ -1570,6 +1570,22 @@ if CAPITAL_LEND_MODE not in ("live", "off"):
     CAPITAL_LEND_MODE = "off"                                                # a typo must not switch it on
 CAPITAL_LEND_RESERVE_FRAC = min(1.0, max(0.0, _og_float("CAPITAL_LEND_RESERVE_FRAC", 0.5)))
 CAPITAL_LEND_PEER_MAX_AGE_S = max(60.0, _og_float("CAPITAL_LEND_PEER_MAX_AGE_S", 900.0))
+# Round 242: the one Dhan account is split between THREE services (Real Trade, Position Stocks, F&O): 25 % each fixed, the last 25 % to the one with the best net return (capital_board.py).
+# CAPITAL_ALLOC_MODE: off (nothing written or read) | shadow (default: the board is written and shown, nothing about sizing changes) | live (Real Trade and Position Stocks use their board
+# percentage instead of the fixed 50 %). Real Trade DECIDES the board (it owns the Dhan balance); the other two services only publish their figures and read it back.
+CAPITAL_ALLOC_MODE = (os.getenv("CAPITAL_ALLOC_MODE") or "shadow").strip().lower()
+if CAPITAL_ALLOC_MODE not in ("off", "shadow", "live"):
+    CAPITAL_ALLOC_MODE = "off"                                               # a typo must not switch it on
+CAPITAL_ALLOC_DIR = (os.getenv("CAPITAL_ALLOC_DIR") or "/data/shared").strip()
+CAPITAL_ALLOC_WINDOW_DAYS = int(max(5, min(180, _og_float("CAPITAL_ALLOC_WINDOW_DAYS", 30.0))))   # the days of net P&L that decide the bonus
+CAPITAL_ALLOC_MIN_TRADES = int(max(1, _og_float("CAPITAL_ALLOC_MIN_TRADES", 20.0)))               # closed trades a service needs in the window to be eligible for the bonus
+CAPITAL_ALLOC_BASE_PCT = min(33.3, max(0.0, _og_float("CAPITAL_ALLOC_BASE_PCT", 25.0)))            # fixed share per service (3 x this is fixed, the rest is the bonus)
+CAPITAL_ALLOC_BONUS_MODE = (os.getenv("CAPITAL_ALLOC_BONUS_MODE") or "proportional").strip().lower()   # proportional (by score) | winner (all to the best)
+if CAPITAL_ALLOC_BONUS_MODE not in ("proportional", "winner"):
+    CAPITAL_ALLOC_BONUS_MODE = "proportional"
+CAPITAL_ALLOC_MAX_PCT = min(100.0, max(34.0, _og_float("CAPITAL_ALLOC_MAX_PCT", 50.0)))            # one service never above this (unless it is the only active one)
+CAPITAL_ALLOC_MAX_STEP_PCT = min(100.0, max(1.0, _og_float("CAPITAL_ALLOC_MAX_STEP_PCT", 10.0)))   # a share moves at most this many points per daily rebalance
+CAPITAL_ALLOC_MAX_AGE_S = max(300.0, _og_float("CAPITAL_ALLOC_MAX_AGE_S", 21600.0))                # a board older than this is ignored (the fixed share applies)
 
 # ── Transaction-cost model (2026-09-18 — user audit finding) ─────────────────
 # Codebase audit found ZERO awareness of brokerage/STT/exchange charges/GST/

@@ -244,10 +244,10 @@ class Runner:
             p = os.path.join(self.runs_dir, name, "meta.json")
             try:
                 d = json.load(open(p, encoding="utf-8"))
-            except Exception:  # noqa: BLE001
+                r = Run(d["id"], d["kind"], d["target"], d.get("title", ""), d.get("params", {}), d.get("by", ""), d.get("trigger", ""), d.get("service", ""))
+                r.d.update(d)
+            except Exception:  # noqa: BLE001 - unreadable, or valid JSON that is not a run record ([], null, no id): skipped. Round 16: the Run(...) line used to sit outside this try, so one such file raised KeyError / TypeError in the constructor and the service never started.
                 continue
-            r = Run(d["id"], d["kind"], d["target"], d.get("title", ""), d.get("params", {}), d.get("by", ""), d.get("trigger", ""), d.get("service", ""))
-            r.d.update(d)
             if r.d["status"] in ("queued", "running"):       # the container restarted in the middle of it
                 r.d["status"] = "failed"
                 r.d["note"] = "the runner restarted while this run was active"
@@ -396,7 +396,10 @@ class Runner:
                 rel = os.path.relpath(p, base)
                 if rel in ("meta.json", "meta.json.tmp"):
                     continue
-                out.append({"name": rel, "bytes": os.path.getsize(p)})
+                try:
+                    out.append({"name": rel, "bytes": os.path.getsize(p)})
+                except OSError:
+                    continue            # round 16: removed while we looked (a newer result replaced this run); used to be a 500 on the run page
         return sorted(out, key=lambda f: (f["name"] != "output.txt", f["name"]))
 
     def file_path(self, rid: str, name: str) -> Optional[str]:
@@ -409,20 +412,37 @@ class Runner:
         if not r:
             return {"found": False}
         p = os.path.join(self._run_dir(rid), "output.txt")
-        text, size = "", 0
+        text, size, used = "", 0, 0
+        start = max(0, offset)
         if os.path.isfile(p):
             size = os.path.getsize(p)
+            start = max(0, min(offset, size))
             with open(p, "rb") as f:
-                f.seek(max(0, min(offset, size)))
-                text = f.read(256 * 1024).decode("utf-8", "replace")
-        return {"found": True, "status": r.d["status"], "offset": min(size, max(0, offset) + len(text.encode("utf-8"))), "size": size, "text": text}
+                f.seek(start)
+                raw = f.read(256 * 1024)
+            # round 16: the chunk can end in the middle of a multi-byte character (the output holds rupee signs and arrows). Decoding it with errors="replace" turned the
+            # 1-2 cut bytes into a 3-byte U+FFFD, so the returned offset ran ahead of the bytes really read and the page skipped (and garbled) text at every 256 KB boundary.
+            # Cut the chunk back to the last complete character instead; the next call continues exactly there (unless the file ended: then it is all there is).
+            if len(raw) == 256 * 1024 and start + len(raw) < size:
+                for back in range(0, 4):
+                    try:
+                        raw[: len(raw) - back].decode("utf-8")
+                        raw = raw[: len(raw) - back]
+                        break
+                    except UnicodeDecodeError:
+                        continue
+            text, used = raw.decode("utf-8", "replace"), len(raw)
+        return {"found": True, "status": r.d["status"], "offset": min(size, start + used), "size": size, "text": text}
 
     def zip_run(self, rid: str, dest: str) -> Optional[str]:
         if rid not in self.index:
             return None
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
             for f in self.files(rid):
-                z.write(os.path.join(self._run_dir(rid), f["name"]), f["name"])
+                try:
+                    z.write(os.path.join(self._run_dir(rid), f["name"]), f["name"])
+                except OSError:
+                    continue            # round 16: a file removed while zipping (newer result replaced the run) is left out, not a 500
         return dest
 
     def zip_latest(self, dest: str, targets: Optional[List[str]] = None, service: str = "") -> int:
@@ -441,7 +461,10 @@ class Runner:
                 head = (r.get("headline") or [""])[0]
                 rows.append(f"{t}: {str(r.get('status')).upper()}  finished {r.get('finished_at') or '-'}  run {r['id']}" + (f"  -> {head}" if head else ""))
                 for f in self.files(r["id"]):
-                    z.write(os.path.join(self._run_dir(r["id"]), f["name"]), f"{t}/{f['name']}")
+                    try:
+                        z.write(os.path.join(self._run_dir(r["id"]), f["name"]), f"{t}/{f['name']}")
+                    except OSError:
+                        continue
             z.writestr("_INDEX.txt", "Latest result of every test (status OK / LOOK / FAILED ...):\n\n" + "\n".join(rows) + "\n")
         return n
 
@@ -602,8 +625,14 @@ class Runner:
                     self._execute(r)
                 except Exception as e:  # noqa: BLE001
                     r.d.update(status="failed", note=f"internal error: {type(e).__name__}: {e}", finished_at=time.time())
-                    self._save(r)
-                self._after_run(r)          # group 447: before the run leaves `running`, so drain() / the page see it complete with its Telegram note
+                    try:
+                        self._save(r)
+                    except OSError:     # round 16: a full disk made this raise out of the loop and the worker thread died for good (the page still counted it as a slot)
+                        pass
+                try:
+                    self._after_run(r)          # group 447: before the run leaves `running`, so drain() / the page see it complete with its Telegram note
+                except Exception:  # noqa: BLE001 - bookkeeping / Telegram never ends a worker thread
+                    pass
             finally:
                 self._tl.run = None
                 with self.cond:
@@ -1013,7 +1042,9 @@ class Runner:
         out.line(f"{method} {self.redact(url)}")
         expect = set(st.get("expect", [200]))
         poll = st.get("poll")
-        deadline = time.time() + (min(left_s, float(poll["max_s"])) if poll else min(left_s, 180.0))
+        t_step = time.time()
+        val = ""
+        deadline = t_step + (min(left_s, float(poll["max_s"])) if poll else min(left_s, 180.0))
         while True:
             code, body = self._request(method if not poll else "GET", url, hdr, timeout=min(60.0, max(5.0, left_s)))
             if poll is None or self._cancelled():
@@ -1047,6 +1078,10 @@ class Runner:
             if not path.startswith(ctx["run"]):
                 self._copy_artifact(path, ctx)
         if code in expect:
+            bad = self._poll_failed(poll, val, body, t_step)
+            if bad:
+                out.line(f"  the job in that service ended as '{bad}': its own error is in the reply above")
+                return "attention", f"{poll['key']}={bad}"
             return "success", ""
         if code == 0 and st.get("optional"):
             out.line("skipped: not running (optional service, its docker profile is off). Start it only if you use it.")
@@ -1054,6 +1089,22 @@ class Runner:
         if code == 0:
             return "failed", f"no answer: {text[:160]}"
         return "failed", f"HTTP {code}"
+
+    @staticmethod
+    def _poll_failed(poll: Optional[Dict[str, Any]], val: str, body: Any, t_step: float) -> str:
+        """Round 16: a wait step that polls a remote job only knew "not running any more", so a backtest that CRASHED in fno-options-service (state "failed") ended the wait
+        as a green success. `attention_on` lists the final values that mean "it ended badly". `fresh_key` (a start time in the reply, epoch seconds) keeps an OLD failed job
+        from being blamed on this run: when the start step was skipped (no recorded chain day) the latest job is last week's.  Returns the value, or ''."""
+        if not poll or not val or val not in {str(x).lower() for x in (poll.get("attention_on") or [])}:
+            return ""
+        fk = poll.get("fresh_key")
+        if fk:
+            try:
+                if float(json.loads(body).get(fk)) < t_step - float(poll.get("fresh_slack_s", 120)):
+                    return ""
+            except Exception:  # noqa: BLE001 - no usable start time: cannot tell it is this run's job, so do not blame it
+                return ""
+        return val
 
     def _request(self, method: str, url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, str]:
         data = b"" if method in ("POST", "PUT", "PATCH") else None

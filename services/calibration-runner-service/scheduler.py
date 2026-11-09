@@ -6,6 +6,7 @@ a calibration started at the wrong time is worse than one skipped. The market-ho
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -150,7 +151,10 @@ class Scheduler:
                 self.state["last_fired"][e["id"]] = now.astimezone(IST).strftime("%Y-%m-%d")
                 fired.append(e["id"])
             if todo:
-                self._save()
+                try:
+                    self._save()
+                except OSError:     # round 16: a full disk raised here AFTER last_fired was set in memory, so the packs were never submitted, nothing told you, and the day was marked done
+                    pass
         for e in todo:
             try:
                 self.submit("pack", e["pack"], {}, "scheduler", "schedule")
@@ -188,7 +192,7 @@ class Scheduler:
                 try:
                     self.tick()
                 except Exception:  # noqa: BLE001
-                    pass
+                    logging.getLogger("calibration-runner").exception("scheduler tick failed")      # round 16: was swallowed with no trace
 
         self.thread = threading.Thread(target=loop, name="scheduler", daemon=True)
         self.thread.start()

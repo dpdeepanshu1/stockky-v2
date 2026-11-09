@@ -34,6 +34,7 @@ _MUST_SET = (
     "kronos-forecast-service",
     "timesfm-forecast-service",      # group434
     "calibration-runner-service",   # group442
+    "fno-options-service",          # F&O round 0
 )
 _RENDER_ON_DEFAULT = re.compile(r"MARKET_DATA_URL[^\n]*onrender\.com|onrender\.com[^\n]*MARKET_DATA_URL")
 

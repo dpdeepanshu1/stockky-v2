@@ -995,6 +995,51 @@ def dhan_status():
         return {"enabled": False, "error": f"{type(e).__name__}"}
 
 
+@app.get("/dhan/options/contracts")
+def dhan_option_contracts(underlying: str = "NIFTY", expiry: Optional[str] = None, limit: int = 2000):
+    """F&O round 1: NIFTY / SENSEX option contracts from Dhan's scrip master (security id, strike, lot size, expiry). Read-only.
+    First thing to check on the VM: "status.contracts" > 0 and "status.lot_sizes"."""
+    try:
+        from dhan_data import options as _opt
+        rows = _opt.contracts_for(underlying, expiry)[: max(1, min(int(limit), 20000))]
+        return {"underlying": underlying.upper(), "expiries": _opt.list_expiries(underlying), "status": _opt.status(),
+                "contracts": [c.to_json() for c in rows]}
+    except Exception as e:  # noqa: BLE001
+        return {"underlying": underlying.upper(), "contracts": [], "error": type(e).__name__}
+
+
+@app.get("/dhan/options/expiries")
+def dhan_option_expiries(underlying: str = "NIFTY"):
+    """Active expiries of NIFTY / SENSEX from Dhan (falls back to the scrip master list). 503 when Dhan is paused / not configured."""
+    from dhan_data import options as _opt
+    from dhan_data.errors import DhanError
+    try:
+        return {"underlying": underlying.upper(), "expiries": _opt.fetch_expiries(underlying), "source": "dhan"}
+    except DhanError as e:
+        fallback = _opt.list_expiries(underlying)
+        if fallback:
+            return {"underlying": underlying.upper(), "expiries": fallback, "source": "scrip_master", "warning": str(e)[:120]}
+        raise HTTPException(status_code=503, detail=f"option expiries unavailable: {str(e)[:120]}")
+
+
+@app.get("/dhan/options/chain")
+def dhan_option_chain(underlying: str = "NIFTY", expiry: str = ""):
+    """One normalised option chain (see dhan_data/options.py normalize_chain). expiry = YYYY-MM-DD from /dhan/options/expiries; blank = nearest.
+    Dhan allows one request per ~3 s per call, so readers share a short cache."""
+    from dhan_data import options as _opt
+    from dhan_data.errors import DhanError
+    try:
+        exp = (expiry or "").strip()
+        if not exp:
+            ex = _opt.fetch_expiries(underlying)
+            if not ex:
+                raise HTTPException(status_code=404, detail="no active expiry")
+            exp = ex[0]
+        return _opt.fetch_chain(underlying, exp)
+    except DhanError as e:
+        raise HTTPException(status_code=503, detail=f"option chain unavailable: {str(e)[:120]}")
+
+
 @app.get("/depth/{symbol}")
 def depth20_book(symbol: str, qty: Optional[float] = None, slip_pct: Optional[float] = None,
                  wait_s: Optional[float] = None):

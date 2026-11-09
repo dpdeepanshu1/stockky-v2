@@ -2941,6 +2941,13 @@ def get_ledger(db: Session = Depends(get_db)):
     return ledger.get_state(db)
 
 
+@app.get("/capital/board")
+def capital_board_status(admin: str = Depends(require_admin)):
+    """Round 242: the three-way capital split as this service sees it (the board Real Trade writes, and the percentage this pool uses now). Read only."""
+    from capital import capital_alloc
+    return capital_alloc.status()
+
+
 @app.post("/ledger/sync")
 def sync_ledger(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     total = ledger.sync_from_broker(db)

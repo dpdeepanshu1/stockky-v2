@@ -910,9 +910,33 @@ async def regenerate_dhan_token(admin: str = Depends(require_admin), db: Session
     return dhan_credentials.connection_status(db)
 
 
+@app.get("/dhan/fno-credentials")
+async def dhan_fno_credentials(response: Response, admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Hands the CURRENT Dhan client id + access token to fno-options-service, but only while its operator arms F&O REAL for the day (that call carries the admin's
+    own session token). Plaintext leaves this service ONLY here: admin session required, token must be valid, every hand-over is written to the audit log,
+    the response is never cached. fno-options-service keeps it in memory only (never on disk) and drops it on disarm / restart."""
+    row = db.query(models.TradeCredential).first()
+    if row is None or not dhan_credentials.is_token_valid(row):
+        raise HTTPException(status_code=409, detail="No valid Dhan token in real-trade-service. Connect / rotate the token on the Auto Trade page first.")
+    creds = dhan_credentials.get_decrypted_credentials(db)
+    if creds is None:
+        raise HTTPException(status_code=409, detail="Dhan credentials could not be decrypted (encryption key mismatch).")
+    log_action(db, actor=admin, action="DHAN_CREDENTIALS_TO_FNO", detail=row.dhan_client_id_masked, mode="REAL")
+    response.headers["Cache-Control"] = "no-store"
+    return {"client_id": creds[0], "access_token": creds[1], "base_url": config.DHAN_BASE_URL, "dhan_env": config.DHAN_ENV}
+
+
 @app.get("/dhan/status")
 async def dhan_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
     return dhan_credentials.connection_status(db)
+
+
+@app.get("/capital/board")
+async def capital_board_status(admin: str = Depends(require_admin), db: Session = Depends(get_db)):
+    """Round 242: the three-way capital split (Real Trade / Position Stocks / F&O): the board's percentages and rupee amounts, each service's score and what THIS service uses now.
+    Read only. CAPITAL_ALLOC_MODE shadow (default) shows it without changing any sizing; live applies it."""
+    from execution import capital_alloc
+    return capital_alloc.status(db)
 
 
 @app.get("/dhan/edis/request-tpin")

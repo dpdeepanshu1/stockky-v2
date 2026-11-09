@@ -267,8 +267,8 @@ class Store:
         self._lock = threading.RLock()
         self._mem: Dict[str, Any] = {"v": 1, "overrides": {}}
         self._audit_mem: List[Dict[str, Any]] = []
+        self.last_error: Optional[str] = None      # BEFORE the probe: it used to be reset right after, so "state dir not writable" never showed its reason
         self.persistent = self._probe()
-        self.last_error: Optional[str] = None
         if self.persistent:
             self._load()
 
@@ -312,7 +312,9 @@ class Store:
 
     def _save(self) -> None:
         if not self.persistent:
-            return
+            self.persistent = self._probe()      # one failed write (a full disk for a minute) must not switch saving off until the next restart: look again
+            if not self.persistent:
+                return
         try:
             fd, tmp = tempfile.mkstemp(prefix=".ov", dir=self.dir)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -339,7 +341,9 @@ class Store:
             self._audit_mem.append(row)
             self._audit_mem = self._audit_mem[-AUDIT_MAX_LINES:]
             if not self.persistent:
-                return
+                self.persistent = self._probe()
+                if not self.persistent:
+                    return
             try:
                 with open(self._audit_path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")

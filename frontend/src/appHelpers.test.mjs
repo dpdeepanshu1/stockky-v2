@@ -106,7 +106,7 @@ for (const m of tc.matchAll(/lazy\(\(\) => import\("([^"]+)"\)\)|import\("([^"]+
   const target = join(here, "components/app", m[1] || m[2]);
   assert.ok(["", ".ts", ".tsx"].some((e) => existsSync(target + e)), `lazy import ${m[1] || m[2]} resolves`);
 }
-assert.equal([...tc.matchAll(/= lazy\(/g)].length, 11, "the same 11 lazy pages as before (Trades via loadTrades)");
+assert.equal([...tc.matchAll(/= lazy\(/g)].length, 12, "12 lazy pages (the 11 before + F&O Options) (Trades via loadTrades)");
 for (const gone of ["lazy(", 'PageHeader title=', "<AdminGate", "<SettingsPage", "<RealAutoTrade", "<CalibrationControlTab"]) {
   assert.ok(!app.includes(gone), `App.tsx no longer holds ${gone}`);
 }

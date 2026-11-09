@@ -123,7 +123,8 @@ def get_other_service_exposure(db: Session) -> float:
     DB error occurs — see module docstring for why that default is safe."""
     try:
         row = db.query(SharedServiceExposure).filter_by(service_name=OTHER_SERVICE_NAME).first()
-        return float(row.open_positions_market_value) if row and row.open_positions_market_value else 0.0
+        base = float(row.open_positions_market_value) if row and row.open_positions_market_value else 0.0
+        return base + _fno_extra()
     except Exception as e:
         logger.warning("shared-exposure: failed to read other service's exposure: %s", e)
         return 0.0
@@ -205,4 +206,13 @@ def get_in_flight_buy_value(db: Session, mode: str) -> float:
         return round(total, 2)
     except Exception as e:
         logger.warning("shared-exposure: failed to compute in-flight BUY value: %s", e)
+        return 0.0
+
+
+def _fno_extra() -> float:
+    """Round 242: F&O's open premium value, the third service sharing the account. 0.0 unless CAPITAL_ALLOC_MODE=live (shadow changes nothing). Never raises."""
+    try:
+        from execution import capital_alloc
+        return capital_alloc.extra_peer_exposure()
+    except Exception:  # noqa: BLE001
         return 0.0

@@ -202,6 +202,9 @@ cmd_security() {
   if [[ -f "$REPO_DIR/scripts/check_compose_ports_loopback.py" ]]; then
     python3 "$REPO_DIR/scripts/check_compose_ports_loopback.py" >/dev/null 2>&1 && ok "docker-compose publishes every service on 127.0.0.1 only" || { bad "docker-compose has a port not bound to 127.0.0.1 (run scripts/check_compose_ports_loopback.py)"; rc=1; }
   fi
+  if [[ -f "$REPO_DIR/scripts/check_compose_fno_env.py" ]]; then
+    python3 "$REPO_DIR/scripts/check_compose_fno_env.py" >/dev/null 2>&1 && ok "docker-compose passes every FNO_* name the F&O service reads" || { bad "docker-compose does not pass every FNO_* name config.py reads (run scripts/check_compose_fno_env.py)"; rc=1; }
+  fi
   echo "== Firewall / hardening =="
   if command -v ufw >/dev/null 2>&1; then info "ufw: $(sudo -n ufw status 2>/dev/null | head -1 || echo 'needs sudo')"; fi
   command -v fail2ban-client >/dev/null 2>&1 && ok "fail2ban installed" || todo "fail2ban not installed (optional): sudo apt install fail2ban"

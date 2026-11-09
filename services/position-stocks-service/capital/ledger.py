@@ -37,7 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
-from capital import conviction_sizing, portfolio_heat, shared_daily_pnl, shared_exposure, shared_heat
+from capital import capital_alloc, conviction_sizing, portfolio_heat, shared_daily_pnl, shared_exposure, shared_heat
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -386,6 +386,7 @@ def publish_exposure(db: Session, force: bool = False) -> None:
         shared_exposure.publish_own_exposure(db, value)
         publish_daily_pnl(db)   # A11: same heartbeat cadence
         publish_heat(db)        # E276 round 50: same heartbeat cadence
+        capital_alloc.publish(db, value)   # round 242: this pool's figures for the three-way capital board (same heartbeat)
         last["value"] = value
         last["ts"] = now
     except Exception as e:  # noqa: BLE001
@@ -423,7 +424,8 @@ def sync_from_broker(db: Session) -> float:
 
     _log_balance_key(matched_key)
 
-    scalp_alloc = available_balance * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
+    _share_pct = capital_alloc.effective_share_pct()       # round 242: the board's % in live mode, else SCALP_POOL_CAPITAL_SHARE_PCT (the fixed 50)
+    scalp_alloc = available_balance * (_share_pct / 100.0)
     row = _get_or_create(db)
 
     # CAPITAL-EROSION FIX (session52 follow-up — "why would the scalp pool
@@ -479,7 +481,7 @@ def sync_from_broker(db: Session) -> float:
                         "to the scalp pool until it publishes again", _age, _max_age)
                 _peer_mv = 0.0
         if _peer_mv > 0:
-            peer_credit = _peer_mv * (config.SCALP_POOL_CAPITAL_SHARE_PCT / 100.0)
+            peer_credit = _peer_mv * (_share_pct / 100.0)
     # group341: only the MARGIN this pool's positions block is missing from Dhan's free cash, not their full cost (see
     # config.SCALP_POOL_COMMITTED_MARGIN_FRAC); adding the whole notional back inflated the baseline ~28% per open position.
     _margin_frac = min(1.0, max(0.0, float(getattr(config, "SCALP_POOL_COMMITTED_MARGIN_FRAC", 1.0))))

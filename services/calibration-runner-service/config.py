@@ -36,6 +36,7 @@ DECISION_URL = _s("DECISION_URL", "http://decision-prediction-service:8000").rst
 NOTIFICATION_URL = _s("NOTIFICATION_URL", "http://notification-scheduler-service:8000").rstrip("/")
 KRONOS_URL = _s("KRONOS_URL", "http://kronos-forecast-service:8010").rstrip("/")
 TIMESFM_URL = _s("TIMESFM_URL", "http://timesfm-forecast-service:8011").rstrip("/")
+FNO_URL = _s("FNO_URL", "http://fno-options-service:8007").rstrip("/")
 
 # E235: several tests at once. Two runs never overlap when one writes what the other reads or writes (lock keys come from each job's own
 # steps, jobs.derive_locks); at most RUNNER_MAX_HEAVY heavy replays / downloads run together and a second one waits while memory is short.

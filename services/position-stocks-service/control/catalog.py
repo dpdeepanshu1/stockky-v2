@@ -745,4 +745,8 @@ CATALOG = (
     Flag("CONVICTION_NO_UPSIZE_ON_LOSS_DAY", "Conviction: no upsize on a losing day", "Money safety", "bool", looser="off",
          help="While this pool is net negative today an upsize is held at x1.0 (a downsize still applies). OFF = a sure setup may be upsized even after a loss.",
          targets=(("config", "CONVICTION_NO_UPSIZE_ON_LOSS_DAY"),), live=True, shipped="true"),
+    # ---------------- three-way capital split (round 244) ----------------
+    Flag("CAPITAL_ALLOC_MODE", "Capital split between the 3 services", "Capital split", "enum", choices=("off", "shadow", "live"), looser="neutral",
+         help="How the ONE Dhan account is split between Real Trade, Position Stocks and F&O (25% each fixed, the last 25% to the best net return). off = nothing written or read | shadow = the board is written and shown (/capital/board), no sizing changes | live = Real Trade and Position Stocks use their board % instead of the fixed 50% and F&O's open premium counts as peer exposure. Set it the same on all three services. Real Trade decides the board; F&O REAL sizing needs shadow or live. Needs about a week of shadow first.",
+         targets=(("config", "CAPITAL_ALLOC_MODE"),), live=True, shipped="shadow", recommended="shadow", evidence="GET /capital/board in shadow for about a week", import_time_ok_files=("config.py",)),
 )

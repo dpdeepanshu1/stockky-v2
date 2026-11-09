@@ -1,0 +1,1 @@
+"""backtest - three ways to test the F&O rules, each labelled with how far it can be trusted. They all use fno.paper / fno.costs / fno.sizing / fno.gates / fno.signals, the same code the live engine runs."""

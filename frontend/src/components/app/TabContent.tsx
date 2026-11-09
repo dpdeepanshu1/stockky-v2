@@ -17,6 +17,7 @@ const SurpriseStocks = lazy(() => import("../SurpriseStocks"));
 const IpoTracker = lazy(() => import("../IpoTracker"));
 const RealAutoTrade = lazy(() => import("../RealAutoTrade"));
 const PositionStocksTab = lazy(() => import("../PositionStocksTab"));
+const FnoTab = lazy(() => import("../fno/FnoTab"));
 const CalibrationControlTab = lazy(() => import("../CalibrationControlTab"));
 const DataFeed = lazy(() => import("../DataFeed"));
 const DataHealthAudit = lazy(() => import("../DataHealthAudit"));
@@ -104,6 +105,13 @@ export function TabContent({
         <div className="page-terminal">
           <PageHeader title="Position Stocks" desc="Fast momentum trades that open and close within the day, using their own capital pool." />
           <PositionStocksTab />
+        </div>
+      </AdminGate>
+    ) : tab === "fno" ? (
+      <AdminGate title="F&O Options" onExit={() => setTab("dashboard")}>
+        <div className="page-terminal">
+          <PageHeader title="F&O Options" desc="Nifty and Sensex option buying (CE / PE). Starts OFF and in DEMO; REAL orders stay locked." />
+          <ErrorBoundary label="F&O Options"><FnoTab /></ErrorBoundary>
         </div>
       </AdminGate>
     ) : tab === "calibration" ? (

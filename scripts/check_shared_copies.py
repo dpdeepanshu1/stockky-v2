@@ -34,8 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "shared_copies_baseline.json"
 
 # family name -> file name that is duplicated across services
-FAMILIES = ["tg_style", "oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier", "session_proof_client", "session_keys", "gate_core", "conviction_sizing", "tape_exit", "setup_engine", "momentum_health", "portfolio_heat", "risk_ladder", "adaptive_params", "gap_rank", "sector_map", "shared_rate_window", "event_lite"]
-IDENTICAL = {"tg_style", "oracle_compat", "boot_forensics", "session_proof_client", "session_keys", "gate_core", "conviction_sizing", "tape_exit", "setup_engine", "momentum_health", "portfolio_heat", "risk_ladder", "adaptive_params", "gap_rank", "sector_map", "shared_rate_window"}  # group320: six copies of the closed-market clien, "event_lite"}
+FAMILIES = ["tg_style", "oracle_compat", "boot_forensics", "kv_cache", "rate_limiter", "circuit_breaker", "pipeline_status", "notifier", "session_proof_client", "session_keys", "gate_core", "conviction_sizing", "tape_exit", "setup_engine", "momentum_health", "portfolio_heat", "risk_ladder", "adaptive_params", "gap_rank", "sector_map", "shared_rate_window", "event_lite", "capital_board"]
+IDENTICAL = {"tg_style", "oracle_compat", "boot_forensics", "session_proof_client", "session_keys", "gate_core", "conviction_sizing", "tape_exit", "setup_engine", "momentum_health", "portfolio_heat", "risk_ladder", "adaptive_params", "gap_rank", "sector_map", "shared_rate_window", "capital_board"}  # group320: six copies of the closed-market clien, "event_lite"}
 SKIP_DIRS = frozenset({"tests", "scripts"})
 
 

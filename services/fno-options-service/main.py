@@ -1,0 +1,377 @@
+"""fno-options-service - NIFTY / SENSEX index-options (F&O) engine: data views, signals, DEMO trades, backtests, and a guarded REAL execution path.
+
+Port 8007 (FNO / PORT). Every /fno/* route and /control/* needs the same admin bearer token as the other pages. The engine ships OFF, in DEMO mode, with REAL orders locked
+(see config.py and fno/execution.py). Run the tests with:  cd services/fno-options-service && python3 -m pytest tests -q
+"""
+import control.boot  # noqa: F401  (applies saved Calibration overrides to config before anything reads it - must stay the first import)
+
+import json
+import logging
+import os
+import threading
+import time
+from dataclasses import asdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
+
+import config
+from auth import require_admin, require_admin_or_runner
+from backtest import metrics as bt_metrics, portfolio as bt_portfolio, replay as bt_replay, report as bt_report, sim as bt_sim
+from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, recorder, signals, strategies
+from fno import capital as fno_capital
+from fno import liveparams
+from fno.params import Params
+from fno.provider import HttpProvider
+from fno.runtime import Runner, market_open
+from fno.store import Store, day_of
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+log = logging.getLogger("fno-options-service")
+
+app = FastAPI(title="fno-options-service", version="1.0.0")
+
+os.makedirs(config.DATA_DIR, exist_ok=True)
+store = Store(os.path.join(config.DATA_DIR, "fno.db"))
+provider = HttpProvider(config.MARKET_DATA_URL, config.MARKET_DATA_TIMEOUT_S)
+broker = execution.DhanBroker(config.DHAN_BASE_URL, config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, config.ORDER_TIMEOUT_S) if (config.DHAN_CLIENT_ID and config.DHAN_ACCESS_TOKEN) else None
+engine = eng.Engine(store, provider, config, broker=broker)
+runner = Runner(engine, config, config.DATA_DIR)
+
+# Real Money Calibration switches (GET/POST/DELETE /control/..., admin session required). See control/kit.py - the same engine as real-trade / position-stocks.
+from control import kit as _control_kit  # noqa: E402
+from control.catalog import CATALOG as _CONTROL_CATALOG  # noqa: E402
+
+try:  # a bug in the control page must never stop the service from booting
+    _control = _control_kit.Controller("fno-options-service", _CONTROL_CATALOG, restart_hint="docker compose restart fno-options-service")
+    _control_kit.mount(app, _control, require_admin)
+except Exception as _control_err:  # noqa: BLE001
+    log.error("control routes NOT mounted (%s: %s)", type(_control_err).__name__, _control_err)
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    if os.getenv("FNO_RUNNER", "1") != "0":
+        runner.start()
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    runner.stop()
+
+
+def _today() -> str:
+    return day_of(time.time())
+
+
+def _locks() -> Dict[str, Any]:
+    ok, closed = execution.real_allowed(config, store.kv_get("fno_armed_day"), _today())
+    return {"engine_enabled": config.FNO_ENGINE_ENABLED, "mode": str(config.FNO_MODE).upper(), "real_enabled": config.FNO_REAL_ENABLED, "armed_today": store.kv_get("fno_armed_day") == _today(),
+            "broker_configured": broker is not None, "real_orders_possible": ok, "closed_locks": closed}
+
+
+# ── health / status ──────────────────────────────────────────────────────────────────────────────────────────
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {"status": "ok", "service": "fno-options-service", "runner_alive": runner.alive(), "engine_enabled": config.FNO_ENGINE_ENABLED, "mode": str(config.FNO_MODE).upper()}
+
+
+@app.get("/fno/overview")
+def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
+    mode = str(config.FNO_MODE).upper() if str(config.FNO_MODE).upper() in ("DEMO", "REAL") else "DEMO"
+    opens = []
+    for p in store.open_positions():
+        ch = provider.chain(p.underlying, p.expiry)
+        row = ch.row(p.strike) if ch else None
+        side = row.side(p.opt_type) if row else None
+        prem = side.mid if side else None
+        opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": ( round((prem - p.entry_premium) * p.qty, 2) if prem else None)})
+    return {"now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist()), "locks": _locks(), "day": store.day_summary(_today(), mode),
+            "open_positions": opens, "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
+            "underlyings": engine.underlyings(), "params": liveparams.current().to_json(),
+            "switches": {"underlyings": str(config.FNO_UNDERLYINGS).upper(), "record_snapshots": bool(config.FNO_RECORD_SNAPSHOTS)}}
+
+
+@app.get("/fno/capital")
+def capital_board_status(admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 242: the three-way capital split as F&O sees it: the board Real Trade writes, and the rupees REAL sizing would use (DEMO keeps FNO_DEMO_CAPITAL). Read only."""
+    out = fno_capital.status(config, store.kv_get("fno_armed_day"), _today())
+    out["switch"] = str(config.CAPITAL_ALLOC_MODE)      # the live value of the calibration switch CAPITAL_ALLOC_MODE (engine and runner read the same config module)
+    return out
+
+
+@app.get("/fno/pipeline")
+def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
+    steps: List[Dict[str, Any]] = []
+    md = provider._get("/dhan/options/contracts", {"underlying": "NIFTY", "limit": 1})
+    steps.append({"step": "market-data reachable", "ok": md is not None, "detail": provider.last_error or ""})
+    st = (md or {}).get("status") or {}
+    steps.append({"step": "option contracts loaded (scrip master)", "ok": bool(st.get("contracts")), "detail": json.dumps({"contracts": st.get("contracts"), "lot_sizes": st.get("lot_sizes")})})
+    for und in ("NIFTY", "SENSEX"):
+        ex = provider.expiries(und)
+        steps.append({"step": f"{und} expiries", "ok": bool(ex), "detail": ", ".join(ex[:3])})
+    steps.append({"step": "India VIX", "ok": provider.vix() is not None, "detail": str(provider.vix())})
+    steps.append({"step": "engine runner thread", "ok": runner.alive(), "detail": runner.last_error or ""})
+    lt = engine.last_tick
+    steps.append({"step": "last engine cycle", "ok": bool(lt.get("ok")) if lt.get("ts") else None, "detail": (lt.get("error") or "") + (f" ({int(time.time() - lt['ts'])}s ago)" if lt.get("ts") else "no cycle yet")})
+    steps.append({"step": "snapshots recorded today", "ok": runner.snapshots_today > 0 or not market_open(eng.now_ist()), "detail": str(runner.snapshots_today)})
+    steps.append({"step": "recorded days available for replay", "ok": None, "detail": str(len(recorder.list_days(config.DATA_DIR)))})
+    return {"steps": steps, "locks": _locks()}
+
+
+# ── data views ───────────────────────────────────────────────────────────────────────────────────────────────
+@app.get("/fno/expiries")
+def expiries(underlying: str = "NIFTY", admin=Depends(require_admin)) -> Dict[str, Any]:
+    return {"underlying": underlying.upper(), "expiries": provider.expiries(underlying.upper())}
+
+
+@app.get("/fno/chain")
+def chain(underlying: str = "NIFTY", expiry: str = "", admin=Depends(require_admin)) -> Dict[str, Any]:
+    u = underlying.upper()
+    if u not in ("NIFTY", "SENSEX"):
+        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX")
+    p = liveparams.current()
+    exp = expiry or engine.pick_expiry(u, eng.now_ist().date(), p) or ""
+    ch = provider.chain(u, exp) if exp else None
+    if ch is None:
+        raise HTTPException(status_code=503, detail="option chain unavailable (market-data / Dhan)")
+    summ = analytics.chain_summary(ch, p.strikes_each_side)
+    bias = signals.index_bias(provider.daily(u), provider.intraday(u), summ, p)
+    return {"chain": ch.to_json(), "summary": summ, "bias": bias, "expiries": provider.expiries(u), "age_s": round(ch.age_s(), 1)}
+
+
+@app.get("/fno/strategies")
+def strategies_view(days: int = Query(30, le=400), admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Every strategy: its switch, its rule, today's entries and the last `days` of closed trades. Plus the ad names that were NOT built, and why."""
+    mode = str(config.FNO_MODE).upper() if str(config.FNO_MODE).upper() in ("DEMO", "REAL") else "DEMO"
+    today = store.day_summary(_today(), mode).get("by_strategy", {})
+    since = day_of(time.time() - days * 86400)
+    closed = [p for p in store.positions(mode=mode, since_day=since, limit=5000) if p.status == "CLOSED"]
+    rows = []
+    on = liveparams.strategy_switches()
+    report_cap = fno_capital.report_capital(config, mode)          # round 251: a REAL report is measured against the board's capital, not FNO_DEMO_CAPITAL
+    for k in strategies.ORDER:
+        spec = strategies.STRATEGIES[k]
+        o = bt_metrics.summarize([p for p in closed if (p.strategy or "CORE") == k], report_cap)["overall"]
+        rows.append({"key": k, "label": spec["label"], "ad": spec["ad"], "sides": spec["sides"], "rule": spec["rule"], "flag": spec["flag"], "expiry_day_only": bool(spec.get("expiry")),
+                     "enabled": on[k], "today": today.get(k, {"entries": 0, "open": 0, "closed": 0, "net": 0.0}),
+                     "recent": {"days": days, "trades": o["trades"], "net": o["net"], "win_rate_pct": o["win_rate_pct"], "profit_factor": o["profit_factor"], "max_drawdown": o["max_drawdown"]}})
+    return {"mode": mode, "strategies": rows, "not_built": strategies.NOT_BUILT, "max_per_day": int(config.FNO_STRATEGY_MAX_PER_DAY),
+            "expiry_rules": {"entry_end": config.FNO_EXPIRY_ENTRY_END, "squareoff_at": config.FNO_EXPIRY_SQUAREOFF_AT, "risk_mult": config.FNO_EXPIRY_RISK_MULT, "real_allowed": bool(config.FNO_EXPIRY_REAL)},
+            "note": "The strategy names come from an Instagram ad that showed names only. The rules are this project's own and unproven: DEMO / SIM evidence first, REAL never by default."}
+
+
+@app.get("/fno/signals")
+def signals_log(limit: int = Query(100, le=500), underlying: Optional[str] = None, admin=Depends(require_admin)) -> Dict[str, Any]:
+    out = []
+    for kind in ("signal", "skip", "veto", "entry", "exit", "real_blocked", "order_failed", "stale"):
+        out += store.events(kind, limit, underlying.upper() if underlying else None)
+    out.sort(key=lambda e: e["ts"], reverse=True)
+    return {"events": out[:limit]}
+
+
+@app.get("/fno/log")
+def log_events(limit: int = Query(200, le=1000), kind: Optional[str] = None, admin=Depends(require_admin)) -> Dict[str, Any]:
+    return {"events": store.events(kind, limit)}
+
+
+@app.get("/fno/positions")
+def positions(status: str = "all", mode: Optional[str] = None, day: Optional[str] = None, limit: int = Query(200, le=2000), admin=Depends(require_admin)) -> Dict[str, Any]:
+    ps = store.positions(mode=mode.upper() if mode else None, day=day, limit=limit)
+    if status == "open":
+        ps = [p for p in ps if p.status == "OPEN"]
+    elif status == "closed":
+        ps = [p for p in ps if p.status == "CLOSED"]
+    return {"positions": [{**p.to_json(), "label": p.label()} for p in ps]}
+
+
+@app.get("/fno/history")
+def history(days: int = Query(30, le=400), mode: str = "DEMO", admin=Depends(require_admin)) -> Dict[str, Any]:
+    mode = mode.upper()                                              # round 251: "real" / "demo" used to match nothing
+    since = day_of(time.time() - days * 86400)
+    ps = [p for p in store.positions(mode=mode, since_day=since, limit=5000) if p.status == "CLOSED"]
+    m = bt_metrics.summarize(ps, fno_capital.report_capital(config, mode))
+    return {"metrics": m, "verdict": bt_metrics.verdict(m), "trades": [{**p.to_json(), "label": p.label()} for p in ps]}
+
+
+@app.get("/fno/charges")
+def charges(days: int = Query(30, le=400), mode: str = "DEMO", admin=Depends(require_admin)) -> Dict[str, Any]:
+    mode = mode.upper()
+    p = liveparams.current()
+    since = day_of(time.time() - days * 86400)
+    tot = {"brokerage": 0.0, "stt": 0.0, "exchange": 0.0, "sebi": 0.0, "gst": 0.0, "stamp": 0.0, "total": 0.0}
+    rows = []
+    for pos in store.positions(mode=mode, since_day=since, limit=5000):
+        if pos.status != "CLOSED" or pos.exit_premium is None:
+            continue
+        c = costs.round_trip(pos.underlying, pos.entry_premium, pos.exit_premium, pos.qty, p, child=pos.parent_id is not None)
+        for k in tot:
+            tot[k] += getattr(c, k)
+        rows.append({"id": pos.id, "label": pos.label(), "turnover": round((pos.entry_premium + pos.exit_premium) * pos.qty, 2), **c.to_json()})
+    return {"totals": {k: round(v, 2) for k, v in tot.items()}, "trades": rows, "rates": {k: v for k, v in p.to_json().items() if k in (
+        "brokerage_per_order", "brokerage_pct_cap", "stt_sell_pct", "exch_txn_pct_nse", "exch_txn_pct_bse", "sebi_pct", "stamp_buy_pct", "gst_pct")},
+        "note": "rates are the configured values (FNO_* env); compare them with a real contract note"}
+
+
+# ── actions ──────────────────────────────────────────────────────────────────────────────────────────────────────
+@app.get("/fno/reconcile")
+def reconcile(refresh: bool = False, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Our open REAL positions vs Dhan's net F&O positions. Read-only; refresh=true asks Dhan now."""
+    return engine.reconcile(eng.now_ist(), force=bool(refresh)) if broker is not None else {"ts": None, "ok": None, "note": "no Dhan credentials loaded (ARM borrows them)"}
+
+
+@app.post("/fno/squareoff")
+def squareoff(admin=Depends(require_admin)) -> Dict[str, Any]:
+    closed = engine.squareoff_all()
+    store.add_event("manual", {"action": "squareoff", "closed": closed, "by": str(admin.get("sub"))})
+    return {"closed": closed}
+
+
+_borrowed: Dict[str, Any] = {"prev": None}      # set while the Dhan token on config was borrowed from real-trade-service (memory only)
+
+
+@app.post("/fno/arm")
+def arm(authorization: str = Header(default=""), admin=Depends(require_admin)) -> Dict[str, Any]:
+    note = "env credentials"
+    if not (config.DHAN_CLIENT_ID and config.DHAN_ACCESS_TOKEN) or _borrowed["prev"] is not None:
+        try:
+            c = dhan_creds.fetch(config.REAL_TRADE_URL, authorization, config.MARKET_DATA_TIMEOUT_S)
+            prev = dhan_creds.apply(config, c)
+            if _borrowed["prev"] is None:
+                _borrowed["prev"] = prev
+            engine.broker = execution.DhanBroker(config.DHAN_BASE_URL, config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, config.ORDER_TIMEOUT_S)
+            globals()["broker"] = engine.broker
+            note = f"borrowed from real-trade-service ({c.get('dhan_env') or '?'})"
+        except dhan_creds.CredsError as e:
+            note = f"no Dhan credentials: {e}"
+    store.kv_set("fno_armed_day", _today())
+    store.add_event("manual", {"action": "arm", "by": str(admin.get("sub")), "credentials": note})
+    return {"armed_day": _today(), "credentials": note, "locks": _locks()}
+
+
+@app.post("/fno/disarm")
+def disarm(admin=Depends(require_admin)) -> Dict[str, Any]:
+    store.kv_set("fno_armed_day", None)
+    if _borrowed["prev"] is not None:
+        dhan_creds.drop(config, _borrowed["prev"])
+        _borrowed["prev"] = None
+        engine.broker = None
+        globals()["broker"] = None
+    store.add_event("manual", {"action": "disarm", "by": str(admin.get("sub"))})
+    return {"locks": _locks()}
+
+
+# ── backtests (replay and a quick sim run inside the service; the file-based EOD / SIM runs are scripts/fno_*_backtest.py) ──────────
+_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+
+class BacktestBody(BaseModel):
+    kind: str                                   # replay | sim
+    underlyings: List[str] = ["NIFTY"]
+    days: Optional[List[str]] = None            # replay: recorded days (default all)
+    overrides: Dict[str, Any] = {}              # Params fields for sim; FNO_* config names for replay
+    strategy: str = "CORE"                      # sim only: one strategy name (fno/strategies.py) or ALL (every strategy side by side)
+
+
+def _run_job(job_id: str, body: BacktestBody) -> None:
+    try:
+        if body.kind == "replay":
+            days = body.days or recorder.list_days(config.DATA_DIR)
+            daily = {u: provider.daily(u) for u in body.underlyings}
+            res = bt_replay.run(config.DATA_DIR, days, daily, body.overrides, body.underlyings)
+        else:
+            u = body.underlyings[0]
+            p = liveparams.current().with_(**body.overrides)
+            hist = provider.intraday_history(u) if hasattr(provider, "intraday_history") else provider.intraday(u)
+            res = (bt_portfolio.run(u, provider.daily(u), hist, None, p) if body.strategy.upper() == "ALL"
+                   else bt_sim.run(u, provider.daily(u), hist, None, p, strategy=body.strategy.upper()))
+            res["notes"].append("data: market-data daily + the intraday candles it serves (a few recent days only); use scripts/fno_sim_backtest.py with CSV files for a long run")
+        path = bt_report.save(config.DATA_DIR, f"fno_{body.kind}", res)
+        txt = path[:-5] + ".txt"
+        with open(txt, "w", encoding="utf-8") as fh:
+            fh.write(bt_report.render_text(res))
+        with _jobs_lock:
+            _jobs[job_id].update(state="done", file=os.path.basename(path), trades=res["metrics"]["overall"]["trades"], verdict=res["verdict"]["status"])
+    except Exception as e:  # noqa: BLE001
+        log.exception("backtest job failed")
+        with _jobs_lock:
+            _jobs[job_id].update(state="failed", error=f"{type(e).__name__}: {str(e)[:200]}")
+
+
+@app.post("/fno/backtests/run-scheduled")
+def backtest_run_scheduled(kind: str = "sim", underlyings: str = "NIFTY,SENSEX", strategy: str = "ALL", admin=Depends(require_admin_or_runner)) -> Dict[str, Any]:
+    """No-body variant for the calibration-runner's scheduled pack. A replay with no recorded day is skipped (200, job None), never an error."""
+    unds = [u.strip().upper() for u in underlyings.split(",") if u.strip()]
+    if kind == "replay" and not recorder.list_days(config.DATA_DIR):
+        return {"job": None, "skipped": "no recorded chain days yet"}
+    if kind == "sim":
+        unds = unds[:1] or ["NIFTY"]          # the sim runs one index per job
+    return backtest_run(BacktestBody(kind=kind, underlyings=unds, strategy=strategy), admin)
+
+
+@app.get("/fno/backtests/latest-job")
+def backtest_latest_job(admin=Depends(require_admin_or_runner)) -> Dict[str, Any]:
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+    return jobs[-1] if jobs else {"state": "none"}
+
+
+@app.post("/fno/backtests/run")
+def backtest_run(body: BacktestBody, admin=Depends(require_admin)) -> Dict[str, Any]:
+    if body.kind not in ("replay", "sim"):
+        raise HTTPException(status_code=400, detail="kind must be replay or sim")
+    if any(u.upper() not in ("NIFTY", "SENSEX") for u in body.underlyings) or not body.underlyings:
+        raise HTTPException(status_code=400, detail="underlyings must be NIFTY and/or SENSEX")
+    body.underlyings = [u.upper() for u in body.underlyings]
+    if body.kind == "sim" and body.strategy.upper() != "ALL" and body.strategy.upper() not in strategies.STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"strategy must be ALL or one of {list(strategies.ORDER)}")
+    with _jobs_lock:
+        if any(j["state"] == "running" for j in _jobs.values()):
+            raise HTTPException(status_code=409, detail="a backtest is already running")
+        job_id = f"{body.kind}-{int(time.time())}-{len(_jobs)}"        # round 16: kind + second alone repeated when a job ended and the next of the same kind started within the same second, and the new record overwrote the old one
+        _jobs[job_id] = {"id": job_id, "kind": body.kind, "state": "running", "started": time.time()}
+    threading.Thread(target=_run_job, args=(job_id, body), daemon=True).start()
+    return {"job": job_id}
+
+
+@app.get("/fno/backtests")
+def backtests(admin=Depends(require_admin_or_runner)) -> Dict[str, Any]:
+    d = os.path.join(config.DATA_DIR, "backtests")
+    files = []
+    if os.path.isdir(d):
+        for f in sorted(os.listdir(d), reverse=True)[:200]:
+            if f.endswith(".json"):
+                try:
+                    r = json.load(open(os.path.join(d, f), encoding="utf-8"))
+                    o = (r.get("metrics") or {}).get("overall") or {}
+                    files.append({"name": f, "kind": r.get("kind"), "underlying": r.get("underlying"), "from": r.get("from"), "to": r.get("to"), "days": r.get("days"),
+                                  "trades": o.get("trades"), "net": o.get("net"), "win_rate_pct": o.get("win_rate_pct"), "max_drawdown": o.get("max_drawdown"),
+                                  "verdict": (r.get("verdict") or {}).get("status")})
+                except (OSError, ValueError):
+                    continue
+    with _jobs_lock:
+        jobs = list(_jobs.values())[-10:]
+    return {"results": files, "jobs": jobs, "recorded_days": recorder.list_days(config.DATA_DIR), "snapshot_days": store.snapshot_days()[-60:]}
+
+
+def _safe_result_path(name: str) -> str:
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".json"):
+        raise HTTPException(status_code=400, detail="bad name")
+    p = os.path.join(config.DATA_DIR, "backtests", name)
+    if not os.path.exists(p):
+        raise HTTPException(status_code=404, detail="no such result")
+    return p
+
+
+@app.get("/fno/backtests/{name}")
+def backtest_result(name: str, admin=Depends(require_admin)) -> Dict[str, Any]:
+    return json.load(open(_safe_result_path(name), encoding="utf-8"))
+
+
+@app.get("/fno/backtests/{name}/text", response_class=PlainTextResponse)
+def backtest_text(name: str, admin=Depends(require_admin)) -> str:
+    return bt_report.render_text(json.load(open(_safe_result_path(name), encoding="utf-8")))

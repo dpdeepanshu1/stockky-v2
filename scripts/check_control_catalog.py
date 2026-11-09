@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _repo_walk import walk_py  # noqa: E402  (prunes .venv* / venv / site-packages by name and by pyvenv.cfg; a plain rglob walked a whole VM virtualenv)
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVICES = ("real-trade-service", "position-stocks-service")
+SERVICES = ("real-trade-service", "position-stocks-service", "fno-options-service")
 SKIP_DIRS = {"tests", "test", "__pycache__", "stockky_ms", "scripts", ".venv", "node_modules", "control"}
 
 

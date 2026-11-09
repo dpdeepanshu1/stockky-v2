@@ -52,8 +52,10 @@ echo "    GET  https://${DOMAIN}/positionstocks/status"
 curl -s -o /dev/null -w "    -> HTTP %{http_code}\n" "https://${DOMAIN}/positionstocks/status" || true
 echo "    GET  https://${DOMAIN}/realtrade/health"
 curl -s -o /dev/null -w "    -> HTTP %{http_code}\n" "https://${DOMAIN}/realtrade/health" || true
+echo "    GET  https://${DOMAIN}/fno-api/health"
+curl -s -o /dev/null -w "    -> HTTP %{http_code}\n" "https://${DOMAIN}/fno-api/health" || true
 echo
-echo "Expect 200 (or 401 if that route now requires admin login) on BOTH —"
+echo "Expect 200 (or 401 if that route now requires admin login) on ALL THREE (/fno-api/health must be 200) —"
 echo "NOT an HTML page, and NOT '405 Not Allowed'. If you see either of"
 echo "those, nginx did not actually pick up the new config — check the"
 echo "nginx -t / reload output above for errors, and confirm this VM's"

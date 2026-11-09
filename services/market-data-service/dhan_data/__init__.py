@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from typing import Callable, List
 
-from . import (client, config, creds, depth20, history, live_poller, live_store, quotes, scrip_master,  # noqa: F401
+from . import (client, config, creds, depth20, history, live_poller, live_store, options, quotes, scrip_master,  # noqa: F401
                ws_feed)
 from .errors import (DhanApiError, DhanAuthError, DhanError, DhanNoDataError, DhanNotConfigured,  # noqa: F401
                      DhanRateLimitError, DhanSubscriptionError)
@@ -51,6 +51,7 @@ def status() -> dict:
         "history_position": config.history_position(),
         "credentials": creds.status(),
         "scrip_master": scrip_master.status(),
+        "option_contracts": options.status(),
         "client": client.stats(),
         "quotes": quotes.status(),
         "live_poller": live_poller.status(),

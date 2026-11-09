@@ -469,3 +469,11 @@ def _e285_gap_rank_off_by_default(monkeypatch):
     except Exception:  # noqa: BLE001
         pass
     yield
+
+
+@_pytest_g172.fixture(autouse=True)
+def _round242_capital_board_off_by_default(monkeypatch):
+    """Round 242: the three-way capital board writes small files under CAPITAL_ALLOC_DIR. Older tests run with it OFF (nothing written, fixed share); the round 242 tests turn it on with a temp dir."""
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "CAPITAL_ALLOC_MODE", "off", raising=False)
+    yield

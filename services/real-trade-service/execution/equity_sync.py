@@ -34,7 +34,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 import config
-from execution import dhan_client, heat_state, shared_daily_pnl, shared_exposure
+from execution import capital_alloc, dhan_client, heat_state, shared_daily_pnl, shared_exposure
 from portfolio.portfolio import _open_positions_market_value, get_account
 
 logger = logging.getLogger("real-trade-equity-sync")
@@ -157,7 +157,8 @@ def sync_real_equity(db: Session) -> Optional[float]:
     # stocks-service's capital/ledger.py already applies on its side. See
     # config.py's CAPITAL_SHARE_PCT comment for the full incident writeup.
     account.broker_cash_available = round(balance, 2)
-    capped_cash = balance * (config.CAPITAL_SHARE_PCT / 100.0)
+    _share_pct = capital_alloc.effective_share_pct()     # round 242: the board's % in live mode, else config.CAPITAL_SHARE_PCT (the fixed 50)
+    capped_cash = balance * (_share_pct / 100.0)
     # E286 round 217: use the part of position-stocks-service's half that is idle (execution/capital_lend.py; CAPITAL_LEND_MODE live | off). Needs a FRESH peer figure,
     # otherwise the fixed share above stays. Never raises; any failure = the fixed share.
     try:
@@ -165,11 +166,11 @@ def sync_real_equity(db: Session) -> Optional[float]:
             from execution import capital_lend
             _peer_age = shared_exposure.get_other_service_exposure_age(db)
             _lent = capital_lend.spendable_cash(
-                balance, market_value, shared_exposure.get_other_service_exposure(db), config.CAPITAL_SHARE_PCT, config.CAPITAL_LEND_RESERVE_FRAC,
+                balance, market_value, shared_exposure.get_other_service_exposure(db), _share_pct, config.CAPITAL_LEND_RESERVE_FRAC,
                 peer_fresh=_peer_age is not None and _peer_age <= config.CAPITAL_LEND_PEER_MAX_AGE_S)
             if _lent is not None and _lent > capped_cash:
                 logger.info("equity_sync: capital lend - spendable cash Rs%.2f instead of the fixed %.0f%% share Rs%.2f (Dhan free Rs%.2f)",
-                            _lent, config.CAPITAL_SHARE_PCT, capped_cash, balance)
+                            _lent, _share_pct, capped_cash, balance)
                 capped_cash = _lent
     except Exception as _cl_exc:  # noqa: BLE001
         logger.debug("equity_sync: capital lend skipped (fixed share used): %s", _cl_exc)
@@ -207,4 +208,6 @@ def sync_real_equity(db: Session) -> Optional[float]:
     shared_daily_pnl.publish_own(db, account.realized_pnl_today, account.current_equity)
     # E276 round 50: publish open risk + gap allowance + capital base for position-stocks-service's heat gate (REAL only inside heat_state). Fail-open.
     heat_state.publish(db, account.current_equity)
+    # Round 242: publish this service's figures and (re)write the three-way capital board. Fail-open; shadow mode changes no sizing.
+    capital_alloc.sync(db, balance, market_value, account.current_equity)
     return account.current_equity

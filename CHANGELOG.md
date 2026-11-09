@@ -3,9 +3,9 @@
  * **Found from the VM run of Round 268:** a LIVE probe that was refused (17:58 IST, outside the 09:30-14:45 window) is saved as the newest probe file, so `GET /fno/probe` and the probe card would show that refusal (no orders, no charges) instead of the real round trip once one exists, and the refusal text was only printed, never saved. The file was also named 12:28, because the script used the host clock (UTC) instead of IST.
  * **Fix (`probecheck.py`):** with no file named, `load` returns the newest probe that SENT an order (`attempted`); when none ever did, the newest file (so a refusal still shows). An unreadable newest file still gives nothing; an unreadable older one is skipped. The file picker still lists every file.
  * **Fix (`realprobe.py`, `scripts/fno_real_order_probe.py`):** the saved result keeps `reason` (why the run stopped) and, from the moment the contract is chosen, `contract`, `security_id`, `lot_size`; the file stamp is IST (`file_stamp`). The summary carries `reason`; the probe card headline and a warning line show it for a stopped run.
- * **New `scripts/vm_frontend_check.sh`:** frontend tests + `tsc` in a node container with the source mounted read-only, so nothing root-owned is left in `frontend/node_modules`.
+ * **New `scripts/vm_frontend_check.sh`:** frontend tests + `tsc` in a node container with the whole repo mounted read-only (the tests read `services/**` files, so `frontend/` alone fails with ENOENT), so nothing root-owned is left in `frontend/node_modules`.
  * **Plan A2 answered from the live expiry list:** NIFTY expires Mon 9 Nov, Tue 17 Nov, Mon 23 Nov (moved for the 10 Nov and 24 Nov holidays); SENSEX on Thursdays from 12 Nov.
- * **Run here:** F&O suite 397 passed (7 new). Not run: a live probe, a browser check.
+ * **Run here:** F&O suite 398 tests: 388 passed + 10 skipped here (no `httpx`; one test needs a non-root user), 7 new. Not run: a live probe, a browser check.
 
 ## 9 Nov 2026 - Round 268: All services no longer asks the heavy charges routes every 20 seconds
 

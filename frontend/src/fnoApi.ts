@@ -71,12 +71,29 @@ export interface FnoChainDoc {
 export interface FnoEvent { id: number; ts: number; kind: string; underlying: string; [k: string]: any }
 export interface FnoBacktestRow { name: string; kind: string; underlying: string; from?: string; to?: string; days?: number; trades?: number; net?: number; win_rate_pct?: number; max_drawdown?: number; verdict?: string }
 export interface FnoBacktestList { results: FnoBacktestRow[]; jobs: { id: string; kind: string; state: string; file?: string; trades?: number; verdict?: string; error?: string }[]; recorded_days: string[]; snapshot_days: any[] }
+// Round 265: GET /fno/probe, POST /fno/probe/note. The probe's saved result and its six charge lines against the numbers you copy from Dhan's contract note.
+export interface FnoProbeOrder { side: string; price: number | null; qty: number | null; ok: boolean | null; order_id: string | null; status: string | null; message: string | null; filled_qty: number | null; avg_price: number | null; hint: string }
+export interface FnoProbePnl { bought_avg: number; sold_avg: number; qty: number; gross: number; charges: number; net: number; market_move: number; spread_buy: number; spread_sell: number }
+export interface FnoProbeSummary { file: string; live: boolean; underlying: string; side: string; contract: string | null; exit_code: number | null; outcome: string; orders: FnoProbeOrder[]; dhan_hint: string; pnl: FnoProbePnl | null; still_open: boolean; dhan_net_position_after: number | null }
+export interface FnoProbeLine { line: string; label: string; model: number; note: number | null; diff: number | null; ok: boolean | null; param: string | null; implied: number | null; current: number | null }
+export interface FnoProbeCompare { verdict: "MATCHED" | "DIFFERS" | "INCOMPLETE" | "NO_NOTE" | "NOT_COMPARABLE"; lines: FnoProbeLine[]; total: { model: number; note: number; diff: number; ok: boolean } | null; tol: number; text: string }
+export interface FnoProbeDoc { dir: string; dir_exists: boolean; files: string[]; probe: FnoProbeSummary | null; note: { lines: Record<string, number>; ts: number } | null; comparison: FnoProbeCompare | null }
 export interface FnoStep { step: string; ok: boolean | null; detail: string }
+// Round 264, slice 2: GET /fno/pipeline also returns eight ordered stages. status is OK / PROBLEM / idle (idle is never green); last_decision is the newest journal event that passed through the stage today.
+export interface FnoStageDecision { ts: number | null; kind: string; underlying: string; text: string; data: Record<string, any> }
+export interface FnoStage { key: string; label: string; status: "OK" | "PROBLEM" | "idle"; detail: string; age_s: number | null; last_decision: FnoStageDecision | null; count_today: number | null }
+export interface FnoPipeline { steps: FnoStep[]; stages: FnoStage[]; stage_summary: { problems: string[]; ok: number; idle: number } | null; locks: FnoLocks }
+// Round 262, slice 3: GET /fno/readiness. ok true = green, false = red, null = unknown (never read as green). `hard` items keep REAL closed while the switch FNO_REAL_REQUIRES_READINESS is ON.
+export interface FnoReadinessItem { key: string; group: string; label: string; ok: boolean | null; hard: boolean; detail: string; manual?: boolean }
+export interface FnoReadiness {
+  ts: number; items: FnoReadinessItem[]; blockers: string[]; all_green: boolean; counts: { green: number; red: number; unknown: number; hard_open: number };
+  real_waits_for_it: boolean; locks: FnoLocks; thresholds: Record<string, number>;
+}
 
 export const fnoApi = {
   overview: () => fnoCall<FnoOverview>("/fno/overview"),
   strategies: () => fnoCall<FnoStrategies>("/fno/strategies"),
-  pipeline: () => fnoCall<{ steps: FnoStep[]; locks: FnoLocks }>("/fno/pipeline"),
+  pipeline: () => fnoCall<FnoPipeline>("/fno/pipeline"),
   chain: (underlying: string, expiry = "") => fnoCall<FnoChainDoc>(`/fno/chain?underlying=${underlying}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ""}`),
   signals: (limit = 100) => fnoCall<{ events: FnoEvent[] }>(`/fno/signals?limit=${limit}`),
   log: (limit = 200) => fnoCall<{ events: FnoEvent[] }>(`/fno/log?limit=${limit}`),
@@ -91,5 +108,9 @@ export const fnoApi = {
   backtest: (name: string) => fnoCall<any>(`/fno/backtests/${encodeURIComponent(name)}`),
   runBacktest: (kind: "replay" | "sim", underlyings: string[], overrides: Record<string, any> = {}, days?: string[], strategy = "CORE") =>
     fnoCall<{ job: string }>("/fno/backtests/run", { method: "POST", body: JSON.stringify({ kind, underlyings, overrides, days, strategy }) }),
+  probe: (file = "") => fnoCall<FnoProbeDoc>(`/fno/probe${file ? `?file=${encodeURIComponent(file)}` : ""}`),
+  probeNote: (file: string, lines: Record<string, number>) => fnoCall<FnoProbeDoc>("/fno/probe/note", { method: "POST", body: JSON.stringify({ file: file || null, ...lines }) }),
+  readiness: () => fnoCall<FnoReadiness>("/fno/readiness"),
+  readinessConfirm: (key: string, ok: boolean) => fnoCall<FnoReadiness>("/fno/readiness/confirm", { method: "POST", body: JSON.stringify({ key, ok }) }),
   controlFlags: () => fnoCall<any>("/control/flags"),
 };

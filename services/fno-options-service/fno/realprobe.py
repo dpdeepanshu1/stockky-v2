@@ -80,6 +80,24 @@ def _cancel_and_settle(broker: Any, oid: str, sleep: Callable[[float], None], sa
     return st
 
 
+def dhan_hint(status: str, message: str) -> str:
+    """Plain-words next step for the Dhan error codes seen on a first real order. Empty when the code is not one we know."""
+    t = f"{status} {message}".upper()
+    if "DH-906" in t and ("TRADE CONTROL" in t or "TRADER CONTROL" in t):
+        return "Derivatives is switched OFF in Dhan > Trader Control (Trade Control): switch it ON there, then run again. Nothing was bought."
+    if "DH-906" in t:
+        return "Dhan says the order is incorrect for this account. If F&O was only just approved, the segment can take 1-2 working days to register at the exchange: try again on the next trading day. Nothing was bought."
+    if "DH-905" in t:
+        return "This server's IP is not whitelisted for orders (Dhan > API settings > Static IP). Nothing was bought."
+    if "DH-901" in t or "DH-902" in t:
+        return "The access token is expired or invalid: generate a new one. Nothing was bought."
+    if "DH-904" in t or "429" in t:
+        return "Dhan's rate limit: wait a minute and run again. Nothing was bought."
+    if "DH-908" in t or "DH-909" in t or "DH-910" in t:
+        return "Dhan had an internal / data problem: run again; if it repeats, tell Dhan support the code. Nothing was bought."
+    return ""
+
+
 def _quote(provider: Any, und: str, expiry: str, strike: float, side: str) -> Optional[Any]:
     ch = provider.chain(und, expiry)
     row = ch.row(strike) if ch else None
@@ -87,7 +105,7 @@ def _quote(provider: Any, und: str, expiry: str, strike: float, side: str) -> Op
 
 
 def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: str = "CE", offset: int = 0, live: bool = False, hold_s: int = 20, fill_timeout_s: int = 25,
-        max_outlay: float = 15000.0, confirm: Optional[Callable[[str], str]] = None, sleep: Callable[[float], None] = time.sleep, now: Optional[Callable[[], datetime]] = None,
+        max_outlay: float = 15000.0, expiry_pick: Optional[str] = None, confirm: Optional[Callable[[str], str]] = None, sleep: Callable[[float], None] = time.sleep, now: Optional[Callable[[], datetime]] = None,
         printer: Callable[[str], None] = print, params: Optional[Params] = None) -> Dict[str, Any]:
     say = _Out(printer)
     p = params or Params()
@@ -116,7 +134,12 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     exps = [e for e in provider.expiries(und) if e and (date.fromisoformat(e) - today).days >= 1]
     if not exps:
         return done(2, "  REFUSED: no expiry at least 1 day away (market-data-service not reachable, or only the expiry day itself is left).")
-    expiry = exps[0]
+    if expiry_pick:
+        if expiry_pick not in exps:
+            return done(2, f"  REFUSED: expiry {expiry_pick} is not one Dhan lists at least 1 day away. Available: {', '.join(exps[:6])}.")
+        expiry = expiry_pick
+    else:
+        expiry = exps[0]
     chain = provider.chain(und, expiry)
     if chain is None or not chain.rows or chain.spot is None or chain.atm_index() is None:
         return done(2, f"  REFUSED: no option chain for {und} {expiry} from market-data-service.")
@@ -203,7 +226,8 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     r = broker.place(payload)
     res["orders"].append({"side": "BUY", "price": buy_px, "qty": qty, "ok": r.ok, "order_id": r.order_id, "status": r.status, "message": r.message})
     if not r.ok:
-        return done(2, f"  Dhan REFUSED the BUY: {r.status} {r.message}\n  Nothing is open. (DH-905 usually means the server IP is not whitelisted for orders in Dhan's API settings; DH-901 an expired token.)")
+        hint = dhan_hint(r.status, r.message)
+        return done(2, f"  Dhan REFUSED the BUY: {r.status} {r.message}\n  Nothing is open. " + (f"WHAT TO DO: {hint}" if hint else "(DH-905 = server IP not whitelisted for orders; DH-901 = expired token; DH-906 = a Dhan account setting, see the message.)"))
     say(f"  accepted: order id {r.order_id}, first status {r.status or '?'}  (accepted = on its way to the exchange, NOT yet bought)")
     st, tl = _wait(broker, r.order_id, fill_timeout_s, sleep, say, t0)
     res["orders"][-1]["timeline"] = tl

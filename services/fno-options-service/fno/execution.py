@@ -1,6 +1,7 @@
 """fno/execution.py - the ONLY place that can talk to Dhan's order API. Guarded by four locks; ships with all of them closed.
 
-REAL orders need ALL of:  1) FNO_ENGINE_ENABLED   2) FNO_MODE == REAL   3) FNO_REAL_ENABLED   4) today's ARM (POST /fno/arm, valid for the current IST date only).
+REAL orders need ALL of:  1) FNO_ENGINE_ENABLED   2) FNO_MODE == REAL   3) FNO_REAL_ENABLED   4) today's ARM (POST /fno/arm, valid for the current IST date only),
+5) unless FNO_REAL_REQUIRES_READINESS is off: every hard item of the readiness list is green (fno/readiness.py, round 262).
 Any lock closed -> `real_allowed` returns the list of closed locks and the engine only LOGS what it would have sent.
 
 ROUND 236: the field names below were checked against Dhan's published v2 docs (dhanhq.co/docs/v2/orders and /portfolio, 8 Nov 2026): POST /orders (orderType LIMIT / MARKET / STOP_LOSS /
@@ -48,6 +49,12 @@ def real_allowed(cfg: Any, armed_day: Optional[str], today: str) -> Tuple[bool, 
         closed.append("not armed today (POST /fno/arm)")
     if not getattr(cfg, "DHAN_CLIENT_ID", "") or not getattr(cfg, "DHAN_ACCESS_TOKEN", ""):
         closed.append("no Dhan client id / access token configured")
+    if getattr(cfg, "FNO_REAL_REQUIRES_READINESS", False):        # round 262: the readiness list (fno/readiness.py) must be all green; never computed = closed
+        blockers = getattr(cfg, "FNO_READINESS_BLOCKERS", None)
+        if blockers is None:
+            closed.append("readiness list not computed yet (it runs every 30 s while the service is up)")
+        elif blockers:
+            closed.append(f"readiness list not green: {len(blockers)} hard item(s) open, first: {blockers[0]}")
     return (not closed), closed
 
 

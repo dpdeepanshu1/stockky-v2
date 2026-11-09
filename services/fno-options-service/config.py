@@ -61,6 +61,8 @@ LOT_FALLBACK = {"NIFTY": _i("FNO_LOT_NIFTY", 65), "SENSEX": _i("FNO_LOT_SENSEX",
 FNO_ENGINE_ENABLED = _b("FNO_ENGINE_ENABLED", False)         # master: run the signal + DEMO engine loop
 FNO_MODE = _s("FNO_MODE", "DEMO").upper()                    # DEMO | REAL
 FNO_REAL_ENABLED = _b("FNO_REAL_ENABLED", False)             # second lock: without it a REAL-mode engine only logs what it would send
+FNO_REAL_REQUIRES_READINESS = _b("FNO_REAL_REQUIRES_READINESS", True)   # round 262: REAL orders wait until every hard item of GET /fno/readiness is green (fno/readiness.py); OFF = the list only advises
+FNO_READINESS_BLOCKERS = None                                # set by readiness.publish every 30 s: [] = all hard items green, a list = what is open, None = not computed yet (REAL stays closed)
 FNO_UNDERLYINGS = _s("FNO_UNDERLYINGS", "BOTH").upper()      # NIFTY | SENSEX | BOTH
 FNO_SIGNAL_MIN_SCORE = _f("FNO_SIGNAL_MIN_SCORE", 45.0)
 # strategies (fno/strategies.py): CORE is the original signal and stays ON; the named ones ship OFF until their DEMO / SIM evidence is read

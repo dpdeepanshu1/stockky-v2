@@ -20,6 +20,7 @@ NOW = datetime(2026, 11, 10, 10, 30, tzinfo=IST)           # a Tuesday, inside t
 def make_cfg(**kw):
     ns = SimpleNamespace(**{k: getattr(real_config, k) for k in dir(real_config) if k.isupper()})
     ns.FNO_ENGINE_ENABLED, ns.FNO_SIGNAL_MIN_SCORE = True, 30.0
+    ns.FNO_REAL_REQUIRES_READINESS = False      # round 262: these tests are about the engine's REAL path, not the readiness gate (tests/test_round262_readiness.py turns it on)
     # round 242: REAL sizing comes from the capital board, never from FNO_DEMO_CAPITAL. Every test config gets a fresh board giving F&O Rs 5,00,000 (what REAL used to size from).
     import tempfile
     from time import time as _now

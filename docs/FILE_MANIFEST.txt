@@ -71,6 +71,8 @@ frontend/src/adminSession.ts
 frontend/src/alertsView.test.mjs
 frontend/src/alignment.css
 frontend/src/alignment.test.mjs
+frontend/src/allServices.test.mjs
+frontend/src/allServices.ts
 frontend/src/api.ts
 frontend/src/api_universe.ts
 frontend/src/appHelpers.test.mjs
@@ -168,6 +170,7 @@ frontend/src/components/board/topPicksView.ts
 frontend/src/components/board/treemapLayout.test.mjs
 frontend/src/components/board/treemapLayout.ts
 frontend/src/components/board/useBoardData.ts
+frontend/src/components/calibration/AllServicesPanel.tsx
 frontend/src/components/calibration/AutoCalibPanel.tsx
 frontend/src/components/calibration/FnoCalibration.tsx
 frontend/src/components/calibration/JobCard.tsx
@@ -190,8 +193,12 @@ frontend/src/components/calibration/ui.tsx
 frontend/src/components/feedView.ts
 frontend/src/components/fno/FnoBacktests.tsx
 frontend/src/components/fno/FnoChain.tsx
+frontend/src/components/fno/FnoControlCard.tsx
 frontend/src/components/fno/FnoJournal.tsx
 frontend/src/components/fno/FnoOverview.tsx
+frontend/src/components/fno/FnoProbeCard.tsx
+frontend/src/components/fno/FnoReadinessCard.tsx
+frontend/src/components/fno/FnoStagesRow.tsx
 frontend/src/components/fno/FnoTab.tsx
 frontend/src/components/fno/useFno.ts
 frontend/src/components/hotView.ts
@@ -259,6 +266,8 @@ frontend/src/eventChips.test.mjs
 frontend/src/eventChips.ts
 frontend/src/feedView.test.mjs
 frontend/src/fnoApi.ts
+frontend/src/fnoControl.test.mjs
+frontend/src/fnoControl.ts
 frontend/src/fnoView.test.mjs
 frontend/src/fnoView.ts
 frontend/src/gatewayAuth.test.mjs
@@ -394,7 +403,9 @@ scripts/export_intraday.py
 scripts/export_records.py
 scripts/fetch_history_for_backtest.py
 scripts/flow_tape_report.py
+scripts/fno_charges_compare.py
 scripts/fno_eod_backtest.py
+scripts/fno_real_order_probe.py
 scripts/fno_replay_backtest.py
 scripts/fno_rolling_backtest.py
 scripts/fno_rolling_check.py
@@ -1164,11 +1175,15 @@ services/fno-options-service/fno/liveparams.py
 services/fno-options-service/fno/models.py
 services/fno-options-service/fno/paper.py
 services/fno-options-service/fno/params.py
+services/fno-options-service/fno/probecheck.py
 services/fno-options-service/fno/provider.py
+services/fno-options-service/fno/readiness.py
+services/fno-options-service/fno/realprobe.py
 services/fno-options-service/fno/recorder.py
 services/fno-options-service/fno/runtime.py
 services/fno-options-service/fno/signals.py
 services/fno-options-service/fno/sizing.py
+services/fno-options-service/fno/stages.py
 services/fno-options-service/fno/store.py
 services/fno-options-service/fno/strategies.py
 services/fno-options-service/main.py
@@ -1230,6 +1245,11 @@ services/fno-options-service/tests/test_round257.py
 services/fno-options-service/tests/test_round258.py
 services/fno-options-service/tests/test_round259.py
 services/fno-options-service/tests/test_round260.py
+services/fno-options-service/tests/test_round261.py
+services/fno-options-service/tests/test_round262.py
+services/fno-options-service/tests/test_round262_readiness.py
+services/fno-options-service/tests/test_round264_stages.py
+services/fno-options-service/tests/test_round265_probecheck.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

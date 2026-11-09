@@ -4,6 +4,10 @@ import { fnoApi, type FnoPosition } from "../../fnoApi";
 import { inr, istHm, lockSummary, positionProgress } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
 import { useFno } from "./useFno";
+import FnoControlCard from "./FnoControlCard";
+import FnoProbeCard from "./FnoProbeCard";
+import FnoReadinessCard from "./FnoReadinessCard";
+import FnoStagesRow from "./FnoStagesRow";
 
 export function PositionCard({ p }: { p: FnoPosition }) {
   const { pct, pnl } = positionProgress(p);
@@ -55,9 +59,11 @@ export default function FnoOverview() {
             <li>Armed today: <b>{d.locks.armed_today ? "yes" : "no"}</b></li>
           </ul>
         )}
-        <p className="mt-2 text-[11px] text-mist">Switches (engine, mode, risk, exits) are changed on Real Money Calibration &gt; F&amp;O. Ships OFF and DEMO.</p>
+        <p className="mt-2 text-[11px] text-mist">The locks and strategies are switched in the Control card below; risk, entry window and exits on Real Money Calibration &gt; F&amp;O. Ships OFF and DEMO.</p>
         {d?.runner.error && <div className="mt-2"><Msg kind="warn">Runner error: {d.runner.error}</Msg></div>}
       </Card>
+
+      <FnoControlCard onChanged={() => { ov.reload(); strat.reload(); }} />
 
       <Card title="Today" right={<Btn small disabled={busy || !d?.open_positions.length} onClick={() => void act(fnoApi.squareoff, "Square-off sent.", "Close ALL open F&O positions now?")}>Square off all</Btn>}>
         {d ? (
@@ -74,6 +80,10 @@ export default function FnoOverview() {
         {d && d.open_positions.length === 0 && <p className="text-mist">No open F&amp;O position.</p>}
         <div className="space-y-2">{d?.open_positions.map((p) => <PositionCard key={p.id ?? p.label} p={p} />)}</div>
       </Card>
+
+      <FnoReadinessCard onChanged={ov.reload} />
+
+      <FnoProbeCard />
 
       <Card title="REAL arm (daily)" tone="warn">
         <p className="mb-2 text-mist">REAL orders need all four: engine ON, mode REAL, REAL orders ON and this per-day arm, plus Dhan credentials. The arm expires at midnight IST. Leave this alone until DEMO evidence exists.</p>
@@ -114,6 +124,8 @@ export default function FnoOverview() {
 
       <Card title="Pipeline check" right={<Btn small onClick={pipe.reload}>Re-check</Btn>}>
         {pipe.error && <Msg kind="err">{pipe.error}</Msg>}
+        <FnoStagesRow stages={pipe.data?.stages} />
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-widest text-mist">Flat checks</p>
         <ul className="space-y-1">
           {pipe.data?.steps.map((s) => (
             <li key={s.step} className="flex flex-wrap gap-2"><Chip tone={s.ok === true ? "good" : s.ok === false ? "bad" : undefined}>{s.ok === true ? "OK" : s.ok === false ? "PROBLEM" : "info"}</Chip><span>{s.step}</span><span className="text-mist">{s.detail}</span></li>

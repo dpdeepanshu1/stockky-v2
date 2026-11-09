@@ -806,6 +806,7 @@ services:
       FNO_ENGINE_ENABLED: ${FNO_ENGINE_ENABLED:-false}
       FNO_MODE: ${FNO_MODE:-DEMO}
       FNO_REAL_ENABLED: ${FNO_REAL_ENABLED:-false}
+      FNO_REAL_REQUIRES_READINESS: ${FNO_REAL_REQUIRES_READINESS:-true}
       FNO_UNDERLYINGS: ${FNO_UNDERLYINGS:-BOTH}
       FNO_DHAN_CLIENT_ID: ${FNO_DHAN_CLIENT_ID:-}
       FNO_DHAN_ACCESS_TOKEN: ${FNO_DHAN_ACCESS_TOKEN:-}
@@ -901,6 +902,9 @@ services:
       - control-state-fno:/data/control
       # round 242: the capital board folder all three trading services share (capital_board.py): F&O publishes its figures here and, in REAL, sizes from its amount
       - shared-runtime:/data/shared
+      # round 265: the real-order probe writes its result on the host (scripts/fno_real_order_probe.py > data/fno_real_probe); the service only reads it (GET /fno/probe).
+      # Create the folder yourself first (mkdir -p data/fno_real_probe) so it belongs to you, not to docker.
+      - ./data/fno_real_probe:/data/fno_real_probe:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health', timeout=5)"]

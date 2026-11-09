@@ -1,5 +1,5 @@
 // frontend/src/fnoView.ts - pure helpers of the F&O pages (no network, no React). Covered by fnoView.test.mjs.
-import type { FnoPosition, FnoLocks } from "./fnoApi";
+import type { FnoPosition, FnoLocks, FnoReadiness, FnoReadinessItem, FnoStage, FnoProbeDoc } from "./fnoApi";
 
 export const IST_OFFSET_MIN = 330;
 /** epoch seconds -> "YYYY-MM-DD" in IST (whatever the browser's timezone is). */
@@ -76,4 +76,97 @@ export function splitEvent(e: Record<string, any>): { strategy: string; rest: Re
 export function pcrReading(pcr: number | null | undefined): string {
   if (pcr == null || Number.isNaN(pcr)) return "-";
   return pcr >= 1.3 ? "bullish tilt (many puts written)" : pcr <= 0.7 ? "bearish tilt (many calls written)" : "balanced";
+}
+
+// ---- Round 262, slice 3: the readiness checklist (GET /fno/readiness) ----
+/** Words, not colour alone: the chip text says what the colour says. */
+export function readinessChip(ok: boolean | null | undefined): { tone: "good" | "bad" | "warn"; text: string } {
+  return ok === true ? { tone: "good", text: "DONE" } : ok === false ? { tone: "bad", text: "NOT MET" } : { tone: "warn", text: "NOT SHOWN YET" };
+}
+
+/** The items in the order the service sent them, grouped by their `group` (first appearance decides the group order). */
+export function readinessGroups(items: FnoReadinessItem[] | null | undefined): { group: string; items: FnoReadinessItem[] }[] {
+  const out: { group: string; items: FnoReadinessItem[] }[] = [];
+  for (const it of Array.isArray(items) ? items : []) {
+    let g = out.find((x) => x.group === it.group);
+    if (!g) { g = { group: it.group, items: [] }; out.push(g); }
+    g.items.push(it);
+  }
+  return out;
+}
+
+/** One plain sentence for the top of the card. It never says "safe": green only means the listed evidence exists. */
+export function readinessHeadline(r: FnoReadiness | null | undefined): { tone: "off" | "warn" | "good"; text: string } {
+  if (!r) return { tone: "off", text: "Waiting for the service" };
+  const n = r.counts.hard_open;
+  if (n === 0) return { tone: "good", text: "Every hard item is done. This is evidence the list asked for, not a promise of profit; the other REAL locks still apply." };
+  const open = `${n} hard item${n === 1 ? " is" : "s are"} not done yet`;
+  return r.real_waits_for_it
+    ? { tone: "warn", text: `${open}: REAL orders stay closed until they are.` }
+    : { tone: "warn", text: `${open}. The wait is switched OFF, so this list only advises.` };
+}
+
+/** The question asked before the person confirms (or withdraws) a check only Dhan can show. */
+export function confirmQuestion(it: FnoReadinessItem, ok: boolean): string {
+  return ok ? `Confirm: ${it.label}?\n\nOnly press OK if you have checked this yourself in Dhan. Nothing verifies it for you.` : `Withdraw your confirmation: ${it.label}?`;
+}
+
+// ---- Round 264, slice 2: the pipeline as ordered stages (GET /fno/pipeline > stages) ----
+/** Words next to the colour. idle is neutral, never green: nothing happened there, which proves nothing. */
+export function stageChip(status: string | null | undefined): { tone: "good" | "bad" | "neutral"; text: string } {
+  return status === "OK" ? { tone: "good", text: "OK" } : status === "PROBLEM" ? { tone: "bad", text: "PROBLEM" } : { tone: "neutral", text: "idle" };
+}
+
+/** "20 s ago" / "3 min ago" / "2 h ago"; "no run yet" when the stage has not done anything today. */
+export function stageAge(age_s: number | null | undefined): string {
+  if (age_s == null || Number.isNaN(age_s)) return "no run yet";
+  const s = Math.max(0, Math.round(age_s));
+  return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+}
+
+/** The first stage that has a PROBLEM is where to look first (data flows left to right); null when none. */
+export function firstProblem(stages: FnoStage[] | null | undefined): FnoStage | null {
+  return (Array.isArray(stages) ? stages : []).find((s) => s.status === "PROBLEM") || null;
+}
+
+/** One sentence above the row of boxes. */
+export function stageHeadline(stages: FnoStage[] | null | undefined): { tone: "off" | "bad" | "good"; text: string } {
+  if (!Array.isArray(stages) || stages.length === 0) return { tone: "off", text: "Stages are not available (the flat checks below still are)." };
+  const p = stages.filter((s) => s.status === "PROBLEM");
+  if (p.length) return { tone: "bad", text: `${p.length} stage${p.length === 1 ? "" : "s"} with a problem; start with ${p[0].label}: ${p[0].detail}` };
+  const ok = stages.filter((s) => s.status === "OK").length;
+  return { tone: "good", text: `No stage reports a problem (${ok} OK, ${stages.length - ok} idle). Idle means nothing happened there today, not that it works.` };
+}
+
+// ---- Round 265: the real-order probe result and its charges check (GET /fno/probe) ----
+export const PROBE_LINES = [["brokerage", "Brokerage"], ["stt", "STT"], ["exchange", "Exchange transaction"], ["sebi", "SEBI fee"], ["gst", "GST"], ["stamp", "Stamp duty"], ["total", "Total (optional)"]] as const;
+
+/** Words next to the colour. MATCHED is one trade's evidence, never "the model is right". */
+export function probeVerdictChip(v: string | null | undefined): { tone: "good" | "bad" | "warn" | "neutral"; text: string } {
+  return v === "MATCHED" ? { tone: "good", text: "MATCHED" } : v === "DIFFERS" ? { tone: "bad", text: "DIFFERS" } : v === "INCOMPLETE" ? { tone: "warn", text: "INCOMPLETE" }
+    : v === "NO_NOTE" ? { tone: "warn", text: "NO NOTE YET" } : { tone: "neutral", text: "NOTHING TO COMPARE" };
+}
+
+/** What the box fields hold -> the numbers to send. Blank fields are left out; "Rs 1,234.50" is read; text or a negative number is an error and nothing is sent. */
+export function parseNoteInputs(raw: Record<string, string>): { lines: Record<string, number>; errors: string[] } {
+  const lines: Record<string, number> = {};
+  const errors: string[] = [];
+  for (const [k, label] of PROBE_LINES) {
+    const t = String(raw?.[k] ?? "").replace(/[₹,]|rs\.?/gi, "").trim();
+    if (!t) continue;
+    const n = Number(t);
+    if (!Number.isFinite(n) || n < 0) errors.push(`${label}: "${raw[k]}" is not an amount in rupees`);
+    else lines[k] = n;
+  }
+  return { lines, errors };
+}
+
+/** One sentence for the top of the probe card. */
+export function probeHeadline(d: FnoProbeDoc | null | undefined): { tone: "off" | "warn" | "bad" | "good"; text: string } {
+  if (!d) return { tone: "off", text: "Waiting for the service" };
+  if (!d.probe) return { tone: "off", text: d.dir_exists ? "No probe result yet. Run scripts/fno_real_order_probe.py (a dry run first), then come back." : "The probe folder does not exist yet: run mkdir -p data/fno_real_probe on the server, restart the service, then run the probe." };
+  const p = d.probe;
+  if (p.still_open) return { tone: "bad", text: `A POSITION IS STILL OPEN (${p.contract || "see the probe file"}): close it in the Dhan app now.` };
+  if (!p.live) return { tone: "off", text: "The newest probe was a dry run: nothing was sent, so there are no charges to compare." };
+  return { tone: p.exit_code === 0 ? "good" : "warn", text: `Newest probe: ${p.outcome}.` };
 }

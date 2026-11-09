@@ -8,7 +8,7 @@ import time
 from datetime import datetime, time as dtime
 from typing import Any, Dict, Optional
 
-from . import capital, recorder
+from . import capital, readiness, recorder
 from .engine import Engine, now_ist
 from .params import Params
 from .store import day_of
@@ -77,6 +77,7 @@ class Runner:
             try:
                 now = now_ist()
                 capital.publish(self.engine.store, self.cfg, self.engine.armed_day())      # round 242: F&O's figures for the capital board (throttled, never raises)
+                readiness.publish(self.cfg, self.engine.store, self.data_dir, self.engine.last_reconcile, self.engine.armed_day())   # round 262: the REAL lock waits for this list (throttled, never raises)
                 if market_open(now):
                     if getattr(self.cfg, "FNO_ENGINE_ENABLED", False) or self.engine.store.open_positions():
                         self.engine.tick(now)

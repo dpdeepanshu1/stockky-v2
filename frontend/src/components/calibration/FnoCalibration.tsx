@@ -15,7 +15,7 @@ const SECTIONS: { id: Section; label: string }[] = [
 
 const PLAN: { when: string; what: string }[] = [
   { when: "Day 0 (once)", what: "Deploy the service. Check Overview > Pipeline check: market-data reachable, option contracts loaded, expiries and India VIX present. Compare the lot sizes with the exchange circular." },
-  { when: "Day 0 (once)", what: "Place one real trade by hand in Dhan and compare its contract note with F&O Options > History > Charges. Correct FNO_* charge rates if they differ." },
+  { when: "Day 0 (once)", what: "In Dhan > Trader Control switch Derivatives ON (the F&O segment can take 1-2 working days to register). Then run scripts/fno_real_order_probe.py (one real lot, every step explained) and compare its charges table with the contract note and F&O Options > History > Charges. Correct FNO_* charge rates if they differ." },
   { when: "Week 1-2", what: "Switch FNO_ENGINE_ENABLED ON (mode stays DEMO). Leave FNO_RECORD_SNAPSHOTS ON so chains are recorded every minute. Do not change other switches." },
   { when: "Every trading day", what: "After 15:30: read the Decision log and the day's trades. A skipped trade states why (gate, score, spread). Do not tune after one day." },
   { when: "Weekly", what: "Run the Replay backtest on the recorded days and the end-of-day script (scripts/fno_eod_backtest.py). Compare the three: a SIMULATED result alone proves nothing." },

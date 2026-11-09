@@ -21,7 +21,7 @@ from pydantic import BaseModel
 import config
 from auth import require_admin, require_admin_or_runner
 from backtest import metrics as bt_metrics, portfolio as bt_portfolio, replay as bt_replay, report as bt_report, sim as bt_sim
-from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, recorder, signals, strategies
+from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, probecheck, readiness, recorder, signals, stages, strategies
 from fno import capital as fno_capital
 from fno import liveparams
 from fno.params import Params
@@ -103,6 +103,36 @@ def capital_board_status(admin=Depends(require_admin)) -> Dict[str, Any]:
     return out
 
 
+def _readiness() -> Dict[str, Any]:
+    board = fno_capital.status(config, store.kv_get("fno_armed_day"), _today())
+    return readiness.collect(store, config, config.DATA_DIR, engine.last_reconcile, board)
+
+
+@app.get("/fno/readiness")
+def readiness_list(admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 262: may REAL orders start? Green / red / unknown items from DEMO evidence, saved rolling backtests, the capital board, reconcile and the checks only you can make in Dhan.
+    While a hard item is not green REAL stays closed (switch FNO_REAL_REQUIRES_READINESS). The list says what has not been shown yet; it never says 'safe'."""
+    r = _readiness()
+    config.FNO_READINESS_BLOCKERS = list(r["blockers"])               # refresh what execution.real_allowed reads
+    return {**r, "real_waits_for_it": bool(config.FNO_REAL_REQUIRES_READINESS), "locks": _locks(),
+            "thresholds": {"demo_days": readiness.MIN_DEMO_DAYS, "demo_trades": readiness.MIN_DEMO_TRADES, "backtest_trades": readiness.MIN_BACKTEST_TRADES, "snapshot_days": readiness.MIN_SNAPSHOT_DAYS}}
+
+
+class ReadinessConfirm(BaseModel):
+    key: str
+    ok: bool = True
+
+
+@app.post("/fno/readiness/confirm")
+def readiness_confirm(body: ReadinessConfirm, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """You confirm (or withdraw) one check only Dhan can show: segment active, Trader Control ON, static IP, probe charges matched. Logged in the journal."""
+    if body.key not in readiness.MANUAL:
+        raise HTTPException(status_code=400, detail=f"key must be one of {list(readiness.MANUAL)}")
+    readiness.set_manual(store, body.key, body.ok)
+    store.add_event("manual", {"action": "readiness_confirm", "key": body.key, "ok": body.ok, "by": str(admin.get("sub"))})
+    return readiness_list(admin)
+
+
 @app.get("/fno/pipeline")
 def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
     steps: List[Dict[str, Any]] = []
@@ -119,7 +149,79 @@ def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
     steps.append({"step": "last engine cycle", "ok": bool(lt.get("ok")) if lt.get("ts") else None, "detail": (lt.get("error") or "") + (f" ({int(time.time() - lt['ts'])}s ago)" if lt.get("ts") else "no cycle yet")})
     steps.append({"step": "snapshots recorded today", "ok": runner.snapshots_today > 0 or not market_open(eng.now_ist()), "detail": str(runner.snapshots_today)})
     steps.append({"step": "recorded days available for replay", "ok": None, "detail": str(len(recorder.list_days(config.DATA_DIR)))})
-    return {"steps": steps, "locks": _locks()}
+    stg: List[Dict[str, Any]] = []
+    try:                                                              # round 264: the same facts as ordered stages (market data > ... > reconcile); never breaks the flat list above
+        ok_of = {x["step"]: x["ok"] for x in steps}
+        evs = {k: store.events(k, stages.EVENT_LIMIT) for k in stages.KINDS}
+        stg = stages.build({"now": time.time(), "enabled": bool(config.FNO_ENGINE_ENABLED), "market_open": market_open(eng.now_ist()),
+                            "md_ok": bool(ok_of.get("market-data reachable")), "vix_ok": bool(ok_of.get("India VIX")),
+                            "expiries_ok": bool(ok_of.get("NIFTY expiries")) and bool(ok_of.get("SENSEX expiries")),
+                            "md_detail": provider.last_error or "", "last_tick": engine.last_tick, "events": evs, "open_positions": len(store.open_positions()),
+                            "broker": broker is not None, "reconcile": engine.last_reconcile}, day_of)
+    except Exception:  # noqa: BLE001
+        log.exception("pipeline stages failed")
+        stg = []
+    return {"steps": steps, "stages": stg, "stage_summary": stages.summary(stg) if stg else None, "locks": _locks()}
+
+
+# ── round 265: the real-order probe's result and its charges against Dhan's contract note ───────────────────────────────────────────────────────
+PROBE_NOTE_KV = "fno_probe_note"
+
+
+class ProbeNote(BaseModel):
+    file: Optional[str] = None                  # a probe_<time>.json name; blank = the newest
+    brokerage: Optional[float] = None
+    stt: Optional[float] = None
+    exchange: Optional[float] = None
+    sebi: Optional[float] = None
+    gst: Optional[float] = None
+    stamp: Optional[float] = None
+    total: Optional[float] = None
+
+
+def _probe_dir() -> str:
+    return probecheck.PROBE_DIR if os.path.isdir(probecheck.PROBE_DIR) else os.path.join(config.DATA_DIR, "fno_real_probe")
+
+
+def _probe_doc(file: Optional[str]) -> Dict[str, Any]:
+    d = _probe_dir()
+    name, probe = probecheck.load(d, file)
+    doc: Dict[str, Any] = {"dir": d, "dir_exists": os.path.isdir(d), "files": probecheck.list_files(d)[:20], "probe": None, "note": None, "comparison": None}
+    if probe is None:
+        return doc
+    summ = probecheck.summarize(probe, name or "")
+    saved = (store.kv_get(PROBE_NOTE_KV, {}) or {}).get(name or "")
+    doc.update(probe=summ, note=saved, comparison=probecheck.compare(probe, (saved or {}).get("lines") or {}, Params.from_config(config)))
+    return doc
+
+
+@app.get("/fno/probe")
+def probe_result(file: Optional[str] = None, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """The newest (or a named) real-order probe result: what was sent, what Dhan said, what filled, gross / charges / net, and the charges check against the note you entered."""
+    if file and not probecheck.NAME_RE.match(file):
+        raise HTTPException(status_code=400, detail="file must look like probe_YYYYMMDD_HHMMSS.json")
+    return _probe_doc(file)
+
+
+@app.post("/fno/probe/note")
+def probe_note(body: ProbeNote, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Save the six charge lines you copied from Dhan's contract note for one probe and compare them with our model. Read-only toward the engine: no rate is changed and the readiness
+    item stays yours to confirm."""
+    if body.file and not probecheck.NAME_RE.match(body.file):
+        raise HTTPException(status_code=400, detail="file must look like probe_YYYYMMDD_HHMMSS.json")
+    name, probe = probecheck.load(_probe_dir(), body.file)
+    if probe is None:
+        raise HTTPException(status_code=404, detail="no probe result found")
+    lines = {k: getattr(body, k) for k in (*probecheck.LINES, "total") if getattr(body, k) is not None}
+    if any(v < 0 for v in lines.values()):
+        raise HTTPException(status_code=400, detail="a charge cannot be negative")
+    cur = dict(store.kv_get(PROBE_NOTE_KV, {}) or {})
+    cur[name or ""] = {"lines": lines, "ts": time.time()}
+    for old in sorted(cur, key=lambda k: cur[k].get("ts", 0.0))[:-20]:
+        cur.pop(old, None)
+    store.kv_set(PROBE_NOTE_KV, cur)
+    store.add_event("manual", {"action": "probe_note", "file": name, "lines": lines, "by": str(admin.get("sub"))})
+    return _probe_doc(name)
 
 
 # ── data views ───────────────────────────────────────────────────────────────────────────────────────────────

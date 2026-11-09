@@ -28,6 +28,7 @@ def main(argv=None) -> int:
     ap.add_argument("--hold-seconds", type=int, default=20)
     ap.add_argument("--fill-timeout", type=int, default=25, help="seconds to wait for each order to fill before cancelling it")
     ap.add_argument("--max-outlay", type=float, default=15000.0, help="refuse when the premium of 1 lot is above this many rupees")
+    ap.add_argument("--expiry", default="", help="YYYY-MM-DD of the expiry to use (default: the nearest one at least 1 day away; the expiry day itself is never used)")
     ap.add_argument("--market-data", default=os.getenv("MARKET_DATA_URL", "http://127.0.0.1:8001"))
     ap.add_argument("--base", default=os.getenv("DHAN_BASE_URL", "https://api.dhan.co/v2"))
     ap.add_argument("--out", default="data/fno_real_probe")
@@ -41,7 +42,7 @@ def main(argv=None) -> int:
         return 2
     prov = provider.HttpProvider(a.market_data)
     brk = execution.DhanBroker(a.base, cid, tok, 10.0) if (cid and tok) else None
-    res = realprobe.run(prov, brk, cid, a.und, a.side, a.offset, a.live, a.hold_seconds, a.fill_timeout, a.max_outlay)
+    res = realprobe.run(prov, brk, cid, a.und, a.side, a.offset, a.live, a.hold_seconds, a.fill_timeout, a.max_outlay, a.expiry or None)
     if a.live:
         os.makedirs(a.out, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")

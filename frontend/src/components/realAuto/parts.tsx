@@ -4,6 +4,7 @@ import { type Position } from "../../realTradeApi";
 import StockCandleBlock from "../StockCandleBlock";
 import { RiskRail } from "../ui/RiskRail";   // design v7
 import { fmtDate, fmtInr, fmtTime, pnlColor, positionLevels } from "./format";
+import { openCharges, afterCharges } from "../../moneyView";   // Round 270
 import { entryReason } from "../../setupView";   // E285 round 104: the Entry reason line (same helper as Position Stocks)
 
 // AUDIT FIX (session64, issue #8 follow-up — "show demat-imported holdings
@@ -61,6 +62,13 @@ export function PositionCard({
               qty already closed on a PARTIALLY_CLOSED position — null on a
               still-fully-OPEN position (nothing closed yet to have a cost
               on), so this only appears once relevant. */}
+          {/* Round 270: open P&L after the estimated cost of getting in and out (same rate card as the Charges tab) */}
+          {(() => { const ch = openCharges({ side: "LONG", qty: p.qty_open, entry: p.avg_entry_price, price: p.current_price, delivery: !!p.broker_imported, entryAlreadyPaid: !!p.broker_imported });
+            const net = afterCharges(p.unrealized_pnl, ch);
+            return net != null && ch != null ? (
+              <div className={`font-display tabular-nums text-[9px] ${pnlColor(net)}`} data-testid="pos-after-charges">
+                after charges {net >= 0 ? "+" : ""}{fmtInr(net, 2)} <span className="text-mist">(charges ≈ ₹{ch.toFixed(2)})</span>
+              </div>) : null; })()}
           {p.net_realized_pnl != null && (
             <div className={`font-display tabular-nums text-[9px] ${pnlColor(p.net_realized_pnl)}`}>
               net {p.net_realized_pnl >= 0 ? "+" : ""}{fmtInr(p.net_realized_pnl, 2)}

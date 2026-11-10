@@ -2,6 +2,7 @@
 //
 // Client for fno-options-service (nginx: /fno-api/). Same admin session as Auto Trade / Position Stocks: the service only VERIFIES the real-trade or
 // position-stocks token, it never issues one. Nothing here places an order except fnoApi.squareoff / arm / disarm, which are explicit buttons.
+import type { BoardStatus } from "./moneyView";   // Round 270
 import { getRealTradeApiUrl, getSessionToken as getRtToken } from "./realTradeApi";
 import { getPositionStocksApiUrl, getSessionToken as getPsToken } from "./positionStocksApi";
 
@@ -47,12 +48,14 @@ export interface FnoPosition {
   id: number | null; underlying: string; expiry: string; strike: number; opt_type: "CE" | "PE"; lot_size: number; lots: number; entry_ts: number; entry_premium: number;
   sl_price: number; target_price: number; mode: string; status: "OPEN" | "CLOSED"; max_premium: number; trail_armed: boolean; trail_stop: number | null;
   exit_ts: number | null; exit_premium: number | null; exit_reason: string; gross_pnl: number | null; charges: number | null; net_pnl: number | null;
-  signal_score: number | null; spot_at_entry: number | null; note: string; label: string; strategy?: string; parent_id?: number | null; premium?: number | null; unrealized?: number | null;
+  signal_score: number | null; spot_at_entry: number | null; note: string; label: string; strategy?: string; parent_id?: number | null; premium?: number | null; unrealized?: number | null; est_charges?: number | null; unrealized_net?: number | null;
+  exit_doubt?: boolean; stop_doubt?: boolean; broker_order_ids?: Record<string, string>;   // Round 289: an exit SELL whose call failed may be live at Dhan (engine marks it; POST /fno/exit-doubt/clear lifts the mark)
 }
 export interface FnoDay { trades: number; open: number; realized_net: number; realized_gross: number; charges: number; wins: number; losses: number }
 export interface FnoOverview {
   now: string; market_open: boolean; locks: FnoLocks; day: FnoDay; open_positions: FnoPosition[];
   last_tick: { ts?: number; ok?: boolean; error?: string; [k: string]: any }; runner: { alive: boolean; error: string | null; snapshots_today: number }; underlyings: string[]; params: Record<string, any>;
+  param_problems?: string[];   // Round 290: settings that cannot work together (e.g. a time set in the environment at boot); the engine refuses every entry while this is not empty
 }
 export interface FnoStrategyRow {
   key: string; label: string; ad: string | null; sides: string; rule: string; flag: string; enabled: boolean; expiry_day_only?: boolean;
@@ -100,8 +103,12 @@ export const fnoApi = {
   positions: (status = "all", mode?: string) => fnoCall<{ positions: FnoPosition[] }>(`/fno/positions?status=${status}${mode ? `&mode=${mode}` : ""}`),
   history: (days = 30, mode = "DEMO") => fnoCall<{ metrics: any; verdict: { status: string; reasons?: string[]; [k: string]: any }; trades: FnoPosition[] }>(`/fno/history?days=${days}&mode=${mode}`),
   charges: (days = 30, mode = "DEMO") => fnoCall<{ totals: Record<string, number>; trades: any[]; rates: Record<string, number>; note: string }>(`/fno/charges?days=${days}&mode=${mode}`),
+  capital: () => fnoCall<BoardStatus>("/fno/capital"),
   reconcile: (refresh = false) => fnoCall<{ ts: number | null; ok: boolean | null; note?: string; differences?: { security_id: string; ours: number; broker: number }[] }>(`/fno/reconcile${refresh ? "?refresh=true" : ""}`),
   squareoff: () => fnoCall<{ closed: any }>("/fno/squareoff", { method: "POST" }),
+  // Round 282: after a failed exit SELL (network / HTTP 5xx) the engine sends no second SELL until you have checked the Dhan app; this clears that mark. It never places an order.
+  stopDoubtClear: (position: number) => fnoCall<{ position: number; cleared: boolean }>(`/fno/stop-doubt/clear?position=${encodeURIComponent(String(position))}`, { method: "POST" }),   // Round 292
+  exitDoubtClear: (position: number) => fnoCall<{ position: number; cleared: boolean }>(`/fno/exit-doubt/clear?position=${encodeURIComponent(String(position))}`, { method: "POST" }),
   arm: () => fnoCall<{ armed_day: string; credentials?: string; locks: FnoLocks }>("/fno/arm", { method: "POST" }),
   disarm: () => fnoCall<{ locks: FnoLocks }>("/fno/disarm", { method: "POST" }),
   backtests: () => fnoCall<FnoBacktestList>("/fno/backtests"),

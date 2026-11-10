@@ -11,6 +11,7 @@
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
 import type { FlowStatsDoc } from "./tapeView";
 import type { SymbolTapeDoc } from "./tapeSymbolView";
+import type { BoardStatus } from "./moneyView";   // Round 270
 import type { SetupStamp } from "./setupView";   // E285 round 104: Entry reason on the Positions cards and the History rows
 
 const STORAGE_URL_KEY = "stockky:real_trade_api_url";
@@ -623,6 +624,8 @@ export interface ReconcileDriftRow {
 export interface ReconcileReportDoc { ran_at: string; mode: string; drift: ReconcileDriftRow[]; warn_count: number; error: string | null; book_positions?: number; alerted?: boolean }
 
 export const realTradeApi = {
+  // Round 270: the three-way Dhan capital board (admin session)
+  capitalBoard: () => rtRequest<BoardStatus>("/capital/board"),
   health: () => rtRequest<{ ok: boolean; service: string; phase: string }>("/health", {}, false),
 
   gateStatus: (mode: "DEMO" | "REAL") => rtRequest<GateStatus>(`/status/${mode}`, {}, false),

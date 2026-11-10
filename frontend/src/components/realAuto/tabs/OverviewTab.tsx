@@ -6,6 +6,8 @@ import { fmtDate, fmtHms, fmtInr, fmtTime, pickNum, pnlColor } from "../format";
 import { OrderFlowDiagram } from "../panels";
 import { Dot, SectionHdr, StatCard } from "../parts";
 import type { Mode } from "../types";
+import DhanMoneyCard from "../../DhanMoneyCard";   // Round 270
+import { openCharges, afterCharges } from "../../../moneyView";
 import SessionRail from "../../session/SessionRail";   // E277: the trading-day rail
 
 // E66 - E31 step 10: the "overview" tab, moved out of RealAutoTrade.tsx (JSX unchanged). PortfolioSummary and GateStep moved with it
@@ -190,6 +192,22 @@ export function OverviewTab({
             <div className="space-y-4">
               {/* E277: where IST time stands against the plan's morning timeline (display only) */}
               <SessionRail service="rt" />
+              {/* Round 270: Dhan money - the three-way allocation, what is free to trade, charges, open P&L before / after charges */}
+              {(() => {
+                const unreal = positions.reduce((a, p) => a + ((p.current_price ?? p.avg_entry_price) - p.avg_entry_price) * p.qty_open, 0);
+                const est = positions.reduce((a, p) => a + (openCharges({ side: "LONG", qty: p.qty_open, entry: p.avg_entry_price, price: p.current_price, delivery: !!p.broker_imported, entryAlreadyPaid: !!p.broker_imported }) ?? 0), 0);
+                const net = afterCharges(unreal, est);
+                return (
+                  <DhanMoneyCard fetcher={realTradeApi.capitalBoard} thisService="real_trade" enabled={loggedIn}
+                    dhanAvailable={pickNum(dhanAccount?.funds, "availabelBalance", "availableBalance", "availableCash")}
+                    tiles={[
+                      { label: "Charges paid today", value: cumBrokerage ? `-${fmtInr(cumBrokerage.today.all_charges, 2)}` : "-", sub: cumBrokerage ? `${cumBrokerage.today.orders} filled orders` : "REAL mode + login", tone: "bad" },
+                      { label: "Charges since start", value: cumBrokerage ? `-${fmtInr(cumBrokerage.all_charges_total, 0)}` : "-", tone: "bad" },
+                      { label: "Open P&L before charges", value: positions.length ? `${unreal >= 0 ? "+" : ""}${fmtInr(unreal, 2)}` : "-", tone: unreal >= 0 ? "good" : "bad" },
+                      { label: "Open P&L after charges", value: positions.length && net != null ? `${net >= 0 ? "+" : ""}${fmtInr(net, 2)}` : "-", sub: positions.length ? `if all closed now (est. charges ${fmtInr(est, 0)})` : "no open positions", tone: net != null && net < 0 ? "bad" : "good" },
+                    ]} />
+                );
+              })()}
               {/* Gate sequence */}
               <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <SectionHdr>Arming sequence — {mode} mode</SectionHdr>

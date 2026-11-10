@@ -11,6 +11,7 @@
 import type { StructureSnapshotDoc, StructureStatusDoc } from "./structureView";
 import type { FlowStatsDoc } from "./tapeView";
 import type { SymbolTapeDoc } from "./tapeSymbolView";
+import type { BoardStatus } from "./moneyView";   // Round 270
 import type { SetupStamp, SetupStatsDoc } from "./setupView";
 import type { PremarketPlanDoc } from "./sessionView";
 
@@ -480,6 +481,8 @@ export interface PendingReconcileRow {
 export interface PendingReconcileDoc { count: number; rows: PendingReconcileRow[] }
 
 export const positionStocksApi = {
+  // Round 270: the three-way Dhan capital board (admin session)
+  capitalBoard: () => psRequest<BoardStatus>("/capital/board", {}, true),
   health: () => psRequest<{ status: string; service: string }>("/health"),
 
   // group306-309: Market Board (read-only, no admin login needed).

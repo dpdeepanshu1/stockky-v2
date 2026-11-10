@@ -82,13 +82,22 @@ def _out(a: argparse.Namespace, name: str, res: Dict[str, Any]) -> int:
     return 0
 
 
+def _default_holidays() -> str:
+    """Round 276: the CLI runs used no holidays at all unless you typed them; default to the same official list the live engine uses."""
+    try:
+        import config
+        return ",".join(config.HOLIDAYS)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _common(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--capital", type=float, default=500000.0)
     ap.add_argument("--out", default="", help="folder for the result files (default $FNO_DATA_DIR or .)")
     ap.add_argument("--set", action="append", help="override a Params field, e.g. --set sl_pct=20 --set min_score=40")
     ap.add_argument("--from", dest="start", default=None)
     ap.add_argument("--to", dest="end", default=None)
-    ap.add_argument("--holidays", default="", help="comma-separated YYYY-MM-DD")
+    ap.add_argument("--holidays", default=_default_holidays(), help="comma-separated YYYY-MM-DD (default: the official 2026 NSE list in config.py; pass \"\" for none)")
 
 
 def main_sim(argv: Optional[List[str]] = None) -> int:

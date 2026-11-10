@@ -65,6 +65,7 @@ class Ctx:
         self.daily_raw, self.intraday_raw, self.summary = daily_raw, intraday_raw, summary
         self._daily_cache = daily_cache
         self.expiry_day = bool(expiry_day)          # True: the contract this context is for expires today (only EXPIRY_* strategies look at it)
+        self.errors: List[Dict[str, Any]] = []      # round 278: strategies whose rule RAISED (a bug or bad data); `candidates` used to swallow these without a trace
         self.vetoes: List[Dict[str, Any]] = []      # signals the option chain cancelled (round 236: the SIM has no chain, so this is how live-vs-SIM can be measured)
         self.cur: str = ""                          # the strategy being evaluated (set by `candidates`)
 
@@ -432,8 +433,9 @@ def candidates(x: Ctx, keys: Sequence[str], core: Optional[Dict[str, Any]] = Non
         x.cur = k
         try:
             s = spec["fn"](x)
-        except Exception:  # noqa: BLE001 - one broken strategy must never stop the others or the cycle
+        except Exception as e:  # noqa: BLE001 - one broken strategy must never stop the others or the cycle ...
             s = None
+            x.errors.append({"strategy": k, "error": f"{type(e).__name__}: {str(e)[:160]}"})     # ... but it is recorded (round 278): a broken rule must not look like "no signal"
         if s:
             out.append({**s, "strategy": k})
     return out
@@ -444,4 +446,10 @@ def evaluate(key: str, x: Ctx) -> Dict[str, Any]:
     if key == CORE:
         return core_bias(x)
     hit = candidates(x, [key])
-    return hit[0] if hit else {"direction": FLAT, "score": 0.0, "reasons": [], "parts": {}, "strategy": key}
+    if hit:
+        return hit[0]
+    out: Dict[str, Any] = {"direction": FLAT, "score": 0.0, "reasons": [], "parts": {}, "strategy": key}
+    err = next((e["error"] for e in x.errors if e["strategy"] == key), None)
+    if err:
+        out["error"] = err                                  # round 278: a backtest can tell "the rule raised" from "the rule did not fire"
+    return out

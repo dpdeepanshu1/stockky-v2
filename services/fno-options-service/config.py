@@ -48,11 +48,54 @@ MARKET_DATA_URL = _s("MARKET_DATA_URL", "http://market-data-service:8001").rstri
 MARKET_DATA_TIMEOUT_S = _f("FNO_MARKET_DATA_TIMEOUT_S", 12.0)
 REAL_TRADE_URL = _s("REAL_TRADE_URL", "http://real-trade-service:8005").rstrip("/")   # only used to borrow the Dhan token for REAL orders
 DATA_DIR = _s("FNO_DATA_DIR", "/data/fno")                   # sqlite db, chain snapshots, backtest outputs (a docker volume)
+
+# The official 2026 NSE trading-holiday list: the EIGHTH copy of the list the other services keep (see scripts/check_holiday_lists_sync.py, which compares this one too).
+_NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # Maharashtra Municipal Corporation elections
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Ram Navami
+    "2026-03-31",  # Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid
+    "2026-06-26",  # Muharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali Balipratipada
+    "2026-11-24",  # Guru Nanak Jayanti
+    "2026-12-25",  # Christmas
+    # 2027 PENDING: NSE publishes it in December 2026. Not guessed; add here AND in the other copies, then run scripts/check_holiday_lists_sync.py.
+}
+
+
+def _dates(name: str, default: tuple) -> tuple:
+    """Comma / space separated YYYY-MM-DD list, blank-safe; a malformed entry is dropped, never a crash. Blank or absent = `default`."""
+    import re
+    from datetime import date
+    raw = _s(name, "")
+    if not raw:
+        return tuple(sorted(default))
+    out = []
+    for tok in re.split(r"[,\s;]+", raw):
+        try:
+            out.append(date.fromisoformat(tok).isoformat())
+        except ValueError:
+            continue
+    return tuple(sorted(set(out)))
+
+
+# Weekday exchange holidays (IST dates) the engine skips. Round 272: the engine used to be built with NO holidays. Round 274: default = the full official list above;
+# FNO_HOLIDAYS (if set) REPLACES it, e.g. for a 2027 list before this file is updated.
+HOLIDAYS = _dates("FNO_HOLIDAYS", tuple(_NSE_HOLIDAYS_2026))
 POLL_INTERVAL_S = _f("FNO_POLL_INTERVAL_S", 5.0)             # engine tick; Dhan's chain limit (1 request / 3 s) is enforced upstream
 CHAIN_INTERVAL_S = _f("FNO_CHAIN_INTERVAL_S", 6.0)           # per underlying
 SNAPSHOT_INTERVAL_S = _f("FNO_SNAPSHOT_INTERVAL_S", 60.0)    # how often a chain snapshot is recorded for the replay backtest
 INDEX_BARS_REFRESH_S = _f("FNO_INDEX_BARS_REFRESH_S", 60.0)
 STATE_BACKEND = _s("FNO_STATE_BACKEND", "sqlite")
+DAILY_EXCLUDE_TODAY = _b("FNO_DAILY_EXCLUDE_TODAY", True)        # round 287: the live direction logic reads the daily candles up to YESTERDAY, like every backtest (the session still running is a repainting candle). false = the old behaviour (env only)
 
 # ---- exchange facts used only as FALLBACKS (the live value is the lot size in Dhan's scrip master) -----------------------
 LOT_FALLBACK = {"NIFTY": _i("FNO_LOT_NIFTY", 65), "SENSEX": _i("FNO_LOT_SENSEX", 20)}   # Nov 2026; check with /dhan/options/contracts

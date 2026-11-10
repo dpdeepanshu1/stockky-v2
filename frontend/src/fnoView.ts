@@ -33,6 +33,50 @@ export function positionProgress(p: FnoPosition): { pct: number; pnl: number | n
   return { pct: Math.round(pct), pnl: pnl == null ? null : Math.round(pnl * 100) / 100 };
 }
 
+/** Round 289: an exit SELL whose call failed (network / HTTP 5xx) may be live at Dhan. The engine then sends no second SELL and no stop until Dhan's positions settle it (round 282).
+ *  Null = nothing in doubt. `limitPx` is the price the SELL was sent at; `correlationId` is what to look for in the Dhan app. Reads the overview row only: it places nothing. */
+export function exitDoubtView(p: FnoPosition): { correlationId: string; reason: string; limitPx: number | null; text: string } | null {
+  const ids = p.broker_order_ids || {};
+  if (!p.exit_doubt && !ids.exit_doubt) return null;
+  const correlationId = String(ids.exit_doubt || "?");
+  const reason = String(ids.exit_doubt_reason || "exit");
+  const px = Number(ids.exit_doubt_px);
+  const limitPx = Number.isFinite(px) && ids.exit_doubt_px !== undefined && ids.exit_doubt_px !== "" ? px : null;
+  const text = `The ${reason} SELL for ${p.label} failed with a network / server error and may still be live at Dhan` + (limitPx != null ? ` (limit ${limitPx.toFixed(2)})` : "") +
+    `. The engine sends no second SELL and no stop until Dhan's positions settle it. Open the Dhan app` + (correlationId !== "?" ? ` and look for correlationId ${correlationId}` : "") +
+    `: if the SELL is there, leave this alone or close it in Dhan; only if it is NOT there, clear the mark so the engine may sell again.`;
+  return { correlationId, reason, limitPx, text };
+}
+
+/** Round 292: a stop-loss order whose call failed (network / HTTP 5xx) may be resting at Dhan. The engine places no second stop (two could sell twice and leave a short) and asks Dhan for the order by the
+ *  correlationId it sent, every cycle. Null = nothing in doubt. The button only matters when that lookup cannot answer: it places nothing. */
+export function stopDoubtView(p: FnoPosition): { correlationId: string; text: string } | null {
+  const ids = p.broker_order_ids || {};
+  if (!p.stop_doubt && !ids.sl_doubt) return null;
+  const correlationId = String(ids.sl_doubt || "?");
+  const text = `The broker-side stop for ${p.label} failed with a network / server error and may be resting at Dhan` + (correlationId !== "?" ? ` (correlationId ${correlationId})` : "") +
+    `. The engine asks Dhan about it every cycle and places no second stop meanwhile; the software stop keeps watching the premium. If Dhan's order lookup cannot answer, look in the Dhan app: ` +
+    `if a stop for this contract is there, leave it; only if none is there, clear the mark so the engine may place a stop again.`;
+  return { correlationId, text };
+}
+
+/** How many of these positions have a stop order in doubt. */
+export function stopDoubtCount(ps: FnoPosition[] | undefined | null): number {
+  return (ps || []).filter((p) => stopDoubtView(p) !== null).length;
+}
+
+/** Round 290: the warning for settings that cannot work together. Empty list / missing = nothing to show (null). */
+export function settingsProblemText(problems: string[] | undefined | null): string | null {
+  const list = (problems || []).filter((x) => typeof x === "string" && x.trim());
+  if (!list.length) return null;
+  return `The engine refuses every new entry until this is fixed: ${list.join("; ")}. Fix it on Real Money Calibration > F&O (or in .env and restart).`;
+}
+
+/** How many of these positions have an exit SELL in doubt (the badge on the State card). */
+export function exitDoubtCount(ps: FnoPosition[] | undefined | null): number {
+  return (ps || []).filter((p) => exitDoubtView(p) !== null).length;
+}
+
 /** Day totals of closed positions, grouped by IST day, newest first. Net is used when present, else gross. */
 export function dayTotals(ps: FnoPosition[]): { day: string; trades: number; wins: number; net: number }[] {
   const by = new Map<string, { day: string; trades: number; wins: number; net: number }>();

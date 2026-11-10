@@ -8,6 +8,7 @@ import control.boot  # noqa: F401  (applies saved Calibration overrides to confi
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import asdict
@@ -21,7 +22,7 @@ from pydantic import BaseModel
 import config
 from auth import require_admin, require_admin_or_runner
 from backtest import metrics as bt_metrics, portfolio as bt_portfolio, replay as bt_replay, report as bt_report, sim as bt_sim
-from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, probecheck, readiness, recorder, signals, stages, strategies
+from fno import analytics, costs, creds as dhan_creds, engine as eng, execution, gates, probecheck, readiness, recorder, signals, stages, strategies
 from fno import capital as fno_capital
 from fno import liveparams
 from fno.params import Params
@@ -36,9 +37,9 @@ app = FastAPI(title="fno-options-service", version="1.0.0")
 
 os.makedirs(config.DATA_DIR, exist_ok=True)
 store = Store(os.path.join(config.DATA_DIR, "fno.db"))
-provider = HttpProvider(config.MARKET_DATA_URL, config.MARKET_DATA_TIMEOUT_S)
+provider = HttpProvider(config.MARKET_DATA_URL, config.MARKET_DATA_TIMEOUT_S, daily_exclude_today=config.DAILY_EXCLUDE_TODAY)
 broker = execution.DhanBroker(config.DHAN_BASE_URL, config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, config.ORDER_TIMEOUT_S) if (config.DHAN_CLIENT_ID and config.DHAN_ACCESS_TOKEN) else None
-engine = eng.Engine(store, provider, config, broker=broker)
+engine = eng.Engine(store, provider, config, broker=broker, holidays=tuple(config.HOLIDAYS))
 runner = Runner(engine, config, config.DATA_DIR)
 
 # Real Money Calibration switches (GET/POST/DELETE /control/..., admin session required). See control/kit.py - the same engine as real-trade / position-stocks.
@@ -46,7 +47,8 @@ from control import kit as _control_kit  # noqa: E402
 from control.catalog import CATALOG as _CONTROL_CATALOG  # noqa: E402
 
 try:  # a bug in the control page must never stop the service from booting
-    _control = _control_kit.Controller("fno-options-service", _CONTROL_CATALOG, restart_hint="docker compose restart fno-options-service")
+    from control.guard import FnoController as _FnoController  # noqa: E402  (round 286: the page refuses a time that cannot work with the other times)
+    _control = _FnoController("fno-options-service", _CONTROL_CATALOG, restart_hint="docker compose restart fno-options-service")
     _control_kit.mount(app, _control, require_admin)
 except Exception as _control_err:  # noqa: BLE001
     log.error("control routes NOT mounted (%s: %s)", type(_control_err).__name__, _control_err)
@@ -88,10 +90,18 @@ def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
         row = ch.row(p.strike) if ch else None
         side = row.side(p.opt_type) if row else None
         prem = side.mid if side else None
-        opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": ( round((prem - p.entry_premium) * p.qty, 2) if prem else None)})
-    return {"now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist()), "locks": _locks(), "day": store.day_summary(_today(), mode),
+        unreal = round((prem - p.entry_premium) * p.qty, 2) if prem else None
+        est = None                                       # Round 270: what closing NOW would cost (same costs.round_trip as the stored charges)
+        if prem:
+            try:
+                est = round(costs.round_trip(p.underlying, p.entry_premium, prem, p.qty, liveparams.current(), child=p.parent_id is not None).total, 2)
+            except Exception:  # noqa: BLE001
+                est = None
+        opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": unreal, "est_charges": est, "exit_doubt": bool(p.broker_order_ids.get("exit_doubt")), "stop_doubt": bool(p.broker_order_ids.get("sl_doubt")),
+                      "unrealized_net": round(unreal - est, 2) if unreal is not None and est is not None else None})
+    return {"now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist(), config.HOLIDAYS), "locks": _locks(), "day": store.day_summary(_today(), mode),
             "open_positions": opens, "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
-            "underlyings": engine.underlyings(), "params": liveparams.current().to_json(),
+            "underlyings": engine.underlyings(), "params": liveparams.current().to_json(), "param_problems": gates.param_problems(liveparams.current()),
             "switches": {"underlyings": str(config.FNO_UNDERLYINGS).upper(), "record_snapshots": bool(config.FNO_RECORD_SNAPSHOTS)}}
 
 
@@ -144,16 +154,17 @@ def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
         ex = provider.expiries(und)
         steps.append({"step": f"{und} expiries", "ok": bool(ex), "detail": ", ".join(ex[:3])})
     steps.append({"step": "India VIX", "ok": provider.vix() is not None, "detail": str(provider.vix())})
+    steps.append(gates.settings_step(liveparams.current()))             # round 290: boot-time env values the page's guard never saw
     steps.append({"step": "engine runner thread", "ok": runner.alive(), "detail": runner.last_error or ""})
     lt = engine.last_tick
     steps.append({"step": "last engine cycle", "ok": bool(lt.get("ok")) if lt.get("ts") else None, "detail": (lt.get("error") or "") + (f" ({int(time.time() - lt['ts'])}s ago)" if lt.get("ts") else "no cycle yet")})
-    steps.append({"step": "snapshots recorded today", "ok": runner.snapshots_today > 0 or not market_open(eng.now_ist()), "detail": str(runner.snapshots_today)})
+    steps.append({"step": "snapshots recorded today", "ok": runner.snapshots_today > 0 or not market_open(eng.now_ist(), config.HOLIDAYS), "detail": str(runner.snapshots_today)})
     steps.append({"step": "recorded days available for replay", "ok": None, "detail": str(len(recorder.list_days(config.DATA_DIR)))})
     stg: List[Dict[str, Any]] = []
     try:                                                              # round 264: the same facts as ordered stages (market data > ... > reconcile); never breaks the flat list above
         ok_of = {x["step"]: x["ok"] for x in steps}
         evs = {k: store.events(k, stages.EVENT_LIMIT) for k in stages.KINDS}
-        stg = stages.build({"now": time.time(), "enabled": bool(config.FNO_ENGINE_ENABLED), "market_open": market_open(eng.now_ist()),
+        stg = stages.build({"now": time.time(), "enabled": bool(config.FNO_ENGINE_ENABLED), "market_open": market_open(eng.now_ist(), config.HOLIDAYS),
                             "md_ok": bool(ok_of.get("market-data reachable")), "vix_ok": bool(ok_of.get("India VIX")),
                             "expiries_ok": bool(ok_of.get("NIFTY expiries")) and bool(ok_of.get("SENSEX expiries")),
                             "md_detail": provider.last_error or "", "last_tick": engine.last_tick, "events": evs, "open_positions": len(store.open_positions()),
@@ -227,7 +238,10 @@ def probe_note(body: ProbeNote, admin=Depends(require_admin)) -> Dict[str, Any]:
 # ── data views ───────────────────────────────────────────────────────────────────────────────────────────────
 @app.get("/fno/expiries")
 def expiries(underlying: str = "NIFTY", admin=Depends(require_admin)) -> Dict[str, Any]:
-    return {"underlying": underlying.upper(), "expiries": provider.expiries(underlying.upper())}
+    u = underlying.upper()
+    if u not in ("NIFTY", "SENSEX"):
+        raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX")
+    return {"underlying": u, "expiries": provider.expiries(u)}
 
 
 @app.get("/fno/chain")
@@ -235,6 +249,8 @@ def chain(underlying: str = "NIFTY", expiry: str = "", admin=Depends(require_adm
     u = underlying.upper()
     if u not in ("NIFTY", "SENSEX"):
         raise HTTPException(status_code=400, detail="underlying must be NIFTY or SENSEX")
+    if expiry and not _DAY_RE.match(expiry):
+        raise HTTPException(status_code=400, detail="expiry must be YYYY-MM-DD")
     p = liveparams.current()
     exp = expiry or engine.pick_expiry(u, eng.now_ist().date(), p) or ""
     ch = provider.chain(u, exp) if exp else None
@@ -269,7 +285,7 @@ def strategies_view(days: int = Query(30, le=400), admin=Depends(require_admin))
 @app.get("/fno/signals")
 def signals_log(limit: int = Query(100, le=500), underlying: Optional[str] = None, admin=Depends(require_admin)) -> Dict[str, Any]:
     out = []
-    for kind in ("signal", "skip", "veto", "entry", "exit", "real_blocked", "order_failed", "stale"):
+    for kind in ("signal", "skip", "veto", "strategy_error", "entry", "exit", "real_blocked", "order_failed", "stale"):
         out += store.events(kind, limit, underlying.upper() if underlying else None)
     out.sort(key=lambda e: e["ts"], reverse=True)
     return {"events": out[:limit]}
@@ -282,11 +298,8 @@ def log_events(limit: int = Query(200, le=1000), kind: Optional[str] = None, adm
 
 @app.get("/fno/positions")
 def positions(status: str = "all", mode: Optional[str] = None, day: Optional[str] = None, limit: int = Query(200, le=2000), admin=Depends(require_admin)) -> Dict[str, Any]:
-    ps = store.positions(mode=mode.upper() if mode else None, day=day, limit=limit)
-    if status == "open":
-        ps = [p for p in ps if p.status == "OPEN"]
-    elif status == "closed":
-        ps = [p for p in ps if p.status == "CLOSED"]
+    st = status.upper() if status.lower() in ("open", "closed") else None      # round 276: filtered in the query, before LIMIT (an old leftover OPEN row used to fall off the newest-200 list)
+    ps = store.positions(mode=mode.upper() if mode else None, day=day, limit=limit, status=st)
     return {"positions": [{**p.to_json(), "label": p.label()} for p in ps]}
 
 
@@ -332,6 +345,26 @@ def squareoff(admin=Depends(require_admin)) -> Dict[str, Any]:
     return {"closed": closed}
 
 
+@app.post("/fno/exit-doubt/clear")
+def exit_doubt_clear(position: int, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 282: an exit SELL whose call failed (network / HTTP 5xx) may be live at Dhan, so the engine sends no second SELL and no stop until Dhan's positions show the contract flat.
+    Once you have looked in the Dhan app and the SELL is NOT there, this clears the mark and the engine may sell again. It never places an order itself. Logged in the journal."""
+    out = engine.clear_exit_doubt(position)
+    if out.get("error"):
+        raise HTTPException(status_code=404, detail=out["error"])
+    return out
+
+
+@app.post("/fno/stop-doubt/clear")
+def stop_doubt_clear(position: int, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 292: a stop-loss order whose call failed (network / HTTP 5xx) may be resting at Dhan, so the engine places no second stop until Dhan's order lookup (by the correlationId it sent) says what became of it.
+    If that lookup cannot answer, you can look in the Dhan app yourself: when no stop is there (or you cancelled it), this clears the mark and the engine may place a stop again. It never places an order itself. Logged."""
+    out = engine.clear_stop_doubt(position)
+    if out.get("error"):
+        raise HTTPException(status_code=404, detail=out["error"])
+    return out
+
+
 _borrowed: Dict[str, Any] = {"prev": None}      # set while the Dhan token on config was borrowed from real-trade-service (memory only)
 
 
@@ -371,6 +404,9 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 
 
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 class BacktestBody(BaseModel):
     kind: str                                   # replay | sim
     underlyings: List[str] = ["NIFTY"]
@@ -384,15 +420,15 @@ def _run_job(job_id: str, body: BacktestBody) -> None:
         if body.kind == "replay":
             days = body.days or recorder.list_days(config.DATA_DIR)
             daily = {u: provider.daily(u) for u in body.underlyings}
-            res = bt_replay.run(config.DATA_DIR, days, daily, body.overrides, body.underlyings)
+            res = bt_replay.run(config.DATA_DIR, days, daily, body.overrides, body.underlyings, list(config.HOLIDAYS))   # round 276: holidays (they decide the first trading day of the week and the holiday-shifted expiry)
         else:
             u = body.underlyings[0]
             p = liveparams.current().with_(**body.overrides)
             hist = provider.intraday_history(u) if hasattr(provider, "intraday_history") else provider.intraday(u)
-            res = (bt_portfolio.run(u, provider.daily(u), hist, None, p) if body.strategy.upper() == "ALL"
-                   else bt_sim.run(u, provider.daily(u), hist, None, p, strategy=body.strategy.upper()))
+            res = (bt_portfolio.run(u, provider.daily(u), hist, None, p, holidays=list(config.HOLIDAYS)) if body.strategy.upper() == "ALL"
+                   else bt_sim.run(u, provider.daily(u), hist, None, p, strategy=body.strategy.upper(), holidays=list(config.HOLIDAYS)))
             res["notes"].append("data: market-data daily + the intraday candles it serves (a few recent days only); use scripts/fno_sim_backtest.py with CSV files for a long run")
-        path = bt_report.save(config.DATA_DIR, f"fno_{body.kind}", res)
+        path = bt_report.save(config.DATA_DIR, bt_report.job_name(body.kind, body.underlyings, body.strategy), res)       # round 285: kind + index + strategy in the name, never overwritten
         txt = path[:-5] + ".txt"
         with open(txt, "w", encoding="utf-8") as fh:
             fh.write(bt_report.render_text(res))
@@ -426,6 +462,8 @@ def backtest_latest_job(admin=Depends(require_admin_or_runner)) -> Dict[str, Any
 def backtest_run(body: BacktestBody, admin=Depends(require_admin)) -> Dict[str, Any]:
     if body.kind not in ("replay", "sim"):
         raise HTTPException(status_code=400, detail="kind must be replay or sim")
+    if body.days is not None and any(not _DAY_RE.match(str(d)) for d in body.days):
+        raise HTTPException(status_code=400, detail="days must be YYYY-MM-DD (they name folders under snapshots/)")
     if any(u.upper() not in ("NIFTY", "SENSEX") for u in body.underlyings) or not body.underlyings:
         raise HTTPException(status_code=400, detail="underlyings must be NIFTY and/or SENSEX")
     body.underlyings = [u.upper() for u in body.underlyings]
@@ -445,16 +483,16 @@ def backtests(admin=Depends(require_admin_or_runner)) -> Dict[str, Any]:
     d = os.path.join(config.DATA_DIR, "backtests")
     files = []
     if os.path.isdir(d):
-        for f in sorted(os.listdir(d), reverse=True)[:200]:
-            if f.endswith(".json"):
-                try:
-                    r = json.load(open(os.path.join(d, f), encoding="utf-8"))
-                    o = (r.get("metrics") or {}).get("overall") or {}
-                    files.append({"name": f, "kind": r.get("kind"), "underlying": r.get("underlying"), "from": r.get("from"), "to": r.get("to"), "days": r.get("days"),
-                                  "trades": o.get("trades"), "net": o.get("net"), "win_rate_pct": o.get("win_rate_pct"), "max_drawdown": o.get("max_drawdown"),
-                                  "verdict": (r.get("verdict") or {}).get("status")})
-                except (OSError, ValueError):
-                    continue
+        jsons = [f for f in os.listdir(d) if f.endswith(".json")]
+        for f in sorted(jsons, key=lambda n: (os.path.getmtime(os.path.join(d, n)), n), reverse=True)[:200]:      # round 285: newest first by write time (the names now differ by index / strategy, so a name sort is no longer chronological)
+            try:
+                r = json.load(open(os.path.join(d, f), encoding="utf-8"))
+                o = (r.get("metrics") or {}).get("overall") or {}
+                files.append({"name": f, "kind": r.get("kind"), "underlying": r.get("underlying"), "from": r.get("from"), "to": r.get("to"), "days": r.get("days"),
+                              "trades": o.get("trades"), "net": o.get("net"), "win_rate_pct": o.get("win_rate_pct"), "max_drawdown": o.get("max_drawdown"),
+                              "verdict": (r.get("verdict") or {}).get("status")})
+            except (OSError, ValueError):
+                continue
     with _jobs_lock:
         jobs = list(_jobs.values())[-10:]
     return {"results": files, "jobs": jobs, "recorded_days": recorder.list_days(config.DATA_DIR), "snapshot_days": store.snapshot_days()[-60:]}
@@ -471,9 +509,11 @@ def _safe_result_path(name: str) -> str:
 
 @app.get("/fno/backtests/{name}")
 def backtest_result(name: str, admin=Depends(require_admin)) -> Dict[str, Any]:
-    return json.load(open(_safe_result_path(name), encoding="utf-8"))
+    with open(_safe_result_path(name), encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 @app.get("/fno/backtests/{name}/text", response_class=PlainTextResponse)
 def backtest_text(name: str, admin=Depends(require_admin)) -> str:
-    return bt_report.render_text(json.load(open(_safe_result_path(name), encoding="utf-8")))
+    with open(_safe_result_path(name), encoding="utf-8") as fh:
+        return bt_report.render_text(json.load(fh))

@@ -81,7 +81,26 @@ def param_problems(p: Params) -> List[str]:
         bad.append(f"slippage {p.slippage_pct:g} % must be from 0 to under 50 (FNO_SLIPPAGE_PCT)")
     if p.max_lots < 1:
         bad.append(f"max lots {p.max_lots} must be at least 1 (FNO_MAX_LOTS)")
+    # Round 284: the times must fit together. An entry window that closes at or after the square-off time opens a position that the same cycle closes again (two flat brokerages, a
+    # spread paid, nothing earned); a window that ends before it starts never opens. An unreadable time falls back to the shipped default, as `parse_hhmm` does everywhere else.
+    t_start, t_end = parse_hhmm(p.entry_start, dtime(9, 30)), parse_hhmm(p.entry_end, dtime(14, 30))
+    t_off, t_xend, t_xoff = parse_hhmm(p.squareoff_at, dtime(15, 15)), parse_hhmm(p.expiry_entry_end, dtime(13, 30)), parse_hhmm(p.expiry_squareoff_at, dtime(14, 45))
+    if t_start > t_end:
+        bad.append(f"entry window opens {p.entry_start} after it closes {p.entry_end} (FNO_ENTRY_START / FNO_ENTRY_END)")
+    if t_end >= t_off:
+        bad.append(f"last entry {p.entry_end} must be before the square-off {p.squareoff_at}: a position opened then would be closed in the same cycle (FNO_ENTRY_END / FNO_SQUAREOFF_AT)")
+    if t_xend >= min(t_off, t_xoff):
+        bad.append(f"expiry-day last entry {p.expiry_entry_end} must be before the expiry-day square-off {p.expiry_squareoff_at} (FNO_EXPIRY_ENTRY_END / FNO_EXPIRY_SQUAREOFF_AT)")
     return bad
+
+
+def settings_step(p: Params) -> Dict[str, Any]:
+    """Round 290: the pipeline-check line for `param_problems`. A time (or a number) that came in through the environment at boot is not seen by the Calibration page's guard (round 286), so the engine
+    refused every entry with the reason only in the skip log. This puts the same reasons where you look: ok False and the reasons in `detail`; ok True and the window in `detail`."""
+    bad = param_problems(p)
+    if bad:
+        return {"step": "settings fit together", "ok": False, "detail": "the engine refuses every entry until this is fixed: " + "; ".join(bad)}
+    return {"step": "settings fit together", "ok": True, "detail": f"entry {p.entry_start}-{p.entry_end}, square-off {p.squareoff_at}; expiry day entry until {p.expiry_entry_end}, out {p.expiry_squareoff_at}"}
 
 
 def entry_gates(now: datetime, expiry: date, vix: Optional[float], chain_age_s: float, state: DayState, p: Params, key: str = "",

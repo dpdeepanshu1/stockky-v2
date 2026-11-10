@@ -104,3 +104,46 @@ assert.match(probeHeadline(PD({}, { exit_code: 2, outcome: "refused, nothing is 
 assert.equal(probeHeadline(PD({}, { exit_code: 0, outcome: "round trip done", reason: "stale" })).text, "Probe: round trip done."); assert.equal(probeHeadline(PD({}, { exit_code: 2, outcome: "refused" })).text, "Probe: refused.");
 assert.equal(probeHeadline(PD({}, {})).tone, "good"); assert.equal(probeHeadline(PD({}, { exit_code: 2, outcome: "refused" })).tone, "warn");
 console.log("fnoView round 265 ok");
+
+// Round 289: an exit SELL in doubt is shown, with what to look for in the Dhan app.
+import { exitDoubtView, exitDoubtCount } from "./fnoView.ts";
+const Q = (o) => P({ status: "OPEN", label: "NIFTY 24500 CE", ...o });
+assert.equal(exitDoubtView(Q({})), null);
+assert.equal(exitDoubtView(Q({ exit_doubt: false, broker_order_ids: { entry: "1" } })), null);
+const dv = exitDoubtView(Q({ exit_doubt: true, broker_order_ids: { exit_doubt: "stky-77", exit_doubt_reason: "SL", exit_doubt_px: "74.5" } }));
+assert.equal(dv.correlationId, "stky-77"); assert.equal(dv.reason, "SL"); assert.equal(dv.limitPx, 74.5);
+assert.match(dv.text, /correlationId stky-77/); assert.match(dv.text, /limit 74\.50/); assert.match(dv.text, /NOT there/);
+const dq = exitDoubtView(Q({ exit_doubt: true, broker_order_ids: { exit_doubt: "?" } }));       // mark without detail: still shown, no invented id or price
+assert.equal(dq.limitPx, null); assert.doesNotMatch(dq.text, /correlationId/); assert.doesNotMatch(dq.text, /limit /);
+assert.ok(exitDoubtView(Q({ broker_order_ids: { exit_doubt: "x" } })));                          // the ids alone are enough
+assert.equal(exitDoubtCount([Q({}), Q({ exit_doubt: true, broker_order_ids: { exit_doubt: "a" } }), Q({ exit_doubt: true, broker_order_ids: { exit_doubt: "b" } })]), 2);
+assert.equal(exitDoubtCount(null), 0); assert.equal(exitDoubtCount([]), 0);
+console.log("fnoView round 289 ok");
+
+// Round 290: settings that cannot work together are shown, not only logged.
+import { settingsProblemText } from "./fnoView.ts";
+assert.equal(settingsProblemText(undefined), null); assert.equal(settingsProblemText(null), null); assert.equal(settingsProblemText([]), null); assert.equal(settingsProblemText(["", "  "]), null);
+const spText = settingsProblemText(["last entry 15:20 must be before the square-off 15:15 (FNO_ENTRY_END / FNO_SQUAREOFF_AT)", "stop loss 150 % must be between 0 and 100 (FNO_SL_PCT)"]);
+assert.match(spText, /refuses every new entry/); assert.match(spText, /FNO_ENTRY_END/); assert.match(spText, /FNO_SL_PCT/); assert.match(spText, /;/);
+console.log("fnoView round 290 ok");
+
+// Round 291: the same warning on Real Money Calibration > F&O (source checks: components are not rendered here)
+import { readFileSync as readSrc291 } from "node:fs";
+const calSrc = readSrc291(new URL("./components/calibration/FnoCalibration.tsx", import.meta.url), "utf8");
+const warnSrc = readSrc291(new URL("./components/fno/FnoSettingsWarning.tsx", import.meta.url), "utf8");
+assert.match(calSrc, /import FnoSettingsWarning from "\.\.\/fno\/FnoSettingsWarning"/); assert.match(calSrc, /<FnoSettingsWarning \/>/);
+assert.match(warnSrc, /settingsProblemText\(ov\.data\?\.param_problems\)/); assert.match(warnSrc, /if \(!text\) return null/); assert.match(warnSrc, /fnoApi\.overview/);
+console.log("fnoView round 291 ok");
+
+// Round 292: a stop order in doubt is shown with its correlationId; the exit-doubt and stop-doubt views are independent.
+import { stopDoubtView, stopDoubtCount } from "./fnoView.ts";
+assert.equal(stopDoubtView(Q({})), null);
+assert.equal(stopDoubtView(Q({ broker_order_ids: { sl: "5" } })), null);
+const sdv = stopDoubtView(Q({ stop_doubt: true, broker_order_ids: { sl_doubt: "sl1a2b", sl_doubt_ts: "1789000000.0" } }));
+assert.equal(sdv.correlationId, "sl1a2b"); assert.match(sdv.text, /correlationId sl1a2b/); assert.match(sdv.text, /no second stop/); assert.match(sdv.text, /only if none is there/);
+const sdq = stopDoubtView(Q({ stop_doubt: true }));                                              // flag without detail: shown, no invented id
+assert.equal(sdq.correlationId, "?"); assert.doesNotMatch(sdq.text, /correlationId/);
+assert.ok(stopDoubtView(Q({ broker_order_ids: { sl_doubt: "x" } })));
+assert.equal(stopDoubtCount([Q({}), Q({ stop_doubt: true }), Q({ broker_order_ids: { sl_doubt: "x" } })]), 2); assert.equal(stopDoubtCount(null), 0);
+assert.equal(exitDoubtView(Q({ stop_doubt: true, broker_order_ids: { sl_doubt: "x" } })), null);   // a stop in doubt is not an exit in doubt
+console.log("fnoView round 292 ok");

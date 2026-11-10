@@ -1,5 +1,6 @@
 import type { DhanStatus, GateStatus } from "../../../realTradeApi";
-import CapitalSplitCard from "../../CapitalSplitCard";
+import DhanMoneyCard from "../../DhanMoneyCard";   // Round 270
+import { realTradeApi } from "../../../realTradeApi";
 import StockCandleBlock from "../../StockCandleBlock";
 import { GlintBox, PriceRoll } from "../../ui/motion";
 import { fmtInr, groupDhanOrdersBySymbol, pickNum, pnlColor, positionLevels } from "../format";
@@ -19,14 +20,10 @@ export interface LiveTabProps {
   liveLoading: boolean;
   liveError: string | null;
   loadLiveDhanData: () => Promise<void>;
-  psSplitPct: number | null;
-  psAllocated: number | null;
-  psAvailable: number | null;
-  psError: string | null;
   soldTodayBySymbol: Map<string, { qty: number; avgPrice: number }>;
 }
 
-export function LiveTab({ mode, loggedIn, status, dhanAccount, livePositions, liveHoldings, liveDhanOrders, liveLoading, liveError, loadLiveDhanData, psSplitPct, psAllocated, psAvailable, psError, soldTodayBySymbol }: LiveTabProps) {
+export function LiveTab({ mode, loggedIn, status, dhanAccount, livePositions, liveHoldings, liveDhanOrders, liveLoading, liveError, loadLiveDhanData, soldTodayBySymbol }: LiveTabProps) {
   return (
             <div className="space-y-4">
               {mode !== "REAL" ? (
@@ -51,22 +48,19 @@ export function LiveTab({ mode, loggedIn, status, dhanAccount, livePositions, li
                     <div className="px-3 py-2 rounded-xl bg-signal-sell/40 border border-signal-sell/30 font-display tabular-nums text-xs text-signal-sell">{liveError}</div>
                   )}
 
+                  {/* Round 270: the funds block used to vanish silently when Dhan's funds call failed or the account was not connected; say why instead */}
+                  {!dhanAccount?.funds && (
+                    <div className="px-3 py-2 rounded-xl bg-signal-hold/10 border border-signal-hold/30 font-display tabular-nums text-xs text-signal-hold" data-testid="live-funds-missing">
+                      Dhan funds are not available: {dhanAccount?.funds_error ? dhanAccount.funds_error : dhanAccount?.connected ? "Dhan returned no funds figure yet - press Refresh all." : "no Dhan account is connected (Overview tab > Connect Dhan)."}
+                    </div>
+                  )}
+
+                  <DhanMoneyCard fetcher={realTradeApi.capitalBoard} thisService="real_trade" enabled
+                    dhanAvailable={dhanAccount?.funds ? pickNum(dhanAccount.funds, "availabelBalance", "availableBalance", "availableCash") : null} />
+
                   {/* Balance allocation */}
                   {dhanAccount?.funds && (
                     <BalanceAllocation funds={dhanAccount.funds} positions={livePositions} />
-                  )}
-
-                  {/* Capital split (this service + Position Stocks Service) */}
-                  {dhanAccount?.funds && (
-                    <CapitalSplitCard
-                      totalBalance={pickNum(dhanAccount.funds, "availabelBalance", "availableBalance", "availableCash")}
-                      splitPct={psSplitPct}
-                      positionStocksAllocated={psAllocated}
-                      positionStocksAvailable={psAvailable}
-                      positionStocksError={psError}
-                      realTradeCashAvailable={status?.account?.cash_available ?? null}
-                      highlight="real_trade"
-                    />
                   )}
 
                   {/* Live positions */}

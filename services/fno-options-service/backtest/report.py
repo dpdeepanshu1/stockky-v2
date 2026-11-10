@@ -14,13 +14,30 @@ RELIABILITY = {
 }
 
 
+def job_name(kind: str, underlyings: Any, strategy: str = "CORE") -> str:
+    """Round 285: the file name stem of a backtest started from the service (/fno/backtests/run): kind + underlying(s) + strategy, the same style the command-line tools use
+    (fno_sim_nifty, fno_sim_nifty_portfolio, fno_replay_nifty-sensex). Before this it was just fno_sim / fno_replay."""
+    unds = [str(u).lower() for u in ([underlyings] if isinstance(underlyings, str) else list(underlyings or []))] or ["nifty"]
+    tail = "" if str(kind) == "replay" or str(strategy).upper() == "CORE" else "_" + ("portfolio" if str(strategy).upper() == "ALL" else str(strategy).lower())
+    return f"fno_{kind}_{'-'.join(unds)}{tail}"
+
+
 def save(root: str, name: str, result: Dict[str, Any]) -> str:
+    """Writes backtests/<name>_<YYYYmmdd_HHMMSS>.json and NEVER overwrites: round 285, two results with the same name finished in the same second (the stamp has no finer part) and the second silently
+    replaced the first; now the second gets a _2, _3 ... suffix. The caller's .txt companion is path[:-5] + '.txt', so it stays unique too."""
     d = os.path.join(root, "backtests")
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, default=str)
-    return path
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    for n in range(1, 1000):
+        path = os.path.join(d, f"{name}_{stamp}{'' if n == 1 else f'_{n}'}.json")
+        try:
+            fh = open(path, "x", encoding="utf-8")
+        except FileExistsError:
+            continue
+        with fh:
+            json.dump(result, fh, default=str)
+        return path
+    raise OSError("too many backtest results with the same name in one second")
 
 
 def render_text(r: Dict[str, Any]) -> str:

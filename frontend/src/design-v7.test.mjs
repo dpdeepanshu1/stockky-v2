@@ -72,7 +72,6 @@ test("the visuals are mounted where the features live", () => {
   assert.ok(/<RiskRail side=\{p\.side\}/.test(ps) && /<ExposureStrip rows=/.test(ps), "Position Stocks rows use the rail and the strip (side-aware)");
   assert.ok(/glow=\{mode === "REAL" && armed/.test(rat), "Real Trade glow only for REAL while armed");
   assert.ok(/glow=\{killSwitchTripped \? "halt"/.test(ps), "Position Stocks glow halts on the kill switch");
-  assert.ok(/<CapitalRing\b/.test(rd("./components/CapitalSplitCard.tsx")), "capital ring on the shared capital card");
   assert.ok(/<ModeLadder mode=\{mv\.mode\}/.test(rd("./components/calibration/ShortSellingPanel.tsx")), "short selling ladder");
   const sw = rd("./components/calibration/SwingPanel.tsx");
   assert.ok(/<ModeLadder\b/.test(sw) && /<EvidenceMeter\b/.test(sw), "swing ladder and evidence meter");
@@ -81,7 +80,7 @@ test("the visuals are mounted where the features live", () => {
 });
 
 test("the v7 parts place nothing: no requests, no controls, and money numbers never animate", () => {
-  for (const f of ["RiskRail", "ExposureStrip", "ModeLadder", "EvidenceMeter", "CapitalRing", "DriftBeat"]) {
+  for (const f of ["RiskRail", "ExposureStrip", "ModeLadder", "EvidenceMeter", "DriftBeat"]) {
     const t = rd(`./components/ui/${f}.tsx`);
     assert.ok(!/realTradeApi\.|positionStocksApi\.|controlApi\.|fetch\(|XMLHttpRequest|onClick|<button|<input|<select/.test(t), `${f} must be display-only`);
     assert.ok(!/PriceRoll|GlintBox|useTickGlint|requestAnimationFrame|countUp|setInterval|setTimeout/i.test(t), `${f} must not animate numbers`);
@@ -96,12 +95,6 @@ test("direction and state are never colour only", () => {
   assert.ok(/SYMBOL = \{ past: "✓", current: "●", future: "○" \}/.test(rd("./components/ui/ModeLadder.tsx")), "ladder symbols");
   assert.ok(/WORDS = \{ steady: "✓/.test(rd("./components/ui/DriftBeat.tsx")), "beat words");
   assert.ok(/short \{[^}]*repeating-linear-gradient/.test(body) || /\.v7-expo-bar \.seg\.short \{[^}]*repeating-linear-gradient/.test(body), "shorts are hatched");
-});
-
-test("the ring's rotation sits on an inner group so the CSS pop does not replace it", () => {
-  const t = rd("./components/ui/CapitalRing.tsx");
-  assert.ok(/<g className="v7-ring-pop">\s*(\{[^}]*\}\s*)?<g transform="rotate\(-90 60 60\)">/.test(t.replace(/\{\/\*[\s\S]*?\*\/\}/g, "")), "rotate lives on the inner <g>");
-  assert.ok(!/className="v7-ring-pop"[^>]*transform=/.test(t), "no transform attribute on the animated group");
 });
 
 console.log(`${passed} design v7 tests passed`);

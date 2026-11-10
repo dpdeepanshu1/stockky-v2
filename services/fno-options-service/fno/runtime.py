@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from datetime import datetime, time as dtime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from . import capital, readiness, recorder
 from .engine import Engine, now_ist
@@ -16,8 +16,9 @@ from .store import day_of
 log = logging.getLogger("fno.runtime")
 
 
-def market_open(now: datetime) -> bool:
-    return now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 31)
+def market_open(now: datetime, holidays: Sequence[str] = ()) -> bool:
+    """Round 273: a weekday exchange holiday is not open (the runner used to tick, and record chain snapshots, on holidays)."""
+    return now.weekday() < 5 and now.date().isoformat() not in set(holidays) and dtime(9, 15) <= now.time() <= dtime(15, 31)
 
 
 class Runner:
@@ -78,7 +79,7 @@ class Runner:
                 now = now_ist()
                 capital.publish(self.engine.store, self.cfg, self.engine.armed_day())      # round 242: F&O's figures for the capital board (throttled, never raises)
                 readiness.publish(self.cfg, self.engine.store, self.data_dir, self.engine.last_reconcile, self.engine.armed_day())   # round 262: the REAL lock waits for this list (throttled, never raises)
-                if market_open(now):
+                if market_open(now, getattr(self.engine, "holidays", ())):
                     if getattr(self.cfg, "FNO_ENGINE_ENABLED", False) or self.engine.store.open_positions():
                         self.engine.tick(now)
                     self.snapshot(now)

@@ -90,8 +90,10 @@ class Store:
             rows = self._db.execute(q + " ORDER BY id", a).fetchall()
         return [self._pos(r) for r in rows]
 
-    def positions(self, mode: Optional[str] = None, day: Optional[str] = None, since_day: Optional[str] = None, limit: int = 500) -> List[Position]:
+    def positions(self, mode: Optional[str] = None, day: Optional[str] = None, since_day: Optional[str] = None, limit: int = 500, status: Optional[str] = None) -> List[Position]:
         q, a = "SELECT * FROM positions WHERE 1=1", []
+        if status:
+            q += " AND status=?"; a.append(status)
         if mode:
             q += " AND mode=?"; a.append(mode)
         if day:

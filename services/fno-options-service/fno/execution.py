@@ -19,13 +19,19 @@ at Dhan after every entry (cancelled before an exit, or closes the position if i
 calls are as unverified as the order payload. A broker that cannot answer keeps the old behaviour: recorded at the limit price and flagged `fill unconfirmed`."""
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+# Round 277: a response cut short (IncompleteRead, BadStatusLine ...) is an http.client.HTTPException, which is NOT an OSError: it used to escape every call below.
+_NET_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
 
 
 @dataclass
@@ -35,6 +41,24 @@ class OrderResult:
     status: str = ""
     message: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
+
+
+def maybe_sent(res: Any) -> bool:
+    """Round 282: True when a FAILED POST /orders may still have reached Dhan, so the order could be live there. That is a network failure (timeout, cut response), an HTTP 5xx / 408 (a gateway
+    can time out after Dhan's order system already took the order), or a 2xx answer without an order id. A plain 4xx (DH-905, DH-906 ...) is a clear refusal and is NOT in this class.
+    Round 277 / 281 only looked at status == "NETWORK"; a 502 / 504 was reported as a refusal and the position was then sold a second time."""
+    if res is None or getattr(res, "ok", False):
+        return False
+    s = str(getattr(res, "status", "") or "").strip().upper()
+    if s in ("NETWORK", "NO_ORDER_ID"):
+        return True
+    if s.startswith("HTTP "):
+        try:
+            code = int(s[5:].split()[0])
+        except (ValueError, IndexError):
+            return False
+        return code >= 500 or code == 408
+    return False
 
 
 def real_allowed(cfg: Any, armed_day: Optional[str], today: str) -> Tuple[bool, List[str]]:
@@ -72,7 +96,7 @@ def build_order(client_id: str, security_id: int, segment: str, side: str, qty: 
 
 @dataclass
 class OrderStatus:
-    state: str                    # TRADED | PENDING | REJECTED | CANCELLED | UNKNOWN (normalised from Dhan's orderStatus)
+    state: str                    # TRADED | PENDING | REJECTED | CANCELLED | UNKNOWN (normalised from Dhan's orderStatus) | NOT_FOUND (round 292: Dhan answered 404 to a lookup by correlationId)
     avg_price: float = 0.0
     filled_qty: int = 0
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -162,6 +186,10 @@ class Broker:
     def net_positions(self) -> Optional[Dict[str, int]]:
         return None
 
+    def order_by_correlation(self, correlation_id: str) -> Optional[OrderStatus]:
+        """Round 292: what became of an order whose POST failed in a way that may still have reached Dhan. None = cannot tell (never read it as "not there"); state \"NOT_FOUND\" = Dhan answered 404."""
+        return None
+
 
 class DhanBroker(Broker):
     can_confirm = True
@@ -182,9 +210,11 @@ class DhanBroker(Broker):
             except ValueError:
                 body = {}
             return OrderResult(False, status=f"HTTP {e.code}", message=describe_error(body)[:200], raw=body)
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except _NET_ERRORS as e:
             return OrderResult(False, status="NETWORK", message=type(e).__name__)
         oid = str(body.get("orderId") or "")
+        if not oid and not any(body.get(k) for k in ("errorCode", "errorType", "errorMessage", "remarks", "omsErrorDescription")):
+            return OrderResult(False, status="NO_ORDER_ID", message="Dhan answered without an order id", raw=body)       # round 282: no id and no error text: the order may exist
         return OrderResult(bool(oid), order_id=oid, status=str(body.get("orderStatus") or ""), message=str(body.get("errorMessage") or "")[:200], raw=body)
 
 
@@ -198,25 +228,44 @@ class DhanBroker(Broker):
     def order_status(self, order_id: str) -> Optional[OrderStatus]:
         try:
             body = self._call("GET", f"/orders/{order_id}")
-        except (urllib.error.URLError, OSError, ValueError):
+        except _NET_ERRORS:
             return None
         if isinstance(body, list):
             body = body[0] if body else {}
         return parse_order_status(body if isinstance(body, dict) else {})
+
+    def order_by_correlation(self, correlation_id: str) -> Optional[OrderStatus]:
+        """Round 292: GET /v2/orders/external/{correlation-id} (Dhan's order API page lists it: "Retrieve the status of an order by correlation id"). Read only.
+        An order found comes back parsed like `order_status`. A 404 is state NOT_FOUND. Anything else (network error, 5xx, 400 / 401 / 429, an answer without an orderStatus) is None: cannot tell.
+        The reply shape for a missing order is not verified against the live API, so only a plain 404 counts as "not there"."""
+        cid = urllib.parse.quote(str(correlation_id or "").strip(), safe="")
+        if not cid:
+            return None
+        try:
+            body = self._call("GET", f"/orders/external/{cid}")
+        except urllib.error.HTTPError as e:
+            return OrderStatus("NOT_FOUND", 0.0, 0, {"http": 404}) if e.code == 404 else None
+        except _NET_ERRORS:
+            return None
+        if isinstance(body, list):
+            body = body[0] if body else {}
+        if not isinstance(body, dict) or not body.get("orderStatus"):
+            return None
+        return parse_order_status(body)
 
     def cancel(self, order_id: str) -> OrderResult:
         try:
             body = self._call("DELETE", f"/orders/{order_id}")
         except urllib.error.HTTPError as e:
             return OrderResult(False, status=f"HTTP {e.code}", message="cancel refused (already traded or closed?)")
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except _NET_ERRORS as e:
             return OrderResult(False, status="NETWORK", message=type(e).__name__)
         return OrderResult(True, order_id=order_id, status=str((body or {}).get("orderStatus") or "CANCELLED"))
 
     def net_positions(self) -> Optional[Dict[str, int]]:
         try:
             body = self._call("GET", "/positions")
-        except (urllib.error.URLError, OSError, ValueError):
+        except _NET_ERRORS:
             return None
         if not isinstance(body, list):
             return None

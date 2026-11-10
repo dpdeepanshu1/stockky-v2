@@ -6,6 +6,7 @@ import SwitchesPanel from "./SwitchesPanel";
 import FnoBacktests from "../fno/FnoBacktests";
 import { FnoHistory, FnoLog } from "../fno/FnoJournal";
 import { Card } from "./ui";
+import FnoSettingsWarning from "../fno/FnoSettingsWarning";   // Round 291
 import { getFnoApiUrl, setFnoApiUrl } from "../../fnoApi";
 
 type Section = "switches" | "trades" | "backtests" | "plan" | "log";
@@ -29,6 +30,7 @@ export default function FnoCalibration() {
   return (
     <div className="space-y-3">
       <SubTabs items={SECTIONS} value={s} onChange={setS} label="F&O section" />
+      <FnoSettingsWarning />
       {s === "switches" && <SwitchesPanel svc="fno" />}
       {s === "trades" && <FnoHistory />}
       {s === "backtests" && <FnoBacktests />}

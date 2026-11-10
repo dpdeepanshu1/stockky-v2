@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-check_holiday_lists_sync.py — verifies the seven NSE-holiday-list copies in
+check_holiday_lists_sync.py — verifies the eight NSE-holiday-list copies in
 this repo agree with each other.
 
 WHY THIS EXISTS (2026-09-14 incident): there is no shared import path
 between services (each is a separately-deployed container — see any
 service's config.py isolation note), so the 2026 NSE/BSE trading-holiday
-calendar is duplicated in SEVEN places:
+calendar is duplicated in EIGHT places:
   - services/position-stocks-service/tz_utils.py   (_NSE_HOLIDAYS_2026)
   - services/real-trade-service/tz_utils.py         (_NSE_HOLIDAYS_2026)
   - services/api-gateway/nse_holidays.py            (_NSE_HOLIDAYS, has 2025+2026)
@@ -14,6 +14,7 @@ calendar is duplicated in SEVEN places:
   - services/market-data-service/market_hours.py    (_NSE_HOLIDAYS_2026; group 139)
   - services/analysis-intelligence-service/technical/main.py (_NSE_HOLIDAYS_2026; group 140)
   - services/decision-prediction-service/decision/main.py    (_NSE_HOLIDAYS_2026; group 140)
+  - services/fno-options-service/config.py                  (_NSE_HOLIDAYS_2026; round 274)
 
 On 2026-09-14 (Ganesh Chaturthi) all four then-existing copies had drifted apart and every one
 of them was ALSO missing that date, so the exchange-closed day ran full
@@ -26,8 +27,8 @@ don't all contain exactly the same holiday date set (2026 and later).
 Usage:
     python3 scripts/check_holiday_lists_sync.py
 
-Exit code 0 = all seven agree. Exit code 1 = drift detected (details printed).
-Run this after editing any one of the seven files.
+Exit code 0 = all eight agree. Exit code 1 = drift detected (details printed).
+Run this after editing any one of the eight files.
 """
 from __future__ import annotations
 
@@ -59,6 +60,9 @@ FILES = {
     ),
     "decision-prediction-service/decision/main.py": (
         REPO_ROOT / "services/decision-prediction-service/decision/main.py"
+    ),
+    "fno-options-service/config.py": (   # Round 274
+        REPO_ROOT / "services/fno-options-service/config.py"
     ),
 }
 

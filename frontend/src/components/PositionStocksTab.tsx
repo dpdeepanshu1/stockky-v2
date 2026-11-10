@@ -25,18 +25,13 @@ import {
   type ScalpCandidateLogRow,
   type ScalpIntradayRestrictedRow,
 } from "../positionStocksApi";
-// Cross-service, read-only: real-trade-service's own account bookkeeping,
-// used only to populate the "Real Trade Service" side of CapitalSplitCard
-// below (see that component's docstring for why this is a best-effort,
-// non-blocking call — this dashboard must keep working even if real-
-// trade-service's URL isn't configured in this browser).
-import { realTradeApi, getRealTradeApiUrl } from "../realTradeApi";
 import { SubTabs } from "./ui/SubTabs";
 import CloseAllDialog from "./CloseAllDialog";
 import ApprovalsPanel from "./ApprovalsPanel";   // group 469
 import { NavIcon } from "./ui/NavIcon";
 import { PriceRoll, GlintBox } from "./ui/motion";   // group 461: live-price motion (prices only)
-import CapitalSplitCard from "./CapitalSplitCard";
+import DhanMoneyCard from "./DhanMoneyCard";   // Round 270
+import { openCharges as moneyOpenCharges, afterCharges } from "../moneyView";
 import MarketBoard from "./board/MarketBoard";
 import JournalPanel from "./board/JournalPanel";
 import { EMOTION_LABEL, FALLBACK_EMOTIONS } from "./board/journalNotesView";
@@ -448,11 +443,6 @@ export default function PositionStocksTab() {
   const [candidateLogError, setCandidateLogError] = useState<string | null>(null);
   const [restrictedSymbols, setRestrictedSymbols] = useState<ScalpIntradayRestrictedRow[]>([]);
   const [restrictedSymbolsError, setRestrictedSymbolsError] = useState<string | null>(null);
-  // Real Trade Service's own account figures, fetched cross-service purely
-  // to populate CapitalSplitCard (see that component's docstring) — this
-  // dashboard's own data (status/ledger/dhanAccount above) never depends on it.
-  const [rtCashAvailable, setRtCashAvailable] = useState<number | null>(null);
-  const [rtAccountError, setRtAccountError] = useState<string | null>(null);
 
   // Sub-tabs — the page used to be one long scroll of every section at
   // once; grouped into tabs so each screen only shows what's relevant to
@@ -570,28 +560,6 @@ export default function PositionStocksTab() {
     }
   }, []);
 
-  // Real Trade Service's account figures, for the Capital Split card below.
-  // No admin login required — gateStatus() is a public read (see
-  // realTradeApi.ts) — and no auth token is shared between the two
-  // services anyway, so this only ever needs real-trade-service's own URL
-  // to be configured somewhere in this browser (Real Automatic Trade tab's
-  // own Settings). Best-effort: if that URL isn't set, or the service is
-  // unreachable, the card just shows the computed reference split instead.
-  const loadRealTradeAccount = useCallback(async () => {
-    if (!getRealTradeApiUrl()) {
-      setRtAccountError("Real Trade Service URL not configured in this browser.");
-      return;
-    }
-    try {
-      const s = await realTradeApi.gateStatus("REAL");
-      setRtCashAvailable(s.account.cash_available);
-      setRtAccountError(null);
-    } catch (e: any) {
-      setRtCashAvailable(null);
-      setRtAccountError(e?.message || "Failed to reach Real Trade Service");
-    }
-  }, []);
-
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -603,18 +571,16 @@ export default function PositionStocksTab() {
     void loadDhanAccount();
     void loadCandidateLog();
     void loadRestrictedSymbols();
-    void loadRealTradeAccount();
-    // group 184: the six data polls pause while the browser tab is hidden and run once when it is shown again.
+    // group 184: the five data polls pause while the browser tab is hidden and run once when it is shown again.
     const stops = [
       setVisibleInterval(() => void loadAll(), 15_000),
       setVisibleInterval(() => void loadDhanLive(), 30_000),
       setVisibleInterval(() => void loadDhanAccount(), 30_000),
       setVisibleInterval(() => void loadCandidateLog(), 15_000),
       setVisibleInterval(() => void loadRestrictedSymbols(), 30_000),
-      setVisibleInterval(() => void loadRealTradeAccount(), 30_000),
     ];
     return () => { stops.forEach((stop) => stop()); };
-  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols, loadRealTradeAccount]);
+  }, [loadAll, loadDhanLive, loadDhanAccount, loadCandidateLog, loadRestrictedSymbols]);
 
   // group 258: cumulative brokerage is only needed on the Charges sub-tab; refresh it every 60 s while that tab is open.
   // group 263: the Overview P&L tiles also show the figure after charges, so it loads there too.
@@ -1032,16 +998,23 @@ export default function PositionStocksTab() {
         )}
       </div>
 
-      {/* ── Capital split (this service + Real Trade Service) ── */}
-      <CapitalSplitCard
-        totalBalance={pickNum(dhanAccount?.funds, "availabelBalance", "availableBalance", "availableCash")}
-        splitPct={status?.scalp_pool_capital_share_pct ?? null}
-        positionStocksAllocated={ledger?.total_allocated_capital ?? null}
-        positionStocksAvailable={ledger?.available_capital ?? null}
-        realTradeCashAvailable={rtCashAvailable}
-        realTradeError={rtAccountError}
-        highlight="position_stocks"
-      />
+      {/* Round 270: Dhan money - the three-way board, free to trade, charges, open P&L before / after charges (reads /capital/board itself) */}
+      {(() => {
+        const unreal = openPositions.reduce((a, p) => a + (p.unrealized_pnl ?? 0), 0);
+        const est = openPositions.reduce((a, p) => a + (psOpenCharges(p) ?? 0), 0);
+        const net = afterCharges(unreal, est);
+        const has = openPositions.length > 0;
+        return (
+          <DhanMoneyCard fetcher={positionStocksApi.capitalBoard} thisService="position_stocks" enabled={loggedIn}
+            dhanAvailable={pickNum(dhanAccount?.funds, "availabelBalance", "availableBalance", "availableCash")}
+            tiles={[
+              { label: "Charges paid today", value: cumCharges ? `-${fmtInr(cumCharges.today.all_charges, 2)}` : "-", sub: cumCharges ? `${cumCharges.today.trades} trades` : "loading", tone: "bad" },
+              { label: "Charges since start", value: cumCharges ? `-${fmtInr(cumCharges.all_charges_total, 0)}` : "-", tone: "bad" },
+              { label: "Open P&L before charges", value: has ? `${unreal >= 0 ? "+" : ""}${fmtInr(unreal, 2)}` : "-", tone: unreal >= 0 ? "good" : "bad" },
+              { label: "Open P&L after charges", value: has && net != null ? `${net >= 0 ? "+" : ""}${fmtInr(net, 2)}` : "-", sub: has ? `if all closed now (est. charges ${fmtInr(est, 0)})` : "no open positions", tone: net != null && net < 0 ? "bad" : "good" },
+            ]} />
+        );
+      })()}
 
       {/* ── 6-cell status grid ── */}
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
@@ -2269,6 +2242,11 @@ function CandidateList({ rows }: { rows: ScalpCandidateRow[] }) {
   );
 }
 
+// Round 270: estimated cost of getting in and out of an OPEN row at its live price (same rate card as the Charges tab); null without a live price.
+function psOpenCharges(p: ScalpPositionRow): number | null {
+  return moneyOpenCharges({ side: p.side, qty: p.quantity, entry: p.entry_price, price: p.current_price, delivery: !!p.overnight_converted_to_cnc });
+}
+
 function PositionRow({ p, onClose, busy, loggedIn }: {
   p: ScalpPositionRow;
   onClose?: (id: number, symbol: string) => void;
@@ -2386,6 +2364,12 @@ function PositionRow({ p, onClose, busy, loggedIn }: {
                 {fmtInr(p.unrealized_pnl)} ({p.unrealized_pnl_pct?.toFixed(2)}%)
               </span>
             ) : <span className="tabular-nums text-paper">—</span>}
+            {/* Round 270: the same open P&L after the estimated charges of closing now */}
+            {(() => { const ch = psOpenCharges(p); const net = afterCharges(p.unrealized_pnl, ch);
+              return net != null && ch != null ? (
+                <div className={`text-[9px] tabular-nums ${net >= 0 ? "text-signal-buy" : "text-signal-sell"}`} data-testid="ps-after-charges">
+                  after charges {net >= 0 ? "+" : ""}{fmtInr(net, 2)} <span className="text-mist">(charges ≈ ₹{ch.toFixed(2)})</span>
+                </div>) : null; })()}
           </div>
           <div><span className="text-mist">To target/stop </span><span className="tabular-nums text-paper">
             {/* AUDIT FIX (2026-09-19): was requiring BOTH values non-null

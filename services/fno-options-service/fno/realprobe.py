@@ -232,6 +232,9 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     sells: List[Tuple[int, float]] = []
     r = broker.place(payload)
     res["orders"].append({"side": "BUY", "price": buy_px, "qty": qty, "ok": r.ok, "order_id": r.order_id, "status": r.status, "message": r.message})
+    if execution.maybe_sent(r):                           # round 281 / 282: the call failed on the network or with an HTTP 5xx, so the BUY may still have reached Dhan: never say "nothing is open"
+        return done(4, f"  the BUY call to Dhan failed ({r.status}: {r.message}). The order MAY have reached Dhan. OPEN THE DHAN APP (Orders / Positions) and check {label} "
+                       f"(correlationId {payload.get('correlationId')}) before doing anything else. Nothing more is sent.")
     if not r.ok:
         hint = dhan_hint(r.status, r.message)
         return done(2, f"  Dhan REFUSED the BUY: {r.status} {r.message}\n  Nothing is open. " + (f"WHAT TO DO: {hint}" if hint else "(DH-905 = server IP not whitelisted for orders; DH-901 = expired token; DH-906 = a Dhan account setting, see the message.)"))
@@ -287,6 +290,10 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
         rs = broker.place(so)
         rec = {"side": "SELL", "price": sell_px, "qty": remaining, "ok": rs.ok, "order_id": rs.order_id, "status": rs.status, "message": rs.message}
         res["orders"].append(rec)
+        if execution.maybe_sent(rs):                          # round 281 / 282: it may be live at Dhan: a second SELL on top of it could open a short
+            res.update(contract=label, security_id=sid, bought=filled, sold=sum(n for n, _ in sells))
+            return done(4, f"  the SELL call to Dhan failed ({rs.status}: {rs.message}). The order MAY be live at Dhan (correlationId {so.get('correlationId')}). "
+                           f"OPEN THE DHAN APP and close {label} ({remaining} units) by hand if it is still held. Not sending any more orders.")
         if not rs.ok:
             say(f"  Dhan REFUSED this SELL: {rs.status} {rs.message}")
             continue

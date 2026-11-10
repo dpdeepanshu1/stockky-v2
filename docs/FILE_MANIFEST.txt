@@ -90,13 +90,13 @@ frontend/src/components/BottomSheet.tsx
 frontend/src/components/BuySniperModal.tsx
 frontend/src/components/CalibrationControlTab.tsx
 frontend/src/components/CandleChart.tsx
-frontend/src/components/CapitalSplitCard.tsx
 frontend/src/components/CloseAllDialog.tsx
 frontend/src/components/CommandPalette.tsx
 frontend/src/components/ConvictionCard.tsx
 frontend/src/components/DataFeed.tsx
 frontend/src/components/DataHealthAudit.tsx
 frontend/src/components/DecisionCard.tsx
+frontend/src/components/DhanMoneyCard.tsx
 frontend/src/components/FeedHealthPanel.tsx
 frontend/src/components/HotStocks.tsx
 frontend/src/components/IpoFeedHealth.tsx
@@ -230,7 +230,6 @@ frontend/src/components/trading/ManualTradeTicket.tsx
 frontend/src/components/trainingView.ts
 frontend/src/components/ui/AiOrb.tsx
 frontend/src/components/ui/AiPulse.tsx
-frontend/src/components/ui/CapitalRing.tsx
 frontend/src/components/ui/DriftBeat.tsx
 frontend/src/components/ui/EmptyState.tsx
 frontend/src/components/ui/ErrorBoundary.tsx
@@ -286,6 +285,8 @@ frontend/src/lightContrast.test.mjs
 frontend/src/liveStateView.test.mjs
 frontend/src/liveStateView.ts
 frontend/src/main.tsx
+frontend/src/moneyView.test.mjs
+frontend/src/moneyView.ts
 frontend/src/paperNet.test.mjs
 frontend/src/paperNet.ts
 frontend/src/popupLayout.test.mjs
@@ -1252,6 +1253,7 @@ services/fno-options-service/tests/test_round262_readiness.py
 services/fno-options-service/tests/test_round264_stages.py
 services/fno-options-service/tests/test_round265_probecheck.py
 services/fno-options-service/tests/test_round269_probe_pick.py
+services/fno-options-service/tests/test_round270_open_charges.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

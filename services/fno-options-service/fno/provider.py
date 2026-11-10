@@ -3,6 +3,7 @@
 `Provider` is the interface the engine needs; `HttpProvider` implements it with stdlib urllib and short caches; tests use a fake. Nothing here places an order."""
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -70,9 +71,10 @@ class _Ttl:
 
 
 class HttpProvider(Provider):
-    def __init__(self, base_url: str, timeout_s: float = 12.0, opener: Any = None):
+    def __init__(self, base_url: str, timeout_s: float = 12.0, opener: Any = None, daily_exclude_today: bool = True):
         self.base = base_url.rstrip("/")
         self.timeout = timeout_s
+        self.daily_exclude_today = bool(daily_exclude_today)
         self._open = opener or urllib.request.urlopen
         self._cache = _Ttl()
         self.last_error: Optional[str] = None
@@ -83,7 +85,7 @@ class HttpProvider(Provider):
             with self._open(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=self.timeout) as r:
                 self.last_error = None
                 return json.loads(r.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:   # round 277: + a truncated response
             self.last_error = f"{path}: {type(e).__name__}"
             return None
 
@@ -104,12 +106,20 @@ class HttpProvider(Provider):
         return ch
 
     def daily(self, underlying: str) -> List[Dict[str, float]]:
+        """Daily index candles. Round 287: by default TODAY's candle is left out (`daily_exclude_today`). market-data serves the session that is still running as the last daily candle, so
+        the live direction logic saw a daily candle that repaints every minute (today's high / low / close so far), while every backtest (sim, rolling, replay) only knows the daily
+        candles up to YESTERDAY. Live now reads the same picture the backtests tested. The raw list is cached; the cut is made on every call, so it follows the date."""
         hit = self._cache.get(("d", underlying), 600)
-        if hit is not None:
+        if hit is None:
+            body = self._get("/history/" + urllib.parse.quote(INDEX_SYMBOL[underlying], safe=""), {"period": "1y", "interval": "1d"})
+            c = convert_candles(body.get("candles") if isinstance(body, dict) else None)
+            if not c:
+                return []
+            hit = self._cache.put(("d", underlying), c)
+        if not self.daily_exclude_today:
             return hit
-        body = self._get("/history/" + urllib.parse.quote(INDEX_SYMBOL[underlying], safe=""), {"period": "1y", "interval": "1d"})
-        c = convert_candles(body.get("candles") if isinstance(body, dict) else None)
-        return self._cache.put(("d", underlying), c) if c else []
+        today = datetime.now(IST).date()
+        return [x for x in hit if datetime.fromtimestamp(x["t"], IST).date() < today]
 
     def intraday(self, underlying: str) -> List[Dict[str, float]]:
         hit = self._cache.get(("i", underlying), 60)

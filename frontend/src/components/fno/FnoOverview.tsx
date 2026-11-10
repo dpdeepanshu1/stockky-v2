@@ -1,20 +1,27 @@
 // F&O Options > Overview: the four locks, today's numbers, open positions, the pipeline check, and the manual buttons.
 import { useState } from "react";
 import { fnoApi, type FnoPosition } from "../../fnoApi";
-import { inr, istHm, lockSummary, positionProgress } from "../../fnoView";
+import { exitDoubtCount, exitDoubtView, inr, istHm, lockSummary, positionProgress, settingsProblemText, stopDoubtCount, stopDoubtView } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
 import { useFno } from "./useFno";
+import DhanMoneyCard from "../DhanMoneyCard";   // Round 270
+import { realTradeApi } from "../../realTradeApi";
+import { pickNum } from "../realAuto/format";
 import FnoControlCard from "./FnoControlCard";
 import FnoProbeCard from "./FnoProbeCard";
 import FnoReadinessCard from "./FnoReadinessCard";
 import FnoStagesRow from "./FnoStagesRow";
 
-export function PositionCard({ p }: { p: FnoPosition }) {
+export function PositionCard({ p, onClearDoubt, onClearStopDoubt, busy }: { p: FnoPosition; onClearDoubt?: (id: number) => void; onClearStopDoubt?: (id: number) => void; busy?: boolean }) {
   const { pct, pnl } = positionProgress(p);
+  const doubt = exitDoubtView(p);   // Round 289
+  const stopDoubt = stopDoubtView(p);   // Round 292
   return (
     <div className="rounded-xl border border-slate p-2 text-[12px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <b>{p.label}</b>{p.strategy && p.strategy !== "CORE" && <Chip>{p.strategy}</Chip>}
+        {doubt && <Chip tone="bad" title="An exit SELL may be live at Dhan">EXIT IN DOUBT</Chip>}
+        {stopDoubt && <Chip tone="warn" title="A stop order may be resting at Dhan">STOP IN DOUBT</Chip>}
         <span className="text-mist">{p.lots} lot x {p.lot_size} · {p.mode} · in {istHm(p.entry_ts)}</span>
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
@@ -24,7 +31,27 @@ export function PositionCard({ p }: { p: FnoPosition }) {
         <span>target {p.target_price.toFixed(2)}</span>
         {p.trail_armed && <Chip tone="good">trail {p.trail_stop?.toFixed(2)}</Chip>}
         <span className={pnlClass(pnl)}>P&amp;L {inr(pnl)}</span>
+        {/* Round 270: the same P&L after what closing now would cost (costs.round_trip, the rule that stores the real charges) */}
+        {p.unrealized_net != null && p.est_charges != null && (
+          <span className={pnlClass(p.unrealized_net)} data-testid="fno-after-charges">after charges {inr(p.unrealized_net, 2)} <span className="text-mist">(charges ≈ {inr(p.est_charges, 2)})</span></span>
+        )}
       </div>
+      {doubt && (
+        <div className="mt-2 space-y-1" data-testid="fno-exit-doubt">
+          <Msg kind="warn">{doubt.text}</Msg>
+          {onClearDoubt && p.id != null && (
+            <Btn small disabled={busy} onClick={() => onClearDoubt(p.id as number)} title="Only after you looked in the Dhan app and the SELL is not there. It places no order.">I checked Dhan: the SELL is not there, clear the mark</Btn>
+          )}
+        </div>
+      )}
+      {stopDoubt && (
+        <div className="mt-2 space-y-1" data-testid="fno-stop-doubt">
+          <Msg kind="warn">{stopDoubt.text}</Msg>
+          {onClearStopDoubt && p.id != null && (
+            <Btn small disabled={busy} onClick={() => onClearStopDoubt(p.id as number)} title="Only after you looked in the Dhan app and no stop is there. It places no order.">I checked Dhan: no stop is there, clear the mark</Btn>
+          )}
+        </div>
+      )}
       <div className="mt-1 h-1.5 w-full rounded bg-white/10" title="stop ... target"><div className="h-1.5 rounded bg-signal-buy" style={{ width: `${pct}%` }} /></div>
     </div>
   );
@@ -35,6 +62,7 @@ export default function FnoOverview() {
   const pipe = useFno(fnoApi.pipeline, 0);
   const rec = useFno(fnoApi.reconcile, 0);
   const strat = useFno(fnoApi.strategies, 30000);
+  const dhan = useFno(realTradeApi.dhanAccount, 30000);   // Round 271: live Dhan funds for the money card (best effort: Real Trade shares the same Dhan account; an error here only leaves the tile empty)
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const act = async (fn: () => Promise<unknown>, okText: string, confirmText?: string) => {
@@ -44,12 +72,16 @@ export default function FnoOverview() {
   };
   const d = ov.data;
   const ls = lockSummary(d?.locks);
+  const doubts = exitDoubtCount(d?.open_positions);   // Round 289
+  const stopDoubts = stopDoubtCount(d?.open_positions);   // Round 292
+  const settingsWarn = settingsProblemText(d?.param_problems);   // Round 290
   return (
     <div className="space-y-3">
       {ov.error && <Msg kind="err">{ov.error}</Msg>}
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
+      {settingsWarn && <div data-testid="fno-settings-problem"><Msg kind="err">{settingsWarn}</Msg></div>}
       <Card title="State" tone={ls.tone === "real" ? "bad" : ls.tone === "real-blocked" ? "warn" : undefined}
-        right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip></>}>
+        right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}</>}>
         <p className="text-[13px] font-bold">{ls.text}</p>
         {d && (
           <ul className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-mist sm:grid-cols-4">
@@ -62,6 +94,26 @@ export default function FnoOverview() {
         <p className="mt-2 text-[11px] text-mist">The locks and strategies are switched in the Control card below; risk, entry window and exits on Real Money Calibration &gt; F&amp;O. Ships OFF and DEMO.</p>
         {d?.runner.error && <div className="mt-2"><Msg kind="warn">Runner error: {d.runner.error}</Msg></div>}
       </Card>
+
+      {/* Round 270: Dhan money for F&O: what it sizes from (board in REAL, virtual capital in DEMO), the three-way split, charges and P&L before / after charges */}
+      {(() => {
+        const opens = d?.open_positions || [];
+        const unreal = opens.reduce((a, p) => a + (p.unrealized ?? 0), 0);
+        const est = opens.reduce((a, p) => a + (p.est_charges ?? 0), 0);
+        const hasLive = opens.some((p) => p.unrealized != null);
+        const net = unreal - est;
+        return (
+          <DhanMoneyCard fetcher={fnoApi.capital} thisService="fno"
+            dhanAvailable={dhan.data?.funds ? pickNum(dhan.data.funds, "availabelBalance", "availableBalance", "availableCash") : null}
+            tiles={d ? [
+              { label: "Closed today: before charges", value: inr(d.day.realized_gross, 2), sub: `${d.day.trades} trades`, tone: d.day.realized_gross >= 0 ? "good" : "bad" },
+              { label: "Charges today", value: `-${inr(d.day.charges, 2)}`, tone: "bad" },
+              { label: "Closed today: after charges", value: inr(d.day.realized_net, 2), tone: d.day.realized_net >= 0 ? "good" : "bad" },
+              { label: "Open P&L before charges", value: hasLive ? inr(unreal, 2) : "-", sub: `${opens.length} open`, tone: unreal >= 0 ? "good" : "bad" },
+              { label: "Open P&L after charges", value: hasLive ? inr(net, 2) : "-", sub: hasLive ? `if all closed now (est. charges ${inr(est, 2)})` : "no open positions", tone: net < 0 ? "bad" : "good" },
+            ] : []} />
+        );
+      })()}
 
       <FnoControlCard onChanged={() => { ov.reload(); strat.reload(); }} />
 
@@ -78,7 +130,7 @@ export default function FnoOverview() {
 
       <Card title="Open positions">
         {d && d.open_positions.length === 0 && <p className="text-mist">No open F&amp;O position.</p>}
-        <div className="space-y-2">{d?.open_positions.map((p) => <PositionCard key={p.id ?? p.label} p={p} />)}</div>
+        <div className="space-y-2">{d?.open_positions.map((p) => <PositionCard key={p.id ?? p.label} p={p} busy={busy} onClearStopDoubt={(id) => void act(() => fnoApi.stopDoubtClear(id), "Stop-doubt mark cleared: the engine may place a stop again.", "Clear the stop-doubt mark? Do this ONLY if you looked in the Dhan app and no stop for this contract is there. The engine may then place a new stop.")} onClearDoubt={(id) => void act(() => fnoApi.exitDoubtClear(id), "Exit-doubt mark cleared: the engine may sell this position again.", "Clear the exit-doubt mark? Do this ONLY if you looked in the Dhan app and the SELL is not there. The engine may then send a new SELL.")} />)}</div>
       </Card>
 
       <FnoReadinessCard onChanged={ov.reload} />

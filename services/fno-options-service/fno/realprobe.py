@@ -11,7 +11,7 @@ Safety, all enforced here (and tested with a fake broker):
     never on the expiry day itself, and never when Dhan already shows a position in that contract (or cannot say);
   * an unfilled BUY is cancelled; a SELL that does not fill is cancelled and re-sent a little lower (at most `SELL_TRIES` times) and never for more than is held (a SELL on nothing would open a short);
   * when the position cannot be closed the run says so loudly, with the contract and quantity to close by hand in the Dhan app, and exits with code 3.
-Exit codes: 0 round trip done (or dry run) | 2 refused / the BUY was rejected, nothing open | 3 a position is STILL OPEN | 4 the state of an order is in doubt: look in the Dhan app | 5 the BUY did not fill, cancelled, nothing open.
+Exit codes: 0 round trip done and Dhan's positions show the contract flat (or dry run) | 2 refused / the BUY was rejected, nothing open | 3 a position is STILL OPEN (Dhan shows one, or an unsold part with no readable positions) | 4 the state of an order is in doubt, or Dhan shows flat but our SELLs sold less than was bought (round 301): look in the Dhan app | 5 the BUY did not fill, cancelled, nothing open.
 """
 from __future__ import annotations
 
@@ -219,8 +219,8 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     before = broker.net_positions()
     if before is None:
         return done(2, "REFUSED: Dhan's net positions cannot be read (token, IP whitelist or network). Without that the run cannot prove it ended flat.")
-    if before.get(str(sid)):
-        return done(2, f"REFUSED: Dhan already shows a position of {before[str(sid)]} in this contract. Close it first.")
+    if execution.net_qty(before, sid, segment):
+        return done(2, f"REFUSED: Dhan already shows a position of {execution.net_qty(before, sid, segment)} in this contract. Close it first.")
     typed = (confirm or input)(f"This sends a REAL order of about Rs {outlay:,.0f} premium ({label}). Type exactly  {CONFIRM_PHRASE}  to continue: ")
     if typed.strip() != CONFIRM_PHRASE:
         return done(2, "REFUSED: the confirmation phrase did not match. Nothing was sent.")
@@ -275,7 +275,7 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
             break
         pos = broker.net_positions()
         if pos is not None:
-            held = int(pos.get(str(sid), 0))
+            held = execution.net_qty(pos, sid, segment)
             if held <= 0:
                 say("  Dhan shows no long position in this contract any more (closed elsewhere?). Not sending another SELL: it would open a short.")
                 break
@@ -317,15 +317,26 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     sold = sum(n for n, _ in sells)
     say()
     after = broker.net_positions()
-    left = int(after.get(str(sid), 0)) if after is not None else None
+    left = execution.net_qty(after, sid, segment) if after is not None else None
     res.update(contract=label, security_id=sid, bought=filled, sold=sold, dhan_net_position_after=left)
-    if sold < filled and (left is None or left > 0):
-        short = filled - sold if left is None else left
+    if left is not None and left != 0:                    # round 301: whatever our own books say, Dhan shows a position in this contract: it is still open (a negative number is a SHORT)
+        say("!" * 78)
+        say(f"!!  A POSITION IS STILL OPEN: {label}  quantity {left:+d}{'  (a SHORT: buy it back)' if left < 0 else ''}  (security id {sid}, {segment}, product INTRADAY)")
+        say("!!  CLOSE IT NOW in the Dhan app (Positions > Exit). Do not wait: INTRADAY positions are also auto squared off by Dhan near 15:15-15:25, at a worse price.")
+        say("!" * 78)
+        res["exit_code"] = 3
+    elif left is None and sold < filled:                  # Dhan's positions cannot be read: assume the unsold part is held
+        short = filled - sold
         say("!" * 78)
         say(f"!!  A POSITION IS STILL OPEN: {label}  quantity {short}  (security id {sid}, {segment}, product INTRADAY)")
         say("!!  CLOSE IT NOW in the Dhan app (Positions > Exit). Do not wait: INTRADAY positions are also auto squared off by Dhan near 15:15-15:25, at a worse price.")
         say("!" * 78)
         res["exit_code"] = 3
+    elif left == 0 and sold < filled:                     # round 301: Dhan's view is flat but our SELLs sold only part of what the BUY filled. 'Closed elsewhere' and 'the positions view cannot be trusted' look the same here, so this is not a clean round trip
+        msg = (f"  NOT A CLEAN ROUND TRIP: bought {filled} units, our SELL orders sold {sold}, yet Dhan's positions show {label} flat. Either it was closed some other way, or the positions view "
+               f"(security id / segment {segment}) does not match what the order book shows. OPEN THE DHAN APP (Orders and Positions) and check that {label} is really flat before anything else.")
+        say(msg)
+        res["exit_code"], res["reason"] = 4, " ".join(msg.split())[:400]
     else:
         res["exit_code"] = 0
 

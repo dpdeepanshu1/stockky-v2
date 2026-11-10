@@ -191,9 +191,13 @@ def pick_contract(chain: Chain, direction: str, now: datetime, p: Optional[Param
             info["reject"] = f"spread {s.spread_pct:.1f}% > {p.max_spread_pct:g}%"
         elif s.ask < p.min_premium:
             info["reject"] = f"premium {s.ask:g} < {p.min_premium:g}"
-        elif s.volume is not None and s.volume < p.min_volume:
+        elif s.volume is None:                                          # round 299: absent data is never good news. Dhan's chain always carries volume and OI, so a missing one is a broken payload, not a liquid strike
+            info["reject"] = "no volume data"
+        elif s.volume < p.min_volume:
             info["reject"] = f"volume {s.volume:g} < {p.min_volume:g}"
-        elif s.oi is not None and s.oi < p.min_oi:
+        elif s.oi is None:
+            info["reject"] = "no open-interest data"
+        elif s.oi < p.min_oi:
             info["reject"] = f"OI {s.oi:g} < {p.min_oi:g}"
         else:
             d = _delta_of(s, chain.spot, row.strike, opt, expiry, now, p.risk_free_rate)

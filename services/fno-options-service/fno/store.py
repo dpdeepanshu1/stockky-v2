@@ -172,16 +172,17 @@ class Store:
         carried = [p for p in self.open_positions(mode) if day_of(p.entry_ts) < day]     # round 248: still open from an EARLIER day: it counts against today's open-position and same-side gates
         for p in carried:
             same[p.key] = same.get(p.key, 0) + 1
-        roots = [p for p in ps if p.parent_id is None]        # a partial-exit child row is part of its parent's trade, not a new trade
+        placed = [p for p in ps if p.exit_reason != "NOT_FILLED"]          # round 296: an entry that never filled is not a trade: it must not use a FNO_MAX_TRADES_PER_DAY / per-strategy slot or count as a loss
+        roots = [p for p in placed if p.parent_id is None]    # a partial-exit child row is part of its parent's trade, not a new trade
         fam: Dict[Any, List[Position]] = {}                    # win / loss is judged per TRADE: the parent and its partial-exit children together, once the whole trade is closed
-        for q in ps:
+        for q in placed:
             fam.setdefault(q.parent_id if q.parent_id is not None else q.id, []).append(q)
         done = [sum(x.net_pnl or 0.0 for x in rows) for rows in fam.values() if all(x.status == CLOSED for x in rows)]
         return {"trades": len(roots), "open": sum(1 for p in ps if p.status == OPEN) + len(carried), "carried_open": len(carried), "carried_closed_net": round(sum(p.net_pnl or 0.0 for p in self.closed_from_earlier(day, mode)), 2), "realized_net": round(sum(p.net_pnl or 0.0 for p in closed), 2),
                 "realized_gross": round(sum(p.gross_pnl or 0.0 for p in closed), 2), "charges": round(sum(p.charges or 0.0 for p in closed), 2),
                 "wins": sum(1 for n in done if n > 0), "losses": sum(1 for n in done if n <= 0),
                 "last_stopout_ts": stop_ts, "open_same_side": same,
-                "by_strategy": self._by_strategy(ps)}
+                "by_strategy": self._by_strategy(placed)}
 
     @staticmethod
     def _by_strategy(ps: List[Position]) -> Dict[str, Dict[str, Any]]:

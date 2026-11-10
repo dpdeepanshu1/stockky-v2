@@ -18,6 +18,7 @@ MIN_DEMO_DAYS = 20            # about 4 trading weeks
 MIN_DEMO_TRADES = 60
 MIN_BACKTEST_TRADES = 30
 MIN_SNAPSHOT_DAYS = 10
+MAX_BACKTEST_AGE_DAYS = 14    # round 305: a rolling result saved longer ago than this no longer counts (the code, the parameters and the market have moved on); re-run scripts/fno_rolling_backtest.py
 RECONCILE_MAX_AGE_S = 1200.0  # a reconcile older than 20 minutes says nothing about now
 PUBLISH_EVERY_S = 30.0
 
@@ -45,7 +46,7 @@ def _all(oks: List[Optional[bool]]) -> Optional[bool]:
     return True if oks and all(o is True for o in oks) else None
 
 
-def backtest_check(r: Optional[Dict[str, Any]]) -> Tuple[Optional[bool], str]:
+def backtest_check(r: Optional[Dict[str, Any]], now: Optional[float] = None) -> Tuple[Optional[bool], str]:
     """One saved rolling result against the Phase 1 exit rule: data_quality.ok, at least MIN_BACKTEST_TRADES trades, net positive after charges, verdict PASSED_THIS_TEST_ONLY."""
     if not r:
         return None, "no rolling backtest saved yet"
@@ -58,6 +59,10 @@ def backtest_check(r: Optional[Dict[str, Any]]) -> Tuple[Optional[bool], str]:
         why.append("net after charges not positive")
     if r.get("verdict") != "PASSED_THIS_TEST_ONLY":
         why.append(f"verdict {r.get('verdict') or '?'}")
+    if now is not None and r.get("mtime") is not None:                       # round 305: an old pass used to stay green for ever
+        age_days = (now - float(r["mtime"])) / 86400.0
+        if age_days > MAX_BACKTEST_AGE_DAYS:
+            why.append(f"result saved {age_days:.0f} days ago (> {MAX_BACKTEST_AGE_DAYS}): run it again")
     tag = f"{r.get('trades')} trades, net {r.get('net')}"
     return (False, "; ".join(why)) if why else (True, tag)
 
@@ -77,7 +82,7 @@ def evaluate(inp: Dict[str, Any]) -> Dict[str, Any]:
     if not bts:
         items.append(_item("backtest", "Backtests", "Rolling backtest passed for every strategy REAL would trade", None, True, "no strategy to check (CORE is switched off?)"))
     for strat, per_und in sorted(bts.items()):
-        res = {u: backtest_check(r) for u, r in per_und.items()}
+        res = {u: backtest_check(r, inp.get("now")) for u, r in per_und.items()}
         ok = _all([v[0] for v in res.values()])
         detail = " | ".join(f"{u}: {v[1]}" for u, v in res.items()) or "no underlying selected"
         items.append(_item(f"backtest_{strat.lower()}", "Backtests", f"Rolling backtest passed: {strat}", ok, True, detail))
@@ -148,7 +153,7 @@ def latest_rolling(data_dir: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
                 r = json.load(open(path, encoding="utf-8"))
                 o = (r.get("metrics") or {}).get("overall") or {}
                 row = {"name": f, "kind": str(r.get("kind") or "").upper(), "strategy": str(r.get("strategy") or "CORE").upper(), "underlying": str(r.get("underlying") or "").upper(),
-                       "trades": o.get("trades"), "net": o.get("net"), "verdict": (r.get("verdict") or {}).get("status"), "dq_ok": (r.get("data_quality") or {}).get("ok")}
+                       "trades": o.get("trades"), "net": o.get("net"), "verdict": (r.get("verdict") or {}).get("status"), "dq_ok": (r.get("data_quality") or {}).get("ok"), "mtime": mt}
                 _bt_cache[path] = (mt, row)
         except (OSError, ValueError, AttributeError):
             continue

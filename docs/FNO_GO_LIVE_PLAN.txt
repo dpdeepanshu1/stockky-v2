@@ -109,7 +109,7 @@ Nothing here proves a profit; each phase only decides whether the next one is al
 
 **B. F&O engine and data**
 5. Six-month fetch with `--resume` (index daily / 5-minute CSVs and a daily India VIX file).
-6. Rolling backtest per strategy; pass = `data_quality.ok`, 30+ trades, net positive after charges; a failing strategy stays OFF. (The readiness list now reads these results.)
+6. Rolling backtest per strategy; pass = `data_quality.ok`, 30+ trades, net positive after charges; a failing strategy stays OFF. (The readiness list now reads these results; since round 305 a result saved more than 14 days ago stops counting.)
 7. DEMO engine ON, CORE only. Expiry-day strategies DEMO only until 30+ DEMO expiry days.
 8. A week before the first REAL week: decide on leaving `CAPITAL_ALLOC_MODE` shadow, board fresh. Reconcile clean; any mismatch = disarm at once.
 9. Every new change ships with tests and a Calibration switch.

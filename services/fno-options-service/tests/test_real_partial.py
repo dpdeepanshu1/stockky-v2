@@ -230,7 +230,7 @@ def test_exit_with_a_stop_whose_state_is_unreadable_waits_instead_of_selling(db)
     b = RB()
     e = real(db, b)
     p = entered(db, b, e)
-    b.miss = {p.broker_order_ids["sl"]: 2}                           # the first status read still works? no: both reads of the stop get no answer
+    b.miss = {p.broker_order_ids["sl"]: 50}                          # round 294: every read of the stop gets no answer, also the retries after the cancel
     n = len(sells(b))
     e.squareoff_all(now=NOW + timedelta(seconds=30))
     assert len(sells(b)) == n and db.get_position(p.id).status == "OPEN"

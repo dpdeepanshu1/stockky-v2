@@ -231,3 +231,19 @@ export function probeHeadline(d: FnoProbeDoc | null | undefined): { tone: "off" 
   const why = p.exit_code !== 0 && p.reason ? ` ${p.reason}` : "";                      // Round 269: say WHY a run stopped (the refusal text is saved in the result)
   return { tone: p.exit_code === 0 ? "good" : "warn", text: `Probe: ${p.outcome}.${why}` };
 }
+
+/** Round 303: the strategies the "Quick simulation" can run. tests/test_round303_backtest_ui.py compares this list with fno/strategies.py ORDER, so a new strategy cannot be missing from the page (the EXPIRY_* two were). */
+export const BT_STRATEGIES: string[] = ["CORE", "TREND_RIDER", "MOMENTUM_SURGE", "BEAR_SWEEP", "BEAR_PIVOT", "DRIFT_EDGE", "WEEKLY_OPENER", "EXPIRY_MOMENTUM", "EXPIRY_ALPHA"];
+
+/** Round 303: what the result page must say about a saved backtest besides the numbers: the verdict AND its reasons (they were only in the .txt), the data-quality line of a rolling run, and the replay's day warnings. */
+export function btVerdictView(doc: Record<string, any> | null | undefined): { status: string; tone: "warn" | "bad" | "neutral"; reasons: string[]; quality: string | null; warnings: string[] } {
+  const v = (doc && doc.verdict) || {};
+  const status = typeof v.status === "string" && v.status ? v.status : "-";
+  const reasons = Array.isArray(v.reasons) ? v.reasons.map(String) : [];
+  const dq = doc && doc.data_quality;
+  const quality = dq && typeof dq === "object"
+    ? `${dq.ok ? "Data quality OK" : "Data quality NOT OK"}: held bars without a candle ${dq.unmanaged_pct ?? "-"}%, exits at the last known price ${dq.unpriced_exit_pct ?? "-"}%, days without a usable VIX ${dq.vix_unknown_pct ?? "-"}%${Array.isArray(dq.labels) && dq.labels.length ? `, strikes fetched ${dq.labels.join(", ")}` : ""}`
+    : null;
+  const warnings = Array.isArray(doc && doc.warnings) ? (doc as any).warnings.map(String) : [];
+  return { status, tone: status === "NO_EDGE" ? "bad" : status === "-" ? "neutral" : "warn", reasons, quality, warnings };   // the service never says "safe": even a pass is only "this test only", so no green
+}

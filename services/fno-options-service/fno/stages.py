@@ -14,6 +14,7 @@ LABELS = {"market_data": "Market data", "chains": "Chains", "signal": "Signal", 
 SIZING_STAGES = ("capital", "contract", "sizing", "capital_room")      # the `stage` a skip event carries (engine._enter)
 EXIT_SIDES = ("SL", "SELL")                                           # the `side` of an order_failed / the `would` of a real_blocked that belongs to the exit path
 STALE_CYCLE_S = 90.0
+RECONCILE_MAX_AGE_S = 1200.0                                          # round 306: the same limit as fno/readiness.py (a test keeps them equal): an older reconcile says nothing about now
 EVENT_LIMIT = 500                                                     # newest events read per kind (the engine throttles repeats, so a day fits)
 KINDS = ("signal", "veto", "skip", "entry", "exit", "real_blocked", "order_failed", "stale")
 
@@ -71,7 +72,7 @@ def _ts(e: Optional[Dict[str, Any]]) -> float:
 
 
 def build(inp: Dict[str, Any], day_of: Any) -> List[Dict[str, Any]]:
-    """inp: now, enabled, market_open, md_ok, vix_ok, expiries_ok, md_detail, last_tick, events {kind: [events]}, open_positions (int), broker (bool), reconcile (dict)."""
+    """inp: now, enabled, market_open, md_ok, vix_ok, expiries_ok, md_detail, last_tick, events {kind: [events]}, open_positions (int), open_real_positions (int, optional), broker (bool), reconcile (dict)."""
     now = float(inp.get("now") or 0.0)
     day = day_of(now)
     tick = inp.get("last_tick") or {}
@@ -183,6 +184,13 @@ def build(inp: Dict[str, Any], day_of: Any) -> List[Dict[str, Any]]:
         put("reconcile", "idle", rec.get("note") or ("REAL only: not checked yet" if inp.get("broker") else "REAL only: no Dhan credentials loaded"))
     elif rec.get("ok") is False:
         put("reconcile", "PROBLEM", f"{len(rec.get('differences') or [])} difference(s) with Dhan: check the Dhan app", age=now - float(rec["ts"]))
+    elif now - float(rec["ts"]) > RECONCILE_MAX_AGE_S:                   # round 306: any age used to show green here, while the readiness list already called a 20-minute-old check unknown
+        mins = int((now - float(rec["ts"])) // 60)
+        open_real = int(inp["open_real_positions"] if inp.get("open_real_positions") is not None else (inp.get("open_positions") or 0))   # the engine only reconciles while a REAL position is open (or mode is REAL): DEMO positions never refresh it
+        if inp.get("market_open") and open_real > 0:
+            put("reconcile", "PROBLEM", f"last check with Dhan is {mins} min old and {open_real} REAL position(s) are open: the engine is not comparing them with Dhan", age=now - float(rec["ts"]))
+        else:
+            put("reconcile", "idle", f"last check with Dhan is {mins} min old (no REAL position open to compare, or the market is closed)", age=now - float(rec["ts"]))
     else:
         put("reconcile", "OK", "our REAL positions match Dhan's", age=now - float(rec["ts"]))
     return [out[k] for k in ORDER]

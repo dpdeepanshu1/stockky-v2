@@ -82,6 +82,18 @@ def real_allowed(cfg: Any, armed_day: Optional[str], today: str) -> Tuple[bool, 
     return (not closed), closed
 
 
+def exit_allowed(cfg: Any, broker: Any) -> Tuple[bool, List[str]]:
+    """Round 294: may a SELL / cancel for a position we ALREADY hold be sent? That needs only a broker with credentials. The four locks, today's ARM and the readiness list decide whether to OPEN
+    risk (`real_allowed`); they must never stop us from closing it. Before this, a readiness blocker (a reconcile difference is one), a disarm or a restart left a REAL position
+    open through its stop and the 15:15 square-off."""
+    closed: List[str] = []
+    if broker is None:
+        closed.append("no broker (Dhan credentials not loaded: ARM borrows them)")
+    elif not getattr(cfg, "DHAN_CLIENT_ID", "") or not getattr(cfg, "DHAN_ACCESS_TOKEN", ""):
+        closed.append("no Dhan client id / access token configured")
+    return (not closed), closed
+
+
 def build_order(client_id: str, security_id: int, segment: str, side: str, qty: int, price: float, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     if side not in ("BUY", "SELL"):
         raise ValueError("side must be BUY or SELL")
@@ -191,6 +203,25 @@ class Broker:
         return None
 
 
+class NetPositions(dict):
+    """Round 296: Dhan's open F&O net positions. As a plain dict it is {securityId: netQty} with every row of one contract SUMMED (an INTRADAY and an NRML row of the same contract add up; one used to overwrite the other).
+    `by_segment` is the exact view {(exchangeSegment, securityId): netQty}: NSE and BSE can reuse a security id, so a caller that knows the segment reads it through net_qty()."""
+
+    def __init__(self, *a: Any, **k: Any):
+        super().__init__(*a, **k)
+        self.by_segment: Dict[Tuple[str, str], int] = {}
+
+
+def net_qty(net: Optional[Dict[str, int]], security_id: Any, segment: str = "") -> int:
+    """What Dhan holds of one contract. Uses the segment when both it and the segment view are known; otherwise the id alone (a plain dict, as the test fakes return, or a row saved before segments were stored)."""
+    if not net:
+        return 0
+    by = getattr(net, "by_segment", None)
+    if by is not None and segment:
+        return int(by.get((str(segment), str(security_id)), 0))
+    return int(net.get(str(security_id), 0))
+
+
 class DhanBroker(Broker):
     can_confirm = True
 
@@ -207,11 +238,15 @@ class DhanBroker(Broker):
         except urllib.error.HTTPError as e:
             try:
                 body = json.loads(e.read().decode("utf-8") or "{}")
-            except ValueError:
+            except _NET_ERRORS:                             # round 294: a 5xx whose body is cut short (IncompleteRead) raised out of this handler, past maybe_sent / exit_doubt; the HTTP code alone decides
+                body = {}
+            if not isinstance(body, dict):
                 body = {}
             return OrderResult(False, status=f"HTTP {e.code}", message=describe_error(body)[:200], raw=body)
         except _NET_ERRORS as e:
             return OrderResult(False, status="NETWORK", message=type(e).__name__)
+        if not isinstance(body, dict):                      # round 294: a list / string answer is "no order id", which maybe_sent treats as possibly placed
+            body = {}
         oid = str(body.get("orderId") or "")
         if not oid and not any(body.get(k) for k in ("errorCode", "errorType", "errorMessage", "remarks", "omsErrorDescription")):
             return OrderResult(False, status="NO_ORDER_ID", message="Dhan answered without an order id", raw=body)       # round 282: no id and no error text: the order may exist
@@ -269,7 +304,7 @@ class DhanBroker(Broker):
             return None
         if not isinstance(body, list):
             return None
-        out: Dict[str, int] = {}
+        out = NetPositions()
         for r in body:
             if not isinstance(r, dict):                     # round 251: one odd row (null, a string) must not hide every other position from the reconcile
                 continue
@@ -277,6 +312,12 @@ class DhanBroker(Broker):
                 q = int(r.get("netQty") or 0)
             except (TypeError, ValueError):
                 continue
-            if q and str(r.get("exchangeSegment") or "").endswith("FNO"):
-                out[str(r.get("securityId"))] = q
+            seg = str(r.get("exchangeSegment") or "")
+            if q and seg.endswith("FNO"):
+                sid = str(r.get("securityId"))
+                out[sid] = out.get(sid, 0) + q                                      # round 296: add rows of the same contract, never overwrite
+                out.by_segment[(seg, sid)] = out.by_segment.get((seg, sid), 0) + q
+        for k in [k for k, v in out.items() if v == 0]:                            # +65 in one row and -65 in another is flat
+            del out[k]
+        out.by_segment = {k: v for k, v in out.by_segment.items() if v != 0}
         return out

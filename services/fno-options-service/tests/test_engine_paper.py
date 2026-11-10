@@ -321,9 +321,10 @@ def test_creds_fetch_apply_drop():
     assert seen["url"] == "http://rt:8005/dhan/fno-credentials" and seen["auth"] == "Bearer tok"
     cfg = _types.SimpleNamespace(DHAN_CLIENT_ID="", DHAN_ACCESS_TOKEN="", DHAN_BASE_URL="x")
     prev = _creds.apply(cfg, c)
-    assert (cfg.DHAN_CLIENT_ID, cfg.DHAN_ACCESS_TOKEN, cfg.DHAN_BASE_URL) == ("C1", "T1", "https://api.dhan.co/v2") and prev == ("", "")
+    assert (cfg.DHAN_CLIENT_ID, cfg.DHAN_ACCESS_TOKEN, cfg.DHAN_BASE_URL) == ("C1", "T1", "https://api.dhan.co/v2") and prev == ("", "", "x")
     _creds.drop(cfg, prev)
     assert cfg.DHAN_CLIENT_ID == "" and cfg.DHAN_ACCESS_TOKEN == ""
+    assert cfg.DHAN_BASE_URL == "x"                    # round 296: disarm restores the base URL that was there before the borrow
 
 
 def test_creds_errors_are_plain():

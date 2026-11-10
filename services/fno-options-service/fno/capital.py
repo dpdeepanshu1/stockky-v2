@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import capital_board
 
@@ -55,14 +55,21 @@ def can_spend_real(cfg: Any, armed_day: Optional[str], today: str) -> bool:
 
 
 def stats(store: Store, cfg: Any, today: Optional[str] = None) -> Dict[str, Any]:
-    """REAL net P&L after charges and closed-trade count over the window, and the premium paid for the REAL positions still open."""
+    """REAL net P&L after charges and closed-trade count over the window, and the premium paid for the REAL positions still open.
+    Round 300: `trades` counts TRADES, like `Store.day_summary`: a NOT_FILLED entry (booked CLOSED with net 0.0) is not a trade, and a partial-exit child row belongs to its parent's trade
+    (counted once, only when the whole family is closed). The capital board gives the bonus share only from `min_trades` closed trades, so counting rows let F&O earn it early.
+    Net P&L still sums every closed row (a partial exit's money is real the moment it is sold)."""
     today = today or day_of(time.time())
     since = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=int(getattr(cfg, "CAPITAL_ALLOC_WINDOW_DAYS", 30)))).strftime("%Y-%m-%d")
-    net, n = 0.0, 0
+    net = 0.0
+    fam: Dict[Any, List[Any]] = {}
     for p in store.positions("REAL", since_day=since, limit=5000):
+        if p.exit_reason == "NOT_FILLED":
+            continue
+        fam.setdefault(p.parent_id if p.parent_id is not None else p.id, []).append(p)
         if p.status == "CLOSED" and p.net_pnl is not None:
             net += float(p.net_pnl)
-            n += 1
+    n = sum(1 for rows in fam.values() if all(x.status == "CLOSED" and x.net_pnl is not None for x in rows))
     exposure = sum(float(p.entry_premium) * p.qty for p in store.open_positions("REAL"))
     return {"net_pnl": net, "trades": n, "exposure": exposure}
 

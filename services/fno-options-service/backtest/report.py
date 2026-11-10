@@ -22,6 +22,24 @@ def job_name(kind: str, underlyings: Any, strategy: str = "CORE") -> str:
     return f"fno_{kind}_{'-'.join(unds)}{tail}"
 
 
+def request_problem(kind: Any, underlyings: Any, strategy: Any = "CORE", days: Any = None, valid_strategies: Any = ()) -> Any:
+    """Round 303: why a backtest request from the service's API must be refused, or None. Pure, so it is tested without the web framework. New: a SIMULATION runs ONE index per job (it used to take the first of
+    several silently, and the result file was then named for all of them, e.g. fno_sim_nifty-sensex.json holding a NIFTY-only run)."""
+    import re
+    if kind not in ("replay", "sim"):
+        return "kind must be replay or sim"
+    if days is not None and any(not re.match(r"^\d{4}-\d{2}-\d{2}$", str(d)) for d in days):
+        return "days must be YYYY-MM-DD (they name folders under snapshots/)"
+    unds = [str(u).upper() for u in (underlyings or [])]
+    if not unds or any(u not in ("NIFTY", "SENSEX") for u in unds):
+        return "underlyings must be NIFTY and/or SENSEX"
+    if kind == "sim" and len(set(unds)) > 1:
+        return "the simulation runs one index per job: pick NIFTY or SENSEX (run it twice for both)"
+    if kind == "sim" and str(strategy).upper() != "ALL" and str(strategy).upper() not in list(valid_strategies):
+        return f"strategy must be ALL or one of {list(valid_strategies)}"
+    return None
+
+
 def save(root: str, name: str, result: Dict[str, Any]) -> str:
     """Writes backtests/<name>_<YYYYmmdd_HHMMSS>.json and NEVER overwrites: round 285, two results with the same name finished in the same second (the stamp has no finer part) and the second silently
     replaced the first; now the second gets a _2, _3 ... suffix. The caller's .txt companion is path[:-5] + '.txt', so it stays unique too."""

@@ -31,12 +31,30 @@ def longest_losing_streak(pnls: List[float]) -> int:
     return best
 
 
+def _fam_key(p: Position) -> Any:
+    """Round 310: the TRADE a closed row belongs to: its parent for a partial-exit child row, else itself (a simulated trade has no id, so it is its own trade)."""
+    fid = p.parent_id if p.parent_id is not None else p.id
+    if fid is None:
+        return ("row", id(p))
+    # round 311: ids restart at 1 in every store (the replay backtest runs one in-memory store per day and pools the trades), so the id alone would merge trades of different days.
+    # A partial-exit child copies its parent's entry time and contract, so these fields are the same for the whole family.
+    return (fid, p.entry_ts, p.underlying, p.opt_type, p.strike, p.expiry)
+
+
+def _trade_nets(ps: List[Position]) -> List[float]:
+    """Net P&L per TRADE, in the order the trades first appear: a parent and its partial-exit rows are one trade, as in Store.day_summary and fno/capital.stats."""
+    fam: Dict[Any, float] = {}
+    for p in ps:
+        fam[_fam_key(p)] = fam.get(_fam_key(p), 0.0) + (p.net_pnl or 0.0)
+    return list(fam.values())
+
+
 def _block(ps: List[Position]) -> Dict[str, Any]:
-    net = [p.net_pnl or 0.0 for p in ps]
+    net = _trade_nets(ps)                                  # round 310: per trade, so a partial exit is not a second trade / a second win
     gross = [p.gross_pnl or 0.0 for p in ps]
     wins = [x for x in net if x > 0]
     losses = [x for x in net if x <= 0]
-    n = len(ps)
+    n = len(net)
     gw, gl = sum(wins), -sum(losses)
     return {"trades": n, "wins": len(wins), "win_rate_pct": round(len(wins) / n * 100.0, 1) if n else None, "gross": round(sum(gross), 2),
             "charges": round(sum(p.charges or 0.0 for p in ps), 2), "net": round(sum(net), 2), "avg_win": round(gw / len(wins), 2) if wins else None,
@@ -45,11 +63,11 @@ def _block(ps: List[Position]) -> Dict[str, Any]:
 
 
 def summarize(positions: Iterable[Position], capital: float = 0.0, k_folds: int = 3) -> Dict[str, Any]:
-    ps = sorted([p for p in positions if p.status == "CLOSED"], key=lambda p: p.exit_ts or 0)
+    ps = sorted([p for p in positions if p.status == "CLOSED" and p.exit_reason != "NOT_FILLED"], key=lambda p: p.exit_ts or 0)   # round 310: an entry that never filled is not a trade (it counted as a loss)
     out: Dict[str, Any] = {"overall": _block(ps)}
     pnls = [p.net_pnl or 0.0 for p in ps]
     out["overall"].update(max_drawdown(pnls))
-    out["overall"]["longest_losing_streak"] = longest_losing_streak(pnls)
+    out["overall"]["longest_losing_streak"] = longest_losing_streak(_trade_nets(ps))
     if capital > 0 and ps:
         out["overall"]["return_pct"] = round(out["overall"]["net"] / capital * 100.0, 2)
         out["overall"]["max_drawdown_pct"] = round(out["overall"]["max_drawdown"] / capital * 100.0, 2)

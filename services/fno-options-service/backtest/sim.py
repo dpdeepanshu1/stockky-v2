@@ -23,6 +23,18 @@ def _d(t: float) -> date:
     return datetime.fromtimestamp(t, IST).date()
 
 
+def check_bar_spacing(intraday: Sequence[dict], bar_minutes: int) -> None:
+    """Round 303: the backtests time a bar as start + `bar_minutes` (the signal is taken at the bar's CLOSE, the gates and the square-off use that time). Index candles of another interval (a 15-minute
+    or 1-minute file given to a 5-minute run) were accepted silently: the gates then saw a time 10 minutes before the bar had really closed, and a rolling run looked its option candles up at times that never matched.
+    The MEDIAN gap inside a day is used, so a few holes in the data do not trip it."""
+    by_day: Dict[date, List[float]] = {}
+    for b in intraday:
+        by_day.setdefault(_d(b["t"]), []).append(b["t"])
+    gaps = sorted(y - x for ts in by_day.values() for x, y in zip(sorted(ts), sorted(ts)[1:]))
+    if gaps and gaps[len(gaps) // 2] != bar_minutes * 60.0:
+        raise ValueError(f"the index candles are {gaps[len(gaps) // 2] / 60:g}-minute bars but this backtest times them as {bar_minutes}-minute bars: pass index candles of {bar_minutes} minutes")
+
+
 def _prem(spot: float, strike: float, ot: str, t_years: float, iv: float, r: float) -> float:
     return max(0.05, bs.price(spot, strike, t_years, r, iv, ot))
 
@@ -39,6 +51,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], vix_by
     lot = lot_size or LOT[und]
     step = STEP[und]
     vix_by_day = vix_by_day or {}
+    check_bar_spacing(intraday, bar_minutes)
     by_day: Dict[date, List[dict]] = {}
     for b in sorted(intraday, key=lambda x: x["t"]):
         by_day.setdefault(_d(b["t"]), []).append(b)

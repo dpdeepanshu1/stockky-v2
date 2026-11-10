@@ -22,6 +22,7 @@ from .store import Store, day_of
 
 log = logging.getLogger("fno.engine")
 THROTTLE_S = 60.0
+EXIT_CHAIN_FALLBACK_S = 30.0   # round 295: when a fresh chain cannot be had, a position is still managed on the last chain seen, if it is at most this old
 STOP_ABSENT_AFTER_S = 120.0     # round 292: a stop whose POST failed is read as "never reached Dhan" only when Dhan answers 404 to the lookup AND this long has passed (a delayed order may still land)
 
 
@@ -47,11 +48,37 @@ class Engine:
         self.fill_tries, self.fill_wait_s = 5, 1.0   # how long a REAL order is waited for before it is cancelled
         self.last_reconcile: Dict[str, Any] = {"ts": None}
         self._reconcile_at = 0.0
+        self._unmanaged_at = 0.0
         self.last_tick: Dict[str, Any] = {"ts": None, "ok": None, "error": None, "summary": {}}
         self.capital_why = ""
+        self._chain_seen: Dict[Tuple[str, str], Chain] = {}   # round 295: the last chain fetched per (underlying, expiry)
         self._lock = threading.RLock()               # round 283: one engine action at a time (runner cycle, manual square-off, clearing an exit-doubt mark)
 
     # ── helpers ──
+    # ── chains (round 295) ──
+    def _get_chain(self, chains: Dict[Tuple[str, str], Optional[Chain]], key: Tuple[str, str], swallow: bool = True) -> Optional[Chain]:
+        """One fetch per (underlying, expiry) per cycle. Dhan allows one option-chain call per ~3 s and market-data spaces them (DHAN_OPTIONCHAIN_MIN_INTERVAL_S), so every repeat fetch inside a cycle
+        queues behind real ones: 2 to 4 distinct chains already take 6 to 13 s. For OPEN positions a fetch that raises is a missing chain (`swallow`), never an aborted cycle;
+        the entry analysis passes swallow=False so a provider failure still shows as a failed cycle (`last_tick.ok`)."""
+        if key in chains:
+            return chains[key]
+        try:
+            ch = self.provider.chain(*key)
+        except Exception as e:  # noqa: BLE001
+            if not swallow:
+                raise
+            log.warning("chain %s %s failed: %s", key[0], key[1], e)
+            ch = None
+        chains[key] = ch
+        if ch is not None:
+            self._chain_seen[key] = ch
+        return ch
+
+    def recent_chain(self, underlying: str, expiry: str, now_ts: Optional[float] = None, max_age_s: float = EXIT_CHAIN_FALLBACK_S) -> Optional[Chain]:
+        """The last chain this engine fetched for the key, if it is not older than `max_age_s`. Readers that only DISPLAY (the Overview page) use it instead of queueing another Dhan call."""
+        ch = self._chain_seen.get((underlying, expiry))
+        return ch if ch is not None and ch.age_s(now_ts) <= max_age_s else None
+
     def _note(self, kind: str, und: str, data: Dict[str, Any], key: str = "", force: bool = False, now: Optional[datetime] = None) -> None:
         k = f"{kind}:{und}:{key}"
         t = (now or now_ist()).timestamp()
@@ -62,6 +89,26 @@ class Engine:
             self.store.add_event(kind, data, underlying=und, ts=t)
         except Exception:  # noqa: BLE001
             log.exception("journal write failed")
+
+    def unmanaged_real(self) -> List[Position]:
+        """Round 296: REAL positions we think are open while no broker is loaded (after a restart the borrowed Dhan token is gone until someone ARMs). Nothing manages them: no stop checks, no square-off, no fill news."""
+        try:
+            return [] if self.broker is not None else self.store.open_positions("REAL")
+        except Exception:  # noqa: BLE001
+            return []
+
+    def warn_unmanaged_real(self, now: Optional[datetime] = None, force: bool = False, every_s: float = 900.0) -> List[Position]:
+        held = self.unmanaged_real()
+        t = (now or now_ist()).timestamp()
+        if not held or (not force and t - self._unmanaged_at < every_s):
+            return held
+        self._unmanaged_at = t
+        labels = [p.label() for p in held]
+        msg = (f"{len(held)} REAL position(s) are open and NO Dhan connection is loaded, so the engine is not managing them: {', '.join(labels)}. Press ARM (it re-borrows the token) or set FNO_DHAN_* in the environment. "
+               "A stop already resting at Dhan still protects you; our books will not see it fill.")
+        log.error("UNMANAGED REAL POSITIONS: %s", msg)
+        self._note("unmanaged_real", "", {"msg": msg, "positions": [p.id for p in held], "labels": labels}, key="all", now=now, force=True)
+        return held
 
     def params(self) -> Params:
         """The cycle's Params. In REAL mode the capital is the amount the three-way capital board allots to F&O (fno/capital.py), NOT FNO_DEMO_CAPITAL; no fresh board = 0 = no entry."""
@@ -161,6 +208,7 @@ class Engine:
             return
         if res.ok:
             pos.broker_order_ids["sl"] = res.order_id
+            pos.broker_order_ids.pop("sl_booked_qty", None)
             self.store.update_position(pos)
         else:
             # the software stop (checked every cycle) still protects the position; say so loudly
@@ -238,6 +286,43 @@ class Engine:
                                             "exit": price, "net": child.net_pnl}, force=True, now=now)
         return child
 
+    def _await_final(self, oid: str) -> Optional[execution.OrderStatus]:
+        """Round 294: read an order until it is TRADED / REJECTED / CANCELLED (a cancel is asynchronous: the first read after it can still say PENDING). Returns the last answer; None = no answer.
+        A broker that cannot answer at all is not waited for (same rule as `_confirm`)."""
+        st = None
+        for i in range(max(1, self.fill_tries)):
+            st = self.broker.order_status(oid) if self.broker else None
+            if st is not None and st.state in ("TRADED", "REJECTED", "CANCELLED"):
+                return st
+            if st is None and not self._can_confirm():
+                return None
+            if i + 1 < self.fill_tries:
+                self.sleep(self.fill_wait_s)
+        return st
+
+    def _absorb_stop_fill(self, pos: Position, st: execution.OrderStatus, p: Params, now: datetime) -> Tuple[str, Optional[float]]:
+        """Round 294: a resting stop sold `st.filled_qty` before it was cancelled / expired. Book it ONCE (the quantity already booked is kept in `sl_booked_qty`, so reading the same order again next
+        cycle cannot book the same lots twice). ("filled", price) = everything is sold; ("partial", price) = whole lots booked as a closed child row, the rest stays open; ("odd", None) = less than one
+        lot (a human must look); ("none", None) = nothing new to book."""
+        ids = pos.broker_order_ids
+        try:
+            already = int(ids.get("sl_booked_qty") or 0)
+        except (TypeError, ValueError):
+            already = 0
+        new_q = max(0, int(st.filled_qty or 0) - already)
+        if new_q <= 0:
+            return "none", None
+        n = self._whole_lots(new_q, pos.lot_size)
+        px = st.avg_price if st.avg_price > 0 else pos.sl_price
+        if n >= pos.lots:
+            return "filled", px
+        if n >= 1:
+            ids["sl_booked_qty"] = str(already + n * pos.lot_size)
+            self._book_partial(pos, n, px, paper.SL, str(ids.get("sl") or ""), p, now, "broker stop")
+            return "partial", px
+        self._note("reconcile", pos.underlying, {"msg": "stop filled an odd quantity: check the Dhan app", "position": pos.id, "filled_qty": st.filled_qty}, key=f"sl-odd{pos.id}", now=now, force=True)
+        return "odd", None
+
     def _sl_state(self, pos: Position, p: Params, now: datetime) -> Tuple[str, Optional[float]]:
         """Before an exit: cancel the resting stop and read what became of it. ("filled", price) = the stop had already sold everything; ("wait", None) = cannot tell, do not
         sell now; ("none", None) = no stop is working any more (the position, possibly with fewer lots after a partial stop fill, is still ours to sell)."""
@@ -253,23 +338,19 @@ class Engine:
         if st is not None and st.state == "TRADED" and st.avg_price > 0:
             return "filled", st.avg_price
         self.broker.cancel(sl)
-        st = self.broker.order_status(sl)
+        st = self._await_final(sl)                          # round 294: a cancel still in transit read as "no stop" and the SELL went out beside a live stop: two sells = a short
         if st is None and self._can_confirm():
             return "wait", None
         if st is not None and st.state == "TRADED" and st.avg_price > 0:
             return "filled", st.avg_price
         if st is not None and st.filled_qty > 0:            # the stop sold part of it before the cancel
-            n = self._whole_lots(st.filled_qty, pos.lot_size)
-            px = st.avg_price if st.avg_price > 0 else pos.sl_price
-            if n >= pos.lots:
+            kind, px = self._absorb_stop_fill(pos, st, p, now)
+            if kind == "filled":
                 return "filled", px
-            if n >= 1:
-                self._book_partial(pos, n, px, paper.SL, sl, p, now, "broker stop")
-            else:
-                self._note("reconcile", pos.underlying, {"msg": "stop filled an odd quantity: check the Dhan app", "position": pos.id, "filled_qty": st.filled_qty}, key=f"sl-odd{pos.id}", now=now, force=True)
-            if st.state in ("PENDING", "UNKNOWN"):
-                return "wait", None
+        if st is not None and st.state in ("PENDING", "UNKNOWN"):
+            return "wait", None                             # still working at Dhan: do not sell on top of it
         pos.broker_order_ids.pop("sl", None)
+        pos.broker_order_ids.pop("sl_booked_qty", None)
         return "none", None
 
     def check_broker_stops(self, now: datetime, p: Params) -> List[Position]:
@@ -295,8 +376,17 @@ class Engine:
                                                     "net": pos.net_pnl}, force=True, now=now)
                 done.append(pos)
             elif st.state in ("REJECTED", "CANCELLED"):
-                self._note("order_failed", pos.underlying, {"side": "SL", "position": pos.id, "status": st.state, "note": "stop order gone; re-placing"}, key=f"sl{pos.id}", now=now, force=True)
+                kind, px = self._absorb_stop_fill(pos, st, p, now) if st.filled_qty > 0 else ("none", None)      # round 294: the stop may have sold part (or all) of it before it ended
+                if kind == "filled":
+                    pos.note = (pos.note + " | closed by the broker-side stop (it ended " + st.state.lower() + " after filling)").strip(" |")
+                    paper.close_position(pos, px, now.timestamp(), paper.SL, p)
+                    self.store.update_position(pos)
+                    self._note("exit", pos.underlying, {"position": pos.id, "label": pos.label(), "reason": paper.SL, "by": "broker stop", "entry": pos.entry_premium, "exit": px, "net": pos.net_pnl}, force=True, now=now)
+                    done.append(pos)
+                    continue
+                self._note("order_failed", pos.underlying, {"side": "SL", "position": pos.id, "status": st.state, "note": "stop order gone; re-placing" + (" (it sold part first: booked)" if kind == "partial" else "")}, key=f"sl{pos.id}", now=now, force=True)
                 pos.broker_order_ids.pop("sl", None)
+                pos.broker_order_ids.pop("sl_booked_qty", None)
                 self.store.update_position(pos)
             elif st.state == "PENDING" and st.filled_qty > 0:
                 self._note("reconcile", pos.underlying, {"msg": "the stop is part-filled and still working: check the Dhan app", "position": pos.id, "filled_qty": st.filled_qty,
@@ -362,7 +452,7 @@ class Engine:
                 continue
             else:
                 net = self.broker.net_positions()
-                if net is not None and net.get(str(pos.security_id), 0) >= pos.qty:
+                if net is not None and execution.net_qty(net, pos.security_id, pos.segment) >= pos.qty:
                     confirmed = True
             if not confirmed:
                 self._note("reconcile", pos.underlying, {"msg": "entry fill still unknown: no stop, will not be sold by the engine. Check the Dhan app", "position": pos.id}, key=f"unk{pos.id}", now=now)
@@ -389,13 +479,29 @@ class Engine:
         if net is None:
             self.last_reconcile = {"ts": now.timestamp(), "ok": None, "note": "broker positions unavailable"}
             return self.last_reconcile
-        own: Dict[str, int] = {}
+        # round 296: compare per (segment, security id): NSE and BSE can reuse an id. A plain-dict broker (no segment view) compares by id alone, as before.
+        by_seg = getattr(net, "by_segment", None)
+        theirs: Dict[Tuple[str, str], int] = dict(by_seg) if by_seg is not None else {("", k): v for k, v in net.items()}
+        segs_of: Dict[str, set] = {}
+        for sg, sid in theirs:
+            segs_of.setdefault(sid, set()).add(sg)
+        own_k: Dict[Tuple[str, str], int] = {}
         for pos in self.store.open_positions("REAL"):
-            own[str(pos.security_id)] = own.get(str(pos.security_id), 0) + pos.qty
-        diffs = [{"security_id": k, "ours": own.get(k, 0), "broker": net.get(k, 0)} for k in sorted(set(own) | set(net)) if own.get(k, 0) != net.get(k, 0)]
-        self.last_reconcile = {"ts": now.timestamp(), "ok": not diffs, "differences": diffs, "ours": own, "broker": net}
+            sid = str(pos.security_id)
+            sg = (pos.segment or "") if by_seg is not None else ""
+            if by_seg is not None and not sg and len(segs_of.get(sid, ())) == 1:      # a row saved without a segment: take the only segment Dhan shows for that id
+                sg = next(iter(segs_of[sid]))
+            own_k[(sg, sid)] = own_k.get((sg, sid), 0) + pos.qty
+        shared = {sid for sid in {k[1] for k in set(own_k) | set(theirs)} if len({k[0] for k in set(own_k) | set(theirs) if k[1] == sid}) > 1}
+        name = lambda k: f"{k[0]}:{k[1]}" if k[1] in shared and k[0] else k[1]      # noqa: E731  the plain id unless two segments share it
+        diffs = []
+        for k in sorted(set(own_k) | set(theirs)):
+            if own_k.get(k, 0) != theirs.get(k, 0):
+                diffs.append({"security_id": k[1], "segment": k[0], "ours": own_k.get(k, 0), "broker": theirs.get(k, 0)})
+        own = {name(k): v for k, v in own_k.items()}
+        self.last_reconcile = {"ts": now.timestamp(), "ok": not diffs, "differences": diffs, "ours": own, "broker": {name(k): v for k, v in theirs.items()}}
         for d in diffs:
-            self._note("reconcile", "", {**d, "msg": "our REAL position and Dhan's net position differ: check the Dhan app"}, key=d["security_id"], now=now)
+            self._note("reconcile", "", {**d, "msg": "our REAL position and Dhan's net position differ: check the Dhan app"}, key=f"{d['segment']}:{d['security_id']}" if d["segment"] else d["security_id"], now=now)
         return self.last_reconcile
 
     # ── exits ──
@@ -445,7 +551,7 @@ class Engine:
         if net is None:
             self._note("reconcile", pos.underlying, {"msg": "an earlier exit SELL may have reached Dhan and Dhan's positions cannot be read: no new SELL", "position": pos.id}, key=f"x-doubt-net{pos.id}", now=now)
             return "wait"
-        held = int(net.get(str(pos.security_id), 0))
+        held = execution.net_qty(net, pos.security_id, pos.segment)
         if held > 0:
             self._note("reconcile", pos.underlying, {"msg": f"an earlier exit SELL may be resting at Dhan (Dhan still shows {held} of {pos.qty}): no second SELL. Check the Dhan app; close it by hand "
                                                              "or clear the mark (POST /fno/exit-doubt/clear)", "position": pos.id, "label": pos.label(), "dhan_qty": held}, key=f"x-doubt-held{pos.id}", now=now)
@@ -525,18 +631,34 @@ class Engine:
             if fill is None:
                 fill = pos.entry_premium
         if pos.mode == "REAL":
-            ok, closed = execution.real_allowed(self.cfg, self.armed_day(), day_of(now.timestamp()))
-            if not ok:
-                self._note("real_blocked", pos.underlying, {"would": "SELL", "position": pos.id, "reason": reason, "locks": closed}, key=f"x{pos.id}", now=now)
-                return pos
             if not self.broker:
                 self._note("order_failed", pos.underlying, {"side": "SELL", "position": pos.id, "message": "no broker"}, key=f"x{pos.id}", now=now, force=True)
                 return pos
+            ok, closed = execution.exit_allowed(self.cfg, self.broker)      # round 294: closing what we hold never waits for the ARM / readiness / mode locks (those only gate opening risk)
+            if not ok:
+                self._note("real_blocked", pos.underlying, {"would": "SELL", "position": pos.id, "reason": reason, "locks": closed}, key=f"x{pos.id}", now=now, force=True)
+                return pos
             if self._unknown_origin(pos):                   # never SELL what may not exist (that opens a short): only if Dhan's net position shows it
                 net = self.broker.net_positions()
-                if net is None or net.get(str(pos.security_id), 0) < pos.qty:
+                if net is None or execution.net_qty(net, pos.security_id, pos.segment) < pos.qty:
                     self._note("reconcile", pos.underlying, {"msg": "will not SELL a position whose entry fill is unknown and not visible at Dhan: check the Dhan app", "position": pos.id},
                                key=f"x-unk{pos.id}", now=now)
+                    return pos
+            elif gates.after_close(now):                    # round 298: after the close the only proof we accept is Dhan's own net position (it squares INTRADAY off itself: a SELL on a closed position opens a short)
+                net = self.broker.net_positions()
+                have = None if net is None else execution.net_qty(net, pos.security_id, pos.segment)
+                if have is None or have < pos.qty:
+                    why = ("Dhan's positions cannot be read" if have is None else f"Dhan shows {have} of {pos.qty}: it was probably closed there already")
+                    self._note("real_blocked", pos.underlying, {"would": "SELL", "position": pos.id, "reason": reason, "dhan_qty": have,
+                                                                "locks": [f"after the close a SELL is sent only when Dhan's net position still shows the contract ({why}); check the Dhan app"]}, key=f"x-close{pos.id}", now=now)
+                    return pos
+            elif day_of(pos.entry_ts) < day_of(now.timestamp()) and self.armed_day() != day_of(now.timestamp()):
+                # round 294: a leftover from an EARLIER day, with no ARM today. Dhan squares INTRADAY positions off itself, so it may be gone already and a SELL would open a short. Without today's ARM
+                # (the operator's "yes, trade") the only proof we accept is Dhan's own net position.
+                net = self.broker.net_positions()
+                if net is None or execution.net_qty(net, pos.security_id, pos.segment) < pos.qty:
+                    self._note("real_blocked", pos.underlying, {"would": "SELL", "position": pos.id, "reason": reason, "locks": ["a leftover from an earlier day is sold without an ARM only when Dhan's net position still shows it"]},
+                               key=f"x{pos.id}", now=now, force=True)
                     return pos
             if pos.broker_order_ids.get("exit_doubt"):      # round 282: an earlier SELL call failed and may be live at Dhan: resolve it from Dhan's positions, never sell on top of it
                 self._resolve_exit_doubt(pos, p, now)
@@ -565,7 +687,12 @@ class Engine:
                 self.store.update_position(pos)
                 self._note("exit", pos.underlying, {"position": pos.id, "label": pos.label(), "reason": paper.SL, "by": "broker stop", "exit": stopped, "net": pos.net_pnl}, force=True, now=now)
                 return pos
-            payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, pos.security_id or 0, pos.segment, "SELL", pos.qty, fill)
+            try:
+                payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, pos.security_id or 0, pos.segment, "SELL", pos.qty, fill)
+            except ValueError as e:                         # round 294: a bad payload must not abort the cycle for every other position
+                self._note("order_failed", pos.underlying, {"side": "SELL", "position": pos.id, "message": str(e)}, key=f"x{pos.id}", now=now, force=True)
+                self._place_sl(pos, now)
+                return pos
             res = self.broker.place(payload)
             if not res.ok:
                 self._maybe_sent(payload, res, pos.underlying, "SELL", now, pos.id)
@@ -608,38 +735,48 @@ class Engine:
             self.resolve_unknown_entries(now)
         closed: List[Position] = self.check_broker_stops(now, p)
         for pos in self.store.open_positions():
-            if pos.mode == "REAL" and pos.broker_order_ids.get("exit_doubt"):      # round 282: settle an exit SELL that was in doubt first, whatever the premium does now
-                if self._resolve_exit_doubt(pos, p, now) == "closed":
-                    closed.append(pos)
-                continue
-            sq = gates.after_squareoff(now, p, pos.expiry) or gates.carried_over(day_of(pos.entry_ts), now, self.holidays)   # a contract that expires today is closed earlier (expiry_squareoff_at); a leftover from an earlier day is closed at the open (round 248)
-            key = (pos.underlying, pos.expiry)
-            if key not in chains:
-                chains[key] = self.provider.chain(*key)
-            ch = chains[key]
-            side = None
+            try:                                            # round 294: one position raising must not leave the others without their stop / square-off, every cycle
+                self._manage_one(pos, now, p, chains, flips, closed)
+            except Exception as e:  # noqa: BLE001
+                log.exception("managing position %s failed", getattr(pos, "id", "?"))
+                self._note("position_error", pos.underlying, {"position": pos.id, "error": f"{type(e).__name__}: {str(e)[:160]}", "msg": "managing this position raised: the others are still managed"},
+                           key=f"perr{pos.id}", now=now)
+        return closed
+
+    def _manage_one(self, pos: Position, now: datetime, p: Params, chains: Dict[Tuple[str, str], Optional[Chain]], flips: Dict[str, str], closed: List[Position]) -> None:
+        if pos.mode == "REAL" and pos.broker_order_ids.get("exit_doubt"):      # round 282: settle an exit SELL that was in doubt first, whatever the premium does now
+            if self._resolve_exit_doubt(pos, p, now) == "closed":
+                closed.append(pos)
+            return
+        sq = gates.after_squareoff(now, p, pos.expiry) or gates.carried_over(day_of(pos.entry_ts), now, self.holidays)   # a contract that expires today is closed earlier (expiry_squareoff_at); a leftover from an earlier day is closed at the open (round 248)
+        key = (pos.underlying, pos.expiry)
+        ch = self._get_chain(chains, key)
+        if ch is None:                                      # round 295: no fresh chain: manage the position on the last one seen (stop, trail, square-off) rather than not at all
+            ch = self.recent_chain(pos.underlying, pos.expiry, now.timestamp())
             if ch is not None:
-                row = ch.row(pos.strike)
-                side = row.side(pos.opt_type) if row else None
-            prem = (side.mid if side and side.mid else None)
-            if prem is None:
-                if sq:                                      # no price at square-off: still close the book at the last known premium
-                    self._exit(pos, paper.SQUAREOFF, None, p, now)
-                    if pos.status == paper.CLOSED:          # a REAL exit that was blocked / is in doubt leaves it OPEN: do not report it as closed
-                        closed.append(pos)
-                else:
-                    self._note("stale", pos.underlying, {"position": pos.id, "msg": "no premium for an open position"}, key=str(pos.id), now=now)
-                continue
-            hit = paper.evaluate_tick(pos, prem, p, squareoff=sq)
-            if hit is None and flips.get(pos.key) == "flip":
-                hit = (paper.SIGNAL_FLIP, prem)
-            if hit:
-                self._exit(pos, hit[0], side, p, now)
-                if pos.status == paper.CLOSED:
+                self._note("stale_chain", pos.underlying, {"position": pos.id, "age_s": round(ch.age_s(now.timestamp()), 1), "msg": "no fresh chain: the position is managed on the last chain seen"}, key=f"sc{pos.id}", now=now)
+        side = None
+        if ch is not None:
+            row = ch.row(pos.strike)
+            side = row.side(pos.opt_type) if row else None
+        prem = (side.mid if side and side.mid else None)
+        if prem is None:
+            if sq:                                      # no price at square-off: still close the book at the last known premium
+                self._exit(pos, paper.SQUAREOFF, None, p, now)
+                if pos.status == paper.CLOSED:          # a REAL exit that was blocked / is in doubt leaves it OPEN: do not report it as closed
                     closed.append(pos)
             else:
-                self.store.update_position(pos)             # persists the new high / trail
-        return closed
+                self._note("stale", pos.underlying, {"position": pos.id, "msg": "no premium for an open position"}, key=str(pos.id), now=now)
+            return
+        hit = paper.evaluate_tick(pos, prem, p, squareoff=sq)
+        if hit is None and flips.get(pos.key) == "flip":
+            hit = (paper.SIGNAL_FLIP, prem)
+        if hit:
+            self._exit(pos, hit[0], side, p, now)
+            if pos.status == paper.CLOSED:
+                closed.append(pos)
+        else:
+            self.store.update_position(pos)             # persists the new high / trail
 
     # ── entries ──
     def _enter(self, und: str, direction: str, bias: Dict[str, Any], chain: Chain, p: Params, now: datetime, strategy: str = "CORE") -> Optional[Position]:
@@ -689,7 +826,11 @@ class Engine:
                 self._note("order_failed", und, {"side": "BUY", "message": "no security id for the contract"}, key="entry", now=now, force=True)
                 return None
             buy_cid = "bu" + uuid.uuid4().hex[:18]            # round 293: our own tag, so a BUY whose call failed can be looked up at Dhan afterwards
-            buy_payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, c.security_id, c.segment, "BUY", pos.qty, fill, correlation_id=buy_cid)
+            try:
+                buy_payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, c.security_id, c.segment, "BUY", pos.qty, fill, correlation_id=buy_cid)
+            except ValueError as e:                         # round 294
+                self._note("order_failed", und, {"side": "BUY", "contract": c.label(), "message": str(e)}, key="entry", now=now, force=True)
+                return None
             res = self.broker.place(buy_payload) if self.broker else execution.OrderResult(False, message="no broker")
             if not res.ok:
                 self._maybe_sent(buy_payload, res, und, "BUY", now)
@@ -753,9 +894,11 @@ class Engine:
 
     # ── the cycle ──
     @_locked
-    def tick(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+    def tick(self, now: Optional[datetime] = None, manage_only: bool = False) -> Dict[str, Any]:
+        """One cycle. `manage_only` (round 298, the runner after the close): stops / square-off / exit-doubt and unknown-entry resolution for what is open, but no analysis and no new entry."""
         now = now or now_ist()
         out: Dict[str, Any] = {"ts": now.timestamp(), "enabled": bool(getattr(self.cfg, "FNO_ENGINE_ENABLED", False)), "entries": [], "exits": [], "decisions": {}}
+        self.warn_unmanaged_real(now)                                          # round 296: repeated every 15 minutes while it stays true
         try:
             p = self.params()
             enabled = strategies.enabled_keys(self.cfg, expiry=False)
@@ -771,7 +914,10 @@ class Engine:
             failed: List[str] = []                                           # round 278: analysis errors; the cycle still manages open positions, then reports not-ok
             vix: Optional[float] = None
             trading_day = gates.is_trading_day(now.date(), self.holidays)
-            if out["enabled"] and trading_day:
+            analysing = bool(out["enabled"] and trading_day and not manage_only)
+            for pos0 in self.store.open_positions():            # round 295: the chains of OPEN positions first. Entry analysis below used to go first and its fetches queued ahead of the stop checks
+                self._get_chain(chains, (pos0.underlying, pos0.expiry))
+            if analysing:
                 vix = self.provider.vix()
                 for und in self.underlyings():
                     try:                                                 # round 278: one index failing to analyse must not stop the exits below (stops, square-off)
@@ -779,8 +925,7 @@ class Engine:
                         if not exp:
                             out["decisions"][und] = {"action": "wait", "why": ["no usable expiry"]}
                             continue
-                        ch = self.provider.chain(und, exp)
-                        chains[(und, exp)] = ch
+                        ch = self._get_chain(chains, (und, exp), swallow=False)
                         if ch is None:
                             out["decisions"][und] = {"action": "wait", "why": ["no chain"]}
                             continue
@@ -794,8 +939,7 @@ class Engine:
                         vetoes = list(ctx.vetoes)
                         ctx0 = None
                         if enabled_exp and today_iso in (self.provider.expiries(und) or []):
-                            ch0 = self.provider.chain(und, today_iso)    # the contract that expires today
-                            chains[(und, today_iso)] = ch0
+                            ch0 = self._get_chain(chains, (und, today_iso), swallow=False)    # the contract that expires today
                             if ch0 is not None:
                                 ctx0 = strategies.build_ctx(und, daily_u, intra_u, analytics.chain_summary(ch0, p.strikes_each_side), now, p, self.holidays, vix, expiry_day=True)
                                 ecands[und] = (ch0, strategies.candidates(ctx0, enabled_exp))
@@ -817,7 +961,7 @@ class Engine:
             out["exits"] = [x.id for x in self.manage_open(now, p, chains, flips)] if (out["enabled"] or self.store.open_positions()) else []
             if self.broker and (self.store.open_positions("REAL") or str(getattr(self.cfg, "FNO_MODE", "DEMO")).upper() == "REAL"):
                 self.reconcile(now)
-            if out["enabled"] and trading_day:
+            if analysing:
                 mode = str(getattr(self.cfg, "FNO_MODE", "DEMO")).upper()
                 mode = mode if mode in ("DEMO", "REAL") else "DEMO"
                 for und, bias in biases.items():
@@ -860,9 +1004,14 @@ class Engine:
         p = Params.from_config(self.cfg)
         done: List[int] = []
         for pos in self.store.open_positions():
-            ch = self.provider.chain(pos.underlying, pos.expiry)
-            row = ch.row(pos.strike) if ch else None
-            self._exit(pos, reason, row.side(pos.opt_type) if row else None, p, now)
+            try:                                            # round 294: a failure on one position must not stop the square-off of the rest
+                ch = self._get_chain({}, (pos.underlying, pos.expiry)) or self.recent_chain(pos.underlying, pos.expiry, now.timestamp())
+                row = ch.row(pos.strike) if ch else None
+                self._exit(pos, reason, row.side(pos.opt_type) if row else None, p, now)
+            except Exception as e:  # noqa: BLE001
+                log.exception("square-off of position %s failed", getattr(pos, "id", "?"))
+                self._note("position_error", pos.underlying, {"position": pos.id, "error": f"{type(e).__name__}: {str(e)[:160]}", "msg": "square-off of this position raised"}, key=f"sqerr{pos.id}", now=now, force=True)
+                continue
             if pos.status == paper.CLOSED:
                 done.append(pos.id)
         return done

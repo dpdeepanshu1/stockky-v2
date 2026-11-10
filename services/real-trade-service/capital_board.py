@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 SERVICES = ("real_trade", "position_stocks", "fno")
 MODES = ("off", "shadow", "live")
 ALLOC_FILE = "capital_alloc.json"
+FNO_ACTIVE_MAX_AGE_S = 900.0              # round 308: F&O publishes every ~30 s, also outside market hours; an "active" older than this is a service that stopped, not one that is armed
 
 
 def _f(v: Any) -> Optional[float]:
@@ -177,7 +178,8 @@ def exposure_of(d: str, service: str, max_age_s: float = 900.0) -> float:
 
 # ── the board (decided by Real Trade only) ──────────────────────────────────────────────────────────────────────────────────
 def refresh(d: str, *, mode: str, day: str, free_cash: float, base_pct: float = 25.0, min_trades: int = 20, bonus_mode: str = "proportional", max_pct: float = 50.0,
-            max_step_pct: Optional[float] = 10.0, frozen: Iterable[str] = ("fno",), stats_max_age_s: float = 3 * 86400.0, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+            max_step_pct: Optional[float] = 10.0, frozen: Iterable[str] = ("fno",), stats_max_age_s: float = 3 * 86400.0, now: Optional[float] = None,
+            fno_active_max_age_s: float = FNO_ACTIVE_MAX_AGE_S) -> Optional[Dict[str, Any]]:
     """Read every service's stats, (re)decide the percentages when the day or the active set changed, write capital_alloc.json with fresh rupee amounts. Returns the document."""
     mode = norm_mode(mode)
     if mode == "off":
@@ -185,8 +187,11 @@ def refresh(d: str, *, mode: str, day: str, free_cash: float, base_pct: float = 
     try:
         now = now if now is not None else time.time()
         stats = {k: read_stats(d, k, stats_max_age_s) for k in SERVICES}
-        # a stock service whose figure is missing / old is treated as active (it keeps its share: it may simply be down for the night); F&O must say so itself
+        # a stock service whose figure is missing / old is treated as active (it keeps its share: it may simply be down for the night); F&O must say so itself, and recently (fno_active_max_age_s)
         active = [k for k in SERVICES if (stats[k] or {}).get("active", k != "fno")]
+        f_ts = _f((stats["fno"] or {}).get("ts"))
+        if "fno" in active and (f_ts is None or now - f_ts > float(fno_active_max_age_s)):
+            active.remove("fno")                              # round 308: a stale "active: true" (F&O service down while armed) used to keep its fixed share reserved for up to 3 days
         prev = read_json(d, ALLOC_FILE)
         redecide = not prev or prev.get("day") != day or sorted(prev.get("active") or []) != sorted(active) or not isinstance(prev.get("pcts"), dict)
         if redecide:

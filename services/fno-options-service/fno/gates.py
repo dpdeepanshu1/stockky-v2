@@ -50,6 +50,15 @@ def after_squareoff(now: datetime, p: Params, expiry: Optional[object] = None) -
     return False
 
 
+MARKET_OPEN, MARKET_CLOSE = dtime(9, 15), dtime(15, 31)      # the runner's own "market hours" (runtime.market_open); the manual tools use the same edges
+
+
+def after_close(now: datetime) -> bool:
+    """Round 298: outside 09:15-15:31. Dhan squares INTRADAY positions off itself at the close and the chain often has no quotes afterwards, so a SELL sent now may land on a position that is already gone and open a short."""
+    t = now.time()
+    return t > MARKET_CLOSE or t < MARKET_OPEN
+
+
 def carried_over(entry_day: str, now: datetime, holidays: Sequence[str] = ()) -> bool:
     """True for a position that was opened on an EARLIER trading day and is still open once today's market has opened (09:15 on a trading day). This service is intraday only,
     so such a position is a leftover (a square-off that failed, a service that was down at 15:15) and is closed at once instead of waiting for its stop (round 248)."""

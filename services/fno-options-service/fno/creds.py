@@ -41,14 +41,18 @@ def fetch(base_url: str, bearer: str, timeout_s: float = 8.0, opener: Optional[C
     return {"client_id": cid, "access_token": tok, "base_url": str(body.get("base_url") or ""), "dhan_env": str(body.get("dhan_env") or "")}
 
 
-def apply(cfg: Any, creds: Dict[str, str]) -> Tuple[str, str]:
-    """Put the borrowed values on the config module (memory only). Returns what to restore on drop."""
-    prev = (str(getattr(cfg, "DHAN_CLIENT_ID", "")), str(getattr(cfg, "DHAN_ACCESS_TOKEN", "")))
+def apply(cfg: Any, creds: Dict[str, str]) -> Tuple[str, str, Optional[str]]:
+    """Put the borrowed values on the config module (memory only). Returns what to restore on drop: (client id, token, base url).
+    Round 296: the base URL is carried too, so disarm puts back the URL that was there before, not the borrowed one."""
+    prev = (str(getattr(cfg, "DHAN_CLIENT_ID", "")), str(getattr(cfg, "DHAN_ACCESS_TOKEN", "")), getattr(cfg, "DHAN_BASE_URL", None))
     cfg.DHAN_CLIENT_ID, cfg.DHAN_ACCESS_TOKEN = creds["client_id"], creds["access_token"]
     if creds.get("base_url"):
         cfg.DHAN_BASE_URL = creds["base_url"].rstrip("/")
     return prev
 
 
-def drop(cfg: Any, prev: Tuple[str, str] = ("", "")) -> None:
-    cfg.DHAN_CLIENT_ID, cfg.DHAN_ACCESS_TOKEN = prev
+def drop(cfg: Any, prev: Tuple[Any, ...] = ("", "", None)) -> None:
+    """Restore what apply() returned. A 2-tuple (id, token) from before round 296 still works: the base URL is then left alone."""
+    cfg.DHAN_CLIENT_ID, cfg.DHAN_ACCESS_TOKEN = (prev[0] if len(prev) > 0 else ""), (prev[1] if len(prev) > 1 else "")
+    if len(prev) > 2 and prev[2] is not None:
+        cfg.DHAN_BASE_URL = prev[2]

@@ -18,31 +18,47 @@ def snapshot_path(root: str, day: str, underlying: str) -> str:
 
 
 def record(root: str, chain: Chain, ts: float, extra: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """Append one snapshot. Returns the file path, or None when it could not be written."""
+    """Append one snapshot. Returns the file path, or None when it could not be written (a disk error, or a value that cannot be written as JSON: round 302, it used to raise).
+    round 302: when the file does not end in a newline (an earlier write was cut short: disk full, a kill mid-write) the new line starts on a fresh line, so the cut line stays the only
+    one lost; before, the next good snapshot was appended to it and was lost as well."""
     try:
         path = snapshot_path(root, day_of(ts), chain.underlying)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         line = json.dumps({"ts": ts, "chain": chain.to_json(), **(extra or {})}, separators=(",", ":"))
-        with _lock, open(path, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        with _lock:
+            prefix = ""
+            try:
+                with open(path, "rb") as rf:
+                    if rf.seek(0, os.SEEK_END) > 0:
+                        rf.seek(-1, os.SEEK_END)
+                        if rf.read(1) != b"\n":
+                            prefix = "\n"
+            except FileNotFoundError:
+                pass
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(prefix + line + "\n")
         return path
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
 
 
 def read_day(root: str, day: str, underlying: str) -> Iterator[Dict[str, Any]]:
-    """Yield the snapshots of one day in time order; a corrupt line is skipped, not raised."""
+    """Yield the snapshots of one day in time order; a corrupt line (bad JSON, bad bytes, or a line that is not a snapshot object) is skipped, not raised.
+    A file that cannot be opened yields nothing (round 302: it raised and stopped the whole replay)."""
     path = snapshot_path(root, day, underlying)
-    if not os.path.exists(path):
-        return
     rows: List[Dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-    rows.sort(key=lambda r: r.get("ts", 0))
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    rows.append(r)
+    except OSError:
+        return
+    rows.sort(key=lambda r: r.get("ts", 0) if isinstance(r.get("ts", 0), (int, float)) else 0)
     yield from rows
 
 

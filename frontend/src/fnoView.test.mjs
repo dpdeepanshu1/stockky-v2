@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types fnoView.test.mjs  (Node >= 22.6). Pure helpers of the F&O pages.
 import assert from "node:assert/strict";
-import { istDay, istHm, inr, signed, lockSummary, positionProgress, dayTotals, tradesCsv, CSV_HEAD, btLabel, pcrReading, splitEvent } from "./fnoView.ts";
+import { istDay, istHm, inr, signed, lockSummary, positionProgress, dayTotals, tradesCsv, CSV_HEAD, btLabel, pcrReading, splitEvent, BT_STRATEGIES, btVerdictView } from "./fnoView.ts";
 
 // 2026-11-09 03:50 UTC = 09:20 IST; 2026-11-09 19:00 UTC = next IST day 00:30
 assert.equal(istDay(Date.UTC(2026, 10, 9, 3, 50) / 1000), "2026-11-09");
@@ -159,3 +159,14 @@ assert.equal(edq.correlationId, null); assert.doesNotMatch(edq.text, /correlatio
 assert.equal(entryDoubtCount([Q({}), Q({ broker_order_ids: { entry_state: "UNKNOWN" } }), Q({ broker_order_ids: { entry_state: "UNKNOWN", entry_cid: "x" } })]), 2); assert.equal(entryDoubtCount(null), 0);
 assert.equal(stopDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN" } })), null); assert.equal(exitDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN" } })), null);
 console.log("fnoView round 293 ok");
+
+// round 303: the result page shows the verdict's reasons, the data-quality line and the replay warnings; the simulation can run every strategy
+assert.ok(BT_STRATEGIES.includes("EXPIRY_MOMENTUM") && BT_STRATEGIES.includes("EXPIRY_ALPHA") && BT_STRATEGIES[0] === "CORE");
+const V = btVerdictView({ verdict: { status: "NOT_PROVEN", reasons: ["only 4 trades (< 30)", "net result after charges is not positive"] },
+  data_quality: { ok: false, unmanaged_pct: 7.5, unpriced_exit_pct: 0, vix_unknown_pct: 12, labels: ["ATM", "ATM+1"] }, warnings: ["2026-11-09: 1 gap(s) in the recording"] });
+assert.equal(V.status, "NOT_PROVEN"); assert.equal(V.tone, "warn"); assert.equal(V.reasons.length, 2);
+assert.match(V.quality, /NOT OK.*7\.5%.*12%.*ATM, ATM\+1/); assert.deepEqual(V.warnings, ["2026-11-09: 1 gap(s) in the recording"]);
+const V2 = btVerdictView({ verdict: { status: "PASSED_THIS_TEST_ONLY", reasons: ["x"] } });
+assert.equal(V2.tone, "warn"); assert.equal(V2.quality, null); assert.deepEqual(V2.warnings, []);      // a pass is never shown green
+assert.equal(btVerdictView(null).status, "-"); assert.equal(btVerdictView({}).tone, "neutral"); assert.deepEqual(btVerdictView({ verdict: { reasons: "nope" } }).reasons, []);
+console.log("fnoView round 303 ok");

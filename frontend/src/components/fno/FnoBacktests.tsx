@@ -2,7 +2,7 @@
 // The end-of-day backtest (real NSE bhavcopy) is a script: scripts/fno_eod_backtest.py.
 import { useState } from "react";
 import { fnoApi } from "../../fnoApi";
-import { btLabel, inr } from "../../fnoView";
+import { BT_STRATEGIES, btLabel, btVerdictView, inr } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
 import { useFno } from "./useFno";
 
@@ -26,9 +26,9 @@ export default function FnoBacktests() {
         <div className="flex flex-wrap gap-2">
           <Btn disabled={!und.length || !d?.recorded_days.length} onClick={() => void run("replay")} title="Runs the recorded chain snapshots through the live engine">Replay recorded chains ({d?.recorded_days.length ?? 0} days)</Btn>
           <select className="rounded border border-slate bg-transparent px-2 text-[12px]" value={strategy} onChange={(e: any) => setStrategy(e.target.value)} title="Simulation only: ALL runs every strategy alone and lists them side by side">
-            {["ALL", "CORE", "TREND_RIDER", "MOMENTUM_SURGE", "BEAR_SWEEP", "BEAR_PIVOT", "DRIFT_EDGE", "WEEKLY_OPENER"].map((k) => <option key={k} value={k}>{k}</option>)}
+            {["ALL", ...BT_STRATEGIES].map((k) => <option key={k} value={k}>{k}</option>)}
           </select>
-          <Btn disabled={!und.length} onClick={() => void run("sim")} title="Black-Scholes simulation on recent index candles">Quick simulation</Btn>
+          <Btn disabled={und.length !== 1} onClick={() => void run("sim")} title={und.length === 1 ? "Black-Scholes simulation on recent index candles" : "The simulation runs one index at a time: pick Nifty or Sensex"}>Quick simulation</Btn>
         </div>
         <p className="mt-2 text-[11px] text-mist">Replay is the most trustworthy but needs days of recorded chains (the engine records one snapshot a minute while the market is open). The simulation uses model prices, not real quotes. The end-of-day test on real NSE prices and the test on Dhan's recorded option candles run as scripts: <code>python scripts/fno_eod_backtest.py</code>, <code>python scripts/fno_rolling_backtest.py</code>.</p>
         {d?.jobs.slice(-3).map((j) => <p key={j.id} className="mt-1 text-[11px]"><Chip tone={j.state === "done" ? "good" : j.state === "failed" ? "bad" : "warn"}>{j.state}</Chip> {j.id} {j.verdict || ""} {j.error || ""}</p>)}
@@ -52,6 +52,17 @@ export default function FnoBacktests() {
       {open && (
         <Card title={open.name} right={<Btn small onClick={() => setOpen(null)}>Close</Btn>}>
           <p className="mb-1 text-mist">{btLabel(open.doc.kind).text}</p>
+          {(() => {
+            const v = btVerdictView(open.doc);
+            return (
+              <div className="mb-2 space-y-1">
+                <p><Chip tone={v.tone === "bad" ? "bad" : v.tone === "warn" ? "warn" : undefined}>{v.status}</Chip></p>
+                {v.reasons.length > 0 && <ul className="list-disc pl-4 text-[11px]">{v.reasons.map((x, i) => <li key={i}>{x}</li>)}</ul>}
+                {v.quality && <p className="text-[11px] text-mist">{v.quality}</p>}
+                {v.warnings.length > 0 && <ul className="list-disc pl-4 text-[11px] text-mist">{v.warnings.map((x, i) => <li key={i}>{x}</li>)}</ul>}
+              </div>
+            );
+          })()}
           <ul className="mb-2 list-disc pl-4">{(open.doc.notes || []).map((n: string, i: number) => <li key={i}>{n}</li>)}</ul>
           {Array.isArray(open.doc.by_strategy) && (
             <table className="mb-2 w-full text-left text-[11px]">

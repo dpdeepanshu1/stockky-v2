@@ -87,6 +87,7 @@ export default function FnoOverview() {
     <div className="space-y-3">
       {ov.error && <Msg kind="err">{ov.error}</Msg>}
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
+      {!!d?.unmanaged_real?.length && <div data-testid="fno-unmanaged-real"><Msg kind="err">{d.unmanaged_real.length} REAL position(s) are open but no Dhan connection is loaded ({d.unmanaged_real.map((x) => x.label).join(", ")}): nothing is managing them. Press ARM to reconnect. A stop already resting at Dhan still protects you.</Msg></div>}
       {settingsWarn && <div data-testid="fno-settings-problem"><Msg kind="err">{settingsWarn}</Msg></div>}
       <Card title="State" tone={ls.tone === "real" ? "bad" : ls.tone === "real-blocked" ? "warn" : undefined}
         right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}{entryDoubts > 0 && <Chip tone="bad" title="An entry BUY may be live or filled at Dhan: see Open positions">{entryDoubts} entry unknown</Chip>}</>}>

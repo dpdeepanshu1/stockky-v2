@@ -56,6 +56,10 @@ except Exception as _control_err:  # noqa: BLE001
 
 @app.on_event("startup")
 def _startup() -> None:
+    try:
+        engine.warn_unmanaged_real(force=True)            # round 296: a restart drops the borrowed Dhan token: say so loudly if REAL positions are still open
+    except Exception:  # noqa: BLE001
+        log.exception("startup check for unmanaged REAL positions failed")
     if (os.getenv("FNO_RUNNER") or "1").strip() != "0":   # blank stays ON (round 75 sweep)
         runner.start()
 
@@ -86,7 +90,7 @@ def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
     mode = str(config.FNO_MODE).upper() if str(config.FNO_MODE).upper() in ("DEMO", "REAL") else "DEMO"
     opens = []
     for p in store.open_positions():
-        ch = provider.chain(p.underlying, p.expiry)
+        ch = engine.recent_chain(p.underlying, p.expiry, max_age_s=10.0) or provider.chain(p.underlying, p.expiry)       # round 295: the engine's own chain (at most 10 s old) first: every extra fetch queues behind Dhan's 1-per-3-s limit
         row = ch.row(p.strike) if ch else None
         side = row.side(p.opt_type) if row else None
         prem = side.mid if side else None
@@ -100,7 +104,7 @@ def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
         opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": unreal, "est_charges": est, "exit_doubt": bool(p.broker_order_ids.get("exit_doubt")), "stop_doubt": bool(p.broker_order_ids.get("sl_doubt")),
                       "unrealized_net": round(unreal - est, 2) if unreal is not None and est is not None else None})
     return {"now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist(), config.HOLIDAYS), "locks": _locks(), "day": store.day_summary(_today(), mode),
-            "open_positions": opens, "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
+            "open_positions": opens, "unmanaged_real": [{"id": q.id, "label": q.label()} for q in engine.unmanaged_real()], "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
             "underlyings": engine.underlyings(), "params": liveparams.current().to_json(), "param_problems": gates.param_problems(liveparams.current()),
             "switches": {"underlyings": str(config.FNO_UNDERLYINGS).upper(), "record_snapshots": bool(config.FNO_RECORD_SNAPSHOTS)}}
 
@@ -167,7 +171,7 @@ def pipeline(admin=Depends(require_admin)) -> Dict[str, Any]:
         stg = stages.build({"now": time.time(), "enabled": bool(config.FNO_ENGINE_ENABLED), "market_open": market_open(eng.now_ist(), config.HOLIDAYS),
                             "md_ok": bool(ok_of.get("market-data reachable")), "vix_ok": bool(ok_of.get("India VIX")),
                             "expiries_ok": bool(ok_of.get("NIFTY expiries")) and bool(ok_of.get("SENSEX expiries")),
-                            "md_detail": provider.last_error or "", "last_tick": engine.last_tick, "events": evs, "open_positions": len(store.open_positions()),
+                            "md_detail": provider.last_error or "", "last_tick": engine.last_tick, "events": evs, "open_positions": len(store.open_positions()), "open_real_positions": len(store.open_positions("REAL")),
                             "broker": broker is not None, "reconcile": engine.last_reconcile}, day_of)
     except Exception:  # noqa: BLE001
         log.exception("pipeline stages failed")
@@ -201,7 +205,7 @@ def _probe_doc(file: Optional[str]) -> Dict[str, Any]:
     if probe is None:
         return doc
     summ = probecheck.summarize(probe, name or "")
-    saved = (store.kv_get(PROBE_NOTE_KV, {}) or {}).get(name or "")
+    saved = probecheck.clean_saved((store.kv_get(PROBE_NOTE_KV, {}) or {}).get(name or ""))
     doc.update(probe=summ, note=saved, comparison=probecheck.compare(probe, (saved or {}).get("lines") or {}, Params.from_config(config)))
     return doc
 
@@ -223,9 +227,9 @@ def probe_note(body: ProbeNote, admin=Depends(require_admin)) -> Dict[str, Any]:
     name, probe = probecheck.load(_probe_dir(), body.file)
     if probe is None:
         raise HTTPException(status_code=404, detail="no probe result found")
-    lines = {k: getattr(body, k) for k in (*probecheck.LINES, "total") if getattr(body, k) is not None}
-    if any(v < 0 for v in lines.values()):
-        raise HTTPException(status_code=400, detail="a charge cannot be negative")
+    lines, bad = probecheck.clean_note_lines({k: getattr(body, k) for k in (*probecheck.LINES, "total")})
+    if bad:
+        raise HTTPException(status_code=400, detail=bad)
     cur = dict(store.kv_get(PROBE_NOTE_KV, {}) or {})
     cur[name or ""] = {"lines": lines, "ts": time.time()}
     for old in sorted(cur, key=lambda k: cur[k].get("ts", 0.0))[:-20]:
@@ -341,8 +345,12 @@ def reconcile(refresh: bool = False, admin=Depends(require_admin)) -> Dict[str, 
 @app.post("/fno/squareoff")
 def squareoff(admin=Depends(require_admin)) -> Dict[str, Any]:
     closed = engine.squareoff_all()
-    store.add_event("manual", {"action": "squareoff", "closed": closed, "by": str(admin.get("sub"))})
-    return {"closed": closed}
+    left = [x.id for x in store.open_positions()]          # round 294: say what is STILL open (a refused / doubtful SELL used to look like a quiet success: {"closed": []})
+    store.add_event("manual", {"action": "squareoff", "closed": closed, "still_open": left, "by": str(admin.get("sub"))})
+    out: Dict[str, Any] = {"closed": closed, "still_open": left}
+    if left:
+        out["note"] = "some positions are still open: a refused, unconfirmed or in-doubt SELL leaves them open. See GET /fno/log (kinds real_blocked, order_failed, reconcile) and the Dhan app"
+    return out
 
 
 @app.post("/fno/exit-doubt/clear")
@@ -390,13 +398,21 @@ def arm(authorization: str = Header(default=""), admin=Depends(require_admin)) -
 @app.post("/fno/disarm")
 def disarm(admin=Depends(require_admin)) -> Dict[str, Any]:
     store.kv_set("fno_armed_day", None)
+    held = store.open_positions("REAL")
+    kept = False
     if _borrowed["prev"] is not None:
-        dhan_creds.drop(config, _borrowed["prev"])
-        _borrowed["prev"] = None
-        engine.broker = None
-        globals()["broker"] = None
-    store.add_event("manual", {"action": "disarm", "by": str(admin.get("sub"))})
-    return {"locks": _locks()}
+        if held:           # round 294: the borrowed token is the only way to cancel the resting stop and SELL what is held; dropping it left the position unmanaged. Disarm still stops all NEW orders (real_allowed).
+            kept = True
+        else:
+            dhan_creds.drop(config, _borrowed["prev"])
+            _borrowed["prev"] = None
+            engine.broker = None
+            globals()["broker"] = None
+    store.add_event("manual", {"action": "disarm", "by": str(admin.get("sub")), "kept_credentials_for_open_positions": kept})
+    out: Dict[str, Any] = {"locks": _locks()}
+    if kept:
+        out["note"] = f"disarmed: no new orders. The Dhan credentials stay in memory because {len(held)} REAL position(s) are still open; the engine still manages their stop and square-off. They are dropped when you disarm again with none open."
+    return out
 
 
 # ── backtests (replay and a quick sim run inside the service; the file-based EOD / SIM runs are scripts/fno_*_backtest.py) ──────────
@@ -460,15 +476,10 @@ def backtest_latest_job(admin=Depends(require_admin_or_runner)) -> Dict[str, Any
 
 @app.post("/fno/backtests/run")
 def backtest_run(body: BacktestBody, admin=Depends(require_admin)) -> Dict[str, Any]:
-    if body.kind not in ("replay", "sim"):
-        raise HTTPException(status_code=400, detail="kind must be replay or sim")
-    if body.days is not None and any(not _DAY_RE.match(str(d)) for d in body.days):
-        raise HTTPException(status_code=400, detail="days must be YYYY-MM-DD (they name folders under snapshots/)")
-    if any(u.upper() not in ("NIFTY", "SENSEX") for u in body.underlyings) or not body.underlyings:
-        raise HTTPException(status_code=400, detail="underlyings must be NIFTY and/or SENSEX")
+    problem = bt_report.request_problem(body.kind, body.underlyings, body.strategy, body.days, list(strategies.ORDER))      # round 303: one pure check (a sim with two indices is refused, not cut to the first)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
     body.underlyings = [u.upper() for u in body.underlyings]
-    if body.kind == "sim" and body.strategy.upper() != "ALL" and body.strategy.upper() not in strategies.STRATEGIES:
-        raise HTTPException(status_code=400, detail=f"strategy must be ALL or one of {list(strategies.ORDER)}")
     with _jobs_lock:
         if any(j["state"] == "running" for j in _jobs.values()):
             raise HTTPException(status_code=409, detail="a backtest is already running")

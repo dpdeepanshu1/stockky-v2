@@ -21,6 +21,11 @@ def market_open(now: datetime, holidays: Sequence[str] = ()) -> bool:
     return now.weekday() < 5 and now.date().isoformat() not in set(holidays) and dtime(9, 15) <= now.time() <= dtime(15, 31)
 
 
+def management_open(now: datetime, holidays: Sequence[str] = (), until: dtime = dtime(16, 0)) -> bool:
+    """Round 298: the short stretch after the close (15:31-16:00) in which the runner still MANAGES what is open (an exit in doubt, a blocked exit, an unknown entry). It never analyses or enters then."""
+    return now.weekday() < 5 and now.date().isoformat() not in set(holidays) and dtime(15, 31) < now.time() <= until
+
+
 class Runner:
     def __init__(self, engine: Engine, cfg: Any, data_dir: str):
         self.engine, self.cfg, self.data_dir = engine, cfg, data_dir
@@ -50,26 +55,35 @@ class Runner:
         if not getattr(self.cfg, "FNO_RECORD_SNAPSHOTS", True):
             return
         p = Params.from_config(self.cfg)
-        vix = self.engine.provider.vix()
+        try:
+            vix = self.engine.provider.vix()
+        except Exception:  # noqa: BLE001 - a chain is still worth saving without the VIX
+            vix = None
         for und in self.engine.underlyings():
-            if now.timestamp() - self._last_snap.get(und, 0.0) < float(getattr(self.cfg, "SNAPSHOT_INTERVAL_S", 60.0)):
-                continue
-            exp = self.engine.pick_expiry(und, now.date(), p)
-            ch = self.engine.provider.chain(und, exp) if exp else None
-            if ch is None:
-                continue
-            self._last_snap[und] = now.timestamp()
-            if recorder.record(self.data_dir, ch, now.timestamp(), {"vix": vix}):
-                self.engine.store.add_snapshot(now.timestamp(), und, ch.expiry, recorder.snapshot_path(self.data_dir, day_of(now.timestamp()), und))
+            try:
+                self._snapshot_one(und, now, p, vix)
+            except Exception:  # noqa: BLE001 - round 302: one underlying that raises must not stop the other from being recorded
+                log.exception("snapshot of %s failed", und)
+
+    def _snapshot_one(self, und: str, now: datetime, p: Params, vix: Optional[float]) -> None:
+        if now.timestamp() - self._last_snap.get(und, 0.0) < float(getattr(self.cfg, "SNAPSHOT_INTERVAL_S", 60.0)):
+            return
+        exp = self.engine.pick_expiry(und, now.date(), p)
+        ch = self.engine.provider.chain(und, exp) if exp else None
+        if ch is None:
+            return
+        self._last_snap[und] = now.timestamp()
+        if recorder.record(self.data_dir, ch, now.timestamp(), {"vix": vix}):
+            self.engine.store.add_snapshot(now.timestamp(), und, ch.expiry, recorder.snapshot_path(self.data_dir, day_of(now.timestamp()), und))
+            self.snapshots_today += 1
+        # Round 238: on a day the weekly contract expires, also record THAT contract (the engine trades next week's, so it was never saved). The expiry-day strategies can only be replayed
+        # on recorded premiums if this exists, and it cannot be recorded afterwards. Same file; the replay picks a chain by its expiry.
+        today = now.date().isoformat()
+        if exp != today and today in (self.engine.provider.expiries(und) or []):
+            ch0 = self.engine.provider.chain(und, today)
+            if ch0 is not None and recorder.record(self.data_dir, ch0, now.timestamp(), {"vix": vix}):
+                self.engine.store.add_snapshot(now.timestamp(), und, ch0.expiry, recorder.snapshot_path(self.data_dir, day_of(now.timestamp()), und))
                 self.snapshots_today += 1
-            # Round 238: on a day the weekly contract expires, also record THAT contract (the engine trades next week's, so it was never saved). The expiry-day strategies can only be replayed
-            # on recorded premiums if this exists, and it cannot be recorded afterwards. Same file; the replay picks a chain by its expiry.
-            today = now.date().isoformat()
-            if exp != today and today in (self.engine.provider.expiries(und) or []):
-                ch0 = self.engine.provider.chain(und, today)
-                if ch0 is not None and recorder.record(self.data_dir, ch0, now.timestamp(), {"vix": vix}):
-                    self.engine.store.add_snapshot(now.timestamp(), und, ch0.expiry, recorder.snapshot_path(self.data_dir, day_of(now.timestamp()), und))
-                    self.snapshots_today += 1
 
     def _loop(self) -> None:
         log.info("fno runner started")
@@ -80,9 +94,13 @@ class Runner:
                 capital.publish(self.engine.store, self.cfg, self.engine.armed_day())      # round 242: F&O's figures for the capital board (throttled, never raises)
                 readiness.publish(self.cfg, self.engine.store, self.data_dir, self.engine.last_reconcile, self.engine.armed_day())   # round 262: the REAL lock waits for this list (throttled, never raises)
                 if market_open(now, getattr(self.engine, "holidays", ())):
-                    if getattr(self.cfg, "FNO_ENGINE_ENABLED", False) or self.engine.store.open_positions():
-                        self.engine.tick(now)
-                    self.snapshot(now)
+                    try:
+                        if getattr(self.cfg, "FNO_ENGINE_ENABLED", False) or self.engine.store.open_positions():
+                            self.engine.tick(now)
+                    finally:
+                        self.snapshot(now)                 # round 302: recording does not depend on the engine cycle succeeding (the replay needs every minute it can get)
+                elif management_open(now, getattr(self.engine, "holidays", ())) and self.engine.store.open_positions():
+                    self.engine.tick(now, manage_only=True)        # round 298: unresolved exits / entries were left until the next 09:15; look at them for a bit after the close (a SELL then needs Dhan's net position)
                 self.last_error = None
             except Exception as e:  # noqa: BLE001
                 self.last_error = f"{type(e).__name__}: {str(e)[:160]}"

@@ -8,6 +8,7 @@ item `probe_charges` for you (that stays your click), never sends anything. One 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,7 +22,7 @@ LINES = ("brokerage", "stt", "exchange", "sebi", "gst", "stamp")
 LABELS = {"brokerage": "Brokerage", "stt": "STT", "exchange": "Exchange transaction", "sebi": "SEBI fee", "gst": "GST", "stamp": "Stamp duty"}
 TOL = 0.05                                    # rupees: a contract note rounds each line to the paisa; five paise is rounding, not a wrong rate
 EXIT_TEXT = {0: "round trip done (or a dry run)", 2: "refused, or the BUY was rejected: nothing is open", 3: "A POSITION IS STILL OPEN: close it in the Dhan app",
-             4: "an order's state is in doubt: look in the Dhan app", 5: "the BUY did not fill and was cancelled: nothing is open"}
+             4: "in doubt (an order's state, or Dhan shows flat but our SELLs sold less than was bought): look in the Dhan app", 5: "the BUY did not fill and was cancelled: nothing is open"}
 
 
 def _num(x: Any) -> Optional[float]:
@@ -29,9 +30,34 @@ def _num(x: Any) -> Optional[float]:
         return None
     try:
         s = str(x).replace(",", "").replace("\u20b9", "").replace("Rs", "").strip()
-        return float(s) if s else None
+        v = float(s) if s else None
+        return v if v is not None and math.isfinite(v) else None       # round 307: "nan" / "inf" parse as floats and would reach the JSON answer as NaN (a 500)
     except (TypeError, ValueError):
         return None
+
+
+def clean_note_lines(raw: Dict[str, Any]) -> Tuple[Dict[str, float], Optional[str]]:
+    """Round 309: the contract-note lines the page sends, checked BEFORE they are stored. (lines, None) when fine; ({}, reason) when any value is not a finite number or is negative.
+    pydantic accepts NaN / Infinity as a float and `nan < 0` is False, so such a line used to be saved, and `GET /fno/probe` then echoed it: the JSON answer could not be built (500) until another note replaced it."""
+    out: Dict[str, float] = {}
+    for k, v in (raw or {}).items():
+        if v is None:
+            continue
+        x = _num(v)
+        if x is None:
+            return {}, f"{k}: not a finite number"
+        if x < 0:
+            return {}, "a charge cannot be negative"
+        out[k] = x
+    return out, None
+
+
+def clean_saved(saved: Any) -> Optional[Dict[str, Any]]:
+    """A stored note with any non-finite or non-numeric line dropped (a note saved before round 309 may hold one). None stays None."""
+    if not isinstance(saved, dict):
+        return None
+    lines = saved.get("lines") if isinstance(saved.get("lines"), dict) else {}
+    return {**saved, "lines": {k: x for k, x in ((k, _num(v)) for k, v in lines.items()) if x is not None}}
 
 
 def list_files(dir_: str = PROBE_DIR) -> List[str]:
@@ -104,13 +130,16 @@ def expected_lines(probe: Dict[str, Any], params: Optional[Params] = None) -> Op
     if not isinstance(pnl, dict) or not isinstance(pnl.get("charges_detail"), dict):
         return None
     p = params or Params()
-    d = {k: float(pnl["charges_detail"].get(k) or 0.0) for k in LINES}
+    d = {k: _num(pnl["charges_detail"].get(k)) for k in LINES}
+    if any(v is None and pnl["charges_detail"].get(k) not in (None, "", 0) for k, v in d.items()):
+        return None                                                    # round 307: a garbled charges line in an old / hand-edited file means "not comparable", never a crash
+    d = {k: (v or 0.0) for k, v in d.items()}
     filled_sells = [o for o in probe.get("orders") or [] if isinstance(o, dict) and o.get("side") == "SELL" and o.get("filled_qty")]
     extra = max(0, len(filled_sells) - 1)
     d["brokerage"] += extra * p.brokerage_per_order
     d["gst"] += extra * p.brokerage_per_order * p.gst_pct / 100.0
-    qty = float(pnl.get("qty") or 0)
-    return {"lines": d, "buy_turnover": float(pnl.get("bought_avg") or 0) * qty, "sell_turnover": float(pnl.get("sold_avg") or 0) * qty, "orders": 1 + len(filled_sells), "extra_sells": extra}
+    qty, ba, sa = _num(pnl.get("qty")) or 0.0, _num(pnl.get("bought_avg")) or 0.0, _num(pnl.get("sold_avg")) or 0.0
+    return {"lines": d, "buy_turnover": ba * qty, "sell_turnover": sa * qty, "orders": 1 + len(filled_sells), "extra_sells": extra}
 
 
 def _current(line: str, und: str, p: Params) -> Tuple[str, float]:

@@ -15,13 +15,14 @@ import csv
 import glob
 import io
 import json
+import math
 import os
 import sys
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fno.params import Params
+from fno.params import CONFIG_NAME, Params
 from fno.provider import IST, label_to_epoch
 from fno import strategies
 from . import eod, portfolio, replay, report, rolling_sim, sim
@@ -37,9 +38,20 @@ def load_candles(path: str) -> List[Dict[str, float]]:
                 o, h, l, c = (float(r[k]) for k in ("open", "high", "low", "close"))
             except (KeyError, ValueError):
                 continue
+            if not all(math.isfinite(x) for x in (o, h, l, c)):          # round 312: "nan" / "inf" parse as floats and would reach the bars as NaN
+                continue
+            try:
+                v = float(r.get("volume") or 0)
+            except ValueError:
+                v = 0.0                                                  # round 312: an index export often has "-" as the volume: that used to stop the whole run with a traceback
+            if not math.isfinite(v):
+                v = 0.0
             if t is not None and c > 0:
-                out.append({"t": t, "o": o, "h": h, "l": l, "c": c, "v": float(r.get("volume") or 0)})
-    return sorted(out, key=lambda x: x["t"])
+                out.append({"t": t, "o": o, "h": h, "l": l, "c": c, "v": v})
+    by_t = {x["t"]: x for x in out}                                    # round 303: one candle per timestamp, the last row wins
+    if len(by_t) < len(out):                                           # (two files glued together, or an export run twice, used to give every strategy the same bar twice: wrong bar counts, ranges and averages)
+        print(f"warning: {path}: {len(out) - len(by_t)} duplicate timestamp(s) dropped (the last row of each is kept)", file=sys.stderr)
+    return [by_t[t] for t in sorted(by_t)]
 
 
 def load_vix(path: str) -> Dict[str, float]:
@@ -66,7 +78,23 @@ def _params(a: argparse.Namespace) -> Params:
     over = {}
     for kv in a.set or []:
         k, _, v = kv.partition("=")
-        over[k.strip()] = type(getattr(p, k.strip()))(v) if not isinstance(getattr(p, k.strip()), bool) else v.lower() in ("1", "true", "yes", "on")
+        k = k.strip()
+        if not hasattr(p, k) or k.startswith("_") or callable(getattr(p, k)):               # round 303: a typo used to end in an AttributeError traceback
+            print(f"error: --set {kv!r}: unknown Params field {k!r}", file=sys.stderr)
+            raise SystemExit(2)
+        cur = getattr(p, k)
+        try:
+            if isinstance(cur, bool):
+                over[k] = v.strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(cur, int):
+                over[k] = int(float(v))                                                      # "--set max_lots=2.0" is fine; "2.5" is cut to 2, so refuse it below
+                if float(v) != over[k]:
+                    raise ValueError("not a whole number")
+            else:
+                over[k] = type(cur)(v)
+        except ValueError:
+            print(f"error: --set {kv!r}: {k} needs a value like {cur!r}", file=sys.stderr)
+            raise SystemExit(2)
     return p.with_(**over)
 
 
@@ -110,10 +138,14 @@ def main_sim(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     daily, intraday, vix = load_candles(a.daily), load_candles(a.intraday), load_vix(a.vix)
     hol = [h for h in a.holidays.split(",") if h]
-    if a.strategy == "ALL":
-        res = portfolio.run(a.underlying, daily, intraday, vix, _params(a), iv_default=a.iv_default, spread_pct=a.spread_pct, holidays=hol, expiry_weekday=a.expiry_weekday, start=a.start, end=a.end)
-        return _out(a, "fno_sim_" + a.underlying.lower() + "_portfolio", res)
-    res = sim.run(a.underlying, daily, intraday, vix, _params(a), a.iv_default, a.spread_pct, hol, None, 5, a.expiry_weekday, a.start, a.end, strategy=a.strategy)
+    try:                                                                  # round 312: a refusal such as "the index candles are 15-minute bars" is a message, not a traceback
+        if a.strategy == "ALL":
+            res = portfolio.run(a.underlying, daily, intraday, vix, _params(a), iv_default=a.iv_default, spread_pct=a.spread_pct, holidays=hol, expiry_weekday=a.expiry_weekday, start=a.start, end=a.end)
+            return _out(a, "fno_sim_" + a.underlying.lower() + "_portfolio", res)
+        res = sim.run(a.underlying, daily, intraday, vix, _params(a), a.iv_default, a.spread_pct, hol, None, 5, a.expiry_weekday, a.start, a.end, strategy=a.strategy)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return _out(a, "fno_sim_" + a.underlying.lower() + ("" if a.strategy == "CORE" else "_" + a.strategy.lower()), res)
 
 
@@ -140,11 +172,8 @@ def main_replay(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     from fno import recorder
     days = [d for d in recorder.list_days(a.snapshots) if (not a.start or d >= a.start) and (not a.end or d <= a.end)]
-    over = {k: v for k, v in (("FNO_DEMO_CAPITAL", a.capital),)}
     p = _params(a)
-    for field, cfg in (("min_score", "FNO_SIGNAL_MIN_SCORE"), ("sl_pct", "FNO_SL_PCT"), ("target_pct", "FNO_TARGET_PCT"), ("trail_arm_pct", "FNO_TRAIL_ARM_PCT"), ("trail_pct", "FNO_TRAIL_PCT"),
-                         ("risk_per_trade_pct", "FNO_RISK_PER_TRADE_PCT"), ("max_lots", "FNO_MAX_LOTS"), ("vix_max", "FNO_VIX_MAX")):
-        over[cfg] = getattr(p, field)
+    over = {cfg: getattr(p, field) for field, cfg in CONFIG_NAME.items()}      # round 303: ALL 59 fields (only 8 were copied, so any other --set, e.g. max_trades_per_day or a strategy threshold, was silently ignored by the replay)
     und = [u for u in a.underlyings.upper().split(",") if u]
     daily = {"NIFTY": load_candles(a.daily) if a.daily else [], "SENSEX": load_candles(a.daily_sensex) if a.daily_sensex else []}
     res = replay.run(a.snapshots, days, daily, over, und, [h for h in a.holidays.split(",") if h], a.vix_default)
@@ -167,5 +196,9 @@ def main_rolling(argv: Optional[List[str]] = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     hol = [h for h in a.holidays.split(",") if h]
-    res = rolling_sim.run(a.underlying, load_candles(a.daily), load_candles(a.intraday), book, load_vix(a.vix), _params(a), a.spread_pct, hol, None, a.expiry_weekday, a.start, a.end, a.strategy)
+    try:
+        res = rolling_sim.run(a.underlying, load_candles(a.daily), load_candles(a.intraday), book, load_vix(a.vix), _params(a), a.spread_pct, hol, None, a.expiry_weekday, a.start, a.end, a.strategy)
+    except ValueError as e:                                               # round 312: e.g. the index candles are not the same interval as the rolling files
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return _out(a, "fno_rolling_" + a.underlying.lower() + ("" if a.strategy == "CORE" else "_" + a.strategy.lower()), res)

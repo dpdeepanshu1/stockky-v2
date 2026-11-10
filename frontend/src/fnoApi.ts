@@ -53,7 +53,7 @@ export interface FnoPosition {
 }
 export interface FnoDay { trades: number; open: number; realized_net: number; realized_gross: number; charges: number; wins: number; losses: number }
 export interface FnoOverview {
-  now: string; market_open: boolean; locks: FnoLocks; day: FnoDay; open_positions: FnoPosition[];
+  now: string; market_open: boolean; locks: FnoLocks; day: FnoDay; open_positions: FnoPosition[]; unmanaged_real?: { id: number | null; label: string }[];   // Round 296: REAL positions open while no Dhan connection is loaded (after a restart)
   last_tick: { ts?: number; ok?: boolean; error?: string; [k: string]: any }; runner: { alive: boolean; error: string | null; snapshots_today: number }; underlyings: string[]; params: Record<string, any>;
   param_problems?: string[];   // Round 290: settings that cannot work together (e.g. a time set in the environment at boot); the engine refuses every entry while this is not empty
 }

@@ -26,6 +26,7 @@ from fno import expiry as xp, gates, paper, signals, sizing, strategies
 from fno.models import ContractRef
 from fno.params import Params
 from . import metrics
+from .sim import check_bar_spacing
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STEP = {"NIFTY": 50.0, "SENSEX": 100.0}
@@ -102,6 +103,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
     lot = lot_size or LOT[und]
     bar_min = book.interval
     vix_by_day = vix_by_day or {}
+    check_bar_spacing(intraday, bar_min)                      # round 303: the option candles are looked up at the index bar's start, so the two must be the same interval
     by_day: Dict[date, List[dict]] = {}
     for b in sorted(intraday, key=lambda x: x["t"]):
         by_day.setdefault(_d(b["t"]), []).append(b)
@@ -146,6 +148,7 @@ def run(underlying: str, daily: Sequence[dict], intraday: Sequence[dict], book: 
                         unpriced_exits += 1
                         trades.append(pos)
                         state.open_positions = 0
+                        state.realized_pnl_net += pos.net_pnl or 0.0       # round 303: this exit was the only one that did not book its result in the day's state
                         pos = None
                     else:
                         skipped_bars += 1

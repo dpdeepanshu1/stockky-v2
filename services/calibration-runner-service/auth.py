@@ -36,7 +36,15 @@ def verify(token: str) -> Dict[str, Any]:
 
 
 def is_admin(claims: Dict[str, Any]) -> bool:
-    return bool(claims.get("admin")) or claims.get("role") == "admin" or claims.get("sub") not in (None, "")
+    """Round 298: a token that SAYS it is not an admin is refused (`admin` present and not true, or a `role` other than admin). The login tokens real-trade-service and position-stocks-service issue carry only
+    `sub` (the admin username, signed after the password check), so a bare non-empty `sub` is still accepted: requiring `admin: true` would lock the operator out of ARM and square-off."""
+    if "admin" in claims and claims["admin"] is not True:
+        return False
+    role = claims.get("role")
+    if role not in (None, "") and role != "admin":
+        return False
+    sub = claims.get("sub")
+    return claims.get("admin") is True or role == "admin" or (isinstance(sub, str) and sub.strip() != "")
 
 
 def require_admin(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:

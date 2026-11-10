@@ -408,7 +408,7 @@ def test_a_blocked_real_exit_is_not_reported_as_closed(db):
     b = RB()
     e = real(db, b)
     pos = entered(db, b, e)
-    db.kv_set("fno_armed_day", "")                                          # disarm: the exit is refused, the position stays open
+    e.cfg.DHAN_ACCESS_TOKEN = ""                                            # round 294: a disarm no longer blocks an exit (see test_round294); no credentials does: the exit is refused, the position stays open
     e.provider.chain = lambda u, x: None
     closed = e.manage_open(NOW.replace(hour=15, minute=16), Params(), {}, {})
     assert closed == [] and db.get_position(pos.id).status == paper.OPEN

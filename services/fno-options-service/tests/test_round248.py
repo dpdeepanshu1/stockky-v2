@@ -111,7 +111,10 @@ def test_real_leftover_is_not_sold_when_not_armed_that_day(db):
     p = _leftover(db, mode="REAL")
     p.security_id, p.segment = 111, "NSE_FNO"
     db.update_position(p)
-    e.tick(NEXT)
+    e.tick(NEXT)                                                                                     # round 294: no ARM today and Dhan's positions cannot be read: Dhan may have squared it off, a SELL could open a short
     assert not sells(b) and db.get_position(p.id).status == paper.OPEN
-    assert [x for x in db.events("real_blocked")]                                                    # the locks still decide; it says so instead of staying silent
+    assert [x for x in db.events("real_blocked")]                                                    # it says so instead of staying silent
+    b.net = {"111": p.qty}                                                                           # Dhan still shows it: closing what we hold needs no ARM
+    e.tick(NEXT + timedelta(seconds=10))
+    assert sells(b) and db.get_position(p.id).status == paper.CLOSED
 

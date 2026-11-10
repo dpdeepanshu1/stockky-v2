@@ -151,7 +151,8 @@ def test_an_entry_buy_failing_with_a_5xx_is_flagged_as_possibly_sent(db):
     b = Gw(net={})
     e = real(db, b)
     e.tick(NOW)
-    assert not db.open_positions("REAL") and _doubt_events(db)
+    ps = db.open_positions("REAL")                                   # round 293: kept as a flagged unknown entry until the correlationId lookup answers
+    assert len(ps) == 1 and ps[0].broker_order_ids["entry_state"] == "UNKNOWN" and _doubt_events(db)
 
 
 # ---- the manual probe ------------------------------------------------------------------------------------------------------------

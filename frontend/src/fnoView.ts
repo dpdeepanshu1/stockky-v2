@@ -65,6 +65,22 @@ export function stopDoubtCount(ps: FnoPosition[] | undefined | null): number {
   return (ps || []).filter((p) => stopDoubtView(p) !== null).length;
 }
 
+/** Round 293: an entry whose fill is not known (the BUY call failed with a network / 5xx error, or its state could not be read after the cancel). The engine keeps the row flagged: no stop, never sold,
+ *  no second BUY; it asks Dhan by the correlationId each cycle and settles it by itself. Nothing to click: it places and clears nothing. Null = nothing unknown. */
+export function entryDoubtView(p: FnoPosition): { correlationId: string | null; text: string } | null {
+  const ids = p.broker_order_ids || {};
+  if (ids.entry_state !== "UNKNOWN") return null;
+  const correlationId = ids.entry_cid ? String(ids.entry_cid) : null;
+  const text = `The entry BUY for ${p.label} may be live or filled at Dhan and its state could not be read yet` + (correlationId ? ` (correlationId ${correlationId})` : "") +
+    `. The engine keeps it flagged: no stop, no sale by the engine and no second BUY, and asks Dhan again every cycle. Look in the Dhan app: if you hold the contract, protect or close it there until this settles.`;
+  return { correlationId, text };
+}
+
+/** How many of these positions have an entry in doubt. */
+export function entryDoubtCount(ps: FnoPosition[] | undefined | null): number {
+  return (ps || []).filter((p) => entryDoubtView(p) !== null).length;
+}
+
 /** Round 290: the warning for settings that cannot work together. Empty list / missing = nothing to show (null). */
 export function settingsProblemText(problems: string[] | undefined | null): string | null {
   const list = (problems || []).filter((x) => typeof x === "string" && x.trim());

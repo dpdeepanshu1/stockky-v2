@@ -1,7 +1,7 @@
 // F&O Options > Overview: the four locks, today's numbers, open positions, the pipeline check, and the manual buttons.
 import { useState } from "react";
 import { fnoApi, type FnoPosition } from "../../fnoApi";
-import { exitDoubtCount, exitDoubtView, inr, istHm, lockSummary, positionProgress, settingsProblemText, stopDoubtCount, stopDoubtView } from "../../fnoView";
+import { entryDoubtCount, entryDoubtView, exitDoubtCount, exitDoubtView, inr, istHm, lockSummary, positionProgress, settingsProblemText, stopDoubtCount, stopDoubtView } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
 import { useFno } from "./useFno";
 import DhanMoneyCard from "../DhanMoneyCard";   // Round 270
@@ -16,12 +16,14 @@ export function PositionCard({ p, onClearDoubt, onClearStopDoubt, busy }: { p: F
   const { pct, pnl } = positionProgress(p);
   const doubt = exitDoubtView(p);   // Round 289
   const stopDoubt = stopDoubtView(p);   // Round 292
+  const entryDoubt = entryDoubtView(p);   // Round 293
   return (
     <div className="rounded-xl border border-slate p-2 text-[12px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <b>{p.label}</b>{p.strategy && p.strategy !== "CORE" && <Chip>{p.strategy}</Chip>}
         {doubt && <Chip tone="bad" title="An exit SELL may be live at Dhan">EXIT IN DOUBT</Chip>}
         {stopDoubt && <Chip tone="warn" title="A stop order may be resting at Dhan">STOP IN DOUBT</Chip>}
+        {entryDoubt && <Chip tone="bad" title="The entry BUY may be live or filled at Dhan; no stop yet">ENTRY UNKNOWN</Chip>}
         <span className="text-mist">{p.lots} lot x {p.lot_size} · {p.mode} · in {istHm(p.entry_ts)}</span>
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
@@ -42,6 +44,11 @@ export function PositionCard({ p, onClearDoubt, onClearStopDoubt, busy }: { p: F
           {onClearDoubt && p.id != null && (
             <Btn small disabled={busy} onClick={() => onClearDoubt(p.id as number)} title="Only after you looked in the Dhan app and the SELL is not there. It places no order.">I checked Dhan: the SELL is not there, clear the mark</Btn>
           )}
+        </div>
+      )}
+      {entryDoubt && (
+        <div className="mt-2 space-y-1" data-testid="fno-entry-doubt">
+          <Msg kind="warn">{entryDoubt.text}</Msg>
         </div>
       )}
       {stopDoubt && (
@@ -74,6 +81,7 @@ export default function FnoOverview() {
   const ls = lockSummary(d?.locks);
   const doubts = exitDoubtCount(d?.open_positions);   // Round 289
   const stopDoubts = stopDoubtCount(d?.open_positions);   // Round 292
+  const entryDoubts = entryDoubtCount(d?.open_positions);   // Round 293
   const settingsWarn = settingsProblemText(d?.param_problems);   // Round 290
   return (
     <div className="space-y-3">
@@ -81,7 +89,7 @@ export default function FnoOverview() {
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
       {settingsWarn && <div data-testid="fno-settings-problem"><Msg kind="err">{settingsWarn}</Msg></div>}
       <Card title="State" tone={ls.tone === "real" ? "bad" : ls.tone === "real-blocked" ? "warn" : undefined}
-        right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}</>}>
+        right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}{entryDoubts > 0 && <Chip tone="bad" title="An entry BUY may be live or filled at Dhan: see Open positions">{entryDoubts} entry unknown</Chip>}</>}>
         <p className="text-[13px] font-bold">{ls.text}</p>
         {d && (
           <ul className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-mist sm:grid-cols-4">

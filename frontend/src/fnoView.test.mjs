@@ -147,3 +147,15 @@ assert.ok(stopDoubtView(Q({ broker_order_ids: { sl_doubt: "x" } })));
 assert.equal(stopDoubtCount([Q({}), Q({ stop_doubt: true }), Q({ broker_order_ids: { sl_doubt: "x" } })]), 2); assert.equal(stopDoubtCount(null), 0);
 assert.equal(exitDoubtView(Q({ stop_doubt: true, broker_order_ids: { sl_doubt: "x" } })), null);   // a stop in doubt is not an exit in doubt
 console.log("fnoView round 292 ok");
+
+// Round 293: an entry whose fill is unknown is shown with its correlationId; it is independent of the exit-doubt and stop-doubt views.
+import { entryDoubtView, entryDoubtCount } from "./fnoView.ts";
+assert.equal(entryDoubtView(Q({})), null);
+assert.equal(entryDoubtView(Q({ broker_order_ids: { entry: "5" } })), null);
+const edv = entryDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN", entry_cid: "bu1a2b" } }));
+assert.equal(edv.correlationId, "bu1a2b"); assert.match(edv.text, /correlationId bu1a2b/); assert.match(edv.text, /no second BUY/); assert.match(edv.text, /no stop/);
+const edq = entryDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN", entry: "9" } }));       // an older unknown entry (order id known, fill unknown): shown, no invented correlationId
+assert.equal(edq.correlationId, null); assert.doesNotMatch(edq.text, /correlationId/);
+assert.equal(entryDoubtCount([Q({}), Q({ broker_order_ids: { entry_state: "UNKNOWN" } }), Q({ broker_order_ids: { entry_state: "UNKNOWN", entry_cid: "x" } })]), 2); assert.equal(entryDoubtCount(null), 0);
+assert.equal(stopDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN" } })), null); assert.equal(exitDoubtView(Q({ broker_order_ids: { entry_state: "UNKNOWN" } })), null);
+console.log("fnoView round 293 ok");

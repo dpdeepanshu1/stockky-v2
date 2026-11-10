@@ -313,10 +313,46 @@ class Engine:
             if not self._unknown_origin(pos):
                 continue
             oid = pos.broker_order_ids.get("entry")
+            if not oid and pos.broker_order_ids.get("entry_cid"):       # round 293: the BUY call failed and we never got an order id: ask Dhan by the correlationId we sent
+                cid = str(pos.broker_order_ids["entry_cid"])
+                look = self.broker.order_by_correlation(cid)
+                if look is None or look.state == "UNKNOWN":
+                    self._note("reconcile", pos.underlying, {"msg": "entry BUY may be live at Dhan and its state cannot be read yet: no stop, no second BUY. Check the Dhan app", "position": pos.id, "correlation_id": cid},
+                               key=f"unk{pos.id}", now=now)
+                    continue
+                if look.state == "NOT_FOUND":
+                    if now.timestamp() - float(pos.entry_ts or 0) < STOP_ABSENT_AFTER_S:       # a delayed order may still land
+                        self._note("reconcile", pos.underlying, {"msg": "Dhan has no order with that correlationId yet; waiting before treating the BUY as never placed", "position": pos.id, "correlation_id": cid},
+                                   key=f"unk{pos.id}", now=now)
+                        continue
+                    pos.status, pos.exit_ts, pos.exit_reason = paper.CLOSED, now.timestamp(), "NOT_FILLED"
+                    pos.gross_pnl = pos.charges = pos.net_pnl = 0.0
+                    pos.note = (pos.note + " | Dhan has no such BUY order: it never arrived, no position").strip(" |")
+                    self.store.update_position(pos)
+                    self._note("reconcile", pos.underlying, {"msg": "unknown entry resolved: the BUY never reached Dhan", "position": pos.id, "correlation_id": cid}, key=f"unk{pos.id}", now=now, force=True)
+                    continue
+                oid = str((look.raw or {}).get("orderId") or "")
+                if not oid:
+                    self._note("reconcile", pos.underlying, {"msg": "Dhan found the BUY order but gave no order id: check the Dhan app", "position": pos.id, "correlation_id": cid}, key=f"unk{pos.id}", now=now)
+                    continue
+                pos.broker_order_ids["entry"] = oid
+                pos.broker_order_ids.pop("entry_cid", None)
+                self.store.update_position(pos)
+                if look.state == "PENDING":                              # still resting: cancel it (the final read below decides what filled), as _settle does at entry
+                    self.broker.cancel(oid)
             st = self.broker.order_status(oid) if oid else None
             confirmed, price = False, None
             if st is not None and st.state == "TRADED" and st.avg_price > 0:
                 confirmed, price = True, st.avg_price
+            elif st is not None and st.state in ("REJECTED", "CANCELLED") and st.filled_qty > 0:
+                n = min(self._whole_lots(st.filled_qty, pos.lot_size), pos.lots)           # round 293: part filled, the rest is gone: keep exactly the filled whole lots (it was flagged forever before)
+                if n < 1:
+                    self._note("reconcile", pos.underlying, {"msg": "entry filled less than one lot: no position can be kept, check the Dhan app", "position": pos.id, "filled_qty": st.filled_qty}, key=f"unk{pos.id}", now=now)
+                    continue
+                if n < pos.lots:
+                    pos.lots = n
+                    pos.note = (pos.note + f" | PARTIAL fill: {st.filled_qty}, kept {n} lot(s)").strip(" |")
+                confirmed, price = True, (st.avg_price if st.avg_price > 0 else None)
             elif st is not None and st.state in ("REJECTED", "CANCELLED") and st.filled_qty == 0:
                 pos.status, pos.exit_ts, pos.exit_reason = paper.CLOSED, now.timestamp(), "NOT_FILLED"
                 pos.gross_pnl = pos.charges = pos.net_pnl = 0.0
@@ -652,12 +688,28 @@ class Engine:
             if not c.security_id:
                 self._note("order_failed", und, {"side": "BUY", "message": "no security id for the contract"}, key="entry", now=now, force=True)
                 return None
-            buy_payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, c.security_id, c.segment, "BUY", pos.qty, fill)
+            buy_cid = "bu" + uuid.uuid4().hex[:18]            # round 293: our own tag, so a BUY whose call failed can be looked up at Dhan afterwards
+            buy_payload = execution.build_order(self.cfg.DHAN_CLIENT_ID, c.security_id, c.segment, "BUY", pos.qty, fill, correlation_id=buy_cid)
             res = self.broker.place(buy_payload) if self.broker else execution.OrderResult(False, message="no broker")
             if not res.ok:
                 self._maybe_sent(buy_payload, res, und, "BUY", now)
-                self._note("order_failed", und, {"side": "BUY", "contract": c.label(), "status": res.status, "message": res.message}, key="entry", now=now, force=True)
-                return None
+                failed = {"side": "BUY", "contract": c.label(), "status": res.status, "message": res.message}
+                found = self.broker.order_by_correlation(buy_cid) if (self.broker and execution.maybe_sent(res)) else None
+                oid = str((found.raw or {}).get("orderId") or "") if found is not None else ""
+                if not execution.maybe_sent(res) or (found is not None and found.state in ("REJECTED", "CANCELLED") and found.filled_qty == 0):
+                    self._note("order_failed", und, failed, key="entry", now=now, force=True)      # Dhan refused it, or says nothing was bought: no order exists
+                    return None
+                if oid:                                      # round 293: the BUY did reach Dhan: carry on exactly as if the call had answered (settle: wait, cancel what rests, read the fill)
+                    self._note("reconcile", und, {"msg": "the BUY call looked failed but Dhan has the order (found by correlationId): handled as placed", "order": oid, "correlation_id": buy_cid,
+                                                  "contract": c.label()}, key="entry-found", now=now, force=True)
+                    res = execution.OrderResult(True, order_id=oid, status="TRANSIT")
+                else:                                        # cannot tell (or Dhan has no such order YET): it may fill later with no stop and no row of ours. Keep a flagged row: it blocks a second BUY,
+                    pos.broker_order_ids.update(entry_state="UNKNOWN", entry_cid=buy_cid)   # gets no stop and is never sold; resolve_unknown_entries looks the order up each cycle
+                    pos.note = (pos.note + " | entry BUY call failed and may be live at Dhan: no stop, will not be sold until the order lookup answers").strip(" |")
+                    self.store.insert_position(pos)
+                    self._note("reconcile", und, {"msg": "entry BUY may be live at Dhan and cannot be read yet: kept as an unknown entry, no second BUY, no stop until Dhan answers", "position": pos.id,
+                                                  "contract": c.label(), "correlation_id": buy_cid}, key="entry-doubt", now=now, force=True)
+                    return pos
             ordered_qty = pos.qty
             st = self._settle(res.order_id)
             if st is None and not self._can_confirm():       # a legacy broker that cannot answer: recorded at the limit price, flagged

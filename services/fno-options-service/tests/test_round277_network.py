@@ -39,7 +39,8 @@ def test_entry_network_failure_is_flagged_and_reconciled_now(db):
     b = NetFailBroker(net={})
     e = real(db, b)
     e.tick(NOW)
-    assert not db.open_positions("REAL")
+    ps = db.open_positions("REAL")                                   # round 293: the BUY may be live at Dhan, so it is kept as a flagged unknown entry (no stop, never sold, blocks a second BUY)
+    assert len(ps) == 1 and ps[0].broker_order_ids["entry_state"] == "UNKNOWN" and ps[0].broker_order_ids["entry_cid"] == b.sent[0]["correlationId"]
     ev = [x for x in db.events("reconcile") if "may have reached Dhan" in x.get("msg", "")]
     assert ev and ev[0]["side"] == "BUY" and ev[0]["correlation_id"] == b.sent[0]["correlationId"]
     assert e.last_reconcile.get("ts") is not None                    # compared with Dhan's positions at once

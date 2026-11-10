@@ -48,10 +48,12 @@ def forward_outcome(entry: Any, stop: Any, target: Any, bars_after: Sequence[Seq
     for h in HORIZONS:
         if len(win) >= h and finite(win[h - 1][C]):
             out[f"ret_{h}d"] = round((float(win[h - 1][C]) / e - 1.0) * 100.0, 3)
-    hi = max(float(b[H]) for b in win if finite(b[H]))
-    lo = min(float(b[L]) for b in win if finite(b[L]))
-    out["mfe_pct"] = round((hi / e - 1.0) * 100.0, 3)
-    out["mae_pct"] = round(min(0.0, (lo / e - 1.0) * 100.0), 3)
+    his = [float(b[H]) for b in win if finite(b[H])]               # E318: max() / min() of an empty sequence raised ValueError when no bar had a finite high / low, and stopped the whole evaluator run
+    los = [float(b[L]) for b in win if finite(b[L])]
+    if his:
+        out["mfe_pct"] = round((max(his) / e - 1.0) * 100.0, 3)
+    if los:
+        out["mae_pct"] = round(min(0.0, (min(los) / e - 1.0) * 100.0), 3)
     for k, b in enumerate(win):
         hit_t = t is not None and t > e and finite(b[H]) and float(b[H]) >= t
         hit_s = s is not None and 0 < s < e and finite(b[L]) and float(b[L]) <= s
@@ -183,7 +185,7 @@ def walk_forward(samples: Sequence[Dict[str, Any]], rule: str, grid: Sequence[fl
     rule in {chase, stretch, room, rr}; `grid` = candidate thresholds. Returns the per-fold picks and the pooled out-of-sample edge."""
     key = {"chase": "chase_atr", "stretch": "stretch_atr", "room": "room_atr", "rr": "rr"}.get(rule)
     ss = sorted([s for s in samples if _ret(s, horizon) is not None], key=lambda s: s["ts"])
-    out: Dict[str, Any] = {"rule": rule, "horizon": horizon, "folds": [], "oos_edge": None, "oos_rejected_n": 0, "oos_passed_n": 0, "stable": None}
+    out: Dict[str, Any] = {"rule": rule, "horizon": horizon, "folds": [], "oos_edge": None, "oos_edge_pooled": None, "oos_rejected_n": 0, "oos_passed_n": 0, "stable": None}
     if key is None or not grid or len(ss) < min_train + folds:
         out["note"] = "insufficient_sample" if key else "unknown_rule"
         return out
@@ -209,10 +211,20 @@ def walk_forward(samples: Sequence[Dict[str, Any]], rule: str, grid: Sequence[fl
         pooled_ok += ok
         out["folds"].append({"fold": f, "threshold": best_v, "train_edge": best_edge, "test_rejected_n": len(rej), "test_passed_n": len(ok), "test_edge": edge})
     if pooled_rej and pooled_ok:
-        out["oos_edge"] = round(mean(pooled_ok) - mean(pooled_rej), 3)
+        # E257: pooling every fold's returns mixes different periods and thresholds (28 Oct run: "chase" lost in all four folds yet pooled to +0.288).
+        # oos_edge is now the average of the per-fold edges, each measured inside its own period, weighted by n_rej * n_ok / (n_rej + n_ok);
+        # folds with fewer than min_n rejected samples are left out. The old pooled number stays as oos_edge_pooled for reference only.
+        out["oos_edge_pooled"] = round(mean(pooled_ok) - mean(pooled_rej), 3)
+        wts = [(x["test_edge"], x["test_rejected_n"] * x["test_passed_n"] / (x["test_rejected_n"] + x["test_passed_n"]))
+               for x in out["folds"] if x["test_edge"] is not None and x["test_rejected_n"] >= min_n]
+        tot = sum(w for _, w in wts)
+        out["oos_edge"] = round(sum(e * w for e, w in wts) / tot, 3) if tot > 0 else None
     out["oos_rejected_n"], out["oos_passed_n"] = len(pooled_rej), len(pooled_ok)
     edges = [x["test_edge"] for x in out["folds"] if x["test_edge"] is not None]
-    out["stable"] = (len(edges) >= 2 and all(e > 0 for e in edges)) if edges else None
+    # E318: `stable` needs at least two folds that are big enough to count in oos_edge (>= min_n rejected). Before, two tiny folds (one rejected sample each) could make it True while oos_edge
+    # rested on a single real fold. A fold of any size with a negative edge still makes it False.
+    big = [x for x in out["folds"] if x["test_edge"] is not None and x["test_rejected_n"] >= min_n]
+    out["stable"] = (len(big) >= 2 and all(e > 0 for e in edges)) if edges else None
     return out
 
 

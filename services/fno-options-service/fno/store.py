@@ -118,7 +118,15 @@ class Store:
             q += " AND underlying=?"; a.append(underlying)
         with self._lock:
             rows = self._db.execute(q + " ORDER BY id DESC LIMIT ?", a + [int(limit)]).fetchall()
-        return [{"id": r["id"], "ts": r["ts"], "kind": r["kind"], "underlying": r["underlying"], **json.loads(r["data"])} for r in rows]
+        out = []
+        for r in rows:
+            try:
+                d = json.loads(r["data"])
+            except (TypeError, ValueError):          # round 313: one unreadable journal row must not blank the whole journal / Overview page
+                d = {"data_unreadable": True}
+            d = d if isinstance(d, dict) else {"value": d}
+            out.append({**d, "id": r["id"], "ts": r["ts"], "kind": r["kind"], "underlying": r["underlying"]})   # the row's own columns win: a payload key named id / ts / kind can no longer overwrite them
+        return out
 
     def prune_events(self, keep_days: int = 30) -> int:
         cutoff = time.time() - keep_days * 86400
@@ -131,7 +139,12 @@ class Store:
     def kv_get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             r = self._db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
-        return json.loads(r["value"]) if r else default
+        if not r:
+            return default
+        try:
+            return json.loads(r["value"])
+        except (TypeError, ValueError):              # round 313: a damaged kv value reads as "not set" (e.g. no armed day = the safe side) instead of raising in the engine loop
+            return default
 
     def kv_set(self, key: str, value: Any) -> None:
         with self._lock:

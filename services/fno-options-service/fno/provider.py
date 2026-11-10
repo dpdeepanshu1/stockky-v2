@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -17,6 +18,27 @@ from .models import Chain
 IST = timezone(timedelta(hours=5, minutes=30))
 INDEX_SYMBOL = {"NIFTY": "^NSEI", "SENSEX": "^BSESN"}
 VIX_SYMBOL = "^INDIAVIX"
+try:                                                           # E322: the same tolerance the market-structure engine's prep applies (0.05 %)
+    from stockky_ms.params import MSParams
+    BAR_TOLERANCE_PCT = float(MSParams().bar_tolerance_pct)
+except Exception:  # noqa: BLE001
+    BAR_TOLERANCE_PCT = 0.05
+
+
+def bar_ok(o: float, h: float, l: float, c: float) -> bool:
+    """E322: the engine's own bar rule (stockky_ms.prep._valid): finite, positive, high >= low, open and close inside [low, high] within the tolerance. The F&O signals and strategies
+    read the index candles as they come, so a corrupt print (a close of 140 under a high of 101, a NaN, a zero) used to reach the opening-range and trend decisions."""
+    try:
+        vals = (float(o), float(h), float(l), float(c))
+    except (TypeError, ValueError):
+        return False
+    if not all(math.isfinite(x) for x in vals):
+        return False
+    o, h, l, c = vals
+    if o <= 0 or h <= 0 or l <= 0 or c <= 0 or h < l:
+        return False
+    tol = max(h, 1e-9) * BAR_TOLERANCE_PCT / 100.0
+    return not (c > h + tol or c < l - tol or o > h + tol or o < l - tol)
 
 
 class Provider:
@@ -40,8 +62,9 @@ def label_to_epoch(label: str) -> Optional[float]:
 
 
 def convert_candles(raw: Any) -> List[Dict[str, float]]:
-    """market-data {"date","open","high","low","close","volume"} rows -> {"t","o","h","l","c","v"}; bad rows dropped, ascending."""
-    out: List[Dict[str, float]] = []
+    """market-data {"date","open","high","low","close","volume"} rows -> {"t","o","h","l","c","v"}; bad rows dropped, ascending, one candle per timestamp (the later row wins).
+    E322: a row the engine's bar rule rejects (see bar_ok) is bad, and an unreadable volume is 0 (it used to raise out of intraday() / daily())."""
+    by_t: Dict[float, Dict[str, float]] = {}
     for r in raw or []:
         if not isinstance(r, dict):
             continue
@@ -50,11 +73,14 @@ def convert_candles(raw: Any) -> List[Dict[str, float]]:
             o, h, l, c = (float(r[k]) for k in ("open", "high", "low", "close"))
         except (KeyError, TypeError, ValueError):
             continue
-        if t is None or c <= 0:
+        if t is None or not bar_ok(o, h, l, c):
             continue
-        out.append({"t": t, "o": o, "h": h, "l": l, "c": c, "v": float(r.get("volume") or 0)})
-    out.sort(key=lambda x: x["t"])
-    return out
+        try:
+            v = float(r.get("volume") or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        by_t[t] = {"t": t, "o": o, "h": h, "l": l, "c": c, "v": v if math.isfinite(v) and v >= 0 else 0.0}
+    return [by_t[k] for k in sorted(by_t)]
 
 
 class _Ttl:

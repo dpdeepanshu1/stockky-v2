@@ -300,7 +300,7 @@ def test_attempt_entry_makes_a_doubtful_setup_smaller(env):
 
 def test_entry_reads_the_multiple_before_it_reserves_capital():
     src = (ROOT / "orders" / "entry.py").read_text(encoding="utf-8")
-    assert src.index("conviction.long_decision(") < src.index("ledger.reserve_capital(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=")
+    assert src.index("conviction.long_decision(") < src.index("= _hold_reserve(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=")
 
 
 def test_every_conviction_switch_is_on_the_calibration_page_and_protected_from_the_calibrator():

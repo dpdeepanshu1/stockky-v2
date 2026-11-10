@@ -94,5 +94,5 @@ def test_the_live_short_row_gets_the_mirrored_record_and_it_cannot_block_the_ent
     assert 'side="SHORT"' in src[i:i + 200]
     block = src[src.rfind("try:", 0, i):src.index("tm_gate.stamp(pos.flow_json", i)]
     assert "except Exception" in block                       # record only: a failure is swallowed before the position is saved
-    assert "ScalpPosition(" in src[:i] and "db.add(pos)" in src[i:]
+    assert "ScalpPosition(" in src[:i] and "position_save.save_new_position(db, pos)" in src[i:]
     assert "orb_shadow" not in (ROOT / "orders" / "short_entry.py").read_text()   # the shadow-only path is untouched

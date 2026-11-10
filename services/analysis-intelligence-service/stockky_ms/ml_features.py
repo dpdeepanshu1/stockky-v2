@@ -95,7 +95,8 @@ def vector(built: Dict[str, Any], fill: Optional[float] = None) -> List[Optional
 
 def assert_comparable(rows: Sequence[Dict[str, Any]]) -> bool:
     """True when every row has the same engine version, params hash and column hash - rows that fail this must not be pooled for training."""
-    keys = {(r.get("meta", {}).get("engine_version"), r.get("meta", {}).get("params_hash"), r.get("meta", {}).get("columns_hash")) for r in rows}
+    metas = [(r.get("meta") if isinstance(r, dict) and isinstance(r.get("meta"), dict) else {}) for r in rows]      # E320: a row with meta null / missing no longer raises
+    keys = {(m.get("engine_version"), m.get("params_hash"), m.get("columns_hash")) for m in metas}
     return len(keys) <= 1
 
 

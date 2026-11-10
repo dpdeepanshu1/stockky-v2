@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .ms_types import C, H, IST_OFFSET_S, L, O, T, V, finite
+from .params import MSParams
 
 SESSION_OPEN_S = 9 * 3600 + 15 * 60          # 09:15 IST, seconds after IST midnight
 SESSION_LEN_S = 375 * 60                     # 09:15 -> 15:30
@@ -41,6 +42,7 @@ _SPECS: Dict[str, Dict[str, Any]] = {
 }
 _FETCH_MIN = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
 MAX_TAIL = 1500
+BAR_TOLERANCE_PCT = MSParams().bar_tolerance_pct       # E320: the same tolerance prep._valid applies, so the chart / opening-range / ranker bars and the engine's bars accept the same rows
 _NOTES = {
     "1m": "1-minute candles are very noisy: patterns on them fail more often than on 15-minute, hourly or daily candles.",
     "5m": "5-minute candles are noisy: treat patterns here as a short-term read and check the 15-minute or hourly chart.",
@@ -112,7 +114,8 @@ def parse_row_ts(v: Any) -> Optional[float]:
 
 
 def rows_to_bars(rows: Any) -> List[Tuple[float, float, float, float, float, float]]:
-    """Candle rows -> ascending (t, o, h, l, c, v), one per timestamp (the later row wins); bad rows are dropped, never raised."""
+    """Candle rows -> ascending (t, o, h, l, c, v), one per timestamp (the later row wins); bad rows are dropped, never raised.
+    E320: a row whose open or close lies outside [low, high] by more than bar_tolerance_pct is bad (the engine's prep drops it too). A missing open is still read as the close."""
     out: Dict[float, Tuple[float, float, float, float, float, float]] = {}
     for r in rows or []:
         try:
@@ -126,6 +129,9 @@ def rows_to_bars(rows: Any) -> List[Tuple[float, float, float, float, float, flo
             of = float(o) if finite(o) else cf
             hf, lf = float(h), float(l)
             if cf <= 0 or hf <= 0 or lf <= 0 or hf < lf:
+                continue
+            tol = hf * BAR_TOLERANCE_PCT / 100.0                      # E320: an open or close outside [low, high] is a bad print: prep._valid drops it, and this function used to keep it
+            if cf > hf + tol or cf < lf - tol or (finite(o) and (of > hf + tol or of < lf - tol)):
                 continue
             v = r.get("volume")
             out[ts] = (ts, of, hf, lf, cf, float(v) if finite(v) and float(v) >= 0 else 0.0)

@@ -36,4 +36,6 @@ def r3(v: Optional[float]) -> Optional[float]:
 
 
 def clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    if v != v:                       # E319: NaN compares False both ways, so it used to come back as NaN, and `min(100.0, nan)` downstream is 100.0: an unknown read as a perfect score. Unknown = lo.
+        return lo
     return lo if v < lo else hi if v > hi else v

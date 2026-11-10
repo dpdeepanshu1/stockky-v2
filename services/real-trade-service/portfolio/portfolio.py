@@ -26,6 +26,7 @@ in the SAME shape once that's wired, without changing this schema again.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -110,7 +111,7 @@ def _accumulate_net_cost(position: "models.TradePosition", qty_closed: int,
         )
 
 
-def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
+def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> bool:
     """BUG FIX (this session): realized_pnl_today was never reset on a new
     trading day anywhere in this service (see models.py's comment on
     TradeAccount.pnl_last_reset_date for the full history) — it only ever
@@ -125,7 +126,7 @@ def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
     even if the service was down across midnight; no scheduler needed."""
     today = ist_today_str()
     if account.pnl_last_reset_date == today:
-        return
+        return False
     prev_reset_date = account.pnl_last_reset_date
     prev_pnl = account.realized_pnl_today
     # group 263: freeze the finished day's gross P&L into trade_pnl_daily BEFORE the counter is zeroed, so that day's
@@ -143,6 +144,7 @@ def _maybe_reset_daily_pnl(db: Session, account: models.TradeAccount) -> None:
         "cleared realized_pnl_today (was ₹%.2f)",
         account.mode, prev_reset_date, today, prev_pnl,
     )
+    return True   # E343: the reset COMMITTED, which ends the transaction (and a FOR UPDATE row lock taken before it): get_account takes the lock again
 
 
 def get_account(db: Session, mode: str, for_update: bool = False) -> models.TradeAccount:
@@ -176,6 +178,7 @@ def get_account(db: Session, mode: str, for_update: bool = False) -> models.Trad
     recompute, equity_sync's authoritative balance overwrite from Dhan)
     do not need it and are left as plain reads."""
     query = db.query(models.TradeAccount).filter_by(mode=mode)
+    bind_dialect = ""
     if for_update:
         try:
             bind_dialect = db.get_bind().dialect.name
@@ -186,7 +189,14 @@ def get_account(db: Session, mode: str, for_update: bool = False) -> models.Trad
     row = query.first()
     if row is None:
         raise RuntimeError(f"No trade_accounts row for mode={mode} — schema not seeded.")
-    _maybe_reset_daily_pnl(db, row)
+    if _maybe_reset_daily_pnl(db, row) is True and for_update and bind_dialect != "sqlite":
+        # E343: the first read of a new IST day commits the daily reset. That commit ends the transaction and so releases the row lock taken above, and the caller's
+        # `account.cash_available += ...` then ran on an unlocked row: the lost-update race this lock exists to stop, open once a day. Lock the row again (and re-read
+        # it) before handing it out. If that fails the account is still returned, as before this fix.
+        try:
+            db.refresh(row, with_for_update=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("portfolio: could not re-lock the %s account row after the daily reset", mode, exc_info=True)
     return row
 
 
@@ -576,9 +586,9 @@ async def import_broker_holdings(db: Session) -> int:
         try:
             _qty_int = int(float(_qty_raw))
             _avg_float = float(_avg_raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):   # E345: OverflowError ("inf") escaped this loop and stopped the whole import for every holding
             continue
-        if _qty_int <= 0 or _avg_float <= 0:
+        if _qty_int <= 0 or _avg_float <= 0 or not math.isfinite(_avg_float):
             continue
         # 2026-10-06 (group 180): the quantity above is the BUY side of today's activity. A delivery row that was
         # partly or fully sold today (buyQty 10, sellQty 4, netQty 6, or netQty 0 / positionType CLOSED) was still
@@ -636,9 +646,9 @@ async def import_broker_holdings(db: Session) -> int:
         try:
             qty = int(qty)
             avg_price = float(avg_price)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if qty <= 0 or avg_price <= 0:
+        if qty <= 0 or avg_price <= 0 or not math.isfinite(avg_price):   # E345: a NaN / inf cost passed "<= 0" and became a position with a NaN stop
             continue
         symbol = str(raw_symbol).upper().strip()
 
@@ -958,8 +968,20 @@ def holdings_sync_reconcile(db: Session) -> dict:
         raw = _get(row, *keys, default=0)
         try:
             return int(float(raw))   # E172: "4.0" / 4.0 used to read as 0 (int("4.0") raises) = "not held" = ghost-close
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):   # E345: OverflowError ("inf") used to escape this function, which must never raise
             return 0
+
+    def _qty_unreadable(row: dict, *keys) -> bool:
+        """E345: a quantity that is PRESENT but cannot be read ("abc", "nan", "inf") is not "0 held". _qty() answers 0 for it, which made the symbol look absent from the
+        broker's answer, and a position this service really holds was force-closed as a ghost (cash refunded, exits stopped)."""
+        raw = _get(row, *keys, default=None)
+        if raw is None:
+            return False
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return True
+        return not math.isfinite(v)
 
     def _sym_key(sym) -> str:
         # E172: Dhan may report an equity as "ABC-EQ"; our rows use the bare symbol. Compare without a trailing -EQ.
@@ -993,11 +1015,14 @@ def holdings_sync_reconcile(db: Session) -> dict:
     holdings_qty_by_symbol: dict[str, int] = {}
     pos_net_by_symbol: dict[str, int] = {}
     pos_sell_avg_by_symbol: dict[str, float] = {}
+    unreadable_symbols: set[str] = set()   # E345: symbols whose quantity the broker sent in a form that cannot be read: never closed or capped from a guess
     for row in holdings or []:
         if not isinstance(row, dict):
             continue
         sym = _get(row, "tradingSymbol", "trading_symbol", "symbol")
         qty = _qty(row, "totalQty", "total_qty", "quantity")
+        if sym and _qty_unreadable(row, "totalQty", "total_qty", "quantity"):
+            unreadable_symbols.add(_sym_key(sym))
         if sym and qty > 0:
             key = _sym_key(sym)
             broker_qty_by_symbol[key] = max(broker_qty_by_symbol.get(key, 0), qty)
@@ -1076,6 +1101,7 @@ def holdings_sync_reconcile(db: Session) -> dict:
     )
 
     closed_symbols: list[str] = []
+    closed_lock_symbols: list[str] = []   # E345: the symbol as the lock table has it (position.symbol), released after the commit below
     synced_symbols: list[str] = []
     account = None
     # BUG FIX (2026-09-10, session21c audit): local import (not top-level —
@@ -1119,6 +1145,10 @@ def holdings_sync_reconcile(db: Session) -> dict:
         # handled by the pending-orders loop this same cycle (or the next
         # one), which is the ONLY path allowed to book a confirmed fill.
         if _has_pending_real_sell(db, symbol):
+            continue
+
+        if symbol in unreadable_symbols:
+            logger.warning("holdings_sync_reconcile: %s skipped this cycle - Dhan sent its holdings quantity in a form that cannot be read, so it is neither closed nor capped.", symbol)
             continue
 
         opened_at = position.opened_at
@@ -1238,12 +1268,18 @@ def holdings_sync_reconcile(db: Session) -> dict:
             account = get_account(db, "REAL", for_update=True)
         account.cash_available += refund
         closed_symbols.append(symbol)
+        closed_lock_symbols.append(position.symbol)
 
     if closed_symbols or synced_symbols:
         if account is not None:
             account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
             account.updated_at = now
         db.commit()
+        # E345: a ghost-closed position is flat, so this service's cross-service symbol claim is stale. This was the one path that closes a REAL position without
+        # releasing it, and this service has no lock sweep (position-stocks has one), so the claim stayed for good and position-stocks could never buy the symbol.
+        # After the commit, like E344: release() commits, and rolls back on an error.
+        for _s in closed_lock_symbols:
+            shared_symbol_lock.release(db, _s)
         if closed_symbols:
             log_action_behind(
                 db, actor="system", action="HOLDINGS_SYNC_CLOSED", mode="REAL",
@@ -1581,6 +1617,7 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     position.qty_open -= qty_closed
     position.realized_pnl += pnl
     _accumulate_net_cost(position, qty_closed, exit_price, pnl, now)
+    flat_symbol = None
     if position.qty_open <= 0:
         position.status = "CLOSED"
         position.closed_at = now
@@ -1590,7 +1627,9 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
         # released on a partial exit (status stays PARTIALLY_CLOSED below)
         # since this service still genuinely holds shares of it. See
         # execution/shared_symbol_lock.py.
-        shared_symbol_lock.release(db, position.symbol)
+        # E344: released AFTER the commit below, not here. release() commits, and on an error it ROLLS BACK: called here, that commit saved the closed
+        # position before the cash and P&L were booked, and a failing release rolled the position change back while the booking that followed still went through.
+        flat_symbol = position.symbol
     else:
         position.status = "PARTIALLY_CLOSED"
         if reason == "target_hit_partial":
@@ -1613,6 +1652,8 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
     account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
     account.updated_at = now
     db.commit()
+    if flat_symbol is not None:
+        shared_symbol_lock.release(db, flat_symbol)   # E344: after the one commit that holds the position, the cash and the P&L together
     log_action_behind(db, actor="system",
                action="POSITION_CLOSED" if position.status == "CLOSED" else "POSITION_PARTIAL_EXIT",
                mode="REAL", detail=f"{position.symbol} {reason} qty={qty_closed} pnl={pnl:+.2f} (broker-confirmed)")
@@ -1663,7 +1704,8 @@ def force_close_real_position(db: Session, position: models.TradePosition, note:
     # position-stocks-service already holds a legitimate claim on the same
     # symbol (a real duplicate that predates this fix), release() only
     # ever touches rows this service itself holds, so it's a no-op there.
-    shared_symbol_lock.release(db, position.symbol)
+    # E344: released after the commit below (see record_real_exit_fill): release() commits and, on an error, rolls back the uncommitted close.
+    symbol = position.symbol
     db.add(models.TradePositionEvent(
         position_id=position.id, event_type="GHOST_CLOSED",
         detail=(
@@ -1678,8 +1720,9 @@ def force_close_real_position(db: Session, position: models.TradePosition, note:
     account.current_equity = account.cash_available + _open_positions_market_value(db, "REAL")
     account.updated_at = now
     db.commit()
+    shared_symbol_lock.release(db, symbol)   # E344
     log_action_behind(db, actor="system", action="POSITION_CLOSED", mode="REAL",
-               detail=f"{position.symbol} {note} qty={qty_open} (ghost-close, no broker fill/P&L)")
+               detail=f"{symbol} {note} qty={qty_open} (ghost-close, no broker fill/P&L)")
     return 0.0
 
 

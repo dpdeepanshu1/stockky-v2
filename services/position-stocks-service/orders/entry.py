@@ -40,7 +40,7 @@ from control.kit import current_profile as _ms_current_profile
 from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from execution import dhan_client
 from models import ScalpCandidateLog, ScalpGateState, ScalpPosition
-from orders import entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
+from orders import position_save, entry_stage_timer, candidate_log_writer, gate_policy, long_target, conviction, approve_first, entry_timing, gain_room, pullback_rearm, sizing, board_gate, calendar_gate, catalyst_gate, circuit_gate, cost_gate, depth_gate, entry_cap, flow_gate, entry_pause, learned_stop, liquidity_gate, opening_protect, order_flow, live_anchor, orb_shadow, manual_buy_window, rr_floor, setup_engine, setup_inputs, setup_live, gap_rank, gap_event, setup_stamp, slot_ladder, soft_gates, stopout_guard, structure_gate, structure_observation, tm_gate, trade_odds, vwap_gate
 from orders.adaptive import AdaptiveLevels, compute as compute_levels, widen_to_atr_floor
 from screening import intraday_eligibility, opening_gate, preopen, vix_gate
 from screening.engine import Candidate
@@ -537,6 +537,108 @@ def _arm_pullback(candidate: Candidate, reason: str) -> None:
         logger.warning("pullback-rearm: could not arm %s (ignored): %s", getattr(candidate, "symbol", "?"), e)
 
 
+# ── E334: release what an entry holds when it crashes BEFORE the order is sent ──────────────────────────────────────────────────────────────
+# attempt_entry / attempt_manual_entry take the symbol claim, then reserve capital, and only then place the order. Every planned rejection releases
+# both explicitly, but an UNEXPECTED error in between (live_anchor, a gate, a DB call...) skipped those releases: the claim and the reserved capital
+# stayed held for the session. Each entry now records what it holds (via the _hold_* wrappers below, used for every claim / reserve / release in the two
+# functions) and the outer wrapper gives back whatever is still held when an exception escapes before the order call. Once the order call is reached
+# (_hold_sent) nothing is released here: the order may exist at the broker.
+class _Hold:
+    __slots__ = ("symbol", "claimed", "value", "sent")
+
+    def __init__(self) -> None:
+        self.symbol, self.claimed, self.value, self.sent = None, False, 0.0, False
+
+
+_hold_tl = _threading.local()
+
+
+def _hold_begin() -> None:
+    _hold_tl.cur = _Hold()
+
+
+def _hold_end() -> None:
+    _hold_tl.cur = None
+
+
+def _hold_cur() -> Optional[_Hold]:
+    return getattr(_hold_tl, "cur", None)
+
+
+def _hold_claim(db, symbol):
+    ok = shared_symbol_lock.try_claim(db, symbol)
+    h = _hold_cur()
+    if ok and h is not None:
+        h.symbol, h.claimed = symbol, True
+    return ok
+
+
+def _hold_unlock(db, symbol):
+    shared_symbol_lock.release(db, symbol)
+    h = _hold_cur()
+    if h is not None and h.symbol == symbol:
+        h.claimed = False
+
+
+def _hold_reserve(db, **kw):
+    v = ledger.reserve_capital(db, **kw)
+    h = _hold_cur()
+    if v is not None and h is not None:
+        h.value = (h.value or 0.0) + float(v)
+    return v
+
+
+def _hold_reserve_more(db, amount):
+    ok = ledger.reserve_additional(db, amount)
+    h = _hold_cur()
+    if ok and h is not None:
+        h.value = (h.value or 0.0) + float(amount)
+    return ok
+
+
+def _hold_release(db, position_value, realized_pnl=0.0):
+    ledger.release_capital(db, position_value=position_value, realized_pnl=realized_pnl)
+    h = _hold_cur()
+    if h is not None:
+        h.value = max(0.0, (h.value or 0.0) - float(position_value))
+        if h.value < 0.005:
+            h.value = 0.0
+
+
+def _hold_sent() -> None:
+    h = _hold_cur()
+    if h is not None:
+        h.sent = True
+
+
+def _hold_cleanup(db, exc: BaseException) -> None:
+    """An exception escaped the entry. Before the order call: give back the capital and the claim still held. After it: leave everything (the order may be live). Never raises."""
+    h = _hold_cur()
+    if h is None:
+        return
+    if h.sent:
+        logger.error("entry: %s raised %s after the order step - capital and claim left as they are (the order may be live)", h.symbol, type(exc).__name__)
+        return
+    if not h.claimed and not h.value:
+        return
+    logger.error("entry: unexpected %s for %s before any order was sent - releasing held capital %.2f and the symbol claim (%s)", type(exc).__name__, h.symbol,
+                 h.value or 0.0, exc)
+    try:
+        db.rollback()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("entry: rollback before release failed (%s)", e)
+    if h.value:
+        try:
+            _hold_release(db, h.value, 0.0)
+        except Exception as e:  # noqa: BLE001
+            logger.critical("entry: capital release for %s FAILED after a crash (%s) - %.2f stays reserved", h.symbol, e, h.value)
+    if h.claimed:
+        try:
+            _hold_unlock(db, h.symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.critical("entry: symbol claim release for %s FAILED after a crash (%s) - the symbol stays locked", h.symbol, e)
+
+
 def attempt_entry(
     db: Session,
     candidate: Candidate,
@@ -546,12 +648,16 @@ def attempt_entry(
     """round 225: times the stages of one entry (log only, see orders/entry_stage_timer.py); the logic is _attempt_entry_impl."""
     entry_stage_timer.begin(getattr(candidate, "symbol", "?"))
     _outcome = "ok"
+    _hold_begin()
     try:
         return _attempt_entry_impl(db, candidate, quality=quality, rearm=rearm)
     except BaseException as _e:  # noqa: BLE001 - re-raised unchanged
         _outcome = type(_e).__name__
+        if isinstance(_e, Exception):
+            _hold_cleanup(db, _e)   # E334
         raise
     finally:
+        _hold_end()
         entry_stage_timer.end(_outcome)
 
 
@@ -654,7 +760,7 @@ def _attempt_entry_impl(
     # skipped as early as possible, not discovered after capital's already
     # committed. See capital/shared_symbol_lock.py for full context
     # (confirmed cause of the AEGISVOPAK broker order-type mismatch).
-    if not shared_symbol_lock.try_claim(db, candidate.symbol):
+    if not _hold_claim(db, candidate.symbol):
         _log_candidate(db, candidate, "SKIPPED", "SYMBOL_HELD_BY_OTHER_SERVICE", quality=quality)
         return None
 
@@ -669,7 +775,7 @@ def _attempt_entry_impl(
             f"PENNY_STOCK:ltp=₹{candidate.current_ltp:.2f} < floor=₹{config.MIN_STOCK_PRICE:.2f}",
             quality=quality,
         )
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         return None
 
     # AUDIT FIX (this session): hard high/low-awareness gate — reject a
@@ -695,7 +801,7 @@ def _attempt_entry_impl(
             range_reject = _range_gate_reject(candidate.symbol, candidate.current_ltp)
     if range_reject:
         _arm_pullback(candidate, f"RANGE_GATE:{range_reject}")
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         # Deliberately its own "RANGE_GATE:" prefix, not "QUALITY_GATE:" —
         # the dashboard's Quality Gate panel's floor text describes the
         # fundamental/technical/market-cap floor specifically
@@ -720,7 +826,7 @@ def _attempt_entry_impl(
             spike_reject = entry_timing.spike_reason(candidate.symbol, candidate.current_ltp)
     if spike_reject:
         _arm_pullback(candidate, spike_reject)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", spike_reject, quality=quality)
         return None
 
@@ -735,7 +841,7 @@ def _attempt_entry_impl(
     if opening_reject and _pos_event:
         _gk = gap_event.gap_kind(opening_reject)
         if _gk == "down":
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(opening_reject, quality), quality=quality)
             return None
         if _gk == "up":
@@ -747,13 +853,14 @@ def _attempt_entry_impl(
     if opening_reject:
         if not rearm:
             _arm_pullback(candidate, opening_reject)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", opening_reject, quality=quality)
         return None
     # (group370: the group 269 opening-gate shadow branch was removed; the gate above is always live.)
 
     # E273 round 3: soft penalties (z-units in the stock's own noise). BELOW_OPEN no longer refuses: it shrinks the size; far enough under the open (total at or
     # above setup_engine.PENALTY_SKIP) still ends in a skip. Collected here, applied with the setup size below, stamped on the trade.
+    _refuse = None   # E335: refuse AFTER the try - a failing log write inside it must not be swallowed with the claim already released
     try:
         _bo = opening_gate.below_open_penalty(candidate.symbol, candidate.current_ltp)
         if _bo:
@@ -761,41 +868,45 @@ def _attempt_entry_impl(
             if _bo["penalty"] < setup_engine.PENALTY_SKIP:
                 _log_policy_soft(candidate, f"OPENING_GATE:BELOW_OPEN:{_bo['pct']:.2f}% under the open (size penalty {_bo['penalty']:.1f}, SOFT)", quality)
             if _bo["penalty"] >= setup_engine.PENALTY_SKIP:
-                shared_symbol_lock.release(db, candidate.symbol)
-                _log_candidate(db, candidate, "SKIPPED", f"OPENING_GATE:BELOW_OPEN_TOO_FAR:{_bo['pct']:.2f}% under the open (penalty {_bo['penalty']:.1f} >= {setup_engine.PENALTY_SKIP:g})", quality=quality)
-                return None
+                _refuse = f"OPENING_GATE:BELOW_OPEN_TOO_FAR:{_bo['pct']:.2f}% under the open (penalty {_bo['penalty']:.1f} >= {setup_engine.PENALTY_SKIP:g})"
     except Exception:  # noqa: BLE001
         logger.debug("entry: below-open penalty failed (entry unaffected)", exc_info=True)
+    if _refuse:
+        _hold_unlock(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _refuse, quality=quality)
+        return None
 
     # E273 round 12: the rest of the opening gate (day-high position, opening-range position, previous-day close, Nifty) are SIZE PENALTIES too (OPENING_PARTS_MODE, default
     # penalty). A re-arm entry has waived NEAR_DAY_HIGH / EXTENDED_ABOVE_OR already, so those two give it no penalty. The day-high part joins the round 9 near-day-high penalty
     # as ONE factor (the larger of the two), not two. Missing data still refuses inside reject_reason.
+    _refuse = None
     try:
         for _k, _v in opening_gate.parts_penalties(candidate.symbol, candidate.current_ltp).items():
             if rearm and _k in ("near_day_high", "extended_or"):
                 continue
             if _k == "gap_down" and _pos_event:          # E285 batch 5: a SOFT gap-down gate still obeys the event rule - a positive event contradicts a gap-down: skipped, as when the gate refused
-                shared_symbol_lock.release(db, candidate.symbol)
-                _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_v["why"], quality), quality=quality)
-                return None
+                _refuse = gap_event.against_reason(_v["why"], quality)
+                break
             _penalties[_k] = max(float(_penalties.get(_k) or 0.0), float(_v["penalty"])) if _k == "near_day_high" else float(_v["penalty"])
             _soft_why[_k] = _v["why"]
             if _k in ("gap_down", "near_day_high"):      # the two parts the adaptive policy measures: a SOFT row keeps their scorecard alive
                 _log_policy_soft(candidate, f"{_v['why']} (size penalty {float(_v['penalty']):.1f}, SOFT)", quality)
-        if not _soft:                                           # SOFT_GATES_MODE=veto skips the total check further down: do it here
+        if not _soft and not _refuse:                                           # SOFT_GATES_MODE=veto skips the total check further down: do it here
             _pt_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
             if _pt_reject:
-                shared_symbol_lock.release(db, candidate.symbol)
-                _log_candidate(db, candidate, "SKIPPED", _pt_reject, quality=quality)
-                return None
+                _refuse = _pt_reject
     except Exception:  # noqa: BLE001
         logger.debug("entry: opening-gate parts penalties failed (entry unaffected)", exc_info=True)
+    if _refuse:
+        _hold_unlock(db, candidate.symbol)
+        _log_candidate(db, candidate, "SKIPPED", _refuse, quality=quality)
+        return None
 
     # 2026-10-05: stale-tick / slippage / day-gain guard — see _price_guard_reject().
     _drift_soft: dict = {}     # E273 round 33 / 34: an up-chase past ENTRY_MAX_SLIPPAGE_PCT or a day gain past MAX_DAY_GAIN_PCT (each up to its HARD_MULT x the limit) is a size penalty, not a refusal
     price_reject = _price_guard_reject(candidate.symbol, candidate.current_ltp, soft=_drift_soft if _soft else None)
     if price_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"PRICE_GUARD:{price_reject}", quality=quality)
         return None
     if _drift_soft:
@@ -803,7 +914,7 @@ def _attempt_entry_impl(
             _penalties[_dk], _soft_why[_dk] = _dv, _dwhy
         _dr_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _dr_reject:
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _dr_reject, quality=quality)
             return None
         logger.info("position-stocks entry: %s price-guard soft reasons sized down instead of refused (%s)", candidate.symbol, "; ".join(f"{k}: {_soft_why[k]}" for k in _drift_soft))
@@ -815,7 +926,7 @@ def _attempt_entry_impl(
         db, candidate.symbol, candidate.current_ltp, reclaim=bool(_reclaim)
     )
     if reentry_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", reentry_reject, quality=quality)
         return None
 
@@ -842,14 +953,14 @@ def _attempt_entry_impl(
         levels = widen_to_atr_floor(levels, candidate.current_ltp, candidate.symbol)
     _stop_reject = opening_gate.stop_reject(candidate.symbol, levels.stop_pct)
     if _stop_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _stop_reject, quality=quality)
         return None
 
     # 2026-10-22: reward:risk 1:2 on the FINAL levels (after the target cap and stop floors). ENTRY_MIN_REWARD_RISK, 0 = off.
     _rr_reject = rr_floor.reject_reason(levels)
     if _rr_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _rr_reject, quality=quality)
         return None
 
@@ -866,7 +977,7 @@ def _attempt_entry_impl(
     else:
         _gr_reject = gain_room.reject_reason(candidate.symbol, candidate.current_ltp, levels.stop_pct, levels.target_pct)
     if _gr_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _gr_reject, quality=quality)
         return None
 
@@ -879,12 +990,12 @@ def _attempt_entry_impl(
                 _penalties["vwap"], _soft_why["vwap"] = _vp["penalty"], _vp["why"]
         except Exception:  # noqa: BLE001
             logger.debug("entry: vwap penalty failed (entry unaffected)", exc_info=True)
+        _refuse = None
         try:        # E273 round 10: the pre-open gap block (gap up or down past its own ATR limit / the fixed %) is a penalty too, same window
             _pg = preopen.gap_penalty(candidate.symbol)
             if _pg and _pos_event and gap_event.gap_kind(_pg["why"]) == "down":
-                shared_symbol_lock.release(db, candidate.symbol)
-                _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_pg["why"], quality), quality=quality)
-                return None
+                _refuse = gap_event.against_reason(_pg["why"], quality)
+                _pg = None
             if _pg and _pos_event and gap_event.gap_kind(_pg["why"]) == "up":
                 _gap_waived.append(_pg["why"])                  # explained by the news: no gap penalty, S1 must confirm below
                 _pg = None
@@ -892,6 +1003,10 @@ def _attempt_entry_impl(
                 _penalties["preopen_gap"], _soft_why["preopen_gap"] = _pg["penalty"], _pg["why"]
         except Exception:  # noqa: BLE001
             logger.debug("entry: pre-open gap penalty failed (entry unaffected)", exc_info=True)
+        if _refuse:
+            _hold_unlock(db, candidate.symbol)
+            _log_candidate(db, candidate, "SKIPPED", _refuse, quality=quality)
+            return None
         _tot_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _tot_reject:
             if not rearm:
@@ -899,14 +1014,14 @@ def _attempt_entry_impl(
                     if _k in _soft_why:
                         _arm_pullback(candidate, _soft_why[_k])
                         break
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _tot_reject, quality=quality)
             return None
 
     # group280 (plan C3): Dhan 5-level depth - skip a wide spread / thin book before any capital is reserved.
     _depth_reject = depth_gate.reject_reason(candidate.symbol)
     if _depth_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _depth_reject, quality=quality)
         return None
 
@@ -999,7 +1114,7 @@ def _attempt_entry_impl(
     # with the original gap reason, i.e. exactly what happened before the rule.
     _gu_reject = gap_event.unconfirmed_reason(_gap_waived, (_setup_res or {}).get("id"))
     if _gu_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _gu_reject, quality=quality)
         return None
 
@@ -1010,7 +1125,7 @@ def _attempt_entry_impl(
         all_enabled=bool(getattr(config, "SETUP_ENGINE_ENABLED", True) and getattr(config, "SETUP_S1_ENABLED", True)
                          and getattr(config, "SETUP_S2_ENABLED", True) and getattr(config, "SETUP_S3_ENABLED", True)))
     if _ns_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _ns_reject, quality=quality)
         return None
 
@@ -1048,7 +1163,7 @@ def _attempt_entry_impl(
     # entry goes on. TM_GATE_MODE live | log | off. The verdict is stamped into flow_json["tm"] whatever it was. Never raises.
     _tm_reason, _flow_snap = tm_gate.entry_check(candidate.symbol, "LONG", levels.stop_pct, levels.target_pct, candidate.current_ltp, _flow_snap)
     if _tm_reason:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _tm_reason, quality=quality)
         return None
 
@@ -1056,7 +1171,7 @@ def _attempt_entry_impl(
     # its lower circuit (a stop or the EOD sell may not execute). Reads the same cached /quote row as the depth gate; fails open.
     _circuit_reject = circuit_gate.reject_reason(candidate.symbol, candidate.current_ltp)
     if _circuit_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _circuit_reject, quality=quality)
         return None
 
@@ -1064,7 +1179,7 @@ def _attempt_entry_impl(
     _gap_reject = None if _soft else preopen.gap_reason(candidate.symbol)   # E273 round 10: a penalty (collected before the total check above) unless SOFT_GATES_MODE=veto
     if _gap_reject and _pos_event:                                           # E273 round 11: veto mode follows the same event-aware rule
         if gap_event.gap_kind(_gap_reject) == "down":
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", gap_event.against_reason(_gap_reject, quality), quality=quality)
             return None
         if gap_event.gap_kind(_gap_reject) == "up" and not gap_event.large_gap_penalty(preopen.gap_of(candidate.symbol)):
@@ -1073,7 +1188,7 @@ def _attempt_entry_impl(
                 _gap_waived.append(_gap_reject)
                 _gap_reject = None
     if _gap_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _gap_reject, quality=quality)
         return None
 
@@ -1081,7 +1196,7 @@ def _attempt_entry_impl(
     # row as the depth / circuit gates; fails open.
     _vwap_reject = None if _soft else vwap_gate.reject_reason(candidate.symbol, candidate.current_ltp)   # E273 round 9: a penalty above unless SOFT_GATES_MODE=veto
     if _vwap_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _vwap_reject, quality=quality)
         return None
 
@@ -1089,7 +1204,7 @@ def _attempt_entry_impl(
     # order-flow checklist; no tape / unreliable / slow = no opinion. FLOW_GATE_MODE live | log | off. Verdict stamped into flow_json["tape"]. Never raises.
     _flow_reject, _flow_snap = flow_gate.entry_check(candidate.symbol, "LONG", _flow_snap)
     if _flow_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _flow_reject, quality=quality)
         return None
 
@@ -1105,14 +1220,14 @@ def _attempt_entry_impl(
         except Exception:  # noqa: BLE001
             logger.debug("entry: rvol penalty failed (the refusal stands)", exc_info=True)
     if _liq_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _liq_reject, quality=quality)
         return None
 
     # group336: expiry / pre-holiday / (optionally) Friday session - no NEW entry after the cut-off (orders/calendar_gate.py). Fails open.
     _cal_reject = calendar_gate.entry_block_reason()
     if _cal_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _cal_reject, quality=quality)
         return None
 
@@ -1120,12 +1235,12 @@ def _attempt_entry_impl(
     # group340: cheap-stock floor (ENTRY_MIN_PRICE, 0 = off) and ordinary-day cut-off (SCALP_ENTRY_CUTOFF_IST, blank = off).
     _min_px = float(getattr(config, "ENTRY_MIN_PRICE", 0.0) or 0.0)
     if _min_px > 0 and 0 < candidate.current_ltp < _min_px:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"MIN_PRICE:ltp={candidate.current_ltp:.2f}<{_min_px:.2f}", quality=quality)
         return None
     _cut_reject = calendar_gate.scalp_cutoff_reason()
     if _cut_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _cut_reject, quality=quality)
         return None
 
@@ -1133,7 +1248,7 @@ def _attempt_entry_impl(
     _cat_block, _cat_mult = catalyst_gate.decide(candidate.pct_change, getattr(quality, "has_positive_catalyst", None) if quality else None,
                                                   bool(getattr(quality, "bulk_deal_flag", False)) if quality else False)
     if _cat_block:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _cat_block, quality=quality)
         return None
 
@@ -1141,7 +1256,7 @@ def _attempt_entry_impl(
     # its zone; any error fails open. Placed after every existing gate and before capital is reserved.
     _board_reject = board_gate.check(candidate.symbol, candidate.current_ltp)
     if _board_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _board_reject, quality=quality)
         return None
     entry_stage_timer.mark("floor_catalyst_board")
@@ -1156,7 +1271,7 @@ def _attempt_entry_impl(
         structure_observation.record(db, candidate.symbol, candidate.current_ltp, _struct_cap.get("verdict") or {}, _struct_cap.get("summary"),
                                      _struct_cap.get("gate_mode") or "", bool(_struct_cap.get("enforced")))
     if _struct_reject:
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", _struct_reject, quality=quality)
         return None
     entry_stage_timer.mark("structure_gate")
@@ -1170,7 +1285,7 @@ def _attempt_entry_impl(
     if _late_pen:
         _late_reject = soft_gates.total_skip_reason(_penalties, soft_gates.skip_limit())
         if _late_reject:
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _late_reject, quality=quality)
             return None
         _new_mult = soft_gates.late_size(_setup_mult, _pen_early, _late_pen, setup_engine.SIZE_FLOOR)
@@ -1187,7 +1302,7 @@ def _attempt_entry_impl(
         _ap = approve_first.gate(candidate.symbol, {"price": candidate.current_ltp, "pct_change": round(float(candidate.pct_change), 2),
                                                     "window": candidate.window_label})
         if not _ap["allowed"]:
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             if _ap.get("new_pending"):
                 _log_candidate(db, candidate, "SKIPPED", "APPROVAL_PENDING", quality=quality)
                 notifier.notify_fire_and_forget(
@@ -1215,7 +1330,7 @@ def _attempt_entry_impl(
     except Exception:  # noqa: BLE001
         _risk_mult = 1.0
     entry_stage_timer.mark("risk_mult")
-    position_value = ledger.reserve_capital(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)      # E282: sized from the plan's stop, not a learned tighter one
+    position_value = _hold_reserve(db, adaptive_stop_pct=_budget_stop_pct, conviction_mult=(_cv or {}).get("mult"), risk_mult=_risk_mult)      # E282: sized from the plan's stop, not a learned tighter one
     entry_stage_timer.mark("reserve_capital")
     if position_value is None:
         _log_candidate(db, candidate, "SKIPPED", "INSUFFICIENT_CAPITAL", quality=quality)
@@ -1225,7 +1340,7 @@ def _attempt_entry_impl(
         # Release the symbol lock first — same as every other early-return
         # skip path above; leaving it held would block the next cycle from
         # even considering this symbol as a candidate.
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_unlock(db, candidate.symbol)
         raise InsufficientCapitalSkip(
             f"{candidate.symbol}: INSUFFICIENT_CAPITAL — pool cannot size a position"
         )
@@ -1234,15 +1349,15 @@ def _attempt_entry_impl(
     try:
         security_id = dhan_client.get_security_id(db, candidate.symbol)
     except dhan_client.SecurityNotResolvedError as e:
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", f"SECURITY_NOT_FOUND:{e}", quality=quality)
         return None
     except Exception:
         # Any other lookup failure (Dhan not connected, scrip-master download error, ...) must not
         # leave the ledger reservation and the cross-service symbol lock held forever.
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, candidate.symbol)
         raise
 
     entry_stage_timer.mark("security_id")
@@ -1250,8 +1365,8 @@ def _attempt_entry_impl(
     # group340: sensible whole-share rounding; skip (not force 1 share) when one share costs far more than the budget.
     quantity = sizing.compute_quantity(position_value, candidate.current_ltp)
     if quantity is None:
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED",
                        f"ONE_SHARE_EXCEEDS_BUDGET:price={candidate.current_ltp:.2f},budget={position_value:.2f}", quality=quality)
         raise InsufficientCapitalSkip(
@@ -1271,7 +1386,7 @@ def _attempt_entry_impl(
                         candidate.symbol, quantity, _cap_qty, _cap_why)
             if _new_value < position_value:
                 # hand the unused part of the reservation back so the pool does not sit on idle capital
-                ledger.release_capital(db, position_value=position_value - _new_value, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value - _new_value, realized_pnl=0.0)
                 position_value = _new_value
             quantity = _cap_qty
 
@@ -1284,7 +1399,7 @@ def _attempt_entry_impl(
                         candidate.symbol, quantity, _vq, _vix_mult)
             _vnew = _vq * candidate.current_ltp
             if _vnew < position_value:
-                ledger.release_capital(db, position_value=position_value - _vnew, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value - _vnew, realized_pnl=0.0)
                 position_value = _vnew
             quantity = _vq
 
@@ -1298,7 +1413,7 @@ def _attempt_entry_impl(
                         candidate.symbol, quantity, _cq, _cal_m, _cat_mult)
             _cnew = _cq * candidate.current_ltp
             if _cnew < position_value:
-                ledger.release_capital(db, position_value=position_value - _cnew, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value - _cnew, realized_pnl=0.0)
                 position_value = _cnew
             quantity = _cq
 
@@ -1311,7 +1426,7 @@ def _attempt_entry_impl(
                         candidate.symbol, quantity, _oq, _open_mult)
             _onew = _oq * candidate.current_ltp
             if _onew < position_value:
-                ledger.release_capital(db, position_value=position_value - _onew, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value - _onew, realized_pnl=0.0)
                 position_value = _onew
             quantity = _oq
 
@@ -1324,7 +1439,7 @@ def _attempt_entry_impl(
                 logger.info("position-stocks entry: %s sized down %d -> %d shares (setup x%.2f, extra x%.2f on top of opening x%.2f)", candidate.symbol, quantity, _sq, _setup_mult, _sf, _open_mult)
                 _snew = _sq * candidate.current_ltp
                 if _snew < position_value:
-                    ledger.release_capital(db, position_value=position_value - _snew, realized_pnl=0.0)
+                    _hold_release(db, position_value=position_value - _snew, realized_pnl=0.0)
                     position_value = _snew
                 quantity = _sq
 
@@ -1342,8 +1457,8 @@ def _attempt_entry_impl(
         # trail and pay the same fixed costs for less edge. The forced 1-share first live order (branch above) is a probe and is never gated.
         _min_q = cost_gate.effective_min_qty(candidate.current_ltp, levels.target_pct, int(getattr(config, "ENTRY_MIN_QTY", 0) or 0))   # E273 round 6: by cost gate
         if _min_q > 0 and quantity < _min_q:
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", f"MIN_QTY:qty={quantity}<{_min_q}:ltp={candidate.current_ltp:.2f}", quality=quality)
             return None
 
@@ -1352,8 +1467,8 @@ def _attempt_entry_impl(
         # is not gated. See orders/cost_gate.py (off with SCALP_COST_GATE_ENABLED=0).
         _cost_reject = cost_gate.reject_reason(candidate.current_ltp, quantity, levels.target_pct)
         if _cost_reject:
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", f"COST_GATE:{_cost_reject}", quality=quality)
             return None
 
@@ -1373,9 +1488,9 @@ def _attempt_entry_impl(
     actual_cost = quantity * candidate.current_ltp
     if actual_cost > position_value:
         shortfall = actual_cost - position_value
-        if not ledger.reserve_additional(db, shortfall):
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, candidate.symbol)
+        if not _hold_reserve_more(db, shortfall):
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(
                 db, candidate, "SKIPPED",
                 f"INSUFFICIENT_CAPITAL_FOR_MIN_QTY:shortfall={shortfall:.2f}",
@@ -1394,8 +1509,8 @@ def _attempt_entry_impl(
     if not (is_first and config.FIRST_LIVE_ORDER_MIN_QTY_OVERRIDE):
         _heat_reject = heat_gate.reject_reason(db, candidate.current_ltp, levels.stop_price, quantity, "LONG", (_setup_res or {}).get("id"), candidate.symbol)
         if _heat_reject:
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, candidate.symbol)
             _log_candidate(db, candidate, "SKIPPED", _heat_reject, quality=quality)
             return None
 
@@ -1410,8 +1525,8 @@ def _attempt_entry_impl(
     # real-trade-service too. Fails open on any error (see
     # shared_order_budget.py's docstring).
     if not shared_order_budget.check_and_reserve(db):
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, candidate.symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, candidate.symbol)
         _log_candidate(db, candidate, "SKIPPED", "SHARED_ORDER_BUDGET_EXHAUSTED", quality=quality)
         return None
 
@@ -1426,6 +1541,7 @@ def _attempt_entry_impl(
                     candidate.symbol, _anchor_live, candidate.current_ltp, _anchor_drift, levels.stop_price, levels.target_price)
 
     entry_stage_timer.mark("live_anchor")
+    _hold_sent()   # E334: from here the order may exist at the broker
     # Place the order
     dhan_super_order_id = None
     plain_order_id = None
@@ -1472,6 +1588,7 @@ def _attempt_entry_impl(
             error_msg = None
         else:
             error_msg = str(e)
+            _skip_msg = None   # E336: written after the branch work below, best effort
             # AUDIT FIX (2026-09-15): classify the BUY-side rejection too — if
             # Dhan rejects the entry itself as "not allowed to be traded in
             # Intraday", record the restriction immediately so this symbol is
@@ -1494,26 +1611,26 @@ def _attempt_entry_impl(
                         "position-stocks entry: could not record restriction for %s: %s",
                         candidate.symbol, rec_e,
                     )
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_RESTRICTED:{error_msg}", quality=quality)
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
+                _skip_msg = f"ORDER_FAILED_INTRADAY_RESTRICTED:{error_msg}"
             elif dhan_client.is_intraday_cutoff_error(error_msg):
                 logger.warning(
                     "position-stocks entry: BUY rejected — INTRADAY_CUTOFF: exchange window "
                     "closed for today. Will retry tomorrow. Error: %s", error_msg,
                 )
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
                 # E196: the exchange's intraday window is closed for the rest of today (is_intraday_cutoff_error's own docstring says to stop
                 # hammering Dhan). Nothing did: every ~15 s cycle sent another doomed BUY (each one also spends the shared order budget).
                 entry_pause.pause_all("INTRADAY_CUTOFF", entry_pause.minutes_left_in_ist_day())
-                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}", quality=quality)
+                _skip_msg = f"ORDER_FAILED_INTRADAY_CUTOFF:{error_msg}"
             elif dhan_client.is_insufficient_funds_error(error_msg):
                 logger.error(
                     "position-stocks entry: BUY rejected — INSUFFICIENT_FUNDS. "
                     "Error: %s", error_msg,
                 )
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
                 entry_pause.pause_all("INSUFFICIENT_FUNDS", config.ENTRY_MARGIN_PAUSE_MINUTES)   # group209
-                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}", quality=quality)
+                _skip_msg = f"ORDER_FAILED_INSUFFICIENT_FUNDS:{error_msg}"
             elif dhan_client.is_circuit_limit_error(error_msg):
                 # 2026-09-15 fix (session41b): "Rate Not Within Ckt Limit X To Y"
                 # — the stock has already hit its upper circuit; our BUY price
@@ -1527,7 +1644,7 @@ def _attempt_entry_impl(
                     "circuit, no intraday exit room). Recording restriction for today. "
                     "Error: %s", error_msg,
                 )
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
                 try:
                     intraday_eligibility.record_restriction(db, candidate.symbol)
                     logger.info(
@@ -1539,18 +1656,24 @@ def _attempt_entry_impl(
                         "position-stocks entry: failed to record circuit-limit restriction for %s: %s",
                         candidate.symbol, rec_e,
                     )
-                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED_CIRCUIT_LIMIT:{error_msg}", quality=quality)
+                _skip_msg = f"ORDER_FAILED_CIRCUIT_LIMIT:{error_msg}"
             else:
                 logger.error("position-stocks entry: order placement failed for %s: %s", candidate.symbol, e)
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
                 entry_pause.cooldown_symbol(candidate.symbol, config.ENTRY_ORDER_FAILED_COOLDOWN_MINUTES, error_msg)   # group209
-                _log_candidate(db, candidate, "SKIPPED", f"ORDER_FAILED:{error_msg}", quality=quality)
+                _skip_msg = f"ORDER_FAILED:{error_msg}"
             # AUDIT FIX (session60): every branch above releases capital on a
             # failed BUY — the symbol claim taken above (before adaptive
             # levels were even computed) must be released here too, or a
             # failed order permanently locks this symbol out for this service
             # (real-trade-service is unaffected either way, since it never
             # held the lock).
+            # E336: the BUY definitively failed (or its status is unknown): the SKIPPED row is an audit line, not a gate. A failing log write used to escape here BEFORE the symbol
+            # claim was released (or the unknown-BUY cooldown and alert ran), and E334 leaves everything alone once the order step is reached, so the claim stayed held.
+            try:
+                _log_candidate(db, candidate, "SKIPPED", _skip_msg, quality=quality)
+            except Exception as _le:  # noqa: BLE001
+                logger.warning("entry: SKIPPED row for %s not written (%s) - claim handling continues", candidate.symbol, _le)
             if _buy_unknown:
                 # E177: the BUY errored AND Dhan's order book could not be read, so it may be LIVE (a super order carries its own legs at the
                 # broker). Releasing the claim and resting the symbol 5 minutes would let the next cycle buy it a second time. Keep it claimed
@@ -1564,7 +1687,7 @@ def _attempt_entry_impl(
                     "Check Dhan for this symbol. No new BUY for it today."
                 )
                 return None
-            shared_symbol_lock.release(db, candidate.symbol)
+            _hold_unlock(db, candidate.symbol)
             return None
 
     entry_stage_timer.mark("dhan_order_call")
@@ -1577,7 +1700,11 @@ def _attempt_entry_impl(
         gate.orders_placed_today = 0
         gate.orders_placed_today_date = today
     gate.orders_placed_today += 1
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:  # noqa: BLE001 - E332: the BUY is already live; a failed order-count write must not stop the position being recorded
+        logger.warning("entry: order-budget count for %s failed (%s)", candidate.symbol, e)
+        db.rollback()
 
     entry_stage_timer.mark("gate_commit")
     # DB record
@@ -1618,20 +1745,33 @@ def _attempt_entry_impl(
         is_first_live_order=is_first,
         opened_at=datetime.now(timezone.utc),
     )
-    db.add(pos)
-    db.commit()
-    db.refresh(pos)
+    if not position_save.save_new_position(db, pos):   # E332: bounded retry; the BUY is live, so on total failure keep capital + claim and alert
+        position_save.alert_unrecorded("BUY", candidate.symbol, quantity, dhan_super_order_id or plain_order_id, "database error")
+        entry_pause.cooldown_symbol(candidate.symbol, _UNKNOWN_BUY_COOLDOWN_MIN, "POSITION_NOT_RECORDED")
+        try:
+            _log_candidate(db, candidate, "SKIPPED", f"POSITION_NOT_RECORDED:order={dhan_super_order_id or plain_order_id}", quality=quality)
+        except Exception:  # noqa: BLE001
+            logger.debug("entry: could not log POSITION_NOT_RECORDED (db down)", exc_info=True)
+        return None
 
     entry_stage_timer.mark("position_commit")
     _nifty = trade_gates.last_nifty_change_pct()
-    _log_candidate(db, candidate, "ENTERED",
-                   (f"PULLBACK_REARM:{rearm.get('why', '')} " if rearm else "")
-                   + f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
-                   f" nifty_pct={'n/a' if _nifty is None else f'{_nifty:+.2f}'}"
-                   f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}"
-                   f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}",
-                   composite_score=candidate.composite_score,
-                   quality=quality)
+    # E336: the position is saved and the BUY is live - a failing audit-row write must not skip the Telegram alert, the approve-first mark or the fill correction below.
+    try:
+        _log_candidate(db, candidate, "ENTERED",
+                       (f"PULLBACK_REARM:{rearm.get('why', '')} " if rearm else "")
+                       + f"SUPER_ORDER={dhan_super_order_id or 'plain_order'}"
+                       f" nifty_pct={'n/a' if _nifty is None else f'{_nifty:+.2f}'}"
+                       f" stop_pct={levels.stop_pct:.2f} target_pct={levels.target_pct:.2f}"
+                       f"{opening_gate.entry_features(candidate.symbol, candidate.current_ltp)}",
+                       composite_score=candidate.composite_score,
+                       quality=quality)
+    except Exception as _le:  # noqa: BLE001
+        logger.warning("entry: ENTERED row for %s not written (%s)", candidate.symbol, _le)
+        try:
+            db.rollback()
+        except Exception as _re:  # noqa: BLE001
+            logger.debug("entry: rollback after the ENTERED row failed (%s)", _re)
     logger.info(
         "position-stocks ENTERED %s x%d @ ₹%.2f target=₹%.2f stop=₹%.2f "
         "(window=%s score=%.3f super_order=%s)",
@@ -1702,6 +1842,23 @@ class ManualEntryRejected(Exception):
 
 
 def attempt_manual_entry(
+    db: Session,
+    symbol: str,
+    current_ltp: float,
+    quantity: Optional[int] = None,
+) -> ScalpPosition:
+    """Manual BUY (see _attempt_manual_entry_impl). E334: what the entry holds is released if an unexpected error escapes before the order call."""
+    _hold_begin()
+    try:
+        return _attempt_manual_entry_impl(db, symbol, current_ltp, quantity)
+    except Exception as _e:  # noqa: BLE001 - re-raised unchanged
+        _hold_cleanup(db, _e)
+        raise
+    finally:
+        _hold_end()
+
+
+def _attempt_manual_entry_impl(
     db: Session,
     symbol: str,
     current_ltp: float,
@@ -1807,7 +1964,7 @@ def attempt_manual_entry(
     # real-trade-service holding as an automatic one, and this is the
     # admin-facing path, so it gets an explicit rejection rather than a
     # silent skip.
-    if not shared_symbol_lock.try_claim(db, symbol):
+    if not _hold_claim(db, symbol):
         raise ManualEntryRejected(
             f"{symbol} is already held by real-trade-service on the shared Dhan "
             "account — buying it here too would create a duplicate broker "
@@ -1825,24 +1982,24 @@ def attempt_manual_entry(
 
     if quantity is not None:
         if quantity <= 0:
-            shared_symbol_lock.release(db, symbol)
+            _hold_unlock(db, symbol)
             raise ManualEntryRejected("quantity must be a positive integer.")
         exact_cost = quantity * current_ltp
-        if not ledger.reserve_additional(db, exact_cost):
-            shared_symbol_lock.release(db, symbol)
+        if not _hold_reserve_more(db, exact_cost):
+            _hold_unlock(db, symbol)
             raise ManualEntryRejected(
                 f"Insufficient capital: need ₹{exact_cost:,.2f} for {quantity} shares of {symbol}."
             )
         position_value = exact_cost
     else:
-        position_value = ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)
+        position_value = _hold_reserve(db, adaptive_stop_pct=levels.stop_pct)
         if position_value is None:
-            shared_symbol_lock.release(db, symbol)
+            _hold_unlock(db, symbol)
             raise ManualEntryRejected("Insufficient available capital (or daily-loss kill switch tripped).")
         quantity = sizing.compute_quantity(position_value, current_ltp)
         if quantity is None:
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-            shared_symbol_lock.release(db, symbol)
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
+            _hold_unlock(db, symbol)
             raise ManualEntryRejected(
                 f"One share of {symbol} (₹{current_ltp:,.2f}) costs far more than the risk budget "
                 f"(₹{position_value:,.2f}) - entry skipped instead of forcing 1 share."
@@ -1850,9 +2007,9 @@ def attempt_manual_entry(
         actual_cost = quantity * current_ltp
         if actual_cost > position_value:
             shortfall = actual_cost - position_value
-            if not ledger.reserve_additional(db, shortfall):
-                ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-                shared_symbol_lock.release(db, symbol)
+            if not _hold_reserve_more(db, shortfall):
+                _hold_release(db, position_value=position_value, realized_pnl=0.0)
+                _hold_unlock(db, symbol)
                 raise ManualEntryRejected(
                     f"Insufficient capital to cover the minimum 1-share order "
                     f"(shortfall ₹{shortfall:,.2f})."
@@ -1862,22 +2019,23 @@ def attempt_manual_entry(
     try:
         security_id = dhan_client.get_security_id(db, symbol)
     except dhan_client.SecurityNotResolvedError as e:
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, symbol)
         raise ManualEntryRejected(f"Could not resolve a Dhan security id for {symbol}: {e}")
     except Exception:
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, symbol)
         raise
 
     if not shared_order_budget.check_and_reserve(db):
-        ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
-        shared_symbol_lock.release(db, symbol)
+        _hold_release(db, position_value=position_value, realized_pnl=0.0)
+        _hold_unlock(db, symbol)
         raise ManualEntryRejected("Shared cross-service Dhan order-rate budget exhausted for today.")
 
     is_first = not gate.first_live_order_done
     dhan_super_order_id = None
     plain_order_id = None
+    _hold_sent()   # E334
     try:
         if config.USE_SUPER_ORDER:
             result = dhan_client.place_super_order(
@@ -1916,15 +2074,19 @@ def attempt_manual_entry(
         if _rec is not None:
             dhan_super_order_id, plain_order_id = _rec
         else:
-            ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
+            _hold_release(db, position_value=position_value, realized_pnl=0.0)
             if not _buy_unknown:
-                shared_symbol_lock.release(db, symbol)
-            db.add(ScalpCandidateLog(
-                symbol=symbol, window_source="MANUAL", pct_change=0.0,
-                composite_score=None, decision="SKIPPED",
-                reason=f"MANUAL_ORDER_FAILED:{e}",
-            ))
-            db.commit()
+                _hold_unlock(db, symbol)
+            try:        # E336: audit row only - a failing write must not skip the unknown-BUY cooldown and alert below
+                db.add(ScalpCandidateLog(
+                    symbol=symbol, window_source="MANUAL", pct_change=0.0,
+                    composite_score=None, decision="SKIPPED",
+                    reason=f"MANUAL_ORDER_FAILED:{e}",
+                ))
+                db.commit()
+            except Exception as _le:  # noqa: BLE001
+                logger.warning("manual entry: SKIPPED row for %s not written (%s)", symbol, _le)
+                db.rollback()
             if _buy_unknown:
                 # E178: same state as attempt_entry (E177). The BUY errored AND Dhan's order book could not be read, so it may be live
                 # with no local position. Keep the symbol claimed, rest it for the session, tell the operator, and say so to the admin.
@@ -1948,7 +2110,11 @@ def attempt_manual_entry(
         gate.orders_placed_today = 0
         gate.orders_placed_today_date = today
     gate.orders_placed_today += 1
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:  # noqa: BLE001 - E332: see attempt_entry
+        logger.warning("manual entry: order-budget count for %s failed (%s)", symbol, e)
+        db.rollback()
 
     pos = ScalpPosition(
         market_state=_ms_current_profile()["market_state"],      # Market Weather stamp
@@ -1974,16 +2140,23 @@ def attempt_manual_entry(
         is_first_live_order=is_first,
         opened_at=datetime.now(timezone.utc),
     )
-    db.add(pos)
-    db.commit()
-    db.refresh(pos)
+    if not position_save.save_new_position(db, pos):   # E332
+        position_save.alert_unrecorded("Manual BUY", symbol, quantity, dhan_super_order_id or plain_order_id, "database error")
+        entry_pause.cooldown_symbol(symbol, _UNKNOWN_BUY_COOLDOWN_MIN, "POSITION_NOT_RECORDED")
+        raise ManualEntryRejected(
+            f"The manual BUY of {symbol} went to Dhan (order {dhan_super_order_id or plain_order_id}) but the position could not be saved after "
+            "retries. Check Dhan and close it by hand; no new BUY for this symbol is allowed today.")
 
-    db.add(ScalpCandidateLog(
-        symbol=symbol, window_source="MANUAL", pct_change=0.0,
-        composite_score=None, decision="ENTERED",
-        reason=f"MANUAL_BUY:SUPER_ORDER={dhan_super_order_id or 'plain_order'}",
-    ))
-    db.commit()
+    try:        # E336: the position is saved and the BUY is live - a failing audit-row write must not turn this into an error for the caller
+        db.add(ScalpCandidateLog(
+            symbol=symbol, window_source="MANUAL", pct_change=0.0,
+            composite_score=None, decision="ENTERED",
+            reason=f"MANUAL_BUY:SUPER_ORDER={dhan_super_order_id or 'plain_order'}",
+        ))
+        db.commit()
+    except Exception as _le:  # noqa: BLE001
+        logger.warning("manual entry: ENTERED row for %s not written (%s)", symbol, _le)
+        db.rollback()
 
     logger.info(
         "position-stocks MANUAL BUY %s x%d @ ₹%.2f target=₹%.2f stop=₹%.2f super_order=%s",

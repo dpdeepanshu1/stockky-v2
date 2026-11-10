@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -1339,6 +1340,38 @@ def find_order_by_tag(db: Session, tag: str) -> tuple:
 _VALID_ORDER_TYPES = {"MARKET", "LIMIT", "STOP_LOSS", "STOP_LOSS_MARKET"}
 
 
+def _finite_positive(v) -> bool:
+    """E325: True only for a finite number above zero. NaN is truthy and `nan <= 0` is False, so the old
+    `not x or x <= 0` guards let a NaN / inf price or trigger through to the broker."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(x) and x > 0
+
+
+def _check_order_numbers(order_type: str, quantity, price, trigger_price) -> None:
+    """E325: fail-closed input check for a REAL order, before anything is sent. Quantity must be a positive whole number
+    (place_order never checked it; place_forever_order did); a LIMIT / STOP_LOSS price must be finite and not negative (0 stays allowed, as before); a trigger,
+    when given, must be finite and positive. MARKET prices are forced to 0 later, so they are not checked here."""
+    try:
+        q = float(quantity)
+    except (TypeError, ValueError):
+        raise ValueError(f"place_order: quantity {quantity!r} is not a number") from None
+    if not math.isfinite(q) or q <= 0 or q != int(q):
+        raise ValueError(f"place_order: quantity must be a positive whole number, got {quantity!r}")
+    if order_type in ("LIMIT", "STOP_LOSS"):
+        # price 0 stays allowed (an existing pinned behaviour: it skips the tick-rounding branch); NaN / inf / negative do not.
+        try:
+            p = float(price)
+        except (TypeError, ValueError):
+            raise ValueError(f"place_order: {order_type} price {price!r} is not a number") from None
+        if not math.isfinite(p) or p < 0:
+            raise ValueError(f"place_order: {order_type} price must be finite and not negative, got {price!r}")
+    if trigger_price is not None and not _finite_positive(trigger_price):
+        raise ValueError(f"place_order: trigger price must be finite and positive, got {trigger_price!r}")
+
+
 def place_order(
     db: Session,
     *,
@@ -1415,6 +1448,8 @@ def place_order(
             f"to Dhan — must be one of {sorted(_VALID_ORDER_TYPES)}. This should be "
             f"unreachable; report as a bug in the caller."
         )
+
+    _check_order_numbers(order_type, quantity, price, trigger_price)
 
     client = _get_sdk_client(db)
 
@@ -1594,6 +1629,8 @@ def place_forever_order(db: Session, *, is_armed: bool, security_id: str, exchan
         raise RuntimeError("place_forever_order refused: not armed")
     if int(quantity) <= 0:
         raise ValueError("a forever order needs a positive quantity")
+    if not _finite_positive(trigger_price) or (price and not _finite_positive(price)):
+        raise ValueError("a forever order needs a finite positive trigger price (and a finite price when one is given)")
     trig = round_stop_to_tick(trigger_price)
     px = round_stop_to_tick(price) if price else 0.0
     if not trig or trig <= 0:

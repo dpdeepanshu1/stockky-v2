@@ -58,7 +58,7 @@ def chase_reference(price: float, ob: Optional[Dict], fvg: Optional[Dict], fib: 
 def location_block(price: float, a: float, ob: Optional[Dict], fvg: Optional[Dict], fib: Dict[str, Any], levels: Dict[str, List[Dict]],
                    sweep: Optional[Dict], ctx: Dict[str, Any], p: MSParams) -> Dict[str, Any]:
     out = empty_location()
-    if not finite(price) or not a or a <= 0:
+    if not finite(price) or not finite(a) or a <= 0:          # E319: `not a or a <= 0` let a NaN ATR through (nan <= 0 is False) and every distance became NaN
         return out
     flags: List[str] = []
     sup, res = levels.get("supports") or [], levels.get("resistances") or []
@@ -137,7 +137,8 @@ def location_block(price: float, a: float, ob: Optional[Dict], fvg: Optional[Dic
     pen += min(20.0, ext)
     if room is not None and room < 0.5 and major:
         pen += 15.0
-    out["entry_location_score"] = int(round(max(0.0, min(100.0, score - pen))))
+    raw_score = score - pen
+    out["entry_location_score"] = int(round(max(0.0, min(100.0, raw_score)))) if finite(raw_score) else 0      # E319: max(0, min(100, nan)) was 100; unknown scores 0
     out["flags"] = flags
     return out
 
@@ -145,7 +146,7 @@ def location_block(price: float, a: float, ob: Optional[Dict], fvg: Optional[Dic
 def structure_rr(price: float, a: float, ob: Optional[Dict], struct: Sequence[Dict], fvg: Optional[Dict], levels: Dict[str, List[Dict]],
                  fib: Dict[str, Any], ctx: Dict[str, Any], p: MSParams) -> Dict[str, Any]:
     out = empty_rr()
-    if not finite(price) or not a or a <= 0:
+    if not finite(price) or not finite(a) or a <= 0:                 # E320: same NaN-ATR guard as location_block (E319)
         out["flags"] = ["invalid"]
         return out
     entry = float(ctx["entry_price"]) if finite(ctx.get("entry_price")) else float(price)

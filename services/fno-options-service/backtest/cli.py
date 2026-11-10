@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fno.params import CONFIG_NAME, Params
-from fno.provider import IST, label_to_epoch
+from fno.provider import IST, bar_ok, label_to_epoch
 from fno import strategies
 from . import eod, portfolio, replay, report, rolling_sim, sim
 
@@ -38,7 +38,7 @@ def load_candles(path: str) -> List[Dict[str, float]]:
                 o, h, l, c = (float(r[k]) for k in ("open", "high", "low", "close"))
             except (KeyError, ValueError):
                 continue
-            if not all(math.isfinite(x) for x in (o, h, l, c)):          # round 312: "nan" / "inf" parse as floats and would reach the bars as NaN
+            if not bar_ok(o, h, l, c):                                   # round 312: "nan" / "inf" parse as floats. E322: and the engine's whole bar rule (positive, high >= low, open / close inside the range), so a corrupt row cannot make a fake breakout in a backtest
                 continue
             try:
                 v = float(r.get("volume") or 0)

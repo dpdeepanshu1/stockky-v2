@@ -32,6 +32,11 @@ def _g(d: Optional[Dict[str, Any]], k: str):
     return d.get(k) if isinstance(d, dict) else None
 
 
+def _u(v: Any) -> float:
+    """E319: a number or 0.0. None, text, NaN and +-inf all read as 0 ("unknown inputs score 0"); `float(nan or 0.0)` kept the NaN, because NaN is truthy."""
+    return float(v) if finite(v) else 0.0
+
+
 def structure_group(trend: Optional[str], bos: Optional[Dict], choch: Optional[Dict]) -> float:
     base = {BULLISH: 0.55, NEUTRAL: 0.25, BEARISH: 0.0, TRANSITION: 0.25}.get(trend or "", 0.0)
     if trend == TRANSITION and _g(choch, "direction") == "bullish":
@@ -40,7 +45,7 @@ def structure_group(trend: Optional[str], bos: Optional[Dict], choch: Optional[D
         base = 0.0
     s = base
     if _g(bos, "direction") == "bullish" and not _g(bos, "failed"):
-        s += 0.25 + 0.2 * float(_g(bos, "strength") or 0.0)
+        s += 0.25 + 0.2 * _u(_g(bos, "strength"))
     elif _g(bos, "direction") == "bearish" and not _g(bos, "failed"):
         s -= 0.3
     if _g(choch, "direction") == "bullish" and not _g(choch, "failed"):
@@ -67,11 +72,11 @@ def zones_group(ob: Optional[Dict], fvg: Optional[Dict]) -> float:
 
 
 def liquidity_group(sweep: Optional[Dict], p: MSParams) -> float:
-    if not sweep or sweep.get("direction") != "bullish" or sweep.get("bars_since") is None:
+    if not sweep or sweep.get("direction") != "bullish" or not finite(sweep.get("bars_since")):      # E319: a NaN age passed `> sweep_max_age` as False and counted as a fresh sweep
         return 0.0
     if sweep["bars_since"] > p.sweep_max_age:
         return 0.0
-    return clamp(0.4 + 0.6 * float(sweep.get("strength") or 0.0))
+    return clamp(0.4 + 0.6 * _u(sweep.get("strength")))
 
 
 def risk_group(rr: Optional[Dict], p: MSParams) -> float:
@@ -102,7 +107,7 @@ def score_block(trend, bos, choch, sweep, ob, fvg, location, rr, quality: str, p
         "structure": structure_group(trend, bos, choch),
         "zones": zones_group(ob, fvg),
         "liquidity": liquidity_group(sweep, p),
-        "location": clamp(float(_g(location, "entry_location_score") or 0.0) / 100.0),
+        "location": clamp(_u(_g(location, "entry_location_score")) / 100.0),
         "risk": risk_group(rr, p),
     }
     cap = p.limited_group_cap if quality == Q_LIMITED else 1.0
@@ -115,7 +120,8 @@ def score_block(trend, bos, choch, sweep, ob, fvg, location, rr, quality: str, p
         total += w * v
         wsum += w
         positive += 1 if raw[name] >= GROUP_POSITIVE else 0
-    out["technical_quality_score"] = int(round(max(0.0, min(100.0, total / wsum * 100.0))))
+    pct = total / wsum * 100.0
+    out["technical_quality_score"] = int(round(max(0.0, min(100.0, pct)))) if finite(pct) else 0    # E319: max(0, min(100, nan)) was 100; unknown scores 0
     out["independent_groups_positive"] = positive
     out["independent_groups_strict"] = strict_groups(raw)
     out["groups"] = groups

@@ -28,6 +28,7 @@ Daily loss kill switch:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -195,9 +196,12 @@ def _pick_balance(funds: dict) -> tuple[Optional[float], Optional[str]]:
         if v is None:
             continue
         try:
-            return float(v), key
+            x = float(v)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(x):
+            continue   # E338: "nan" / "inf" passes float() and `nan <= 0` is False, so it became the whole pool; try the next field
+        return x, key
     return None, None
 
 
@@ -248,6 +252,45 @@ def _sync_age_s(row: ScalpCapitalLedger) -> Optional[float]:
         return None
 
 
+def _finite_amount(what: str, v) -> float:
+    """E338: v as a float if it is finite, else 0.0 with a CRITICAL log. A NaN / inf amount added to the ledger makes available_capital NaN
+    for good: `position_value > nan` is False, so the "insufficient capital" check approves every size, and `nan >= limit` is False, so the
+    daily-loss kill switch can never trip. The callers' own sources are guarded (E324-E326); this is the last line before the ledger row."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        x = float("nan")
+    if math.isfinite(x):
+        return x
+    logger.critical("ledger: %s was %r (not a finite number) - treated as 0 so it cannot poison the pool; check the position's prices", what, v)
+    return 0.0
+
+
+_LEDGER_NUMERIC_FIELDS = ("total_allocated_capital", "available_capital", "realized_pnl_today", "realized_pnl_total")
+
+
+def _heal_non_finite(db: Session, row) -> None:
+    """E338: a ledger row that already holds a NaN / inf number (written before this guard) is set back to 0 for that field, loudly. Zero
+    allocation refuses new entries until the next broker sync; zero available is rebuilt by that sync. Only real float / int NaN / inf
+    values are touched. Never raises."""
+    try:
+        fixed = []
+        for name in _LEDGER_NUMERIC_FIELDS:
+            v = getattr(row, name, None)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and not math.isfinite(v):
+                setattr(row, name, 0.0)
+                fixed.append(f"{name}={v!r}")
+        if fixed:
+            db.commit()
+            logger.critical("ledger: the capital row held non-finite numbers (%s) - reset to 0; new entries wait for the next broker sync", ", ".join(fixed))
+    except Exception as e:  # noqa: BLE001 - healing is best effort
+        logger.error("ledger: could not heal the capital row (%s)", e)
+        try:
+            db.rollback()
+        except Exception as rb:  # noqa: BLE001
+            logger.error("ledger: rollback after the failed heal also failed (%s)", rb)
+
+
 def _get_or_create(db: Session) -> ScalpCapitalLedger:
     row = db.query(ScalpCapitalLedger).filter_by(mode="REAL").first()
     if row is None:
@@ -262,6 +305,7 @@ def _get_or_create(db: Session) -> ScalpCapitalLedger:
         db.add(row)
         db.commit()
         db.refresh(row)
+    _heal_non_finite(db, row)
     _maybe_lazy_reset_daily(db, row)
     return row
 
@@ -757,6 +801,9 @@ def reserve_capital(
     if conviction_mult is not None:
         position_value = conviction_budget(row, position_value, conviction_mult, adaptive_stop_pct, side)
 
+    if not math.isfinite(position_value):
+        logger.warning("ledger.reserve_capital: the sized position value is %r (not a finite number) - refusing the entry", position_value)
+        return None
     if position_value > row.available_capital:
         logger.info(
             "ledger.reserve_capital: insufficient capital (need ₹%.2f, have ₹%.2f)",
@@ -797,6 +844,13 @@ def reserve_additional(db: Session, additional_amount: float) -> bool:
     Does NOT re-check the daily-loss kill switch or
     total_allocated_capital>0 — those were already verified by the
     reserve_capital() call this tops up."""
+    try:
+        _add_ok = math.isfinite(float(additional_amount))
+    except (TypeError, ValueError):
+        _add_ok = False
+    if not _add_ok:
+        logger.warning("ledger.reserve_additional: the amount is %r (not a finite number) - refusing the top-up", additional_amount)
+        return False       # E338: the caller then skips the trade instead of placing an order the ledger cannot back
     if additional_amount <= 0:
         return True
     row = _get_or_create(db)
@@ -819,7 +873,9 @@ def release_capital(
     position_value: float,
     realized_pnl: float,
 ) -> None:
-    """Return capital + P&L on exit. Checks daily-loss kill switch."""
+    """Return capital + P&L on exit. Checks daily-loss kill switch. E338: a non-finite amount is booked as 0 (loud), never as NaN."""
+    position_value = _finite_amount("release_capital position_value", position_value)
+    realized_pnl = _finite_amount("release_capital realized_pnl", realized_pnl)
     row = _get_or_create(db)
     row.available_capital += position_value + realized_pnl
     row.realized_pnl_today += realized_pnl
@@ -902,6 +958,7 @@ def reconcile_position_cost(db: Session, *, delta: float) -> None:
     Does NOT touch the daily-loss kill switch — that trips off
     realized_pnl_today in release_capital() at actual exit time, not off
     an in-flight cost correction on a still-open position."""
+    delta = _finite_amount("reconcile_position_cost delta", delta)
     if delta == 0:
         return
     row = _get_or_create(db)
@@ -947,6 +1004,7 @@ def reclaim_premature_release(db: Session, *, capital_risked: float) -> None:
     earlier release_capital() call that turned out to be premature, not
     correcting a cost estimate. Does NOT touch realized_pnl (no trade
     actually happened) or the daily-loss kill switch (no loss booked)."""
+    capital_risked = _finite_amount("reclaim_premature_release capital_risked", capital_risked)
     if capital_risked <= 0:
         return
     row = _get_or_create(db)
@@ -1008,6 +1066,7 @@ def adjust_closed_pnl_today(db: Session, *, delta: float) -> None:
     cost and P&L moves. Net effect: the pool's cash, today's and the lifetime realized
     P&L all move by `delta` (new P&L - old P&L). Does NOT re-evaluate the daily-loss
     kill switch (a correction is not a new loss event)."""
+    delta = _finite_amount("adjust_closed_pnl_today delta", delta)
     if not delta:
         return
     row = _get_or_create(db)
@@ -1026,6 +1085,7 @@ def book_late_realized_pnl(db: Session, realized_pnl: float) -> None:
     P&L moves: available_capital and realized_pnl_total. It is deliberately
     NOT added to realized_pnl_today — that would attribute yesterday's result
     to today's daily-loss kill switch."""
+    realized_pnl = _finite_amount("book_late_realized_pnl realized_pnl", realized_pnl)
     row = _get_or_create(db)
     row.available_capital += realized_pnl
     row.realized_pnl_total += realized_pnl

@@ -206,6 +206,20 @@ def samples_from_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _vote(picks: List[float], current: Any) -> float:
+    """E318: the threshold most folds chose. A tie (2-2 with four folds is common) used to go to whichever value the set happened to list first; now the shipped threshold wins a tie it is part of
+    (no change is suggested on a split vote), and otherwise the tied value closest to it, the smaller change."""
+    counts: Dict[float, int] = {}
+    for x in picks:
+        counts[x] = counts.get(x, 0) + 1
+    top = max(counts.values())
+    tied = sorted(x for x, c in counts.items() if c == top)
+    if current in tied:
+        return current
+    cur = _num(current)
+    return min(tied, key=lambda x: (abs(x - cur), x)) if cur is not None else tied[0]
+
+
 def calibrate(rows: Iterable[Dict[str, Any]], thresholds: Optional[Dict[str, Any]] = None, horizon: Optional[int] = None, min_n: int = 20,
               folds: int = 4) -> Dict[str, Any]:
     """Advisory calibration from the observed outcomes. `thresholds` = the gate's own thresholds (defaults: backtest.DEFAULT_THRESHOLDS).
@@ -236,7 +250,7 @@ def calibrate(rows: Iterable[Dict[str, Any]], thresholds: Optional[Dict[str, Any
             item["walk_forward"] = {k: wf.get(k) for k in ("oos_edge", "oos_rejected_n", "oos_passed_n", "stable", "folds", "note")}
             picks = [f["threshold"] for f in wf.get("folds", []) if f.get("threshold") is not None]
             if wf.get("stable") and (wf.get("oos_edge") or 0) > 0.25 and picks:
-                best = max(set(picks), key=picks.count)
+                best = _vote(picks, item["current"])
                 if best != item["current"]:
                     item["suggested"] = best
                     out["suggestions"].append({"rule": rule, "from": item["current"], "to": best, "oos_edge": wf.get("oos_edge")})

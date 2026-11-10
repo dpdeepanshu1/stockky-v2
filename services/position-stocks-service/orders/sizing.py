@@ -6,6 +6,7 @@ when one share costs more than SIZING_ONE_SHARE_MAX_MULT x the budget -> None (s
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional
 
 import config
@@ -38,6 +39,13 @@ def compute_quantity(position_value: float, price: float, side: str = "LONG") ->
         return _short_quantity(position_value, price)
     if _s not in ("", "LONG"):
         raise ValueError(f"sizing: unknown side {side!r}")
+    # E331: a NaN / infinite price or budget used to fall through the except branches and come out as ONE share (legacy floor) - a position
+    # sized from a number that does not exist. The short path already skips (`not (price > 0)`); a long now skips too.
+    try:
+        if not (math.isfinite(float(price)) and math.isfinite(float(position_value))):
+            return None
+    except (TypeError, ValueError):
+        pass          # junk like "x" keeps its documented fallback below
     try:
         if price <= 0:
             return 1

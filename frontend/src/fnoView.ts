@@ -11,7 +11,13 @@ export function istHm(ts: number | null | undefined): string {
   if (!ts) return "-";
   return new Date(ts * 1000 + IST_OFFSET_MIN * 60000).toISOString().slice(11, 16);
 }
-export const inr = (v: number | null | undefined, dp = 0): string => (v == null || Number.isNaN(v) ? "-" : `${v < 0 ? "-" : ""}₹${Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: dp, maximumFractionDigits: dp })}`);
+/** Rupees. Round 340 (E342): an amount that rounds to zero ("-0.4" at 0 decimals) is shown as ₹0, not "-₹0". */
+export function inr(v: number | null | undefined, dp = 0): string {
+  if (v == null || Number.isNaN(v)) return "-";
+  const body = Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  const zero = Number(body.replace(/,/g, "")) === 0;
+  return `${v < 0 && !zero ? "-" : ""}₹${body}`;
+}
 export const signed = (v: number | null | undefined, dp = 2): string => (v == null || Number.isNaN(v) ? "-" : `${v > 0 ? "+" : ""}${v.toFixed(dp)}`);
 export const pctOf = (a: number, b: number): number | null => (b ? ((a - b) / b) * 100 : null);
 
@@ -108,8 +114,14 @@ export function dayTotals(ps: FnoPosition[]): { day: string; trades: number; win
 }
 
 export const CSV_HEAD = "id,day,underlying,expiry,strike,type,lots,entry_time,entry,exit_time,exit,reason,gross,charges,net,mode";
+/** Round 340 (E342): one CSV cell. A comma, quote or line break in a text field (the exit reason is free text) used to shift every column after it; such a cell is now quoted. A text that starts with = + @ gets a leading ' so a spreadsheet does not run it as a formula. Numbers are written as they are. */
+export function csvCell(v: unknown): string {
+  let s = v == null ? "" : String(v);
+  if (typeof v === "string" && /^[=+@]/.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
 export function tradesCsv(ps: FnoPosition[]): string {
-  const rows = ps.map((p) => [p.id ?? "", istDay(p.entry_ts), p.underlying, p.expiry, p.strike, p.opt_type, p.lots, istHm(p.entry_ts), p.entry_premium, istHm(p.exit_ts), p.exit_premium ?? "", p.exit_reason, p.gross_pnl ?? "", p.charges ?? "", p.net_pnl ?? "", p.mode].join(","));
+  const rows = ps.map((p) => [p.id ?? "", istDay(p.entry_ts), p.underlying, p.expiry, p.strike, p.opt_type, p.lots, istHm(p.entry_ts), p.entry_premium, istHm(p.exit_ts), p.exit_premium ?? "", p.exit_reason, p.gross_pnl ?? "", p.charges ?? "", p.net_pnl ?? "", p.mode].map(csvCell).join(","));
   return [CSV_HEAD, ...rows].join("\n");
 }
 

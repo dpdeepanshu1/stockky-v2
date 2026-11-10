@@ -27,9 +27,12 @@ export function TradeTable({ rows }: { rows: FnoPosition[] }) {
 }
 
 function download(name: string, text: string) {
+  // Round 340 (E342): attached to the page for the click and released a moment later (some browsers cancel a download whose link is not in the page or is revoked at once)
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
-  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+  a.href = url; a.download = name; a.style.display = "none";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function FnoPositions() {

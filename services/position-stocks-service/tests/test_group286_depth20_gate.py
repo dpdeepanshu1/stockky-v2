@@ -103,3 +103,16 @@ def test_exception_never_shrinks(md):
 def test_zero_shares_within_slip_gives_one(md):
     md["resp"] = Resp(200, {"available": True, "buy_qty_within_slip": 0})
     assert depth_gate.max_qty_from_depth20("ABC", 800) == 1
+
+
+# E337: a SHORT is sized against the BID side (sell_qty_within_slip), a long against the ask side
+def test_short_uses_the_bid_side_and_long_keeps_the_ask_side(md):
+    md["resp"] = Resp(200, {"available": True, "buy_qty_within_slip": 1000, "sell_qty_within_slip": 200, "sell_impact_pct": 0.4})
+    assert depth_gate.max_qty_from_depth20("ABC", 800, "SHORT") == 100     # 50% of the 200 bid shares
+    assert depth_gate.max_qty_from_depth20("ABC", 800) == 500              # legacy / long: 50% of the 1000 ask shares
+    assert depth_gate.max_qty_from_depth20("ABC", 800, "LONG") == 500
+
+
+def test_short_with_no_bid_side_in_the_answer_has_no_cap(md):
+    md["resp"] = Resp(200, {"available": True, "buy_qty_within_slip": 1000})
+    assert depth_gate.max_qty_from_depth20("ABC", 800, "SHORT") is None    # fails open, as before

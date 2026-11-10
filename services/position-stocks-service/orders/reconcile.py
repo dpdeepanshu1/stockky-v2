@@ -38,6 +38,7 @@ are best-effort estimates, not verified fills; treat them as such.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional
@@ -178,6 +179,8 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
                 price = float(v)
             except (TypeError, ValueError):
                 continue
+            if not (math.isfinite(price) and price > 0):
+                continue          # E326: NaN is truthy, so `if v:` let it through as the exit price (inf too)
             # DIAGNOSTIC (2026-09-16, additive, no behavior change): this is
             # exactly the "ASSUMPTION FLAGGED FOR LIVE VERIFICATION" case
             # from the module docstring — log which key actually resolved
@@ -197,6 +200,8 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
             price = float(v)
         except (TypeError, ValueError):
             price = None
+        if price is not None and not (math.isfinite(price) and price > 0):
+            price = None          # E326
         if price is not None:
             logger.info(
                 "reconcile: leg fill price NOT found via any averageTradedPrice-"
@@ -212,6 +217,8 @@ def _extract_leg_price(leg: dict, parent_row: dict, own_fallback_price: float = 
             _pp = float(parent_price)
         except (TypeError, ValueError):
             _pp = None
+        if _pp is not None and not (math.isfinite(_pp) and _pp > 0):
+            _pp = None            # E326
         if _pp is not None:
             if entry_price and own_fallback_price and abs(_pp - float(entry_price)) < 0.005:
                 logger.warning("reconcile: parent averageTradedPrice ₹%.2f is this position's ENTRY fill, not an exit - not used as the exit price "
@@ -435,7 +442,7 @@ def _alt_exit_for_dead_sell(db: Session, pos: ScalpPosition, dead_oid: str, plai
             price = float(r.get("averageTradedPrice") or r.get("average_traded_price") or 0)
         except (TypeError, ValueError):
             price = 0.0
-        if price > 0:
+        if math.isfinite(price) and price > 0:
             cands.append({"kind": "order", "order_id": oid, "price": price})
     return cands[0] if len(cands) == 1 else None
 
@@ -514,6 +521,8 @@ def _reconcile_eod_pending(db: Session, eod_pending: list[ScalpPosition]) -> int
                 real_exit_price = float(raw_fill) if raw_fill else None
             except (TypeError, ValueError):
                 real_exit_price = None
+            if real_exit_price is not None and not (math.isfinite(real_exit_price) and real_exit_price > 0):
+                real_exit_price = None    # E326: a NaN / inf / negative fill must not be booked as the exit
             if real_exit_price is None:
                 logger.warning(
                     "reconcile: EOD flat-SELL for %s (id=%d, order %s) reports %s but no "
@@ -835,7 +844,7 @@ def _num(v) -> Optional[float]:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f > 0 else None
+    return f if (math.isfinite(f) and f > 0) else None
 
 
 _LEG_PRICE_KEYS = ("averageTradedPrice", "tradedPrice", "avgPrice", "avgTradedPrice")
@@ -1579,8 +1588,10 @@ def repair_dead_sell_errors(db: Session, *, apply: bool = False) -> dict:
             pos.dhan_exit_order_id = exit_oid
             pos.error_message = None
             db.commit()
-            ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=pnl)
-            shared_symbol_lock.release(db, pos.symbol)
+            try:
+                ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=pnl)
+            finally:  # E340: the lock goes back even if the capital release raised (the row is already closed and committed)
+                shared_symbol_lock.release(db, pos.symbol)
             logger.info("reconcile: repaired dead-SELL ERROR row %s (id=%d) -> %s @ ₹%.2f, P&L ₹%.2f",
                         pos.symbol, pos.id, new_status, price, pnl)
     return out
@@ -2249,8 +2260,10 @@ def run_exit_reconciliation(db: Session) -> int:
                     pos.error_message = None
                     pos.closed_at = datetime.now(timezone.utc)
                     db.commit()
-                    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=_pnl)
-                    shared_symbol_lock.release(db, pos.symbol)
+                    try:
+                        ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=_pnl)
+                    finally:  # E340: the lock goes back even if the capital release raised (the row is already closed and committed)
+                        shared_symbol_lock.release(db, pos.symbol)
                     closed += 1
                     logger.info("reconcile: %s (id=%d) parent row %s but BUY+SELL traded - booked %s %.2f->%.2f P&L Rs%.2f",
                                 pos.symbol, pos.id, entry_status, _ex["kind"], _alive["entry"], _ex["price"], _pnl)
@@ -2300,13 +2313,15 @@ def run_exit_reconciliation(db: Session) -> int:
                 _learn_from_entry_rejection(db, pos, entry_status, reject_reason)
                 pos.closed_at = datetime.now(timezone.utc)
                 db.commit()
-                ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
-                # BUG FIX (Issue #4): symbol lock was never released on the
-                # dead-entry path — capital was freed but the SharedSymbolLock
-                # row was left behind, permanently blocking re-entry into this
-                # symbol (e.g. TREL stuck with held_by_mode=null). Fixed by
-                # mirroring the same release() call every other exit path makes.
-                shared_symbol_lock.release(db, pos.symbol)
+                try:
+                    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
+                finally:  # E340: the lock goes back even if the capital release raised (the row is already closed and committed)
+                    # BUG FIX (Issue #4): symbol lock was never released on the
+                    # dead-entry path — capital was freed but the SharedSymbolLock
+                    # row was left behind, permanently blocking re-entry into this
+                    # symbol (e.g. TREL stuck with held_by_mode=null). Fixed by
+                    # mirroring the same release() call every other exit path makes.
+                    shared_symbol_lock.release(db, pos.symbol)
                 closed += 1
                 logger.warning(
                     "reconcile: %s (id=%d) entry leg %s — capital released, no trade",
@@ -2353,15 +2368,17 @@ def run_exit_reconciliation(db: Session) -> int:
         pos.closed_at = datetime.now(timezone.utc)
         db.commit()
 
-        ledger.release_capital(
-            db,
-            position_value=0.0 if _capital_already_released else pos.capital_risked,
-            realized_pnl=realized_pnl,
-        )
-        # AUDIT FIX (session60): position is now fully flat — release this
-        # service's cross-service symbol lock claim so the symbol becomes
-        # buyable again by either service. See capital/shared_symbol_lock.py.
-        shared_symbol_lock.release(db, pos.symbol)
+        try:
+            ledger.release_capital(
+                db,
+                position_value=0.0 if _capital_already_released else pos.capital_risked,
+                realized_pnl=realized_pnl,
+            )
+        finally:  # E340: the lock goes back even if the capital release raised (the row is already closed and committed)
+            # AUDIT FIX (session60): position is now fully flat — release this
+            # service's cross-service symbol lock claim so the symbol becomes
+            # buyable again by either service. See capital/shared_symbol_lock.py.
+            shared_symbol_lock.release(db, pos.symbol)
         closed += 1
         logger.info(
             "reconcile: %s (id=%d) %s @ ₹%.2f — P&L ₹%.2f (%.2f%%)",

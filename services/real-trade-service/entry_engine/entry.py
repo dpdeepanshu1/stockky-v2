@@ -60,7 +60,7 @@ try:
     from return_sanity import clamp_for_atr as _clamp_for_atr
 except ImportError:
     def _clamp_for_atr(x):
-        return None if x is None or abs(x) > 30.0 else x
+        return None if x is None or not math.isfinite(x) or abs(x) > 30.0 else x
 
 logger = logging.getLogger("real-trade-entry")
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import costs, execution
 from .params import Params
@@ -111,7 +111,7 @@ def _quote(provider: Any, und: str, expiry: str, strike: float, side: str) -> Op
 
 def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: str = "CE", offset: int = 0, live: bool = False, hold_s: int = 20, fill_timeout_s: int = 25,
         max_outlay: float = 15000.0, expiry_pick: Optional[str] = None, confirm: Optional[Callable[[str], str]] = None, sleep: Callable[[float], None] = time.sleep, now: Optional[Callable[[], datetime]] = None,
-        printer: Callable[[str], None] = print, params: Optional[Params] = None) -> Dict[str, Any]:
+        printer: Callable[[str], None] = print, params: Optional[Params] = None, holidays: Sequence[str] = ()) -> Dict[str, Any]:
     say = _Out(printer)
     p = params or Params()
     now = now or (lambda: datetime.now(IST))
@@ -197,6 +197,8 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     hm = (now().hour, now().minute)
     if now().weekday() >= 5 or not (WINDOW[0] <= hm <= WINDOW[1]):
         guard.append(f"outside the live window {WINDOW[0][0]:02d}:{WINDOW[0][1]:02d}-{WINDOW[1][0]:02d}:{WINDOW[1][1]:02d} IST on a weekday")
+    if now().date().isoformat() in set(holidays):             # round 318: the engine's market_open knows the exchange holidays; the probe only knew weekends, so on a weekday holiday only the 30 s quote-age check stood in the way
+        guard.append(f"{now().date().isoformat()} is an exchange holiday (FNO_HOLIDAYS)")
 
     payload = execution.build_order(client_id, sid, segment, "BUY", qty, buy_px, "probebuy" + now().strftime("%H%M%S"))
     shown = dict(payload, dhanClientId=mask(client_id))

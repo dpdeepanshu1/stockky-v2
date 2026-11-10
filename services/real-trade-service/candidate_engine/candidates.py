@@ -67,6 +67,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -1253,8 +1254,8 @@ def _compute_atr_from_candles(candles: list) -> Optional[float]:
             h  = float(candles[i].get("high")  or 0)
             l  = float(candles[i].get("low")   or 0)
             pc = float(candles[i - 1].get("close") or 0)
-            if h <= 0 or l <= 0 or pc <= 0:
-                continue
+            if not (math.isfinite(h) and math.isfinite(l) and math.isfinite(pc)) or h <= 0 or l <= 0 or pc <= 0 or h < l:
+                continue                     # E323: a NaN / inf / inverted candle is skipped (a NaN high made the whole ATR NaN, and `if atr_val and atr_val > 0` then skipped the too-volatile veto)
             trs.append(max(h - l, abs(h - pc), abs(l - pc)))
         if len(trs) < _ATR_WINDOW:
             return None

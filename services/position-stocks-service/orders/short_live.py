@@ -32,7 +32,7 @@ from capital import heat_gate, ledger, shared_order_budget, shared_symbol_lock
 from control.kit import current_profile as _current_profile
 from execution import dhan_client
 from models import ScalpGateState, ScalpPosition
-from orders import approve_first, entry_cap, entry_pause, flow_gate, opening_protect, plain_short, sell_probe, short_entry, tm_gate, trade_odds
+from orders import approve_first, entry_cap, entry_pause, flow_gate, opening_protect, plain_short, position_save, sell_probe, short_entry, tm_gate, trade_odds
 from tz_utils import ist_today_str
 
 logger = logging.getLogger("position-stocks-short-live")
@@ -409,9 +409,8 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
             pos.flow_json = _ls.stamp(pos.flow_json, plan.get("stop_note"))                  # E282 round 76: how the stop was learned (tighter only), record only
         except Exception:  # noqa: BLE001
             logger.debug("short live: learned stop stamp failed (record only, entry unaffected)", exc_info=True)
-        db.add(pos)
-        db.commit()
-        db.refresh(pos)
+        if not position_save.save_new_position(db, pos):   # E332: bounded retry first (the SELL is live); only then the alert below
+            raise RuntimeError("position row not saved after retries")
     except Exception as e:  # noqa: BLE001
         db.rollback()
         logger.critical("short live: SELL order %s for %s x%s WAS PLACED but the position row could not be saved (%s). Capital and symbol lock are kept. "

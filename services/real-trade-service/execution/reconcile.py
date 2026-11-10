@@ -50,7 +50,11 @@ _FILLED_STATUSES = {"TRADED", "COMPLETE", "FILLED", "EXECUTED"}
 # must stay out of _DEAD_STATUSES and keep the order eligible in the
 # PLACED/PARTIAL query below.
 _PARTIAL_STATUSES = {"PART_TRADED", "PARTIALLY_FILLED"}
-_DEAD_STATUSES = {"REJECTED", "CANCELLED", "CANCELED"}
+# E346: "EXPIRED" is one of Dhan's order statuses (a DAY order that reached the close unfilled, or whose validity ran out) and every other dead-status list in this
+# service already has it (dhan_client._DEAD_ORDER_STATUSES, broker_stop, entry._CANCEL_TERMINAL_STATUSES). Missing here, an EXPIRED row fell through to "still pending at the
+# broker" for ever: a BUY stayed PLACED, and an EXPIRED SELL stayed "in flight", which blocks every other exit for the symbol and keeps _repair_orphaned_pending_exits from
+# restoring a PENDING_EXIT position.
+_DEAD_STATUSES = {"REJECTED", "CANCELLED", "CANCELED", "EXPIRED"}
 
 
 def _get(row: dict, *keys, default=None):
@@ -58,6 +62,19 @@ def _get(row: dict, *keys, default=None):
         if k in row and row[k] not in (None, ""):
             return row[k]
     return default
+
+
+def _usable_price(v) -> bool:
+    """E324: True only for a finite price above zero. Dhan's order book can show averageTradedPrice as 0
+    for an order that has not traded (a present field, not a missing one), and a bad feed can send NaN.
+    `fill_price is None` let both through, so new shares could be booked at Rs 0 (a BUY with zero cost,
+    or a SELL booked as a total loss that then trips the daily-loss limit) or at NaN. An unusable price
+    is treated like a missing one: leave the order open and retry next cycle."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(x) and x > 0
 
 
 # session110: Dhan reports averageTradedPrice to paise (2 dp), so each cumulative
@@ -587,15 +604,15 @@ async def reconcile_real_orders(db: Session) -> dict:
                 # be booked before the order is marked dead, or they'd
                 # silently disappear from this system's own books while still
                 # sitting in the actual Dhan account/position.
-                if delta_qty and delta_qty > 0 and fill_price is None:
+                if delta_qty and delta_qty > 0 and not _usable_price(fill_price):
                     # E171: shares did trade but the broker row carries no price yet. Marking the order dead here would treat it as
                     # a zero-fill (restore the position, count a failure) and lose the fill. Leave it PLACED/PARTIAL; next cycle retries.
                     logger.critical(
-                        "reconcile: order %s (%s %s) is %s with %s new filled share(s) but no average price - leaving it open to retry",
-                        order.dhan_order_id, order.side, order.symbol, status, delta_qty,
+                        "reconcile: order %s (%s %s) is %s with %s new filled share(s) but no usable average price (%r) - leaving it open to retry",
+                        order.dhan_order_id, order.side, order.symbol, status, delta_qty, fill_price,
                     )
                     continue
-                if delta_qty and delta_qty > 0 and fill_price is not None:
+                if delta_qty and delta_qty > 0 and _usable_price(fill_price):
                     await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=True,
                                            cumulative_qty=int(fill_qty_cumulative))
                     tally["partial_fills"] += 1
@@ -636,7 +653,7 @@ async def reconcile_real_orders(db: Session) -> dict:
                             db, dead_position, order, status,
                             rejection_reason=rejection_reason, rejection_code=rejection_code,
                         )
-                dead_status = "REJECTED" if status == "REJECTED" else "CANCELLED"
+                dead_status = "REJECTED" if status == "REJECTED" else ("EXPIRED" if status == "EXPIRED" else "CANCELLED")
                 order.status = dead_status
                 # BUG FIX (2026-09-18, user-reported: a manually-placed BUY on a
                 # T2T/ASM-restricted symbol — e.g. product_type=INTRADAY — got
@@ -708,6 +725,15 @@ async def reconcile_real_orders(db: Session) -> dict:
                 if is_complete_status and order.status != "FILLED":
                     order.status = "FILLED"
                     db.commit()
+                continue
+
+            if not _usable_price(fill_price):
+                # E324: shares traded but the price is 0 / NaN / non-numeric - booking it would create a
+                # Rs 0 (or NaN) fill. Same handling as a missing price: stay open, retry next cycle.
+                logger.warning(
+                    "reconcile: order %s reports %s with %s new filled share(s) but unusable average price %r - leaving as-is.",
+                    order.dhan_order_id, status, delta_qty, fill_price,
+                )
                 continue
 
             await _book_fill_delta(db, order, float(fill_price), delta_qty, is_partial=is_partial_status,

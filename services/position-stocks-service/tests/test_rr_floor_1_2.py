@@ -54,10 +54,10 @@ def test_entry_skips_on_the_final_levels_before_any_capital_is_reserved():
     i_levels = src.index("levels: AdaptiveLevels = compute_levels(\n        candidate.pct_change")
     i_rr = src.index("_rr_reject = rr_floor.reject_reason(levels)")
     i_depth = src.index("_depth_reject = depth_gate.reject_reason(candidate.symbol)")
-    i_reserve = src.index("reserve_capital(", i_levels)
+    i_reserve = src.index("_hold_reserve(", i_levels)
     assert i_levels < i_rr < i_depth and i_rr < i_reserve
     block = src[i_rr: i_rr + 400]
-    assert "shared_symbol_lock.release(db, candidate.symbol)" in block and '"SKIPPED"' in block and "return None" in block
+    assert "_hold_unlock(db, candidate.symbol)" in block and '"SKIPPED"' in block and "return None" in block
     assert "rr_floor" in src.split("from orders.adaptive")[0]
 
 

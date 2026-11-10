@@ -170,3 +170,16 @@ const V2 = btVerdictView({ verdict: { status: "PASSED_THIS_TEST_ONLY", reasons: 
 assert.equal(V2.tone, "warn"); assert.equal(V2.quality, null); assert.deepEqual(V2.warnings, []);      // a pass is never shown green
 assert.equal(btVerdictView(null).status, "-"); assert.equal(btVerdictView({}).tone, "neutral"); assert.deepEqual(btVerdictView({ verdict: { reasons: "nope" } }).reasons, []);
 console.log("fnoView round 303 ok");
+
+// Round 340 (E342): a negative amount that rounds to zero is not "-₹0"; a CSV cell with a comma / quote / line break is quoted; a formula-looking text is defused
+import { csvCell } from "./fnoView.ts";
+assert.equal(inr(-0.4), "₹0"); assert.equal(inr(-0.5), "-₹1"); assert.equal(inr(-0.004, 2), "₹0.00"); assert.equal(inr(-0.005, 2), "-₹0.01"); assert.equal(inr(0), "₹0"); assert.equal(inr(-1234.5), "-₹1,235");
+assert.equal(csvCell("TARGET"), "TARGET"); assert.equal(csvCell(null), ""); assert.equal(csvCell(-400), "-400"); assert.equal(csvCell(12.5), "12.5");
+assert.equal(csvCell("SL, then flat"), "\"SL, then flat\""); assert.equal(csvCell("said \"x\""), "\"said \"\"x\"\"\""); assert.equal(csvCell("a\nb"), "\"a\nb\"");
+assert.equal(csvCell("=1+1"), "'=1+1"); assert.equal(csvCell("@sum"), "'@sum");
+const tricky = tradesCsv([P({ exit_reason: "SL, trailing \"armed\"" })]).split("\n")[1];
+assert.match(tricky, /,"SL, trailing ""armed""",/);
+// a plain row keeps the column count; a quoted cell does not add a column when parsed with quotes honoured
+const cols = (line) => { const out = []; let cur = "", q = false; for (let i = 0; i < line.length; i++) { const c = line[i]; if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; } else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c; } out.push(cur); return out; };
+assert.equal(cols(tricky).length, CSV_HEAD.split(",").length); assert.equal(cols(tricky)[11], "SL, trailing \"armed\"");
+console.log("fnoView.test.mjs (round 340): all passed");

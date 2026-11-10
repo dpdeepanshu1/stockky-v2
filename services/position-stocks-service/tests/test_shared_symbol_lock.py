@@ -215,12 +215,14 @@ class TestTryClaim:
         assert sl.try_claim(db, "NEW") is True  # would raise if session left poisoned
         assert _symbols(db) == ["ABC", "NEW"]
 
-    def test_race_but_winner_row_vanished_fails_open(self):
+    def test_race_but_winner_row_vanished_and_insert_keeps_colliding_fails_closed(self, monkeypatch):
+        # E338: used to return True with NO lock row held. The insert is now tried once more; two collisions with no row to show = refuse.
+        _capture_alerts(monkeypatch, sl)
         db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.side_effect = [None, None]
+        db.query.return_value.filter_by.return_value.first.side_effect = [None, None, None, None]
         db.commit.side_effect = _integrity_error()
-        assert sl.try_claim(db, "ABC") is True
-        db.rollback.assert_called_once()
+        assert sl.try_claim(db, "ABC") is False
+        assert db.rollback.call_count == 2
 
     def test_race_and_reread_failure_fails_closed(self, monkeypatch):
         _capture_alerts(monkeypatch, sl)

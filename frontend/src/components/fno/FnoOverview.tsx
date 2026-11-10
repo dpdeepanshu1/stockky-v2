@@ -71,6 +71,7 @@ export default function FnoOverview() {
   const strat = useFno(fnoApi.strategies, 30000);
   const dhan = useFno(realTradeApi.dhanAccount, 30000);   // Round 271: live Dhan funds for the money card (best effort: Real Trade shares the same Dhan account; an error here only leaves the tile empty)
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [recErr, setRecErr] = useState<string | null>(null);   // Round 340 (E342): a failed "Check now" used to leave the OLD result on screen, looking like a fresh check
   const [busy, setBusy] = useState(false);
   const act = async (fn: () => Promise<unknown>, okText: string, confirmText?: string) => {
     if (confirmText && !window.confirm(confirmText)) return;
@@ -177,7 +178,8 @@ export default function FnoOverview() {
         )}
       </Card>
 
-      <Card title="Reconcile with Dhan (REAL only)" right={<Btn small onClick={() => void fnoApi.reconcile(true).then(rec.reload, rec.reload)}>Check now</Btn>}>
+      <Card title="Reconcile with Dhan (REAL only)" right={<Btn small onClick={() => { setRecErr(null); void fnoApi.reconcile(true).then(() => rec.reload(), (e: any) => { setRecErr(String(e?.message || e)); rec.reload(); }); }}>Check now</Btn>}>
+        {recErr && <Msg kind="err">The check could not run: {recErr}. The result below is the previous one.</Msg>}
         {rec.data?.ok === true && <Msg kind="ok">Our open REAL positions match Dhan's net positions.</Msg>}
         {rec.data?.ok === false && <Msg kind="err">Mismatch: {rec.data.differences?.map((x) => `${x.security_id}: ours ${x.ours}, Dhan ${x.broker}`).join(" | ")}. Check the Dhan app; nothing is traded automatically.</Msg>}
         {rec.data?.ok == null && <p className="text-mist">{rec.data?.note || rec.error || "Not checked yet (needs REAL mode with Dhan credentials)."}</p>}

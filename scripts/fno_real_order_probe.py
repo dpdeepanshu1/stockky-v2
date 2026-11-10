@@ -17,6 +17,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services", "fno-options-service"))
 from fno import execution, provider, realprobe  # noqa: E402
 
+try:                                                    # round 318: the same holiday list the engine uses (FNO_HOLIDAYS or the built-in 2026 list)
+    from config import HOLIDAYS  # noqa: E402
+except Exception:  # noqa: BLE001 - the probe still runs without it; the quote-age guard remains
+    HOLIDAYS = ()
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -41,7 +46,7 @@ def main(argv=None) -> int:
         return 2
     prov = provider.HttpProvider(a.market_data)
     brk = execution.DhanBroker(a.base, cid, tok, 10.0) if (cid and tok) else None
-    res = realprobe.run(prov, brk, cid, a.und, a.side, a.offset, a.live, a.hold_seconds, a.fill_timeout, a.max_outlay, a.expiry or None)
+    res = realprobe.run(prov, brk, cid, a.und, a.side, a.offset, a.live, a.hold_seconds, a.fill_timeout, a.max_outlay, a.expiry or None, holidays=tuple(HOLIDAYS))
     if a.live:
         os.makedirs(a.out, exist_ok=True)
         stamp = realprobe.file_stamp()

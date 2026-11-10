@@ -25,6 +25,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .atr import atr_series
 from .ms_types import C, H, L, O, V, finite, r2, r3
+from .params import MSParams as _MSP
+from .prep import _valid
+
+_TOL = _MSP().bar_tolerance_pct
 
 PIVOT_K = 3
 MIN_BARS = 30
@@ -36,7 +40,7 @@ def _clean(raw_bars: Any) -> List[Tuple[float, float, float, float, float, float
     out = []
     for b in raw_bars or []:
         try:
-            if len(b) >= 6 and all(finite(x) for x in b[:5]):
+            if len(b) >= 6 and all(finite(x) for x in b[:5]) and _valid(b, _TOL):   # E321: the engine's bar rule (positive, ordered, open / close inside the range)
                 out.append((float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]) if finite(b[5]) else 0.0))
         except (TypeError, ValueError):
             continue

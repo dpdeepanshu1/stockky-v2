@@ -297,4 +297,16 @@ reset(); o = asyncio.run(se.run_short_cycle(DB(gate())))
 check("E222 short cycle, switches on: not skipped (goes on to scan)", "skipped" not in o)
 reset("shadow"); o = asyncio.run(se.run_short_cycle(DB(gate(auto_pilot_enabled=False))))
 check("E222 shadow mode is not affected (it places nothing)", "skipped" not in o)
+# E332 the SELL is live but saving the position row fails: bounded retry first, then the loud alert (capital + claim stay held)
+config.ENTRY_POSITION_SAVE_RETRIES = 3; config.ENTRY_POSITION_SAVE_BACKOFF_S = 0.0
+class FlakyDB(DB):
+    def __init__(self, g, fails): super().__init__(g); self.fails, self.rollbacks = fails, 0
+    def commit(self):
+        if self.fails > 0 and self.added and isinstance(self.added[-1], models.ScalpPosition):
+            self.fails -= 1; raise RuntimeError("oracle gone")
+    def rollback(self): self.rollbacks += 1
+reset(); db = FlakyDB(gate(), 1); r = sl.attempt_short_live(db, cand)
+check("E332 one failed save is retried: the position is returned, no alert, capital + lock kept", r is not None and r.status == "OPEN" and db.rollbacks == 1 and not calls["lock_rel"] and not any("NOT recorded" in n for n in NOTES))
+reset(); db = FlakyDB(gate(), 99); r = sl.attempt_short_live(db, cand)
+check("E332 every save fails: one SELL only, nothing returned, operator alerted, capital + lock NOT released", r is None and len(calls["orders"]) == 1 and any("NOT recorded" in n for n in NOTES) and not calls["lock_rel"] and calls["released"] == [19900.0] and sum(isinstance(o, models.ScalpPosition) for o in db.added) == 3)
 print("ALL", ok, "OK")

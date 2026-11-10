@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "shared" / "market_structure"
 PKG = "stockky_ms"
 # service dirs (relative to services/) that receive a copy at <service>/stockky_ms
-TARGETS = ("analysis-intelligence-service", "api-gateway", "position-stocks-service", "decision-prediction-service", "real-trade-service")
+TARGETS = ("analysis-intelligence-service", "api-gateway", "position-stocks-service", "decision-prediction-service", "real-trade-service", "fno-options-service")   # round 317: F&O was missing, so its copy drifted unnoticed (it still had the pooled walk-forward edge of E257)
 MANIFEST = "MANIFEST.sha256"
 
 
@@ -38,13 +38,15 @@ def _manifest(files: dict) -> str:
     return "".join(f"{_digest(p)}  {n}\n" for n, p in files.items())
 
 
-def sync(write: bool) -> list:
+def sync(write: bool, only: tuple = ()) -> list:
     problems = []
     src = _files(SRC)
     if not src:
         return [f"source package empty: {SRC}"]
     want = _manifest(src)
     for svc in TARGETS:
+        if only and svc not in only:
+            continue
         dst = ROOT / "services" / svc / PKG
         if not (ROOT / "services" / svc).is_dir():
             problems.append(f"{svc}: service dir missing")
@@ -72,12 +74,13 @@ def sync(write: bool) -> list:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true", help="do not write; exit 1 when any copy differs")
+    ap.add_argument("--only", action="append", default=[], metavar="SERVICE", help="limit to this service (repeatable), e.g. --only fno-options-service")
     a = ap.parse_args()
-    problems = sync(write=not a.check)
+    problems = sync(write=not a.check, only=tuple(a.only))
     for p in problems:
         print("DRIFT:", p)
     if a.check and not problems:
-        print(f"ok: {len(TARGETS)} copies of {PKG} match shared/market_structure")
+        print(f"ok: {len(a.only) or len(TARGETS)} copies of {PKG} match shared/market_structure")
     return 1 if problems else 0
 
 

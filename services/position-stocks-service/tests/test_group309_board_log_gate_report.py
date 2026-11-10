@@ -155,7 +155,7 @@ def test_evaluate_and_entry_wiring(monkeypatch):
     monkeypatch.setattr(board, "zone_view", lambda *a, **k: None)
     assert board_gate.evaluate("A", 101.0) is None
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "orders", "entry.py")).read()
-    assert src.index("depth_gate.reject_reason(") < src.index("board_gate.check(") < src.index("ledger.reserve_capital(db, adaptive_stop_pct=levels.stop_pct)")
+    assert src.index("depth_gate.reject_reason(") < src.index("board_gate.check(") < src.index("= _hold_reserve(db, adaptive_stop_pct=levels.stop_pct)")
 
 
 def _row(kind, day, sym, side="bull", rank=1, conv=80, note=None, zone="fresh", f30=None, ts=0, ver="b1"):

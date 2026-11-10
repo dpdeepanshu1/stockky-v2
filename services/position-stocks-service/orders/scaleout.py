@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -141,7 +142,7 @@ def _num(v: Any) -> Optional[float]:
         x = float(v)
     except (TypeError, ValueError):
         return None
-    return x if x == x and x > 0 else None
+    return x if math.isfinite(x) and x > 0 else None
 
 
 def _status(row: Optional[dict]) -> str:
@@ -381,7 +382,7 @@ def _run(db, pos, ltp: float, decision: dict, broker, sleep, clock, res: Dict[st
     sec = str(pos.dhan_security_id)
     sup = str(pos.dhan_super_order_id)
     res.update(qty_kept=qty)
-    if half < 1 or keep < 1 or ltp <= 0:
+    if half < 1 or keep < 1 or not (math.isfinite(ltp) and ltp > 0):
         res.update(stage="size", reason="nothing to split", fallback="FULL")
         return res
 
@@ -625,8 +626,10 @@ def _book_stop_fill(db, pos, row: dict) -> None:
     pos.error_message = None if confirmed else "STOP_HIT booked at the stop price: Dhan showed no average traded price (check the trade book)"
     pos.closed_at = datetime.now(timezone.utc)
     db.commit()
-    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=sell_pnl)
-    shared_symbol_lock.release(db, pos.symbol)
+    try:
+        ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=sell_pnl)
+    finally:  # E340: the lock goes back even if the capital release raised (the row is already closed and committed)
+        shared_symbol_lock.release(db, pos.symbol)
     _stats["stop_filled"] += 1
     logger.info("scaleout: %s (id=%s) kept half STOP_HIT @ %.2f, total P&L %.2f", pos.symbol, pos.id, exit_price, total)
     _alert(f"🔴 <b>STOP_HIT</b> - {pos.symbol} x{pos.quantity} (kept half)\nEntry ₹{pos.entry_price:.2f} → exit ₹{exit_price:.2f}\nTotal P&L with the half-sell ₹{total:,.2f} ({pct:.2f}%)")

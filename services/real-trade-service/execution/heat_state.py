@@ -47,6 +47,25 @@ def gap_pct_for(symbol) -> float:
     return max(float(getattr(config, "HEAT_GAP_MIN_PCT", 0.5)), float(v)) if v is not None else default
 
 
+def _heat_strict(positions) -> Tuple[float, float]:
+    """The maths of positions_heat, but a failure RAISES (E343: publish() must be able to tell "nothing at risk" from "could not read")."""
+    risk = gap = 0.0
+    carried_syms = []
+    for p in positions:
+        c = _carried(p)
+        if c:
+            carried_syms.append(getattr(p, "symbol", None))
+        r, g = ph.position_heat(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", c, gap_pct_for(getattr(p, "symbol", None)))
+        risk += r
+        gap += g
+    if carried_syms and bool(getattr(config, "HEAT_GAP_P95_ENABLED", True)):
+        try:
+            gap_cache.warm([x for x in carried_syms if x])
+        except Exception as e:  # noqa: BLE001 - the background fetch is an extra, never a reason to lose the figure
+            logger.warning("heat_state: gap warm-up failed (flat default used): %s", e)
+    return risk, gap
+
+
 def positions_heat(positions) -> Tuple[float, float]:
     """(open risk, gap allowance) in rupees for an iterable of TradePosition-like rows. Never raises. Carried symbols without a cached p95 are queued for a
     background fetch (the flat default is used until it lands)."""
@@ -86,6 +105,21 @@ def peer_heat(db, mode: str) -> Tuple[float, float]:
         return 0.0, 0.0
     risk, base, _age = shared_heat.get_peer(db, float(getattr(config, "HEAT_PEER_MAX_AGE_S", 900.0)))
     return risk, base
+
+
+def _sector_strict(positions) -> dict:
+    """The maths of sector_risk, but a failure RAISES (E343, for publish())."""
+    out: dict = {}
+    from risk_engine import sector_map
+    for p in positions:
+        sec = sector_map.sector_of(getattr(p, "symbol", ""))
+        if sec == "Other":
+            continue
+        r = ph.stop_risk(p.avg_entry_price, p.current_stop, p.qty_open, "LONG")
+        if r > 0:
+            k = ph.sector_key(sec, "LONG")
+            out[k] = out.get(k, 0.0) + r
+    return out
 
 
 def sector_risk(positions) -> dict:
@@ -131,9 +165,23 @@ def publish(db, capital_base: float) -> None:
     try:
         if not bool(getattr(config, "PORTFOLIO_HEAT_SHARED_ENABLED", True)):
             return
-        risk, gap = own_heat(db, "REAL")
+        # E343: own_heat() / own_sector_risk() answer 0 when the positions cannot be read, which is right for this service's own check (the old single-service cap)
+        # but WRONG to publish: the peer would take a fresh row of zeros for "nothing at risk" and undercount the shared heat until the next publish.
+        # When the read fails nothing is published; the peer keeps the last figure until HEAT_PEER_MAX_AGE_S, then ignores it (the old cap).
+        try:
+            from portfolio.portfolio import held_exposure_positions
+            positions = held_exposure_positions(db, "REAL")
+            risk, gap = _heat_strict(positions)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("heat_state: publish skipped, own open risk could not be read: %s", e)
+            return
         shared_heat.publish_own(db, risk, gap, float(capital_base or 0.0))
         if bool(getattr(config, "SECTOR_HEAT_ENABLED", True)):
-            shared_heat.publish_sectors(db, own_sector_risk(db, "REAL"))   # E276 round 60
+            try:
+                sectors = _sector_strict(positions)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("heat_state: sector split not published, it could not be read: %s", e)
+                return
+            shared_heat.publish_sectors(db, sectors)   # E276 round 60
     except Exception as e:  # noqa: BLE001
         logger.warning("heat_state: publish failed (non-fatal): %s", e)

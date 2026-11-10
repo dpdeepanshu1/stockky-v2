@@ -100,42 +100,49 @@ def try_claim(db: Session, symbol: str, mode: str = "REAL") -> bool:
     False if position-stocks-service already holds it and the BUY should
     be rejected/skipped. On ANY error, logs and returns True (fail open)."""
     symbol = symbol.strip().upper()
-    try:
-        existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
-        if existing is not None:
-            if existing.held_by_service == _SERVICE_NAME:
-                return True  # already ours — not a conflict
-            logger.warning(
-                "symbol lock BLOCKED buy of %s — already held by %s (mode=%s) since %s",
-                symbol, existing.held_by_service, existing.held_by_mode, existing.claimed_at,
-            )
-            return False
-        db.add(SharedSymbolLock(symbol=symbol, held_by_service=_SERVICE_NAME, held_by_mode=mode))
-        db.commit()
-        return True
-    except IntegrityError:
-        # Race: position-stocks-service (or a concurrent request here)
-        # inserted the same symbol between our SELECT and our INSERT.
-        db.rollback()
+    # E338: when our INSERT collided and the re-read finds NO row (the other holder released in between, or the collision was not the unique
+    # key), the old code returned True although this service held nothing. It now tries the INSERT once more, then fails closed like any other gate error.
+    for _attempt in (1, 2):
         try:
             existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
-            if existing is not None and existing.held_by_service != _SERVICE_NAME:
+            if existing is not None:
+                if existing.held_by_service == _SERVICE_NAME:
+                    return True  # already ours — not a conflict
                 logger.warning(
-                    "symbol lock BLOCKED buy of %s — lost race to %s",
-                    symbol, existing.held_by_service,
+                    "symbol lock BLOCKED buy of %s — already held by %s (mode=%s) since %s",
+                    symbol, existing.held_by_service, existing.held_by_mode, existing.claimed_at,
                 )
                 return False
-        except Exception as chk_e:  # noqa: BLE001
-            logger.warning("symbol lock race re-check for %s failed (%s)", symbol, chk_e)
-            return _gate_failed("symbol lock", chk_e)
-        return True
-    except Exception as e:
-        logger.error("shared_symbol_lock.try_claim(%s) failed: %s", symbol, e, exc_info=True)
-        try:
+            db.add(SharedSymbolLock(symbol=symbol, held_by_service=_SERVICE_NAME, held_by_mode=mode))
+            db.commit()
+            return True
+        except IntegrityError:
+            # Race: position-stocks-service (or a concurrent request here)
+            # inserted the same symbol between our SELECT and our INSERT.
             db.rollback()
-        except Exception:
-            pass
-        return _gate_failed("symbol lock", e)
+            try:
+                existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
+            except Exception as chk_e:  # noqa: BLE001
+                logger.warning("symbol lock race re-check for %s failed (%s)", symbol, chk_e)
+                return _gate_failed("symbol lock", chk_e)
+            if existing is not None:
+                if existing.held_by_service != _SERVICE_NAME:
+                    logger.warning(
+                        "symbol lock BLOCKED buy of %s — lost race to %s",
+                        symbol, existing.held_by_service,
+                    )
+                    return False
+                return True   # a concurrent request of ours holds it
+            logger.warning("symbol lock insert for %s collided but no row is there now (attempt %d) - %s",
+                           symbol, _attempt, "trying once more" if _attempt == 1 else "giving up")
+        except Exception as e:
+            logger.error("shared_symbol_lock.try_claim(%s) failed: %s", symbol, e, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return _gate_failed("symbol lock", e)
+    return _gate_failed("symbol lock", RuntimeError("the lock insert kept colliding but no lock row exists"))
 
 
 def release(db: Session, symbol: str) -> None:

@@ -1,6 +1,6 @@
 // F&O backtests: list of saved results with a reliability label, and buttons for the two runs the service can do itself (replay of recorded chains, simulation).
 // The end-of-day backtest (real NSE bhavcopy) is a script: scripts/fno_eod_backtest.py.
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { fnoApi } from "../../fnoApi";
 import { BT_STRATEGIES, btLabel, btVerdictView, inr } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
@@ -17,7 +17,11 @@ export default function FnoBacktests() {
     try { await fnoApi.runBacktest(kind, und, {}, undefined, strategy); b.reload(); } catch (e: any) { setErr(String(e?.message || e)); }
   };
   const toggle = (u: string) => setUnd((cur) => (cur.includes(u) ? cur.filter((x) => x !== u) : [...cur, u]));
-  const view = async (name: string) => { try { setOpen({ name, doc: await fnoApi.backtest(name) }); } catch (e: any) { setErr(String(e?.message || e)); } };
+  const viewSeq = useRef(0);   // Round 340 (E342): the result of an earlier click must not replace the one clicked later (or reopen a card that was closed)
+  const view = async (name: string) => {
+    const mine = ++viewSeq.current;
+    try { const doc = await fnoApi.backtest(name); if (mine === viewSeq.current) setOpen({ name, doc }); } catch (e: any) { if (mine === viewSeq.current) setErr(String(e?.message || e)); }
+  };
   const d = b.data;
   return (
     <div className="space-y-3">
@@ -50,7 +54,7 @@ export default function FnoBacktests() {
         </ul>
       </Card>
       {open && (
-        <Card title={open.name} right={<Btn small onClick={() => setOpen(null)}>Close</Btn>}>
+        <Card title={open.name} right={<Btn small onClick={() => { viewSeq.current += 1; setOpen(null); }}>Close</Btn>}>
           <p className="mb-1 text-mist">{btLabel(open.doc.kind).text}</p>
           {(() => {
             const v = btVerdictView(open.doc);

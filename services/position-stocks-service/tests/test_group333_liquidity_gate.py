@@ -94,5 +94,5 @@ def test_reject_reason_never_raises(monkeypatch):
 def test_entry_wiring_runs_before_capital_is_reserved():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "orders", "entry.py"), encoding="utf-8").read()
     assert "liquidity_gate.reject_reason(candidate.symbol, candidate.current_ltp)" in src
-    assert src.index("liquidity_gate.reject_reason(") < src.index("ledger.reserve_capital(")
+    assert src.index("liquidity_gate.reject_reason(") < src.index("position_value = _hold_reserve(")
     assert config.ENTRY_MIN_AVG_TURNOVER_CR == 3.0 and config.ENTRY_MIN_RVOL == 0.35

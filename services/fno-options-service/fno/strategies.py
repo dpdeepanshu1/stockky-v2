@@ -175,6 +175,8 @@ def core_bias(x: Ctx) -> Dict[str, Any]:
     """The original signal (fno/signals.py), unchanged: raw bars, summed score against p.min_score. Always returns a dict (direction FLAT when nothing fires); the engine also uses it
     to flip a held position and to show the bias on the Signals page, whether or not CORE entries are switched on."""
     i, iwhy = signals.intraday_score(x.intraday_raw) if x.intraday_raw else (0.0, [])
+    if x.intraday_raw and x.stale == "intraday bars are stale":    # round 314: a feed that stopped (or yesterday's bars) must not vote: the named strategies already skip it, CORE scored it as if fresh
+        i, iwhy = 0.0, ["intraday bars are stale: intraday part ignored"]
     d, dwhy, atr = x.daily_parts
     c, cwhy = x.chain_parts
     return signals.combine_bias(d, dwhy, atr, i, iwhy, c, cwhy, x.p)

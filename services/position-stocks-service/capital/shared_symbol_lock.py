@@ -138,38 +138,48 @@ def _ensure_table(db: Session) -> None:
 
 
 def _claim_once(db: Session, symbol: str) -> bool:
-    """One claim attempt. Returns True / False for a decision; a database error other than the unique-constraint race is RAISED to try_claim."""
-    try:
-        existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
-        if existing is not None:
-            if existing.held_by_service == _SERVICE_NAME:
-                return True  # already ours (e.g. re-entry attempt) — not a conflict
-            logger.warning(
-                "position-stocks: symbol lock BLOCKED buy of %s — already held by %s (mode=%s) since %s",
-                symbol, existing.held_by_service, existing.held_by_mode, existing.claimed_at,
-            )
-            return False
-        db.add(SharedSymbolLock(symbol=symbol, held_by_service=_SERVICE_NAME, held_by_mode=None))
-        db.commit()
-        return True
-    except IntegrityError:
-        # Race: real-trade-service (or a concurrent request here) inserted
-        # the same symbol between our SELECT and our INSERT. The unique
-        # constraint on `symbol` caught it — treat exactly like the
-        # "existing row found" branch above.
-        db.rollback()
+    """One claim attempt. Returns True / False for a decision; a database error other than the unique-constraint race is RAISED to try_claim.
+
+    E338: when our INSERT collided (IntegrityError) and the re-read finds NO row (the other holder released in between, or the collision was
+    not the unique key at all), the old code returned True although this service held nothing: the BUY went out with no lock, so
+    real-trade-service could buy the same symbol (the AEGISVOPAK double position). It now tries the INSERT once more; if that collides
+    again with still no row to show for it, the gate fails closed like any other gate error."""
+    for _attempt in (1, 2):
         try:
             existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
-            if existing is not None and existing.held_by_service != _SERVICE_NAME:
+            if existing is not None:
+                if existing.held_by_service == _SERVICE_NAME:
+                    return True  # already ours (e.g. re-entry attempt) — not a conflict
                 logger.warning(
-                    "position-stocks: symbol lock BLOCKED buy of %s — lost race to %s",
-                    symbol, existing.held_by_service,
+                    "position-stocks: symbol lock BLOCKED buy of %s — already held by %s (mode=%s) since %s",
+                    symbol, existing.held_by_service, existing.held_by_mode, existing.claimed_at,
                 )
                 return False
-        except Exception as chk_e:  # noqa: BLE001
-            logger.warning("position-stocks: symbol lock race re-check for %s failed (%s)", symbol, chk_e)
-            return _gate_failed("symbol lock", chk_e)
-        return True
+            db.add(SharedSymbolLock(symbol=symbol, held_by_service=_SERVICE_NAME, held_by_mode=None))
+            db.commit()
+            return True
+        except IntegrityError:
+            # Race: real-trade-service (or a concurrent request here) inserted
+            # the same symbol between our SELECT and our INSERT. The unique
+            # constraint on `symbol` caught it — treat exactly like the
+            # "existing row found" branch above.
+            db.rollback()
+            try:
+                existing = db.query(SharedSymbolLock).filter_by(symbol=symbol).first()
+            except Exception as chk_e:  # noqa: BLE001
+                logger.warning("position-stocks: symbol lock race re-check for %s failed (%s)", symbol, chk_e)
+                return _gate_failed("symbol lock", chk_e)
+            if existing is not None:
+                if existing.held_by_service != _SERVICE_NAME:
+                    logger.warning(
+                        "position-stocks: symbol lock BLOCKED buy of %s — lost race to %s",
+                        symbol, existing.held_by_service,
+                    )
+                    return False
+                return True   # a concurrent request of ours holds it
+            logger.warning("position-stocks: symbol lock insert for %s collided but no row is there now (attempt %d) - %s",
+                           symbol, _attempt, "trying once more" if _attempt == 1 else "giving up")
+    return _gate_failed("symbol lock", RuntimeError("the lock insert kept colliding but no lock row exists"))
 
 
 def try_claim(db: Session, symbol: str) -> bool:

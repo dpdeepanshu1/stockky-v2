@@ -151,7 +151,8 @@ def test_chain_only_vetoes():
 
 def test_core_through_the_strategy_layer_equals_the_original_signal():
     pv = FakeProvider()
-    x = S.build_ctx("NIFTY", pv.daily("NIFTY"), pv.intraday("NIFTY"), {"pcr_oi": 1.3, "spot": 24500.0}, datetime(2026, 11, 10, 10, 30, tzinfo=IST), Params())
+    fresh_now = datetime.fromtimestamp(pv.intraday("NIFTY")[-1]["t"] + 300, IST)         # round 314: CORE now ignores stale bars, so the fixture's clock sits right after its last bar
+    x = S.build_ctx("NIFTY", pv.daily("NIFTY"), pv.intraday("NIFTY"), {"pcr_oi": 1.3, "spot": 24500.0}, fresh_now, Params())
     assert S.core_bias(x) == signals.index_bias(pv.daily("NIFTY"), pv.intraday("NIFTY"), {"pcr_oi": 1.3, "spot": 24500.0}, Params())
 
 

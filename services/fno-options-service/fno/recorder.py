@@ -3,6 +3,7 @@ recorded premiums. Layout: <DATA_DIR>/snapshots/<YYYY-MM-DD>/<UNDERLYING>.jsonl 
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from typing import Any, Dict, Iterator, List, Optional
@@ -24,7 +25,7 @@ def record(root: str, chain: Chain, ts: float, extra: Optional[Dict[str, Any]] =
     try:
         path = snapshot_path(root, day_of(ts), chain.underlying)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        line = json.dumps({"ts": ts, "chain": chain.to_json(), **(extra or {})}, separators=(",", ":"))
+        line = json.dumps({**(extra or {}), "ts": ts, "chain": chain.to_json()}, separators=(",", ":"))     # round 318: ts and chain last, so an extra key can never overwrite them
         with _lock:
             prefix = ""
             try:
@@ -42,9 +43,16 @@ def record(root: str, chain: Chain, ts: float, extra: Optional[Dict[str, Any]] =
         return None
 
 
+def _is_snapshot(r: Dict[str, Any]) -> bool:
+    ts = r.get("ts")
+    return isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts) and isinstance(r.get("chain"), dict)
+
+
 def read_day(root: str, day: str, underlying: str) -> Iterator[Dict[str, Any]]:
     """Yield the snapshots of one day in time order; a corrupt line (bad JSON, bad bytes, or a line that is not a snapshot object) is skipped, not raised.
-    A file that cannot be opened yields nothing (round 302: it raised and stopped the whole replay)."""
+    A file that cannot be opened yields nothing (round 302: it raised and stopped the whole replay).
+    Round 318: "a snapshot object" now means what the replay needs: a finite numeric `ts` and a `chain` object. Before, any JSON object passed, and one line without a `ts`, with a text or NaN `ts`,
+    or with a `chain` that was not an object crashed the whole replay (KeyError / TypeError / ValueError) or made every tick of that day fail."""
     path = snapshot_path(root, day, underlying)
     rows: List[Dict[str, Any]] = []
     try:
@@ -54,11 +62,11 @@ def read_day(root: str, day: str, underlying: str) -> Iterator[Dict[str, Any]]:
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(r, dict):
+                if isinstance(r, dict) and _is_snapshot(r):
                     rows.append(r)
     except OSError:
         return
-    rows.sort(key=lambda r: r.get("ts", 0) if isinstance(r.get("ts", 0), (int, float)) else 0)
+    rows.sort(key=lambda r: r["ts"])
     yield from rows
 
 

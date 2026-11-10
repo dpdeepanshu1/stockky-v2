@@ -260,7 +260,7 @@ def plan_short(db: Session, cand: Any, quality: Any, board_row: Optional[dict], 
     if qty is None:
         _refuse(db, cand, "SHORT_ONE_SHARE_TOO_BIG", f"one share at {live:.2f} exceeds the budget {value:.2f}")
         return None
-    for cap_fn in (lambda: depth_gate.max_qty_from_book(sym, live), lambda: depth_gate.max_qty_from_depth20(sym, qty)):
+    for cap_fn in (lambda: depth_gate.max_qty_from_book(sym, live), lambda: depth_gate.max_qty_from_depth20(sym, qty, "SHORT")):   # E337: a short SELL walks into the BIDS
         cap = cap_fn()
         if cap is not None and qty > cap:
             qty = cap

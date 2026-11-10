@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading as _threading
 import time as _time
@@ -328,8 +329,8 @@ def _compute_atr_from_candles(candles: list) -> Optional[float]:
             h  = float(candles[i].get("high")  or 0)
             l  = float(candles[i].get("low")   or 0)
             pc = float(candles[i - 1].get("close") or 0)
-            if h <= 0 or l <= 0 or pc <= 0:
-                continue
+            if not (math.isfinite(h) and math.isfinite(l) and math.isfinite(pc)) or h <= 0 or l <= 0 or pc <= 0 or h < l:
+                continue                     # E323: a NaN / inf / inverted candle is skipped (a NaN high made the whole ATR NaN, and `if atr_val and atr_val > 0` then skipped the too-volatile veto)
             trs.append(max(h - l, abs(h - pc), abs(l - pc)))
         if len(trs) < ATR_WINDOW:
             return None
@@ -537,6 +538,17 @@ def _schedule_atr_refresh(client: Optional[httpx.AsyncClient], symbol: str) -> b
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
     return True
+
+
+def _price_ok(v) -> bool:
+    """E325: True only for a finite price above zero. The old guards (`not p or float(p) <= 0`, `float(p) > 0`) let a NaN
+    quote through on the /quote path (`not nan` and `nan <= 0` are both False), and inf through everywhere. A NaN price makes
+    every `ltp <= stop` test False, so a held stock's stop never fires - and nothing alerts. Unusable = no price."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(x) and x > 0
 
 
 class Tick:
@@ -799,7 +811,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             lq = r_lq.json()
             ltp = lq.get("ltp")
             updated_at_str = lq.get("updated_at")
-            if ltp and float(ltp) > 0 and updated_at_str:
+            if _price_ok(ltp) and updated_at_str:
                 from dateutil import parser as _dp
                 updated_at = _dp.parse(updated_at_str)
                 if updated_at.tzinfo is None:
@@ -876,7 +888,7 @@ async def get_quote(client: httpx.AsyncClient, symbol: str, *, for_display: bool
             return None
         q = r.json()
         price = q.get("price") or q.get("cmp")
-        if not price or float(price) <= 0:
+        if not _price_ok(price):
             # group256: market-data answers source="cooldown_unpriced" while AngelOne's quote cooldown runs and it has no
             # recent cached price - that says nothing about the symbol, so it must not count towards the dead-symbol pause.
             if str(q.get("source") or "") != "cooldown_unpriced":
@@ -1075,7 +1087,7 @@ async def get_display_prices(symbols: list[str]) -> dict[str, float]:
                         got = await _bulk_ticks(bulk_client, misses2, max_age_s=_age, stats=bstats, schedule_atr=False)
                     for sym in misses2:
                         t = got.get(_clean_sym(sym))
-                        if t is not None and t.price and t.price > 0:
+                        if t is not None and _price_ok(t.price):
                             priced[sym] = float(t.price)
                     bulk_answered = not (bstats.get("failed") and not got)
                     logger.info("get_display_prices: bulk priced %d/%d symbol(s)", len(priced), len(misses2))
@@ -1136,7 +1148,7 @@ def _tick_from_bulk_item(item, *, now: Optional[datetime] = None, max_age_s: Opt
         price = float(item.get("price") or item.get("cmp") or 0)
     except (TypeError, ValueError):
         return None
-    if price <= 0 or price != price:
+    if not _price_ok(price):
         return None
     ts = _parse_bulk_ts(item.get("fetched_at"))
     if ts is None:
@@ -1179,7 +1191,7 @@ def _bulk_reject_reason(item, *, now: Optional[datetime] = None, max_age_s: Opti
             price = float(item.get("price") or item.get("cmp") or 0)
         except (TypeError, ValueError):
             return "no_price"
-        if price <= 0 or price != price:
+        if not _price_ok(price):
             return "no_price"
         ts = _parse_bulk_ts(item.get("fetched_at"))
         if ts is None:
@@ -1626,7 +1638,7 @@ async def _get_preview(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]
                 or q.get("prev_close") or q.get("previous_close")
                 or q.get("close") or q.get("last_close")
             )
-            if px and float(px) > 0:
+            if _price_ok(px):
                 return Tick(
                     symbol=symbol,
                     price=float(px),
@@ -1658,7 +1670,7 @@ async def _get_preview_last_close(client: httpx.AsyncClient, symbol: str) -> Opt
             return None
         q = r.json()
         px = q.get("price") or q.get("close") or q.get("previous_close")
-        if px and float(px) > 0:
+        if _price_ok(px):
             return Tick(symbol=symbol, price=float(px), as_of=datetime.now(timezone.utc),
                         atr=_cached_atr(symbol), source="preview:last_close")
     except Exception as e:
@@ -1684,7 +1696,7 @@ async def get_preview_quotes(symbols: list[str]) -> dict[str, Tick]:
         logger.warning("get_preview_quotes: bulk pass failed (%s: %s) - /last-close path for all", type(e).__name__, e)
     for sym in uniq:
         t = got.get(_clean_sym(sym))
-        if t is not None and t.price and t.price > 0:
+        if t is not None and _price_ok(t.price):
             out[sym] = Tick(symbol=sym, price=float(t.price), as_of=datetime.now(timezone.utc),
                             atr=_cached_atr(sym), source="preview:last_close")
 

@@ -12,7 +12,7 @@ CONTRACT = among the strikes around ATM on the chosen side, the one whose |delta
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import analytics, bs
@@ -106,6 +106,10 @@ def daily_score(daily: Sequence[Any]) -> Tuple[float, List[str], Optional[float]
 def intraday_score(intraday: Sequence[Any]) -> Tuple[float, List[str]]:
     """(score in [-25, 25], reasons) from today's intraday index candles (5 or 15 minute)."""
     bars = to_ms_bars(intraday)
+    if bars:        # round 315: today's session only (the latest bar's IST date): a feed that also carries an earlier day must not blend two days into one VWAP / opening range
+        ist = timezone(timedelta(hours=5, minutes=30))
+        last_day = datetime.fromtimestamp(bars[-1][0], ist).date()
+        bars = [b for b in bars if datetime.fromtimestamp(b[0], ist).date() == last_day]
     if len(bars) < 6:
         return 0.0, ["too few intraday candles"]
     score = 0.0

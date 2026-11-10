@@ -14,6 +14,7 @@ Runs from main.py's fast reconcile loop right after the trailing stop. Fails ope
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Optional
 
@@ -45,7 +46,8 @@ def _last_tick(symbol: str):
         if not buf:
             return None, None
         ts, ltp = buf[-1][0], buf[-1][1]
-        return (float(ltp) if ltp and ltp > 0 else None), max(0.0, time.time() - float(ts))
+        # E327: finite only - an inf tick would read as 'above target' and sell at market (NaN was already refused by `ltp > 0`)
+        return (float(ltp) if ltp and math.isfinite(float(ltp)) and ltp > 0 else None), max(0.0, time.time() - float(ts))
     except Exception:  # noqa: BLE001
         return None, None
 
@@ -54,7 +56,7 @@ def is_breached(ltp: Optional[float], stop: Optional[float], short: bool = False
     """True when `ltp` is at least STOP_WATCHDOG_MIN_BREACH_TICKS ticks under `stop` (a SHORT's stop sits ABOVE
     entry, so for a short: at least that many ticks OVER it). Pure."""
     try:
-        if not ltp or not stop or ltp <= 0 or stop <= 0:
+        if not ltp or not stop or ltp <= 0 or stop <= 0 or not math.isfinite(ltp) or not math.isfinite(stop):
             return False
         ticks = max(1, int(config.STOP_WATCHDOG_MIN_BREACH_TICKS))
         if short:

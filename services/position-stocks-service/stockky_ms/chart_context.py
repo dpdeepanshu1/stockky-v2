@@ -27,6 +27,10 @@ from typing import Any, Dict, List, Optional
 from .ms_types import C, H, L, O, V, finite, r2
 from .patterns import analyze_patterns, _sma
 from .timeframes import crosses_session, span_of, spec
+from .params import MSParams as _MSP
+from .prep import _valid
+
+_TOL = _MSP().bar_tolerance_pct
 
 SCHEMA = 1
 MAX_SHAPES = 3
@@ -134,7 +138,7 @@ def _clean(raw_bars: Any, dates: Any, keep: int = 10):
         return bars, ds
     for b, d in zip(seq_b, seq_d):
         try:
-            if len(b) >= 6 and all(finite(x) for x in b[:5]) and isinstance(d, str) and len(d) >= keep:
+            if len(b) >= 6 and all(finite(x) for x in b[:5]) and _valid(b, _TOL) and isinstance(d, str) and len(d) >= keep:   # E321: same bar rule as the engine
                 bars.append((float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]) if finite(b[5]) else 0.0))
                 ds.append(d[:keep])
         except (TypeError, ValueError):

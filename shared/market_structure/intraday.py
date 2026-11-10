@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .engine import analyze
 from .ms_types import C, H, IST_OFFSET_S, L, O, T, V, finite
 from .params import MSParams
+from .prep import _valid
 from .replay import EMA_PERIOD, ema_last, replay
 from .summary import flatten_summary
 
@@ -30,6 +31,7 @@ SESSION_MINUTES = 375
 SESSION_LEN_S = SESSION_MINUTES * 60
 COMPLETE_FIRST_MINUTE_MAX = 5
 COMPLETE_MIN_COVERAGE = 0.80
+BAR_TOLERANCE_PCT = MSParams().bar_tolerance_pct
 
 INTRADAY_PRESETS: Dict[int, Dict[str, float]] = {
     15: {"min_bars": 50, "full_bars": 100, "objective_pct": 1.5, "fib_min_leg_pct": 1.0, "gap_event_pct": 3.0},
@@ -59,7 +61,7 @@ def _clean_minutes(bars_1m: Sequence[Sequence[float]]) -> List[Bar6]:
             v = float(b[V]) if len(b) > V and finite(b[V]) and float(b[V]) >= 0 else 0.0
         except (TypeError, ValueError):
             continue
-        if o <= 0 or h <= 0 or l <= 0 or c <= 0 or h < l:
+        if not _valid((t, o, h, l, c, v), BAR_TOLERANCE_PCT):   # E321: the engine's own rule (open / close inside [low, high], 0.05 % tolerance). A bad 1-minute print used to be merged into the N-minute bar, where it looked consistent and prep could no longer drop it
             continue
         m = float(int(t // 60) * 60)
         out[m] = (m, o, h, l, c, v)                       # one bar per minute; the later row wins

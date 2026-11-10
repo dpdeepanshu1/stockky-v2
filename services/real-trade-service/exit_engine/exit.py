@@ -42,6 +42,7 @@ All REAL-mode Dhan placement, IP guard, audit trail unchanged from original.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -82,7 +83,7 @@ try:
     from return_sanity import clamp_for_atr as _clamp_for_atr
 except ImportError:
     def _clamp_for_atr(x):
-        return None if x is None or abs(x) > 30.0 else x
+        return None if x is None or not math.isfinite(x) or abs(x) > 30.0 else x
 
 logger = logging.getLogger("real-trade-exit")
 
@@ -110,6 +111,11 @@ BREAKEVEN_ATR_TRIGGER = float(((os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER") or "").s
 # Emergency exit: fire if unrealized loss > this × original stop distance.
 # Catches gap-down scenarios where price breaks through the stop level.
 EMERGENCY_LOSS_MULT = float(((os.getenv("EXIT_EMERGENCY_LOSS_MULT") or "").strip() or "1.5"))
+
+# E330: when a position has NO usable stop distance (initial_stop_distance missing/zero/NaN and no stop to derive one from), the
+# emergency gap-down check used to be silently skipped. 0 (default) = keep that behaviour but log it; > 0 = treat a loss of this many
+# percent of the entry price as the emergency threshold for such positions.
+EMERGENCY_NO_RISK_LOSS_PCT = float(((os.getenv("EXIT_EMERGENCY_NO_RISK_LOSS_PCT") or "").strip() or "0"))
 
 # Time-stop: max days to hold a non-performing position.
 MAX_HOLD_DAYS = int(((os.getenv("EXIT_MAX_HOLD_DAYS") or "").strip() or "10"))
@@ -391,6 +397,24 @@ def _is_manual_sell_order(order) -> bool:
         return False
 
 
+def _broker_filled_qty(db: Session, dhan_order_id) -> Optional[int]:
+    """E348: shares Dhan's order book says traded for one order, or None when that cannot be read (never raises)."""
+    try:
+        for r in dhan_client.get_order_list(db):
+            if isinstance(r, dict) and str(r.get("orderId") or r.get("order_id") or "") == str(dhan_order_id):
+                v = r.get("filledQty", r.get("filled_qty", r.get("tradedQuantity", r.get("traded_quantity"))))
+                if v is None:
+                    tot, rem = r.get("quantity", r.get("qty")), r.get("remainingQuantity", r.get("remaining_quantity"))
+                    if tot is None or rem is None:
+                        return None
+                    v = int(float(tot)) - int(float(rem))
+                v = float(v)
+                return int(v) if v == v and abs(v) != float("inf") and v >= 0 else None
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def expire_stale_exit_orders(db: Session, mode: str) -> int:
     """2026-09-18 audit fix #1 — the exit-side counterpart of entry_engine's
     expire_stale_orders(). Only ever finds anything for mode=="REAL": DEMO
@@ -451,6 +475,16 @@ async def expire_stale_exit_orders(db: Session, mode: str) -> int:
                     "The stop-loss check for this position stays paused until then."
                 )
                 continue
+
+        # E348: shares can trade between the last reconcile and this cancel. Marking the order EXPIRED now would take it out of
+        # reconcile's PLACED/PARTIAL query for good, so that fill would never be booked and the resend below would use a stale
+        # remaining quantity. When the broker shows more traded than we have booked, leave the order for reconcile (it books the
+        # fill, then closes the order as CANCELLED). An unreadable order book keeps the old behaviour.
+        _traded = _broker_filled_qty(db, order.dhan_order_id) if order.dhan_order_id else None
+        if _traded is not None and _traded > (order.filled_qty_so_far or 0):
+            logger.warning("expire_stale_exit_orders: %s order %s traded %d at Dhan but only %d booked - leaving it for reconcile to book",
+                           order.symbol, order.dhan_order_id, _traded, order.filled_qty_so_far or 0)
+            continue
 
         remaining_qty = max(0, order.qty - (order.filled_qty_so_far or 0))
         was_partial   = order.status == "PARTIAL"
@@ -686,6 +720,12 @@ def _send_real_sell(
     Now short-circuits before ever calling Dhan again for a position that
     already hit the cutoff earlier this IST day (see the snapshot check
     right below the same-day/product_type decision above)."""
+    _unrec = _UNRECORDED_SELLS.get(position.id)
+    if _unrec is not None:
+        if time.monotonic() - _unrec < _UNRECORDED_SELL_HOLD_S:
+            logger.warning("Skipping SELL for %s (%s) - an earlier SELL for it is live at Dhan but could not be recorded (E329); exits held", position.symbol, reason)
+            return False
+        _UNRECORDED_SELLS.pop(position.id, None)
     _cutoff_key = f"intraday_cutoff_hit_{position.id}_{ist_today_str()}"
     if load_snapshot(db, _cutoff_key):
         logger.info(
@@ -843,63 +883,100 @@ def _send_real_sell(
             raise RuntimeError(
                 f"Dhan accepted the SELL but returned no order id: {result}"
             )
-        # Unconditional — tracked for visibility into the shared cross-service
-        # budget's real usage, but never gates an exit ("exits always
-        # allowed" convention, same as the is_armed=True passed above).
-        shared_order_budget.record_order_unconditional(db)
+        # Unconditional — tracked for visibility into the shared cross-service budget's real usage, but never gates an exit
+        # ("exits always allowed" convention, same as the is_armed=True passed above). E329: the SELL is already live, so a
+        # failure of this counter must not be read as a failed SELL.
+        try:
+            shared_order_budget.record_order_unconditional(db)
+        except Exception as _bud_err:  # noqa: BLE001
+            logger.warning("exit SELL %s: order-budget counter update failed (%s) - continuing", position.symbol, _bud_err)
 
-        order = models.TradeOrder(
-            mode="REAL", symbol=position.symbol, side="SELL", order_type=effective_order_type,
-            qty=qty, status="PLACED", dhan_order_id=dhan_order_id,
-            limit_price=(effective_price if effective_order_type == "LIMIT" else None),
-            execution_source=execution_source,
-            confirmed_by=confirmed_by,
-            confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
-            exit_reason=reason,
-            # 2026-09-18 audit fix #1: only a LIMIT sell can sit unfilled at
-            # Dhan for a meaningful stretch (MARKET exits fill in under a
-            # second) — give it its own short cancel-and-reassess window,
-            # mirroring entry_engine's ENTRY_VALIDITY_MINUTES pattern. See
-            # config.EXIT_LIMIT_VALIDITY_MINUTES and this module's
-            # expire_stale_exit_orders() for the matching expiry pass. NULL
-            # (never expires here) for every MARKET sell, exactly like a
-            # BUY's valid_until is NULL for order types that don't use it.
-            valid_until=(
-                datetime.now(timezone.utc) + timedelta(minutes=config.EXIT_LIMIT_VALIDITY_MINUTES)
-                if effective_order_type == "LIMIT" else None
-            ),
-        )
-        db.add(order)
-        db.flush()
-        db.add(models.TradeOrderEvent(
-            order_id=order.id, event_type="PLACED",
-            detail=(
-                f"{reason}: {effective_order_type} SELL {qty}"
-                f"{f' @ {effective_price}' if effective_order_type == 'LIMIT' else ''}"
-                f" sent to Dhan ({sell_product_type})"
-            ),
-        ))
-        record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
-        # 2026-09-07: a successful placement means any prior repeated-
-        # rejection streak for this position is over — clear it so a later
-        # rejection (if the position re-enters trouble another way) starts
-        # counting fresh rather than inheriting today's count.
-        save_snapshot(db, f"exit_reject_streak_{position.id}", {"count": 0})
+        # E329: the SELL is LIVE at Dhan from here. If recording it fails (DB hiccup / lock), the generic handler below used to
+        # treat that as a broker rejection: no TradeOrder row, position still OPEN, so after the retry cooldown a SECOND
+        # SELL went out (an INTRADAY position would open a short). Record in its own guarded step: on failure roll back and retry
+        # once; if it still fails, hold this position's exits for a while (in-process) and alert - and still return True,
+        # because the order WAS sent.
+        def _record_sent_sell():
+            order = models.TradeOrder(
+                mode="REAL", symbol=position.symbol, side="SELL", order_type=effective_order_type,
+                qty=qty, status="PLACED", dhan_order_id=dhan_order_id,
+                limit_price=(effective_price if effective_order_type == "LIMIT" else None),
+                execution_source=execution_source,
+                confirmed_by=confirmed_by,
+                confirmed_at=datetime.now(timezone.utc) if confirmed_by else None,
+                exit_reason=reason,
+                # 2026-09-18 audit fix #1: only a LIMIT sell can sit unfilled at
+                # Dhan for a meaningful stretch (MARKET exits fill in under a
+                # second) — give it its own short cancel-and-reassess window,
+                # mirroring entry_engine's ENTRY_VALIDITY_MINUTES pattern. See
+                # config.EXIT_LIMIT_VALIDITY_MINUTES and this module's
+                # expire_stale_exit_orders() for the matching expiry pass. NULL
+                # (never expires here) for every MARKET sell, exactly like a
+                # BUY's valid_until is NULL for order types that don't use it.
+                valid_until=(
+                    datetime.now(timezone.utc) + timedelta(minutes=config.EXIT_LIMIT_VALIDITY_MINUTES)
+                    if effective_order_type == "LIMIT" else None
+                ),
+            )
+            db.add(order)
+            db.flush()
+            db.add(models.TradeOrderEvent(
+                order_id=order.id, event_type="PLACED",
+                detail=(
+                    f"{reason}: {effective_order_type} SELL {qty}"
+                    f"{f' @ {effective_price}' if effective_order_type == 'LIMIT' else ''}"
+                    f" sent to Dhan ({sell_product_type})"
+                ),
+            ))
+            record_real_exit_sent(db, position, dhan_order_id, qty, reason, full=full)
+            # 2026-09-07: a successful placement means any prior repeated-
+            # rejection streak for this position is over — clear it so a later
+            # rejection (if the position re-enters trouble another way) starts
+            # counting fresh rather than inheriting today's count.
+            save_snapshot(db, f"exit_reject_streak_{position.id}", {"count": 0})
+
+        _pos_id, _pos_sym = position.id, position.symbol   # read before any rollback expires the instance (a dead DB would make this raise)
+        try:
+            _record_sent_sell()
+        except Exception as _rec_err:  # noqa: BLE001
+            logger.error("exit SELL %s order %s sent but recording failed (%s) - retrying once", _pos_sym, dhan_order_id, _rec_err)
+            try:
+                db.rollback()
+                _record_sent_sell()
+            except Exception as _rec_err2:  # noqa: BLE001
+                try:
+                    db.rollback()
+                except Exception as _rb_err:  # noqa: BLE001
+                    logger.warning("exit SELL %s: rollback after a failed record also failed (%s)", _pos_sym, _rb_err)
+                _UNRECORDED_SELLS[_pos_id] = time.monotonic()
+                logger.critical("exit SELL %s x%s: Dhan order %s is LIVE but could not be recorded (%s) - exits for this position held for %ds",
+                                _pos_sym, qty, dhan_order_id, _rec_err2, _UNRECORDED_SELL_HOLD_S)
+                try:
+                    notify_sync(f"🚨 *SELL sent but NOT recorded* - {_pos_sym} x{qty} ({reason})\n"
+                                f"Dhan order {dhan_order_id} is live, but saving it failed ({str(_rec_err2)[:150]}). No second SELL will be sent for "
+                                f"{_UNRECORDED_SELL_HOLD_S // 60} min. Check Dhan's order book and this position by hand: reconcile only follows orders that were recorded.")
+                except Exception:  # noqa: BLE001
+                    logger.warning("exit SELL %s: could not send the not-recorded alert", _pos_sym, exc_info=True)
+                return True
         # ENRICHMENT (2026-09-02): previously just symbol + qty + reason, no
         # price at all. Now includes entry price, current stop/target, and
         # last-mark unrealized P&L so the Telegram alert is actionable on
         # its own without needing to open the dashboard.
-        _stop_txt = f"₹{position.current_stop:.2f}" if position.current_stop is not None else "—"
-        _target_txt = f"₹{position.current_target:.2f}" if position.current_target is not None else "—"
-        _order_type_txt = (
-            f"LIMIT @ ₹{effective_price}" if effective_order_type == "LIMIT" else "MARKET"
-        )
-        notify_sync(
-            f"📤 *SELL sent* — {position.symbol} ×{qty} ({reason}, {_order_type_txt})\n"
-            f"Entry: ₹{position.avg_entry_price:.2f} | Stop: {_stop_txt} | Target: {_target_txt}\n"
-            f"Unrealized P&L: ₹{position.unrealized_pnl:,.2f}\n"
-            "Awaiting broker fill confirmation."
-        )
+        # E330: best-effort - the SELL is already live and recorded; a formatting/notify error here must not turn into a 'rejected' return.
+        try:
+            _stop_txt = f"₹{position.current_stop:.2f}" if position.current_stop is not None else "—"
+            _target_txt = f"₹{position.current_target:.2f}" if position.current_target is not None else "—"
+            _order_type_txt = (
+                f"LIMIT @ ₹{effective_price}" if effective_order_type == "LIMIT" else "MARKET"
+            )
+            notify_sync(
+                f"📤 *SELL sent* — {position.symbol} ×{qty} ({reason}, {_order_type_txt})\n"
+                f"Entry: ₹{position.avg_entry_price:.2f} | Stop: {_stop_txt} | Target: {_target_txt}\n"
+                f"Unrealized P&L: ₹{float(position.unrealized_pnl or 0.0):,.2f}\n"
+                "Awaiting broker fill confirmation."
+            )
+        except Exception as _nt_err:  # noqa: BLE001
+            logger.warning("exit SELL %s: 'SELL sent' alert failed (%s) - the order itself is recorded", position.symbol, _nt_err)
         return True
 
     except Exception as e:
@@ -1060,7 +1137,15 @@ def _send_real_sell(
                         position.symbol, broker_qty, position.qty_open,
                     )
                     position.qty_open = broker_qty
-                    db.flush()
+                    # E347: commit the cap now. A flush alone is lost if anything later in this pass rolls the session back
+                    # (another position's failed snapshot write, a per-position error), and the next cycle would hit the
+                    # same oversell rejection again. A failed commit is logged and rolled back; it never raises out of here.
+                    try:
+                        db.commit()
+                    except Exception as _cap_err:  # noqa: BLE001
+                        db.rollback()
+                        logger.warning("exit SELL %s: could not save the capped qty_open=%s (%s) - will re-sync next cycle",
+                                       position.symbol, broker_qty, _cap_err)
                     notify_sync(
                         f"🔄 *Qty synced* — {position.symbol}: "
                         f"was {qty}, broker holds {broker_qty}. Retrying next cycle."
@@ -1416,6 +1501,9 @@ def _send_real_sell(
         return False
 
 
+_UNRECORDED_SELL_HOLD_S = 900
+_UNRECORDED_SELLS: dict = {}   # position id -> monotonic time a live SELL could not be recorded (E329)
+
 # group321: a held position whose price cannot be read is not being checked against its stop at all (the loop writes a HOLD
 # note and moves on). One quiet cycle is normal; a streak is not. After EXIT_NO_PRICE_ALERT_CYCLES in a row (default 6,
 # about a minute at the 8 s exit interval) log a WARNING and send one Telegram alert per symbol per
@@ -1429,6 +1517,125 @@ def _env_int_blank_safe(name: str, default: int) -> int:
         return int(((os.getenv(name) or "").strip() or default))
     except Exception:
         return default
+
+
+def _usable_positive(v) -> Optional[float]:
+    """E330: v as a float if it is finite and > 0, else None. (`nan > 0` is False, so a NaN used to turn a guard off without a word.)"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) and x > 0 else None
+
+
+def _partial_qty(qty_open, frac) -> int:
+    """E351: shares to sell at the first target. `frac` must be finite and in (0, 1]; a NaN, zero, negative or above-1 value (say
+    EXIT_PARTIAL_FRACTION=60 meant as a percent) falls back to the global PARTIAL_EXIT_FRACTION, then 0.60. The result is at least 1
+    and never more than the shares open, so a bad fraction can neither oversell nor raise (`int(q * nan)` is a ValueError)."""
+    q = int(qty_open)
+    f = _usable_positive(frac)
+    if f is None or f > 1.0:
+        f = _usable_positive(PARTIAL_EXIT_FRACTION)
+        if f is None or f > 1.0:
+            f = 0.60
+    return max(1, min(q, int(q * f)))
+
+
+def _be_trigger_value(v) -> float:
+    """E352: the breakeven ATR trigger, finite and > 0. A NaN never fires the breakeven stop; 0 or a negative value fires it on any tiny gain.
+    A bad profile value falls back to the global BREAKEVEN_ATR_TRIGGER, then 1.0."""
+    x = _usable_positive(v)
+    if x is None:
+        x = _usable_positive(BREAKEVEN_ATR_TRIGGER)
+    return x if x is not None else 1.0
+
+
+def _usable_schedule(sched):
+    """E352: a trail schedule that _trail_atr_mult can walk (non-empty list of (max_days, multiplier>0) pairs), else None = the global default.
+    An empty list made `s[-1]` raise IndexError and a NaN multiplier made the trail candidate NaN."""
+    try:
+        out = [(d, m) for d, m in sched]
+    except Exception:  # noqa: BLE001
+        return None
+    if not out or any(_usable_positive(m) is None for _, m in out):
+        return None
+    return out
+
+
+_NO_RISK_WARNED: set = set()
+_BAD_STOP_WARNED: set = set()
+
+
+def _repair_non_finite_stop(db: Session, position, mode: str) -> bool:
+    """E339: a NaN / inf `current_stop` made `ltp <= stop` False forever: the position's stop never fired and nothing said so. Rebuild the stop
+    as entry minus the stored risk distance (initial_stop_distance, else the percent floor `_emergency_risk_distance` already uses), write a
+    STOP_REPAIRED event, and shout once per position. With no usable distance the stop stays unusable and only the alert goes out (the emergency
+    gap-down check still runs). A missing stop (None) and a finite one are left alone. Returns True when the stop was rewritten. Never raises."""
+    try:
+        cs = getattr(position, "current_stop", None)
+        if cs is None or isinstance(cs, bool) or not isinstance(cs, (int, float)) or math.isfinite(cs):
+            return False
+        entry = _usable_positive(getattr(position, "avg_entry_price", None))
+        dist, src = _emergency_risk_distance(position)
+        new_stop = round(entry - dist, 2) if (entry is not None and dist is not None and entry - dist > 0) else None
+        first = position.id not in _BAD_STOP_WARNED
+        if new_stop is None:
+            _BAD_STOP_WARNED.add(position.id)   # E349: marked warned only once the alert path runs (below), or after the commit
+            if first:
+                logger.critical("exit: %s (position %s, %s) has a non-finite stop (%r) and no usable stop distance - its stop is NOT being checked; set one by hand",
+                                position.symbol, position.id, mode, cs)
+                try:
+                    notify_sync(f"\U0001f6a8 *Broken stop on {position.symbol} ({mode})* - the stop-loss value is not a number and could not be rebuilt, so the stop is NOT being checked. Set it by hand.")
+                except Exception as _n:  # noqa: BLE001
+                    logger.warning("exit: could not send the broken-stop alert for %s (%s)", position.symbol, _n)
+            return False
+        position.current_stop = new_stop
+        db.add(models.TradePositionEvent(position_id=position.id, event_type="STOP_REPAIRED",
+                                         detail=f"Stop was {cs!r} (not a number); rebuilt as entry {entry:.2f} - risk {dist:.2f} ({src}) = {new_stop:.2f}"[:400]))
+        db.commit()
+        _BAD_STOP_WARNED.add(position.id)   # E349: only after the commit held; a failed commit rolls back, and the retry must still alert
+        logger.critical("exit: %s (position %s, %s) had a non-finite stop (%r) - rebuilt as Rs%.2f (%s)", position.symbol, position.id, mode, cs, new_stop, src)
+        if first:
+            try:
+                notify_sync(f"\u26a0\ufe0f *Stop repaired on {position.symbol} ({mode})* - the stop-loss value was not a number; rebuilt at Rs{new_stop:.2f}. Check it.")
+            except Exception as _n:  # noqa: BLE001
+                logger.warning("exit: could not send the stop-repaired alert for %s (%s)", position.symbol, _n)
+        return True
+    except Exception as e:  # noqa: BLE001 - never stop the exit loop
+        logger.error("exit: could not repair the non-finite stop of %s: %s", getattr(position, "symbol", "?"), e)
+        try:
+            db.rollback()
+        except Exception as rb:  # noqa: BLE001
+            logger.error("exit: rollback after the failed stop repair also failed (%s)", rb)
+        return False
+
+
+def _emergency_risk_distance(position) -> tuple:
+    """E330: (risk per share, source) for the emergency gap-down check; (None, "none") when no usable distance exists.
+    Order: the stored initial_stop_distance (fixed at the opening fill), else |entry - current_stop| (pre-migration rows), else an
+    optional percent-of-entry floor (EXIT_EMERGENCY_NO_RISK_LOSS_PCT, off by default). Before this, only a None initial distance
+    fell back: a 0 or NaN one disabled the check silently, and so did a missing/NaN stop."""
+    d = _usable_positive(getattr(position, "initial_stop_distance", None))
+    if d is not None:
+        return d, "initial_stop_distance"
+    entry = _usable_positive(getattr(position, "avg_entry_price", None))
+    stop = _usable_positive(getattr(position, "current_stop", None))
+    if entry is not None and stop is not None and abs(entry - stop) > 0:
+        return abs(entry - stop), "current_stop"
+    pct = _usable_positive(EMERGENCY_NO_RISK_LOSS_PCT)
+    if entry is not None and pct is not None:
+        return entry * pct / 100.0, "pct_floor"
+    return None, "none"
+
+
+def _ltp_usable(v) -> bool:
+    """E325: a held position's price must be a finite number above zero. A NaN `ltp` makes every `ltp <= stop` test False, so
+    the stop silently never fires; the feed now refuses such quotes, and this is the backstop for any tick that still gets here."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(x) and x > 0
 
 
 def _note_no_price(symbol: str, mode: str) -> int:
@@ -1503,6 +1710,10 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             pass
 
         tick = ticks.get(position.symbol)
+        if tick is not None and not _ltp_usable(getattr(tick, "price", None)):
+            logger.error("exit: unusable price %r for held %s (%s) - treating as no price, its stop is not being checked this cycle",
+                         getattr(tick, "price", None), position.symbol, mode)
+            tick = None
         if tick is None:
             _note_no_price(position.symbol, mode)   # group321: a held position with no price has NO stop check - say so
             _write_exit_decision(
@@ -1551,12 +1762,14 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             # horizon_class; for manual/pre-upgrade positions it returns the
             # existing global constants — zero behavior change for those.
             _prof = _load_profile(db, position)
-            _trail_schedule  = _prof["trail_atr_schedule"]
-            _be_trigger      = _prof["breakeven_atr_trigger"]
+            _trail_schedule  = _usable_schedule(_prof["trail_atr_schedule"])   # E352: a malformed schedule falls back to the global one
+            _be_trigger      = _be_trigger_value(_prof["breakeven_atr_trigger"])   # E352: finite and > 0
             _max_hold        = _prof["max_hold_days"]
             _early_warn      = _prof["early_warn_days"]
             _partial_frac    = _prof["partial_exit_fraction"]
             _horizon         = _prof["horizon_class"]  # for audit trail
+            _repair_non_finite_stop(db, position, mode)   # E339: a NaN stop never fires; rebuild it before any check reads it
+            _early_warned = False                          # E339: the early-warning HOLD row below no longer ends the cycle
 
             # ── 0. Emergency gap-down exit ────────────────────────────────────────
             # 2026-09-18 audit note (follow-on item #7 from the cost-model audit,
@@ -1584,14 +1797,15 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             # when there's the most unrealized profit at stake — the opposite of
             # the intent). Rows opened before this migration have no stored
             # value, so they fall back to the previous approximation.
-            original_risk = position.initial_stop_distance
-            if original_risk is None:
-                original_risk = abs(
-                    position.avg_entry_price - (position.current_stop or position.avg_entry_price)
-                )
+            original_risk, _risk_src = _emergency_risk_distance(position)   # E330: NaN / 0 / missing no longer disables the check silently
+            if original_risk is None and position.id not in _NO_RISK_WARNED:
+                _NO_RISK_WARNED.add(position.id)
+                logger.warning("exit: %s (position %s) has no usable stop distance (initial_stop_distance=%r, current_stop=%r) - the emergency "
+                               "gap-down check cannot run for it; set EXIT_EMERGENCY_NO_RISK_LOSS_PCT to give such positions a floor",
+                               position.symbol, position.id, getattr(position, "initial_stop_distance", None), position.current_stop)
             unrealized_loss_per_share = position.avg_entry_price - ltp
             if (
-                original_risk > 0
+                original_risk is not None
                 and unrealized_loss_per_share > EMERGENCY_LOSS_MULT * original_risk
             ):
                 reasoning = (
@@ -1640,7 +1854,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         _ee_v = _ee.evaluate(_ee_ev, entry_price=position.avg_entry_price, ltp=ltp, current_stop=position.current_stop, atr=tick.atr,
                                              now_ist=now.astimezone(IST), tick=dhan_client.tick_size_for_price(ltp))
                         _ee_applied = False
-                        if _ee_v.get("action") == "tighten" and _ee_v.get("new_stop") is not None:
+                        if _ee_v.get("action") == "tighten" and _usable_positive(_ee_v.get("new_stop")) is not None:   # E354: a NaN / non-positive stop is never written
                             _old_ee = position.current_stop
                             if _old_ee is None or float(_ee_v["new_stop"]) > float(_old_ee):
                                 position.current_stop = float(_ee_v["new_stop"])
@@ -1694,7 +1908,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     _sm_v = _sm.evaluate(bars_1m=_ob.get_bars(position.symbol), entry=position.avg_entry_price, stop=position.current_stop, ltp=ltp, qty=position.qty_open,
                                          opened_at=as_aware(position.opened_at), now=now, tick=dhan_client.tick_size_for_price(ltp))
                     _sm_applied = False
-                    if _sm_v["action"] == "TIGHTEN" and _sm_v.get("new_stop") is not None:
+                    if _sm_v["action"] == "TIGHTEN" and _usable_positive(_sm_v.get("new_stop")) is not None:   # E354: same
                         _old_sm = position.current_stop
                         if _old_sm is None or float(_sm_v["new_stop"]) > float(_old_sm):
                             position.current_stop = float(_sm_v["new_stop"])
@@ -1738,7 +1952,9 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 try:
                     from swing import live as _swing_live
                     _sw_sell = _swing_live.overdue(position)
-                except Exception:  # noqa: BLE001
+                except Exception as _sw_exc:  # noqa: BLE001
+                    # E355: any doubt = no sale, but a broken import / verdict used to disable the backstop in silence for good; say so.
+                    logger.warning("swing backstop check failed for %s (no sale this tick): %s", position.symbol, _sw_exc)
                     _sw_sell = None
                 if _sw_sell:
                     _write_exit_decision(db, position, "FULL_EXIT", f"Swing backstop: {_sw_sell}. Closing full position ({position.qty_open} shares).", ltp)
@@ -1793,6 +2009,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                                                 range_mult=config.PROFIT_LOCK_RANGE_MULT, min_gap_pct=config.PROFIT_LOCK_MIN_GAP_PCT,
                                                 max_gap_pct=config.PROFIT_LOCK_MAX_GAP_PCT, fallback_gap_pct=config.PROFIT_LOCK_FALLBACK_GAP_PCT,
                                                 min_gain_pct=config.PROFIT_LOCK_MIN_GAIN_PCT, min_lock_pct=config.PROFIT_LOCK_MIN_LOCK_PCT)
+                        # E353: the new stop must be finite, > 0 and above the current stop (never loosen, never write NaN); intraday_guard is trusted for neither
+                        if _pl_v and (_usable_positive(_pl_v.get("new_stop")) is None
+                                      or (position.current_stop is not None and _usable_positive(position.current_stop) is not None
+                                          and float(_pl_v["new_stop"]) <= float(position.current_stop))):
+                            logger.warning("PROFIT_LOCK %s: new stop %r is unusable or not above the current stop %r - skipped", position.symbol, _pl_v.get("new_stop"), position.current_stop)
+                            _pl_v = None
                         if _pl_v:
                             if config.PROFIT_LOCK_MODE == "log":
                                 logger.info("PROFIT_LOCK (log only) %s: %s", position.symbol, _pl_v["reason"])
@@ -1828,7 +2050,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     logger.info("exit E214: %s target partial deferred: %s", position.symbol, _stale_skip)
                     held += 1
                     continue
-                qty_to_close = max(1, int(position.qty_open * _partial_frac))
+                qty_to_close = _partial_qty(position.qty_open, _partial_frac)   # E351: clamped to 1..qty_open, bad fraction falls back
                 pct_locked   = qty_to_close / position.qty_open * 100
                 # group 264: don't pay the DP fee to book a tiny target gain on a carried CNC holding - hold it and
                 # protect the winner with a breakeven stop instead (stops / emergency / time exits are unaffected).
@@ -1898,19 +2120,37 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         # FIX: nullify target + raise stop to breakeven for REAL too.
                         # Without this, the next cycle sees ltp >= target again and
                         # fires another partial sell on the already-reduced position.
-                        position.current_stop   = max(
-                            position.current_stop or 0, position.avg_entry_price
-                        )
-                        position.current_target = None
-                        db.add(models.TradePositionEvent(
-                            position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
-                            detail=(
-                                f"REAL partial sent to Dhan. Stop raised to breakeven "
-                                f"₹{position.avg_entry_price:.2f}, target nullified — "
-                                "remainder now on ATR trail."
-                            ),
-                        ))
-                        db.commit()
+                        # E330: the partial is already live at Dhan. A failed commit here used to be caught by the per-position handler with the
+                        # target still armed, so once the fill landed the next cycle sold a SECOND partial. Retry once; shout if it still fails.
+                        for _pe_try in (1, 2):
+                            try:
+                                position.current_stop   = max(
+                                    position.current_stop or 0, position.avg_entry_price
+                                )
+                                position.current_target = None
+                                db.add(models.TradePositionEvent(
+                                    position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",
+                                    detail=(
+                                        f"REAL partial sent to Dhan. Stop raised to breakeven "
+                                        f"₹{position.avg_entry_price:.2f}, target nullified — "
+                                        "remainder now on ATR trail."
+                                    ),
+                                ))
+                                db.commit()
+                                break
+                            except Exception as _pe_err:  # noqa: BLE001
+                                try:
+                                    db.rollback()
+                                except Exception as _pe_rb:  # noqa: BLE001
+                                    logger.warning("exit partial %s: rollback failed (%s)", position.symbol, _pe_rb)
+                                if _pe_try == 2:
+                                    logger.critical("exit partial %s: SELL is live but the breakeven/target update failed twice (%s) - target is still armed, "
+                                                    "a second partial could fire; fix the position by hand", position.symbol, _pe_err)
+                                    try:
+                                        notify_sync(f"🚨 *Partial SELL sent, position NOT updated* - {position.symbol}\nThe target is still armed and a second partial may fire. "
+                                                    f"Set the stop to breakeven and clear the target by hand ({str(_pe_err)[:120]}).")
+                                    except Exception as _pe_nt:  # noqa: BLE001
+                                        logger.warning("exit partial %s: could not send the not-updated alert (%s)", position.symbol, _pe_nt)
                     else:
                         held += 1
                 continue
@@ -1924,8 +2164,11 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
             # let positions 1-5% above entry ride forever — a slow drifter that
             # never hits its target still ties up capital. Use current_target as
             # the benchmark: if we're below target after max_hold days, exit.
-            _time_stop_target = position.current_target if position.current_target else position.avg_entry_price * 1.005
-            if held_days >= _max_hold and ltp < _time_stop_target:
+            # E330: a NaN current_target is truthy and `ltp < nan` is False, so the time-stop never fired for it; an unusable
+            # max-hold (None / NaN) raised TypeError and cut the rest of this position's checks for the cycle.
+            _time_stop_target = _usable_positive(position.current_target) or position.avg_entry_price * 1.005
+            _max_hold_eff = _usable_positive(_max_hold) or MAX_HOLD_DAYS
+            if held_days >= _max_hold_eff and ltp < _time_stop_target:
                 reasoning = (
                     f"Time-stop: held {held_days} days with no meaningful favorable move "
                     f"(LTP ₹{ltp:.2f} vs entry ₹{position.avg_entry_price:.2f}). "
@@ -1961,12 +2204,12 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     db, position, "HOLD",
                     f"Day {held_days} review: LTP ₹{ltp:.2f} still at/below entry "
                     f"₹{position.avg_entry_price:.2f}. "
-                    f"Time-stop fires in {_max_hold - held_days} more days if no move."
+                    f"Time-stop fires in {(_usable_positive(_max_hold) or MAX_HOLD_DAYS) - held_days} more days if no move."
                     f" [horizon={_horizon or 'manual'}]",
                     ltp,
                 )
-                held += 1
-                continue
+                _early_warned = True   # E339: was `held += 1; continue`, which skipped the order-flow tape step (5b) all day for a losing position
+                # (breakeven / trail / structure need ltp > entry, so only the tape step can still act here)
 
             # ── 3b. Daily market structure while the position is open (group365) ─────────────────────────────
             # Reads ONLY the structure cache (a miss starts a background fetch), so a slow gateway can never delay a stop
@@ -1983,7 +2226,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         _sx_v = _sx.evaluate(_sx_sum, entry_price=position.avg_entry_price, ltp=ltp, current_stop=position.current_stop,
                                              atr=tick.atr, opened_at=position.opened_at)
                         _sx_applied = False
-                        if _sx_v.get("action") in ("tighten", "trail") and _sx_v.get("new_stop") is not None:
+                        if _sx_v.get("action") in ("tighten", "trail") and _usable_positive(_sx_v.get("new_stop")) is not None:   # E353: a NaN / non-positive stop is never written
                             _old_sx = position.current_stop
                             if _old_sx is None or float(_sx_v["new_stop"]) > float(_old_sx):
                                 position.current_stop = float(_sx_v["new_stop"])
@@ -2056,7 +2299,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
 
                 if gain_per_share >= (_be_trigger * _be_mult) * tick.atr:
                     be_level = cost_model.breakeven_level(position.avg_entry_price, position.qty_open, ltp, carried=(held_days or 0) >= 1)   # round 156: entry + charges + buffer
-                    if position.current_stop is None or position.current_stop < be_level:
+                    if _usable_positive(be_level) is not None and (position.current_stop is None or position.current_stop < be_level):   # E352: never write a NaN / non-positive breakeven stop
                         old_stop = position.current_stop
                         position.current_stop = be_level
                         db.add(models.TradePositionEvent(
@@ -2122,7 +2365,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 trail_candidate = round(ltp * (1 - (atr_pct * trail_mult) / 100.0), 2)
 
                 # Only ever tighten (ratchet up), never loosen the stop.
-                if position.current_stop is None or trail_candidate > position.current_stop:
+                if _usable_positive(trail_candidate) is not None and (position.current_stop is None or trail_candidate > position.current_stop):   # E350: never write a NaN / non-positive stop
                     old_stop = position.current_stop
                     position.current_stop = trail_candidate
                     db.add(models.TradePositionEvent(
@@ -2158,6 +2401,10 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                                                key=("rt", mode, position.id))
                     if _tx and _tx.get("action") == "TIGHTEN":
                         _n_stop, _n_tgt = _tx.get("new_stop"), _tx.get("new_target")
+                        if _n_stop is not None and _usable_positive(_n_stop) is None:
+                            _n_stop = None                                   # E350: a NaN / zero / negative stop is never written (NaN <= x is False, so it slipped past 'never loosen')
+                        if _n_tgt is not None and _usable_positive(_n_tgt) is None:
+                            _n_tgt = None                                    # E350: same for the target
                         if _n_stop is not None and float(_n_stop) <= float(position.current_stop):
                             _n_stop = None                                   # never loosen
                         if _n_tgt is not None and position.current_target is not None and float(_n_tgt) >= float(position.current_target):
@@ -2189,13 +2436,17 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 logger.debug("exit tape step failed for %s (ignored): %s", position.symbol, _tx_exc)
 
             # ── 6. Hold ───────────────────────────────────────────────────────────
-            _write_exit_decision(
-                db, position, "HOLD",
-                f"No exit condition met at LTP ₹{ltp:.2f}. Monitoring.", ltp,
-            )
+            if not _early_warned:   # the early-warning row was already written for this cycle
+                _write_exit_decision(
+                    db, position, "HOLD",
+                    f"No exit condition met at LTP ₹{ltp:.2f}. Monitoring.", ltp,
+                )
             held += 1
         except Exception as _pos_exc:
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception as _pos_rb:  # noqa: BLE001 - E355: a failing rollback (dead connection) must not abort the cycle for every other position
+                logger.error("evaluate_mode: rollback after the error on %s (%s) also failed: %s", position.symbol, mode, _pos_rb)
             logger.error(
                 "evaluate_mode: unexpected error evaluating %s (%s) -- skipping this "
                 "position for this cycle only, other positions unaffected: %s",
@@ -2211,10 +2462,20 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                 db.commit()
             except Exception as _note_exc:
                 logger.warning("evaluate_mode: could not store the HOLD note for %s (%s): %s", position.symbol, mode, _note_exc)
-                db.rollback()
+                try:
+                    db.rollback()
+                except Exception as _note_rb:  # noqa: BLE001 - E355
+                    logger.error("evaluate_mode: rollback after the HOLD-note failure on %s (%s) also failed: %s", position.symbol, mode, _note_rb)
             held += 1
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as _end_exc:  # noqa: BLE001 - E355: the closing commit only flushes leftovers; a failure must not hide the tally of exits already sent
+        logger.error("evaluate_mode (%s): closing commit failed: %s", mode, _end_exc)
+        try:
+            db.rollback()
+        except Exception as _end_rb:  # noqa: BLE001
+            logger.error("evaluate_mode (%s): rollback after the closing commit failure also failed: %s", mode, _end_rb)
     tally = {
         "evaluated":      len(positions),
         "held":           held,

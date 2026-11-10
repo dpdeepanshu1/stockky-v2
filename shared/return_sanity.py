@@ -15,6 +15,7 @@ Apply clamp_for_atr() to every daily return before feeding into:
   - Any rolling window feeding adaptive_gate / hybrid_gate
 """
 from __future__ import annotations
+import math
 from typing import Optional
 
 # If a single day's move exceeds this %, treat it as a corporate-action
@@ -35,7 +36,8 @@ def clamp_for_atr(daily_return_pct: float) -> Optional[float]:
     ATR(14) is safe with excluded values — it simply uses fewer inputs.
     Zero divide-by-zero risk; only the warmup period shortens slightly.
     """
-    if abs(daily_return_pct) > CORPORATE_ACTION_JUMP_THRESHOLD:
+    # E328: NaN / inf are excluded too (`abs(nan) > 30` is False, so NaN used to pass straight into the ATR / trail maths)
+    if not math.isfinite(daily_return_pct) or abs(daily_return_pct) > CORPORATE_ACTION_JUMP_THRESHOLD:
         return None
     return daily_return_pct
 
@@ -55,4 +57,4 @@ def atr_input_series(daily_returns: list) -> list:
 
 def clamp_series(values: list, threshold: float = CORPORATE_ACTION_JUMP_THRESHOLD) -> list:
     """Generic clamper — same logic, configurable threshold."""
-    return [v for v in values if v is not None and abs(v) <= threshold]
+    return [v for v in values if v is not None and math.isfinite(v) and abs(v) <= threshold]

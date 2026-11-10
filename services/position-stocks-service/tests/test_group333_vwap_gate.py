@@ -77,5 +77,5 @@ def test_zero_tolerance_blocks_any_dip(monkeypatch):
 def test_entry_wiring_runs_before_capital_is_reserved():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "orders", "entry.py"), encoding="utf-8").read()
     assert "vwap_gate.reject_reason(candidate.symbol, candidate.current_ltp)" in src
-    assert src.index("vwap_gate.reject_reason(") < src.index("ledger.reserve_capital(")
+    assert src.index("vwap_gate.reject_reason(") < src.index("position_value = _hold_reserve(")
     assert config.ENTRY_VWAP_TOLERANCE_PCT == 0.15 and config.ENTRY_VWAP_MIN_TIME_IST == "09:45"

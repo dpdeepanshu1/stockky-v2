@@ -209,4 +209,21 @@ check("orphan: a SELL missing from a readable book for 2+ minutes does not exist
 fresh(); BK["rows"]["E1"] = {"orderId": "E1", "orderStatus": "TRADED", "filledQty": 1}; BK["cover_error"] = Ambig("timeout"); ps.watch_orphan("E1", "X", "77", 1, 100.0); ps.run_plain_short_guard(None, 1000.0)
 check("orphan: an ambiguous cover error is alerted and not repeated blind", sum(1 for o in BK["orders"] if o["transaction_type"] == "BUY") == 1 and ps.stats()["orphans_watched"] == 0 and any("NOT confirmed" in x for x in NOTES))
 fresh(); ps.watch_orphan(None, "X", "77", 1, 1.0); check("orphan: no order id -> nothing to watch", ps.stats()["orphans_watched"] == 0)
+# ---- E333: an unexpected error after the SELL step never escapes (the SELL may be live)
+_real_filled = ps._filled_qty
+fresh(); BK["rows"]["E1"] = dict(SOLD); ps._filled_qty = lambda row, q: (_ for _ in ()).throw(ValueError("bad row"))
+try:
+    r = op()
+finally:
+    ps._filled_qty = _real_filled
+check("E333: a crash while reading the fill is returned, not raised: not ok, critical, the SELL id kept for the watch list", (not r["ok"]) and r["critical"] and r["entry_order_id"] == "E1" and "ValueError" in r["reason"])
+check("E333: ... the operator is told and the unknown-state counter moves", any("state unknown" in n for n in NOTES) and ps.stats()["unknown_state"] == 1)
+check("E333: ... nothing else was sent (no stop, no cover)", not BK["stops"] and len(BK["orders"]) == 1)
+fresh(); BK["sell_error"] = RuntimeError("x"); _real_amb = dc.is_ambiguous_placement_error
+dc.is_ambiguous_placement_error = lambda e: (_ for _ in ()).throw(KeyError("classifier broke"))
+try:
+    r = op()
+finally:
+    dc.is_ambiguous_placement_error = _real_amb
+check("E333: a crash before any SELL id is known -> critical with no id (caller keeps capital + lock, no watch entry)", (not r["ok"]) and r["critical"] and not r["entry_order_id"])
 print("ALL %d OK" % N[0])

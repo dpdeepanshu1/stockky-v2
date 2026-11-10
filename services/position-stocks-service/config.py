@@ -1363,6 +1363,8 @@ CONVICTION_MAX_POOL_PCT = min(100.0, max(0.0, _get_float("CONVICTION_MAX_POOL_PC
 CONVICTION_NO_UPSIZE_ON_LOSS_DAY = _get_bool("CONVICTION_NO_UPSIZE_ON_LOSS_DAY", True)
 CONVICTION_MIN_KNOWN = min(6, max(1, _get_int("CONVICTION_MIN_KNOWN", 2)))   # round 188: inputs that must be known before the score sizes a trade (2 = unchanged; 3 stops a 2-input score from upsizing)
 ENTRY_ORDER_FAILED_COOLDOWN_MINUTES = _get_int("ENTRY_ORDER_FAILED_COOLDOWN_MINUTES", 5)
+ENTRY_POSITION_SAVE_RETRIES = max(1, _get_int("ENTRY_POSITION_SAVE_RETRIES", 3))   # E332: tries to save the position row of a BUY/SELL that is already live at the broker
+ENTRY_POSITION_SAVE_BACKOFF_S = _get_float("ENTRY_POSITION_SAVE_BACKOFF_S", 0.3)   # E332: wait before try 2 (x2 before try 3)
 
 # ── Shared Dhan account-wide order-rate budget (tracking doc §3.8) ─────────
 # Dhan's own account-wide cap is roughly 5,000-7,000 orders/day, shared with

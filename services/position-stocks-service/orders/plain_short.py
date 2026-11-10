@@ -27,6 +27,7 @@ Known limit: a stop that filled in part and then died is alerted (critical), not
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -51,6 +52,8 @@ _next_try: Dict[int, float] = {}          # position id -> monotonic time before
 _replaced: Dict[int, int] = {}            # position id -> how many times a dead stop was re-placed
 _alerted: set = set()                     # (position id, kind) alerts already sent once
 _orphans: Dict[str, Dict[str, Any]] = {}  # entry order id -> {sym, security_id, qty, value, since, cancelled, tries}
+_pending_release: List[Dict[str, Any]] = []   # E331: capital / symbol-lock releases that failed after a short was closed, retried every guard pass (this process only)
+RELEASE_RETRY_LIMIT = 20
 _tripped_day: List[Optional[str]] = [None]   # IST date on which a stop could not be placed: no new plain short that day
 _stats: Dict[str, int] = {"opened": 0, "stop_failed_covered": 0, "unprotected": 0, "unknown_state": 0, "stop_filled": 0, "target_exit": 0, "breach_cover": 0,
                           "stop_replaced": 0, "orphan_covered": 0, "orphan_released": 0, "cover_adopted": 0}
@@ -58,14 +61,14 @@ _stats: Dict[str, int] = {"opened": 0, "stop_failed_covered": 0, "unprotected": 
 
 def reset_state() -> None:
     """Test helper."""
-    _breach_since.clear(); _next_try.clear(); _replaced.clear(); _alerted.clear(); _orphans.clear()
+    _breach_since.clear(); _next_try.clear(); _replaced.clear(); _alerted.clear(); _orphans.clear(); _pending_release.clear()
     _tripped_day[0] = None
     for k in _stats:
         _stats[k] = 0
 
 
 def stats() -> Dict[str, Any]:
-    return {**_stats, "orphans_watched": len(_orphans), "breaker_day": _tripped_day[0]}
+    return {**_stats, "orphans_watched": len(_orphans), "releases_pending": len(_pending_release), "breaker_day": _tripped_day[0]}
 
 
 def _today() -> str:
@@ -92,7 +95,7 @@ def _num(v: Any) -> Optional[float]:
         x = float(v)
     except (TypeError, ValueError):
         return None
-    return x if x == x and x > 0 else None
+    return x if math.isfinite(x) and x > 0 else None      # E331: inf passed `x > 0` and then int(inf) raised OverflowError in _raw_filled, after the SELL was already live
 
 
 def _status(row: Optional[dict]) -> str:
@@ -169,6 +172,59 @@ def _round_levels(fill: float, stop_pct: float, target_pct: float, stop_fallback
     return float(stop), float(target)
 
 
+# ---------------------------------------------------------------- releasing the capital and the symbol lock
+def _rollback_quietly(db) -> None:
+    try:
+        db.rollback()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("plain short: rollback failed (%s)", e)
+
+
+def _do_release(db, item: Dict[str, Any]) -> None:
+    from capital import ledger, shared_symbol_lock
+    if item["kind"] == "capital":
+        ledger.release_capital(db, position_value=item["value"], realized_pnl=item["pnl"])
+    else:
+        shared_symbol_lock.release(db, item["sym"])
+
+
+def release_claims(db, sym: str, value: float, pnl: float) -> bool:
+    """E331: give back the capital and the symbol lock of a short that is now closed. The two are tried separately: when one fails it is queued and retried on every guard
+    pass (retry_pending_releases), because the position row is already closed and nothing else would ever look at it again - the capital would stay reserved and the symbol
+    locked for the rest of the session. Never raises. True when both went through now."""
+    all_ok = True
+    for item in ({"kind": "capital", "sym": sym, "value": float(value or 0.0), "pnl": float(pnl or 0.0), "tries": 0},
+                 {"kind": "lock", "sym": sym, "tries": 0}):
+        try:
+            _do_release(db, item)
+        except Exception as e:  # noqa: BLE001
+            all_ok = False
+            _rollback_quietly(db)
+            _pending_release.append(item)
+            logger.error("plain short: releasing the %s of %s failed (%s) - queued for retry", item["kind"], sym, e)
+            _alert(f"⚠️ <b>Short closed, {item['kind']} NOT released</b> - {sym}\n{str(e)[:160]}\nThe release is retried every few seconds; if this repeats, release it by hand.")
+    return all_ok
+
+
+def retry_pending_releases(db) -> int:
+    """Retry the queued releases once. Returns how many went through. Never raises."""
+    done = 0
+    for item in list(_pending_release):
+        try:
+            _do_release(db, item)
+            _pending_release.remove(item)
+            done += 1
+            logger.info("plain short: queued %s release of %s done", item["kind"], item["sym"])
+        except Exception as e:  # noqa: BLE001
+            _rollback_quietly(db)
+            item["tries"] += 1
+            if item["tries"] >= RELEASE_RETRY_LIMIT:
+                _pending_release.remove(item)
+                logger.critical("plain short: giving up releasing the %s of %s after %d tries (%s)", item["kind"], item["sym"], item["tries"], e)
+                _alert(f"🚨 <b>{item['kind'].title()} still held</b> - {item['sym']}\nThe release failed {item['tries']} times ({str(e)[:120]}). Release it by hand.")
+    return done
+
+
 # ---------------------------------------------------------------- the orphan watch list
 def watch_orphan(entry_order_id: Optional[str], sym: str, security_id: str, qty: int, value: float) -> None:
     """Put a SELL whose state is unknown on the watch list. The caller keeps the capital and the symbol lock held; this module releases them when the SELL resolves."""
@@ -179,12 +235,7 @@ def watch_orphan(entry_order_id: Optional[str], sym: str, security_id: str, qty:
 
 
 def _release_claims(db, o: Dict[str, Any]) -> None:
-    try:
-        from capital import ledger, shared_symbol_lock
-        ledger.release_capital(db, position_value=o["value"], realized_pnl=0.0)
-        shared_symbol_lock.release(db, o["sym"])
-    except Exception as e:  # noqa: BLE001
-        logger.error("plain short: releasing the capital / symbol lock of %s failed (%s)", o.get("sym"), e)
+    release_claims(db, o["sym"], o["value"], 0.0)
 
 
 def run_orphan_check(db, now_mono: Optional[float] = None) -> int:
@@ -256,6 +307,25 @@ def open_plain_short(db, *, is_armed: bool, security_id: str, sym: str, qty: int
     for a moment) - except critical=True, where the state is unknown (entry_order_id is set when the SELL is known to exist: the caller puts it on the watch list)."""
     res: Dict[str, Any] = {"ok": False, "reason": "", "entry_order_id": None, "stop_order_id": None, "fill_price": None, "qty": 0, "stop_price": float(stop_price),
                            "target_price": float(target_price), "protected": False, "covered": False, "critical": False}
+    try:
+        return _open_plain_short(db, res, is_armed=is_armed, security_id=security_id, sym=sym, qty=qty, live=live, stop_price=stop_price, target_price=target_price,
+                                 stop_pct=stop_pct, target_pct=target_pct, sleep=sleep, poll_every_s=poll_every_s)
+    except Exception as e:  # noqa: BLE001 - E333: an unexpected error here must never escape with a SELL that may be live
+        logger.critical("plain short: unexpected %s for %s after the SELL step: %s", type(e).__name__, sym, e, exc_info=True)
+        if res.get("covered") or (res.get("ok") and res.get("protected")):
+            return res                                   # the short is already flat, or it already has its broker stop: the result stands
+        if res.get("ok"):
+            res["critical"] = True                       # adopted without a stop: keep ok so the position row is saved and the guard covers it
+            return res
+        res.update(ok=False, critical=True, reason=f"unexpected error after the plain SELL step ({type(e).__name__}: {str(e)[:160]}): check Dhan for a {sym} short")
+        _stats["unknown_state"] += 1
+        _alert(f"🚨 <b>Plain short state unknown</b> - {sym} x{qty}\n{res['reason']}\nThe SELL (order {res.get('entry_order_id') or 'unknown'}) is on the watch list if its id is known.")
+        return res
+
+
+def _open_plain_short(db, res: Dict[str, Any], *, is_armed: bool, security_id: str, sym: str, qty: int, live: float, stop_price: float, target_price: float, stop_pct: float, target_pct: float,
+                      sleep: Callable[[float], None], poll_every_s: float) -> Dict[str, Any]:
+    """The body of open_plain_short; `res` is created by the caller so a crash in here still leaves the order id readable."""
     # 1. the SELL
     oid = ""
     try:
@@ -425,9 +495,9 @@ def _last_tick(symbol: str):
 
 def _book_stop_fill(db, pos, row: dict) -> None:
     """The broker stop filled: book STOP_HIT at the real fill (same bookkeeping as reconcile's bracket exit)."""
-    from capital import ledger, shared_symbol_lock
     from orders import reconcile, side as _side
     stop = _num(pos.stop_price) or 0.0
+    _sym, _cap = pos.symbol, pos.capital_risked      # read before the commit expires the row: a release failure must not depend on reloading it
     exit_price = _fill_price(row) or stop
     confirmed = _fill_price(row) is not None
     try:
@@ -441,8 +511,7 @@ def _book_stop_fill(db, pos, row: dict) -> None:
     pos.error_message = None if confirmed else "STOP_HIT booked at the stop price: Dhan showed no average traded price (check the trade book)"
     pos.closed_at = datetime.now(timezone.utc)
     db.commit()
-    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=pnl)
-    shared_symbol_lock.release(db, pos.symbol)
+    release_claims(db, _sym, _cap, pnl)
     _stats["stop_filled"] += 1
     logger.info("plain short: %s (id=%d) STOP_HIT @ %.2f P&L %.2f", pos.symbol, pos.id, exit_price, pnl)
     _alert(f"🔴 <b>STOP_HIT</b> - {pos.symbol} x{pos.quantity} (short, plain order)\nEntry ₹{pos.entry_price:.2f} → Cover ₹{exit_price:.2f}\nP&L ₹{pnl:,.2f} ({pct:.2f}%)")
@@ -479,8 +548,8 @@ def _find_cover(db, pos) -> Tuple[Optional[dict], bool]:
 
 def _adopt_cover(db, pos, row: dict, reason: str) -> None:
     """A cover BUY already exists at Dhan: record the position as closed-pending-reconcile on it (same bookkeeping as eod_squareoff.close_position_now), never send a second."""
-    from capital import ledger, shared_symbol_lock
     oid = str(row.get("orderId") or row.get("order_id") or "")
+    _sym, _cap = pos.symbol, pos.capital_risked      # read before the commit expires the row
     pos.dhan_exit_order_id = oid or None
     pos.plain_stop_order_id = None
     pos.status = reason
@@ -489,8 +558,7 @@ def _adopt_cover(db, pos, row: dict, reason: str) -> None:
     pos.realized_pnl, pos.realized_pnl_pct = 0.0, 0.0
     pos.error_message = f"{reason}_PENDING_RECONCILE: adopted the cover BUY {oid} found at Dhan; exit_price=entry_price placeholder until reconcile fills in the real price."
     db.commit()
-    ledger.release_capital(db, position_value=pos.capital_risked, realized_pnl=0.0)
-    shared_symbol_lock.release(db, pos.symbol)
+    release_claims(db, _sym, _cap, 0.0)
     _stats["cover_adopted"] += 1
     _alert(f"⚠️ <b>Short cover found at Dhan</b> - {pos.symbol} x{pos.quantity}\nBUY {oid} already exists: adopted as {reason}, no second BUY sent.")
 
@@ -530,6 +598,10 @@ def run_plain_short_guard(db, now_mono: Optional[float] = None) -> int:
     Runs whatever SHORT_PLAIN_FALLBACK says: the switch gates new plain shorts only."""
     now = time.monotonic() if now_mono is None else now_mono
     done = 0
+    try:
+        retry_pending_releases(db)
+    except Exception as e:  # noqa: BLE001
+        logger.error("plain short guard: pending-release retry failed (%s)", e)
     try:
         done += run_orphan_check(db, now)
     except Exception as e:  # noqa: BLE001

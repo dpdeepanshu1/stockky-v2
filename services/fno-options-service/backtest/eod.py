@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fno import expiry as xp, gates, paper, signals, sizing
 from fno.models import ContractRef
+from fno.provider import bar_ok
 from fno.params import Params
 from . import metrics
 
@@ -55,6 +56,8 @@ def parse_bhavcopy(text: str, symbol: str = "NIFTY") -> List[Dict[str, Any]]:
         k = _f(r.get("strkpric") or r.get("strike_pr"))
         o, h, l, c = (_f(r.get(a) or r.get(b)) for a, b in (("opnpric", "open"), ("hghpric", "high"), ("lwpric", "low"), ("clspric", "close")))
         if ot not in ("CE", "PE") or not (day and exp and k) or None in (o, h, l, c):
+            continue
+        if not bar_ok(o, h, l, c):                                         # E322: a row with an inverted range or an open / close outside it would trigger a false stop or target
             continue
         out.append({"day": day, "expiry": exp, "strike": k, "ot": ot, "o": o, "h": h, "l": l, "c": c, "vol": _f(r.get("ttltradgvol") or r.get("contracts")) or 0.0,
                     "oi": _f(r.get("opnintrst") or r.get("open_int")) or 0.0})

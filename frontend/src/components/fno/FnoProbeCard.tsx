@@ -10,7 +10,7 @@ import { useFno } from "./useFno";
 export default function FnoProbeCard() {
   const [file, setFile] = useState("");
   const r = useFno(() => fnoApi.probe(file), 0, [file]);
-  const [fields, setFields] = useState<Record<string, string>>({});
+  const [fields, setFields] = useState<Record<string, string>>({});   // Round 340 (E342): cleared when another probe file is picked: amounts typed from one contract note must never be saved against another trade's probe
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const d = r.data;
@@ -37,7 +37,7 @@ export default function FnoProbeCard() {
           {head.tone === "bad" ? <Msg kind="err">{head.text}</Msg> : <p className="text-[13px] font-bold">{head.text}</p>}
           {d.files.length > 1 && (
             <label className="flex items-center gap-2 text-[11px] text-mist">Probe file
-              <select className="rounded border border-slate bg-transparent p-1" value={file || d.probe?.file || ""} onChange={(e) => setFile(e.target.value)}>{d.files.map((f) => <option key={f} value={f}>{f}</option>)}</select>
+              <select className="rounded border border-slate bg-transparent p-1" value={file || d.probe?.file || ""} onChange={(e) => { setFile(e.target.value); setFields({}); setMsg(null); }}>{d.files.map((f) => <option key={f} value={f}>{f}</option>)}</select>
             </label>
           )}
           {d.probe && (

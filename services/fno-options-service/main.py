@@ -56,7 +56,7 @@ except Exception as _control_err:  # noqa: BLE001
 
 @app.on_event("startup")
 def _startup() -> None:
-    if os.getenv("FNO_RUNNER", "1") != "0":
+    if (os.getenv("FNO_RUNNER") or "1").strip() != "0":   # blank stays ON (round 75 sweep)
         runner.start()
 
 

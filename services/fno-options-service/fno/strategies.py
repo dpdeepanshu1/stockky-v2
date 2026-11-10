@@ -388,7 +388,7 @@ STRATEGIES["EXPIRY_ALPHA"] = {"flag": "FNO_STRAT_EXPIRY_ALPHA", "label": "Expiry
                               "rule": "EXPIRY DAY ONLY (DEMO): after a big move and a tight 30-minute pause, a close beyond the session high / low. Half risk, 1 lot, entry by 13:30, out by 14:45."}
 ORDER: Tuple[str, ...] = tuple(STRATEGIES)
 
-# The ad's other four names: NOT built, DECIDED in round 236 (research in docs/FNO_DECISIONS_ROUND236.md). Inferred from the NAME only: the ad does not say what they do.
+# The ad's other four names: NOT built, DECIDED in round 236 (research in docs/FNO_DECISIONS_ROUND236.txt). Inferred from the NAME only: the ad does not say what they do.
 NOT_BUILT: List[Dict[str, str]] = [
     {"ad": "IA-4 Premium Harvester (Nifty)", "why": "DECIDED: never. The name says SELLING premium: unlimited-risk naked legs, margin blocks, and a gap or a spike can lose more than the account. This system only BUYS options."},
     {"ad": "IA-2 Contra Shield (Nifty)", "why": "DECIDED: later (phase 2). A 'shield' is a hedged structure (a debit spread). Needs two-leg orders, leg-risk on part fills and a margin check, none of which the single-leg REAL path has. Revisit after 1 lot REAL has run clean."},

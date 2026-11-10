@@ -1,0 +1,125 @@
+# F&O options: control view and go-live plan (Round 260 plan, updated in Rounds 261 and 262, 9 Nov 2026)
+
+Planning only: no frontend or engine code changed in this round. Everything below builds on what is already in the repo.
+
+## 0. Round 261 update (9 Nov 2026): where we are
+
+**Phase 0 result from the VM (9 Nov):** full suite 299 passed; one-week NIFTY fetch (ATM, +-1, +-2, CALL and PUT, 10 files) complete, 0 HTTP 429, `fno_rolling_check.py` 10 files, 0 problems (77 bars/day, 09:15..15:35, ATM label follows spot, strike-spot gap <= 2.5 steps); SENSEX is id 51 in the scrip master (`BSE,I,51,INDEX,SENSEX`). The 15:30 / 15:35 rows are the known after-close rows (handled by the sim, see `backtest/rolling.py`). On 3 Nov (expiry day) the ATM CALL / PUT closed at 10.8 / 0.1, i.e. `WEEK1` is the expiring contract on its own expiry day; the straddle then jumps to 384.7 on 4 Nov (next weekly). Phase 0 is therefore passed.
+
+**New in Round 261: `scripts/fno_real_order_probe.py`** (code in `fno/realprobe.py`, tests in `tests/test_round261.py`). One manual run does ONE real round trip of 1 lot (BUY LIMIT at the ask, hold, SELL LIMIT at the bid) and prints every step: contract and lot size, quote and spread, the exact POST /v2/orders body, the fill read back from Dhan, gross P&L, each charge line, the split "market move - spread BUY - spread SELL = gross", and what to compare in the Dhan app. It uses the same `execution.build_order`, `DhanBroker` and `costs.round_trip` the engine will use in REAL mode, so it proves them and the charges model against Dhan's books. Safety: dry run by default; live needs `--live` AND the typed phrase; 09:30-14:45 IST weekdays only; fresh two-sided quote, spread <= 3%, premium <= `--max-outlay`; refuses when Dhan already shows a position in the contract or cannot be read; an unfilled order is cancelled and its final state confirmed (never a second SELL on top of a live one); a position left open exits with code 3 and the contract to close by hand. The real-trade-service only imports CNC / DELIVERY rows from Dhan positions, so an INTRADAY F&O probe position is not picked up by it.
+
+**Decision taken (your standing rule: I decide from research):** the REAL toggle is BLOCKED while the readiness list has a red item (slice 3); the env file can still override it.
+
+### Round 293 (10 Nov 2026): the entry BUY with a failed call
+* **Gap closed:** an entry BUY whose POST failed with a network error or HTTP 5xx made no position row, although the LIMIT order could be resting at Dhan and fill later: a long with no stop and no row of ours, and the next cycle could BUY again. Round 292 had closed the same hole for the stop and the exit SELL, not for the entry.
+* **Fix (`fno/engine.py`):** the BUY carries our own correlationId (`bu...`). On a maybe-sent failure the engine asks Dhan (`GET /orders/external/{id}`, read only). Found: handled as placed (settle: wait, cancel what rests, read the fill, stop for exactly the filled lots). Rejected / cancelled with nothing filled: no row. Cannot tell (or 404 inside 2 minutes): kept as a flagged `entry_state=UNKNOWN` row with `entry_cid`: no stop, never sold, blocks a second BUY; `resolve_unknown_entries` asks again every cycle (404 after 2 minutes = never arrived, closed NOT_FILLED; found resting = cancelled, what filled decides).
+* **Older gap closed on the way:** a part-filled entry flagged UNKNOWN (cancel not confirmed) now settles once Dhan shows the cancel: the filled whole lots are kept with a stop (before it stayed flagged, with no stop, forever). Less than one lot filled stays flagged and loud.
+* **Frontend:** amber-red "ENTRY UNKNOWN" chip and message on the position card, "N entry unknown" chip on the Overview header. Read-only: it places and clears nothing.
+* **No Calibration switch on purpose:** it is a safety rule for real money, a switch to turn it off would only re-open the hole.
+* **Tests:** `tests/test_round293_entry_lookup.py` (15; 13 fail on the round 292 engine, 2 pin unchanged behaviour); `fnoView.test.mjs` round 293 block. Two older tests that asserted "no row is kept after a failed BUY" (`test_round277_network`, `test_round282_exit_doubt`) now assert the flagged row.
+* **VM:** `scripts/fno_live_check.py` is a read-only look at the engine during market hours (see the round 293 message for the command).
+* **Still unverified live:** Dhan's reply for an unknown correlationId (only a plain 404 is read as "not there").
+
+### Round 262 (9 Nov 2026)
+
+* **First live probe attempt, 9 Nov 12:57 IST:** guards passed (NIFTY 17 Nov 25350 CE, premium about Rs 6,968, spread 0.19%); Dhan refused the BUY with DH-906 "enable in trade control": Derivatives was OFF in Dhan > Trader Control, and the F&O segment itself was only approved that day (Dhan: 1-2 working days to register at the exchange). Nothing was bought. IP whitelist was not the problem.
+* Market is closed on 10 Nov (Diwali, Bali Pratipada); trading resumes Wed 11 Nov. The earlier "Tue 10 Nov expiry" line is wrong: the nearest expiry at least 1 day away was 17 Nov, so this week's expiry moved to Mon 9 Nov because of the holiday (confirmed from the live expiries list, 9 Nov: NIFTY Mon 9 Nov, Tue 17 Nov, Mon 23 Nov; SENSEX Thursdays from 12 Nov).
+* Probe: refusals now print WHAT TO DO (DH-906 trader control / segment not yet registered, DH-905 IP, DH-901 token, DH-904 rate limit); new `--expiry YYYY-MM-DD` picks a listed expiry (the expiry day itself is never used).
+* Frontend slice 1 done: F&O Overview > **Control** card (four locks, underlyings, nine strategy switches, same `controlApi.set` as the Switches page; typed word REAL to turn REAL on).
+* Before the first REAL week add to the checklist: Dhan > Trader Control > Derivatives ON, F&O segment active at the exchange.
+
+### Dated plan from today
+
+| When | What | Who | Done when |
+|---|---|---|---|
+| Mon 9 Nov or Wed 11 Nov | Dhan > Trader Control > Derivatives ON, then ONE live probe 09:30-14:45 IST (`--offset 8 --max-outlay 9000`); if the segment is not yet registered, repeat on Wed 11 | you (VM) | probe exit 0, Dhan app shows both orders Traded and net 0 |
+| Tue 10 Nov (market closed, Diwali) | No orders possible. After the close: Dhan Reports > P&L / contract note (charges appear after close or next morning) and compare line by line with the probe table; paste me both. Start the 6-month fetch with `--resume`. Turn the DEMO engine ON (CORE only) | you | charges match within a few paise, or I fix the rate in Params |
+| 10 to 12 Nov | Round 262: fix whatever the probe comparison shows; frontend slice 1 | me | tests green, new zip |
+| 10 to 12 Nov | Index daily and 5-minute CSV, daily India VIX file exported | you | files exist (else I write the export script) |
+| 12 to 16 Nov | Rolling backtest per strategy | you (VM) + me | `data_quality.ok`, >= 30 trades, net positive after charges |
+| 11 Nov to about 9 Dec | DEMO evidence: 4 weeks and 60+ trades, replay vs DEMO | you + me | agree, net positive, no unexplained skipped stop |
+| week before REAL | `CAPITAL_ALLOC_MODE` shadow about a week with a fresh board; reconcile clean; slices 2 and 3 live | me + you | readiness list all green |
+| not before about 9 Dec | First REAL week: `FNO_MAX_LOTS` 1, `FNO_REAL_ENABLED` ON, mode REAL, Arm by hand each morning, never on an expiry day, reconcile after the close | you | stop at once on any mismatch or daily loss limit |
+| after | One change per week; never raise size to recover a loss. Expiry-day strategies stay DEMO until 30+ DEMO expiry days | | |
+
+## 1. What already exists (so nothing is built twice)
+
+| Need | Where it is today |
+|---|---|
+| ON / OFF switches with LIVE badge, confirm step when a change LOOSENS a rule, audit log, "move to recommended" | Real Money Calibration > F&O Options > Switches (`SwitchesPanel`, `controlApi.set`, service `control/catalog.py`) |
+| The four locks (engine, mode, REAL allowed, armed today) | F&O Options > Overview, read-only text + `POST /fno/arm` / `/fno/disarm` |
+| Strategy list with ON/OFF chip and today / last-N-days result | F&O Options > Overview > Strategies, **read-only** (the toggles are on the Switches page) |
+| Pipeline check (market data, contracts, expiries, VIX, runner, last cycle, snapshots) | `GET /fno/pipeline` + Overview card, a flat list of checks |
+| Three-way capital split | `CAPITAL_ALLOC_MODE` (shadow by default), `GET /fno/capital`, `GET /capital/board` |
+
+So the switches are already live-changing (no restart); what is missing is one place that shows the whole path and lets you flip the main controls without hunting through 30 rows.
+
+## 2. Frontend plan: one "Control + Pipeline" view (4 slices, each shippable alone)
+
+1. **Control card on F&O Overview (frontend only).** The four locks, the underlyings choice and the nine strategy toggles as real switches. Each calls the same `controlApi.set`, so the LOOSENS confirmation, the audit log and the live/restart badge come for free. The risk numbers, entry window and exits stay on the Switches page (link to it). Turning on REAL orders asks for a typed confirmation.
+2. **Pipeline as stages (small backend change) - DONE in round 264.** `fno/stages.py`; `GET /fno/pipeline` also returns `stages` and `stage_summary`; `FnoStagesRow` on the Overview (click a box for the last decision). Original scope: Extend `GET /fno/pipeline` into ordered stages: market data > chains > signal > gates > sizing > order > exits / square-off > reconcile. Each stage: OK / PROBLEM / idle, age of its last run, and the last reason it stopped something (the decision log already stores the veto text). The UI draws it as one row of boxes; a click opens the last decision.
+3. **Readiness checklist (backend + UI) - DONE in round 262.** `GET /fno/readiness`, `POST /fno/readiness/confirm`, `FnoReadinessCard` on the Overview, and the REAL lock waits for it (switch `FNO_REAL_REQUIRES_READINESS`, ON). Original scope: New `GET /fno/readiness` computes, from data the service already has: DEMO days and DEMO trade count, net after charges, last replay / rolling backtest verdict and its `data_quality.ok`, the reconcile result, a fresh capital board, Dhan credentials present, snapshots recorded today. The REAL toggle shows these as green / red. Whether red items only warn or really block `FNO_REAL_ENABLED` is your decision (a hard block is safer; the env file can still override it).
+4. **One cross-service page - DONE in round 266 (read-only).** `AllServicesPanel` as Calibration > All services: mode, auto-pilot / engine, armed, kill switch and today's P&L of the three services; F&O DEMO is shown apart from real money; switches are still changed where they live. Original scope: Real Trade, Position Stocks and F&O master switches and today's P&L side by side, on top of the existing `SwitchesPanel` support for `rt`, `ps`, `fno` and the scheduler.
+
+Tests: `fnoView.test.mjs` style for the view helpers; pytest for `/fno/readiness` and the stage list; the existing `check_control_catalog.py` and `audit_ui_coverage.py` guards stay green.
+
+## 3. Go-live plan with exit criteria
+
+Nothing here proves a profit; each phase only decides whether the next one is allowed.
+
+**Phase 0 - verify the tooling (this week, needs the VM).**
+- Full F&O suite on the VM (`python3 -m pytest -q`).
+- One-week fetch of ATM, ATM+-1, ATM+-2 and `fno_rolling_check.py`: settles bar-start timestamps, `spot` being the index and the ATM label following spot (the PUT file in the stand-in test shows what a shifted file looks like).
+- Expiry-day behaviour of `expiryCode 1` (3 Nov snippet).
+- Confirm SENSEX id 51 in the scrip master before any SENSEX fetch.
+- Exit: suite green, checker clean, no 429 (raise `--pause` otherwise).
+
+**Phase 1 - the rolling backtest (about 1 week).**
+- Fetch about six months (`--resume` now also extends a range), export index daily and 5-minute CSVs, and a **daily India VIX file (required since Round 260)**.
+- Run `fno_rolling_backtest.py` per strategy.
+- Exit per strategy: `data_quality.ok` true, at least 30 trades, positive net after charges, the folds not all depending on one stretch. A strategy that is `NOT_PROVEN` stays OFF.
+
+**Phase 2 - DEMO evidence (at least 4 weeks and 60 trades).**
+- `FNO_ENGINE_ENABLED` ON, mode DEMO, `FNO_RECORD_SNAPSHOTS` ON; only CORE plus the strategies that passed Phase 1.
+- Daily after 15:30: decision log and trades. Weekly: replay backtest on the recorded days, compared with DEMO and with Phase 1.
+- Exit: replay and DEMO agree, net positive after charges, drawdown you can live with, no unexplained skipped stop. Expiry-day strategies need 30+ DEMO expiry days (about 7 months) and stay DEMO until then.
+- Earliest date: if DEMO starts about 11 Nov, 4 weeks puts the first possible REAL decision around 9 Dec; with the 3-trades-a-day cap, 60 trades may take longer.
+
+**Phase 3 - first REAL week.**
+- Before: Dhan static-IP whitelist for API orders, one manual trade compared with History > Charges, `CAPITAL_ALLOC_MODE` shadow for about a week with a fresh board, reconcile check clean.
+- Settings: `FNO_MAX_LOTS` 1, `FNO_REAL_ENABLED` ON, mode REAL, `Arm today` by hand every morning (it expires at midnight IST), reconcile after the close, never on an expiry day.
+- Stop at once (disarm, engine OFF, square off all) on any reconcile mismatch, any order that did not do what the log says, or the daily loss limit.
+
+**Phase 4 - scale slowly.** One change at a time, a week apart; never raise lots or risk % to recover a loss. Thresholds are calibrated from the results, not from one day.
+
+## 4. What I need from you
+
+- VM output: full suite, checker, the 3 Nov expiry look.
+- SENSEX id 51 confirmation.
+- Whether you have the index daily / 5-minute CSVs and a VIX file exported.
+- Your choice on the REAL toggle: warn only, or block until the readiness list is green.
+
+## 5. Remaining items (after round 262, slice 3)
+
+**A. Probe (round 262)**
+1. After the probe: compare the charges table with Dhan's contract note; fix any line that differs in the `FNO_*` rate. **Tool built in round 265:** `python3 scripts/fno_charges_compare.py --brokerage .. --stt .. --exchange .. --sebi .. --gst .. --stamp ..` or the "Real-order probe" card on F&O Overview (one-time: `mkdir -p data/fno_real_probe`, then `docker compose up -d fno-options-service`). It names the `FNO_*` rate that differs and what the note implies; it changes no rate. You still read the note and confirm the readiness item yourself.
+2. DONE (Round 269): the live expiries list shows the NIFTY expiry moved to Mon 9 Nov (holiday on 10 Nov); the "Tue 10 Nov expiry" line is wrong and stays corrected above.
+3. (Done: `--expiry` choice and plain Dhan error hints, round 262.)
+4. Save a short summary of the probe output from `data/fno_real_probe/`. **Done in round 265:** `scripts/fno_charges_compare.py` (with or without the note) writes `probe_<time>_summary.txt` beside the probe file.
+
+**B. F&O engine and data**
+5. Six-month fetch with `--resume` (index daily / 5-minute CSVs and a daily India VIX file).
+6. Rolling backtest per strategy; pass = `data_quality.ok`, 30+ trades, net positive after charges; a failing strategy stays OFF. (The readiness list now reads these results.)
+7. DEMO engine ON, CORE only. Expiry-day strategies DEMO only until 30+ DEMO expiry days.
+8. A week before the first REAL week: decide on leaving `CAPITAL_ALLOC_MODE` shadow, board fresh. Reconcile clean; any mismatch = disarm at once.
+9. Every new change ships with tests and a Calibration switch.
+
+**C. Frontend**
+10. Slice 1 control card - done. Slice 3 readiness - done. Slice 2 pipeline stages - done.
+11. Slice 2 - done in round 264: `/fno/pipeline` as ordered stages (market data > chains > signal > gates > sizing > order > exits > reconcile), OK / PROBLEM / idle, click for the last decision.
+12. Slice 4: one cross-service page (Real Trade, Position Stocks, F&O master switches and today's P&L).
+13. A probe result card (Dhan error, fill, charges, "charges model matched") - done in round 265 (`FnoProbeCard`, `GET /fno/probe`, `POST /fno/probe/note`).
+14. `fnoView.test.mjs` style tests; `check_control_catalog.py` and `audit_ui_coverage.py` stay green.
+
+**D. Earlier requests (status not checked in this session)**
+15. Groww-style frontend redesign with light animation. 16. One stylish admin login (Real Trade, Position Stocks, Calibration) with change password. 17. New Telegram look: news first, then each trade. 18. Trading-rule direction (entry timing, conviction sizing, 09:15-09:20 entries behind a safety guard, max 5 concurrent trades, entry reason on every trade, bullish and bearish markets). 19. News processing with event_lite and Hugging Face only where it matters, inside the rate limit. 20. Kronos forecasting model: fit review and implementation plan.

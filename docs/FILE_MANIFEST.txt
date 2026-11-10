@@ -52,8 +52,8 @@ deploy/nginx-stockky.conf
 docker-compose.yml
 docs/ENV_REFERENCE.txt
 docs/FILE_MANIFEST.txt
-docs/FNO_DECISIONS_ROUND236.md
-docs/FNO_GO_LIVE_PLAN.md
+docs/FNO_DECISIONS_ROUND236.txt
+docs/FNO_GO_LIVE_PLAN.txt
 docs/ROUTE_AUTH_TRIAGE.json
 frontend/.dockerignore
 frontend/Dockerfile
@@ -198,6 +198,7 @@ frontend/src/components/fno/FnoJournal.tsx
 frontend/src/components/fno/FnoOverview.tsx
 frontend/src/components/fno/FnoProbeCard.tsx
 frontend/src/components/fno/FnoReadinessCard.tsx
+frontend/src/components/fno/FnoSettingsWarning.tsx
 frontend/src/components/fno/FnoStagesRow.tsx
 frontend/src/components/fno/FnoTab.tsx
 frontend/src/components/fno/useFno.ts
@@ -406,6 +407,7 @@ scripts/fetch_history_for_backtest.py
 scripts/flow_tape_report.py
 scripts/fno_charges_compare.py
 scripts/fno_eod_backtest.py
+scripts/fno_live_check.py
 scripts/fno_real_order_probe.py
 scripts/fno_replay_backtest.py
 scripts/fno_rolling_backtest.py
@@ -1144,6 +1146,7 @@ services/decision-prediction-service/training/triple_barrier.py
 services/decision-prediction-service/training/universe_ingest.py
 services/decision-prediction-service/training/universe_routes.py
 services/decision-prediction-service/training/walk_forward.py
+services/fno-options-service/.dockerignore
 services/fno-options-service/Dockerfile
 services/fno-options-service/auth.py
 services/fno-options-service/backtest/__init__.py
@@ -1162,6 +1165,7 @@ services/fno-options-service/config.py
 services/fno-options-service/control/__init__.py
 services/fno-options-service/control/boot.py
 services/fno-options-service/control/catalog.py
+services/fno-options-service/control/guard.py
 services/fno-options-service/control/kit.py
 services/fno-options-service/fno/__init__.py
 services/fno-options-service/fno/analytics.py
@@ -1254,6 +1258,23 @@ services/fno-options-service/tests/test_round264_stages.py
 services/fno-options-service/tests/test_round265_probecheck.py
 services/fno-options-service/tests/test_round269_probe_pick.py
 services/fno-options-service/tests/test_round270_open_charges.py
+services/fno-options-service/tests/test_round272_holidays.py
+services/fno-options-service/tests/test_round276_audit.py
+services/fno-options-service/tests/test_round277_network.py
+services/fno-options-service/tests/test_round278_strategy_errors.py
+services/fno-options-service/tests/test_round279_analysis_isolation.py
+services/fno-options-service/tests/test_round280_creds_network.py
+services/fno-options-service/tests/test_round281_probe_network.py
+services/fno-options-service/tests/test_round282_exit_doubt.py
+services/fno-options-service/tests/test_round283_engine_lock.py
+services/fno-options-service/tests/test_round284_time_limits.py
+services/fno-options-service/tests/test_round285_result_names.py
+services/fno-options-service/tests/test_round286_time_guard.py
+services/fno-options-service/tests/test_round287_daily_today.py
+services/fno-options-service/tests/test_round288_clear_guard.py
+services/fno-options-service/tests/test_round290_settings_step.py
+services/fno-options-service/tests/test_round292_correlation_lookup.py
+services/fno-options-service/tests/test_round293_entry_lookup.py
 services/fno-options-service/tests/test_strategies.py
 services/kronos-forecast-service/.dockerignore
 services/kronos-forecast-service/Dockerfile

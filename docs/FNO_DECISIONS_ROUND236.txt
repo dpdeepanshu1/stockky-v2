@@ -1,0 +1,40 @@
+# F&O decisions, round 236 (8 Nov 2026)
+
+Every open decision that did not need VM output was settled from research and put into code. Sources are listed at the end. Anything the research could not settle is in "Still open".
+
+## Decisions
+
+| # | Question | Decision | Why |
+|---|---|---|---|
+| B1 | Expiry Momentum (IA-3) and Expiry Alpha (IA-5): open expiry-day entry? | **Built, DEMO only.** Switches `FNO_STRAT_EXPIRY_MOMENTUM` / `FNO_STRAT_EXPIRY_ALPHA` ship OFF. They trade only the contract that expires today. Entry 09:30 to 13:30, half the normal risk, 1 lot, out by **14:45**. REAL needs the env switch `FNO_EXPIRY_REAL` (not on the Calibration page). Every other strategy is still blocked on expiry day. | Studies of retail 0DTE option buying are poor, so it must earn DEMO evidence first. The 14:45 exit keeps us out of the last-30-minute window (below). |
+| B1b | 7 Dec 2026 settlement | Reported: from 7 Dec 2026 an expiring index contract stops trading at 15:30 and settles on the last-30-minute VWAP of its constituents. We never hold past 14:45 on expiry day and 15:15 otherwise, so no code needs to change. | Press reports of the SEBI decision. The circular itself was not read. |
+| B2 | Premium Harvester (IA-4) | **Never built.** | Name means selling. This system only buys options. |
+| B3 | Contra Shield (IA-2), Expiry Guard (IA-6) | **Phase 2.** | Hedged spreads need two-leg orders, part-fill handling and a margin check. Revisit after 1 lot REAL has run clean. |
+| B4 | Range Edge (IA-7) | **Not built.** | Ranges are usually traded by selling. Buying a fade pays theta both ways. |
+| B5 | Screenshot | Names only. Rules are ours, unverified, and are not their system. | Nothing to verify. |
+
+## Verified from Dhan's docs (was "from memory")
+
+* D1 STOP_LOSS payload: `orderType STOP_LOSS`, `price`, `triggerPrice`, `productType INTRADAY`, `validity DAY`. Matches the code.
+* D2 `GET/DELETE /orders/{id}`: `orderStatus` (TRANSIT, PENDING, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED), `filledQty`, `averageTradedPrice`, `remainingQuantity`. DELETE returns 202 with `orderId` and `orderStatus`. Matches the code. The tests use the docs' sample JSON.
+* D3 `GET /positions`: `netQty`, `securityId`, `exchangeSegment`, `positionType` (LONG, SHORT, CLOSED). Matches the code.
+* D5 Expired options data **exists** (rolling option API, about 5 years, strike as ATM+/-n, Data API plan; the docs say 30 days a call, **measured 9 Nov 2026: one day apart per call (toDate - fromDate at most 1, toDate inclusive), anything wider is HTTP 400 DH-905**). So the strategies CAN get a real-price backtest. Parser, fetch script (`backtest/rolling.py`, `scripts/fno_rolling_fetch.py`), probe (`scripts/fno_rolling_probe.py`) and file checker (`scripts/fno_rolling_check.py`).
+* D9 Static IP: only order APIs need it. A non-whitelisted IP is rejected with DH-905. The broker now keeps the DH-9xx code in the error message and explains DH-905.
+* Charges: STT on option sell premium 0.15 % from 1 Apr 2026 (confirmed). **NSE option transaction charge is 0.03553 % from 1 Mar 2026, not 0.03503 %: default changed.** BSE option charge 0.0325 % unchanged.
+
+## Code changes that remove a VM dependency
+
+* C6 (real bar interval): every strategy window is now written in minutes and turned into a bar count with the feed's measured interval. 1-, 5- and 15-minute bars give the same rules. With 5-minute bars nothing changed (all old tests pass).
+* A1 (SIM has no chain veto): a chain veto is now written to the journal as a `veto` event, so live and SIM can be compared by counting them.
+* A3: Signals tab has a Strategy chip on each event; the strategies card marks expiry-day strategies and shows the expiry rules.
+
+## Still open
+
+See the bottom of the round 236 reply. Short version: the VM checks (C), the Dhan items that need your account (D6, D7 circular, D8), threshold calibration, and DEMO evidence (E, F).
+
+## Sources
+
+* Dhan docs: dhanhq.co/docs/v2/orders, /portfolio, /expired-options-data
+* Dhan support: DH-905 invalid IP
+* Zerodha bulletin on STT from 1 Apr 2026; onetradejournal charges benchmark (NSE 0.03553 % from 1 Mar 2026); Angel One note on BSE Sensex/Bankex option fees
+* Angel One note on the SEBI expiry-settlement decision; neudata review of 0DTE retail results

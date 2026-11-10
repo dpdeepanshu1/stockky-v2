@@ -107,7 +107,7 @@ def test_unreachable_market_data_is_no_opinion_and_cached_short():
 def test_gate_is_wired_into_attempt_entry_before_the_liquidity_gate():
     import inspect
     from orders import entry
-    src = inspect.getsource(entry.attempt_entry)
+    src = inspect.getsource(entry._attempt_entry_impl)
     idx_flow = src.index("E268: intraday order-flow tape")
     idx_liq = src.index("# group333: volume / turnover floor")
     assert idx_flow < idx_liq

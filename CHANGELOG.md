@@ -197,7 +197,7 @@
  * **Rules in `allServices.ts`:** F&O in DEMO mode is simulated money and is shown apart, never added to the real-money total. A service that did not answer (or left the P&L out) is named in the headline and left out of the total, never counted as 0. A missing flag is never read as LIVE. A tripped kill switch is said before anything friendlier. The Real Trade P&L is its own book, not the account-wide Dhan figure, and the page says that the total is two books added together, not a broker statement.
  * **Tests:** `allServices.test.mjs` (added to `npm test`): each normaliser, every state word, the kill switch winning, DEMO apart from real money, failed and junk answers, the total without a float tail, the headline, rupee formatting.
  * **Run here:** `allServices.test.mjs`, the whole `npm test` and `tsc --noEmit` passed; `audit_ui_coverage.py` and `check_control_catalog.py` pass. **Not run:** no browser look (it needs the VM: log in, open Calibration > All services, check the three cards against the three service pages), and no backend test (no backend changed). Rebuild the frontend container to see it.
- * **Plan:** slice 4 is done, so all four slices of the control view are done (`docs/FNO_GO_LIVE_PLAN.md`). Still open there: plan A2 (the expiries list for the 9 Nov holiday), and the probe, charges comparison and DEMO evidence on your side.
+ * **Plan:** slice 4 is done, so all four slices of the control view are done (`docs/FNO_GO_LIVE_PLAN.txt`). Still open there: plan A2 (the expiries list for the 9 Nov holiday), and the probe, charges comparison and DEMO evidence on your side.
 
 ## 9 Nov 2026 - Round 265 (plan items A1, A4 and C13): the probe result card and the charges-vs-contract-note check
 
@@ -236,7 +236,7 @@
  * **Fix (`backtest/rolling_sim.py`, `backtest/report.py`):** every tested day whose last VIX close BEFORE the day is missing, or older than `VIX_STALE_DAYS` (5 calendar days; a weekend or a long weekend fits) is counted. `data_quality` gains `vix_unknown_days` and `vix_unknown_pct`; above `MAX_VIX_UNKNOWN_PCT` (10 %) `ok` is false and the verdict is forced to `NOT_PROVEN` with the reason first ("... pass --vix with a daily close for the whole range"). The text report's `data quality:` line prints the VIX count; a note says how many days had none. The decision itself is unchanged (a missing value is still read as 15), so a run with a complete VIX file gives the same trades as before.
  * **Effect:** a run that passed no VIX file is now `NOT_PROVEN` / `NOT OK` whatever its P&L. `scripts/fno_rolling_backtest.py --vix vix.csv` (daily close, date + close) is now needed for a verdict. Results written before this round have no `vix_unknown_*`; re-run them.
  * **Tests:** `test_round260.py` (4; all fail on the round 259 code): a full VIX file counts 0 unknown days (and the weekend gap is not stale); no VIX at all is `NOT_PROVEN` and says `--vix`; a VIX file that stops about two weeks early is stale for every later day; the gate itself via the limit. `test_round258` changed in one place (its "enough strikes is OK" run now passes a VIX, because `ok` also needs one). Whole F&O suite in the stand-in runner (no pytest here): 298 passed, 1 not run (needs a non-root user). **Run the full F&O suite on the VM.**
- * **Left as it was:** `backtest/sim.py` (Black-Scholes, "upper-bound sanity check only") has the same fallback to 15; it is labelled as simulated and not used for a verdict on real premiums. `docs/FNO_GO_LIVE_PLAN.md` is new: the phased plan to REAL and the control / pipeline view for the frontend (planning only, no frontend code changed this round).
+ * **Left as it was:** `backtest/sim.py` (Black-Scholes, "upper-bound sanity check only") has the same fallback to 15; it is labelled as simulated and not used for a verdict on real premiums. `docs/FNO_GO_LIVE_PLAN.txt` is new: the phased plan to REAL and the control / pipeline view for the frontend (planning only, no frontend code changed this round).
 
 ## 9 Nov 2026 - Round 259: `fno_rolling_fetch.py --resume` also EXTENDS a series (a later `--to` or earlier `--from` fetches only the missing days)
 
@@ -418,7 +418,7 @@
 
 ## 8 Nov 2026 - Round 236: pending decisions settled from research; expiry-day strategies (DEMO)
 
- * **Decisions:** `docs/FNO_DECISIONS_ROUND236.md` (expiry-day entries: built, DEMO only; Premium Harvester never; Contra Shield / Expiry Guard phase 2; Range Edge not built).
+ * **Decisions:** `docs/FNO_DECISIONS_ROUND236.txt` (expiry-day entries: built, DEMO only; Premium Harvester never; Contra Shield / Expiry Guard phase 2; Range Edge not built).
  * **New strategies:** EXPIRY_MOMENTUM (IA-3) and EXPIRY_ALPHA (IA-5), OFF by default. Same-day contract only, entry until 13:30, half risk, 1 lot, out by 14:45 (before the 7 Dec 2026 last-30-minute VWAP settlement window). REAL needs env `FNO_EXPIRY_REAL`. Gates, engine, SIM and the journal know about them.
  * **Strategy windows are minutes, not bar counts**: the rules no longer assume 5-minute bars.
  * **Journal:** a chain veto is logged as a `veto` event. Signals tab shows the strategy as its own chip.

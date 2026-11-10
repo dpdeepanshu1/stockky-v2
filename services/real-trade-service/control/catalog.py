@@ -566,4 +566,7 @@ CATALOG = (
     Flag("CAPITAL_ALLOC_MODE", "Capital split between the 3 services", "Capital split", "enum", choices=("off", "shadow", "live"), looser="neutral",
          help="How the ONE Dhan account is split between Real Trade, Position Stocks and F&O (25% each fixed, the last 25% to the best net return). off = nothing written or read | shadow = the board is written and shown (/capital/board), no sizing changes | live = Real Trade and Position Stocks use their board % instead of the fixed 50% and F&O's open premium counts as peer exposure. Set it the same on all three services. Real Trade decides the board; F&O REAL sizing needs shadow or live. Needs about a week of shadow first.",
          targets=((_C, "CAPITAL_ALLOC_MODE"),), live=True, shipped="shadow", recommended="shadow", evidence="GET /capital/board in shadow for about a week", import_time_ok_files=("config.py",)),
+    Flag("CAPITAL_ALLOC_BONUS_MODE", "Capital split: how the bonus is shared", "Capital split", "enum", choices=("proportional", "winner"), looser="neutral",
+         help="How the bonus share (what is left after the fixed 25% each) is handed out at the daily rebalance. proportional = split between the eligible services by score | winner = all of it to the best net return. Only matters when CAPITAL_ALLOC_MODE is shadow or live.",
+         targets=((_C, "CAPITAL_ALLOC_BONUS_MODE"),), live=True, shipped="proportional", evidence="GET /capital/board: compare the two splits in shadow", import_time_ok_files=("config.py",)),
 )

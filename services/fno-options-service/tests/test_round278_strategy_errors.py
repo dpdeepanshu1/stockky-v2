@@ -56,7 +56,7 @@ def test_the_engine_writes_a_strategy_error_event_and_keeps_trading(db, monkeypa
 
 
 def test_the_signals_route_lists_strategy_errors():
-    import main
-    src = open(main.__file__).read()
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")   # read the source: importing main makes /data (config.DATA_DIR), which CI cannot write
     assert '"strategy_error"' in src.split("def signals_log")[1].split("@app.get")[0]
 

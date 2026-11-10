@@ -53,7 +53,7 @@ def reject_reason(db, price: float, stop_price: float, quantity: int, side: str 
         from capital import ledger
         own_risk, own_gap, own_pool = ledger.own_heat(db)
         peer_risk, peer_pool, _age = shared_heat.get_peer(db, float(getattr(config, "HEAT_PEER_MAX_AGE_S", 900.0)))
-        new_risk = portfolio_heat.stop_risk(price, stop_price, quantity, side)
+        new_risk = portfolio_heat.stop_risk(price, stop_price, quantity, side, max_stop_pct=float(getattr(config, "MAX_STOP_PCT", 5.0)))
         sec_extra, sec = _sector_extra(db, symbol, side, new_risk)
         ok, after, cap = portfolio_heat.check(own_risk, own_gap, peer_risk, new_risk, own_pool, peer_pool, limit, sec_extra)
         if ok:

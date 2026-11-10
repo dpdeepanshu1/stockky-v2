@@ -407,6 +407,7 @@ RISK_LADDER_LOSS_DAYS_ENABLED = (os.getenv("RISK_LADDER_LOSS_DAYS_ENABLED") or "
 RISK_LADDER_RISK_ENABLED = (os.getenv("RISK_LADDER_RISK_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 RISK_LADDER_RISK_STEP = float(((os.getenv("RISK_LADDER_RISK_STEP") or "").strip() or "0.25"))
 HEAT_GAP_MIN_PCT = float(((os.getenv("HEAT_GAP_MIN_PCT") or "").strip() or "0.5"))   # floor on the cached p95 gap
+HEAT_MISSING_STOP_PCT = max(0.0, float(((os.getenv("HEAT_MISSING_STOP_PCT") or "").strip() or "6.0")))   # E360: portfolio heat counts a position with no usable stop and no initial_stop_distance as risking this % of its entry (0 = old behaviour, counts 0)
 HEAT_GAP_P95_ENABLED = (os.getenv("HEAT_GAP_P95_ENABLED") or "true").strip().lower() in ("1", "true", "yes", "on")
 # E276 round 60: same-sector rule. A new BUY in a sector that already holds an open long (this service or position-stocks-service, from its published split)
 # counts SECTOR_HEAT_MULT x its own risk plus that sector's open risk. Unlisted ("Other") names are not a sector. Off = no surcharge. risk_engine/engine.py reads these two env vars itself.

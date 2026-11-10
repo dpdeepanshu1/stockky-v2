@@ -50,6 +50,7 @@ _cancel_fails: dict = {}       # symbol -> consecutive cancel failures
 _warned: dict = {}             # symbol -> monotonic time of the last placement warning
 _edis_until: dict = {}         # symbol -> clock time before which no placement is attempted (eDIS / TPIN refusal backoff)
 _slm_rejected: bool = False    # True once Dhan is known to reject STOP_LOSS_MARKET here (go straight to STOP_LOSS)
+_unverified: dict = {}         # E359: symbol -> True while a stop placement may have reached Dhan without us booking it (the order book is checked before any new send)
 _band: dict = {}               # E258: symbol -> (lower, upper) circuit band read from a Dhan "Rate Not Within Ckt Limit" rejection
 _BAND_RE = re.compile(r"(?:ckt limit|circuit limit|within)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*to\s*(\d+(?:\.\d+)?)", re.I)
 
@@ -81,7 +82,7 @@ def boot_safety_message(enabled: bool, store_persistent: Optional[bool]) -> Opti
 
 def reset_state() -> None:
     global _slm_rejected
-    _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear(); _band.clear()
+    _last_sync.clear(); _cancel_fails.clear(); _warned.clear(); _edis_until.clear(); _band.clear(); _unverified.clear()
     _slm_rejected = False
 
 
@@ -297,6 +298,121 @@ def _not_in_demat_holdings(db: Session, symbol: str) -> bool:
         return False
 
 
+_STOP_TYPES = ("STOP_LOSS", "STOP_LOSS_MARKET")
+_NOT_LIVE = frozenset({"REJECTED", "CANCELLED", "CANCELED", "EXPIRED", "TRADED"})
+
+
+def _definite_rejection(msg: str) -> bool:
+    """E359: True when the error is Dhan answering and refusing (RMS / EXCH codes, IP, circuit band, eDIS, tick size, trigger-price relation):
+    the stop is not live, so there is nothing to look for. Anything else (timeout, dropped connection, a reply with no order id) may mean
+    the stop WAS accepted."""
+    return bool(dhan_client.is_clear_broker_rejection(msg) or _is_tick_size_error(msg) or _is_trigger_price_error(msg))
+
+
+def _row_oid(r: dict) -> str:
+    return str(r.get("orderId") or r.get("order_id") or "")
+
+
+def _find_live_stop(db: Session, position, security_id) -> Tuple[Optional[dict], bool]:
+    """E359: an open SELL trigger order for this position's symbol and open quantity in Dhan's order book that no TradeOrder row knows.
+    Returns (row_or_None, checked_ok); checked_ok False = the order book could not be read (the stop may be live, so the caller must not
+    send another blind). Our stops carry the tag BSTOP; an order with a different tag is someone else's and is not adopted. Never raises."""
+    try:
+        want = str(position.symbol or "").strip().upper()
+        qty = int(position.qty_open)
+        cands = []
+        for r in dhan_client.get_order_list(db):
+            if not isinstance(r, dict):
+                continue
+            if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "SELL":
+                continue
+            if str(r.get("orderType") or r.get("order_type") or "").upper() not in _STOP_TYPES:
+                continue
+            if str(r.get("orderStatus") or r.get("order_status") or "").upper() in _NOT_LIVE:
+                continue
+            try:
+                if int(float(r.get("quantity", r.get("qty")))) != qty:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            sym = str(r.get("tradingSymbol") or r.get("trading_symbol") or r.get("symbol") or "").strip().upper()
+            sid = str(r.get("securityId") or r.get("security_id") or "")
+            if not ((sym and sym.split("-")[0] == want) or (security_id is not None and sid and sid == str(security_id))):
+                continue
+            tag = str(r.get("correlationId") or r.get("correlation_id") or "")
+            if tag and tag != "BSTOP":
+                continue
+            if not _row_oid(r):
+                continue
+            cands.append(r)
+        if not cands:
+            return None, True
+        ids = [_row_oid(r) for r in cands]
+        known = {x for (x,) in db.query(models.TradeOrder.dhan_order_id).filter(models.TradeOrder.dhan_order_id.in_(ids)).all()}
+        fresh = [r for r in cands if _row_oid(r) not in known]
+        if len(fresh) > 1:
+            logger.error("broker stop: %d unbooked open SELL stops for %s x%s at Dhan (%s) - adopting the first; check Dhan for the rest",
+                         len(fresh), position.symbol, qty, ", ".join(_row_oid(r) for r in fresh))
+        return (fresh[0] if fresh else None), True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("broker stop: order book unreadable while looking for an unbooked stop on %s: %s", getattr(position, "symbol", "?"), e)
+        return None, False
+
+
+def _adopt_stop(db: Session, position, row: dict, trigger: float) -> bool:
+    """E359: book a stop that is live at Dhan but had no TradeOrder row. True = booked. On a failed commit the symbol stays flagged
+    (_unverified) so the next pass adopts it instead of placing another. Never raises."""
+    oid = _row_oid(row)
+    otype = str(row.get("orderType") or row.get("order_type") or "").upper()
+    otype = otype if otype in _STOP_TYPES else str(config.BROKER_STOP_ORDER_TYPE)
+    try:
+        trig = float(row.get("triggerPrice", row.get("trigger_price")))
+        trig = trig if (trig - trig == 0 and trig > 0) else float(trigger)
+    except (TypeError, ValueError):
+        trig = float(trigger)
+    try:
+        db.add(models.TradeOrder(
+            mode="REAL", symbol=position.symbol, side="SELL", order_type=otype, qty=int(position.qty_open),
+            status="PLACED", dhan_order_id=oid, limit_price=trig, execution_source="AUTO", exit_reason=BROKER_STOP_REASON,
+        ))
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        _unverified[position.symbol] = True
+        logger.error("broker stop: could not book the live stop %s for %s (%s) - will adopt it on the next pass", oid, position.symbol, e)
+        return False
+    _unverified.pop(position.symbol, None)
+    _edis_until.pop(position.symbol, None)
+    logger.warning("broker stop: adopted order %s for %s x%s (trigger %.2f) - Dhan held it but the placement call had not returned it; no second stop placed",
+                   oid, position.symbol, position.qty_open, trig)
+    try:
+        notifier.notify_fire_and_forget(f"\u26a0\ufe0f Broker stop for {position.symbol} recovered: Dhan holds order {oid} (trigger {trig:.2f}); booked, no second stop placed.")
+    except Exception:  # noqa: BLE001
+        logger.debug("broker stop: adopt alert failed", exc_info=True)
+    return True
+
+
+def _recover_unbooked_stop(db: Session, position, security_id, trigger: float, now: Optional[float]) -> Optional[bool]:
+    """E359: after an error that may not be a refusal. True = adopted a live stop. False = the order book could not be read or the
+    adoption could not be saved: flagged and backed off, nothing is sent. None = checked, no such stop at Dhan (the failure was real)."""
+    row, ok = _find_live_stop(db, position, security_id)
+    if row is not None:
+        return True if _adopt_stop(db, position, row, trigger) else False
+    if ok:
+        _unverified.pop(position.symbol, None)
+        return None
+    _unverified[position.symbol] = True
+    backoff = _edis_backoff_s()
+    if backoff > 0:
+        _edis_until[position.symbol] = (time.monotonic() if now is None else now) + backoff
+    _warn_once(position.symbol, "broker stop for %s: the placement call failed and Dhan's order book could not be read, so a stop may already be live; "
+               "no second one is sent until the book can be checked", position.symbol)
+    return False
+
+
 def _send_stop(db: Session, security_id: str, position, trigger: float, otype: str):
     price = limit_price_below(trigger, 0.5) if otype == "STOP_LOSS" else 0.0
     return dhan_client.place_order(
@@ -308,11 +424,19 @@ def _send_stop(db: Session, security_id: str, position, trigger: float, otype: s
 
 def _place(db: Session, position, trigger: float, now: Optional[float] = None) -> bool:
     global _slm_rejected
+    security_id = None
+    call_started = False
     try:
         security_id = dhan_client.get_security_id(db, position.symbol)
+        if _unverified.get(position.symbol):
+            # E359: an earlier placement may have reached Dhan without being booked: look before sending anything new.
+            _rec = _recover_unbooked_stop(db, position, security_id, trigger, now)
+            if _rec is not None:
+                return _rec
         otype = config.BROKER_STOP_ORDER_TYPE
         if otype == "STOP_LOSS_MARKET" and _slm_rejected:
             otype = "STOP_LOSS"          # learned earlier in this process: Dhan rejects SL-M here
+        call_started = True
         try:
             res = _send_stop(db, security_id, position, trigger, otype)
         except Exception as first:  # noqa: BLE001
@@ -350,6 +474,12 @@ def _place(db: Session, position, trigger: float, now: Optional[float] = None) -
         except Exception:  # noqa: BLE001
             pass
         msg = str(e)
+        if call_started and not _definite_rejection(msg):
+            # E359: the call failed without a clear refusal (lost response, timeout, no order id in the reply): the stop may be live at Dhan with no
+            # TradeOrder row, which would let the next pass place a second stop and leave one that cancel_for_exit cannot see.
+            _rec = _recover_unbooked_stop(db, position, security_id, trigger, now)
+            if _rec is not None:
+                return _rec
         if dhan_client.is_cdsl_edis_error(msg):
             backoff = _edis_backoff_s()
             if backoff > 0:

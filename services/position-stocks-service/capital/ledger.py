@@ -378,7 +378,8 @@ def own_heat(db: Session) -> tuple:
     risk = gap = 0.0
     for p in db.query(_SP).filter(_SP.status.in_(("OPEN", "EXIT_LEGS_REJECTED"))).all():
         r, g = portfolio_heat.position_heat(p.entry_price, p.stop_price, p.quantity, getattr(p, "side", None) or "LONG",
-                                            bool(getattr(p, "overnight_converted_to_cnc", False)), float(config.HEAT_GAP_DEFAULT_PCT))
+                                            bool(getattr(p, "overnight_converted_to_cnc", False)), float(config.HEAT_GAP_DEFAULT_PCT),
+                                            max_stop_pct=float(config.MAX_STOP_PCT))
         risk += r
         gap += g
     return risk, gap, float(_get_or_create(db).total_allocated_capital or 0.0)
@@ -395,7 +396,7 @@ def own_sector_risk(db: Session) -> dict:
         if sec == "Other":
             continue
         side = getattr(p, "side", None) or "LONG"
-        r = portfolio_heat.stop_risk(p.entry_price, p.stop_price, p.quantity, side)
+        r = portfolio_heat.stop_risk(p.entry_price, p.stop_price, p.quantity, side, max_stop_pct=float(config.MAX_STOP_PCT))
         if r > 0:
             k = portfolio_heat.sector_key(sec, side)
             out[k] = out.get(k, 0.0) + r

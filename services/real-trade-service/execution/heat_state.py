@@ -38,6 +38,12 @@ def _carried(p) -> bool:
         return False
 
 
+def _stop_kw(p) -> dict:
+    """E360: fallbacks for a position whose current_stop is missing or NaN: its own initial_stop_distance, else HEAT_MISSING_STOP_PCT % of the entry."""
+    return {"stop_distance": getattr(p, "initial_stop_distance", None),
+            "max_stop_pct": float(getattr(config, "HEAT_MISSING_STOP_PCT", 6.0) or 0.0)}
+
+
 def gap_pct_for(symbol) -> float:
     """Gap % for a carried stock: its own cached p95 (floored at HEAT_GAP_MIN_PCT) when known, else HEAT_GAP_DEFAULT_PCT. Never blocks."""
     default = float(getattr(config, "HEAT_GAP_DEFAULT_PCT", 1.5))
@@ -55,7 +61,7 @@ def _heat_strict(positions) -> Tuple[float, float]:
         c = _carried(p)
         if c:
             carried_syms.append(getattr(p, "symbol", None))
-        r, g = ph.position_heat(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", c, gap_pct_for(getattr(p, "symbol", None)))
+        r, g = ph.position_heat(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", c, gap_pct_for(getattr(p, "symbol", None)), **_stop_kw(p))
         risk += r
         gap += g
     if carried_syms and bool(getattr(config, "HEAT_GAP_P95_ENABLED", True)):
@@ -76,7 +82,7 @@ def positions_heat(positions) -> Tuple[float, float]:
             c = _carried(p)
             if c:
                 carried_syms.append(getattr(p, "symbol", None))
-            r, g = ph.position_heat(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", c, gap_pct_for(getattr(p, "symbol", None)))
+            r, g = ph.position_heat(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", c, gap_pct_for(getattr(p, "symbol", None)), **_stop_kw(p))
             risk += r
             gap += g
         if carried_syms and bool(getattr(config, "HEAT_GAP_P95_ENABLED", True)):
@@ -115,7 +121,7 @@ def _sector_strict(positions) -> dict:
         sec = sector_map.sector_of(getattr(p, "symbol", ""))
         if sec == "Other":
             continue
-        r = ph.stop_risk(p.avg_entry_price, p.current_stop, p.qty_open, "LONG")
+        r = ph.stop_risk(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", **_stop_kw(p))
         if r > 0:
             k = ph.sector_key(sec, "LONG")
             out[k] = out.get(k, 0.0) + r
@@ -131,7 +137,7 @@ def sector_risk(positions) -> dict:
             sec = sector_map.sector_of(getattr(p, "symbol", ""))
             if sec == "Other":
                 continue
-            r = ph.stop_risk(p.avg_entry_price, p.current_stop, p.qty_open, "LONG")
+            r = ph.stop_risk(p.avg_entry_price, p.current_stop, p.qty_open, "LONG", **_stop_kw(p))
             if r > 0:
                 k = ph.sector_key(sec, "LONG")
                 out[k] = out.get(k, 0.0) + r

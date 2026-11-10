@@ -493,6 +493,30 @@ def _circuit_rejected_today(mode: str, symbol: str) -> bool:
         return False
 
 
+def _commit_rejection(db: Session, order, detail: str) -> bool:
+    """E357: record a failed BUY placement (order REJECTED + its REJECTED event row) and COMMIT it, before anything else touches the session.
+    shared_symbol_lock.release() commits on success but ROLLS BACK on failure, and the REJECTED status used to still be uncommitted when it
+    ran, so a failing release threw the rejection away: the order stayed PLACED with no event and nothing said it had been refused. One retry
+    after a rollback (a dropped connection often recovers on the next try); a second failure is logged at ERROR and returns False. Never raises."""
+    try:
+        oid = order.id
+    except Exception:  # noqa: BLE001
+        oid = None
+    for attempt in (1, 2):
+        try:
+            order.status = "REJECTED"
+            db.add(models.TradeOrderEvent(order_id=oid if oid is not None else order.id, event_type="REJECTED", detail=detail))
+            db.commit()
+            return True
+        except Exception as _c:  # noqa: BLE001
+            logger.error("entry_engine: could not commit the REJECTED status of order %s (attempt %d of 2): %s", oid, attempt, _c)
+            try:
+                db.rollback()
+            except Exception as _rb:  # noqa: BLE001
+                logger.error("entry_engine: rollback after the failed REJECTED commit of order %s also failed: %s", oid, _rb)
+    return False
+
+
 def _uncertain_buy_active(mode: str, symbol: str) -> bool:
     try:
         from tz_utils import ist_today_str
@@ -2332,7 +2356,9 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     # group335: a failure about THIS symbol frees its slot for the next shortlisted pick; an account-wide one (shared order
                     # budget used up) does not - every other pick would hit the same wall.
                     _slot_failed = "order budget exhausted" not in str(ex).lower()
-                    order.status = "REJECTED"
+                    # E357: commit the REJECTED status and its event row FIRST. release() below rolls the session back when it fails, which
+                    # used to discard the uncommitted status (the order stayed PLACED, no event, no trace of the refusal).
+                    _commit_rejection(db, order, f"Dhan placement failed: {ex}")
                     # AUDIT FIX (session60): release the symbol claim taken
                     # above on ANY placement failure (including our own
                     # "already held by the other service" RuntimeError above,
@@ -2341,11 +2367,11 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                     # permanently locks this symbol out for this service.
                     if not (_uncertain or _blocked_uncertain or _blocked_dup):
                         shared_symbol_lock.release(db, cand.symbol)
-                    db.add(models.TradeOrderEvent(
-                        order_id=order.id, event_type="REJECTED",
-                        detail=f"Dhan placement failed: {ex}",
-                    ))
                     decision.action = "WAIT"
+                    # E358: an UNKNOWN BUY (the call errored and Dhan's order book could not be read) may be live at Dhan, so its cash is NOT
+                    # handed back to the rest of this cycle: another candidate could otherwise spend money that is already committed. The
+                    # next cycle reads Dhan's live balance, which then reflects the truth either way.
+                    _cash_back = 0.0 if _uncertain else decision.proposed_qty * entry_price
                     if dhan_client.is_invalid_ip_error(str(ex)):
                         decision.reasoning = (
                             "Risk-approved but blocked: Dhan rejected — outbound IP not whitelisted. "
@@ -2353,7 +2379,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         )
                         entered       -= 1
                         waited        += 1
-                        reserved_cash -= decision.proposed_qty * entry_price
+                        reserved_cash -= _cash_back
                         entry_details.append({
                             "symbol": cand.symbol, "action": decision.action,
                             "reasoning": decision.reasoning, "risk_verdict": decision.risk_verdict,
@@ -2395,7 +2421,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         )
                         entered       -= 1
                         waited        += 1
-                        reserved_cash -= decision.proposed_qty * entry_price
+                        reserved_cash -= _cash_back
                         _mark_circuit_rejected(mode, cand.symbol)   # E217: the "skipping for today" above is now real
                         db.commit()
                         logger.warning(
@@ -2412,7 +2438,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
                         decision.reasoning = f"Risk-approved but Dhan placement failed: {ex}"
                         entered       -= 1
                         waited        += 1
-                        reserved_cash -= decision.proposed_qty * entry_price  # release reserved capital
+                        reserved_cash -= _cash_back  # release reserved capital
                         db.commit()
                         await notify_async(
                             f"⚠️ *Auto BUY rejected by Dhan* — {cand.symbol}\n{str(ex)[:300]}"

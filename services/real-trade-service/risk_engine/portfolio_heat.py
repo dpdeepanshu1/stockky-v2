@@ -15,9 +15,24 @@ def _f(x, d: float = 0.0) -> float:
         return d
 
 
-def stop_risk(entry, stop, qty, side: str = "LONG") -> float:
-    """Rupees lost if the stop fills at its price. A stop at or past breakeven (long: stop >= entry) risks nothing."""
-    e, s, q = _f(entry), _f(stop, _f(entry)), max(0.0, _f(qty))
+def _finite_pos(x) -> Optional[float]:
+    v = _f(x, float("nan"))
+    return v if (v == v and v not in (float("inf"), float("-inf")) and v > 0) else None
+
+
+def stop_risk(entry, stop, qty, side: str = "LONG", stop_distance=None, max_stop_pct=None) -> float:
+    """Rupees lost if the stop fills at its price. A stop at or past breakeven (long: stop >= entry) risks nothing.
+    E360: a stop that is missing, NaN, infinite or <= 0 used to count as 0 risk (the stop was read as the entry price), so a position with a damaged
+    stop looked risk-free. Now the risk is taken from `stop_distance` (the position's own initial stop distance, rupees per share) when that is a
+    finite number > 0, else from `max_stop_pct` (% of the entry price) when that is > 0, else 0 as before (callers that pass neither keep the old maths)."""
+    e, q = _f(entry), max(0.0, _f(qty))
+    s = _finite_pos(stop)
+    if s is None:
+        d = _finite_pos(stop_distance)
+        if d is None:
+            pct = _finite_pos(max_stop_pct)
+            d = (max(0.0, e) * pct / 100.0) if pct is not None else 0.0
+        return max(0.0, d) * q
     d = (e - s) if str(side).upper() in ("LONG", "BUY") else (s - e)
     return max(0.0, d) * q
 
@@ -27,9 +42,10 @@ def gap_allowance(entry, qty, gap_pct) -> float:
     return max(0.0, _f(entry)) * max(0.0, _f(qty)) * max(0.0, _f(gap_pct)) / 100.0
 
 
-def position_heat(entry, stop, qty, side: str = "LONG", carried: bool = False, gap_pct=0.0) -> Tuple[float, float]:
-    """(stop risk, gap allowance) in rupees for one position. The allowance is 0 unless the position is carried overnight."""
-    return stop_risk(entry, stop, qty, side), (gap_allowance(entry, qty, gap_pct) if carried else 0.0)
+def position_heat(entry, stop, qty, side: str = "LONG", carried: bool = False, gap_pct=0.0, stop_distance=None, max_stop_pct=None) -> Tuple[float, float]:
+    """(stop risk, gap allowance) in rupees for one position. The allowance is 0 unless the position is carried overnight.
+    stop_distance / max_stop_pct are the E360 fallbacks for a missing or bad stop (see stop_risk)."""
+    return stop_risk(entry, stop, qty, side, stop_distance, max_stop_pct), (gap_allowance(entry, qty, gap_pct) if carried else 0.0)
 
 
 def p95_gap_pct(opens: Sequence, closes: Sequence, min_days: int = 20) -> Optional[float]:

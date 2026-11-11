@@ -137,9 +137,13 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     # ---- 1. contract -------------------------------------------------------------------------------------------------------
     say("STEP 1  PICK THE CONTRACT")
     today = now().date()
-    exps = [e for e in provider.expiries(und) if e and (date.fromisoformat(e) - today).days >= 1]
+    all_exps = [e for e in provider.expiries(und) if e]
+    exps = [e for e in all_exps if (date.fromisoformat(e) - today).days >= 1]
     if not exps:
-        return done(2, "  REFUSED: no expiry at least 1 day away (market-data-service not reachable, or only the expiry day itself is left).")
+        if not all_exps:                                       # round 386: an EMPTY list means market-data answered nothing usable; the old text blamed "only the expiry day is left" for that too
+            why = getattr(provider, "last_error", None)
+            return done(2, "  REFUSED: market-data-service returned no expiry list for " + und + (f" (last call: {why})" if why else "") + ". Check MARKET_DATA_URL, that market-data is up (curl $MARKET_DATA_URL/health), and that its Dhan scrip master loaded; then run again.")
+        return done(2, f"  REFUSED: no expiry at least 1 day away: the nearest listed is {all_exps[0]} (today is {today.isoformat()}), so only the expiry day itself is left.")
     if expiry_pick:
         if expiry_pick not in exps:
             return done(2, f"  REFUSED: expiry {expiry_pick} is not one Dhan lists at least 1 day away. Available: {', '.join(exps[:6])}.")
@@ -232,6 +236,7 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     say("STEP 4  BUY")
     buys: List[Tuple[int, float]] = []
     sells: List[Tuple[int, float]] = []
+    t0 = time.monotonic()                                  # round 386: "+ N s" is seconds since THIS order was sent (it used to count from program start, i.e. it included the time spent typing the confirmation phrase)
     r = broker.place(payload)
     res["orders"].append({"side": "BUY", "price": buy_px, "qty": qty, "ok": r.ok, "order_id": r.order_id, "status": r.status, "message": r.message})
     if execution.maybe_sent(r):                           # round 281 / 282: the call failed on the network or with an HTTP 5xx, so the BUY may still have reached Dhan: never say "nothing is open"
@@ -260,7 +265,11 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
     res["orders"][-1].update(filled_qty=filled, avg_price=bought_px)
     say(f"  BOUGHT {filled} units at an average Rs {bought_px:.2f}  -> money paid for the premium: Rs {filled * bought_px:,.2f}")
     mid_buy = mid
-    say(f"  you asked Rs {buy_px}, the mid was Rs {mid_buy:.2f}: paying above the mid by Rs {(bought_px - mid_buy) * filled:,.2f} is the spread cost of the BUY.")
+    d_buy = (bought_px - mid_buy) * filled
+    if d_buy >= 0:
+        say(f"  you asked Rs {buy_px}, the mid was Rs {mid_buy:.2f}: paying above the mid by Rs {d_buy:,.2f} is the spread cost of the BUY.")
+    else:                                                  # round 386: a fill BELOW the quoted mid is a price improvement, not a cost; the line used to print "above the mid by Rs -16.25"
+        say(f"  you asked Rs {buy_px}, the mid was Rs {mid_buy:.2f}: the fill was BELOW the mid by Rs {-d_buy:,.2f} (a price improvement: the BUY cost nothing in spread, it earned this).")
     say()
 
     # ---- 5. hold -----------------------------------------------------------------------------------------------------------
@@ -289,6 +298,7 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
         sell_px = max(tick, round_tick(bid_now - attempt * 2 * tick, tick))
         so = execution.build_order(client_id, sid, segment, "SELL", remaining, sell_px, f"probesell{attempt}" + now().strftime("%H%M%S"))
         say(f"  attempt {attempt + 1}/{SELL_TRIES}: SELL {remaining} units LIMIT at {sell_px}  (bid now {bid_now}{'' if attempt == 0 else f', {attempt * 2} tick(s) lower to get filled'})")
+        t0 = time.monotonic()
         rs = broker.place(so)
         rec = {"side": "SELL", "price": sell_px, "qty": remaining, "ok": rs.ok, "order_id": rs.order_id, "status": rs.status, "message": rs.message}
         res["orders"].append(rec)
@@ -374,8 +384,8 @@ def run(provider: Any, broker: Any, client_id: str, und: str = "NIFTY", side: st
         say(f"  to break even the premium must rise about {total_charges / q_:.2f} points ({total_charges / (b_avg * q_) * 100:.2f}% of what you paid) just to pay the charges.")
         say("  WHERE THE MONEY WENT (the identity: gross = market move - spread cost of the BUY - spread cost of the SELL):")
         say(f"    market move   (mid at sell {ms:.2f} - mid at buy {mid_buy:.2f}) x {q_}        {move:>10,.2f}")
-        say(f"    spread, BUY   ({b_avg:.2f} paid - {mid_buy:.2f} mid) x {q_}                -{spread_buy:>9,.2f}")
-        say(f"    spread, SELL  ({ms:.2f} mid - {s_avg:.2f} got) x {q_}                -{spread_sell:>9,.2f}")
+        say(f"    spread, BUY   ({b_avg:.2f} paid - {mid_buy:.2f} mid) x {q_}  {-spread_buy:>14,.2f}{'   (fill below the mid: a gain)' if spread_buy < 0 else ''}")
+        say(f"    spread, SELL  ({ms:.2f} mid - {s_avg:.2f} got) x {q_}  {-spread_sell:>14,.2f}{'   (fill above the mid: a gain)' if spread_sell < 0 else ''}")
         say(f"    = gross                                                  {move - spread_buy - spread_sell:>10,.2f}")
         say(f"    charges                                                  -{total_charges:>9,.2f}")
         say(f"    = net                                                    {net:>10,.2f}")

@@ -7904,11 +7904,16 @@ def _start_structure_refresh_locked(force: bool, dry_run: bool, limit: Optional[
         return {"ok": True, "dry_run": True, "status": "dry_run", "would_refresh": len(syms), "symbols": syms[:50], **plan_info}
     # group 486: planning reads EVERY feed row (a slow store read). It used to run before this function returned, so the POST blocked for the whole read
     # and the daily_close job timed out at 60 s on 2026-10-21 although the docstring says "returns at once". Plan inside the worker thread instead.
+    _sr._STOP.clear()   # E447: a Stop clicked while idle (or left from the last run) must not cancel this run; a Stop during planning below is honoured
     _sr._set_job(status="running", message="Structure refresh: planning (reading the feed rows)", processed=0, total=0, force=bool(force), selection={})
 
     def _worker() -> None:
         try:
             syms, tally, expected = _sr.plan(store, force=bool(force), limit=limit)
+            if _sr._STOP.is_set():   # E447: Stop arrived during planning; run() clears the flag when it starts, so without this the stop was lost
+                _sr._set_job(status="stopped", message="Stopped during planning (nothing refreshed)", processed=0, total=len(syms),
+                             selection=tally, expected_bar_date=str(expected), finished_at=datetime.now(IST).isoformat())
+                return
             if not syms:
                 _sr._set_job(status="done", message="Nothing to do: every feed row already has the latest completed daily structure",
                              processed=0, total=0, selection=tally, expected_bar_date=str(expected))
@@ -8902,7 +8907,7 @@ async def _run_refill_all_job(limit: int):
             "last_symbol": None,
             "cancel_requested": False,
         })
-        audit = await audit_missing_feed_data(limit=max(limit, 5000))
+        audit = await audit_missing_feed_data(limit=max(limit, 5000), cache=False)   # E446: a 20 s memo could list rows that are already repaired
         targets = [item["symbol"] for item in (audit.get("incomplete_stocks") or [])]
         targets = targets[:limit] if limit else targets
         _REFILL_ALL_JOB.update({

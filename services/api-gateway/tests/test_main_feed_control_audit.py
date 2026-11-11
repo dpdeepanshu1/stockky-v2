@@ -581,11 +581,13 @@ class TestRefillTrigger:
         assert out == {"ok": True, "already_running": True, "status": "running", "total": 9}
         assert refill.set_calls == []
 
-    def test_running_with_force_starts_anyway(self, store, refill):
-        refill.job = {"status": "running"}
+    def test_running_with_force_no_longer_starts_a_second_worker(self, store, refill):
+        # E447: the frontend always sends force=true, so force used to bypass the only guard; a live job now blocks a second start either way.
+        refill.job = {"status": "running", "total": 9}
         store.symbols = ["AAA"]
-        out = _run(gw.data_feed_refill_additional(BackgroundTasks(), force=True))
-        assert out["status"] == "running" and out["total"] == 1
+        bt = BackgroundTasks()
+        out = _run(gw.data_feed_refill_additional(bt, force=True))
+        assert out["already_running"] is True and out["status"] == "running" and bt.tasks == [] and refill.set_calls == []
 
     def test_idle_job_starts_regardless_of_force_flag(self, store, refill):
         store.symbols = ["AAA"]
@@ -640,10 +642,20 @@ class TestRefillTrigger:
         _run_tasks(bt)                                     # must not raise
 
     def test_setup_failure_is_a_500_truncated_to_240(self, store, refill):
-        refill.job_raises = True
-        with pytest.raises(HTTPException) as ei:
-            _run(gw.data_feed_refill_additional(BackgroundTasks()))
-        assert ei.value.status_code == 500 and ei.value.detail == "J" * 240
+        # E447: an unreadable job row no longer blocks a start (the guard fails open); a failing job write is still the 500.
+        store.symbols = ["AAA"]
+        refill_additional_set = refill_additional._set_job
+
+        def boom(**kw):
+            raise RuntimeError("S" * 300)
+
+        refill_additional._set_job = boom
+        try:
+            with pytest.raises(HTTPException) as ei:
+                _run(gw.data_feed_refill_additional(BackgroundTasks()))
+        finally:
+            refill_additional._set_job = refill_additional_set
+        assert ei.value.status_code == 500 and ei.value.detail == "S" * 240
 
     def test_routed_on_both_paths_post_only(self, store, refill, tc):
         store.symbols = ["AAA"]

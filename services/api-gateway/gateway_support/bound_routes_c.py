@@ -460,7 +460,7 @@ def build_bound_routes_c(ref):
         """
         limit = max(1, min(int(limit or 10), 25))
         try:
-            audit = await ref.audit_missing_feed_data(limit=limit)
+            audit = await ref.audit_missing_feed_data(limit=limit, cache=False)   # E446: act on the real incomplete list, not a memo
         except Exception as e:
             # Same "never 500 the UI" contract as repair-single: report the failure as an envelope.
             ref.logger.exception("repair_batch_missing audit: %s", e)

@@ -457,6 +457,14 @@ def build_bound_routes_h(ref):
         if ref._REFILL_ALL_JOB.get("status") == "running":
             return {"ok": True, "already_running": True, **ref._REFILL_ALL_JOB}
         limit = max(1, min(int(limit or 5000), 5000))
+        # E446: claim the job HERE, before the response. The worker only marked itself running once the background task got to start (after the
+        # response was sent), so a double click or the UI's own retry could pass the check above twice and start two jobs that both walked
+        # the whole list and wrote the same counters. There is no await between the check and this write, so the claim is atomic on the loop.
+        ref._REFILL_ALL_JOB.update({
+            "status": "running", "total": 0, "processed": 0, "ok_count": 0,
+            "started_at": ref.datetime.now(ref.IST).isoformat(), "finished_at": None,
+            "message": "Refill All queued…", "last_symbol": None, "cancel_requested": False,
+        })
         background_tasks.add_task(ref._run_refill_all_job, limit)
         return {"ok": True, "started": True, "message": "Refill All started in the background."}
 

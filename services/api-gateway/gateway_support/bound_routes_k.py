@@ -93,147 +93,158 @@ def build_bound_routes_k(ref):
     @start_bulk_feed_router.post("/api/data-feed/start-bulk-feed")
     @start_bulk_feed_router.post("/api/feed/start-bulk-feed")
     async def start_bulk_feed(
-        force: bool = True,
+        force: bool = False,
         use_universe: bool = True,
         background_tasks: ref.BackgroundTasks = None,
     ):
+        """Start the Yahoo bulk price feed. E447: answers `already_running` while a feed job (bulk, Refill Additional, slow-field run) is making
+        progress, instead of starting a second worker on the same job row; a stalled job can always be restarted. `force` is kept for old
+        callers and no longer overrides a live job (Stop it first)."""
+        async def _impl():
+            """
+        Yahoo bulk price feeder — NON-BLOCKING.
+
+        Returns 200 in <100 ms. Heavy yfinance download runs in BackgroundTasks
+        so Render/Vercel gateway never hits the 98-second timeout.
+
+        1) Build symbol list from scan universe (or existing feed index)
+        2) Mark job=running for UI polling
+        3) Schedule background worker that does the chunked bulk download (run_bulk) + Neon upsert
         """
-    Yahoo bulk price feeder — NON-BLOCKING.
+            from data_feed import run_bulk_yahoo_price_feed, clear_data_feed_stop
 
-    Returns 200 in <100 ms. Heavy yfinance download runs in BackgroundTasks
-    so Render/Vercel gateway never hits the 98-second timeout.
-
-    1) Build symbol list from scan universe (or existing feed index)
-    2) Mark job=running for UI polling
-    3) Schedule background worker that does the chunked bulk download (run_bulk) + Neon upsert
-    """
-        from data_feed import run_bulk_yahoo_price_feed, clear_data_feed_stop
-
-        try:
-            clear_data_feed_stop()
-        except Exception:
-            pass
-
-        symbols: list = []
-        if use_universe:
             try:
-                symbols = (await ref.asyncio.to_thread(ref._build_scan_universe)) or []
-            except Exception as e:
-                ref.logger.warning("bulk-feed universe: %s", e)
-                symbols = []
-            # group426: the scan universe (~500 symbols, sometimes a stale copy) is smaller than the feed index (587), so ~48 indexed
-            # symbols (MARUTI, ONGC, HAL ...) were never priced by this job. Append the indexed ones (duplicates are dropped below).
-            # BULK_FEED_INCLUDE_INDEX=0 restores the old list.
-            if symbols and ref._bulk_feed_include_index():
+                clear_data_feed_stop()
+            except Exception:
+                pass
+
+            symbols: list = []
+            if use_universe:
                 try:
-                    _indexed = [x for x in (ref._feed_store().list_symbols() or []) if x]
+                    symbols = (await ref.asyncio.to_thread(ref._build_scan_universe)) or []
+                except Exception as e:
+                    ref.logger.warning("bulk-feed universe: %s", e)
+                    symbols = []
+                # group426: the scan universe (~500 symbols, sometimes a stale copy) is smaller than the feed index (587), so ~48 indexed
+                # symbols (MARUTI, ONGC, HAL ...) were never priced by this job. Append the indexed ones (duplicates are dropped below).
+                # BULK_FEED_INCLUDE_INDEX=0 restores the old list.
+                if symbols and ref._bulk_feed_include_index():
+                    try:
+                        _indexed = [x for x in (ref._feed_store().list_symbols() or []) if x]
+                    except Exception:
+                        _indexed = []
+                    if _indexed:
+                        ref.logger.info("bulk-feed: scan universe %d + feed index %d (duplicates are dropped next)", len(symbols), len(_indexed))
+                        symbols = list(symbols) + _indexed
+            if not symbols:
+                try:
+                    symbols = ref._feed_store().list_symbols() or []
                 except Exception:
-                    _indexed = []
-                if _indexed:
-                    ref.logger.info("bulk-feed: scan universe %d + feed index %d (duplicates are dropped next)", len(symbols), len(_indexed))
-                    symbols = list(symbols) + _indexed
-        if not symbols:
+                    symbols = []
+            if not symbols:
+                try:
+                    symbols = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
+                except Exception:
+                    symbols = []
+
+            symbols = [
+                str(s).upper().replace(".NS", "").replace(".BO", "").strip()
+                for s in symbols
+                if s
+            ]
+            # de-dupe preserve order
+            seen = set()
+            clean = []
+            for s in symbols:
+                if s and s not in seen:
+                    seen.add(s)
+                    clean.append(s)
+            symbols = clean
+
+            if not symbols:
+                raise ref.HTTPException(status_code=400, detail="No symbols available for bulk feed")
+
+            # Mark job running for UI (instant)
             try:
-                symbols = ref._feed_store().list_symbols() or []
-            except Exception:
-                symbols = []
-        if not symbols:
-            try:
-                symbols = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
-            except Exception:
-                symbols = []
-
-        symbols = [
-            str(s).upper().replace(".NS", "").replace(".BO", "").strip()
-            for s in symbols
-            if s
-        ]
-        # de-dupe preserve order
-        seen = set()
-        clean = []
-        for s in symbols:
-            if s and s not in seen:
-                seen.add(s)
-                clean.append(s)
-        symbols = clean
-
-        if not symbols:
-            raise ref.HTTPException(status_code=400, detail="No symbols available for bulk feed")
-
-        # Mark job running for UI (instant)
-        try:
-            store = ref._feed_store()
-            store.set_job(
-                status="running",
-                message=f"Bulk Yahoo feed started for {len(symbols)} symbols (background)…",
-                processed=0,
-                total=len(symbols),
-                ok_count=0,
-                error_count=0,
-                stop_requested=False,
-                started_at=__import__("datetime").datetime.now(
-                    __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-                ).isoformat(),
-            )
-        except Exception:
-            pass
-
-        def _bulk_worker(syms: list):
-            """Runs entirely outside the HTTP request — no gateway timeout risk."""
-            try:
-                result = run_bulk_yahoo_price_feed(syms, merge_existing=True)
-                n = int((result or {}).get("tracked_stocks") or 0)
                 store = ref._feed_store()
                 store.set_job(
-                    status="done",
-                    message=(result or {}).get("message") or f"Bulk feed done: {n}",
-                    processed=n,
-                    total=len(syms),
-                    ok_count=n,
+                    status="running",
+                    message=f"Bulk Yahoo feed started for {len(symbols)} symbols (background)…",
+                    processed=0,
+                    total=len(symbols),
+                    ok_count=0,
                     error_count=0,
-                    finished_at=__import__("datetime").datetime.now(
+                    stop_requested=False,
+                    started_at=__import__("datetime").datetime.now(
                         __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
                     ).isoformat(),
                 )
-                store.set_meta(
-                    last_success_at=__import__("datetime").datetime.now(
-                        __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
-                    ).isoformat(),
-                    last_count=n,
-                    last_message=(result or {}).get("message"),
-                    source="yfinance_bulk_bg",
-                )
-                ref.logger.info("background bulk feed finished: %s", result)
-            except Exception as e:
-                ref.logger.exception("background bulk feed failed: %s", e)
+            except Exception:
+                pass
+
+            def _bulk_worker(syms: list):
+                """Runs entirely outside the HTTP request — no gateway timeout risk."""
                 try:
-                    ref._feed_store().set_job(
-                        status="error",
-                        message=str(e)[:200],
+                    result = run_bulk_yahoo_price_feed(syms, merge_existing=True)
+                    n = int((result or {}).get("tracked_stocks") or 0)
+                    store = ref._feed_store()
+                    # E447: the run reports "stopped" (Stop pressed) or "error" (httpx missing); the worker used to write "done" for both
+                    _st = str((result or {}).get("status") or "").lower()
+                    _final = _st if _st in ("stopped", "error") else "done"
+                    store.set_job(
+                        status=_final,
+                        message=(result or {}).get("message") or f"Bulk feed done: {n}",
+                        processed=n,
+                        total=len(syms),
+                        ok_count=n,
+                        error_count=0,
                         finished_at=__import__("datetime").datetime.now(
                             __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
                         ).isoformat(),
                     )
-                except Exception:
-                    pass
+                    if _final != "error":   # E447: a failed run is not a success
+                        store.set_meta(
+                            last_success_at=__import__("datetime").datetime.now(
+                                __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
+                            ).isoformat(),
+                            last_count=n,
+                            last_message=(result or {}).get("message"),
+                            source="yfinance_bulk_bg",
+                        )
+                    ref.logger.info("background bulk feed finished: %s", result)
+                except Exception as e:
+                    ref.logger.exception("background bulk feed failed: %s", e)
+                    try:
+                        ref._feed_store().set_job(
+                            status="error",
+                            message=str(e)[:200],
+                            finished_at=__import__("datetime").datetime.now(
+                                __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))
+                            ).isoformat(),
+                        )
+                    except Exception:
+                        pass
 
-        if background_tasks is not None:
-            background_tasks.add_task(_bulk_worker, symbols)
-        else:
-            # Fallback if FastAPI somehow omits BackgroundTasks (should not happen)
-            import threading
-            threading.Thread(target=_bulk_worker, args=(symbols,), daemon=True).start()
+            if background_tasks is not None:
+                background_tasks.add_task(_bulk_worker, symbols)
+            else:
+                # Fallback if FastAPI somehow omits BackgroundTasks (should not happen)
+                import threading
+                threading.Thread(target=_bulk_worker, args=(symbols,), daemon=True).start()
 
-        return {
-            "ok": True,
-            "status": "started",
-            "started": True,
-            "total": len(symbols),
-            "message": (
-                f"Data feed background worker initiated for {len(symbols)} symbols. "
-                "Ingesting into Cache DB. Poll /data-feed/status."
-            ),
-        }
+            return {
+                "ok": True,
+                "status": "started",
+                "started": True,
+                "total": len(symbols),
+                "message": (
+                    f"Data feed background worker initiated for {len(symbols)} symbols. "
+                    "Ingesting into Cache DB. Poll /data-feed/status."
+                ),
+            }
+
+        from gateway_support.feed_start_guard import guarded
+        return await guarded(ref, "bulk feed", _impl)
 
     @data_feed_refill_additional_router.post("/data-feed/refill-additional")
     @data_feed_refill_additional_router.post("/api/data-feed/refill-additional")
@@ -241,61 +252,58 @@ def build_bound_routes_k(ref):
         background_tasks: ref.BackgroundTasks,
         force: bool = True,
     ):
-        """
-    Manual / API trigger: Refill Additional Data (fundamentals + technical + events)
-    into the data-feed store with force=true upstream calls.
-
-    Returns immediately; work runs in BackgroundTasks. Poll
-    GET /data-feed/status or /data-feed/refill-additional/status.
-    """
-        try:
-            from refill_additional import get_refill_job, run_refill_additional, _set_job
-            job = get_refill_job()
-            if job.get("status") == "running" and not force:
-                return {"ok": True, "already_running": True, **job}
-
-            # Resolve universe before returning so UI shows total quickly
-            store = ref._feed_store()
-            symbols = []
+        """E447: `already_running` while a feed job is making progress (the frontend always sends force=true, so the old "running and not force"
+        check never fired and a double click started two workers). `force` is kept for old callers and no longer overrides a live job; a
+        stalled job can always be restarted."""
+        async def _impl():
             try:
-                symbols = list(store.list_symbols() or [])
-            except Exception:
+                from refill_additional import run_refill_additional, _set_job
+
+                # Resolve universe before returning so UI shows total quickly
+                store = ref._feed_store()
                 symbols = []
-            if not symbols:
                 try:
-                    symbols = (await ref.asyncio.to_thread(ref._build_scan_universe))
+                    symbols = list(store.list_symbols() or [])
                 except Exception:
                     symbols = []
-            symbols = [str(s).upper().replace(".NS", "").replace(".BO", "") for s in (symbols or []) if s]
-            _set_job(
-                status="running",
-                message=f"Starting Refill Additional Data for {len(symbols)} symbols…",
-                processed=0,
-                total=len(symbols),
-                ok_count=0,
-                error_count=0,
-            )
-
-            def _worker(syms=symbols):
-                try:
-                    run_refill_additional(syms)
-                except Exception as e:
-                    ref.logger.exception("refill_additional worker: %s", e)
+                if not symbols:
                     try:
-                        _set_job(status="error", message=str(e)[:240])
+                        symbols = (await ref.asyncio.to_thread(ref._build_scan_universe))
                     except Exception:
-                        pass
+                        symbols = []
+                symbols = [str(s).upper().replace(".NS", "").replace(".BO", "") for s in (symbols or []) if s]
+                _set_job(
+                    status="running",
+                    message=f"Starting Refill Additional Data for {len(symbols)} symbols…",
+                    processed=0,
+                    total=len(symbols),
+                    ok_count=0,
+                    error_count=0,
+                )
 
-            background_tasks.add_task(_worker)
-            return {
-                "ok": True,
-                "status": "running",
-                "message": f"Refill Additional Data started for {len(symbols)} symbols",
-                "total": len(symbols),
-            }
-        except Exception as e:
-            ref.logger.exception("data_feed_refill_additional: %s", e)
-            raise ref.HTTPException(status_code=500, detail=str(e)[:240])
+                def _worker(syms=symbols):
+                    try:
+                        run_refill_additional(syms)
+                    except Exception as e:
+                        ref.logger.exception("refill_additional worker: %s", e)
+                        try:
+                            _set_job(status="error", message=str(e)[:240])
+                        except Exception:
+                            pass
+
+                background_tasks.add_task(_worker)
+                return {
+                    "ok": True,
+                    "status": "running",
+                    "message": f"Refill Additional Data started for {len(symbols)} symbols",
+                    "total": len(symbols),
+                }
+            except Exception as e:
+                ref.logger.exception("data_feed_refill_additional: %s", e)
+                raise ref.HTTPException(status_code=500, detail=str(e)[:240])
+
+        from gateway_support.feed_start_guard import guarded
+        return await guarded(ref, "Refill Additional", _impl)
 
     @data_feed_run_router.post("/data-feed/run")
     @data_feed_run_router.post("/api/data-feed/run")
@@ -425,6 +433,27 @@ def build_bound_routes_k(ref):
             return bool(rid) and rid != run_id
 
         async def _run(start_at: int, ok0: int, err0: int, done0: set):
+            """E445: guard around the worker. An exception nothing inside `_run_impl` catches (the store's job read / write failing mid-loop,
+            a bad upstream shape in the bulk phase's bookkeeping, ...) used to die silently inside the background task and leave the job
+            row at status "running" for ever: Stop / Resume had a dead worker to wait on and the UI showed a feed that never finished. Now the
+            job is marked "error" (counters and checkpoint are kept, so Resume continues from the cursor) unless a newer run owns the row."""
+            try:
+                await _run_impl(start_at, ok0, err0, done0)
+            except Exception as e:  # noqa: BLE001  (CancelledError is a BaseException and still propagates)
+                ref.logger.exception("data-feed run %s crashed: %s", run_id, e)
+                try:
+                    if not _superseded():
+                        ts = ref.datetime.now(ref.IST).isoformat()
+                        store.set_job(
+                            status="error",
+                            message=f"Data feed crashed: {str(e)[:160] or type(e).__name__} — Resume continues from the last checkpoint",
+                            finished_at=ts,
+                            stop_requested=False,
+                        )
+                except Exception:  # noqa: BLE001  (the store may be the very thing that failed)
+                    pass
+
+        async def _run_impl(start_at: int, ok0: int, err0: int, done0: set):
             ref.clear_data_feed_stop()
             ok_n = ok0
             err_n = err0

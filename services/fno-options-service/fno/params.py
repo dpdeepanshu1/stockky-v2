@@ -44,6 +44,7 @@ class Params:
     strat_trend_i: float = 15.0    # TREND_RIDER: intraday score that must agree
     strat_chain_veto: float = 15.0    # the option chain vetoes a signal when it leans this far against it
     strat_sweep_max_d: float = 50.0    # BEAR_SWEEP: not above this daily score
+    core_min_intraday_bars: int = 6    # round 388 (E404): a SWITCH, 0 = off, anything else = on. On: CORE may enter only when its intraday part could be scored (intraday_score needs 6 bars of today = 09:45 on 5-minute bars). Off = the old behaviour (daily + chain alone could enter at 09:30)
     strat_pivot_max_d: float = 15.0    # BEAR_PIVOT: not above this daily score
     strat_opener_d: float = 15.0    # WEEKLY_OPENER: daily score needed in the break direction
     strat_surge_body: float = 0.6     # MOMENTUM_SURGE: body as a fraction of the bar range
@@ -101,7 +102,7 @@ class Params:
             strat_trend_d=float(g("FNO_STRAT_TREND_D", 40.0)), strat_trend_i=float(g("FNO_STRAT_TREND_I", 15.0)), strat_chain_veto=float(g("FNO_STRAT_CHAIN_VETO", 15.0)), strat_sweep_max_d=float(g("FNO_STRAT_SWEEP_MAX_D", 50.0)), strat_pivot_max_d=float(g("FNO_STRAT_PIVOT_MAX_D", 15.0)), strat_opener_d=float(g("FNO_STRAT_OPENER_D", 15.0)), strat_surge_body=float(g("FNO_STRAT_SURGE_BODY", 0.6)), strat_surge_close=float(g("FNO_STRAT_SURGE_CLOSE", 0.7)), strat_surge_vol_mult=float(g("FNO_STRAT_SURGE_VOL_MULT", 1.3)), strat_expiry_body=float(g("FNO_STRAT_EXPIRY_BODY", 0.5)), strat_alpha_move=float(g("FNO_STRAT_ALPHA_MOVE", 0.5)), strat_alpha_pause=float(g("FNO_STRAT_ALPHA_PAUSE", 0.4)), strat_drift_touch_pct=float(g("FNO_STRAT_DRIFT_TOUCH_PCT", 0.08)),
             strat_surge_range_mult=float(g("FNO_STRAT_SURGE_RANGE_MULT", 1.5)), strat_expiry_range_mult=float(g("FNO_STRAT_EXPIRY_RANGE_MULT", 1.3)),
             strat_drift_closes=int(g("FNO_STRAT_DRIFT_CLOSES", 10)), strat_drift_slope_pct=float(g("FNO_STRAT_DRIFT_SLOPE_PCT", 0.04)),
-            strat_pivot_break_pct=float(g("FNO_STRAT_PIVOT_BREAK_PCT", 0.03)),
+            strat_pivot_break_pct=float(g("FNO_STRAT_PIVOT_BREAK_PCT", 0.03)), core_min_intraday_bars=int(g("FNO_CORE_MIN_INTRADAY_BARS", 6)),
             expiry_entry_end=str(g("FNO_EXPIRY_ENTRY_END", "13:30")), expiry_squareoff_at=str(g("FNO_EXPIRY_SQUAREOFF_AT", "14:45")),
             expiry_risk_mult=float(g("FNO_EXPIRY_RISK_MULT", 0.5)), expiry_real_ok=bool(g("FNO_EXPIRY_REAL", False)),
             sl_pct=float(g("FNO_SL_PCT", 25.0)), target_pct=float(g("FNO_TARGET_PCT", 50.0)), trail_arm_pct=float(g("FNO_TRAIL_ARM_PCT", 30.0)),
@@ -144,6 +145,7 @@ CONFIG_NAME: Dict[str, str] = {
     "strat_trend_i": "FNO_STRAT_TREND_I",
     "strat_chain_veto": "FNO_STRAT_CHAIN_VETO",
     "strat_sweep_max_d": "FNO_STRAT_SWEEP_MAX_D",
+    "core_min_intraday_bars": "FNO_CORE_MIN_INTRADAY_BARS",
     "strat_pivot_max_d": "FNO_STRAT_PIVOT_MAX_D",
     "strat_opener_d": "FNO_STRAT_OPENER_D",
     "strat_surge_body": "FNO_STRAT_SURGE_BODY",

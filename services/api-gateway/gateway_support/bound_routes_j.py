@@ -398,6 +398,11 @@ def build_bound_routes_j(ref):
                     row = dict(prefetched.get(base) or {})
                     row.setdefault("close", px)
                     row.setdefault("price", px)
+                    # E414: since E410 the scan reads last_price / current_price BEFORE close / price. A feed row that already carries them (written by
+                    # patch_feed_price earlier in the day) would beat this chunk's fresh quote, so refresh those two keys when they exist (never add them).
+                    for _lk in ("last_price", "current_price"):
+                        if row.get(_lk) is not None:
+                            row[_lk] = px
                     prefetched[base] = row
 
                 # Sticky Fix Step 3: lite = pure gateway eval (no decision HTTP)
@@ -478,7 +483,7 @@ def build_bound_routes_j(ref):
                         continue
                 for sym, res in zip(chunk, batch):
                     processed += 1
-                    if isinstance(res, Exception):
+                    if isinstance(res, BaseException):   # E417: a child cancelled from outside is a CancelledError (not an Exception) and used to become an "invalid" row
                         try:
                             base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                             fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
@@ -486,12 +491,12 @@ def build_bound_routes_j(ref):
                             from instant_scanner import compute_instant_scores
                             out = compute_instant_scores(base, fed or {}, {"price": px} if px > 0 else {})
                             out["fallback_instant"] = True
-                            out["fallback_reason"] = str(res)[:120]
+                            out["fallback_reason"] = (str(res) or type(res).__name__)[:120]
                         except Exception:
                             out = {
                                 "symbol": sym,
                                 "decision": "ERROR",
-                                "error": str(res)[:200],
+                                "error": (str(res) or type(res).__name__)[:200],
                             }
                     elif isinstance(res, dict):
                         out = res
@@ -504,6 +509,11 @@ def build_bound_routes_j(ref):
                             base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                             fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else None
                             tick = {"price": None}
+                            _live_px = 0.0   # E429: did this chunk (or the single-quote fallback below) give a live price for the symbol?
+                            try:
+                                _live_px = float((chunk_prices or {}).get(base) or 0)
+                            except (TypeError, ValueError):
+                                _live_px = 0.0
                             # Prefer bulk-injected feed close already in prefetched
                             out = ensure_row_price(out, feed=fed if isinstance(fed, dict) else None)
                             if extract_safe_price(decision=out) <= 0:
@@ -511,8 +521,17 @@ def build_bound_routes_j(ref):
                                     px = ref._fetch_price_from_quote(sym)
                                     if px is not None:
                                         out = apply_price_aliases(out, float(px))
+                                        _live_px = float(px)
                                 except Exception:
                                     pass
+                            # E429: no live quote for this symbol in its chunk: the price on the row is the Data Feed's old one (the only source left).
+                            # Say so on the row instead of presenting it as live; the UI shows a STALE PRICE chip.
+                            # Only when the row's price IS the feed's: a worker that fetched its own quote gives a different (live) price and is not flagged.
+                            if not (_live_px > 0) and "ERROR" != out.get("decision") and isinstance(fed, dict):
+                                _row_px = extract_safe_price(decision=out)
+                                _feed_px = extract_safe_price(decision=fed)
+                                if _row_px > 0 and _feed_px > 0 and abs(_row_px - _feed_px) < 1e-9:
+                                    out["price_stale"] = True
                         except Exception as _pe:
                             ref.logger.debug("price_resolver stream: %s", _pe)
                     out["_progress"] = {
@@ -707,10 +726,13 @@ def build_bound_routes_j(ref):
                 # the full dict is passed through, not just
                 # next_earnings_date.
                 normalized["event_data"] = events
-                if events.get("next_earnings_date"):
-                    normalized["event_risk"] = True
+                from earnings_window import earnings_event_risk   # E427: past dates no longer set event_risk
+                _er, _er_line = earnings_event_risk(events.get("next_earnings_date"))
+                if _er_line:
+                    if _er:
+                        normalized["event_risk"] = True
                     reasons = normalized.get("reasons", {})
-                    reasons["event"] = [f"Earnings due: {events['next_earnings_date']}"]
+                    reasons["event"] = [_er_line]
                     normalized["reasons"] = reasons
 
             pred_data = job_results.get("prediction")
@@ -1145,7 +1167,7 @@ def build_bound_routes_j(ref):
                     ticks = [None] * len(batch)
 
                 for sym, tick in zip(batch, ticks):
-                    if isinstance(tick, Exception) or not tick:
+                    if isinstance(tick, BaseException) or not tick:   # E417: a cancelled quote child is truthy and used to reach score_stock
                         # No quote: nothing real to score. Scoring an empty tick
                         # could still return a "hit" built from the baseline alone.
                         quotes_failed += 1

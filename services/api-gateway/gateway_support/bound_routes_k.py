@@ -321,7 +321,7 @@ def build_bound_routes_k(ref):
         universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
         if not universe:
             universe = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
-        _df_max = int(ref.os.getenv("DATA_FEED_MAX_SYMBOLS", "0") or 0)
+        _df_max = ref._safe_int(ref.os.getenv("DATA_FEED_MAX_SYMBOLS"), 0)   # E444: a junk value is "no cap", not a 500
         if _df_max > 0:
             universe = universe[:_df_max]
         universe = [u.upper().replace(".NS", "").replace(".BO", "") for u in universe]
@@ -354,16 +354,22 @@ def build_bound_routes_k(ref):
             ref.logger.info("data-feed only_new: %s symbols without feed entry", len(universe))
 
 
+        # E443: every launch gets its own run id, written into the job row. A Resume (which stops the running job first), or a force
+        # run, used to start a SECOND worker while the first was still inside its current symbol: the new run cleared the process stop
+        # flag and wrote stop_requested=False / status "running", so the old worker saw no stop and kept feeding. Two workers then
+        # wrote interleaved progress and checkpoints. The worker now exits quietly once the job row carries another run's id.
+        run_id = ref.uuid.uuid4().hex[:12]
+
         # Checkpoint: list of already-fed symbols + cursor
         checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
         done_set = set(checkpoint.get("done") or [])
         start_idx = 0
-        ok_n = int(job.get("ok_count") or 0)
-        err_n = int(job.get("error_count") or 0)
+        ok_n = max(0, ref._safe_int(job.get("ok_count")))        # E444: tolerant parse of stored counters
+        err_n = max(0, ref._safe_int(job.get("error_count")))
 
         if resume and not force:
             # Prefer explicit cursor; else skip symbols already in done
-            start_idx = int(checkpoint.get("cursor") or job.get("processed") or 0)
+            start_idx = ref._safe_int(checkpoint.get("cursor")) or ref._safe_int(job.get("processed"))
             start_idx = max(0, min(start_idx, len(universe)))
             # If job was stopped mid-way, resume from there
             if job.get("status") in ("stopped", "error", "idle", "done") and start_idx >= len(universe):
@@ -382,6 +388,7 @@ def build_bound_routes_k(ref):
                 ok_count=ok_n,
                 error_count=err_n,
                 stop_requested=False,
+                run_id=run_id,
                 checkpoint={"cursor": start_idx, "done": list(done_set), "universe": universe},
             )
             mode = "resume"
@@ -403,9 +410,19 @@ def build_bound_routes_k(ref):
                 ok_count=0,
                 error_count=0,
                 stop_requested=False,
+                run_id=run_id,
                 checkpoint={"cursor": 0, "done": [], "universe": universe},
             )
             mode = "refresh" if force else "start"
+
+        def _superseded() -> bool:
+            """E443: True when the job row now belongs to a different run (a newer launch replaced this one). A row with no run id
+            (written before this existed, or reset) never counts as superseded."""
+            try:
+                rid = (store.job() or {}).get("run_id")
+            except Exception:
+                return False
+            return bool(rid) and rid != run_id
 
         async def _run(start_at: int, ok0: int, err0: int, done0: set):
             ref.clear_data_feed_stop()
@@ -505,7 +522,7 @@ def build_bound_routes_k(ref):
 
             if True:
                 # Concurrent fund-only fill (no news storm) — max 3 in-flight
-                fund_sem = ref.asyncio.Semaphore(int(((ref.os.getenv("DATA_FEED_FUND_CONCURRENCY") or "").strip() or "3")))
+                fund_sem = ref.asyncio.Semaphore(max(1, ref._safe_int(ref.os.getenv("DATA_FEED_FUND_CONCURRENCY"), 3) or 3))   # E444: junk / 0 no longer kills or deadlocks the worker
 
                 async def _feed_one(base: str):
                     async with fund_sem:
@@ -526,6 +543,10 @@ def build_bound_routes_k(ref):
                         return base, fund, events
 
                 for i in range(start_at, len(universe)):
+                    # E443: a newer run owns the job now — leave its rows alone (no stopped/done commit from this worker)
+                    if _superseded():
+                        ref.logger.info("data-feed run %s superseded at %s/%s — exiting", run_id, i, len(universe))
+                        return
                     # Cooperative stop (process flag OR job flag) — ASAP
                     jnow = store.job()
                     if ref.data_feed_stop_requested() or jnow.get("stop_requested") or jnow.get("status") in ("stopped", "stopping"):
@@ -582,6 +603,9 @@ def build_bound_routes_k(ref):
                         err_n += 1
                         ref.logger.debug("data-feed %s: %s", base, e)
 
+                    if _superseded():   # E443: the symbol just fed is saved; do not overwrite the newer run's progress / checkpoint
+                        ref.logger.info("data-feed run %s superseded after %s — exiting", run_id, base)
+                        return
                     store.set_job(
                         status="running",
                         processed=i + 1,
@@ -593,7 +617,7 @@ def build_bound_routes_k(ref):
                         updated_at=ref.datetime.now(ref.IST).isoformat(),
                         checkpoint={"cursor": i + 1, "done": list(done_set), "universe": universe},
                     )
-                    feed_batch = max(5, int(((ref.os.getenv("DATA_FEED_BATCH_SIZE") or "").strip() or "20")))
+                    feed_batch = max(5, ref._safe_int(ref.os.getenv("DATA_FEED_BATCH_SIZE"), 20) or 20)   # E444
                     if (i + 1) % feed_batch == 0:
                         # Complete batch → warm all upstreams, then continue
                         store.set_job(

@@ -27,6 +27,9 @@ def _mode(cfg: Any) -> str:
 def real_capital(cfg: Any) -> Tuple[float, str]:
     """(rupees REAL sizing may use, why). 0.0 means no REAL entry."""
     try:
+        fixed = float(getattr(cfg, "FNO_REAL_FIXED_CAPITAL", 0.0) or 0.0)      # round 387 (E403)
+        if fixed > 0 and fixed == fixed and fixed != float("inf"):
+            return fixed, "fixed F&O amount (FNO_REAL_FIXED_CAPITAL)"
         if _mode(cfg) == "off":
             return 0.0, "CAPITAL_ALLOC_MODE is off on F&O: REAL sizing needs the capital board (set shadow or live; Real Trade must write it)"
         amt, why = capital_board.amount_for(str(getattr(cfg, "CAPITAL_ALLOC_DIR", "/data/shared")), SERVICE, float(getattr(cfg, "CAPITAL_ALLOC_MAX_AGE_S", 21600.0)))

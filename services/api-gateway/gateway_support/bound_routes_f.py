@@ -645,6 +645,8 @@ def build_bound_routes_f(ref):
                     purged.append(sym)
                 except Exception as e:
                     ref.logger.warning("purge_over_cap: failed to delete %s: %s", sym, e)
+        if purged:
+            ref._audit_cache_clear("feed_audit:")   # E442: the memoised Health Audit still listed the purged rows
         return {
             "ok": True,
             "purged_count": len(purged),

@@ -520,7 +520,9 @@ def _extract_event_signals(events: dict | None) -> dict:
     if next_earnings:
         try:
             earnings_dt = datetime.fromisoformat(str(next_earnings)[:10])
-            days_out = (earnings_dt - now).days
+            # E427: compare calendar dates (IST). `earnings_dt` is midnight and `now` has a time of day, so a results date of TODAY gave
+            # (midnight - now).days == -1 and was read as "recent earnings", missing the highest-risk day.
+            days_out = (earnings_dt.date() - (now + timedelta(hours=5, minutes=30)).date()).days
             earnings_days_out = days_out
             if 0 <= days_out <= EARNINGS_RISK_DAYS:
                 event_risk = True

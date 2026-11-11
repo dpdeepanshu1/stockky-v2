@@ -41,6 +41,8 @@ finally:
 
 import data_feed as _df
 
+_SOON = (__import__("datetime").datetime.now(__import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))).date() + __import__("datetime").timedelta(days=1)).isoformat()   # E427: a date inside the event-risk window, so these tests do not rot
+
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -685,10 +687,10 @@ def test_fundamental_task_exception_is_ignored(env):
 
 def test_event_data_with_an_earnings_date_flags_event_risk(env):
     env.get_result = DResp(dict(ALL_SUPPLIED, event_data=None, reasons={"technical": ["t"]}))
-    env.event = {"next_earnings_date": "2026-10-20", "bulk_deals": [1]}
+    env.event = {"next_earnings_date": _SOON, "bulk_deals": [1]}
     out = analyze("TCS")
     assert out["event_data"] == env.event and out["event_risk"] is True
-    assert out["reasons"]["event"] == ["Earnings due: 2026-10-20"] and out["reasons"]["technical"] == ["t"]
+    assert out["reasons"]["event"] == [f"Earnings due: {_SOON}"] and out["reasons"]["technical"] == ["t"]
 
 
 def test_event_data_without_a_date_is_stored_but_does_not_flag_risk(env):
@@ -865,7 +867,7 @@ def test_cancelled_children_do_not_block_the_surviving_ones(env):
     env.fund_exc = asyncio.CancelledError()
     env.news_exc = asyncio.CancelledError()
     env.pred = (64.0, "model says up")
-    env.event = {"next_earnings_date": "2026-10-20"}
+    env.event = {"next_earnings_date": _SOON}
     out = analyze("TCS")
     assert out["prediction_score"] == 64.0 and out["event_risk"] is True
     assert not out.get("fundamental_metrics")

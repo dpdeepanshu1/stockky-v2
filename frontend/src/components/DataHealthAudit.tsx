@@ -13,6 +13,11 @@ interface AuditStats {
   fully_populated: number;
   incomplete_count: number;
   health_score: number;
+  /** E430: rows with a required field that is a baseline seed, not a real read (still counted as populated in health_score). */
+  seeded_count?: number;
+  seeded_by_field?: Record<string, number>;
+  real_data_count?: number;
+  real_data_score?: number;
   incomplete_stocks: IncompleteStock[];
   required_fields?: string[];
 }
@@ -244,6 +249,17 @@ export default function DataHealthAudit() {
           <span className="scan-stat-value text-signal-sell">{stats?.incomplete_count ?? "—"}</span>
         </div>
       </div>
+
+      {stats?.seeded_count != null && (
+        <div
+          className="text-[11px] text-mist"
+          title="Seeded values are baseline placeholders (PE, ROCE, sentiment, RSI) that count as populated in the health score until a real read replaces them."
+        >
+          Real data {stats.real_data_score ?? "—"}% ({stats.real_data_count ?? "—"} rows) · {stats.seeded_count} row(s) rest on a seeded value
+          {stats.seeded_by_field && Object.keys(stats.seeded_by_field).length > 0 &&
+            ` (${Object.entries(stats.seeded_by_field).map(([k, v]) => `${k} ${v}`).join(", ")})`}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <input

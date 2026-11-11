@@ -476,6 +476,7 @@ class TestNum:
     @pytest.mark.parametrize("value, expected", [
         (None, None), (5, 5.0), ("3.5", 3.5), (Decimal("75.00"), 75.0), (0, 0.0),
         (True, 1.0), ("abc", None), ("", None), (object(), None), ([], None),
+        (float("nan"), None), (float("inf"), None), (float("-inf"), None), (Decimal("NaN"), None), ("nan", None),   # E441
     ])
     def test_cases(self, m, value, expected):
         assert m._num(value) == expected
@@ -1465,18 +1466,18 @@ class TestRepairBatchFetch:
         out = m.hotpicks_repair_batch(market_data_url=MD)
         assert out == {"status": "completed", "repaired": ["AAA"], "attempted": 1}
         ((sql, params),) = env.hp.shared.find("UPDATE")
-        assert sql == ("UPDATE hotpicks_static_feed SET item_json = :item_json, "
-                       "updated_at = NOW[postgresql] WHERE symbol = :symbol AND section = :section")
+        assert sql == ("UPDATE hotpicks_static_feed SET item_json = :item_json "
+                       "WHERE symbol = :symbol AND section = :section")   # E425: updated_at is not touched
         assert params["symbol"] == "AAA" and params["section"] == "results_driven"
         assert json.loads(params["item_json"]) == {"decision": "BUY", "keep": "me", "price": 123.5, "close": 123.5}
         assert env.hp.shared.begins == 1
 
-    def test_update_uses_dialect_now_func(self, m, env):
+    def test_update_never_touches_updated_at_in_either_dialect(self, m, env):   # E425
         env.hp.dial = "oracle"
         self._one(env)
         env.http.routes[f"{MD}/quote/AAA"] = FakeResp(200, {"price": 5})
         m.hotpicks_repair_batch(market_data_url=MD)
-        assert "updated_at = NOW[oracle]" in env.hp.shared.find("UPDATE")[0][0]
+        assert "updated_at" not in env.hp.shared.find("UPDATE")[0][0]
 
     def test_item_json_under_the_schema_cap_is_written_whole_and_valid(self, m, env):
         """E394: used to be cut at 15000 chars (invalid JSON). 20000 chars is under the 30000-byte schema cap."""
@@ -1760,9 +1761,11 @@ class TestRepairScoresFetch:
         # attempted used to stay 0 here (pinned as current behaviour); it now counts the row tried.
         assert out == {"status": "completed", "repaired": ["AAA"], "attempted": 1}
         sql, params, blob = self._saved(env)
-        assert sql == ("UPDATE hotpicks_static_feed SET item_json = :item_json, "
-                       "updated_at = NOW[postgresql] WHERE symbol = :symbol AND section = :section")
+        # E425: updated_at is not touched. E441: the typed decision / score columns are set too (COALESCE keeps a stored value when absent)
+        assert sql == ("UPDATE hotpicks_static_feed SET item_json = :item_json, decision = COALESCE(:decision, decision), "
+                       "score = COALESCE(:score, score) WHERE symbol = :symbol AND section = :section")
         assert params["symbol"] == "AAA" and params["section"] == "bulk_insider_driven"
+        assert params["decision"] == "BUY" and params["score"] == 77.0
         assert blob == {
             "price": 10, "keep": "me", "decision": "BUY", "score": 77, "combined_score": 77,
             "technical_score": 61, "fundamental_score": 55, "news_score": 40, "prediction_score": 52,
@@ -1770,12 +1773,28 @@ class TestRepairScoresFetch:
             "stop_loss": 95, "holding_period": "5d", "holding_period_estimate": "3-7d",
             "confidence": "HIGH", "reasons": ["r1", "r2"]}
 
-    def test_update_uses_dialect_now_func(self, m, env):
+    def test_typed_columns_keep_the_stored_value_when_the_repair_has_none(self, m, env):   # E441
+        self._one(env)
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"technical_score": 61})
+        m.hotpicks_repair_scores(decision_url=DEC)
+        _, params, _ = self._saved(env)
+        assert params["decision"] is None and params["score"] is None
+
+    def test_non_finite_scores_are_never_stored_in_item_json_or_the_score_column(self, m, env):   # E441
+        self._one(env)
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY", "combined_score": float("nan"),
+                                                               "technical_score": float("inf")})
+        m.hotpicks_repair_scores(decision_url=DEC)
+        _, params, blob = self._saved(env)
+        assert "NaN" not in params["item_json"] and "Infinity" not in params["item_json"]
+        assert blob["score"] is None and blob["technical_score"] is None and params["score"] is None
+
+    def test_update_never_touches_updated_at_in_either_dialect(self, m, env):   # E425
         env.hp.dial = "oracle"
         self._one(env)
         env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY"})
         m.hotpicks_repair_scores(decision_url=DEC)
-        assert "updated_at = NOW[oracle]" in self._saved(env)[0]
+        assert "updated_at" not in self._saved(env)[0]
 
     def test_zero_combined_score_is_copied(self, m, env):
         self._one(env)
@@ -1997,7 +2016,7 @@ class TestAgainstRealSchema:
         used.add("ensure_hotpicks_schema")
         assert {"ROW_KEYS", "TABLE_NAME", "database_url", "dialect", "make_engine", "shared_engine",
                 "adapt_rows", "upsert_sql", "table_exists_sql", "select_recent_sql",
-                "delete_older_than_sql", "now_func", "coerce_bool"} <= used
+                "delete_older_than_sql", "coerce_bool"} <= used   # E425: now_func no longer used (repairs do not touch updated_at)
         missing = sorted(n for n in used if not hasattr(real_schema, n))
         assert missing == []
 

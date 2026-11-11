@@ -16,9 +16,11 @@ NOT stored here (always live when needed):
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import math
 import os
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 import threading
@@ -253,7 +255,16 @@ def extract_feed_payload(
 
 
 def _payload_is_useful(payload: Optional[dict]) -> bool:
-    """True when feed row has any field that can short-circuit upstream work."""
+    """True when feed row has any field that can short-circuit upstream work.
+
+    E434 (round 417), on purpose: a row that only carries price fields is NOT useful. The keys tested for price (`close`, `price`, `ltp`) are
+    never on a normalized row (normalize_feed_payload maps them to `prev_close` / `last_price`), so a normalized price-only row falls through
+    to the durable read every time. That is kept: `put_symbol` and `put_symbols_bulk` build the row they merge into from `get_symbol(s)` and
+    then upsert the WHOLE merged value under all three keys, so a thin local row served as "useful" would become the merge base and overwrite
+    a richer durable row (fundamentals / events written or restored behind this process, e.g. after a hard reset) with a price-only one. The
+    price is one extra durable read for symbols that really have no more than a price; `get_symbols_bulk` reads all of them in one round trip.
+    Do not add `prev_close` / `last_price` here without first making the write paths read the durable row.
+    """
     if not isinstance(payload, dict) or not payload:
         return False
     return bool(
@@ -328,6 +339,10 @@ def merge_feed_payload(existing: dict, incoming: dict) -> dict:
 
     for k, v in inc.items():
         if k in _rejected_seed_flags:
+            continue
+        # E424: "yahoo_missing" marks a placeholder for a symbol the bulk quote call did not return; it is not a source of any data, so it must
+        # not replace the label of a row that already has one (it used to turn a real yahoo_bulk / nse_bhavcopy row into "yahoo_missing").
+        if k == "source" and v == "yahoo_missing" and base.get("source"):
             continue
         # 1) Sparse zero protection
         if k in _ZERO_PROTECTED:
@@ -1083,36 +1098,84 @@ LOCK_PREFIX = "stockky:lock:refresh:"
 _MEM_LOCKS: Dict[str, float] = {}
 
 
-def try_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> bool:
+# E435 (round 418): the lock used to be released by whoever finished, whether or not it still held it. The foreground refresh takes the lock for 5 s
+# but its upstream call can run 35 s, so the lock expired mid-call, a second request took it, and the first one's `release_refresh_lock` then freed the
+# SECOND request's lock, letting a third refresh start (the same happened with the 45 s background lock after a long outage). Each acquisition now gets
+# a token (stored as the Redis value and in `_MEM_LOCK_TOKENS`); a release only frees the lock while it still carries that token. Callers do not have to
+# change: `acquire_refresh_lock` / `try_refresh_lock` remember the token in a ContextVar, and `release_refresh_lock(redis, symbol)` called in the same
+# asyncio task, or in a task created from it after the lock was taken (the fire-and-forget background refresh), finds it there. A release with no
+# token anywhere (called from a context that never acquired) keeps the old behaviour: free the lock unconditionally. `token=` can be passed explicitly.
+_MEM_LOCK_TOKENS: Dict[str, str] = {}
+_LOCK_TOKENS_CV: contextvars.ContextVar = contextvars.ContextVar("refresh_lock_tokens", default=None)
+
+
+def acquire_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> Optional[str]:
+    """Take the refresh lock for `symbol`. Returns the owner token, or None when somebody else holds it."""
     key = f"{LOCK_PREFIX}{_norm_sym(symbol)}"
     now = datetime.now(IST).timestamp()
     # Always use process lock first
     exp = _MEM_LOCKS.get(key)
     if exp and exp > now:
-        return False
+        return None
+    token = "t" + uuid.uuid4().hex
     _MEM_LOCKS[key] = now + ttl_sec
-    if redis_client is None:
-        return True
-    try:
-        ok = redis_client.set(key, "1", nx=True, ex=int(ttl_sec))
-        return bool(ok)
-    except TypeError:
+    _MEM_LOCK_TOKENS[key] = token
+    ok = True                      # no Redis, or Redis failing, fails open: the process lock above is what holds
+    if redis_client is not None:
         try:
-            ok = redis_client.set(key, "1", ex=ttl_sec, nx=True)
-            return bool(ok)
+            ok = bool(redis_client.set(key, token, nx=True, ex=int(ttl_sec)))
+        except TypeError:
+            try:
+                ok = bool(redis_client.set(key, token, ex=ttl_sec, nx=True))
+            except Exception:
+                ok = True
         except Exception:
-            return True
-    except Exception:
-        return True
+            ok = True
+    if not ok:
+        if _MEM_LOCK_TOKENS.get(key) == token:
+            _MEM_LOCK_TOKENS.pop(key, None)      # somebody else holds it in Redis: we own nothing
+        return None
+    held = dict(_LOCK_TOKENS_CV.get() or {})
+    held[key] = token
+    _LOCK_TOKENS_CV.set(held)
+    return token
 
 
-def release_refresh_lock(redis_client, symbol: str) -> None:
+def try_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> bool:
+    return acquire_refresh_lock(redis_client, symbol, ttl_sec=ttl_sec) is not None
+
+
+def release_refresh_lock(redis_client, symbol: str, token: Optional[str] = None) -> None:
+    """Free the lock, but only while it is still the one this caller took (see the E435 note above). No token known = free it unconditionally."""
     key = f"{LOCK_PREFIX}{_norm_sym(symbol)}"
-    _MEM_LOCKS.pop(key, None)
+    held = _LOCK_TOKENS_CV.get() or {}
+    if token is None:
+        token = held.get(key)
+    if key in held:
+        rest = dict(held)
+        rest.pop(key, None)
+        _LOCK_TOKENS_CV.set(rest)
+    if token is None:                                  # never acquired in this context: the old unconditional release
+        _MEM_LOCKS.pop(key, None)
+        _MEM_LOCK_TOKENS.pop(key, None)
+        if redis_client is None:
+            return
+        try:
+            redis_client.delete(key)
+        except Exception:
+            pass
+        return
+    if _MEM_LOCK_TOKENS.get(key) == token:
+        _MEM_LOCK_TOKENS.pop(key, None)
+        _MEM_LOCKS.pop(key, None)
     if redis_client is None:
         return
     try:
-        redis_client.delete(key)
+        cur = redis_client.get(key)
+        if isinstance(cur, bytes):
+            cur = cur.decode("utf-8", "replace")
+        if cur == token:                               # a newer holder's token (or an expired key) is left alone; the TTL ends the rest
+            redis_client.delete(key)
     except Exception:
         pass
 
@@ -1535,7 +1598,6 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
             out[b] = {
                 "symbol": b,
                 "source": "yahoo_missing",
-                "price_refreshed_at": _now_iso(),
                 "pe_ratio": 22.5,
                 "pe_ratio_seed": True,
                 "roce": 15.0,
@@ -2149,30 +2211,37 @@ def run_bulk_yahoo_price_feed_cached(
         cache = get_bulk_quote_cache()
         quotes = (cache or {}).get("quotes") or {}
         if quotes:
-            # Optionally still merge into feed store for dashboard consistency
-            if merge_existing and symbols:
-                store = get_data_feed_store()
-                saved = 0
-                for sym in symbols:
-                    b = _norm_sym(sym)
-                    row = quotes.get(b)
+            # E438: with a requested list, only the requested symbols that have a usable cached price count as served. The reply used to
+            # list EVERY cached key and count them all, so the feed job marked symbols outside its universe (and requested ones with no
+            # price, which were never merged) as done and never fetched them. A request the cache covers not at all goes to the live run.
+            served = None
+            if symbols:
+                served = []
+                for sym in dict.fromkeys(_norm_sym(x) for x in symbols):
+                    row = quotes.get(sym) if sym else None
                     if isinstance(row, dict) and _payload_price(row) > 0:
+                        served.append(sym)
+            if served is None or served:
+                # Optionally still merge into feed store for dashboard consistency
+                if merge_existing and served:
+                    store = get_data_feed_store()
+                    for b in served:
                         try:
                             # put_symbol → merge_feed_payload (protects real fundamentals)
-                            store.put_symbol(b, row)
-                            saved += 1
+                            store.put_symbol(b, quotes[b])
                         except Exception:
                             pass
-            return {
-                "status": "success",
-                "source": "cache",
-                "tracked_stocks": len(quotes),
-                "requested": len(symbols or []),
-                "yahoo_hits": 0,
-                "cache_age_sec": bulk_cache_age_sec(),
-                "message": f"Bulk quote cache hit ({len(quotes)} symbols, age {int(bulk_cache_age_sec() or 0)}s)",
-                "symbols": sorted(quotes.keys()),
-            }
+                hit = served if served is not None else sorted(quotes.keys())
+                return {
+                    "status": "success",
+                    "source": "cache",
+                    "tracked_stocks": len(hit),
+                    "requested": len(symbols or []),
+                    "yahoo_hits": 0,
+                    "cache_age_sec": bulk_cache_age_sec(),
+                    "message": f"Bulk quote cache hit ({len(hit)} symbols, age {int(bulk_cache_age_sec() or 0)}s)",
+                    "symbols": hit,
+                }
 
     result = run_bulk_yahoo_price_feed(symbols, merge_existing=merge_existing)
     # Build quotes map from result symbols via store
@@ -2229,8 +2298,12 @@ def save_price_alerts(alerts: list) -> list:
                 target = float(a.get("target_price") or a.get("target") or 0)
             except (TypeError, ValueError):
                 continue
-            if target <= 0:
+            if not math.isfinite(target) or target <= 0:   # E439: nan / inf never fire and nan is not valid JSON
                 continue
+            try:
+                trigger_count = int(a.get("trigger_count") or 0)
+            except (TypeError, ValueError, OverflowError):   # E439: one unreadable count used to fail the WHOLE save
+                trigger_count = 0
             direction = str(a.get("direction") or "above").lower()
             if direction not in ("above", "below"):
                 direction = "above"
@@ -2243,7 +2316,7 @@ def save_price_alerts(alerts: list) -> list:
                 "note": str(a.get("note") or "")[:120],
                 "created_at": a.get("created_at") or _now_iso(),
                 "last_triggered_at": a.get("last_triggered_at"),
-                "trigger_count": int(a.get("trigger_count") or 0),
+                "trigger_count": trigger_count,
             })
         _kc.kv_set(PRICE_ALERTS_KEY, {"alerts": clean}, ttl=None)
         return clean
@@ -2324,10 +2397,13 @@ def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
         if not a.get("enabled", True):
             continue
         sym = a.get("symbol")
-        px = float(price_map.get(sym) or 0)
-        if px <= 0:
+        try:
+            px = float(price_map.get(sym) or 0)
+            target = float(a.get("target_price") or 0)
+        except (TypeError, ValueError):   # E439: one non-numeric price or target used to abort the check of every alert
             continue
-        target = float(a.get("target_price") or 0)
+        if not (math.isfinite(px) and px > 0 and math.isfinite(target)):
+            continue
         direction = a.get("direction") or "above"
         hit = (px >= target) if direction == "above" else (px <= target)
         if not hit:

@@ -229,9 +229,16 @@ def build_bound_routes_l(ref):
                     # Overall deadline: keep whatever finished in time, cancel the rest. (A plain
                     # gather() could outlive the budget by the slowest per-call timeout.)
                     keys = list(tasks.keys())
-                    _done, _pending = await ref.asyncio.wait(
-                        [tasks[k] for k in keys], timeout=max(0.0, _remaining())
-                    )
+                    try:
+                        _done, _pending = await ref.asyncio.wait(
+                            [tasks[k] for k in keys], timeout=max(0.0, _remaining())
+                        )
+                    except BaseException:
+                        # E418: the request itself was cancelled (client gone, server shutdown). The enrichment tasks are separate tasks and
+                        # used to keep running to their own 30-60 s timeouts; cancel them with the request.
+                        for _t in tasks.values():
+                            _t.cancel()
+                        raise
                     for _t in _pending:
                         _t.cancel()
                     if _pending:
@@ -280,7 +287,7 @@ def build_bound_routes_l(ref):
                             "source": "stock_enrich_fundamental",
                         })
                         if row:
-                            save_stock_feed(symbol_to_use, row)
+                            await ref.asyncio.to_thread(save_stock_feed, symbol_to_use, row)   # E418: a Neon write, off the event loop (as groups 303 / 361 did elsewhere)
                     except Exception as _fe:
                         ref.logger.debug("fund writeback %s: %s", symbol_to_use, _fe)
 
@@ -293,11 +300,14 @@ def build_bound_routes_l(ref):
                 ed = fetched.get("events")
                 if isinstance(ed, dict):
                     result["event_data"] = ed
-                    if ed.get("next_earnings_date"):
-                        result["event_risk"] = True
+                    from earnings_window import earnings_event_risk   # E427: past dates no longer set event_risk
+                    _er, _er_line = earnings_event_risk(ed.get("next_earnings_date"))
+                    if _er_line:
+                        if _er:
+                            result["event_risk"] = True
                         reasons.setdefault("event", [])
                         if isinstance(reasons["event"], list):
-                            reasons["event"] = list(reasons["event"]) + [f"Earnings due: {ed['next_earnings_date']}"]
+                            reasons["event"] = list(reasons["event"]) + [_er_line]
 
                 pd = fetched.get("pred")
                 if isinstance(pd, dict) and pd.get("model_loaded"):

@@ -141,6 +141,7 @@ FNO_RECORD_SNAPSHOTS = _b("FNO_RECORD_SNAPSHOTS", True)
 FNO_DEMO_CAPITAL = _f("FNO_DEMO_CAPITAL", 500000.0)
 # Round 242: the three-way split of the one Dhan account (capital_board.py). Real Trade decides the board (it owns the Dhan balance); this service publishes its figures and, in REAL mode only,
 # SIZES FROM ITS BOARD AMOUNT instead of FNO_DEMO_CAPITAL (a virtual 5,00,000 must never size a real order). No fresh board = no REAL entry (fail closed). off | shadow (default) | live.
+FNO_REAL_FIXED_CAPITAL = max(0.0, _f("FNO_REAL_FIXED_CAPITAL", 0.0))   # round 387 (E403): a fixed rupee amount REAL sizing may use, instead of the capital board (an idle F&O gets 0 from the board, so it could never start). 0 = off = the board decides. Open REAL premium counts against it.
 CAPITAL_ALLOC_MODE = _s("CAPITAL_ALLOC_MODE", "shadow").lower()
 if CAPITAL_ALLOC_MODE not in ("off", "shadow", "live"):
     CAPITAL_ALLOC_MODE = "off"                                   # a typo must not switch it on
@@ -155,6 +156,7 @@ FNO_STRAT_TREND_D = _f("FNO_STRAT_TREND_D", 40.0)
 FNO_STRAT_TREND_I = _f("FNO_STRAT_TREND_I", 15.0)
 FNO_STRAT_CHAIN_VETO = _f("FNO_STRAT_CHAIN_VETO", 15.0)
 FNO_STRAT_SWEEP_MAX_D = _f("FNO_STRAT_SWEEP_MAX_D", 50.0)
+FNO_CORE_MIN_INTRADAY_BARS = max(0, _i("FNO_CORE_MIN_INTRADAY_BARS", 6))     # round 388 (E404): switch, 0 = off, else on: CORE needs a scoreable intraday part (6 bars of today)
 FNO_STRAT_PIVOT_MAX_D = _f("FNO_STRAT_PIVOT_MAX_D", 15.0)
 FNO_STRAT_OPENER_D = _f("FNO_STRAT_OPENER_D", 15.0)
 FNO_STRAT_SURGE_BODY = _f("FNO_STRAT_SURGE_BODY", 0.6)

@@ -30,8 +30,8 @@ def db():
     s.close()
 
 
-def _open_real(db, premium, lots=1, lot=65):
-    c = ContractRef("SENSEX", "2026-11-17", 80000, "CE", lot, None, "BSE_FNO", 0.05)
+def _open_real(db, premium, lots=1, lot=20):
+    c = ContractRef("SENSEX", "2026-11-17", 24500, "CE", lot, None, "BSE_FNO", 0.05)       # round 389: a strike the fake SENSEX chain really has, so the position is priced (an unpriced open position now blocks every new REAL entry before the capital check)
     p = paper.open_position(c, lots, premium, NOW.timestamp(), Params(capital=500000.0), mode="REAL")
     db.insert_position(p)
     return p
@@ -40,7 +40,7 @@ def _open_real(db, premium, lots=1, lot=65):
 def test_real_entry_is_refused_when_the_open_positions_already_hold_the_allotment(db):
     b = RB()
     e = real(db, b)
-    _open_real(db, premium=7600.0, lots=1)                                     # 7600 x 65 = Rs 4,94,000 of the Rs 5,00,000 the board gives F&O
+    _open_real(db, premium=24700.0, lots=1)                                    # 24,700 x 20 = Rs 4,94,000 of the Rs 5,00,000 the board gives F&O
     before = len(db.open_positions("REAL"))
     e.tick(NOW)
     assert len(db.open_positions("REAL")) == before and not b.sent             # nothing was sent to Dhan

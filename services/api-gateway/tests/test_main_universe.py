@@ -1482,6 +1482,19 @@ def test_build_samples_the_securities_list_up_to_the_target(ub, monkeypatch):
     assert set(out) - {"DYN1", "NEWA", "NEWB1", "NEWB2"} <= set(S(250))
 
 
+def test_build_price_cap_runs_inside_the_cut_so_the_universe_stays_full(ub, monkeypatch):
+    """E433 (round 416): 20 dynamic names push the list past the target; 10 of them and 10 base names are over the cap.
+    Old order (cut to 250, then filter) ended at 230; the cap now runs inside the cut, so the universe is full."""
+    monkeypatch.setattr(gw, "SCAN_UNIVERSE_TARGET", 250)
+    ub.securities = S(400)
+    ub.bulk = [f"DYN{i:02d}" for i in range(20)]
+    over = {f"DYN{i:02d}" for i in range(10)} | set(S(400)[:10])
+    monkeypatch.setattr(gw, "_filter_symbols_under_max_price", lambda s: [x for x in s if x not in over])
+    out = gw._build_scan_universe()
+    assert len(out) == 250 and not (set(out) & over)
+    assert out[:10] == [f"DYN{i:02d}" for i in range(10, 20)]          # priority order kept
+
+
 def test_build_uses_indices_when_the_securities_list_is_empty(ub):
     ub.indices = ["IDX1", "IDX2"]
     assert {"IDX1", "IDX2"} <= set(gw._build_scan_universe())
@@ -1600,19 +1613,19 @@ def test_build_dynamic_priority_ignores_symbols_pruned_out_of_the_universe(ub):
 
 
 def test_build_dynamic_priority_failure_is_non_fatal(ub, log, monkeypatch):
+    """E409: each dynamic source is read once per build (the priority merge reuses the list), so a source that raises on its one call is
+    logged by the merge step and the build still finishes; there is no second call left to fail."""
     ub.securities = ["PLAIN1"]
     calls = {"n": 0}
 
     def flaky_bulk():
         calls["n"] += 1
-        if calls["n"] == 2:                                     # first call is the merge step; second is priority
-            raise RuntimeError("bulk down on 2nd call")
-        return ["BULK1"]
+        raise RuntimeError("bulk down")
 
     monkeypatch.setattr(gw, "_get_bulk_deal_symbols", flaky_bulk)
     out = gw._build_scan_universe()
-    assert "PLAIN1" in out and "BULK1" in out
-    assert log.any("warning", "dynamic priority merge failed")
+    assert "PLAIN1" in out and calls["n"] == 1
+    assert log.any("warning", "Failed to fetch momentum movers")
 
 
 def _securities_on_second_call(monkeypatch, symbols):

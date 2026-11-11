@@ -420,6 +420,18 @@ def params_for(key: str, p: Params) -> Params:
     return p.with_(risk_per_trade_pct=p.risk_per_trade_pct * p.expiry_risk_mult, max_lots=min(int(p.max_lots), 1))
 
 
+def core_intraday_missing(x: Ctx, b: Dict[str, Any]) -> str:
+    """Round 388 (E404): why CORE's intraday part did not vote ('' = it did, or the guard is off). Looks at the reasons core_bias already produced, so it can never disagree with it."""
+    if int(getattr(x.p, "core_min_intraday_bars", 0) or 0) <= 0:
+        return ""
+    if not x.intraday_raw:
+        return "no intraday candles: CORE would be decided by the daily trend and the chain alone"
+    for r in b.get("reasons") or []:
+        if r == "too few intraday candles" or str(r).startswith("intraday bars are stale"):
+            return f"{r}: CORE would be decided by the daily trend and the chain alone"
+    return ""
+
+
 def candidates(x: Ctx, keys: Sequence[str], core: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """The signals that fire right now, in registry order, each tagged with its strategy. Named strategies are skipped on stale / thin intraday data."""
     out: List[Dict[str, Any]] = []
@@ -427,6 +439,10 @@ def candidates(x: Ctx, keys: Sequence[str], core: Optional[Dict[str, Any]] = Non
         if k == CORE:
             b = core if core is not None else core_bias(x)
             if b["direction"] != FLAT:
+                miss = core_intraday_missing(x, b)
+                if miss:                                    # round 388 (E404): the 45-point bar was set for daily + intraday + chain; with no intraday part daily + chain alone decided (both 09:30:02 DEMO entries on 11 Nov)
+                    x.vetoes.append({"strategy": CORE, "direction": b["direction"], "intraday": "missing", "base_score": b["score"], "reasons": [miss]})
+                    continue
                 out.append({**b, "strategy": CORE})
             continue
         spec = STRATEGIES.get(k)
@@ -446,7 +462,12 @@ def candidates(x: Ctx, keys: Sequence[str], core: Optional[Dict[str, Any]] = Non
 def evaluate(key: str, x: Ctx) -> Dict[str, Any]:
     """One strategy as a bias dict (direction FLAT when it does not fire): what the backtests use."""
     if key == CORE:
-        return core_bias(x)
+        b = core_bias(x)
+        miss = core_intraday_missing(x, b) if b["direction"] != FLAT else ""
+        if miss:                                            # round 389 (E405): the backtests enter through here, not through `candidates`: same rule as live (E404), so SIM / rolling results are not flattered by 09:30 entries live no longer makes
+            x.vetoes.append({"strategy": CORE, "direction": b["direction"], "intraday": "missing", "base_score": b["score"], "reasons": [miss]})
+            return {**b, "direction": FLAT, "score": 0.0, "reasons": [miss], "strategy": CORE}
+        return b
     hit = candidates(x, [key])
     if hit:
         return hit[0]

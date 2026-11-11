@@ -127,7 +127,8 @@ export default function FnoOverview() {
 
       <FnoControlCard onChanged={() => { ov.reload(); strat.reload(); }} />
 
-      <Card title="Today" right={<Btn small disabled={busy || !d?.open_positions.length} onClick={() => void act(fnoApi.squareoff, "Square-off sent.", "Close ALL open F&O positions now?")}>Square off all</Btn>}>
+      <Card title="Today" right={<span className="flex gap-2">{d?.paused ? <Btn small disabled={busy} onClick={() => void act(fnoApi.resume, "Entries resumed: the engine may open new positions again.")}>Resume entries</Btn> : <Btn small disabled={busy} onClick={() => void act(fnoApi.pause, "Entries paused: no new position; open ones keep their stop, target and square-off.", "Pause NEW entries? Open positions stay managed.")}>Pause entries</Btn>}<Btn small disabled={busy || !d?.open_positions.length} onClick={() => void act(fnoApi.squareoff, "Square-off sent.", "Close ALL open F&O positions now?")}>Square off all</Btn></span>}>
+        {d?.paused && <Msg kind="err">Autopilot is PAUSED: no new entries until you press Resume entries.</Msg>}
         {d ? (
           <ul className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             <li>Trades <b>{d.day.trades}</b></li><li>Open <b>{d.day.open}</b></li>
@@ -140,7 +141,7 @@ export default function FnoOverview() {
 
       <Card title="Open positions">
         {d && d.open_positions.length === 0 && <p className="text-mist">No open F&amp;O position.</p>}
-        <div className="space-y-2">{d?.open_positions.map((p) => <PositionCard key={p.id ?? p.label} p={p} busy={busy} onClearStopDoubt={(id) => void act(() => fnoApi.stopDoubtClear(id), "Stop-doubt mark cleared: the engine may place a stop again.", "Clear the stop-doubt mark? Do this ONLY if you looked in the Dhan app and no stop for this contract is there. The engine may then place a new stop.")} onClearDoubt={(id) => void act(() => fnoApi.exitDoubtClear(id), "Exit-doubt mark cleared: the engine may sell this position again.", "Clear the exit-doubt mark? Do this ONLY if you looked in the Dhan app and the SELL is not there. The engine may then send a new SELL.")} />)}</div>
+        <div className="space-y-2">{d?.open_positions.map((p) => <div key={p.id ?? p.label}><PositionCard p={p} busy={busy} onClearStopDoubt={(id) => void act(() => fnoApi.stopDoubtClear(id), "Stop-doubt mark cleared: the engine may place a stop again.", "Clear the stop-doubt mark? Do this ONLY if you looked in the Dhan app and no stop for this contract is there. The engine may then place a new stop.")} onClearDoubt={(id) => void act(() => fnoApi.exitDoubtClear(id), "Exit-doubt mark cleared: the engine may sell this position again.", "Clear the exit-doubt mark? Do this ONLY if you looked in the Dhan app and the SELL is not there. The engine may then send a new SELL.")} />{p.id != null && <div className="mt-1 text-right"><Btn small disabled={busy} onClick={() => void act(() => fnoApi.closeOne(p.id as number), "Close sent for this position.", `Close ${p.label} now?`)}>Close this one</Btn></div>}</div>)}</div>
       </Card>
 
       <FnoReadinessCard onChanged={ov.reload} />

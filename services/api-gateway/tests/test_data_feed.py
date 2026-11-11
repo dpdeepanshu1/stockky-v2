@@ -12,6 +12,8 @@ Run from services/api-gateway:
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import copy
 import sys
 import types
@@ -98,6 +100,8 @@ def _clean_state(monkeypatch):
     df._LOCAL_JOB.clear()
     df._LOCAL_INDEX.clear()
     df._MEM_LOCKS.clear()
+    df._MEM_LOCK_TOKENS.clear()
+    df._LOCK_TOKENS_CV.set(None)             # E435: the owner tokens live in a ContextVar; never let one test's reach the next
     df._INDEX_WARMED = False
     df._feed_store_singleton = None
     df._BHAV_CACHE["data"] = None
@@ -110,6 +114,8 @@ def _clean_state(monkeypatch):
     df._LOCAL_JOB.clear()
     df._LOCAL_INDEX.clear()
     df._MEM_LOCKS.clear()
+    df._MEM_LOCK_TOKENS.clear()
+    df._LOCK_TOKENS_CV.set(None)             # E435: the owner tokens live in a ContextVar; never let one test's reach the next
     df._INDEX_WARMED = False
     df._feed_store_singleton = None
     df._BHAV_CACHE["data"] = None
@@ -453,6 +459,32 @@ class TestGetSymbol:
         df._LOCAL_SYMBOLS[df.DATA_FEED_PREFIX + "TCS"] = {"junk": 1}
         kv.store[df.DATA_FEED_PREFIX + "TCS"] = rich()
         assert store.get_symbol("TCS") == rich()
+
+    def test_price_only_normalized_local_row_is_not_useful_and_rereads_durable(self, kv, store):
+        """E434 (round 417): kept on purpose, see `_payload_is_useful`. A normalized price-only row (prev_close / last_price) is not served from
+        the local cache, so a richer durable row is still found."""
+        thin = {"symbol": "TCS", "prev_close": 100.0, "last_price": 101.0}
+        assert df._payload_is_useful(thin) is False
+        df._LOCAL_SYMBOLS[df.DATA_FEED_PREFIX + "TCS"] = thin
+        kv.store[df.DATA_FEED_PREFIX + "TCS"] = rich(sector="IT", fundamental_score=61)
+        got = store.get_symbol("TCS")
+        assert got["fundamental_score"] == 61 and got["sector"] == "IT"
+
+    def test_price_update_over_a_thin_local_row_does_not_wipe_a_richer_durable_row(self, kv, store):
+        """E434: the reason `_payload_is_useful` stays strict. put_symbol merges into get_symbol(), so the durable row must win over a thin local one."""
+        df._LOCAL_SYMBOLS[df.DATA_FEED_PREFIX + "TCS"] = {"symbol": "TCS", "prev_close": 100.0, "last_price": 101.0}
+        kv.store[df.DATA_FEED_PREFIX + "TCS"] = {"symbol": "TCS", "sector": "IT", "fundamental_score": 61, "prev_close": 99.0}
+        store.put_symbol("TCS", {"price": 105.0})
+        for pre in (df.DATA_FEED_PREFIX, df.FEED_ALIAS_PREFIX, df.FEED_LEGACY_PREFIX):
+            saved = kv.store[pre + "TCS"]
+            assert saved["sector"] == "IT" and saved["fundamental_score"] == 61 and saved["prev_close"] == 105.0
+
+    def test_price_update_in_bulk_over_a_thin_local_row_keeps_the_durable_fields(self, kv, store):
+        df._LOCAL_SYMBOLS[df.DATA_FEED_PREFIX + "TCS"] = {"symbol": "TCS", "prev_close": 100.0}
+        kv.store[df.DATA_FEED_PREFIX + "TCS"] = {"symbol": "TCS", "sector": "IT", "fundamental_score": 61}
+        assert store.put_symbols_bulk({"TCS": {"price": 105.0}}) == 1
+        saved = kv.store[df.DATA_FEED_PREFIX + "TCS"]
+        assert saved["sector"] == "IT" and saved["fundamental_score"] == 61 and saved["prev_close"] == 105.0
 
     def test_durable_hit_warms_all_aliases_and_index(self, kv, store):
         kv.store[df.FEED_LEGACY_PREFIX + "TCS"] = rich()
@@ -1098,6 +1130,8 @@ class FakeRedis:
         self.ttl_raises, self.del_raises = ttl_raises, del_raises
         self.type_error_first = type_error_first
         self.set_calls, self.deleted = [], []
+        self.values = {}                      # E435: the lock value (owner token) is read back by release_refresh_lock
+        self.get_raises = None
 
     def set(self, key, val, **kw):
         self.set_calls.append((key, kw))
@@ -1105,7 +1139,14 @@ class FakeRedis:
             raise TypeError("bad kwargs")
         if self.set_raises:
             raise self.set_raises
+        if self.set_result:
+            self.values[key] = val
         return self.set_result
+
+    def get(self, key):
+        if self.get_raises:
+            raise self.get_raises
+        return self.values.get(key)
 
     def ttl(self, key):
         if self.ttl_raises:
@@ -1116,6 +1157,7 @@ class FakeRedis:
         if self.del_raises:
             raise self.del_raises
         self.deleted.append(key)
+        self.values.pop(key, None)
 
 
 class TestRefreshLocks:
@@ -1157,6 +1199,111 @@ class TestRefreshLocks:
         assert r.deleted == [df.LOCK_PREFIX + "TCS"]
         assert df.LOCK_PREFIX + "TCS" not in df._MEM_LOCKS
         df.release_refresh_lock(FakeRedis(del_raises=RuntimeError("x")), "TCS")
+
+    # ── E435 (round 418): a release only frees the lock while it is still the caller's ──
+    KEY = df.LOCK_PREFIX + "TCS"
+
+    def _expire_process_lock(self):
+        df._MEM_LOCKS[self.KEY] = 1.0
+
+    def test_acquire_returns_an_owner_token_and_refuses_a_second_holder(self):
+        t = df.acquire_refresh_lock(None, "TCS")
+        assert isinstance(t, str) and t
+        assert df.acquire_refresh_lock(None, "tcs.ns") is None
+
+    def test_refused_redis_lock_returns_none_and_leaves_no_owner(self):
+        r = FakeRedis(set_result=None)
+        assert df.acquire_refresh_lock(r, "TCS") is None
+        assert self.KEY not in df._MEM_LOCK_TOKENS
+
+    def test_a_late_release_does_not_free_the_lock_a_newer_holder_took(self):
+        a = df.acquire_refresh_lock(None, "TCS")
+        self._expire_process_lock()                       # A's 5 s ran out while its 35 s call was still going
+        b = df.acquire_refresh_lock(None, "TCS")
+        assert b and b != a
+        df.release_refresh_lock(None, "TCS", token=a)     # A finishes late
+        assert df.acquire_refresh_lock(None, "TCS") is None   # B still holds it
+        df.release_refresh_lock(None, "TCS", token=b)
+        assert df.acquire_refresh_lock(None, "TCS")       # now free
+
+    def test_a_late_release_leaves_the_newer_holders_redis_key(self):
+        r = FakeRedis()
+        a = df.acquire_refresh_lock(r, "TCS")
+        r.delete(self.KEY); r.deleted.clear()             # the key expired in Redis
+        self._expire_process_lock()
+        b = df.acquire_refresh_lock(r, "TCS")
+        assert r.values[self.KEY] == b
+        df.release_refresh_lock(r, "TCS", token=a)
+        assert r.deleted == [] and r.values[self.KEY] == b
+        df.release_refresh_lock(r, "TCS", token=b)
+        assert r.deleted == [self.KEY]
+
+    def test_release_without_a_token_in_this_context_stays_unconditional(self):
+        df.acquire_refresh_lock(None, "TCS")
+        ctx = contextvars.Context()                       # a context that never acquired it
+        ctx.run(df.release_refresh_lock, None, "TCS")
+        assert self.KEY not in df._MEM_LOCKS and self.KEY not in df._MEM_LOCK_TOKENS
+        r = FakeRedis()
+        r.values[self.KEY] = "1"                          # a lock written by the old code
+        contextvars.Context().run(df.release_refresh_lock, r, "TCS")
+        assert r.deleted == [self.KEY]
+
+    def test_redis_read_or_delete_failure_on_release_is_swallowed(self):
+        r = FakeRedis()
+        df.try_refresh_lock(r, "TCS")
+        r.get_raises = RuntimeError("down")
+        df.release_refresh_lock(r, "TCS")
+        r2 = FakeRedis(del_raises=RuntimeError("x"))
+        df.try_refresh_lock(r2, "INFY")
+        df.release_refresh_lock(r2, "INFY")
+
+    def test_bytes_value_from_redis_is_compared_as_text(self):
+        r = FakeRedis()
+        t = df.acquire_refresh_lock(r, "TCS")
+        r.values[self.KEY] = t.encode()
+        df.release_refresh_lock(r, "TCS", token=t)
+        assert r.deleted == [self.KEY]
+
+    def test_failing_open_redis_still_releases_the_process_lock(self):
+        r = FakeRedis(set_raises=RuntimeError("x"))
+        t = df.acquire_refresh_lock(r, "TCS")             # Redis is down: the process lock holds
+        assert t and r.values == {}
+        df.release_refresh_lock(r, "TCS", token=t)
+        assert df.acquire_refresh_lock(None, "TCS")
+
+    def test_release_without_a_token_argument_is_owner_aware_inside_the_acquiring_task(self):
+        """The gateway calls `release_refresh_lock(redis, symbol)`; the token comes from the ContextVar of the task that took the lock."""
+        async def holder(started, gate):
+            assert df.try_refresh_lock(None, "TCS")
+            started.set()
+            await gate.wait()
+            df.release_refresh_lock(None, "TCS")          # the late release of the first holder
+
+        async def go():
+            started, gate = asyncio.Event(), asyncio.Event()
+            first = asyncio.create_task(holder(started, gate))
+            await started.wait()
+            self._expire_process_lock()                   # the first holder's lock ran out
+            assert df.try_refresh_lock(None, "TCS")       # this task is the newer holder
+            gate.set()
+            await first
+            assert df.try_refresh_lock(None, "TCS") is False      # the first holder's release did not free ours
+            df.release_refresh_lock(None, "TCS")
+            assert df.try_refresh_lock(None, "TCS") is True
+
+        asyncio.run(go())
+
+    def test_a_task_created_after_the_acquire_releases_that_lock(self):
+        """The fire-and-forget background refresh: the parent takes the lock, the spawned task releases it."""
+        async def child():
+            df.release_refresh_lock(None, "TCS")
+
+        async def go():
+            assert df.try_refresh_lock(None, "TCS")
+            await asyncio.create_task(child())
+            assert df.try_refresh_lock(None, "TCS") is True
+
+        asyncio.run(go())
 
     @pytest.mark.parametrize("client,expected", [
         (None, False), (FakeRedis(ttl_val=5), True), (FakeRedis(ttl_val=10), True),
@@ -2159,10 +2306,26 @@ class TestRunBulkYahooPriceFeedCached:
             "quotes": {"A": {"symbol": "A", "price": 5}, "B": {"symbol": "B", "price": 0}},
         }
         r = df.run_bulk_yahoo_price_feed_cached(["a", "B", "C"])
-        assert r["source"] == "cache" and r["tracked_stocks"] == 2 and r["requested"] == 3
-        assert r["symbols"] == ["A", "B"] and "Bulk quote cache hit" in r["message"]
+        # E438: only the requested symbols with a usable cached price are reported (B has no price, C is not cached)
+        assert r["source"] == "cache" and r["tracked_stocks"] == 1 and r["requested"] == 3
+        assert r["symbols"] == ["A"] and "Bulk quote cache hit" in r["message"]
         assert df.DATA_FEED_PREFIX + "A" in feed.kv.store
         assert df.DATA_FEED_PREFIX + "B" not in feed.kv.store            # no price → not merged
+
+    def test_warm_cache_does_not_report_symbols_that_were_not_requested(self, feed, monkeypatch):
+        monkeypatch.setattr(df, "should_refresh_bulk_cache", lambda *a, **k: False)
+        feed.kv.store[df.BULK_QUOTE_CACHE_KEY] = {"quotes": {"A": {"price": 5}, "X": {"price": 9}, "Y": {"price": 7}}}
+        r = df.run_bulk_yahoo_price_feed_cached(["A", "a"])
+        assert r["symbols"] == ["A"] and r["tracked_stocks"] == 1
+        assert df.DATA_FEED_PREFIX + "X" not in feed.kv.store
+        assert df.run_bulk_yahoo_price_feed_cached()["symbols"] == ["A", "X", "Y"]      # no list requested: all cached keys, as before
+
+    def test_warm_cache_that_covers_none_of_the_request_runs_live(self, feed, monkeypatch):
+        monkeypatch.setattr(df, "should_refresh_bulk_cache", lambda *a, **k: False)
+        feed.kv.store[df.BULK_QUOTE_CACHE_KEY] = {"quotes": {"X": {"price": 9}}}
+        feed.bhav = bhav_rows("A")
+        r = df.run_bulk_yahoo_price_feed_cached(["A"])
+        assert r["source"] == "live"
 
     def test_warm_cache_without_symbols_or_merge(self, feed, monkeypatch):
         monkeypatch.setattr(df, "should_refresh_bulk_cache", lambda *a, **k: False)
@@ -2256,11 +2419,17 @@ class TestPriceAlertStore:
         assert df.save_price_alerts(raw) is raw
         assert df.save_price_alerts(None) == []
 
-    def test_save_bad_trigger_count_falls_to_failure_path(self, kv):
-        # int("x") is not guarded inside the per-alert try, so the outer handler returns the raw list
-        raw = [{"symbol": "A", "target_price": 1, "trigger_count": "x"}]
-        assert df.save_price_alerts(raw) is raw
-        assert df.PRICE_ALERTS_KEY not in kv.store
+    def test_save_bad_trigger_count_becomes_zero_and_the_alert_is_kept(self, kv):
+        # E439: this used to fail the whole save (int("x") was outside the per-alert guard) and return the raw list
+        raw = [{"symbol": "A", "target_price": 1, "trigger_count": "x"}, {"symbol": "B", "target_price": 2, "trigger_count": 4}]
+        clean = df.save_price_alerts(raw)
+        assert [(a["symbol"], a["trigger_count"]) for a in clean] == [("A", 0), ("B", 4)]
+        assert kv.store[df.PRICE_ALERTS_KEY] == {"alerts": clean}
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "nan", "inf", float("-inf")])
+    def test_save_drops_non_finite_targets(self, kv, bad):
+        clean = df.save_price_alerts([{"symbol": "A", "target_price": bad}, {"symbol": "B", "target_price": 3}])
+        assert [a["symbol"] for a in clean] == ["B"]
 
     def test_add_alert(self, kv):
         e = df.add_price_alert("tcs.ns", "150", direction="below", note="watch")
@@ -2310,6 +2479,13 @@ class TestEvaluatePriceAlerts:
         out = df.evaluate_price_alerts({"TCS": 99.0, "ZZ": 0, "PP": None})
         assert out == []
         assert kv.sets == []                       # nothing changed → nothing saved
+
+    def test_one_unreadable_price_or_target_does_not_stop_the_other_alerts(self, kv):
+        # E439: float("abc") raised out of the loop, so no alert was checked and none was saved
+        self._put(kv, stored_alert(id="bad", symbol="BAD"), stored_alert(id="badt", symbol="BT", target_price="x"),
+                  stored_alert(id="nan", symbol="NN"), stored_alert(id="ok"))
+        out = df.evaluate_price_alerts({"BAD": "abc", "BT": 100.0, "NN": float("nan"), "TCS": 200.0})
+        assert [a["id"] for a in out] == ["ok"]
 
     def test_cooldown_iso_epoch_and_z_suffix(self, kv):
         now = datetime.now(df.IST)

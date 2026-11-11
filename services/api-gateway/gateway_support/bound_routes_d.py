@@ -106,7 +106,11 @@ def build_bound_routes_d(ref):
 
         # Use a semaphore to limit concurrent downstream calls inside this batch
         # Aligned with MAX_PARALLEL_WORKERS=8 so analysis service is never overloaded
-        sem = ref.asyncio.Semaphore(8)
+        try:
+            _workers = max(1, int(ref.MAX_PARALLEL_WORKERS))   # E415: was a fixed 8 although the comment says "aligned with MAX_PARALLEL_WORKERS"
+        except (TypeError, ValueError, AttributeError):
+            _workers = 8
+        sem = ref.asyncio.Semaphore(_workers)
         client = ref._get_http_client()  # shared keepalive pool
         if True:
             # One Neon bulk for this batch
@@ -114,6 +118,7 @@ def build_bound_routes_d(ref):
                 batch_feeds = await ref.asyncio.to_thread(ref._feed_store().get_symbols_bulk, symbols) or {}  # group361: off the event loop
             except Exception:
                 batch_feeds = {}
+            unique_symbols = list(dict.fromkeys(symbols))   # E415: a symbol listed twice was analysed twice
             tasks = [
                 ref._analyze_one_symbol_ultra(
                     sym,
@@ -124,18 +129,29 @@ def build_bound_routes_d(ref):
                     # Multi-symbol batch — Gemini reserved for single-stock Analyse.
                     skip_gemini=True,
                 )
-                for sym in symbols
+                for sym in unique_symbols
             ]
             results = await ref.asyncio.gather(*tasks, return_exceptions=True)
 
-            final_results = []
-            for sym, result in zip(symbols, results):
-                if isinstance(result, Exception):
-                    final_results.append({"symbol": sym, "decision": "ERROR", "error": str(result)})
+            by_symbol = {}
+            for sym, result in zip(unique_symbols, results):
+                # E415: BaseException, not Exception: a child cancelled from outside comes back from gather as a CancelledError, which is not an
+                # Exception and used to be put into the JSON response as an object (a 500).
+                if isinstance(result, BaseException):
+                    by_symbol[sym] = {"symbol": sym, "decision": "ERROR", "error": str(result) or type(result).__name__}
                 else:
                     if isinstance(result, dict):
                         result["symbol"] = sym  # enforce normalized symbol
-                    final_results.append(result)
+                    by_symbol[sym] = result
+            # One row per requested symbol, in the requested order; a repeated symbol was analysed once and gets its own copy of the row.
+            final_results = []
+            _seen = set()
+            for sym in symbols:
+                row = by_symbol[sym]
+                if sym in _seen and isinstance(row, dict):
+                    row = dict(row)
+                _seen.add(sym)
+                final_results.append(row)
             return {"results": final_results}
 
     @api_run_premarket_feed_router.post("/api/surprise/run-premarket-feed")

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -102,9 +103,26 @@ def _num(value) -> Optional[float]:
     if value is None:
         return None
     try:
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError):
         return None
+    # E441: NaN / inf (a Postgres NUMERIC 'NaN' comes back as Decimal('NaN')) is not a number the UI or the DB can use: Oracle NUMBER refuses
+    # it, which rolled back the whole scan write, and the JSON response refuses it ("Out of range float values"). It reads as "no value".
+    return f if math.isfinite(f) else None
+
+
+def _scrub_non_finite(obj, _depth: int = 0):
+    """E441: copy of a JSON-like value with every NaN / inf float replaced by None. json.dumps writes them as the bare tokens NaN / Infinity,
+    which json.loads reads back as floats, and the response layer then fails on them for the whole Hot Picks table."""
+    if _depth > 25:
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _scrub_non_finite(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub_non_finite(v, _depth + 1) for v in obj]
+    return obj
 
 
 def _int(value) -> int:
@@ -146,7 +164,7 @@ def _row_to_item(row_map: Dict[str, Any], hp) -> Dict[str, Any]:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
-                item = parsed
+                item = _scrub_non_finite(parsed)
         except Exception:
             item = {}
     item.setdefault("symbol", row_map.get("symbol"))
@@ -186,7 +204,7 @@ def _payload_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not sym:
                 continue
             try:
-                item_json = json.dumps(item, default=str)
+                item_json = json.dumps(_scrub_non_finite(item), default=str)
             except Exception:
                 item_json = None
             rows.append({
@@ -497,7 +515,7 @@ def _hotpicks_audit_uncached() -> Dict[str, Any]:
                 # already reads it off the persisted payload.
                 px = 0.0
                 try:
-                    blob = json.loads(m.get("item_json") or "{}")
+                    blob = json.loads(_lob_to_str(m.get("item_json")) or "{}")
                     for k in ("price", "close"):
                         v = float(blob.get(k) or 0)
                         if v > 0:
@@ -591,6 +609,7 @@ def _dump_item_json(blob: Dict[str, Any], max_bytes: int = 30000) -> Optional[st
     JSON_MAX_BYTES, 30000 by default, so the repair was also stricter than the scan's own writer.) Now the full JSON is used when it fits;
     otherwise bulky optional keys are dropped one by one until it does; and when even that is not enough None is returned so the caller
     leaves the stored row untouched instead of corrupting it."""
+    blob = _scrub_non_finite(blob)   # E441: a NaN from the decision service must not be stored as a bare NaN token
     try:
         raw = json.dumps(blob, default=str)
     except Exception:
@@ -623,7 +642,7 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
     mirrors repair_surprise_batch's exact pattern (surprise_scanner.py),
     adapted for the fact that price here lives inside item_json (see
     _hotpicks_audit_uncached's note) rather than a first-class column, so
-    the repair is a targeted UPDATE of item_json + updated_at, not a full
+    the repair is a targeted UPDATE of item_json only (updated_at keeps the scan time, E425), not a full
     row upsert. Does NOT attempt to repair missing decision/score — those
     only come from a fresh scoring pass (a real scan), not a price lookup,
     so they're reported by the audit but intentionally left for the next
@@ -665,7 +684,7 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                 if force_sym and sym != force_sym:
                     continue
                 try:
-                    blob = json.loads(item_json_raw or "{}")
+                    blob = json.loads(_lob_to_str(item_json_raw) or "{}")
                 except Exception:
                     blob = {}
                 px = 0.0
@@ -750,9 +769,11 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                     if payload_json is None:
                         logger.warning("hotpicks repair %s skipped: item too large to rewrite safely", sym)
                         continue
+                    # E425: item_json only. updated_at is the scan time (freshness, stored_at, the 24h / 72h repair windows read it); a repair
+                    # used to reset it, so a row repaired days after its scan looked freshly stored and a stale feed passed the freshness check.
                     conn.execute(
-                        text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
-                             f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
+                        text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json "
+                             f"WHERE symbol = :symbol AND section = :section"),
                         {"item_json": payload_json, "symbol": sym, "section": section},
                     )
                     repaired.append(sym)
@@ -856,7 +877,7 @@ def hotpicks_repair_scores(
                 if force_sym and sym != force_sym:
                     continue
                 try:
-                    blob = json.loads(item_json_raw or "{}")
+                    blob = json.loads(_lob_to_str(item_json_raw) or "{}")
                 except Exception:
                     blob = {}
                 if _row_needs_scores(blob):
@@ -912,10 +933,15 @@ def hotpicks_repair_scores(
                             logger.warning("hotpicks score-repair %s skipped: item too large to rewrite safely", sym)
                             time.sleep(0.4)
                             continue
+                        # E425: updated_at stays the scan time (see hotpicks_repair_batch). E441: the typed `decision` / `score` columns are what the
+                        # audit counts (missing_decision, missing_score, fully_populated); only item_json was written, so a repaired row stayed
+                        # "missing" there for ever. COALESCE keeps the stored value when the repair has none (or a non-finite one).
+                        _dec = str(blob.get("decision"))[:30] if blob.get("decision") else None
                         conn.execute(
-                            text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
-                                 f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
-                            {"item_json": payload_json, "symbol": sym, "section": section},
+                            text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, decision = COALESCE(:decision, decision), "
+                                 f"score = COALESCE(:score, score) WHERE symbol = :symbol AND section = :section"),
+                            {"item_json": payload_json, "decision": _dec, "score": _num(blob.get("score")),
+                             "symbol": sym, "section": section},
                         )
                         repaired.append(sym)
                 except Exception as e:

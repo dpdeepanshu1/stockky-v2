@@ -40,6 +40,8 @@ finally:
 
 import hotpicks_store
 
+_SOON = (__import__("datetime").datetime.now(__import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))).date() + __import__("datetime").timedelta(days=1)).isoformat()   # E428: a date inside the results window, so these tests do not rot
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -478,7 +480,8 @@ def _news(hc=0, score=None, summary="", headlines=None):
 
 
 def _results(**kw):
-    d = {"next_earnings_date": "2026-10-20"}
+    # E428: only a date from today to EARNINGS_DUE_DAYS ahead is a results signal, so this must be relative to today (a fixed date goes stale).
+    d = {"next_earnings_date": (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")}
     d.update(kw)
     return d
 
@@ -914,15 +917,15 @@ class TestHotSections:
     def test_results_section_row(self, henv, kv):
         kv.store["stockky:last_decision:AAA"] = {"decision": "PREPARE TO BUY", "score": 66}
         henv.watch = ["AAA"]
-        henv.events = {"AAA": {"next_earnings_date": "2026-10-20", "earnings_surprise": {"surprise_pct": -3.0},
+        henv.events = {"AAA": {"next_earnings_date": _SOON, "earnings_surprise": {"surprise_pct": -3.0},
                                "summary": "Q2 due"}}
         row = _hot()["results_driven"][0]
-        assert row["section"] == "results_driven" and row["next_earnings_date"] == "2026-10-20"
+        assert row["section"] == "results_driven" and row["next_earnings_date"] == _SOON
         assert row["earnings_surprise"] == {"surprise_pct": -3.0} and row["summary"] == "Q2 due"
         assert row["signal_strength"] == "high" and row["decision"] == "PREPARE TO BUY"
 
     @pytest.mark.parametrize("event", [
-        {"next_earnings_date": "2026-10-20"},
+        {"next_earnings_date": _SOON},
         {"earnings_surprise": {"surprise_pct": 0}},
         {"classified_events": [{"event_type": "results"}]},
     ])
@@ -935,6 +938,17 @@ class TestHotSections:
         henv.watch = ["AAA"]
         henv.events = {"AAA": {"summary": "nothing", "classified_events": [{"event_type": "other"}]}}
         assert _hot()["results_driven"] == []
+
+    @pytest.mark.parametrize("value", ["2020-01-01", "x", "soon", ""])
+    def test_a_past_or_unreadable_earnings_date_is_not_a_results_signal(self, henv, value):   # E428
+        henv.watch = ["AAA"]
+        henv.events = {"AAA": {"next_earnings_date": value, "summary": "old date"}}
+        assert _hot()["results_driven"] == []
+
+    def test_a_past_earnings_date_still_lets_a_real_results_event_count(self, henv):   # E428
+        henv.watch = ["AAA"]
+        henv.events = {"AAA": {"next_earnings_date": "2020-01-01", "classified_events": [{"event_type": "results"}]}}
+        assert _syms(_hot()["results_driven"]) == ["AAA"]
 
     def test_bulk_insider_section_row(self, henv):
         henv.watch = ["AAA"]
@@ -973,7 +987,7 @@ class TestHotSections:
     def test_one_symbol_can_appear_in_all_three_sections(self, henv):
         henv.watch = ["AAA"]
         henv.news = {"AAA": _news(4, 60)}
-        henv.events = {"AAA": {"next_earnings_date": "2026-10-20", "bulk_deals": [{"x": 1}]}}
+        henv.events = {"AAA": {"next_earnings_date": _SOON, "bulk_deals": [{"x": 1}]}}
         out = _hot()
         assert _syms(out["news_driven"]) == _syms(out["results_driven"]) == _syms(out["bulk_insider_driven"]) == ["AAA"]
 
@@ -985,7 +999,7 @@ class TestHotCatalystPromotion:
     def test_all_five_catalysts_promote_with_the_capped_score(self, henv, kv):
         henv.watch = ["AAA"]
         henv.news = {"AAA": _news(3, 70, "Stock set to rally on order win", [f"h{i}" for i in range(6)])}
-        henv.events = {"AAA": {"next_earnings_date": "2026-10-20", "earnings_surprise": {"surprise_pct": 12.5},
+        henv.events = {"AAA": {"next_earnings_date": _SOON, "earnings_surprise": {"surprise_pct": 12.5},
                                "bulk_deals": [{"x": 1}], "has_positive_catalyst": True}}
         out = _hot()
         bits = ["Positive news flow (score 70, 3 headlines)", "Catalyst language in news summary",
@@ -1014,7 +1028,7 @@ class TestHotCatalystPromotion:
     def test_only_neutral_decisions_are_promoted(self, henv, kv, decision):
         kv.store["stockky:last_decision:AAA"] = {"decision": decision, "score": 60}
         henv.watch = ["AAA"]
-        henv.events = {"AAA": {"has_positive_catalyst": True, "next_earnings_date": "x"}}
+        henv.events = {"AAA": {"has_positive_catalyst": True, "next_earnings_date": _SOON}}
         out = _hot()
         assert out["results_driven"][0]["decision"] == decision
         assert "catalyst_promoted" not in kv.store["stockky:last_decision:AAA"]
@@ -1023,7 +1037,7 @@ class TestHotCatalystPromotion:
     def test_each_neutral_decision_is_promoted(self, henv, kv, decision):
         kv.store["stockky:last_decision:AAA"] = {"decision": decision, "score": 60}
         henv.watch = ["AAA"]
-        henv.events = {"AAA": {"has_positive_catalyst": True, "next_earnings_date": "x"}}
+        henv.events = {"AAA": {"has_positive_catalyst": True, "next_earnings_date": _SOON}}
         assert _hot()["results_driven"][0]["decision"] == "PREPARE TO BUY"
 
     def test_positive_news_needs_both_a_high_score_and_two_headlines(self, henv, kv):
@@ -1141,7 +1155,7 @@ class TestHotPrices:
 
     def test_a_symbol_in_two_sections_is_priced_in_both_with_one_lookup(self, henv):
         henv.watch = ["AAA"]
-        henv.events = {"AAA": {"next_earnings_date": "x", "bulk_deals": [{"x": 1}]}}
+        henv.events = {"AAA": {"next_earnings_date": _SOON, "bulk_deals": [{"x": 1}]}}
         henv.bulk_prices = {"AAA": 42.0}
         out = _hot()
         assert out["results_driven"][0]["price"] == 42.0 and out["bulk_insider_driven"][0]["price"] == 42.0
@@ -1205,7 +1219,7 @@ class TestHotRankingAndCaps:
     def test_section_caps(self, henv):
         names = [f"S{i:02d}" for i in range(15)]
         henv.watch = names
-        henv.events = {n: {"next_earnings_date": "x", "bulk_deals": [{"x": 1}]} for n in names}
+        henv.events = {n: {"next_earnings_date": _SOON, "bulk_deals": [{"x": 1}]} for n in names}
         henv.news = {n: _news(4, 60) for n in names}
         out = _hot()
         assert len(out["news_driven"]) == 10

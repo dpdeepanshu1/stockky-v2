@@ -103,7 +103,7 @@ def overview(admin=Depends(require_admin)) -> Dict[str, Any]:
                 est = None
         opens.append({**p.to_json(), "label": p.label(), "premium": prem, "unrealized": unreal, "est_charges": est, "exit_doubt": bool(p.broker_order_ids.get("exit_doubt")), "stop_doubt": bool(p.broker_order_ids.get("sl_doubt")),
                       "unrealized_net": round(unreal - est, 2) if unreal is not None and est is not None else None})
-    return {"now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist(), config.HOLIDAYS), "locks": _locks(), "day": store.day_summary(_today(), mode),
+    return {"paused": engine.is_paused(), "now": datetime.now().isoformat(timespec="seconds"), "market_open": market_open(eng.now_ist(), config.HOLIDAYS), "locks": _locks(), "day": store.day_summary(_today(), mode),
             "open_positions": opens, "unmanaged_real": [{"id": q.id, "label": q.label()} for q in engine.unmanaged_real()], "last_tick": engine.last_tick, "runner": {"alive": runner.alive(), "error": runner.last_error, "snapshots_today": runner.snapshots_today},
             "underlyings": engine.underlyings(), "params": liveparams.current().to_json(), "param_problems": gates.param_problems(liveparams.current()),
             "switches": {"underlyings": str(config.FNO_UNDERLYINGS).upper(), "record_snapshots": bool(config.FNO_RECORD_SNAPSHOTS)}}
@@ -351,6 +351,33 @@ def squareoff(admin=Depends(require_admin)) -> Dict[str, Any]:
     if left:
         out["note"] = "some positions are still open: a refused, unconfirmed or in-doubt SELL leaves them open. See GET /fno/log (kinds real_blocked, order_failed, reconcile) and the Dhan app"
     return out
+
+
+@app.post("/fno/close")
+def close_one(position: int, admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 387 (E403): close ONE open position now (manual). A REAL position goes through the normal exit (cancel the resting stop, SELL); a refused or in-doubt SELL leaves it open and the answer says closed=false. Logged."""
+    out = engine.close_position(position)
+    if out.get("error") and "no open position" in out["error"]:
+        raise HTTPException(status_code=404, detail=out["error"])
+    store.add_event("manual", {"action": "close", "position": position, "result": out, "by": str(admin.get("sub"))})
+    if out.get("closed") is False:
+        out["note"] = "still open: a refused, unconfirmed or in-doubt SELL leaves it open. See GET /fno/log and the Dhan app"
+    return out
+
+
+@app.post("/fno/pause")
+def pause(admin=Depends(require_admin)) -> Dict[str, Any]:
+    """Round 387 (E403): no NEW entries (autopilot analysis stops). Open positions keep their stop, target and square-off. Survives a restart until /fno/resume."""
+    store.kv_set("fno_paused", True)
+    store.add_event("manual", {"action": "pause", "by": str(admin.get("sub"))})
+    return {"paused": True, "open_positions": [x.id for x in store.open_positions()]}
+
+
+@app.post("/fno/resume")
+def resume(admin=Depends(require_admin)) -> Dict[str, Any]:
+    store.kv_set("fno_paused", None)
+    store.add_event("manual", {"action": "resume", "by": str(admin.get("sub"))})
+    return {"paused": False}
 
 
 @app.post("/fno/exit-doubt/clear")

@@ -1265,11 +1265,33 @@ class TestNifty50Data:
         mv.store[gw.MARKET_MOVERS_LAST_KNOWN] = [{"symbol": "OLD"}]
         # group109: AngelOne unreachable here, so the open-session fallback serves the last-known list
         assert gw._get_nifty50_data() == [{"symbol": "OLD", "stale": True}]     # group110: marked stale
-        assert mv.sets == [(CACHE_KEY, [], 86400)]
+        assert mv.sets == [(CACHE_KEY, [], 30)]                     # E431: a 30 s back-off marker, no longer a day-long entry
         assert mv.store[gw.MARKET_MOVERS_LAST_KNOWN] == [{"symbol": "OLD"}]
-        # an empty list is falsy, so the next request re-fetches instead of trusting it
+        # E431: while the marker lives the next request does NOT re-run the fetch (it serves the fallback)
         mv.hists.clear()
+        built = len(mv.tickers_built)
+        assert gw._get_nifty50_data() == [{"symbol": "OLD", "stale": True}]
+        assert len(mv.tickers_built) == built
+        # once the marker has expired (a missing key) the next request fetches again
+        del mv.store[CACHE_KEY]
         assert [d["symbol"] for d in gw._get_nifty50_data()] == ["A", "B"]
+
+    def test_the_empty_backoff_can_be_switched_off(self, mv, monkeypatch):   # E431
+        monkeypatch.setenv("MOVERS_EMPTY_BACKOFF_SEC", "0")
+        mv.indices = ["A"]
+        mv.hists["A"] = RuntimeError("down")
+        assert gw._get_nifty50_data() == []
+        assert mv.sets == []                                        # nothing written
+        mv.hists.clear()
+        assert [d["symbol"] for d in gw._get_nifty50_data()] == ["A"]   # and the next request fetches
+
+    @pytest.mark.parametrize("raw, expected", [(None, 30), ("", 30), ("45", 45), ("0", 0), ("x", 30), ("-5", 30)])
+    def test_empty_backoff_seconds_parse(self, monkeypatch, raw, expected):   # E431
+        if raw is None:
+            monkeypatch.delenv("MOVERS_EMPTY_BACKOFF_SEC", raising=False)
+        else:
+            monkeypatch.setenv("MOVERS_EMPTY_BACKOFF_SEC", raw)
+        assert gw._movers_empty_backoff_sec() == expected
 
     # ── group109 (item 20): open-session fallback when yfinance returns nothing ──────────────────────
     def _all_fail(self, mv):
@@ -1289,7 +1311,7 @@ class TestNifty50Data:
         ]
         assert mv.log.any("warning", "serving 2 AngelOne movers")
         assert gw.MARKET_MOVERS_LAST_KNOWN not in mv.store          # fallback rows never become "last known"
-        assert mv.sets == [(CACHE_KEY, [], 86400)]                  # and are not cached under the daily key
+        assert mv.sets == [(CACHE_KEY, [], 30)]                     # and are not cached under the daily key (E431: only the 30 s back-off marker)
 
     def test_angelone_rows_that_are_malformed_are_skipped(self, mv):
         self._all_fail(mv)

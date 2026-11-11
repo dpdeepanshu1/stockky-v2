@@ -41,6 +41,8 @@ finally:
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 
+_SOON = (__import__("datetime").datetime.now(__import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))).date() + __import__("datetime").timedelta(days=1)).isoformat()   # E427: a date inside the event-risk window, so these tests do not rot
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -571,11 +573,11 @@ class TestStockEnrichment:
 
     def test_event_enrichment_appends_earnings_reason(self, env):
         self._bare(env, event_data=None)
-        env.client.routes[E("TCS")] = FakeResp(200, {"next_earnings_date": "2026-10-15"})
+        env.client.routes[E("TCS")] = FakeResp(200, {"next_earnings_date": _SOON})
         out = stock("TCS")
-        assert out["event_data"] == {"next_earnings_date": "2026-10-15"}
+        assert out["event_data"] == {"next_earnings_date": _SOON}
         assert out["event_risk"] is True
-        assert out["reasons"]["event"] == ["Earnings due: 2026-10-15"]
+        assert out["reasons"]["event"] == [f"Earnings due: {_SOON}"]
 
     def test_event_enrichment_without_earnings_leaves_risk_alone(self, env):
         self._bare(env, event_data=None)

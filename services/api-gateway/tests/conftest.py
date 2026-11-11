@@ -63,6 +63,18 @@ def _reset_nse_api_block_and_movers_warning():
 
 
 @pytest.fixture(autouse=True)
+def _e432_prediction_cache_starts_empty():
+    """E432: `_fetch_prediction_cached` keeps a 60 s per-symbol answer in this process; one test's answer must never reach the next."""
+    def _clear():
+        mod = sys.modules.get("main")
+        if mod is not None and hasattr(mod, "_prediction_cache"):
+            mod._prediction_cache.clear()
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _g233_market_open_by_default(monkeypatch):
     """group233: with the market closed the gateway's bulk price helpers accept hours-old rows and skip the
     per-symbol /quote leftover. Existing tests were written for an open market and must not depend on the wall

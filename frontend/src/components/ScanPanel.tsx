@@ -810,6 +810,11 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
                         THIN TECH
                       </span>
                     )}
+                    {r.price_stale === true && (
+                      <span className="text-amber-300" title="No live quote came back for this symbol in the scan; the price shown is the Data Feed's older one">
+                        STALE PRICE
+                      </span>
+                    )}
                     {rowSummary(r) && (
                       <span className="text-mist/70">{rowSummary(r).slice(0, 100)}</span>
                     )}

@@ -72,6 +72,8 @@ export interface Decision {
   structure?: DecisionStructure | null;
   /** Label only (group105): technical read rests on a minimal / fallback price history. Absent on fast-path rows. */
   technical_thin?: boolean;
+  /** E429: /scan/stream had no live quote for this symbol in its chunk, so `price` is the Data Feed's older one. Absent when the price is live. */
+  price_stale?: boolean;
   decision: "BUY NOW" | "PREPARE TO BUY" | "HOLD" | "DO NOT BUY" | "SELL" | "WAIT";
   confidence: "High" | "Medium" | "Low";
   combined_score: number;

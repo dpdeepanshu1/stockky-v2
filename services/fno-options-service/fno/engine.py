@@ -766,6 +766,7 @@ class Engine:
                 if pos.status == paper.CLOSED:          # a REAL exit that was blocked / is in doubt leaves it OPEN: do not report it as closed
                     closed.append(pos)
             else:
+                self._unpriced = getattr(self, "_unpriced", set()) | {pos.id}
                 self._note("stale", pos.underlying, {"position": pos.id, "msg": "no premium for an open position"}, key=str(pos.id), now=now)
             return
         hit = paper.evaluate_tick(pos, prem, p, squareoff=sq)
@@ -898,6 +899,9 @@ class Engine:
         """One cycle. `manage_only` (round 298, the runner after the close): stops / square-off / exit-doubt and unknown-entry resolution for what is open, but no analysis and no new entry."""
         now = now or now_ist()
         out: Dict[str, Any] = {"ts": now.timestamp(), "enabled": bool(getattr(self.cfg, "FNO_ENGINE_ENABLED", False)), "entries": [], "exits": [], "decisions": {}}
+        self._unpriced = set()                                                 # round 387 (E403): ids of open positions with no premium this cycle (filled by _manage_one); a REAL entry waits while any exists
+        paused = self.is_paused()
+        out["paused"] = paused
         self.warn_unmanaged_real(now)                                          # round 296: repeated every 15 minutes while it stays true
         try:
             p = self.params()
@@ -914,7 +918,7 @@ class Engine:
             failed: List[str] = []                                           # round 278: analysis errors; the cycle still manages open positions, then reports not-ok
             vix: Optional[float] = None
             trading_day = gates.is_trading_day(now.date(), self.holidays)
-            analysing = bool(out["enabled"] and trading_day and not manage_only)
+            analysing = bool(out["enabled"] and trading_day and not manage_only and not paused)       # round 387: paused = no analysis and no new entry; stops, targets, square-off and exit-doubt still run
             for pos0 in self.store.open_positions():            # round 295: the chains of OPEN positions first. Entry analysis below used to go first and its fetches queued ahead of the stop checks
                 self._get_chain(chains, (pos0.underlying, pos0.expiry))
             if analysing:
@@ -984,6 +988,10 @@ class Engine:
                             d.update(action="blocked", why=why)
                             self._note("skip", und, {**d, "stage": "gates", "strategy": sname}, key=f"gates:{sname}:" + "|".join(why)[:80], now=now)
                             continue
+                        if mode == "REAL" and getattr(self, "_unpriced", None):          # round 387 (E403): a REAL position whose stop / target cannot be priced this cycle: no NEW real money on top of it
+                            d.update(action="blocked", why=["an open position has no premium this cycle"])
+                            self._note("skip", und, {**d, "stage": "unpriced_position", "strategy": sname}, key=f"unpriced:{sname}", now=now)
+                            continue
                         pos = self._enter(und, cand["direction"], cand, chn, p, now, strategy=sname)
                         if pos is not None:
                             d.update(action="entered", strategy=sname)
@@ -997,6 +1005,31 @@ class Engine:
             self.last_tick = {"ts": now.timestamp(), "ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}", "summary": out}
             out["error"] = self.last_tick["error"]
         return out
+
+    def is_paused(self) -> bool:
+        """Round 387 (E403): the manual PAUSE (kv `fno_paused`, survives a restart). Never raises; unreadable = not paused (a pause only ever removes entries)."""
+        try:
+            return bool(self.store.kv_get("fno_paused"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    @_locked                                                # round 389 (E406): round 387 put its new is_paused between this method and the round 283 lock, so the decorator moved onto is_paused (a plain kv read that /fno/overview calls) and a manual close / square-off could race the runner's exit: two SELLs, a short if both filled
+    def close_position(self, pid: int, reason: str = paper.MANUAL, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Round 387 (E403): close ONE open position by hand (same exit path as squareoff_all, so a REAL position cancels its resting stop and SELLs through the normal checks).
+        {"error": ...} when no such open position; otherwise {"id", "closed": bool}; a refused / in-doubt SELL leaves it open and says so (closed False)."""
+        now = now or now_ist()
+        pos = next((x for x in self.store.open_positions() if x.id == pid), None)
+        if pos is None:
+            return {"error": f"no open position with id {pid}"}
+        p = Params.from_config(self.cfg)
+        try:
+            ch = self._get_chain({}, (pos.underlying, pos.expiry)) or self.recent_chain(pos.underlying, pos.expiry, now.timestamp())
+            row = ch.row(pos.strike) if ch else None
+            self._exit(pos, reason, row.side(pos.opt_type) if row else None, p, now)
+        except Exception as e:  # noqa: BLE001
+            log.exception("manual close of position %s failed", pid)
+            return {"id": pid, "closed": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}
+        return {"id": pid, "closed": pos.status == paper.CLOSED, "exit_reason": pos.exit_reason, "net_pnl": pos.net_pnl}
 
     @_locked
     def squareoff_all(self, reason: str = paper.MANUAL, now: Optional[datetime] = None) -> List[int]:

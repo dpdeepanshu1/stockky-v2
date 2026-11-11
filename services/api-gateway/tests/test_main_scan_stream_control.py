@@ -46,6 +46,8 @@ import instant_scanner
 import price_resolver
 from fastapi.testclient import TestClient
 
+_SOON = (__import__("datetime").datetime.now(__import__("datetime").timezone(__import__("datetime").timedelta(hours=5, minutes=30))).date() + __import__("datetime").timedelta(days=1)).isoformat()   # E427: a date inside the event-risk window, so these tests do not rot
+
 
 # ── shared fakes ─────────────────────────────────────────────────────────────
 
@@ -706,6 +708,62 @@ class TestStreamPriceResolution:
         assert senv.quote_calls == []
         assert _rows(lines)[0]["close"] == 100.0
 
+    # E429: a symbol with no quote in its chunk keeps the feed's old price; the row says so
+    def test_row_priced_from_the_feed_only_is_flagged_stale(self, senv):
+        senv.universe = ["AAA"]          # default worker returns close=100.0 = the feed's close, the chunk has no quote for AAA
+        senv.feeds = {"AAA": {"close": 100.0}}
+        senv.prices = {}
+        _, lines = _stream(lite=False)
+        assert _rows(lines)[0]["price_stale"] is True
+
+    def test_row_whose_worker_found_its_own_price_is_not_flagged(self, senv):
+        senv.universe = ["AAA"]          # worker returns close=100.0, the feed says 90.0: the row did not come from the feed
+        senv.feeds = {"AAA": {"close": 90.0}}
+        senv.prices = {}
+        _, lines = _stream(lite=False)
+        assert "price_stale" not in _rows(lines)[0]
+
+    def test_row_with_a_live_chunk_quote_is_not_flagged(self, senv):
+        senv.universe = ["AAA"]
+        senv.feeds = {"AAA": {"close": 100.0}}
+        senv.prices = {"AAA": 101.5}
+        _, lines = _stream(lite=False)
+        assert "price_stale" not in _rows(lines)[0]
+
+    def test_row_filled_by_the_single_quote_fallback_is_not_flagged(self, senv):
+        async def no_price(sym, kw):
+            return {"symbol": "AAA", "decision": "HOLD"}
+
+        senv.ultra = no_price
+        senv.quote = lambda sym: 42.0
+        senv.universe = ["AAA"]
+        _, lines = _stream(lite=False)
+        assert _rows(lines)[0]["close"] == 42.0 and "price_stale" not in _rows(lines)[0]
+
+    def test_priceless_and_error_rows_are_not_flagged(self, senv):
+        async def no_price(sym, kw):
+            return {"symbol": "AAA", "decision": "HOLD"}
+
+        senv.ultra = no_price
+        senv.universe = ["AAA"]
+        _, lines = _stream(lite=False)
+        assert "price_stale" not in _rows(lines)[0]          # no price at all is "missing", not "stale"
+
+        async def err(sym, kw):
+            return {"symbol": "AAA", "decision": "ERROR", "close": 9.0}
+
+        senv.ultra = err
+        _, lines = _stream(lite=False)
+        assert "price_stale" not in _rows(lines)[0]
+
+    def test_lite_mode_flags_the_same_way(self, senv):
+        senv.universe = ["AAA", "BBB"]
+        senv.feeds = {"AAA": {"close": 100.0}, "BBB": {"close": 20.0}}
+        senv.prices = {"BBB": 20.0}
+        _, lines = _stream(lite=True)
+        by = {r["symbol"]: r for r in _rows(lines)}
+        assert by["AAA"].get("price_stale") is True and "price_stale" not in by["BBB"]
+
     def test_resolver_failure_is_swallowed_and_the_row_still_streams(self, senv, monkeypatch):
         def boom(row, feed=None, tick=None):
             raise RuntimeError("resolver broke")
@@ -1330,12 +1388,12 @@ class TestWatchlistEnrichment:
         assert called == []
 
     def test_events_job_with_an_earnings_date_raises_event_risk(self, wl):
-        wl.events = lambda sym: {"next_earnings_date": "2026-10-20", "other": 1}
+        wl.events = lambda sym: {"next_earnings_date": _SOON, "other": 1}
         out = _scan(wl, ["AAA"], {"AAA": _decision("AAA", event_risk=False)})
         r = out["all_results"][0]
         assert r["event_risk"] is True
-        assert r["reasons"]["event"] == ["Earnings due: 2026-10-20"]
-        assert r["event_data"] == {"next_earnings_date": "2026-10-20", "other": 1}
+        assert r["reasons"]["event"] == [f"Earnings due: {_SOON}"]
+        assert r["event_data"] == {"next_earnings_date": _SOON, "other": 1}
 
     def test_events_job_without_an_earnings_date_only_attaches_event_data(self, wl):
         wl.events = lambda sym: {"next_earnings_date": None, "note": "none"}

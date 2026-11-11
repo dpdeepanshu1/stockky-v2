@@ -53,7 +53,7 @@ export interface FnoPosition {
 }
 export interface FnoDay { trades: number; open: number; realized_net: number; realized_gross: number; charges: number; wins: number; losses: number }
 export interface FnoOverview {
-  now: string; market_open: boolean; locks: FnoLocks; day: FnoDay; open_positions: FnoPosition[]; unmanaged_real?: { id: number | null; label: string }[];   // Round 296: REAL positions open while no Dhan connection is loaded (after a restart)
+  now: string; paused?: boolean; market_open: boolean; locks: FnoLocks; day: FnoDay; open_positions: FnoPosition[]; unmanaged_real?: { id: number | null; label: string }[];   // Round 296: REAL positions open while no Dhan connection is loaded (after a restart)
   last_tick: { ts?: number; ok?: boolean; error?: string; [k: string]: any }; runner: { alive: boolean; error: string | null; snapshots_today: number }; underlyings: string[]; params: Record<string, any>;
   param_problems?: string[];   // Round 290: settings that cannot work together (e.g. a time set in the environment at boot); the engine refuses every entry while this is not empty
 }
@@ -106,6 +106,10 @@ export const fnoApi = {
   capital: () => fnoCall<BoardStatus>("/fno/capital"),
   reconcile: (refresh = false) => fnoCall<{ ts: number | null; ok: boolean | null; note?: string; differences?: { security_id: string; ours: number; broker: number }[] }>(`/fno/reconcile${refresh ? "?refresh=true" : ""}`),
   squareoff: () => fnoCall<{ closed: any }>("/fno/squareoff", { method: "POST" }),
+  // Round 387 (E403): manual control. Pause = no new entries (open positions keep stop / target / square-off); close = ONE position through the normal exit.
+  pause: () => fnoCall<{ paused: boolean }>("/fno/pause", { method: "POST" }),
+  resume: () => fnoCall<{ paused: boolean }>("/fno/resume", { method: "POST" }),
+  closeOne: (position: number) => fnoCall<{ id: number; closed: boolean; note?: string }>(`/fno/close?position=${encodeURIComponent(String(position))}`, { method: "POST" }),
   // Round 282: after a failed exit SELL (network / HTTP 5xx) the engine sends no second SELL until you have checked the Dhan app; this clears that mark. It never places an order.
   stopDoubtClear: (position: number) => fnoCall<{ position: number; cleared: boolean }>(`/fno/stop-doubt/clear?position=${encodeURIComponent(String(position))}`, { method: "POST" }),   // Round 292
   exitDoubtClear: (position: number) => fnoCall<{ position: number; cleared: boolean }>(`/fno/exit-doubt/clear?position=${encodeURIComponent(String(position))}`, { method: "POST" }),

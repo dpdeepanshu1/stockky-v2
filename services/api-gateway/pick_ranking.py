@@ -54,13 +54,16 @@ def _board_rank_key(row: dict) -> float:
     """Sort key for a horizon board: the horizon score plus the same cheap-stock
     value bonus the verdict's `_select_top_picks` uses, so the list people see is
     ranked the way the verdict counts it. `_hz_score` itself stays the raw score."""
+    # E440: `float(x or 0)` let a NaN / inf horizon score (NaN is truthy) or combined score through, so the board sort got a NaN / -inf key
+    # (NaN compares False both ways: unpredictable order). E395 fixed this for `_select_top_picks`; the board key now uses the same `_finite`
+    # rule, and the bonus is computed against the same finite combined score `_value_adjusted_score` used, so a junk or non-finite combined
+    # score no longer turns the bonus into NaN / -inf (it counts as 0, exactly as in the verdict's ranking).
+    sc = _finite(row.get("_hz_score"), 0.0)
     try:
-        sc = float(row.get("_hz_score") or 0)
-    except (TypeError, ValueError):
-        sc = 0.0
-    try:
-        combined = float(row.get("combined_score") or 0)
+        combined = _finite(row.get("combined_score", 0), 0.0)
         bonus = float(_value_adjusted_score(row)[0]) - combined
     except Exception:
+        bonus = 0.0
+    if bonus != bonus or bonus in (float("inf"), float("-inf")):
         bonus = 0.0
     return sc + bonus

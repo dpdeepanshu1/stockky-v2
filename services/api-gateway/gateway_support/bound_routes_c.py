@@ -145,7 +145,9 @@ def build_bound_routes_c(ref):
                             ref._redis_set(ref.SCAN_UNIVERSE_KEY, stale, ttl=300)
                             # Kick off background rebuild so data freshens soon
                             try:
-                                ref.asyncio.create_task(ref.asyncio.to_thread(ref._build_scan_universe_fresh))
+                                # E420: strong reference + one rebuild at a time (a bare create_task can be garbage-collected mid-rebuild, and a
+                                # rebuild slower than the 300 s live key was started again by every stale serve)
+                                ref._spawn_background_task(ref.asyncio.to_thread(ref._build_scan_universe_fresh), key="scan-universe-rebuild")
                             except Exception:
                                 pass
                             searched = await ref._load_searched_safe()
@@ -508,6 +510,11 @@ def build_bound_routes_c(ref):
         status = job.get("status")
         if status not in ("running", "stopping", "stopped") and not force:
             return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
+        # E444: `force` is for a worker that died while the row still says running (see docstring). A job that is KNOWN to be finished or idle
+        # has nothing to stop: with the default force=True this used to rewrite a "done" run as "stopped", stamp last_success_at / last_count
+        # with a fake "stop" commit (source=stop) and leave a stop flag set. Now a pure no-op, same envelope as force=false.
+        if status in ("idle", "done", "error"):
+            return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
 
         # Hard stop first — worker sees this on next symbol (no Neon round-trip)
         try:
@@ -527,10 +534,11 @@ def build_bound_routes_c(ref):
 
         try:
             cp = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-            cursor = int(cp.get("cursor") or job.get("processed") or 0)
-            total = int(job.get("total") or 0)
-            ok_n = int(job.get("ok_count") or 0)
-            err_n = int(job.get("error_count") or job.get("errors") or 0)
+            # E444: tolerant parse (a junk stored counter used to raise here, after the stop signal, and leave the job stuck at "stopping")
+            cursor = max(0, ref._safe_int(cp.get("cursor")) or ref._safe_int(job.get("processed")))
+            total = max(0, ref._safe_int(job.get("total")))
+            ok_n = max(0, ref._safe_int(job.get("ok_count")))
+            err_n = max(0, ref._safe_int(job.get("error_count")) or ref._safe_int(job.get("errors")))
             # Prefer counting done list if present
             done = list(cp.get("done") or [])
             if done:

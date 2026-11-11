@@ -810,6 +810,7 @@ def test_events_upstream_hit_is_cached_and_written_through(feed, kv, cb):
     body = {"summary": "S", "bulk_deals": [1, 2, 3, 4, 5, 6, 7], "recent_insider_transactions": [1] * 9,
             "earnings_surprise": 3, "next_earnings_date": "D", "has_positive_catalyst": True,
             "recent_event_score": 2}
+    feed.rows["TCS"] = {"sector": "IT"}        # E436: write-through only updates a row that exists (no event markers → not a feed hit)
     cb.resp = Resp(200, body)
     assert run(gw._fetch_events_cached("TCS", None)) == body
     assert cb.calls == [("event", f"{gw.EVENT_URL}/events/TCS", 25)]
@@ -839,7 +840,18 @@ def test_events_summary_key_is_used_when_event_summary_absent(feed, kv, cb):
     assert feed.puts[0][1]["event_summary"] == "only summary"
 
 
+def test_events_with_no_feed_row_creates_no_events_only_row(feed, kv, cb):
+    """E436 (round 394 note 3): an upstream events answer for a symbol with no feed row is returned and kept in the short Redis copy,
+    but no events-only row (no price, no fundamentals) is written to the feed."""
+    body = {"summary": "S", "bulk_deals": [1], "has_positive_catalyst": True}
+    cb.resp = Resp(200, body)
+    assert run(gw._fetch_events_cached("TCS", None)) == body
+    assert kv.sets == [(EKEY, body, gw.STATIC_PARAM_TTL)]
+    assert feed.puts == []
+
+
 def test_events_feed_write_error_is_swallowed(feed, kv, cb, log):
+    feed.rows["TCS"] = {"sector": "IT"}
     feed.put_raises = RuntimeError("x")
     cb.resp = Resp(200, {"summary": "S"})
     assert run(gw._fetch_events_cached("TCS", None)) == {"summary": "S"}
@@ -904,6 +916,7 @@ def test_prediction_returns_score_and_note_when_model_loaded(cb):
     cb.resp = Resp(200, {"model_loaded": True, "prediction_score": 63.5, "note": "n"})
     assert run(gw._fetch_prediction_cached("TCS", None)) == (63.5, "n")
     assert cb.calls == [("prediction", f"{gw.PREDICTION_URL}/predict/TCS", 25)]
+    gw._prediction_cache.clear()                   # E432: the 63.5 above is kept for 60 s; this second answer must be read fresh
     cb.resp = Resp(200, {"model_loaded": True})
     assert run(gw._fetch_prediction_cached("TCS", None)) == (None, None)
 
@@ -938,7 +951,7 @@ def test_gemini_prompt_uses_two_reasons_per_side():
 
 def test_gemini_prompt_defaults_for_a_sparse_row():
     p = gw._build_gemini_prompt({"decision": "HOLD", "entry_range": None, "reasons": None})
-    assert "for this stock." in p and "Entry range: None-None" in p
+    assert "for this stock." in p and "Entry range: not set," in p and "None-None" not in p
     assert "Technical reasons: none listed." in p and "Fundamental reasons: none listed." in p
     p2 = gw._build_gemini_prompt({"reasons": {"technical": [], "fundamental": []}})
     assert "none listed" in p2
@@ -965,7 +978,7 @@ def test_summary_buy_now_full():
 def test_summary_buy_now_without_reasons_or_symbol():
     s = gw._generate_summary({"decision": "BUY NOW", "reasons": {"technical": [], "fundamental": []}})
     assert "Unknown" in s and "तकनीकी" not in s and "फंडामेंटल" not in s
-    assert "None-None" in s
+    assert "None-None" not in s and "एंट्री तय नहीं, टारगेट" in s
 
 
 def test_summary_prepare_hold_sell_and_default():

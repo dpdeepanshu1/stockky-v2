@@ -358,6 +358,26 @@ class TestPriceTier:
         assert out["patched_fields"] == [] and out["still_missing"] == ["price"] and out["complete"] is False
         assert out["message"] == "Repaired A: no changes — still missing ['price']"
 
+    def test_no_row_and_no_price_creates_no_stub_row(self, env):
+        """E436 (round 390 note): a symbol with no feed row whose quote fails must not get a seeded, priceless stub row."""
+        env.client.routes["/quote/"] = FakeResp(200, {"price": 0, "cmp": 0})
+        env.fallback = lambda s: (s + ".NS", {"resolution": "unchanged"})
+        out = go(env, "NEWSYM")
+        assert env.store.puts == []
+        assert out["patched_fields"] == [] and out["complete"] is False and out["created"] is False
+        assert "price" in out["still_missing"] and "no row was created" in out["message"]
+
+    def test_no_row_but_a_real_price_still_creates_the_row(self, env):
+        env.client.routes["/quote/"] = FakeResp(200, {"price": 42})
+        out = go(env, "NEWSYM")
+        assert stored(env)["price"] == 42.0 and "price" in out["patched_fields"]
+
+    def test_existing_priceless_row_is_still_repaired_and_written(self, env):
+        env.client.routes["/quote/"] = FakeResp(200, {"price": 0})
+        env.fallback = lambda s: (s + ".NS", {"resolution": "unchanged"})
+        go(env, "A", dict(NO_PRICE))
+        assert len(env.store.puts) == 1
+
     def test_price_not_missing_means_no_quote_call(self, env):
         go(env, "A", dict(FULL))
         assert env.client.calls == [] and env.sleeps == []
@@ -887,7 +907,8 @@ class TestSeedsAndEnvelope:
         return env
 
     def test_everything_cold_seeds_every_field_but_never_invents_a_price(self, cold):
-        out = go(cold, "A", {})
+        # E436: a symbol with NO stored row gets no stub row, so this is an existing row that holds nothing useful (not `{}`, which reads as "no row").
+        out = go(cold, "A", {"sector": "IT"})
         row = stored(cold)
         assert row["rsi"] == 50.0 and row["rsi_seed"] is True
         assert row["pe_ratio"] == 22.5 and row["pe_seed"] is True

@@ -1695,7 +1695,7 @@ def test_build_result_is_cut_to_the_target_and_the_hard_cap(ub, monkeypatch):
 ])
 def test_build_cache_ttl_follows_the_ist_market_window(ub, when, ttl):
     ub.time.at(*when)
-    ub.securities = ["AAA"]
+    ub.securities = ["AAA"] + S(60)
     gw._build_scan_universe()
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == ttl
 
@@ -1705,21 +1705,21 @@ def test_build_cache_ttl_holiday_lookup_failure_keeps_the_weekday_answer(ub, mon
         raise RuntimeError("calendar broke")
     monkeypatch.setattr(gw, "is_nse_holiday", boom)
     ub.time.at(2026, 10, 2, 12, 0)                   # holiday, but the lookup fails -> old weekday-only rule
-    ub.securities = ["AAA"]
+    ub.securities = ["AAA"] + S(60)
     gw._build_scan_universe()
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == 1800
 
 
 def test_build_cache_ttl_falls_back_to_one_hour_when_the_clock_fails(ub):
     ub.time.broken()
-    ub.securities = ["AAA"]
+    ub.securities = ["AAA"] + S(60)
     gw._build_scan_universe()
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == 3600
 
 
 def test_build_writes_live_and_stale_keys_with_the_price_filtered_result(ub, monkeypatch):
     monkeypatch.setattr(gw, "_filter_symbols_under_max_price", lambda s: [x for x in s if x != "PRICEY"])
-    ub.securities = ["PRICEY", "CHEAP"]
+    ub.securities = ["PRICEY", "CHEAP"] + S(60)
     out = gw._build_scan_universe()
     assert "PRICEY" not in out and "CHEAP" in out
     (live_val, live_ttl), = _sets(ub, gw.SCAN_UNIVERSE_KEY)
@@ -1730,10 +1730,34 @@ def test_build_writes_live_and_stale_keys_with_the_price_filtered_result(ub, mon
 
 def test_build_stale_key_write_failure_is_non_fatal(ub, log):
     ub.set_raises[gw.SCAN_UNIVERSE_STALE_KEY] = RuntimeError("neon down")
-    ub.securities = ["AAA"]
+    ub.securities = ["AAA"] + S(60)
     assert "AAA" in gw._build_scan_universe()
     assert log.any("debug", "stale-key write failed")
     assert _sets(ub, gw.SCAN_UNIVERSE_KEY)
+
+
+def test_e451_thin_build_is_served_briefly_and_never_stored_as_the_stale_copy(ub, log):
+    ub.securities = ["AAA"]                                       # 1 symbol: far under SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS
+    out = gw._build_scan_universe()
+    assert "AAA" in out
+    (val, ttl), = _sets(ub, gw.SCAN_UNIVERSE_KEY)
+    assert val == out and ttl == gw.SCAN_UNIVERSE_THIN_TTL_S      # not the 1800 s in-market window
+    assert _sets(ub, gw.SCAN_UNIVERSE_STALE_KEY) == []            # the durable copy is left alone
+    assert log.any("warning", "serving it for")
+
+
+def test_e451_thin_build_off_hours_is_not_cached_for_six_hours(ub):
+    ub.time.at(2026, 9, 30, 8, 0)                                 # 08:00: the old code stored this for 21600 s
+    ub.securities = ["AAA"]
+    gw._build_scan_universe()
+    (_val, ttl), = _sets(ub, gw.SCAN_UNIVERSE_KEY)
+    assert ttl == gw.SCAN_UNIVERSE_THIN_TTL_S
+
+
+def test_e451_a_build_at_the_minimum_is_stored_as_before(ub):
+    ub.securities = S(gw.SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS)
+    gw._build_scan_universe()
+    assert _sets(ub, gw.SCAN_UNIVERSE_KEY)[0][1] == 1800 and _sets(ub, gw.SCAN_UNIVERSE_STALE_KEY)
 
 
 def test_build_logs_the_summary(ub, log, monkeypatch):

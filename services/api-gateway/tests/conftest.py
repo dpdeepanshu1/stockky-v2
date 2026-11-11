@@ -57,6 +57,8 @@ def _reset_nse_api_block_and_movers_warning():
                 mod._nse_securities_fallback["symbols"] = []
                 mod._nse_securities_fallback["ts"] = 0.0
             mod._angelone_movers_warned_at[0] = 0.0
+        if mod is not None and hasattr(mod, "_MM_EMPTY_UNTIL"):
+            mod._MM_EMPTY_UNTIL[0] = 0.0     # E450: the "last pass found nothing" window is per process too
     _clear()
     yield
     _clear()

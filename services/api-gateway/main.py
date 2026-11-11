@@ -1437,6 +1437,9 @@ def _momentum_single_flight_cfg() -> tuple:
 # group203: set once a movers pass has produced a non-empty list in this process. Until then (cold start) a
 # /scan/universe caller waits SCAN_UNIVERSE_COLD_MOVERS_DEADLINE_S instead of the full movers deadline.
 _MOVERS_EVER_READY = False
+# E450: end (epoch seconds) of the short "the last full pass found nothing" window. The readers treat an empty cached list as a miss, so an empty
+# pass was recomputed (AngelOne sweep with a 25 s timeout, the seed fallback) by every sequential caller. MOMENTUM_MOVERS_EMPTY_TTL_S (default 20, 0 = off).
+_MM_EMPTY_UNTIL = [0.0]
 
 
 def _note_movers_ready(out) -> None:
@@ -1562,6 +1565,8 @@ def _compute_momentum_movers() -> List[str]:
     cached = _redis_get(MOMENTUM_MOVERS_CACHE_KEY)
     if isinstance(cached, list) and cached:
         return cached
+    if time.time() < _MM_EMPTY_UNTIL[0]:   # E450: the pass that just ran found nothing; do not pay for the same sweep again right away
+        return []
 
     movers: set[str] = set()
 
@@ -1787,31 +1792,37 @@ def _compute_momentum_movers() -> List[str]:
         )
 
     if len(movers) < 40:
-        nifty_idx_full = _get_nifty_indices()  # NIFTY50+NEXT50+MID100+MID150+SMALL100
-        largecap_seed = nifty_idx_full[:20]     # small largecap slice — cheap sanity coverage
-        midsmall_seed = nifty_idx_full[20:]     # NEXT50 tail + MID/SMALLCAP — highest value
-        random.shuffle(midsmall_seed)
-        all_sec = _get_all_nse_securities()
-        general_pool = _general_pool_excluding(all_sec, nifty_idx_full)
-        # 2026-09-01 fix: this used to be a fresh random.sample() every call,
-        # so coverage of the ~2000-symbol general pool was purely probabilistic
-        # — a given symbol (e.g. one of the Groww "Volume shockers" names that
-        # isn't in any NIFTY index) could go unsampled for many cycles in a
-        # row by bad luck, while others got re-checked repeatedly for no
-        # benefit. A persistent rotating cursor instead guarantees the WHOLE
-        # general_pool is covered exactly once every
-        # ceil(len(general_pool) / _GENERAL_POOL_SAMPLE_SIZE) cycles, so real
-        # coverage gaps shrink to a bounded, known cycle count instead of
-        # "maybe never." Sample size/order otherwise unchanged, so this adds
-        # no extra yfinance load per cycle.
-        general_sample = _next_general_pool_slice(general_pool, _GENERAL_POOL_SAMPLE_SIZE)
-        seed = list(dict.fromkeys(largecap_seed + midsmall_seed[:80] + general_sample))[:180]
-        logger.info(
-            "momentum_movers fallback seed: %d largecap + %d mid/smallcap-index + "
-            "%d general (rotating cursor, full pool=%d) = %d total (nse_live_movers_so_far=%d)",
-            len(largecap_seed), min(80, len(midsmall_seed)), len(general_sample),
-            len(general_pool), len(seed), len(movers),
-        )
+        seed: list = []
+        try:   # E450: a failure building the seed used to raise out of the whole function and drop every mover steps 1-3 had collected
+            nifty_idx_full = _get_nifty_indices()  # NIFTY50+NEXT50+MID100+MID150+SMALL100
+            largecap_seed = nifty_idx_full[:20]     # small largecap slice — cheap sanity coverage
+            midsmall_seed = nifty_idx_full[20:]     # NEXT50 tail + MID/SMALLCAP — highest value
+            random.shuffle(midsmall_seed)
+            all_sec = _get_all_nse_securities()
+            general_pool = _general_pool_excluding(all_sec, nifty_idx_full)
+            # 2026-09-01 fix: this used to be a fresh random.sample() every call,
+            # so coverage of the ~2000-symbol general pool was purely probabilistic
+            # — a given symbol (e.g. one of the Groww "Volume shockers" names that
+            # isn't in any NIFTY index) could go unsampled for many cycles in a
+            # row by bad luck, while others got re-checked repeatedly for no
+            # benefit. A persistent rotating cursor instead guarantees the WHOLE
+            # general_pool is covered exactly once every
+            # ceil(len(general_pool) / _GENERAL_POOL_SAMPLE_SIZE) cycles, so real
+            # coverage gaps shrink to a bounded, known cycle count instead of
+            # "maybe never." Sample size/order otherwise unchanged, so this adds
+            # no extra yfinance load per cycle.
+            general_sample = _next_general_pool_slice(general_pool, _GENERAL_POOL_SAMPLE_SIZE)
+            seed = list(dict.fromkeys(largecap_seed + midsmall_seed[:80] + general_sample))[:180]
+            logger.info(
+                "momentum_movers fallback seed: %d largecap + %d mid/smallcap-index + "
+                "%d general (rotating cursor, full pool=%d) = %d total (nse_live_movers_so_far=%d)",
+                len(largecap_seed), min(80, len(midsmall_seed)), len(general_sample),
+                len(general_pool), len(seed), len(movers),
+            )
+        except Exception as e:
+            logger.warning("momentum_movers: fallback seed not built (%s); returning the %d movers collected so far", e, len(movers))
+            seed = []
+
         # BUG FIX (2026-09-01, round 15): this used to call yf.Ticker(...).history()
         # once PER SYMBOL, sequentially — up to 180 blocking network round-trips
         # in-process. That's what made GET /scan/universe time out at 20s (the
@@ -1828,8 +1839,11 @@ def _compute_momentum_movers() -> List[str]:
         # day_change_pct, not 5-day history, so the week_chg>=5% leg is dropped
         # here — day_chg alone is still the dominant volume-shock signal.
         try:
-            from data_feed import bulk_yahoo_download_prices
-            bulk_quotes = bulk_yahoo_download_prices(seed)
+            if seed:
+                from data_feed import bulk_yahoo_download_prices
+                bulk_quotes = bulk_yahoo_download_prices(seed)
+            else:
+                bulk_quotes = {}
         except Exception as e:
             logger.warning("momentum_movers bulk quote fetch failed: %s", e)
             bulk_quotes = {}
@@ -1846,6 +1860,15 @@ def _compute_momentum_movers() -> List[str]:
 
     out = sorted(movers)
     logger.info("Momentum movers collected: %s symbols", len(out))
+    if not out:
+        try:
+            _ttl_e = float((os.getenv("MOMENTUM_MOVERS_EMPTY_TTL_S") or "").strip() or "20")
+        except ValueError:
+            _ttl_e = 20.0
+        if _ttl_e == _ttl_e and _ttl_e > 0:
+            _MM_EMPTY_UNTIL[0] = time.time() + min(_ttl_e, MOMENTUM_MOVERS_CACHE_TTL)
+    else:
+        _MM_EMPTY_UNTIL[0] = 0.0
     try:
         _redis_set(MOMENTUM_MOVERS_CACHE_KEY, out, ttl=MOMENTUM_MOVERS_CACHE_TTL)
     except Exception as e:
@@ -2305,6 +2328,7 @@ def _cut_universe_under_price_cap(ordered: List[str], target: int) -> List[str]:
 _UNIVERSE_REFRESH_LOCK = threading.Lock()
 _universe_refresh_ctx = threading.local()
 SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS = 50     # a rebuild thinner than this never overwrites the stored universe
+SCAN_UNIVERSE_THIN_TTL_S = 120             # E451: a thin non-refresh build is served, but only this long, and never written as the durable stale copy
 
 
 def _stale_universe_refresh_enabled() -> bool:
@@ -2610,6 +2634,15 @@ def _build_scan_universe() -> List[str]:
         logger.warning("scan_universe: background rebuild produced only %d symbol(s) - kept the stored universe",
                        len(result))
         return result
+    if len(result) < SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS:
+        # E451: the group196 guard above only covered the background refresh. A foreground build that came out thin (NSE blocked and the
+        # padding lookup failing too, or the ten-name fallback) was stored for the full 30 min / 6 h and written over the 4 h durable stale
+        # copy, so a build at 08:00 left the whole trading morning on a handful of names. The caller still gets what was built; it is kept
+        # for SCAN_UNIVERSE_THIN_TTL_S so the next caller rebuilds (or serves the stale copy), and the stored stale copy is left alone.
+        logger.warning("scan_universe: build produced only %d symbol(s) - serving it for %ss, not stored as the durable copy",
+                       len(result), SCAN_UNIVERSE_THIN_TTL_S)
+        _redis_set(SCAN_UNIVERSE_KEY, result, ttl=min(ttl, SCAN_UNIVERSE_THIN_TTL_S))
+        return result
     _redis_set(SCAN_UNIVERSE_KEY, result, ttl=ttl)
     # 2026-09-18 fix: also write a long-lived stale-fallback copy so a restart
     # that finds the 30-min live key expired can still serve something fast
@@ -2895,9 +2928,16 @@ def _is_symbol_pruned(symbol: str) -> bool:
     state = _redis_get(SYMBOL_PERF_KEY_PREFIX + symbol)
     if not state:
         return False
-    if state.get("total_scans", 0) < UNIVERSE_GRACE_PERIOD_SCANS:
+    # E451: one malformed stored row (not a dict, or a counter that is None / text) used to raise out of the list comprehension in
+    # _build_scan_universe and abort the whole build. A row that cannot be read is simply not pruned.
+    if not isinstance(state, dict):
         return False
-    return state.get("weak_streak", 0) >= UNIVERSE_PRUNE_AFTER_WEAK_SCANS
+    try:
+        if state.get("total_scans", 0) < UNIVERSE_GRACE_PERIOD_SCANS:
+            return False
+        return state.get("weak_streak", 0) >= UNIVERSE_PRUNE_AFTER_WEAK_SCANS
+    except TypeError:
+        return False
 
 # ── Fallback helpers with caching ──────────────────────────────────────────
 def _fetch_price_from_quote(symbol: str) -> Optional[float]:
@@ -2914,7 +2954,7 @@ def _fetch_price_from_quote(symbol: str) -> Optional[float]:
             if v is not None:
                 try:
                     px = float(v)
-                    if px > 0:
+                    if math.isfinite(px) and px > 0:   # E452: "inf" / 1e999 passed `px > 0` and came back as a price (E449 fixed the same gap in data_feed)
                         return px
                 except (TypeError, ValueError):
                     pass
@@ -4478,7 +4518,9 @@ async def _analyze_one_symbol_ultra(
                 # string is (often a static "2-6 weeks" or "N/A") — kept as
                 # a separate field so nothing that already reads
                 # holding_period breaks.
-                entry = normalized.get("entry_range") or {}
+                entry = normalized.get("entry_range")
+                if not isinstance(entry, dict):   # E452: a string / list `entry_range` raised on .get() and turned the whole analysis (and, once cached, every later call for the TTL) into an ERROR row
+                    entry = {}
                 entry_price = entry.get("low") or normalized.get("close")
                 normalized["holding_period_estimate"] = _estimate_holding_period(
                     entry_price, normalized.get("target"), normalized.get("decision")
@@ -8369,14 +8411,14 @@ def _feed_resolved_price(payload: dict) -> float:
     try:
         from data_feed import _payload_price
         px = float(_payload_price(data) or 0)
-        if px > 0:
+        if px > 0 and math.isfinite(px):   # E449: an inf price is not a price
             return px
     except Exception:
         pass
     try:
         from price_resolver import resolve_display_price
         px = float(resolve_display_price(str(data.get("symbol") or ""), {}, data) or 0)
-        if px > 0:
+        if px > 0 and math.isfinite(px):
             return px
     except Exception:
         pass

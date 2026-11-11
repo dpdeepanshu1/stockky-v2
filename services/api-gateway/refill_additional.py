@@ -184,6 +184,15 @@ def _build_payload(sym: str, fund: Optional[dict], tech: Optional[dict], events:
 _FUND_FAILED_KEY = "_fund_failed"
 
 
+def _is_real_price(v: Any) -> bool:
+    """E449: a finite positive number (or numeric string). The old truthiness test counted NaN, inf and any non-empty junk string as priced."""
+    try:
+        f = float(str(v).replace(",", "").strip()) if isinstance(v, str) else float(v)
+    except (TypeError, ValueError):
+        return False
+    return 0 < f < float("inf")
+
+
 def _priced_symbols(store, symbols: List[str]) -> set:
     """Symbols whose stored feed row already has a price (one bulk read). The refill must not relabel such a row's `source`
     (e.g. `nse_bhavcopy` -> `refill_additional`): the price in it was not written by this job. Any failure -> empty set (old behaviour)."""
@@ -194,7 +203,7 @@ def _priced_symbols(store, symbols: List[str]) -> set:
         return set()
     out = set()
     for sym, row in (rows.items() if isinstance(rows, dict) else []):
-        if isinstance(row, dict) and any(row.get(k) for k in ("last_price", "current_price", "price")):
+        if isinstance(row, dict) and any(_is_real_price(row.get(k)) for k in ("last_price", "current_price", "price")):
             out.add(_norm(sym))
     return out
 

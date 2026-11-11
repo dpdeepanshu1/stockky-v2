@@ -385,6 +385,10 @@ def test_record_outcomes_handles_many_symbols_independently(kv, clock):
     ({"total_scans": 3, "weak_streak": 10}, True),                        # both boundaries inclusive
     ({"total_scans": 40, "weak_streak": 11}, True),
     ({"weak_streak": 50}, False),                                         # no total_scans → grace
+    ("not-a-dict", False), (["x"], False),                                  # E451: a malformed stored row is not pruned
+    ({"total_scans": None, "weak_streak": 50}, False),
+    ({"total_scans": 40, "weak_streak": "many"}, False),
+    ({"total_scans": "40", "weak_streak": 50}, False),
 ])
 def test_is_symbol_pruned(kv, state, expected):
     if state is not None:
@@ -419,6 +423,13 @@ def test_quote_price_reads_the_first_positive_field(http):
     http.resp = Resp(200, {"price": "101.5", "close": 5})
     assert gw._fetch_price_from_quote("TCS") == 101.5
     assert http.calls == [(f"{gw.MARKET_DATA_URL}/quote/TCS", 4.0)]
+
+
+def test_quote_price_skips_non_finite_values_e452(http):
+    http.resp = Resp(200, {"price": "inf", "close": 1e999, "ltp": "nan", "regularMarketPrice": 55.5})
+    assert gw._fetch_price_from_quote("TCS") == 55.5
+    http.resp = Resp(200, {"price": "inf", "close": "-inf"})
+    assert gw._fetch_price_from_quote("TCS") is None
 
 
 def test_quote_price_falls_through_unusable_fields_in_order(http):

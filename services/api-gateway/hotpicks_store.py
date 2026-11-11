@@ -312,7 +312,17 @@ def hotpicks_db_payload(hours: Optional[float] = None) -> Optional[Dict[str, Any
     Returns None when nothing is configured/stored, so callers can fall through
     to kv_cache or a live scan. This is what makes reopening the tab instant.
     """
-    hrs = int(hours if hours is not None else HOTPICKS_TABLE_HOURS)
+    # E448: a fraction below one hour (0.5) became `int(0.5)` = 0, an empty window; NaN / inf / a non-number raised outside the try below; a negative
+    # window selected nothing. A fraction in (0, 1) now means one hour; a missing, non-numeric, NaN, inf or negative value falls back to the default
+    # window. Whole and larger values keep their old meaning (6.7 -> 6) and an explicit 0 is still honoured (a test pins it).
+    try:
+        _h = float(hours) if hours is not None else float(HOTPICKS_TABLE_HOURS)
+        if not math.isfinite(_h) or _h < 0:
+            hrs = int(HOTPICKS_TABLE_HOURS)
+        else:
+            hrs = 1 if 0 < _h < 1 else int(_h)
+    except (TypeError, ValueError):
+        hrs = int(HOTPICKS_TABLE_HOURS)
     try:
         hp = _schema()
         from sqlalchemy import text

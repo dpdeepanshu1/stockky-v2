@@ -104,12 +104,12 @@ def _coerce_price(val) -> float:
     try:
         if isinstance(val, (int, float)):
             f = float(val)
-            return f if f > 0 and f == f else 0.0
+            return f if 0 < f < float("inf") else 0.0   # E449: `inf` is not a price (NaN was already refused)
         s = str(val).replace(",", "").replace("\u00a0", "").replace(" ", "").strip()
         if not s or s.upper() in ("-", "NA", "N/A", "NONE", "NULL"):
             return 0.0
         f = float(s)
-        return f if f > 0 and f == f else 0.0
+        return f if 0 < f < float("inf") else 0.0   # E449: "inf" / "1e999" parse to inf and used to count as a price
     except (TypeError, ValueError):
         return 0.0
 

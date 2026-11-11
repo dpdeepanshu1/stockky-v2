@@ -809,6 +809,15 @@ def test_holding_period_uses_entry_low_then_close(env, monkeypatch):
     assert seen == [(10.0, None, "HOLD")]
 
 
+@pytest.mark.parametrize("bad", ["95-99", [95.0, 99.0], 7, True])
+def test_e452_a_non_dict_entry_range_is_ignored_not_an_error_row(env, bad):
+    """A string / list entry_range raised on .get() inside the per-symbol analysis: the row became decision=ERROR."""
+    env.get_result = DResp(dict(ALL_SUPPLIED, entry_range=bad, target=120.0, decision="BUY NOW"))
+    out = analyze("TCS")
+    assert out.get("decision") == "BUY NOW" and "error" not in out
+    assert out["holding_period_estimate"] is not None            # the close (10.0) stands in for the missing entry low
+
+
 def test_real_holding_estimate_lands_on_the_row(env):
     env.get_result = DResp(dict(ALL_SUPPLIED, entry_range={"low": 100.0}, target=110.0, decision="BUY NOW"))
     est = analyze("TCS")["holding_period_estimate"]

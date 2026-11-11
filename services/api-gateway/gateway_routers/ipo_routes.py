@@ -63,7 +63,7 @@ async def api_ipo_scan(
         # Same shape as the sibling IPO routes when ipo_scanner can't load.
         return {"accepted": False, "status": "error", "error": f"ipo_scanner unavailable: {str(e)[:160]}"}
 
-    current = get_ipo_scan_progress()
+    current = await asyncio.to_thread(get_ipo_scan_progress)  # E396: durable kv_get, off the event loop (the status poll below does the same)
     if current.get("status") == "running":
         return {"accepted": True, "already_running": True, **current}
 

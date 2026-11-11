@@ -579,6 +579,45 @@ def ensure_hotpicks_schema() -> Dict[str, Any]:
         return {"ok": False, "error": str(e)[:200]}
 
 
+# Optional bulky keys a repair may drop, in this order, when a rewritten item would not fit the stored-JSON cap.
+_DROPPABLE_ITEM_KEYS = ("reasons", "headlines", "news", "articles", "summary")
+
+
+def _dump_item_json(blob: Dict[str, Any], max_bytes: int = 30000) -> Optional[str]:
+    """Serialise a repaired item for write-back WITHOUT ever cutting it mid-JSON.
+
+    E394: both repair paths used to write `json.dumps(blob)[:15000]`. An item over 15000 characters came out as invalid JSON, so the next
+    read failed to parse it and the card fell back to the typed columns, losing every other field. (The write cap in hotpicks_schema is
+    JSON_MAX_BYTES, 30000 by default, so the repair was also stricter than the scan's own writer.) Now the full JSON is used when it fits;
+    otherwise bulky optional keys are dropped one by one until it does; and when even that is not enough None is returned so the caller
+    leaves the stored row untouched instead of corrupting it."""
+    try:
+        raw = json.dumps(blob, default=str)
+    except Exception:
+        return None
+    if len(raw.encode("utf-8")) <= max_bytes:
+        return raw
+    slim = dict(blob)
+    for k in _DROPPABLE_ITEM_KEYS:
+        if k in slim:
+            slim.pop(k)
+            try:
+                raw = json.dumps(slim, default=str)
+            except Exception:
+                return None
+            if len(raw.encode("utf-8")) <= max_bytes:
+                return raw
+    return None
+
+
+def _json_cap(hp) -> int:
+    try:
+        v = int(getattr(hp, "JSON_MAX_BYTES", 30000))
+        return v if v > 0 else 30000
+    except (TypeError, ValueError):
+        return 30000
+
+
 def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_data_url: str = "") -> Dict[str, Any]:
     """Waterfall price fill for hotpicks_static_feed rows missing a price —
     mirrors repair_surprise_batch's exact pattern (surprise_scanner.py),
@@ -653,6 +692,13 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
             return out
 
         md = ((market_data_url or "").strip() or (os.getenv("MARKET_DATA_URL") or "").strip()).rstrip("/")
+        if not md:
+            # E394: with no market-data URL every POST went to "/quotes/bulk", failed inside the per-chunk try (debug log only), and the pass
+            # still came back "completed" with nothing repaired, hiding the misconfiguration. hotpicks_repair_scores already reports
+            # not_configured for a missing DECISION_URL; this pass now does the same.
+            out["status"] = "not_configured"
+            out["error"] = "MARKET_DATA_URL not set"
+            return out
         repaired = []
         # group233: price every target with chunked POST /quotes/bulk (market-data answers a closed market
         # from the last close) instead of one GET /quote per symbol; a symbol bulk cannot price is skipped
@@ -700,10 +746,14 @@ def hotpicks_repair_batch(limit: int = 15, symbol: Optional[str] = None, market_
                         continue
                     blob["price"] = px
                     blob["close"] = px
+                    payload_json = _dump_item_json(blob, _json_cap(hp))
+                    if payload_json is None:
+                        logger.warning("hotpicks repair %s skipped: item too large to rewrite safely", sym)
+                        continue
                     conn.execute(
                         text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
                              f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
-                        {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
+                        {"item_json": payload_json, "symbol": sym, "section": section},
                     )
                     repaired.append(sym)
                 except Exception as e:
@@ -857,10 +907,15 @@ def hotpicks_repair_scores(
                     if rs and isinstance(rs, list):   # E192: the engine sends a dict; the old else-branch just wrote reasons=None into a row without one
                         blob["reasons"] = rs
                     if changed:
+                        payload_json = _dump_item_json(blob, _json_cap(hp))
+                        if payload_json is None:
+                            logger.warning("hotpicks score-repair %s skipped: item too large to rewrite safely", sym)
+                            time.sleep(0.4)
+                            continue
                         conn.execute(
                             text(f"UPDATE {hp.TABLE_NAME} SET item_json = :item_json, "
                                  f"updated_at = {hp.now_func(dial)} WHERE symbol = :symbol AND section = :section"),
-                            {"item_json": json.dumps(blob)[:15000], "symbol": sym, "section": section},
+                            {"item_json": payload_json, "symbol": sym, "section": section},
                         )
                         repaired.append(sym)
                 except Exception as e:

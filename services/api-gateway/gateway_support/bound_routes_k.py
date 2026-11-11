@@ -139,7 +139,7 @@ def build_bound_routes_k(ref):
                 symbols = []
         if not symbols:
             try:
-                symbols = list(ref._get_nifty_indices() or [])[:150]
+                symbols = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
             except Exception:
                 symbols = []
 
@@ -320,7 +320,7 @@ def build_bound_routes_k(ref):
 
         universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
         if not universe:
-            universe = list(ref._get_nifty_indices() or [])[:150]
+            universe = list(await ref.asyncio.to_thread(ref._get_nifty_indices) or [])[:150]  # E398: 5 sequential NSE calls, off the loop
         _df_max = int(ref.os.getenv("DATA_FEED_MAX_SYMBOLS", "0") or 0)
         if _df_max > 0:
             universe = universe[:_df_max]

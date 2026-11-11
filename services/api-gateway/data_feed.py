@@ -2298,12 +2298,22 @@ def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
                 px = _payload_price(row)
                 if px > 0:
                     price_map[str(sym).upper()] = px
-        if not price_map:
-            store = get_data_feed_store()
-            for a in alerts:
-                sym = a.get("symbol")
-                row = store.get_symbol(sym) or {}
-                px = _payload_price(row)
+        # E392: the feed store used to be consulted only when the WHOLE cache was empty, so with a warm but partial cache (a symbol whose bulk
+        # quote failed, or one outside the cached universe) an enabled alert on a symbol the cache lacks was skipped for good although the feed
+        # row has a last price. Now each such alert falls back to its feed row. A caller-supplied price_map is still used exactly as given.
+        wanted = [a.get("symbol") for a in alerts if isinstance(a, dict) and a.get("enabled", True) and a.get("symbol")
+                  and not price_map.get(a.get("symbol"))]
+        if wanted:
+            try:
+                store = get_data_feed_store()
+            except Exception:  # noqa: BLE001
+                store = None
+            for sym in dict.fromkeys(wanted):
+                try:
+                    row = (store.get_symbol(sym) if store is not None else None) or {}
+                except Exception:  # noqa: BLE001
+                    row = {}
+                px = _payload_price(row) if isinstance(row, dict) else 0.0
                 if px > 0:
                     price_map[sym] = px
 

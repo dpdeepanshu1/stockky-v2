@@ -1,6 +1,8 @@
 """Data-feed cache and background-job routes: bulk quote cache view, structure-refresh stop, refill-additional status. Moved out of main.py in E49, code unchanged (rules: gateway_routers/__init__.py)."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 bulk_cache_router = APIRouter()
@@ -11,15 +13,21 @@ bulk_cache_router = APIRouter()
 async def api_bulk_quote_cache():
     """Shared bulk quote cache status + map (market-aware TTL)."""
     from data_feed import get_bulk_quote_cache, bulk_cache_age_sec, should_refresh_bulk_cache
-    cache = get_bulk_quote_cache()
-    return {
-        "ok": True,
-        "age_sec": bulk_cache_age_sec(),
-        "should_refresh": should_refresh_bulk_cache(),
-        "meta": (cache or {}).get("_meta"),
-        "count": len((cache or {}).get("quotes") or {}),
-        "quotes": (cache or {}).get("quotes") or {},
-    }
+
+    def _view() -> dict:
+        # E393: this handler is `async` and the three helpers each do a kv_get (Redis/Neon), so they used to run three sequential reads ON the
+        # event loop (each could park it for KV_LOOP_READ_TIMEOUT_S). The whole read now runs on a worker thread, as the surprise scan already does.
+        cache = get_bulk_quote_cache()
+        return {
+            "ok": True,
+            "age_sec": bulk_cache_age_sec(),
+            "should_refresh": should_refresh_bulk_cache(),
+            "meta": (cache or {}).get("_meta"),
+            "count": len((cache or {}).get("quotes") or {}),
+            "quotes": (cache or {}).get("quotes") or {},
+        }
+
+    return await asyncio.to_thread(_view)
 
 
 feed_job_router = APIRouter()

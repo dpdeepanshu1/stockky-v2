@@ -211,7 +211,7 @@ def build_bound_routes_d(ref):
         scan results."""
         try:
             from ipo_scanner import get_ipo_list
-            listing = get_ipo_list(display_days=None)
+            listing = await ref.asyncio.to_thread(get_ipo_list, display_days=None)  # E396: durable kv_get, off the event loop (same as /ipo/list)
         except Exception as e:
             raise ref.HTTPException(status_code=500, detail=f"ipo_scanner import failed: {e}")
 

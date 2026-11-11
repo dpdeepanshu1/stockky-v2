@@ -14,7 +14,7 @@ router = APIRouter()
 @router.get("/price-alerts")
 async def api_list_price_alerts():
     from data_feed import list_price_alerts
-    alerts = list_price_alerts()
+    alerts = await asyncio.to_thread(list_price_alerts)  # E393: kv_get off the event loop (add/delete already do this)
     return {"ok": True, "alerts": alerts, "count": len(alerts)}
 
 

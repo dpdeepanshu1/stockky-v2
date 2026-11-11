@@ -19,16 +19,25 @@ VALUE_PRICE_CAP = 2000.0
 VALUE_BONUS_MAX = 8.0
 VALUE_MIN_FUNDAMENTAL_FOR_BONUS = 50.0
 
+def _finite(v, default):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and f not in (float("inf"), float("-inf")) else default
+
 def _value_adjusted_score(r: dict):
     """Returns (adjusted_score, eligible_for_top_pick).
     Price > VALUE_PRICE_CAP no longer hard-excludes a name — only removes
     the cheap-stock bonus. High-score large-caps must still surface as picks.
     """
-    price = r.get("close")
-    combined = r.get("combined_score", 0) or 0
+    # E395: a NaN/inf or non-numeric score made `sorted(...)` order picks unpredictably (NaN compares False both ways) or raised TypeError on a
+    # string, taking down the whole recommendations list. Such values now count as 0 (price: unknown), exactly like a missing one.
+    price = _finite(r.get("close"), None)
+    combined = _finite(r.get("combined_score", 0), 0)
     if price is None or price <= 0:
         return combined, True
-    fundamental = r.get("fundamental_score", 0) or 0
+    fundamental = _finite(r.get("fundamental_score", 0), 0)
     bonus = 0.0
     if price <= VALUE_PRICE_CAP and fundamental >= VALUE_MIN_FUNDAMENTAL_FOR_BONUS:
         bonus = (1 - price / VALUE_PRICE_CAP) * VALUE_BONUS_MAX

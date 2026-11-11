@@ -57,14 +57,17 @@ def build_bound_routes(ref):
             body = await request.json()
         except Exception:
             body = {}
+        if not isinstance(body, dict):
+            body = {}  # E397: valid JSON that is not an object (a list, a string) used to raise AttributeError on .get -> bare 500; same as an unparseable body
         dest = body.get("url") or body.get("destination")
         try:
             delay = int(body.get("delay_seconds") or 0)
         except (TypeError, ValueError):
             return JSONResponse({"ok": False, "error": "delay_seconds must be an integer"}, status_code=400)
+        # E397: both calls are sync httpx round trips (up to a 20 s timeout) and used to run ON the event loop; now on a worker thread.
         if not dest:
-            return ref.qstash_client.schedule_gateway_tick(delay_seconds=delay, body=body)
-        return ref.qstash_client.publish(dest, body.get("payload") or {}, delay_seconds=delay)
+            return await ref.asyncio.to_thread(ref.qstash_client.schedule_gateway_tick, delay_seconds=delay, body=body)
+        return await ref.asyncio.to_thread(ref.qstash_client.publish, dest, body.get("payload") or {}, delay_seconds=delay)
 
     @ready_router.get("/ready")
     def ready():

@@ -275,8 +275,18 @@ async def _start_shared_http():
     # Wrapped tightly so a slow/Neon-down DB never blocks FastAPI boot.
     try:
         from data_feed import clear_stuck_feed_job_on_boot
-        result = clear_stuck_feed_job_on_boot()
+        # E393: the heal does sync Neon reads/writes; run directly in this coroutine a slow or down DB froze startup (the comment above promised
+        # otherwise). Now on a worker thread with a bounded wait; on timeout the heal keeps going in the background and boot continues.
+        try:
+            _heal_wait = float(((os.getenv("BOOT_HEAL_TIMEOUT_S") or "").strip() or "15"))
+        except ValueError:
+            _heal_wait = 15.0
+        if not (_heal_wait > 0):
+            _heal_wait = 15.0
+        result = await asyncio.wait_for(asyncio.to_thread(clear_stuck_feed_job_on_boot), timeout=_heal_wait)
         logger.info("Boot feed-job heal: %s", result)
+    except asyncio.TimeoutError:
+        logger.warning("Startup warning (feed-job heal timed out after %ss, continuing boot; heal still running in background)", _heal_wait)
     except Exception as e:
         logger.warning("Startup warning (feed-job heal, non-fatal): %s", e)
     # 2026-09-09 fix: reset circuit breakers on every startup so a half-open/open
@@ -2750,7 +2760,13 @@ from pick_ranking import (  # noqa: E402,F401
 # prediction — it's meant to replace a meaningless placeholder with a
 # concrete date range, not to claim precision the system doesn't have.
 def _estimate_holding_period(entry_price, target_price, decision: str):
-    if not entry_price or not target_price or entry_price <= 0:
+    # E399: a NaN/inf or text price made `round(nan)` raise ValueError (or the subtraction raise TypeError) inside the per-symbol analysis; such inputs
+    # now mean "no estimate", exactly like a missing price.
+    try:
+        entry_price, target_price = float(entry_price), float(target_price)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(entry_price) and math.isfinite(target_price)) or entry_price <= 0 or target_price <= 0:
         return None
     move_pct = abs(target_price - entry_price) / entry_price * 100
     if decision == "BUY NOW":
@@ -3654,6 +3670,25 @@ def _batch_result_cache_get(symbol: str, lite: bool = False) -> Optional[dict]:
     return data
 
 
+def _seed_batch_cache_from_rows(prev_all, lite: bool) -> int:
+    """Re-cache the rows of the last (partial) scan that the batch cache no longer holds; returns how many were seeded. Sync (kv I/O per row)."""
+    seeded = 0
+    for row in prev_all or []:
+        if not isinstance(row, dict):
+            continue
+        sym = (row.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
+        if not sym or row.get("decision") == "ERROR":
+            continue
+        # A lite row (score ladder, no fundamentals/news) must not be
+        # served by a FULL scan as if it were a full result.
+        if row.get("lite") and not lite:
+            continue
+        if not _batch_result_cache_get(sym, lite=lite):
+            _batch_result_cache_set(sym, row, lite=lite)
+            seeded += 1
+    return seeded
+
+
 def _batch_result_cache_set(symbol: str, result: dict, lite: bool = False) -> None:
     if not BATCH_RESULT_CACHE_ENABLED:
         return
@@ -4387,20 +4422,9 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
             except Exception:
                 pass
             prev_all = prev.get("all_results") or []
-            seeded = 0
-            for row in prev_all:
-                if not isinstance(row, dict):
-                    continue
-                sym = (row.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
-                if not sym or row.get("decision") == "ERROR":
-                    continue
-                # A lite row (score ladder, no fundamentals/news) must not be
-                # served by a FULL scan as if it were a full result.
-                if row.get("lite") and not lite:
-                    continue
-                if not _batch_result_cache_get(sym, lite=lite):
-                    _batch_result_cache_set(sym, row, lite=lite)
-                    seeded += 1
+            # E398: one kv read (a deliberate miss) and one write PER ROW used to run here on the event loop; for a few hundred rows that is a few
+            # hundred durable round trips before the scan even starts. The whole loop now runs on a worker thread.
+            seeded = await asyncio.to_thread(_seed_batch_cache_from_rows, prev_all, lite)
             if seeded:
                 logger.info("Seeded batch_result cache with %s symbols from last partial scan", seeded)
     except Exception as e:
@@ -4598,7 +4622,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
         ),
         "best_short": (top_picks_short[0].get("symbol") if top_picks_short else None),
     }
-    _record_symbol_outcomes(results)  # feeds universe self-pruning — see _build_scan_universe
+    await asyncio.to_thread(_record_symbol_outcomes, results)  # feeds universe self-pruning — see _build_scan_universe (E398: 2 kv ops per result, off the loop)
     watchlist_candidates = []
     if not top_picks:
         watchlist_candidates = results[:3]
@@ -6185,7 +6209,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         + list(event_syms)[:80]
         + list(scan_syms)
         + list(watch)
-        + list(_load_searched() or [])[:40]
+        + list(await _load_searched_safe() or [])[:40]  # E398: kv read off the loop
         + list(await asyncio.to_thread(_get_recent_ipos) or [])[:20]  # group361: off the event loop
     )
     # De-duplicate on the NORMALISED symbol ("AAA" == "AAA.NS" == "aaa.ns"),
@@ -6205,7 +6229,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                     len(_dropped_dead), ",".join(sorted(_dropped_dead)[:20]))
     universe = list(_seen_u.values())
     if not universe:
-        universe = list(_get_nifty_indices() or [])[:80]
+        universe = list(await asyncio.to_thread(_get_nifty_indices) or [])[:80]  # E398: 5 sequential NSE calls, off the loop
     # Full catalyst universe by default. Optional max_symbols only if caller caps.
     # Heavy work is processed in batches (CATALYST_BATCH_SIZE / HOT_BATCH_SIZE) with warm between batches.
     if max_symbols is not None:
@@ -7829,6 +7853,22 @@ def _compute_feed_audit(limit: int) -> dict:
             clean.append(su)
     symbols = clean
 
+    # E400: one bulk read instead of one get_symbol() per symbol. A get_symbol() miss on the local cache
+    # costs up to three sequential durable (Neon) reads (canonical, alias, legacy key), so a few thousand
+    # tracked symbols meant thousands of round trips inside this worker-thread walk. get_symbols_bulk()
+    # does the same lookup for all of them in one get_many call. If the store has no bulk reader or it
+    # raises, `bulk` stays None and every symbol falls back to the old per-symbol get_symbol() read.
+    bulk = None
+    _bulk_fn = getattr(store, "get_symbols_bulk", None)
+    if callable(_bulk_fn) and symbols:
+        try:
+            _b = _bulk_fn(list(symbols))
+            if isinstance(_b, dict):
+                bulk = _b
+        except Exception as e:
+            logger.debug("audit bulk read: %s", e)
+            bulk = None
+
     incomplete = []
     over_cap = []
     complete_count = 0
@@ -7836,7 +7876,10 @@ def _compute_feed_audit(limit: int) -> dict:
     for sym in symbols:
         total += 1
         try:
-            row = store.get_symbol(sym) or {}
+            if bulk is not None:
+                row = bulk.get(sym) or {}
+            else:
+                row = store.get_symbol(sym) or {}
         except Exception:
             row = {}
         if not isinstance(row, dict):

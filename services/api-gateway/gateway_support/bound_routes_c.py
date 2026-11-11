@@ -136,7 +136,7 @@ def build_bound_routes_c(ref):
             # Live cache cold — try stale Neon fallback
             if ref._kv_cache is not None:
                 try:
-                    stale = ref._kv_cache.get_stale(ref.SCAN_UNIVERSE_STALE_KEY)
+                    stale = await ref.asyncio.to_thread(ref._kv_cache.get_stale, ref.SCAN_UNIVERSE_STALE_KEY)  # E396: durable read off the event loop
                     if stale and isinstance(stale, list) and len(stale) >= 50:
                         stale = ref._filter_equities(stale)
                         stale = await ref.asyncio.to_thread(ref._filter_symbols_under_max_price, stale)  # group361: off the event loop
@@ -177,9 +177,9 @@ def build_bound_routes_c(ref):
             # the build keeps running in its thread and refreshes the caches itself.
             fallback = None
             try:
-                fallback = ref._redis_get(ref.SCAN_UNIVERSE_KEY)
+                fallback = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_UNIVERSE_KEY)  # E396: durable reads off the event loop
                 if not (isinstance(fallback, list) and len(fallback) >= 50) and ref._kv_cache is not None:
-                    fallback = ref._kv_cache.get_stale(ref.SCAN_UNIVERSE_STALE_KEY)
+                    fallback = await ref.asyncio.to_thread(ref._kv_cache.get_stale, ref.SCAN_UNIVERSE_STALE_KEY)
             except Exception:
                 fallback = None
             # The >=50 check must hold AFTER the equity/price filters, otherwise a

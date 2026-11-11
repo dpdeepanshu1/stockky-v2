@@ -1,6 +1,8 @@
 """IPO-scan and Surprise-scan status / stop routes (progress files and stop flags live in ipo_scanner / surprise_premarket, imported inside the handlers). Moved out of main.py in E49, code unchanged (rules: gateway_routers/__init__.py)."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 ipo_status_router = APIRouter()
@@ -11,7 +13,7 @@ ipo_status_router = APIRouter()
 async def api_ipo_scan_status():
     try:
         from ipo_scanner import get_ipo_scan_progress
-        return get_ipo_scan_progress()
+        return await asyncio.to_thread(get_ipo_scan_progress)  # E396: this is polled by the UI; the durable kv_get must not run on the event loop
     except Exception as e:
         return {"status": "error", "message": str(e)[:160]}
 

@@ -1447,10 +1447,17 @@ class TestRepairBatchFetch:
         mod.hotpicks_repair_batch(market_data_url="http://arg///")
         assert [p[0] for p in env.http.posts] == ["http://arg/quotes/bulk"]
 
-    def test_no_url_at_all_uses_empty_base(self, m, env):
+    def test_no_url_at_all_is_not_configured(self, m, env):
+        """E394: used to POST to "/quotes/bulk", fail silently and report "completed"."""
         self._one(env)
-        m.hotpicks_repair_batch()
-        assert [p[0] for p in env.http.posts] == ["/quotes/bulk"]
+        out = m.hotpicks_repair_batch()
+        assert out["status"] == "not_configured" and out["error"] == "MARKET_DATA_URL not set"
+        assert out["repaired"] == [] and out["attempted"] == 1
+        assert env.http.posts == [] and env.hp.shared.find("UPDATE") == []
+
+    def test_no_url_but_nothing_to_repair_is_still_completed(self, m, env):
+        _targets(env, ("A", "news_driven", _json(price=10)))
+        assert m.hotpicks_repair_batch()["status"] == "completed"
 
     def test_successful_update(self, m, env):
         _targets(env, ("AAA", "results_driven", _json(decision="BUY", keep="me")))
@@ -1471,11 +1478,26 @@ class TestRepairBatchFetch:
         m.hotpicks_repair_batch(market_data_url=MD)
         assert "updated_at = NOW[oracle]" in env.hp.shared.find("UPDATE")[0][0]
 
-    def test_item_json_is_capped_at_15000_chars(self, m, env):
+    def test_item_json_under_the_schema_cap_is_written_whole_and_valid(self, m, env):
+        """E394: used to be cut at 15000 chars (invalid JSON). 20000 chars is under the 30000-byte schema cap."""
         _targets(env, ("AAA", "news_driven", _json(blob="x" * 20000)))
         env.http.routes[f"{MD}/quote/AAA"] = FakeResp(200, {"price": 5})
-        m.hotpicks_repair_batch(market_data_url=MD)
-        assert len(env.hp.shared.find("UPDATE")[0][1]["item_json"]) == 15000
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        written = json.loads(env.hp.shared.find("UPDATE")[0][1]["item_json"])
+        assert out["repaired"] == ["AAA"] and written["blob"] == "x" * 20000 and written["price"] == 5.0
+
+    def test_oversize_item_drops_bulky_keys_and_stays_valid_json(self, m, env):
+        _targets(env, ("AAA", "news_driven", _json(keep="me", reasons=["r" * 40000])))
+        env.http.routes[f"{MD}/quote/AAA"] = FakeResp(200, {"price": 5})
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        written = json.loads(env.hp.shared.find("UPDATE")[0][1]["item_json"])
+        assert out["repaired"] == ["AAA"] and written == {"keep": "me", "price": 5.0, "close": 5.0}
+
+    def test_oversize_item_that_cannot_shrink_is_left_untouched(self, m, env):
+        _targets(env, ("AAA", "news_driven", _json(blob="x" * 40000)))
+        env.http.routes[f"{MD}/quote/AAA"] = FakeResp(200, {"price": 5})
+        out = m.hotpicks_repair_batch(market_data_url=MD)
+        assert out["repaired"] == [] and env.hp.shared.find("UPDATE") == []
 
     def test_price_key_priority(self, m, env):
         self._one(env)
@@ -1816,11 +1838,19 @@ class TestRepairScoresFetch:
         assert out["repaired"] == [] and env.hp.shared.find("UPDATE") == []
         assert env.clock.slept == [0.4]
 
-    def test_item_json_is_capped_at_15000_chars(self, m, env):
+    def test_item_json_under_the_schema_cap_is_written_whole_and_valid(self, m, env):
+        """E394: used to be cut at 15000 chars (invalid JSON)."""
         self._one(env, _needs(blob="x" * 20000))
         env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY"})
-        m.hotpicks_repair_scores(decision_url=DEC)
-        assert len(env.hp.shared.find("UPDATE")[0][1]["item_json"]) == 15000
+        out = m.hotpicks_repair_scores(decision_url=DEC)
+        written = json.loads(env.hp.shared.find("UPDATE")[0][1]["item_json"])
+        assert out["repaired"] == ["AAA"] and written["blob"] == "x" * 20000 and written["decision"] == "BUY"
+
+    def test_oversize_item_that_cannot_shrink_is_left_untouched(self, m, env):
+        self._one(env, _needs(blob="x" * 40000))
+        env.http.routes[f"{DEC}/decide/AAA"] = FakeResp(200, {"decision": "BUY"})
+        out = m.hotpicks_repair_scores(decision_url=DEC)
+        assert out["repaired"] == [] and env.hp.shared.find("UPDATE") == []
 
     @pytest.mark.parametrize("resp", [FakeResp(500, {"decision": "BUY"}), FakeResp(404, {})])
     def test_non_200_sleeps_and_skips(self, m, env, resp):

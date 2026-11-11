@@ -34,7 +34,9 @@ def test_partial_entry_answers_only_a_skip_http_call():
 
 def test_sentiment_score_uses_the_first_present_value():
     assert 'feed_row.get("sentiment_score") or feed_row.get("market_score")' not in SRC
-    assert ('feed_row.get("sentiment_score") if feed_row.get("sentiment_score") is not None else feed_row.get("market_score")') in SRC
+    # E459: the expression moved into _feed_scoring_sentiment (which also turns a seeded value into the neutral 50); eval_payload calls it
+    assert ('row.get("sentiment_score") if row.get("sentiment_score") is not None else row.get("market_score")') in SRC
+    assert "_feed_scoring_sentiment(feed_row)" in SRC
 
 
 def test_sentiment_expression_behaviour():

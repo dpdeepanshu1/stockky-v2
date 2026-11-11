@@ -1762,6 +1762,7 @@ def test_e451_a_build_at_the_minimum_is_stored_as_before(ub):
 
 def test_build_logs_the_summary(ub, log, monkeypatch):
     monkeypatch.setattr(gw, "MAX_UNIVERSE_PRICE", 5000.0)
+    monkeypatch.setattr(gw, "SCAN_UNIVERSE_MIN_REBUILD_SYMBOLS", 1)   # E459: since E451 a build under the minimum is "thin" and logs the thin warning instead of the summary
     ub.securities = ["AAA"]
     ub.bulk = ["AAA"]
     gw._build_scan_universe()

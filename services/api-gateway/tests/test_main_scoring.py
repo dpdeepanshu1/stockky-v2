@@ -615,7 +615,7 @@ def test_fundamental_unusable_redis_value_goes_upstream(feed, kv, locks, monkeyp
     monkeypatch.setattr(gw, "_refresh_fundamental_upstream", upstream)
     assert run(gw._fetch_fundamental_cached("TCS", "CLIENT")) == ({"up": 1}, False)
     assert calls == [("TCS", FKEY)]
-    assert locks.acquired == [("TCS", 5)] and locks.released == ["TCS"]
+    assert locks.acquired == [("TCS", gw._FUNDAMENTAL_FG_LOCK_TTL_SEC)] and locks.released == ["TCS"]   # E457: was 5
 
 
 def test_fundamental_soft_ttl_kicks_a_background_refresh(feed, kv, locks, monkeypatch):

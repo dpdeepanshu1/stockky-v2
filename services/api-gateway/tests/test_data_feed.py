@@ -1633,7 +1633,7 @@ class TestBulkYahooDownloadPrices:
         assert tcs["source"] == "yahoo_bulk" and tcs["price_refreshed_at"] == "T0"
         assert tcs["pe_ratio"] == 22.5 and tcs["pe_ratio_seed"] is True
         assert tcs["roce"] == 15.0 and tcs["roce_seed"] is True
-        assert tcs["sentiment_score"] == 0.65 and tcs["sentiment_seed"] is True
+        assert tcs["sentiment_score"] == 50.0 and tcs["sentiment_seed"] is True
         assert "extra" not in tcs
         infy = out["INFY"]
         assert infy["pe_ratio"] == 30.0 and "pe_ratio_seed" not in infy

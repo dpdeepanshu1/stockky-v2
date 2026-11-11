@@ -3152,6 +3152,11 @@ _BG_REFRESH_TASKS: set = set()
 # expired while the first refresh was still running, so every request in the soft window started another one, and the first one's release then
 # freed a lock a later refresh held.
 _FUNDAMENTAL_BG_LOCK_TTL_SEC = 45
+# E457: the FOREGROUND refresh took the same lock for 5 s while the same 35 s upstream call ran under it, so it expired mid-call: a second request then
+# started a duplicate upstream call, the stampede the lock exists to stop. E435 made the release safe (a late release no longer frees a newer holder's lock);
+# this removes the early expiry itself. The `finally` that releases is unchanged, so a normal call still frees the lock the moment it finishes. Only a
+# process killed mid-call keeps it, for at most this long (the Redis TTL).
+_FUNDAMENTAL_FG_LOCK_TTL_SEC = 45
 
 
 _BG_KEYED_TASKS: dict = {}   # E420: key -> the one running task for that job
@@ -3235,7 +3240,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
         return cached.get("metrics"), cached.get("fallback", False)
 
     # 3) Upstream + write-through to Data Feed (mutex against stampede)
-    if not try_refresh_lock(_redis, symbol, ttl_sec=5):
+    if not try_refresh_lock(_redis, symbol, ttl_sec=_FUNDAMENTAL_FG_LOCK_TTL_SEC):
         # Another worker is refreshing — return short cache or None
         cached2 = _redis_get(cache_key)
         if cached2 and isinstance(cached2, dict):
@@ -4329,15 +4334,16 @@ async def _analyze_one_symbol_ultra(
                     # and prevents free-tier PoolTimeout / circuit opens.
                     feed_has_data = _feed_has_data   # E191: computed above, before the cache read
                     if feed_has_data:
+                        _sent_for_eval, _news_for_eval = _feed_scoring_sentiment(feed_row)   # E459
                         eval_payload = {
                             "symbol": base_sym or symbol,
                             "rsi": feed_row.get("rsi"),
                             "pe_ratio": feed_row.get("pe_ratio") or feed_row.get("pe"),
                             "technical_score": feed_row.get("technical_score"),
                             "fundamental_score": feed_row.get("fundamental_score"),
-                            "news_score": feed_row.get("news_score"),
-                            # E191: first value that is present (a real 0 is the most negative score, not a missing one)
-                            "sentiment_score": feed_row.get("sentiment_score") if feed_row.get("sentiment_score") is not None else feed_row.get("market_score"),
+                            "news_score": _news_for_eval,
+                            # E191: first value that is present (a real 0 is the most negative score, not a missing one). E459: a seeded one is sent as 50.
+                            "sentiment_score": _sent_for_eval,
                             "close": _feed_row_price(feed_row),  # E410: was close/price/ltp/cmp only; dropped when None below
                             "support": feed_row.get("support"),
                             "resistance": feed_row.get("resistance"),
@@ -8396,6 +8402,21 @@ def _feed_missing_fields(payload: dict) -> list:
 _FEED_SEED_FLAGS = (("rsi", "rsi_seed"), ("pe_ratio", "pe_ratio_seed"), ("roce", "roce_seed"), ("sentiment_score", "sentiment_seed"))
 
 
+def _feed_scoring_sentiment(row: dict) -> tuple:
+    """E459: (sentiment_score, news_score) to hand the decision engine for one feed row. A value flagged `sentiment_seed` is a placeholder, not a read, and
+    rows stored before E459 hold the old 0.65 seed, which the engine's int() turns into 0 (market_score 0 = extreme correction, news 0 = very negative).
+    A flagged sentiment is sent as the neutral 50, and a news_score equal to it (the repair copy of the seed) too. A real score is passed through
+    unchanged (a real 0 stays 0). Either may be None (absent). Pure."""
+    row = row if isinstance(row, dict) else {}
+    sent = row.get("sentiment_score") if row.get("sentiment_score") is not None else row.get("market_score")
+    news = row.get("news_score")
+    if row.get("sentiment_seed") is True:
+        if news is not None and news == row.get("sentiment_score"):
+            news = 50.0
+        sent = 50.0
+    return sent, news
+
+
 def _feed_seeded_fields(payload: dict) -> list:
     """E430: the required feed fields whose value is a baseline seed (flagged `<field>_seed`), not a real read. The Health Audit still counts a seed
     as populated on purpose (data_feed seeds pe_ratio / roce / sentiment so the five fields are filled without peer storms, and a stock with no
@@ -8440,16 +8461,34 @@ def _feed_resolved_price(payload: dict) -> float:
 
 
 
+_REPAIR_SYMBOL_LOCKS: dict = {}   # E454: symbol -> [asyncio.Lock, callers in flight or waiting]
+
+
 async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> dict:
     """The Repair worker (see `_patch_single_stock_feed_impl`). E442: whatever the outcome (patched, purged, nothing stored, error), the
     memoised Health Audit is dropped afterwards so the next audit read counts the repaired row, not the one from before it."""
+    # E454: repair-single, repair-batch and Refill All each call this, and two of them on the same symbol read the same stored row, fetched
+    # the same upstreams and wrote back over each other (the second write could undo a field the first had just patched, or re-create a row the
+    # first had purged). One repair per symbol at a time: a second caller waits, then reads the row the first one wrote. The lock entry is
+    # reference-counted and removed when the last caller leaves, so the map never grows past the symbols in flight.
+    key = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
+    entry = _REPAIR_SYMBOL_LOCKS.get(key)
+    if entry is None:
+        entry = _REPAIR_SYMBOL_LOCKS[key] = [asyncio.Lock(), 0]
+    entry[1] += 1
     try:
-        return await _patch_single_stock_feed_impl(symbol, client)
+        async with entry[0]:
+            try:
+                return await _patch_single_stock_feed_impl(symbol, client)
+            finally:
+                try:
+                    _audit_cache_clear("feed_audit:")
+                except Exception:  # noqa: BLE001  (never let the memo break a repair)
+                    pass
     finally:
-        try:
-            _audit_cache_clear("feed_audit:")
-        except Exception:  # noqa: BLE001  (never let the memo break a repair)
-            pass
+        entry[1] -= 1
+        if entry[1] <= 0 and _REPAIR_SYMBOL_LOCKS.get(key) is entry:
+            _REPAIR_SYMBOL_LOCKS.pop(key, None)
 
 
 async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) -> dict:
@@ -8676,7 +8715,7 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
                                 vol = int(float(cleaned["volume"]))
                                 if vol > 0:
                                     current["volume"] = vol
-                            except (TypeError, ValueError):
+                            except (TypeError, ValueError, OverflowError):   # E453: int(float("inf")) raises OverflowError, which used to abort the price step after the price was set but before "price" was reported as patched
                                 pass
                         patched.append("price")
                         break
@@ -8796,6 +8835,11 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
             if r.status_code == 200:
                 n = r.json() if isinstance(r.json(), dict) else {}
                 ns = n.get("news_score", n.get("sentiment_score"))
+                # E453: only a finite number is a score. NaN / inf / "n/a" / a list used to be stored and reported as patched (the write then dropped
+                # or kept the junk), and the seed block was skipped, so the row stayed without a usable sentiment. Unusable now falls to the seed.
+                ns = None if isinstance(ns, bool) else (_safe_float(ns, float("nan")) if ns is not None else None)
+                if ns is not None and not math.isfinite(ns):
+                    ns = None
                 if ns is not None:
                     current["sentiment_score"] = ns
                     current.pop("sentiment_seed", None)  # E407
@@ -8841,13 +8885,13 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
         logger.info("repair %s: seeded baseline ROCE=15", base)
 
     if "sentiment_score" in missing:
-        current["sentiment_score"] = 0.65
+        current["sentiment_score"] = 50.0   # E459: 0-100 scale (was 0.65, which the decision engine read as ~0 = very bearish)
         current["sentiment_seed"] = True
         if current.get("news_score") is None:
-            current["news_score"] = 0.65
+            current["news_score"] = 50.0
         patched.append("sentiment_score")
         missing.discard("sentiment_score")
-        logger.info("repair %s: seeded baseline sentiment=0.65", base)
+        logger.info("repair %s: seeded baseline sentiment=50", base)
 
     # Price still missing and over-cap stocks: keep existing price if present
     # (MRF-style names already have live price from bulk; do not wipe them)

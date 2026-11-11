@@ -297,13 +297,42 @@ def strip_none_fields(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if v is not None}
 
 
+# E459: the neutral sentiment / news placeholder. Every reader (news service, decision engine, instant scanner, prediction) works on 0-100 with 50 neutral.
+NEUTRAL_SENTIMENT_SEED = 50.0
+
+
+def _flat_day_is_real(row: dict) -> bool:
+    """E460: True when an incoming row proves its own `day_change_pct` of 0: it carries a usable previous close AND a current price (last_price /
+    current_price / ltp / price / cmp) that equals it to the 0.01% the stored figure is rounded to. A bare 0 with no such pair is the sparse fallback
+    the merge protects against (volume / pe / day_change_pct of 0 from a quote that had no data). Pure; never raises."""
+    if not isinstance(row, dict):
+        return False
+
+    def _pos(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f and f not in (float("inf"), float("-inf")) and f > 0 else None
+
+    prev = _pos(row.get("previous_close"))
+    if prev is None:
+        return False
+    for key in ("last_price", "current_price", "ltp", "price", "cmp"):
+        px = _pos(row.get(key))
+        if px is not None:
+            return abs(px - prev) / prev * 100 < 0.005
+    return False
+
+
 def merge_feed_payload(existing: dict, incoming: dict) -> dict:
     """
     Merge incoming quote/repair fields into existing feed row.
     Rules (Merge, Never Wipe):
     - Drops None from incoming (no poison overwrite of durable Neon fields)
     - Does not write volume/pe_ratio/day_change_pct/roce/rsi when incoming is 0
-      and existing has a real non-zero value (sparse fallback protection)
+      and existing has a real non-zero value (sparse fallback protection); E460: a day_change_pct of 0
+      is written when the incoming row's own price equals its previous close (a real flat day)
     - Seeded fundamentals (pe_ratio_seed / roce_seed / sentiment_seed) never
       overwrite a previously stored non-seed real value
     - Volatile price fields (price, volume, day_change_pct, …) always refresh
@@ -351,7 +380,10 @@ def merge_feed_payload(existing: dict, incoming: dict) -> dict:
                 old_f = float(old) if old is not None else None
                 new_f = float(v) if v is not None else None
                 if old_f is not None and old_f != 0 and new_f == 0:
-                    continue
+                    if k == "day_change_pct" and _flat_day_is_real(inc):
+                        pass   # E460: the row itself shows price == previous close, so 0 is a real flat day, not a sparse fallback
+                    else:
+                        continue
             except (TypeError, ValueError):
                 pass
 
@@ -1145,6 +1177,34 @@ def try_refresh_lock(redis_client, symbol: str, ttl_sec: int = 5) -> bool:
     return acquire_refresh_lock(redis_client, symbol, ttl_sec=ttl_sec) is not None
 
 
+# E456: the owner check above was GET then DELETE, two round trips. The 5 s lock can expire between them (its upstream call runs up to 35 s), a second
+# request takes it, and the DELETE then frees THAT request's lock: the E435 problem again, in a narrower window. Redis runs a Lua script atomically, so
+# the compare and the delete happen as one step. Both client shapes are tried (upstash_redis: eval(script, keys=[...], args=[...]); redis-py:
+# eval(script, numkeys, key, arg)). A client without `eval`, or one where the script is refused, falls back to the old GET + DELETE, so nothing gets worse.
+_RELEASE_LOCK_LUA = 'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end'
+
+
+def _redis_delete_if_owner(redis_client, key: str, token: str) -> None:
+    ev = getattr(redis_client, "eval", None)
+    if callable(ev):
+        try:
+            try:
+                ev(_RELEASE_LOCK_LUA, keys=[key], args=[token])
+            except TypeError:
+                ev(_RELEASE_LOCK_LUA, 1, key, token)
+            return
+        except Exception as e:  # noqa: BLE001  (script refused / transport error: fall back below)
+            logger.debug("refresh lock atomic release failed for %s, using GET+DELETE: %s", key, e)
+    try:
+        cur = redis_client.get(key)
+        if isinstance(cur, bytes):
+            cur = cur.decode("utf-8", "replace")
+        if cur == token:
+            redis_client.delete(key)
+    except Exception:
+        pass
+
+
 def release_refresh_lock(redis_client, symbol: str, token: Optional[str] = None) -> None:
     """Free the lock, but only while it is still the one this caller took (see the E435 note above). No token known = free it unconditionally."""
     key = f"{LOCK_PREFIX}{_norm_sym(symbol)}"
@@ -1170,14 +1230,7 @@ def release_refresh_lock(redis_client, symbol: str, token: Optional[str] = None)
         _MEM_LOCKS.pop(key, None)
     if redis_client is None:
         return
-    try:
-        cur = redis_client.get(key)
-        if isinstance(cur, bytes):
-            cur = cur.decode("utf-8", "replace")
-        if cur == token:                               # a newer holder's token (or an expired key) is left alone; the TTL ends the rest
-            redis_client.delete(key)
-    except Exception:
-        pass
+    _redis_delete_if_owner(redis_client, key, token)   # a newer holder's token (or an expired key) is left alone; the TTL ends the rest
 
 
 def soft_ttl_should_refresh(redis_client, key: str, soft_window: int = 10) -> bool:
@@ -1576,7 +1629,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
                     rec["roce"] = 15.0
                     rec["roce_seed"] = True
                 if "sentiment_score" not in rec or rec.get("sentiment_score") is None:
-                    rec["sentiment_score"] = 0.65
+                    rec["sentiment_score"] = NEUTRAL_SENTIMENT_SEED   # E459: 0-100 scale like every reader (was 0.65, read as ~0 = very bearish)
                     rec["sentiment_seed"] = True
 
                 # Drop pure Nones only
@@ -1602,7 +1655,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
                 "pe_ratio_seed": True,
                 "roce": 15.0,
                 "roce_seed": True,
-                "sentiment_score": 0.65,
+                "sentiment_score": NEUTRAL_SENTIMENT_SEED,   # E459
                 "sentiment_seed": True,
             }
 
@@ -1802,7 +1855,7 @@ def bhavcopy_seed(rec: dict) -> dict:
         seed["rsi"] = 50.0
         seed["rsi_seed"] = True
     if seed.get("sentiment_score") is None:
-        seed["sentiment_score"] = 50.0
+        seed["sentiment_score"] = NEUTRAL_SENTIMENT_SEED
         seed["sentiment_seed"] = True
     seed["_seed"] = True
     seed["source"] = seed.get("source") or "nse_bhavcopy"
@@ -2095,6 +2148,10 @@ def list_feed_symbols_from_neon_under_max_price(max_price: float = None) -> List
 # ── Optimized bulk quote cache (shared Data Feed + Surprise) ───────────────
 BULK_QUOTE_CACHE_KEY = "system:bulk_quote_cache"
 PRICE_ALERTS_KEY = "system:price_alerts"
+# E455: add / delete / evaluate each read the whole alert list, change it and write it all back. Two of them at once (two Add clicks, an Add during
+# the 5-minute evaluate, a Delete during an evaluate) lost one change, a deleted alert came back or a new one vanished. One lock around every
+# read-change-write. The app runs one process (see the E454 note), and these functions always run in a worker thread, so a thread lock is enough.
+_PRICE_ALERTS_LOCK = threading.Lock()
 BULK_QUOTE_OPEN_TTL = int(__import__("os").getenv("BULK_QUOTE_OPEN_TTL", "120"))   # 2 min during market
 BULK_QUOTE_CLOSED_TTL = int(__import__("os").getenv("BULK_QUOTE_CLOSED_TTL", "21600"))  # 6h closed
 
@@ -2130,23 +2187,65 @@ def get_bulk_quote_cache() -> dict:
     return {}
 
 
-def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk") -> dict:
+def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk", merge: bool = True, complete: bool = True) -> dict:
     """
     Persist bulk quotes with market-aware TTL.
     Open: short TTL so UI stays fresh; Closed: long TTL (no Yahoo storm).
+
+    E461: the write used to REPLACE the whole shared map with the run's rows, so a run over a few symbols (a repair, a retry, a small request)
+    dropped every other cached quote and stamped one timestamp on the whole map, which then looked warm. Now each quote carries its own write time
+    (`_meta.quote_ts`), a write MERGES into the stored map (this run's rows win; stored quotes older than the TTL are dropped, so the map cannot
+    grow stale for ever), and `_meta.full_run_ts` is the time of the last write that covered the whole universe (`complete=True`; a partial caller
+    passes False and the stored value is kept). `merge=False` is the old replace. A merge with no new quotes writes nothing (it would only move
+    the timestamp). A stored map from before E461 has no `quote_ts`: its quotes count as written at its `_meta.timestamp`.
     """
     quotes = quotes if isinstance(quotes, dict) else {}
+    now = __import__("time").time()
     open_now = _is_nse_session_open()
     ttl = BULK_QUOTE_OPEN_TTL if open_now else BULK_QUOTE_CLOSED_TTL
+    fresh = {str(k).upper(): v for k, v in (quotes or {}).items() if not str(k).startswith("_")}
+    kept: dict = {}
+    ts_map: dict = {}
+    full_ts = now if complete else None
+    if merge:
+        old = get_bulk_quote_cache()
+        old = old if isinstance(old, dict) else {}
+        old_quotes = old.get("quotes") if isinstance(old.get("quotes"), dict) else {}
+        old_meta = old.get("_meta") if isinstance(old.get("_meta"), dict) else {}
+        old_ts = old_meta.get("quote_ts") if isinstance(old_meta.get("quote_ts"), dict) else {}
+        legacy_ts = _as_ts(old_meta.get("timestamp"))
+        for sym, row in old_quotes.items():
+            sym = str(sym).upper()
+            if sym in fresh or sym.startswith("_"):
+                continue
+            t = _as_ts(old_ts.get(sym))
+            if t is None:
+                t = legacy_ts
+            if t is None or now - t > ttl:
+                continue
+            kept[sym] = row
+            ts_map[sym] = t
+        if not complete:
+            full_ts = _as_ts(old_meta.get("full_run_ts"))
+            if full_ts is None and "quote_ts" not in old_meta:
+                full_ts = legacy_ts   # a pre-E461 map was always a whole-universe write
+        if not fresh and kept:
+            return {"_meta": dict(old_meta), "quotes": kept}   # nothing new: leave the stored map and its timestamp alone
+    for sym in fresh:
+        ts_map[sym] = now
+    merged = {**kept, **fresh}
     payload = {
         "_meta": {
-            "timestamp": __import__("time").time(),
+            "timestamp": now,
             "source": source,
             "market_open": open_now,
-            "count": len([k for k in quotes.keys() if not str(k).startswith("_")]),
+            "count": len(merged),
+            "written": len(fresh),
             "ttl_sec": ttl,
+            "quote_ts": ts_map,
+            "full_run_ts": full_ts,
         },
-        "quotes": {str(k).upper(): v for k, v in (quotes or {}).items() if not str(k).startswith("_")},
+        "quotes": merged,
     }
     try:
         import kv_cache as _kc
@@ -2154,6 +2253,40 @@ def set_bulk_quote_cache(quotes: dict, source: str = "yahoo_bulk") -> dict:
     except Exception as e:
         logger.warning("bulk quote cache write: %s", e)
     return payload
+
+
+def _as_ts(v) -> Optional[float]:
+    """E461: a usable epoch time or None (None, text, NaN, inf, <= 0 are all None). Pure."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) and f > 0 else None
+
+
+def bulk_quote_age_sec(symbol: str, cache: Optional[dict] = None) -> Optional[float]:
+    """E461: seconds since this symbol's quote was written to the bulk cache (its own `_meta.quote_ts`, else the map's timestamp for a pre-E461
+    map), or None when unknown."""
+    base = _norm_sym(symbol)
+    if cache is None:
+        cache = get_bulk_quote_cache()
+    meta = (cache or {}).get("_meta") if isinstance(cache, dict) else None
+    meta = meta if isinstance(meta, dict) else {}
+    qts = meta.get("quote_ts") if isinstance(meta.get("quote_ts"), dict) else {}
+    t = _as_ts(qts.get(base))
+    if t is None:
+        t = _as_ts(meta.get("timestamp"))
+    return None if t is None else max(0.0, __import__("time").time() - t)
+
+
+def bulk_full_run_age_sec(cache: Optional[dict] = None) -> Optional[float]:
+    """E461: seconds since the last write that covered the whole universe (`_meta.full_run_ts`; a pre-E461 map falls back to its timestamp)."""
+    if cache is None:
+        cache = get_bulk_quote_cache()
+    meta = (cache or {}).get("_meta") if isinstance(cache, dict) else None
+    meta = meta if isinstance(meta, dict) else {}
+    t = _as_ts(meta.get("full_run_ts")) if "full_run_ts" in meta else _as_ts(meta.get("timestamp"))
+    return None if t is None else max(0.0, __import__("time").time() - t)
 
 
 def get_cached_quote(symbol: str, cache: Optional[dict] = None) -> Optional[dict]:
@@ -2197,6 +2330,45 @@ def should_refresh_bulk_cache(max_age_open: int = None, max_age_closed: int = No
 
 
 # Patch run_bulk_yahoo_price_feed to also write shared cache — done via wrapper below
+def _cached_quote_feed_row(quote: dict) -> dict:
+    """E458: the feed row for one bulk-cache quote on a warm-cache hit. The quote carries `price` / `cmp`, which normalize_feed_payload renames to
+    `prev_close` (the last stored CLOSE, which instant_scanner measures the live price against), so pushing the quote as it was replaced the stored
+    close with whatever price the cache held (an intraday price while the market is open) and left `last_price` untouched: the same defect E390 fixed
+    for patch_feed_price. The cached price now goes to the keys that stay price keys (last_price / current_price); the close aliases are not sent, and
+    `previous_close` (the real prior-day close), the day range, volume and source ride along unchanged. Pure."""
+    row = {k: v for k, v in (quote or {}).items() if k not in ("price", "cmp", "close", "prev_close", "prevclose")}
+    px = _payload_price(quote or {})
+    if px > 0:
+        row["last_price"] = px
+        row["current_price"] = px
+    return row
+
+
+def _iso_epoch(v) -> Optional[float]:
+    """E462: epoch seconds of an ISO timestamp such as `price_refreshed_at` (a trailing Z is read as UTC, a naive time as IST), or None when it is
+    missing or unreadable. Pure; never raises."""
+    if not isinstance(v, str) or not v.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        return _as_ts(dt.timestamp())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _row_price_is_newer_than_quote(row: Optional[dict], quote_written_at: Optional[float]) -> bool:
+    """E462: True when the stored feed row holds a price that was written AFTER the cached quote was (its `price_refreshed_at` is later than the
+    quote's write time by more than a second, and it has a usable price). A warm-cache hit must not push the older quote over it: the cache is only
+    refreshed by whole runs, while patch_feed_price / the live feed write single symbols in between. Unknown times on either side: False (push, as
+    before). Pure."""
+    if quote_written_at is None or not isinstance(row, dict) or _payload_price(row) <= 0:
+        return False
+    row_ts = _iso_epoch(row.get("price_refreshed_at"))
+    return row_ts is not None and row_ts > quote_written_at + 1.0
+
+
 def run_bulk_yahoo_price_feed_cached(
     symbols: Optional[List[str]] = None,
     merge_existing: bool = True,
@@ -2210,6 +2382,12 @@ def run_bulk_yahoo_price_feed_cached(
     if not force and not should_refresh_bulk_cache():
         cache = get_bulk_quote_cache()
         quotes = (cache or {}).get("quotes") or {}
+        _limit = float(BULK_QUOTE_OPEN_TTL if _is_nse_session_open() else BULK_QUOTE_CLOSED_TTL)   # E461: per-quote freshness, not just the map's
+        if quotes and not symbols:
+            # E461: a whole-universe request is only a hit when the last whole-universe write is fresh; partial writes no longer stand in for it
+            _fa = bulk_full_run_age_sec(cache)
+            if _fa is not None and _fa >= _limit:   # unknown age: the map-level gate above already passed it
+                quotes = {}
         if quotes:
             # E438: with a requested list, only the requested symbols that have a usable cached price count as served. The reply used to
             # list EVERY cached key and count them all, so the feed job marked symbols outside its universe (and requested ones with no
@@ -2220,18 +2398,31 @@ def run_bulk_yahoo_price_feed_cached(
                 for sym in dict.fromkeys(_norm_sym(x) for x in symbols):
                     row = quotes.get(sym) if sym else None
                     if isinstance(row, dict) and _payload_price(row) > 0:
-                        served.append(sym)
+                        _qa = bulk_quote_age_sec(sym, cache)   # E461
+                        if _qa is None or _qa < _limit:
+                            served.append(sym)
+            kept_newer: list = []   # E462
             if served is None or served:
                 # Optionally still merge into feed store for dashboard consistency
                 if merge_existing and served:
                     store = get_data_feed_store()
                     for b in served:
                         try:
+                            # E462: the quote's own write time; a stored price written after it is newer, so the older cached quote must not replace it
+                            _qa = bulk_quote_age_sec(b, cache)
+                            _qw = (__import__("time").time() - _qa) if _qa is not None else None
+                            if _row_price_is_newer_than_quote(store.get_symbol(b), _qw):
+                                kept_newer.append(b)
+                                continue
                             # put_symbol → merge_feed_payload (protects real fundamentals)
-                            store.put_symbol(b, quotes[b])
+                            _row = _cached_quote_feed_row(quotes[b])   # E458: not the raw quote (see the helper)
+                            if _qw is not None:
+                                _row["price_refreshed_at"] = datetime.fromtimestamp(_qw, IST).isoformat()   # E462: the price is as old as the quote, not "now"
+                            store.put_symbol(b, _row)
                         except Exception:
                             pass
-                hit = served if served is not None else sorted(quotes.keys())
+                hit = served if served is not None else sorted(
+                    k for k in quotes if (bulk_quote_age_sec(k, cache) or 0.0) < _limit)   # E461: only quotes still inside the TTL
                 return {
                     "status": "success",
                     "source": "cache",
@@ -2239,6 +2430,7 @@ def run_bulk_yahoo_price_feed_cached(
                     "requested": len(symbols or []),
                     "yahoo_hits": 0,
                     "cache_age_sec": bulk_cache_age_sec(),
+                    "kept_newer_feed_price": len(kept_newer),   # E462: served symbols whose stored price was newer than the cached quote and so was left alone
                     "message": f"Bulk quote cache hit ({len(hit)} symbols, age {int(bulk_cache_age_sec() or 0)}s)",
                     "symbols": hit,
                 }
@@ -2264,7 +2456,7 @@ def run_bulk_yahoo_price_feed_cached(
             }
             quotes[sym] = {k: v for k, v in quotes[sym].items() if v is not None}
     if quotes:
-        set_bulk_quote_cache(quotes, source="yahoo_bulk")
+        set_bulk_quote_cache(quotes, source="yahoo_bulk", complete=not symbols)   # E461: merge; only a no-list run counts as a whole-universe write
     result["source"] = result.get("source") or "live"
     result["cache_written"] = bool(quotes)
     return result
@@ -2326,6 +2518,11 @@ def save_price_alerts(alerts: list) -> list:
 
 
 def add_price_alert(symbol: str, target_price: float, direction: str = "above", note: str = "") -> dict:
+    with _PRICE_ALERTS_LOCK:   # E455
+        return _add_price_alert_locked(symbol, target_price, direction, note)
+
+
+def _add_price_alert_locked(symbol: str, target_price: float, direction: str, note: str) -> dict:
     alerts = list_price_alerts()
     entry = {
         "id": f"{_norm_sym(symbol)}-{direction}-{target_price}-{int(__import__('time').time())}",
@@ -2344,12 +2541,13 @@ def add_price_alert(symbol: str, target_price: float, direction: str = "above", 
 
 
 def delete_price_alert(alert_id: str) -> bool:
-    alerts = list_price_alerts()
-    new = [a for a in alerts if str(a.get("id")) != str(alert_id)]
-    if len(new) == len(alerts):
-        return False
-    save_price_alerts(new)
-    return True
+    with _PRICE_ALERTS_LOCK:   # E455
+        alerts = list_price_alerts()
+        new = [a for a in alerts if str(a.get("id")) != str(alert_id)]
+        if len(new) == len(alerts):
+            return False
+        save_price_alerts(new)
+        return True
 
 
 def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
@@ -2390,9 +2588,20 @@ def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
                 if px > 0:
                     price_map[sym] = px
 
+    # E455: the price lookups above can take a while, so the lock is NOT held for them. The alert list is read again under the lock and the
+    # trigger fields are applied to that fresh list, so an alert added or deleted while prices were being fetched is neither lost nor revived.
+    with _PRICE_ALERTS_LOCK:
+        alerts = list_price_alerts()
+        triggered, updated = _apply_price_alert_hits(alerts, price_map, _time.time())
+        if updated:
+            save_price_alerts(alerts)
+    return triggered
+
+
+def _apply_price_alert_hits(alerts: list, price_map: dict, now: float):
+    """Mark the alerts that fire at `price_map` (15 min cooldown) and return (triggered, updated). Mutates `alerts`; saving is the caller's job."""
     triggered = []
     updated = False
-    now = _time.time()
     for a in alerts:
         if not a.get("enabled", True):
             continue
@@ -2429,6 +2638,4 @@ def evaluate_price_alerts(price_map: Optional[dict] = None) -> list:
             "current_price": px,
             "triggered_at": a["last_triggered_at"],
         })
-    if updated:
-        save_price_alerts(alerts)
-    return triggered
+    return triggered, updated

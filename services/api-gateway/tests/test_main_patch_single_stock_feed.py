@@ -10,7 +10,7 @@ Pass 76. `_patch_single_stock_feed(symbol, client)`, the surgical repair worker 
 * RSI: local yfinance 1mo history, then the technical service (404 -> `/technical/{sym}` fallback);
 * PE / ROCE from the fundamental service (404 fallback, metrics merge, never-overwrite rules);
 * sentiment from the news service;
-* the baseline seeds (RSI 50, PE 22.5, ROCE 15, sentiment 0.65) and the final envelope / persisted row.
+* the baseline seeds (RSI 50, PE 22.5, ROCE 15, sentiment 50) and the final envelope / persisted row.
 
 Everything downstream is faked: the feed store, the shared async httpx client, `symbol_aliases` predicates,
 `yfinance.Ticker`, `data_feed.compute_rsi_from_closes`, `asyncio.sleep`. Nothing touches the network or a
@@ -345,11 +345,13 @@ class TestPriceTier:
         go(env, "A", dict(NO_PRICE))
         assert stored(env)["price"] == 7.0
 
-    @pytest.mark.parametrize("vol", [0, -5, "1,000", "abc", None])
+    @pytest.mark.parametrize("vol", [0, -5, "1,000", "abc", None, float("inf"), float("-inf"), float("nan"), "inf"])
     def test_unusable_volume_is_ignored(self, env, vol):
         env.client.routes["/quote/"] = FakeResp(200, {"price": 10, "volume": vol})
-        go(env, "A", dict(NO_PRICE))
+        out = go(env, "A", dict(NO_PRICE))
         assert "volume" not in stored(env)
+        # E453: an infinite volume raised OverflowError out of the price step: the price was set but never reported as patched
+        assert stored(env)["price"] == 10.0 and "price" in out["patched_fields"]
 
     def test_zero_price_quote_is_not_patched_and_price_stays_missing(self, env):
         env.client.routes["/quote/"] = FakeResp(200, {"price": 0, "cmp": 0})
@@ -853,18 +855,32 @@ class TestSentimentTier:
         env.client.routes["/analyze/"] = FakeResp(200, {"news_score": None})
         go(env, "A", {**NO_SENT, "news_score": None})
         row = stored(env)
-        assert row["sentiment_seed"] is True and row["news_score"] == 0.65 and row["sentiment_score"] == 0.65
+        assert row["sentiment_seed"] is True and row["news_score"] == 50.0 and row["sentiment_score"] == 50.0
 
     def test_none_score_falls_to_the_seed(self, env):
         env.client.routes["/analyze/"] = FakeResp(200, {"news_score": None})
         go(env, "A", dict(NO_SENT))
         row = stored(env)
-        assert row["sentiment_score"] == 0.65 and row["sentiment_seed"] is True and row["news_score"] == 0.65
+        assert row["sentiment_score"] == 50.0 and row["sentiment_seed"] is True and row["news_score"] == 50.0
 
     def test_non_dict_body_falls_to_the_seed(self, env):
         env.client.routes["/analyze/"] = FakeResp(200, [1])
         go(env, "A", dict(NO_SENT))
         assert stored(env)["sentiment_seed"] is True
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "n/a", "abc", [0.5], {"a": 1}, True, False])
+    def test_e453_unusable_news_score_falls_to_the_seed(self, env, bad):
+        env.client.routes["/analyze/"] = FakeResp(200, {"news_score": bad})
+        out = go(env, "A", dict(NO_SENT))
+        row = stored(env)
+        assert row["sentiment_score"] == 50.0 and row["sentiment_seed"] is True and row["news_score"] == 50.0
+        assert out["patched_fields"] == ["sentiment_score"]
+
+    def test_e453_numeric_string_score_is_stored_as_a_number(self, env):
+        env.client.routes["/analyze/"] = FakeResp(200, {"news_score": "0.8"})
+        go(env, "A", dict(NO_SENT))
+        row = stored(env)
+        assert row["sentiment_score"] == 0.8 and "sentiment_seed" not in row
 
     @pytest.mark.parametrize("status", [401, 429])
     def test_back_off(self, env, status):
@@ -914,7 +930,7 @@ class TestSeedsAndEnvelope:
         assert row["pe_ratio"] == 22.5 and row["pe_seed"] is True
         assert row["pe_ratio_seed"] is True          # group 145: the flag merge_feed_payload actually reads
         assert row["roce"] == 15.0 and row["roce_seed"] is True
-        assert row["sentiment_score"] == 0.65 and row["sentiment_seed"] is True and row["news_score"] == 0.65
+        assert row["sentiment_score"] == 50.0 and row["sentiment_seed"] is True and row["news_score"] == 50.0
         assert "price" not in row
         assert out["patched_fields"] == ["rsi", "pe_ratio", "roce", "sentiment_score"]
         assert out["still_missing"] == ["price"] and out["complete"] is False and out["price"] == 0.0
@@ -923,7 +939,7 @@ class TestSeedsAndEnvelope:
 
     def test_seeded_sentiment_keeps_an_existing_news_score(self, cold):
         go(cold, "A", {**FULL, "sentiment_score": None, "news_score": 0.1})
-        assert stored(cold)["news_score"] == 0.1 and stored(cold)["sentiment_score"] == 0.65
+        assert stored(cold)["news_score"] == 0.1 and stored(cold)["sentiment_score"] == 50.0
 
     def test_complete_row_is_a_no_op_with_a_complete_message(self, env):
         out = go(env, "A", dict(FULL))
@@ -992,3 +1008,102 @@ class TestLiteStructureSummaryE385:
         env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44, "structure_summary": summ})
         out = go(env, "A", dict(NO_RSI))
         assert "ms_quality" not in stored(env) and "market_structure" not in out["patched_fields"]
+
+
+# -- E454: one repair per symbol at a time ---------------------------------
+
+def _lock_probe(monkeypatch):
+    """Replace the repair body with one that parks on an Event, so overlap is decided by the lock alone (no sleeps)."""
+    st = types.SimpleNamespace(active={}, peak={}, order=[], gates={})
+
+    async def fake_impl(symbol, client):
+        key = str(symbol).upper().removesuffix(".NS")   # E459: the real impl strips the suffix itself; the wrapper only keys its lock on it, so the stand-in must too
+        st.order.append(("start", key))
+        st.active[key] = st.active.get(key, 0) + 1
+        st.peak[key] = max(st.peak.get(key, 0), st.active[key])
+        gate = st.gates.get(key)
+        if gate is not None:
+            await gate.wait()
+        st.active[key] -= 1
+        st.order.append(("end", key))
+        if key == "BOOM":
+            raise RuntimeError("repair blew up")
+        return {"symbol": key}
+
+    monkeypatch.setattr(gw, "_patch_single_stock_feed_impl", fake_impl)
+    monkeypatch.setattr(gw, "_audit_cache_clear", lambda *_a, **_k: None)
+    gw._REPAIR_SYMBOL_LOCKS.clear()
+    return st
+
+
+def test_e454_same_symbol_repairs_never_overlap(monkeypatch):
+    st = _lock_probe(monkeypatch)
+
+    async def main():
+        st.gates["TCS"] = asyncio.Event()
+        t1 = asyncio.create_task(gw._patch_single_stock_feed("TCS", None))
+        t2 = asyncio.create_task(gw._patch_single_stock_feed("tcs.NS", None))   # same symbol, different spelling
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert st.order == [("start", "TCS")]                # the second caller is parked on the lock
+        assert gw._REPAIR_SYMBOL_LOCKS["TCS"][1] == 2
+        st.gates["TCS"].set()
+        return await asyncio.gather(t1, t2)
+
+    out = _run(main())
+    assert out == [{"symbol": "TCS"}, {"symbol": "TCS"}]
+    assert st.peak["TCS"] == 1
+    assert st.order == [("start", "TCS"), ("end", "TCS"), ("start", "TCS"), ("end", "TCS")]
+    assert gw._REPAIR_SYMBOL_LOCKS == {}                     # entry removed when the last caller left
+
+
+def test_e454_different_symbols_still_run_together(monkeypatch):
+    st = _lock_probe(monkeypatch)
+
+    async def main():
+        st.gates["TCS"] = asyncio.Event()
+        st.gates["INFY"] = asyncio.Event()
+        t1 = asyncio.create_task(gw._patch_single_stock_feed("TCS", None))
+        t2 = asyncio.create_task(gw._patch_single_stock_feed("INFY", None))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert ("start", "TCS") in st.order and ("start", "INFY") in st.order
+        st.gates["TCS"].set()
+        st.gates["INFY"].set()
+        await asyncio.gather(t1, t2)
+
+    _run(main())
+    assert gw._REPAIR_SYMBOL_LOCKS == {}
+
+
+def test_e454_a_failed_repair_releases_the_lock_and_the_entry(monkeypatch):
+    st = _lock_probe(monkeypatch)
+
+    async def main():
+        with pytest.raises(RuntimeError):
+            await gw._patch_single_stock_feed("BOOM", None)
+        with pytest.raises(RuntimeError):                    # would hang here if the first call had kept the lock
+            await asyncio.wait_for(gw._patch_single_stock_feed("BOOM", None), timeout=2)
+
+    _run(main())
+    assert st.peak["BOOM"] == 1 and gw._REPAIR_SYMBOL_LOCKS == {}
+
+
+def test_e454_a_cancelled_waiter_does_not_leak_or_block(monkeypatch):
+    st = _lock_probe(monkeypatch)
+
+    async def main():
+        st.gates["TCS"] = asyncio.Event()
+        t1 = asyncio.create_task(gw._patch_single_stock_feed("TCS", None))
+        t2 = asyncio.create_task(gw._patch_single_stock_feed("TCS", None))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        t2.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t2
+        assert gw._REPAIR_SYMBOL_LOCKS["TCS"][1] == 1
+        st.gates["TCS"].set()
+        assert await t1 == {"symbol": "TCS"}
+
+    _run(main())
+    assert gw._REPAIR_SYMBOL_LOCKS == {}

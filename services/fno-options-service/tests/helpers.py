@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 from fno import bs
 from fno.models import Chain
@@ -47,8 +47,15 @@ def make_daily(n: int = 120, start: float = 22000.0, drift: float = 0.0015, wigg
     return out
 
 
-def make_intraday(n: int = 40, start: float = 24400.0, step: float = 6.0, t0: int = 1_700_000_000) -> List[dict]:
+# E401: the default bars end exactly at the engine tests' clock (Tue 10 Nov 2026 10:30 IST, tests/test_engine_paper.NOW). They were dated 14 Nov 2023 (t0 = 1_700_000_000), which the
+# round 314 stale-feed rule correctly ignores, so every engine test saw "intraday bars are stale" and no signal. Pass t0 to build bars for another day.
+_DEFAULT_END = 1_794_286_800          # 2026-11-10 10:30 IST
+
+
+def make_intraday(n: int = 40, start: float = 24400.0, step: float = 6.0, t0: Optional[int] = None) -> List[dict]:
     """5-minute candles trending by `step` points per bar (negative step = falling)."""
+    if t0 is None:
+        t0 = _DEFAULT_END - n * 300
     out, px = [], start
     for i in range(n):
         o = px

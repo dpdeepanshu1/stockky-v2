@@ -47,7 +47,18 @@ def main() -> int:
     print(f"== now {now:%a %d %b %Y %H:%M:%S} IST | holiday-or-weekend: {is_hol} | inside 09:15-15:30: {in_hours}")
     if is_hol:
         red.append(f"{today} is in the repo's holiday list (or a weekend): the engine trades nothing today. If NSE really is open, add the date's removal to config.HOLIDAYS and tell me.")
-    print("== switches (container env): " + " ".join(f"{k}={os.environ.get(k, '-')}" for k in ("FNO_ENGINE_ENABLED", "FNO_MODE", "FNO_REAL_ENABLED", "FNO_UNDERLYINGS")))
+    # E401: a Calibration > Switches change lives in <CONTROL_DIR>/overrides.json and reaches os.environ only inside the RUNNING service process (control/boot.py), so a fresh
+    # `docker compose exec` process saw plain env and printed FNO_ENGINE_ENABLED=false while /health said true. Read the override file too and mark what it set.
+    ov: dict = {}
+    try:
+        _p = os.path.join((os.environ.get("CONTROL_DIR") or "").strip() or "/data/control", "overrides.json")
+        with open(_p, encoding="utf-8") as _fh:
+            ov = {k: v.get("value") for k, v in (json.load(_fh).get("overrides") or {}).items() if isinstance(v, dict)}
+    except Exception:  # noqa: BLE001 - no file / unreadable: fall back to env only
+        ov = {}
+    def _sw(k: str) -> str:
+        return f"{k}={ov[k]} (switch)" if k in ov else f"{k}={os.environ.get(k, '-')}"
+    print("== switches (live: Calibration override, else container env): " + " ".join(_sw(k) for k in ("FNO_ENGINE_ENABLED", "FNO_MODE", "FNO_REAL_ENABLED", "FNO_UNDERLYINGS")))
     if not os.path.exists(a.db):
         print(f"!! {a.db} not found (run inside the fno-options-service container, or pass --db)")
         return 2

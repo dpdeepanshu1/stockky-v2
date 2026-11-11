@@ -65,7 +65,7 @@ from data_feed import (
     try_refresh_lock, release_refresh_lock, soft_ttl_should_refresh,
     request_data_feed_stop, clear_data_feed_stop, data_feed_stop_requested,
 )
-from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots
+from circuit_breaker import get_breaker, CircuitOpenError, all_snapshots, is_data_thin_503
 from metrics import metrics, label_limiter
 from rate_limit_monitor import monitor as rate_limit_monitor
 try:
@@ -3711,7 +3711,7 @@ async def _cb_get(client: httpx.AsyncClient, name: str, url: str, timeout: float
         try:
             resp = await client.get(url, timeout=timeout, **kwargs)
             metrics.observe_ms("stockky_dependency_latency", (time.time() - t0) * 1000, dependency=name)
-            if resp.status_code >= 500:
+            if resp.status_code >= 500 and not is_data_thin_503(resp):   # E386: thin history is an answer, not an outage
                 br.record_failure(f"HTTP {resp.status_code}")
                 metrics.inc("stockky_dependency_errors_total", dependency=name)
             else:
@@ -8265,6 +8265,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 rsi_local = compute_rsi_from_closes(closes, period=14)
                 if rsi_local is not None:
                     current["rsi"] = rsi_local
+                    current.pop("rsi_seed", None)   # E391: a real RSI must not keep a stale seed flag (merge would treat it as a seed)
                     patched.append("rsi")
                     missing.discard("rsi")
         except Exception as e:
@@ -8280,6 +8281,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 rsi = t.get("rsi")
                 if rsi is not None and _safe_float(rsi) != 0:
                     current["rsi"] = _safe_float(rsi)
+                    current.pop("rsi_seed", None)   # E391
                     patched.append("rsi")
                     # Without this the baseline-seed block below still fired and
                     # stamped rsi_seed=True on a real technical-service value.
@@ -8291,7 +8293,7 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
                 if t.get("macd_hist") is not None or t.get("macd") is not None:
                     current["macd_hist"] = t.get("macd_hist", t.get("macd"))
                 try:  # Group 349: seed the flat ms_* summary keys into the feed row (only non-None values)
-                    _msk = ms_passthrough.feed_keys(t)
+                    _msk = ms_passthrough.feed_keys(t) or ms_passthrough.lite_summary_keys(t)   # E385: lite replies carry only the flat summary
                     if _msk:
                         current.update(_msk)
                         patched.append("market_structure")

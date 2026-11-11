@@ -1359,6 +1359,11 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
     _peer_age = shared_exposure.get_other_service_exposure_age(db) if mode == "REAL" else None
     # GROUP 289: same loss-streak input the live entry path uses, so this preview matches what a real BUY would get.
     _streak, _streak_at = _pf_today_loss_streak(db, mode)
+    _open_pnl = 0.0
+    if body.side.upper() == "BUY":   # E370: same open-loss input as the live BUY paths (E368); a SELL is never checked against it
+        from portfolio import open_pnl as _open_pnl_mod
+        from market_feed.feed import get_quotes as _open_pnl_quotes
+        _open_pnl = await _open_pnl_mod.open_unrealized_pnl(db, mode, quotes_fn=_open_pnl_quotes)
     account_state = AccountState(
         equity=account_row.current_equity,
         risk_per_trade_pct=effective_risk_pct(risk_row),
@@ -1369,6 +1374,7 @@ async def risk_engine_check(body: RiskCheckRequest, authorization: str = Header(
         max_tick_volatility_mult=risk_row.max_tick_volatility_mult,
         allow_pyramiding=risk_row.allow_pyramiding,
         realized_pnl_today=account_row.realized_pnl_today,
+        open_unrealized_pnl=float(_open_pnl or 0.0),
         open_position_count=len(open_positions),
         open_position_symbols={p.symbol for p in open_positions} | _pf_working_buy_symbols(db, mode),   # group297
         open_positions_total_risk=sum(

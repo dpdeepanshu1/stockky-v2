@@ -61,7 +61,12 @@ async def _sniper_attach_structure(payload: Dict[str, Any]) -> int:
                         return
                     data = resp.json()
                     if ms_passthrough.safe_block(data) is None:
-                        _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="no_block")
+                        _ts = ms_passthrough.truncated_summary(data)   # E388: over-size block, flat summary only
+                        if _ts is None:
+                            _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="no_block")
+                            return
+                        sums[sym] = _ts
+                        _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="ok")
                         return
                     sums[sym] = ms_passthrough.safe_summary(data)
                     _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="ok")

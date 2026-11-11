@@ -179,6 +179,13 @@ def attempt_short_live(db: Session, cand: Any, quality: Any = None, board_row: O
         return None
 
 
+def _rollback_quietly(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("short live: rollback failed (%s)", e)
+
+
 def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], now: Optional[datetime]) -> Optional[ScalpPosition]:
     sym = cand.symbol
     why = _live_guards(db, cand)
@@ -194,17 +201,23 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
 
     def _undo() -> None:
         nonlocal position_value, claimed
+        # E363: a failed release used to be logged and forgotten: the capital stayed reserved and the symbol locked for the session (a failed capital release also left the
+        # session in an aborted transaction, so the lock release after it failed too). Now the session is rolled back after a failure and the release is queued for retry.
         if position_value is not None:
             try:
                 ledger.release_capital(db, position_value=position_value, realized_pnl=0.0)
             except Exception as e:  # noqa: BLE001
-                logger.error("short live: capital release for %s failed (%s)", sym, e)
+                logger.error("short live: capital release for %s failed (%s) - queued for retry", sym, e)
+                _rollback_quietly(db)
+                plain_short.queue_release("capital", sym, value=position_value, db=db)
             position_value = None
         if claimed:
             try:
                 shared_symbol_lock.release(db, sym)
             except Exception as e:  # noqa: BLE001
-                logger.error("short live: symbol lock release for %s failed (%s)", sym, e)
+                logger.error("short live: symbol lock release for %s failed (%s) - queued for retry", sym, e)
+                _rollback_quietly(db)
+                plain_short.queue_release("lock", sym, db=db)
             claimed = False
 
     try:
@@ -312,7 +325,7 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
         error_msg = None
         if plain.get("critical") and not plain.get("ok"):
             # the SELL may exist and its state is unknown: keep the capital and the lock, hand the SELL to the watch list (it releases them when the SELL resolves)
-            plain_short.watch_orphan(plain.get("entry_order_id"), sym, security_id, int(qty), position_value or 0.0)
+            plain_short.watch_orphan(plain.get("entry_order_id"), sym, security_id, int(qty), position_value or 0.0, db=db)
             short_entry._refuse(db, cand, "SHORT_PLAIN_UNKNOWN", str(plain.get("reason"))[:400])
             return None                                   # nothing is released here on purpose: the order may exist at Dhan
         if not plain.get("ok"):
@@ -327,9 +340,11 @@ def _attempt(db: Session, cand: Any, quality: Any, board_row: Optional[dict], no
                 keep = position_value * got / float(qty)
                 try:
                     ledger.release_capital(db, position_value=position_value - keep, realized_pnl=0.0)
-                    position_value = keep
                 except Exception as e:  # noqa: BLE001
-                    logger.error("short live: partial-fill capital release for %s failed (%s)", sym, e)
+                    logger.error("short live: partial-fill capital release for %s failed (%s) - queued for retry", sym, e)
+                    _rollback_quietly(db)
+                    plain_short.queue_release("capital", sym, value=position_value - keep, db=db)      # E363: the position keeps only its own part either way
+                position_value = keep
             qty = got
             live = float(plain.get("fill_price") or live)
             levels.stop_price = float(plain.get("stop_price") or levels.stop_price)       # the levels plain_short really sent / computed from the real fill (tick-rounded)

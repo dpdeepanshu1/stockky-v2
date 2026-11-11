@@ -42,6 +42,35 @@ def safe_summary(src: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {"ms_quality": "unavailable"}
 
 
+def truncated_summary(src: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """E384: the flat summary the technical service sends INSTEAD of an over-size block (`structure_truncated: true`, no `market_structure`).
+    Only ms_* keys we know are kept, and only when it carries a real quality; anything else is None."""
+    try:
+        if not isinstance(src, dict) or src.get("structure_truncated") is not True or isinstance(src.get("market_structure"), dict):
+            return None
+        s = src.get("structure_summary")
+        if not isinstance(s, dict) or s.get("ms_quality") in (None, "unavailable"):
+            return None
+        return {k: s.get(k) for k in SUMMARY_KEYS}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def lite_summary_keys(src: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """E385: non-None ms_* keys from a technical `?lite=1` reply. Lite never carries the block, only the flat `structure_summary` (served from the
+    structure cache), so feed_keys() - which needs a valid block - always returned {} for it. Same rules as feed_keys: flag off -> {}, a missing /
+    non-dict summary or one whose ms_quality is missing / 'unavailable' -> {}, only known ms_* keys."""
+    if not enabled() or not isinstance(src, dict) or isinstance(src.get("market_structure"), dict):
+        return {}
+    try:
+        s = src.get("structure_summary")
+        if not isinstance(s, dict) or s.get("ms_quality") in (None, "unavailable"):
+            return {}
+        return {k: s[k] for k in SUMMARY_KEYS if s.get(k) is not None}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def merge_into(target: Dict[str, Any], src: Optional[Dict[str, Any]], with_block: bool = True) -> bool:
     """Copy block + summary from a technical response into `target` (a result / feed row). Returns True when a valid block was copied.
     Never overwrites an existing block with a worse one."""
@@ -50,6 +79,9 @@ def merge_into(target: Dict[str, Any], src: Optional[Dict[str, Any]], with_block
     try:
         b = safe_block(src)
         if b is None:
+            ts = truncated_summary(src)      # E384: no block (size guard), but the flat summary was sent on purpose; keep it
+            if ts is not None:
+                target["structure_summary"] = ts
             return False
         if with_block:
             target["market_structure"] = b
@@ -66,5 +98,6 @@ def feed_keys(src: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     # No valid block -> nothing to seed. (safe_summary() would still say ms_quality='unavailable', a non-None value; seeding that
     # made every technical reply without a structure block look like a patched feed field and stamped a fake quality on the row.)
     if safe_block(src) is None:
-        return {}
+        ts = truncated_summary(src)   # E384
+        return {k: v for k, v in ts.items() if v is not None} if ts else {}
     return {k: v for k, v in safe_summary(src).items() if v is not None and k in SUMMARY_KEYS}

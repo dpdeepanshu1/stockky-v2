@@ -41,7 +41,8 @@ def test_due_waits_for_a_later_session_and_stops_when_complete():
     assert d["due"] is True and 10 < d["lookback_days"] <= 120
     r["complete"] = True
     assert due(r, OBS_TS + 40 * DAY) == {"due": False, "reason": "complete", "lookback_days": 0}
-    assert due(_row(), OBS_TS + 900 * DAY)["lookback_days"] == 120
+    assert due(_row(), OBS_TS + 900 * DAY) == {"due": False, "reason": "too_old", "lookback_days": 0}   # E365
+    assert due(_row(), OBS_TS + 110 * DAY)["lookback_days"] == 120
 
 
 def _bars_from(obs_ts, closes):

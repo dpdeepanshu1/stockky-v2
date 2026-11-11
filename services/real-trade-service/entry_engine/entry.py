@@ -525,7 +525,7 @@ def _uncertain_buy_active(mode: str, symbol: str) -> bool:
         return False
 
 
-def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: float = 0.0) -> AccountState:
+def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: float = 0.0, open_pnl: float = 0.0) -> AccountState:
     if mode == "REAL":
         from execution.equity_sync import sync_real_equity
         sync_real_equity(db)
@@ -615,6 +615,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool, reserved_cash: floa
         other_service_sector_risk=heat_state.peer_sector_risk(db, mode),
         loss_streak=_streak,
         entries_today=_entries_today,
+        open_unrealized_pnl=float(open_pnl or 0.0),      # E368
         # A11: combined loss of both engines today (REAL only; DEMO has no peer).
         account_wide_daily_loss_pct=(
             shared_daily_pnl.account_wide_loss_pct(db, account.realized_pnl_today, account.current_equity)
@@ -758,6 +759,7 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
     if not candidates:
         return {"evaluated": 0, "entered": 0, "waited": 0, "rejected": 0, "entry_details": []}
     candidates = _order_candidates_for_capital(candidates)
+    _open_pnl_box: dict = {}                   # E368: this cycle's open unrealized P&L, filled on first use
     try:                                       # E272 round 8: tell position-stocks which symbols to record bars for (record only, never raises)
         from entry_engine import candidate_outcomes as _co_wanted
         _co_wanted.note_candidates(candidates)
@@ -1472,7 +1474,10 @@ async def evaluate_mode(db: Session, mode: str, gate_armed: bool) -> dict:
             continue
 
         # ── Conviction-adjusted sizing ─────────────────────────────────────────
-        account_state  = _account_state(db, mode, gate_armed, reserved_cash)
+        if _open_pnl_box.get("v") is None:               # E368: once per cycle, fresh quotes only, fail-open 0
+            from portfolio import open_pnl as _open_pnl_mod
+            _open_pnl_box["v"] = await _open_pnl_mod.open_unrealized_pnl(db, mode, quotes_fn=get_quotes)
+        account_state  = _account_state(db, mode, gate_armed, reserved_cash, open_pnl=_open_pnl_box["v"])
         adj_risk_pct   = _conviction_adjusted_risk_pct(
             account_state.risk_per_trade_pct, cand.conviction_score
         )

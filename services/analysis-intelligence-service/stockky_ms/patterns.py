@@ -284,7 +284,8 @@ def chart_patterns(bars, window: int = 120) -> List[Dict[str, Any]]:
         width_now = up_now - lo_now
         first = min(rh[0][0], rl[0][0])
         width_then = (sh * first + bh) - (sl * first + bl)
-        inside = lo_now - buf <= price <= up_now + buf
+        reach = 1.5 * atr    # E375: a breakout stays reportable for up to 1.5 ATR beyond a line. It used to be only `buf` (0.25 ATR), the same distance `confirmed` needs, so these six patterns could never reach `confirmed`: the moment price broke out they vanished.
+        inside = lo_now - reach <= price <= up_now + reach
         if width_now > 0 and width_then > 0 and inside:
             converging = width_now < 0.85 * width_then
             hf, lf = abs(sh) <= flat, abs(sl) <= flat
@@ -302,8 +303,11 @@ def chart_patterns(bars, window: int = 120) -> List[Dict[str, Any]]:
             elif hf and lf and width_now >= 2 * atr:
                 name, bias = "rectangle", _NEUT
             if name:
-                status = "confirmed" if (price > up_now + buf or price < lo_now - buf) else "forming"
-                add(name, bias, status, upper=up_now, lower=lo_now, start=first, upper0=sh * first + bh, lower0=sl * first + bl)
+                up_brk, dn_brk = price > up_now + buf, price < lo_now - buf
+                failed = (bias == _BULL and dn_brk) or (bias == _BEAR and up_brk)    # E375: broke the wrong way for its bias = the pattern failed, not reported as bullish / bearish
+                if not failed:
+                    status = "confirmed" if ((bias == _BULL and up_brk) or (bias == _BEAR and dn_brk) or (bias == _NEUT and (up_brk or dn_brk))) else "forming"
+                    add(name, bias, status, upper=up_now, lower=lo_now, start=first, upper0=sh * first + bh, lower0=sl * first + bl)
     # flags: a sharp pole, then a short shallow drift against it. end == n: still inside the flag (forming);
     # end == n - 1: the last bar is the candidate breakout bar (confirmed only when it closes beyond the flag by 0.25 ATR).
     done = False

@@ -385,6 +385,10 @@ MAX_DAILY_LOSS_PCT_OF_POOL = _get_float("MAX_DAILY_LOSS_PCT_OF_POOL", 4.0)
 # as a % of their combined capital; at or above this, reserve_capital() refuses new entries. 0 disables. An extra layer on
 # top of MAX_DAILY_LOSS_PCT_OF_POOL, not a replacement. Same env name as real-trade-service so one value governs both.
 ACCOUNT_MAX_DAILY_LOSS_PCT = _get_float("ACCOUNT_MAX_DAILY_LOSS_PCT", 3.0)
+# E367: when True, reserve_capital() also refuses a new entry once today's realized P&L PLUS the open positions' unrealized P&L (fresh ticks only) is a loss of MAX_DAILY_LOSS_PCT_OF_POOL
+# of the pool. It only blocks entries: no position is closed and the persistent kill switch is not tripped (that stays realized-only). Off = the old realized-only behaviour.
+DAILY_LOSS_COUNTS_UNREALIZED = _get_bool("DAILY_LOSS_COUNTS_UNREALIZED", True)
+DAILY_LOSS_UNREALIZED_MAX_TICK_AGE_S = _get_float("DAILY_LOSS_UNREALIZED_MAX_TICK_AGE_S", 30.0)
 
 # ── Trade gates (2026-10-02 loss-day fix) ───────────────────────────────────
 # Added after a day where ~19 scalp trades netted about -₹370 (avg loss -1.3%,

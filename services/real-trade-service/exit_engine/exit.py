@@ -73,6 +73,7 @@ from exit_engine import excursion as _excursion   # group 397
 # every test that monkeypatches `notify_sync` on this module) is unchanged.
 from notifier import notify_fire_and_forget as notify_sync
 from portfolio.portfolio import (
+    raised_to_breakeven,
     close_position, force_close_real_position, open_positions, refresh_unrealized, record_real_exit_sent,
 )
 from resilience.local_cache import load_snapshot, save_snapshot
@@ -555,7 +556,19 @@ def _event_exit_order_pending(db: Session, position: models.TradePosition) -> bo
         return False
 
 
-def _should_skip_exit_this_cycle(position: models.TradePosition) -> bool:
+_URGENT_EXIT_REASONS = frozenset({"stop_hit", "emergency_gap_down"})
+
+
+def _retry_cooldown_seconds(position: models.TradePosition, reason: Optional[str] = None) -> float:
+    """E364: BASE * 2^(failures-1), capped. A stop_hit or emergency_gap_down exit is capped at EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS (default 120 s) instead of the 900 s cap:
+    these are exits the position cannot afford to wait a quarter of an hour for, and a rejection that clears (funds, IP, exchange hiccup) must not leave a loss running."""
+    cap = float(config.EXIT_RETRY_MAX_COOLDOWN_SECONDS)
+    if reason in _URGENT_EXIT_REASONS:
+        cap = min(cap, float(getattr(config, "EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS", 120)))
+    return min(cap, config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)))
+
+
+def _should_skip_exit_this_cycle(position: models.TradePosition, reason: Optional[str] = None) -> bool:
     """Return True if this position is still inside its exponential backoff
     cooldown after consecutive broker rejections.  Extracted from
     _send_real_sell for testability (session72 issue #32).
@@ -566,10 +579,7 @@ def _should_skip_exit_this_cycle(position: models.TradePosition) -> bool:
     """
     if not (position.consecutive_exit_failures and position.last_exit_failure_at):
         return False
-    cooldown_seconds = min(
-        config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
-        config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)),
-    )
+    cooldown_seconds = _retry_cooldown_seconds(position, reason)
     elapsed_seconds = (
         datetime.now(timezone.utc) - as_aware(position.last_exit_failure_at)
     ).total_seconds()
@@ -749,11 +759,8 @@ def _send_real_sell(
     # fires the operator alert once the streak crosses
     # EXIT_RETRY_ALERT_THRESHOLD) and what resets both back to 0/None the
     # moment a fill is actually booked.
-    if _should_skip_exit_this_cycle(position):
-        cooldown_seconds = min(
-            config.EXIT_RETRY_MAX_COOLDOWN_SECONDS,
-            config.EXIT_RETRY_BASE_COOLDOWN_SECONDS * (2 ** (position.consecutive_exit_failures - 1)),
-        )
+    if _should_skip_exit_this_cycle(position, reason):
+        cooldown_seconds = _retry_cooldown_seconds(position, reason)
         elapsed_seconds = (datetime.now(timezone.utc) - as_aware(position.last_exit_failure_at)).total_seconds()
         logger.info(
             "Skipping SELL for %s (%s) — in backoff after %d consecutive broker "
@@ -2078,9 +2085,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                     if position.qty_open > 0:
                         # Raise stop to breakeven on the remainder so the rest
                         # is now a "free trade" — worst case exits at entry price.
-                        position.current_stop   = max(
-                            position.current_stop or 0, position.avg_entry_price
-                        )
+                        position.current_stop   = raised_to_breakeven(position.current_stop, position.avg_entry_price)   # E361
                         # Nullify target — remainder is now trailed, not held to a
                         # stale fixed target that could be hit again for a second
                         # unintended partial exit.
@@ -2124,9 +2129,7 @@ async def evaluate_mode(db: Session, mode: str) -> dict:
                         # target still armed, so once the fill landed the next cycle sold a SECOND partial. Retry once; shout if it still fails.
                         for _pe_try in (1, 2):
                             try:
-                                position.current_stop   = max(
-                                    position.current_stop or 0, position.avg_entry_price
-                                )
+                                position.current_stop   = raised_to_breakeven(position.current_stop, position.avg_entry_price)   # E361
                                 position.current_target = None
                                 db.add(models.TradePositionEvent(
                                     position_id=position.id, event_type="PARTIAL_EXIT_TRAIL",

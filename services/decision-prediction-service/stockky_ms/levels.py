@@ -49,7 +49,7 @@ def build_levels(bars: Sequence[Sequence[float]], struct: Sequence[Dict], pools:
         elif not kind_up and hi < price:
             sup.append({"low": lo, "high": hi, "src": src})
 
-    for s in struct:  # structural swings still intact (no close through them since confirmation)
+    for s in struct:  # structural swings still intact. Deliberate asymmetry: a HIGH is spent once any bar WICKS above it (liquidity taken, no longer a ceiling); a LOW is spent only by a CLOSE below it
         after = bars[s["confirmed_at"] + 1:]
         if s["kind"] == "high":
             if not any(b[H] > s["price"] for b in after):

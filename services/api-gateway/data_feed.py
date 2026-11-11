@@ -313,6 +313,7 @@ def merge_feed_payload(existing: dict, incoming: dict) -> dict:
         "debt_to_equity": "debt_to_equity_seed",
         "revenue_growth": "revenue_growth_seed",
         "fundamental_score": "fundamental_score_seed",
+        "rsi": "rsi_seed",   # E391: the neutral 50.0 seeds (bhavcopy feed, repair) must never overwrite a real stored RSI
     }
     _ZERO_PROTECTED = ("volume", "pe_ratio", "market_cap", "day_change_pct", "roce", "rsi")
 
@@ -344,6 +345,8 @@ def merge_feed_payload(existing: dict, incoming: dict) -> dict:
         if seed_flag and inc.get(seed_flag) is True:
             old_val = base.get(k)
             old_was_seed = bool(base.get(seed_flag))
+            if k == "rsi" and not old_val:
+                old_val = None   # E391: a stored 0 / None RSI is "unusable, not a value" (repair seeds over it on purpose)
             if old_val is not None and not old_was_seed:
                 # Keep the durable real fundamental; do not write the seed flag either
                 continue
@@ -1315,12 +1318,11 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
 
     store = get_data_feed_store()
     existing = store.get_symbol(base) or {}
-    if not isinstance(existing, dict):
-        existing = {}
-    existing["price"] = px
-    existing["close"] = px
-    existing["cmp"] = px
-    existing["ltp"] = px
+    existing = dict(existing) if isinstance(existing, dict) else {}   # E390: never mutate the store's cached row in place
+    # E390: write the live price ONLY to the keys that survive normalize_feed_payload as price keys (last_price / current_price). price / close /
+    # cmp are aliases that normalize renames to `prev_close` (the last stored CLOSE, which instant_scanner measures the live price against), so
+    # writing the intraday price through them replaced prev_close with the live price: the next change_pct / `price >= prev_close` read was
+    # against the last patch, not against the close.
     existing["last_price"] = px
     existing["current_price"] = px
     existing["price_refreshed_at"] = _now_iso()
@@ -1728,6 +1730,23 @@ def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
     return out
 
 
+def bhavcopy_seed(rec: dict) -> dict:
+    """E391: the feed row written for one bhavcopy record. The neutral defaults (rsi 50.0, sentiment_score 50.0) used to be written as if they
+    were real values, so every bulk feed run overwrote a real stored RSI / sentiment score (technical / news / repair) with 50.0. They are now
+    flagged `rsi_seed` / `sentiment_seed` (and only added when the record has no value), which merge_feed_payload keeps from overwriting a real
+    value. `_seed` stays as before. Pure."""
+    seed = dict(rec)
+    if seed.get("rsi") is None:
+        seed["rsi"] = 50.0
+        seed["rsi_seed"] = True
+    if seed.get("sentiment_score") is None:
+        seed["sentiment_score"] = 50.0
+        seed["sentiment_seed"] = True
+    seed["_seed"] = True
+    seed["source"] = seed.get("source") or "nse_bhavcopy"
+    return seed
+
+
 def run_bulk_yahoo_price_feed(
     symbols: Optional[List[str]] = None,
     merge_existing: bool = True,
@@ -1803,14 +1822,7 @@ def run_bulk_yahoo_price_feed(
         if not rec:
             continue
         try:
-            seed = dict(rec)
-            seed.setdefault("rsi", seed.get("rsi") if seed.get("rsi") is not None else 50.0)
-            seed.setdefault("pe_ratio", seed.get("pe_ratio") if seed.get("pe_ratio") is not None else None)
-            seed.setdefault("roce", seed.get("roce") if seed.get("roce") is not None else None)
-            seed.setdefault("sentiment_score", seed.get("sentiment_score") if seed.get("sentiment_score") is not None else 50.0)
-            seed["_seed"] = True
-            seed["source"] = seed.get("source") or "nse_bhavcopy"
-            seed_batch[base] = seed
+            seed_batch[base] = bhavcopy_seed(rec)   # E391: defaults are flagged seeds, never written over a real RSI / sentiment
             bhav_hits += 1
         except Exception as e:
             skipped += 1

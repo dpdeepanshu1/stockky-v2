@@ -954,3 +954,20 @@ def test_repair_pe_seed_cannot_overwrite_a_real_stored_pe():
     import data_feed as df
     out = df.merge_feed_payload({"pe_ratio": 30.0}, {"pe_ratio": 22.5, "pe_seed": True, "pe_ratio_seed": True})
     assert out["pe_ratio"] == 30.0 and not out.get("pe_ratio_seed")
+
+
+class TestLiteStructureSummaryE385:
+    """E385: the technical `?lite=1` reply has the flat structure_summary but never the block, so the repair path never seeded ms_* keys."""
+
+    def test_lite_summary_is_seeded_into_the_row(self, env):
+        env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44, "structure_summary": {"ms_quality": "ok", "ms_trend": "up", "ms_bos_dir": None, "bogus": 1}})
+        out = go(env, "A", dict(NO_RSI))
+        row = stored(env)
+        assert row["ms_quality"] == "ok" and row["ms_trend"] == "up" and "ms_bos_dir" not in row and "bogus" not in row
+        assert "market_structure" in out["patched_fields"]
+
+    @pytest.mark.parametrize("summ", [None, "x", {"ms_quality": "unavailable", "ms_trend": "up"}, {"ms_trend": "up"}])
+    def test_unusable_summary_seeds_nothing(self, env, summ):
+        env.client.routes["/analyze/"] = FakeResp(200, {"rsi": 44, "structure_summary": summ})
+        out = go(env, "A", dict(NO_RSI))
+        assert "ms_quality" not in stored(env) and "market_structure" not in out["patched_fields"]

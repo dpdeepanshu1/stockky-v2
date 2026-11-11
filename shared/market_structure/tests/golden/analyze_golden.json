@@ -278,13 +278,13 @@
  "choppy_12": {
   "atr": 2.54,
   "bos": {
-   "bars_since": 5,
+   "bars_since": 6,
    "direction": "bearish",
    "failed": false,
    "gap_event": false,
-   "level": 142.86,
-   "strength": 0.787,
-   "vol_ratio": 1.21
+   "level": 143.33,
+   "strength": 0.328,
+   "vol_ratio": 0.87
   },
   "choch": {
    "bars_since": null,
@@ -311,7 +311,7 @@
    "positives": [],
    "summary": "Structure neutral; quality ok; TQS 3/100 with 0 independent group(s) positive.",
    "warnings": [
-    "bearish break of structure 5 bar(s) ago",
+    "bearish break of structure 6 bar(s) ago",
     "resistance less than 1 ATR above",
     "structure R:R 0.84 (stop 129.08, target 135.83)",
     "target is below the profit objective"
@@ -795,13 +795,13 @@
  "down_12": {
   "atr": 1.59,
   "bos": {
-   "bars_since": 11,
+   "bars_since": 15,
    "direction": "bearish",
    "failed": false,
    "gap_event": false,
-   "level": 50.81,
-   "strength": 0.431,
-   "vol_ratio": 0.78
+   "level": 48.74,
+   "strength": 0.169,
+   "vol_ratio": 0.99
   },
   "choch": {
    "bars_since": null,
@@ -828,7 +828,7 @@
    "positives": [],
    "summary": "Structure neutral; quality ok; TQS 3/100 with 0 independent group(s) positive.",
    "warnings": [
-    "bearish break of structure 11 bar(s) ago",
+    "bearish break of structure 15 bar(s) ago",
     "resistance less than 1 ATR above",
     "risk/reward could not be built"
    ]
@@ -1348,13 +1348,13 @@
  "range_12": {
   "atr": 1.5,
   "bos": {
-   "bars_since": 4,
+   "bars_since": 5,
    "direction": "bearish",
    "failed": false,
    "gap_event": false,
-   "level": 97.87,
-   "strength": 0.443,
-   "vol_ratio": 0.8
+   "level": 98.39,
+   "strength": 0.435,
+   "vol_ratio": 1.21
   },
   "choch": {
    "bars_since": null,
@@ -1384,7 +1384,7 @@
    "summary": "Structure bearish; quality ok; TQS 22/100 with 2 independent group(s) positive.",
    "warnings": [
     "bearish structure (lower highs and lower lows)",
-    "bearish break of structure 4 bar(s) ago",
+    "bearish break of structure 5 bar(s) ago",
     "resistance less than 1 ATR above",
     "structure R:R 2.30 (stop 94.13, target 100.54)",
     "target is below the profit objective"

@@ -165,25 +165,19 @@ def build_bound_routes_l(ref):
                             result["close"] = price
                     except Exception:
                         pass
+                _placeholder_levels = set()
                 if result.get("close") is not None:
                     result["data_insufficient"] = False
-                    try:
-                        c = float(result["close"])
-                        if result.get("support") is None:
-                            result["support"] = round(c * 0.97, 2)
-                        if result.get("resistance") is None:
-                            result["resistance"] = round(c * 1.03, 2)
-                    except (TypeError, ValueError):
-                        pass
+                    from stock_enrich import fill_placeholder_levels   # E387
+                    _placeholder_levels = fill_placeholder_levels(result)
 
                 tech_blob = _reason_blob(reasons, "technical")
                 fund_blob = _reason_blob(reasons, "fundamental")
                 news_blob = _reason_blob(reasons, "news")
 
                 # Tighten: neutral score 50 alone is NOT a re-fetch trigger
-                need_tech = _pillar_failed(tech_blob) or (
-                    result.get("technical_score") is None and result.get("data_insufficient")
-                )
+                from stock_enrich import tech_refetch_needed   # E389: data_insufficient was just forced False above, so the old clause never fired
+                need_tech = tech_refetch_needed(result, _pillar_failed(tech_blob))
                 need_fund = _pillar_failed(fund_blob) or (
                     result.get("fundamental_score") is None
                     and not result.get("fundamental_metrics")
@@ -262,9 +256,8 @@ def build_bound_routes_l(ref):
                 if isinstance(td, dict):
                     if td.get("technical_score") is not None:
                         result["technical_score"] = td["technical_score"]
-                    for k in ("support", "resistance", "trend_strength", "volume_surge", "rsi", "close"):
-                        if td.get(k) is not None and result.get(k) is None:
-                            result[k] = td[k]
+                    from stock_enrich import apply_tech_fields   # E387: a real support / resistance replaces the +-3% placeholder
+                    apply_tech_fields(result, td, _placeholder_levels)
                     if td.get("reasons"):
                         reasons["technical"] = td["reasons"] if isinstance(td["reasons"], list) else [str(td["reasons"])]
                     ref.ms_passthrough.merge_into(result, td)  # Group 349: additive market_structure + structure_summary
@@ -354,6 +347,9 @@ def build_bound_routes_l(ref):
                 level = "low" if level != "high" else "medium"
             if result.get("prediction_score") is None:
                 flags.append("Model score missing")
+            if result.get("technical_score") is None:
+                flags.append("Technical unavailable")   # E389: still no technical score after the re-fetch
+                level = "medium" if level == "high" else level
             tech_reasons = (result.get("reasons") or {}).get("technical") or []
             if any("delivery" in str(r).lower() and "unavailable" in str(r).lower() for r in tech_reasons):
                 flags.append("Delivery % not official")

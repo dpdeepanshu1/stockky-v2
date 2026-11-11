@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -86,13 +87,25 @@ def from_dict(overrides: Optional[Dict[str, Any]]) -> MSParams:
         cur = getattr(default, k)
         try:
             if isinstance(cur, bool):
+                if isinstance(v, str):      # E376: bool("false") is True, so a quoted "false" / "0" in STRUCTURE_PARAMS_JSON silently turned the flag ON
+                    t = v.strip().lower()
+                    if t in ("1", "true", "yes", "on"):
+                        clean[k] = True
+                    elif t in ("0", "false", "no", "off"):
+                        clean[k] = False
+                    continue                # anything else: ignored, the default stays
                 clean[k] = bool(v)
             elif isinstance(cur, int):
+                if isinstance(v, bool) or (isinstance(v, float) and not math.isfinite(v)):
+                    continue
                 clean[k] = int(v)
             elif isinstance(cur, float):
-                clean[k] = float(v)
+                x = float(v)
+                if not math.isfinite(x):    # E376: json.loads accepts NaN / Infinity; a NaN threshold makes every comparison False and the rule silently stops working
+                    continue
+                clean[k] = x
             else:
                 clean[k] = str(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
     return dataclasses.replace(default, **clean)

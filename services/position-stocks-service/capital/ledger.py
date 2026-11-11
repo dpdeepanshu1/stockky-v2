@@ -38,7 +38,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import config
-from capital import capital_alloc, conviction_sizing, portfolio_heat, shared_daily_pnl, shared_exposure, shared_heat
+from capital import available_guard, capital_alloc, conviction_sizing, open_pnl, portfolio_heat, shared_daily_pnl, shared_exposure, shared_heat
 from execution import dhan_client
 from models import ScalpCapitalLedger, ScalpGateState
 from tz_utils import ist_today_str, iso_utc
@@ -530,6 +530,7 @@ def sync_from_broker(db: Session) -> float:
     # group341: only the MARGIN this pool's positions block is missing from Dhan's free cash, not their full cost (see
     # config.SCALP_POOL_COMMITTED_MARGIN_FRAC); adding the whole notional back inflated the baseline ~28% per open position.
     _margin_frac = min(1.0, max(0.0, float(getattr(config, "SCALP_POOL_COMMITTED_MARGIN_FRAC", 1.0))))
+    _committed_full = float(own_committed_capital or 0.0)   # E371: the full cost basis, before the margin fraction
     own_committed_capital = own_committed_capital * _margin_frac
     new_total = scalp_alloc + own_committed_capital + peer_credit
     if peer_credit > 0:
@@ -576,6 +577,15 @@ def sync_from_broker(db: Session) -> float:
                 row.available_capital = row.total_allocated_capital
         else:
             row.available_capital = row.total_allocated_capital
+    elif available_guard.enabled() and row.available_capital > 0:
+        # E371: positions are open, so no re-base; but never let the running figure sit above what the pool can spend (a double release,
+        # a credit for a position that never reserved, a shrunk pool). Lowers only, with a tolerance; see capital/available_guard.py.
+        _clamped = available_guard.clamped_available(row.available_capital, row.total_allocated_capital, _committed_full)
+        if _clamped != row.available_capital:
+            logger.warning("ledger: available_capital %.2f is above the pool ceiling (total %.2f - open cost %.2f = %.2f) - lowered to the ceiling "
+                           "(E371; SCALP_AVAILABLE_CEILING_CLAMP=0 turns this off)", row.available_capital, row.total_allocated_capital,
+                           _committed_full, _clamped)
+            row.available_capital = _clamped
     elif row.available_capital <= 0:
         # Open positions exist but available_capital hit zero — at minimum
         # reset to the freshly synced free-cash slice (own_committed_capital
@@ -764,6 +774,14 @@ def reserve_capital(
                 "ledger.reserve_capital: ACCOUNT-WIDE daily loss %.2f%% (both engines) has reached the %.2f%% cap "
                 "— refusing entry", _acct_loss, config.ACCOUNT_MAX_DAILY_LOSS_PCT,
             )
+            return None
+
+    # E367: the day's loss counts what is still open too (realized + unrealized, fresh ticks only). Blocks a new entry only; the persistent kill switch stays realized-only.
+    if getattr(config, "DAILY_LOSS_COUNTS_UNREALIZED", True) and config.MAX_DAILY_LOSS_PCT_OF_POOL > 0:
+        _day_loss = open_pnl.day_loss_pct_with_open(db, row.realized_pnl_today, row.total_allocated_capital)
+        if _day_loss >= config.MAX_DAILY_LOSS_PCT_OF_POOL:
+            if _should_log_sync("open_loss", int(time.time() // 300)):
+                logger.warning("ledger.reserve_capital: today's loss including OPEN positions is %.2f%% of the pool (limit %.2f%%) - refusing entry", _day_loss, config.MAX_DAILY_LOSS_PCT_OF_POOL)
             return None
 
     # BUG FIX (#1 — position sizing formula ate 100% of pool per trade):

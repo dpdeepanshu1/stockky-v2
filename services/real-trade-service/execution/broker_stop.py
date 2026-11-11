@@ -15,6 +15,9 @@ DESIGN (kept deliberately small, and subordinate to the software exits):
     traded) first. If Dhan says the stop already traded, the software SELL is skipped and reconcile books the fill. If the cancel
     keeps failing for another reason, after BROKER_STOP_CANCEL_MAX_FAILS tries the software SELL goes ahead anyway (a second SELL
     on a CNC holding that is already gone is rejected by Dhan as an oversell, which the exit engine already handles).
+  * E369: after an accepted cancel the order is read back. Traded -> no software SELL. For an INTRADAY (MIS) position a still-live
+    stop, an unreadable-after-failed-cancel streak or an error with a known stop also means NO software SELL (a second SELL on a
+    gone long opens a short); only CNC may sell anyway after BROKER_STOP_CANCEL_MAX_FAILS.
   * Everything here is best effort: nothing raises into the exit loop; failures are logged (placement failures at most once per
     BROKER_STOP_ALERT_COOLDOWN_S per symbol, and an eDIS / TPIN rejection is named as such - a CNC stop on holdings needs it).
 
@@ -209,22 +212,41 @@ def _broker_status(db: Session, order_id: str) -> Optional[str]:
     return None
 
 
+_LIVE_STOP_STATES = ("TRADED", "PART_TRADED", "PARTIALLY_TRADED")
+_DEAD_STOP_STATES = ("CANCELLED", "CANCELED", "REJECTED", "EXPIRED")
+
+
+def _is_intraday(position) -> bool:
+    return getattr(position, "entry_product_type", None) in ("INTRADAY", "MIS")
+
+
 def cancel_for_exit(db: Session, position) -> bool:
     """Called right before a software SELL. True = go ahead (no stop, or it is cancelled / dead). False = do NOT sell this
-    cycle (the stop may have traded; reconcile will book it, or the cancel is being retried). Never raises."""
+    cycle (the stop may have traded; reconcile will book it, or the cancel is being retried). Never raises.
+
+    E369: a successful cancel call is now READ BACK from Dhan's order book before the SELL goes out. A cancel can be accepted
+    while the stop has already traded or is still live. For an INTRADAY (MIS) position that matters most: a second SELL on a
+    long that is already gone opens a SHORT (a CNC double sell is just rejected as an oversell). So for MIS:
+      * the stop traded / part traded        -> no software SELL (reconcile books the fill);
+      * the stop is still live after cancel  -> no software SELL this cycle, cancel is retried;
+      * the cancel keeps failing             -> still no software SELL (the stop keeps protecting; Dhan squares MIS off itself),
+        an alert is sent once per streak - it never sells anyway the way the CNC path does.
+    CNC keeps the old behaviour except that a read-back showing TRADED now also skips the SELL."""
+    stop = None
     try:
         stop = open_stop(db, position.symbol)
         if stop is None:
             return True
+        intraday = _is_intraday(position)
         try:
             dhan_client.cancel_order(db, is_armed=True, dhan_order_id=stop.dhan_order_id)
         except Exception as e:  # noqa: BLE001
             st = _broker_status(db, stop.dhan_order_id)
-            if st in ("TRADED", "PART_TRADED", "PARTIALLY_TRADED"):
+            if st in _LIVE_STOP_STATES:
                 logger.warning("broker stop %s for %s already traded at Dhan - software SELL skipped, reconcile books it",
                                stop.dhan_order_id, position.symbol)
                 return False
-            if st in ("CANCELLED", "CANCELED", "REJECTED", "EXPIRED"):
+            if st in _DEAD_STOP_STATES:
                 stop.status = "CANCELLED" if st != "REJECTED" else "REJECTED"
                 db.commit()
                 _cancel_fails.pop(position.symbol, None)
@@ -232,12 +254,35 @@ def cancel_for_exit(db: Session, position) -> bool:
             n = _cancel_fails.get(position.symbol, 0) + 1
             _cancel_fails[position.symbol] = n
             if n >= int(config.BROKER_STOP_CANCEL_MAX_FAILS):
+                if intraday:
+                    logger.error("broker stop %s for %s (INTRADAY): cancel failed %d times (%s) - NOT selling: a second SELL "
+                                 "could open a short; the stop stays resting", stop.dhan_order_id, position.symbol, n, e)
+                    if n == int(config.BROKER_STOP_CANCEL_MAX_FAILS):
+                        notifier.notify_fire_and_forget(
+                            f"\U0001f6a8 {position.symbol}: the resting broker stop could not be cancelled ({n} tries), so the "
+                            "square-off SELL was NOT sent (it could open a short). Check Dhan; Dhan's own MIS square-off still applies.")
+                    return False
                 logger.error("broker stop %s for %s: cancel failed %d times (%s) - selling anyway; a second SELL on a "
                              "holding that is already gone is rejected by Dhan", stop.dhan_order_id, position.symbol, n, e)
                 return True
             logger.warning("broker stop %s for %s: cancel failed (%s) - software SELL waits (try %d/%d)",
                            stop.dhan_order_id, position.symbol, e, n, config.BROKER_STOP_CANCEL_MAX_FAILS)
             return False
+        # The cancel call was accepted: read the order back before trusting it.
+        st = _broker_status(db, stop.dhan_order_id)
+        if st in _LIVE_STOP_STATES:
+            logger.warning("broker stop %s for %s traded at Dhan (cancel accepted too late) - software SELL skipped, reconcile books it",
+                           stop.dhan_order_id, position.symbol)
+            return False
+        if st is not None and st not in _DEAD_STOP_STATES and intraday:
+            n = _cancel_fails.get(position.symbol, 0) + 1
+            _cancel_fails[position.symbol] = n
+            logger.warning("broker stop %s for %s (INTRADAY) still %s after the cancel - software SELL waits (try %d)",
+                           stop.dhan_order_id, position.symbol, st, n)
+            return False
+        if st is None and intraday:
+            logger.warning("broker stop %s for %s: cancel accepted but the order book could not be read - trusting the cancel",
+                           stop.dhan_order_id, position.symbol)
         stop.status = "CANCELLED"
         db.commit()
         _cancel_fails.pop(position.symbol, None)
@@ -248,6 +293,9 @@ def cancel_for_exit(db: Session, position) -> bool:
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
+        if stop is not None and _is_intraday(position):   # a stop was found but could not be handled; with no stop known the SELL goes ahead
+            logger.error("broker stop: cancel_for_exit(%s) failed (%s) - INTRADAY software SELL skipped this cycle", position.symbol, e)
+            return False
         logger.error("broker stop: cancel_for_exit(%s) failed (%s) - software SELL goes ahead", position.symbol, e)
         return True
 

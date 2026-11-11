@@ -81,7 +81,9 @@ def due(row: Dict[str, Any], now_ts: float) -> Dict[str, Any]:
     if now_k <= obs_k:
         return {"due": False, "reason": "same_day", "lookback_days": 0}
     age = now_k - obs_k
-    return {"due": True, "reason": "pending", "lookback_days": min(120, age + 10)}
+    if age + 10 > 120:    # E365: the 120-day fetch no longer reaches back to the sessions right after the observation, so T+k would be measured from the wrong bars: not evaluated
+        return {"due": False, "reason": "too_old", "lookback_days": 0}
+    return {"due": True, "reason": "pending", "lookback_days": age + 10}
 
 
 def bars_after(bars: Sequence[Sequence[float]], obs_ts: float) -> List[Sequence[float]]:

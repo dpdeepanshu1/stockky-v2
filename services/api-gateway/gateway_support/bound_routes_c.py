@@ -37,6 +37,9 @@ def build_bound_routes_c(ref):
             data = resp.json()
             blk = ref.ms_passthrough.safe_block(data)
             if blk is None:
+                _ts = ref.ms_passthrough.truncated_summary(data)   # E388: over-size block -> technical sent only the flat summary; the entry gate reads that
+                if _ts is not None:
+                    return {"symbol": base, "market_structure": None, "structure_summary": _ts}
                 return empty
             return {"symbol": base, "market_structure": blk, "structure_summary": ref.ms_passthrough.safe_summary(data)}
         except Exception as e:  # noqa: BLE001

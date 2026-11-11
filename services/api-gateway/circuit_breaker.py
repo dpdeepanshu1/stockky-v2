@@ -281,6 +281,27 @@ class CircuitBreaker:
             raise
 
 
+# E386: the technical service answers /structure/{sym} and the daily /chart-context/{sym} with an HTTP 503 whose detail says the HISTORY is thin
+# (a new listing, a halted stock) - the service is up and answering, it just has nothing to compute. Counting that as a dependency failure let a
+# run of thin-history symbols (12 in a row by default) open the shared "technical" breaker and block /analyze for everyone.
+_BENIGN_503_DETAILS = (
+    "structure unavailable (history thin or engine error)",
+    "chart context unavailable (history thin or engine error)",
+)
+
+
+def is_data_thin_503(resp: Any) -> bool:
+    """True when `resp` is the technical service's own 'history thin' 503 (not an outage / cold-start 503). Never raises."""
+    try:
+        if getattr(resp, "status_code", None) != 503:
+            return False
+        body = resp.json()
+        detail = body.get("detail") if isinstance(body, dict) else None
+        return isinstance(detail, str) and detail.strip() in _BENIGN_503_DETAILS
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _registry: Dict[str, CircuitBreaker] = {}
 _registry_lock = threading.Lock()
 

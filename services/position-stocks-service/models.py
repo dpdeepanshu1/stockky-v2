@@ -557,6 +557,18 @@ class SharedHeatSectors(Base):
     updated_at = Column(DateTime, nullable=False, default=_now, onupdate=_now)
 
 
+class ScalpPendingClaim(Base):
+    """E366: a release or a watched SELL that plain_short.py keeps in memory and that must survive a restart: a capital release or symbol-lock release that failed after a short
+    was closed or undone (kind 'capital' / 'lock'), and a plain SELL whose state is unknown (kind 'orphan'). A NEW table, so create_all() adds it with no ALTER. Rows are written
+    best-effort when the item is queued and deleted when it resolves; the guard reloads them once per process."""
+    __tablename__ = "scalp_pending_claims"
+
+    key = Column(String(64), primary_key=True)
+    kind = Column(String(16), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+
 class ScalpIntradayRestrictedSecurity(Base):
     """Learned list of NSE securities Dhan has rejected as 'not allowed to
     be traded in Intraday' (T2T / ASM / GSM surveillance stocks).

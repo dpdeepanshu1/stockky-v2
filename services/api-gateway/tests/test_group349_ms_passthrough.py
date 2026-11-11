@@ -79,3 +79,34 @@ def test_feed_keys_empty_without_a_valid_block():
     assert mp.feed_keys({"rsi": 33}) == {}
     assert mp.feed_keys({"market_structure": {"schema_version": 99}}) == {}
     assert mp.feed_keys(None) == {}
+
+
+def test_e384_truncated_block_keeps_the_flat_summary():
+    blk = analyze(_bars())
+    flat = mp.flatten_summary(blk)
+    src = {"structure_summary": flat, "structure_truncated": True}      # what technical sends over STRUCTURE_MAX_BYTES
+    t = {}
+    assert mp.merge_into(t, src) is False and "market_structure" not in t
+    assert t["structure_summary"] == flat
+    k = mp.feed_keys(src)
+    assert k and k["ms_quality"] == blk["quality"] and all(v is not None for v in k.values())
+    # not trusted without the flag, with an unavailable quality, or when a real block is present
+    assert mp.feed_keys({"structure_summary": flat}) == {} and mp.merge_into({}, {"structure_summary": flat}) is False
+    assert mp.feed_keys({"structure_summary": {"ms_quality": "unavailable"}, "structure_truncated": True}) == {}
+    assert mp.truncated_summary({"structure_summary": flat, "structure_truncated": True, "market_structure": blk}) is None
+    assert mp.truncated_summary({"structure_summary": "x", "structure_truncated": True}) is None
+
+
+def test_e385_lite_summary_keys():
+    blk = analyze(_bars())
+    flat = mp.flatten_summary(blk)
+    k = mp.lite_summary_keys({"structure_summary": flat})
+    assert k and k["ms_quality"] == blk["quality"] and all(v is not None for v in k.values()) and set(k) <= set(SUMMARY_KEYS)
+    assert mp.lite_summary_keys({"structure_summary": flat, "market_structure": blk}) == {}      # a real block goes through feed_keys
+    assert mp.lite_summary_keys({"structure_summary": {"ms_quality": "unavailable"}}) == {}
+    assert mp.lite_summary_keys(None) == {} and mp.lite_summary_keys({"structure_summary": 3}) == {}
+    os.environ["STRUCTURE_PASSTHROUGH"] = "0"
+    try:
+        assert mp.lite_summary_keys({"structure_summary": flat}) == {}
+    finally:
+        del os.environ["STRUCTURE_PASSTHROUGH"]

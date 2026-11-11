@@ -1592,6 +1592,24 @@ def record_real_exit_sent(db: Session, position: models.TradePosition, dhan_orde
     db.commit()
 
 
+def raised_to_breakeven(current_stop, entry_price):
+    """E361: the stop after a partial exit moves the remainder to breakeven: max(current stop, entry price).
+    The plain `max(current_stop or 0, entry)` kept a NaN stop: `nan or 0` is nan (nan is truthy) and `max(nan, x)` returns its first argument, so the breakeven raise was
+    silently dropped and the NaN stayed (it then counts as no stop to the exit checks). A missing, NaN, infinite or <= 0 stop now becomes the entry price.
+    An unusable entry price leaves the stop as it is."""
+    try:
+        e = float(entry_price)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(e) and e > 0):
+        return current_stop
+    try:
+        c = float(current_stop)
+    except (TypeError, ValueError):
+        return e
+    return max(c, e) if (math.isfinite(c) and c > 0) else e
+
+
 def record_real_exit_fill(db: Session, position: models.TradePosition, exit_price: float,
                            qty_closed: int, reason: str) -> float:
     """REAL-only. Confirmed by reconcile_real_orders() against Dhan's own
@@ -1636,7 +1654,7 @@ def record_real_exit_fill(db: Session, position: models.TradePosition, exit_pric
             # De-risk the remainder the same way DEMO does — move the stop
             # up to breakeven rather than leaving it at the original,
             # wider stop distance now that some profit is locked in.
-            position.current_stop = max(position.current_stop or 0, position.avg_entry_price)
+            position.current_stop = raised_to_breakeven(position.current_stop, position.avg_entry_price)   # E361: a NaN stop is replaced, not kept
 
     db.add(models.TradePositionEvent(
         position_id=position.id,

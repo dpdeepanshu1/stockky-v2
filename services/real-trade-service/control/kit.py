@@ -496,7 +496,10 @@ class Controller:
             rec = {"value": new, "orig_env": orig, "by": by, "at": _now(), "note": (note or "")[:200]}
             self.store.put(f.key, rec)
             os.environ[f.key] = new
+            _prev_running = running_value(f) if f.live else None
             applied, err = (self._apply_live(f, new) if f.live else (False, None))
+            if f.live and not applied and _prev_running is not None:
+                self._apply_live(f, _prev_running)           # E372: a failed live apply must not leave some targets on the new value while the page says "after restart"
             restart = not (f.live and applied)
             self.store.audit({"action": "set", "service": self.service, "key": f.key, "from": cur, "to": new, "change": change, "by": by,
                               "applied_live": applied, "restart_required": restart, "note": rec["note"], "error": err})
@@ -598,10 +601,12 @@ class Controller:
             before = {f.key: self._overlays.get(f.key) for f, _, _, _ in plan}
             done: List[Flag] = []
             failed: Optional[Tuple[str, Optional[str]]] = None
+            failed_flag: Optional[Flag] = None
             for f, saved, new, change in plan:
                 applied, err = self._apply_live(f, new)
                 if not applied:
                     failed = (f.key, err)
+                    failed_flag = f
                     break
                 done.append(f)
                 if change == "SAME":
@@ -610,6 +615,9 @@ class Controller:
                     self._overlays[f.key] = {"saved": saved, "value": new, "until": when.isoformat(timespec="seconds"), "until_ts": when.timestamp(),
                                              "state": st, "version": ver, "by": by}
             if failed:                                       # roll everything this call touched back to how it was
+                if failed_flag is not None:                  # E372: the switch that failed may have had some of its targets rewritten already
+                    _p = before.get(failed_flag.key)
+                    self._apply_live(failed_flag, _p["value"] if _p else self._saved(failed_flag))
                 for f in done:
                     prev = before.get(f.key)
                     if prev:

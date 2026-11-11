@@ -14,7 +14,7 @@ import os
 from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NAMES = ("record_real_exit_fill", "force_close_real_position")
+NAMES = ("record_real_exit_fill", "force_close_real_position", "raised_to_breakeven")   # E361: record_real_exit_fill calls the breakeven helper
 
 
 def _build(account_raises=False, release_rolls_back=False):
@@ -42,6 +42,7 @@ def _build(account_raises=False, release_rolls_back=False):
             db.rollback()
 
     ns = {
+        "math": __import__("math"),
         "models": SimpleNamespace(TradePositionEvent=lambda **k: SimpleNamespace(**k)),
         "datetime": __import__("datetime").datetime, "timezone": __import__("datetime").timezone,
         "_accumulate_net_cost": lambda *a, **k: None, "get_account": get_account, "_open_positions_market_value": lambda db, m: 0.0,

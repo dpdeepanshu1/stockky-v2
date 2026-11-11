@@ -140,6 +140,7 @@ def _detect(bars, t, a, struct, consumed, state, trans_dir, gap, p: MSParams, bo
             level_sw = prior_h[-1] if prior_h else None
         if level_sw is not None and px_up > level_sw["price"] + p.bos_min_atr * a:
             consumed.add(("high", level_sw["idx"]))
+            consumed.update(("high", x["idx"]) for x in hs if px_up > x["price"] + p.bos_min_atr * a)   # E373: one bar that closes through several swing highs is ONE break. Every live high this bar took out (by the same test that detects a break) is spent, not only the reported level, or an older one fires a second BOS on the next bar
             ev = {"dir": 1, "direction": "bullish", "level": level_sw["price"], "level_idx": level_sw["idx"], "break_price": b[C],
                   "break_idx": t, "gap_event": gap, "disp": disp > 0, "vol_ratio": _vol_ratio(bars, t, p.vol_mean_bars),
                   "strength": _strength(bars, t, level_sw["price"], 1, a, gap, p, live, disp > 0)}
@@ -155,6 +156,7 @@ def _detect(bars, t, a, struct, consumed, state, trans_dir, gap, p: MSParams, bo
             level_sw = prior_l[-1] if prior_l else None
         if level_sw is not None and px_dn < level_sw["price"] - p.bos_min_atr * a:
             consumed.add(("low", level_sw["idx"]))
+            consumed.update(("low", x["idx"]) for x in ls if px_dn < x["price"] - p.bos_min_atr * a)   # E373: mirror of the high side
             ev = {"dir": -1, "direction": "bearish", "level": level_sw["price"], "level_idx": level_sw["idx"], "break_price": b[C],
                   "break_idx": t, "gap_event": gap, "disp": disp < 0, "vol_ratio": _vol_ratio(bars, t, p.vol_mean_bars),
                   "strength": _strength(bars, t, level_sw["price"], -1, a, gap, p, live, disp < 0)}

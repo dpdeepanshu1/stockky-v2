@@ -67,7 +67,7 @@ _FALLBACK_STOP_PCT = 3.2
 _FALLBACK_TARGET_PCT = 6.5
 
 
-def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
+def _account_state(db: Session, mode: str, gate_armed: bool, open_pnl: float = 0.0) -> AccountState:
     if mode == "REAL":
         # Same fix as entry_engine/entry.py — see execution/equity_sync.py.
         # Without this, a manual Review always saw equity=0 and came back
@@ -94,6 +94,7 @@ def _account_state(db: Session, mode: str, gate_armed: bool) -> AccountState:
         max_tick_volatility_mult=risk.max_tick_volatility_mult,
         allow_pyramiding=risk.allow_pyramiding,
         realized_pnl_today=account.realized_pnl_today,
+        open_unrealized_pnl=float(open_pnl or 0.0),      # E370: same open-loss input as the automatic entry path (E368)
         open_position_count=len(positions),
         open_position_symbols={p.symbol for p in positions} | working_buy_symbols(db, mode),   # group297
         open_positions_total_risk=sum(
@@ -244,7 +245,9 @@ async def evaluate_manual_order(
         if req.target_price and not swing and target_price <= reference_price:
             return {"ok": False, "reason": "invalid_target", "detail": "Target price must be above entry price."}
 
-        account_state = _account_state(db, mode, gate_armed)
+        from portfolio import open_pnl as _open_pnl_mod   # E370: fresh quotes only, fail-open 0, 4 s cap
+        _open_pnl = await _open_pnl_mod.open_unrealized_pnl(db, mode, quotes_fn=get_quotes)
+        account_state = _account_state(db, mode, gate_armed, open_pnl=_open_pnl)
         if swing and swing.get('max_trade_value'):
             import dataclasses
             account_state = dataclasses.replace(account_state, max_trade_value=float(swing['max_trade_value']))

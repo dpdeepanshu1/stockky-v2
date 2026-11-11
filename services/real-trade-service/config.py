@@ -1380,6 +1380,7 @@ EXIT_EARLY_WARN_DAYS                = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or
 # so a very long stuck streak doesn't go silent after the first alert).
 EXIT_RETRY_BASE_COOLDOWN_SECONDS    = int(((os.getenv("EXIT_RETRY_BASE_COOLDOWN_SECONDS") or "").strip() or "60"))
 EXIT_RETRY_MAX_COOLDOWN_SECONDS     = int(((os.getenv("EXIT_RETRY_MAX_COOLDOWN_SECONDS") or "").strip() or "900"))
+EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS = int(((os.getenv("EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS") or "").strip() or "120"))   # E364: cap for stop_hit / emergency_gap_down
 EXIT_RETRY_ALERT_THRESHOLD          = int(((os.getenv("EXIT_RETRY_ALERT_THRESHOLD") or "").strip() or "5"))
 
 #

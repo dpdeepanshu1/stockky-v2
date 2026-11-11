@@ -54,6 +54,7 @@ _alerted: set = set()                     # (position id, kind) alerts already s
 _orphans: Dict[str, Dict[str, Any]] = {}  # entry order id -> {sym, security_id, qty, value, since, cancelled, tries}
 _pending_release: List[Dict[str, Any]] = []   # E331: capital / symbol-lock releases that failed after a short was closed, retried every guard pass (this process only)
 RELEASE_RETRY_LIMIT = 20
+_loaded: List[bool] = [False]                # E366: the durable rows were read into the two queues above in this process
 _tripped_day: List[Optional[str]] = [None]   # IST date on which a stop could not be placed: no new plain short that day
 _stats: Dict[str, int] = {"opened": 0, "stop_failed_covered": 0, "unprotected": 0, "unknown_state": 0, "stop_filled": 0, "target_exit": 0, "breach_cover": 0,
                           "stop_replaced": 0, "orphan_covered": 0, "orphan_released": 0, "cover_adopted": 0}
@@ -63,6 +64,7 @@ def reset_state() -> None:
     """Test helper."""
     _breach_since.clear(); _next_try.clear(); _replaced.clear(); _alerted.clear(); _orphans.clear(); _pending_release.clear()
     _tripped_day[0] = None
+    _loaded[0] = False
     for k in _stats:
         _stats[k] = 0
 
@@ -172,6 +174,72 @@ def _round_levels(fill: float, stop_pct: float, target_pct: float, stop_fallback
     return float(stop), float(target)
 
 
+# ---------------------------------------------------------------- the durable copy (E366)
+def _store():
+    from orders import claim_store
+    return claim_store
+
+
+def _persist(db, key: str, kind: str, payload: Dict[str, Any]) -> None:
+    try:
+        _store().save(db, key, kind, payload)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("plain short: durable save of %s failed (%s)", key, e)
+
+
+def _forget(db, key: Optional[str]) -> None:
+    try:
+        if key:
+            _store().forget(db, key)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("plain short: durable delete of %s failed (%s)", key, e)
+
+
+def _new_key(prefix: str) -> str:
+    import uuid
+    return f"{prefix}:{uuid.uuid4().hex[:24]}"
+
+
+def load_persisted(db) -> int:
+    """E366: once per process, read the saved releases and watched SELLs back into the in-memory queues (an item already queued here is not doubled). Returns how many were
+    added. When the table cannot be read, it is tried again on the next pass. Never raises."""
+    if _loaded[0]:
+        return 0
+    try:
+        rows, ok = _store().load_all(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("plain short: durable load failed (%s)", e)
+        return 0
+    if not ok:
+        return 0
+    _loaded[0] = True
+    added = 0
+    have = {i.get("key") for i in _pending_release}
+    for key, kind, p in rows:
+        try:
+            if kind in ("capital", "lock"):
+                if key in have:
+                    continue
+                item = {"kind": kind, "sym": str(p["sym"]), "tries": 0, "key": key}
+                if kind == "capital":
+                    item.update(value=float(p.get("value") or 0.0), pnl=float(p.get("pnl") or 0.0))
+                _pending_release.append(item)
+                added += 1
+            elif kind == "orphan":
+                oid = str(p["order_id"])
+                if oid in _orphans:
+                    continue
+                _orphans[oid] = {"sym": str(p["sym"]), "security_id": str(p["security_id"]), "qty": int(p["qty"]), "value": float(p.get("value") or 0.0),
+                                 "since": time.monotonic(), "cancelled": False, "tries": 0, "next": 0.0, "key": key}
+                added += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("plain short: saved item %s skipped (%s)", key, e)
+    if added:
+        logger.warning("plain short: %d saved release / watched SELL item(s) reloaded after a restart", added)
+        _alert(f"?? <b>Short claims reloaded after a restart</b> - {added} pending release(s) or watched SELL(s) were saved before the restart and are being handled again.")
+    return added
+
+
 # ---------------------------------------------------------------- releasing the capital and the symbol lock
 def _rollback_quietly(db) -> None:
     try:
@@ -200,10 +268,27 @@ def release_claims(db, sym: str, value: float, pnl: float) -> bool:
         except Exception as e:  # noqa: BLE001
             all_ok = False
             _rollback_quietly(db)
+            item["key"] = _new_key(item["kind"])
             _pending_release.append(item)
+            _persist(db, item["key"], item["kind"], item)
             logger.error("plain short: releasing the %s of %s failed (%s) - queued for retry", item["kind"], sym, e)
             _alert(f"⚠️ <b>Short closed, {item['kind']} NOT released</b> - {sym}\n{str(e)[:160]}\nThe release is retried every few seconds; if this repeats, release it by hand.")
     return all_ok
+
+
+def queue_release(kind: str, sym: str, value: float = 0.0, pnl: float = 0.0, db=None) -> None:
+    """E363: queue ONE failed release ('capital' or 'lock') for the guard's retry (retry_pending_releases). For callers outside this module (short_live._undo) whose own release failed.
+    Never raises."""
+    try:
+        item = {"kind": kind, "sym": sym, "tries": 0}
+        if kind == "capital":
+            item.update(value=float(value or 0.0), pnl=float(pnl or 0.0))
+        item["key"] = _new_key(kind)
+        _pending_release.append(item)
+        _persist(db, item["key"], kind, item)
+        _alert(f"?? <b>Short entry undone, {kind} NOT released</b> - {sym}\nThe release is retried every few seconds; if this repeats, release it by hand.")
+    except Exception as e:  # noqa: BLE001
+        logger.error("plain short: could not queue the %s release of %s (%s)", kind, sym, e)
 
 
 def retry_pending_releases(db) -> int:
@@ -213,6 +298,7 @@ def retry_pending_releases(db) -> int:
         try:
             _do_release(db, item)
             _pending_release.remove(item)
+            _forget(db, item.get("key"))
             done += 1
             logger.info("plain short: queued %s release of %s done", item["kind"], item["sym"])
         except Exception as e:  # noqa: BLE001
@@ -220,22 +306,31 @@ def retry_pending_releases(db) -> int:
             item["tries"] += 1
             if item["tries"] >= RELEASE_RETRY_LIMIT:
                 _pending_release.remove(item)
+                _forget(db, item.get("key"))
                 logger.critical("plain short: giving up releasing the %s of %s after %d tries (%s)", item["kind"], item["sym"], item["tries"], e)
                 _alert(f"🚨 <b>{item['kind'].title()} still held</b> - {item['sym']}\nThe release failed {item['tries']} times ({str(e)[:120]}). Release it by hand.")
     return done
 
 
 # ---------------------------------------------------------------- the orphan watch list
-def watch_orphan(entry_order_id: Optional[str], sym: str, security_id: str, qty: int, value: float) -> None:
+def watch_orphan(entry_order_id: Optional[str], sym: str, security_id: str, qty: int, value: float, db=None) -> None:
     """Put a SELL whose state is unknown on the watch list. The caller keeps the capital and the symbol lock held; this module releases them when the SELL resolves."""
     if not entry_order_id:
         return
     _orphans[str(entry_order_id)] = {"sym": sym, "security_id": str(security_id), "qty": int(qty), "value": float(value or 0.0),
-                                     "since": time.monotonic(), "cancelled": False, "tries": 0, "next": 0.0}
+                                     "since": time.monotonic(), "cancelled": False, "tries": 0, "next": 0.0, "key": f"orphan:{entry_order_id}"}
+    o = _orphans[str(entry_order_id)]
+    _persist(db, o["key"], "orphan", {"order_id": str(entry_order_id), "sym": sym, "security_id": str(security_id), "qty": int(qty), "value": float(value or 0.0)})
 
 
 def _release_claims(db, o: Dict[str, Any]) -> None:
     release_claims(db, o["sym"], o["value"], 0.0)
+
+
+def _drop_orphan(db, oid: str) -> None:
+    """The watched SELL is resolved (or given up): out of memory and out of the durable table."""
+    o = _orphans.pop(oid, None)
+    _forget(db, (o or {}).get("key") or f"orphan:{oid}")
 
 
 def run_orphan_check(db, now_mono: Optional[float] = None) -> int:
@@ -267,20 +362,20 @@ def run_orphan_check(db, now_mono: Optional[float] = None) -> int:
                 except Exception as e:  # noqa: BLE001
                     o["tries"] += 1
                     if broker.is_ambiguous_placement_error(e) or o["tries"] >= ORPHAN_COVER_TRIES:
-                        _orphans.pop(oid, None)                          # may exist at Dhan (or we gave up): no second BUY blind
+                        _drop_orphan(db, oid)                          # may exist at Dhan (or we gave up): no second BUY blind
                         _alert(f"🚨 <b>Watched SELL filled, cover NOT confirmed</b> - {sym} x{fq}\nSELL {oid} filled but the cover BUY failed ({str(e)[:160]}). Check Dhan and cover by hand.")
                         done += 1
                     else:
                         o["next"] = now + 10.0
                     continue
-                _orphans.pop(oid, None)
+                _drop_orphan(db, oid)
                 _release_claims(db, o)
                 _stats["orphan_covered"] += 1
                 done += 1
                 _alert(f"⚠️ <b>Unconfirmed short covered</b> - {sym} x{fq}\nThe plain SELL {oid} turned out to be filled and had no stop. Covered at market (BUY {cid}). No short remains; check Dhan for the round-trip result.")
                 continue
             if st in DEAD or (row is None and age >= ORPHAN_ABSENT_S):
-                _orphans.pop(oid, None)
+                _drop_orphan(db, oid)
                 _release_claims(db, o)
                 _stats["orphan_released"] += 1
                 done += 1
@@ -321,6 +416,27 @@ def open_plain_short(db, *, is_armed: bool, security_id: str, sym: str, qty: int
         _stats["unknown_state"] += 1
         _alert(f"🚨 <b>Plain short state unknown</b> - {sym} x{qty}\n{res['reason']}\nThe SELL (order {res.get('entry_order_id') or 'unknown'}) is on the watch list if its id is known.")
         return res
+
+
+def _resting_buy_stops(db, security_id: str) -> Tuple[List[dict], bool]:
+    """E362: the STOP_LOSS_MARKET BUY rows Dhan's order book lists for this security. (rows, readable): readable False = the book could not be read."""
+    try:
+        rows = broker.get_order_list(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("plain short: order book read failed while looking for a resting stop (%s)", e)
+        return [], False
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("securityId") or r.get("security_id") or "") != str(security_id):
+            continue
+        if str(r.get("transactionType") or r.get("transaction_type") or "").upper() != "BUY":
+            continue
+        if str(r.get("orderType") or r.get("order_type") or "").upper() not in ("STOP_LOSS_MARKET", "SL-M", "SLM"):
+            continue
+        out.append(r)
+    return out, True
 
 
 def _open_plain_short(db, res: Dict[str, Any], *, is_armed: bool, security_id: str, sym: str, qty: int, live: float, stop_price: float, target_price: float, stop_pct: float, target_pct: float,
@@ -408,7 +524,39 @@ def _open_plain_short(db, res: Dict[str, Any], *, is_armed: bool, security_id: s
     except Exception as e:  # noqa: BLE001
         stop_err = str(e)[:300]
         res.update(ok=False, protected=False)
+    # 3b. E362: place_intraday_buy_stop raises in cases where the stop may EXIST at Dhan (timeout after sending, "placed but the order list could not be read / does not show it").
+    # Covering the short while that BUY stop stays live leaves a stray trigger that later opens a LONG nobody owns. Look for it first: a live stop is adopted (its id is saved, so
+    # release_stop_before_cover cancels it before any later cover); one that already traded means the short is flat; only when the book shows none is the short covered.
+    stops, book_ok = _resting_buy_stops(db, security_id)
+    traded = [r for r in stops if _status(r) in FILLED and _raw_filled(r) in (0, int(filled))]
+    live = [r for r in stops if _status(r) not in FILLED | DEAD]
+    if traded:
+        sid = str(traded[0].get("orderId") or traded[0].get("order_id") or "")
+        res.update(ok=False, covered=True, reason=f"the broker stop call failed ({stop_err}) but Dhan shows the stop {sid} already traded: the short is flat")
+        _stats["stop_filled"] += 1
+        _alert(f"?? <b>Plain short stopped out at once</b> - {sym} x{filled}\nThe stop call errored but Dhan's book shows stop {sid} traded, so the short is flat. Check Dhan.")
+        return res
+    if live:
+        r0 = live[0]
+        sid = str(r0.get("orderId") or r0.get("order_id") or "")
+        if sid:
+            trig = _num(r0.get("triggerPrice") or r0.get("trigger_price"))
+            try:
+                q0 = int(float(r0.get("quantity") or 0))
+            except (TypeError, ValueError):
+                q0 = 0
+            planned = float(res["stop_price"])
+            res.update(ok=True, protected=True, stop_order_id=sid, reason="")
+            if trig is not None:
+                res["stop_price"] = float(trig)                  # the caller stores the stop that really rests at Dhan
+            _stats["opened"] += 1
+            logger.warning("plain short: %s stop call errored (%s) but Dhan lists the live stop %s (trigger %s, qty %s): adopted, not covered", sym, stop_err, sid, trig, q0)
+            if q0 != int(filled) or trig is None or abs(trig - planned) > 0.06:
+                _alert(f"?? <b>Plain short stop adopted</b> - {sym}\nThe stop call errored; Dhan lists stop {sid} (qty {q0}, trigger {trig}) for a short of {filled}. Check it covers the whole short.")
+            return res
     # 4. no stop: the day breaker trips and the short is covered at once
+    if not book_ok:
+        stop_err += " (the order book could not be read: if a BUY stop-loss order for this stock is listed at Dhan, cancel it)"
     _tripped_day[0] = _today()
     cover_id, last = "", ""
     for attempt in range(1, 4):
@@ -598,6 +746,10 @@ def run_plain_short_guard(db, now_mono: Optional[float] = None) -> int:
     Runs whatever SHORT_PLAIN_FALLBACK says: the switch gates new plain shorts only."""
     now = time.monotonic() if now_mono is None else now_mono
     done = 0
+    try:
+        load_persisted(db)
+    except Exception as e:  # noqa: BLE001
+        logger.error("plain short guard: durable reload failed (%s)", e)
     try:
         retry_pending_releases(db)
     except Exception as e:  # noqa: BLE001

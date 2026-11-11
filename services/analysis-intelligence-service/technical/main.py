@@ -13,10 +13,11 @@ All results are cached with TTL that respects market hours:
 - Outside: TTL = 21600 seconds (6 hours)
 """
 import os
+import asyncio
 import json
 import logging
 import math
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -139,8 +140,29 @@ def is_market_open() -> bool:
         pass
     return True
 
+def _close_buffer_remaining_s() -> int:
+    """E377: seconds left of the post-close window (15:30 .. 15:30 + STRUCTURE_BAR_CLOSE_BUFFER_MIN) on a trading weekday, else 0.
+    Structure drops today's bar until the buffer ends, but is_market_open() is already False after 15:30; without this the
+    'closed' 6 h TTL froze a structure / chart-context / analyze result that still lacked today's final bar. Never raises."""
+    try:
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if now.weekday() >= 5 or now.strftime("%Y-%m-%d") in _NSE_HOLIDAYS_2026:
+            return 0
+        close_dt = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        end_dt = close_dt + timedelta(minutes=_bar_close_buffer_min())
+        if close_dt < now < end_dt:
+            return int((end_dt - now).total_seconds())
+        return 0
+    except Exception:  # noqa: BLE001
+        return 0
+
 def get_cache_ttl() -> int:
-    return 300 if is_market_open() else 21600
+    if is_market_open():
+        return 300
+    rem = _close_buffer_remaining_s()
+    if rem > 0:
+        return min(21600, max(30, rem + 5))   # expire just after the buffer so the next read sees the closed final bar
+    return 21600
 
 # A "history too thin" quote-only result is a stopgap, not an analysis: cache
 # it only briefly so full technicals come back as soon as history recovers.
@@ -902,7 +924,7 @@ def _structure_cached(sym, df, ctx=None, force=False):
             return None, None
         flags = f"{int(bool((ctx or {}).get('extended')))}{int(bool((ctx or {}).get('extended_short')))}"
         key = f"tech_ms:{sym}:{flags}"
-        sig = [str(pd.Timestamp(df.index[-1])), int(len(df)), _structure_frame(sym, df)[1]]
+        sig = [str(pd.Timestamp(df.index[-1])), int(len(df)), _structure_frame(sym, df)[1], (os.getenv("STRUCTURE_PARAMS_JSON") or "").strip()]   # E378: a changed override must not serve the old block
         if not force and _structure_cache_ttl() > 0:
             hit = _cache_get(key)
             if isinstance(hit, dict) and hit.get("sig") == sig and hit.get("block") is not None:
@@ -957,13 +979,16 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
                 db_url = "postgresql://" + db_url[len("postgres://"):]
             from sqlalchemy import create_engine, text as _text
             engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-            with engine.connect() as conn:
-                row = conn.execute(
-                    _text("SELECT sector FROM symbol_master WHERE current_symbol=:s AND status='active'"),
-                    {"s": sym}
-                ).fetchone()
-                if row:
-                    sec = row[0] or ""
+            try:
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        _text("SELECT sector FROM symbol_master WHERE current_symbol=:s AND status='active'"),
+                        {"s": sym}
+                    ).fetchone()
+                    if row:
+                        sec = row[0] or ""
+            finally:
+                engine.dispose()   # E383: one engine per request was never disposed, so each request left a pooled connection open
         except Exception:
             pass
 
@@ -976,7 +1001,9 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
             from adaptive_thresholds import relative_strength_vs_sector
 
         async def _get_return(s, days):
-            df = _fetch_history(normalize_symbol(s))
+            # E382: _fetch_history is blocking HTTP (up to 25 s a call, 1 + up to 50 peers in a row); run it off the event loop so
+            # /health and every other request stay responsive while a sector read is in flight.
+            df = await asyncio.to_thread(_fetch_history, normalize_symbol(s))
             if df is None or df.empty or "Close" not in df.columns:
                 return None
             closes = df["Close"].dropna()
@@ -991,11 +1018,14 @@ async def sector_relative_strength(symbol: str, sector: str = ""):
                     db_url = "postgresql://" + db_url[len("postgres://"):]
                 from sqlalchemy import create_engine, text as _text
                 engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-                with engine.connect() as conn:
-                    rows = conn.execute(
-                        _text("SELECT current_symbol FROM symbol_master WHERE sector=:sec AND status='active' LIMIT 50"),
-                        {"sec": s}
-                    ).fetchall()
+                try:
+                    with engine.connect() as conn:
+                        rows = conn.execute(
+                            _text("SELECT current_symbol FROM symbol_master WHERE sector=:sec AND status='active' LIMIT 50"),
+                            {"sec": s}
+                        ).fetchall()
+                finally:
+                    engine.dispose()   # E383
                 return [r[0] for r in rows]
             except Exception:
                 return []
@@ -1063,6 +1093,14 @@ def analyze(
     lite: bool = False,
 ):
     sym = normalize_symbol(symbol)
+    # E379: FastAPI parses "nan" / "inf" as floats. A NaN weight made `round(score)` raise (500 on every call, and the gateway counts a 5xx
+    # against the technical circuit breaker); a NaN threshold silently switched a rule off. A non-finite override is the static default.
+    rsi_oversold = _num(rsi_oversold, 30.0)
+    rsi_overbought = _num(rsi_overbought, 70.0)
+    extended_1m_pct = _num(extended_1m_pct, 0.18)
+    extended_short_pct = _num(extended_short_pct, 0.05)
+    trend_weight = _num(trend_weight, 1.0)
+    meanrev_weight = _num(meanrev_weight, 1.0)
     # force=True and/or non-default threshold overrides must bypass the
     # plain per-symbol cache below — otherwise a cached response computed
     # under yesterday's thresholds (or under someone else's override)
@@ -1133,6 +1171,8 @@ def analyze(
             # result even after the upstream recovered.
         return result
 
+    if "Volume" not in df.columns:   # E380: a candle feed without volume used to KeyError (500); treat volume as unknown
+        df = df.assign(Volume=float("nan"))
     close  = df["Close"]
     high   = df["High"]
     low    = df["Low"]
@@ -1170,8 +1210,10 @@ def analyze(
     atr_val    = _num(atr_series.iloc[-1], 0.0)
     bb_up      = _num(bb_upper.iloc[-1], close_val)
     bb_lo      = _num(bb_lower.iloc[-1], close_val)
-    vol_now    = float(latest["Volume"])
-    vol_avg20  = float(volume.tail(min(20, len(volume))).mean()) if len(volume) >= 5 else vol_now
+    # E380: a NaN volume on the last bar made volume_ratio NaN, which the JSON response refuses (500). Unknown volume = no surge, ratio null.
+    vol_known  = math.isfinite(_num(latest["Volume"], float("nan")))
+    vol_now    = _num(latest["Volume"], 0.0)
+    vol_avg20  = _num(volume.tail(min(20, len(volume))).mean(), vol_now) if len(volume) >= 5 else vol_now
 
     score   = 50
     reasons = []
@@ -1336,7 +1378,7 @@ def analyze(
     # this is what decision-engine needs to forward rsi/volume_ratio through
     # to training-service as real numbers instead of always-null. Was
     # computed here already but never included in the response.
-    volume_ratio = round(vol_now / vol_avg20, 3) if vol_avg20 > 0 else None
+    volume_ratio = round(vol_now / vol_avg20, 3) if (vol_avg20 > 0 and vol_known) else None
 
     # Official NSE delivery % via market-data-service (quote → bhavcopy → fallback)
     delivery_pct = None
@@ -1420,7 +1462,10 @@ def analyze(
     # computed under non-default (adaptive) thresholds — only cache the
     # plain static-default computation, same as before this change.
     if not _using_overrides:
-        _cache_set(cache_key, result)
+        # E381: a result built while structure was wanted but missing (transient error / empty frame) is cached only briefly, so the next
+        # call retries it instead of serving a structure-less result for the whole 5 min - 6 h TTL.
+        _ms_wanted_missing = _ms_block is None and _ms_analyze is not None and _structure_enabled()
+        _cache_set(cache_key, result, ttl=min(get_cache_ttl(), _INSUFFICIENT_CACHE_TTL) if _ms_wanted_missing else None)
     return result
 
 def _extras_enabled() -> bool:

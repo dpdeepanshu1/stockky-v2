@@ -1,6 +1,6 @@
 """E114 behaviour test for orders/plain_short.py, runnable anywhere: no SQLAlchemy, no network, no pytest. Fakes the broker, ledger, lock and eod module in sys.modules,
 so it MUST run in its own interpreter. Run:  cd services/position-stocks-service && python3 ../../scripts/test_plain_short.py   (prints PASS/FAIL lines and 'ALL n OK')."""
-import sys, types, os
+import sys, types, os, time
 from unittest import mock
 sys.path.insert(0, '.')
 os.environ.setdefault("CONTROL_DIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "plain_short_ctl"))
@@ -33,6 +33,15 @@ def close_position_now(db, pos, exit_reason="MANUAL_EXIT"):
     COVERS.append((pos.symbol, exit_reason)); pos.status = exit_reason
     return {}
 eod.close_position_now = close_position_now; sys.modules["orders.eod_squareoff"] = eod; orders.eod_squareoff = eod
+cs = types.ModuleType("orders.claim_store"); STORE = {"rows": {}, "fail_save": False, "unreadable": False}
+def _cs_save(db, key, kind, payload):
+    if STORE["fail_save"]: return False
+    STORE["rows"][key] = (kind, dict(payload)); return True
+def _cs_forget(db, key): STORE["rows"].pop(key, None); return True
+def _cs_load(db):
+    if STORE["unreadable"]: return [], False
+    return [(k, v[0], dict(v[1])) for k, v in STORE["rows"].items()], True
+cs.save, cs.forget, cs.load_all = _cs_save, _cs_forget, _cs_load; sys.modules["orders.claim_store"] = cs; orders.claim_store = cs
 tzu = types.ModuleType("tz_utils"); DAY = {"d": "2026-10-26"}; tzu.ist_today_str = lambda: DAY["d"]; sys.modules["tz_utils"] = tzu
 import config
 config.SHORT_PLAIN_FALLBACK = True; config.SHORT_PLAIN_FILL_WAIT_S = 2.0; config.SHORT_PLAIN_STOP_GRACE_S = 6.0; config.SCALP_EXCHANGE_SEGMENT = "NSE_EQ"
@@ -226,4 +235,48 @@ try:
 finally:
     dc.is_ambiguous_placement_error = _real_amb
 check("E333: a crash before any SELL id is known -> critical with no id (caller keeps capital + lock, no watch entry)", (not r["ok"]) and r["critical"] and not r["entry_order_id"])
+
+# ---- E362: a stop call that errored but whose order exists at Dhan is adopted / not left live under a cover BUY
+def stop_row(oid, status="PENDING", qty=1, trig=101.0, **k):
+    return dict({"orderId": oid, "orderStatus": status, "securityId": "77", "transactionType": "BUY", "orderType": "STOP_LOSS_MARKET", "quantity": qty, "triggerPrice": trig}, **k)
+def _sold(): return dict(SOLD, securityId="77", transactionType="SELL", orderType="MARKET")
+fresh(); BK["rows"]["E1"] = _sold(); BK["rows"]["X9"] = stop_row("X9"); BK["stop_error"] = Ambig("timeout after sending"); r = op()
+check("E362: the stop call timed out but Dhan lists the live stop -> adopted, protected, NO cover BUY", r["ok"] and r["protected"] and r["stop_order_id"] == "X9" and not r["covered"] and not any(o["transaction_type"] == "BUY" for o in BK["orders"]))
+check("E362: ... the day breaker is NOT tripped by an adopted stop", not ps.breaker_tripped() and not r["critical"])
+fresh(); BK["rows"]["E1"] = _sold(); BK["rows"]["X9"] = stop_row("X9", qty=2); BK["stop_error"] = RuntimeError("placed S9 but it is not in the order list"); r = op()
+check("E362: a listed stop of another size is still adopted and alerted", r["ok"] and r["protected"] and r["stop_order_id"] == "X9" and any("Plain short stop adopted" in n for n in NOTES))
+fresh(); BK["rows"]["E1"] = _sold(); BK["rows"]["X9"] = stop_row("X9", status="TRADED", filledQty=1); BK["stop_error"] = RuntimeError("x"); r = op()
+check("E362: the stop already traded -> the short is flat, no cover BUY", (not r["ok"]) and r["covered"] and not any(o["transaction_type"] == "BUY" for o in BK["orders"]))
+fresh(); BK["rows"]["E1"] = _sold(); BK["rows"]["X9"] = stop_row("X9", status="REJECTED"); BK["stop_error"] = RuntimeError("x"); r = op()
+check("E362: a dead stop in the book is not adopted -> covered as before", (not r["ok"]) and r["covered"] and ps.breaker_tripped())
+fresh(); BK["rows"]["E1"] = _sold(); BK["rows"]["Z1"] = stop_row("Z1", securityId="999"); BK["stop_error"] = RuntimeError("x"); r = op()
+check("E362: a stop for ANOTHER security is ignored", (not r["ok"]) and r["covered"])
+fresh(); BK["rows"]["E1"] = _sold(); BK["stop_error"] = RuntimeError("x")
+dc.get_order_list = lambda db: (_ for _ in ()).throw(RuntimeError("book down"))
+r = op()
+check("E362: the book cannot be read for the stop lookup -> covered as before, with a warning to cancel a listed stop by hand", (not r["ok"]) and r["covered"] and any("cancel it" in n for n in NOTES))
+
+# ---- E363: short_live._undo queues a failed release for the guard's retry
+fresh(); ps.queue_release("capital", "X", value=250.0); ps.queue_release("lock", "X")
+check("E363: two failed releases are queued", len(ps._pending_release) == 2 and ps.stats()["releases_pending"] == 2)
+REL.clear(); LOCK.clear()
+check("E363: the retry gives the capital and the lock back and empties the queue", ps.retry_pending_releases(None) == 2 and REL == [(250.0, 0.0)] and LOCK == ["X"] and not ps._pending_release)
+
+# ---- E366: the queues survive a restart
+fresh(); STORE["rows"].clear(); STORE["fail_save"] = False; STORE["unreadable"] = False
+ps.queue_release("capital", "X", value=250.0, db=object()); ps.queue_release("lock", "X", db=object()); ps.watch_orphan("E7", "X", "77", 2, 400.0, db=object())
+check("E366: a queued release and a watched SELL are saved", sorted(v[0] for v in STORE["rows"].values()) == ["capital", "lock", "orphan"] and "orphan:E7" in STORE["rows"])
+ps._pending_release.clear(); ps._orphans.clear(); ps._loaded[0] = False       # a restart
+check("E366: after the restart the guard pass reloads all three", ps.load_persisted(object()) == 3 and len(ps._pending_release) == 2 and "E7" in ps._orphans and ps._orphans["E7"]["qty"] == 2)
+check("E366: the reload runs once per process (no doubling)", ps.load_persisted(object()) == 0 and len(ps._pending_release) == 2)
+REL.clear(); LOCK.clear(); n = ps.retry_pending_releases(object())
+check("E366: a reloaded release goes through and its saved row is deleted", n == 2 and REL == [(250.0, 0.0)] and LOCK == ["X"] and sorted(v[0] for v in STORE["rows"].values()) == ["orphan"])
+BK.update(rows={"E7": {"orderId": "E7", "orderStatus": "REJECTED"}}); ps.run_orphan_check(object(), now_mono=time.monotonic() + 1)
+check("E366: a watched SELL that resolves is deleted from the table and its claims released", not STORE["rows"] and not ps._orphans and REL[-1] == (400.0, 0.0) and LOCK[-1] == "X")
+fresh(); STORE["rows"].clear(); STORE["unreadable"] = True
+check("E366: an unreadable table is retried on the next pass, not marked loaded", ps.load_persisted(object()) == 0 and not ps._loaded[0])
+STORE["unreadable"] = False; STORE["rows"]["bad"] = ("capital", {"nosym": 1}); STORE["rows"]["ok"] = ("lock", {"sym": "Y"})
+check("E366: a damaged saved row is skipped, the others still load", ps.load_persisted(object()) == 1 and ps._pending_release[0]["sym"] == "Y")
+fresh(); STORE["rows"].clear(); STORE["fail_save"] = True; ps.queue_release("lock", "Z", db=object())
+check("E366: when the save fails the in-memory queue still holds the item", len(ps._pending_release) == 1 and not STORE["rows"]); STORE["fail_save"] = False
 print("ALL %d OK" % N[0])

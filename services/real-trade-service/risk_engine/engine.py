@@ -294,6 +294,8 @@ class AccountState:
     # ADDED (A11): combined net loss today of both engines, % of their combined capital (0.0 = unknown/none).
     # Default 0.0 means the account-wide cap never triggers for a site that does not populate it.
     account_wide_daily_loss_pct: float = 0.0
+    # ADDED (E368): unrealized P&L of the open positions (fresh quotes only), rupees. Default 0.0 = the daily loss check stays realized-only for a site that does not populate it.
+    open_unrealized_pnl: float = 0.0
 
 
 @dataclass
@@ -314,6 +316,12 @@ def _sector_heat_mult() -> float:
         return float((os.getenv("SECTOR_HEAT_MULT") or "").strip() or 1.5)
     except ValueError:
         return 1.5
+
+
+def _daily_loss_counts_unrealized() -> bool:
+    """E368: DAILY_LOSS_COUNTS_UNREALIZED (default on). Read per call so a restart is not needed to flip it."""
+    raw = (os.getenv("DAILY_LOSS_COUNTS_UNREALIZED") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _cap_trade_risk_at_daily_loss() -> bool:
@@ -409,6 +417,16 @@ def evaluate(
                 f"Daily loss {daily_loss_pct:.2f}% has reached the "
                 f"{account.max_daily_loss_pct:.2f}% cap. "
                 "No new trades for the rest of this trading day.",
+            )
+
+    # ── 3-open. E368: the day's loss also counts what is still open (realized + unrealized, fresh quotes). Blocks a new BUY only; flag DAILY_LOSS_COUNTS_UNREALIZED (default on).
+    if (intent.side == "BUY" and account.equity > 0 and account.open_unrealized_pnl < 0 and _daily_loss_counts_unrealized()):
+        _loss_with_open = -(account.realized_pnl_today + account.open_unrealized_pnl) / account.equity * 100.0
+        if _loss_with_open >= account.max_daily_loss_pct:
+            return RiskResult(
+                RiskVerdict.BLOCKED_GLOBAL, "daily_loss_limit_open",
+                f"Today's loss including open positions is {_loss_with_open:.2f}% (realized {account.realized_pnl_today:,.0f}, open {account.open_unrealized_pnl:,.0f}), "
+                f"at or over the {account.max_daily_loss_pct:.2f}% cap. No new buys until it recovers.",
             )
 
     # ── 3a. Account-wide daily loss cap (BUY only, A11) - both engines' combined loss, see shared_daily_pnl.py ──

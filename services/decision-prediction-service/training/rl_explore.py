@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+try:
+    from env_util import env_float_safe  # E505: a typo / blank setting must not stop this code path
+except ImportError:   # imported as a package module, the folder is not on sys.path
+    from .env_util import env_float_safe
 import random
 from typing import Any, Dict
 
@@ -58,7 +62,7 @@ class EpsilonGreedyBandit:
     """
 
     def __init__(self, epsilon: float = 0.08):
-        self.epsilon = float(((os.getenv("RL_EPSILON") or "").strip() or str(epsilon)))
+        self.epsilon = env_float_safe("RL_EPSILON", epsilon, lo=0, hi=1)
         self._n: Dict[str, Dict[str, int]] = {}
         self._q: Dict[str, Dict[str, float]] = {}
 

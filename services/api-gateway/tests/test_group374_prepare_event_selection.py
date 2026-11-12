@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys as _sys_e502
+_SVC_E502 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SVC_E502 not in _sys_e502.path:   # E502: buy_sniper now imports env_util; a path-loaded module needs the service dir on sys.path
+    _sys_e502.path.insert(0, _SVC_E502)
+
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

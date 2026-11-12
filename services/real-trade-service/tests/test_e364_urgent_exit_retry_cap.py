@@ -37,4 +37,4 @@ def test_urgent_exits_are_capped_at_120():
 def test_both_call_sites_pass_the_reason_and_the_env_is_wired():
     assert "_should_skip_exit_this_cycle(position, reason)" in SRC
     cfg = (ROOT / "config.py").read_text(encoding="utf-8")
-    assert re.search(r'EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS.*"120"', cfg)
+    assert re.search(r'EXIT_RETRY_URGENT_MAX_COOLDOWN_SECONDS.*("120"|, 120[,)])', cfg)   # E506: a range argument may follow the default

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
 import threading
 import time
 from datetime import datetime
@@ -26,9 +27,9 @@ logger = logging.getLogger("kronos-forecast-service")
 logging.basicConfig(level=logging.INFO)
 
 MARKET_DATA_URL = (os.getenv("MARKET_DATA_URL") or "http://market-data-service:8001").strip().rstrip("/")
-LOOKBACK = int(float(os.getenv("KRONOS_LOOKBACK") or 128))
-CACHE_TTL_S = float(os.getenv("KRONOS_WORKER_CACHE_TTL_S") or 900)
-HISTORY_TIMEOUT_S = float(os.getenv("KRONOS_HISTORY_TIMEOUT_S") or 20)
+LOOKBACK = env_int_safe("KRONOS_LOOKBACK", 128, positive=True)
+CACHE_TTL_S = env_float_safe("KRONOS_WORKER_CACHE_TTL_S", 900, lo=0)
+HISTORY_TIMEOUT_S = env_float_safe("KRONOS_HISTORY_TIMEOUT_S", 20, positive=True)
 
 app = FastAPI(title="kronos-forecast-service")
 _lock = threading.Lock()                       # one forecast at a time: the CPU budget is small

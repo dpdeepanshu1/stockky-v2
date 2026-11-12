@@ -14,6 +14,10 @@ Changes:
   internal traffic during market scans on free tier).
 """
 import os
+try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
 import json
 import asyncio
 import gc
@@ -99,10 +103,10 @@ EARNINGS_BOOST_DAYS = 7
 
 # ── Decide cache (avoids re-running full fan-out for same symbol within TTL) ──
 IST = ZoneInfo("Asia/Kolkata")
-DECIDE_CACHE_TTL_OPEN = int(((os.getenv("DECIDE_CACHE_TTL_OPEN") or "").strip() or "600"))
-DECIDE_CACHE_TTL_CLOSED = int(((os.getenv("DECIDE_CACHE_TTL_CLOSED") or "").strip() or "43200"))
-BATCH_MAX_SYMBOLS = int(((os.getenv("DECIDE_BATCH_MAX") or "").strip() or "25"))
-BATCH_CONCURRENCY = int(((os.getenv("DECIDE_BATCH_CONCURRENCY") or "").strip() or "8"))
+DECIDE_CACHE_TTL_OPEN = env_int_safe("DECIDE_CACHE_TTL_OPEN", 600, lo=0)
+DECIDE_CACHE_TTL_CLOSED = env_int_safe("DECIDE_CACHE_TTL_CLOSED", 43200, lo=0)
+BATCH_MAX_SYMBOLS = env_int_safe("DECIDE_BATCH_MAX", 25, positive=True)
+BATCH_CONCURRENCY = env_int_safe("DECIDE_BATCH_CONCURRENCY", 8, positive=True)
 
 _decide_mem_cache: dict = {}  # symbol -> (expires_ts, payload)
 _redis = None
@@ -438,7 +442,7 @@ async def _fetch_optional(client: httpx.AsyncClient, url: str, label: str):
 
 # ── Market Sentiment fetch from API Gateway ──────────────────────
 _sentiment_cache = {"ts": 0.0, "data": None}
-_SENTIMENT_TTL = float(((os.getenv("MARKET_SENTIMENT_TTL_SEC") or "").strip() or "120"))
+_SENTIMENT_TTL = env_float_safe("MARKET_SENTIMENT_TTL_SEC", 120, lo=0)
 
 
 async def get_market_sentiment() -> dict:

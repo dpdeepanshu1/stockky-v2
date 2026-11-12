@@ -10,6 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 from typing import Optional
 
 from fastapi import FastAPI
@@ -50,7 +54,7 @@ async def _lifespan(_app):
 
 
 app = FastAPI(title="Stockky Scheduler (merged)", version="0.1.0", lifespan=_lifespan)
-_NEON_INTERVAL = int(((os.getenv("NEON_KEEPALIVE_INTERVAL_SEC") or "").strip() or "240"))
+_NEON_INTERVAL = env_int_safe("NEON_KEEPALIVE_INTERVAL_SEC", 240)
 _task: Optional[asyncio.Task] = None
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import re
 import threading
 import time
@@ -66,27 +67,27 @@ IPO_WEIGHTS = {
     "recency": 0.10,
 }
 
-BUY_NOW_BAR = float(((os.getenv("IPO_BUY_NOW_BAR") or "").strip() or "70"))  # raised 66→70: weak market, higher bar
-PREPARE_BAR = float(((os.getenv("IPO_PREPARE_BAR") or "").strip() or "58"))  # raised 54→58: choppy market, fewer marginal signals
-DO_NOT_BUY_BAR = float(((os.getenv("IPO_DO_NOT_BUY_BAR") or "").strip() or "40"))
-FRESH_WINDOW_DAYS = int(((os.getenv("IPO_FRESH_WINDOW_DAYS") or "").strip() or "30"))
+BUY_NOW_BAR = env_float_safe("IPO_BUY_NOW_BAR", 70)  # raised 66→70: weak market, higher bar
+PREPARE_BAR = env_float_safe("IPO_PREPARE_BAR", 58)  # raised 54→58: choppy market, fewer marginal signals
+DO_NOT_BUY_BAR = env_float_safe("IPO_DO_NOT_BUY_BAR", 40)
+FRESH_WINDOW_DAYS = env_int_safe("IPO_FRESH_WINDOW_DAYS", 30, positive=True)
 # IPO_CHECKER_DEFAULT_DISPLAY_DAYS is the "IPO Checker" tab's default DISPLAY
 # filter (last ~1 month) — but the DISCOVERY/scan window below (LOOKBACK_DAYS_MAX
 # / HARD_CAP) is intentionally much wider (last ~1 year) so the scan itself
 # actually finds every IPO that listed within the last year; the frontend then
 # filters the returned list down to the last IPO_CHECKER_DEFAULT_DISPLAY_DAYS
 # days by default, with the option to widen the filter without re-scanning.
-IPO_CHECKER_DEFAULT_DISPLAY_DAYS = int(((os.getenv("IPO_CHECKER_DEFAULT_DISPLAY_DAYS") or "").strip() or "30"))
-LOOKBACK_DAYS_MAX = int(((os.getenv("IPO_LOOKBACK_DAYS_MAX") or "").strip() or "365"))
+IPO_CHECKER_DEFAULT_DISPLAY_DAYS = env_int_safe("IPO_CHECKER_DEFAULT_DISPLAY_DAYS", 30, lo=0)
+LOOKBACK_DAYS_MAX = env_int_safe("IPO_LOOKBACK_DAYS_MAX", 365, positive=True)
 # Hard ceiling regardless of IPO_LOOKBACK_DAYS_MAX — "recent IPO" stops
 # meaning anything past a year no matter how that env var is set (previously
 # hard-capped at 60 days, which silently dropped nearly every real-world IPO
 # candidate from ipoalerts/NSE discovery and made the Scan button look broken
 # — it was working, just filtering its own results down to ~nothing).
-IPO_LOOKBACK_DAYS_HARD_CAP = int(((os.getenv("IPO_LOOKBACK_DAYS_HARD_CAP") or "").strip() or "365"))
+IPO_LOOKBACK_DAYS_HARD_CAP = env_int_safe("IPO_LOOKBACK_DAYS_HARD_CAP", 365, positive=True)
 # Not-yet-listed IPOs (listing today/tomorrow/this week) — how far forward
 # to look for those.
-IPO_UPCOMING_WINDOW_DAYS = int(((os.getenv("IPO_UPCOMING_WINDOW_DAYS") or "").strip() or "21"))
+IPO_UPCOMING_WINDOW_DAYS = env_int_safe("IPO_UPCOMING_WINDOW_DAYS", 21, lo=0)
 
 def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     """URL setting from the environment with a blank-safe fallback.
@@ -211,15 +212,15 @@ def _is_ipo_non_equity(symbol: str) -> bool:
 # A successful fetch is cached for IPOALERTS_CACHE_HOURS so repeated Scan
 # IPOs clicks (or the daily premarket job on a day nothing changed) reuse it
 # instead of re-spending quota; only a cache MISS counts against the quota.
-IPOALERTS_DAILY_LIMIT = int(os.getenv("IPOALERTS_DAILY_LIMIT", "20") or 20)
-IPOALERTS_RECENT_WINDOW_DAYS = int(os.getenv("IPOALERTS_RECENT_WINDOW_DAYS", "7") or 7)
-IPOALERTS_CACHE_HOURS = float(os.getenv("IPOALERTS_CACHE_HOURS", "6") or 6)
+IPOALERTS_DAILY_LIMIT = env_int_safe("IPOALERTS_DAILY_LIMIT", 20, lo=0)
+IPOALERTS_RECENT_WINDOW_DAYS = env_int_safe("IPOALERTS_RECENT_WINDOW_DAYS", 7, lo=0)
+IPOALERTS_CACHE_HOURS = env_float_safe("IPOALERTS_CACHE_HOURS", 6, lo=0)
 IPOALERTS_STATUSES = ("open", "listed")  # NOT "upcoming"/"closed" — see above
 # 2026-10-06 (group 183): the free plan answers HTTP 400 "This parameter is not supported for free plan users." for
 # status=listed, on every cache miss, and each of those calls still costs one of the ~25 daily requests. When the body
 # says the plan rejects a status, remember it in the durable kv layer (survives a restart) for this long and stop asking.
 # 0 = old behaviour (ask every time).
-IPOALERTS_UNSUPPORTED_TTL_S = int(os.getenv("IPOALERTS_UNSUPPORTED_TTL_S", "604800") or 0)
+IPOALERTS_UNSUPPORTED_TTL_S = env_int_safe("IPOALERTS_UNSUPPORTED_TTL_S", 604800, blank=0, lo=0)
 
 
 def _ipoalerts_unsupported_key(status: str) -> str:
@@ -462,7 +463,7 @@ def _ipo_db_freshness_hours() -> Optional[float]:
         return None
 
 
-IPO_DB_FRESH_HOURS = float(((os.getenv("IPO_DB_FRESH_HOURS") or "").strip() or "24"))
+IPO_DB_FRESH_HOURS = env_float_safe("IPO_DB_FRESH_HOURS", 24, lo=0)
 
 # The KV cache backing IPO_LIST_KEY used to live for a flat 4h regardless of
 # IPO_DB_FRESH_HOURS (default 24h). That mismatch was the actual cause of

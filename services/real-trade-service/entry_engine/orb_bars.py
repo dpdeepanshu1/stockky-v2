@@ -22,25 +22,18 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from env_util import env_float_safe, env_int_safe  # E507
 import config
 from tz_utils import ist_now, ist_today_str, parse_hhmm
 
 logger = logging.getLogger("real-trade-orb-bars")
 
 
-def _envf(name: str, default: float) -> float:
-    try:
-        v = float((os.getenv(name) or "").strip() or default)
-        return v if math.isfinite(v) and v > 0 else default
-    except ValueError:
-        return default
-
-
 FETCH_ON = ((os.getenv("ORB_BARS_FETCH") or "").strip() or "true").lower() not in ("0", "false", "no", "off")
-REFRESH_S = _envf("ORB_BARS_REFRESH_S", 60.0)          # a symbol's bars are re-fetched at most this often
-MAX_LAG_S = _envf("ORB_BARS_MAX_LAG_S", 180.0)         # newest cached bar older than this: write no fields
-TIMEOUT_S = _envf("ORB_BARS_TIMEOUT_S", 4.0)
-MAX_INFLIGHT = int(_envf("ORB_BARS_MAX_INFLIGHT", 3.0))
+REFRESH_S = env_float_safe("ORB_BARS_REFRESH_S", 60.0, positive=True)          # a symbol's bars are re-fetched at most this often
+MAX_LAG_S = env_float_safe("ORB_BARS_MAX_LAG_S", 180.0, positive=True)         # newest cached bar older than this: write no fields
+TIMEOUT_S = env_float_safe("ORB_BARS_TIMEOUT_S", 4.0, positive=True)
+MAX_INFLIGHT = env_int_safe("ORB_BARS_MAX_INFLIGHT", 3, positive=True)
 MAX_CACHE = 600
 
 _lock = threading.Lock()

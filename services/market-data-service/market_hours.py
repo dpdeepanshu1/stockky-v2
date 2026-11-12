@@ -19,6 +19,7 @@ _get_live_quotes_engine()-style comments elsewhere in this service).
 from __future__ import annotations
 
 import os
+from env_util import env_int_safe  # E503: a typo / blank setting must not stop the import
 from datetime import datetime, time as _time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -60,8 +61,8 @@ _NSE_HOLIDAYS_2026 = {
 # A few minutes of slack on each side so a feed doesn't stop/start right
 # at the bell — lets it warm up just before open and finish flushing just
 # after close. Configurable without a code change.
-_PRE_OPEN_SLACK_MIN = int(((os.getenv("MARKET_HOURS_PRE_OPEN_SLACK_MIN") or "").strip() or "10"))
-_POST_CLOSE_SLACK_MIN = int(((os.getenv("MARKET_HOURS_POST_CLOSE_SLACK_MIN") or "").strip() or "5"))
+_PRE_OPEN_SLACK_MIN = env_int_safe("MARKET_HOURS_PRE_OPEN_SLACK_MIN", 10, lo=0)
+_POST_CLOSE_SLACK_MIN = env_int_safe("MARKET_HOURS_POST_CLOSE_SLACK_MIN", 5, lo=0)
 
 # Escape hatch: force the feeds to poll 24/7 anyway (e.g. local dev/testing
 # outside market hours). Off by default.

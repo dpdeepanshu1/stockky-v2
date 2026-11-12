@@ -69,6 +69,7 @@ import json
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -108,7 +109,7 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 # ── Quality thresholds — market-intelligence derived, all env-overridable ────
 # Raised from 45 → 55 because in a choppy/weak market, borderline signals
 # lose more often. Only take high-conviction setups.
-MIN_CONVICTION = float(((os.getenv("CANDIDATE_MIN_CONVICTION") or "").strip() or "55"))
+MIN_CONVICTION = env_float_safe("CANDIDATE_MIN_CONVICTION", 55)
 
 
 def _adapted(name: str, base):
@@ -134,18 +135,18 @@ def _min_conviction() -> float:
 
 # Raised from 3 → 4: need stronger multi-TF alignment when the index itself
 # is in a correction. A single-day event alone is not enough.
-MIN_BULLISH_TIMEFRAMES = int(((os.getenv("CANDIDATE_MIN_BULLISH_TF") or "").strip() or "4"))
+MIN_BULLISH_TIMEFRAMES = env_int_safe("CANDIDATE_MIN_BULLISH_TF", 4, lo=0)
 
 # §10 weighted timeframe vote (1-day = 0.5×, all others 1.0×)
 TIMEFRAME_WEIGHTS = {"1d": 0.5, "1w": 1.0, "1m": 1.0, "3m": 1.0, "6m": 1.0, "1y": 1.0, "2y": 1.0}
 
 # 6m downtrend: tightened to −10% (was −12%) because in a market where the
 # index itself is −7% in 6m, a stock down −10% in 6m has no relative strength.
-DOWNTREND_6M_THRESHOLD = float(((os.getenv("CANDIDATE_DOWNTREND_6M_PCT") or "").strip() or "-10.0"))
+DOWNTREND_6M_THRESHOLD = env_float_safe("CANDIDATE_DOWNTREND_6M_PCT", -10.0)
 
 # 52w overextension: tightened to top 12% (was 15%) — in a choppy market,
 # stocks near yearly highs face heavy profit-booking.
-OVEREXTENDED_52W_TOP_PCT = float(((os.getenv("CANDIDATE_OVEREXTENDED_52W_TOP_PCT") or "").strip() or "12.0"))
+OVEREXTENDED_52W_TOP_PCT = env_float_safe("CANDIDATE_OVEREXTENDED_52W_TOP_PCT", 12.0, lo=0)
 
 # Task 4 (31 Oct 2026): the 52-week "top 12%" rejection rule, its log-only mode, its regime gate and the market-score refresh are REMOVED
 # (the horizon check showed the rule hurts at 5, 10 and 20 days). What stays is the fresh-high exemption below: a stock AT a fresh,
@@ -158,20 +159,13 @@ def _env_flag_on(name: str, default: str = "1") -> bool:
     return ((os.getenv(name) or "").strip() or default).lower() not in ("0", "false", "no", "off")
 
 
-def _env_float_or(name: str, default: float) -> float:
-    try:
-        return float(((os.getenv(name) or "").strip() or default))
-    except (TypeError, ValueError):
-        return float(default)
-
-
 FRESH_HIGH_EXEMPT = _env_flag_on("CANDIDATE_52W_FRESH_HIGH_EXEMPT")
-FRESH_HIGH_PCT = _env_float_or("CANDIDATE_52W_FRESH_HIGH_PCT", 1.0)
-FRESH_HIGH_DAYS = _env_float_or("CANDIDATE_52W_FRESH_HIGH_DAYS", 10.0)
-FRESH_HIGH_VOL_RATIO = _env_float_or("CANDIDATE_52W_FRESH_HIGH_VOL_RATIO", 1.2)
+FRESH_HIGH_PCT = env_float_safe("CANDIDATE_52W_FRESH_HIGH_PCT", 1.0, lo=0, hi=100)
+FRESH_HIGH_DAYS = env_float_safe("CANDIDATE_52W_FRESH_HIGH_DAYS", 10.0, lo=0)
+FRESH_HIGH_VOL_RATIO = env_float_safe("CANDIDATE_52W_FRESH_HIGH_VOL_RATIO", 1.2, lo=0)
 
 # ATR cap: slightly tightened (7% vs 8%) for safer sizing in volatile conditions.
-MAX_ATR_PCT = float(((os.getenv("CANDIDATE_MAX_ATR_PCT") or "").strip() or "7.0"))
+MAX_ATR_PCT = env_float_safe("CANDIDATE_MAX_ATR_PCT", 7.0, lo=0)
 
 # ── 2026-09-11 addition: cycle-scoped adaptive parameter cache ────────────
 # MAX_ATR_PCT above is read directly (no `db` in scope) by both
@@ -286,15 +280,15 @@ def _refresh_cycle_adaptive_params(db: Session) -> None:
         logger.warning("candidate_engine: adaptive param refresh failed (%s), keeping prior values", e)
 
 # Minimum stock price: sub-₹20 stocks = operator risk + wide spreads + illiquid
-MIN_STOCK_PRICE = float(((os.getenv("CANDIDATE_MIN_STOCK_PRICE") or "").strip() or "10.0"))
+MIN_STOCK_PRICE = env_float_safe("CANDIDATE_MIN_STOCK_PRICE", 10.0, lo=0)
 
 # Volume health: recent 5-day avg must be ≥ this fraction of 20-day avg.
 # Low-volume moves in choppy markets are fake — they reverse fast.
-VOLUME_HEALTH_RATIO = float(((os.getenv("CANDIDATE_VOLUME_HEALTH_RATIO") or "").strip() or "0.80"))
+VOLUME_HEALTH_RATIO = env_float_safe("CANDIDATE_VOLUME_HEALTH_RATIO", 0.80, lo=0)
 
 # A positive return must be at least +0.5% to count as "bullish" in a TF.
 # Pure flat or near-zero returns are not bullish signals.
-BULLISH_THRESHOLD_PCT = float(((os.getenv("CANDIDATE_BULLISH_THRESHOLD_PCT") or "").strip() or "0.5"))
+BULLISH_THRESHOLD_PCT = env_float_safe("CANDIDATE_BULLISH_THRESHOLD_PCT", 0.5, lo=0)
 
 _ACTIONABLE_DECISIONS = {"BUY NOW", "PREPARE TO BUY"}
 
@@ -372,7 +366,7 @@ _SOURCES = {
 # actually unquotable, the fetch never had a chance to complete. Bounding
 # concurrency here keeps the in-flight request count sane so the fast ones
 # succeed instead of all of them queuing behind each other into a timeout.
-CANDIDATE_ANALYSIS_CONCURRENCY = int(((os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY") or "").strip() or "15"))
+CANDIDATE_ANALYSIS_CONCURRENCY = env_int_safe("CANDIDATE_ANALYSIS_CONCURRENCY", 15, positive=True)
 
 # 2026-09-01 tuning: loosened from 2.0x/5.0% to widen the entry gate so more
 # of /scan/universe's momentum_movers survive into the candidate list. This
@@ -384,7 +378,7 @@ CANDIDATE_ANALYSIS_CONCURRENCY = int(((os.getenv("CANDIDATE_ANALYSIS_CONCURRENCY
 # signals and loosening them would dilute the one part of this gate with
 # the most backtest support. Both remain env-overridable with no code
 # change if this turns out too loose (or not loose enough) in practice.
-VOLUME_SHOCK_MULTIPLIER = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER") or "").strip() or "1.5"))
+VOLUME_SHOCK_MULTIPLIER = env_float_safe("CANDIDATE_VOLUME_SHOCK_MULTIPLIER", 1.5, lo=0)
 # 2026-09-03 recalibration: lowered from 3.5% → 2.5%.
 # Rationale: real NSE volume-shocker sessions (Groww screenshots 2026-09-03)
 # show genuine institutional movers like Hikal +16.95%, Raymond +14.13%,
@@ -394,18 +388,18 @@ VOLUME_SHOCK_MULTIPLIER = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_MULTIPLIER")
 # inserted. Lowering to 2.5% lets moderate-strength movers through while
 # the HIGH_CONVICTION (15x vol + 15% return) and UPPER_CIRCUIT (19.9%)
 # tiers — which have the strongest backtest evidence — remain unchanged.
-VOLUME_SHOCK_MIN_RETURN_PCT = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT") or "").strip() or "2.5"))
+VOLUME_SHOCK_MIN_RETURN_PCT = env_float_safe("CANDIDATE_VOLUME_SHOCK_MIN_RETURN_PCT", 2.5, lo=0)
 
 # HIGH CONVICTION tier — from 1-year NSE backtest (30-Aug-2026):
 # vol >= 15x AND return >= 15% → 55.7% next-day win rate, mean +2.28%
 # Upper circuit (>=19.9%) → 69.7% win rate, mean +5.22% — strongest signal
-HIGH_CONVICTION_VOL_MULTIPLIER = float(((os.getenv("CANDIDATE_HC_VOL_MULTIPLIER") or "").strip() or "15.0"))
-HIGH_CONVICTION_MIN_RETURN_PCT = float(((os.getenv("CANDIDATE_HC_MIN_RETURN_PCT") or "").strip() or "15.0"))
-UPPER_CIRCUIT_THRESHOLD_PCT = float(((os.getenv("CANDIDATE_UPPER_CIRCUIT_PCT") or "").strip() or "19.9"))
+HIGH_CONVICTION_VOL_MULTIPLIER = env_float_safe("CANDIDATE_HC_VOL_MULTIPLIER", 15.0, lo=0)
+HIGH_CONVICTION_MIN_RETURN_PCT = env_float_safe("CANDIDATE_HC_MIN_RETURN_PCT", 15.0, lo=0)
+UPPER_CIRCUIT_THRESHOLD_PCT = env_float_safe("CANDIDATE_UPPER_CIRCUIT_PCT", 19.9, lo=0)
 
 # Delivery % quality tiers — from 1-year NSE backtest:
 # >60% = institutional quality; include in payload for frontend display
-DELIVERY_HIGH_QUALITY_PCT = float(((os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT") or "").strip() or "60.0"))
+DELIVERY_HIGH_QUALITY_PCT = env_float_safe("CANDIDATE_DELIVERY_HIGH_QUALITY_PCT", 60.0, lo=0, hi=100)
 
 # ── 2026-09-01 re-backtest (819,906-row NSE bhavcopy, reproduced independently) ──
 # Confirmed the tiered structure above holds (win rate rises with each tier,
@@ -426,7 +420,7 @@ DELIVERY_HIGH_QUALITY_PCT = float(((os.getenv("CANDIDATE_DELIVERY_HIGH_QUALITY_P
 # alone, since a missing-data reject would be indistinguishable from a
 # low-delivery reject in the logs and this filter is meant to catch
 # intraday-churn moves specifically, not unrelated data gaps.
-BASE_TIER_MIN_DELIVERY_PCT = float(((os.getenv("CANDIDATE_BASE_MIN_DELIVERY_PCT") or "").strip() or "30.0"))
+BASE_TIER_MIN_DELIVERY_PCT = env_float_safe("CANDIDATE_BASE_MIN_DELIVERY_PCT", 30.0, lo=0, hi=100)
 
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -449,7 +443,7 @@ async def _fetch(client: httpx.AsyncClient, path: str) -> Any:
 # cycle reports the breakdown, and symbols that DEFINITELY have none (HTTP 404/400, an empty answer, or fewer than
 # 6 daily candles) are not asked again for CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S (default 6 h; 0 = off).
 # Timeouts, 429 and 5xx are never cached: they say nothing about the symbol.
-VOLUME_SHOCK_NOHIST_TTL_S = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S") or "").strip() or str(6 * 3600)))
+VOLUME_SHOCK_NOHIST_TTL_S = env_float_safe("CANDIDATE_VOLUME_SHOCK_NOHIST_TTL_S", 6 * 3600, lo=0)
 _HIST_REASON: dict = {}        # symbol -> last failure reason (absent / None = last call returned candles)
 _HIST_NONE_UNTIL: dict = {}    # symbol -> monotonic time until which "no history" is taken as known
 _HIST_DEFINITE = ("empty answer", "HTTP 404", "HTTP 400", "short history")
@@ -524,7 +518,7 @@ def clear_history_state() -> None:
 # empty answer or 404/400, which stay "definite") the last good answer for that symbol/period/interval is reused
 # if it is younger than CANDIDATE_HISTORY_STALE_FALLBACK_S (default 1800; 0 = off). Only 1d/1wk/1mo candles are
 # eligible (intraday bars go stale too fast). The failure reason is still recorded as before.
-HISTORY_STALE_FALLBACK_S = float(((os.getenv("CANDIDATE_HISTORY_STALE_FALLBACK_S") or "").strip() or "1800"))
+HISTORY_STALE_FALLBACK_S = env_float_safe("CANDIDATE_HISTORY_STALE_FALLBACK_S", 1800, lo=0)
 _HISTORY_STALE_INTERVALS = ("1d", "1wk", "1mo")
 _HISTORY_LAST_GOOD: dict = {}   # (symbol, period, interval) -> (monotonic ts, candles)
 _HISTORY_LAST_GOOD_MAX = 4000
@@ -660,7 +654,7 @@ async def _fetch_history(
 # requests in flight against market-data-service - the same process that prices the held positions. The gate
 # below caps how many of THIS service's candidate /history calls are in flight at once; callers simply wait
 # their turn (the 42 s request timeout starts only after the gate is passed). 0 = off (old behaviour).
-HISTORY_MAX_INFLIGHT = int(((os.getenv("CANDIDATE_HISTORY_MAX_INFLIGHT") or "").strip() or "6"))
+HISTORY_MAX_INFLIGHT = env_int_safe("CANDIDATE_HISTORY_MAX_INFLIGHT", 6, lo=0)
 _HISTORY_GATES: dict[int, asyncio.Semaphore] = {}
 
 
@@ -867,8 +861,8 @@ async def _fetch_fund_tech_score(client: httpx.AsyncClient, symbol: str) -> dict
 # 2026-10-06 boot and logged "market_cap fetch failed for HFCL ()" - httpx timeouts stringify to ''. A failed fetch
 # also means NO market-cap floor for that candidate (missing data is not a reject). Market caps move slowly, so the
 # last good value (up to CANDIDATE_MCAP_STALE_TTL_S, default 24 h, 0 = off) is used when a fetch fails.
-_MCAP_TIMEOUT_S = float(((os.getenv("CANDIDATE_MCAP_TIMEOUT_S") or "").strip() or "12"))
-_MCAP_STALE_TTL_S = float(((os.getenv("CANDIDATE_MCAP_STALE_TTL_S") or "").strip() or "86400"))
+_MCAP_TIMEOUT_S = env_float_safe("CANDIDATE_MCAP_TIMEOUT_S", 12, positive=True)
+_MCAP_STALE_TTL_S = env_float_safe("CANDIDATE_MCAP_STALE_TTL_S", 86400, lo=0)
 # ── group191 (item 17): "CANDIDATE REJECTED ..." log lines were cut at 150 characters ─────────────────────────
 # The REJECTED INFO lines printed `reject[:150]`, but the reasons carry the whole timeframe-returns dict and a
 # sentence of advice (HFCL ended mid-dict with no closing brace, REDINGTON at "Wait for a breakout or"), so the
@@ -1128,8 +1122,8 @@ def _quality_gate_fund_tech(scored: dict, sector_peers: list, cross_cycle_peer_s
 # fetches below run means _fetch_quote() mostly hits a warm cache (fast,
 # no rate-limiter contention) instead of racing 200 other requests for the
 # same few tokens/sec.
-BULK_QUOTE_CHUNK_SIZE = int(((os.getenv("CANDIDATE_BULK_QUOTE_CHUNK_SIZE") or "").strip() or "40"))
-BULK_QUOTE_TIMEOUT_SECONDS = float(((os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS") or "").strip() or "90.0"))
+BULK_QUOTE_CHUNK_SIZE = env_int_safe("CANDIDATE_BULK_QUOTE_CHUNK_SIZE", 40, positive=True)
+BULK_QUOTE_TIMEOUT_SECONDS = env_float_safe("CANDIDATE_BULK_QUOTE_TIMEOUT_SECONDS", 90.0, positive=True)
 
 # 2026-09-01 incident fix (504 / 300+s "Fetching candidates" stall): this
 # loop used to `await` one chunk POST at a time in a plain `for`, so N
@@ -1146,7 +1140,7 @@ BULK_QUOTE_TIMEOUT_SECONDS = float(((os.getenv("CANDIDATE_BULK_QUOTE_TIMEOUT_SEC
 # of the sum. Paired with rate_limiter.py's new breaker check on the bulk
 # yf.download() path, a Yahoo outage now fails the whole prefetch in
 # roughly one hard-timeout window, not one per chunk.
-BULK_QUOTE_CONCURRENCY = int(((os.getenv("CANDIDATE_BULK_QUOTE_CONCURRENCY") or "").strip() or "4"))
+BULK_QUOTE_CONCURRENCY = env_int_safe("CANDIDATE_BULK_QUOTE_CONCURRENCY", 4, positive=True)
 
 # group246: use the quotes the bulk prefetch already returned instead of one GET /quote/{symbol} per symbol.
 # CANDIDATE_USE_BULK_QUOTES=0 restores the old per-symbol calls (the bulk call still warms the cache).
@@ -1299,9 +1293,9 @@ def _is_bullish(pct: Optional[float]) -> bool:
 #     reason says "incomplete history" (data_incomplete) instead of "weak momentum"
 TF_SANITY_ENABLED = ((os.getenv("CANDIDATE_TF_SANITY") or "").strip() or "1") != "0"
 _TF_SANITY_CAPS = {
-    "1d": float(((os.getenv("CANDIDATE_TF_CAP_1D_PCT") or "").strip() or "25")),
-    "1w": float(((os.getenv("CANDIDATE_TF_CAP_1W_PCT") or "").strip() or "60")),
-    "1m": float(((os.getenv("CANDIDATE_TF_CAP_1M_PCT") or "").strip() or "120")),
+    "1d": env_float_safe("CANDIDATE_TF_CAP_1D_PCT", 25, lo=0),
+    "1w": env_float_safe("CANDIDATE_TF_CAP_1W_PCT", 60, lo=0),
+    "1m": env_float_safe("CANDIDATE_TF_CAP_1M_PCT", 120, lo=0),
 }
 _TF_NEXT_LONGER = {"1d": "1w", "1w": "1m", "1m": "3m"}
 
@@ -1412,7 +1406,7 @@ def _fresh_high_breakout(candles_1y: Any, candles_recent: Any, current_price: fl
 # CANDIDATE_WEEKLY_FROM_DAILY=0 restores the two weekly yfinance calls. A daily series shorter than
 # CANDIDATE_WEEKLY_FROM_DAILY_MIN_BARS (default 60, about 3 months) or without dates is not trusted for this.
 WEEKLY_FROM_DAILY = ((os.getenv("CANDIDATE_WEEKLY_FROM_DAILY") or "").strip() or "1") not in ("0", "false", "False")
-WEEKLY_FROM_DAILY_MIN_BARS = int(((os.getenv("CANDIDATE_WEEKLY_FROM_DAILY_MIN_BARS") or "").strip() or "60"))
+WEEKLY_FROM_DAILY_MIN_BARS = env_int_safe("CANDIDATE_WEEKLY_FROM_DAILY_MIN_BARS", 60, lo=0)
 
 
 def _weekly_views_from_daily(daily: Any) -> Optional[tuple[list, list]]:
@@ -1811,7 +1805,7 @@ def _rows_from_volume_shock(payload: Any) -> list[dict]:
 # this system's own data - the floor stops the first minutes from inflating a handful of ticks
 # into a "shock", and VOLUME_SHOCK_TOD_ADJUST=0 turns the projection off (old behaviour).
 VOLUME_SHOCK_TOD_ADJUST = ((os.getenv("VOLUME_SHOCK_TOD_ADJUST") or "").strip() or "1") not in ("0", "false", "False")
-VOLUME_SHOCK_TOD_MIN_FRACTION = float(((os.getenv("VOLUME_SHOCK_TOD_MIN_FRACTION") or "").strip() or "0.15"))
+VOLUME_SHOCK_TOD_MIN_FRACTION = env_float_safe("VOLUME_SHOCK_TOD_MIN_FRACTION", 0.15, lo=0, hi=1)
 # (minutes since 09:15 IST, cumulative share of the full session's volume)
 _SESSION_VOLUME_CURVE = (
     (0, 0.00), (15, 0.09), (45, 0.20), (105, 0.34), (165, 0.45),
@@ -1824,7 +1818,7 @@ _SESSION_VOLUME_CURVE = (
 # symbols ("Insufficient daily history"). The quote already carries previous_close, so a symbol
 # whose live return is clearly below the gate is rejected before any history request.
 VOLUME_SHOCK_QUOTE_PREFILTER = ((os.getenv("CANDIDATE_VOLUME_SHOCK_QUOTE_PREFILTER") or "").strip() or "1") not in ("0", "false", "False")
-VOLUME_SHOCK_PREFILTER_MARGIN_PCT = float(((os.getenv("CANDIDATE_VOLUME_SHOCK_PREFILTER_MARGIN_PCT") or "").strip() or "1.0"))
+VOLUME_SHOCK_PREFILTER_MARGIN_PCT = env_float_safe("CANDIDATE_VOLUME_SHOCK_PREFILTER_MARGIN_PCT", 1.0, lo=0)
 
 
 def _session_volume_fraction(now_ist: datetime) -> float:

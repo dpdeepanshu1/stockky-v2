@@ -5,6 +5,10 @@ Exposes REST API endpoints for training intelligence, prediction recording, and 
 """
 import asyncio
 import os
+try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
 import logging
 import json
 import time
@@ -169,7 +173,7 @@ except Exception:
 LOCK_FILE = os.path.join(_DATA_DIR, "training.lock")
 # Training a full universe can exceed 5 minutes — a short timeout made the lock
 # look "stale" mid-run so a second Trigger would delete the lock and abort the job.
-LOCK_TIMEOUT_SECONDS = int(((os.environ.get("TRAINING_LOCK_TIMEOUT_SECONDS") or "").strip() or "2700"))  # 45 min default
+LOCK_TIMEOUT_SECONDS = env_int_safe("TRAINING_LOCK_TIMEOUT_SECONDS", 2700, positive=True)  # 45 min default
 
 
 # ---------- Pydantic models for prediction recording ----------
@@ -1625,7 +1629,7 @@ async def train_clear_lock_alias():
 async def model_status():
     return JSONResponse(content=get_training_status())
 
-_SCANNER_TTL_SEC = float(((os.environ.get("TRAINING_SCANNER_TTL_SEC") or "").strip() or "120"))
+_SCANNER_TTL_SEC = env_float_safe("TRAINING_SCANNER_TTL_SEC", 120, lo=0)
 _scanner_cache = {"obj": None, "ts": 0.0}
 _scanner_lock = __import__("threading").Lock()
 

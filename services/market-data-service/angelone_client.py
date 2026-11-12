@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from env_util import env_float_safe  # E503: a typo / blank setting must not stop the import
 import threading as _threading
 import time
 import weakref as _weakref
@@ -210,7 +211,7 @@ def _resolve_client_public_ip() -> str:
 # rate", "errorcode": "..."} per multiple SmartAPI Forum reports (topics
 # 5560, 5636/5637) — detect it and cool down rather than let the caller's
 # normal retry logic hammer it again immediately.
-_ANGELONE_COOLDOWN_SEC = float(((os.environ.get("ANGELONE_COOLDOWN_SEC") or "").strip() or "30"))
+_ANGELONE_COOLDOWN_SEC = env_float_safe("ANGELONE_COOLDOWN_SEC", 30, lo=0)
 
 
 def _is_rate_limit_response(status_code: int, body: Optional[dict], text: Optional[str] = None) -> bool:
@@ -285,9 +286,9 @@ def _log_denied(endpoint: str, r: httpx.Response) -> None:
 # Candle calls that can't get a rate-limit token within this many seconds are
 # SKIPPED (caller falls back to yfinance) instead of being let through anyway —
 # see rate_limiter.try_acquire.
-_CANDLE_MAX_WAIT_S = float(((os.environ.get("ANGELONE_CANDLE_MAX_WAIT_S") or "").strip() or "15"))
+_CANDLE_MAX_WAIT_S = env_float_safe("ANGELONE_CANDLE_MAX_WAIT_S", 15, lo=0)
 # group211: how long a CANDIDATE/BACKGROUND batch call waits for its lane's reserve before it is shed.
-_LANE_MAX_WAIT_S = float(((os.environ.get("ANGELONE_LANE_MAX_WAIT_S") or "").strip() or "20"))
+_LANE_MAX_WAIT_S = env_float_safe("ANGELONE_LANE_MAX_WAIT_S", 20, lo=0)
 
 
 class AngelOneSession:

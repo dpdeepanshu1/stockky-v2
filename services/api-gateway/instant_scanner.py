@@ -13,6 +13,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("instant-scanner")
@@ -22,8 +23,9 @@ logger = logging.getLogger("instant-scanner")
 # means "no cap, show every eligible stock". VALUE_BUY_THRESHOLD is a
 # display/tagging hint only ("value buy" badge) — it never excludes a stock.
 import os as _os
-MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
-VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
+from env_util import env_float_safe  # E502: a typo / blank setting must not stop the import
+MAX_STOCK_PRICE = env_float_safe("MAX_STOCK_PRICE", 0, lo=0)
+VALUE_BUY_THRESHOLD = env_float_safe("VALUE_BUY_THRESHOLD", 2000, lo=0)
 
 
 def _price_capped(price: float) -> bool:
@@ -98,8 +100,9 @@ def _f(val: Any, default: float = 0.0) -> float:
     try:
         if val is None or val == "":
             return default
-        return float(val)
-    except (TypeError, ValueError):
+        f = float(val)
+        return f if math.isfinite(f) else default   # E500: NaN / inf passed through and made the symbol's instant score NaN (E475 only closed the repair write path)
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

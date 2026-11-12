@@ -28,9 +28,10 @@ logger = logging.getLogger("market-data-bhavcopy")
 # Price gate — OFF by default (0 = no cap; full universe passes through).
 # Set MAX_STOCK_PRICE in the environment to re-enable an explicit cap.
 import os as _os
-MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
+from env_util import env_float_safe  # E503: a typo / blank setting must not stop the import
+MAX_STOCK_PRICE = env_float_safe("MAX_STOCK_PRICE", 0, lo=0)
 # Display-only "value buy" tag threshold — never excludes a stock.
-VALUE_BUY_THRESHOLD = float(_os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
+VALUE_BUY_THRESHOLD = env_float_safe("VALUE_BUY_THRESHOLD", 2000, lo=0)
 
 # Remember which URL class worked last (process-local)
 _BHAV_LAST_GOOD_PREFIX: str = ""
@@ -632,7 +633,7 @@ def _parse_bhav_csv_all(text: str) -> Dict[str, Dict[str, Any]]:
 # leader finished tries again exactly as before.
 _BHAV_INFLIGHT: Dict[str, threading.Event] = {}
 _BHAV_INFLIGHT_LOCK = threading.Lock()
-_BHAV_DAY_WAIT_S = float((_os.getenv("BHAVCOPY_DAY_WAIT_S") or "").strip() or "45")
+_BHAV_DAY_WAIT_S = env_float_safe("BHAVCOPY_DAY_WAIT_S", 45, lo=0)
 
 
 def _fetch_bhav_day_parsed(client: httpx.Client, d) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -857,7 +858,7 @@ def delivery_from_bhavcopy(symbol: str) -> Optional[Dict[str, Any]]:
 # waterfall) are remembered, so a repeat lookup costs nothing and the INFO line is not
 # logged again. Only a miss against days that really had rows counts (an empty/unparsed
 # day proves nothing). 0 turns the memory off.
-_EOD_MISS_TTL_S = float((_os.getenv("BHAVCOPY_EOD_MISS_TTL_S") or "").strip() or "21600")
+_EOD_MISS_TTL_S = env_float_safe("BHAVCOPY_EOD_MISS_TTL_S", 21600, lo=0)
 _EOD_MISS: Dict[str, float] = {}
 
 

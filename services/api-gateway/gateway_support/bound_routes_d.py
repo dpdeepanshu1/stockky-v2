@@ -470,7 +470,7 @@ def build_bound_routes_d(ref):
         if not isinstance(symbols, list) or not symbols:
             return {"ok": False, "error": "symbols list required", "ok_count": 0, "error_count": 0}
         # Hard cap protects free-tier CPU / upstream rate limits
-        max_n = int(((ref.os.getenv("DATA_FEED_UPDATE_BATCH_MAX") or "").strip() or "15"))
+        max_n = ref.env_int_safe("DATA_FEED_UPDATE_BATCH_MAX", 15, positive=True)
         symbols = [
             str(s).upper().replace(".NS", "").replace(".BO", "").strip()
             for s in symbols

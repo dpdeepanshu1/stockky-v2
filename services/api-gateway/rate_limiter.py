@@ -31,6 +31,7 @@ import contextlib
 import contextvars
 import logging
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import threading
 import time
 from dataclasses import dataclass, field
@@ -69,9 +70,9 @@ _DEFAULTS = {
 #     the full max_wait. Scans now stop drawing at the reserve line, so a quick
 #     lookup always finds tokens waiting for it.
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_WAIT_DEFAULT = float(((os.getenv("RL_MAX_WAIT_SEC") or "").strip() or "5.0"))
-MIN_WAIT_FLOOR = float(((os.getenv("RL_MIN_WAIT_SEC") or "").strip() or "0.5"))
-INTERACTIVE_RESERVE_FRACTION = float(((os.getenv("RL_INTERACTIVE_RESERVE") or "").strip() or "0.34"))
+MAX_WAIT_DEFAULT = env_float_safe("RL_MAX_WAIT_SEC", 5.0, lo=0)
+MIN_WAIT_FLOOR = env_float_safe("RL_MIN_WAIT_SEC", 0.5, lo=0)
+INTERACTIVE_RESERVE_FRACTION = env_float_safe("RL_INTERACTIVE_RESERVE", 0.34, lo=0, hi=1)
 
 # Pipelines that run as bulk background jobs. Anything not listed here (a plain
 # symbol lookup, a chart request, a repair button) counts as interactive and may
@@ -447,8 +448,8 @@ def is_skippable(symbol) -> bool:
 RENAME_DISCOVERY = os.getenv("RL_RENAME_DISCOVERY", "1").strip().lower() not in (
     "0", "false", "no", "off",
 )
-DISCOVERY_AT_STREAK = int(((os.getenv("RL_DISCOVERY_AT_STREAK") or "").strip() or "2"))
-DISCOVERY_TIMEOUT = float(((os.getenv("RL_DISCOVERY_TIMEOUT") or "").strip() or "8"))
+DISCOVERY_AT_STREAK = env_int_safe("RL_DISCOVERY_AT_STREAK", 2, lo=0)
+DISCOVERY_TIMEOUT = env_float_safe("RL_DISCOVERY_TIMEOUT", 8, positive=True)
 SKIP_HIGH_PRICE = os.getenv("RL_SKIP_HIGH_PRICE", "0").strip().lower() in (
     "1", "true", "yes", "on",
 )
@@ -596,9 +597,9 @@ def _empty_frame():
 # had raised any other error.
 import concurrent.futures as _cf
 
-YFINANCE_HARD_TIMEOUT_SEC = float(((os.getenv("YFINANCE_HARD_TIMEOUT_SEC") or "").strip() or "18"))
+YFINANCE_HARD_TIMEOUT_SEC = env_float_safe("YFINANCE_HARD_TIMEOUT_SEC", 18, positive=True)
 _yf_hardcap_pool = _cf.ThreadPoolExecutor(
-    max_workers=int(((os.getenv("YFINANCE_POOL_WORKERS") or "").strip() or "8")),
+    max_workers=env_int_safe("YFINANCE_POOL_WORKERS", 8, positive=True),
     thread_name_prefix="yf-hardcap",
 )
 

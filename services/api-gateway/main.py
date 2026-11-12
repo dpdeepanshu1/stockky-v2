@@ -5,6 +5,7 @@ Single entry point for the React frontend.
 v2.5.16 – uses IST for fetched_at timestamp (hh:mm:ss AM/PM).
 """
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import re
 import math
 import json
@@ -149,6 +150,19 @@ def _env_url(name: str, default: str, rstrip: bool = True) -> str:
     if rstrip:
         raw = raw.rstrip("/")
     return raw or (default.rstrip("/") if rstrip else default)
+
+
+def _env_float_safe(name: str, default: float, fallback_name: str = None) -> float:
+    """E501: float setting from the environment; unset / blank / non-numeric / NaN / inf give `default`. A blank `name` falls back to `fallback_name`
+    (os.getenv(name, other) only falls back when the variable is UNSET, so a blank dashboard variable hid the one behind it). Never raises."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw and fallback_name:
+        raw = (os.getenv(fallback_name) or "").strip()
+    try:
+        v = float(raw) if raw else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+    return v if math.isfinite(v) else float(default)
 
 
 # ---- Service URLs (env-driven; defaults match config/service_urls.py) ----
@@ -656,17 +670,17 @@ FUNDAMENTAL_CACHE_PREFIX = "stockky:fundamental:"
 EVENT_CACHE_PREFIX = "stockky:event:"
 NEWS_CACHE_PREFIX = "stockky:news:"
 # Slow-changing layers: 24h. Nightly cron refreshes them after midnight IST.
-STATIC_PARAM_TTL = int(((os.getenv("STATIC_PARAM_TTL") or "").strip() or "86400"))  # 24 hours
+STATIC_PARAM_TTL = env_int_safe("STATIC_PARAM_TTL", 86400, lo=0)  # 24 hours
 LAST_FULL_SCAN_KEY = "stockky:last_full_scan"
-LAST_FULL_SCAN_TTL = int(((os.getenv("LAST_FULL_SCAN_TTL") or "").strip() or "86400"))  # 24h — survive refresh / stop partial
+LAST_FULL_SCAN_TTL = env_int_safe("LAST_FULL_SCAN_TTL", 86400, lo=0)  # 24h — survive refresh / stop partial
 DECIDE_CACHE_PREFIX = "stockky:decide_cache:"
-DECIDE_CACHE_TTL_OPEN = int(((os.getenv("DECIDE_CACHE_TTL_OPEN") or "").strip() or "300"))   # 5 min market open
-DECIDE_CACHE_TTL_CLOSED = int(((os.getenv("DECIDE_CACHE_TTL_CLOSED") or "").strip() or "21600"))  # 6 h closed
+DECIDE_CACHE_TTL_OPEN = env_int_safe("DECIDE_CACHE_TTL_OPEN", 300, lo=0)   # 5 min market open
+DECIDE_CACHE_TTL_CLOSED = env_int_safe("DECIDE_CACHE_TTL_CLOSED", 21600, lo=0)  # 6 h closed
 BATCH_RESULT_CACHE_PREFIX = "stockky:batch_result:"
 BATCH_RESULT_CACHE_ENABLED = ((os.getenv("BATCH_RESULT_CACHE") or "").strip() or "true").lower() in ("1", "true", "yes")
 SCAN_LITE_DEFAULT = os.getenv("SCAN_LITE_DEFAULT", "false").lower() in ("1", "true", "yes")
 WAKE_BEFORE_SCAN = ((os.getenv("WAKE_BEFORE_SCAN") or "").strip() or "true").lower() in ("1", "true", "yes")
-WAKE_WAIT_SECONDS = float(((os.getenv("WAKE_WAIT_SECONDS") or "").strip() or "12"))
+WAKE_WAIT_SECONDS = env_float_safe("WAKE_WAIT_SECONDS", 12, lo=0)
 
 # ── Symbol Aliases ──────────────────────────────────────────────────────────
 SYMBOL_ALIASES: Dict[str, Union[str, List[str]]] = {
@@ -998,7 +1012,7 @@ _nse_endpoint_fail: dict = {}   # endpoint -> [consecutive_failures, paused_unti
 def _nse_endpoint_env(name: str, default: float) -> float:
     try:
         v = float((os.getenv(name) or "").strip() or default)
-        return v if v >= 0 else default
+        return v if 0 <= v < float("inf") else default   # E501: inf paused an NSE endpoint for ever (NaN fails the comparison)
     except ValueError:
         return default
 
@@ -1488,7 +1502,7 @@ def _momentum_single_flight_cfg() -> tuple:
         wait = float((os.getenv("MOMENTUM_MOVERS_JOIN_WAIT_S") or "").strip() or "45")
     except ValueError:
         wait = 45.0
-    if wait != wait or wait < 0:
+    if not math.isfinite(wait) or wait < 0:   # E501: inf made a caller wait for the in-flight movers pass without a bound
         wait = 45.0
     return on, wait
 
@@ -2221,8 +2235,8 @@ def _get_52w_extreme_symbols() -> List[str]:
 # ── Universe price gate — OFF by default (0 = no cap; full universe) ───────
 # Set MAX_UNIVERSE_PRICE (or MAX_STOCK_PRICE) in the environment to re-enable
 # an explicit cap. VALUE_BUY_THRESHOLD is a display/tag-only hint.
-MAX_UNIVERSE_PRICE = float(os.getenv("MAX_UNIVERSE_PRICE", os.getenv("MAX_STOCK_PRICE", "0")) or 0)
-VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
+MAX_UNIVERSE_PRICE = _env_float_safe("MAX_UNIVERSE_PRICE", 0.0, fallback_name="MAX_STOCK_PRICE")   # E501: a typo here ("abc", "₹500") raised at import and stopped the gateway
+VALUE_BUY_THRESHOLD = _env_float_safe("VALUE_BUY_THRESHOLD", 2000.0)
 
 # ── Universe size ────────────────────────────────────────────────────────────
 # SCAN_UNIVERSE_TARGET is how many symbols _build_scan_universe() tries to
@@ -2231,8 +2245,8 @@ VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
 # symbols so a bug in universe assembly (dedup failure, a runaway source,
 # etc.) can never grow the feed unboundedly; it should never actually be hit
 # in normal operation at a 500-symbol target.
-SCAN_UNIVERSE_TARGET = int(((os.getenv("SCAN_UNIVERSE_TARGET") or "").strip() or "500"))
-SCAN_UNIVERSE_HARD_CAP = int(((os.getenv("SCAN_UNIVERSE_HARD_CAP") or "").strip() or "5000"))
+SCAN_UNIVERSE_TARGET = env_int_safe("SCAN_UNIVERSE_TARGET", 500, positive=True)
+SCAN_UNIVERSE_HARD_CAP = env_int_safe("SCAN_UNIVERSE_HARD_CAP", 5000, positive=True)
 
 
 def _row_price_over_cap(row: dict, symbol: Optional[str] = None) -> bool:
@@ -2381,7 +2395,7 @@ def _price_headroom_pct() -> float:
         v = float((os.getenv("SCAN_UNIVERSE_PRICE_HEADROOM_PCT") or "").strip() or 20.0)
     except ValueError:
         v = 20.0
-    return v if v >= 0 else 20.0
+    return v if 0 <= v < float("inf") else 20.0   # E501: inf headroom overflowed the universe cut (NaN fails the comparison)
 
 
 def _cut_universe_under_price_cap(ordered: List[str], target: int) -> List[str]:
@@ -3529,6 +3543,8 @@ def _log_circuit_skip(name: str, symbol: str, err: Exception) -> None:
         every = float((os.getenv("NEWS_CIRCUIT_LOG_EVERY_S") or "").strip() or 60.0)
     except ValueError:
         every = 60.0
+    if not math.isfinite(every):   # E501: nan / inf made `now - ent[0] >= every` False for ever, so the one summary warning per downstream never appeared
+        every = 60.0
     ent = _circuit_skip_log.setdefault(name, [0.0, 0])
     ent[1] += 1
     now = time.time()
@@ -3574,6 +3590,8 @@ def _prediction_cache_ttl() -> float:
     try:
         v = float((os.getenv("PREDICTION_CACHE_TTL_SEC") or "").strip() or 60.0)
     except ValueError:
+        v = 60.0
+    if not math.isfinite(v):   # E501: nan silently turned the prediction cache off, inf made a cached prediction live for ever
         v = 60.0
     return v if v > 0 else 0.0
 
@@ -3629,8 +3647,8 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # Free-tier Gemini has its own RPM limit, independent of MAX_PARALLEL_WORKERS
 # (which bounds calls to decision-engine, not Gemini) — a scan running 10
 # concurrent symbol analyses shouldn't also fire 10 concurrent Gemini calls.
-GEMINI_SEMAPHORE = asyncio.Semaphore(int(((os.getenv("GEMINI_MAX_CONCURRENT") or "").strip() or "3")))
-GEMINI_MAX_OUTPUT_TOKENS = int(((os.getenv("GEMINI_MAX_OUTPUT_TOKENS") or "").strip() or "400"))
+GEMINI_SEMAPHORE = asyncio.Semaphore(env_int_safe("GEMINI_MAX_CONCURRENT", 3, positive=True))
+GEMINI_MAX_OUTPUT_TOKENS = env_int_safe("GEMINI_MAX_OUTPUT_TOKENS", 400, positive=True)
 # After a 429 from Gemini, stop calling it for a while and serve the template straight away.
 # Without this every /stock call made a Gemini request that was certain to 429 again (same
 # approach as decision-prediction-service's _gemini_cooldown_until, which uses 10 minutes).
@@ -3851,7 +3869,7 @@ def _scan_notify_num(v):
     """Float for a message field, or None when it is missing / not a usable number."""
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # E500: an int of 400+ digits raised OverflowError
         return None
     return f if math.isfinite(f) else None
 
@@ -3966,8 +3984,8 @@ def _wake_notification_service() -> bool:
 # requests into analysis-intelligence-service, causing PoolTimeout / ReadTimeout and
 # circuit-breaker opens that feed neutral 50.0 scores into the ML model.
 # Override via MAX_PARALLEL_SCAN_WORKERS if you move to paid tier.
-MAX_PARALLEL_WORKERS = int(((os.getenv("MAX_PARALLEL_SCAN_WORKERS") or "").strip() or "8"))  # free-tier safe
-SCAN_BATCH_SIZE = int(((os.getenv("SCAN_BATCH_SIZE") or "").strip() or "8"))  # aligned with workers; bulk Neon removes DB N+1
+MAX_PARALLEL_WORKERS = env_int_safe("MAX_PARALLEL_SCAN_WORKERS", 8, positive=True)  # free-tier safe
+SCAN_BATCH_SIZE = env_int_safe("SCAN_BATCH_SIZE", 8, positive=True)  # aligned with workers; bulk Neon removes DB N+1
 
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
@@ -5679,9 +5697,11 @@ _ops_alert_clock = time.monotonic
 
 def _ops_alert_cooldown_sec() -> float:
     try:
-        return max(0.0, float(((os.getenv("OPS_ALERT_COOLDOWN_SEC") or "").strip() or "900")))
+        v = float(((os.getenv("OPS_ALERT_COOLDOWN_SEC") or "").strip() or "900"))
     except (TypeError, ValueError):
         return 900.0
+    # E500: "nan" gave max(0.0, nan) = 0.0 (throttling off, an alert on every check) and "inf" a cooldown that never ends
+    return max(0.0, v) if math.isfinite(v) else 900.0
 
 
 # E83: moved to gateway_support/bound_routes_h.py (body unchanged, main.py names read via MainRef at call time); included here so route order is unchanged.
@@ -6067,7 +6087,8 @@ def _lite_evaluate_from_feed(symbol: str, feed: dict, live_price: float = 0.0) -
     Lite path: ZERO downstream HTTP.
     Delegates to instant_scanner (Neon feed + live tick → full score card).
     """
-    tick = {"price": live_price} if live_price and live_price > 0 else {}
+    live_price = _safe_float(live_price)   # E500: an inf / text live price went into the tick as a price (NaN / None / "" already meant none)
+    tick = {"price": live_price} if live_price > 0 else {}
     try:
         from instant_scanner import compute_instant_scores
         return compute_instant_scores(symbol, feed if isinstance(feed, dict) else {}, tick)
@@ -6368,8 +6389,8 @@ app.include_router(_bound_routes_f.get_market_indices_router)
 # for tens of seconds. It now runs in a worker thread under a deadline; on
 # timeout the thread keeps running (it warms MOMENTUM_MOVERS_CACHE_KEY for the
 # next caller) and this request returns without movers, flagged partial.
-SCAN_UNIVERSE_MOVERS_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_MOVERS_DEADLINE_S") or "").strip() or "12"))
-SCAN_UNIVERSE_BUILD_DEADLINE_S = float(((os.getenv("SCAN_UNIVERSE_BUILD_DEADLINE_S") or "").strip() or "20"))
+SCAN_UNIVERSE_MOVERS_DEADLINE_S = env_float_safe("SCAN_UNIVERSE_MOVERS_DEADLINE_S", 12, positive=True)
+SCAN_UNIVERSE_BUILD_DEADLINE_S = env_float_safe("SCAN_UNIVERSE_BUILD_DEADLINE_S", 20, positive=True)
 
 
 def _scan_universe_cold_movers_deadline() -> float:
@@ -6479,9 +6500,9 @@ app.include_router(_bound_routes_h.training_other_proxy_router)
 HOT_STOCKS_CACHE_KEY = "stockky:hot_stocks"
 # Market hours: short cache (2–5 min) so UI stays light but not spammy.
 # Off-hours: until next market open (see _hot_stocks_ttl).
-HOT_STOCKS_TTL_OPEN_MIN = int(((os.getenv("HOT_STOCKS_TTL_OPEN_MIN") or "").strip() or "120"))    # 2 min
-HOT_STOCKS_TTL_OPEN_MAX = int(((os.getenv("HOT_STOCKS_TTL_OPEN_MAX") or "").strip() or "300"))    # 5 min
-HOT_STOCKS_TTL_OPEN_DEFAULT = int(((os.getenv("HOT_STOCKS_TTL_OPEN") or "").strip() or "180"))    # 3 min default when open
+HOT_STOCKS_TTL_OPEN_MIN = env_int_safe("HOT_STOCKS_TTL_OPEN_MIN", 120, lo=0)    # 2 min
+HOT_STOCKS_TTL_OPEN_MAX = env_int_safe("HOT_STOCKS_TTL_OPEN_MAX", 300, lo=0)    # 5 min
+HOT_STOCKS_TTL_OPEN_DEFAULT = env_int_safe("HOT_STOCKS_TTL_OPEN", 180, lo=0)    # 3 min default when open
 
 
 def _seconds_until_next_market_open() -> int:
@@ -6678,7 +6699,7 @@ def _hot_float(v):
     """float(v) or None when v is missing / non-numeric / non-finite."""
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # E500: an int of 400+ digits raised OverflowError
         return None
     return f if math.isfinite(f) else None
 
@@ -7129,7 +7150,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     if stopped_early:
         # A user-stopped scan is incomplete by definition — keep it just long
         # enough to paint the tab, then let the next call do a real scan.
-        ttl = min(ttl, int(((os.getenv("HOT_PARTIAL_CACHE_TTL") or "").strip() or "300")))
+        ttl = min(ttl, env_int_safe("HOT_PARTIAL_CACHE_TTL", 300))
         payload["cache_ttl_seconds"] = ttl
         payload["quality_note"] = (
             f"PARTIAL — scan stopped after {processed_symbols}/{len(universe)} symbols. "
@@ -7212,7 +7233,7 @@ api_surprise_audit = _bound_routes_c.api_surprise_audit
 app.include_router(_bound_routes_c.api_surprise_audit_router)
 
 
-SURPRISE_SCAN_DEADLINE_S = float(((os.getenv("SURPRISE_SCAN_DEADLINE_S") or "").strip() or "20"))
+SURPRISE_SCAN_DEADLINE_S = env_float_safe("SURPRISE_SCAN_DEADLINE_S", 20, positive=True)
 
 # 2026-10-06 (group 175): single-flight for the default full-universe surprise scan. A scan that outlived the
 # 20 s deadline kept running in the background, but every later request (the Surprise tab, the real-trade-service
@@ -8489,7 +8510,7 @@ _REQUIRED_FEED_FIELDS = ("price", "rsi", "pe_ratio", "roce", "sentiment_score")
 # job writes, and those take minutes; the response carries "cached": true so the
 # UI can tell a memoised answer from a fresh one, and any Refresh button that
 # passes cache=False still forces a real recount.
-AUDIT_TTL_SEC = float(((os.getenv("AUDIT_TTL_SEC") or "").strip() or "20"))
+AUDIT_TTL_SEC = env_float_safe("AUDIT_TTL_SEC", 20, lo=0)
 _AUDIT_MEMO: dict = {}
 _AUDIT_MEMO_LOCK = __import__("threading").Lock()
 
@@ -8702,7 +8723,7 @@ app.include_router(_bound_routes_d.data_feed_update_batch_refresh_router)
 # ── Surgical Data Repair (audit + non-destructive patch) ───────────────────
 # _REQUIRED_FEED_FIELDS defined above (before audit-missing route)
 
-REPAIR_COOLDOWN_SEC = float(((os.getenv("REPAIR_COOLDOWN_SEC") or "").strip() or "0.5"))
+REPAIR_COOLDOWN_SEC = env_float_safe("REPAIR_COOLDOWN_SEC", 0.5, lo=0)
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -8754,7 +8775,7 @@ def _feed_missing_fields(payload: dict) -> list:
     if roce is None or _safe_float(roce) == 0:
         missing.append("roce")
     sent = data.get("sentiment_score", data.get("news_score", m.get("sentiment_score")))
-    if sent is None:
+    if sent is None or (isinstance(sent, float) and not math.isfinite(sent)):   # E500: a NaN / inf sentiment is not a read (rsi / pe / roce already count as missing)
         missing.append("sentiment_score")
     return missing
 
@@ -8774,6 +8795,11 @@ def _feed_scoring_sentiment(row: dict) -> tuple:
         if news is not None and news == row.get("sentiment_score"):
             news = 50.0
         sent = 50.0
+    # E500: a NaN / inf score is "absent", not a number to hand the decision engine
+    if isinstance(sent, float) and not math.isfinite(sent):
+        sent = None
+    if isinstance(news, float) and not math.isfinite(news):
+        news = None
     return sent, news
 
 

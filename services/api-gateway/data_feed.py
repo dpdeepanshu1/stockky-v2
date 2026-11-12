@@ -20,6 +20,7 @@ import contextvars
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -38,7 +39,7 @@ DATA_FEED_META_KEY = "stockky:data_feed:meta"
 DATA_FEED_JOB_KEY = "stockky:data_feed:job"
 DATA_FEED_INDEX_KEY = "stockky:data_feed:index"  # list of symbols currently in feed
 # Default 24h — long enough for full trading day + overnight; midnight scheduler refreshes
-DATA_FEED_TTL = int(((os.getenv("DATA_FEED_TTL_SECONDS") or "").strip() or str(24 * 3600)))
+DATA_FEED_TTL = env_int_safe("DATA_FEED_TTL_SECONDS", 24 * 3600, lo=0)
 
 # Process-local hot cache (speed). Durable source of truth is Neon via _get/_set.
 _LOCAL_SYMBOLS: Dict[str, dict] = {}
@@ -92,9 +93,9 @@ def _norm_sym(symbol: str) -> str:
 
 # Price gate — OFF by default (0 = no cap; every eligible stock is kept and
 # persisted). Set MAX_STOCK_PRICE in the environment for an explicit cap.
-MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
+MAX_STOCK_PRICE = env_float_safe("MAX_STOCK_PRICE", 0, lo=0)
 # Display-only "value buy" tag threshold — never excludes/strips a stock.
-VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "2000") or 2000)
+VALUE_BUY_THRESHOLD = env_float_safe("VALUE_BUY_THRESHOLD", 2000, lo=0)
 
 
 def _coerce_price(val) -> float:
@@ -110,7 +111,7 @@ def _coerce_price(val) -> float:
             return 0.0
         f = float(s)
         return f if 0 < f < float("inf") else 0.0   # E449: "inf" / "1e999" parse to inf and used to count as a price
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # E500: an int of 400+ digits (valid JSON) raised OverflowError out of float()
         return 0.0
 
 
@@ -1465,12 +1466,12 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
 # how many tickers are in the string, so shrinking chunk_size doesn't reduce
 # Yahoo request *rate* — it only adds more chunks, each paying the same
 # between-chunk pause. Bigger chunks = fewer round-trips = faster overall.
-BULK_YF_CHUNK = int(__import__("os").getenv("BULK_YF_CHUNK", "60"))
+BULK_YF_CHUNK = env_int_safe("BULK_YF_CHUNK", 60, positive=True)
 # Base courtesy gap between clean chunks. Real backoff (see below) only
 # kicks in when a chunk actually signals rate-limiting.
-BULK_YF_CHUNK_SLEEP = float(__import__("os").getenv("BULK_YF_CHUNK_SLEEP", "0.3"))
-BULK_YF_BACKOFF_SLEEP = float(__import__("os").getenv("BULK_YF_BACKOFF_SLEEP", "8.0"))
-BULK_YF_MAX_RETRIES_PER_CHUNK = int(__import__("os").getenv("BULK_YF_MAX_RETRIES_PER_CHUNK", "2"))
+BULK_YF_CHUNK_SLEEP = env_float_safe("BULK_YF_CHUNK_SLEEP", 0.3, lo=0)
+BULK_YF_BACKOFF_SLEEP = env_float_safe("BULK_YF_BACKOFF_SLEEP", 8.0, lo=0)
+BULK_YF_MAX_RETRIES_PER_CHUNK = env_int_safe("BULK_YF_MAX_RETRIES_PER_CHUNK", 2, lo=0)
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -1701,7 +1702,7 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
 # and reusing it removes most symbols from the Yahoo path entirely — Yahoo is
 # then only needed for live intraday LTP while the market is open.
 _BHAV_CACHE: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
-BHAV_CACHE_TTL_SEC = int(__import__("os").getenv("BHAV_CACHE_TTL_SEC", "1800"))  # 30 min
+BHAV_CACHE_TTL_SEC = env_int_safe("BHAV_CACHE_TTL_SEC", 1800, lo=0)  # 30 min
 
 _NSE_BHAV_HEADERS = {
     "User-Agent": (
@@ -1762,7 +1763,7 @@ def download_nse_bhavcopy_bulk(force: bool = False) -> Dict[str, dict]:
     # data-feed's PHASE 0 — a thread pool call can't be cancelled once
     # started, so it must check the flag itself). Cap total time here and
     # bail out to the Yahoo-bulk fallback instead.
-    _deadline = _time.time() + float(((os.getenv("BHAV_BULK_MAX_SEC") or "").strip() or "45"))
+    _deadline = _time.time() + env_float_safe("BHAV_BULK_MAX_SEC", 45)
     try:
         with _httpx.Client(timeout=15, headers=_NSE_BHAV_HEADERS, follow_redirects=True) as client:
             try:
@@ -2213,8 +2214,8 @@ PRICE_ALERTS_KEY = "system:price_alerts"
 # the 5-minute evaluate, a Delete during an evaluate) lost one change, a deleted alert came back or a new one vanished. One lock around every
 # read-change-write. The app runs one process (see the E454 note), and these functions always run in a worker thread, so a thread lock is enough.
 _PRICE_ALERTS_LOCK = threading.Lock()
-BULK_QUOTE_OPEN_TTL = int(__import__("os").getenv("BULK_QUOTE_OPEN_TTL", "120"))   # 2 min during market
-BULK_QUOTE_CLOSED_TTL = int(__import__("os").getenv("BULK_QUOTE_CLOSED_TTL", "21600"))  # 6h closed
+BULK_QUOTE_OPEN_TTL = env_int_safe("BULK_QUOTE_OPEN_TTL", 120, lo=0)   # 2 min during market
+BULK_QUOTE_CLOSED_TTL = env_int_safe("BULK_QUOTE_CLOSED_TTL", 21600, lo=0)  # 6h closed
 
 
 def _is_nse_session_open() -> bool:
@@ -2670,7 +2671,7 @@ def _apply_price_alert_hits(alerts: list, price_map: dict, now: float):
         try:
             px = float(price_map.get(sym) or 0)
             target = float(a.get("target_price") or 0)
-        except (TypeError, ValueError):   # E439: one non-numeric price or target used to abort the check of every alert
+        except (TypeError, ValueError, OverflowError):   # E439: one non-numeric price or target used to abort the check of every alert (E500: and an int of 400+ digits)
             continue
         if not (math.isfinite(px) and px > 0 and math.isfinite(target)):
             continue

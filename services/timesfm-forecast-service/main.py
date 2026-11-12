@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from env_util import env_float_safe  # E504: a typo / blank setting must not stop the import
 import tempfile
 import threading
 import time
@@ -29,7 +30,7 @@ logger = logging.getLogger("timesfm-forecast-service")
 
 MARKET_DATA_URL = (os.getenv("MARKET_DATA_URL") or "").strip().rstrip("/") or "http://market-data-service:8001"
 CACHE_PATH = (os.getenv("TSFM_CACHE_PATH") or "").strip() or "/app/cache/tsfm_cache.json"
-HISTORY_TIMEOUT_S = float(os.getenv("TSFM_HISTORY_TIMEOUT_S") or 20)
+HISTORY_TIMEOUT_S = env_float_safe("TSFM_HISTORY_TIMEOUT_S", 20, positive=True)
 
 
 def _int_env(name: str, default: int) -> int:

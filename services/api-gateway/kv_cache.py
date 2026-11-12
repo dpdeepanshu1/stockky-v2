@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+from env_util import env_int_safe  # E502: a typo / blank setting must not stop the import
 import re
 import threading
 import time
@@ -42,7 +43,7 @@ if os.getenv("DISABLE_UPSTASH", "0").lower() in ("1", "true", "yes"):
 if os.getenv("DISABLE_REDIS", "0").lower() in ("1", "true", "yes"):
     USE_REDIS = False
 
-KV_MEMORY_MAX_KEYS = int(((os.getenv("KV_MEMORY_MAX_KEYS") or "").strip() or "8000"))
+KV_MEMORY_MAX_KEYS = env_int_safe("KV_MEMORY_MAX_KEYS", 8000, positive=True)
 
 
 # Keys written to Neon so Render restarts do not wipe them

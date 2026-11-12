@@ -30,6 +30,10 @@ ENHANCEMENTS (lightweight financial ML best practices):
 """
 
 import os
+try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
 import logging
 import time
 import random
@@ -160,7 +164,7 @@ BASE_TRAINING_UNIVERSE = [
 ]
 
 # Cap how many optional extras we add from disk (keep training time sane)
-MAX_DYNAMIC_EXTRAS = int(((os.getenv("PRED_MAX_DYNAMIC_EXTRAS") or "").strip() or "80"))
+MAX_DYNAMIC_EXTRAS = env_int_safe("PRED_MAX_DYNAMIC_EXTRAS", 80, lo=0)
 
 
 def load_dynamic_training_universe():
@@ -217,10 +221,10 @@ logger.info("Total symbols : %d", len(TRAINING_UNIVERSE))
 logger.info("=" * 80)
 
 LOOKAHEAD_DAYS = 10
-TARGET_GAIN_PCT = float(((os.getenv("PRED_TARGET_GAIN_PCT") or "").strip() or "4.0"))  # ~4% in 10 sessions
-DECISION_THRESHOLD_FALLBACK = float(((os.getenv("PRED_DECISION_THRESHOLD") or "").strip() or "0.35"))
-MIN_PRECISION_AT_THRESHOLD = float(((os.getenv("PRED_MIN_PRECISION") or "").strip() or "0.30"))
-MIN_RECALL_AT_THRESHOLD = float(((os.getenv("PRED_MIN_RECALL") or "").strip() or "0.15"))
+TARGET_GAIN_PCT = env_float_safe("PRED_TARGET_GAIN_PCT", 4.0, lo=0)  # ~4% in 10 sessions
+DECISION_THRESHOLD_FALLBACK = env_float_safe("PRED_DECISION_THRESHOLD", 0.35, lo=0, hi=1)
+MIN_PRECISION_AT_THRESHOLD = env_float_safe("PRED_MIN_PRECISION", 0.30, lo=0, hi=1)
+MIN_RECALL_AT_THRESHOLD = env_float_safe("PRED_MIN_RECALL", 0.15, lo=0, hi=1)
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -772,12 +776,12 @@ def _apply_smote(X, y, random_state: int = 42):
         return X, y, info
 
     # Target: bring minority up toward ~40% of majority (not full 1:1 to limit noise)
-    target_ratio = float(((os.getenv("PRED_SMOTE_RATIO") or "").strip() or "0.45"))
+    target_ratio = env_float_safe("PRED_SMOTE_RATIO", 0.45, lo=0)
     target_ratio = min(max(target_ratio, 0.25), 1.0)
     sampling_strategy = min(target_ratio, n_pos / max(n_neg, 1) + 0.35)
     sampling_strategy = min(max(sampling_strategy, float(n_pos) / max(n_neg, 1) + 1e-6), 1.0)
 
-    k = int(((os.getenv("PRED_SMOTE_K") or "").strip() or "5"))
+    k = env_int_safe("PRED_SMOTE_K", 5, lo=0)
     k = max(1, min(k, n_pos - 1))
 
     try:
@@ -1015,9 +1019,9 @@ def main():
             logger.info("scale_pos_weight after SMOTE adjusted to %.2f", scale_pos_weight)
 
     base_model = XGBClassifier(
-        n_estimators=int(((os.getenv("PRED_N_ESTIMATORS") or "").strip() or "400")),
-        max_depth=int(((os.getenv("PRED_MAX_DEPTH") or "").strip() or "5")),
-        learning_rate=float(((os.getenv("PRED_LR") or "").strip() or "0.04")),
+        n_estimators=env_int_safe("PRED_N_ESTIMATORS", 400, positive=True),
+        max_depth=env_int_safe("PRED_MAX_DEPTH", 5, positive=True),
+        learning_rate=env_float_safe("PRED_LR", 0.04, positive=True),
         subsample=0.85,
         colsample_bytree=0.85,
         min_child_weight=3,

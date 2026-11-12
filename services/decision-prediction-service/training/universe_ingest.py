@@ -18,6 +18,10 @@ import re
 import re
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -28,7 +32,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 logger = logging.getLogger("universe_ingest")
 
 IST = ZoneInfo("Asia/Kolkata")
-RETENTION_HOURS = int(((os.getenv("TRAINING_SAMPLE_RETENTION_HOURS") or "").strip() or "48"))  # 24–48h
+RETENTION_HOURS = env_int_safe("TRAINING_SAMPLE_RETENTION_HOURS", 48, lo=0)  # 24–48h
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip() or (os.getenv("TRAINING_DATABASE_URL") or "").strip() or "sqlite:///./training.db"
 
 Base = declarative_base()

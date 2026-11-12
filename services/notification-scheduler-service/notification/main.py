@@ -28,6 +28,10 @@ reliable delivery pipe — same design principle as Market Data Service.
 v0.5.0 – respects the 'channel' parameter: "telegram", "discord", "slack", or "all".
 """
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 import re as _re_top
 import json
 import logging
@@ -992,7 +996,7 @@ def test_notifications():
 
 
 # ── DB keep-alive (every ~4 minutes) — prevents free-tier auto-suspend ──
-_NEON_KEEPALIVE_SEC = int(((os.getenv("NEON_KEEPALIVE_INTERVAL_SEC") or "").strip() or "240"))
+_NEON_KEEPALIVE_SEC = env_int_safe("NEON_KEEPALIVE_INTERVAL_SEC", 240)
 _neon_keepalive_task = None
 
 

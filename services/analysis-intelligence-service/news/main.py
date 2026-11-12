@@ -7,6 +7,10 @@ v0.5.0 - Multi-source news aggregation.
 """
 import os
 try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
+try:
     from news_quality import build_news_response
 except Exception:
     build_news_response = None  # type: ignore
@@ -267,8 +271,8 @@ def _base_symbol(symbol: str) -> str:
 _NAME_CACHE: Dict[str, str] = {}          # base -> resolved name ("" = looked up, nothing found)
 _NAME_CACHE_TS: Dict[str, float] = {}     # base -> monotonic time the entry was stored
 _NAME_CACHE_LOCK = threading.Lock()
-_NAME_HIT_TTL_S = float((os.getenv("NEWS_NAME_CACHE_TTL_S") or "").strip() or "604800")   # names rarely change: 7d
-_NAME_MISS_TTL_S = float((os.getenv("NEWS_NAME_MISS_TTL_S") or "").strip() or "3600")   # retry failed lookups hourly
+_NAME_HIT_TTL_S = env_float_safe("NEWS_NAME_CACHE_TTL_S", 604800, lo=0)   # names rarely change: 7d
+_NAME_MISS_TTL_S = env_float_safe("NEWS_NAME_MISS_TTL_S", 3600, lo=0)   # retry failed lookups hourly
 _NAME_LOOKUP_ENABLED = ((os.getenv("NEWS_NAME_LOOKUP") or "").strip() or "1").lower() not in ("0", "false", "no", "off")
 _NAME_SUFFIX_RE = re.compile(r"\b(limited|ltd\.?|inc\.?|corporation|corp\.?)\s*$", re.IGNORECASE)
 
@@ -399,8 +403,8 @@ def _parse_feed_items(parsed, publisher: str, keywords: List[str], max_items: in
 # YAHOO_NEWS_BACKOFF_SECONDS; the first non-empty result resets the count. Only Yahoo is skipped: every
 # other headline source still runs, so what comes back is unchanged except for the wasted Yahoo attempts.
 # Set YAHOO_NEWS_BACKOFF_AFTER=0 to turn the backoff off. State is per process.
-_YAHOO_BACKOFF_AFTER = int(((os.getenv("YAHOO_NEWS_BACKOFF_AFTER") or "").strip() or "10"))
-_YAHOO_BACKOFF_SECONDS = float(((os.getenv("YAHOO_NEWS_BACKOFF_SECONDS") or "").strip() or "600"))
+_YAHOO_BACKOFF_AFTER = env_int_safe("YAHOO_NEWS_BACKOFF_AFTER", 10, lo=0)
+_YAHOO_BACKOFF_SECONDS = env_float_safe("YAHOO_NEWS_BACKOFF_SECONDS", 600, lo=0)
 _yahoo_lock = threading.Lock()
 _yahoo_state: Dict[str, Any] = {"misses": 0, "skip_until": 0.0}
 _mono = time.monotonic

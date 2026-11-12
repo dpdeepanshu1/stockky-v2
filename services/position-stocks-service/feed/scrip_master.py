@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from env_util import env_float_safe  # E503: a typo / blank setting must not stop the import
 import tempfile
 import threading
 import time
@@ -34,24 +35,24 @@ SCRIP_MASTER_URL = os.getenv(
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
 )
 # The file itself is only republished once a day — no point re-fetching more often.
-REFRESH_INTERVAL_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_REFRESH_S") or "").strip() or str(24 * 3600)))
+REFRESH_INTERVAL_S = env_float_safe("ANGELONE_SCRIP_MASTER_REFRESH_S", 24 * 3600, lo=0)
 
 # How long a request thread that finds NO map at all (cold start) will wait for
 # the single in-flight fetch before giving up and letting its caller fall back
 # to its non-AngelOne path. Deliberately short: these are request threads.
-DEFAULT_WAIT_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_WAIT_S") or "").strip() or "3"))
+DEFAULT_WAIT_S = env_float_safe("ANGELONE_SCRIP_MASTER_WAIT_S", 3, lo=0)
 # Failure backoff: first retry after BASE seconds, doubling up to MAX.
-_FAIL_BACKOFF_BASE_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_FAIL_BACKOFF_S") or "").strip() or "30"))
-_FAIL_BACKOFF_MAX_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_FAIL_BACKOFF_MAX_S") or "").strip() or "600"))
+_FAIL_BACKOFF_BASE_S = env_float_safe("ANGELONE_SCRIP_MASTER_FAIL_BACKOFF_S", 30, lo=0)
+_FAIL_BACKOFF_MAX_S = env_float_safe("ANGELONE_SCRIP_MASTER_FAIL_BACKOFF_MAX_S", 600, lo=0)
 # Network: per-read timeout (httpx applies it between chunks, not to the whole
 # download) plus a hard wall-clock cap on the entire download.
-_READ_TIMEOUT_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_READ_TIMEOUT_S") or "").strip() or "30"))
-_MAX_DOWNLOAD_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_MAX_DOWNLOAD_S") or "").strip() or "180"))
+_READ_TIMEOUT_S = env_float_safe("ANGELONE_SCRIP_MASTER_READ_TIMEOUT_S", 30, positive=True)
+_MAX_DOWNLOAD_S = env_float_safe("ANGELONE_SCRIP_MASTER_MAX_DOWNLOAD_S", 180, lo=0)
 # Disk snapshot of the parsed map (tiny). A snapshot up to CACHE_MAX_AGE old is
 # accepted for a warm start; anything older than REFRESH_INTERVAL_S is then
 # refreshed in the background right away.
 _CACHE_PATH = os.getenv("ANGELONE_SCRIP_MASTER_CACHE_PATH", "/tmp/position_stocks_scrip_master_cache.json")
-_CACHE_MAX_AGE_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_CACHE_MAX_AGE_S") or "").strip() or str(7 * 24 * 3600)))
+_CACHE_MAX_AGE_S = env_float_safe("ANGELONE_SCRIP_MASTER_CACHE_MAX_AGE_S", 7 * 24 * 3600, lo=0)
 # Streaming-parse safety valve: if this much data accumulates without a single
 # complete JSON object being decodable, the payload is malformed — bail out.
 _MAX_PENDING_CHARS = 8 * 1024 * 1024
@@ -63,7 +64,7 @@ _FALLBACK_URLS = [u.strip() for u in (os.getenv("ANGELONE_SCRIP_MASTER_FALLBACK_
 # (a loop of N get_token() calls - /internal/feed-coverage takes up to 200 - used to stack N x 3 s on request threads,
 # which is what timed real-trade's /quotes/bulk and /quote calls out while the first download was in flight).
 # Callers that pass an explicit wait_s (the WS feeds, the movers sweep) are never short-circuited.
-_COLD_NOWAIT_S = float(((os.getenv("ANGELONE_SCRIP_MASTER_COLD_NOWAIT_S") or "").strip() or "15"))
+_COLD_NOWAIT_S = env_float_safe("ANGELONE_SCRIP_MASTER_COLD_NOWAIT_S", 15, lo=0)
 
 # group488: after a container (re)start with a stored snapshot, the first background refresh of a STALE snapshot waits this
 # long (plus up to 50 % random jitter) counted from process start, so it does not hit AngelOne's file server at the same

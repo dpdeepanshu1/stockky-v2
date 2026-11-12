@@ -28,6 +28,8 @@ from datetime import datetime, time as _time, timezone
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
+from env_util import env_int_safe  # E507
+
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger("session-proof")
 
@@ -37,13 +39,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in ("1", "true", "yes", "on")
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(((os.getenv(name) or "").strip() or default))
-    except Exception:
-        return default
 
 
 def _env_time(name: str, default: _time) -> _time:
@@ -58,11 +53,11 @@ def _env_time(name: str, default: _time) -> _time:
 ENABLED = _env_bool("SESSION_PROOF_ENABLED", True)
 WINDOW_START = _env_time("SESSION_PROOF_START_IST", _time(9, 15))
 WINDOW_END = _env_time("SESSION_PROOF_END_IST", _time(10, 0))
-MIN_MOVES = max(1, _env_int("SESSION_PROOF_MIN_MOVES", 1))
-MIN_SYMBOLS = max(1, _env_int("SESSION_PROOF_MIN_SYMBOLS", 10))
+MIN_MOVES = max(1, env_int_safe("SESSION_PROOF_MIN_MOVES", 1))
+MIN_SYMBOLS = max(1, env_int_safe("SESSION_PROOF_MIN_SYMBOLS", 10))
 # group320: Nifty ALONE may close the day only after this many separate in-window readings of an unchanged index
 # (one stale cached index quote must never be enough; the probe takes one reading a minute).
-NIFTY_MIN_OBS = max(1, _env_int("SESSION_NIFTY_MIN_OBS", 3))
+NIFTY_MIN_OBS = max(1, env_int_safe("SESSION_NIFTY_MIN_OBS", 3))
 
 # Index names that count as "Nifty" for the Nifty-unchanged half of the rule.
 _NIFTY_KEYS = {"NIFTY", "NIFTY 50", "NIFTY50", "^NSEI", "NSEI"}
@@ -245,7 +240,7 @@ def is_closed_today(now: Optional[datetime] = None) -> bool:
 # polls at most every NIFTY_PROBE_S (60 s) and only while it can matter: inside the proof window, or while the day
 # is judged closed (so the first real Nifty move still overturns the verdict). Never raises, never blocks the caller
 # for longer than the fetcher takes (the feed loop runs it off the event loop).
-NIFTY_PROBE_S = max(5, _env_int("SESSION_NIFTY_PROBE_S", 60))
+NIFTY_PROBE_S = max(5, env_int_safe("SESSION_NIFTY_PROBE_S", 60))
 _nifty_fetcher = None
 _nifty_last_probe = 0.0
 

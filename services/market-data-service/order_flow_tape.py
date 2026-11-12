@@ -33,6 +33,8 @@ from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from env_util import env_float_safe, env_int_safe  # E507
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 _MAX_BARS = 420
 _MAX_LEVELS_PER_BAR = 24
@@ -47,20 +49,12 @@ _stats = {"rows": 0, "intervals": 0, "skipped_no_volume": 0, "skipped_reset": 0,
 
 
 # ── settings (call time) ─────────────────────────────────────────────────────────────────────────────────────────────────────
-def _envf(name: str, default: float) -> float:
-    try:
-        v = os.getenv(name)
-        return float(v) if v not in (None, "") else float(default)
-    except (TypeError, ValueError):
-        return float(default)
-
-
 def enabled() -> bool:
     return ((os.getenv("FLOW_TAPE_ENABLED") or "").strip() or "1").lower() not in ("0", "false", "no", "off")   # a blank value stays on (group 75 sweep)
 
 
 def _max_symbols() -> int:
-    return int(max(50, _envf("FLOW_TAPE_MAX_SYMBOLS", 1500)))
+    return int(max(50, env_float_safe("FLOW_TAPE_MAX_SYMBOLS", 1500)))
 
 
 def _f(v) -> Optional[float]:
@@ -411,11 +405,11 @@ def _reliability(st: _Sym, now: datetime) -> Tuple[bool, str, Optional[float]]:
     cov = None
     if st.last_vol and st.last_vol > 0:
         cov = round(100.0 * st.tape_volume / st.last_vol, 1)
-    if st.intervals < int(_envf("FLOW_MIN_INTERVALS", 40)):
+    if st.intervals < env_int_safe("FLOW_MIN_INTERVALS", 40, lo=0):
         return False, "too_few_intervals", cov
-    if (now - st.started_at).total_seconds() < _envf("FLOW_MIN_TAPE_MINUTES", 8) * 60.0:
+    if (now - st.started_at).total_seconds() < env_float_safe("FLOW_MIN_TAPE_MINUTES", 8, lo=0) * 60.0:
         return False, "tape_too_young", cov
-    if cov is None or cov < _envf("FLOW_MIN_COVERAGE_PCT", 35):
+    if cov is None or cov < env_float_safe("FLOW_MIN_COVERAGE_PCT", 35, lo=0, hi=100):
         return False, "low_coverage", cov
     if (now - st.last_at).total_seconds() > _STALE_ROW_S:
         return False, "stale", cov
@@ -438,7 +432,7 @@ def _add_interval(st: _Sym, now: datetime, ltp: float, tpx: float, dv: float, si
     big = False
     if len(st.ivols) >= 20:
         med = statistics.median(st.ivols)
-        big = med > 0 and dv >= _envf("FLOW_BIG_PRINT_MULT", 8) * med and value >= _envf("FLOW_BIG_PRINT_MIN_VALUE_RS", 500000)
+        big = med > 0 and dv >= env_float_safe("FLOW_BIG_PRINT_MULT", 8, positive=True) * med and value >= env_float_safe("FLOW_BIG_PRINT_MIN_VALUE_RS", 500000, lo=0)
     st.ivols.append(dv)
     b = _to_bin(tpx, st.bin)
     if side == "buy":
@@ -556,7 +550,7 @@ def snapshot(symbol: str, now: Optional[datetime] = None) -> dict:
 def verdict(symbol: str, side: str = "LONG", min_against: Optional[int] = None, now: Optional[datetime] = None) -> dict:
     """Compact gate answer. `block` is True only on a RELIABLE tape with at least `min_against` adverse checks for the side."""
     s = "short" if str(side or "").strip().upper() in ("SHORT", "SELL") else "long"
-    n_min = int(min(6, max(1, min_against if min_against is not None else _envf("FLOW_GATE_MIN_AGAINST", 2))))
+    n_min = int(min(6, max(1, min_against if min_against is not None else env_float_safe("FLOW_GATE_MIN_AGAINST", 2))))
     snap = snapshot(symbol, now)
     base = {"symbol": snap.get("symbol"), "side": s.upper(), "available": bool(snap.get("available")), "reliable": bool(snap.get("reliable")),
             "block": False, "reason": snap.get("reason"), "against": 0, "for_count": 0, "checks": {}, "coverage_pct": snap.get("coverage_pct")}

@@ -23,6 +23,7 @@ import asyncio
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading
 from datetime import datetime, timedelta, timezone
 import write_behind as _write_behind   # A3
@@ -73,15 +74,15 @@ FLAT_STOP_PCT   = 3.2
 FLAT_TARGET_PCT = 6.5
 
 # ── Entry quality gates (env-overridable, adaptive layer applies on top) ──────
-MIN_REWARD_RISK_RATIO = float(((os.getenv("ENTRY_MIN_REWARD_RISK") or "").strip() or "2.0"))
-MAX_ENTRY_DRIFT_ATR   = float(((os.getenv("ENTRY_MAX_DRIFT_ATR") or "").strip() or "0.75"))
+MIN_REWARD_RISK_RATIO = env_float_safe("ENTRY_MIN_REWARD_RISK", 2.0, lo=0)
+MAX_ENTRY_DRIFT_ATR   = env_float_safe("ENTRY_MAX_DRIFT_ATR", 0.75, lo=0)
 
 # Static fallback for regime gate — adaptive layer overrides this at runtime.
-REGIME_MIN_SCORE_STATIC = int(((os.getenv("ENTRY_REGIME_MIN_SCORE") or "").strip() or "38"))
+REGIME_MIN_SCORE_STATIC = env_int_safe("ENTRY_REGIME_MIN_SCORE", 38)
 
 # Conviction sizing
-CONVICTION_MIDPOINT  = float(((os.getenv("ENTRY_CONVICTION_MIDPOINT") or "").strip() or "65.0"))
-CONVICTION_MAX_SCALE = float(((os.getenv("ENTRY_CONVICTION_MAX_SCALE") or "").strip() or "0.25"))
+CONVICTION_MIDPOINT  = env_float_safe("ENTRY_CONVICTION_MIDPOINT", 65.0)
+CONVICTION_MAX_SCALE = env_float_safe("ENTRY_CONVICTION_MAX_SCALE", 0.25, lo=0)
 
 # BUG FIX (31-Aug-2026): this set used to be {"BUY NOW", "PREPARE TO BUY"}
 # only — a straight copy-paste of candidate_engine/candidates.py's own

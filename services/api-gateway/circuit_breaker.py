@@ -12,6 +12,7 @@ This way gateway and decision services share the same open/closed picture.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -20,9 +21,14 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger("circuit-breaker")
 
-DEFAULT_FAILURE_THRESHOLD = int(((os.getenv("CB_FAILURE_THRESHOLD") or "").strip() or "12"))
-DEFAULT_RECOVERY_TIMEOUT = float(((os.getenv("CB_RECOVERY_TIMEOUT") or "").strip() or "30"))  # faster half-open after cold start
-DEFAULT_HALF_OPEN_SUCCESS = int(((os.getenv("CB_HALF_OPEN_SUCCESS") or "").strip() or "2"))
+try:
+    from env_util import env_float_safe, env_int_safe  # E507: ranges for the settings this module reads
+except ImportError:  # imported as a package module
+    from .env_util import env_float_safe, env_int_safe
+
+DEFAULT_FAILURE_THRESHOLD = env_int_safe("CB_FAILURE_THRESHOLD", 12, positive=True)
+DEFAULT_RECOVERY_TIMEOUT = env_float_safe("CB_RECOVERY_TIMEOUT", 30.0, positive=True)  # faster half-open after cold start
+DEFAULT_HALF_OPEN_SUCCESS = env_int_safe("CB_HALF_OPEN_SUCCESS", 2, positive=True)
 
 _redis = None
 _redis_init = False
@@ -80,7 +86,11 @@ class CircuitBreaker:
     ):
         self.name = name
         self.failure_threshold = max(1, int(failure_threshold))
-        self.recovery_timeout = float(recovery_timeout)
+        try:
+            _rt = float(recovery_timeout)
+        except (TypeError, ValueError):
+            _rt = DEFAULT_RECOVERY_TIMEOUT
+        self.recovery_timeout = _rt if math.isfinite(_rt) else DEFAULT_RECOVERY_TIMEOUT   # E501: nan / inf never reached half_open
         self.half_open_success = max(1, int(half_open_success))
         self._lock = threading.Lock()
         self._failures = 0
@@ -100,7 +110,7 @@ class CircuitBreaker:
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
             return
         now = time.time()
-        min_iv = float(((os.getenv("CB_REDIS_MIN_INTERVAL") or "").strip() or "15"))
+        min_iv = env_float_safe("CB_REDIS_MIN_INTERVAL", 15.0, lo=0)   # E501
         if (now - getattr(self, "_last_load_at", 0.0)) < min_iv:
             return
         self._last_load_at = now
@@ -126,7 +136,9 @@ class CircuitBreaker:
                 if fails is not None:
                     self._failures = int(fails)
                 if opened is not None:
-                    self._opened_at = float(opened)
+                    _o = float(opened)
+                    if math.isfinite(_o):   # E501: a NaN timestamp is truthy and never >= recovery_timeout
+                        self._opened_at = _o
         except Exception as e:
             logger.debug("cb load remote %s: %s", self.name, e)
 
@@ -140,7 +152,7 @@ class CircuitBreaker:
         if os.getenv("CB_REDIS_SYNC", "0").lower() not in ("1", "true", "yes"):
             return
         now = time.time()
-        min_iv = float(((os.getenv("CB_REDIS_MIN_INTERVAL") or "").strip() or "15"))
+        min_iv = env_float_safe("CB_REDIS_MIN_INTERVAL", 15.0, lo=0)   # E501
         last = getattr(self, "_last_persist_at", 0.0)
         sig = (self._state, self._failures)
         if sig == getattr(self, "_last_persist_sig", None) and (now - last) < min_iv:
@@ -188,6 +200,11 @@ class CircuitBreaker:
 
     def _maybe_half_open_unlocked(self) -> None:
         if self._state != "open":
+            return
+        if not self._opened_at:
+            # E501: state "open" with no timestamp (the shared Redis state key was loaded but the opened_at key was missing / expired) never
+            # recovered: `opened and ...` was falsy for ever and retry_after() answered 0. Start the recovery clock now.
+            self._opened_at = time.time()
             return
         # Prefer wall clock when redis-shared
         opened = self._opened_at

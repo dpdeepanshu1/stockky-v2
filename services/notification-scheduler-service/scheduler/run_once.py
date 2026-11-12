@@ -4,6 +4,10 @@ Scheduler — single-shot mode, driven by GitHub Actions cron.
 Now uses batch scanning via /scan/batch to avoid monolithic timeouts.
 """
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 import json
 import logging
 import time
@@ -205,11 +209,11 @@ def _select_top_picks(actionable: list, limit: int = 5) -> list:
     eligible.sort(key=lambda r: _value_adjusted_score(r)[0], reverse=True)
     return eligible[:limit]
 
-SCAN_INTERVAL_MINUTES = int(((os.getenv("SCAN_INTERVAL_MINUTES") or "").strip() or "60"))
-BATCH_SIZE = int(((os.getenv("BATCH_SIZE") or "").strip() or "12"))          # max symbols per batch (gateway limit 15)
-MAX_CONCURRENT_BATCHES = int(((os.getenv("MAX_CONCURRENT_BATCHES") or "").strip() or "2"))
-BATCH_TIMEOUT = int(((os.getenv("BATCH_TIMEOUT") or "").strip() or "300"))   # seconds per batch (free-tier cold)
-SCAN_TIMEOUT_TOTAL = int(((os.getenv("SCAN_TIMEOUT_TOTAL") or "").strip() or "5400"))  # 90 min hard cap
+SCAN_INTERVAL_MINUTES = env_int_safe("SCAN_INTERVAL_MINUTES", 60, lo=0)
+BATCH_SIZE = env_int_safe("BATCH_SIZE", 12, positive=True)          # max symbols per batch (gateway limit 15)
+MAX_CONCURRENT_BATCHES = env_int_safe("MAX_CONCURRENT_BATCHES", 2, positive=True)
+BATCH_TIMEOUT = env_int_safe("BATCH_TIMEOUT", 300, positive=True)   # seconds per batch (free-tier cold)
+SCAN_TIMEOUT_TOTAL = env_int_safe("SCAN_TIMEOUT_TOTAL", 5400, positive=True)  # 90 min hard cap
 USE_FULL_UNIVERSE = ((os.getenv("USE_FULL_UNIVERSE") or "").strip() or "true").lower() in ("1", "true", "yes")
 USE_GATEWAY_ASYNC_SCAN = ((os.getenv("USE_GATEWAY_ASYNC_SCAN") or "").strip() or "true").lower() in ("1", "true", "yes")
 FORCE_SCAN = os.getenv("FORCE_SCAN", "false").lower() == "true"

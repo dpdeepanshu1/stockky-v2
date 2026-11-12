@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -34,9 +35,22 @@ import uuid
 
 logger = logging.getLogger("boot-forensics")
 
+
+def _env_float(name: str, default: float, lo: float = None, hi: float = None, positive: bool = False) -> float:
+    """E505 / E506: a typo / blank / nan / inf setting, or one outside [lo, hi] (or <= 0 when `positive`), falls back to the default instead of stopping the import
+    or breaking the loop that uses it (identical copy in every service that has this file)."""
+    try:
+        v = float((os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(v) or (positive and not v > 0) or (lo is not None and v < lo) or (hi is not None and v > hi):
+        return float(default)
+    return v
+
+
 _STATE_PATH = os.getenv("BOOT_FORENSICS_PATH", "/tmp/stockky_boot_state.json")
-_HEARTBEAT_S = float(((os.getenv("BOOT_FORENSICS_HEARTBEAT_S") or "").strip() or "15"))
-_MEM_WARN_PCT = float(((os.getenv("BOOT_FORENSICS_MEM_WARN_PCT") or "").strip() or "85"))
+_HEARTBEAT_S = _env_float("BOOT_FORENSICS_HEARTBEAT_S", 15, positive=True)
+_MEM_WARN_PCT = _env_float("BOOT_FORENSICS_MEM_WARN_PCT", 85, positive=True, hi=100)
 
 _state: dict = {}
 _lock = threading.Lock()

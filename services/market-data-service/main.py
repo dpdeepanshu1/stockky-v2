@@ -11,6 +11,7 @@ All data is cached with TTL that depends on market hours:
 v2.2 – reduced retries and timeouts for faster responses.
 """
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import re
 import asyncio
 import urllib.parse
@@ -40,7 +41,7 @@ from pydantic import BaseModel
 import httpx
 from circuit_breaker import get_breaker, all_snapshots
 import gc
-MAX_HISTORY_ROWS = int(((os.environ.get("MAX_HISTORY_ROWS") or "").strip() or "260"))  # ~1y daily, 512MB-safe
+MAX_HISTORY_ROWS = env_int_safe("MAX_HISTORY_ROWS", 260, positive=True)  # ~1y daily, 512MB-safe
 # E27: the 260-row cap is right for daily bars (~1y) but cut a 1-minute chart to 260 minutes: an intraday interval gets its own cap
 # (5 sessions of 1-minute bars = 1875 rows; 5m / 15m over a month and 1h over 3 months are smaller). Blank / non-numeric -> 2600.
 _raw_intraday_rows = (os.environ.get("MAX_HISTORY_ROWS_INTRADAY") or "").strip() or "2600"
@@ -193,9 +194,9 @@ def _compute_growth(current, previous):
 # Caps concurrent Yahoo calls across quote + history + fundamentals so a
 # parallel market scan does not stampede Yahoo and get empty responses.
 import threading
-_YFINANCE_MAX_CONCURRENT = int(((os.getenv("YFINANCE_MAX_CONCURRENT") or "").strip() or "1"))
+_YFINANCE_MAX_CONCURRENT = env_int_safe("YFINANCE_MAX_CONCURRENT", 1, positive=True)
 _yf_semaphore = threading.Semaphore(_YFINANCE_MAX_CONCURRENT)
-_YF_MIN_INTERVAL = float(((os.getenv("YFINANCE_MIN_INTERVAL_SEC") or "").strip() or "0.35"))
+_YF_MIN_INTERVAL = env_float_safe("YFINANCE_MIN_INTERVAL_SEC", 0.35, lo=0)
 _yf_last_call = 0.0
 _yf_lock = threading.Lock()
 
@@ -664,7 +665,7 @@ async def _start_boot_feed_fallback():
 # live-feed cache. This periodically re-points both feeds at api-gateway's
 # live /scan/universe (movers/bulk-deals/52w/news/watchlist — the same set
 # candidate_engine trades from).
-UNIVERSE_REFRESH_INTERVAL_S = float(((os.getenv("FEED_UNIVERSE_REFRESH_INTERVAL_S") or "").strip() or "900"))
+UNIVERSE_REFRESH_INTERVAL_S = env_float_safe("FEED_UNIVERSE_REFRESH_INTERVAL_S", 900, positive=True)
 
 _current_feed_universe: list = []
 
@@ -727,8 +728,8 @@ async def _refresh_feed_universe_loop():
     # First refresh now happens shortly after boot (giving api-gateway time to
     # come up), retries quickly until it succeeds once, then settles into the
     # normal cadence.
-    _initial_delay = float(((os.getenv("FEED_UNIVERSE_INITIAL_DELAY_S") or "").strip() or "20"))
-    _retry_delay = min(UNIVERSE_REFRESH_INTERVAL_S, float(((os.getenv("FEED_UNIVERSE_RETRY_DELAY_S") or "").strip() or "60")))
+    _initial_delay = env_float_safe("FEED_UNIVERSE_INITIAL_DELAY_S", 20, lo=0)
+    _retry_delay = min(UNIVERSE_REFRESH_INTERVAL_S, env_float_safe("FEED_UNIVERSE_RETRY_DELAY_S", 60))
     delay = _initial_delay
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
@@ -1268,7 +1269,7 @@ FALLBACK_TTL_SECONDS = 30 * 24 * 60 * 60
 
 # Global Yahoo/upstream cooldown after 429 (stops stampede + Redis write storm)
 _YF_COOLDOWN_UNTIL = 0.0
-_YF_COOLDOWN_SEC = float(((os.getenv("YFINANCE_COOLDOWN_SEC") or "").strip() or "180"))  # 3 min
+_YF_COOLDOWN_SEC = env_float_safe("YFINANCE_COOLDOWN_SEC", 180, lo=0)  # 3 min
 _UPSTREAM_COOLDOWN = {}  # name -> until epoch
 
 def _in_cooldown(name: str = "yfinance") -> bool:
@@ -4733,7 +4734,7 @@ def _nse_history_candles(sym: str, period: str, interval: str, days: Optional[in
 #      last HISTORY_FORCE_REUSE_S seconds (default 60) is reused, and identical
 #      forced requests coalesce through the single-flight below. Daily candles
 #      do not change inside a minute. 0 restores the old always-upstream force.
-_HISTORY_FORCE_REUSE_S = float(((os.getenv("HISTORY_FORCE_REUSE_S") or "").strip() or "60"))
+_HISTORY_FORCE_REUSE_S = env_float_safe("HISTORY_FORCE_REUSE_S", 60, lo=0)
 _HISTORY_DERIVE_MIN_BARS = 5
 _HISTORY_DERIVE_MIN_BARS_BY_PERIOD = {"5d": 3}   # group231: a 7-calendar-day window holds 3-5 sessions
 _HISTORY_PERIOD_ORDER = ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"]
@@ -5009,7 +5010,7 @@ def _history_last_good_for(cache_key: str, sym: str, period: str, interval: str,
 # 1.5 req/s candle bucket and the 8-worker yfinance pool. Now only the first
 # request for a given key goes upstream; identical concurrent requests wait
 # (bounded) for it and are then served from the cache it just filled.
-_HISTORY_FLIGHT_WAIT_S = float(((os.getenv("HISTORY_SINGLE_FLIGHT_WAIT_S") or "").strip() or "20"))
+_HISTORY_FLIGHT_WAIT_S = env_float_safe("HISTORY_SINGLE_FLIGHT_WAIT_S", 20, lo=0)
 _history_flights: dict = {}
 _history_flights_guard = threading.Lock()
 

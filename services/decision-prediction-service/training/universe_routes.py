@@ -29,7 +29,11 @@ router = APIRouter(prefix="/api/universe", tags=["universe-training"])
 
 # Price gate — OFF by default (0 = no cap; every eligible sample is kept).
 import os as _os
-MAX_STOCK_PRICE = float(_os.getenv("MAX_STOCK_PRICE", "0") or 0)
+try:
+    from env_util import env_float_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe
+MAX_STOCK_PRICE = env_float_safe("MAX_STOCK_PRICE", 0, lo=0)
 
 
 def get_filtered_universe(

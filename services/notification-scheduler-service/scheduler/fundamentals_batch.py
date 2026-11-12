@@ -15,6 +15,10 @@ Same shape as weekend_hydrator.py — reuses _fetch_universe() pattern.
 from __future__ import annotations
 import logging
 import os
+try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -45,9 +49,9 @@ DB_URL = (
     or ""
 )
 
-BATCH_DELAY_S    = float(((os.getenv("FUNDAMENTALS_BATCH_DELAY_S") or "").strip() or "0.5"))   # ~2 req/s
-REQUEST_TIMEOUT  = float(((os.getenv("FUNDAMENTALS_REQUEST_TIMEOUT") or "").strip() or "30.0"))
-MAX_SYMBOLS      = int(((os.getenv("FUNDAMENTALS_MAX_SYMBOLS") or "").strip() or "500"))
+BATCH_DELAY_S    = env_float_safe("FUNDAMENTALS_BATCH_DELAY_S", 0.5, lo=0)   # ~2 req/s
+REQUEST_TIMEOUT  = env_float_safe("FUNDAMENTALS_REQUEST_TIMEOUT", 30.0, positive=True)
+MAX_SYMBOLS      = env_int_safe("FUNDAMENTALS_MAX_SYMBOLS", 500, lo=0)
 
 
 def _fetch_universe() -> list:

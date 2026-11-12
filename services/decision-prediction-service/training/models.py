@@ -32,6 +32,10 @@ Base = declarative_base()
 # ---------- Portable auto-increment primary key (Postgres SERIAL ↔ Oracle IDENTITY) ----------
 import os as _os
 
+try:
+    from env_util import env_int_safe  # E505: a typo / blank setting must not stop this code path
+except ImportError:   # imported as a package module, the folder is not on sys.path
+    from .env_util import env_int_safe
 # Presence of ORACLE_DSN is the single switch that means "this process talks to
 # Oracle Autonomous DB" — the same convention used by oracle_compat.py and
 # get_engine() below. Evaluated at import time; docker compose always exports it
@@ -857,10 +861,10 @@ def _oracle_engine_kwargs(full_url_provided: bool) -> dict:
     return {
         "echo": False,
         "pool_pre_ping": True,
-        "pool_recycle": int(((os.environ.get("DB_POOL_RECYCLE") or "").strip() or "300")),
-        "pool_size": int(((os.environ.get("DB_POOL_SIZE") or "").strip() or "3")),
-        "max_overflow": int(((os.environ.get("DB_MAX_OVERFLOW") or "").strip() or "2")),
-        "pool_timeout": int(((os.environ.get("DB_POOL_TIMEOUT") or "").strip() or "30")),
+        "pool_recycle": env_int_safe("DB_POOL_RECYCLE", 300, positive=True),
+        "pool_size": env_int_safe("DB_POOL_SIZE", 3, positive=True),
+        "max_overflow": env_int_safe("DB_MAX_OVERFLOW", 2, lo=0),
+        "pool_timeout": env_int_safe("DB_POOL_TIMEOUT", 30, positive=True),
         "connect_args": ca,
     }
 
@@ -953,18 +957,18 @@ def get_engine(database_url=None):
             use_null = os.environ.get("DB_NULL_POOL", "0").lower() in ("1", "true", "yes")
             if use_null:
                 kwargs["poolclass"] = NullPool
-                kwargs["connect_args"] = {"connect_timeout": int(((os.environ.get("DB_CONNECT_TIMEOUT") or "").strip() or "10"))}
+                kwargs["connect_args"] = {"connect_timeout": env_int_safe("DB_CONNECT_TIMEOUT", 10, positive=True)}
                 _log.info("Using NullPool (serverless / Neon extreme free-tier)")
             else:
                 kwargs["pool_pre_ping"] = True
-                kwargs["pool_recycle"] = int(((os.environ.get("DB_POOL_RECYCLE") or "").strip() or "180"))  # < typical idle timeout
-                kwargs["pool_size"] = int(((os.environ.get("DB_POOL_SIZE") or "").strip() or "2"))
-                kwargs["max_overflow"] = int(((os.environ.get("DB_MAX_OVERFLOW") or "").strip() or "1"))
-                kwargs["pool_timeout"] = int(((os.environ.get("DB_POOL_TIMEOUT") or "").strip() or "20"))
+                kwargs["pool_recycle"] = env_int_safe("DB_POOL_RECYCLE", 180, positive=True)  # < typical idle timeout
+                kwargs["pool_size"] = env_int_safe("DB_POOL_SIZE", 2, positive=True)
+                kwargs["max_overflow"] = env_int_safe("DB_MAX_OVERFLOW", 1, lo=0)
+                kwargs["pool_timeout"] = env_int_safe("DB_POOL_TIMEOUT", 20, positive=True)
                 kwargs["pool_use_lifo"] = True  # prefer hot connections under burst
                 # Neon pooler rejects startup options like statement_timeout
                 kwargs["connect_args"] = {
-                    "connect_timeout": int(((os.environ.get("DB_CONNECT_TIMEOUT") or "").strip() or "10")),
+                    "connect_timeout": env_int_safe("DB_CONNECT_TIMEOUT", 10, positive=True),
                 }
                 _log.info(
                     "Neon/Postgres pool ready (size=%s overflow=%s recycle=%ss lifo=1)",

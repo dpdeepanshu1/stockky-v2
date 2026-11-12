@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+try:
+    from env_util import env_float_safe, env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe, env_int_safe
 import re
 import threading
 import time
@@ -53,8 +57,8 @@ logger = logging.getLogger("peer_multi_quarter")
 # is unchanged — only how the data underneath is obtained.
 _FUND_CACHE: Dict[str, tuple] = {}  # symbol -> (fetched_at_epoch, data)
 _FUND_CACHE_LOCK = threading.Lock()
-_FUND_CACHE_TTL = float(((os.getenv("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS") or "").strip() or "60"))
-_FUND_FETCH_MAX_WORKERS = int(((os.getenv("PEER_FUNDAMENTALS_FETCH_WORKERS") or "").strip() or "6"))
+_FUND_CACHE_TTL = env_float_safe("PEER_FUNDAMENTALS_CACHE_TTL_SECONDS", 60, lo=0)
+_FUND_FETCH_MAX_WORKERS = env_int_safe("PEER_FUNDAMENTALS_FETCH_WORKERS", 6, positive=True)
 
 
 # group300: the market-data /fundamentals pass for a COLD symbol (Yahoo info + financials + balance sheet + cash flow) can

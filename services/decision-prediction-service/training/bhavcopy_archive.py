@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("bhavcopy-archive")
 
-RETENTION_DAYS = int(((os.environ.get("BHAVCOPY_RETENTION_DAYS") or "").strip() or "90"))
+RETENTION_DAYS = env_int_safe("BHAVCOPY_RETENTION_DAYS", 90, lo=0)
 ARCHIVE_DIR = Path(os.environ.get("BHAVCOPY_ARCHIVE_DIR", "./archive_parquet"))
 
 

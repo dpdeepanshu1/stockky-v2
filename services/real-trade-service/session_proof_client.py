@@ -11,14 +11,28 @@ Off with SESSION_PROOF_CLIENT_ENABLED=false. Never refreshes under pytest or whe
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
 import urllib.request
 from typing import Optional
 
-_TTL_S = float(os.getenv("SESSION_PROOF_CLIENT_TTL_S", "30") or 30)
-_TIMEOUT_S = float(os.getenv("SESSION_PROOF_CLIENT_TIMEOUT_S", "2") or 2)
+
+def _env_float(name: str, default: float, lo: float = None, hi: float = None, positive: bool = False) -> float:
+    """E505 / E506: a typo / blank / nan / inf setting, or one outside [lo, hi] (or <= 0 when `positive`), falls back to the default instead of stopping the import
+    or breaking the loop that uses it (identical copy in every service that has this file)."""
+    try:
+        v = float((os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(v) or (positive and not v > 0) or (lo is not None and v < lo) or (hi is not None and v > hi):
+        return float(default)
+    return v
+
+
+_TTL_S = _env_float("SESSION_PROOF_CLIENT_TTL_S", 30, lo=0)
+_TIMEOUT_S = _env_float("SESSION_PROOF_CLIENT_TIMEOUT_S", 2, positive=True)
 
 _lock = threading.Lock()
 _cache: dict = {"day": None, "closed": False, "at": 0.0, "inflight": False}

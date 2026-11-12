@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import re
 import threading
 import time
@@ -29,7 +30,7 @@ import yf_policy as _yf_policy  # group279
 
 logger = logging.getLogger("surprise-premarket")
 
-LOOKBACK_DAYS = int(((os.getenv("SURPRISE_LOOKBACK_DAYS") or "").strip() or "30"))
+LOOKBACK_DAYS = env_int_safe("SURPRISE_LOOKBACK_DAYS", 30, positive=True)
 # BUG FIX (31-Aug-2026): is_liquid was gated on raw SHARE volume (>=50,000
 # shares/day) with no price awareness. That's fine for a ₹20 penny stock
 # (50k shares = only ₹10L/day) but is an absurdly high bar for anything
@@ -42,12 +43,12 @@ LOOKBACK_DAYS = int(((os.getenv("SURPRISE_LOOKBACK_DAYS") or "").strip() or "30"
 # reached the scanner at all. Switched to a rupee-turnover floor — the same
 # ₹50L/day HARD_FLOOR_LIQUIDITY already used inside score_stock() — so the
 # pre-filter and the in-score check now agree and neither is price-blind.
-LIQUID_MIN_DAILY_TURNOVER = float(((os.getenv("SURPRISE_LIQUID_MIN_TURNOVER") or "").strip() or "5000000"))
-MAX_SYMBOLS = int(((os.getenv("SURPRISE_MAX_SYMBOLS") or "").strip() or "320"))
+LIQUID_MIN_DAILY_TURNOVER = env_float_safe("SURPRISE_LIQUID_MIN_TURNOVER", 5000000, lo=0)
+MAX_SYMBOLS = env_int_safe("SURPRISE_MAX_SYMBOLS", 320, lo=0)
 # Concurrent yfinance workers (free-tier safe; override via env)
-MAX_WORKERS = int(((os.getenv("SURPRISE_PREMARKET_WORKERS") or "").strip() or "6"))  # free-tier safe
+MAX_WORKERS = env_int_safe("SURPRISE_PREMARKET_WORKERS", 6, positive=True)  # free-tier safe
 # Flush to Neon every N successful rows
-UPSERT_BATCH = int(((os.getenv("SURPRISE_UPSERT_BATCH") or "").strip() or "40"))
+UPSERT_BATCH = env_int_safe("SURPRISE_UPSERT_BATCH", 40, positive=True)
 
 
 def _normalize_db_url(url: str) -> str:
@@ -274,8 +275,8 @@ def _yahoo_sym(symbol: str) -> str:
 
 
 _INDEX_SKIP = {"NIFTY50", "NIFTY", "NIFTY 50", "BANKNIFTY", "NIFTYBANK", "SENSEX"}
-YF_BULK_BATCH_SIZE = int(((os.getenv("SURPRISE_YF_BULK_BATCH") or "").strip() or "50"))
-YF_BULK_BATCH_PAUSE = float(((os.getenv("SURPRISE_YF_BULK_PAUSE") or "").strip() or "0.5"))
+YF_BULK_BATCH_SIZE = env_int_safe("SURPRISE_YF_BULK_BATCH", 50, positive=True)
+YF_BULK_BATCH_PAUSE = env_float_safe("SURPRISE_YF_BULK_PAUSE", 0.5, lo=0)
 
 
 def _yahoo_session():

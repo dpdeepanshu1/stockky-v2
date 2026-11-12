@@ -1,19 +1,29 @@
 """E27: /history keeps up to MAX_HISTORY_ROWS_INTRADAY rows for 1m ... 1h (a 1-minute chart was cut to 260 minutes); daily keeps its 260.
 The cap helper is exec'd from main.py's source, so no web framework is needed."""
 import os
+import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
 
 
 def _load(env):
-    a = SRC.index("MAX_HISTORY_ROWS = int(")
+    a = SRC.index("MAX_HISTORY_ROWS = env_int_safe(")
     b = SRC.index("def _report_rate_limit")
 
     class _OS:
         environ = dict(env)
 
-    ns = {"os": _OS}
+    import unittest.mock as _mock
+    import env_util as _eu   # E503: the cap is read through env_util now; run it against the fake env
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+
+    def _safe(name, default, blank=None, **kw):   # E506: the range arguments (lo / hi / positive) pass through
+        with _mock.patch.dict(os.environ, dict(env), clear=True):
+            return _eu.env_int_safe(name, default, blank, **kw)
+
+    ns = {"os": _OS, "env_int_safe": _safe}
     exec(compile(SRC[a:b], "cap", "exec"), ns)
     return ns
 

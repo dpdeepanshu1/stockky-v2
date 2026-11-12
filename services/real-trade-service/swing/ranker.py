@@ -14,22 +14,15 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from env_util import env_int_safe  # E507
 from swing import momentum
 
 logger = logging.getLogger("real-trade-swing-ranker")
 
 
-def _envi(name: str, default: int) -> int:
-    try:
-        v = int((os.getenv(name) or "").strip() or default)
-        return v if v > 0 else default
-    except ValueError:
-        return default
-
-
-MAX_SYMBOLS = _envi("SWING_RANK_MAX_SYMBOLS", 200)
-WORKERS = min(8, _envi("SWING_RANK_WORKERS", 4))
-TIMEOUT_S = float(_envi("SWING_RANK_TIMEOUT_S", 8))
+MAX_SYMBOLS = env_int_safe("SWING_RANK_MAX_SYMBOLS", 200, positive=True)
+WORKERS = min(8, env_int_safe("SWING_RANK_WORKERS", 4, positive=True))
+TIMEOUT_S = float(env_int_safe("SWING_RANK_TIMEOUT_S", 8, positive=True))
 DEFAULT_SYMBOLS = [s.strip().upper() for s in (os.getenv("SWING_RANK_DEFAULT_SYMBOLS") or "").split(",") if s.strip()]
 _IST = ZoneInfo("Asia/Kolkata")
 

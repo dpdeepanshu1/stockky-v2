@@ -36,6 +36,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from env_util import env_float_safe, env_int_safe  # E507
 import config
 
 logger = logging.getLogger("real-trade-regime-adaptive")
@@ -60,13 +61,6 @@ RETIRED = ("CANDIDATE_OVEREXTENDED_52W_TOP_PCT",)
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float((os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return float(default)
 
 
 def mode() -> str:
@@ -176,7 +170,7 @@ _history: "deque[Dict[str, Any]]" = deque(maxlen=60)
 
 
 def _max_age_s() -> float:
-    return max(0.0, _env_float("REGIME_ADAPTIVE_MAX_AGE_H", 36.0)) * 3600.0
+    return max(0.0, env_float_safe("REGIME_ADAPTIVE_MAX_AGE_H", 36.0)) * 3600.0
 
 
 def _fresh_snapshot() -> Optional[Dict[str, Any]]:
@@ -230,7 +224,7 @@ def fetch_index_closes() -> List[float]:
     from market_feed.feed import MARKET_DATA_URL
     from stockky_ms import candles as _candles
     sym = (os.getenv("REGIME_ADAPTIVE_INDEX_SYMBOL") or "").strip() or str(getattr(config, "STRUCTURE_OBS_BENCH_SYMBOL", "") or "NIFTY")
-    with httpx.Client(timeout=_env_float("REGIME_ADAPTIVE_HISTORY_TIMEOUT_S", 20.0)) as client:
+    with httpx.Client(timeout=env_float_safe("REGIME_ADAPTIVE_HISTORY_TIMEOUT_S", 20.0, positive=True)) as client:
         r = client.get(f"{MARKET_DATA_URL}/history/{sym}", params={"period": "2y", "interval": "1d"})
     if r.status_code != 200:
         raise RuntimeError(f"index history HTTP {r.status_code}")
@@ -260,11 +254,11 @@ def refresh(session_factory: Optional[Callable[[], Any]] = None, fetch: Optional
         if pic is None:
             raise RuntimeError(f"not enough index history ({len(closes)} sessions, need {MIN_SESSIONS})")
         fb, n_tr, wr = 0.0, 0, None
-        days = int(_env_float("REGIME_ADAPTIVE_RESULT_DAYS", 60))
+        days = env_int_safe("REGIME_ADAPTIVE_RESULT_DAYS", 60, positive=True)
         if session_factory is not None:
             db = session_factory()
             try:
-                fb, n_tr, wr = result_feedback((pnls or closed_real_pnls)(db, days), int(_env_float("REGIME_ADAPTIVE_MIN_TRADES", 15)))
+                fb, n_tr, wr = result_feedback((pnls or closed_real_pnls)(db, days), env_int_safe("REGIME_ADAPTIVE_MIN_TRADES", 15, lo=0))
             except Exception as e:  # noqa: BLE001 - results are optional evidence; the market part still works
                 logger.debug("regime adaptive: closed-trade read failed (market part only): %s", e)
             finally:
@@ -319,7 +313,7 @@ async def run_loop(session_factory: Callable[[], Any]) -> None:
             raise
         except Exception as e:  # noqa: BLE001
             logger.warning("regime adaptive loop error (will retry): %s", e)
-        await asyncio.sleep(max(60.0, _env_float("REGIME_ADAPTIVE_REFRESH_S", 900.0)))
+        await asyncio.sleep(max(60.0, env_float_safe("REGIME_ADAPTIVE_REFRESH_S", 900.0)))
 
 
 def _reset_for_tests() -> None:

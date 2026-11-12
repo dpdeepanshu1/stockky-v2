@@ -37,6 +37,7 @@ import contextvars
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E502: a typo / blank setting must not stop the import
 import re
 import time
 from time import monotonic as _monotonic   # group344: kept apart from `time` (tests swap that module for a fake clock)
@@ -48,31 +49,31 @@ logger = logging.getLogger("surprise-scanner")
 
 # ── Thresholds (market-intelligence derived, all env-overridable) ─────────────
 # Raised from 60 → 65: only genuine breakouts in choppy/weak-index market.
-MIN_SCORE = int(((os.getenv("SURPRISE_MIN_SCORE") or "").strip() or "65"))
+MIN_SCORE = env_int_safe("SURPRISE_MIN_SCORE", 65)
 # §5 — hard floor: average daily traded value (price × vol × ~25 intraday bars)
 # ₹50 lakh/day minimum. Never adaptive — unconditional BUY-side gate.
-HARD_FLOOR_LIQUIDITY = float(((os.getenv("HARD_FLOOR_LIQUIDITY") or "").strip() or "5000000"))
+HARD_FLOOR_LIQUIDITY = env_float_safe("HARD_FLOOR_LIQUIDITY", 5000000, lo=0)
 # Raised from 1.0 → 1.5: 1% moves in a choppy market are noise.
-MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_MIN_CHANGE_PCT") or "").strip() or "1.5"))
-CONCURRENCY = int(((os.getenv("SURPRISE_SCAN_CONCURRENCY") or "").strip() or "20"))
-QUOTE_TIMEOUT = float(((os.getenv("SURPRISE_QUOTE_TIMEOUT") or "").strip() or "3"))
+MIN_CHANGE_PCT = env_float_safe("SURPRISE_MIN_CHANGE_PCT", 1.5)
+CONCURRENCY = env_int_safe("SURPRISE_SCAN_CONCURRENCY", 20, positive=True)
+QUOTE_TIMEOUT = env_float_safe("SURPRISE_QUOTE_TIMEOUT", 3, positive=True)
 # group229: scan() used to send one GET /quote/{sym} per liquid-universe symbol (~1,000, 25 at a time)
 # whenever the shared bulk cache was cold. During the open session that was the main source of the
 # per-symbol /quote storm on market-data-service (each call shed from the AngelOne lane and sent to
 # Yahoo). scan() now prices the whole key list with chunked POST /quotes/bulk first and only the
 # symbols bulk could not price use the old per-symbol path. SURPRISE_BULK_PREFETCH=0 turns it off.
 BULK_PREFETCH = ((os.getenv("SURPRISE_BULK_PREFETCH") or "").strip() or "1") not in ("0", "false", "False")
-BULK_CHUNK = max(1, int(float(((os.getenv("SURPRISE_BULK_CHUNK") or "").strip() or "100"))))
-BULK_TIMEOUT = float(((os.getenv("SURPRISE_BULK_TIMEOUT") or "").strip() or "15"))
-BULK_CONCURRENCY = max(1, int(float(((os.getenv("SURPRISE_BULK_CONCURRENCY") or "").strip() or "2"))))
-BULK_MAX_AGE_SEC = float(((os.getenv("SURPRISE_BULK_MAX_AGE_SEC") or "").strip() or "30"))
+BULK_CHUNK = max(1, int(env_float_safe("SURPRISE_BULK_CHUNK", 100)))
+BULK_TIMEOUT = env_float_safe("SURPRISE_BULK_TIMEOUT", 15, positive=True)
+BULK_CONCURRENCY = max(1, int(env_float_safe("SURPRISE_BULK_CONCURRENCY", 2)))
+BULK_MAX_AGE_SEC = env_float_safe("SURPRISE_BULK_MAX_AGE_SEC", 30, lo=0)
 # group344 (13 Oct log: "surprise scan 22-55 s, upstream_calls=1007, cache_hits=0", over the 20 s budget so a stale result was served):
 #  * the counters now say what happened: `bulk_priced` (answered by the bulk prefetch), `cache_hits` (the shared bulk cache), `single_calls`
 #    (one GET /quote each, the slow path), `unpriced`, `over_budget`; `upstream_calls` = bulk requests + single_calls (it used to count every
 #    bulk-priced symbol as its own upstream call, which made the scan look like 1007 calls);
 #  * the per-symbol fallback has a time budget, SURPRISE_SINGLE_BUDGET_S (default 10 s after the bulk prefetch; 0 = unlimited): symbols still
 #    unpriced when it ends are scored without a quote instead of holding the whole scan past its limit.
-SINGLE_BUDGET_S = float(((os.getenv("SURPRISE_SINGLE_BUDGET_S") or "").strip() or "10"))
+SINGLE_BUDGET_S = env_float_safe("SURPRISE_SINGLE_BUDGET_S", 10, lo=0)
 # 2026-09-03 fix: default cached_max_age_sec (below, in SurpriseStockEngine.scan)
 # was 90s while real-trade-service's pipeline cycle (AUTO_PILOT_INTERVAL_SECONDS,
 # config.py) defaults to 180s. That mismatch meant candidate_engine's
@@ -81,7 +82,7 @@ SINGLE_BUDGET_S = float(((os.getenv("SURPRISE_SINGLE_BUDGET_S") or "").strip() o
 # what produced the recurring "surprise/scan ... ReadTimeout" in the logs
 # (candidate_engine's own client-side timeout on that call is 25s). Widened
 # so one full-universe scan reliably covers a full pipeline cycle with margin.
-SURPRISE_CACHE_MAX_AGE_SEC = float(((os.getenv("SURPRISE_CACHE_MAX_AGE_SEC") or "").strip() or "220"))
+SURPRISE_CACHE_MAX_AGE_SEC = env_float_safe("SURPRISE_CACHE_MAX_AGE_SEC", 220, lo=0)
 # 2026-09-18 fix: self._last_result/self._last_scan_ts (below) are plain
 # in-process attributes, wiped on every container restart. A live diagnostic
 # measured /surprise/scan?cached=true taking 320s right after a restart —
@@ -166,9 +167,9 @@ def _last_result_durable_ttl_sec(cached_max_age_sec: float) -> int:
     except ValueError:
         configured = SURPRISE_LAST_RESULT_TTL_DEFAULT_SEC
     return max(floor, configured)
-MAX_STOCK_PRICE = float(os.getenv("MAX_STOCK_PRICE", "0") or 0)
+MAX_STOCK_PRICE = env_float_safe("MAX_STOCK_PRICE", 0, lo=0)
 # Value-buy badge: ₹20–₹500 (same as buy_sniper — midcaps/smallcaps outperforming)
-VALUE_BUY_THRESHOLD = float(os.getenv("VALUE_BUY_THRESHOLD", "500") or 500)
+VALUE_BUY_THRESHOLD = env_float_safe("VALUE_BUY_THRESHOLD", 500, lo=0)
 
 # FIX (session72 — futures-symbol leak): F&O contract symbols (e.g.
 # "APLAPOLLO29SEP26FUT", "BANKNIFTY29SEP2648000CE") can reach this module via
@@ -199,18 +200,18 @@ def _is_dead_symbol(sym: str) -> bool:
         return False
 
 # Building tier
-BUILDING_MIN_SCORE = int(((os.getenv("SURPRISE_BUILDING_MIN_SCORE") or "").strip() or "35"))
+BUILDING_MIN_SCORE = env_int_safe("SURPRISE_BUILDING_MIN_SCORE", 35)
 BUILDING_MAX_SCORE = MIN_SCORE
-BUILDING_MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_BUILDING_MIN_CHANGE_PCT") or "").strip() or "0.3"))
+BUILDING_MIN_CHANGE_PCT = env_float_safe("SURPRISE_BUILDING_MIN_CHANGE_PCT", 0.3)
 # Raised from 0.4 → 0.6: need stronger volume acceleration in choppy market
-RVOL_SLOPE_MIN = float(((os.getenv("SURPRISE_RVOL_SLOPE_MIN") or "").strip() or "0.6"))
-SECTOR_SYMPATHY_MIN_SCORE = int(((os.getenv("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE") or "").strip() or "45"))
+RVOL_SLOPE_MIN = env_float_safe("SURPRISE_RVOL_SLOPE_MIN", 0.6)
+SECTOR_SYMPATHY_MIN_SCORE = env_int_safe("SURPRISE_SECTOR_SYMPATHY_MIN_SCORE", 45)
 
 # 52W proximity gate: within 8% of 52W high = genuine relative strength.
 # Tightened from 12% — in a falling index, only near-52W-high stocks are
 # showing real strength independent of the market.
-DIST_52W_BREAKOUT_PCT = float(((os.getenv("SURPRISE_DIST_52W_BREAKOUT_PCT") or "").strip() or "8.0"))
-DIST_52W_NEAR_PCT = float(((os.getenv("SURPRISE_DIST_52W_NEAR_PCT") or "").strip() or "15.0"))
+DIST_52W_BREAKOUT_PCT = env_float_safe("SURPRISE_DIST_52W_BREAKOUT_PCT", 8.0, lo=0)
+DIST_52W_NEAR_PCT = env_float_safe("SURPRISE_DIST_52W_NEAR_PCT", 15.0, lo=0)
 
 # ── Volume-Shocker override (added 31-Aug-2026) ───────────────────────────────
 # BUG: score_stock() requires MIN_SCORE=65/100 for the "breakout" tier, but
@@ -227,15 +228,15 @@ DIST_52W_NEAR_PCT = float(((os.getenv("SURPRISE_DIST_52W_NEAR_PCT") or "").strip
 # move itself was weak. A large price move CONFIRMED by real volume is
 # exactly what "Volume shockers" means, independent of 52W distance or
 # order-book depth — so it must be able to reach "breakout" on its own.
-SHOCKER_MIN_CHANGE_PCT = float(((os.getenv("SURPRISE_SHOCKER_MIN_CHANGE_PCT") or "").strip() or "5.0"))
-SHOCKER_MIN_RVOL = float(((os.getenv("SURPRISE_SHOCKER_MIN_RVOL") or "").strip() or "2.0"))
+SHOCKER_MIN_CHANGE_PCT = env_float_safe("SURPRISE_SHOCKER_MIN_CHANGE_PCT", 5.0)
+SHOCKER_MIN_RVOL = env_float_safe("SURPRISE_SHOCKER_MIN_RVOL", 2.0)
 
 # ── ORB-proxy tuning (added 31-Aug-2026, see BUGFIX note in score_stock) ─────
 # Fraction of a stock's normal daily ATR used as the "opening range" buffer
 # above the open when the feed has no true opening-range high.
-ORB_ATR_FRACTION = float(((os.getenv("SURPRISE_ORB_ATR_FRACTION") or "").strip() or "0.3"))
+ORB_ATR_FRACTION = env_float_safe("SURPRISE_ORB_ATR_FRACTION", 0.3, lo=0, hi=1)
 # Fallback buffer (as a fraction of open price) when daily_atr is unknown/0.
-ORB_FALLBACK_PCT = float(((os.getenv("SURPRISE_ORB_FALLBACK_PCT") or "").strip() or "0.005"))
+ORB_FALLBACK_PCT = env_float_safe("SURPRISE_ORB_FALLBACK_PCT", 0.005, lo=0)
 
 
 def _normalize_db_url(url: str) -> str:
@@ -1396,12 +1397,12 @@ surprise_engine = SurpriseStockEngine()
 
 # ── All cache/repair/audit functions below are unchanged from original ─────────
 SURPRISE_FEED_CACHE_KEY = "system:surprise_feed"
-SURPRISE_FEED_OPEN_TTL_SEC = int(__import__("os").getenv("SURPRISE_FEED_OPEN_TTL_SEC", "7200"))
-SURPRISE_FEED_COOLDOWN_SEC = float(__import__("os").getenv("SURPRISE_FEED_COOLDOWN_SEC", "0.5"))
-SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC = float(__import__("os").getenv("SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC", "300"))
+SURPRISE_FEED_OPEN_TTL_SEC = env_int_safe("SURPRISE_FEED_OPEN_TTL_SEC", 7200, lo=0)
+SURPRISE_FEED_COOLDOWN_SEC = env_float_safe("SURPRISE_FEED_COOLDOWN_SEC", 0.5, lo=0)
+SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC = env_float_safe("SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC", 300, lo=0)
 # group279: while the market is open a market-data quote older than this is not a live price for the feed (closed
 # market: the last close is the right answer, so no age limit applies).
-SURPRISE_FEED_MAX_QUOTE_AGE_SEC = float(__import__("os").getenv("SURPRISE_FEED_MAX_QUOTE_AGE_SEC", "120"))
+SURPRISE_FEED_MAX_QUOTE_AGE_SEC = env_float_safe("SURPRISE_FEED_MAX_QUOTE_AGE_SEC", 120, lo=0)
 
 import yf_policy as _yf_policy  # noqa: E402  (group279: the shared "may I call yfinance myself" switch)
 

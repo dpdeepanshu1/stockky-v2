@@ -499,11 +499,18 @@ class TestStateMachine:
         clock.mono = 130.0
         assert b.state() == "half_open"
 
-    def test_open_without_opened_at_never_half_opens(self, clock):
+    def test_open_without_opened_at_starts_its_recovery_clock(self, clock):
+        # E501: it used to stay open for ever (state loaded from the shared Redis state key, opened_at key missing / expired): the recovery
+        # clock now starts at the first look and the circuit reaches half_open recovery_timeout later.
         b = cb.CircuitBreaker("svc")
         b._state, b._opened_at = "open", 0.0
         clock.now += 10_000
         assert b.state() == "open"
+        assert b._opened_at == clock.now
+        clock.now += b.recovery_timeout - 1
+        assert b.state() == "open"
+        clock.now += 1
+        assert b.state() == "half_open"
 
     def test_half_open_success_closes(self, log):
         b = cb.CircuitBreaker("svc", failure_threshold=1, half_open_success=2)

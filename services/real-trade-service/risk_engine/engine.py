@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from env_util import env_float_safe  # E503: a typo / blank setting must not stop the import
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -80,9 +81,7 @@ def _conviction_cap(base_cap: float, intent: "OrderIntent", equity: float) -> fl
 # so an add can no longer take the symbol past the cap a single entry is held to (ITC 6 + 8 = 14 shares on 3 Nov). false = the old maths.
 SYMBOL_EXPOSURE_CAP = ((os.getenv("RISK_SYMBOL_EXPOSURE_CAP") or "").strip().lower() or "true") in ("1", "true", "yes", "on")
 
-MAX_POSITION_CONCENTRATION_PCT = float(
-    ((os.getenv("RISK_MAX_POSITION_CONCENTRATION_PCT") or "").strip() or "25.0")
-)
+MAX_POSITION_CONCENTRATION_PCT = env_float_safe("RISK_MAX_POSITION_CONCENTRATION_PCT", 25.0, lo=0, hi=100)
 # Minimum stock price — sub-₹20 = operator risk, wide spreads, illiquid exits.
 # 2026-09-01 cleanup: this used to be duplicated as two independently-
 # configurable env vars (MIN_STOCK_PRICE / HARD_FLOOR_PRICE) both defaulting
@@ -90,15 +89,14 @@ MAX_POSITION_CONCENTRATION_PCT = float(
 # HARD_FLOOR_PRICE only ever fed the dead passes_hard_floor() helper removed
 # in the same cleanup (see below). Collapsed to one knob so retuning the
 # floor only ever requires touching one env var.
-MIN_STOCK_PRICE = float(((os.getenv("RISK_MIN_STOCK_PRICE") or "").strip()
-                         or (os.getenv("HARD_FLOOR_PRICE") or "").strip() or "10.0"))
+MIN_STOCK_PRICE = env_float_safe("RISK_MIN_STOCK_PRICE", env_float_safe("HARD_FLOOR_PRICE", 10.0, lo=0), lo=0)
 # ── Cross-service capital split (session52 fix — see config.py's
 # CAPITAL_SHARE_PCT comment in the main service config for the full
 # incident writeup). Kept as its own os.getenv() constant here, matching
 # this module's existing style of self-contained env-driven caps, rather
 # than importing config.py — avoids a cross-import for one shared number.
 # MUST match config.py's CAPITAL_SHARE_PCT (both default 50.0).
-CAPITAL_SHARE_PCT = float(((os.getenv("REAL_TRADE_CAPITAL_SHARE_PCT") or "").strip() or "50.0"))
+CAPITAL_SHARE_PCT = env_float_safe("REAL_TRADE_CAPITAL_SHARE_PCT", 50.0, lo=0, hi=100)
 
 # Maximum per-share price. Stocks above this threshold require a minimum position
 # value (entry_price / stop_pct) that exceeds the per-trade risk budget at the
@@ -158,8 +156,8 @@ LOSS_STREAK_PAUSE_MINUTES = _blank_safe_int("RISK_LOSS_STREAK_PAUSE_MINUTES", 45
 # stop (entry_engine/entry.py's MAX_STOP_PCT, not its typical/flat one), so
 # the derived ceiling stays conservative: it should never let through a
 # stock that a wide-ATR stop would actually make unsizeable at 1 share.
-ADAPTIVE_MAX_PRICE_STOP_PCT = float(((os.getenv("RISK_ADAPTIVE_MAX_PRICE_STOP_PCT") or "").strip() or "6.0"))
-HARD_FLOOR_LIQUIDITY = float(((os.getenv("HARD_FLOOR_LIQUIDITY") or "").strip() or "5000000"))
+ADAPTIVE_MAX_PRICE_STOP_PCT = env_float_safe("RISK_ADAPTIVE_MAX_PRICE_STOP_PCT", 6.0, lo=0)
+HARD_FLOOR_LIQUIDITY = env_float_safe("HARD_FLOOR_LIQUIDITY", 5000000, lo=0)
 # 2026-09-01 cleanup: HARD_FLOOR_CONVICTION and the passes_hard_floor()
 # helper below it were removed here — both were dead code, never called
 # from evaluate() or anywhere else. A conviction floor is already enforced

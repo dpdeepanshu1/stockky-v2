@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading
 import time
 from dataclasses import dataclass, field
@@ -341,9 +342,9 @@ _yf_patch_lock = threading.Lock()
 # instead of hanging indefinitely.
 import concurrent.futures as _cf
 
-YFINANCE_HARD_TIMEOUT_SEC = float(((os.getenv("YFINANCE_HARD_TIMEOUT_SEC") or "").strip() or "18"))
+YFINANCE_HARD_TIMEOUT_SEC = env_float_safe("YFINANCE_HARD_TIMEOUT_SEC", 18, positive=True)
 _yf_hardcap_pool = _cf.ThreadPoolExecutor(
-    max_workers=int(((os.getenv("YFINANCE_POOL_WORKERS") or "").strip() or "8")),
+    max_workers=env_int_safe("YFINANCE_POOL_WORKERS", 8, positive=True),
     thread_name_prefix="yf-hardcap",
 )
 

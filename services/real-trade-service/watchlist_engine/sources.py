@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from env_util import env_float_safe, env_int_safe  # E507
 import config
 from resilience.circuit_breaker import api_gateway_breaker, event_service_breaker
 from resilience.local_cache import save_snapshot, load_snapshot
@@ -63,14 +64,6 @@ def _now() -> datetime:
 #   job that stays slow cannot add the wait to every cycle.
 _HOT_BUCKET_KEYS = ("bulk_insider_driven", "results_driven", "news_driven")
 _warm_wait_last = [-1e9]
-
-
-def _env_num(name: str, default: float) -> float:
-    try:
-        v = float((os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-    return v if v == v and v >= 0 else default
 
 
 def _hot_is_warming_empty(payload: Any) -> bool:
@@ -114,9 +107,9 @@ def _snapshot_fresh_enough(snap: Any, max_age_h: float) -> bool:
 async def _wait_for_hot_picks(payload: dict) -> dict:
     """Re-poll /stockky-hot while it still says "warming" with empty buckets. Returns the payload with the newest Hot
     Picks answer (the original one when nothing better came). Never raises."""
-    retries = int(_env_num("WATCHLIST_TIER1_WARMUP_RETRIES", 3))
-    wait_s = _env_num("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0)
-    gap_s = _env_num("WATCHLIST_TIER1_WARMUP_MIN_GAP_S", 120.0)
+    retries = env_int_safe("WATCHLIST_TIER1_WARMUP_RETRIES", 3, lo=0)
+    wait_s = env_float_safe("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0, lo=0)
+    gap_s = env_float_safe("WATCHLIST_TIER1_WARMUP_MIN_GAP_S", 120.0, lo=0)
     if retries <= 0 or not _hot_is_warming_empty(payload):
         return payload
     import time as _t
@@ -222,7 +215,7 @@ async def fetch_watchlist_candidates(db, mode: str) -> list[dict]:
             _snap = load_snapshot(db, "tier1_hot_picks")
         except Exception:  # noqa: BLE001
             _snap = None
-        if _snapshot_fresh_enough(_snap, _env_num("WATCHLIST_TIER1_SNAPSHOT_MAX_AGE_H", 8.0)):
+        if _snapshot_fresh_enough(_snap, env_float_safe("WATCHLIST_TIER1_SNAPSHOT_MAX_AGE_H", 8.0, lo=0)):
             logger.info("watchlist/sources: Hot Picks is warming - using today's saved Tier 1 snapshot (saved %s) instead of waiting",
                         _snap.get(_SNAP_STAMP))
             payload = {k: v for k, v in _snap.items() if k != _SNAP_STAMP}

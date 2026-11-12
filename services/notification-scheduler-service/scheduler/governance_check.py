@@ -12,6 +12,10 @@ Run from notification-scheduler-service cron (same pattern as weekend_hydrator).
 from __future__ import annotations
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 import re as _re_top
 from datetime import datetime, timezone
 
@@ -65,7 +69,7 @@ REGIME_CONSTANTS = {
     "CANDIDATE_MIN_BULLISH_TF":       ("4",     "2026-10-04", 2, 5),
 }
 
-STALE_DAYS      = int(((os.getenv("GOVERNANCE_STALE_DAYS") or "").strip() or "30"))
+STALE_DAYS      = env_int_safe("GOVERNANCE_STALE_DAYS", 30, lo=0)
 MIN_SECTOR_SAMPLE = 8
 THIN_SECTOR_SESSIONS = 5  # alert after this many consecutive thin sessions
 

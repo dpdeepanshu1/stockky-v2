@@ -95,6 +95,7 @@ import asyncio
 import json
 import logging
 import os
+from env_util import env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading
 import time as _time_mod
 from datetime import datetime, timedelta, timezone
@@ -158,7 +159,7 @@ _mode_locks_meta: threading.Lock = threading.Lock()
 # there is open exposure that needed evaluating" state observable. Throttled
 # per mode (same idea as exit.py's CDSL_ALERT_COOLDOWN_MIN) so a gate left
 # off on purpose overnight/over a weekend doesn't spam Telegram every tick.
-GATE_OFF_ALERT_COOLDOWN_MIN = int(((os.getenv("AUTO_PILOT_GATE_OFF_ALERT_COOLDOWN_MIN") or "").strip() or "30"))
+GATE_OFF_ALERT_COOLDOWN_MIN = env_int_safe("AUTO_PILOT_GATE_OFF_ALERT_COOLDOWN_MIN", 30, lo=0)
 _gate_off_alert_last_sent: dict = {}  # mode -> aware datetime of last alert
 
 
@@ -219,7 +220,7 @@ import os as _os
 # Floor lowered to 5s and default to 8s per explicit request (stops/targets
 # checked every 5-10s during market hours, independent of full-cycle timing).
 EXIT_CHECK_INTERVAL_SECONDS = max(
-    5, int(((_os.getenv("EXIT_CHECK_INTERVAL_SECONDS") or "").strip() or "8"))
+    5, env_int_safe("EXIT_CHECK_INTERVAL_SECONDS", 8)
 )
 
 
@@ -322,7 +323,7 @@ def _get_exit_lock(mode: str) -> threading.Lock:
 # always actually run) — they just also update the shared timestamp so nothing
 # double-fires right after.
 REAL_RECONCILE_MIN_INTERVAL_SECONDS = max(
-    10, int(((_os.getenv("REAL_RECONCILE_MIN_INTERVAL_SECONDS") or "").strip() or "20"))
+    10, env_int_safe("REAL_RECONCILE_MIN_INTERVAL_SECONDS", 20)
 )
 _last_real_reconcile_at: dict = {}  # mode -> aware datetime of last reconcile_real_orders() call (any caller)
 

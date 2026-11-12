@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -91,7 +92,7 @@ logger = logging.getLogger("real-trade-exit")
 # ── Exit constants — market-intelligence tuned ────────────────────────────────
 # Lock in 60% at first target (was 50%) — in choppy market, don't let
 # profits turn into losses. The 40% remainder rides an ever-tightening trail.
-PARTIAL_EXIT_FRACTION = float(((os.getenv("EXIT_PARTIAL_FRACTION") or "").strip() or "0.60"))
+PARTIAL_EXIT_FRACTION = env_float_safe("EXIT_PARTIAL_FRACTION", 0.60, lo=0, hi=1)
 
 # Age → ATR multiplier mapping for trailing stop.
 # 2026-09-15 calibration (session42): tightened across all phases.
@@ -107,21 +108,21 @@ TRAIL_ATR_SCHEDULE = [
 ]
 
 # Breakeven stop: move stop to entry once unrealized gain >= this many ATRs.
-BREAKEVEN_ATR_TRIGGER = float(((os.getenv("EXIT_BREAKEVEN_ATR_TRIGGER") or "").strip() or "1.0"))
+BREAKEVEN_ATR_TRIGGER = env_float_safe("EXIT_BREAKEVEN_ATR_TRIGGER", 1.0, lo=0)
 
 # Emergency exit: fire if unrealized loss > this × original stop distance.
 # Catches gap-down scenarios where price breaks through the stop level.
-EMERGENCY_LOSS_MULT = float(((os.getenv("EXIT_EMERGENCY_LOSS_MULT") or "").strip() or "1.5"))
+EMERGENCY_LOSS_MULT = env_float_safe("EXIT_EMERGENCY_LOSS_MULT", 1.5, lo=0)
 
 # E330: when a position has NO usable stop distance (initial_stop_distance missing/zero/NaN and no stop to derive one from), the
 # emergency gap-down check used to be silently skipped. 0 (default) = keep that behaviour but log it; > 0 = treat a loss of this many
 # percent of the entry price as the emergency threshold for such positions.
-EMERGENCY_NO_RISK_LOSS_PCT = float(((os.getenv("EXIT_EMERGENCY_NO_RISK_LOSS_PCT") or "").strip() or "0"))
+EMERGENCY_NO_RISK_LOSS_PCT = env_float_safe("EXIT_EMERGENCY_NO_RISK_LOSS_PCT", 0, lo=0)
 
 # Time-stop: max days to hold a non-performing position.
-MAX_HOLD_DAYS = int(((os.getenv("EXIT_MAX_HOLD_DAYS") or "").strip() or "10"))
+MAX_HOLD_DAYS = env_int_safe("EXIT_MAX_HOLD_DAYS", 10, positive=True)
 # Day at which we log an early warning (no exit yet, just visibility).
-EARLY_WARN_DAYS = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or "").strip() or "6"))
+EARLY_WARN_DAYS = env_int_safe("EXIT_EARLY_WARN_DAYS", 6, lo=0)
 
 # 2026-09-07 fix: CDSL eDIS/TPIN rejections (see dhan_client.is_cdsl_edis_error's
 # docstring) are not a transient/retryable-into-success failure the same
@@ -133,7 +134,7 @@ EARLY_WARN_DAYS = int(((os.getenv("EXIT_EARLY_WARN_DAYS") or "").strip() or "6")
 # position per this many minutes; the underlying retry (still attempted
 # every cycle, in case the human completes the CDSL step mid-day) is
 # unaffected — only the notification is throttled.
-CDSL_ALERT_COOLDOWN_MIN = int(((os.getenv("EXIT_CDSL_ALERT_COOLDOWN_MIN") or "").strip() or "60"))
+CDSL_ALERT_COOLDOWN_MIN = env_int_safe("EXIT_CDSL_ALERT_COOLDOWN_MIN", 60, lo=0)
 
 
 def _ddpi_active(db) -> bool:
@@ -147,7 +148,7 @@ def _ddpi_active(db) -> bool:
 # the same position, escalate to a distinctly-worded alert (see the generic
 # rejection branch in _send_real_sell) instead of sending an identical
 # "rejected" message every single cycle forever.
-EXIT_REJECT_STREAK_ESCALATE_AT = int(((os.getenv("EXIT_REJECT_STREAK_ESCALATE_AT") or "").strip() or "3"))
+EXIT_REJECT_STREAK_ESCALATE_AT = env_int_safe("EXIT_REJECT_STREAK_ESCALATE_AT", 3, lo=0)
 
 
 def _held_trading_days(opened_at, now) -> int:

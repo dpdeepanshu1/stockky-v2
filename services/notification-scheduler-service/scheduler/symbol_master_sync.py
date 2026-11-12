@@ -14,6 +14,10 @@ SECTOR TAXONOMY (per PDF §4):
 from __future__ import annotations
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E505: a typo / blank setting must not stop this code path
+except ImportError:   # imported as a package module, the folder is not on sys.path
+    from .env_util import env_int_safe
 import time
 from datetime import datetime, timezone
 
@@ -183,7 +187,7 @@ def run_sync() -> dict:
     # skip delisting rather than risk mass-marking active symbols delisted
     # off an incomplete list. Upserts above are unaffected either way; they
     # only ever add/refresh rows, never remove.
-    MIN_PLAUSIBLE_UNIVERSE = int(((os.getenv("SYMBOL_MASTER_MIN_UNIVERSE") or "").strip() or "1000"))
+    MIN_PLAUSIBLE_UNIVERSE = env_int_safe("SYMBOL_MASTER_MIN_UNIVERSE", 1000, lo=0)
     delisting_safe = len(all_syms) >= MIN_PLAUSIBLE_UNIVERSE
     if all_syms and not delisting_safe:
         logger.warning(

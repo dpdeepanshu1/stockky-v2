@@ -22,9 +22,17 @@ from typing import Optional
 # discontinuity and exclude it from ATR/percentile inputs.
 # Cross-check against symbol_master's corporate-action data once that table
 # exists — this is the safe default before it does.
-CORPORATE_ACTION_JUMP_THRESHOLD = float(
-    __import__("os").getenv("CORPORATE_ACTION_JUMP_THRESHOLD", "30.0")
-)
+def _env_float(name: str, default: float) -> float:
+    """E504: blank / non-numeric / NaN / inf setting -> default. A typo in CORPORATE_ACTION_JUMP_THRESHOLD used to stop the importing service at start-up.
+    Self-contained on purpose: this file is copied into more than one service."""
+    try:
+        v = float((__import__("os").getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        return float(default)
+    return v if math.isfinite(v) and v > 0 else float(default)   # E507: a zero / negative jump threshold flags every move (or none)
+
+
+CORPORATE_ACTION_JUMP_THRESHOLD = _env_float("CORPORATE_ACTION_JUMP_THRESHOLD", 30.0)
 
 
 def clamp_for_atr(daily_return_pct: float) -> Optional[float]:

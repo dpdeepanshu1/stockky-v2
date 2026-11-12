@@ -13,6 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "event"))
+from env_util import env_float_safe  # E505 (event/ is on sys.path above)
 BASE = os.getenv("EVENT_BASE", "http://127.0.0.1:8002/event").rstrip("/")
 
 
@@ -81,9 +82,9 @@ _W = {"regulatory": 0.9, "results": 0.85, "deal": 0.7, "order": 0.65, "rating": 
 def cmd_dryrun():
     d = _get("/events/active")
     ev = d.get("events", [])
-    min_strength = float((os.getenv("INTRADAY_EVENT_TRIGGER_MIN_STRENGTH") or "").strip() or "0.60")
-    max_age = float((os.getenv("INTRADAY_EVENT_TRIGGER_MAX_AGE_MINUTES") or "").strip() or "30") * 60.0
-    veto_min = float((os.getenv("INTRADAY_EVENT_VETO_MIN_STRENGTH") or "").strip() or "0.40")
+    min_strength = env_float_safe("INTRADAY_EVENT_TRIGGER_MIN_STRENGTH", 0.60, lo=0, hi=1)
+    max_age = env_float_safe("INTRADAY_EVENT_TRIGGER_MAX_AGE_MINUTES", 30, lo=0) * 60.0
+    veto_min = env_float_safe("INTRADAY_EVENT_VETO_MIN_STRENGTH", 0.40, lo=0, hi=1)
     print("feed ok", d.get("ok"), "events", len(ev), "| trigger types", _TRIGGER_TYPES, f"min strength {min_strength} max age {int(max_age/60)}m | veto min {veto_min}")
     best = {}
     for e in ev:

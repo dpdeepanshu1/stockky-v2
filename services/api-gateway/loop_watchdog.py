@@ -22,6 +22,8 @@ import time
 import traceback
 from typing import Optional
 
+from env_util import env_float_safe  # E507
+
 logger = logging.getLogger("api-gateway")
 
 HEARTBEAT_S = 0.5
@@ -36,13 +38,6 @@ _state = {
     "last_stack": None,
 }
 _lock = threading.Lock()
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return max(0.1, float(((os.getenv(name) or "").strip() or default)))
-    except ValueError:
-        return float(default)
 
 
 def enabled() -> bool:
@@ -104,8 +99,8 @@ def check_once(now: float, warn_after: float, log_every: float, last_logged: flo
 
 
 def _watch() -> None:
-    warn_after = _env_float("GATEWAY_LOOP_STALL_WARN_S", 3.0)
-    log_every = _env_float("GATEWAY_LOOP_STALL_LOG_EVERY_S", 30.0)
+    warn_after = max(0.1, env_float_safe("GATEWAY_LOOP_STALL_WARN_S", 3.0))
+    log_every = max(0.1, env_float_safe("GATEWAY_LOOP_STALL_LOG_EVERY_S", 30.0))
     last_logged = 0.0
     while True:
         time.sleep(1.0)

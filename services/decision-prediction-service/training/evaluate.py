@@ -3,6 +3,10 @@ Outcome evaluation for predictions.
 Enhanced to support comprehensive metrics, batch evaluation, and summary statistics.
 """
 import os
+try:
+    from env_util import env_float_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe
 import logging
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
@@ -43,7 +47,7 @@ MARKET_DATA_URL = os.environ.get("MARKET_DATA_URL", "").rstrip("/")
 
 # Global Yahoo cool-down after 429 (shared across T+1/T+5 batch)
 _yf_rate_limited_until = 0.0
-_YF_COOLDOWN_SEC = float(((os.environ.get("YF_EVAL_COOLDOWN_SEC") or "").strip() or "180"))
+_YF_COOLDOWN_SEC = env_float_safe("YF_EVAL_COOLDOWN_SEC", 180, lo=0)
 
 # Session 72 (open-issue #10): history_backfill labels a prediction with the LAST TWO BARS OF HISTORY when
 # its own next session isn't available yet. Those bars are, by construction, at or BEFORE the prediction

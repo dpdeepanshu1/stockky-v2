@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from env_util import env_float_safe  # E502: a typo / blank setting must not stop the import
 import re
 import threading
 import time
@@ -394,7 +395,7 @@ def _kv():
 # loop thread wait up to KV_LOOP_READ_TIMEOUT_S (default 1.5 s). On the loop thread the reads below now serve a short-TTL cache and
 # refresh it in a background thread (a cold cache returns {} = "nothing learned yet", the same fail-open answer as a KV error).
 # Off the loop thread the read stays direct, so worker threads and writers always see fresh data.
-_LEARNED_CACHE_TTL_S = max(0.0, float(__import__("os").getenv("LEARNED_RENAMES_CACHE_TTL_S", "60") or 60))
+_LEARNED_CACHE_TTL_S = max(0.0, env_float_safe("LEARNED_RENAMES_CACHE_TTL_S", 60))
 _learned_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _learned_refreshing: set = set()
 _learned_lock = threading.Lock()

@@ -106,6 +106,7 @@ import asyncio
 import notifier
 import logging
 import os
+from env_util import env_float_safe  # E503: a typo / blank setting must not stop the import
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -435,7 +436,7 @@ _cycle_lock = asyncio.Lock()  # prevents the background loop and a manual
 # is taking. _run_cycle()'s own reconcile stage stays as-is (harmless,
 # idempotent, and still useful as a same-cycle catch-up) — this is purely
 # additive.
-_FAST_RECONCILE_INTERVAL_S = max(5.0, float(((os.getenv("FAST_RECONCILE_INTERVAL_S") or "").strip() or "6")))
+_FAST_RECONCILE_INTERVAL_S = max(5.0, env_float_safe("FAST_RECONCILE_INTERVAL_S", 6))
 
 
 async def _fast_reconcile_loop() -> None:

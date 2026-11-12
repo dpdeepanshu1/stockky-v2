@@ -45,6 +45,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+try:
+    from env_util import env_int_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_int_safe
 import threading
 import time
 from datetime import datetime
@@ -85,7 +89,7 @@ _DEFAULT_CONFIG = {
     "enabled": ((os.getenv("OVERNIGHT_ORCH_ENABLED") or "").strip() or "true").lower() == "true",
     "datafeed_time": os.getenv("OVERNIGHT_DATAFEED_TIME", "00:30"),
     "premarket_time": os.getenv("OVERNIGHT_PREMARKET_TIME", "07:00"),
-    "rest_between_steps_sec": int(((os.getenv("OVERNIGHT_REST_SEC") or "").strip() or "45")),
+    "rest_between_steps_sec": env_int_safe("OVERNIGHT_REST_SEC", 45, lo=0),
 }
 
 _CONFIG_LOCK = threading.Lock()

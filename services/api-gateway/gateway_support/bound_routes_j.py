@@ -411,19 +411,19 @@ def build_bound_routes_j(ref):
                     for sym in chunk:
                         base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                         fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                        px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                        px = ref._safe_float(chunk_prices.get(base)) if chunk_prices else 0.0   # E500: text raised ValueError (outside the try) and inf became the live price
                         try:
                             batch.append(ref._lite_evaluate_from_feed(sym, fed or {}, px))
                         except Exception as e:
                             batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
                 else:
                     # Full mode: bounded wait per symbol; cold microservices must not stall the stream
-                    STREAM_SYM_TIMEOUT = float(((ref.os.getenv("SCAN_STREAM_SYMBOL_TIMEOUT") or "").strip() or "12"))
+                    STREAM_SYM_TIMEOUT = ref.env_float_safe("SCAN_STREAM_SYMBOL_TIMEOUT", 12, positive=True)
 
                     async def _ultra_or_instant(sym: str):
                         base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                         fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                        px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                        px = ref._safe_float(chunk_prices.get(base)) if chunk_prices else 0.0   # E500: text raised ValueError (outside the try) and inf became the live price
                         try:
                             return await ref.asyncio.wait_for(
                                 ref._analyze_one_symbol_ultra(
@@ -487,7 +487,7 @@ def build_bound_routes_j(ref):
                         try:
                             base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()
                             fed = (prefetched or {}).get(base) if isinstance(prefetched, dict) else {}
-                            px = float(chunk_prices.get(base) or 0) if chunk_prices else 0.0
+                            px = ref._safe_float(chunk_prices.get(base)) if chunk_prices else 0.0   # E500: text raised ValueError (outside the try) and inf became the live price
                             from instant_scanner import compute_instant_scores
                             out = compute_instant_scores(base, fed or {}, {"price": px} if px > 0 else {})
                             out["fallback_instant"] = True

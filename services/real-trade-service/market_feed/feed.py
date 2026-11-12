@@ -32,6 +32,7 @@ import asyncio
 import logging
 import math
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading as _threading
 import time as _time
 from datetime import datetime, timedelta, timezone
@@ -60,7 +61,7 @@ MARKET_DATA_URL = _env_url("MARKET_DATA_URL", "http://market-data-service:8001")
 
 # §1 — max age for live_quotes rows before we consider them stale.
 # If the AngelOne row is older than this, fall through to the yfinance path.
-LIVE_QUOTE_MAX_AGE_S = float(((os.getenv("LIVE_QUOTE_MAX_AGE_S") or "").strip() or "5.0"))
+LIVE_QUOTE_MAX_AGE_S = env_float_safe("LIVE_QUOTE_MAX_AGE_S", 5.0, lo=0)
 
 # §2 — Process-scoped ATR cache.
 #
@@ -109,9 +110,9 @@ _ATR_HISTORY_PERIOD = os.getenv("FEED_ATR_HISTORY_PERIOD", "1mo")  # 14+ daily c
 # was also busy warming up after a redeploy). Cap in-flight lookups per batch
 # and bound the batch's wall-clock so a slow upstream degrades to "partial
 # results, on time" instead of a stalled cycle.
-FEED_QUOTE_CONCURRENCY = max(1, int(((os.getenv("FEED_QUOTE_CONCURRENCY") or "").strip() or "32")))
-FEED_BATCH_DEADLINE_S = float(((os.getenv("FEED_BATCH_DEADLINE_S") or "").strip() or "45"))
-FEED_HTTP_MAX_CONNECTIONS = max(8, int(((os.getenv("FEED_HTTP_MAX_CONNECTIONS") or "").strip() or "64")))
+FEED_QUOTE_CONCURRENCY = max(1, env_int_safe("FEED_QUOTE_CONCURRENCY", 32))
+FEED_BATCH_DEADLINE_S = env_float_safe("FEED_BATCH_DEADLINE_S", 45, positive=True)
+FEED_HTTP_MAX_CONNECTIONS = max(8, env_int_safe("FEED_HTTP_MAX_CONNECTIONS", 64))
 
 # ── group152 (log-audit 2026-10-05, items 1 + 2) ────────────────────────────
 # At the open the five REAL positions' /live-quote and /quote calls all hit ReadTimeout on every 8s
@@ -124,13 +125,13 @@ FEED_HTTP_MAX_CONNECTIONS = max(8, int(((os.getenv("FEED_HTTP_MAX_CONNECTIONS") 
 #   * bulk-first for large non-priority batches: above FEED_BULK_MIN_SYMBOLS symbols, price them with
 #     chunked POST /quotes/bulk first and only fall back to per-symbol /live-quote + /quote for the
 #     ones bulk could not price (or priced with data older than FEED_BULK_MAX_AGE_S).
-FEED_PRIORITY_TIMEOUT_SCALE = max(1.0, float(((os.getenv("FEED_PRIORITY_TIMEOUT_SCALE") or "").strip() or "2.0")))
-FEED_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_BULK_MIN_SYMBOLS") or "").strip() or "25")))
+FEED_PRIORITY_TIMEOUT_SCALE = max(1.0, env_float_safe("FEED_PRIORITY_TIMEOUT_SCALE", 2.0))
+FEED_BULK_MIN_SYMBOLS = max(2, env_int_safe("FEED_BULK_MIN_SYMBOLS", 25))
 # group246: small non-priority batches (the <=20 entry candidates of a cycle) used to skip bulk and cost one
 # /live-quote plus one /quote per symbol (~40 calls) while the held positions were being priced. From this many
 # symbols up they use /quotes/bulk first too. The large-batch rules (distress back-off) still key on
 # FEED_BULK_MIN_SYMBOLS only, so a small batch is never starved. Set it >= FEED_BULK_MIN_SYMBOLS to switch off.
-FEED_SMALL_BATCH_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_SMALL_BATCH_BULK_MIN_SYMBOLS") or "").strip() or "5")))
+FEED_SMALL_BATCH_BULK_MIN_SYMBOLS = max(2, env_int_safe("FEED_SMALL_BATCH_BULK_MIN_SYMBOLS", 5))
 
 # group248: when one /quotes/bulk chunk of a bulk-first batch times out (while other chunks were answered), the symbols
 # of that chunk used to fall straight to the per-symbol /live-quote + /quote path - on 2026-10-08 that was 120 GET /quote
@@ -138,12 +139,12 @@ FEED_SMALL_BATCH_BULK_MIN_SYMBOLS = max(2, int(((os.getenv("FEED_SMALL_BATCH_BUL
 # once more as smaller bulk calls (FEED_BULK_RETRY_CHUNK_SIZE per call, FEED_BULK_RETRY_TIMEOUT_S each) before the
 # per-symbol path. FEED_BULK_RETRY_FAILED=0 turns it off. Only done when at least one chunk answered (market-data is up).
 FEED_BULK_RETRY_FAILED = ((os.getenv("FEED_BULK_RETRY_FAILED") or "").strip() or "1") not in ("0", "false", "False")
-FEED_BULK_RETRY_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_RETRY_CHUNK_SIZE") or "").strip() or "25")))
-FEED_BULK_RETRY_TIMEOUT_S = float(((os.getenv("FEED_BULK_RETRY_TIMEOUT_S") or "").strip() or "20"))
-FEED_BULK_CHUNK_SIZE = max(5, int(((os.getenv("FEED_BULK_CHUNK_SIZE") or "").strip() or "100")))
-FEED_BULK_CONCURRENCY = max(1, int(((os.getenv("FEED_BULK_CONCURRENCY") or "").strip() or "3")))
-FEED_BULK_TIMEOUT_S = float(((os.getenv("FEED_BULK_TIMEOUT_S") or "").strip() or "12"))
-FEED_BULK_MAX_AGE_S = float(((os.getenv("FEED_BULK_MAX_AGE_S") or "").strip() or "20"))
+FEED_BULK_RETRY_CHUNK_SIZE = max(5, env_int_safe("FEED_BULK_RETRY_CHUNK_SIZE", 25))
+FEED_BULK_RETRY_TIMEOUT_S = env_float_safe("FEED_BULK_RETRY_TIMEOUT_S", 20, positive=True)
+FEED_BULK_CHUNK_SIZE = max(5, env_int_safe("FEED_BULK_CHUNK_SIZE", 100))
+FEED_BULK_CONCURRENCY = max(1, env_int_safe("FEED_BULK_CONCURRENCY", 3))
+FEED_BULK_TIMEOUT_S = env_float_safe("FEED_BULK_TIMEOUT_S", 12, positive=True)
+FEED_BULK_MAX_AGE_S = env_float_safe("FEED_BULK_MAX_AGE_S", 20, lo=0)
 
 # ── group171 (item 3 of the 2026-10-06 list): fewer market-data calls for held symbols ───────────────────
 # The exit cycle (~8-10 s) priced each of the 5 open positions with GET /live-quote and then GET /quote, i.e.
@@ -160,31 +161,22 @@ FEED_BULK_MAX_AGE_S = float(((os.getenv("FEED_BULK_MAX_AGE_S") or "").strip() or
 #   * non-priority symbols that bulk already answered or missed skip /live-quote and go straight to /quote
 #     (bulk had just read the same live feeds); FEED_LEFTOVER_SKIP_LIVE=0 restores it. The log line now says
 #     why bulk left symbols unpriced (missing from the answer / older than the limit / no price).
-def _env_float(name: str, default: float) -> float:
-    raw = (os.getenv(name) or "").strip()
-    try:
-        v = float(raw) if raw else default
-    except ValueError:
-        return default
-    return v if v == v and v >= 0 else default
-
-
 def _env_on(name: str, default: str = "1") -> bool:
     return ((os.getenv(name) or "").strip() or default) not in ("0", "false", "False", "off", "no")
 
 
 FEED_PRIORITY_BULK_FIRST = _env_on("FEED_PRIORITY_BULK_FIRST")
-FEED_PRIORITY_BULK_MAX_AGE_S = _env_float("FEED_PRIORITY_BULK_MAX_AGE_S", 10.0)
-FEED_PRIORITY_BULK_TIMEOUT_S = _env_float("FEED_PRIORITY_BULK_TIMEOUT_S", 4.0)
-FEED_PRIORITY_BULK_COOLDOWN_S = _env_float("FEED_PRIORITY_BULK_COOLDOWN_S", 30.0)
-FEED_PRIORITY_SHARE_S = _env_float("FEED_PRIORITY_SHARE_S", 3.0)
+FEED_PRIORITY_BULK_MAX_AGE_S = env_float_safe("FEED_PRIORITY_BULK_MAX_AGE_S", 10.0, positive=True)
+FEED_PRIORITY_BULK_TIMEOUT_S = env_float_safe("FEED_PRIORITY_BULK_TIMEOUT_S", 4.0, positive=True)
+FEED_PRIORITY_BULK_COOLDOWN_S = env_float_safe("FEED_PRIORITY_BULK_COOLDOWN_S", 30.0, lo=0)
+FEED_PRIORITY_SHARE_S = env_float_safe("FEED_PRIORITY_SHARE_S", 3.0, lo=0)
 # group252 (2026-10-08 log): the held-position bulk call (one chunk of 6) timed out after its full 4 s and ONLY THEN did the
 # per-symbol path start, so every held-position price (and the 8 s exit cycle) lost 4 s while market-data answered the
 # per-symbol calls at once. Retrying a 6-symbol chunk in smaller chunks cannot help; the wait is the cost. Now, when the bulk
 # call has not answered within FEED_PRIORITY_HEDGE_S (default 1.5; 0 = old behaviour) the per-symbol lookups start
 # alongside it and each symbol takes whichever answer arrives first. A bulk call that was still unanswered then counts as
 # a failed bulk-first (same FEED_PRIORITY_BULK_COOLDOWN_S pause as before).
-FEED_PRIORITY_HEDGE_S = _env_float("FEED_PRIORITY_HEDGE_S", 1.5)
+FEED_PRIORITY_HEDGE_S = env_float_safe("FEED_PRIORITY_HEDGE_S", 1.5, lo=0)
 FEED_LEFTOVER_SKIP_LIVE = _env_on("FEED_LEFTOVER_SKIP_LIVE")
 _PRIO_LOCK = _threading.Lock()
 
@@ -200,9 +192,9 @@ _PRIO_LOCK = _threading.Lock()
 #     leftovers of LARGE non-priority batches (> FEED_BULK_MIN_SYMBOLS) off for FEED_BACKPRESSURE_S
 #     (default 20 s; small entry batches are never affected) and a single non-priority batch sends at most FEED_LEFTOVER_MAX (default 120) per-symbol lookups
 #     (0 = no cap), so the watchlist poll can no longer starve the positions.
-FEED_PRIORITY_STALE_FALLBACK_S = _env_float("FEED_PRIORITY_STALE_FALLBACK_S", 90.0)
-FEED_BACKPRESSURE_S = _env_float("FEED_BACKPRESSURE_S", 20.0)
-FEED_LEFTOVER_MAX = int(_env_float("FEED_LEFTOVER_MAX", 120.0))
+FEED_PRIORITY_STALE_FALLBACK_S = env_float_safe("FEED_PRIORITY_STALE_FALLBACK_S", 90.0, lo=0)
+FEED_BACKPRESSURE_S = env_float_safe("FEED_BACKPRESSURE_S", 20.0, lo=0)
+FEED_LEFTOVER_MAX = env_int_safe("FEED_LEFTOVER_MAX", 120, lo=0)
 _PRIO_LAST_GOOD: dict = {}         # clean symbol -> Tick (last tick the priority lane priced)
 _PRIO_DISTRESS_UNTIL = [0.0]       # monotonic time until which non-priority per-symbol leftovers are skipped
 _PRIO_SHARED: dict = {}            # clean symbol -> (monotonic ts, Tick)
@@ -215,7 +207,7 @@ _PRIO_BULK_OFF_UNTIL = [0.0]       # monotonic time until which bulk-first is sk
 # the bulk pass could not price now reuses the last tick the non-priority path priced for it, if that tick is at most
 # FEED_LEFTOVER_STALE_S old (default 120 s, 0 = off). The Tick keeps its REAL as_of and its source is tagged
 # "stale_last_good(<orig>)". Only symbols with no recent tick still go to the per-symbol path.
-FEED_LEFTOVER_STALE_S = _env_float("FEED_LEFTOVER_STALE_S", 120.0)
+FEED_LEFTOVER_STALE_S = env_float_safe("FEED_LEFTOVER_STALE_S", 120.0, lo=0)
 _WL_LAST_GOOD: dict = {}           # clean symbol -> Tick (last tick the non-priority batch path priced)
 _WL_LAST_GOOD_MAX = 3000
 
@@ -277,9 +269,9 @@ def clear_priority_share() -> None:
 # endpoint that is the 403 storm. Now: only when the ATR is missing or older
 # than the TTL, never twice concurrently for one symbol, at most N in flight
 # process-wide, and a failed attempt backs off instead of retrying next cycle.
-_ATR_REFRESH_TTL_S = float(((os.getenv("FEED_ATR_REFRESH_TTL_S") or "").strip() or str(6 * 3600)))
-_ATR_RETRY_BACKOFF_S = float(((os.getenv("FEED_ATR_RETRY_BACKOFF_S") or "").strip() or "300"))
-_ATR_MAX_INFLIGHT = max(1, int(((os.getenv("FEED_ATR_MAX_INFLIGHT") or "").strip() or "8")))
+_ATR_REFRESH_TTL_S = env_float_safe("FEED_ATR_REFRESH_TTL_S", 6 * 3600, lo=0)
+_ATR_RETRY_BACKOFF_S = env_float_safe("FEED_ATR_RETRY_BACKOFF_S", 300, lo=0)
+_ATR_MAX_INFLIGHT = max(1, env_int_safe("FEED_ATR_MAX_INFLIGHT", 8))
 _ATR_INFLIGHT_MAX_AGE_S = 30.0   # a slot older than this is presumed leaked (e.g. its loop was torn down)
 # group245: after a restart _ATR_LAST_OK is empty while the ATR cache is warm from the DB, so EVERY symbol the first
 # bulk/quote passes priced looked "due" and got a /history refresh (8 in flight, hundreds queued over the open): each is
@@ -287,7 +279,7 @@ _ATR_INFLIGHT_MAX_AGE_S = 30.0   # a slot older than this is presumed leaked (e.
 # getCandleData 403 "exceeding access rate" and a 30-60 s candle cooldown). A symbol whose ATR came from the DB and has
 # not been refreshed by this process is now refreshed at most FEED_ATR_WARM_REFRESH_PER_MIN times a minute process-wide
 # (default 6); a symbol with NO ATR is not limited (trading needs it). 0 = no limit (the old behaviour).
-_ATR_WARM_REFRESH_PER_MIN = int(_env_float("FEED_ATR_WARM_REFRESH_PER_MIN", 6.0))
+_ATR_WARM_REFRESH_PER_MIN = env_int_safe("FEED_ATR_WARM_REFRESH_PER_MIN", 6, lo=0)
 _ATR_WARM_STAMPS: list = []                  # monotonic times of recent warm-ATR refreshes (guarded by _ATR_STATE_LOCK)
 _ATR_STATE_LOCK = _threading.Lock()          # plain threading lock: state is touched from >1 event loop/thread
 _ATR_INFLIGHT: dict[str, float] = {}         # clean symbol -> monotonic start
@@ -1003,17 +995,17 @@ def _market_open_now() -> bool:
 # for a display-only price column. Now one short-TTL cache is shared by the
 # three routes, concurrent callers wait for the first one's fetch instead of
 # repeating it, and the display path never triggers ATR /history refreshes.
-DISPLAY_PRICE_TTL_OPEN_S = float(((os.getenv("DISPLAY_PRICE_TTL_OPEN_S") or "").strip() or "8"))
-DISPLAY_PRICE_TTL_CLOSED_S = float(((os.getenv("DISPLAY_PRICE_TTL_CLOSED_S") or "").strip() or "120"))
+DISPLAY_PRICE_TTL_OPEN_S = env_float_safe("DISPLAY_PRICE_TTL_OPEN_S", 8, lo=0)
+DISPLAY_PRICE_TTL_CLOSED_S = env_float_safe("DISPLAY_PRICE_TTL_CLOSED_S", 120, lo=0)
 # A symbol that returned nothing is remembered briefly so an unquotable symbol
 # is not re-requested on every poll.
-DISPLAY_PRICE_MISS_TTL_S = float(((os.getenv("DISPLAY_PRICE_MISS_TTL_S") or "").strip() or "30"))
+DISPLAY_PRICE_MISS_TTL_S = env_float_safe("DISPLAY_PRICE_MISS_TTL_S", 30, lo=0)
 # group243: the Candidates tab (limit 40) used to price its symbols with GET /live-quote + GET /quote each, ~80
 # calls per poll right at the open, most of them shed by AngelOne's lane budget and sent on to Yahoo. Bulk first now.
 FEED_DISPLAY_BULK = _env_on("FEED_DISPLAY_BULK")
-FEED_DISPLAY_BULK_MIN_SYMBOLS = max(2, int(_env_float("FEED_DISPLAY_BULK_MIN_SYMBOLS", 8.0)))
-FEED_DISPLAY_BULK_MAX_AGE_S = _env_float("FEED_DISPLAY_BULK_MAX_AGE_S", 60.0)   # market open; closed = FEED_PREVIEW_BULK_MAX_AGE_S
-FEED_DISPLAY_LEFTOVER_MAX = int(_env_float("FEED_DISPLAY_LEFTOVER_MAX", 10.0))
+FEED_DISPLAY_BULK_MIN_SYMBOLS = max(2, env_int_safe("FEED_DISPLAY_BULK_MIN_SYMBOLS", 8))
+FEED_DISPLAY_BULK_MAX_AGE_S = env_float_safe("FEED_DISPLAY_BULK_MAX_AGE_S", 60.0, positive=True)   # market open; closed = FEED_PREVIEW_BULK_MAX_AGE_S
+FEED_DISPLAY_LEFTOVER_MAX = env_int_safe("FEED_DISPLAY_LEFTOVER_MAX", 10, lo=0)
 _DISPLAY_CACHE: dict = {}                 # clean symbol -> (monotonic ts, price | None)
 _DISPLAY_CACHE_LOCK = _threading.Lock()   # guards the dict only (never held across an await)
 _DISPLAY_FETCH_LOCKS: dict = {}           # running loop id -> asyncio.Lock (single-flight per loop)
@@ -1658,8 +1650,8 @@ async def _get_preview(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]
 # non-tradeable preview; market-data answers a closed market from the last close), then GET /last-close/{sym}
 # (cache / bhavcopy only, never AngelOne or Yahoo) for the symbols bulk did not price, and GET /quote/{sym} only
 # for at most FEED_PREVIEW_QUOTE_FALLBACK_MAX of the rest (0 = never; a brand-new listing no cache knows yet).
-FEED_PREVIEW_BULK_MAX_AGE_S = float(((os.getenv("FEED_PREVIEW_BULK_MAX_AGE_S") or "").strip() or str(7 * 86400)))
-FEED_PREVIEW_QUOTE_FALLBACK_MAX = max(0, int(((os.getenv("FEED_PREVIEW_QUOTE_FALLBACK_MAX") or "").strip() or "5")))
+FEED_PREVIEW_BULK_MAX_AGE_S = env_float_safe("FEED_PREVIEW_BULK_MAX_AGE_S", 7 * 86400, lo=0)
+FEED_PREVIEW_QUOTE_FALLBACK_MAX = max(0, env_int_safe("FEED_PREVIEW_QUOTE_FALLBACK_MAX", 5))
 
 
 async def _get_preview_last_close(client: httpx.AsyncClient, symbol: str) -> Optional[Tick]:

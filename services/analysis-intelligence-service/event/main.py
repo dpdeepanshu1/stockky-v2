@@ -10,6 +10,10 @@ Merged with v0.3.1 features:
 """
 import os
 try:
+    from env_util import env_float_safe  # E504: a typo / blank setting must not stop the import
+except ImportError:   # imported as a package module (e.g. scheduler.governance_check), the folder is not on sys.path
+    from .env_util import env_float_safe
+try:
     from event_depth import enrich_events
 except Exception:
     enrich_events = None  # type: ignore
@@ -1223,7 +1227,7 @@ import threading as _threading
 
 _inflight_lock = _threading.Lock()
 _inflight: Dict[str, "_threading.Event"] = {}
-_INFLIGHT_WAIT_S = float(os.getenv("EVENT_INFLIGHT_WAIT_S", "40") or 40)
+_INFLIGHT_WAIT_S = env_float_safe("EVENT_INFLIGHT_WAIT_S", 40, lo=0)
 _live_lock = _threading.Lock()
 _live_requests = [0]            # live /events/* requests being served right now; /check yields to them
 
@@ -1880,7 +1884,7 @@ def check_for_changes():
     # group345: this warm-up is background work. It yields to live requests (the quality gate's per-entry news check) and stops after
     # CHECK_MAX_SECONDS so one pass cannot hold the event service for 300 s (13 Oct: dynamic_universe /check ran 300 s, 7 gate calls timed out).
     _t0 = time.monotonic()
-    _budget = float(os.getenv("CHECK_MAX_SECONDS", "240") or 0)
+    _budget = env_float_safe("CHECK_MAX_SECONDS", 240, blank=0, lo=0)
     done = 0
     _need_sleep = False
     # round 197: where the pass spends its budget (evidence only, nothing reads it). 4 Nov VM log: 60 of 469 symbols in 241 s = ~4 s each, and

@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+from env_util import env_float_safe, env_int_safe  # E503: a typo / blank setting must not stop the import
 import threading
 import time
 from datetime import datetime, timezone
@@ -84,15 +85,15 @@ _generation = 0
 # How often an idling (outside market hours) loop rechecks whether the
 # window has opened. Cheap — just a datetime compare, no upstream call.
 IDLE_RECHECK_S = 60.0
-SESSION_CLOSED_PROBE_S = float(os.getenv("SESSION_CLOSED_PROBE_S", "300") or 300)  # group319
+SESSION_CLOSED_PROBE_S = env_float_safe("SESSION_CLOSED_PROBE_S", 300, lo=0)  # group319
 
 # How often a full poll cycle restarts once it finishes the whole universe.
 # The file itself only updates once/day, but this governs freshness of
 # live_quotes during market hours.
-POLL_INTERVAL_S = float(((os.getenv("ANGELONE_POLL_INTERVAL_S") or "").strip() or "3.0"))
+POLL_INTERVAL_S = env_float_safe("ANGELONE_POLL_INTERVAL_S", 3.0, positive=True)
 # Small pause between successive batches within one cycle, so a large
 # universe doesn't fire every batch back-to-back with zero spacing.
-BATCH_GAP_S = float(((os.getenv("ANGELONE_BATCH_GAP_S") or "").strip() or "0.35"))
+BATCH_GAP_S = env_float_safe("ANGELONE_BATCH_GAP_S", 0.35, lo=0)
 BATCH_SIZE = 50  # AngelOne's documented per-request token cap for this endpoint
 # group230 (log review item 3): a poll cycle walked its 14 batches strictly one after another (request latency + the
 # 0.35 s gap + the DB write each), so a cycle took 15-25 s against the 15 s target (70 s at boot) and rows polled
@@ -114,7 +115,7 @@ except ValueError:
 DB_BATCH_WRITES = ((os.getenv("ANGELONE_FEED_DB_BATCH") or "").strip() or "1") not in ("0", "false", "False")
 # A poll cycle longer than this logs one WARNING (at most every SLOW_CYCLE_LOG_EVERY_S):
 # it means live_quotes rows are about to go stale for the symbols polled first.
-SLOW_CYCLE_WARN_S = float(((os.getenv("ANGELONE_FEED_SLOW_CYCLE_WARN_S") or "").strip() or "15.0"))
+SLOW_CYCLE_WARN_S = env_float_safe("ANGELONE_FEED_SLOW_CYCLE_WARN_S", 15.0, lo=0)
 SLOW_CYCLE_LOG_EVERY_S = 300.0
 _last_cycle_s: Optional[float] = None
 # Round 196: per-cycle breakdown for the slow-cycle warning, so one log line says WHERE the time went (AngelOne request time vs waiting between batches vs failed
@@ -149,8 +150,8 @@ _last_slow_cycle_log = 0.0
 # their own priority lanes; the rest of the universe is refreshed at most every FEED_COLD_INTERVAL_S seconds
 # as BACKGROUND (which keeps a token reserve free for the lanes above it). 0 = the old behaviour: every
 # symbol every cycle, no lanes. ANGELONE_FEED_HOT_MAX caps the hot (non-held) set.
-FEED_COLD_INTERVAL_S = float(((os.getenv("ANGELONE_FEED_COLD_INTERVAL_S") or "").strip() or "30"))
-FEED_HOT_MAX = int(float(((os.getenv("ANGELONE_FEED_HOT_MAX") or "").strip() or "100")))
+FEED_COLD_INTERVAL_S = env_float_safe("ANGELONE_FEED_COLD_INTERVAL_S", 30, lo=0)
+FEED_HOT_MAX = env_int_safe("ANGELONE_FEED_HOT_MAX", 100, lo=0)
 _last_cold_poll = 0.0
 
 

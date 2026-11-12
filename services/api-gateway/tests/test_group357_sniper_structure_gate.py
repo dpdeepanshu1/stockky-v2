@@ -6,6 +6,11 @@ from __future__ import annotations
 import importlib.util
 import os
 
+import sys as _sys_e502
+_SVC_E502 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SVC_E502 not in _sys_e502.path:   # E502: buy_sniper now imports env_util; a path-loaded module needs the service dir on sys.path
+    _sys_e502.path.insert(0, _SVC_E502)
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ENV = ("SNIPER_MIN_CONVICTION", "SNIPER_MIN_PRICE", "MAX_PRICE", "SNIPER_MIN_REWARD_RISK", "SNIPER_STRUCTURE_MODE", "STRUCTURE_MAX_CHASE_ATR",
         "STRUCTURE_MAX_STRETCH_ATR", "STRUCTURE_MIN_ROOM_ATR", "STRUCTURE_MIN_RR", "STRUCTURE_BEARISH_BLOCK", "STRUCTURE_BEARISH_BOS_BARS",

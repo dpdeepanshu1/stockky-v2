@@ -12,6 +12,7 @@ Used by:
 """
 from __future__ import annotations
 
+import math
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -95,11 +96,14 @@ def _avoid_payload(symbol: str, price: float = 0.0, reason: str = "PRICE > 5000 
 
 
 def _f(val: Any, default: float = 0.0) -> float:
+    """float(val), or `default` for None / "" / junk AND for NaN / inf (round 459, E480). float("nan") and float("inf") succeed, so a stored NaN rsi / pe / ema20 / macd_hist used to
+    pass through and reach the score maths and the JSON reply; inf in the price walk even passed the `> 0` test as a price."""
     try:
         if val is None or val == "":
             return default
-        return float(val)
-    except (TypeError, ValueError):
+        x = float(val)
+        return x if math.isfinite(x) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

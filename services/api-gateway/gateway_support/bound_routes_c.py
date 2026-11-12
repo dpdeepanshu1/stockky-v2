@@ -117,7 +117,7 @@ def build_bound_routes_c(ref):
         # timeout (25s) is safe even right after a restart.
         if cached:
             # Try live cache first (may already be warm from pre-warm task)
-            live = ref._redis_get(ref.SCAN_UNIVERSE_KEY)
+            live = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_UNIVERSE_KEY)   # E470: kv read off the event loop
             if live and isinstance(live, list) and len(live) > 0:
                 live = ref._filter_equities(live)
                 live = await ref.asyncio.to_thread(ref._filter_symbols_under_max_price, live)  # group361: off the event loop
@@ -142,7 +142,7 @@ def build_bound_routes_c(ref):
                         stale = await ref.asyncio.to_thread(ref._filter_symbols_under_max_price, stale)  # group361: off the event loop
                         if len(stale) >= 50:
                             # Repopulate live key (short TTL) so next caller is fast
-                            ref._redis_set(ref.SCAN_UNIVERSE_KEY, stale, ttl=300)
+                            await ref.asyncio.to_thread(ref._redis_set, ref.SCAN_UNIVERSE_KEY, stale, ttl=300)
                             # Kick off background rebuild so data freshens soon
                             try:
                                 # E420: strong reference + one rebuild at a time (a bare create_task can be garbage-collected mid-rebuild, and a

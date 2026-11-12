@@ -83,6 +83,13 @@ except Exception:
     def _json_sanitize(x):
         return x
 
+def _ws_dumps(obj, default=str) -> str:
+    """E476: JSON text for a WebSocket frame, with NaN / +-inf turned into null first (`json_safe.sanitize`). `json.dumps` writes them as the
+    bare tokens `NaN` / `Infinity`, which are not JSON: the browser's `JSON.parse` rejects the whole frame. A scan result is the realistic
+    carrier (decision-service scores are not coerced on the full-scan path), and one NaN in it lost the "done" push for the entire scan."""
+    return json.dumps(_json_sanitize(obj), default=default)
+
+
 def _safe_json_response(content, status_code=200):
     from fastapi.responses import JSONResponse
     return JSONResponse(content=_json_sanitize(content), status_code=status_code)
@@ -2059,6 +2066,16 @@ def _get_bulk_deal_symbols() -> List[str]:
     return out[:100]
 
 
+def _first_present(item: dict, keys):
+    """E478: the value of the first key in `keys` that is present and not None, else None. Unlike `a or b or c`, a real 0 / 0.0 is a value:
+    `item.get("change_pct") or item.get("pChange")` skipped a genuine 0.0 change and fell through to a missing key (None)."""
+    for k in keys:
+        v = item.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def _get_52w_extreme_symbols() -> List[str]:
     """Symbols near 52-week high/low or with sharp multi-day moves (surprise raise)."""
     out: List[str] = []
@@ -2092,7 +2109,7 @@ def _get_52w_extreme_symbols() -> List[str]:
             payload = getter()
             for item in (payload or {}).get("data") or []:
                 if isinstance(item, dict):
-                    chg = item.get("change_pct") or item.get("pChange") or item.get("pctChange")
+                    chg = _first_present(item, ("change_pct", "pChange", "pctChange"))   # E478: a real 0.0 is not "missing"
                     try:
                         chg_f = abs(float(chg)) if chg is not None else None
                     except (TypeError, ValueError):
@@ -2114,7 +2131,7 @@ def _get_52w_extreme_symbols() -> List[str]:
                 rows = data.get("data") or []
             for item in (rows or [])[:40]:
                 if isinstance(item, dict):
-                    chg = item.get("pChange") or item.get("perChange")
+                    chg = _first_present(item, ("pChange", "perChange"))   # E478
                     try:
                         if chg is not None and abs(float(chg)) < 3.0:
                             continue
@@ -3840,6 +3857,19 @@ SCAN_BATCH_SIZE = int(((os.getenv("SCAN_BATCH_SIZE") or "").strip() or "8"))  # 
 MAX_RETRIES = 1
 RETRY_BACKOFF = 1.0
 
+
+def _is_permanent_client_error(exc) -> bool:
+    """E463: True for an HTTP status error that asking again cannot fix: a 4xx other than 408 (timeout), 425 (too early) and 429 (rate limit).
+    A 5xx, a timeout, a connect / read error and a 429 are transient and keep their retry. Pure."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    try:
+        code = int(exc.response.status_code)
+    except Exception:
+        return False
+    return 400 <= code < 500 and code not in (408, 425, 429)
+
+
 def _is_market_open_ist() -> bool:
     """NSE continuous session 09:15–15:30 IST, Mon–Fri, excluding known holidays."""
     now = datetime.now(IST)
@@ -4209,8 +4239,9 @@ async def _analyze_one_symbol_ultra(
       that path keeps the real Gemini summary.
     """
     _circuit_err = None   # E416: set when a dependency circuit is open; handled AFTER the scan slot is released
-    async with sem:
-        for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(MAX_RETRIES + 1):
+        _retry_wait = None   # E463: the retry pause is taken AFTER the scan slot is released, as the circuit-open lane already is
+        async with sem:
             try:
                 base_sym = (symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
                 # ── Neon Data Feed (stockky_kv) — prefer bulk-prefetched row ──
@@ -4313,7 +4344,7 @@ async def _analyze_one_symbol_ultra(
 
                 # ── Decide-level cache (same symbol within TTL → instant) ──
                 cache_key = f"{DECIDE_CACHE_PREFIX}{base_sym}"
-                cached_decide = _redis_get(cache_key)
+                cached_decide = await asyncio.to_thread(_redis_get, cache_key)   # E471: durable key (Neon on a miss) off the event loop
                 # E191: this call sends a skip_http request itself whenever the feed row has data (below), so a partial-input (skip_http) entry is a
                 # fair answer for it; E190 had made such entries unusable here, which turned every feed-based scan call into a decision-service hop.
                 _feed_has_data = isinstance(feed_row, dict) and any(
@@ -4566,11 +4597,10 @@ async def _analyze_one_symbol_ultra(
                 logger.warning(
                     f"Scan error for {symbol} (attempt {attempt+1}/{MAX_RETRIES+1}): {error_type} - {error_msg}"
                 )
-                if attempt < MAX_RETRIES:
+                if attempt < MAX_RETRIES and not _is_permanent_client_error(e):   # E463: a 4xx will not change on a second ask
                     wait = RETRY_BACKOFF ** attempt
                     logger.info(f"Retrying {symbol} in {wait:.1f}s...")
-                    await asyncio.sleep(wait)
-                    continue
+                    _retry_wait = wait   # E463: slept below, outside `async with sem`
                 else:
                     return {
                         "symbol": symbol,
@@ -4584,8 +4614,10 @@ async def _analyze_one_symbol_ultra(
                     "decision": "ERROR",
                     "error": f"Unexpected: {type(e).__name__} - {str(e)}"
                 }
-        if _circuit_err is None:
-            return {"symbol": symbol, "decision": "ERROR", "error": "Max retries exceeded"}
+        if _retry_wait is not None:
+            await asyncio.sleep(_retry_wait)   # E463: the slot is free while this symbol waits to retry
+    if _circuit_err is None:
+        return {"symbol": symbol, "decision": "ERROR", "error": "Max retries exceeded"}
 
     # E416: circuit-open lane, now outside the semaphore (same row, same sleeps, same quote fallback as before).
     e = _circuit_err
@@ -4619,6 +4651,79 @@ def _score_sort_key(row) -> float:
         return 0.0
     v = _hot_float(row.get("combined_score"))
     return v if v is not None else 0.0
+
+
+def _scan_num(v):
+    """E472: a usable finite number from a score field, else None. A finite int / float is returned unchanged (its type kept); numeric text
+    ("57") is parsed; None, bool-free junk, NaN and +/-inf give None."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v if math.isfinite(v) else None
+    return _hot_float(v)
+
+
+def _apply_repair_tech_extras(current: dict, t: dict) -> None:
+    """E475: copy `ema20`, `technical_score` and `macd_hist` (or `macd`) from a technical-service reply into the repaired feed row, finite
+    numbers only. The step stored them as sent: a NaN `ema20` / `macd_hist` (Python's JSON reader accepts `NaN`) went into the stored row, where
+    `instant_scanner._f` passes it through (`float(nan)`), so the symbol's instant score came out NaN; and `t.get("macd_hist", t.get("macd"))`
+    stored None when the reply carried `macd_hist: null` next to a valid `macd`. The first finite of `macd_hist`, `macd` wins now; an
+    unusable value leaves the row's existing one alone. `technical_score` still only fills an empty slot. Mutates `current`; never raises."""
+    if not isinstance(current, dict) or not isinstance(t, dict):
+        return
+
+    def _num(x):   # a bool is not a reading (`_scan_num(True)` would give 1.0)
+        return None if isinstance(x, bool) else _scan_num(x)
+
+    v = _num(t.get("ema20"))
+    if v is not None:
+        current["ema20"] = v
+    if current.get("technical_score") is None:
+        v = _num(t.get("technical_score"))
+        if v is not None:
+            current["technical_score"] = v
+    for _k in ("macd_hist", "macd"):
+        v = _num(t.get(_k))
+        if v is not None:
+            current["macd_hist"] = v
+            break
+
+
+def _scan_horizon_picks(results_list, horizon_key, limit=5):
+    """Top-N board for one horizon (short / mid / long) from the scan's rows. Moved out of `_run_scan_parallel_impl` (E472) with the same rules.
+    The scores it reads (`horizons[<h>].score`, `combined_score`, `fundamental_score`) come from the decision service and are not coerced anywhere
+    on the full-scan path, and the old closure did arithmetic and `>=` on them directly: one text or NaN score raised TypeError at the very end of
+    the scan, after every symbol had been scored and before the result was saved, so the whole scan was lost. An unusable score now counts as 0 /
+    absent, exactly as `_score_sort_key` and `_value_adjusted_score` already treat it."""
+    scored = []
+    for r in results_list or []:
+        if not isinstance(r, dict) or r.get("decision") == "ERROR":
+            continue
+        _hzs = r.get("horizons")
+        hz = _hzs.get(horizon_key) if isinstance(_hzs, dict) else None
+        hz = hz if isinstance(hz, dict) else {}
+        comb = _scan_num(r.get("combined_score")) or 0
+        sc = _scan_num(hz.get("score"))
+        if sc is None:
+            sc = comb
+            # Mid/long without horizon block: slight discount vs short
+            if horizon_key == "mid":
+                sc = sc * 0.95
+            elif horizon_key == "long":
+                sc = (_scan_num(r.get("fundamental_score")) or sc) * 0.9 + comb * 0.1
+        decision = hz.get("decision") or r.get("decision")
+        # Include BUY/PREPARE always; also include high-score DO NOT BUY as
+        # PREPARE candidates so the Top-5 lists are never empty on a
+        # cautious market day (score bar: short 54, mid 56, long 58).
+        min_sc = {"short": 54, "mid": 56, "long": 58}.get(horizon_key, 54)
+        # A DO NOT BUY row is never promoted to PREPARE TO BUY on score alone
+        # (it used to be, which put "Top N Picks" under a "DO NOT BUY ANY
+        # STOCK TODAY" verdict). An empty board still falls back to the
+        # overall ranking below, with each row's true decision.
+        if decision in ("DO NOT BUY", "SELL"):
+            continue
+        if decision in ("BUY NOW", "PREPARE TO BUY") or (sc or 0) >= min_sc:
+            scored.append({**r, "_hz_score": sc, "horizon_focus": horizon_key})
+    scored.sort(key=_board_rank_key, reverse=True)
+    return scored[:limit]
 
 
 async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = False):
@@ -4732,7 +4837,7 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
     # Seed per-symbol batch cache from last partial scan so 60/300 style
     # resumes don't re-score already completed names (Neon/redis durable).
     try:
-        last = _redis_get(LAST_FULL_SCAN_KEY) if BATCH_RESULT_CACHE_ENABLED else None
+        last = (await asyncio.to_thread(_redis_get, LAST_FULL_SCAN_KEY)) if BATCH_RESULT_CACHE_ENABLED else None   # E471
         if last and isinstance(last, dict):
             prev = (last.get("result") or {})
             # The last-scan record lives 24h, but seeding re-caches each row with a FRESH
@@ -4890,45 +4995,16 @@ async def _run_scan_parallel_impl(task_id: str, universe: List[str], lite: bool 
 
     actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
     top_picks = _select_top_picks(actionable, limit=5)
-    # Three horizon Top-5 lists (short preferred)
-    def _horizon_picks(results_list, horizon_key, limit=5):
-        scored = []
-        for r in results_list:
-            if r.get("decision") == "ERROR":
-                continue
-            hz = (r.get("horizons") or {}).get(horizon_key) or {}
-            sc = hz.get("score")
-            if sc is None:
-                sc = r.get("combined_score", 0) or 0
-                # Mid/long without horizon block: slight discount vs short
-                if horizon_key == "mid":
-                    sc = sc * 0.95
-                elif horizon_key == "long":
-                    sc = (r.get("fundamental_score") or sc) * 0.9 + (r.get("combined_score") or 0) * 0.1
-            decision = hz.get("decision") or r.get("decision")
-            # Include BUY/PREPARE always; also include high-score DO NOT BUY as
-            # PREPARE candidates so the Top-5 lists are never empty on a
-            # cautious market day (score bar: short 54, mid 56, long 58).
-            min_sc = {"short": 54, "mid": 56, "long": 58}.get(horizon_key, 54)
-            # A DO NOT BUY row is never promoted to PREPARE TO BUY on score alone
-            # (it used to be, which put "Top N Picks" under a "DO NOT BUY ANY
-            # STOCK TODAY" verdict). An empty board still falls back to the
-            # overall ranking below, with each row's true decision.
-            if decision in ("DO NOT BUY", "SELL"):
-                continue
-            if decision in ("BUY NOW", "PREPARE TO BUY") or (sc or 0) >= min_sc:
-                scored.append({**r, "_hz_score": sc, "horizon_focus": horizon_key})
-        scored.sort(key=_board_rank_key, reverse=True)
-        return scored[:limit]
-    top_picks_short = _horizon_picks(results, "short")
-    top_picks_mid = _horizon_picks(results, "mid")
-    top_picks_long = _horizon_picks(results, "long")
+    # Three horizon Top-5 lists (short preferred); E472: `_scan_horizon_picks` reads every score defensively
+    top_picks_short = _scan_horizon_picks(results, "short")
+    top_picks_mid = _scan_horizon_picks(results, "mid")
+    top_picks_long = _scan_horizon_picks(results, "long")
 
     # Guarantee Top-5 boards are never empty ("No picks in this horizon").
     # Fall back to overall ranked results sliced into non-overlapping bands.
     sorted_all = sorted(
         [r for r in results if r.get("decision") != "ERROR"],
-        key=lambda x: x.get("combined_score", 0) or 0,
+        key=_score_sort_key,   # E472: a text / NaN combined_score used to raise TypeError here, after the whole scan had run
         reverse=True,
     )
     if not top_picks_short:
@@ -5211,8 +5287,49 @@ def _movers_rows_from_market_data(symbols: List[str]) -> List[dict]:
     return out
 
 
+def _movers_row_from_history(sym, hist, ticker):
+    """E473: one movers row from a yfinance 1-minute history frame (moved out of `_get_nifty50_data._fetch_one`, same rules). The row used to be
+    built from `hist.iloc[-1]["Close"]` with no finite check: yfinance's newest 1-minute bar often has a NaN close, and that NaN became the
+    row's price, change and change_pct. `_rank_market_rows` skips a NaN change_pct for gainers / losers but ranks `most-active` on volume, so
+    the NaN row was returned, FastAPI could not JSON-encode it (HTTP 500 on /market/most-active), and the list is cached for the whole day.
+    Now the price is the last FINITE close, high / low / volume are finite or fall back to it, and the change comes from `_safe_pct`.
+    Returns None when there is no usable close or previous close."""
+    closes = hist["Close"].dropna() if "Close" in hist.columns else None
+    if closes is None or closes.empty:
+        return None
+    last_close = _hot_float(closes.iloc[-1])
+    if last_close is None:
+        return None
+    # Previous SESSION close when yfinance exposes it; otherwise the day's first bar (open if present, else its close).
+    prev_close = None
+    try:
+        prev_close = _hot_float(ticker.fast_info.get("previous_close"))
+    except Exception:
+        prev_close = None
+    if not prev_close or prev_close <= 0:
+        first = hist.iloc[0]
+        prev_close = _hot_float(first["Open"]) if "Open" in hist.columns else None
+        if not prev_close or prev_close <= 0:
+            prev_close = _hot_float(first["Close"])
+    if not prev_close or prev_close <= 0:
+        return None
+    change = last_close - prev_close
+    hi = _hot_float(hist["High"].max()) if "High" in hist.columns else None
+    lo = _hot_float(hist["Low"].min()) if "Low" in hist.columns else None
+    vol = _hot_float(hist["Volume"].sum()) if "Volume" in hist.columns else None
+    return {
+        "symbol": sym,
+        "price": round(last_close, 2),
+        "change": round(change, 2),
+        "change_pct": round(_safe_pct(change, prev_close), 2),
+        "volume": int(vol or 0),
+        "high": round(hi if hi is not None else last_close, 2),
+        "low": round(lo if lo is not None else last_close, 2),
+    }
+
+
 def _get_nifty50_data() -> List[dict]:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(IST).strftime("%Y-%m-%d")   # E477: the IST trading day (was server-local, UTC on the host: rolled at 05:30 IST)
     cache_key = f"{MARKET_MOVERS_CACHE_PREFIX}{today}"
     cached = _redis_get(cache_key)
     if cached and isinstance(cached, list) and len(cached) > 0:
@@ -5324,33 +5441,7 @@ def _get_nifty50_data() -> List[dict]:
                 hist = ticker.history(period="1d", interval="1m")
                 if hist.empty:
                     return None
-                latest = hist.iloc[-1]
-                # Previous SESSION close when yfinance exposes it; otherwise the
-                # day's first bar (open if present, else its close). It used to
-                # be the first 1-minute bar's close, and volume/high/low were the
-                # LAST minute only, so "most active" ranked one minute of volume.
-                prev_close = None
-                try:
-                    prev_close = _hot_float(ticker.fast_info.get("previous_close"))
-                except Exception:
-                    prev_close = None
-                if not prev_close or prev_close <= 0:
-                    first = hist.iloc[0]
-                    prev_close = _hot_float(first["Open"]) if "Open" in hist.columns else None
-                    if not prev_close or prev_close <= 0:
-                        prev_close = _hot_float(first["Close"])
-                if not prev_close or prev_close <= 0:
-                    return None
-                change_pct = (latest["Close"] - prev_close) / prev_close * 100
-                return {
-                    "symbol": sym,
-                    "price": round(latest["Close"], 2),
-                    "change": round(latest["Close"] - prev_close, 2),
-                    "change_pct": round(change_pct, 2),
-                    "volume": int(hist["Volume"].sum()),
-                    "high": round(hist["High"].max(), 2),
-                    "low": round(hist["Low"].min(), 2),
-                }
+                return _movers_row_from_history(sym, hist, ticker)   # E473
             except Exception as e:
                 logger.warning(f"Could not fetch {sym}: {e}")
                 return None
@@ -5382,7 +5473,7 @@ def _get_nifty50_data() -> List[dict]:
             # real data to serve instead of an empty list.
             _redis_set(MARKET_MOVERS_LAST_KNOWN, data, ttl=7 * 86400)
             try:
-                _redis_set(MARKET_MOVERS_LAST_KNOWN_AT, datetime.now().strftime("%Y-%m-%d %H:%M"), ttl=7 * 86400)
+                _redis_set(MARKET_MOVERS_LAST_KNOWN_AT, datetime.now(IST).strftime("%Y-%m-%d %H:%M"), ttl=7 * 86400)   # E477: IST label
             except Exception:
                 pass            # the timestamp is only a label; never fail the fetch over it
             return data
@@ -6468,7 +6559,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     Batching: every HOT_BATCH_SIZE symbols, warm upstream services.
     """
     if not force:
-        cached = _redis_get(HOT_STOCKS_CACHE_KEY)
+        cached = await asyncio.to_thread(_redis_get, HOT_STOCKS_CACHE_KEY)   # E471: durable key
         if cached:
             return {**cached, "cached": True}
 
@@ -6478,7 +6569,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
     # mid/small caps never entered the evaluation set.
     scan_syms: list = []
     try:
-        last_scan = _redis_get(LAST_FULL_SCAN_KEY)
+        last_scan = await asyncio.to_thread(_redis_get, LAST_FULL_SCAN_KEY)   # E471
         if isinstance(last_scan, dict):
             for key in ("recommendations", "recommendations_short", "all_results", "results"):
                 for r in last_scan.get(key) or []:
@@ -6647,7 +6738,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 # last_decision seed. Read-only KV lookups (no network).
                 _decide_full = None
                 try:
-                    _decide_full = _redis_get(f"{DECIDE_CACHE_PREFIX}{base}")
+                    _decide_full = await asyncio.to_thread(_redis_get, f"{DECIDE_CACHE_PREFIX}{base}")   # E471: durable key, once per symbol
                 except Exception:
                     _decide_full = None
                 conviction_extra = _build_hot_conviction_extra(_decide_full, decision_data)
@@ -7058,7 +7149,10 @@ async def _surprise_closed_market_result(engine, limit):
         result["cache_age_sec"] = round(age, 1)
         result["message"] = "Market closed - showing the last saved scan. Use Refresh Scan to run a fresh one."
         if limit is not None and isinstance(result.get("stocks"), list):
-            result["stocks"] = result["stocks"][: max(0, int(limit))]
+            try:
+                result["stocks"] = result["stocks"][: max(0, int(limit))]
+            except (TypeError, ValueError, OverflowError):
+                pass   # E478: a junk limit serves the saved list whole (it used to abandon it and start a live sweep on a closed market)
         return result
     except Exception as e:  # noqa: BLE001 - never let this shortcut break a scan
         logger.debug("surprise closed-market serve skipped: %s", e)
@@ -7243,7 +7337,7 @@ class ConnectionManager:
 
     async def broadcast(self, channel: str, payload: dict):
         dead = []
-        msg = json.dumps({**payload, "channel": channel}, default=str)
+        msg = _ws_dumps({**payload, "channel": channel})   # E476
         for ws in list(self.active):
             chans = self.subs.get(id(ws), set())
             if channel in chans or "all" in chans:
@@ -7259,19 +7353,47 @@ ws_manager = ConnectionManager()
 _quote_loop_task = None
 
 
+def _ws_quote_num(v, positive: bool = False):
+    """E474: a finite float from a quote field, else None (None, bool, junk text, NaN, +/-inf; with `positive` also 0 and negatives).
+    Numeric text ("101.5") is parsed, as the old `float(price)` did."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    if positive and f <= 0:
+        return None
+    return f
+
+
 def _resolve_quote_price(sym: str):
-    """Best-effort free-tier quote for WS push."""
+    """Best-effort free-tier quote for WS push.
+
+    E474: every number in the frame is finite. `ConnectionManager.broadcast` and the WS handler use `json.dumps` (NaN allowed), so a NaN /
+    inf `price`, `close` or `change_pct` from market-data (Python's JSON reader accepts `NaN`) or from yfinance's `fast_info` (a NaN is truthy,
+    so `float(nan) or None` and `if price:` both let it through) went out as the bare token `NaN`, which is not JSON: the browser's
+    `JSON.parse` rejects the frame, and with it every quote for that symbol until the value cleared. The old `price or regularMarketPrice or ...`
+    chain also stopped at a NaN price and never reached a valid `close` behind it.
+    """
     try:
         resp = httpx.get(f"{MARKET_DATA_URL}/quote/{sym}", timeout=6)
         if resp.status_code == 200:
             data = resp.json()
-            price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
+            price = None
+            for _k in ("price", "regularMarketPrice", "close", "last"):
+                price = _ws_quote_num(data.get(_k), positive=True)
+                if price is not None:
+                    break
             if price is not None:
+                _close = _ws_quote_num(data.get("close"), positive=True)
                 return {
                     "symbol": sym,
-                    "price": float(price),
-                    "close": data.get("close") or float(price),
-                    "change_pct": data.get("change_pct"),
+                    "price": price,
+                    "close": _close if _close is not None else price,
+                    "change_pct": _ws_quote_num(data.get("change_pct")),
                     "as_of": data.get("as_of") or datetime.now(IST).isoformat(),
                     "source": data.get("source") or "market-data",
                 }
@@ -7287,7 +7409,9 @@ def _resolve_quote_price(sym: str):
         info = getattr(t, "fast_info", None) or {}
         price = None
         try:
-            price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
+            price = _ws_quote_num(info.get("last_price"), positive=True)
+            if price is None:
+                price = _ws_quote_num(info.get("lastPrice"), positive=True)
         except Exception:
             price = None
         if price:
@@ -7303,6 +7427,105 @@ def _resolve_quote_price(sym: str):
     return None
 
 
+_QUOTE_TICK_MAX = 12          # upstream quote calls per tick (protects Yahoo / NSE / the free tier)
+_quote_loop_cursor = 0        # E468: where the next tick starts in the watched list
+
+
+def _quote_tick_batch(symbols, cursor, size=_QUOTE_TICK_MAX):
+    """E468: the symbols to push this tick and the cursor for the next one.
+
+    `symbols` is the sorted watched list. A list of at most `size` is pushed whole every tick; a longer one is walked round-robin, `size` at a
+    time, wrapping at the end. The loop used to take `symbols[:12]` every tick, so with more than 12 symbols watched across clients everything
+    after the first 12 alphabetically never got a live push.
+    """
+    syms = list(symbols or [])
+    n = len(syms)
+    if n == 0:
+        return [], 0
+    size = max(1, int(size))
+    if n <= size:
+        return syms, 0
+    try:
+        start = int(cursor) % n
+    except (TypeError, ValueError):
+        start = 0
+    return [syms[(start + i) % n] for i in range(size)], (start + size) % n
+
+
+_PRICE_ALERT_INDIVIDUAL_PER_TICK = 5   # separate notifications per tick; any further alert goes into ONE digest (E472)
+
+
+def _price_alert_digest_text(rest) -> str:
+    """One notification text for the alerts past the per-tick cap: `SYM ₹price (direction ₹target)` per line, capped so a big batch stays a
+    readable message. Pure."""
+    lines = []
+    for t in rest:
+        lines.append(f"{t.get('symbol')} ₹{t.get('current_price')} ({t.get('direction')} ₹{t.get('target_price')})")
+    shown = lines[:40]
+    text = f"⚡ {len(lines)} more price alerts triggered:\n" + "\n".join(shown)
+    if len(lines) > len(shown):
+        text += f"\n… and {len(lines) - len(shown)} more"
+    return text
+
+
+async def _deliver_triggered_price_alerts(triggered, max_individual: int = _PRICE_ALERT_INDIVIDUAL_PER_TICK) -> dict:
+    """E472: send the alerts `evaluate_price_alerts` returned. That function stamps `last_triggered_at` (a 15 min cooldown) on EVERY alert that
+    fired and saves it before it returns, but the quote loop then delivered `triggered[:5]` only: with more than five alerts firing in one
+    tick (a market-wide move, or the first tick after a restart with many alerts already past their level) alerts 6 and up were marked
+    triggered, never notified, and silent for the next 15 minutes. The first `max_individual` still get their own notification (the storm
+    guard the cap was for); the rest are sent as ONE digest notification, and every alert still gets its WebSocket push. A delivery that
+    fails is logged with the symbols (the cooldown is already spent). Never raises."""
+    items = [t for t in (triggered or []) if isinstance(t, dict)]
+    out = {"individual": 0, "digest": 0, "failed": 0}
+    if not items:
+        return out
+    first, rest = items[:max(0, int(max_individual))], items[max(0, int(max_individual)):]
+
+    async def _ws(t):
+        try:
+            await ws_manager.broadcast("alerts", {
+                "type": "price_alert",
+                **{k: t.get(k) for k in ("symbol", "current_price", "target_price", "direction", "note", "id")},
+            })
+        except Exception as e_ws:   # noqa: BLE001
+            logger.debug("price alert ws push %s: %s", t.get("symbol"), e_ws)
+
+    async def _post(title, msg):
+        resp = await asyncio.to_thread(
+            httpx.post, f"{NOTIFICATION_URL}/notify",
+            json={"title": title, "message": msg, "channel": "all"}, timeout=8,
+        )
+        code = getattr(resp, "status_code", 200)
+        if isinstance(code, int) and code >= 400:
+            raise RuntimeError(f"notification service answered HTTP {code}")
+
+    for t in first:
+        try:
+            await asyncio.to_thread(_wake_notification_service)
+            msg = (
+                f"⚡ {t.get('symbol')} ₹{t.get('current_price')} "
+                f"({t.get('direction')} target ₹{t.get('target_price')})"
+            )
+            await _post(f"Price Alert · {t.get('symbol')}", msg)
+            out["individual"] += 1
+            await _ws(t)
+        except Exception as e_alert:   # group 451: was `pass` - a price alert that could not be sent vanished without a trace (its cooldown is already used)
+            out["failed"] += 1
+            logger.warning("price alert for %s was NOT delivered: %s: %s", t.get("symbol"), type(e_alert).__name__, e_alert)
+    if rest:
+        try:
+            await asyncio.to_thread(_wake_notification_service)
+            await _post(f"Price Alerts · {len(rest)} more", _price_alert_digest_text(rest))
+            out["digest"] = len(rest)
+        except Exception as e_dg:
+            out["failed"] += len(rest)
+            logger.warning("%s price alerts (%s) were NOT delivered: %s: %s", len(rest),
+                           ", ".join(str(t.get("symbol")) for t in rest[:20]), type(e_dg).__name__, e_dg)
+        for t in rest:
+            await _ws(t)
+    return out
+
+
 async def _quote_broadcast_loop():
     """Push quotes for WS-watched symbols and evaluate price alerts.
 
@@ -7314,6 +7537,7 @@ async def _quote_broadcast_loop():
     Power-off / activity pause: sleep only — zero upstream calls.
     Off-hours / weekend / holiday: idle sleep (no upstream spam, no alerts).
     """
+    global _quote_loop_cursor
     while True:
         try:
             if activity_paused() or scan_in_progress() or not _QUOTE_LOOP_ENABLED:
@@ -7334,8 +7558,9 @@ async def _quote_broadcast_loop():
         try:
             # No connected clients → do not hit market-data for quotes at all
             symbols = ws_manager.all_watched_symbols() if getattr(ws_manager, "active", None) else []
-            # Cap concurrent watched symbols to protect Yahoo/NSE / free-tier
-            for sym in list(symbols)[:12]:
+            # Cap upstream calls per tick to protect Yahoo/NSE / free-tier; round-robin so every watched symbol gets a turn (E468)
+            _batch, _quote_loop_cursor = _quote_tick_batch(symbols, _quote_loop_cursor)
+            for sym in _batch:
                 # One failing symbol/broadcast must not abort the rest of the tick.
                 try:
                     q = await asyncio.to_thread(_resolve_quote_price, sym)
@@ -7363,25 +7588,7 @@ async def _quote_broadcast_loop():
         try:
             from data_feed import evaluate_price_alerts
             triggered = await asyncio.to_thread(evaluate_price_alerts)
-            for t in triggered[:5]:
-                try:
-                    await asyncio.to_thread(_wake_notification_service)
-                    msg = (
-                        f"⚡ {t.get('symbol')} ₹{t.get('current_price')} "
-                        f"({t.get('direction')} target ₹{t.get('target_price')})"
-                    )
-                    await asyncio.to_thread(
-                        httpx.post,
-                        f"{NOTIFICATION_URL}/notify",
-                        json={"title": f"Price Alert · {t.get('symbol')}", "message": msg, "channel": "all"},
-                        timeout=8,
-                    )
-                    await ws_manager.broadcast("alerts", {
-                        "type": "price_alert",
-                        **{k: t.get(k) for k in ("symbol", "current_price", "target_price", "direction", "note", "id")},
-                    })
-                except Exception as e_alert:   # group 451: was `pass` - a price alert that could not be sent vanished without a trace (its cooldown is already used)
-                    logger.warning("price alert for %s was NOT delivered: %s: %s", t.get("symbol"), type(e_alert).__name__, e_alert)
+            await _deliver_triggered_price_alerts(triggered)   # E472: every triggered alert is delivered (was `triggered[:5]`: the rest were lost)
         except Exception as e:
             logger.debug("quote loop alerts: %s", e)
         # Open with quotes to push: 8s; preopen/post — or nothing to push (no
@@ -8491,6 +8698,26 @@ async def _patch_single_stock_feed(symbol: str, client: httpx.AsyncClient) -> di
             _REPAIR_SYMBOL_LOCKS.pop(key, None)
 
 
+def _repair_row_for_write(original: dict, patched_row: dict, fresh) -> dict:
+    """E472: the row the Repair worker writes. `_patch_single_stock_feed_impl` reads the stored row first, then spends seconds on upstream calls
+    (an 0.5 s cooldown after each one, up to 8 + 20 + 35 + 20 s of timeouts), and used to write the WHOLE snapshot back. `put_symbol` merges
+    the incoming row over the stored one and lets valid volatile fields (last_price / current_price / volume / day_change_pct /
+    price_refreshed_at ...) win, so a live price patch or a bulk-feed write that landed during the repair was overwritten by the older price
+    and an older `price_refreshed_at`. Now only what repair changed is applied (keys it added or changed, and keys it removed, such as a stale
+    seed flag) on top of a fresh copy of the stored row. `fresh` empty / not a dict (a failed or empty read) falls back to the old behaviour:
+    the patched snapshot is written as it was, so a transient read miss never drops a repair. Never mutates its arguments."""
+    if not isinstance(fresh, dict) or not fresh:
+        return patched_row
+    row = dict(fresh)   # the store hands out its cached row: copy, never mutate it
+    for k in original:
+        if k not in patched_row:
+            row.pop(k, None)
+    for k, v in patched_row.items():
+        if k not in original or original[k] != v:
+            row[k] = v
+    return row
+
+
 async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) -> dict:
     """
     Surgically fetch ONLY missing fields and merge into existing Neon feed blob.
@@ -8503,6 +8730,7 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
     base = str(symbol or "").upper().replace(".NS", "").replace(".BO", "").strip()
     current = dict(await asyncio.to_thread(store.get_symbol, base) or {})  # group303
     had_row = bool(current)  # E436: a symbol with no stored row must not get a priceless stub row from repair
+    original_row = dict(current)  # E472: what the row looked like when repair started (see `_repair_row_for_write`)
 
     # Known chronically->₹5000 names (static list — MRF, MARUTI, PAGEIND,
     # ...): purge immediately, no live quote needed. Previously this symbol
@@ -8767,12 +8995,7 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
                     # Without this the baseline-seed block below still fired and
                     # stamped rsi_seed=True on a real technical-service value.
                     missing.discard("rsi")
-                if t.get("ema20") is not None:
-                    current["ema20"] = t.get("ema20")
-                if t.get("technical_score") is not None and current.get("technical_score") is None:
-                    current["technical_score"] = t.get("technical_score")
-                if t.get("macd_hist") is not None or t.get("macd") is not None:
-                    current["macd_hist"] = t.get("macd_hist", t.get("macd"))
+                _apply_repair_tech_extras(current, t)   # E475: finite values only
                 try:  # Group 349: seed the flat ms_* summary keys into the feed row (only non-None values)
                     _msk = ms_passthrough.feed_keys(t) or ms_passthrough.lite_summary_keys(t)   # E385: lite replies carry only the flat summary
                     if _msk:
@@ -8930,6 +9153,13 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
             "created": False,
             "message": f"{base} has no feed row and no price could be fetched, so no row was created.",
         }
+    # E472: write back what repair CHANGED on top of the row as it is stored now, not the whole snapshot taken at the start.
+    if had_row:
+        try:
+            _fresh = await asyncio.to_thread(store.get_symbol, base)
+        except Exception:  # noqa: BLE001
+            _fresh = None
+        current = _repair_row_for_write(original_row, current, _fresh)
     # group303: this commit used to run on the event loop (loop-watchdog saw a 4.0s stall in oracledb commit during repair-all)
     await asyncio.to_thread(store.put_symbol, base, current, DATA_FEED_TTL)
     still_missing = _feed_missing_fields(current)

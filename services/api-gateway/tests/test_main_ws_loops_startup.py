@@ -3,7 +3,7 @@
 Pass 72. The realtime half of the gateway and its startup hooks:
 
 * `_quote_broadcast_loop` — the four idle gates (paused / scan running / loop disabled, no clients, market
-  closed, no watched symbols), the 12-symbol cap, per-quote broadcast + metric, the price-alert pass (5 per
+  closed, no watched symbols), the 12-symbol cap, per-quote broadcast + metric, the price-alert pass (5 separate + one digest per
   tick, per-alert failure isolation, `evaluate_price_alerts` failure) and the 8s / 20s cadence;
 * `_ensure_quote_loop` / `_ensure_jobs_loop` — task creation, reuse, re-creation once done, no-loop failure;
 * `websocket_endpoint` (`/ws`) — greeting, ping, `subscribe_quotes` / `unsubscribe_quotes`, `subscribe` /
@@ -177,6 +177,7 @@ class QEnv:
 @pytest.fixture
 def qenv(monkeypatch):
     env = QEnv()
+    monkeypatch.setattr(gw, "_quote_loop_cursor", 0, raising=False)   # E468: the round-robin position is module state
 
     def resolve(sym):
         env.resolve_calls.append(sym)
@@ -297,10 +298,16 @@ class TestQuoteLoopBroadcast:
         assert _drive(gw._quote_broadcast_loop, lenv, 3) == [0.2, 0.2, 8]
         assert [c for c, _ in qenv.hub.broadcasts] == ["quote:TCS"]
 
-    def test_only_the_first_twelve_symbols_are_fetched(self, lenv, qenv):
+    def test_a_tick_fetches_at_most_twelve_symbols_starting_at_the_front(self, lenv, qenv):
         qenv.hub.symbols = [f"S{i:02d}" for i in range(15)]
         _drive(gw._quote_broadcast_loop, lenv, 13)
         assert qenv.resolve_calls == [f"S{i:02d}" for i in range(12)]
+
+    def test_e468_the_next_tick_continues_where_the_last_stopped(self, lenv, qenv):
+        qenv.hub.symbols = [f"S{i:02d}" for i in range(15)]
+        _drive(gw._quote_broadcast_loop, lenv, 26)                      # two ticks: 12 inner sleeps + the tick sleep, twice
+        names = [f"S{i:02d}" for i in range(15)]
+        assert qenv.resolve_calls == names[:12] + names[12:] + names[:9]  # old code fetched S00..S11 twice and S12..S14 never
 
     def test_a_failing_metric_does_not_stop_the_broadcast(self, lenv, qenv):
         qenv.hub.symbols = ["TCS"]
@@ -346,11 +353,16 @@ class TestQuoteLoopPriceAlerts:
             "type": "price_alert", "symbol": "TCS", "current_price": 4000, "target_price": 3900,
             "direction": "above", "note": "n", "id": "id-TCS"}
 
-    def test_at_most_five_alerts_are_processed_per_tick(self, lenv, qenv):
+    def test_five_alerts_get_their_own_notification_and_the_rest_go_in_one_digest(self, lenv, qenv):
+        # E472: this used to pin `triggered[:5]` ("at most five alerts are processed per tick"), but evaluate_price_alerts has already stamped the
+        # 15 minute cooldown on all eight, so alerts 6-8 were never notified and stayed silent for 15 minutes.
         qenv.hub.symbols = ["TCS"]
         qenv.alerts = [_alert(f"S{i}") for i in range(8)]
         _drive(gw._quote_broadcast_loop, lenv, 2)
-        assert [p[1]["title"] for p in qenv.posts] == [f"Price Alert · S{i}" for i in range(5)]
+        titles = [p[1]["title"] for p in qenv.posts]
+        assert titles == [f"Price Alert · S{i}" for i in range(5)] + ["Price Alerts · 3 more"]
+        assert all(f"S{i} ₹4000" in qenv.posts[5][1]["message"] for i in (5, 6, 7))
+        assert [p["symbol"] for c, p in qenv.hub.broadcasts if c == "alerts"] == [f"S{i}" for i in range(8)]
 
     def test_one_failing_alert_does_not_block_the_next(self, lenv, qenv):
         qenv.hub.symbols = ["TCS"]

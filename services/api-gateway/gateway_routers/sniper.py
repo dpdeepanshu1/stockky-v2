@@ -46,7 +46,11 @@ async def _sniper_attach_structure(payload: Dict[str, Any]) -> int:
             budget = max(1.0, float(((os.getenv("SNIPER_STRUCTURE_FETCH_TIMEOUT_S") or "").strip() or "10")))
         except ValueError:
             budget = 10.0
-        syms = _bs.symbols_needing_structure(payload, limit)
+        # E468: the symbol comes from the request body. "X/../admin?a=1" went straight into the technical-service URL path and reached another
+        # route. An NSE symbol is letters, digits, & _ - (M&M, BAJAJ-AUTO); anything else is skipped (no opinion for that row), the rest is URL-quoted.
+        import re as _re
+        from urllib.parse import quote as _quote
+        syms = [s for s in _bs.symbols_needing_structure(payload, limit) if _re.fullmatch(r"[A-Z0-9][A-Z0-9&_\-]{0,24}", s)]
         if not syms:
             return 0
         sums: Dict[str, Dict[str, Any]] = {}
@@ -55,7 +59,7 @@ async def _sniper_attach_structure(payload: Dict[str, Any]) -> int:
         async def _one(client, sym: str) -> None:
             async with sem:
                 try:
-                    resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{sym}", timeout=5.0)
+                    resp = await _cb_get(client, "technical", f"{TECHNICAL_URL}/structure/{_quote(sym, safe='')}", timeout=5.0)
                     if resp.status_code != 200:
                         _structure_metric("stockky_sniper_structure_fetch_total", 1, outcome="http_error")
                         return

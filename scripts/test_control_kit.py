@@ -359,6 +359,231 @@ def test_main_py_wires_boot_first_and_mounts_the_routes():
         assert f'Controller("{name}"' in s and "_control_kit.mount(app, _control, require_admin)" in s
 
 
+# ---- E465: audit log hardening + "-0" ------------------------------------------------------------------------------------------------------
+
+def test_e465_negative_zero_is_zero():
+    f = F("T_NZ", "nz", "g", "float", "h", lo=-1, hi=100, shipped="0", looser="higher")
+    assert kit.canonical(f, "-0") == "0" and kit.canonical(f, "-0.0") == "0" and kit.canonical(f, "-0.0000001") == "0"
+    assert kit.canonical(f, "2.50") == "2.5" and kit.canonical(f, "100") == "100"
+    assert kit.classify(f, kit.canonical(f, "0"), kit.canonical(f, "-0")) == "SAME"
+
+
+def test_e465_a_torn_audit_line_does_not_hide_the_history_or_swallow_the_next_row():
+    d = tempfile.mkdtemp(prefix="ctl_")
+    st = kit.Store(d)
+    for i in range(3):
+        st.audit({"action": "a", "i": i})
+    with open(st._audit_path, "a", encoding="utf-8") as fh:
+        fh.write('{"at":"x","action":"torn"')                         # crash mid-append: no closing brace, no newline
+    st.audit({"action": "b"})
+    st.audit({"action": "c"})
+    got = [r["action"] for r in st.read_audit(10)]
+    assert got == ["c", "b", "a", "a", "a"], got                       # newest first; the torn line is skipped, "b" is not glued onto it
+
+
+def test_e465_audit_rotation_keeps_the_newest_lines_and_leaves_no_temp_file():
+    import json
+    d = tempfile.mkdtemp(prefix="ctl_")
+    st = kit.Store(d)
+    pad = json.dumps({"action": "pad", "x": "y" * 700})
+    with open(st._audit_path, "a", encoding="utf-8") as fh:
+        for _ in range(2500):
+            fh.write(pad + "\n")
+    st.audit({"action": "after"})
+    with open(st._audit_path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    assert len(lines) == kit.AUDIT_MAX_LINES and json.loads(lines[-1])["action"] == "after"
+    assert sorted(os.listdir(d)) == ["audit.jsonl"]
+
+
+def test_e465_a_failed_rotation_keeps_the_old_audit_file():
+    import json
+    d = tempfile.mkdtemp(prefix="ctl_")
+    st = kit.Store(d)
+    pad = json.dumps({"action": "pad", "x": "y" * 700})
+    with open(st._audit_path, "a", encoding="utf-8") as fh:
+        for _ in range(2500):
+            fh.write(pad + "\n")
+    before = os.path.getsize(st._audit_path)
+    real = os.replace
+
+    def boom(a, b):
+        raise OSError("disk full")
+
+    os.replace = boom
+    try:
+        st.audit({"action": "x"})
+    finally:
+        os.replace = real
+    assert os.path.getsize(st._audit_path) >= before                    # was truncated to nothing by open(..., "w")
+    assert sorted(os.listdir(d)) == ["audit.jsonl"] and "audit failed" in (st.last_error or "")
+
+
+def test_e465_every_service_has_the_same_engine():
+    h = {s: hashlib.sha256((ROOT / "services" / s / "control" / "kit.py").read_bytes()).hexdigest()
+         for s in ("real-trade-service", "position-stocks-service", "notification-scheduler-service", "fno-options-service")}
+    assert len(set(h.values())) == 1, h
+
+
+# ---- E466: preset vs overlay, unreadable old value, bad `until` -----------------------------------------------------------------------------
+
+def _overlay_ctl():
+    import time as _t
+    _fake("fake_e466", MARKET_STATE_MODE="live", CHASE=10.0, WEIRD=None)
+    flags = (
+        F("MARKET_STATE_MODE", "mode", "g", "enum", "h", choices=("off", "shadow", "live"), targets=(("fake_e466", "MARKET_STATE_MODE"),), live=True, shipped="live"),
+        F("T_E466_CHASE", "chase", "g", "float", "h", lo=0, hi=100, looser="higher", overlay=True, targets=(("fake_e466", "CHASE"),), live=True, shipped="10", recommended="10"),
+        F("T_E466_WEIRD", "weird", "g", "float", "h", lo=0, hi=100, looser="higher", targets=(("fake_e466", "WEIRD"),), live=True, shipped="10"),
+    )
+    return _ctl(flags), _t.time() + 3600
+
+
+def test_e466_preset_judges_an_overlaid_switch_against_its_saved_value():
+    _clean_env()
+    c, until = _overlay_ctl()
+    c.overlay_set({"T_E466_CHASE": "5"}, until, "stressed", "v1", "runner")
+    assert sys.modules["fake_e466"].CHASE == 5.0
+    dry = c.preset_recommended("me", dry_run=True)
+    assert dry["changes"] == [] and dry["loosening"] == 0, dry          # saved 10 == recommended 10: nothing to change (it listed 5 -> 10 "LOOSENS")
+    r = c.preset_recommended("me", dry_run=False, confirm=True)
+    assert r["applied"] == [] and "T_E466_CHASE" in c._overlays and sys.modules["fake_e466"].CHASE == 5.0, r   # the overlay survives the preset
+
+
+def test_e466_preset_still_moves_a_saved_value_that_differs_and_that_cancels_the_overlay():
+    _clean_env()
+    c, until = _overlay_ctl()
+    c.set("T_E466_CHASE", "20", "me", confirm=True)                       # saved 20, recommended 10: a real change
+    c.overlay_set({"T_E466_CHASE": "5"}, until, "stressed", "v1", "runner")
+    dry = c.preset_recommended("me", dry_run=True)
+    assert [(p["from"], p["to"], p["change"]) for p in dry["changes"]] == [("20", "10", "TIGHTENS")], dry   # judged against the saved 20, not today's 5
+    c.preset_recommended("me", dry_run=False)
+    assert "T_E466_CHASE" not in c._overlays and sys.modules["fake_e466"].CHASE == 10.0
+    _clean_env()
+
+
+def test_e466_an_unreadable_old_numeric_value_is_neutral_not_a_500():
+    f = F("T_E466_N", "n", "g", "float", "h", lo=0, hi=100, looser="higher", shipped="10")
+    for old in ("None", "abc", "", "nan"):
+        assert kit.classify(f, old, "20") == "NEUTRAL", old
+    assert kit.classify(f, "10", "20") == "LOOSENS" and kit.classify(f, "10", "5") == "TIGHTENS"
+    _clean_env()
+    c, _ = _overlay_ctl()                                                   # a config attribute that is None: set() used to raise ValueError
+    r = c.set("T_E466_WEIRD", "20", "me", confirm=True)
+    assert r["change"] == "NEUTRAL" and r["ok"] is True, r
+    _clean_env()
+
+
+def test_e466_a_bad_until_is_a_400_never_a_500():
+    for bad in (1e30, float("nan"), float("inf"), -1e30, "0001-01-01T00:00:00+05:30", "9999-12-31T23:59:59-05:00", "garbage", "2026-11-11T10:00:00", True):
+        try:
+            kit._parse_until(bad)
+        except kit.ControlError as e:
+            assert e.status == 400, (bad, e.status)
+        else:
+            raise AssertionError(f"{bad!r} was accepted")
+    assert kit._parse_until("2026-11-11T15:30:00+05:30").hour == 10         # a good value is unchanged (UTC)
+
+
+# ---- E467: the state stamp outlives the last overlay in force --------------------------------------------------------------------------------
+
+def test_e467_stamp_lasts_until_the_last_overlay_ends():
+    import time as _t
+    _clean_env()
+    _fake("fake_e467", MARKET_STATE_MODE="live", A=10.0, B=10.0)
+    flags = (
+        F("MARKET_STATE_MODE", "mode", "g", "enum", "h", choices=("off", "shadow", "live"), targets=(("fake_e467", "MARKET_STATE_MODE"),), live=True, shipped="live"),
+        F("T_E467_A", "a", "g", "float", "h", lo=0, hi=100, looser="higher", overlay=True, targets=(("fake_e467", "A"),), live=True, shipped="10"),
+        F("T_E467_B", "b", "g", "float", "h", lo=0, hi=100, looser="higher", overlay=True, targets=(("fake_e467", "B"),), live=True, shipped="10"),
+    )
+    c = _ctl(flags)
+    now = _t.time()
+    c.overlay_set({"T_E467_A": "5"}, now + 7200, "stressed", "v1", "runner")
+    r = c.overlay_set({"T_E467_B": "5"}, now + 60, "calm", "v2", "runner")      # shorter `until`, newer state
+    assert r["state"] == "calm" and abs(kit.ACTIVE["until_ts"] - (now + 7200)) < 2, kit.ACTIVE
+    assert c.reap(now + 120) == ["T_E467_B"]                                    # B expires ...
+    assert sys.modules["fake_e467"].A == 5.0 and sys.modules["fake_e467"].B == 10.0
+    assert kit.current_profile()["market_state"] == "calm"                      # ... A is still tightened, so trades are still stamped (was None)
+    assert c.reap(now + 7300) == ["T_E467_A"] and kit.current_profile()["market_state"] is None
+    r2 = c.overlay_set({"T_E467_A": "4"}, now + 600, "stressed", "v3", "runner")  # a single call: the stamp ends at its own `until`
+    assert abs(kit.ACTIVE["until_ts"] - (now + 600)) < 2
+    c.overlay_clear("runner")
+    _clean_env()
+
+
+# ---- E468: the preset is all or nothing -------------------------------------------------------------------------------------------------------
+
+def test_e468_preset_is_all_or_nothing():
+    _clean_env()
+    mod = _mod()
+    mod.GATE, mod.LOGONLY = False, False
+    c = _ctl(_flags())
+    real_put, calls = c.store.put, []
+
+    def flaky(key, rec):
+        calls.append(key)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real_put(key, rec)
+
+    c.store.put = flaky
+    try:
+        c.preset_recommended("admin", dry_run=False, confirm=True)
+        assert False
+    except kit.ControlError as e:
+        assert e.status == 500 and e.detail["failed_at"] == "T_LOGONLY" and e.detail["rolled_back"] == ["T_GATE"] and not e.detail["not_restored"], e.detail
+    c.store.put = real_put
+    assert mod.GATE is False and mod.LOGONLY is False and c.store.overrides() == {} and "T_GATE" not in os.environ and "T_LOGONLY" not in os.environ
+    assert [r for r in c.store.read_audit(5) if r.get("action") == "preset_rollback"]
+    out = c.preset_recommended("admin", dry_run=False, confirm=True)             # the next, healthy run still applies everything
+    assert mod.GATE is True and mod.LOGONLY is True and sorted(out["applied"]) == ["T_GATE", "T_LOGONLY"]
+    _clean_env()
+    mod = _mod()
+    bad = (F("T_BADREC", "bad", "g", "float", "h", lo=0, hi=5, looser="lower", targets=(("fake_cfg_mod", "ROOM"),), live=True, shipped="0.5", recommended="99"),)
+    try:
+        _ctl(bad).preset_recommended("admin", dry_run=True)
+        assert False
+    except kit.ControlError as e:
+        assert e.status == 500 and "T_BADREC" in str(e.detail)       # a clean 500 naming the switch (was an uncaught ValueError)
+    _clean_env()
+
+
+def test_e468_rollback_puts_back_an_earlier_override_and_a_market_state_overlay():
+    import time as _t
+    _clean_env()
+    _fake("fake_e468", MARKET_STATE_MODE="live", A=10.0, C=10.0)
+    flags = (
+        F("MARKET_STATE_MODE", "mode", "g", "enum", "h", choices=("off", "shadow", "live"), targets=(("fake_e468", "MARKET_STATE_MODE"),), live=True, shipped="live"),
+        F("T_E468_A", "a", "g", "float", "h", lo=0, hi=100, looser="higher", overlay=True, targets=(("fake_e468", "A"),), live=True, shipped="10", recommended="8"),
+        F("T_E468_C", "c", "g", "float", "h", lo=0, hi=100, looser="higher", targets=(("fake_e468", "C"),), live=True, shipped="10", recommended="6"),
+    )
+    c = _ctl(flags)
+    c.set("T_E468_C", "9", "admin")                                              # an earlier saved override that must survive a failed preset
+    c.overlay_set({"T_E468_A": "5"}, _t.time() + 3600, "stressed", "v1", "runner")
+    mod = sys.modules["fake_e468"]
+    assert mod.A == 5.0 and mod.C == 9.0
+    real_put, calls = c.store.put, []
+
+    def flaky(key, rec):
+        calls.append(key)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real_put(key, rec)
+
+    c.store.put = flaky
+    try:
+        c.preset_recommended("admin", dry_run=False, confirm=True)
+        assert False
+    except kit.ControlError as e:
+        assert e.status == 500 and not e.detail["not_restored"], e.detail
+    c.store.put = real_put
+    ov = c.store.overrides()
+    assert ov["T_E468_C"]["value"] == "9" and "T_E468_A" not in ov               # C keeps its earlier override, A has none
+    assert mod.A == 5.0 and mod.C == 9.0                                         # the overlay's tightened value is live again
+    assert list(c._overlays) == ["T_E468_A"] and kit.current_profile()["market_state"] == "stressed"
+    c.overlay_clear("runner")
+    _clean_env()
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

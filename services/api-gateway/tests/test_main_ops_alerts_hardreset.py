@@ -612,10 +612,16 @@ class TestAddAlert:
         tc.post("/price-alerts", json={"symbol": "A", "target_price": 0, "target": 7})
         assert added[0]["target"] == 7.0
 
-    def test_direction_is_not_validated_by_the_gateway(self, added, tc):
-        """data_feed.add_price_alert normalises it; the route passes any string through."""
-        tc.post("/price-alerts", json={"symbol": "A", "target_price": 1, "direction": "Sideways"})
-        assert added[0]["direction"] == "sideways"
+    def test_direction_other_than_above_or_below_is_a_400(self, added, tc):
+        """E468: a typo used to be stored as "above" (an alert that fires the opposite way); the route now refuses it. Nothing is stored."""
+        r = tc.post("/price-alerts", json={"symbol": "A", "target_price": 1, "direction": "Sideways"})
+        assert r.status_code == 400 and r.json()["detail"] == "direction must be 'above' or 'below'"
+        assert added == []
+
+    def test_direction_is_case_insensitive_and_defaults_to_above(self, added, tc):
+        tc.post("/price-alerts", json={"symbol": "A", "target_price": 1, "direction": "BELOW"})
+        tc.post("/price-alerts", json={"symbol": "B", "target_price": 1})
+        assert [a["direction"] for a in added] == ["below", "above"]
 
     @pytest.mark.parametrize("body", [
         {}, {"symbol": "TCS"}, {"target_price": 10}, {"symbol": "   ", "target_price": 10},

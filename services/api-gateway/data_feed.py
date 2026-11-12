@@ -936,6 +936,16 @@ class DataFeedStore:
 
     def set_job(self, **kwargs) -> dict:
         j = self.job()
+        # E464: a Stop that landed mid-symbol used to be undone by the worker's next progress write (status "running" over
+        # "stopping" / "stopped", and its message over "Stop requested"). While the stop flag is set and the stored job is
+        # already stopping / stopped, a PROGRESS write (status "running" without a new started_at) keeps its counters but not its
+        # status / message. A real start writes started_at (or clears the flag first), so it is never blocked.
+        if kwargs.get("status") == "running" and "started_at" not in kwargs:
+            try:
+                if data_feed_stop_requested() and str(j.get("status") or "").lower() in ("stopping", "stopped"):
+                    kwargs = {k: v for k, v in kwargs.items() if k not in ("status", "message")}
+            except Exception:
+                pass
         j.update(kwargs)
         if j.get("started_at") and j.get("status") == "running":
             try:
@@ -1862,6 +1872,33 @@ def bhavcopy_seed(rec: dict) -> dict:
     return seed
 
 
+def _bulk_download_interruptible(targets: List[str], poll_sec: float = 0.5):
+    """E464: run `bulk_yahoo_download_prices` (one blocking POST, up to 60 s) in a worker thread and poll the stop flag while it runs,
+    so Stop ends the Yahoo phase within ~poll_sec instead of after the whole call. Returns (prices, stopped). On stop the thread is left
+    to finish on its own (its HTTP call has its own timeout) and its result is dropped. A download error is re-raised for the caller's
+    existing warning path."""
+    import threading
+    box: dict = {}
+
+    def _work():
+        try:
+            box["prices"] = bulk_yahoo_download_prices(targets) or {}
+        except BaseException as e:   # noqa: BLE001  (carried to the caller; a thread must not die silently)
+            box["error"] = e
+
+    t = threading.Thread(target=_work, name="bulk-yahoo-download", daemon=True)
+    t.start()
+    while t.is_alive():
+        if data_feed_stop_requested():
+            return {}, True
+        t.join(poll_sec)
+    if data_feed_stop_requested():
+        return {}, True
+    if "error" in box:
+        raise box["error"]
+    return box.get("prices") or {}, False
+
+
 def run_bulk_yahoo_price_feed(
     symbols: Optional[List[str]] = None,
     merge_existing: bool = True,
@@ -2024,11 +2061,21 @@ def run_bulk_yahoo_price_feed(
             ok_count=saved,
         )
         logger.info("BULK_PATH calling POST /quotes/bulk for %s symbols", len(yahoo_targets))
+        _stopped_in_yahoo = False
         try:
-            prices = bulk_yahoo_download_prices(yahoo_targets) or {}
+            prices, _stopped_in_yahoo = _bulk_download_interruptible(yahoo_targets)   # E464: Stop is honoured during the download
         except Exception as e:
             logger.warning("BULK_PATH /quotes/bulk failed: %s", e)
             prices = {}
+        if _stopped_in_yahoo:
+            logger.info("run_bulk_yahoo_price_feed: stop requested during the Yahoo phase, exiting")
+            return {
+                "status": "stopped",
+                "message": f"Stopped during Yahoo phase — {saved}/{total} seeded",
+                "tracked_stocks": saved,
+                "requested": total,
+                "symbols": hit_symbols,
+            }
         if prices:
             try:
                 store.put_symbols_bulk(prices, ttl=DATA_FEED_TTL)
@@ -2456,7 +2503,7 @@ def run_bulk_yahoo_price_feed_cached(
             }
             quotes[sym] = {k: v for k, v in quotes[sym].items() if v is not None}
     if quotes:
-        set_bulk_quote_cache(quotes, source="yahoo_bulk", complete=not symbols)   # E461: merge; only a no-list run counts as a whole-universe write
+        set_bulk_quote_cache(quotes, source="yahoo_bulk", complete=(not symbols) and str(result.get("status") or "").lower() != "stopped")   # E461: merge; only a no-list run counts as a whole-universe write; E464: not a run that was stopped part-way
     result["source"] = result.get("source") or "live"
     result["cache_written"] = bool(quotes)
     return result

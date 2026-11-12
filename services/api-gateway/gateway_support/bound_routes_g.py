@@ -190,7 +190,7 @@ def build_bound_routes_g(ref):
     3) Pause activity gate so quote loop / workers idle
     4) Frontend should reload and only hit health/keepalive afterwards
     """
-        phases = ref._graceful_shutdown_commit(reason="power_off")
+        phases = await ref.asyncio.to_thread(ref._graceful_shutdown_commit, reason="power_off")   # E470: durable writes off the event loop
 
         # Best-effort stop training lock on decision-prediction service
         try:

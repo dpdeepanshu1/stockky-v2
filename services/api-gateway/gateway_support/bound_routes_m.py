@@ -52,7 +52,7 @@ def build_bound_routes_m(ref):
         ref._ensure_quote_loop()
         ref._ensure_jobs_loop()
         try:
-            await websocket.send_text(ref.json.dumps({
+            await websocket.send_text(ref._ws_dumps({
                 "channel": "system",
                 "type": "connected",
                 "ts": ref.datetime.now(ref.IST).isoformat(),
@@ -79,12 +79,12 @@ def build_bound_routes_m(ref):
                     channel = f"quote:{_qsym}" if _qsym else ""
 
                 if action == "ping":
-                    await websocket.send_text(ref.json.dumps({"channel": "system", "type": "pong"}))
+                    await websocket.send_text(ref._ws_dumps({"channel": "system", "type": "pong"}))
 
                 elif action == "subscribe_quotes":
                     syms = ref._ws_symbol_list(msg.get("symbols"))
                     ref.ws_manager.watch_quotes(websocket, syms)
-                    await websocket.send_text(ref.json.dumps({
+                    await websocket.send_text(ref._ws_dumps({
                         "channel": "system",
                         "type": "quotes_subscribed",
                         "symbols": sorted(ref.ws_manager.quote_syms.get(id(websocket), set())),
@@ -93,7 +93,7 @@ def build_bound_routes_m(ref):
                     for sym in list(ref.ws_manager.quote_syms.get(id(websocket), set()))[:10]:
                         q = await ref.asyncio.to_thread(ref._resolve_quote_price, sym)
                         if q:
-                            await websocket.send_text(ref.json.dumps({
+                            await websocket.send_text(ref._ws_dumps({
                                 "channel": f"quote:{sym}",
                                 "type": "quote",
                                 **q,
@@ -105,7 +105,7 @@ def build_bound_routes_m(ref):
                         ref.ws_manager.unwatch_quotes(websocket, None)
                     else:
                         ref.ws_manager.unwatch_quotes(websocket, ref._ws_symbol_list(syms))
-                    await websocket.send_text(ref.json.dumps({
+                    await websocket.send_text(ref._ws_dumps({
                         "channel": "system",
                         "type": "quotes_unsubscribed",
                     }))
@@ -115,13 +115,13 @@ def build_bound_routes_m(ref):
                     if channel.startswith("quote:"):
                         sym = channel.split(":", 1)[1]
                         ref.ws_manager.watch_quotes(websocket, [sym])
-                    await websocket.send_text(ref.json.dumps({
+                    await websocket.send_text(ref._ws_dumps({
                         "channel": channel, "type": "subscribed"
                     }))
                     if channel.startswith("scan:"):
                         task_id = channel.split(":", 1)[1]
-                        data = ref._redis_get(ref.SCAN_TASK_PREFIX + task_id) or {}
-                        await websocket.send_text(ref.json.dumps({
+                        data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}   # E470
+                        await websocket.send_text(ref._ws_dumps({
                             "channel": channel,
                             "type": "scan_status",
                             "task_id": task_id,
@@ -135,7 +135,7 @@ def build_bound_routes_m(ref):
                         sym = channel.split(":", 1)[1]
                         q = await ref.asyncio.to_thread(ref._resolve_quote_price, sym)
                         if q:
-                            await websocket.send_text(ref.json.dumps({
+                            await websocket.send_text(ref._ws_dumps({
                                 "channel": channel, "type": "quote", **q
                             }, default=str))
 
@@ -146,8 +146,8 @@ def build_bound_routes_m(ref):
 
                 elif action == "poll_scan" and isinstance(msg.get("task_id"), str) and msg.get("task_id"):
                     task_id = msg["task_id"]
-                    data = ref._redis_get(ref.SCAN_TASK_PREFIX + task_id) or {}
-                    await websocket.send_text(ref.json.dumps({
+                    data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}   # E470
+                    await websocket.send_text(ref._ws_dumps({
                         "channel": f"scan:{task_id}",
                         "type": "scan_status",
                         "task_id": task_id,

@@ -276,7 +276,7 @@ def build_bound_routes_j(ref):
         universe = (await ref.asyncio.to_thread(ref._build_scan_universe))
         if force_refresh:
             try:
-                ref._redis_set(ref.SCAN_UNIVERSE_KEY, None, ttl=1)
+                await ref.asyncio.to_thread(ref._redis_set, ref.SCAN_UNIVERSE_KEY, None, ttl=1)   # E470
             except Exception:
                 pass
             universe = (await ref.asyncio.to_thread(ref._build_scan_universe_forced))
@@ -518,7 +518,7 @@ def build_bound_routes_j(ref):
                             out = ensure_row_price(out, feed=fed if isinstance(fed, dict) else None)
                             if extract_safe_price(decision=out) <= 0:
                                 try:
-                                    px = ref._fetch_price_from_quote(sym)
+                                    px = await ref.asyncio.to_thread(ref._fetch_price_from_quote, sym)   # E469: blocking httpx.get (4 s) was on the event loop
                                     if px is not None:
                                         out = apply_price_aliases(out, float(px))
                                         _live_px = float(px)
@@ -1351,7 +1351,7 @@ def build_bound_routes_j(ref):
             ref._redis_set(job_key, cur, ttl=86400)
             return cur
 
-        existing = ref._redis_get(job_key) or {}
+        existing = await ref.asyncio.to_thread(ref._redis_get, job_key) or {}
         # ``force`` only bypasses the hot-stocks cache. It used to also bypass this
         # already-running guard, and it defaults to True, so a plain call always
         # started a second sweep. Only an explicit ``restart=true`` overrides it.
@@ -1366,7 +1366,8 @@ def build_bound_routes_j(ref):
             except Exception:
                 pass
 
-        _set_job(
+        await ref.asyncio.to_thread(
+            _set_job,
             status="running",
             started_at=ref.datetime.now(ref.IST).isoformat(),
             message="Catalyst sweep started (full universe, batched)",
@@ -1408,7 +1409,7 @@ def build_bound_routes_j(ref):
                         batch_size=batch_size,
                     )
 
-                _set_job(message="Building full catalyst universe…")
+                await ref.asyncio.to_thread(_set_job, message="Building full catalyst universe…")
                 # max_symbols=None → ALL candidates; internal loop warms every batch_size
                 # Temporarily set env for this process batch size
                 ref.os.environ["HOT_BATCH_SIZE"] = str(batch_size)
@@ -1512,11 +1513,11 @@ def build_bound_routes_j(ref):
                     "total": total_u,
                     "batch_size": batch_size,
                 }
-                _set_job(**result)
+                await ref.asyncio.to_thread(_set_job, **result)
                 return result
             except Exception as e:
                 ref.logger.exception("catalyst alert failed")
-                _set_job(status="error", error=str(e)[:300], message=f"Error: {e}")
+                await ref.asyncio.to_thread(_set_job, status="error", error=str(e)[:300], message=f"Error: {e}")
                 return {"ok": False, "status": "error", "error": str(e)[:300]}
             finally:
                 # Stop the keep-alive loop on EVERY exit path (it used to leak
@@ -1806,7 +1807,7 @@ def build_bound_routes_j(ref):
                 done = int((result or {}).get("processed_symbols") or total)
                 if isinstance(result, dict):
                     result = {**result, "generated_at": result.get("generated_at") or ts, "persisted_at": ts}
-                    ref._redis_set(ref.HOT_RESULT_KEY, result, ttl=20 * 3600)
+                    await ref.asyncio.to_thread(ref._redis_set, ref.HOT_RESULT_KEY, result, ttl=20 * 3600)
                 picks = sum(
                     len((result or {}).get(k) or [])
                     for k in ("news_driven", "results_driven", "bulk_insider_driven")
@@ -1867,7 +1868,7 @@ def build_bound_routes_j(ref):
                 or (p.get("bulk_insider_driven") or [])
             )
 
-        cached = ref._redis_get(ref.HOT_STOCKS_CACHE_KEY)
+        cached = await ref.asyncio.to_thread(ref._redis_get, ref.HOT_STOCKS_CACHE_KEY)
         if not _has_picks(cached):
             # Falls through on an empty/stale cache dict too, not only a missing one,
             # so picks sitting in the durable table are not hidden.

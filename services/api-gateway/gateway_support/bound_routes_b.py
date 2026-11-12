@@ -33,7 +33,7 @@ def build_bound_routes_b(ref):
         Example (GitHub Actions / external cron):
           curl -X POST https://<api-gateway>/ops/neon-keepalive
         """
-        result = ref._neon_keepalive_ping()
+        result = await ref.asyncio.to_thread(ref._neon_keepalive_ping)
         return {
             **result,
             "at": ref.datetime.now(ref.IST).isoformat(),

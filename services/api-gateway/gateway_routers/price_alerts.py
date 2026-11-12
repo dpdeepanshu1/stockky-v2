@@ -43,6 +43,9 @@ async def api_add_price_alert(request: Request):
     note = str(body.get("note") or "")
     if not sym or target <= 0:
         raise HTTPException(status_code=400, detail="symbol and target_price required")
+    if direction not in ("above", "below"):
+        # E468: data_feed stored anything else as "above", so a typo made an alert that fires the opposite way. The UI only sends above / below.
+        raise HTTPException(status_code=400, detail="direction must be 'above' or 'below'")
     entry = await asyncio.to_thread(add_price_alert, sym, target, direction=direction, note=note)  # group361: off the event loop
     return {"ok": True, "alert": entry}
 

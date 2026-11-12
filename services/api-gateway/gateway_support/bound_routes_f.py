@@ -38,7 +38,7 @@ def build_bound_routes_f(ref):
             }
         did = []
         try:
-            nk = ref._neon_keepalive_ping()
+            nk = await ref.asyncio.to_thread(ref._neon_keepalive_ping)
             did.append("neon_keepalive_ok" if nk.get("ok") else "neon_keepalive_error")
         except Exception as e:
             ref.logger.debug("idle-tick neon keepalive: %s", e)
@@ -50,7 +50,7 @@ def build_bound_routes_f(ref):
         except Exception as e:
             ref.logger.debug("idle-tick indices: %s", e)
         try:
-            cached = ref._redis_get(ref.HOT_STOCKS_CACHE_KEY)
+            cached = await ref.asyncio.to_thread(ref._redis_get, ref.HOT_STOCKS_CACHE_KEY)
             if not cached:
                 # Only rebuild if empty — respects short market TTL
                 await ref.stockky_hot_stocks(force=False)
@@ -107,11 +107,11 @@ def build_bound_routes_f(ref):
     past the wait budget).
     """
         if force_refresh:
-            ref._drop_cache_keys(ref.SCAN_UNIVERSE_KEY, ref.LAST_FULL_SCAN_KEY)
+            await ref.asyncio.to_thread(ref._drop_cache_keys, ref.SCAN_UNIVERSE_KEY, ref.LAST_FULL_SCAN_KEY)   # E470
 
         # Serve recent complete scan from cache when not forcing
         if not force_refresh:
-            cached = ref._redis_get(ref.LAST_FULL_SCAN_KEY)
+            cached = await ref.asyncio.to_thread(ref._redis_get, ref.LAST_FULL_SCAN_KEY)
             if cached and isinstance(cached, dict) and cached.get("result"):
                 res = cached.get("result") or {}
                 processed = int(cached.get("processed") or res.get("scanned") or 0)
@@ -144,12 +144,12 @@ def build_bound_routes_f(ref):
             await ref.run_scan_parallel(task_id, universe, use_lite)
         except Exception as e:
             ref.logger.exception("legacy /scan parallel wrapper failed: %s", e)
-            data = ref._redis_get(ref.SCAN_TASK_PREFIX + task_id) or {}
+            data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}
             if data.get("result"):
                 return data["result"]
             raise ref.HTTPException(status_code=500, detail=f"Scan failed: {str(e)[:200]}")
 
-        data = ref._redis_get(ref.SCAN_TASK_PREFIX + task_id) or {}
+        data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}
         result = data.get("result")
         if isinstance(result, dict) and result:
             return result

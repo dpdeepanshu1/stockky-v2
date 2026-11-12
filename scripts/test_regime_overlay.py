@@ -251,6 +251,11 @@ def test_real_catalogs_declare_the_market_state_switches_correctly():
         cat, k = chk._load_catalog(ROOT / "services" / svc)
         by = {f.key: f for f in cat.CATALOG}
         assert all(k.validate_flag(f) == [] for f in cat.CATALOG), svc
+        if "MARKET_STATE_MODE" not in by:
+            # E465: the F&O catalog (added after this test) has no Market Weather layer; only it may lack the switch
+            assert svc == "fno-options-service", f"{svc} must declare MARKET_STATE_MODE"
+            assert not any(f.overlay for f in cat.CATALOG), svc
+            continue
         mode, mult = by["MARKET_STATE_MODE"], by["MARKET_STATE_RISK_MULT"]
         assert mode.shipped == "live" and not mode.overlay and mode.live   # E272 changed the shipped default to live
         assert mult.shipped == "1.0" and mult.overlay and mult.looser == "higher" and (mult.lo, mult.hi) == (0.1, 1.0)

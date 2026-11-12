@@ -165,6 +165,7 @@ def canonical(f: Flag, raw: Any) -> str:
         raise ValueError("expected a number")
     if n != n or n in (float("inf"), float("-inf")):
         raise ValueError("expected a finite number")
+    n = n + 0.0   # E465: "-0" / "-0.0" is 0, not a second spelling of it ("-0" != "0" made classify() call the same value a change)
     if f.lo is not None and n < f.lo:
         raise ValueError(f"must be >= {f.lo:g}")
     if f.hi is not None and n > f.hi:
@@ -173,7 +174,8 @@ def canonical(f: Flag, raw: Any) -> str:
         if n != int(n):
             raise ValueError("expected a whole number")
         return str(int(n))
-    return repr(round(n, 6)).rstrip("0").rstrip(".") if "." in repr(round(n, 6)) else repr(round(n, 6))
+    r6 = round(n, 6) + 0.0   # E465: a tiny negative rounds to -0.0, which prints "-0"
+    return repr(r6).rstrip("0").rstrip(".") if "." in repr(r6) else repr(r6)
 
 
 def parsed(f: Flag, canon: str) -> Any:
@@ -218,7 +220,12 @@ def classify(f: Flag, old: Optional[str], new: str) -> str:
         except (ValueError, IndexError):
             return "NEUTRAL"
         return ("LOOSENS" if mn > mo else "TIGHTENS") if f.looser == "later" else ("TIGHTENS" if mn > mo else "LOOSENS")
-    fo, fn = float(old), float(new)
+    try:
+        fo, fn = float(old), float(new)
+    except (TypeError, ValueError):
+        return "NEUTRAL"   # E466: an unreadable old value (a config attribute that is None / text) is unknown as the docstring says; it raised and set() / preset answered HTTP 500
+    if fo != fo or fn != fn:
+        return "NEUTRAL"
     if f.zero_off and f.looser == "higher":
         fo = float("inf") if fo == 0 else fo
         fn = float("inf") if fn == 0 else fn
@@ -345,13 +352,33 @@ class Store:
                 if not self.persistent:
                     return
             try:
+                lead = ""
+                try:
+                    if os.path.getsize(self._audit_path) > 0:
+                        with open(self._audit_path, "rb") as fh:
+                            fh.seek(-1, os.SEEK_END)
+                            if fh.read(1) != b"\n":
+                                lead = "\n"      # E465: the file ends in a torn line (crash mid-append); start this row on its own line instead of gluing it onto the torn one
+                except OSError:
+                    pass
                 with open(self._audit_path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+                    fh.write(lead + json.dumps(row, separators=(",", ":"), default=str) + "\n")
                 if os.path.getsize(self._audit_path) > 1_500_000:        # keep the newest lines only
-                    with open(self._audit_path, "r", encoding="utf-8") as fh:
+                    with open(self._audit_path, "r", encoding="utf-8", errors="replace") as fh:
                         lines = fh.readlines()[-AUDIT_MAX_LINES:]
-                    with open(self._audit_path, "w", encoding="utf-8") as fh:
-                        fh.writelines(lines)
+                    # E465: write the kept lines to a temp file and swap it in. Opening the live file with "w" truncated it first, so a
+                    # full disk (or a crash) in the middle left an EMPTY audit trail for the whole history.
+                    fd, tmp = tempfile.mkstemp(prefix=".au", dir=self.dir)
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            fh.writelines(lines)
+                        os.replace(tmp, self._audit_path)
+                    except Exception:
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
+                        raise
             except Exception as e:  # noqa: BLE001
                 self.last_error = f"audit failed: {type(e).__name__}"[:200]
 
@@ -360,9 +387,17 @@ class Store:
         with self._lock:
             if self.persistent and os.path.exists(self._audit_path):
                 try:
-                    with open(self._audit_path, "r", encoding="utf-8") as fh:
-                        rows = [json.loads(x) for x in fh.readlines()[-limit:] if x.strip()]
-                    return rows[::-1]
+                    with open(self._audit_path, "r", encoding="utf-8", errors="replace") as fh:
+                        raw = [x for x in fh.readlines() if x.strip()]
+                    rows: List[Dict[str, Any]] = []
+                    for x in raw[-(limit + 20):]:      # E465: a torn line (crash mid-append) is skipped; it used to discard EVERY row and fall back to this boot's memory
+                        try:
+                            r = json.loads(x)
+                        except ValueError:
+                            continue
+                        if isinstance(r, dict):
+                            rows.append(r)
+                    return rows[-limit:][::-1]
                 except Exception:  # noqa: BLE001
                     pass
             return self._audit_mem[-limit:][::-1]
@@ -373,15 +408,17 @@ def _parse_until(raw: Any) -> datetime:
     msg = "until must be an ISO-8601 time WITH a UTC offset, e.g. 2026-10-23T15:30:00+05:30"
     if isinstance(raw, bool):
         raise ControlError(400, msg)
-    if isinstance(raw, (int, float)):
-        return datetime.fromtimestamp(float(raw), timezone.utc)
     try:
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(float(raw), timezone.utc)
         d = datetime.fromisoformat(str(raw or "").strip().replace("Z", "+00:00"))
-    except ValueError:
+        if d.tzinfo is None:
+            raise ControlError(400, msg)
+        return d.astimezone(timezone.utc)
+    except ControlError:
+        raise
+    except (ValueError, OverflowError, OSError):   # E466: nan, 1e30 and 0001-01-01T00:00:00+05:30 raised OverflowError / ValueError out of here -> HTTP 500 instead of 400
         raise ControlError(400, msg)
-    if d.tzinfo is None:
-        raise ControlError(400, msg)
-    return d.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------- controller
@@ -628,8 +665,13 @@ class Controller:
                         self._apply_live(f, self._saved(f))
                 self.store.audit({"action": "overlay_failed", "service": self.service, "key": failed[0], "error": failed[1], "by": by})
                 raise ControlError(500, f"{failed[0]}: could not apply live ({failed[1]}); nothing was changed")
+            # E467: there is ONE stamp but overlays can have different `until` times. A later call with an earlier `until` used to make the stamp
+            # expire first, so trades were stamped with no market state while an earlier call's tighter switches were still in force. The stamp
+            # now lasts until the last overlay in force ends (the newest state and version are still the ones shown).
+            last_ts = max([when.timestamp()] + [float(o.get("until_ts") or 0) for o in self._overlays.values()])
+            last = datetime.fromtimestamp(last_ts, timezone.utc)
             ACTIVE.clear()
-            ACTIVE.update({"state": st, "version": ver, "until": when.isoformat(timespec="seconds"), "until_ts": when.timestamp()})
+            ACTIVE.update({"state": st, "version": ver, "until": last.isoformat(timespec="seconds"), "until_ts": last_ts})
             self._ensure_reaper()
             self.store.audit({"action": "overlay", "service": self.service, "state": st, "version": ver, "until": ACTIVE["until"], "by": by, "mode": mode,
                               "note": (note or "")[:200],
@@ -683,8 +725,15 @@ class Controller:
         for f in self.catalog:
             if f.recommended is None:
                 continue
-            rec = canonical(f, f.recommended)
-            cur = running_value(f) or self._desired(f, self.store.overrides().get(f.key))
+            try:
+                rec = canonical(f, f.recommended)
+            except ValueError as e:      # E468: a bad catalog value was an uncaught ValueError (HTTP 500 with no key named), even on a dry run
+                raise ControlError(500, f"{f.key}: the catalog's recommended value is not valid ({e}); nothing was changed")
+            # E466: while a market-state overlay is in force the RUNNING value is today's tightened one. Comparing it with the recommended value made a
+            # switch whose SAVED value already is the recommended one show as a (false) LOOSENS, and applying the preset cancelled the overlay and
+            # loosened the rules on a stressed day. Same rule as set() and describe(): judge against the saved value.
+            saved_v = self._desired(f, self.store.overrides().get(f.key))
+            cur = saved_v if f.key in self._overlays else (running_value(f) or saved_v)
             if cur == rec:
                 continue
             plan.append({"key": f.key, "title": f.title, "from": cur, "to": rec, "change": classify(f, cur, rec), "live": f.live})
@@ -693,9 +742,58 @@ class Controller:
             return {"ok": True, "dry_run": True, "changes": plan, "loosening": len(loosening)}
         if loosening and not confirm:
             raise ControlError(409, {"needs_confirm": True, "change": "LOOSENS", "changes": plan, "message": f"{len(loosening)} of {len(plan)} changes LOOSEN live rules; send confirm=true."})
-        done = [self.set(p["key"], p["to"], by, confirm=True, note="preset: recommended") for p in plan]
+        with self._lock:
+            # E468: ALL OR NOTHING. The changes used to be applied one at a time, so an unexpected failure part-way (a bug, a full disk raising out of the
+            # store) left the earlier switches changed and the rest not, with a 500 that did not say which. The state is snapshotted first and put back on any failure.
+            keys = {p["key"] for p in plan}
+            snap = {"ov": self.store.overrides(), "env": {k: os.environ.get(k) for k in keys},
+                    "overlays": {k: dict(v) for k, v in self._overlays.items()}, "active": dict(ACTIVE),
+                    "running": {f.key: running_value(f) for f in self.catalog if f.live and (f.key in self._overlays or f.key in keys)}}
+            done: List[Dict[str, Any]] = []
+            try:
+                for p in plan:
+                    done.append(self.set(p["key"], p["to"], by, confirm=True, note="preset: recommended"))
+            except Exception as e:  # noqa: BLE001 - whatever failed, the preset must not stay half applied
+                failed_at = plan[len(done)]["key"] if len(done) < len(plan) else None
+                problems = self._preset_rollback(snap, plan, by)
+                raise ControlError(500, {"message": f"preset failed at {failed_at} ({type(e).__name__}: {str(e)[:120]}); every change was rolled back" + (f", but {len(problems)} could not be restored" if problems else ""),
+                                         "failed_at": failed_at, "rolled_back": [p["key"] for p in plan[:len(done)]], "not_restored": problems})
         return {"ok": True, "dry_run": False, "changes": plan, "applied": [d["key"] for d in done if d.get("applied_live")],
                 "restart_required": [d["key"] for d in done if d.get("restart_required")]}
+
+    def _preset_rollback(self, snap: Dict[str, Any], plan: List[Dict[str, Any]], by: str) -> List[str]:
+        """E468: put the stored overrides, environment, live values, overlays and the state stamp back to how `snap` found them. Caller holds the lock.
+        Every step is attempted on its own; the keys that could not be restored are returned (and audited)."""
+        problems: List[str] = []
+        for p in reversed(plan):
+            f = self.by_key[p["key"]]
+            try:
+                prior = snap["ov"].get(f.key)
+                if prior is not None:
+                    self.store.put(f.key, prior)
+                else:
+                    self.store.delete(f.key)
+                before_env = snap["env"].get(f.key)
+                if before_env is None:
+                    os.environ.pop(f.key, None)
+                else:
+                    os.environ[f.key] = before_env
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{f.key}: {type(e).__name__}")
+        self._overlays.clear()
+        self._overlays.update({k: dict(v) for k, v in snap["overlays"].items()})
+        ACTIVE.clear()
+        ACTIVE.update(snap["active"])
+        for key, run in snap["running"].items():
+            f = self.by_key[key]
+            try:
+                applied, _err = self._apply_live(f, run)      # run None = the unset state
+                if not applied:
+                    problems.append(f"{key}: live value not restored")
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{key}: {type(e).__name__}")
+        self.store.audit({"action": "preset_rollback", "service": self.service, "by": by, "keys": [p["key"] for p in plan], "not_restored": problems})
+        return problems
 
 
 def _env_value_orig(f: Flag) -> Optional[str]:

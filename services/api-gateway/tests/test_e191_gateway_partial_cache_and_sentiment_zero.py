@@ -14,7 +14,7 @@ SRC = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-
 
 
 def _block():
-    i = SRC.index("cached_decide = _redis_get(cache_key)")
+    i = SRC.index("cached_decide = await asyncio.to_thread(_redis_get, cache_key)")
     return SRC[i:i + 2600]
 
 

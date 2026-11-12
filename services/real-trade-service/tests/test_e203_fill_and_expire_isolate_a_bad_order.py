@@ -78,13 +78,13 @@ def test_a_raising_order_does_not_stop_the_others_in_expire(db, monkeypatch):
     a = _stale(db, "AAA", "D1")
     b = _stale(db, "BBB", "D2")
     c = _stale(db, "CCC", "D3")
-    real_release = entry.shared_symbol_lock.release
+    real_event = entry.models.TradeOrderEvent
 
-    def release(d, sym):
-        if sym == "BBB":
-            raise RuntimeError("lock table unavailable")
-        return real_release(d, sym)
-    monkeypatch.setattr(entry.shared_symbol_lock, "release", release)
+    def event(**kw):                                  # E481: the failure is injected before the commit (release() runs after it now)
+        if kw.get("order_id") == b.id and kw.get("event_type") == "EXPIRED":
+            raise RuntimeError("event write failed")
+        return real_event(**kw)
+    monkeypatch.setattr(entry.models, "TradeOrderEvent", event)
 
     assert run(entry.expire_stale_orders(db, "REAL")) == 2
     for o in (a, b, c):

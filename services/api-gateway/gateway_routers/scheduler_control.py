@@ -13,7 +13,7 @@ from admin_guard import require_admin
 
 scheduler_control_router = APIRouter(dependencies=[Depends(require_admin)])
 
-_ALLOWED = re.compile(r"^(flags|flags/[A-Z0-9_]{1,80}|preset/recommended|audit)$")
+_ALLOWED = re.compile(r"(flags|flags/[A-Z0-9_]{1,80}|preset/recommended|audit)")   # E468: used with fullmatch; `$` let "audit\n" through (then KeyError = 500)
 _METHODS = {"flags": {"GET"}, "audit": {"GET"}, "preset/recommended": {"POST"}}
 
 
@@ -26,7 +26,7 @@ def _base() -> str:
 async def scheduler_control_proxy(path: str, request: Request):
     import httpx
     path = path.strip("/")
-    if not _ALLOWED.match(path):
+    if not _ALLOWED.fullmatch(path):
         raise HTTPException(status_code=404, detail="unknown scheduler control path")
     allowed = {"POST", "DELETE"} if path.startswith("flags/") else _METHODS[path]
     if request.method not in allowed:

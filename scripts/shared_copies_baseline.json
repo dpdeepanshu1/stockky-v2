@@ -55,6 +55,13 @@
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
+ "circuit_breaker::_BENIGN_503_DETAILS": {
+  "services/api-gateway/circuit_breaker.py": "15a2a976",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "-",
+  "services/market-data-service/circuit_breaker.py": "-",
+  "services/position-stocks-service/resilience/circuit_breaker.py": "-",
+  "services/real-trade-service/resilience/circuit_breaker.py": "-"
+ },
  "circuit_breaker::_FAILURE_THRESHOLD": {
   "services/api-gateway/circuit_breaker.py": "-",
   "services/decision-prediction-service/decision/circuit_breaker.py": "-",
@@ -185,6 +192,13 @@
   "services/api-gateway/circuit_breaker.py": "62a6cc8f",
   "services/decision-prediction-service/decision/circuit_breaker.py": "62a6cc8f",
   "services/market-data-service/circuit_breaker.py": "62a6cc8f",
+  "services/position-stocks-service/resilience/circuit_breaker.py": "-",
+  "services/real-trade-service/resilience/circuit_breaker.py": "-"
+ },
+ "circuit_breaker::is_data_thin_503": {
+  "services/api-gateway/circuit_breaker.py": "8e67d02b",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "-",
+  "services/market-data-service/circuit_breaker.py": "-",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },

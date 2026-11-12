@@ -13,12 +13,13 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import realprobe
+from . import costs, realprobe
 from .params import Params
 
 PROBE_DIR = "/data/fno_real_probe"
 NAME_RE = re.compile(r"^probe_\d{8}_\d{6}\.json$")
 LINES = ("brokerage", "stt", "exchange", "sebi", "gst", "stamp")
+ROUNDED = ("stt", "stamp")                    # round 458 (E479): Dhan's contract note prints these two in whole rupees (STT 5.855 -> 6.00, stamp 0.119 -> 0.00)
 LABELS = {"brokerage": "Brokerage", "stt": "STT", "exchange": "Exchange transaction", "sebi": "SEBI fee", "gst": "GST", "stamp": "Stamp duty"}
 TOL = 0.05                                    # rupees: a contract note rounds each line to the paisa; five paise is rounding, not a wrong rate
 EXIT_TEXT = {0: "round trip done (or a dry run)", 2: "refused, or the BUY was rejected: nothing is open", 3: "A POSITION IS STILL OPEN: close it in the Dhan app",
@@ -176,20 +177,24 @@ def compare(probe: Dict[str, Any], note: Dict[str, Any], params: Optional[Params
 
     out: List[Dict[str, Any]] = []
     for k in LINES:
-        m, n = round(exp["lines"][k], 2), given[k]
-        row: Dict[str, Any] = {"line": k, "label": LABELS[k], "model": m, "note": n, "diff": None if n is None else round(n - m, 2), "ok": None if n is None else abs(n - m) <= tol, "param": None, "implied": None, "current": None}
+        exact, n = round(exp["lines"][k], 2), given[k]
+        m = costs.rupee(exp["lines"][k]) if k in ROUNDED else exact          # what the note should print; a note that shows the paisa figure (a P&L report) also matches `exact`
+        ok = None if n is None else (abs(n - m) <= tol or abs(n - exact) <= tol)
+        row: Dict[str, Any] = {"line": k, "label": LABELS[k], "model": m, "model_exact": exact, "rounded": k in ROUNDED, "note": n, "diff": None if n is None else round(n - (exact if ok and abs(n - m) > tol else m), 2), "ok": ok, "param": None, "implied": None, "current": None}
         if n is not None and not row["ok"]:
             param, cur = _current(k, und, p)
             imp = implied(k)
             row.update(param=param, current=cur, implied=None if imp is None else round(imp, 6))
         out.append(row)
     tot_note = _num((note or {}).get("total"))
-    total = None if tot_note is None else {"model": round(sum(exp["lines"].values()), 2), "note": tot_note, "diff": round(tot_note - sum(exp["lines"].values()), 2), "ok": abs(tot_note - sum(exp["lines"].values())) <= tol * 2}
+    tot_exact = sum(exp["lines"].values())
+    tot_rounded = sum(r["model"] for r in out)                                # the sum of the printed lines, as the note adds them
+    total = None if tot_note is None else {"model": round(tot_rounded, 2), "note": tot_note, "diff": round(tot_note - tot_rounded, 2), "ok": min(abs(tot_note - tot_rounded), abs(tot_note - tot_exact)) <= tol * 2}
     n_given = sum(1 for r in out if r["note"] is not None)
     bad = [r for r in out if r["ok"] is False] + ([total] if total and not total["ok"] else [])
     verdict = "NO_NOTE" if n_given == 0 and total is None else "DIFFERS" if bad else "MATCHED" if n_given == len(LINES) else "INCOMPLETE"
     if verdict == "MATCHED":
-        text = f"All six lines are within Rs {tol:.2f} of the contract note for this one trade. That is evidence for this size and price, not proof for every trade."
+        text = f"All six lines are within Rs {tol:.2f} of the contract note for this one trade (STT and stamp duty compared as whole rupees, the way Dhan prints them). That is evidence for this size and price, not proof for every trade."
     elif verdict == "DIFFERS":
         text = "These lines differ: " + "; ".join(f"{r['label']} (ours {r['model']:.2f}, note {r['note']:.2f})" for r in out if r["ok"] is False) + ". The rate the note implies is next to each; a rounded paisa makes it approximate, so check it against Dhan's published rate before changing anything."
     elif verdict == "INCOMPLETE":

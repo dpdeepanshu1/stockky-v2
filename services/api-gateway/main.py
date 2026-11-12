@@ -6657,14 +6657,11 @@ def _build_hot_conviction_extra(decide_full, last_decision):
 
 
 def _env_int(name: str, default: int, fallback_name: str = None) -> int:
-    """int(os.environ[name]) with a safe default for unset/blank/non-numeric."""
-    raw = os.getenv(name)
-    if (raw is None or str(raw).strip() == "") and fallback_name:
-        raw = os.getenv(fallback_name)
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
+    """Integer setting with a safe default for unset / blank / non-numeric. `fallback_name` is read when `name` is unset or blank.
+    E509: goes through env_int_safe like every other numeric setting (no range here: the callers clamp, e.g. max(5, ...))."""
+    if fallback_name and not (os.getenv(name) or "").strip():
+        name = fallback_name
+    return env_int_safe(name, default)
 
 
 def _hot_base(sym) -> str:

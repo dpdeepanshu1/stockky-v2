@@ -826,14 +826,6 @@ _LITE_USED = {"n": 0}   # headlines scored by the lite scorer since start (for /
 
 
 # Round 213: Hugging Face only where event_lite cannot decide, inside a rate budget.
-def _env_int(name: str, default: int) -> int:
-    try:
-        v = int((os.getenv(name) or "").strip())
-        return v if v >= 0 else default
-    except ValueError:
-        return default
-
-
 _HF_CALL_TIMES: List[float] = []                 # monotonic times of real HF calls (this process), pruned to the last 24 h
 _HF_CACHE: Dict[str, tuple] = {}                  # normalised headline -> (monotonic time, score)
 _HF_CACHE_TTL_SEC = 6 * 3600.0
@@ -844,7 +836,7 @@ _HF_LOCK = threading.Lock()
 
 def _hf_budget_ok(now: float) -> bool:
     """True when one more HF call fits both caps (HF_MAX_CALLS_PER_HOUR default 20, HF_MAX_CALLS_PER_DAY default 100; 0 = never call HF)."""
-    hour, day = _env_int("HF_MAX_CALLS_PER_HOUR", 20), _env_int("HF_MAX_CALLS_PER_DAY", 100)
+    hour, day = env_int_safe("HF_MAX_CALLS_PER_HOUR", 20, lo=0), env_int_safe("HF_MAX_CALLS_PER_DAY", 100, lo=0)
     with _HF_LOCK:
         _HF_CALL_TIMES[:] = [t for t in _HF_CALL_TIMES if now - t < 86400.0]
         return sum(1 for t in _HF_CALL_TIMES if now - t < 3600.0) < hour and len(_HF_CALL_TIMES) < day
@@ -962,8 +954,8 @@ def lite_stats():
     return {"available": _event_lite is not None, "mode": _sentiment_mode(), "sentiment_source": _sentiment_source(),
             "headlines_scored_by_lite": _LITE_USED["n"], "stats": st,
             "hf_smart": dict(_HF_SMART, calls_last_hour=sum(1 for t in _HF_CALL_TIMES if time.monotonic() - t < 3600.0),
-                             calls_last_24h=len(_HF_CALL_TIMES), max_per_hour=_env_int("HF_MAX_CALLS_PER_HOUR", 20),
-                             max_per_day=_env_int("HF_MAX_CALLS_PER_DAY", 100), hf_state=_hf_state())}
+                             calls_last_24h=len(_HF_CALL_TIMES), max_per_hour=env_int_safe("HF_MAX_CALLS_PER_HOUR", 20, lo=0),
+                             max_per_day=env_int_safe("HF_MAX_CALLS_PER_DAY", 100, lo=0), hf_state=_hf_state())}
 
 
 @app.get("/feed-health")

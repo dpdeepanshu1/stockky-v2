@@ -46,6 +46,8 @@ import threading
 import time
 from typing import Iterable, List, Optional
 
+from env_util import env_float_safe  # E508
+
 logger = logging.getLogger("angelone-budget")
 
 POSITION = "position"
@@ -59,44 +61,30 @@ def _env_str(name: str, default: str) -> str:
     return (os.getenv(name) or "").strip() or default
 
 
-def _env_float(name: str, default: float, lo: Optional[float] = None, hi: Optional[float] = None) -> float:
-    try:
-        v = float(_env_str(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-    if v != v:  # NaN
-        return default
-    if lo is not None and v < lo:
-        return default
-    if hi is not None and v > hi:
-        return default
-    return v
-
-
 def enabled() -> bool:
     return _env_str("ANGELONE_BUDGET", "1").lower() not in ("0", "false", "off", "no")
 
 
 def _cooldown_base_s() -> float:
-    return _env_float("ANGELONE_GLOBAL_COOLDOWN_S", 30.0, 1.0, 600.0)
+    return env_float_safe("ANGELONE_GLOBAL_COOLDOWN_S", 30.0, lo=1.0, hi=600.0)
 
 
 def _candle_cooldown_base_s() -> float:
     """group344: first candle cooldown. The 30 s base was refused again on the first call after it ended (trip #2, 13 Oct and 08 Oct),
     so the candle family starts at ANGELONE_CANDLE_COOLDOWN_BASE_S (default 90 s) and then doubles up to the candle ceiling. Never
     below the shared base. Set it to 30 for the old ladder."""
-    return max(_cooldown_base_s(), _env_float("ANGELONE_CANDLE_COOLDOWN_BASE_S", 90.0, 1.0, 3600.0))
+    return max(_cooldown_base_s(), env_float_safe("ANGELONE_CANDLE_COOLDOWN_BASE_S", 90.0, lo=1.0, hi=3600.0))
 
 
 def _candle_cooldown_max_s() -> float:
     """group255: candle-only ceiling of the escalation ladder (30, 60, 120, 240 ... up to this). The 2026-10-08 log showed the
     first call after a 30 s candle cooldown refused again (0.0 s after it ended), i.e. AngelOne's block outlasts a minute-long
     cooldown; every extra probe of a blocked endpoint is pointless. ANGELONE_CANDLE_COOLDOWN_MAX_S=60 restores the old ceiling."""
-    return max(_cooldown_max_s(), _env_float("ANGELONE_CANDLE_COOLDOWN_MAX_S", 600.0, 1.0, 3600.0))
+    return max(_cooldown_max_s(), env_float_safe("ANGELONE_CANDLE_COOLDOWN_MAX_S", 600.0, lo=1.0, hi=3600.0))
 
 
 def _cooldown_max_s() -> float:
-    return max(_cooldown_base_s(), _env_float("ANGELONE_GLOBAL_COOLDOWN_MAX_S", 60.0, 1.0, 1800.0))
+    return max(_cooldown_base_s(), env_float_safe("ANGELONE_GLOBAL_COOLDOWN_MAX_S", 60.0, lo=1.0, hi=1800.0))
 
 
 _ESCALATE_WINDOW_S = 300.0
@@ -105,9 +93,9 @@ _ESCALATE_WINDOW_S = 300.0
 def reserve_fraction(lane: Optional[str]) -> float:
     """Share of a bucket's burst capacity that must stay free for the lanes above `lane`."""
     if lane == CANDIDATE:
-        return _env_float("ANGELONE_LANE_RESERVE_CANDIDATE", 0.25, 0.0, 0.9)
+        return env_float_safe("ANGELONE_LANE_RESERVE_CANDIDATE", 0.25, lo=0.0, hi=0.9)
     if lane == BACKGROUND:
-        return _env_float("ANGELONE_LANE_RESERVE_BACKGROUND", 0.5, 0.0, 0.9)
+        return env_float_safe("ANGELONE_LANE_RESERVE_BACKGROUND", 0.5, lo=0.0, hi=0.9)
     return 0.0
 
 
@@ -323,8 +311,8 @@ def note_candle_sent() -> None:
 # seconds. Quote buckets are untouched. ANGELONE_CANDLE_SLOWDOWN_S=0 or factor>=1 turns it off.
 def _slow_candle_bucket(cooldown_s: float) -> None:
     try:
-        factor = _env_float("ANGELONE_CANDLE_SLOWDOWN_FACTOR", 0.5, 0.05, 1.0)
-        slow_s = _env_float("ANGELONE_CANDLE_SLOWDOWN_S", 600.0, 0.0, 86400.0)
+        factor = env_float_safe("ANGELONE_CANDLE_SLOWDOWN_FACTOR", 0.5, lo=0.05, hi=1.0)
+        slow_s = env_float_safe("ANGELONE_CANDLE_SLOWDOWN_S", 600.0, lo=0.0, hi=86400.0)
         if slow_s <= 0.0 or factor >= 1.0:
             return
         import rate_limiter as _rl
@@ -355,10 +343,10 @@ def position_probe_allowed(lane: Optional[str], family: str = QUOTE) -> bool:
     global _probe_next
     if lane != POSITION or family != QUOTE or not enabled():
         return False
-    interval = _env_float("ANGELONE_POSITION_PROBE_INTERVAL_S", 1.0, 0.0, 600.0)
+    interval = env_float_safe("ANGELONE_POSITION_PROBE_INTERVAL_S", 1.0, lo=0.0, hi=600.0)
     if interval <= 0.0:
         return False
-    min_age = _env_float("ANGELONE_POSITION_PROBE_MIN_AGE_S", 2.0, 0.0, 600.0)
+    min_age = env_float_safe("ANGELONE_POSITION_PROBE_MIN_AGE_S", 2.0, lo=0.0, hi=600.0)
     now = time.time()
     with _lock:
         if now - _cool[QUOTE]["last_trip"] < min_age or now < _probe_next:
@@ -371,7 +359,7 @@ def position_probe_allowed(lane: Optional[str], family: str = QUOTE) -> bool:
 def position_probe_denied() -> None:
     """A probe was answered with a rate-limit response: stop probing for a while."""
     global _probe_next
-    backoff = _env_float("ANGELONE_POSITION_PROBE_BACKOFF_S", 10.0, 0.0, 3600.0)
+    backoff = env_float_safe("ANGELONE_POSITION_PROBE_BACKOFF_S", 10.0, lo=0.0, hi=3600.0)
     with _lock:
         _probe_next = time.time() + backoff
         _probes["denied"] += 1
@@ -480,7 +468,7 @@ def position_symbols() -> frozenset:
     """Cached set of held symbols (clean spelling). Returns at once; a stale cache is refreshed on a daemon
     thread. Empty until the first refresh lands, and always empty when the lane lookup is off."""
     global _pos_refreshing
-    interval = _env_float("ANGELONE_POSITION_LANE_REFRESH_S", 15.0, 0.0, 3600.0)
+    interval = env_float_safe("ANGELONE_POSITION_LANE_REFRESH_S", 15.0, lo=0.0, hi=3600.0)
     if interval <= 0.0 or not enabled():
         return frozenset()
     start = False
@@ -511,14 +499,14 @@ def note_demand(symbol: str) -> None:
     with _demand_lock:
         _demand[c] = now
         if len(_demand) > _DEMAND_MAX:
-            cutoff = now - _env_float("ANGELONE_HOT_DEMAND_WINDOW_S", 120.0, 1.0, 3600.0)
+            cutoff = now - env_float_safe("ANGELONE_HOT_DEMAND_WINDOW_S", 120.0, lo=1.0, hi=3600.0)
             for k in [k for k, t in _demand.items() if t < cutoff]:
                 _demand.pop(k, None)
 
 
 def hot_symbols(limit: int = 100) -> List[str]:
     """Symbols looked up within ANGELONE_HOT_DEMAND_WINDOW_S (120), newest first, at most `limit`."""
-    cutoff = time.time() - _env_float("ANGELONE_HOT_DEMAND_WINDOW_S", 120.0, 1.0, 3600.0)
+    cutoff = time.time() - env_float_safe("ANGELONE_HOT_DEMAND_WINDOW_S", 120.0, lo=1.0, hi=3600.0)
     with _demand_lock:
         items = sorted(((t, s) for s, t in _demand.items() if t >= cutoff), reverse=True)
     return [s for _t, s in items[:max(0, limit)]]

@@ -58,6 +58,11 @@ _EXACT = {
     "DEFAULT_MAX_CONCURRENT_POSITIONS": _NN, "EVENT_INFLIGHT_WAIT_S": _NN, "SCAN_INTERVAL_MINUTES": _NN, "SURPRISE_FEED_MIN_FORCE_INTERVAL_SEC": _NN,
     "YFINANCE_MIN_INTERVAL_SEC": _NN, "PRED_SMOTE_K": _NN, "ENTRY_COMPOSITE_WEIGHT_CONVICTION": _NN, "ENTRY_CONVICTION_MAX_SCALE": _NN,
     "CHECK_MAX_SECONDS": _NN, "BHAVCOPY_DAY_WAIT_S": _NN, "CB_REDIS_MIN_INTERVAL": _NN,   # E507: 0 = persist / reload on every call
+    # E508: 0 switches position probing off; a feed timeout already has lo=2, so 0 can never get through
+    "ANGELONE_POSITION_PROBE_INTERVAL_S": _NN, "NEWS_FEED_TIMEOUT_SEC": dict(lo=2),
+    # E507: real-trade settings whose names give no hint that 0 would stall them (a zero look-back / refresh / max age / symbol cap)
+    "REGIME_ADAPTIVE_RESULT_DAYS": _POS, "ORB_BARS_REFRESH_S": _POS, "ORB_BARS_MAX_LAG_S": _POS, "SWING_RANK_MAX_SYMBOLS": _POS,
+    "FEED_PRIORITY_BULK_MAX_AGE_S": _POS, "FEED_DISPLAY_BULK_MAX_AGE_S": _POS,
     # a signed value, or a deliberate negative: exempt
     "CANDIDATE_DOWNTREND_6M_PCT": {},
     "REFILL_CONCURRENCY": {}, "HYDRATOR_CONCURRENCY": {}, "NEON_KEEPALIVE_INTERVAL_SEC": {},   # the code already clamps these with max(1, ...) / max(60, ...): 0 means "the minimum"
@@ -181,6 +186,9 @@ def test_a_rejected_setting_is_logged_once_and_a_valid_one_is_not():
     h = _H()
     m._log.addHandler(h)
     old_level = m._log.level
+    old_disable, old_disabled = logging.root.manager.disable, m._log.disabled
+    logging.disable(logging.NOTSET)   # E509: an earlier test in a full run may have disabled logging; this one has to see the record
+    m._log.disabled = False
     m._log.setLevel(logging.WARNING)
     old = os.environ.get("E506_W")
     try:
@@ -194,6 +202,8 @@ def test_a_rejected_setting_is_logged_once_and_a_valid_one_is_not():
     finally:
         m._log.removeHandler(h)
         m._log.setLevel(old_level)
+        logging.disable(old_disable)
+        m._log.disabled = old_disabled
         if old is None:
             os.environ.pop("E506_W", None)
         else:

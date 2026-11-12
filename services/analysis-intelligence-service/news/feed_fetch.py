@@ -33,6 +33,11 @@ from typing import Any, Dict, Optional, Tuple
 import feedparser
 import httpx
 
+try:
+    from env_util import env_int_safe  # E508: out-of-range / typo setting -> default
+except ImportError:  # imported as a package module
+    from .env_util import env_int_safe
+
 logger = logging.getLogger("news_feed_fetch")
 
 FEED_HEADERS = {
@@ -99,21 +104,12 @@ def _all_entries_stale(parsed: Any, days: float) -> bool:
     return True
 
 
-def _env_int(name: str, default: int, lo: int, hi: int) -> int:
-    """Blank / garbage / out-of-range env values fall back to the default (never crash on import)."""
-    try:
-        v = int(((os.getenv(name) or "").strip() or str(default)))
-    except (TypeError, ValueError):
-        return default
-    return v if lo <= v <= hi else default
-
-
-FEED_TIMEOUT_SEC = float(_env_int("NEWS_FEED_TIMEOUT_SEC", 10, 2, 30))
-CACHE_TTL_SEC = _env_int("NEWS_FEED_CACHE_TTL_SEC", 300, 0, 3600)    # 0 disables caching
+FEED_TIMEOUT_SEC = float(env_int_safe("NEWS_FEED_TIMEOUT_SEC", 10, lo=2, hi=30))
+CACHE_TTL_SEC = env_int_safe("NEWS_FEED_CACHE_TTL_SEC", 300, lo=0, hi=3600)    # 0 disables caching
 _SEARCH_TTL_CAP_SEC = 120
 _FAIL_TTL_SEC = 60
-_BLOCKED_TTL_SEC = _env_int("NEWS_FEED_BLOCKED_TTL_SEC", 1800, 60, 86400)   # all URLs bot-gated: do not retry per request
-STALE_DAYS = _env_int("NEWS_FEED_STALE_DAYS", 3, 0, 60)   # 0 disables the all-stale check
+_BLOCKED_TTL_SEC = env_int_safe("NEWS_FEED_BLOCKED_TTL_SEC", 1800, lo=60, hi=86400)   # all URLs bot-gated: do not retry per request
+STALE_DAYS = env_int_safe("NEWS_FEED_STALE_DAYS", 3, lo=0, hi=60)   # 0 disables the all-stale check
 _FALLBACKS_ENABLED = (os.getenv("NEWS_FEED_FALLBACKS") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 _cache: Dict[str, Tuple[float, Any, Dict[str, Any]]] = {}
@@ -124,14 +120,14 @@ _lock = threading.Lock()
 # re-downloaded on every cache expiry only to fail and be answered by its fallback. Once a fallback has served for it,
 # the primary is not tried again for NEWS_FEED_PRIMARY_DEAD_TTL_SEC (default 1800 s; 0 disables) - the fallback is used
 # straight away. Transient errors (timeouts, 5xx, bot-gate statuses) never mark a primary dead.
-PRIMARY_DEAD_TTL_SEC = _env_int("NEWS_FEED_PRIMARY_DEAD_TTL_SEC", 1800, 0, 86400)
+PRIMARY_DEAD_TTL_SEC = env_int_safe("NEWS_FEED_PRIMARY_DEAD_TTL_SEC", 1800, lo=0, hi=86400)
 _primary_dead_until: Dict[str, float] = {}
 _DEAD_STATUSES = frozenset({404, 410})
 # E285 round 162 (plan item 20, dead news feeds): the dead-primary memory above only covers the three feeds that HAVE a fallback. Any other feed that
 # answers 404 / 410 (retired URL) and has no fallback was downloaded again every _FAIL_TTL_SEC (60 s), one wasted request a minute per dead feed, for as
 # long as the service ran. Its "nothing served" answer is now remembered for NEWS_FEED_DEAD_TTL_SEC (default 1800 s; 0 = the old 60 s). The same
 # 404 / 410 only: timeouts, 5xx and bot-gate statuses keep their own rules. GET /news/feed-health still shows the feed as empty.
-DEAD_TTL_SEC = _env_int("NEWS_FEED_DEAD_TTL_SEC", 1800, 0, 86400)
+DEAD_TTL_SEC = env_int_safe("NEWS_FEED_DEAD_TTL_SEC", 1800, lo=0, hi=86400)
 
 
 def _primary_is_dead(url: str) -> bool:

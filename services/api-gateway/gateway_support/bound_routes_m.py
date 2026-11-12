@@ -121,6 +121,8 @@ def build_bound_routes_m(ref):
                     if channel.startswith("scan:"):
                         task_id = channel.split(":", 1)[1]
                         data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}   # E470
+                        if not isinstance(data, dict):
+                            data = {}      # E496: a non-dict stored value raised on `.get` and closed the whole websocket
                         await websocket.send_text(ref._ws_dumps({
                             "channel": channel,
                             "type": "scan_status",
@@ -147,6 +149,8 @@ def build_bound_routes_m(ref):
                 elif action == "poll_scan" and isinstance(msg.get("task_id"), str) and msg.get("task_id"):
                     task_id = msg["task_id"]
                     data = await ref.asyncio.to_thread(ref._redis_get, ref.SCAN_TASK_PREFIX + task_id) or {}   # E470
+                    if not isinstance(data, dict):
+                        data = {}          # E496: same as the subscribe path above
                     await websocket.send_text(ref._ws_dumps({
                         "channel": f"scan:{task_id}",
                         "type": "scan_status",

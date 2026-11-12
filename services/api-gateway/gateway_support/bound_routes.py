@@ -62,7 +62,7 @@ def build_bound_routes(ref):
         dest = body.get("url") or body.get("destination")
         try:
             delay = int(body.get("delay_seconds") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):   # E498: JSON `Infinity` / 1e999 parses to inf and int(inf) raised OverflowError (bare 500)
             return JSONResponse({"ok": False, "error": "delay_seconds must be an integer"}, status_code=400)
         # E397: both calls are sync httpx round trips (up to a 20 s timeout) and used to run ON the event loop; now on a worker thread.
         if not dest:

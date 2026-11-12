@@ -13,7 +13,8 @@ def test_surprise_scanner_52w_distance_zero_is_kept():
     src = _text("surprise_scanner.py")
     assert 'float(static.get("dist_52w_pct") or 100.0)' not in src
     assert '_dist_raw = static.get("dist_52w_pct")' in src
-    assert "dist = float(_dist_raw) if _dist_raw is not None else 100.0" in src
+    # E498: E497 made the read NaN / text safe (`_finite_num`); a missing value (None) still falls back to 100 and a real 0 is still kept
+    assert "dist = _finite_num(_dist_raw, 100.0) if _dist_raw is not None else 100.0" in src
 
 
 def test_instant_scanner_sentiment_zero_is_kept():

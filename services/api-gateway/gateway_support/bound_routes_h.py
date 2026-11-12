@@ -191,13 +191,17 @@ def build_bound_routes_h(ref):
                     continue
                 try:
                     # Force refresh: clear cache keys then re-fetch into 24h TTL
-                    try:
-                        if ref._redis:
-                            ref._redis.delete(f"{ref.FUNDAMENTAL_CACHE_PREFIX}{base}")
-                            ref._redis.delete(f"{ref.EVENT_CACHE_PREFIX}{base}")
-                            ref._redis.delete(f"{ref.NEWS_CACHE_PREFIX}{base}")
-                    except Exception:
-                        pass
+                    # E496: the three deletes are blocking HTTP calls (Upstash REST) and ran on the event loop, up to 240 of them per run, so every
+                    # other request waited; they now run in one worker thread per symbol (same order, same keys, failures still ignored).
+                    def _drop_static(_b=base):
+                        try:
+                            if ref._redis:
+                                ref._redis.delete(f"{ref.FUNDAMENTAL_CACHE_PREFIX}{_b}")
+                                ref._redis.delete(f"{ref.EVENT_CACHE_PREFIX}{_b}")
+                                ref._redis.delete(f"{ref.NEWS_CACHE_PREFIX}{_b}")
+                        except Exception:
+                            pass
+                    await ref.asyncio.to_thread(_drop_static)
                     metrics_data, _fb = await ref._fetch_fundamental_cached(base, client)
                     if metrics_data is not None:
                         refreshed["fundamental"] += 1
@@ -213,11 +217,13 @@ def build_bound_routes_h(ref):
                 await ref.asyncio.sleep(0.25)
 
         # Also refresh hot-stocks cache so next UI load is cheap
-        try:
-            if ref._redis:
-                ref._redis.delete(ref.HOT_STOCKS_CACHE_KEY)
-        except Exception:
-            pass
+        def _drop_hot():
+            try:
+                if ref._redis:
+                    ref._redis.delete(ref.HOT_STOCKS_CACHE_KEY)
+            except Exception:
+                pass
+        await ref.asyncio.to_thread(_drop_hot)      # E496: off the event loop, like the per-symbol deletes above
 
         return {
             "status": "ok",
@@ -245,18 +251,24 @@ def build_bound_routes_h(ref):
                 r = await client.get(f"{ref.MARKET_DATA_URL}/history/{sym}", params={"period": md_period, "interval": "1d"}, timeout=_hist_timeout)
                 if r.status_code == 200:
                     data = r.json()
-                    candles = data.get("candles") or []
+                    candles = (data.get("candles") if isinstance(data, dict) else None) or []
                     points = []
                     for c in candles:
-                        if c.get("close") is None:
+                        if not isinstance(c, dict):
+                            continue          # E496: a non-dict entry raised and sent the whole chart to the fallback
+                        # E496: a NaN / inf / text close used to be kept: NaN made `change_pct` NaN and the JSON response itself fail (500); a text close
+                        # raised in the change maths and dropped market-data's good bars for the training fallback. Such a bar is skipped; a bad
+                        # open / high / low is blanked (the candle chart tolerates a missing wick value) and the volume falls back to 0.
+                        _cl = ref._hot_float(c.get("close"))
+                        if _cl is None:
                             continue
                         points.append({
                             "date": c.get("date"),
-                            "open": c.get("open"),
-                            "high": c.get("high"),
-                            "low": c.get("low"),
+                            "open": c.get("open") if ref._hot_float(c.get("open")) is not None else None,
+                            "high": c.get("high") if ref._hot_float(c.get("high")) is not None else None,
+                            "low": c.get("low") if ref._hot_float(c.get("low")) is not None else None,
                             "close": c.get("close"),
-                            "volume": c.get("volume") or 0,
+                            "volume": (c.get("volume") if ref._hot_float(c.get("volume")) is not None else 0) or 0,
                         })
                     if points:
                         # Daily candles only: trim the 1-month window to the span asked for so change_pct
@@ -283,7 +295,7 @@ def build_bound_routes_h(ref):
             try:
                 r2 = await client.get(f"{ref.TRAINING_URL}/api/stock/history/{sym}", params={"period": period if period in ("1d","5d","1mo","1y","5y") else "1mo"}, timeout=_hist_timeout)
                 if r2.status_code == 200:
-                    data = r2.json()
+                    data = ref._json_sanitize(r2.json())   # E496: a NaN in the training history made the response itself fail (500)
                     data["source"] = data.get("source") or "training"
                     return data
                 last_err = f"{last_err}; training HTTP {r2.status_code}"
@@ -429,7 +441,9 @@ def build_bound_routes_h(ref):
             # Always try JSON first — portfolio/deposit/trades all return JSON
             try:
                 data = response.json()
-                return ref.JSONResponse(content=data, status_code=response.status_code)
+                # E496: httpx parses a bare NaN / Infinity token; JSONResponse then refuses it, and the broad except below turned a good reply
+                # into "502 Training proxy error: Out of range float values". They go out as null instead.
+                return ref.JSONResponse(content=ref._json_sanitize(data), status_code=response.status_code)
             except Exception:
                 pass
 

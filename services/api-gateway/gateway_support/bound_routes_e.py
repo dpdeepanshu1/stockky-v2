@@ -107,7 +107,7 @@ def build_bound_routes_e(ref):
             below_90 = _t > 0 and _p < int(_t * 0.9)
         except (TypeError, ValueError):
             below_90 = False
-        return {
+        return ref._json_sanitize({   # E498: a NaN / inf in the stored result (written before the E495-E497 guards) made the response itself fail (500)
             "ok": True,
             "task_id": cached.get("task_id"),
             "scanned_at": cached.get("scanned_at"),
@@ -122,14 +122,14 @@ def build_bound_routes_e(ref):
             "processed": cached.get("processed"),
             "total": total,
             "result": cached.get("result"),
-        }
+        })
 
     @get_scan_status_router.get("/scan/status/{task_id}")
     def get_scan_status(task_id: str):
         """Return scan progress. Missing task → soft response (not hard 404) so UI can stop cleanly."""
 
         data = ref._redis_get(ref.SCAN_TASK_PREFIX + task_id)
-        if not data:
+        if not data or not isinstance(data, dict):   # E498: a truthy non-dict stored value raised AttributeError on .get (bare 500); it is as unusable as no task
             return {
                 "task_id": task_id,
                 "status": "unknown",
@@ -142,17 +142,20 @@ def build_bound_routes_e(ref):
             }
             # was: raise HTTPException
         if data.get("status") == "running":
-            processed = data.get("processed", 0)
-            total = data.get("total", 0)
-            elapsed = data.get("elapsed", 0)
-            if processed > 0 and elapsed > 0:
-                avg_time_per_stock = elapsed / processed
-                remaining_stocks = max(0, total - processed)
-                estimated_remaining = round(remaining_stocks * avg_time_per_stock, 1)
-                data["estimated_remaining"] = estimated_remaining
-            else:
+            # E498: a null / text / NaN counter (a half-written or older task record) raised TypeError on `> 0` / `-` (bare 500) and an inf
+            # elapsed gave an inf estimate that failed the JSON write; unreadable or non-finite values now mean "no estimate".
+            try:
+                processed = float(data.get("processed", 0))   # a missing key still means 0 (as before); a null / text value is "no estimate"
+                total = float(data.get("total", 0))
+                elapsed = float(data.get("elapsed", 0))
+                if processed > 0 and elapsed > 0 and all(map(ref.math.isfinite, (processed, total, elapsed))):
+                    estimated_remaining = round(max(0.0, total - processed) * (elapsed / processed), 1)
+                    data["estimated_remaining"] = estimated_remaining if ref.math.isfinite(estimated_remaining) else None
+                else:
+                    data["estimated_remaining"] = None
+            except (TypeError, ValueError, OverflowError):
                 data["estimated_remaining"] = None
-        return data
+        return ref._json_sanitize(data)
 
     @market_top_gainers_router.get("/market/top-gainers")
     def market_top_gainers():
@@ -193,7 +196,7 @@ def build_bound_routes_e(ref):
         if not cached or not isinstance(cached, dict):
             # a truthy non-dict value in the cache is as unusable as no result at all
             return {"ok": False, "detail": "No Hot Picks result yet — run Search Hot Picks Stocks"}
-        return {**cached, "ok": True, "cached": True}
+        return ref._json_sanitize({**cached, "ok": True, "cached": True})   # E498: NaN / inf in a stored Hot Picks result failed the response (500)
 
     @stockky_hot_premarket_status_router.get("/stockky-hot/premarket/status")
     def stockky_hot_premarket_status():

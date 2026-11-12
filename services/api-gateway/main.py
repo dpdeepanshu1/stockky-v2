@@ -3352,7 +3352,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
 
     # 2) Short Redis cache
     cache_key = f"{FUNDAMENTAL_CACHE_PREFIX}{symbol}"
-    cached = _redis_get(cache_key)
+    cached = await asyncio.to_thread(_redis_get, cache_key)   # E499: durable key (Neon / Oracle on a memory miss) off the event loop, once per symbol in a scan
     if cached and isinstance(cached, dict) and (cached.get("full") or cached.get("metrics") is not None):
         # Stale-while-revalidate: if we're inside the soft TTL window (close to
         # hard expiry), kick off a background refresh now so the cache is warm
@@ -3368,7 +3368,7 @@ async def _fetch_fundamental_cached(symbol: str, client: httpx.AsyncClient) -> t
     # 3) Upstream + write-through to Data Feed (mutex against stampede)
     if not try_refresh_lock(_redis, symbol, ttl_sec=_FUNDAMENTAL_FG_LOCK_TTL_SEC):
         # Another worker is refreshing — return short cache or None
-        cached2 = _redis_get(cache_key)
+        cached2 = await asyncio.to_thread(_redis_get, cache_key)   # E499
         if cached2 and isinstance(cached2, dict):
             if isinstance(cached2.get("full"), dict):
                 return cached2["full"], cached2.get("fallback", False)
@@ -3472,7 +3472,7 @@ async def _fetch_events_cached(symbol: str, client: httpx.AsyncClient) -> Option
         logger.debug("data feed events read: %s", e)
 
     # 2) Short Redis
-    cached = _redis_get(cache_key)
+    cached = await asyncio.to_thread(_redis_get, cache_key)   # E499: durable key off the event loop
     if cached and isinstance(cached, dict):
         return cached
 
@@ -3542,7 +3542,7 @@ def _log_circuit_skip(name: str, symbol: str, err: Exception) -> None:
 
 async def _fetch_news_cached(symbol: str, client: httpx.AsyncClient) -> Optional[dict]:
     cache_key = f"{NEWS_CACHE_PREFIX}{symbol}"
-    cached = _redis_get(cache_key)
+    cached = await asyncio.to_thread(_redis_get, cache_key)   # E499: durable key off the event loop
     if cached and isinstance(cached, dict):
         return cached
 
@@ -4864,7 +4864,7 @@ async def run_scan_parallel(task_id: str, universe: List[str], lite: bool = Fals
     except Exception as e:
         logger.error("scan %s crashed: %s", task_id, e, exc_info=True)
         try:
-            _cur = _redis_get(SCAN_TASK_PREFIX + task_id)
+            _cur = await asyncio.to_thread(_redis_get, SCAN_TASK_PREFIX + task_id)   # E499
             # A crash AFTER the result was saved (e.g. a failing notification)
             # must not overwrite a finished task record.
             if isinstance(_cur, dict) and _cur.get("status") not in (None, "running"):
@@ -6237,12 +6237,17 @@ def _trending_yf_row(sym):
     hist = ticker.history(period="1d")
     if hist.empty:
         return None
-    price = round(hist["Close"].iloc[-1], 2)
-    change = round(hist["Close"].iloc[-1] - hist["Open"].iloc[-1], 2)
+    _close = float(hist["Close"].iloc[-1])
+    if not (math.isfinite(_close) and _close > 0):
+        return None            # E495: an incomplete bar has a NaN Close; it became a NaN price and a 500 when the response was rendered
+    price = round(_close, 2)
     _open = float(hist["Open"].iloc[-1])
     # A zero/invalid Open used to give inf, which FastAPI cannot
     # JSON-encode: one bad bar turned the whole route into a 500.
-    change_pct = round(change / _open * 100, 2) if (math.isfinite(_open) and _open > 0) else None
+    if not (math.isfinite(_open) and _open > 0):
+        return price, None, None   # E495: price kept, the change is dropped (a NaN Open gave a NaN change)
+    change = round(_close - _open, 2)
+    change_pct = round(change / _open * 100, 2)
     return price, change, change_pct
 
 
@@ -6880,7 +6885,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 except Exception:
                     pass
                 try:
-                    decision_data = _redis_get(f"stockky:last_decision:{base}")
+                    decision_data = await asyncio.to_thread(_redis_get, f"stockky:last_decision:{base}")   # E499: durable key, once per symbol
                 except Exception:
                     decision_data = None
 

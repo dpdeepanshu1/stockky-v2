@@ -246,10 +246,9 @@ def build_bound_routes_c(ref):
                     res = await client.get(training_url, timeout=10.0)
                     if res.status_code == 200:
                         body = res.json()
-                        if isinstance(body, list):
-                            symbols = [str(s) for s in body]
-                        elif isinstance(body, dict):
-                            symbols = [str(s) for s in (body.get("symbols") or body.get("universe") or [])]
+                        # E497: only a list of names counts (a dict / text under "symbols" was iterated into its keys / characters; None became "None")
+                        _names = body if isinstance(body, list) else (body.get("symbols") or body.get("universe") or []) if isinstance(body, dict) else []
+                        symbols = [str(s).strip() for s in _names if s is not None and not isinstance(s, (bool, dict, list, tuple)) and str(s).strip()] if isinstance(_names, list) else []
             except Exception as e:
                 ref.logger.debug("api/universe training fetch: %s", e)
                 symbols = []
@@ -331,7 +330,7 @@ def build_bound_routes_c(ref):
         if not sym_list and not force_reload and not refresh:
             _closed = await ref._surprise_closed_market_result(surprise_engine, limit)
             if _closed is not None:
-                return _closed
+                return ref._json_sanitize(_closed)   # E497: a NaN / inf in a stored result made the response itself fail (500)
 
         client = ref._get_http_client()
         # Session 72 (#3): never run past the callers' 25s client timeout. The scan
@@ -372,7 +371,9 @@ def build_bound_routes_c(ref):
         if limit is not None and isinstance(result.get("stocks"), list):
             result = dict(result)
             result["stocks"] = result["stocks"][: max(0, int(limit))]
-        return result
+        # E497: a NaN / inf in a scored row (or in the durable last result, which can still hold the bare tokens) made the response itself fail
+        # (500) for every caller, candidate_engine included; JSON null is what `/hot-stocks` and the WebSocket frames already send.
+        return ref._json_sanitize(result)
 
     @api_evaluate_price_alerts_router.post("/api/price-alerts/evaluate")
     @api_evaluate_price_alerts_router.post("/price-alerts/evaluate")
@@ -506,7 +507,7 @@ def build_bound_routes_c(ref):
         job to stopping with stop_requested=True and nothing undid it).
         """
         store = ref._feed_store()
-        job = store.job()
+        job = await ref.asyncio.to_thread(store.job)   # E497: store.job / set_job / set_meta are durable DB calls (a feed run is saturating the DB when Stop is pressed): off the event loop
         status = job.get("status")
         if status not in ("running", "stopping", "stopped") and not force:
             return {"ok": True, "stopped": False, "detail": f"Not running (status={status})", **job}
@@ -523,12 +524,12 @@ def build_bound_routes_c(ref):
             pass
         # Mark stopping so in-flight loop exits even if Event was cleared
         try:
-            store.set_job(stop_requested=True, status="stopping", message="Stop requested — finishing current symbol…")
+            await ref.asyncio.to_thread(store.set_job, stop_requested=True, status="stopping", message="Stop requested — finishing current symbol…")
         except Exception:
             pass
         # Re-read: the stopping write may have merged fields we want to keep.
         try:
-            job = store.job() or job
+            job = (await ref.asyncio.to_thread(store.job)) or job
         except Exception:
             pass
 
@@ -545,7 +546,8 @@ def build_bound_routes_c(ref):
                 ok_n = max(ok_n, len(done))
             ts = ref.datetime.now(ref.IST).isoformat()
             msg = f"Stopped at {cursor}/{total} — committed {ok_n} fed stocks at {ts}"
-            store.set_meta(
+            await ref.asyncio.to_thread(
+                store.set_meta,
                 last_success_at=ts,
                 last_count=ok_n,
                 last_errors=err_n,
@@ -554,7 +556,8 @@ def build_bound_routes_c(ref):
                 universe_size=total,
                 partial=bool(total and cursor < total),
             )
-            job = store.set_job(
+            job = await ref.asyncio.to_thread(
+                store.set_job,
                 status="stopped",
                 processed=cursor,
                 total=total,

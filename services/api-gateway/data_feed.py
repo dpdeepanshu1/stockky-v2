@@ -1436,7 +1436,7 @@ def patch_feed_price(symbol: str, live_price: float) -> bool:
         px = float(live_price)
     except (TypeError, ValueError):
         return False
-    if px <= 0:
+    if not math.isfinite(px) or px <= 0:     # E495: NaN passed `px <= 0` and the cap test and was stored as the live price (inf too when the cap is 0)
         return False
     if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
         logger.info("patch_feed_price skip %s — ₹%.2f > cap", base, px)

@@ -37,6 +37,8 @@ def build_bound_routes_g(ref):
             return resp.json()
         except ref.httpx.HTTPError as e:
             raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:   # E498: 200 with a non-JSON body -> 502 (was a bare 500)
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON body: {e}")
 
     @delete_notification_channel_router.delete("/notifications/config/{channel}", dependencies=[ref.Depends(ref._require_admin)])
     def delete_notification_channel(channel: str):
@@ -46,6 +48,8 @@ def build_bound_routes_g(ref):
             return resp.json()
         except ref.httpx.HTTPError as e:
             raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:   # E498: 200 with a non-JSON body -> 502 (was a bare 500)
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON body: {e}")
 
     @notifications_call_me_router.api_route("/notifications/call/me", dependencies=[ref.Depends(ref._require_admin)], methods=["GET", "POST"])
     def notifications_call_me(request: ref.Request, message: str = "Stockky test call alert"):
@@ -70,6 +74,8 @@ def build_bound_routes_g(ref):
             )
         except ref.httpx.HTTPError as e:
             raise ref.HTTPException(status_code=502, detail=f"CallMeBot unreachable: {e}")
+        except ValueError as e:   # E498: 200 with a non-JSON body -> 502 (was a bare 500)
+            raise ref.HTTPException(status_code=502, detail=f"CallMeBot returned a non-JSON body: {e}")
 
     @test_notification_channels_router.post("/notifications/test", dependencies=[ref.Depends(ref._require_admin)])
     def test_notification_channels():
@@ -103,6 +109,8 @@ def build_bound_routes_g(ref):
             )
         except ref.httpx.HTTPError as e:
             raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:   # E498: 200 with a non-JSON body -> 502 (was a bare 500)
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON body: {e}")
 
     @trigger_training_router.post("/training/train", dependencies=[ref.Depends(ref._require_admin)])
     async def trigger_training():
@@ -318,7 +326,9 @@ def build_bound_routes_g(ref):
             # Reset job/meta so UI shows 0 stocks immediately
             try:
                 store = ref._feed_store()
-                store.set_job(
+                # E498: set_job / set_meta are durable DB calls (job / meta reads, count_symbols, two writes); this async route ran them on the event loop
+                await ref.asyncio.to_thread(
+                    store.set_job,
                     status="idle",
                     message="Hard-reset complete — ready for fresh feed",
                     stop_requested=False,
@@ -326,7 +336,8 @@ def build_bound_routes_g(ref):
                     total=0,
                     ok_count=0,
                 )
-                store.set_meta(
+                await ref.asyncio.to_thread(
+                    store.set_meta,
                     last_success_at=None,
                     last_count=0,
                     last_message="Hard-reset — memory + DB wiped",

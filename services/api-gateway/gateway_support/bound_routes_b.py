@@ -77,9 +77,12 @@ def build_bound_routes_b(ref):
         try:
             resp = ref.httpx.get(f"{ref.NOTIFICATION_URL}/config", timeout=10)
             resp.raise_for_status()
-            return resp.json()
+            return ref._json_sanitize(resp.json())
         except ref.httpx.HTTPError as e:
             raise ref.HTTPException(status_code=502, detail=f"Notification service unreachable: {e}")
+        except ValueError as e:
+            # E498: a 200 with a non-JSON body raised ValueError -> bare 500 (the health route above already answers 502 for this)
+            raise ref.HTTPException(status_code=502, detail=f"Notification service returned a non-JSON config body: {e}")
 
     @training_status_router.get("/training/status")
     async def training_status():

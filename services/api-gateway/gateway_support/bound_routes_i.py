@@ -22,12 +22,21 @@ def build_bound_routes_i(ref):
             resp = ref.httpx.get(f"{ref.MARKET_DATA_URL}/quote/{sym}", timeout=8)
             if resp.status_code == 200:
                 data = resp.json()
-                price = data.get("price") or data.get("regularMarketPrice") or data.get("close") or data.get("last")
+                if not isinstance(data, dict):      # E495: a list / null body raised on `.get` (caught below, but logged as a bare AttributeError)
+                    data = {}
+                # E495: each key must be a finite positive number. NaN / inf made the JSON response itself fail (500) and a text price was passed
+                # through; an unusable `price` now falls to the next key, then to the fallback below.
+                price = None
+                for _k in ("price", "regularMarketPrice", "close", "last"):
+                    _v = ref._hot_float(data.get(_k))
+                    if _v is not None and _v > 0:
+                        price = _v
+                        break
                 if price:
                     return {
                         "symbol": sym,
                         "price": price,
-                        "close": data.get("close") or price,
+                        "close": (lambda _c: _c if _c is not None and _c > 0 else price)(ref._hot_float(data.get("close"))),
                         "as_of": data.get("as_of") or ref.datetime.now(ref.IST).isoformat(),
                         "source": data.get("source") or "market-data",
                         "raw": {k: data.get(k) for k in ("volume", "delivery_pct", "change_pct") if k in data},
@@ -48,6 +57,8 @@ def build_bound_routes_i(ref):
             price = None
             try:
                 price = float(info.get("last_price") or info.get("lastPrice") or 0) or None
+                if price is not None and not (ref.math.isfinite(price) and price > 0):   # E495: NaN is truthy, so it was returned as the price
+                    price = None
             except Exception:
                 price = None
             return {"symbol": sym, "price": price, "close": price, "as_of": ref.datetime.now(ref.IST).isoformat(), "source": "yfinance_fast"}

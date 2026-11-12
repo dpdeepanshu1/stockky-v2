@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import math
 import os
 import re
 import time
@@ -430,6 +431,28 @@ def _seconds_to_open_in_preopen(now_ts: float) -> Optional[float]:
     return (now.replace(hour=9, minute=15, second=0, microsecond=0) - now).total_seconds()
 
 
+def _finite_float(value, default: float) -> float:
+    """E497: `float(value or default)` where text, NaN and +-inf count as missing (the default). A tick value that is NaN or inf is truthy and
+    passes every `> 0` / `<= 0` test, so it used to reach the scored row: an infinite price made a full "breakout" row with price / change_pct /
+    target inf, and a NaN volume or buy share put NaN into rvol / buy_pct. The whole /surprise/scan answer then failed (500) and the same
+    row sat in the cached last result."""
+    try:
+        f = float(value or default)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return f if math.isfinite(f) else default
+
+
+def _finite_num(value, default: float) -> float:
+    """E497: `float(value)` for a field that was supplied (not None): a real 0 stays 0 (dist_52w_pct 0 = at the 52-week high), text, NaN and
+    +-inf become the default."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 class SurpriseStockEngine:
     def __init__(self):
         self.static_cache: Dict[str, Dict[str, Any]] = {}
@@ -712,8 +735,10 @@ class SurpriseStockEngine:
             )
         except Exception:
             current_price = 0.0
+        if not math.isfinite(current_price):
+            current_price = 0.0   # E497: NaN / inf price = no price (baseline fallback below, else no row)
 
-        prev_close = float(static.get("prev_close") or 0.0)
+        prev_close = _finite_float(static.get("prev_close"), 0.0)
         if current_price <= 0 and prev_close > 0:
             current_price = prev_close
             tick = dict(tick or {})
@@ -723,20 +748,20 @@ class SurpriseStockEngine:
         if prev_close <= 0:
             prev_close = current_price
 
-        open_price       = float(tick.get("open") or prev_close)
-        current_vol_15m  = float(tick.get("vol_15m") or tick.get("volume") or 0.0)
+        open_price       = _finite_float(tick.get("open"), prev_close)
+        current_vol_15m  = _finite_float(tick.get("vol_15m") or tick.get("volume"), 0.0)
         if current_vol_15m > 0 and tick.get("vol_15m") is None:
             # BUGFIX (31-Aug-2026): session_progress is never supplied by any
             # tick source either — was hardcoded to 0.4 regardless of actual
             # clock time (see _session_progress_ist() docstring for the full
             # impact on rvol). Use the real elapsed-session fraction instead.
             sp_raw = tick.get("session_progress")
-            progress = float(sp_raw) if sp_raw is not None else _session_progress_ist()
+            progress = _finite_num(sp_raw, _session_progress_ist()) if sp_raw is not None else _session_progress_ist()
             progress = max(0.15, min(progress, 1.0))
             current_vol_15m = current_vol_15m / max(1.0, 25.0 * progress)
 
-        day_high  = float(tick.get("high") or current_price)
-        day_low   = float(tick.get("low") or current_price)
+        day_high  = _finite_float(tick.get("high"), current_price)
+        day_low   = _finite_float(tick.get("low"), current_price)
 
         # ── BUGFIX (31-Aug-2026): dead ORB/VWAP bucket ───────────────────────
         # Confirmed across every tick source (/quote/{symbol}, the bulk quote
@@ -774,31 +799,36 @@ class SurpriseStockEngine:
         #     the feed has no true first-15/30-min high. Falls back to a
         #     small fixed % above open on illiquid names with atr=0.
         vwap_raw = tick.get("vwap")
-        vwap = float(vwap_raw) if vwap_raw is not None else (open_price + day_high + day_low) / 3.0
+        vwap = _finite_num(vwap_raw, (open_price + day_high + day_low) / 3.0) if vwap_raw is not None else (open_price + day_high + day_low) / 3.0
 
         orb_raw = tick.get("orb_high")
+        orb_high = None
         if orb_raw is not None:
-            orb_high = float(orb_raw)
-        else:
-            daily_atr_static = float(static.get("daily_atr") or 0.0)
+            _o = _finite_num(orb_raw, float("nan"))
+            orb_high = _o if math.isfinite(_o) else None   # E497: NaN / inf / text orb_high = not supplied (derived below)
+        if orb_high is None:
+            daily_atr_static = _finite_float(static.get("daily_atr"), 0.0)
             orb_buffer = (daily_atr_static * ORB_ATR_FRACTION) if daily_atr_static > 0 else (open_price * ORB_FALLBACK_PCT)
             orb_high = open_price + orb_buffer
 
-        avg_15m_vol   = max(int(static.get("avg_15m_volume") or 1), 1)
+        avg_15m_vol   = max(int(_finite_float(static.get("avg_15m_volume"), 1.0)), 1)
         rvol          = round(current_vol_15m / avg_15m_vol, 2) if avg_15m_vol else 0.0
         price_change_pct = round(((current_price - prev_close) / prev_close) * 100.0, 2) if prev_close else 0.0
 
         # Order-book imbalance
         buy_pct = tick.get("buy_pct")
         if buy_pct is None:
-            total_bid = float(tick.get("total_bid_qty") or 0.0)
-            total_ask = float(tick.get("total_ask_qty") or 0.0)
-            if (total_bid + total_ask) > 0:
+            _nan = float("nan")
+            total_bid = _finite_num(tick.get("total_bid_qty") or 0.0, _nan)   # E497: an unreadable quantity leaves the share neutral (50), not 0 / NaN
+            total_ask = _finite_num(tick.get("total_ask_qty") or 0.0, _nan)
+            if math.isfinite(total_bid) and math.isfinite(total_ask) and (total_bid + total_ask) > 0:
                 buy_pct = round((total_bid / (total_bid + total_ask)) * 100.0, 2)
         try:
             buy_pct = float(buy_pct) if buy_pct is not None else 50.0
         except (TypeError, ValueError):
             buy_pct = 50.0
+        if not math.isfinite(buy_pct):
+            buy_pct = 50.0   # E497
 
         # RVOL slope
         key = symbol.upper().replace(".NS", "").replace(".BO", "")
@@ -851,7 +881,7 @@ class SurpriseStockEngine:
         # E148: a stock exactly AT its 52-week high has dist 0.0, which is falsy; `or 100.0` made it look far away and it lost the
         # "Near 52W High" points. Only a missing value (None) falls back to 100.
         _dist_raw = static.get("dist_52w_pct")
-        dist = float(_dist_raw) if _dist_raw is not None else 100.0
+        dist = _finite_num(_dist_raw, 100.0) if _dist_raw is not None else 100.0
         if dist <= DIST_52W_BREAKOUT_PCT:
             score += 15
             if score >= 50:
@@ -860,7 +890,7 @@ class SurpriseStockEngine:
             score += 7
 
         # ── 4. Range expansion (10) — REDUCED from 15 to fund order-book ─────
-        daily_atr      = float(static.get("daily_atr") or 0.0)
+        daily_atr      = _finite_float(static.get("daily_atr"), 0.0)
         intraday_range = max(0.0, day_high - day_low)
         if daily_atr > 0 and intraday_range >= (daily_atr * 0.8):
             score += 10
@@ -928,7 +958,7 @@ class SurpriseStockEngine:
         hit["value_buy"]     = bool(20.0 <= px <= VALUE_BUY_THRESHOLD)
 
         # §5 passes_hard_floor — liquidity gate (BUY-side only)
-        avg_vol = float(static.get("avg_15m_volume") or 0)
+        avg_vol = _finite_float(static.get("avg_15m_volume"), 0.0)   # E497: NaN / inf / text = unknown (0), not a NaN avg_traded_value in the row
         avg_traded_value = avg_vol * px * 25  # 25 bars/day estimate
         hit["avg_traded_value"] = avg_traded_value
         if avg_traded_value < HARD_FLOOR_LIQUIDITY and avg_traded_value > 0:

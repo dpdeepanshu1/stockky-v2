@@ -473,7 +473,7 @@ def build_bound_routes_l(ref):
         fed = ref._feed_store().get_symbol(symbol)
         if not fed:
             return {"ok": False, "symbol": symbol.upper(), "detail": "No data feed entry"}
-        return {"ok": True, "data": fed}
+        return {"ok": True, "data": ref._json_sanitize(fed)}   # E496: a stored NaN / inf (e.g. a pe_ratio) made this response fail (500)
 
     return SimpleNamespace(
         stock_chart_context_router=stock_chart_context_router,

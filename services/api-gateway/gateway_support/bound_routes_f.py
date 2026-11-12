@@ -432,6 +432,7 @@ def build_bound_routes_f(ref):
     [min_score, max_score) band (default 58–68) are quoted, with a 0.3s gap.
     """
         import asyncio
+        import math      # E495: local, like asyncio (tests/test_group358 runs this function's source with a stand-in `ref`)
         from data_feed import (
             find_prepare_to_buy_candidates,
             patch_feed_price,
@@ -487,7 +488,7 @@ def build_bound_routes_f(ref):
                             for k in ("cmp", "price", "ltp", "close", "last_price", "regularMarketPrice"):
                                 try:
                                     v = float(body.get(k) or 0)
-                                    if v > 0:
+                                    if v > 0 and math.isfinite(v):   # E495: "inf" passed `v > 0` and was patched into the feed row
                                         live_price = v
                                         break
                                 except (TypeError, ValueError):

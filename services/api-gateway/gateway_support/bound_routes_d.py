@@ -235,6 +235,16 @@ def build_bound_routes_d(ref):
         if not results:
             return {"ok": False, "sent": False, "count": 0, "message": "No IPO Tracker results available right now — run Scan IPOs first."}
 
+        results = [r for r in results if isinstance(r, dict)]   # E495: a non-dict entry raised on `.get` (500)
+        if not results:
+            return {"ok": False, "sent": False, "count": 0, "message": "No IPO Tracker results available right now — run Scan IPOs first."}
+
+        def _px(v):
+            # E495: a NaN / inf price printed "₹nan" / "₹inf" in the Telegram message; it prints a dash like a missing one
+            if v is None or (isinstance(v, float) and not ref.math.isfinite(v)):
+                return None
+            return v
+
         top = results[: max(1, min(int(top_n), 20))]
         lines = [f"🆕 *IPO Tracker — Top {len(top)}*"]
         for i, r in enumerate(top, 1):
@@ -245,12 +255,13 @@ def build_bound_routes_d(ref):
             score = r.get("ipo_score")
             if score is None:
                 score = r.get("pre_listing_advisory_score")
+            score = _px(score)
             stage = str(r.get("stage") or "").replace("_", " ")
-            issue_px = r.get("issue_price")
-            cur_px = r.get("current_price")
+            issue_px = _px(r.get("issue_price"))
+            cur_px = _px(r.get("current_price"))
             chg = r.get("current_vs_issue_pct")
             try:
-                chg_str = f"{float(chg):+.2f}%" if chg is not None else "—"
+                chg_str = f"{float(chg):+.2f}%" if chg is not None and ref.math.isfinite(float(chg)) else "—"
             except (TypeError, ValueError):
                 chg_str = "—"
             lines.append(

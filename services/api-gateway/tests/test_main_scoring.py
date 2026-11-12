@@ -722,6 +722,7 @@ def cb(monkeypatch):
 
 
 def test_refresh_upstream_writes_through_cache_and_feed(cb, kv, feed):
+    feed.rows["TCS"] = {"price": 100}                       # E490: write-through only for a symbol that already has a row
     cb.resp = Resp(200, {"fundamental_score": 66, "metrics": {"pe": 1}, "fallback_used": True, "sector": "IT"})
     data, fb = run(gw._refresh_fundamental_upstream("TCS", None, FKEY))
     assert fb is True and data["fundamental_score"] == 66 and data["from_data_feed"] is False
@@ -765,10 +766,29 @@ def test_refresh_upstream_non_dict_json_becomes_empty_data(cb, kv, feed):
 
 
 def test_refresh_upstream_feed_write_error_is_swallowed(cb, kv, feed, log):
+    feed.rows["TCS"] = {"price": 100}                       # E490: a row must exist for the write to be attempted
     feed.put_raises = RuntimeError("neon")
     cb.resp = Resp(200, {"fundamental_score": 3})
     data, _ = run(gw._refresh_fundamental_upstream("TCS", None, FKEY))
     assert data["fundamental_score"] == 3 and log.any("debug", "data feed write-through fund")
+
+
+def test_refresh_upstream_with_no_feed_row_creates_no_fundamentals_only_row(cb, kv, feed):
+    # E490: no stored row -> no priceless stub row; the answer is still returned and still cached in Redis
+    cb.resp = Resp(200, {"fundamental_score": 66, "metrics": {"pe": 1}, "fallback_used": False, "sector": "IT"})
+    data, fb = run(gw._refresh_fundamental_upstream("TCS", None, FKEY))
+    assert fb is False and data["fundamental_score"] == 66 and data["from_data_feed"] is False
+    assert feed.puts == [] and "TCS" not in feed.rows
+    key, cached, ttl = kv.sets[0]
+    assert key == FKEY and ttl == gw.STATIC_PARAM_TTL and cached["full"]["sector"] == "IT"
+
+
+def test_refresh_upstream_feed_read_error_still_returns_and_caches(cb, kv, feed, log):
+    feed.get_raises = RuntimeError("neon read")
+    cb.resp = Resp(200, {"fundamental_score": 4})
+    data, _ = run(gw._refresh_fundamental_upstream("TCS", None, FKEY))
+    assert data["fundamental_score"] == 4 and feed.puts == [] and len(kv.sets) == 1
+    assert log.any("debug", "data feed write-through fund")
 
 
 def test_refresh_upstream_non_200_and_exceptions_return_empty_fallback(cb, kv, feed, log):

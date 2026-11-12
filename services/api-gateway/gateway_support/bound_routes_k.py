@@ -21,7 +21,9 @@ def build_bound_routes_k(ref):
         def _blocking():
             movers = ref._get_momentum_movers()
             news = ref._get_news_mentioned_symbols()
-            trending = list(set(movers + news))
+            # E494: `list(set(...))` threw away the movers' ranking, so `trending[:10]` below kept a random ten of the (up to ~100) names on every call
+            # (the same page showed different "trending" stocks on each refresh). dict.fromkeys drops duplicates and keeps movers first, in rank order.
+            trending = list(dict.fromkeys(list(movers or []) + list(news or [])))
             trending_data = []
             # group233: price the (at most 10) names with ONE POST /quotes/bulk instead of one GET /quote each.
             _bulk_rows: dict = {}
@@ -43,16 +45,18 @@ def build_bound_routes_k(ref):
                     try:
                         data = _bulk_rows.get(str(sym).upper().replace(".NS", "").replace(".BO", "").strip())
                         if data:
-                            p = data.get("price") or data.get("cmp")
-                            prev = data.get("previous_close")
-                            if p is not None and float(p) > 0:
-                                price = round(float(p), 2)
-                                if prev and float(prev) > 0:
-                                    change = round(float(p) - float(prev), 2)
-                                    change_pct = round((change / float(prev)) * 100, 2)
-                                elif data.get("day_change_pct") is not None:
-                                    change_pct = data.get("day_change_pct")
-                                    change = round(price * change_pct / 100, 2) if change_pct is not None else None
+                            p = ref._hot_float(data.get("price") or data.get("cmp"))   # E494: "inf" / NaN passed `float(p) > 0` and the JSON response then failed (500)
+                            prev = ref._hot_float(data.get("previous_close"))
+                            if p is not None and p > 0:
+                                price = round(p, 2)
+                                if prev and prev > 0:
+                                    change = round(p - prev, 2)
+                                    change_pct = round((change / prev) * 100, 2)
+                                else:
+                                    _dcp = ref._hot_float(data.get("day_change_pct"))   # E494: a text value raised on the multiply and left a text change_pct in the row
+                                    if _dcp is not None:
+                                        change_pct = _dcp
+                                        change = round(price * _dcp / 100, 2)
                     except Exception as e:
                         ref.logger.debug("trending market-data quote %s: %s", sym, e)
 
@@ -432,6 +436,18 @@ def build_bound_routes_k(ref):
                 return False
             return bool(rid) and rid != run_id
 
+        # E494: store.job() / store.set_job() are durable (Neon / Oracle) reads and writes, and set_job also refreshes the meta row. The
+        # per-symbol loop below called them straight from the event loop (about 600 symbols x 2-3 calls), so every other request waited
+        # behind the feed's database round trips for the whole run (the symbol reads / writes were already off the loop in group303).
+        async def _job_a():
+            return await ref.asyncio.to_thread(store.job)
+
+        async def _set_job_a(**kw):
+            return await ref.asyncio.to_thread(lambda: store.set_job(**kw))
+
+        async def _superseded_a() -> bool:
+            return await ref.asyncio.to_thread(_superseded)
+
         async def _run(start_at: int, ok0: int, err0: int, done0: set):
             """E445: guard around the worker. An exception nothing inside `_run_impl` catches (the store's job read / write failing mid-loop,
             a bad upstream shape in the bulk phase's bookkeeping, ...) used to die silently inside the background task and leave the job
@@ -573,11 +589,11 @@ def build_bound_routes_k(ref):
 
                 for i in range(start_at, len(universe)):
                     # E443: a newer run owns the job now — leave its rows alone (no stopped/done commit from this worker)
-                    if _superseded():
+                    if await _superseded_a():
                         ref.logger.info("data-feed run %s superseded at %s/%s — exiting", run_id, i, len(universe))
                         return
                     # Cooperative stop (process flag OR job flag) — ASAP
-                    jnow = store.job()
+                    jnow = await _job_a()
                     if ref.data_feed_stop_requested() or jnow.get("stop_requested") or jnow.get("status") in ("stopped", "stopping"):
                         ts = ref.datetime.now(ref.IST).isoformat()
                         msg = f"Stopped at {i}/{len(universe)} — committed {ok_n} fed stocks at {ts}"
@@ -607,7 +623,7 @@ def build_bound_routes_k(ref):
 
                     base = universe[i]
                     if base in done_set:
-                        store.set_job(
+                        await _set_job_a(
                             status="running",
                             processed=i + 1,
                             total=len(universe),
@@ -632,10 +648,10 @@ def build_bound_routes_k(ref):
                         err_n += 1
                         ref.logger.debug("data-feed %s: %s", base, e)
 
-                    if _superseded():   # E443: the symbol just fed is saved; do not overwrite the newer run's progress / checkpoint
+                    if await _superseded_a():   # E443: the symbol just fed is saved; do not overwrite the newer run's progress / checkpoint
                         ref.logger.info("data-feed run %s superseded after %s — exiting", run_id, base)
                         return
-                    store.set_job(
+                    await _set_job_a(
                         status="running",
                         processed=i + 1,
                         total=len(universe),
@@ -649,7 +665,7 @@ def build_bound_routes_k(ref):
                     feed_batch = max(5, ref._safe_int(ref.os.getenv("DATA_FEED_BATCH_SIZE"), 20) or 20)   # E444
                     if (i + 1) % feed_batch == 0:
                         # Complete batch → warm all upstreams, then continue
-                        store.set_job(
+                        await _set_job_a(
                             message=f"Batch done {i + 1}/{len(universe)} — warming services…",
                             updated_at=ref.datetime.now(ref.IST).isoformat(),
                         )

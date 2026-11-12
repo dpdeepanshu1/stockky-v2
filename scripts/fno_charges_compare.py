@@ -5,7 +5,7 @@
   with the six lines from the note: python3 scripts/fno_charges_compare.py --brokerage 40 --stt 12.34 --exchange 5.67 --sebi 0.01 --gst 8.2 --stamp 0.45 [--total 66.9]
   an older probe:                   python3 scripts/fno_charges_compare.py --file probe_20261111_101500.json ...
 
-Reads data/fno_real_probe/probe_<time>.json (the newest unless --file), prints what was sent, what Dhan said and what filled, compares the six charge lines (within Rs 0.05 each; STT and stamp duty as whole rupees, the way Dhan prints them since round 458) and writes
+Reads data/fno_real_probe/probe_<time>.json (the newest unless --file), prints what was sent, what Dhan said and what filled, compares the six charge lines (within Rs 0.05 each) and writes
 probe_<time>_summary.txt beside it. It changes no rate and sends nothing. Exit code: 0 all six lines match | 1 a line differs | 2 no probe result / cannot compare | 3 note incomplete or not given.
 The same check is on the F&O Overview (card "Real-order probe") and at GET /fno/probe.
 """

@@ -2783,6 +2783,8 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         # held until exit_engine closes it out. Releasing here in that case
         # would let position-stocks-service buy the same symbol while this
         # service still genuinely holds shares of it.
+        if mode == "REAL" and not was_partial:
+            shared_symbol_lock.release(db, order.symbol)
         fill_note = f" {order.filled_qty_so_far}/{order.qty} had already filled." if was_partial else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="EXPIRED",
@@ -2791,16 +2793,6 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 " Dhan order cancelled." if mode == "REAL" and order.dhan_order_id else ""
             ),
         ))
-        # E481: the EXPIRED status and its event are COMMITTED before the lock is released. release() commits on success but rolls the
-        # session back when it fails, and it used to run first with the status still uncommitted: a failed release threw the EXPIRED
-        # status away while the event row (added after it) and the Dhan cancel both stood, so the order stayed PLACED next to an
-        # EXPIRED event. A failed commit raises to the per-order handler below, which rolls back and retries the whole order next cycle.
-        db.commit()
-        if mode == "REAL" and not was_partial:
-            try:
-                shared_symbol_lock.release(db, order.symbol)
-            except Exception:  # noqa: BLE001 - release() never raises; the order is already retired and committed, so only the lock is at stake
-                logger.exception("expire_stale_orders: %s order %s is EXPIRED but its symbol lock could not be released", order.symbol, order.id)
         return True
 
     for order in stale:

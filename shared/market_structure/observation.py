@@ -233,8 +233,8 @@ def calibrate(rows: Iterable[Dict[str, Any]], thresholds: Optional[Dict[str, Any
     samples = samples_from_rows(rows)
     th = dict(DEFAULT_THRESHOLDS)
     th.update(thresholds or {})
-    have = {h: sum(1 for s in samples if finite(s["outcome"].get(f"ret_{h}d"))) for h in HORIZONS if h >= 5}
-    h = int(horizon) if horizon in HORIZONS else next((x for x in sorted(have, reverse=True) if have[x] >= min_n), 5)
+    have = {h: sum(1 for s in samples if finite(s["outcome"].get(f"ret_{h}d"))) for h in HORIZONS}     # E482: T+1 is counted too, so an explicit horizon=1 reports its real `finished` and is not called insufficient
+    h = int(horizon) if horizon in HORIZONS else next((x for x in sorted((k for k in have if k >= 5), reverse=True) if have[x] >= min_n), 5)   # the automatic pick still only considers T+5 / T+10 / T+20
     out: Dict[str, Any] = {"advisory": True, "horizon": h, "min_n": min_n, "samples": len(samples), "finished": have.get(h, 0), "thresholds": th,
                            "rules": {}, "score": None, "suggestions": [], "note": None}
     if have.get(h, 0) < min_n:

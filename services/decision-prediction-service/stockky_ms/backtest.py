@@ -166,7 +166,7 @@ def rule_effects(samples: Iterable[Dict[str, Any]], horizon: int = 10, threshold
         ok = [r for f, r in rows if not f[rule]]
         a, b = _stats(rej), _stats(ok)
         edge = round(b["mean"] - a["mean"], 3) if a["mean"] is not None and b["mean"] is not None else None
-        if a["n"] < min_n or b["n"] < min_n:
+        if edge is None or a["n"] < min_n or b["n"] < min_n:      # E482: edge is None when a side is empty; min_n <= 0 used to get past the size test and then compare None > 0.25 (TypeError)
             verdict = "insufficient_sample"
         else:
             verdict = "helps" if edge > 0.25 else "hurts" if edge < -0.25 else "inconclusive"

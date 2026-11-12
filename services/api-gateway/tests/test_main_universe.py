@@ -880,7 +880,7 @@ def news(monkeypatch, log):
                 return types.SimpleNamespace(entries=entries)
         return types.SimpleNamespace(entries=env.default_entries)
 
-    monkeypatch.setattr(gw.feedparser, "parse", parse)
+    monkeypatch.setattr(gw, "_news_feed_parse", parse)
 
     def secs():
         if env.sec_raises is not None:
@@ -969,7 +969,7 @@ def test_news_one_bad_feed_does_not_stop_the_others(news):
 
 def test_news_feed_with_no_entries_attribute_value(news, monkeypatch):
     news.securities = ["TCS"]
-    monkeypatch.setattr(gw.feedparser, "parse", lambda url: types.SimpleNamespace(entries=None))
+    monkeypatch.setattr(gw, "_news_feed_parse", lambda url: types.SimpleNamespace(entries=None))
     assert gw._get_news_mentioned_symbols() == []
 
 

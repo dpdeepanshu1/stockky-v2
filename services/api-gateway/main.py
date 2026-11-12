@@ -316,6 +316,58 @@ async def _start_shared_http():
         logger.debug("holiday coverage check skipped (non-fatal): %s", e)
 
 
+def _heal_stuck_hot_jobs_sync() -> dict:
+    """E494: reset a Hot Picks / Premarket job record left at "running" by a process that died mid-run (OOM kill, SIGKILL after a hung stop, a deploy).
+
+    Both records live in the durable kv (the premarket one for 7 days) and `/stockky-hot/run` and `/stockky-hot/premarket` answer `already_running`
+    while they say "running", so after such a death neither button could start a run again for hours or days. `clear_stuck_feed_job_on_boot` only
+    heals the data-feed job. At boot no run of this process can be in progress, so any "running" record is a dead one: it becomes "error"
+    ("interrupted"). Stock rows / results are never touched. Each record is healed on its own (one failing does not skip the other)."""
+    out: dict = {}
+    for name, getter, setter, extra in (
+        ("hot", hot_job_get, hot_job_set, {"current_symbol": None, "stopped": False}),
+        ("premarket", hot_premarket_job_get, hot_premarket_job_set, {}),
+    ):
+        try:
+            j = getter(_redis_get)
+            if not isinstance(j, dict) or str(j.get("status") or "").lower() != "running":
+                out[name] = False
+                continue
+            setter(
+                _redis_set,
+                _redis_get,
+                status="error",
+                message="Interrupted by a restart — start it again",
+                finished_at=datetime.now(IST).isoformat(),
+                estimated_remaining_sec=None,
+                **extra,
+            )
+            out[name] = True
+        except Exception as e:
+            logger.warning("Boot heal (%s job) failed (non-fatal): %s", name, e)
+            out[name] = False
+    return out
+
+
+@_on_startup
+async def _heal_stuck_hot_jobs_on_boot():
+    """E494: startup hook around `_heal_stuck_hot_jobs_sync` — a worker thread with a bounded wait, like the feed-job heal (a slow / down DB must not hold boot)."""
+    try:
+        _wait = float(((os.getenv("BOOT_HEAL_TIMEOUT_S") or "").strip() or "15"))
+    except ValueError:
+        _wait = 15.0
+    if not (_wait > 0):
+        _wait = 15.0
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(_heal_stuck_hot_jobs_sync), timeout=_wait)
+        if any(res.values()):
+            logger.info("Boot hot-job heal: %s", res)
+    except asyncio.TimeoutError:
+        logger.warning("Startup warning (hot-job heal timed out after %ss, continuing boot)", _wait)
+    except Exception as e:
+        logger.warning("Startup warning (hot-job heal, non-fatal): %s", e)
+
+
 @_on_shutdown
 async def _graceful_shutdown():
     """FastAPI/uvicorn SIGTERM path: commit work, stop loops, close clients."""
@@ -594,7 +646,7 @@ def _movers_empty_backoff_sec() -> int:
     """E431: seconds an EMPTY open-session movers fetch is remembered (default 30; MOVERS_EMPTY_BACKOFF_SEC=0 turns it off)."""
     try:
         v = int(float(((os.getenv("MOVERS_EMPTY_BACKOFF_SEC") or "").strip() or "30")))
-    except ValueError:
+    except (ValueError, OverflowError):   # E485: "inf" raised OverflowError out of the movers fetch
         v = 30
     return v if v >= 0 else 30
 INDICES_CACHE_KEY   = "stockky:indices"
@@ -1862,7 +1914,7 @@ def _compute_momentum_movers() -> List[str]:
                 day_chg = float(q.get("day_change_pct"))
             except (TypeError, ValueError):
                 continue
-            if abs(day_chg) >= 5.0:
+            if math.isfinite(day_chg) and abs(day_chg) >= 5.0:   # E488: an infinite change (previous close 0) is not a 5% move
                 movers.add(sym)
 
     out = sorted(movers)
@@ -1906,6 +1958,27 @@ def _news_symbol_is_ambiguous(sym: str) -> bool:
     return sym in _NEWS_AMBIGUOUS_WORD_SYMBOLS
 
 
+def _news_feed_timeout_s() -> float:
+    try:
+        v = float((os.getenv("NEWS_FEED_TIMEOUT_S") or "").strip() or "10")
+    except ValueError:
+        v = 10.0
+    return min(max(v, 1.0), 60.0) if v == v else 10.0
+
+
+def _news_feed_parse(url: str):
+    """E483: download the feed with a timeout, then parse the bytes. `feedparser.parse(url)` opens the URL itself with no timeout, so one
+    Google News connection that is accepted and never answered blocked the calling thread for good; that thread is the scan-universe rebuild
+    (which holds _UNIVERSE_REFRESH_LOCK, so no later rebuild could start) or the /hot-stocks news step. A non-200 answer gives an empty feed,
+    as feedparser did; a timeout or connection error raises and the caller skips that one query."""
+    resp = httpx.get(url, timeout=_news_feed_timeout_s(), follow_redirects=True,
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                              "Accept": "application/rss+xml, application/xml, text/xml, */*"})
+    if resp.status_code != 200:
+        return feedparser.parse(b"")
+    return feedparser.parse(resp.content)
+
+
 def _get_news_mentioned_symbols() -> List[str]:
     """Symbols appearing in fresh market news (results, bulk deals, upgrades)."""
     mentioned: list[str] = []
@@ -1920,7 +1993,7 @@ def _get_news_mentioned_symbols() -> List[str]:
     try:
         for q in queries:
             try:
-                feed = feedparser.parse(
+                feed = _news_feed_parse(
                     f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
                 )
                 for e in (feed.entries or [])[:20]:
@@ -2513,8 +2586,10 @@ def _build_scan_universe() -> List[str]:
     except Exception as e:
         logger.warning(f"Failed to fetch event symbols: {e}")
 
-    universe.update(_load_watchlist())
-    universe.update(_load_searched())
+    _watch_syms = _load_watchlist()       # E484: read once; the same lists are pinned ahead of the cut below
+    _searched_syms = _load_searched()
+    universe.update(_watch_syms)
+    universe.update(_searched_syms)
     for target in SYMBOL_ALIASES.values():
         if isinstance(target, list):
             universe.update(target)
@@ -2574,7 +2649,7 @@ def _build_scan_universe() -> List[str]:
     # evolve over time, not just get reshuffled by whatever the live sources
     # happen to return this cycle. Watchlist symbols are always kept
     # regardless of performance; a user's own watchlist is never auto-pruned.
-    watchlist_set = set(_load_watchlist())
+    watchlist_set = set(_watch_syms)
     before_prune = len(clean)
     clean = [s for s in clean if s in watchlist_set or not _is_symbol_pruned(s)]
     pruned_count = before_prune - len(clean)
@@ -2595,9 +2670,25 @@ def _build_scan_universe() -> List[str]:
     except Exception as e:
         logger.warning("dynamic priority merge failed: %s", e)
 
-    _prio_set = set(dynamic_priority)                       # E409: was rebuilt for every symbol
+    # E484: the user's watchlist and recently searched names go right after the dynamic names. They were merged into `universe` (a set) with
+    # everything else and ended up in `rest` in hash order, so when the dynamic sources plus the base list came to more than the target the cut
+    # below dropped a random share of them (reproduced: 5 watchlist names, ~270 dynamic names, target 500 -> two missing per build on average),
+    # although a name the user put on the watchlist is meant to be scanned (the prune step above already exempts it). Watchlist first, then
+    # searched; a name pruned above is not in `clean`, so it stays out as before.
+    pinned: List[str] = []
+    try:
+        _pin_seen = set(dynamic_priority)
+        _clean_set_pin = set(clean)
+        for _raw in list(_watch_syms or []) + list(_searched_syms or []):
+            _c = _clean_equity_symbol(_raw)
+            if _c and _c in _clean_set_pin and _c not in _pin_seen:
+                _pin_seen.add(_c)
+                pinned.append(_c)
+    except Exception as e:
+        logger.warning("watchlist pin failed: %s", e)
+    _prio_set = set(dynamic_priority) | set(pinned)         # E409: was rebuilt for every symbol
     rest = [s for s in clean if s not in _prio_set]
-    ordered = dynamic_priority + rest
+    ordered = dynamic_priority + pinned + rest
 
     # Target ~SCAN_UNIVERSE_TARGET names (default 500); if live sources thin, pad
     # from the liquid NSE list. Padding floor scales with the target instead of
@@ -2926,20 +3017,34 @@ UNIVERSE_GRACE_PERIOD_SCANS = 3
 SYMBOL_PERF_TTL = 30 * 86400  # 30-day rolling window
 
 def _record_symbol_outcomes(results: list):
+    # E492: both callers (the full scan and /scan/watchlist) run this AFTER every symbol is scored and before the result is returned / saved, and
+    # it was unguarded: one stored row that was not a dict, or whose counters were None / text (E451 guarded the read side in _is_symbol_pruned
+    # only), or one failing kv write, raised out of it and lost the whole scan. A row that cannot be read now starts again from zero, and a
+    # failure on one symbol never stops the others.
     for r in results:
-        symbol = r.get("symbol")
-        decision = r.get("decision")
-        if not symbol or decision in (None, "ERROR"):
-            continue
-        key = SYMBOL_PERF_KEY_PREFIX + symbol
-        state = _redis_get(key) or {"weak_streak": 0, "total_scans": 0, "last_actionable_at": None}
-        state["total_scans"] = state.get("total_scans", 0) + 1
-        if decision in ("BUY NOW", "PREPARE TO BUY"):
-            state["weak_streak"] = 0
-            state["last_actionable_at"] = datetime.now(IST).isoformat()
-        else:
-            state["weak_streak"] = state.get("weak_streak", 0) + 1
-        _redis_set(key, state, ttl=SYMBOL_PERF_TTL)
+        try:
+            symbol = r.get("symbol")
+            decision = r.get("decision")
+            if not symbol or decision in (None, "ERROR"):
+                continue
+            key = SYMBOL_PERF_KEY_PREFIX + symbol
+            state = _redis_get(key)
+            if not isinstance(state, dict):
+                state = {"weak_streak": 0, "total_scans": 0, "last_actionable_at": None}
+            else:
+                state = dict(state)
+                for _c in ("total_scans", "weak_streak"):
+                    _v = state.get(_c, 0)
+                    state[_c] = _v if isinstance(_v, int) and not isinstance(_v, bool) else 0
+            state["total_scans"] = state.get("total_scans", 0) + 1
+            if decision in ("BUY NOW", "PREPARE TO BUY"):
+                state["weak_streak"] = 0
+                state["last_actionable_at"] = datetime.now(IST).isoformat()
+            else:
+                state["weak_streak"] = state.get("weak_streak", 0) + 1
+            _redis_set(key, state, ttl=SYMBOL_PERF_TTL)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("symbol outcome record skipped: %s", e)
 
 def _is_symbol_pruned(symbol: str) -> bool:
     state = _redis_get(SYMBOL_PERF_KEY_PREFIX + symbol)
@@ -3004,7 +3109,11 @@ def _gw_env_num(name: str, default: float) -> float:
 
 
 def _gw_quote_px(data) -> Optional[float]:
-    """First positive price field of a market-data quote dict (same order as the per-symbol path)."""
+    """First positive, FINITE price field of a market-data quote dict (same order as the per-symbol path).
+
+    E485: `px > 0` alone accepted +inf ("Infinity" in the JSON body, which Python's reader allows, or 1e999): it was returned as the price, kept in
+    `_GW_BULK_PX_CACHE` for the cache window and used for the scan price / movers row (E452 closed the same gap in `_fetch_price_from_quote`). An
+    infinite field now falls through to the next key, like a NaN already did."""
     if not isinstance(data, dict):
         return None
     for k in ("price", "close", "ltp", "regularMarketPrice", "last"):
@@ -3012,7 +3121,7 @@ def _gw_quote_px(data) -> Optional[float]:
         if v is not None:
             try:
                 px = float(v)
-                if px > 0:
+                if math.isfinite(px) and px > 0:
                     return px
             except (TypeError, ValueError):
                 pass
@@ -3302,16 +3411,19 @@ async def _refresh_fundamental_upstream(symbol: str, client: httpx.AsyncClient, 
                 ttl=STATIC_PARAM_TTL,
             )
             try:
-                payload = extract_feed_payload(symbol, fundamental=data, events=None)
-                # merge with existing feed events if present
                 existing = await asyncio.to_thread(_feed_store().get_symbol, symbol) or {}  # group303
+                # E490: no feed row yet -> do not create a fundamentals-only row (no price; it would enter the feed index and the
+                # Health Audit as incomplete). Same rule as E436 for events. The short Redis copy above already serves repeat calls,
+                # and the feed job / Repair create the row once a price exists.
                 if existing:
+                    payload = extract_feed_payload(symbol, fundamental=data, events=None)
+                    # merge with existing feed events
                     for k in ("bulk_deals", "recent_insider_transactions", "earnings_surprise",
                               "next_earnings_date", "event_summary", "has_positive_catalyst",
                               "recent_event_score"):
                         if existing.get(k) is not None and payload.get(k) in (None, [], ""):
                             payload[k] = existing.get(k)
-                await asyncio.to_thread(_feed_store().put_symbol, symbol, payload, DATA_FEED_TTL)  # group303: 1 read + 3 writes + index = ~5 Oracle round trips
+                    await asyncio.to_thread(_feed_store().put_symbol, symbol, payload, DATA_FEED_TTL)  # group303: 1 read + 3 writes + index = ~5 Oracle round trips
             except Exception as e:
                 logger.debug("data feed write-through fund: %s", e)
             if data.get("fundamental_score") is not None:
@@ -3819,7 +3931,10 @@ def _cleanup_scan_resources(pool, client, not_done, deadline_seconds):
     then force-releases the thread pool and HTTP client either way so a
     slow watchlist scan can never leak connections/threads across calls.
     """
-    grace = float(((os.getenv("WATCHLIST_SCAN_GRACE_SECONDS") or "").strip() or "30"))
+    try:
+        grace = float(((os.getenv("WATCHLIST_SCAN_GRACE_SECONDS") or "").strip() or "30"))
+    except ValueError:   # E491: a typo here raised out of this thread before the pool and client below were released
+        grace = 30.0
     try:
         if not_done:
             wait(not_done, timeout=grace)
@@ -4214,6 +4329,26 @@ def _decide_cache_copy(row):
         return dict(row) if isinstance(row, dict) else row
 
 
+def _warm_local_feed_row(base_sym: str, feed_row) -> None:
+    """E484: put a feed row into data_feed's process-local cache so later `get_symbol` calls hit memory, but ONLY when the slot is empty.
+
+    The row handed to `_analyze_one_symbol_ultra` is the scan's bulk-prefetch snapshot, taken before the scan started; a full scan runs for minutes.
+    The old code wrote that snapshot over `_LOCAL_SYMBOLS[prefix + sym]` unconditionally, so a live price patch, a bulk feed write or a structure
+    refresh (`replace_fields`) that had landed since the prefetch was rewound in memory, and only the canonical key (alias / legacy keys kept the newer
+    row, and `get_symbol` reads the canonical one first). The next `put_symbol` / `patch_feed_price` then used that older row as its merge base
+    and wrote it to the durable store. `get_symbols_bulk` / `get_symbol` already warm the cache themselves, so a filled slot is left alone.
+    Never raises."""
+    try:
+        from data_feed import DATA_FEED_PREFIX as _dfp, _LOCAL_SYMBOLS as _ls, _LOCAL_INDEX as _li
+        key = _dfp + base_sym
+        cur = _ls.get(key)
+        if not (isinstance(cur, dict) and cur):
+            _ls[key] = dict(feed_row)
+        _li.add(base_sym)
+    except Exception:
+        pass
+
+
 async def _analyze_one_symbol_ultra(
     symbol: str,
     client: httpx.AsyncClient,
@@ -4255,13 +4390,7 @@ async def _analyze_one_symbol_ultra(
                     except Exception:
                         feed_row = None
                 if isinstance(feed_row, dict) and feed_row:
-                    # Warm process-local cache so later get_symbol hits memory
-                    try:
-                        from data_feed import DATA_FEED_PREFIX as _dfp, _LOCAL_SYMBOLS as _ls, _LOCAL_INDEX as _li
-                        _ls[_dfp + base_sym] = dict(feed_row)
-                        _li.add(base_sym)
-                    except Exception:
-                        pass
+                    _warm_local_feed_row(base_sym, feed_row)   # E484: fills an empty slot only
 
                 # Lite mode: NEVER wait on decision-engine (45s) — free-tier scan must stay fast.
                 # Prefer Neon feed row; otherwise quote-only HOLD with a real price when available.
@@ -5271,7 +5400,7 @@ def _movers_rows_from_market_data(symbols: List[str]) -> List[dict]:
                 lo = _hot_float(q.get("day_low")) or px
                 try:
                     vol = int(float(q.get("volume") or 0))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):   # E485: int(float("inf")) raises OverflowError (E453 fixed the same in the repair path); it fell to the chunk-level except and dropped the rest of the chunk's rows
                     vol = 0
                 out.append({
                     "symbol": base,
@@ -6390,6 +6519,26 @@ def _hot_payload_fingerprint(payload: dict) -> str:
         return ""
 
 
+def _hot_rank_items(items: list) -> list:
+    """Hot Picks section order, moved out of `stockky_hot_stocks` (E486) with the same rules: scan-seeded first, then signal strength, decision, score,
+    headline count. E486: the score is read with `_scan_num`. `-(x.get("score") or 0)` raised TypeError for a text score ("72", "N/A") and ordered
+    on NaN for a NaN one; the score comes from the last-scan seed (`combined_score or score`), where E472 found text / NaN scores, and the raise came
+    AFTER every symbol's news / event / price work, so the whole Hot Picks refresh failed and nothing was cached. A junk score ranks as 0."""
+    order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
+    strength = {"high": 0, "medium": 1, "low": 2}
+
+    def _key(x):
+        x = x if isinstance(x, dict) else {}
+        return (
+            0 if x.get("from_scan") else 1,
+            strength.get(x.get("signal_strength") or "low", 9),
+            order.get(x.get("decision") or "", 9),
+            -(_scan_num(x.get("score")) or 0),
+            -(_scan_num(x.get("headline_count")) or 0),
+        )
+    return sorted(items, key=_key)
+
+
 async def _warm_upstream_services(client: Optional[httpx.AsyncClient] = None) -> None:
     """Ping gateway deps so free-tier does not sleep between batches."""
     if not _wake_pings_enabled():
@@ -6461,6 +6610,8 @@ def _build_hot_conviction_extra(decide_full, last_decision):
         for k in keys:
             v = src.get(k)
             if v is not None and v != "N/A":
+                if isinstance(v, float) and not math.isfinite(v):
+                    continue   # E486: a NaN / inf score went into the card row (and the JSON reply); the other source's value, or none, is used instead
                 out[k] = v
     # Derive a Horizon label when we have entry+target but no explicit estimate.
     if "holding_period_estimate" not in out:
@@ -6744,7 +6895,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
                 conviction_extra = _build_hot_conviction_extra(_decide_full, decision_data)
 
                 decision = (decision_data or {}).get("decision") or "DO NOT BUY"
-                score = (decision_data or {}).get("score")
+                score = _scan_num((decision_data or {}).get("score"))   # E486: a text / NaN seed score is "no score" (it broke the ranking and, as NaN, the JSON reply)
                 reasons = (decision_data or {}).get("reasons") or []
                 if isinstance(reasons, dict):
                     flat = []
@@ -6947,19 +7098,7 @@ async def stockky_hot_stocks(force: bool = False, max_symbols: Optional[int] = N
         except Exception as _pe:
             logger.debug("stockky-hot price pass-2 failed (non-fatal): %s", _pe)
 
-    def _rank(items: list) -> list:
-        order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
-        strength = {"high": 0, "medium": 1, "low": 2}
-        return sorted(
-            items,
-            key=lambda x: (
-                0 if x.get("from_scan") else 1,
-                strength.get(x.get("signal_strength") or "low", 9),
-                order.get(x.get("decision") or "", 9),
-                -(x.get("score") or 0),
-                -(x.get("headline_count") or 0),
-            ),
-        )
+    _rank = _hot_rank_items   # E486: module-level, tolerant of text / NaN scores
 
     # Prefer bulk/results; keep news thinner
     payload = {
@@ -7508,10 +7647,10 @@ async def _deliver_triggered_price_alerts(triggered, max_individual: int = _PRIC
             )
             await _post(f"Price Alert · {t.get('symbol')}", msg)
             out["individual"] += 1
-            await _ws(t)
         except Exception as e_alert:   # group 451: was `pass` - a price alert that could not be sent vanished without a trace (its cooldown is already used)
             out["failed"] += 1
             logger.warning("price alert for %s was NOT delivered: %s: %s", t.get("symbol"), type(e_alert).__name__, e_alert)
+        await _ws(t)   # E489: after the try, so an alert whose notification failed still reaches the open browser tabs (the docstring promised every alert a push; the digest branch already did)
     if rest:
         try:
             await asyncio.to_thread(_wake_notification_service)
@@ -8184,7 +8323,16 @@ def _start_structure_refresh_locked(force: bool, dry_run: bool, limit: Optional[
             except Exception:  # noqa: BLE001
                 pass
 
-    threading.Thread(target=_worker, name="structure-refresh", daemon=True).start()
+    try:
+        threading.Thread(target=_worker, name="structure-refresh", daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        # E491: the job was already marked running above; if the thread could not start nothing would ever clear it and every later start
+        # (and the catch-up loop) would see "running" and back off.
+        try:
+            _sr._set_job(status="error", message=f"could not start the worker thread: {str(e)[:200]}")
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     return {"ok": True, "status": "running", "message": "Structure refresh started (planning in the background); poll /data-feed/structure-refresh/status"}
 
 
@@ -8718,6 +8866,25 @@ def _repair_row_for_write(original: dict, patched_row: dict, fresh) -> dict:
     return row
 
 
+def _repair_apply_quote_extras(current: dict, cleaned: dict) -> None:
+    """E487: copy `previous_close`, `day_high`, `day_low` and `day_change_pct` from a market-data quote into the repaired feed row, usable numbers only.
+    The repair copied them as sent (only None was filtered): a NaN / inf (Python's JSON reader accepts `NaN` and `Infinity`) or text value went into the
+    stored row and replaced a good stored one; E475 closed the same gap for the technical-service extras. A finite number is stored with its type kept
+    (numeric text is parsed); anything else leaves the row's existing value alone. Mutates `current`; never raises."""
+    for ok in ("previous_close", "day_high", "day_low", "day_change_pct"):
+        v = _scan_num(cleaned.get(ok)) if isinstance(cleaned, dict) else None
+        if v is not None:
+            current[ok] = v
+
+
+def _repair_clean_metrics(metrics) -> dict:
+    """E487: a fundamental reply's `metrics` without None and without NaN / inf floats, so merging it over the row's stored metrics cannot replace a
+    real stored value with NaN (repair promises never to wipe a valid value)."""
+    if not isinstance(metrics, dict):
+        return {}
+    return {k: v for k, v in metrics.items() if v is not None and not (isinstance(v, float) and not math.isfinite(v))}
+
+
 async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) -> dict:
     """
     Surgically fetch ONLY missing fields and merge into existing Neon feed blob.
@@ -8935,9 +9102,7 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
                             if _safe_float(current.get(_alias)) <= 0:
                                 current[_alias] = px
                         # Real OHLCV from Yahoo 2d when present
-                        for ok in ("previous_close", "day_high", "day_low", "day_change_pct"):
-                            if cleaned.get(ok) is not None:
-                                current[ok] = cleaned[ok]
+                        _repair_apply_quote_extras(current, cleaned)   # E487: finite numbers only
                         if cleaned.get("volume") is not None:
                             try:
                                 vol = int(float(cleaned["volume"]))
@@ -9038,13 +9203,14 @@ async def _patch_single_stock_feed_impl(symbol: str, client: httpx.AsyncClient) 
                     current.pop("roce_seed", None)       # E407
                     patched.append("roce")
                     missing.discard("roce")       # keep the real ROCE out of the seed block
-                if f.get("fundamental_score") is not None and current.get("fundamental_score") is None:
-                    current["fundamental_score"] = f.get("fundamental_score")
+                _fs = _scan_num(f.get("fundamental_score"))   # E487: a NaN / inf / text score was stored as sent
+                if _fs is not None and current.get("fundamental_score") is None:
+                    current["fundamental_score"] = _fs
                 if f.get("sector") and not current.get("sector"):
                     current["sector"] = f.get("sector")
                 if metrics:
                     cur_m = current.get("metrics") if isinstance(current.get("metrics"), dict) else {}
-                    current["metrics"] = {**cur_m, **{k: v for k, v in metrics.items() if v is not None}}
+                    current["metrics"] = {**cur_m, **_repair_clean_metrics(metrics)}
             elif r.status_code in (401, 429):
                 logger.warning("repair fund %s HTTP %s — backing off", base, r.status_code)
                 await asyncio.sleep(cooldown * 2)
@@ -9370,7 +9536,15 @@ app.include_router(_bound_routes_d.stockky_hot_repair_batch_router)
 
 # ── OS signal hooks (Render deploy / free-tier SIGTERM) ─────────────────────
 def _install_signal_handlers() -> None:
-    """Ensure SIGTERM/SIGINT commit checkpoints even if uvicorn path is skipped."""
+    """Ensure SIGTERM/SIGINT commit checkpoints even if uvicorn path is skipped.
+
+    E491: the handler used to REPLACE whatever was installed before it. The module is imported by uvicorn, and depending on the uvicorn
+    version that import happens either before uvicorn installs its own handlers (ours is then overwritten and only runs again after
+    shutdown) or after (ours overwrote uvicorn's `Server.handle_exit`, so a SIGTERM committed the checkpoint but never told uvicorn to
+    stop and the container hung until SIGKILL). Each handler now remembers the one it replaced and calls it after the commit, so uvicorn
+    still starts its normal shutdown. The Python default SIGINT handler (it only raises KeyboardInterrupt) and SIG_DFL / SIG_IGN are
+    not chained, as before.
+    """
     import signal
 
     _once = getattr(_install_signal_handlers, "_installed", False)
@@ -9378,17 +9552,25 @@ def _install_signal_handlers() -> None:
         return
     _install_signal_handlers._installed = True  # type: ignore[attr-defined]
 
-    def _handle(signum, frame):
-        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
-        logger.warning("Received %s — running graceful shutdown commit", name)
-        try:
-            _graceful_shutdown_commit(reason=f"signal_{name}")
-        except Exception as e:
-            logger.warning("signal shutdown commit failed: %s", e)
+    def _make_handler(previous):
+        def _handle(signum, frame):
+            name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+            logger.warning("Received %s — running graceful shutdown commit", name)
+            try:
+                _graceful_shutdown_commit(reason=f"signal_{name}")
+            except Exception as e:
+                logger.warning("signal shutdown commit failed: %s", e)
+            if callable(previous) and previous is not getattr(signal, "default_int_handler", None):
+                previous(signum, frame)
+        return _handle
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(sig, _handle)
+            _prev = signal.getsignal(sig)
+        except Exception:
+            _prev = None
+        try:
+            signal.signal(sig, _make_handler(_prev))
         except Exception as e:
             logger.debug("signal %s install: %s", sig, e)
 

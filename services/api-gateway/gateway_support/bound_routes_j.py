@@ -618,9 +618,20 @@ def build_bound_routes_j(ref):
         # pattern already used by /scan's own asyncio.Semaphore(8). Outer
         # concurrency is back down to a modest default; it no longer needs to
         # carry the load-limiting responsibility, the semaphore does.
-        _SCAN_CONCURRENCY = int(((ref.os.getenv("WATCHLIST_SCAN_CONCURRENCY") or "").strip() or "4"))
-        _SCAN_HTTP_CONCURRENCY = int(((ref.os.getenv("WATCHLIST_SCAN_HTTP_CONCURRENCY") or "").strip() or str(ref.MAX_PARALLEL_WORKERS)))
-        _SCAN_DEADLINE_SECONDS = float(((ref.os.getenv("WATCHLIST_SCAN_TIMEOUT_SECONDS") or "").strip() or "18"))
+        # E492: these three were bare int() / float() calls, so a typo in an env var ("4 ", "8x", "18s", "nan") raised out of the route
+        # (HTTP 500 on every /scan/watchlist call) instead of using the default. An unreadable value now means the default.
+        def _wl_env(name, default, cast):
+            try:
+                v = cast(((ref.os.getenv(name) or "").strip() or str(default)))
+                if cast is float and not (ref.math.isfinite(v) and v > 0):
+                    return default
+                return v
+            except (TypeError, ValueError, OverflowError):
+                return default
+
+        _SCAN_CONCURRENCY = _wl_env("WATCHLIST_SCAN_CONCURRENCY", 4, int)
+        _SCAN_HTTP_CONCURRENCY = _wl_env("WATCHLIST_SCAN_HTTP_CONCURRENCY", ref.MAX_PARALLEL_WORKERS, int)
+        _SCAN_DEADLINE_SECONDS = _wl_env("WATCHLIST_SCAN_TIMEOUT_SECONDS", 18.0, float)
         _http_sem = ref.threading.BoundedSemaphore(max(1, _SCAN_HTTP_CONCURRENCY))
 
         def _scan_one_symbol(client: ref.httpx.Client, symbol: str):
@@ -629,6 +640,7 @@ def build_bound_routes_j(ref):
             resp.raise_for_status()
             raw = resp.json()
             normalized = ref._normalize_decision_response(raw, symbol)
+            ref._reasons_dict(normalized)   # E492: a null / non-dict `reasons` from the decision service made the news and event merges below raise (E413 fixed the same in the async analyzer)
 
             # Fix (30 Aug 2026): these four enrichment lookups (price fallback,
             # fundamentals merge, news, events, prediction) are independent of
@@ -715,7 +727,7 @@ def build_bound_routes_j(ref):
             news = job_results.get("news")
             if news:
                 normalized["news_score"] = news.get("news_score")
-                reasons = normalized.get("reasons", {})
+                reasons = ref._reasons_dict(normalized)
                 if news.get("reasons"):
                     reasons["news"] = news["reasons"]
                     normalized["reasons"] = reasons
@@ -731,7 +743,7 @@ def build_bound_routes_j(ref):
                 if _er_line:
                     if _er:
                         normalized["event_risk"] = True
-                    reasons = normalized.get("reasons", {})
+                    reasons = ref._reasons_dict(normalized)
                     reasons["event"] = [_er_line]
                     normalized["reasons"] = reasons
 
@@ -745,7 +757,8 @@ def build_bound_routes_j(ref):
             # string is (often a static "2-6 weeks" or "N/A") — kept as
             # a separate field so nothing that already reads
             # holding_period breaks.
-            entry = normalized.get("entry_range") or {}
+            entry = normalized.get("entry_range")
+            entry = entry if isinstance(entry, dict) else {}   # E492: a text / list entry_range raised AttributeError and dropped the symbol
             entry_price = entry.get("low") or normalized.get("close")
             normalized["holding_period_estimate"] = ref._estimate_holding_period(
                 entry_price, normalized.get("target"), normalized.get("decision")
@@ -814,38 +827,18 @@ def build_bound_routes_j(ref):
         actionable = [r for r in results if r.get("decision") in ("BUY NOW", "PREPARE TO BUY")]
         top_picks = ref._select_top_picks(actionable, limit=5)
         # horizon picks for watchlist scan
+        # E493: the closure that stood here did arithmetic and `>=` on the decision service's scores as sent, so one text / NaN score raised
+        # TypeError at the very end of the scan and the whole response was lost. The full scan already had this board as `_scan_horizon_picks`
+        # (E472, same rules, scores coerced); both now use it.
         def _horizon_picks_wl(results_list, horizon_key, limit=5):
-            scored = []
-            for r in results_list:
-                if r.get("decision") == "ERROR":
-                    continue
-                hz = (r.get("horizons") or {}).get(horizon_key) or {}
-                sc = hz.get("score")
-                if sc is None:
-                    sc = r.get("combined_score", 0) or 0
-                    if horizon_key == "mid":
-                        sc = sc * 0.95
-                    elif horizon_key == "long":
-                        sc = (r.get("fundamental_score") or sc) * 0.9 + (r.get("combined_score") or 0) * 0.1
-                decision = hz.get("decision") or r.get("decision")
-                min_sc = {"short": 54, "mid": 56, "long": 58}.get(horizon_key, 54)
-                # A DO NOT BUY row is never promoted to PREPARE TO BUY on score alone
-                # (it used to be, which put "Top N Picks" under a "DO NOT BUY ANY
-                # STOCK TODAY" verdict). An empty board still falls back to the
-                # overall ranking below, with each row's true decision.
-                if decision in ("DO NOT BUY", "SELL"):
-                    continue
-                if decision in ("BUY NOW", "PREPARE TO BUY") or (sc or 0) >= min_sc:
-                    scored.append({**r, "_hz_score": sc, "horizon_focus": horizon_key})
-            scored.sort(key=ref._board_rank_key, reverse=True)
-            return scored[:limit]
+            return ref._scan_horizon_picks(results_list, horizon_key, limit)
         top_picks_short = _horizon_picks_wl(results, "short")
         top_picks_mid = _horizon_picks_wl(results, "mid")
         top_picks_long = _horizon_picks_wl(results, "long")
         # Guarantee Top-5 boards never empty (watchlist scan path)
         sorted_all = sorted(
             [r for r in results if r.get("decision") != "ERROR"],
-            key=lambda x: x.get("combined_score", 0) or 0,
+            key=ref._score_sort_key,   # E493: a text combined_score raised TypeError here
             reverse=True,
         )
         if not top_picks_short:
@@ -943,10 +936,12 @@ def build_bound_routes_j(ref):
             picks = recs
 
         def _num(v):
+            # E493: NaN / inf are not prices; they printed as "Current: ₹nan" (and an inf close gave a NaN upside) in the Telegram message.
             try:
-                return float(v) if v is not None else None
+                f = float(v) if v is not None else None
             except (TypeError, ValueError):
                 return None
+            return f if f is not None and ref.math.isfinite(f) else None
 
         def _fmt_holding(h):
             # scan_watchlist attaches holding_period_estimate as a dict; print it
@@ -1106,7 +1101,14 @@ def build_bound_routes_j(ref):
         async def event_generator():
             t0 = ref.time.time()
             client = ref._get_http_client()
-            n_static = await ref.asyncio.to_thread(surprise_engine.load_static_cache, bool(force_reload))  # group302: blocking SQL, off the loop
+            try:
+                n_static = await ref.asyncio.to_thread(surprise_engine.load_static_cache, bool(force_reload))  # group302: blocking SQL, off the loop
+            except Exception as e:
+                # E494: a DB error here ended the response mid-stream with no "done" line; the page waited on a scan that never finished
+                ref.logger.warning("surprise stream: static cache load failed: %s", e)
+                yield ref.json.dumps({"_meta": True, "event": "error", "error": f"surprise static cache load failed: {str(e)[:160]}"}) + "\n"
+                yield ref.json.dumps({"_meta": True, "event": "done", "hits": 0, "universe": 0, "elapsed": 0}) + "\n"
+                return
             yield ref.json.dumps({
                 "_meta": True,
                 "event": "static_loaded",
@@ -1167,14 +1169,19 @@ def build_bound_routes_j(ref):
                     ticks = [None] * len(batch)
 
                 for sym, tick in zip(batch, ticks):
-                    if isinstance(tick, BaseException) or not tick:   # E417: a cancelled quote child is truthy and used to reach score_stock
+                    if isinstance(tick, BaseException) or not tick or not isinstance(tick, dict):   # E417: a cancelled quote child is truthy and used to reach score_stock; E494: so did any non-dict reply
                         # No quote: nothing real to score. Scoring an empty tick
                         # could still return a "hit" built from the baseline alone.
                         quotes_failed += 1
                         continue
                     quotes_ok += 1
-                    scored = surprise_engine.score_stock(sym, tick)
-                    if scored:
+                    try:
+                        scored = surprise_engine.score_stock(sym, tick)
+                    except Exception as e:
+                        # E494: one symbol's bad tick raised out of the generator and cut the whole stream (no later hits, no "done" line)
+                        ref.logger.warning("surprise stream: score_stock(%s) failed: %s", sym, e)
+                        continue
+                    if scored and isinstance(scored, dict):
                         hits += 1
                         scored["_progress"] = {
                             "processed": min(i + chunk, total),
@@ -1183,7 +1190,9 @@ def build_bound_routes_j(ref):
                             "quotes_ok": quotes_ok,
                             "elapsed": round(ref.time.time() - t0, 1),
                         }
-                        yield ref.json.dumps(scored, default=str) + "\n"
+                        # E494: `json.dumps` writes a NaN / inf score as the bare token NaN / Infinity, which the browser's JSON.parse rejects
+                        # (that line, and with a line-by-line reader the rest of the stream, was lost). `_ws_dumps` turns them into null first.
+                        yield ref._ws_dumps(scored) + "\n"
 
                 processed = min(i + chunk, total)
                 elapsed = round(ref.time.time() - t0, 1)
@@ -1256,6 +1265,9 @@ def build_bound_routes_j(ref):
                 "message": result.get("error") or "No Surprise Momentum picks available right now.",
             }
 
+        stocks = [s for s in stocks if isinstance(s, dict)]   # E494: one non-dict entry raised AttributeError on `.get` and the button answered 500
+        if not stocks:
+            return {"ok": False, "sent": False, "count": 0, "message": "No Surprise Momentum picks available right now."}
         top = stocks[: max(1, min(int(top_n), 20))]
         lines = [f"🎯 *Surprise Momentum — Top {len(top)} Picks*"]
         for i, s in enumerate(top, 1):
@@ -1268,13 +1280,16 @@ def build_bound_routes_j(ref):
             stop = s.get("trailing_stop")
             trig = s.get("trigger_type") or ""
             try:
-                chg_str = f"{float(chg):+.2f}%"
+                _chg_f = float(chg)
+                chg_str = f"{_chg_f:+.2f}%" if ref.math.isfinite(_chg_f) else "—"   # E494: NaN / inf printed "+nan%" / "+inf%"
             except (TypeError, ValueError):
                 chg_str = "—"
 
             def _val(v, money=False):
-                # A missing field prints a dash, never "None" / "₹None".
+                # A missing field prints a dash, never "None" / "₹None" (E494: nor "₹nan" / "₹inf").
                 if v is None or v == "":
+                    return "—"
+                if isinstance(v, float) and not ref.math.isfinite(v):
                     return "—"
                 return f"₹{v}" if money else str(v)
 
@@ -1423,7 +1438,9 @@ def build_bound_routes_j(ref):
                 picks = []
                 for section in ("bulk_insider_driven", "results_driven", "news_driven"):
                     for item in (hot or {}).get(section) or []:
-                        dec = (item.get("decision") or "").upper()
+                        if not isinstance(item, dict):
+                            continue
+                        dec = str(item.get("decision") or "").upper()
                         # A "high" signal must not list a DO NOT BUY / SELL row.
                         if dec in ("BUY NOW", "PREPARE TO BUY") or (
                             item.get("signal_strength") == "high" and dec not in ("DO NOT BUY", "SELL")
@@ -1431,7 +1448,8 @@ def build_bound_routes_j(ref):
                             picks.append({**item, "section": section})
 
                 rank_sec = {"bulk_insider_driven": 0, "results_driven": 1, "news_driven": 2}
-                picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(x.get("score") or 0)))
+                # E493: `-(score or 0)` raised TypeError on a text score and let a NaN one scramble the order, after the whole universe was scored
+                picks.sort(key=lambda x: (rank_sec.get(x.get("section"), 9), -(ref._hot_float(x.get("score")) or 0.0)))
                 seen = set()
                 unique = []
                 for p in picks:
@@ -1493,7 +1511,9 @@ def build_bound_routes_j(ref):
                         # the primary /notify POST above failed. Call it directly;
                         # the surrounding try/except already covers a real failure.
                         try:
-                            ref.send_picks_to_telegram({"recommendations": unique[:10]})
+                            # E493: it is a plain function that blocks on httpx for up to 15 s per part (plus a 5 s wake ping); called inline it
+                            # froze the event loop for every other request whenever the notification service was down.
+                            await ref.asyncio.to_thread(ref.send_picks_to_telegram, {"recommendations": unique[:10]})
                             notified = True
                         except Exception as e2:
                             ref.logger.warning("catalyst telegram fallback: %s", e2)
@@ -1640,6 +1660,8 @@ def build_bound_routes_j(ref):
                                     _body = _r.json()
                                     _quotes = _body.get("quotes") or []
                                     for _q in _quotes:
+                                        if not isinstance(_q, dict):   # E494: one non-dict entry raised and dropped the rest of the 50-symbol chunk
+                                            continue
                                         _sym_q = str(_q.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "").strip()
                                         if not _sym_q:
                                             continue
@@ -1647,7 +1669,7 @@ def build_bound_routes_j(ref):
                                         for _k in ("price", "ltp", "close", "cmp", "last_price"):
                                             try:
                                                 _v = float(_q.get(_k) or 0)
-                                                if _v > 0:
+                                                if ref.math.isfinite(_v) and _v > 0:   # E494: "inf" passed `_v > 0` and was written as price / ltp / close
                                                     _px = _v
                                                     break
                                             except (TypeError, ValueError):
@@ -1795,7 +1817,7 @@ def build_bound_routes_j(ref):
                 if force:
                     try:
                         if ref._redis:
-                            ref._redis.delete(ref.HOT_STOCKS_CACHE_KEY)
+                            await ref.asyncio.to_thread(ref._redis.delete, ref.HOT_STOCKS_CACHE_KEY)   # E494: can be a durable DB call, off the event loop
                     except Exception:
                         pass
                 result = await ref.stockky_hot_stocks(force=force, progress_cb=_on_symbol)
@@ -1886,15 +1908,29 @@ def build_bound_routes_j(ref):
                 "message": "No Hot Picks available right now — run a scan first.",
             }
 
-        merged = (
-            list(cached.get("bulk_insider_driven") or [])
-            + list(cached.get("results_driven") or [])
-            + list(cached.get("news_driven") or [])
-        )
+        merged = [
+            x for x in (
+                list(cached.get("bulk_insider_driven") or [])
+                + list(cached.get("results_driven") or [])
+                + list(cached.get("news_driven") or [])
+            ) if isinstance(x, dict)   # E494: a non-dict entry raised on `.get` in the sort key
+        ]
+        if not merged:
+            return {
+                "ok": False,
+                "sent": False,
+                "count": 0,
+                "message": "No Hot Picks available right now — run a scan first.",
+            }
         order = {"BUY NOW": 0, "PREPARE TO BUY": 1, "DO NOT BUY": 2, "SELL": 3}
-        merged.sort(key=lambda x: (order.get((x.get("decision") or "").upper(), 9), -(x.get("score") or 0)))
-        # `merged` is never empty here: _has_picks() above already returned early
-        # when all three lists were empty, so `top` always has at least one item.
+
+        def _hp_sort_key(x):
+            # E494: `-(score or 0)` raised TypeError on a text score (the "Send Top 5 to Telegram" button answered 500) and a NaN score
+            # scrambled the order. An unusable score sorts as 0; `decision` may also be a non-string.
+            _sc = ref._hot_float(x.get("score"))
+            return (order.get(str(x.get("decision") or "").upper(), 9), -(_sc if _sc is not None else 0.0))
+
+        merged.sort(key=_hp_sort_key)
         top = merged[: max(1, min(int(top_n), 20))]
 
         lines = [f"🔥 *Stockky Hot Picks — Top {len(top)}*"]
@@ -1902,8 +1938,16 @@ def build_bound_routes_j(ref):
             sym = s.get("symbol")
             decision = s.get("decision") or "—"
             score = s.get("score")
-            price = s.get("price") or s.get("close")
-            section = (s.get("section") or "").replace("_", " ")
+            if isinstance(score, float) and not ref.math.isfinite(score):
+                score = None   # E494: "score nan/100"
+            price = None
+            for _pk in ("price", "close"):
+                _pv = s.get(_pk)
+                # E494: a NaN / inf price is truthy and printed "₹nan" / "₹inf"; an unusable one now falls through to `close`, then "price n/a"
+                if _pv and ref._hot_float(_pv) is not None:
+                    price = _pv
+                    break
+            section = str(s.get("section") or "").replace("_", " ")
             price_str = f"₹{price}" if price else "price n/a"
             lines.append(f"{i}. {sym} — {decision} (score {score if score is not None else '—'}/100)\n   {price_str} · {section}")
         message = "\n".join(lines)

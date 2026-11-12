@@ -1612,10 +1612,17 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
                     continue
 
                 # Honour existing price cap used by the rest of the feed
-                try:
-                    px = float(q.get("price") or q.get("cmp") or 0)
-                except (TypeError, ValueError):
-                    px = 0.0
+                # E488: the first FINITE positive of price / cmp. `float(price or cmp or 0)` took a NaN price (a NaN is truthy, and `nan <= 0` /
+                # `nan > cap` are both False), so the row passed both checks with price NaN instead of falling back to a valid cmp or being skipped.
+                px = 0.0
+                for _pk in ("price", "cmp"):
+                    try:
+                        _pv = float(q.get(_pk) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(_pv) and _pv > 0:
+                        px = _pv
+                        break
                 if px <= 0:
                     continue
                 if MAX_STOCK_PRICE > 0 and px > MAX_STOCK_PRICE:
@@ -1624,6 +1631,13 @@ def bulk_yahoo_download_prices(symbols: List[str], chunk_size: int = None) -> Di
 
                 rec = dict(q)
                 rec["symbol"] = base
+                if "price" in rec:
+                    try:
+                        _rp = float(rec["price"])
+                    except (TypeError, ValueError):
+                        _rp = float("nan")
+                    if not (math.isfinite(_rp) and _rp > 0):
+                        rec["price"] = px   # E488: the usable price found above (a NaN / junk `price` next to a valid `cmp`)
                 # Normalize field names expected by downstream feed merge
                 if "price_refreshed_at" not in rec:
                     rec["price_refreshed_at"] = rec.get("fetched_at") or _now_iso()

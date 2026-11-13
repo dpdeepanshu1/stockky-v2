@@ -150,9 +150,9 @@ class TestFreshHighExemption:
         assert cd._env_flag_on("G379_X") is True
         assert cd._env_flag_on("G379_X", "0") is False
         monkeypatch.setenv("G379_F", "abc")
-        assert cd._env_float_or("G379_F", 7.5) == 7.5
+        assert cd.env_float_safe("G379_F", 7.5, lo=0) == 7.5
         monkeypatch.setenv("G379_F", " 3.25 ")
-        assert cd._env_float_or("G379_F", 7.5) == 3.25
+        assert cd.env_float_safe("G379_F", 7.5, lo=0) == 3.25
 
 
 # ── E2: the shared ETF name test ────────────────────────────────────────────────────────────────────────────

@@ -72,7 +72,12 @@ class TestPartialInputs:
     def test_gateway_fast_path_skips_a_partial_entry(self):
         from pathlib import Path
         src = (Path(_ROOT).parents[1] / "api-gateway" / "main.py").read_text(encoding="utf-8")
-        i = src.index("cached_decide = _redis_get(cache_key)")
+        import re
+        # E471 moved the lookup off the event loop: `cached_decide = await asyncio.to_thread(_redis_get, cache_key)`.
+        # Accept both the direct call and the thread-wrapped one so the guard follows the code, not one spelling.
+        m = re.search(r"cached_decide = (?:await asyncio\.to_thread\(_redis_get, cache_key\)|_redis_get\(cache_key\))", src)
+        assert m, "the gateway /decide fast path no longer reads cached_decide from _redis_get(cache_key)"
+        i = m.start()
         assert 'cached_decide.get("partial_inputs")' in src[i:i + 1600]   # E191 relaxed this: see test_e191_gateway_partial_cache_and_sentiment_zero.py
 
 

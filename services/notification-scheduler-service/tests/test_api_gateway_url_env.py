@@ -50,6 +50,9 @@ def _load(filename, raw, monkeypatch):
         monkeypatch.delenv("API_GATEWAY_URL", raising=False)
     else:
         monkeypatch.setenv("API_GATEWAY_URL", raw)
+    # The modules do `from env_util import ...` (E504) with a package-relative fallback. Loaded by file path there is no
+    # parent package, so the scheduler folder must be importable the way it is when the service runs (main.py puts it on sys.path).
+    monkeypatch.syspath_prepend(_SCHED)
     name = f"_gwurl_{next(_counter)}"
     spec = importlib.util.spec_from_file_location(name, os.path.join(_SCHED, filename))
     mod = importlib.util.module_from_spec(spec)

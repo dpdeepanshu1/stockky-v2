@@ -86,7 +86,9 @@ def test_a_raising_order_does_not_stop_the_others_in_expire(db, monkeypatch):
         return real_release(d, sym)
     monkeypatch.setattr(entry.shared_symbol_lock, "release", release)
 
-    assert run(entry.expire_stale_orders(db, "REAL")) == 2
+    # E511: the expiry is committed BEFORE the lock is released, so a release that raises no longer undoes it: b stays EXPIRED (its lock is
+    # logged and left to the lock sweeper) instead of being rolled back to PLACED and re-cancelled every cycle. a and c are still processed.
+    assert run(entry.expire_stale_orders(db, "REAL")) == 3
     for o in (a, b, c):
         db.refresh(o)
-    assert (a.status, b.status, c.status) == ("EXPIRED", "PLACED", "EXPIRED")   # a is kept, b rolled back, c still processed
+    assert (a.status, b.status, c.status) == ("EXPIRED", "EXPIRED", "EXPIRED")

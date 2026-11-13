@@ -167,4 +167,4 @@ class TestEnv:
     @pytest.mark.parametrize("raw,expected", [("", 300), ("  ", 300), ("abc", 300), ("99999", 300), ("120", 120), ("0", 0)])
     def test_env_int_blank_safe(self, monkeypatch, raw, expected):
         monkeypatch.setenv("NEWS_FEED_CACHE_TTL_SEC", raw)
-        assert ff._env_int("NEWS_FEED_CACHE_TTL_SEC", 300, 0, 3600) == expected
+        assert ff.env_int_safe("NEWS_FEED_CACHE_TTL_SEC", 300, lo=0, hi=3600) == expected   # E508: the shared safe helper replaced the local _env_int

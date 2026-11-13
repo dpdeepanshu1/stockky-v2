@@ -10,6 +10,7 @@ Costs do not depend on direction (long-only): a winning trade pays the same fixe
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict
 
 from .params import Params
@@ -27,6 +28,27 @@ class Cost:
 
     def to_json(self) -> Dict[str, float]:
         return {k: round(v, 2) for k, v in asdict(self).items()}
+
+
+def rupee(x: float) -> float:
+    """Whole rupees, halves rounded UP (2.5 -> 3, 0.5 -> 1), not Python's round-half-to-even (round(2.5) == 2). Dhan's contract note prints each charge line this way
+    (a Rs 0.12 SEBI fee shows as 0, a Rs 5.855 STT as 6). Goes through str() so 0.285 is not pushed the wrong way by binary floating point."""
+    try:
+        return float(Decimal(str(float(x))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except Exception:  # noqa: BLE001 - nan / inf / text: hand back a plain float, never raise
+        try:
+            return float(x)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+
+_NOTE_LINES = ("brokerage", "stt", "exchange", "sebi", "gst", "stamp")
+
+
+def on_contract_note(c: "Cost") -> "Cost":
+    """The six charge lines as Dhan's contract note prints them (each in whole rupees, see rupee()). `total` is left as the exact paise sum: the note's own total is
+    not a sum of its rounded lines, which is why compare() checks the total against the exact figure and the lines against these."""
+    return Cost(*(rupee(getattr(c, f)) for f in _NOTE_LINES), c.total)
 
 
 def _leg(turnover: float, p: Params, exch_pct: float, sell: bool) -> Cost:

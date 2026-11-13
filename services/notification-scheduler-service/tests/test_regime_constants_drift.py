@@ -22,7 +22,11 @@ HYDRATOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sched
 
 def _rt_default(name: str) -> float:
     src = open(RT_CONFIG, encoding="utf-8").read()
-    m = re.search(r'^%s\s*=.*?or\s*"([^"]+)"\)' % re.escape(name), src, re.M)
+    # Current form (E505+): NAME = env_int_safe("NAME", 25, ...) / env_float_safe("NAME", 25.0, ...).
+    m = re.search(r'^%s\s*=\s*env_(?:int|float)_safe\(\s*"%s"\s*,\s*([-+]?\d+(?:\.\d+)?)' % (re.escape(name), re.escape(name)), src, re.M)
+    if not m:
+        # Older form: NAME = int(os.getenv("NAME") or "25")
+        m = re.search(r'^%s\s*=.*?or\s*"([^"]+)"\)' % re.escape(name), src, re.M)
     assert m, f"{name} default not found in real-trade-service/config.py"
     return float(m.group(1))
 

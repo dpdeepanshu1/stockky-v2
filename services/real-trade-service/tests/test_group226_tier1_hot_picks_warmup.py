@@ -123,7 +123,7 @@ def test_helpers_are_defensive(monkeypatch):
     assert src._hot_is_warming_empty({"hot_picks": "x"}) is False
     assert src._hot_is_warming_empty({"hot_picks": WARMING}) is True
     monkeypatch.setenv("WATCHLIST_TIER1_WARMUP_WAIT_S", "garbage")
-    assert src._env_num("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0) == 8.0
+    assert src.env_float_safe("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0, lo=0) == 8.0
     monkeypatch.setenv("WATCHLIST_TIER1_WARMUP_WAIT_S", "-3")
-    assert src._env_num("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0) == 8.0
+    assert src.env_float_safe("WATCHLIST_TIER1_WARMUP_WAIT_S", 8.0, lo=0) == 8.0
     assert run(src._wait_for_hot_picks({"hot_picks": HOT})) == {"hot_picks": HOT}   # not warming: returned untouched

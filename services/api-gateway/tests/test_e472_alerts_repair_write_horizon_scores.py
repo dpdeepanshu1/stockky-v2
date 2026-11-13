@@ -125,13 +125,15 @@ def test_a_failing_individual_alert_does_not_block_the_next_and_is_counted():
     ns, posts, wakes, hub = _alert_ns(post_fails=("AAA",))
     out = run(ns["_deliver_triggered_price_alerts"]([_alert("AAA"), _alert("BBB")]))
     assert len(posts) == 2 and out == {"individual": 1, "digest": 0, "failed": 1}
-    assert [p["symbol"] for c, p in hub.broadcasts] == ["BBB"]
+    # E489: the WebSocket push no longer depends on the notification: AAA failed to notify but still reaches the open browser tabs
+    assert [p["symbol"] for c, p in hub.broadcasts] == ["AAA", "BBB"]
 
 
 def test_a_http_error_from_the_notification_service_is_a_failure_not_a_delivery(caplog=None):
     ns, posts, wakes, hub = _alert_ns(post_status=500)
     out = run(ns["_deliver_triggered_price_alerts"]([_alert("AAA")]))
-    assert out == {"individual": 0, "digest": 0, "failed": 1} and hub.broadcasts == []
+    assert out == {"individual": 0, "digest": 0, "failed": 1}
+    assert [p["symbol"] for c, p in hub.broadcasts] == ["AAA"]   # E489: the failed notification does not cancel the WebSocket push
 
 
 def test_a_failed_digest_is_counted_and_the_websocket_pushes_still_go_out():
@@ -144,7 +146,8 @@ def test_a_failed_digest_is_counted_and_the_websocket_pushes_still_go_out():
 def test_a_failing_wake_skips_that_alert_only():
     ns, posts, wakes, hub = _alert_ns(wake_raises=True)
     out = run(ns["_deliver_triggered_price_alerts"]([_alert("AAA")]))
-    assert posts == [] and hub.broadcasts == [] and out["failed"] == 1
+    assert posts == [] and out["failed"] == 1   # no notification went out...
+    assert [p["symbol"] for c, p in hub.broadcasts] == ["AAA"]   # ...but (E489) the WebSocket push still did
 
 
 def test_digest_text_is_capped_for_a_big_batch():

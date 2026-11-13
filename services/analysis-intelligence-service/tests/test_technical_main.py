@@ -2272,6 +2272,9 @@ def _fake_sqlalchemy(monkeypatch, sector_row=None, peer_rows=None, exec_exc=None
                 raise connect_exc
             return Conn()
 
+        def dispose(self):   # E383: the code now disposes the one-shot engine in a finally
+            seen["disposed"] = seen.get("disposed", 0) + 1
+
     def create_engine(url, **kw):
         seen["urls"].append(url)
         seen["kw"].append(kw)

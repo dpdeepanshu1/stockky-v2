@@ -62,9 +62,10 @@ class _Db:
 def test_shipped_defaults_in_config_source():
     src = open(os.path.join(os.path.dirname(config.__file__), "config.py")).read()
     assert '"SIZE_LADDER_ENABLED") or "").strip() or "true"' in src
-    for frag in ('"SIZE_LADDER_STEP_PCT") or "").strip() or "25.0"', '"SIZE_LADDER_MAX_LEVEL") or "").strip() or "2"',
-                 '"SIZE_LADDER_MIN_DAYS") or "").strip() or "10"', '"SIZE_LADDER_MIN_POSITIVE_DAYS_PCT") or "").strip() or "60.0"',
-                 '"SIZE_LADDER_BRAKE_DAYS") or "").strip() or "3"'):
+    # E505+: the numeric knobs are read through the crash-proof helpers: NAME = env_float_safe("NAME", 25.0, ...) / env_int_safe("NAME", 2, ...)
+    for frag in ('env_float_safe("SIZE_LADDER_STEP_PCT", 25.0', 'env_int_safe("SIZE_LADDER_MAX_LEVEL", 2',
+                 'env_int_safe("SIZE_LADDER_MIN_DAYS", 10', 'env_float_safe("SIZE_LADDER_MIN_POSITIVE_DAYS_PCT", 60.0',
+                 'env_int_safe("SIZE_LADDER_BRAKE_DAYS", 3'):
         assert frag in src
 
 

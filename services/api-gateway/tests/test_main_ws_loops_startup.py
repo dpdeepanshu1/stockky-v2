@@ -371,14 +371,16 @@ class TestQuoteLoopPriceAlerts:
         _drive(gw._quote_broadcast_loop, lenv, 2)
         assert len(qenv.posts) == 2
         assert [c for c, p in qenv.hub.broadcasts if c == "alerts" and p["symbol"] == "BBB"] == ["alerts"]
-        assert not [1 for c, p in qenv.hub.broadcasts if c == "alerts" and p["symbol"] == "AAA"]
+        # E489: a failed notification no longer suppresses the WebSocket push - AAA still reaches the open tabs
+        assert [c for c, p in qenv.hub.broadcasts if c == "alerts" and p["symbol"] == "AAA"] == ["alerts"]
 
-    def test_a_failing_wake_skips_that_alert_entirely(self, lenv, qenv):
+    def test_a_failing_wake_skips_the_notification_but_not_the_websocket_push(self, lenv, qenv):
         qenv.hub.symbols = ["TCS"]
         qenv.alerts = [_alert()]
         qenv.wake_raises = True
         _drive(gw._quote_broadcast_loop, lenv, 2)
-        assert qenv.posts == [] and qenv.hub.broadcasts == []
+        assert qenv.posts == []
+        assert [p["symbol"] for c, p in qenv.hub.broadcasts if c == "alerts"] == ["TCS"]   # E489
 
     def test_evaluate_price_alerts_failure_is_logged_and_the_loop_carries_on(self, lenv, qenv, caplog):
         qenv.hub.symbols = ["TCS"]

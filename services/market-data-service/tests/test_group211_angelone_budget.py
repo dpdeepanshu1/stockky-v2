@@ -57,15 +57,15 @@ def test_enabled_is_blank_safe(monkeypatch, val, expected):
 
 def test_env_float_rejects_garbage_nan_and_out_of_range(monkeypatch):
     monkeypatch.setenv("X_F", "abc")
-    assert b._env_float("X_F", 7.0) == 7.0
+    assert b.env_float_safe("X_F", 7.0) == 7.0
     monkeypatch.setenv("X_F", "nan")
-    assert b._env_float("X_F", 7.0) == 7.0
+    assert b.env_float_safe("X_F", 7.0) == 7.0
     monkeypatch.setenv("X_F", "-1")
-    assert b._env_float("X_F", 7.0, lo=0.0) == 7.0
+    assert b.env_float_safe("X_F", 7.0, lo=0.0) == 7.0
     monkeypatch.setenv("X_F", "99")
-    assert b._env_float("X_F", 7.0, hi=10.0) == 7.0
+    assert b.env_float_safe("X_F", 7.0, hi=10.0) == 7.0
     monkeypatch.setenv("X_F", " 3.5 ")
-    assert b._env_float("X_F", 7.0, 0.0, 10.0) == 3.5
+    assert b.env_float_safe("X_F", 7.0, lo=0.0, hi=10.0) == 3.5
 
 
 def test_reserve_fractions_defaults_and_overrides(monkeypatch):

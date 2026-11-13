@@ -416,13 +416,13 @@ def test_get_quote_default_still_tries_live_quote_first(monkeypatch):
 
 def test_env_float_and_env_on(monkeypatch):
     monkeypatch.setenv("G171_X", " 2.5 ")
-    assert f._env_float("G171_X", 1.0) == 2.5
+    assert f.env_float_safe("G171_X", 1.0, lo=0) == 2.5
     monkeypatch.setenv("G171_X", "abc")
-    assert f._env_float("G171_X", 1.0) == 1.0
+    assert f.env_float_safe("G171_X", 1.0, lo=0) == 1.0
     monkeypatch.setenv("G171_X", "-3")
-    assert f._env_float("G171_X", 1.0) == 1.0
+    assert f.env_float_safe("G171_X", 1.0, lo=0) == 1.0
     monkeypatch.setenv("G171_X", "")
-    assert f._env_float("G171_X", 4.0) == 4.0
+    assert f.env_float_safe("G171_X", 4.0, lo=0) == 4.0
     monkeypatch.delenv("G171_X")
     assert f._env_on("G171_X") is True
     for off in ("0", "false", "False", "off", "no", " 0 "):

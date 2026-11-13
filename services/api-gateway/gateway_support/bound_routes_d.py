@@ -470,7 +470,11 @@ def build_bound_routes_d(ref):
         if not isinstance(symbols, list) or not symbols:
             return {"ok": False, "error": "symbols list required", "ok_count": 0, "error_count": 0}
         # Hard cap protects free-tier CPU / upstream rate limits
-        max_n = ref.env_int_safe("DATA_FEED_UPDATE_BATCH_MAX", 15, positive=True)
+        try:
+            from env_util import env_int_safe  # E505: crash-proof numeric env read; a handler-local import (no module global)
+        except ImportError:  # pragma: no cover - env_util sits next to main.py; otherwise use main's own binding
+            env_int_safe = ref.env_int_safe
+        max_n = env_int_safe("DATA_FEED_UPDATE_BATCH_MAX", 15, positive=True)
         symbols = [
             str(s).upper().replace(".NS", "").replace(".BO", "").strip()
             for s in symbols

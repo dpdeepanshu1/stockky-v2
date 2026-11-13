@@ -2784,8 +2784,10 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
         # held until exit_engine closes it out. Releasing here in that case
         # would let position-stocks-service buy the same symbol while this
         # service still genuinely holds shares of it.
-        if mode == "REAL" and not was_partial:
-            shared_symbol_lock.release(db, order.symbol)
+        # E511 (CI: test_e481_expire_commits_before_lock_release): the EXPIRED status and its event are written and COMMITTED before the lock is
+        # released. release() rolls the session back when it fails, which used to throw away the status and the event with it (the order
+        # looked live again, the cancelled Dhan order was retried next cycle, and the audit row was lost). A release that fails afterwards
+        # no longer undoes the expiry: the order stays EXPIRED with its event and the failure is logged (the lock sweeper frees a stale lock).
         fill_note = f" {order.filled_qty_so_far}/{order.qty} had already filled." if was_partial else ""
         db.add(models.TradeOrderEvent(
             order_id=order.id, event_type="EXPIRED",
@@ -2794,6 +2796,17 @@ async def expire_stale_orders(db: Session, mode: str) -> int:
                 " Dhan order cancelled." if mode == "REAL" and order.dhan_order_id else ""
             ),
         ))
+        if mode == "REAL" and not was_partial:
+            db.commit()   # nothing is pending in the session when the lock is released
+            try:
+                shared_symbol_lock.release(db, order.symbol)
+            except Exception as _rel_err:  # noqa: BLE001 - the order is already EXPIRED and committed; do not undo or skip it
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    logger.debug("expire_stale_orders: rollback after a failed lock release also failed", exc_info=True)
+                logger.error("expire_stale_orders: %s order %s is EXPIRED but its symbol lock was not released (%s) - the lock sweeper will free it",
+                             order.symbol, order.id, _rel_err)
         return True
 
     for order in stale:

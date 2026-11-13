@@ -3043,7 +3043,7 @@ def _record_symbol_outcomes(results: list):
                 continue
             key = SYMBOL_PERF_KEY_PREFIX + symbol
             state = _redis_get(key)
-            if not isinstance(state, dict):
+            if not isinstance(state, dict) or not state:   # an empty row is "new" too (it used to be, via `_redis_get(key) or {...}`): it must get all three fields
                 state = {"weak_streak": 0, "total_scans": 0, "last_actionable_at": None}
             else:
                 state = dict(state)

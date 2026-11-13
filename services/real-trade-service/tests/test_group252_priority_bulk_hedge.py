@@ -199,6 +199,6 @@ def test_env_blank_safe():
     for raw, want in (("", 1.5), ("  ", 1.5), ("x", 1.5), ("-1", 1.5), ("0", 0.0), ("2.5", 2.5)):
         os.environ["FEED_PRIORITY_HEDGE_S"] = raw
         try:
-            assert f._env_float("FEED_PRIORITY_HEDGE_S", 1.5) == want
+            assert f.env_float_safe("FEED_PRIORITY_HEDGE_S", 1.5, lo=0) == want
         finally:
             os.environ.pop("FEED_PRIORITY_HEDGE_S", None)

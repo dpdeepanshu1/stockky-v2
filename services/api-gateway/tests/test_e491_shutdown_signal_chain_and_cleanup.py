@@ -153,12 +153,15 @@ def test_uvicorn_still_shuts_down_when_the_app_is_imported_inside_its_signal_cap
     def _read():
         for line in p.stdout:
             lines.append(line)
-            if "Application startup complete" in line:
+            # "Application startup complete" is printed BEFORE uvicorn binds its socket; a SIGTERM in that gap makes Server._serve return
+            # without running the lifespan shutdown (should_exit is already set), so wait for the line printed after the sockets are up.
+            if "Uvicorn running on" in line:
                 ready.set()
 
     threading.Thread(target=_read, daemon=True).start()
     try:
         assert ready.wait(20), "server never started:\n" + "".join(lines)
+        time.sleep(0.5)   # the line is logged inside startup(); let the server reach its main loop (a should_exit set before it skips the lifespan shutdown)
         p.send_signal(signal.SIGTERM)
         try:
             p.wait(8)

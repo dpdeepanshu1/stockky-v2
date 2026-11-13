@@ -418,7 +418,11 @@ def build_bound_routes_j(ref):
                             batch.append({"symbol": base, "decision": "ERROR", "error": str(e)[:200]})
                 else:
                     # Full mode: bounded wait per symbol; cold microservices must not stall the stream
-                    STREAM_SYM_TIMEOUT = ref.env_float_safe("SCAN_STREAM_SYMBOL_TIMEOUT", 12, positive=True)
+                    try:
+                        from env_util import env_float_safe  # E505: crash-proof numeric env read; a handler-local import (no module global, see test_gateway_support_split_j)
+                    except ImportError:  # pragma: no cover - env_util sits next to main.py; otherwise use main's own binding
+                        env_float_safe = ref.env_float_safe
+                    STREAM_SYM_TIMEOUT = env_float_safe("SCAN_STREAM_SYMBOL_TIMEOUT", 12, positive=True)
 
                     async def _ultra_or_instant(sym: str):
                         base = str(sym).upper().replace(".NS", "").replace(".BO", "").strip()

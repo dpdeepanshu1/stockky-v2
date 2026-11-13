@@ -86,7 +86,10 @@ def test_failed_capital_release_is_queued_and_the_lock_still_goes(ps):
     db = _Db()
     assert ps.release_claims(db, "ABC", 1000.0, 5.0) is False
     assert ps._calls["lock"] == ["ABC"], "the lock release must not depend on the capital release"
-    assert ps.stats()["releases_pending"] == 1 and db.rollbacks == 1
+    assert ps.stats()["releases_pending"] == 1
+    # the failed release rolls the session back once; E366's claim_store.save() then tries to persist the queued item and, on this
+    # query-less fake, rolls back again (best effort, never raises) - so "at least one", not "exactly one"
+    assert db.rollbacks >= 1
     assert any("NOT released" in n for n in ps._calls["notes"])
     assert ps.retry_pending_releases(db) == 1
     assert ps._calls["cap"] == [(1000.0, 5.0)] and ps.stats()["releases_pending"] == 0

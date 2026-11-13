@@ -782,7 +782,15 @@ def sig(monkeypatch):
             raise s.commit_raises
         return []
 
+    s.previous = {}   # signum -> handler that "was installed before" (E491: the handler chains to it); default: nothing to chain to
+
+    def fake_getsignal(num):
+        return s.previous.get(num, signal.SIG_DFL)
+
     monkeypatch.setattr(signal, "signal", fake_signal)
+    # E491: each handler remembers the one it replaced. Without this the real getsignal returns the handler main.py installed at import,
+    # which would be chained and commit a second time.
+    monkeypatch.setattr(signal, "getsignal", fake_getsignal)
     monkeypatch.setattr(gw, "_graceful_shutdown_commit", commit)
     monkeypatch.setattr(gw._install_signal_handlers, "_installed", False, raising=False)
     return s
@@ -813,6 +821,16 @@ class TestSignalHandlers:
         gw._install_signal_handlers()
         dict(sig.calls)[sig.signal.SIGTERM](sig.signal.SIGTERM, None)
         assert sig.commits == ["signal_SIGTERM"]
+
+    def test_handler_chains_to_the_handler_it_replaced_after_the_commit(self, sig):
+        """E491: uvicorn's own handler must still run after the checkpoint commit, or the container never stops."""
+        order = []
+        sig.previous = {sig.signal.SIGTERM: lambda n, f: order.append(("uvicorn", n))}
+        gw._install_signal_handlers()
+        handler = dict(sig.calls)[sig.signal.SIGTERM]
+        handler(sig.signal.SIGTERM, None)
+        assert sig.commits == ["signal_SIGTERM"]
+        assert order == [("uvicorn", sig.signal.SIGTERM)]
 
     def test_handler_falls_back_to_the_number_when_signal_has_no_Signals_enum(self, sig, monkeypatch):
         gw._install_signal_handlers()

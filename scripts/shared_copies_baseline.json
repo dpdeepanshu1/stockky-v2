@@ -1,7 +1,7 @@
 {
  "circuit_breaker::CircuitBreaker": {
-  "services/api-gateway/circuit_breaker.py": "1eae69be",
-  "services/decision-prediction-service/decision/circuit_breaker.py": "1776449d",
+  "services/api-gateway/circuit_breaker.py": "b7555722",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "3bf4d5d1",
   "services/market-data-service/circuit_breaker.py": "490d140e",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "6ead7cc1"
@@ -14,23 +14,23 @@
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
  "circuit_breaker::DEFAULT_FAILURE_THRESHOLD": {
-  "services/api-gateway/circuit_breaker.py": "032a412a",
-  "services/decision-prediction-service/decision/circuit_breaker.py": "032a412a",
-  "services/market-data-service/circuit_breaker.py": "032a412a",
+  "services/api-gateway/circuit_breaker.py": "51193628",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "51193628",
+  "services/market-data-service/circuit_breaker.py": "51193628",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
  "circuit_breaker::DEFAULT_HALF_OPEN_SUCCESS": {
-  "services/api-gateway/circuit_breaker.py": "4dd17ab3",
-  "services/decision-prediction-service/decision/circuit_breaker.py": "4dd17ab3",
-  "services/market-data-service/circuit_breaker.py": "4dd17ab3",
+  "services/api-gateway/circuit_breaker.py": "1d1a2211",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "1d1a2211",
+  "services/market-data-service/circuit_breaker.py": "1d1a2211",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
  "circuit_breaker::DEFAULT_RECOVERY_TIMEOUT": {
-  "services/api-gateway/circuit_breaker.py": "2f53b03e",
-  "services/decision-prediction-service/decision/circuit_breaker.py": "9cb9c760",
-  "services/market-data-service/circuit_breaker.py": "2f53b03e",
+  "services/api-gateway/circuit_breaker.py": "22b73fae",
+  "services/decision-prediction-service/decision/circuit_breaker.py": "dc74a407",
+  "services/market-data-service/circuit_breaker.py": "22b73fae",
   "services/position-stocks-service/resilience/circuit_breaker.py": "-",
   "services/real-trade-service/resilience/circuit_breaker.py": "-"
  },
@@ -694,31 +694,31 @@
  },
  "rate_limiter::DISCOVERY_AT_STREAK": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "-",
-  "services/api-gateway/rate_limiter.py": "957e1a38",
+  "services/api-gateway/rate_limiter.py": "d7846d7e",
   "services/market-data-service/rate_limiter.py": "-",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "-"
  },
  "rate_limiter::DISCOVERY_TIMEOUT": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "-",
-  "services/api-gateway/rate_limiter.py": "7fc61c2d",
+  "services/api-gateway/rate_limiter.py": "a9a54354",
   "services/market-data-service/rate_limiter.py": "-",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "-"
  },
  "rate_limiter::INTERACTIVE_RESERVE_FRACTION": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "-",
-  "services/api-gateway/rate_limiter.py": "ab19e044",
+  "services/api-gateway/rate_limiter.py": "52382486",
   "services/market-data-service/rate_limiter.py": "-",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "-"
  },
  "rate_limiter::MAX_WAIT_DEFAULT": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "-",
-  "services/api-gateway/rate_limiter.py": "2f070220",
+  "services/api-gateway/rate_limiter.py": "d39a79a6",
   "services/market-data-service/rate_limiter.py": "-",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "-"
  },
  "rate_limiter::MIN_WAIT_FLOOR": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "-",
-  "services/api-gateway/rate_limiter.py": "bdc46059",
+  "services/api-gateway/rate_limiter.py": "40e0fb64",
   "services/market-data-service/rate_limiter.py": "-",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "-"
  },
@@ -736,8 +736,8 @@
  },
  "rate_limiter::YFINANCE_HARD_TIMEOUT_SEC": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "81f8e696",
-  "services/api-gateway/rate_limiter.py": "82adb56a",
-  "services/market-data-service/rate_limiter.py": "82adb56a",
+  "services/api-gateway/rate_limiter.py": "8d63c1a5",
+  "services/market-data-service/rate_limiter.py": "8d63c1a5",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "81f8e696"
  },
  "rate_limiter::_Bucket": {
@@ -862,8 +862,8 @@
  },
  "rate_limiter::_yf_hardcap_pool": {
   "services/analysis-intelligence-service/fundamental/rate_limiter.py": "dfe1aa8b",
-  "services/api-gateway/rate_limiter.py": "2ee7ef5d",
-  "services/market-data-service/rate_limiter.py": "2ee7ef5d",
+  "services/api-gateway/rate_limiter.py": "4138f1d4",
+  "services/market-data-service/rate_limiter.py": "4138f1d4",
   "services/notification-scheduler-service/scheduler/rate_limiter.py": "dfe1aa8b"
  },
  "rate_limiter::acquire": {

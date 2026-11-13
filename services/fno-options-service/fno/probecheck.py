@@ -13,7 +13,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import realprobe
+from . import costs, realprobe
 from .params import Params
 
 PROBE_DIR = "/data/fno_real_probe"
@@ -176,7 +176,15 @@ def compare(probe: Dict[str, Any], note: Dict[str, Any], params: Optional[Params
 
     out: List[Dict[str, Any]] = []
     for k in LINES:
-        m, n = round(exp["lines"][k], 2), given[k]
+        exact, n = round(exp["lines"][k], 2), given[k]
+        # Dhan's note prints each line in whole rupees (costs.rupee, halves up). A note line matches the exact figure (a note typed to the paisa) OR that
+        # whole-rupee form; a line that matches neither is reported against the form the note would print, so the diff is what you would actually see.
+        if n is not None and abs(n - exact) <= tol:
+            m = exact
+        elif n is not None:
+            m = costs.rupee(exp["lines"][k])
+        else:
+            m = exact
         row: Dict[str, Any] = {"line": k, "label": LABELS[k], "model": m, "note": n, "diff": None if n is None else round(n - m, 2), "ok": None if n is None else abs(n - m) <= tol, "param": None, "implied": None, "current": None}
         if n is not None and not row["ok"]:
             param, cur = _current(k, und, p)

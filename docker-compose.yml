@@ -813,6 +813,9 @@ services:
       # round 254: every other FNO_* / CAPITAL_ALLOC_* name config.py reads. This service has no env_file (it must not see the Dhan / database secrets of the others), so a name that is not listed
       # here NEVER reached the container: FNO_EXPIRY_REAL, the FNO_STRAT_* thresholds, FNO_SL_PCT ... set in .env were silently ignored, and CAPITAL_ALLOC_MODE=live moved Real Trade but not F&O.
       # A blank value falls back to the code default (config.py reads blank-safe), so listing a name with no .env line changes nothing. scripts/check_compose_fno_env.py fails when config.py reads a name that is not here.
+      # round 492: FNO_REAL_FIXED_CAPITAL (round 387) and FNO_CORE_MIN_INTRADAY_BARS (round 388) were read by config.py but never listed, so a value in .env never arrived (blank = code default).
+      FNO_REAL_FIXED_CAPITAL: ${FNO_REAL_FIXED_CAPITAL:-}
+      FNO_CORE_MIN_INTRADAY_BARS: ${FNO_CORE_MIN_INTRADAY_BARS:-}
       # (CAPITAL_ALLOC_DIR is left out on purpose: it is the container path /data/shared mounted below.)
       FNO_BLOCK_EXPIRY_DAY: ${FNO_BLOCK_EXPIRY_DAY:-}
       FNO_BROKERAGE_PCT_CAP: ${FNO_BROKERAGE_PCT_CAP:-}

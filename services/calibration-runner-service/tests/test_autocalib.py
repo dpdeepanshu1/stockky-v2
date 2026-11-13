@@ -105,7 +105,7 @@ def test_every_rule_points_at_a_real_switch_and_a_real_test():
     cfg_src = "".join((HERE.parent / path / "config.py").read_text(encoding="utf-8")
                       for path in ("real-trade-service", "position-stocks-service"))
     for k in A.PROTECTED:
-        assert (any(k in c for c in cat.values()) or re.search(r'getenv\(\s*"%s"' % re.escape(k), cfg_src)
+        assert (any(k in c for c in cat.values()) or re.search(r'(?:getenv|env_\w+_safe)\(\s*"%s"' % re.escape(k), cfg_src)   # E512: config.py now reads numbers through env_int_safe / env_float_safe (E503)
                 or k.endswith("_DEMO_MODE") or k.startswith("PS_")), k
 
 

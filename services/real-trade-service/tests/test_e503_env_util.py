@@ -33,7 +33,7 @@ def _bare():
     out = []
     skip = {"env_util.py", "boot_forensics.py", "session_proof_client.py", "return_sanity.py"}   # return_sanity.py is a byte-identical copy of shared/return_sanity.py   # the last two are byte-identical copies across services
     for cur, dirs, files in os.walk(_SERVICE):
-        dirs[:] = [d for d in dirs if d not in {"tests", "__pycache__", "node_modules"}]
+        dirs[:] = [d for d in dirs if d not in {"tests", "__pycache__", "node_modules", "venv", "site-packages"} and not d.startswith(".")]   # E513: a local .venv / venv inside the service folder (gitignored, never in CI) is not service code
         for fn in sorted(files):
             if fn.endswith(".py") and fn not in skip:
                 out += _bare_in(os.path.join(cur, fn))

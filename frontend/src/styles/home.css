@@ -1,0 +1,84 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — HOME + STOCK DECISION (redesign round 4, E536). Loads last (after shell.css). New classes only: hm- (Home) and dt- (decision top).
+   Colours come from tokens.css; no gradient, glass, !important or animation. Presentation only.
+   Roll back: delete the `./styles/home.css` import in main.tsx and restore DashboardView / DecisionCard / MarketSentimentHeader / MarketMovers from round 515.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Home ── */
+.hm-home { display: flex; flex-direction: column; gap: var(--k-gap-5); }
+.hm-hero { display: flex; flex-direction: column; gap: var(--k-gap-4); }
+.hm-hero-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--k-gap-3); }
+.hm-hero-top > div:first-child { flex: 1 1 18rem; min-width: 0; }
+.hm-search-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-3); }
+.hm-search { flex: 1 1 22rem; display: flex; align-items: center; gap: var(--k-gap-2); min-width: 0; padding: 4px 4px 4px 12px; border: 1px solid rgb(var(--border-strong-rgb)); border-radius: var(--k-r-ctl); background: rgb(var(--panel-2-rgb)); }
+.hm-search:focus-within { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 1px; }
+.hm-search-prefix { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: rgb(var(--muted-rgb)); }
+.hm-search input { flex: 1; min-width: 0; height: 40px; border: 0; background: transparent; color: rgb(var(--fg-rgb)); font: inherit; font-size: 1rem; outline: none; }   /* 16px: no iOS zoom */
+.hm-search input::placeholder { color: rgb(var(--muted-rgb)); }
+.hm-scan { position: relative; }
+.hm-scan-menu { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; width: min(20rem, calc(100vw - 2rem)); padding: 6px; display: flex; flex-direction: column; gap: 2px; border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-ctl); background: rgb(var(--panel-rgb)); box-shadow: var(--card-shadow); }
+.hm-scan-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 10px 12px; border: 0; border-radius: 10px; background: transparent; color: rgb(var(--fg-rgb)); font: inherit; text-align: left; cursor: pointer; }
+.hm-scan-menu button:hover, .hm-scan-menu button:focus-visible { background: rgb(var(--panel-2-rgb)); }
+.hm-scan-menu small { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+
+.hm-results { display: flex; flex-direction: column; gap: var(--k-gap-4); min-width: 0; }
+.hm-two { display: grid; gap: var(--k-gap-5); grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 1024px) { .hm-two:not(.single) { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); } }
+.hm-note { margin: 0 0 var(--k-gap-2); font-size: 0.8125rem; color: rgb(var(--muted-rgb)); }
+.hm-idle { padding: var(--k-gap-6) var(--k-gap-4); text-align: center; border: 1px dashed rgb(var(--border-strong-rgb)); border-radius: var(--k-r-card); }
+.hm-idle p { margin: 0; font-size: 0.875rem; color: rgb(var(--muted-rgb)); }
+.hm-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-2); }
+.hm-chip { min-height: 32px; padding: 0 12px; border: 1px solid rgb(var(--border-strong-rgb)); border-radius: 999px; background: transparent; color: rgb(var(--fg-rgb)); font: inherit; font-size: 0.8125rem; cursor: pointer; }
+.hm-chip:hover { background: rgb(var(--panel-2-rgb)); }
+
+/* your positions today */
+.hm-pos-list { list-style: none; margin: var(--k-gap-4) 0 0; padding: 0; display: flex; flex-direction: column; }
+.hm-pos-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px var(--k-gap-3); align-items: baseline; padding: 10px 0; border-top: 1px solid rgb(var(--border-rgb)); }
+.hm-pos-sym { font-weight: 600; color: rgb(var(--fg-rgb)); }
+.hm-pos-meta { grid-column: 1; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.hm-pos-pnl { grid-column: 2; grid-row: 1 / span 2; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hm-pos-pnl small { display: block; font-size: 0.75rem; font-weight: 500; }
+.hm-pos-pnl.up { color: rgb(var(--buy-rgb)); }
+.hm-pos-pnl.down { color: rgb(var(--sell-rgb)); }
+.hm-pos-pnl.flat { color: rgb(var(--muted-rgb)); }
+
+/* market movers */
+.hm-movers-grid { display: grid; gap: var(--k-gap-2); margin-top: var(--k-gap-4); grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); }
+.hm-mover { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-ctl); background: rgb(var(--panel-rgb)); color: rgb(var(--fg-rgb)); font: inherit; text-align: left; cursor: pointer; }
+.hm-mover:hover { border-color: rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); }
+.hm-mover-top { display: flex; justify-content: space-between; gap: 6px; align-items: baseline; }
+.hm-mover-sym { font-size: 0.8125rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hm-mover-pct { font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
+.hm-mover-pct.up { color: rgb(var(--buy-rgb)); }
+.hm-mover-pct.down { color: rgb(var(--sell-rgb)); }
+.hm-mover-pct.flat { color: rgb(var(--muted-rgb)); }
+.hm-mover-price { font-size: 1rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hm-mover-vol { font-size: 0.6875rem; color: rgb(var(--muted-rgb)); }
+
+/* ── Stock decision: the top ── */
+.dt-top { display: flex; flex-direction: column; gap: var(--k-gap-4); }
+.dt-head { display: grid; gap: var(--k-gap-4); grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.dt-id { min-width: 0; }
+.dt-sym-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px var(--k-gap-2); }
+.dt-sym { margin: 0; font-size: 1.75rem; line-height: 1.15; font-weight: 700; color: rgb(var(--fg-rgb)); }
+.dt-meta { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.dt-signal-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-2) var(--k-gap-3); margin-top: var(--k-gap-2); }
+.dt-signal { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 999px; font-size: 0.9375rem; font-weight: 700; letter-spacing: 0.02em; background: rgb(var(--sig) / 0.14); color: rgb(var(--sig-ink)); border: 1px solid rgb(var(--sig) / 0.45); }
+.dt-signal.buy { --sig: var(--buy-rgb); --sig-ink: var(--buy-rgb); }
+.dt-signal.prepare { --sig: var(--accent-rgb); --sig-ink: var(--accent-rgb); }
+.dt-signal.hold { --sig: var(--warn-rgb); --sig-ink: var(--warn-rgb); }
+.dt-signal.avoid { --sig: var(--muted-2-rgb); --sig-ink: var(--muted-rgb); }
+.dt-signal.sell { --sig: var(--sell-rgb); --sig-ink: var(--sell-rgb); }
+.dt-conf { font-size: 0.8125rem; color: rgb(var(--muted-rgb)); }
+.dt-quality { margin: var(--k-gap-2) 0 0; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.dt-price { text-align: right; }
+.dt-price-num { font-size: 1.75rem; line-height: 1.15; font-weight: 600; font-variant-numeric: tabular-nums; color: rgb(var(--fg-rgb)); }
+.dt-price-sub { margin-top: 2px; font-size: 0.8125rem; color: rgb(var(--muted-rgb)); }
+.dt-price-sub .up { color: rgb(var(--buy-rgb)); }
+.dt-price-sub .down { color: rgb(var(--sell-rgb)); }
+.dt-ring { grid-column: 1 / -1; justify-self: start; }
+.dt-risk { margin: 0; padding: 10px 12px; border: 1px solid rgb(var(--warn-rgb) / 0.55); border-radius: var(--k-r-ctl); background: rgb(var(--warn-rgb) / 0.08); font-size: 0.875rem; color: rgb(var(--fg-rgb)); }
+.dt-note { margin: 0; font-size: 0.8125rem; color: rgb(var(--muted-rgb)); }
+.dt-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--k-gap-2); }
+@media (min-width: 640px) { .dt-head { grid-template-columns: minmax(0, 1fr) auto auto; } .dt-ring { grid-column: auto; justify-self: auto; } }
+@media (max-width: 639px) { .dt-price { text-align: left; } .dt-actions { justify-content: flex-start; } }

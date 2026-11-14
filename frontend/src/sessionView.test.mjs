@@ -5,6 +5,7 @@ import { sessionView, premarketPlanView, PS_SLOTS, RT_SLOTS, istDay } from "./se
 import { setupLadderView, SETUP_CATALOG } from "./setupView.ts";
 import { ladderView } from "./v7View.ts";
 import { swingView } from "./swingView.ts";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
 const at = (hhmm, day = "2026-11-02") => new Date(`${day}T${hhmm}:00+05:30`);   // 2 Nov 2026 is a Monday
 
@@ -56,7 +57,7 @@ for (const f of ["./components/calibration/SwingPanel.tsx", "./swingView.ts"]) a
 assert.ok(/twoStep/.test(rd("./components/calibration/SwingPanel.tsx")));
 
 // mounts
-assert.ok(/<SessionRail service="ps"/.test(rd("./components/PositionStocksTab.tsx")) && /<PremarketPlanCard/.test(rd("./components/PositionStocksTab.tsx")));
+assert.ok(/<SessionRail service="ps"/.test(psSource()) && /<PremarketPlanCard/.test(psSource()));
 assert.ok(/<SessionRail service="rt"/.test(rd("./components/realAuto/tabs/OverviewTab.tsx")));
 assert.ok(/<Card title="Setup ladder"/.test(rd("./components/calibration/SetupScorecardPanel.tsx")));
 for (const f of ["./components/session/SessionRail.tsx", "./components/session/PremarketPlanCard.tsx"]) assert.ok(!/\.post\(|method:\s*"POST"|onClick/.test(rd(f)), `${f} must place nothing`);

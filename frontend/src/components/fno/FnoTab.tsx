@@ -1,5 +1,6 @@
 // "F&O Options" page: Nifty / Sensex index options (buy-only CE / PE). DEMO by default, REAL locked. Backend: fno-options-service (nginx /fno-api/).
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { publishModeStrip } from "../app/modeStrip";
 import { PageHero } from "../ui/PageHero";
 import { SubTabs } from "../ui/SubTabs";
 import FnoOverview from "./FnoOverview";
@@ -15,6 +16,8 @@ const SECTIONS: { id: Section; label: string }[] = [
 
 export default function FnoTab() {
   const [s, setS] = useState<Section>("overview");
+  // E535: the Overview publishes mode / armed / P&L to the shell's strip; it stays up (marked out of date after 90 s) on the other sections, and clears when the page closes
+  useEffect(() => () => publishModeStrip("fno", null), []);
   return (
     <div className="v6-page v6-flow space-y-3">
       <PageHero icon="trend" title="F&O Options" kicker="Nifty · Sensex · buy CE / PE" subtitle="Option buying on the two indices. Starts OFF and in DEMO: nothing real happens until you switch it on in Real Money Calibration." />

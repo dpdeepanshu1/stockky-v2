@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import TrainingProgressPanel from "./TrainingProgressPanel";
 import { KpiStrip } from "./ui/KpiStrip";
+import { Button } from "./kit";   // E542
 import { trainingKpis, fmtMetric, fmtFixed, predictionRowView } from "./trainingView";
 import { api, TrainingStatusResponse, PeriodRollupItem, TrainingProgress } from "../api";
 
@@ -774,15 +775,15 @@ export default function Training() {
           </button>
 
 
-          <button
+          <Button
             onClick={handleStopTraining}
             disabled={(!training && !status?.training_in_progress) || isStopping}
-            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-sell/20 text-signal-sell border border-signal-sell/30 hover:bg-signal-sell/30 transition disabled:opacity-50"
+            variant="danger"
           >
             {isStopping ? "Stopping..." : "⏹ Stop Training"}
-          </button>
+          </Button>
 
-          <button
+          <Button
             onClick={async () => {
               setIsStopping(true);
               await clearLock();
@@ -791,24 +792,24 @@ export default function Training() {
             }}
             disabled={isStopping}
             title="Force-release training.lock if a previous run crashed or timed out"
-            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-hold/15 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/25 transition disabled:opacity-50"
+            variant="ghost"
           >
             🔓 Clear Lock
-          </button>
+          </Button>
 
-          <button
+          <Button
             onClick={handleRefresh}
-            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-prepare/20 text-signal-prepare border border-signal-prepare/30 hover:bg-signal-prepare/30 transition"
+            variant="ghost"
           >
             🔄 Refresh
-          </button>
+          </Button>
 
-          <button
+          <Button
             onClick={handleRestart}
-            className="font-display tabular-nums text-sm px-4 py-2 rounded-2xl bg-signal-hold/20 text-signal-hold border border-signal-hold/30 hover:bg-signal-hold/30 transition"
+            variant="ghost"
           >
             🔁 Restart Page
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -841,7 +842,7 @@ export default function Training() {
                 </p>
               )}
           </div>
-          <button
+          <Button
             type="button"
             onClick={async () => {
               setIsStopping(true);
@@ -849,10 +850,10 @@ export default function Training() {
               stopTraining(false);
               setIsStopping(false);
             }}
-            className="font-display tabular-nums text-[11px] px-3 py-1.5 rounded-2xl bg-signal-hold/20 text-signal-hold border border-signal-hold/40 hover:bg-signal-hold/30"
+            variant="soft" size="sm"
           >
             Unlock &amp; reset
-          </button>
+          </Button>
         </div>
       )}
 
@@ -897,20 +898,20 @@ export default function Training() {
           🛠️ Manual Controls (use if automation isn't running)
         </h3>
         <div className="flex flex-wrap gap-3">
-          <button
+          <Button
             onClick={() => runEvaluation("t1")}
             disabled={runningT1}
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
+            variant="ghost"
           >
             {runningT1 ? <Spinner /> : null} Run T+1 Evaluation Sweep
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={() => runEvaluation("t5")}
             disabled={runningT5}
-            className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-slate/30 text-mist hover:bg-slate/50 transition disabled:opacity-50 flex items-center gap-2"
+            variant="ghost"
           >
             {runningT5 ? <Spinner /> : null} Run T+5 Evaluation Sweep
-          </button>
+          </Button>
         </div>
         <p className="text-mist/40 text-[11px] mt-2">
           Trade mark-to-market has its own manual trigger on the Trades tab.
@@ -1104,7 +1105,7 @@ export default function Training() {
           <KpiStrip items={trainingKpis({ status, progress: trainProgress, training }, Date.now())} label="Training Lab summary" />
 
           {/* Walk‑Forward Metrics */}
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+          <div className="k-card">
             <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               📉 Walk‑Forward Performance Metrics
             </h3>
@@ -1113,7 +1114,7 @@ export default function Training() {
 
           {/* Fold Details */}
           {status?.fold_details && status.fold_details.length > 0 && (
-            <div className="bg-graphite border border-slate/40 rounded-2xl p-5">
+            <div className="k-card">
               <button
                 onClick={() => setShowFolds(!showFolds)}
                 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest flex items-center gap-2 hover:text-paper transition"
@@ -1155,7 +1156,7 @@ export default function Training() {
           )}
 
           {/* Daily / Weekly Pick Tracking */}
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+          <div className="k-card">
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest">
                 📅 Pick Tracking (T+1 / T+5 by {periodView === "daily" ? "day" : "week"})
@@ -1178,7 +1179,7 @@ export default function Training() {
           </div>
 
           {/* Prediction History */}
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+          <div className="k-card">
             <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               📋 Prediction History (T+1 / T+5 tracking)
             </h3>
@@ -1187,7 +1188,7 @@ export default function Training() {
 
           {/* Summary Metrics */}
           {summaryMetrics && (
-            <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+            <div className="k-card">
               <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
                 📊 Training Run Summary
               </h3>
@@ -1201,7 +1202,7 @@ export default function Training() {
           )}
 
           {/* Learning Insights */}
-          <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
+          <div className="k-card">
             <h3 className="font-display tabular-nums text-xs text-mist uppercase tracking-widest mb-2">
               💡 Learning Insights
             </h3>

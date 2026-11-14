@@ -1,8 +1,9 @@
 // group 442: one runnable job: what it does, when to run it, the last result, its options and a Run button.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { activeRuns, downloadRunFile, fmtDur, istStamp, relTime, type JobDef } from "../../calibrationApi";
 import { Btn, StatusPill } from "./ui";
 import { useRunner } from "./RunnerContext";
+import { runProgress } from "../../calibrationNav";
 
 export default function JobCard({ job, compact }: { job: JobDef; compact?: boolean }) {
   const { summary, start, openRun, cancel } = useRunner();
@@ -14,6 +15,15 @@ export default function JobCard({ job, compact }: { job: JobDef; compact?: boole
   const active = !!activeRec;
   const [vals, setVals] = useState<Record<string, any>>({});
   const [showOpts, setShowOpts] = useState(false);
+  // E539: inline progress while it runs: how much of its time limit is used (re-read every 5 s; it is time used, not work done, and the label says so)
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, [running?.id]);
+  const prog = running ? runProgress(running.started_at, job.timeout_s, now) : null;
   const params = () => Object.fromEntries((job.params || []).map((p) => [p.name, vals[p.name] ?? p.default]));
 
   return (
@@ -52,6 +62,12 @@ export default function JobCard({ job, compact }: { job: JobDef; compact?: boole
           <span className="font-bold text-signal-buy">{running ? "● Running now" : "◌ Waiting in the queue"}</span>
           <span className="text-mist">{running ? `started ${relTime(running.started_at)} · time limit ${fmtDur(job.timeout_s)}` : (queuedRec?.waiting_for ? `${queuedRec.waiting_for}` : "it starts when a slot is free")}</span>
           <button type="button" className="underline" onClick={() => openRun(activeRec.id)}>Watch live output</button>
+          {prog && (
+            <span className="cx-prog" data-testid={`job-progress-${job.id}`}>
+              <span className="cx-prog-bar" role="progressbar" aria-label="Time used of the time limit" aria-valuemin={0} aria-valuemax={100} aria-valuenow={prog.pct}><i style={{ width: `${prog.pct}%` }} /></span>
+              <span className="text-mist">{fmtDur(prog.usedS)} of {fmtDur(job.timeout_s)} time limit used</span>
+            </span>
+          )}
         </div>
       )}
       {showOpts && (

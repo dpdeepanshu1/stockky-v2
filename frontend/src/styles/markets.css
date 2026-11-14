@@ -1,0 +1,37 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — MARKETS, PAPER, SYSTEM PAGES (redesign round 7, E540). Loads last (after control.css). New classes only: mk- prefix.
+   Colours come from tokens.css; no gradient, glass, !important or animation. Presentation only.
+   Roll back: delete the `./styles/markets.css` import in main.tsx and restore ui/KpiStrip, WatchlistManager and Trades from round 519.
+   ═══════════════════════════════════════════════════════════════════════ */
+/* summary tiles of every page (KpiStrip, now kit Stat tiles): the gap the old v6 tile row had under it */
+.mk-kpis { margin: 0 0 var(--k-gap-4); }
+.mk-kpis .k-stats { padding: var(--k-gap-3) var(--k-gap-4); border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-card); background: rgb(var(--panel-rgb)); }
+
+/* tab bar inside a page card (Paper Trades) */
+.mk-tabs { margin-bottom: var(--k-gap-4); }
+
+/* watchlist: order bar and the move arrows */
+.mk-sortbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--k-gap-2); margin-bottom: var(--k-gap-3); }
+.mk-sorthint { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.mk-move { display: inline-flex; flex-direction: column; gap: 2px; flex: none; }
+.mk-move button { width: 28px; height: 20px; line-height: 1; font-size: 0.625rem; border: 1px solid rgb(var(--border-rgb)); border-radius: 4px; background: rgb(var(--panel-rgb)); color: rgb(var(--muted-rgb)); cursor: pointer; }
+.mk-move button:disabled { opacity: 0.35; cursor: default; }
+.mk-move button:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 1px; }
+.watchlist-terminal .v5-wl-card[draggable="true"] { cursor: grab; }
+.watchlist-terminal .v5-wl-card[data-dragging="true"] { opacity: 0.5; outline: 2px dashed rgb(var(--accent-rgb)); }
+
+/* Markets pages: the shared search + sort bar (Hot Picks, Surprise Momentum, IPO Tracker) */
+.mk-filter { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-2) var(--k-gap-4); margin: 0 0 var(--k-gap-3); }
+.mk-search { flex: 1 1 14rem; max-width: 20rem; min-width: 0; height: 40px; padding: 0 12px; font-size: 1rem; border-radius: var(--k-r-ctl); border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); color: rgb(var(--fg-rgb)); }
+.mk-search:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 1px; }
+.mk-count { margin-left: auto; font-size: 0.75rem; color: rgb(var(--muted-rgb)); font-variant-numeric: tabular-nums; }
+.mk-nomatch { margin: var(--k-gap-3) 0; padding: var(--k-gap-4); text-align: center; font-size: 0.875rem; color: rgb(var(--muted-rgb)); border: 1px dashed rgb(var(--border-strong-rgb)); border-radius: var(--k-r-ctl); }
+.mk-nomatch button { margin-left: 6px; color: rgb(var(--accent-rgb)); font-weight: 600; text-decoration: underline; background: transparent; border: 0; cursor: pointer; }
+.mk-nomatch button:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; }
+
+/* Settings page (E542): URL row, action row, checklist */
+.st-row { display: flex; flex-direction: column; gap: var(--k-gap-2); align-items: stretch; }
+.st-row .k-field { flex: 1 1 auto; }
+@media (min-width: 640px) { .st-row { flex-direction: row; align-items: flex-end; } }
+.st-actions { display: flex; flex-wrap: wrap; gap: var(--k-gap-2); }
+.st-list { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; font-size: 0.8125rem; color: rgb(var(--muted-rgb)); list-style: disc; }

@@ -5,7 +5,7 @@
   --ob-bg: #07090d; --ob-panel: #0b0f15; --ob-panel-2: #10161e; --ob-line: rgba(255,255,255,.07); --ob-line-2: rgba(255,255,255,.12);
   --ob-fg: #e8edf2; --ob-dim: #8b9aab; --ob-dim-2: #5c6b7a;
   --ob-g: #1fe08f; --ob-r: #ff3d5a; --ob-amber: #f5a623; --ob-cyan: #4aa3ff;
-  position: relative; color: var(--ob-fg); font-family: "DM Sans", "Inter", system-ui, sans-serif;
+  position: relative; color: var(--ob-fg); font-family: "Inter", system-ui, sans-serif;
   background:
     linear-gradient(var(--ob-line) 1px, transparent 1px) 0 0 / 28px 28px,
     linear-gradient(90deg, var(--ob-line) 1px, transparent 1px) 0 0 / 28px 28px,

@@ -35,12 +35,12 @@ for (const gone of ['import MarketBoard', 'import ShortlistPanel', 'import TopPi
 
 // E66: the overview tab (arming, Dhan, risk config, snapshot) and its two helpers moved out too.
 const ov = read("components/realAuto/tabs/OverviewTab.tsx");
-for (const piece of ["export function OverviewTab(", "function GateStep(", "function PortfolioSummary(", "<CloseAllDialog", "<ManualTradeTicket",
+for (const piece of ["export function OverviewTab(", "<ArmStepper", "function PortfolioSummary(", "<CloseAllDialog", "<ManualTradeTicket",
                      "<OrderFlowDiagram", "Arming sequence", "doSaveRiskConfig", "doEdisAuthorize", "doRegenerateToken"]) {
   assert.ok(ov.includes(piece), `OverviewTab keeps ${piece}`);
 }
 assert.ok(!ov.includes("activeTab"), "OverviewTab does not read the parent's activeTab");
-for (const gone of ["function GateStep(", "function PortfolioSummary(", "<CloseAllDialog", "<ManualTradeTicket", "Arming sequence"]) {
+for (const gone of ["function GateStep(", "<GateStep", "function PortfolioSummary(", "<CloseAllDialog", "<ManualTradeTicket", "Arming sequence"]) {
   assert.ok(!main.includes(gone), `RealAutoTrade no longer has ${gone}`);
 }
 // every prop the tab declares is handed over by RealAutoTrade

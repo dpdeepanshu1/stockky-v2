@@ -2,13 +2,13 @@
 // capital board, recorded chains) and the four checks only you can make in Dhan. While a hard item is not done, REAL orders stay closed (switch "REAL waits for the readiness list").
 // Green means "the evidence the list asked for exists", never "safe": the card says so.
 import { useState } from "react";
-import { fnoApi } from "../../fnoApi";
+import { fnoApi, type FnoReadiness } from "../../fnoApi";
 import { confirmQuestion, readinessChip, readinessGroups, readinessHeadline } from "../../fnoView";
 import { Btn, Card, Chip, Msg } from "../calibration/ui";
-import { useFno } from "./useFno";
+import type { FnoPoll } from "./useFno";
 
-export default function FnoReadinessCard({ onChanged }: { onChanged?: () => void }) {
-  const r = useFno(fnoApi.readiness, 30000);
+// E539: the page owns the poll (one call feeds both this card and the Engine status row)
+export default function FnoReadinessCard({ r, onChanged }: { r: FnoPoll<FnoReadiness>; onChanged?: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const d = r.data;

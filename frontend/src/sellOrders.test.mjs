@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { sellOrdersView, brokerStateView } from "./sellOrdersView.ts";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok", name); };
@@ -45,7 +46,7 @@ t("live shorts and probes are merged newest first; waiting orders are counted in
   assert.equal(v.waiting, 1);
 });
 t("the card is wired into the Positions sub-tab and reads /short/orders", () => {
-  const tab = readFileSync(new URL("./components/PositionStocksTab.tsx", import.meta.url), "utf8");
+  const tab = psSource();
   assert.match(tab, /<SellOrdersCard active=\{subTab === "positions"\}/);
   assert.match(readFileSync(new URL("./positionStocksApi.ts", import.meta.url), "utf8"), /shortOrders: \(\) => psRequest<any>\("\/short\/orders"\)/);
 });

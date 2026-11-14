@@ -53,8 +53,8 @@ assert.equal(tapeView(doc({ gate: gate({ calls: 0, blocks: 0 }) })).entry.blockP
 const rd = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 const tab = rd("./components/CalibrationControlTab.tsx");
 assert.match(tab, /section === "tape" && <TapePanel svc=\{svc\} \/>/);
-assert.match(tab, /\{ id: "tape", label: "Order-flow tape" \}/);
-assert.match(tab, /section !== "tape"/, "no Run-all bar on the tape section");
+assert.match(rd("./calibrationNav.ts"), /\{ id: "tape", label: "Order-flow tape" \}/);   // E539: the section list moved to calibrationNav.ts
+assert.match(rd("./calibrationNav.ts"), /NO_RUN_ALL: CalSection\[\] = \[[^\]]*"tape"/, "no Run-all bar on the tape section");   // E539: the rule moved to calibrationNav.ts
 const panel = rd("./components/calibration/TapePanel.tsx");
 assert.match(panel, /positionStocksApi\.flowStats\(\)/);
 assert.match(panel, /realTradeApi\.flowStats\(\)/);

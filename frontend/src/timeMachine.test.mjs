@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { defaultForm, parseSymbols, formProblem, buildBody, errorText, verdictView, pct, rText, toneOfR, histBars, gapLine, controlLine, MAX_COMPARE, gateModeView, gateTimerLine, gateCountsLine } from "./timeMachineView.ts";
 import { readFileSync } from "node:fs";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const ok = (o = {}) => ({ ...defaultForm(null), symbol: "RELIANCE", ...o });
 
@@ -76,7 +77,7 @@ assert.equal(controlLine(null), "");
 const root = new URL(".", import.meta.url);
 const api = readFileSync(new URL("positionStocksApi.ts", root), "utf8");
 for (const route of ["/time-machine/status", "/time-machine/run", "/time-machine/compare"]) assert.ok(api.includes(route), route);
-const tab = readFileSync(new URL("components/PositionStocksTab.tsx", root), "utf8");
+const tab = psSource();
 assert.ok(tab.includes('"timemachine"') && tab.includes("TimeMachinePanel"), "tab wired");
 assert.ok(readFileSync(new URL("../package.json", root), "utf8").includes("timeMachine.test.mjs"), "in npm test");
 // E115: the live picking gate card

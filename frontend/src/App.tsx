@@ -7,14 +7,14 @@ import WatchlistManager from "./components/WatchlistManager";
 import SystemCheck from "./components/SystemCheck";
 import ServiceManager from "./components/ServiceManager";
 import ErrorBoundary from "./components/ui/ErrorBoundary";
-import { NavIcon } from "./components/ui/NavIcon";
 import CommandPalette, { CommandAction } from "./components/CommandPalette";
 import StockPopup from "./components/board/StockPopup";
 import type { BoardRowLite } from "./components/board/boardTypes";
-import { DesktopSidebar, MobileTopBar, MobileDrawer, DesktopTopBar, BackendDownBanner } from "./components/app/AppNav";
+import { DesktopSidebar, MobileTopBar, MobileDrawer, DesktopTopBar, BackendDownBanner, MobileBottomNav, TradingSheet, ModeStrip, MarketsTabs } from "./components/app/AppNav";
 import { TabContent, loadTrades } from "./components/app/TabContent";
 import type { DashboardViewProps } from "./components/app/DashboardView";
-import type { NavItem, Tab } from "./components/app/appTypes";
+import type { Tab } from "./components/app/appTypes";
+import { isMarketsTab, isTradingTab, sectionTarget } from "./components/app/navModel";
 import { useWatchlist } from "./hooks/useWatchlist";
 import { useBackendStatus } from "./hooks/useBackendStatus";
 import { useScanRunner } from "./hooks/useScanRunner";
@@ -22,9 +22,8 @@ import { useScanRunner } from "./hooks/useScanRunner";
 // E70 - E31 step 14: App is now the shell. The page switch is components/app/TabContent.tsx (with the lazy page chunks); the watchlist, the backend
 // check and the whole scan / analysis runner are hooks in src/hooks/. What stays here: theme, keep-alive, DB wake, idle tick, shortcuts, navigation.
 
-// The five tabs the mobile bottom bar shows, in order. Explicit so that adding
-// a tab to navItems can never silently displace one of them.
-const MOBILE_BOTTOM_TABS: Tab[] = ["dashboard", "realtrade", "positionstocks", "hot"];
+// E535: the sidebar, the phone bottom bar (Home, Markets, Trading, Alerts, More), the Markets tab strip and the mode strip all read
+// components/app/navModel.ts, so a tab added to NAV_ITEMS can never silently displace one of the five bottom-bar slots.
 
 
 export default function App() {
@@ -85,11 +84,13 @@ export default function App() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [boardSym, setBoardSym] = useState<BoardRowLite | null>(null);   // group311: Market Board popup opened from the command palette
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [tradingOpen, setTradingOpen] = useState(false);   // E535: the phone "Trading" sheet (the four admin-login pages)
 
   // Watchlist overlay must not stick when navigating Dashboard / other tabs
   useEffect(() => {
     if (tab !== "watchlist") setShowWatchlist(false);
     setMobileMoreOpen(false);
+    setTradingOpen(false);
   }, [tab]);
 
   // Lock body scroll while mobile more sheet is open
@@ -182,7 +183,32 @@ export default function App() {
     return <SystemCheck onReady={() => setSystemReady(true)} />;
   }
 
+
+  const goTo = (id: Tab) => {
+    const apply = () => {
+      setTab(id);
+      if (id === "watchlist") setShowWatchlist(true);
+      else setShowWatchlist(false);
+      setMobileMoreOpen(false);
+      setTradingOpen(false);
+    };
+    // group 460: soft cross-fade where the View Transitions API exists; off for reduced-motion and TV mode
+    try {
+      const vt = (document as any).startViewTransition;
+      const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("tv");
+      if (typeof vt === "function" && !calm) { vt.call(document, () => flushSync(apply)); return; }
+    } catch { /* fall through to the plain switch */ }
+    apply();
+  };
+  // "Fix in Settings" / "Check backend settings": open the Settings page, where the API URL is edited (they used to set a flag nothing rendered).
+  const openSettings = () => goTo("settings");
   const cmdActions: CommandAction[] = [
+    // E535: the five sections (a section opens its first page, or stays on the page of that section you are already on)
+    { id: "sec-home", label: "Home", group: "Sections", hint: "section", keywords: "dashboard", run: () => goTo(sectionTarget(tab, "home")) },
+    { id: "sec-markets", label: "Markets", group: "Sections", hint: "section", keywords: "hot picks surprise ipo watchlist", run: () => goTo(sectionTarget(tab, "markets")) },
+    { id: "sec-trading", label: "Trading", group: "Sections", hint: "section", keywords: "auto trade position stocks f&o calibration real money admin login", run: () => goTo(sectionTarget(tab, "trading")) },
+    { id: "sec-paper", label: "Paper", group: "Sections", hint: "section", keywords: "paper trades practice demo", run: () => goTo(sectionTarget(tab, "paper")) },
+    { id: "sec-system", label: "System", group: "Sections", hint: "section", keywords: "alerts data feed training settings", run: () => goTo(sectionTarget(tab, "system")) },
     { id: "dash", label: "Dashboard", group: "Navigate", hint: "tab", run: () => setTab("dashboard") },
     { id: "datafeed", label: "Data Feed", group: "Navigate", hint: "tab", run: () => setTab("datafeed") },
     { id: "hot", label: "Stockky Hot Picks", group: "Navigate", hint: "tab", run: () => setTab("hot") },
@@ -208,40 +234,6 @@ export default function App() {
     })),
   ];
 
-  // Grouped by what the person is doing, not by which service backs the tab.
-  const navItems: NavItem[] = [
-    { id: "dashboard", label: "Dashboard", short: "Home", icon: "home", group: "" },
-    { id: "realtrade", label: "Auto Trade", short: "Auto Trade", icon: "bot", group: "Trading" },
-    { id: "positionstocks", label: "Position Stocks", short: "Scalp", icon: "trend", group: "Trading" },
-    { id: "fno", label: "F&O Options", short: "F&O", icon: "trend", group: "Trading" },
-    { id: "calibration", label: "Real Money Calibration", short: "Calibrate", icon: "sliders", group: "Trading" },
-    { id: "trades", label: "Paper Trades", short: "Paper", icon: "swap", group: "Trading" },
-    { id: "hot", label: "Hot Picks", short: "Picks", icon: "flame", group: "Discover" },
-    { id: "surprise", label: "Surprise Momentum", short: "Surprise", icon: "zap", group: "Discover" },
-    { id: "ipo", label: "IPO Tracker", short: "IPO", icon: "tag", group: "Discover" },
-    { id: "watchlist", label: "Watchlist", short: "Watchlist", icon: "star", group: "Discover" },
-    { id: "notifications", label: "Alerts", short: "Alerts", icon: "bell", group: "System" },
-    { id: "datafeed", label: "Data Feed", short: "Feed", icon: "database", group: "System" },
-    { id: "training", label: "Training Lab", short: "Train", icon: "flask", group: "System" },
-    { id: "settings", label: "Settings", short: "Settings", icon: "sliders", group: "System" },
-  ];
-  const goTo = (id: Tab) => {
-    const apply = () => {
-      setTab(id);
-      if (id === "watchlist") setShowWatchlist(true);
-      else setShowWatchlist(false);
-      setMobileMoreOpen(false);
-    };
-    // group 460: soft cross-fade where the View Transitions API exists; off for reduced-motion and TV mode
-    try {
-      const vt = (document as any).startViewTransition;
-      const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("tv");
-      if (typeof vt === "function" && !calm) { vt.call(document, () => flushSync(apply)); return; }
-    } catch { /* fall through to the plain switch */ }
-    apply();
-  };
-  // "Fix in Settings" / "Check backend settings": open the Settings page, where the API URL is edited (they used to set a flag nothing rendered).
-  const openSettings = () => goTo("settings");
   const themeLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
   // Everything the dashboard page needs from the scan runner and the watchlist, as one object for the TabContent "dashboard" prop.
   const dashboard: DashboardViewProps = {
@@ -264,22 +256,25 @@ export default function App() {
       )}
 
       {/* Desktop sidebar */}
-      <DesktopSidebar navItems={navItems} tab={tab} goTo={goTo} showServiceManager={showServiceManager}
+      <DesktopSidebar tab={tab} goTo={goTo} showServiceManager={showServiceManager}
         setShowServiceManager={setShowServiceManager} setCmdOpen={setCmdOpen} />
 
       {/* Mobile top bar */}
-      <MobileTopBar navItems={navItems} tab={tab} mobileMoreOpen={mobileMoreOpen} setMobileMoreOpen={setMobileMoreOpen} backendUp={backendUp}
+      <MobileTopBar tab={tab} backendUp={backendUp}
         wsLive={wsLive} handleWakeBackend={handleWakeBackend} setTab={setTab} setCmdOpen={setCmdOpen} />
 
       {/* Mobile slide-over menu (professional drawer) */}
       {mobileMoreOpen && (
-        <MobileDrawer navItems={navItems} tab={tab} goTo={goTo} setMobileMoreOpen={setMobileMoreOpen} setShowServiceManager={setShowServiceManager}
+        <MobileDrawer tab={tab} goTo={goTo} setMobileMoreOpen={setMobileMoreOpen} setShowServiceManager={setShowServiceManager}
           wakeAllDbs={wakeAllDbs} dbWakeState={dbWakeState} theme={theme} setTheme={setTheme} />
       )}
 
       {/* Desktop top bar: search + system status */}
       <DesktopTopBar setCmdOpen={setCmdOpen} wsLive={wsLive} backendUp={backendUp} handleWakeBackend={handleWakeBackend} setTab={setTab}
         dbWakeState={dbWakeState} wakeAllDbs={wakeAllDbs} themeLabel={themeLabel} theme={theme} setTheme={setTheme} />
+
+      {/* E535: always-visible mode strip on the four Trading pages (DEMO or REAL, armed or not, today's P&L). Read-only. */}
+      {isTradingTab(tab) && <ModeStrip tab={tab} />}
 
       {showServiceManager && (
         <ServiceManager onClose={() => setShowServiceManager(false)} />
@@ -309,6 +304,7 @@ export default function App() {
       )}
 
       <main id="main-content" tabIndex={-1} className="terminal-main max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-24 md:pb-8">
+        {isMarketsTab(tab) && <MarketsTabs tab={tab} goTo={goTo} />}
         <ErrorBoundary key={tab} label="This page">
         <Suspense fallback={<div className="py-16 flex justify-center" role="status" aria-label="Loading page"><span className="inline-block w-5 h-5 rounded-full border-2 border-mist border-t-transparent animate-spin" /></div>}>
         <TabContent tab={tab} setTab={setTab} watchlist={watchlist} handleWatchlistUpdate={handleWatchlistUpdate}
@@ -318,34 +314,10 @@ export default function App() {
         </ErrorBoundary>
       </main>
 
-      
-      {/* Mobile bottom navigation */}
-      <nav className="terminal-bottom-nav md:hidden" aria-label="Primary">
-        {/* Pinned to the same five tabs this bar has always shown. Adding
-            "ipo" to navItems would otherwise have silently pushed "training"
-            out of a blind .slice(0, 5); IPO Tracker is reachable from the
-            desktop rail, the ⋯ More drawer and the command palette. */}
-        {MOBILE_BOTTOM_TABS.map((id) => navItems.find((i) => i.id === id)!).map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={tab === item.id ? "active" : ""}
-            aria-current={tab === item.id ? "page" : undefined}
-            onClick={() => goTo(item.id)}
-          >
-            <NavIcon name={item.icon} />
-            <span>{item.short}</span>
-          </button>
-        ))}
-        <button
-          type="button"
-          className={mobileMoreOpen || !MOBILE_BOTTOM_TABS.includes(tab) ? "active" : ""}
-          onClick={() => setMobileMoreOpen(true)}
-        >
-          <NavIcon name="menu" />
-          <span>More</span>
-        </button>
-      </nav>
+
+      {/* E535: phone bottom bar (Home, Markets, Trading, Alerts, More) and the Trading sheet */}
+      <MobileBottomNav tab={tab} goTo={goTo} tradingOpen={tradingOpen} setTradingOpen={setTradingOpen} mobileMoreOpen={mobileMoreOpen} setMobileMoreOpen={setMobileMoreOpen} />
+      <TradingSheet open={tradingOpen} onClose={() => setTradingOpen(false)} tab={tab} goTo={goTo} />
 
       <footer className="app-footer px-4 sm:px-6 py-5 border-t border-slate/40 mt-8 pb-20 md:pb-5">
         <p className="text-[11px] text-mist/70">

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { sideOf, isShort, legLabels, pnlPctFromPrices, sideBadge, shortModeView } from "./positionSide.ts";
 import { shortShadowView } from "./shortShadowView.ts";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 let n = 0;
 const t = (name, fn) => { fn(); n++; console.log("ok", name); };
@@ -33,8 +34,8 @@ t("the short view calls live mode live and off mode off", () => {
   assert.equal(shortShadowView({ ...base, mode: "off" }).kind, "off");
 });
 t("the Positions tab uses the helpers (badge, leg labels, short-aware P&L %) and has no long-only P&L formula left", () => {
-  const src = readFileSync(new URL("./components/PositionStocksTab.tsx", import.meta.url), "utf8");
-  assert.ok(src.includes('from "../positionSide"') && src.includes("sideBadge(p)") && src.includes("legLabels(p)") && src.includes("pnlPctFromPrices(p)"));
+  const src = psSource();
+  assert.ok(/from "(\.\.\/)+positionSide"/.test(src) && src.includes("sideBadge(p)") && src.includes("legLabels(p)") && src.includes("pnlPctFromPrices(p)"));
   assert.ok(!src.includes("((p.exit_price - p.entry_price) / p.entry_price) * 100"));
 });
 t("the Short selling panel can still only switch SHORT_MODE OFF (never shadow or live) and names the cap switch", () => {

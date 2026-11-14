@@ -1,3 +1,4 @@
+import { SessionMissingNote } from "../../AdminGate";   // E535
 import type { Dispatch, SetStateAction } from "react";
 import { realTradeApi, type DhanEdisSummary, type DhanStatus, type GateStatus, type Position, type CumulativeBrokerage } from "../../../realTradeApi";
 import ManualTradeTicket from "../../trading/ManualTradeTicket";
@@ -9,6 +10,7 @@ import type { Mode } from "../types";
 import DhanMoneyCard from "../../DhanMoneyCard";   // Round 270
 import { openCharges, afterCharges } from "../../../moneyView";
 import SessionRail from "../../session/SessionRail";   // E277: the trading-day rail
+import { ArmStepper } from "../../trading/ArmStepper";   // E537
 
 // E66 - E31 step 10: the "overview" tab, moved out of RealAutoTrade.tsx (JSX unchanged). PortfolioSummary and GateStep moved with it
 // (only this tab used them). State and handlers stay in RealAutoTrade and arrive as props.
@@ -126,17 +128,6 @@ function PortfolioSummary({
   );
 }
 
-// ── Gate sequence steps ──────────────────────────────────────────────────────
-function GateStep({ n, label, done, active }: { n: number; label: string; done: boolean; active: boolean }) {
-  return (
-    <div className={`rt-gate transition-colors ${active && !done ? "animate-pulse" : ""}`}
-      data-state={done ? "done" : active ? "active" : "idle"}>
-      <div className="rt-gate-n">{done ? "✓" : n}</div>
-      <span className="font-display tabular-nums">{label}</span>
-    </div>
-  );
-}
-
 export type RiskForm = {
   risk_per_trade_pct: string; max_daily_loss_pct: string; max_concurrent_positions: string;
   max_portfolio_risk_pct: string; stale_data_seconds: string; max_tick_volatility_mult: string;
@@ -158,7 +149,6 @@ export interface OverviewTabProps {
   nextGateNeeded: number | null;
   positions: Position[];
   // login
-  username: string; setUsername: Setter<string>; password: string; setPassword: Setter<string>; doLogin: Act;
   // arming
   doConfirmRisk: Act; doArm: Act; doDisarm: Act; doEmergencyPause: Act;
   showCloseAll: boolean; setShowCloseAll: Setter<boolean>; loadStatus: (m: Mode) => Promise<void>;
@@ -180,7 +170,6 @@ export interface OverviewTabProps {
 
 export function OverviewTab({
   mode, status, loggedIn, loading, gate1, gate2, gate3, armed, nextGateNeeded, positions,
-  username, setUsername, password, setPassword, doLogin,
   doConfirmRisk, doArm, doDisarm, doEmergencyPause, showCloseAll, setShowCloseAll, loadStatus,
   dhanAccount, secondsRemaining, showDhanForm, setShowDhanForm, dhanClientId, setDhanClientId, dhanToken, setDhanToken,
   doConnectDhan, doRegenerateToken, regenLoading, edisSummary, edisBusy, doEdisRequestTpin, doEdisAuthorize,
@@ -211,30 +200,11 @@ export function OverviewTab({
               {/* Gate sequence */}
               <div className="bg-graphite border border-slate rounded-2xl p-4">
                 <SectionHdr>Arming sequence — {mode} mode</SectionHdr>
-                <div className="grid grid-cols-2 gap-2 mb-4">
-                  <GateStep n={1} label="Admin authenticated" done={gate1} active={nextGateNeeded === 1} />
-                  <GateStep n={2} label={mode === "DEMO" ? "Dhan (not required)" : "Dhan connected"} done={gate2} active={nextGateNeeded === 2} />
-                  <GateStep n={3} label="Risk config confirmed" done={gate3} active={nextGateNeeded === 3} />
-                  <GateStep n={4} label="Armed" done={armed} active={nextGateNeeded === 4} />
-                </div>
+                {/* E537: the four gates as a 3-step stepper (same gates, same handlers; the buttons below are unchanged) */}
+                <ArmStepper gate1={gate1} gate2={gate2} gate3={gate3} armed={armed} dhanRequired={mode !== "DEMO"} />
 
-                {/* Inline login form when armed but session expired —
-                    don't block the full page, just gate the mutating actions */}
-                {mode === "REAL" && !loggedIn && armed && (
-                  <div className="rt-login-inline">
-                    <p className="font-display tabular-nums">Session expired — log in to disarm or change config. Auto-pilot keeps running.</p>
-                    <div className="rt-inline-row">
-                      <input type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-                        placeholder="Username" value={username} onChange={e => setUsername(e.target.value)} />
-                      <input type="password" autoComplete="current-password"
-                        placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
-                        onKeyDown={e => e.key === "Enter" && void doLogin()} />
-                      <button onClick={() => void doLogin()} disabled={loading || !password} className="rt-btn rt-btn-primary" style={{ width: "auto" }}>
-                        {loading ? "…" : "Login"}
-                      </button>
-                    </div>
-                  </div>
-                )}
+                {/* E535: the inline login form is gone (one login lives in AdminGate); a missing session is explained and sent there */}
+                {mode === "REAL" && !loggedIn && armed && <SessionMissingNote service="Auto Trade" />}
 
                 {/* Login form already shown above when not logged in; here only if
                     logged in but gate not met */}

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "./ui/EmptyState";   // group 463
 import WatchlistPulse from "./WatchlistPulse";   // design v5
 import { api } from "../api";
+import { Tabs } from "./kit";   // E540
+import { WATCH_SORTS, dropSymbol, moveSymbol, sortWatchlist, type WatchSort } from "../watchlistOrder";   // E540
 import { AddedMap, STORAGE_KEY, formatPct, isBigMove, label, parseAdded, pctSince, prune, tone, withBaseline, checkSymbol } from "../watchlistGain";   // E28
 
 interface Props {
@@ -19,6 +21,8 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
     try { return parseAdded(window.localStorage.getItem(STORAGE_KEY)); } catch { return {}; }
   });
   const [prices, setPrices] = useState<Record<string, number>>({});
+  const [sort, setSort] = useState<WatchSort>("mine");   // E540: only changes what is shown, never the saved order
+  const [dragging, setDragging] = useState<string | null>(null);
   const symbolsRef = useRef<string[]>(symbols);
   symbolsRef.current = symbols;
 
@@ -80,6 +84,11 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
     onChange(symbols.filter((s) => s !== sym));
   }
 
+  // E540: the list as shown. "My order" is the saved order (drag or the arrow buttons change it and save it through onChange);
+  // the gainers / losers views are display-only, so nothing is saved while they are on.
+  const shown = sortWatchlist(symbols, Object.fromEntries(symbols.map((x) => [x, pctSince(added[x], prices[x])])), sort);
+  const canMove = sort === "mine";
+
   return (
     <div className="watchlist-terminal space-y-4">
       <header className="terminal-panel">
@@ -136,13 +145,26 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
           </div>
         )}
 
+        {symbols.length > 1 && (
+          <div className="mk-sortbar">
+            <Tabs label="Watchlist order" items={WATCH_SORTS.map((o) => ({ id: o.id, label: o.label }))} value={sort} onChange={setSort} />
+            <span className="mk-sorthint">{canMove ? "Drag a card, or use the arrows, to reorder. The order is saved." : "Sorted by % since added. Switch to My order to reorder."}</span>
+          </div>
+        )}
+
         {symbols.length === 0 ? (
           <EmptyState title="Your watchlist is empty" hint="Add NSE symbols above to follow them and scan them together." />
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {symbols.map((s) => (
+            {shown.map((s, idx) => (
               <div
                 key={s}
+                draggable={canMove}
+                onDragStart={canMove ? (e) => { setDragging(s); e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", s); } catch { /* some browsers refuse: the state still holds the symbol */ } } : undefined}
+                onDragOver={canMove && dragging ? (e) => e.preventDefault() : undefined}
+                onDrop={canMove && dragging ? (e) => { e.preventDefault(); const next = dropSymbol(symbols, dragging, s); setDragging(null); if (next.some((x, i) => x !== symbols[i])) onChange(next); } : undefined}
+                onDragEnd={() => setDragging(null)}
+                data-dragging={dragging === s ? "true" : undefined}
                 className="v5-wl-card flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
                 data-tone={tone(pctSince(added[s], prices[s]))}
               >
@@ -170,6 +192,12 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
                     );
                   })()}
                 </div>
+                {canMove && symbols.length > 1 && (
+                  <span className="mk-move">
+                    <button type="button" aria-label={`Move ${s} earlier`} disabled={idx === 0} onClick={() => onChange(moveSymbol(symbols, idx, idx - 1))}>▲</button>
+                    <button type="button" aria-label={`Move ${s} later`} disabled={idx === shown.length - 1} onClick={() => onChange(moveSymbol(symbols, idx, idx + 1))}>▼</button>
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => remove(s)}

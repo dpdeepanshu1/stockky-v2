@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { KpiStrip } from "./ui/KpiStrip";
+import { Tabs } from "./kit";   // E540
 import { tradesKpis, pnlView, dirOf, levelText, countText } from "./tradesView";
 import { MoneyModeBanner } from "./ui/MoneyModeBanner";   // design v5
 import { api, apiUrl, PaperTrade, PortfolioSummary, TradeReportBucket } from "../api";
@@ -641,23 +642,18 @@ export default function Trades() {
       )}
 
       <div className="bg-graphite border border-slate/60 rounded-2xl p-5">
-        <div className="flex gap-1 bg-ink/40 border border-slate/40 rounded-xl p-0.5 w-fit mb-4 flex-wrap">
-          {([
-            ["open", `Open (${openTrades.length})`],
-            ["closed", `Closed (${closedTrades.length})`],
-            ["daily", "Daily Report"],
-            ["weekly", "Weekly Report"],
-          ] as const).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={`px-3 py-1 text-xs font-display tabular-nums uppercase rounded-xl transition-colors ${
-                tab === key ? "bg-slate/60 text-paper" : "text-mist/50 hover:text-mist"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="mk-tabs">
+          <Tabs
+            label="Paper trades view"
+            items={[
+              { id: "open", label: "Open", count: openTrades.length },
+              { id: "closed", label: "Closed", count: closedTrades.length },
+              { id: "daily", label: "Daily Report" },
+              { id: "weekly", label: "Weekly Report" },
+            ]}
+            value={tab}
+            onChange={setTab}
+          />
         </div>
 
         {tab === "open" &&

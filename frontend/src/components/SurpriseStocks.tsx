@@ -6,6 +6,8 @@ import { PriceRoll } from "./ui/motion";   // group 462 (phase 4)
 import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import { KpiStrip } from "./ui/KpiStrip";
+import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
+import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
 import { surpriseKpis, surpriseRowView } from "./surpriseView";
 
 export interface SurpriseStock {
@@ -61,12 +63,15 @@ function formatEta(sec?: number | null) {
   return `${r}s`;
 }
 
+const SURPRISE_ACCESS: MarketAccess<SurpriseStock> = { symbol: (r) => r.symbol, score: (r) => r.score, change: (r) => (r as { change_pct?: unknown }).change_pct };   // E541
+
 export default function SurpriseStocks({
   onSelect,
 }: {
   onSelect?: (symbol: string) => void;
 }) {
   const [stocks, setStocks] = useState<SurpriseStock[]>([]);
+  const [mfilter, setMfilter] = useState<MarketFilter>(NO_FILTER);   // E541: what is shown only; the scan list itself is untouched
   const [sniperOpen, setSniperOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<BuySuggestion[]>([]);
   const [sniperLoading, setSniperLoading] = useState(false);
@@ -589,6 +594,8 @@ export default function SurpriseStocks({
 
   const scPct = Math.min(100, Math.max(0, Number(scanProg?.percent ?? 0)));
 
+  const shownStocks = applyMarketFilter(stocks, SURPRISE_ACCESS, mfilter);   // E541
+
   return (
     <div className="rounded-2xl border border-slate bg-graphite p-4 sm:p-6">
       <div className="flex flex-wrap justify-between items-start gap-4 mb-5">
@@ -876,6 +883,8 @@ export default function SurpriseStocks({
       </div>
 
       <KpiStrip items={surpriseKpis(stocks, meta)} label="Surprise Momentum summary" />
+      <MarketsFilterBar label="Surprise Momentum" query={mfilter.query} onQuery={(query) => setMfilter((f) => ({ ...f, query }))} sort={mfilter.sort}
+        onSort={(sort) => setMfilter((f) => ({ ...f, sort }))} sorts={sortsFor(SURPRISE_ACCESS)} shown={shownStocks.length} total={stocks.length} />
 
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
@@ -893,7 +902,7 @@ export default function SurpriseStocks({
             </tr>
           </thead>
           <tbody>
-            {stocks.map((s) => {
+            {shownStocks.map((s) => {
               const v = surpriseRowView(s);   // E161: formatted text, dashes for missing values
               return (
               <tr key={s.symbol} className={`v7-srow ${v.change.dir ?? "flat"} border-b border-slate/40 hover:bg-ink/40 text-sm transition`}>
@@ -936,6 +945,9 @@ export default function SurpriseStocks({
               </tr>
               );
             })}
+            {isFilteredEmpty(shownStocks.length, stocks.length) && (
+              <tr><td colSpan={9}><NoMatch query={mfilter.query} onClear={() => setMfilter(NO_FILTER)} /></td></tr>
+            )}
             {stocks.length === 0 && !loading && (
               <tr>
                 <td colSpan={9} className="py-10 text-center font-display tabular-nums text-xs text-mist/45">

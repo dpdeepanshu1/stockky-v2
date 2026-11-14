@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ApiError, controlApi, switchUrl, type FlagRow, type FlagsDoc, type PresetPlanRow, type SwitchSvc } from "../../calibrationApi";
+import { lastChangedText, oneLine } from "../../calibrationNav";
 import { Btn, Card, Msg } from "./ui";
 
 const SVC_NAME: Record<SwitchSvc, string> = { rt: "real-trade-service", ps: "position-stocks-service", sch: "notification-scheduler-service", fno: "fno-options-service" };
@@ -177,7 +178,8 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: SwitchSvc; onCh
                           {f.matches_recommended === false && <span className="rounded border border-signal-hold px-1 text-[9px] text-signal-hold">recommended: {valueLabel(f, f.recommended)}</span>}
                           {f.matches_recommended === true && <span className="rounded border border-slate px-1 text-[9px] text-mist">= recommended</span>}
                         </div>
-                        <div className="text-[10px] text-mist">{f.key} · from {f.source}{f.shipped != null ? ` · deployed default ${valueLabel(f, f.shipped)}` : ""}</div>
+                        {open !== f.key && f.help && <p className="text-[11px] text-mist" data-testid={`flag-line-${f.key}`}>{oneLine(f.help)}</p>}
+                        <div className="text-[10px] text-mist">{f.key} · from {f.source}{f.shipped != null ? ` · deployed default ${valueLabel(f, f.shipped)}` : ""} · <span data-testid={`flag-changed-${f.key}`}>{lastChangedText(f.override)}</span></div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
                         {f.kind === "bool" ? (

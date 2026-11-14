@@ -40,6 +40,18 @@ export function formatCountdown(sec: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** E535: the top-bar session pill turns to the warning colour and offers Extend at or under this many seconds. */
+export const PILL_WARN_SECONDS = 300;
+
+/** Text inside the session pill: "7h 59m" for long sessions, "24 min", "4:59" under the warning limit, "Admin" when the time is unknown. */
+export function pillTime(sec: number | null): string {
+  if (sec == null) return "Admin";
+  const s = Math.max(0, Math.floor(sec));
+  if (s >= 3600) return formatCountdown(s);
+  if (s > PILL_WARN_SECONDS) return `${Math.ceil(s / 60)} min`;
+  return formatCountdown(s);
+}
+
 export const MIN_NEW_PASSWORD = 10;
 export const MAX_NEW_PASSWORD = 128;
 

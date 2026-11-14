@@ -54,7 +54,7 @@ export function TabContent({
       </div>
     ) : tab === "trades" ? (
       <div className="page-terminal">
-        <PageHeader title="Paper Trades" desc="Practice trades with a simulated wallet. No real money is used here." icon="swap" kicker="Trading" />
+        <PageHeader title="Paper Trades" desc="Practice trades with a simulated wallet. No real money is used here." icon="swap" kicker="Paper" />
         <Trades />
       </div>
     ) : tab === "datafeed" ? (
@@ -65,7 +65,7 @@ export function TabContent({
       </div>
     ) : tab === "hot" ? (
       <div className="page-terminal">
-        <PageHeader title="Hot Picks" desc="Stocks currently ranked highest by the combined technical, fundamental and news score." icon="flame" kicker="Discover" />
+        <PageHeader title="Hot Picks" desc="Stocks currently ranked highest by the combined technical, fundamental and news score." icon="flame" kicker="Markets" />
         <HotStocks
           onAnalyze={(s) => {
             setTab("dashboard");
@@ -75,7 +75,7 @@ export function TabContent({
       </div>
     ) : tab === "surprise" ? (
       <div className="page-terminal">
-        <PageHeader title="Surprise Momentum" desc="Stocks making unusual moves on volume, news or price right now." icon="zap" kicker="Discover" />
+        <PageHeader title="Surprise Momentum" desc="Stocks making unusual moves on volume, news or price right now." icon="zap" kicker="Markets" />
         <SurpriseStocks
           onSelect={(s) => {
             setTab("dashboard");
@@ -85,7 +85,7 @@ export function TabContent({
       </div>
     ) : tab === "ipo" ? (
       <div className="page-terminal">
-        <PageHeader title="IPO Tracker" desc="Upcoming, open and recently listed IPOs." icon="tag" kicker="Discover" />
+        <PageHeader title="IPO Tracker" desc="Upcoming, open and recently listed IPOs." icon="tag" kicker="Markets" />
         <IpoTracker
           onSelect={(s) => {
             setTab("dashboard");
@@ -131,7 +131,7 @@ export function TabContent({
       />
     ) : tab === "watchlist" ? (
       <div className="page-terminal">
-        <PageHeader title="Watchlist" desc="The stocks you follow. Scan them together or open one for a full analysis." icon="star" kicker="Discover" />
+        <PageHeader title="Watchlist" desc="The stocks you follow. Scan them together or open one for a full analysis." icon="star" kicker="Markets" />
         <WatchlistManager
           symbols={watchlist}
           onChange={handleWatchlistUpdate}

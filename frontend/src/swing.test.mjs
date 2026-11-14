@@ -137,7 +137,7 @@ for (const k of ["verdict", "reasons", "stopped_pct", "gap_through"]) assert.ok(
 // WIRING: the page shows the card, polls with the shared visible-interval helper, never posts, and the tab has the section.
 const tab = readFileSync(new URL("frontend/src/components/CalibrationControlTab.tsx", root), "utf8");
 assert.match(tab, /section === "swing" && <SwingPanel \/>/);
-assert.match(tab, /\{ id: "swing", label: "Swing lane" \}/);
+assert.match(readFileSync(new URL("frontend/src/calibrationNav.ts", root), "utf8"), /\{ id: "swing", label: "Swing lane" \}/);   // E539: the section list moved to calibrationNav.ts
 const panel = readFileSync(new URL("frontend/src/components/calibration/SwingPanel.tsx", root), "utf8");
 assert.match(panel, /setVisibleInterval/);
 assert.ok(!/method:\s*"(POST|PUT|DELETE)"/.test(panel) && !/swingResume|swingProbe|swingScan/.test(panel), "the swing card is read-only");

@@ -142,7 +142,12 @@ for (const svc of ["rt", "ps"]) { const r = planRunAll(realCat, svc, true); asse
 const bar = readFileSync(new URL("./components/calibration/RunAllBar.tsx", import.meta.url), "utf8");
 assert.match(bar, /Run all test cases/);
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
-assert.match(tab, /section !== \"runs\" && section !== \"alerts\" && section !== \"weather\" && section !== \"research\" && section !== \"swing\" && section !== \"reconcile\" && section !== \"tape\" && section !== \"setups\" && section !== \"probes\" && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except Runs & downloads, the scheduler Alert switches (E51), Market Weather (not per service) and the read-only status sections (Swing lane, Reconciliation and Status probes from E144, Order-flow tape from E271 and Setup scorecard from E272: they start no test)");
+assert.match(tab, /showsRunAll\(section\) && <RunAllBar svc=\{svc\} \/>/, "Run all shows on every tab except the ones listed in calibrationNav NO_RUN_ALL");
+{ // E539: the rule moved to calibrationNav.ts (same nine exceptions: Runs & downloads, scheduler Alert switches (E51), Market Weather (not per service), and the read-only status sections Swing lane, Reconciliation, Status probes (E144), Order-flow tape (E271), Setup scorecard (E272): they start no test)
+  const nav = readFileSync(new URL("./calibrationNav.ts", import.meta.url), "utf8");
+  const m = nav.match(/NO_RUN_ALL: CalSection\[\] = \[([^\]]*)\]/);
+  assert.deepEqual(m[1].split(",").map((x) => x.trim().replace(/"/g, "")).sort(), ["alerts", "probes", "reconcile", "research", "runs", "setups", "swing", "tape", "weather"]);
+}
 // E51: the scheduler's alert switches go through the gateway proxy, never straight to the scheduler
 assert.match(tab, /section === \"alerts\" && <SwitchesPanel svc=\"sch\" \/>/);
 assert.match(api, /`\/scheduler-control\$\{path\}`/, "alert switches use the gateway proxy path");

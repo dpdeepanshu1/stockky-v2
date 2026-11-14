@@ -86,7 +86,7 @@ assert.ok(!/reconcile-report[^"`]*run=true/.test(rtApi));
 // WIRING: the section is on the page, both panels poll with the shared helper and only read.
 const tab = readFileSync(new URL("frontend/src/components/CalibrationControlTab.tsx", root), "utf8");
 assert.match(tab, /section === "reconcile" && <ReconcilePanel svc=\{svc\} \/>/);
-assert.match(tab, /\{ id: "reconcile", label: "Reconciliation" \}/);
+assert.match(readFileSync(new URL("frontend/src/calibrationNav.ts", root), "utf8"), /\{ id: "reconcile", label: "Reconciliation" \}/);   // E539: the section list moved to calibrationNav.ts
 const panel = readFileSync(new URL("frontend/src/components/calibration/ReconcilePanel.tsx", root), "utf8");
 assert.match(panel, /setVisibleInterval/);
 assert.ok(!/method:\s*"(POST|PUT|DELETE)"/.test(panel));

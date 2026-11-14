@@ -23,6 +23,8 @@ import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 import IpoFeedHealth from "./IpoFeedHealth";
 import IpoLifecycle from "./IpoLifecycle";   // design v5
 import { KpiStrip } from "./ui/KpiStrip";
+import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
+import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
 import { ipoKpis, ipoRowView } from "./ipoView";
 
 type IpoProgress = {
@@ -66,12 +68,15 @@ function BusySpinner({ className = "" }: { className?: string }) {
   );
 }
 
+const IPO_ACCESS: MarketAccess<IpoAnalysis> = { symbol: (r) => r.symbol, name: (r) => r.company_name, score: (r) => r.ipo_score, change: (r) => r.current_vs_issue_pct };   // E541: change = % vs issue price
+
 export default function IpoTracker({
   onSelect,
 }: {
   onSelect?: (symbol: string) => void;
 }) {
   const [ipoList, setIpoList] = useState<IpoAnalysis[]>([]);
+  const [mfilter, setMfilter] = useState<MarketFilter>(NO_FILTER);   // E541: what is shown only; the IPO list itself is untouched
   const [ipoGeneratedAt, setIpoGeneratedAt] = useState<string | null>(null);
   const [ipoScanning, setIpoScanning] = useState(false);
   const [ipoProgress, setIpoProgress] = useState<IpoProgress | null>(null);
@@ -424,6 +429,8 @@ export default function IpoTracker({
       ? Math.min(100, Math.round((100 * (ipoProgress.processed || 0)) / ipoProgress.total))
       : 0;
 
+  const shownIpo = applyMarketFilter(ipoList, IPO_ACCESS, mfilter);   // E541
+
   return (
     <div className="space-y-4">
       {/* design v5: lifecycle overview + live AI scan status (reads rows and progress already held here) */}
@@ -675,7 +682,10 @@ export default function IpoTracker({
           </p>
         ) : (
           <div className="space-y-2">
-            {ipoList.map((ipo) => {
+            <MarketsFilterBar label="IPO Tracker" query={mfilter.query} onQuery={(query) => setMfilter((f) => ({ ...f, query }))} sort={mfilter.sort}
+              onSort={(sort) => setMfilter((f) => ({ ...f, sort }))} sorts={sortsFor(IPO_ACCESS)} shown={shownIpo.length} total={ipoList.length} />
+            {isFilteredEmpty(shownIpo.length, ipoList.length) && <NoMatch query={mfilter.query} onClear={() => setMfilter(NO_FILTER)} />}
+            {shownIpo.map((ipo) => {
               const v = ipoRowView(ipo);   // E162: formatted text, dashes for missing values
               const stage = { text: v.stage.text, tone: v.stage.tone === "up" ? "text-signal-buy" : v.stage.tone === "warn" ? "text-signal-hold" : v.stage.tone === "down" ? "text-signal-sell/70" : "text-mist/60" };
               return (

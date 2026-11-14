@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import Pipeline from "./Pipeline";
 import { KpiStrip } from "./ui/KpiStrip";
+import { Button } from "./kit";   // E542
 import { feedKpis, checkAlertTarget, alertRowView } from "./feedView";
 import { useStockkyRealtime, type RealtimeMessage } from "../useRealtime";
 
@@ -287,7 +288,7 @@ export default function DataFeed() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl border border-slate/50 bg-graphite/80 p-5">
+      <div className="k-card">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="font-display text-xl text-paper tracking-wide">Data Feed</h2>
@@ -298,42 +299,42 @@ export default function DataFeed() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button
+            <Button
               type="button"
               onClick={onResume}
               disabled={!canResume}
               title="Continue from last committed checkpoint (works after sleep/timeout)"
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-prepare/20 border border-signal-prepare/40 text-signal-prepare hover:bg-signal-prepare/30 disabled:opacity-40"
+              variant="soft" size="sm"
             >
               {busy === "resume" ? "Resuming…" : "Resume"}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={onStop}
               disabled={!canStop}
               title="Stop now and commit checkpoint (force, even if worker died)"
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-sell/20 border border-signal-sell/40 text-white hover:bg-signal-sell/30 disabled:opacity-40"
+              variant="danger" size="sm"
             >
               {busy === "stop" ? "Stopping…" : "Stop"}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={onRefreshPage}
               disabled={busy != null}
               title="Refresh status from server — auto-heals stuck Running after sleep"
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-mist/20 border border-mist/40 text-paper hover:bg-mist/30 disabled:opacity-40"
+              variant="ghost" size="sm"
             >
               {busy === "refresh-ui" ? "…" : "Refresh status"}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={onRefillAdditional}
               disabled={busy != null || status === "running"}
               title="Force-refresh fundamentals, technical snapshot, and events into the data-feed (merge, never wipe). Slow and deliberate on free tier."
-              className="font-display tabular-nums text-xs px-3 py-2 rounded-2xl bg-signal-prepare/20 border border-signal-prepare/40 text-white hover:bg-signal-prepare/30 disabled:opacity-40"
+              variant="soft" size="sm"
             >
               {busy === "refill" ? "Refilling…" : "Refill Additional Data"}
-            </button>
+            </Button>
             {refillJob?.status && refillJob.status !== "idle" && (
               <span className="font-display tabular-nums text-[10px] text-mist/60 self-center">
                 {refillJob.status === "stalled"
@@ -361,7 +362,7 @@ export default function DataFeed() {
                 )}
               </span>
             )}
-            <button
+            <Button
               type="button"
               onClick={startFresh}
               disabled={!(canStart || canFullRefeed)}
@@ -370,23 +371,23 @@ export default function DataFeed() {
                   ? "All stocks fed — start a full re-feed from 0"
                   : "Start feed for scan universe (from 0)"
               }
-              className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-signal-hold/20 border border-signal-hold/40 text-signal-hold hover:bg-signal-hold/30 disabled:opacity-40"
+              variant="primary"
             >
               {status === "running" && !job?.stop_requested
                 ? "Feeding…"
                 : complete
                 ? "Full re-feed"
                 : "Data feed to All Scan Universe Stocks"}
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={startNewOnly}
               disabled={busy != null || isActivelyRunning}
               title="Only feed symbols that are not already in the data-feed store"
-              className="font-display tabular-nums text-xs px-4 py-2 rounded-2xl bg-signal-prepare/15 border border-signal-prepare/40 text-white hover:bg-signal-prepare/25 disabled:opacity-40"
+              variant="soft"
             >
               {busy === "start-new" ? "Feeding new…" : "Feed newly added stocks only"}
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -442,12 +443,12 @@ export default function DataFeed() {
       </div>
 
       {/* Real-time price alerts */}
-      <div className="mt-6 rounded-2xl border border-slate bg-ink/40 p-4">
+      <div className="k-card mt-6">
         <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
           <h3 className="font-display tabular-nums text-sm font-bold text-paper">⚡ Price Alerts</h3>
-          <button
+          <Button
             type="button"
-            className="font-display tabular-nums text-[11px] px-2 py-1 rounded border border-slate text-mist hover:bg-slate/40"
+            variant="ghost" size="sm"
             onClick={async () => {
               try {
                 const res = await api.listPriceAlerts();
@@ -456,7 +457,7 @@ export default function DataFeed() {
             }}
           >
             Refresh
-          </button>
+          </Button>
         </div>
         <div className="flex flex-wrap gap-2 mb-3">
           <input
@@ -479,10 +480,10 @@ export default function DataFeed() {
             <option value="above">Above</option>
             <option value="below">Below</option>
           </select>
-          <button
+          <Button
             type="button"
             disabled={alertBusy || !alertSym || !alertTarget}
-            className="font-display tabular-nums text-xs px-3 py-1.5 rounded bg-signal-buy/30 text-white border border-signal-buy/40 disabled:opacity-50"
+            variant="primary" size="sm"
             onClick={async () => {
               const chk = checkAlertTarget(alertSym, alertTarget);   // E163: refuse a non-number target before it is sent
               if (!chk.ok) { setErr(chk.reason); return; }
@@ -505,10 +506,10 @@ export default function DataFeed() {
             }}
           >
             Add alert
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="font-display tabular-nums text-xs px-3 py-1.5 rounded bg-signal-hold/20 text-signal-hold border border-signal-hold/40"
+            variant="soft" size="sm"
             onClick={async () => {
               try {
                 const res = await api.evaluatePriceAlerts();
@@ -523,7 +524,7 @@ export default function DataFeed() {
             }}
           >
             Check now
-          </button>
+          </Button>
         </div>
         <ul className="space-y-1 max-h-40 overflow-y-auto">
           {(alerts || []).length === 0 ? (

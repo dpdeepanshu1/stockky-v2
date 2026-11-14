@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { entryReason, scorecardView, setupName, slotLabel, LEGACY_ID } from "./setupView.ts";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const rd = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 
@@ -85,14 +86,14 @@ assert.equal(bad.rows[0].winPct, null);
 const api = rd("./positionStocksApi.ts");
 assert.match(api, /setupStats: \(\) => psRequest<SetupStatsDoc>\("\/setup\/stats", undefined, true\)/);
 assert.match(api, /setup\?: SetupStamp \| null/);
-const tab = rd("./components/PositionStocksTab.tsx");
+const tab = psSource();
 assert.match(tab, /<th className="py-1 pr-3">Entry reason<\/th>/, "history table has the column");
 assert.match(tab, /entryReason\(t\.setup\)/);
 assert.match(tab, /entryReason\(p\.setup\)/, "open position card shows it too");
 const cal = rd("./components/CalibrationControlTab.tsx");
 assert.match(cal, /section === "setups" && <SetupScorecardPanel svc=\{svc\} \/>/);
-assert.match(cal, /section !== "setups"/, "no Run-all bar on the setups section");
-assert.match(cal, /\{ id: "setups", label: "Setup scorecard" \}/);
+assert.match(rd("./calibrationNav.ts"), /NO_RUN_ALL: CalSection\[\] = \[[^\]]*"setups"/, "no Run-all bar on the setups section");   // E539: the rule moved to calibrationNav.ts
+assert.match(rd("./calibrationNav.ts"), /\{ id: "setups", label: "Setup scorecard" \}/);   // E539: the section list moved to calibrationNav.ts
 const panel = rd("./components/calibration/SetupScorecardPanel.tsx");
 assert.match(panel, /scorecardView\(doc\)/);
 assert.match(panel, /positionStocksApi\.setupStats\(\)/);

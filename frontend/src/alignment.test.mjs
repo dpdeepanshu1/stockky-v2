@@ -27,8 +27,8 @@ test("dashboard hero lets the title keep its width and wraps the clock below on 
   assert.match(css, /\.dash-hero-top \{ flex-wrap: wrap/);
   assert.match(css, /flex-basis: 100%/);
 });
-test("Market Movers header wraps instead of squeezing its title", () => {
-  assert.match(movers, /flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-4/);
-  assert.match(movers, /whitespace-nowrap">📊 Market Movers/);
+test("Market Movers (E536) uses the kit card header and a scrolling-safe tab strip, so its title cannot be squeezed", () => {
+  assert.match(movers, /<CardHeader title="Market movers"/);
+  assert.match(movers, /<Tabs<MarketType>/);
 });
 console.log(`${passed} alignment tests passed`);

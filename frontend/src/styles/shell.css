@@ -1,0 +1,90 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — SHELL (redesign round 3, E535). Loads last (after components.css). New classes only (sh- prefix): sidebar sections, the phone
+   Trading sheet, the Markets tab strip, the mode strip and the session pill. Colours come from tokens.css; no gradient, glass or looping animation.
+   Presentation only. Roll back: delete the `./styles/shell.css` import in main.tsx (and revert AppNav.tsx / AdminGate.tsx).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Sidebar sections ── */
+.sh-sec-label, .sh-sec-toggle { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; }
+.sh-sec-toggle { width: calc(100% - 1rem); background: none; border: 0; text-align: left; cursor: pointer; border-radius: 6px; padding-top: 0.15rem; padding-bottom: 0.15rem; }
+.sh-sec-toggle:hover { color: rgb(var(--fg-rgb)); }
+.sh-chev { font-size: 0.7rem; }
+.sh-lock { display: inline-grid; place-items: center; color: rgb(var(--muted-2-rgb)); }
+.sh-lock .nav-icon { width: 13px; height: 13px; }
+@media (min-width: 1024px) { .sidebar-link.sh-folded { display: none; } }   /* the tablet rail always shows System, so nothing is unreachable there */
+html.tv .sidebar-link.sh-folded { display: none; }
+@media (min-width: 768px) and (max-width: 1023px) {
+  html:not(.tv) .sh-lock, html:not(.tv) .sh-chev { display: none; }
+  html:not(.tv) .sh-sec-toggle { width: auto; padding: 0; pointer-events: none; }
+}
+
+/* ── Phone: status dot button in the top bar ── */
+.sh-dot-btn { display: inline-flex; align-items: center; gap: 0.4rem; min-height: 34px; padding: 0 0.6rem; border-radius: 999px; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-rgb)); color: rgb(var(--muted-rgb)); font-size: 0.75rem; font-weight: 600; cursor: pointer; }
+.sh-dot-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: rgb(var(--muted-2-rgb)); flex: none; }
+.sh-dot-btn.ok .dot { background: rgb(var(--buy-rgb)); }
+.sh-dot-btn.bad { color: rgb(var(--sell-rgb)); border-color: rgb(var(--sell-rgb) / 0.4); }
+.sh-dot-btn.bad .dot { background: rgb(var(--sell-rgb)); border-radius: 2px; }   /* a square when down, so it is not colour-only */
+.sh-dot-btn.warn .dot { background: rgb(var(--warn-rgb)); }
+@media (max-width: 430px) { .sh-dot-word { display: none; } }
+.terminal-topbar .mtb-app { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+.terminal-topbar .mtb-titles { min-width: 0; }
+
+/* ── Sheet lists (phone Trading sheet, session menu) ── */
+.sh-sheet-note { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.75rem; font-size: 0.8125rem; color: rgb(var(--muted-rgb)); }
+.sh-sheet-note .nav-icon { width: 16px; height: 16px; }
+.sh-sheet-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.sh-sheet-link { display: flex; align-items: center; gap: 0.75rem; min-height: 52px; padding: 0 0.9rem; width: 100%; text-align: left; font: inherit; font-size: 0.9375rem; font-weight: 600; color: rgb(var(--fg-rgb)); background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb)); border-radius: 12px; cursor: pointer; }
+.sh-sheet-link .nav-icon { width: 20px; height: 20px; color: rgb(var(--muted-rgb)); }
+.sh-sheet-link em { margin-left: auto; font-style: normal; font-weight: 500; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.sh-sheet-link.active { border-color: rgb(var(--accent-rgb)); color: rgb(var(--accent-rgb)); }
+.sh-sheet-link.danger { color: rgb(var(--sell-rgb)); }
+
+/* ── Markets tab strip ── */
+.sh-markets-tabs { margin: 0 0 1rem; overflow-x: auto; }
+
+/* ── Mode strip: sticky under the top bar on the four Trading pages ── */
+.sh-modestrip { position: sticky; z-index: 29; top: calc(var(--topbar-h) + var(--safe-t, 0px)); display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem 1rem; padding: 0.4rem 1rem; font-size: 0.8125rem; color: rgb(var(--fg-rgb)); background: rgb(var(--panel-rgb)); border-bottom: 1px solid rgb(var(--border-rgb)); }
+@media (min-width: 768px) { .sh-modestrip { top: var(--topbar-h); margin-left: var(--sidebar-w); padding-left: 1.5rem; padding-right: 1.5rem; } }
+.sh-modestrip .nav-icon { width: 14px; height: 14px; }
+.sh-ms-mode { display: inline-flex; align-items: center; gap: 0.4rem; }
+.sh-ms-armed { display: inline-flex; align-items: center; gap: 0.4rem; color: rgb(var(--muted-rgb)); font-weight: 600; }
+.sh-ms-armed i { width: 8px; height: 8px; border-radius: 2px; border: 1.5px solid rgb(var(--muted-rgb)); }
+.sh-ms-armed.on { color: rgb(var(--fg-rgb)); }
+.sh-ms-armed.on i { background: rgb(var(--accent-rgb)); border-color: rgb(var(--accent-rgb)); border-radius: 50%; }
+.sh-ms-pnl { font-weight: 700; font-variant-numeric: tabular-nums; }
+.sh-ms-pnl.up { color: rgb(var(--buy-rgb)); }
+.sh-ms-pnl.down { color: rgb(var(--sell-rgb)); }
+.sh-ms-pnl em { font-style: normal; font-weight: 500; color: rgb(var(--muted-rgb)); }
+.sh-ms-hint { margin-left: auto; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+/* REAL: a solid amber edge and bar on the same flat card colour (a tinted fill would lower the contrast of the red / green P&L text on it) */
+.sh-modestrip.real { border-bottom: 2px solid rgb(var(--warn-rgb)); box-shadow: inset 4px 0 0 rgb(var(--warn-rgb)); }
+.sh-modestrip.demo { box-shadow: inset 4px 0 0 rgb(var(--info-rgb)); }
+.sh-modestrip.control { box-shadow: inset 4px 0 0 rgb(var(--muted-2-rgb)); }
+html.tv .sh-modestrip { font-size: 1rem; }
+
+/* ── Session pill ── */
+.sh-pill { flex: none; white-space: nowrap; display: inline-flex; align-items: center; height: 38px; border-radius: 999px; border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-rgb)); color: rgb(var(--fg-rgb)); font-size: 0.8125rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sh-pill button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.sh-pill .sh-pill-extend, .sh-pill .sh-pill-out { padding: 0; }
+.sh-pill-main { display: inline-flex; align-items: center; gap: 0.4rem; height: 100%; padding: 0 0.6rem 0 0.5rem; border-radius: 999px; }
+.sh-pill-main:hover { background: rgb(var(--panel-2-rgb)); }
+.sh-pill-label { color: rgb(var(--muted-rgb)); }
+.sh-pill .ring-bg { fill: none; stroke: rgb(var(--border-rgb)); stroke-width: 3; }
+.sh-pill .ring-fg { fill: none; stroke: rgb(var(--accent-rgb)); stroke-width: 3; stroke-linecap: round; }
+.sh-pill .sh-pill-extend { height: 26px; margin: 0 0.2rem; padding: 0 0.6rem; border-radius: 999px; background: rgb(var(--warn-rgb)); color: rgb(var(--on-solid-rgb)); font-weight: 700; font-size: 0.75rem; }
+.sh-pill .sh-pill-out { display: grid; place-items: center; width: 34px; height: 100%; border-radius: 0 999px 999px 0; color: rgb(var(--muted-rgb)); border-left: 1px solid rgb(var(--border-rgb)); }
+.sh-pill .sh-pill-out:hover { color: rgb(var(--sell-rgb)); }
+.sh-pill.warn { border-color: rgb(var(--warn-rgb)); }
+.sh-pill.warn .ring-fg { stroke: rgb(var(--warn-rgb)); }
+.sh-pill.warn .sh-pill-time { color: rgb(var(--warn-rgb)); }
+html.light .sh-pill.warn .sh-pill-time { color: rgb(130 76 0); }
+.sh-pill.compact { height: 34px; }
+.sh-pill.compact .sh-pill-main { padding: 0 0.45rem; }
+.sh-pill.compact .sh-pill-out { width: 30px; }
+
+/* ── "This service has no session" note (replaces the old per-page login cards) ── */
+.sh-missing { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem 1rem; padding: 0.7rem 1rem; border-radius: 12px; font-size: 0.875rem; font-weight: 500; color: rgb(var(--fg-rgb)); background: rgb(var(--panel-rgb)); border: 1px solid rgb(var(--warn-rgb)); }
+.sh-missing button { min-height: 40px; padding: 0 1rem; border-radius: 10px; border: 0; font: inherit; font-weight: 700; cursor: pointer; color: rgb(var(--on-solid-rgb)); background: rgb(var(--accent-rgb)); }
+
+/* focus rings stay visible on the new controls */
+.sh-pill button:focus-visible, .sh-sheet-link:focus-visible, .sh-dot-btn:focus-visible, .sh-missing button:focus-visible, .sh-sec-toggle:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; }

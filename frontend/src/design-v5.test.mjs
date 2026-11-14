@@ -51,9 +51,11 @@ test("part 3 (score ring, plan bar) has off switches, text alternatives and is m
     assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
     assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
   }
-  const dc = rd("./components/DecisionCard.tsx");
+  // E536: the ring and plan bar moved with the card top into decision/DecisionTop.tsx; the long-idea rule lives in decision/planView.ts (isLongIdea)
+  const dc = rd("./components/decision/DecisionTop.tsx");
   assert.ok(/<ScoreRing\b/.test(dc) && /<TradePlanBar\b/.test(dc), "ring / plan bar not mounted");
-  assert.ok(/decision === "BUY NOW" \|\| data\.decision === "PREPARE TO BUY"/.test(dc), "plan bar must only show for long ideas");
+  assert.ok(/decision === "BUY NOW" \|\| decision === "PREPARE TO BUY"/.test(rd("./components/decision/planView.ts")), "long-idea rule changed");
+  assert.ok(/\{long && plan && \(/.test(dc), "plan bar must only show for long ideas");
   assert.ok(/aria-label=\{`AI score/.test(rd("./components/ui/ScoreRing.tsx")), "ring needs a text alternative");
   const bar = rd("./components/ui/TradePlanBar.tsx");
   assert.ok(/stop < lo && hi < target/.test(bar), "plan bar must check stop < entry < target");

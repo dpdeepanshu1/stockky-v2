@@ -5,7 +5,9 @@
 // (4) follow the written Monday / daily / weekly / monthly plan. Two sub-tabs, one per service. Backends: GET/POST /control/* on each trading service and
 // calibration-runner-service (nginx /calibration/). Nothing here places a trade.
 import { useEffect, useState } from "react";
-import { SubTabs } from "./ui/SubTabs";
+import { Tabs } from "./kit";
+import CalNav from "./calibration/CalNav";
+import { showsRunAll, type CalSection } from "../calibrationNav";
 import { PageHero } from "./ui/PageHero";   // design v6
 import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { setRealTradeApiUrl } from "../realTradeApi";
@@ -31,27 +33,7 @@ import { RunsPanel, RunWindow } from "./calibration/RunsPanel";
 import { RunnerBanner, RunnerProvider, useRunner } from "./calibration/RunnerContext";
 import { Btn, Card, Msg } from "./calibration/ui";
 
-type Section = "switches" | "alerts" | "auto" | "weather" | "research" | "short" | "tape" | "setups" | "swing" | "reconcile" | "probes" | "trades" | "plan" | "tests" | "runs";
-
 const SVC_ITEMS: { id: Svc | "fno" | "all"; label: string }[] = [{ id: "rt", label: "Real Trade" }, { id: "ps", label: "Position Stocks Service" }, { id: "fno", label: "F&O Options" }, { id: "all", label: "All services" }];
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "switches", label: "Switches" },
-  { id: "alerts", label: "Alert switches" },
-  { id: "auto", label: "Auto-calibration" },
-  { id: "weather", label: "Market Weather" },
-  { id: "research", label: "Market research" },
-  { id: "short", label: "Short selling" },
-  { id: "tape", label: "Order-flow tape" },
-  { id: "setups", label: "Setup scorecard" },
-  { id: "swing", label: "Swing lane" },
-  { id: "reconcile", label: "Reconciliation" },
-  { id: "probes", label: "Status probes" },
-  { id: "trades", label: "Daily trades" },
-  { id: "plan", label: "Run plan" },
-  { id: "tests", label: "Tests & training" },
-  { id: "runs", label: "Runs & downloads" },
-];
-
 function LoginCard({ onDone }: { onDone: () => void }) {
   const [u, setU] = useState("admin");
   const [p, setP] = useState("");
@@ -116,7 +98,7 @@ function ConnectionCard() {
 }
 
 function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
-  const [section, setSection] = useState<Section>("switches");
+  const [section, setSection] = useState<CalSection>("switches");
   const [all, setAll] = useState(false);     // All services: read-only side-by-side view of the three services
   const [fno, setFno] = useState(false);     // F&O Options tab: its own panel, the equity runner sections do not apply
   const { start, summary } = useRunner();
@@ -133,12 +115,14 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
         subtitle="Switch the rules of both trading services on or off, check the day's trades, and run tests and training from buttons." />
       <AiPulse title="Calibration runner" working={running.length > 0} chips={pulseChips}
         line={running.length ? `Running: ${running.map((r) => r.title).join(" · ")}${waiting ? ` · ${waiting} waiting` : ""}` : summary?.state ? "Idle · pick a test, or change a switch below" : "Waiting for the runner to answer"} />
-      <SubTabs items={SVC_ITEMS} value={all ? "all" : fno ? "fno" : svc} onChange={(v) => { if (v === "all") { setAll(true); setFno(false); } else if (v === "fno") { setAll(false); setFno(true); } else { setAll(false); setFno(false); setSvc(v as Svc); } }} label="Service" />
+      <Tabs items={SVC_ITEMS} value={all ? "all" : fno ? "fno" : svc} onChange={(v) => { if (v === "all") { setAll(true); setFno(false); } else if (v === "fno") { setAll(false); setFno(true); } else { setAll(false); setFno(false); setSvc(v as Svc); } }} label="Service" />
       {all ? <AllServicesPanel /> : fno ? <FnoCalibration /> : <>
-      <SubTabs items={SECTIONS} value={section} onChange={setSection} label="Section" />
+      <div className="cx-layout">
+      <CalNav value={section} onChange={setSection} />
+      <div className="cx-main space-y-3">
       <RunnerBanner />
       <SessionNotice />
-      {section !== "runs" && section !== "alerts" && section !== "weather" && section !== "research" && section !== "swing" && section !== "reconcile" && section !== "tape" && section !== "setups" && section !== "probes" && <RunAllBar svc={svc} />}
+      {showsRunAll(section) && <RunAllBar svc={svc} />}
       {section === "switches" && <SwitchesPanel svc={svc} />}
       {section === "alerts" && <SwitchesPanel svc="sch" />}
       {section === "auto" && <AutoCalibPanel />}
@@ -154,6 +138,8 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
       {section === "plan" && <RunPlanPanel svc={svc} />}
       {section === "tests" && <TestsPanel svc={svc} />}
       {section === "runs" && <RunsPanel />}
+      </div>
+      </div>
       </>}
       <ConnectionCard />
       <RunWindow />

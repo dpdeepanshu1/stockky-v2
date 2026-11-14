@@ -76,7 +76,7 @@ const panel = readFileSync(new URL("./components/calibration/WeatherPanel.tsx", 
 const tab = readFileSync(new URL("./components/CalibrationControlTab.tsx", import.meta.url), "utf8");
 const api = readFileSync(new URL("./calibrationApi.ts", import.meta.url), "utf8");
 assert.match(tab, /section === "weather" && <WeatherPanel \/>/);
-assert.match(tab, /\{ id: "weather", label: "Market Weather" \}/);
+assert.match(readFileSync(new URL("./calibrationNav.ts", import.meta.url), "utf8"), /\{ id: "weather", label: "Market Weather" \}/);   // E539: the section list moved to calibrationNav.ts
 assert.match(api, /"\/weather\/status"/);
 assert.match(api, /"\/weather\/run"/);
 assert.match(panel, /SHADOW · changes nothing/);

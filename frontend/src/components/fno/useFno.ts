@@ -5,7 +5,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPollGate, sameInputs } from "../../fnoPoll";
 
-export function useFno<T>(fn: () => Promise<T>, everyMs: number, deps: unknown[] = []): { data: T | null; error: string | null; loading: boolean; reload: () => void } {
+export interface FnoPoll<T> { data: T | null; error: string | null; loading: boolean; reload: () => void }
+
+export function useFno<T>(fn: () => Promise<T>, everyMs: number, deps: unknown[] = []): FnoPoll<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

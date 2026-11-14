@@ -1,0 +1,57 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — F&O CHAIN AND CALIBRATION CONTROL ROOM (redesign round 6, E539). Loads last (after trading.css). New classes only: oc- (option chain,
+   engine row) and cx- (calibration layout, run progress). Colours come from tokens.css; no gradient, glass, !important or animation. Presentation only.
+   Green and red are NOT used for calls and puts (they mean profit and loss); calls and puts are told apart by column position and words.
+   Roll back: delete the `./styles/control.css` import in main.tsx and restore FnoChain, FnoOverview, FnoReadinessCard, CalibrationControlTab from round 518.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── option chain ─────────────────────────────────────────────────────── */
+.oc-tools { display: inline-flex; align-items: center; gap: var(--k-gap-2); flex-wrap: wrap; }
+.oc-select { font-size: 1rem; height: 36px; padding: 0 10px; border-radius: var(--k-r-ctl); border: 1px solid rgb(var(--border-strong-rgb)); background: rgb(var(--panel-2-rgb)); color: rgb(var(--fg-rgb)); }
+.oc-table { margin-top: var(--k-gap-4); border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-ctl); overflow: hidden; }
+.oc-table .k-table-wrap { max-height: 30rem; }
+.oc-table .k-table th, .oc-table .k-table td { padding-left: 10px; padding-right: 10px; }
+.oc-table .k-table td { position: relative; }
+.oc-table td.oc-itm { background: rgb(var(--info-rgb) / 0.07); }
+.oc-table td.oc-mid { font-weight: 700; background: rgb(var(--panel-2-rgb)); border-left: 1px solid rgb(var(--border-strong-rgb)); border-right: 1px solid rgb(var(--border-strong-rgb)); }
+.oc-table tr.oc-row-atm td { background: rgb(var(--accent-rgb) / 0.12); border-top: 2px solid rgb(var(--accent-rgb)); border-bottom: 2px solid rgb(var(--accent-rgb)); font-weight: 700; }
+.oc-strike { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.oc-atm { font-style: normal; font-size: 0.6875rem; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: rgb(var(--accent-rgb)); color: rgb(var(--on-solid-rgb)); }
+/* open-interest bar behind the number: --oi is the width; calls grow from the right edge, puts from the left (both from the strike side) */
+.oc-oi { position: relative; display: block; min-width: 5.5rem; padding: 2px 6px; }
+.oc-oi::before { content: ""; position: absolute; top: 3px; bottom: 3px; width: var(--oi, 0%); border-radius: 3px; }
+.oc-oi.ce::before { right: 0; background: rgb(var(--info-rgb) / 0.25); }
+.oc-oi.pe::before { left: 0; background: rgb(var(--muted-2-rgb) / 0.4); }
+.oc-oi-n { position: relative; }
+.oc-legend { margin: var(--k-gap-3) 0 0; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.oc-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.oc-sw { display: inline-block; width: 14px; height: 10px; border-radius: 3px; border: 1px solid rgb(var(--border-strong-rgb)); }
+.oc-sw.atm { background: rgb(var(--accent-rgb) / 0.2); border-color: rgb(var(--accent-rgb)); }
+.oc-sw.itm { background: rgb(var(--info-rgb) / 0.12); }
+.oc-sw.bar { background: rgb(var(--info-rgb) / 0.35); border-color: transparent; }
+
+/* ── F&O engine status row ────────────────────────────────────────────── */
+.oc-engine { list-style: none; margin: var(--k-gap-3) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ── calibration: side list + open section ───────────────────────────── */
+.cx-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--k-gap-4); align-items: start; }
+.cx-main { min-width: 0; }
+.cx-nav { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.cx-nav-group { display: flex; gap: 6px; flex: none; }
+.cx-nav-h { display: none; margin: 0; }
+.cx-nav-i { flex: none; height: 36px; padding: 0 12px; border-radius: 999px; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-rgb)); color: rgb(var(--muted-rgb)); font-size: 0.875rem; font-weight: 500; text-align: left; white-space: nowrap; cursor: pointer; }
+.cx-nav-i[aria-current="page"] { color: rgb(var(--fg-rgb)); font-weight: 600; border-color: rgb(var(--accent-rgb)); box-shadow: inset 0 0 0 1px rgb(var(--accent-rgb)); }
+.cx-nav-i:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 2px; }
+@media (min-width: 900px) {
+  .cx-layout { grid-template-columns: 14.5rem minmax(0, 1fr); }
+  .cx-nav { position: sticky; top: 72px; max-height: calc(100vh - 88px); overflow-y: auto; flex-direction: column; gap: var(--k-gap-4); padding: 12px; border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-card); background: rgb(var(--panel-rgb)); }
+  .cx-nav-group { flex-direction: column; gap: 2px; }
+  .cx-nav-h { display: block; padding: 0 8px 4px; font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: rgb(var(--muted-rgb)); }
+  .cx-nav-i { width: 100%; border: 0; border-radius: var(--k-r-ctl); background: transparent; }
+  .cx-nav-i[aria-current="page"] { background: rgb(var(--accent-rgb) / 0.1); box-shadow: inset 3px 0 0 rgb(var(--accent-rgb)); }
+}
+
+/* run progress, inside the "running now" strip of a job */
+.cx-prog { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-basis: 100%; }
+.cx-prog-bar { display: inline-block; width: min(16rem, 100%); height: 6px; border-radius: 3px; background: rgb(var(--panel-2-rgb)); border: 1px solid rgb(var(--border-rgb)); overflow: hidden; }
+.cx-prog-bar i { display: block; height: 100%; background: rgb(var(--accent-rgb)); }

@@ -1,5 +1,6 @@
 // F&O Options > Overview: the four locks, today's numbers, open positions, the pipeline check, and the manual buttons.
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { publishModeStrip } from "../app/modeStrip";   // E535: feeds the shell's mode strip (read-only)
 import { fnoApi, type FnoPosition } from "../../fnoApi";
 import { entryDoubtCount, entryDoubtView, exitDoubtCount, exitDoubtView, inr, istHm, lockSummary, positionProgress, settingsProblemText, stopDoubtCount, stopDoubtView } from "../../fnoView";
 import { Btn, Card, Chip, Msg, pnlClass } from "../calibration/ui";
@@ -11,6 +12,7 @@ import FnoControlCard from "./FnoControlCard";
 import FnoProbeCard from "./FnoProbeCard";
 import FnoReadinessCard from "./FnoReadinessCard";
 import FnoStagesRow from "./FnoStagesRow";
+import EngineStatusRow from "./EngineStatusRow";
 
 export function PositionCard({ p, onClearDoubt, onClearStopDoubt, busy }: { p: FnoPosition; onClearDoubt?: (id: number) => void; onClearStopDoubt?: (id: number) => void; busy?: boolean }) {
   const { pct, pnl } = positionProgress(p);
@@ -69,6 +71,7 @@ export default function FnoOverview() {
   const pipe = useFno(fnoApi.pipeline, 0);
   const rec = useFno(fnoApi.reconcile, 0);
   const strat = useFno(fnoApi.strategies, 30000);
+  const ready = useFno(fnoApi.readiness, 30000);   // E539: one poll for the Readiness card and the Engine status row
   const dhan = useFno(realTradeApi.dhanAccount, 30000);   // Round 271: live Dhan funds for the money card (best effort: Real Trade shares the same Dhan account; an error here only leaves the tile empty)
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [recErr, setRecErr] = useState<string | null>(null);   // Round 340 (E342): a failed "Check now" used to leave the OLD result on screen, looking like a fresh check
@@ -80,6 +83,10 @@ export default function FnoOverview() {
   };
   const d = ov.data;
   const ls = lockSummary(d?.locks);
+  // E535: tell the shell's mode strip what this page already polls (mode, armed today, closed P&L after charges today). The strip only reads it.
+  useEffect(() => {
+    if (d?.locks) publishModeStrip("fno", { mode: d.locks.mode === "REAL" ? "REAL" : "DEMO", armed: !!d.locks.armed_today, pnl: typeof d.day?.realized_net === "number" ? d.day.realized_net : null });
+  }, [d]);
   const doubts = exitDoubtCount(d?.open_positions);   // Round 289
   const stopDoubts = stopDoubtCount(d?.open_positions);   // Round 292
   const entryDoubts = entryDoubtCount(d?.open_positions);   // Round 293
@@ -91,16 +98,9 @@ export default function FnoOverview() {
       {!!d?.unmanaged_real?.length && <div data-testid="fno-unmanaged-real"><Msg kind="err">{d.unmanaged_real.length} REAL position(s) are open but no Dhan connection is loaded ({d.unmanaged_real.map((x) => x.label).join(", ")}): nothing is managing them. Press ARM to reconnect. A stop already resting at Dhan still protects you.</Msg></div>}
       {settingsWarn && <div data-testid="fno-settings-problem"><Msg kind="err">{settingsWarn}</Msg></div>}
       <Card title="State" tone={ls.tone === "real" ? "bad" : ls.tone === "real-blocked" ? "warn" : undefined}
-        right={<><Chip tone={d?.market_open ? "good" : undefined}>{d?.market_open ? "Market open" : "Market closed"}</Chip><Chip tone={d?.runner.alive ? "good" : "warn"}>{d?.runner.alive ? "runner alive" : "runner stopped"}</Chip>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}{entryDoubts > 0 && <Chip tone="bad" title="An entry BUY may be live or filled at Dhan: see Open positions">{entryDoubts} entry unknown</Chip>}</>}>
+        right={<>{doubts > 0 && <Chip tone="bad" title="An exit SELL may be live at Dhan: see Open positions">{doubts} exit in doubt</Chip>}{stopDoubts > 0 && <Chip tone="warn" title="A stop order may be resting at Dhan: see Open positions">{stopDoubts} stop in doubt</Chip>}{entryDoubts > 0 && <Chip tone="bad" title="An entry BUY may be live or filled at Dhan: see Open positions">{entryDoubts} entry unknown</Chip>}</>}>
         <p className="text-[13px] font-bold">{ls.text}</p>
-        {d && (
-          <ul className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-mist sm:grid-cols-4">
-            <li>Engine: <b>{d.locks.engine_enabled ? "ON" : "OFF"}</b></li>
-            <li>Mode: <b>{d.locks.mode}</b></li>
-            <li>REAL orders allowed: <b>{d.locks.real_enabled ? "yes" : "no"}</b></li>
-            <li>Armed today: <b>{d.locks.armed_today ? "yes" : "no"}</b></li>
-          </ul>
-        )}
+        <EngineStatusRow o={d} pipe={pipe.data?.stage_summary} ready={ready.data} />
         <p className="mt-2 text-[11px] text-mist">The locks and strategies are switched in the Control card below; risk, entry window and exits on Real Money Calibration &gt; F&amp;O. Ships OFF and DEMO.</p>
         {d?.runner.error && <div className="mt-2"><Msg kind="warn">Runner error: {d.runner.error}</Msg></div>}
       </Card>
@@ -144,7 +144,7 @@ export default function FnoOverview() {
         <div className="space-y-2">{d?.open_positions.map((p) => <div key={p.id ?? p.label}><PositionCard p={p} busy={busy} onClearStopDoubt={(id) => void act(() => fnoApi.stopDoubtClear(id), "Stop-doubt mark cleared: the engine may place a stop again.", "Clear the stop-doubt mark? Do this ONLY if you looked in the Dhan app and no stop for this contract is there. The engine may then place a new stop.")} onClearDoubt={(id) => void act(() => fnoApi.exitDoubtClear(id), "Exit-doubt mark cleared: the engine may sell this position again.", "Clear the exit-doubt mark? Do this ONLY if you looked in the Dhan app and the SELL is not there. The engine may then send a new SELL.")} />{p.id != null && <div className="mt-1 text-right"><Btn small disabled={busy} onClick={() => void act(() => fnoApi.closeOne(p.id as number), "Close sent for this position.", `Close ${p.label} now?`)}>Close this one</Btn></div>}</div>)}</div>
       </Card>
 
-      <FnoReadinessCard onChanged={ov.reload} />
+      <FnoReadinessCard r={ready} onChanged={ov.reload} />
 
       <FnoProbeCard />
 

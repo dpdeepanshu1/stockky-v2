@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { sellProbeView, shortShadowView, shortSwitchRows, canSwitchShortOff } from "./shortShadowView.ts";
 import { readFileSync, existsSync } from "node:fs";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const doc = (o = {}) => ({ mode: "off", gate_counters: { by_code: {} }, ...o });
 
@@ -33,7 +34,7 @@ assert.equal(shortShadowView({ mode: "off", gate_counters: { by_code: { X: "bad"
 const viewSrc = readFileSync(new URL("./shortShadowView.ts", import.meta.url), "utf8");
 for (const gone of ["s2Ready", "s2Missing", "ShortShadowRow", "statusTone", "S2_DAYS_NEEDED", "would-be"]) assert.ok(!viewSrc.includes(gone), `${gone} is removed`);
 assert.ok(!existsSync(new URL("./components/board/ShortShadowCard.tsx", import.meta.url)), "the shadow card file is deleted");
-const tabSrc = readFileSync(new URL("./components/PositionStocksTab.tsx", import.meta.url), "utf8");
+const tabSrc = psSource();
 assert.ok(!tabSrc.includes("ShortShadowCard"), "the Position Stocks board no longer shows the shadow card");
 
 console.log("shortShadow.test.mjs: ok");

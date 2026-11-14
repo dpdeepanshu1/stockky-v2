@@ -5,6 +5,7 @@ import { PageHeader } from "../ui/PageHeader";
 import { KpiStrip } from "../ui/KpiStrip";
 import { settingsKpis, checkApiUrl, powerOffReport } from "../settingsView";
 import { OvernightAutomationPanel } from "./OvernightAutomationPanel";
+import { Button, Card, CardHeader, Field, StatusPill } from "../kit";   // E542
 
 async function powerOffAll() {
   // E168: one tap used to stop everything with no way back; ask first
@@ -88,101 +89,61 @@ export function SettingsPage({
   return (
     <div className="page-terminal settings-page space-y-4">
       <PageHeader title="Settings" desc="Backend address, appearance and system tools." icon="sliders" kicker="System" />
-      <p className="text-xs text-mist/60 mb-2">API connection · theme · services · deploy checklist</p>
       <KpiStrip items={settingsKpis({ backendUp, url: normalizeGatewayUrl(url), savedUrl: getApiUrl(), theme, dbWake: dbWakeState, dbDetail: dbWakeDetail })} label="Settings summary" />
-      <section className="terminal-panel">
-        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Backend connection</h3>
-        <p className="text-mist/70 text-xs mb-3 max-w-lg">
-          API Gateway public URL. Required when frontend and backend are deployed separately.
-          Status:{" "}
-          <strong className={backendUp === "up" ? "text-signal-buy" : backendUp === "down" ? "text-signal-sell" : "text-mist"}>
-            {backendUp}
-          </strong>
-        </p>
-        <div className="flex flex-col sm:flex-row gap-2">
-          <input
+      <Card>
+        <CardHeader title="Backend connection" sub="API Gateway public URL. Required when frontend and backend are deployed separately." action={<StatusPill state={backendUp === "up" ? "live" : backendUp === "down" ? "offline" : "info"}>{backendUp === "up" ? "Backend up" : backendUp === "down" ? "Backend down" : "Checking"}</StatusPill>} />
+        <div className="st-row">
+          <Field
+            label="API Gateway URL"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && save()}
             placeholder="https://your-api-gateway.onrender.com"
-            className="flex-1 bg-ink/60 border border-slate rounded-lg px-3 py-2 font-mono text-xs text-paper placeholder:text-mist/30 outline-none focus:border-cyan-500/50"
             spellCheck={false}
             autoComplete="off"
           />
-          <button type="button" onClick={save} className="btn-terminal">
-            Save URL
-          </button>
+          <Button onClick={save}>Save URL</Button>
         </div>
         {savedMsg && <p role="status" className={`mono text-xs mt-2 mb-0 ${savedMsg.startsWith("API URL saved") ? "text-signal-buy" : "text-signal-sell"}`}>{savedMsg}</p>}
-      </section>
+      </Card>
 
-      <section className="terminal-panel">
-        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Appearance</h3>
-        <button type="button" className="btn-terminal" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-          Switch to {theme === "dark" ? "light" : "dark"} mode
-        </button>
-      </section>
+      <Card>
+        <CardHeader title="Appearance" sub="Light is the default; the choice is remembered on this device." action={<Button variant="ghost" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>Switch to {theme === "dark" ? "light" : "dark"} mode</Button>} />
+      </Card>
 
-      <section className="terminal-panel">
-        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Databases</h3>
-        <p className="text-mist/70 text-xs mb-3">
-          Wakes Neon (gateway) + training service DB + cache DB together, so the first query of
-          the session doesn't pay Neon's cold-compute latency. Runs automatically on page load —
-          use this to force it again anytime.
-        </p>
-        <button
-          type="button"
-          className="btn-terminal"
-          onClick={() => void wakeDbNow()}
-          disabled={dbWakeState === "waking"}
-        >
-          {dbWakeState === "waking" ? "Waking DB…" : "Wake DB"}
-        </button>
+      <Card>
+        <CardHeader title="Databases" sub="Wakes Neon (gateway) + training service DB + cache DB together, so the first query of the session doesn't pay Neon's cold-compute latency. Runs automatically on page load; use this to force it again anytime." action={<Button variant="soft" onClick={() => void wakeDbNow()} disabled={dbWakeState === "waking"}>{dbWakeState === "waking" ? "Waking DB…" : "Wake DB"}</Button>} />
         {dbWakeDetail && (
-          <p
-            className={`mono text-xs mt-2 mb-0 ${
-              dbWakeState === "ok" ? "text-signal-buy" : "text-signal-sell"
-            }`}
-          >
+          <p className={`mono text-xs mt-2 mb-0 ${dbWakeState === "ok" ? "text-signal-buy" : "text-signal-sell"}`}>
             {dbWakeDetail}
           </p>
         )}
-      </section>
+      </Card>
 
-      <section className="terminal-panel">
-        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Services</h3>
-        <p className="text-mist/70 text-xs mb-3">Wake or inspect microservice health.</p>
-        <div className="flex flex-wrap gap-2 mb-2">
-          <button
-            type="button"
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-600/90 hover:bg-red-500 text-white border border-red-400/40"
-            onClick={() => powerOffAll()}
-            title="Stop scan, data-feed, hot-picks; reset UI"
-          >
-            ⏻ Power Off
-          </button>
-          <button type="button" className="btn-terminal" onClick={onOpenServices}>
-            Open Service Manager
-          </button>
+      <Card>
+        <CardHeader title="Services" sub="Wake or inspect microservice health." />
+        <div className="st-actions">
+          <Button variant="danger" onClick={() => powerOffAll()} title="Stop scan, data-feed, hot-picks; reset UI">⏻ Power Off</Button>
+          <Button variant="ghost" onClick={onOpenServices}>Open Service Manager</Button>
         </div>
-      </section>
+      </Card>
 
-      <section className="terminal-panel">
+      <Card>
         <RateLimitDashboard />
-      </section>
+      </Card>
 
       <OvernightAutomationPanel />
 
-      <section className="terminal-panel">
-        <h3 className="mono text-xs text-mist uppercase tracking-widest mb-2">Deploy checklist</h3>
-        <ul className="text-xs text-mist/80 space-y-1.5 mono pl-4 list-disc">
+      <Card>
+        <CardHeader title="Deploy checklist" />
+        <ul className="st-list">
           <li>Set VITE_API_URL at frontend build time to your API Gateway</li>
           <li>Set DATABASE_URL on decision-prediction-service (Neon/Supabase Postgres)</li>
           <li>Set UPSTASH_REDIS_REST_URL + TOKEN on all services</li>
           <li>Replace placeholder *.onrender.com URLs with your real service URLs</li>
           <li>Optional: CALLMEBOT_USER / CALLMEBOT_USERS for voice alerts</li>
         </ul>
-      </section>
+      </Card>
     </div>
   );
 }

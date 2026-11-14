@@ -7,9 +7,14 @@ import {
   type GateStatus, type AuditLogRow, type Position, type OrderRow, type CycleResult, type DhanStatus, type DhanEdisSummary,
   type PipelineStatus, type CandidateRow, type WatchlistEntry, type ResilienceStatus,
 } from "../realTradeApi";
-import { SubTabs } from "./ui/SubTabs";
+import { TradingHeader } from "./trading/TradingHeader";   // E537
+import { GroupTabs } from "./trading/GroupTabs";
+import { RT_GROUPS } from "./trading/tradingGroups";
 import { NavIcon } from "./ui/NavIcon";
 import { PageHero } from "./ui/PageHero";   // design v6
+import { publishModeStrip } from "./app/modeStrip";   // E535: feeds the shell's mode strip (read-only)
+import { SessionMissingNote } from "./AdminGate";   // E535: replaces the old login card
+import { AUTH_CHANGED_EVENT, logoutEverywhere } from "../adminAuth";
 import { KpiStrip, type Kpi } from "./ui/KpiStrip";   // design v6
 import { AiPulse, type PulseChip } from "./ui/AiPulse";   // design v6
 import { signedInr } from "./realAuto/history";   // E122
@@ -45,14 +50,24 @@ export default function RealAutoTrade() {
   const [apiUrlInput, setApiUrlInput] = useState(getRealTradeApiUrl());
 
   const [status, setStatus] = useState<GateStatus | null>(null);
+  // E535: tell the shell's mode strip what this page already knows (mode, armed, today's realised P&L). The strip only reads it: no call, no handler.
+  useEffect(() => {
+    publishModeStrip("realtrade", { mode, armed: status ? status.armed : null, pnl: status?.account?.realized_pnl_today ?? null });
+  }, [mode, status]);
+  useEffect(() => () => publishModeStrip("realtrade", null), []);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [regenLoading, setRegenLoading] = useState(false);
 
   const [loggedIn, setLoggedIn] = useState(!!getSessionToken());
+  // E535: the login now lives in AdminGate (the top-bar "Extend" and the re-login box log in WITHOUT this page's own code), so follow the stored
+  // token whenever the shared login announces a change; this is what the removed per-page login used to set by hand.
+  useEffect(() => {
+    const sync = () => setLoggedIn(!!getSessionToken());
+    window.addEventListener(AUTH_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, sync);
+  }, []);
   const [showCloseAll, setShowCloseAll] = useState(false);   // group 466
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
 
   const [dhanClientId, setDhanClientId] = useState("");
   const [dhanToken, setDhanToken] = useState("");
@@ -357,21 +372,6 @@ export default function RealAutoTrade() {
   }, [activeTab, mode, loggedIn]);
 
   const saveApiUrl = () => { setRealTradeApiUrl(apiUrlInput); void loadStatus(mode); };
-
-  const doLogin = async () => {
-    setLoading(true); setError(null);
-    try {
-      const res = await realTradeApi.login(username, password);
-      setSessionToken(res.token); setLoggedIn(true); setPassword("");
-      await loadStatus(mode);
-    } catch (e: any) { setError(e?.message || "Login failed"); }
-    finally { setLoading(false); }
-  };
-
-  const doLogout = async () => {
-    try { await realTradeApi.logout(); } catch { }
-    setSessionToken(null); setLoggedIn(false); void loadStatus(mode);
-  };
 
   const doConnectDhan = async () => {
     setLoading(true); setError(null);
@@ -699,6 +699,13 @@ export default function RealAutoTrade() {
       {/* design v5: plain-words money mode + safety chips (presentation only) */}
       <MoneyModeBanner mode={mode} chips={[{ label: armed ? "Auto-orders armed" : "Auto-orders off", state: armed && mode === "REAL" ? "warn" : "ok" }]} />
 
+      {/* E537: status first - mode, armed, today's P&L, capital in use, idle capital and the emergency pause (the page's own handler, with its own confirm) */}
+      {status != null && (
+        <TradingHeader
+          input={{ mode, armed, pnl: status.account?.realized_pnl_today, total: status.account?.current_equity, idle: status.account?.cash_available }}
+          onPause={doEmergencyPause} pauseLabel="Emergency pause" />
+      )}
+
       {status != null && (
         <>
           <AiPulse title="Auto-trade engine" working={pulseWorking} line={pulseLine} chips={pulseChips} />
@@ -721,38 +728,16 @@ export default function RealAutoTrade() {
 
       {/* ── Auth / session bar (REAL only) ──────────────────────────────── */}
       {mode === "REAL" && !loggedIn && !status?.armed ? (
-        <div className="rt-login">
-          <div className="rt-login-head">
-            <span className="rt-login-icon" aria-hidden="true"><NavIcon name="lock" /></span>
-            <div className="min-w-0">
-              <h3 className="rt-login-title">Admin login required</h3>
-              <p className="rt-login-sub">REAL mode places live Dhan orders, so it needs an admin session.</p>
-            </div>
-          </div>
-          <div className="rt-field">
-            <label className="rt-label" htmlFor="rt-admin-user">Admin username</label>
-            <input id="rt-admin-user" type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
-              placeholder="Admin username" value={username} onChange={e => setUsername(e.target.value)} />
-          </div>
-          <div className="rt-field">
-            <label className="rt-label" htmlFor="rt-admin-pass">Password</label>
-            <input id="rt-admin-pass" type="password" autoComplete="current-password"
-              placeholder="Password" value={password} onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && void doLogin()} />
-          </div>
-          <button onClick={() => void doLogin()} disabled={loading || !password} className="rt-btn rt-btn-primary">
-            {loading ? "Authenticating…" : "Authenticate"}
-          </button>
-        </div>
+        <SessionMissingNote service="Auto Trade" />
       ) : (
         <>
           {mode === "REAL" && (
             loggedIn ? (
               <div className="rt-session rt-session-ok">
                 <span className="font-display tabular-nums">
-                  <Dot on={true} /> Admin session active ({username})
+                  <Dot on={true} /> Admin session active
                 </span>
-                <button onClick={() => void doLogout()} className="font-display tabular-nums">
+                <button onClick={logoutEverywhere} className="font-display tabular-nums">
                   Log out
                 </button>
               </div>
@@ -761,14 +746,14 @@ export default function RealAutoTrade() {
                 <span className="font-display tabular-nums">
                   Session expired — auto-pilot still running. Log in to make changes.
                 </span>
-                <button onClick={() => setActiveTab("overview")} className="font-display tabular-nums">
+                <button onClick={logoutEverywhere} className="font-display tabular-nums">
                   Log in
                 </button>
               </div>
             )
           )}
 
-          <SubTabs items={tabs} value={activeTab} onChange={setActiveTab} label="Auto Trade sections" />
+          <GroupTabs groups={RT_GROUPS} items={tabs} value={activeTab} onChange={setActiveTab} label="Auto Trade sections" />
 
           {/* ═══════════════════════════════════════════════════════════════
               TAB: OVERVIEW
@@ -782,7 +767,6 @@ export default function RealAutoTrade() {
           {activeTab === "overview" && (
             <OverviewTab mode={mode} status={status} loggedIn={loggedIn} loading={loading}
               gate1={gate1} gate2={gate2} gate3={gate3} armed={armed} nextGateNeeded={nextGateNeeded} positions={positions}
-              username={username} setUsername={setUsername} password={password} setPassword={setPassword} doLogin={doLogin}
               doConfirmRisk={doConfirmRisk} doArm={doArm} doDisarm={doDisarm} doEmergencyPause={doEmergencyPause}
               showCloseAll={showCloseAll} setShowCloseAll={setShowCloseAll} loadStatus={loadStatus}
               dhanAccount={dhanAccount} secondsRemaining={secondsRemaining} showDhanForm={showDhanForm} setShowDhanForm={setShowDhanForm}

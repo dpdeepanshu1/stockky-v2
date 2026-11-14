@@ -7,6 +7,8 @@ import { BuySniperModal, type BuySuggestion } from "./BuySniperModal";
 import { getSafePrice } from "../priceDisplay";
 import FeedHealthPanel, { type FeedHealthData } from "./FeedHealthPanel";
 import { KpiStrip } from "./ui/KpiStrip";
+import { MarketsFilterBar, NoMatch } from "./MarketsFilterBar";   // E541
+import { NO_FILTER, applyMarketFilter, isFilteredEmpty, sortsFor, type MarketAccess, type MarketFilter } from "../marketsFilter";   // E541
 import { hotKpis } from "./hotView";
 
 type HotItem = {
@@ -254,10 +256,13 @@ function Section({
   items,
   liveQuotes,
   onAnalyze,
+  filtered = false,
 }: {
   title: string;
   subtitle: string;
   items: HotItem[];
+  /** E541: true when the page's search is hiding this section's rows (the empty text then says so) */
+  filtered?: boolean;
   liveQuotes: Record<string, { price: number; as_of?: string }>;
   onAnalyze?: (symbol: string) => void;
 }) {
@@ -268,7 +273,7 @@ function Section({
         <p className="hot-section-sub">{subtitle}</p>
       </header>
       {items.length === 0 ? (
-        <div className="hot-empty">No qualifying picks in this section right now.</div>
+        <div className="hot-empty">{filtered ? "No pick in this section matches the search." : "No qualifying picks in this section right now."}</div>
       ) : (
         <div className="hot-grid">
           {items.map((item) => {
@@ -293,8 +298,11 @@ function Section({
   );
 }
 
+const HOT_ACCESS: MarketAccess<HotItem> = { symbol: (r) => r.symbol, score: (r) => r.score ?? r.combined_score };   // E541
+
 export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) => void }) {
   const [data, setData] = useState<HotPayload | null>(null);
+  const [mfilter, setMfilter] = useState<MarketFilter>(NO_FILTER);   // E541: what is shown only; the loaded picks are untouched
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobMsg, setJobMsg] = useState<string | null>(null);
@@ -727,6 +735,12 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
 
   const storedFromTable = data?.source === "hotpicks_static_feed";
 
+  const hotShown = {   // E541: the three sections after the search / sort (rank = the order the scan returned)
+    bulk: applyMarketFilter(data?.bulk_insider_driven, HOT_ACCESS, mfilter),
+    results: applyMarketFilter(data?.results_driven, HOT_ACCESS, mfilter),
+    news: applyMarketFilter(data?.news_driven, HOT_ACCESS, mfilter),
+  };
+
   return (
     <div className="hot-root space-y-4">
       <div className="rounded-2xl border border-slate/50 bg-graphite/80 p-5">
@@ -868,24 +882,31 @@ export default function HotStocks({ onAnalyze }: { onAnalyze?: (symbol: string) 
               ? ` · PARTIAL — scan stopped after ${data.processed_symbols ?? 0} symbols`
               : ""}
           </div>
+          <MarketsFilterBar label="Hot Picks" query={mfilter.query} onQuery={(query) => setMfilter((f) => ({ ...f, query }))} sort={mfilter.sort}
+            onSort={(sort) => setMfilter((f) => ({ ...f, sort }))} sorts={sortsFor(HOT_ACCESS)}
+            shown={hotShown.bulk.length + hotShown.results.length + hotShown.news.length}
+            total={(data.bulk_insider_driven || []).length + (data.results_driven || []).length + (data.news_driven || []).length} />
           <Section
             title="Bulk / insider"
             subtitle="Highest weight — bulk/block deals & insider activity"
-            items={data.bulk_insider_driven || []}
+            filtered={mfilter.query.trim() !== ""}
+            items={hotShown.bulk}
             liveQuotes={liveQuotes as any}
             onAnalyze={onAnalyze}
           />
           <Section
             title="Results / earnings"
             subtitle="Results & earnings surprise catalysts"
-            items={data.results_driven || []}
+            filtered={mfilter.query.trim() !== ""}
+            items={hotShown.results}
             liveQuotes={liveQuotes as any}
             onAnalyze={onAnalyze}
           />
           <Section
             title="News-driven"
             subtitle="News catalysts (strict quality filter)"
-            items={data.news_driven || []}
+            filtered={mfilter.query.trim() !== ""}
+            items={hotShown.news}
             liveQuotes={liveQuotes as any}
             onAnalyze={onAnalyze}
           />

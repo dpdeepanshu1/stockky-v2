@@ -5,6 +5,7 @@
 // 4. v7 loads after v6; direction / state is never colour only
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
+import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
 const css = rd("./design-v7.css");
@@ -66,7 +67,7 @@ test("v7 loads after v6 and the page-level look still loads last", () => {
 });
 
 test("the visuals are mounted where the features live", () => {
-  const rat = rd("./components/RealAutoTrade.tsx"), ps = rd("./components/PositionStocksTab.tsx"), parts = rd("./components/realAuto/parts.tsx"), pos = rd("./components/realAuto/tabs/PositionsTab.tsx");
+  const rat = rd("./components/RealAutoTrade.tsx"), ps = psSource(), parts = rd("./components/realAuto/parts.tsx"), pos = rd("./components/realAuto/tabs/PositionsTab.tsx");
   assert.ok(/<RiskRail side="LONG"/.test(parts), "Real Trade position card has the rail");
   assert.ok(/<ExposureStrip rows=/.test(pos), "Real Trade Positions tab has the exposure strip");
   assert.ok(/<RiskRail side=\{p\.side\}/.test(ps) && /<ExposureStrip rows=/.test(ps), "Position Stocks rows use the rail and the strip (side-aware)");

@@ -43,9 +43,9 @@ test("icons used are real nav icons", () => {
   for (const m of [...tc.matchAll(/ icon="([a-z]+)"/g), ...sp.matchAll(/ icon="([a-z]+)"/g)]) assert.ok(names.has(m[1]), `icon ${m[1]} is not a NavIcon name`);
 });
 
-test("kickers match the sidebar groups", () => {
-  const app = read("./App.tsx");
-  const groups = { Alerts: "System", "Training Lab": "System", "Paper Trades": "Trading", "Data Feed": "System", "Hot Picks": "Discover", "Surprise Momentum": "Discover", "IPO Tracker": "Discover", Watchlist: "Discover" };
+test("kickers match the sidebar sections (E535: the nav list moved from App.tsx to components/app/navModel.ts)", () => {
+  const app = read("./components/app/navModel.ts");
+  const groups = { Alerts: "System", "Training Lab": "System", "Paper Trades": "Paper", "Data Feed": "System", "Hot Picks": "Markets", "Surprise Momentum": "Markets", "IPO Tracker": "Markets", Watchlist: "Markets" };
   for (const [title, kick] of Object.entries(groups)) {
     assert.ok(new RegExp(`<PageHeader title="${title}"[^>]*kicker="${kick}"`).test(tc), `${title} kicker should be ${kick}`);
     assert.ok(new RegExp(`label: "${title}"[^}]*group: "${kick}"`).test(app), `${title} sits in sidebar group ${kick}`);

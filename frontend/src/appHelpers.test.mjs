@@ -55,13 +55,17 @@ for (const [fn, marker] of Object.entries(NAV)) {
   for (const prop of destructured) assert.ok(new RegExp(`\\b${prop}=\\{`).test(call), `App passes ${prop} to ${fn}`);
 }
 assert.ok(nav.includes('aria-label="Main navigation"') && nav.includes('aria-label="Menu"'), "nav landmarks and the drawer dialog label kept");
-assert.ok(existsSync(join(here, "components/app/appTypes.ts")) && /import type \{ NavItem, Tab(, ViewState)? \} from "\.\/components\/app\/appTypes";/.test(app));
+assert.ok(existsSync(join(here, "components/app/appTypes.ts")) && /import type \{ (NavItem, )?Tab(, ViewState)? \} from "\.\/components\/app\/appTypes";/.test(app));
 assert.ok(!/^type Tab =/m.test(app), "Tab type lives in appTypes.ts");
 
 // E69: the dashboard view moved to components/app/DashboardView.tsx.
 const dash = read("components/app/DashboardView.tsx");
 assert.match(dash, /export function DashboardView\(/);
-for (const piece of ["Analyse any stock", 'aria-label="Symbol search"', "Quick scan", "Full market scan", "<MarketSentimentHeader", "<MarketMovers",
+// E536: the two scan buttons moved into the scan menu (components/app/ScanMenu.tsx); the dashboard mounts it and wires the same two handlers.
+const scanMenu = read("components/app/ScanMenu.tsx");
+for (const piece of ["Quick scan", "Full market scan"]) assert.ok(scanMenu.includes(piece), `ScanMenu keeps ${piece}`);
+assert.ok(dash.includes("<ScanMenu") && dash.includes("handleScan(true)") && dash.includes("handleScan(false)"), "DashboardView wires both scans to the menu");
+for (const piece of ["Analyse any stock", 'aria-label="Symbol search"', "<HomePositions", "<MarketSentimentHeader", "<MarketMovers",
                      "<BreadthStrip", "<Pipeline", "<DecisionCard", "<ScanPanel", "<SignalStream", 'view.mode === "idle"', 'view.mode === "loading"',
                      'view.mode === "error"', 'view.mode === "stock"', 'view.mode === "scan"', "handleSendAllActionable"]) {
   assert.ok(dash.includes(piece), `DashboardView keeps ${piece}`);

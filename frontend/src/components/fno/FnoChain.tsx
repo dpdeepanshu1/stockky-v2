@@ -1,14 +1,33 @@
-// F&O Options > Chain: live option chain around the money, with the OI / PCR / max-pain summary and the signal's reasoning.
-import { useState } from "react";
+// F&O Options > Chain (E539, redesign round 6): the live option chain as a table. CE on the left, PE on the right, the strike in the middle, the ATM row marked
+// (and scrolled into view), open interest drawn as a bar behind the number. Same call and same 8 s poll as before; the bias card is unchanged. Nothing here places an order.
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fnoApi } from "../../fnoApi";
 import { pcrReading } from "../../fnoView";
-import { Card, Chip, Msg } from "../calibration/ui";
-import { SubTabs } from "../ui/SubTabs";
+import { atmIndex, chainN0, chainN2, chainRows, type ChainRow } from "../../fnoChainView";
+import { Msg } from "../calibration/ui";
+import { Card, CardHeader, DataTable, Stat, Stats, StatusPill, Tabs, type Column } from "../kit";
 import { useFno } from "./useFno";
 
-const UNDS = [{ id: "NIFTY", label: "Nifty" }, { id: "SENSEX", label: "Sensex" }] as const;
-const n0 = (v: number | null | undefined) => (v == null ? "-" : Math.round(v).toLocaleString("en-IN"));
-const n2 = (v: number | null | undefined) => (v == null ? "-" : v.toFixed(2));
+const UNDS = [{ id: "NIFTY" as const, label: "Nifty" }, { id: "SENSEX" as const, label: "Sensex" }];
+
+/** a number with its open-interest bar behind it: --oi is the bar width, side says which edge it grows from (always from the strike side) */
+function OiCell({ v, pct, side }: { v: number | null | undefined; pct: number; side: "ce" | "pe" }) {
+  return <span className={`oc-oi ${side}`} style={{ ["--oi" as string]: `${pct}%` }}><span className="oc-oi-n">{chainN0(v)}</span></span>;
+}
+
+const COLS: Column<ChainRow>[] = [
+  { key: "ceoi", header: "CE OI", align: "right", render: (r) => <OiCell v={r.ce?.oi} pct={r.ceOiPct} side="ce" />, cellClass: (r) => (r.ceItm ? "oc-itm" : "") },
+  { key: "cevol", header: "CE Vol", align: "right", render: (r) => chainN0(r.ce?.volume), cellClass: (r) => (r.ceItm ? "oc-itm" : "") },
+  { key: "ceiv", header: "CE IV", align: "right", render: (r) => chainN2(r.ce?.iv), cellClass: (r) => (r.ceItm ? "oc-itm" : "") },
+  { key: "cedl", header: "CE Delta", align: "right", render: (r) => chainN2(r.ce?.delta), cellClass: (r) => (r.ceItm ? "oc-itm" : "") },
+  { key: "celtp", header: "CE LTP", align: "right", render: (r) => <b>{chainN2(r.ce?.ltp)}</b>, cellClass: (r) => (r.ceItm ? "oc-itm" : "") },
+  { key: "strike", header: "Strike", align: "right", render: (r) => <span className="oc-strike">{r.strike}{r.atm && <em className="oc-atm">ATM</em>}</span>, cellClass: () => "oc-mid" },
+  { key: "peltp", header: "PE LTP", align: "right", render: (r) => <b>{chainN2(r.pe?.ltp)}</b>, cellClass: (r) => (r.peItm ? "oc-itm" : "") },
+  { key: "pedl", header: "PE Delta", align: "right", render: (r) => chainN2(r.pe?.delta), cellClass: (r) => (r.peItm ? "oc-itm" : "") },
+  { key: "peiv", header: "PE IV", align: "right", render: (r) => chainN2(r.pe?.iv), cellClass: (r) => (r.peItm ? "oc-itm" : "") },
+  { key: "pevol", header: "PE Vol", align: "right", render: (r) => chainN0(r.pe?.volume), cellClass: (r) => (r.peItm ? "oc-itm" : "") },
+  { key: "peoi", header: "PE OI", align: "right", render: (r) => <OiCell v={r.pe?.oi} pct={r.peOiPct} side="pe" />, cellClass: (r) => (r.peItm ? "oc-itm" : "") },
+];
 
 export default function FnoChain() {
   const [und, setUnd] = useState<"NIFTY" | "SENSEX">("NIFTY");
@@ -16,47 +35,58 @@ export default function FnoChain() {
   const c = useFno(() => fnoApi.chain(und, expiry), 8000, [und, expiry]);
   const d = c.data;
   const spot = d?.chain.spot ?? 0;
-  const atm = d?.chain.strikes.reduce<number | null>((best, r) => (best == null || Math.abs(r.strike - spot) < Math.abs(best - spot) ? r.strike : best), null) ?? null;
-  const rows = d ? d.chain.strikes.filter((r) => atm != null && Math.abs(r.strike - atm) <= (und === "NIFTY" ? 600 : 2000)) : [];
+  const rows = useMemo(() => (d ? chainRows(d.chain.strikes, spot, und) : []), [d, spot, und]);
   const s = d?.summary || {};
+  const wrap = useRef<HTMLDivElement>(null);
+  const placed = useRef("");
+  // pin the ATM row: scroll the table's own box (not the page) so the ATM row is in the middle, once per index / expiry (not on every 8 s refresh, which would undo your scrolling)
+  useEffect(() => {
+    const key = `${und}|${d?.chain.expiry || ""}`;
+    const box = wrap.current;
+    const i = atmIndex(rows);
+    if (!box || i < 0 || placed.current === key) return;
+    const tr = box.querySelector<HTMLElement>("tr.oc-row-atm");
+    if (!tr) return;
+    box.scrollTop = Math.max(0, tr.offsetTop - box.clientHeight / 2 + tr.offsetHeight / 2);
+    placed.current = key;
+  }, [rows, und, d?.chain.expiry]);
+  const dir = d?.bias.direction;
   return (
     <div className="space-y-3">
-      <SubTabs items={UNDS as any} value={und} onChange={(v) => { setUnd(v as any); setExpiry(""); }} label="Index" />
+      <Tabs items={UNDS} value={und} onChange={(v) => { setUnd(v); setExpiry(""); }} label="Index" />
       {c.error && <Msg kind="err">{c.error}</Msg>}
-      <Card title={`${und} chain`} right={<>
-        <select value={expiry || d?.chain.expiry || ""} onChange={(e) => setExpiry(e.target.value)} className="rounded-lg border border-slate bg-transparent px-2 py-1 text-[11px]">
-          {(d?.expiries || []).map((x) => <option key={x} value={x}>{x}</option>)}
-        </select>
-        {d && <Chip tone={d.age_s > 30 ? "warn" : "good"}>{Math.round(d.age_s)}s old</Chip>}
-      </>}>
+      <Card>
+        <CardHeader title={`${und} chain`} sub={d ? `Expiry ${d.chain.expiry}` : undefined}
+          action={<span className="oc-tools">
+            <select value={expiry || d?.chain.expiry || ""} onChange={(e) => setExpiry(e.target.value)} aria-label="Expiry" className="oc-select">
+              {(d?.expiries || []).map((x) => <option key={x} value={x}>{x}</option>)}
+            </select>
+            {d && <StatusPill state={d.age_s > 30 ? "paused" : "live"}>{Math.round(d.age_s)}s old</StatusPill>}
+          </span>} />
         {d ? (
           <>
-            <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1">
-              <span>Spot <b>{n2(spot)}</b></span>
-              <span>PCR <b>{n2(s.pcr_oi)}</b> <span className="text-mist">{pcrReading(s.pcr_oi)}</span></span>
-              <span>Max pain <b>{n0(s.max_pain)}</b></span>
-              <span>Call wall <b>{n0(s.call_wall)}</b></span>
-              <span>Put wall <b>{n0(s.put_wall)}</b></span>
+            <Stats>
+              <Stat size="sm" label="Spot" value={chainN2(spot)} />
+              <Stat size="sm" label="PCR (OI)" value={chainN2(s.pcr_oi)} sub={pcrReading(s.pcr_oi)} />
+              <Stat size="sm" label="Max pain" value={chainN0(s.max_pain)} />
+              <Stat size="sm" label="Call wall" value={chainN0(s.call_wall)} sub="most call OI" />
+              <Stat size="sm" label="Put wall" value={chainN0(s.put_wall)} sub="most put OI" />
+            </Stats>
+            <div className="oc-table" style={{ ["--k-table-max" as string]: "30rem" }}>
+              <DataTable dense columns={COLS} rows={rows} rowKey={(r) => String(r.strike)} rowClass={(r) => (r.atm ? "oc-row-atm" : "")} wrapRef={wrap}
+                caption="Option chain around the spot price" empty={<p className="text-mist">No strikes near the money.</p>} />
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-right text-[11px]">
-                <thead className="text-mist"><tr><th>OI</th><th>Vol</th><th>IV</th><th>Delta</th><th>CE LTP</th><th className="text-center">Strike</th><th>PE LTP</th><th>Delta</th><th>IV</th><th>Vol</th><th>OI</th></tr></thead>
-                <tbody>
-                  {rows.map((r) => (
-                    <tr key={r.strike} className={r.strike === atm ? "bg-white/10 font-bold" : ""}>
-                      <td>{n0(r.ce?.oi)}</td><td>{n0(r.ce?.volume)}</td><td>{n2(r.ce?.iv)}</td><td>{n2(r.ce?.delta)}</td><td>{n2(r.ce?.ltp)}</td>
-                      <td className="text-center">{r.strike}</td>
-                      <td>{n2(r.pe?.ltp)}</td><td>{n2(r.pe?.delta)}</td><td>{n2(r.pe?.iv)}</td><td>{n0(r.pe?.volume)}</td><td>{n0(r.pe?.oi)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <p className="oc-legend">
+              <span><i className="oc-sw atm" aria-hidden="true" /> ATM = the strike nearest the spot price</span>
+              <span><i className="oc-sw itm" aria-hidden="true" /> shaded cells = in the money (calls below the spot, puts above it)</span>
+              <span><i className="oc-sw bar" aria-hidden="true" /> bar behind OI = open interest relative to the biggest strike shown</span>
+            </p>
           </>
         ) : <p className="text-mist">{c.loading ? "Loading…" : "No chain."}</p>}
       </Card>
       {d && (
-        <Card title="What the signal sees" right={<Chip tone={d.bias.direction === "UP" ? "good" : d.bias.direction === "DOWN" ? "bad" : undefined}>{d.bias.direction === "UP" ? "UP (CE)" : d.bias.direction === "DOWN" ? "DOWN (PE)" : "FLAT (no trade)"} · score {Math.round(d.bias.score)}</Chip>}>
+        <Card>
+          <CardHeader title="What the signal sees" action={<StatusPill state={dir === "UP" ? "live" : dir === "DOWN" ? "offline" : "closed"}>{dir === "UP" ? "▲ UP (CE)" : dir === "DOWN" ? "▼ DOWN (PE)" : "FLAT (no trade)"} · score {Math.round(d.bias.score)}</StatusPill>} />
           <ul className="list-disc space-y-0.5 pl-4">{(d.bias.reasons || []).map((r, i) => <li key={i}>{r}</li>)}</ul>
           {!d.bias.reasons?.length && <p className="text-mist">No reasons reported.</p>}
         </Card>

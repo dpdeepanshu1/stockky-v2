@@ -1,0 +1,38 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STOCKKY — TRADING PAGES (redesign round 5, E537). Loads last (after home.css). New classes only: tr- prefix.
+   Colours come from tokens.css; no gradient, glass, !important or animation. Presentation only.
+   Roll back: delete the `./styles/trading.css` import in main.tsx and restore RealAutoTrade / PositionStocksTab / OverviewTab from round 516.
+   ═══════════════════════════════════════════════════════════════════════ */
+.tr-head { display: flex; flex-direction: column; gap: var(--k-gap-3); }
+.tr-head.real { border-color: rgb(var(--warn-rgb) / 0.55); }
+.tr-head-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-2); }
+.tr-head-pause { margin-left: auto; }
+.tr-tabs { display: flex; flex-direction: column; gap: var(--k-gap-2); min-width: 0; }
+.tr-tabs .k-tabs + .k-tabs { border-bottom: 0; }
+
+/* arming stepper */
+.tr-stepper { list-style: none; margin: 0 0 var(--k-gap-4); padding: 0; display: grid; gap: var(--k-gap-2); grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }
+.tr-step { display: flex; align-items: flex-start; gap: var(--k-gap-2); padding: 10px 12px; border: 1px solid rgb(var(--border-rgb)); border-radius: var(--k-r-ctl); background: rgb(var(--panel-rgb)); }
+.tr-step.current { border-color: rgb(var(--accent-rgb)); outline: 1px solid rgb(var(--accent-rgb)); }
+.tr-step.done { border-color: rgb(var(--buy-rgb) / 0.55); }
+.tr-step-n { flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font-size: 0.75rem; font-weight: 700; border: 1.5px solid rgb(var(--muted-2-rgb)); color: rgb(var(--muted-rgb)); }
+.tr-step.done .tr-step-n { background: rgb(var(--buy-rgb)); border-color: rgb(var(--buy-rgb)); color: rgb(var(--on-solid-rgb)); }
+.tr-step.current .tr-step-n { border-color: rgb(var(--accent-rgb)); color: rgb(var(--accent-rgb)); }
+.tr-step-text { display: flex; flex-direction: column; min-width: 0; }
+.tr-step-text b { font-size: 0.875rem; font-weight: 600; color: rgb(var(--fg-rgb)); }
+.tr-step-text small { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.tr-stepper.armed .tr-step.done:last-child { background: rgb(var(--buy-rgb) / 0.1); border-color: rgb(var(--buy-rgb)); }
+
+/* market board legend (Position Stocks board). The swatches reuse the board's own --ob-* colours, they are inside .ob */
+.tr-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.tr-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.tr-lg-sw { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 12px; border-radius: 3px; border: 1px solid var(--ob-dim-2); font-size: 9px; font-weight: 700; color: var(--ob-fg); }
+.tr-lg-sw.bull { background: var(--ob-g); border-color: var(--ob-g); }
+.tr-lg-sw.bear { background: var(--ob-r); border-color: var(--ob-r); }
+.tr-lg-sw.heat-lo { background: var(--ob-g); border-color: var(--ob-g); opacity: 0.35; }
+.tr-lg-sw.heat-hi { background: var(--ob-g); border-color: var(--ob-g); }
+.tr-lg-sw.size-s { min-width: 8px; height: 8px; background: var(--ob-dim); border-color: var(--ob-dim); }
+.tr-lg-sw.size-l { min-width: 16px; height: 14px; background: var(--ob-dim); border-color: var(--ob-dim); }
+.tr-lg-sw.held { border: 2px solid var(--ob-amber); background: transparent; }
+.tr-lg-sw.marked { border: 1.5px dashed var(--ob-cyan); background: transparent; }
+.tr-lg-sw.text { border-color: transparent; padding: 0 2px; }

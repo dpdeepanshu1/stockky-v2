@@ -76,3 +76,14 @@ def test_the_replay_cli_warns_when_the_daily_candles_are_missing(tmp_path, monke
     f.write_text("date,open,high,low,close,volume\n2026-11-12,100,110,95,105,0\n", encoding="utf-8")
     assert cli.main_replay(["--snapshots", str(tmp_path), "--out", str(tmp_path), "--underlyings", "NIFTY", "--daily", str(f)]) == 0
     assert "no daily candles" not in capsys.readouterr().err
+
+
+def test_the_replay_cli_says_why_when_there_are_no_snapshot_days(tmp_path, monkeypatch, capsys):
+    """Round 503: no recorded days used to give a silent empty NOT_PROVEN report (the VM host has no /data/fno; the recordings are inside the container)."""
+    monkeypatch.setattr(cli.replay, "run", lambda *a, **k: {"kind": "REPLAY", "metrics": {"overall": {}}, "verdict": {}, "notes": []})
+    assert cli.main_replay(["--snapshots", str(tmp_path / "nope"), "--out", str(tmp_path), "--underlyings", "NIFTY"]) == 0
+    err = capsys.readouterr().err
+    assert "does not exist" in err and "fno_replay_vm.sh" in err
+    (tmp_path / "snapshots" / "2026-11-12").mkdir(parents=True)
+    cli.main_replay(["--snapshots", str(tmp_path), "--out", str(tmp_path), "--underlyings", "NIFTY"])
+    assert "no recorded snapshot days" not in capsys.readouterr().err

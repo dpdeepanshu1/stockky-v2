@@ -76,3 +76,28 @@ def test_a_missing_vix_is_not_an_error_and_a_dead_market_data_is(tmp_path, capsy
     assert (tmp_path / "nifty_d.csv").exists() and not (tmp_path / "vix.csv").exists()
     assert E.main(["--base", "http://127.0.0.1:9", "--out", str(tmp_path / "x")]) == 1
     assert "is market-data-service running" in capsys.readouterr().err
+
+
+def test_the_vm_replay_wrapper_exports_on_the_host_and_replays_inside_the_container(tmp_path):
+    """Round 503: scripts/fno_replay_vm.sh with a fake `docker` and a stub market-data: the replay is run through `docker compose exec` on fno-options-service, pointed at the container's own paths."""
+    import shutil
+    import subprocess
+    if not shutil.which("bash"):
+        return
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    log = tmp_path / "docker_args.txt"
+    (fake / "docker").write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "' + str(log) + '"\n')
+    (fake / "docker").chmod(0o755)
+    srv, _, base = _stub()
+    try:
+        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"], MARKET_DATA_URL_HOST=base, REPLAY_INPUTS=str(tmp_path / "in"))
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fno_replay_vm.sh")
+        r = subprocess.run(["bash", script, "--from", "2026-11-11"], env=env, capture_output=True, text=True, timeout=60)
+    finally:
+        srv.shutdown()
+    assert r.returncode == 0, r.stderr
+    args = log.read_text().split("\n")
+    assert args[:3] == ["compose", "exec", "-T"] and "fno-options-service" in args and "--snapshots" in args and "/data/fno" in args
+    assert "/data/fno_real_probe/replay_inputs/nifty_d.csv" in args and "NIFTY,SENSEX" in args and args[-3:-1] == ["--from", "2026-11-11"]
+    assert (tmp_path / "in" / "nifty_d.csv").exists() and (tmp_path / "in" / "sensex_d.csv").exists()

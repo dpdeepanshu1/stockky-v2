@@ -413,6 +413,7 @@ scripts/fno_export_candles.py
 scripts/fno_live_check.py
 scripts/fno_real_order_probe.py
 scripts/fno_replay_backtest.py
+scripts/fno_replay_vm.sh
 scripts/fno_rolling_backtest.py
 scripts/fno_rolling_check.py
 scripts/fno_rolling_fetch.py

@@ -131,6 +131,27 @@ def test_round499_a_normal_busy_day_of_about_five_percent_does_not_switch_the_gu
     assert g.tripped() is False
 
 
+def _feed_rolled(n, every):
+    """After the close the feed's previous close is the last price; the band (95 / 105 around a base of 100) still shows the real reference."""
+    for i in range(n):
+        if i % every == 0:
+            r = g.assess(105.9, 105.9, symbol=f"R{i}", upper=105.0, lower=95.0)      # moved 5.9 %: corrected to the band base
+            assert r["status"] == "corrected" and r["prev"] == 100.0
+        else:
+            g.assess(101.0, 100.0, symbol=f"R{i}", upper=105.0, lower=95.0)
+
+
+def test_round500_a_post_close_roll_is_corrected_but_never_trips_the_guard():
+    _feed_rolled(600, 4)               # 25 % of the names "moved more than 5 %": a roll, not a layout fault
+    assert g.tripped() is False
+
+
+def test_round500_real_mismatches_still_trip_even_with_rolled_rows_in_the_mix():
+    _feed_rolled(300, 4)
+    _feed(600, 5)                      # 20 % genuinely wrong rows (previous close far from the price) on other symbols
+    assert g.tripped() is True
+
+
 def test_round499_a_small_early_sample_never_trips():
     _feed(250, 2)                      # half flagged, but under 300 distinct symbols so far
     assert g.tripped() is False

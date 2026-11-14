@@ -7,6 +7,7 @@ The script runs here against a sandbox repo whose docker_test.sh / vm_frontend_c
 import os
 import re
 import shutil
+import site
 import subprocess
 import sys
 
@@ -40,7 +41,9 @@ def _sandbox(tmp_path, frontend_rc=0, service_rc=0, with_test_reads=None):
 
 
 def _run(root, tmp_path, **env):
-    e = dict(os.environ, PYTHON=sys.executable, OUT=str(tmp_path / "out"), DOCKER_BIN=sys.executable, HOME=str(tmp_path))
+    # round 500: no HOME override. The script gets OUT explicitly, and a changed HOME hides a `pip install --user` pytest from the inner `python -m pytest` step
+    # (it passed here with a system-wide pytest and failed on the VM, where pytest is a user install). The user site is pinned as well, for a harness run with another HOME.
+    e = dict(os.environ, PYTHON=sys.executable, OUT=str(tmp_path / "out"), DOCKER_BIN=sys.executable, PYTHONUSERBASE=site.getuserbase())
     e.update(env)
     return subprocess.run(["bash", str(root / "scripts" / "vm_full_check.sh")], capture_output=True, text=True, env=e, timeout=120)
 

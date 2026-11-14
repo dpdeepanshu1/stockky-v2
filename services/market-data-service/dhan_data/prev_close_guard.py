@@ -26,6 +26,7 @@ SELF-CHECK (fail open): a corporate-action day touches a handful of names out of
 (default 10 %, was 5 % until round 499) of the distinct symbols seen (at least PREV_CLOSE_GUARD_TRIP_MIN, default 300, was 100) come out corrected / suspect, the
 assumption behind the check (the feed's band layout) is what is wrong, not the data: the guard then passes every row through
 unchanged for PREV_CLOSE_GUARD_TRIP_S seconds (default 900), logs one ERROR and starts counting again afterwards.
+Rows whose previous close equals the last price (the feed's post-close roll, round 500) are still corrected but are not counted towards it.
 PREV_CLOSE_GUARD_MODE=off turns the whole thing off.
 """
 from __future__ import annotations
@@ -120,7 +121,11 @@ def assess(price: Any, prev: Any, *, open_: Any = None, high: Any = None, low: A
         if _mode_off() or p is None or pv is None or tripped():
             return out
         res = _assess(p, pv, out, open_, high, low, upper, lower)
-        _note(symbol, res["status"] in ("corrected", "suspect"))
+        # round 500 (E520): a row whose "previous close" IS the last price is the feed rolling the field forward after the close (14 Nov: all 30 logged names had prev == ltp,
+        # e.g. UMIYA-MRO 100.57 / 100.57 against a band base of 95.61). Correcting it is right (the day's move is kept), but it says nothing about the feed's band layout, so it
+        # must not count towards the self-check: otherwise the flagged share is just the share of stocks that moved more than ~5 % that day.
+        rolled = abs(p - pv) <= max(0.006, 1e-6 * p)
+        _note(symbol, res["status"] in ("corrected", "suspect") and not rolled)
         return res
     except Exception:  # noqa: BLE001 - a guard must never break a quote
         return {"prev": pv, "raw": pv, "status": "unchecked", "reason": None}

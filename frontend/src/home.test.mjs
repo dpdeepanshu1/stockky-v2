@@ -1,5 +1,6 @@
 // E536 (redesign round 4): guards for Home and the stock decision card. Run: node --experimental-strip-types src/home.test.mjs
 import { readFileSync, existsSync } from "node:fs";
+import { cascadeOrder } from "./cssText.mjs";
 import assert from "node:assert/strict";
 import * as plan from "./components/decision/planView.ts";
 import * as home from "./components/app/homeView.ts";
@@ -143,7 +144,7 @@ test("every Home / decision class used in the sources is defined in home.css", (
 });
 test("home.css: loads right before trading.css, control.css and markets.css, tokens only, no animation, no !important, no blur or gradient, no hex colour, 16px search input", () => {
   const css = stripCss(rd("./styles/home.css")); const main = rd("./main.tsx");
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
+  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
   assert.equal(imports[imports.length - 4], "styles/home.css");   // trading.css (E537), control.css (E539) and markets.css (E540) are the only later files
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");

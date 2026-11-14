@@ -11,11 +11,11 @@ export function Spark({ points, width = 260, height = 64, label }: { points: num
   const area = `${line} L${x(points.length - 1).toFixed(1)} ${height - pad} L${x(0).toFixed(1)} ${height - pad} Z`;
   const up = points[points.length - 1] >= 0;
   return (
-    <svg className={`v6-spark ${up ? "up" : "down"}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">
-      <line className="v6-spark-zero" x1={pad} x2={width - pad} y1={y(0)} y2={y(0)} />
-      <g className="v6-spark-draw">
-        <path className="v6-spark-area" d={area} />
-        <path className="v6-spark-line" d={line} vectorEffect="non-scaling-stroke" />
+    <svg className={`w-spark ${up ? "up" : "down"}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">
+      <line className="w-spark-zero" x1={pad} x2={width - pad} y1={y(0)} y2={y(0)} />
+      <g className="w-spark-draw">
+        <path className="w-spark-area" d={area} />
+        <path className="w-spark-line" d={line} vectorEffect="non-scaling-stroke" />
       </g>
     </svg>
   );

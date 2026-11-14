@@ -22,7 +22,7 @@ export function PositionCard({
   closing: boolean;
 }) {
   return (
-    <GlintBox value={p.current_price} className="v7-pos bg-graphite border border-slate rounded-2xl p-4">
+    <GlintBox value={p.current_price} className="w-pos bg-graphite border border-slate rounded-2xl p-4">
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 shrink-0 rounded-full bg-ink border border-slate flex items-center justify-center font-display text-[11px] font-bold text-mist">
@@ -130,15 +130,15 @@ export function Dot({ on, pulse }: { on: boolean; pulse?: boolean }) {
 // ── Tiny stat card ──────────────────────────────────────────────────────────
 export function StatCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
   return (
-    <div className="rt-stat">
-      <p className="rt-stat-label font-display tabular-nums">{label}</p>
-      <p className={`rt-stat-value font-display tabular-nums ${color ?? "text-paper"}`}>{value}</p>
-      {sub && <p className="rt-stat-sub font-display tabular-nums">{sub}</p>}
+    <div className="ra-stat">
+      <p className="ra-stat-label font-display tabular-nums">{label}</p>
+      <p className={`ra-stat-value font-display tabular-nums ${color ?? "text-paper"}`}>{value}</p>
+      {sub && <p className="ra-stat-sub font-display tabular-nums">{sub}</p>}
     </div>
   );
 }
 
 // ── Section header ───────────────────────────────────────────────────────────
 export function SectionHdr({ children }: { children: React.ReactNode }) {
-  return <p className="rt-section-hdr font-display tabular-nums">{children}</p>;
+  return <p className="ra-section-hdr font-display tabular-nums">{children}</p>;
 }

@@ -6,27 +6,25 @@
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { liveSelectors } from "./cssLive.mjs";
-import { reducedMotionText, keyframesOf } from "./cssText.mjs";   // E546: only classes a component can still render need an off switch
+import { reducedMotionText, keyframesOf, optIn } from "./cssText.mjs";   // E546: only classes a component can still render need an off switch
 import { psSource } from "./psSource.mjs";   // E538: Position Stocks is now the shell + components/positionStocks/*
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-const css = rd("./styles/legacy.css");
+const css = rd("./styles/base.css");
 const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "");
 const body = stripComments(css);   // round 8i: one folded file, so the whole file is both the rules and the off-switch text
 const offs = body;
 const reducedBlock = reducedMotionText(css);
-const own = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => sel.includes(".v7-")).map((m) => m[0]).join("\n");   // rules of this layer only (and not its off switches)
+const own = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => /\.w-(evidence|meter|rail|expo|beat|ladder|mark|alert|pos|side)/.test(sel)).map((m) => m[0]).join("\n");   // rules of this layer only (and not its off switches)
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
-const LOOPS = liveSelectors([".v7-glow::before", ".v7-rail-mark i::after", ".v7-ladder .step.current.v7m-live .dot::after", ".v7-beat-run"]);
-const ENTRANCES = liveSelectors([".v7-rail-zone", ".v7-expo", ".v7-expo-bar .seg", ".v7-ladder .step", ".v7-meter-fill", ".v7-ring-pop", ".v7-beat"]);
+const LOOPS = liveSelectors([".hx-glow::before", ".w-rail-mark i::after", ".w-ladder .step.current.wm-live .dot::after", ".w-beat-run"]);
+const ENTRANCES = liveSelectors([".w-rail-zone", ".w-expo", ".w-expo-bar .seg", ".w-ladder .step", ".w-meter-fill", ".v7-ring-pop", ".w-beat"]);
 
 test("every loop and entrance has the three off switches; loops pause when the tab is hidden", () => {
   for (const sel of [...LOOPS, ...ENTRANCES]) {
-    assert.ok(reducedBlock.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(offs.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
-    assert.ok(offs.includes(`html.v6-calm ${sel}`), `${sel} missing from the Animations: Off switch`);
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
   for (const sel of LOOPS) assert.ok(offs.includes(`html[data-hidden="true"] ${sel}`), `${sel} must pause on a hidden tab`);
 });
@@ -35,9 +33,9 @@ test("every animated selector in the file is covered by an off switch (nothing a
   let seen = 0;
   for (const [, sel, decl] of [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]) {
     if (!/\banimation\s*:/.test(decl) || /animation\s*:\s*none/.test(decl)) continue;
-    for (const one of sel.split(",").map((x) => x.trim()).filter((x) => x.includes(".v7-"))) {   // round 8i: the folded file holds every layer; this guard covers its own selectors
+    for (const one of sel.split(",").map((x) => x.trim()).filter((x) => /\.w-(evidence|meter|rail|expo|beat|ladder|mark|alert|pos|side)/.test(x))) {   // round 8i: the folded file holds every layer; this guard covers its own selectors
       seen += 1;
-      assert.ok(reducedBlock.includes(one) && offs.includes(`html.tv ${one}`) && offs.includes(`html.v6-calm ${one}`), `animated selector "${one}" has no off switch`);
+      assert.ok(optIn(css, one), `animated selector "${one}" has no off switch`);
     }
   }
   assert.ok(seen >= 8, `expected to find the animated selectors, saw ${seen}`);   // E546: 10 after the round 8 clean-up removed the rules of classes no component renders
@@ -46,12 +44,12 @@ test("every animated selector in the file is covered by an off switch (nothing a
 test("every transition on a moving thing is switched off too", () => {
   for (const [, sel, decl] of [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]) {
     if (!/\btransition\s*:/.test(decl) || !/transform/.test(decl)) continue;
-    for (const one of sel.split(",").map((x) => x.trim()).filter(Boolean)) assert.ok(offs.includes(one.replace(/^\./, ".")) || offs.includes(`html.v6-calm ${one}`), `transform transition "${one}" has no off switch`);
+    for (const one of sel.split(",").map((x) => x.trim()).filter(Boolean)) assert.ok(offs.includes(one.replace(/^\./, ".")) || offs.includes(`html.anim-off ${one}`), `transform transition "${one}" has no off switch`);
   }
 });
 
 test("keyframes animate only transform and opacity", () => {
-  const frames = keyframesOf(css, "v7").map((k) => [null, k.name, k.body]);
+  const frames = keyframesOf(css, "kf-").filter((k) => ["kf-rise-10b","kf-grow","kf-reveal-b","kf-pop","kf-glow-spin","kf-ping","kf-slide"].includes(k.name)).map((k) => [null, k.name, k.body]);
   assert.ok(frames.length >= 7, "keyframes not found");
   for (const [, name, inner] of frames) for (const [, prop] of inner.matchAll(/([a-z-]+)\s*:/g)) assert.ok(prop === "transform" || prop === "opacity", `${name} animates ${prop}`);
 });
@@ -94,7 +92,7 @@ test("direction and state are never colour only", () => {
   assert.ok(/"▲"[\s\S]*"▼"/.test(rd("./components/ui/ExposureStrip.tsx").replace(/v\.pnlTotal/g, "x")) || /▲/.test(rd("./components/ui/ExposureStrip.tsx")), "exposure arrows");
   assert.ok(/SYMBOL = \{ past: "✓", current: "●", future: "○" \}/.test(rd("./components/ui/ModeLadder.tsx")), "ladder symbols");
   assert.ok(/WORDS = \{ steady: "✓/.test(rd("./components/ui/DriftBeat.tsx")), "beat words");
-  assert.ok(/short \{[^}]*repeating-linear-gradient/.test(body) || /\.v7-expo-bar \.seg\.short \{[^}]*repeating-linear-gradient/.test(body), "shorts are hatched");
+  assert.ok(/short \{[^}]*repeating-linear-gradient/.test(body) || /\.w-expo-bar \.seg\.short \{[^}]*repeating-linear-gradient/.test(body), "shorts are hatched");
 });
 
 console.log(`${passed} design v7 tests passed`);

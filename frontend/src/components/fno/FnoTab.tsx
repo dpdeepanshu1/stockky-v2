@@ -19,7 +19,7 @@ export default function FnoTab() {
   // E535: the Overview publishes mode / armed / P&L to the shell's strip; it stays up (marked out of date after 90 s) on the other sections, and clears when the page closes
   useEffect(() => () => publishModeStrip("fno", null), []);
   return (
-    <div className="v6-page v6-flow space-y-3">
+    <div className="hx-page hx-flow space-y-3">
       <PageHero icon="trend" title="F&O Options" kicker="Nifty · Sensex · buy CE / PE" subtitle="Option buying on the two indices. Starts OFF and in DEMO: nothing real happens until you switch it on in Real Money Calibration." />
       <SubTabs items={SECTIONS} value={s} onChange={setS} label="Section" />
       {s === "overview" && <FnoOverview />}

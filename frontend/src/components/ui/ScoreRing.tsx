@@ -6,12 +6,12 @@ export function ScoreRing({ score, size = 88 }: { score: number; size?: number }
   const tone = s >= 70 ? "buy" : s >= 55 ? "acc" : s >= 40 ? "warn" : "sell";
   const r = 40, c = 2 * Math.PI * r;
   return (
-    <div className={`v5-ring ${tone}`} style={{ width: size, height: size }} role="img" aria-label={`AI score ${s} out of 100, ${word}`}>
+    <div className={`w-ring ${tone}`} style={{ width: size, height: size }} role="img" aria-label={`AI score ${s} out of 100, ${word}`}>
       <svg viewBox="0 0 100 100" aria-hidden="true">
-        <circle className="v5-ring-track" cx="50" cy="50" r={r} />
-        <circle className="v5-ring-arc" cx="50" cy="50" r={r} strokeDasharray={c} style={{ ["--ring-full" as string]: c, ["--ring-to" as string]: c * (1 - s / 100) }} />
+        <circle className="w-ring-track" cx="50" cy="50" r={r} />
+        <circle className="w-ring-arc" cx="50" cy="50" r={r} strokeDasharray={c} style={{ ["--ring-full" as string]: c, ["--ring-to" as string]: c * (1 - s / 100) }} />
       </svg>
-      <div className="v5-ring-label"><b className="num">{s}</b><small>{word}</small></div>
+      <div className="w-ring-label"><b className="num">{s}</b><small>{word}</small></div>
     </div>
   );
 }

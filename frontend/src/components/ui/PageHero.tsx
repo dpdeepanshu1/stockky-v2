@@ -8,11 +8,11 @@ import { NavIcon, type IconName } from "./NavIcon";
 const CALM_KEY = "stockky:v6_calm";
 const readCalm = (): boolean => { try { return window.localStorage.getItem(CALM_KEY) === "1"; } catch { return false; } };
 
-/** One shared "animations on / off" preference for every v6 page: html.v6-calm turns the decorative loops off. */
+/** One shared "animations on / off" preference for every v6 page: html.anim-off turns the decorative loops off. */
 function useCalm(): [boolean, () => void] {
   const [calm, setCalm] = useState<boolean>(() => (typeof window === "undefined" ? false : readCalm()));
   useEffect(() => {
-    try { document.documentElement.classList.toggle("v6-calm", calm); } catch { /* no document */ }
+    try { document.documentElement.classList.toggle("anim-off", calm); } catch { /* no document */ }
   }, [calm]);
   const toggle = () => setCalm((c) => {
     const next = !c;
@@ -41,39 +41,39 @@ const WAVE = Array.from({ length: 125 }, (_, i) => {
 export function PageHero({ icon, title, kicker, subtitle, right, glow }: { icon: IconName; title: ReactNode; kicker: string; subtitle?: string; right?: ReactNode; glow?: "armed" | "halt" }) {
   const [calm, toggleCalm] = useCalm();
   return (
-    <header className="v6-hero">
-      {glow && <span className={`v7-glow${glow === "halt" ? " halt" : ""}`} aria-hidden="true" />}
-      <svg className="v6-art" viewBox="0 0 880 150" preserveAspectRatio="xMaxYMid slice" aria-hidden="true" focusable="false">
+    <header className="hx-hero">
+      {glow && <span className={`hx-glow${glow === "halt" ? " halt" : ""}`} aria-hidden="true" />}
+      <svg className="hx-art" viewBox="0 0 880 150" preserveAspectRatio="xMaxYMid slice" aria-hidden="true" focusable="false">
         <defs>
           <linearGradient id="v6g-wave" gradientUnits="userSpaceOnUse" x1="0" x2="880" y1="0" y2="0"><stop offset="0" stopColor="currentColor" stopOpacity="0" /><stop offset="0.6" stopColor="currentColor" stopOpacity="0.55" /><stop offset="1" stopColor="currentColor" stopOpacity="0.9" /></linearGradient>
         </defs>
-        <g className="v6-art-grid">{[30, 60, 90, 120].map((y) => <line key={y} x1="0" x2="880" y1={y} y2={y} />)}</g>
-        <path className="v6-art-wave" d={WAVE} stroke="url(#v6g-wave)" />
-        <g className="v6-art-candles">
+        <g className="hx-art-grid">{[30, 60, 90, 120].map((y) => <line key={y} x1="0" x2="880" y1={y} y2={y} />)}</g>
+        <path className="hx-art-wave" d={WAVE} stroke="url(#v6g-wave)" />
+        <g className="hx-art-candles">
           {CANDLES.map(([x, wt, bt, bb, wb, d], i) => (
-            <g key={x} className={`v6-candle ${d}`} style={{ ["--i" as string]: i } as CSSProperties}>
+            <g key={x} className={`hx-candle ${d}`} style={{ ["--i" as string]: i } as CSSProperties}>
               <line x1={x} x2={x} y1={wt} y2={wb} /><rect x={x - 7} y={bt} width="14" height={bb - bt} rx="2" />
             </g>
           ))}
         </g>
-        <g className="v6-art-net">
+        <g className="hx-art-net">
           {LINKS.map(([a, b]) => <line key={`${a}-${b}`} x1={NODES[a][0]} y1={NODES[a][1]} x2={NODES[b][0]} y2={NODES[b][1]} />)}
-          {NODES.map(([x, y], i) => <circle key={i} className="v6-node" cx={x} cy={y} r="4.5" style={{ ["--i" as string]: i } as CSSProperties} />)}
+          {NODES.map(([x, y], i) => <circle key={i} className="hx-node" cx={x} cy={y} r="4.5" style={{ ["--i" as string]: i } as CSSProperties} />)}
         </g>
       </svg>
-      <div className="v6-hero-row">
-        <div className="v6-hero-title">
-          <span className="v6-hero-icon" aria-hidden="true"><NavIcon name={icon} /></span>
+      <div className="hx-hero-row">
+        <div className="hx-hero-title">
+          <span className="hx-hero-icon" aria-hidden="true"><NavIcon name={icon} /></span>
           <div className="min-w-0">
-            <span className="v6-kicker"><i aria-hidden="true" />{kicker}</span>
-            <h2 className="v6-h">{title}</h2>
-            {subtitle && <p className="v6-sub">{subtitle}</p>}
+            <span className="hx-kicker"><i aria-hidden="true" />{kicker}</span>
+            <h2 className="hx-h">{title}</h2>
+            {subtitle && <p className="hx-sub">{subtitle}</p>}
           </div>
         </div>
-        <div className="v6-hero-right">
+        <div className="hx-hero-right">
           {right}
-          <button type="button" role="switch" aria-checked={!calm} onClick={toggleCalm} className="v6-anim-toggle" title="Turn the decorative animations on or off">
-            <span className="v6-anim-track" aria-hidden="true"><i /></span>
+          <button type="button" role="switch" aria-checked={!calm} onClick={toggleCalm} className="hx-anim-toggle" title="Turn the decorative animations on or off">
+            <span className="hx-anim-track" aria-hidden="true"><i /></span>
             <span>Animations: {calm ? "Off" : "On"}</span>
           </button>
         </div>

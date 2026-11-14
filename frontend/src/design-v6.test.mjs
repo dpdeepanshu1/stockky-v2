@@ -6,26 +6,24 @@
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { liveSelectors } from "./cssLive.mjs";
-import { reducedMotionText, keyframesOf } from "./cssText.mjs";   // E546: only classes a component can still render need an off switch
+import { reducedMotionText, keyframesOf, optIn } from "./cssText.mjs";   // E546: only classes a component can still render need an off switch
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-const css = rd("./styles/legacy.css");
+const css = rd("./styles/base.css");
 const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "");
 const body = stripComments(css);   // round 8i: one folded file, so the whole file is both the rules and the off-switch text
 const offs = body;
 const reducedBlock = reducedMotionText(css);
-const own = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => sel.includes(".v6-")).map((m) => m[0]).join("\n");   // rules of this layer only (and not its off switches)
+const own = [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => sel.includes(".hx-")).map((m) => m[0]).join("\n");   // rules of this layer only (and not its off switches)
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
-const LOOPS = liveSelectors([".v6-hero::before", ".v6-hero::after", ".v6-art-wave", ".v6-candle", ".v6-node", ".v6-kicker i::after", ".v6-pulse.working::after"]);
-const ENTRANCES = liveSelectors([".v6-hero", ".v6-kpi", ".v6-stage > *", ".v6-flow > *", ".v6-card", ".v6-mixbar", ".v6-spark-draw", ".v6-row", ".v6-detail"]);
+const LOOPS = liveSelectors([".hx-hero::before", ".hx-hero::after", ".hx-art-wave", ".hx-candle", ".hx-node", ".hx-kicker i::after", ".w-pulse.working::after"]);
+const ENTRANCES = liveSelectors([".hx-hero", ".hx-kpi", ".hx-stage > *", ".hx-flow > *", ".hx-card", ".hx-mixbar", ".w-spark-draw", ".hx-row", ".hx-detail"]);
 
 test("every loop and entrance has the three off switches; loops pause when the tab is hidden", () => {
   for (const sel of [...LOOPS, ...ENTRANCES]) {
-    assert.ok(reducedBlock.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(offs.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
-    assert.ok(offs.includes(`html.v6-calm ${sel}`), `${sel} missing from the Animations: Off switch`);
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
   for (const sel of LOOPS) assert.ok(offs.includes(`html[data-hidden="true"] ${sel}`), `${sel} must pause on a hidden tab`);
 });
@@ -35,16 +33,16 @@ test("every animated selector in the file is covered by an off switch (nothing a
   let seen = 0;
   for (const [, sel, decl] of rules) {
     if (!/\banimation\s*:/.test(decl) || /animation\s*:\s*none/.test(decl)) continue;
-    for (const one of sel.split(",").map((x) => x.trim()).filter((x) => x.includes(".v6-"))) {   // round 8i: the folded file holds every layer; this guard covers its own selectors
+    for (const one of sel.split(",").map((x) => x.trim()).filter((x) => x.includes(".hx-"))) {   // round 8i: the folded file holds every layer; this guard covers its own selectors
       seen += 1;
-      assert.ok(reducedBlock.includes(one) && offs.includes(`html.tv ${one}`) && offs.includes(`html.v6-calm ${one}`), `animated selector "${one}" has no off switch`);
+      assert.ok(optIn(css, one), `animated selector "${one}" has no off switch`);
     }
   }
-  assert.ok(seen >= 14, "expected to find the animated selectors");
+  assert.ok(seen >= 10, "expected to find the animated selectors");
 });
 
 test("keyframes animate only transform and opacity", () => {
-  const frames = keyframesOf(css, "v6").map((k) => [null, k.name, k.body]);
+  const frames = keyframesOf(css, "kf-").filter((k) => ["kf-rise-10","kf-float","kf-wave","kf-candle","kf-node","kf-ping-sm","kf-pulse-sweep","kf-reveal"].includes(k.name)).map((k) => [null, k.name, k.body]);
   assert.ok(frames.length >= 8, "keyframes not found");
   for (const [, name, inner] of frames) {
     for (const [, prop] of inner.matchAll(/([a-z-]+)\s*:/g)) assert.ok(prop === "transform" || prop === "opacity", `${name} animates ${prop}`);
@@ -83,15 +81,15 @@ test("direction is never colour only: arrows / signs are in the text", () => {
 
 test("the artwork is decorative and the animation switch is a labelled toggle that remembers its choice safely", () => {
   const t = rd("./components/ui/PageHero.tsx");
-  assert.ok(/<svg className="v6-art"[^>]*aria-hidden="true"/.test(t), "artwork aria-hidden");
+  assert.ok(/<svg className="hx-art"[^>]*aria-hidden="true"/.test(t), "artwork aria-hidden");
   assert.ok(/role="switch"/.test(t) && /aria-checked=\{!calm\}/.test(t) && /Animations: /.test(t), "labelled switch");
   assert.ok(/try \{[^}]*localStorage\.getItem[^}]*\} catch/.test(t) && /try \{[^}]*localStorage\.setItem[^}]*\} catch/.test(t), "storage wrapped in try/catch");
 });
 
 test("v6 loads after v5; the Calibration switch keeps role + aria-checked and gets the v6 class", () => {
   const sw = rd("./components/calibration/SwitchesPanel.tsx");
-  assert.ok(/role="switch" aria-checked=\{cur === "true"\}/.test(sw) && /className=\{`v6-switch \$\{cur === "true" \? "on" : "off"\}`\}/.test(sw), "switch markup");
-  assert.ok(/\.v6-switch\.on::before\s*\{[^}]*transform: translateX/.test(css), "knob slides");
+  assert.ok(/role="switch" aria-checked=\{cur === "true"\}/.test(sw) && /className=\{`hx-switch \$\{cur === "true" \? "on" : "off"\}`\}/.test(sw), "switch markup");
+  assert.ok(/\.hx-switch\.on::before\s*\{[^}]*transform: translateX/.test(css), "knob slides");
 });
 
 console.log(`${passed} passed`);

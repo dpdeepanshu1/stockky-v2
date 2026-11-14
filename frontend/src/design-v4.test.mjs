@@ -5,8 +5,9 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import { optIn } from "./cssText.mjs";
 
-const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/base.css", import.meta.url), "utf8") + "\n" + readFileSync(new URL("./styles/components.css", import.meta.url), "utf8");   // round 532: the skeleton shimmer lives in the kit sheet
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
@@ -21,12 +22,11 @@ const files = [...walk(srcDir)].map((p) => ({ p, s: readFileSync(p, "utf8") }));
 
 test("looping animations are switched off for reduced-motion, TV and paused when hidden", () => {
   const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
-  for (const sel of [".v4-roll", ".v4-live-dot", ".v4-skel::after", ".page-terminal", ".v4-glint-up::after"]) {
-    assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
+  for (const sel of [".w-roll", ".w-live", ".k-skel::after", ".page-terminal", ".w-glint-up::after"]) {
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
-  assert.ok(css.includes('html[data-hidden="true"] .v4-live-dot'), "live dot must pause on a hidden tab");
-  assert.ok(css.includes('html[data-hidden="true"] .v4-skel::after'), "skeleton must pause on a hidden tab");
+  assert.ok(css.includes('html[data-hidden="true"] .w-live'), "live dot must pause on a hidden tab");
+  assert.ok(css.includes('html[data-hidden="true"] .k-skel::after'), "skeleton must pause on a hidden tab");
 });
 
 test("only transform, opacity (and box-shadow flash on the glint) are animated", () => {
@@ -74,7 +74,7 @@ test("group 463: skip link targets the main landmark, a page crash is contained,
   assert.ok(/href="#main-content"/.test(app) && /<main id="main-content"/.test(app), "skip link needs a target");
   assert.ok(/<ErrorBoundary key=\{tab\}/.test(app) && /<\/ErrorBoundary>\s*<\/main>/.test(app), "main content must sit inside a per-tab ErrorBoundary");
   assert.ok(/role="status"/.test(app), "toast needs a live region");
-  for (const cls of [".skip-link", ".v4-empty", ".v4-empty-icon"]) assert.ok(css.includes(cls), `${cls} missing from design-v4.css`);
+  for (const cls of [".skip-link", ".k-empty", ".k-empty-icon"]) assert.ok(css.includes(cls), `${cls} missing from design-v4.css`);
   for (const f of ["MarketMovers", "WatchlistManager"]) assert.ok(files.find((x) => x.p.endsWith(f + ".tsx")).s.includes("<EmptyState"), `${f} should use EmptyState`);
 });
 

@@ -680,16 +680,16 @@ export default function RealAutoTrade() {
     : armed ? "Armed and waiting for the next cycle" : "Idle · not placing orders";
 
   return (
-    <div className="rt-page v6-page max-w-5xl mx-auto mode-frame" data-mode={mode}
+    <div className="ra-page hx-page max-w-5xl mx-auto mode-frame" data-mode={mode}
       data-frame-label={mode === "REAL" ? "REAL MONEY · live Dhan orders" : "DEMO · simulated orders, no money"}>
       {/* ── Header bar ───────────────────────────────────────────────────── */}
-      <PageHero glow={mode === "REAL" && armed ? "armed" : undefined} icon="bot" kicker="AI-assisted · auto trading" title={<>Real Auto Trade{armed && <span className="rt-armed-pill animate-pulse">ARMED</span>}</>}
+      <PageHero glow={mode === "REAL" && armed ? "armed" : undefined} icon="bot" kicker="AI-assisted · auto trading" title={<>Real Auto Trade{armed && <span className="ra-armed-pill animate-pulse">ARMED</span>}</>}
         subtitle={mode === "REAL" ? "Live Dhan orders" : "Simulated demo orders"}
         right={(
-          <div className="rt-seg" role="group" aria-label="Trading mode">
+          <div className="ra-seg" role="group" aria-label="Trading mode">
             {(["DEMO", "REAL"] as Mode[]).map(m => (
               <button key={m} type="button" onClick={() => setMode(m)} data-mode={m} data-active={mode === m}
-                aria-pressed={mode === m} className="rt-seg-btn">
+                aria-pressed={mode === m} className="ra-seg-btn">
                 <Dot on={mode === m && armed} pulse /> {m}
               </button>
             ))}
@@ -714,13 +714,13 @@ export default function RealAutoTrade() {
       )}
 
       {/* Phase notice */}
-      <p className="rt-notice font-display tabular-nums">
+      <p className="ra-notice font-display tabular-nums">
         Phase 2 active — DEMO fully wired (candidates→risk→fill→exit). REAL places live Dhan orders & reconciles fills.
       </p>
 
       {/* Error banner */}
       {error && (
-        <div className="rt-alert font-display tabular-nums" role="alert">
+        <div className="ra-alert font-display tabular-nums" role="alert">
           <span>{error}</span>
           <button onClick={() => setError(null)} aria-label="Dismiss error">✕</button>
         </div>
@@ -733,7 +733,7 @@ export default function RealAutoTrade() {
         <>
           {mode === "REAL" && (
             loggedIn ? (
-              <div className="rt-session rt-session-ok">
+              <div className="ra-session ra-session-ok">
                 <span className="font-display tabular-nums">
                   <Dot on={true} /> Admin session active
                 </span>
@@ -742,7 +742,7 @@ export default function RealAutoTrade() {
                 </button>
               </div>
             ) : (
-              <div className="rt-session rt-session-warn">
+              <div className="ra-session ra-session-warn">
                 <span className="font-display tabular-nums">
                   Session expired — auto-pilot still running. Log in to make changes.
                 </span>

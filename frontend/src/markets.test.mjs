@@ -1,5 +1,6 @@
 // E540 (redesign round 7): plain-node tests (Node >= 22.6): node --experimental-strip-types src/markets.test.mjs
 import { test } from "node:test";
+import { cascadeOrder } from "./cssText.mjs";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import * as wl from "./watchlistOrder.ts";
@@ -51,7 +52,7 @@ test("KpiStrip is built on the kit Stat; direction is never colour-only (sub-lin
   assert.ok(/from "\.\.\/kit"/.test(t) && /<Stats>/.test(t) && /<Stat\b/.test(t));
   assert.ok(/delta=\{k\.sub\}/.test(t) && /ARROW\[tone\]/.test(t), "delta line, or arrow fallback");
   assert.ok(!/PriceRoll|GlintBox|useTickGlint|requestAnimationFrame|countUp|fetch\(/.test(t));
-  assert.ok(!/v6-kpi/.test(t), "no old tile classes left");
+  assert.ok(!/hx-kpi/.test(t), "no old tile classes left");
 });
 test("Watchlist: order changes go through onChange only in My order; the sorted views are display-only; moves also work without a mouse", () => {
   const t = rd("./components/WatchlistManager.tsx");
@@ -80,7 +81,7 @@ test("Alerts: no history feed exists on the backend, so none is drawn (no invent
 /* ---------- CSS ---------- */
 test("markets.css: loads last, tokens only, no animation, no !important, no blur or gradient, no hex colour; every mk- class used is defined", () => {
   const css = stripCss(rd("./styles/markets.css")); const main = rd("./main.tsx");
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
+  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
   assert.equal(imports[imports.length - 1], "styles/markets.css");
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");
@@ -289,7 +290,7 @@ test("round 8e (E550): the IPO overview is a kit Card, the row faces use mk- nam
   const css = stripCss(rd("./styles/markets.css"));
   const ip = rd("./components/IpoLifecycle.tsx");
   assert.ok(/import \{ Card \} from "\.\/kit\/Card"/.test(ip) && /<Card\b/.test(ip) && !/<section/.test(ip));
-  const old = ["styles/base.css", "styles/legacy.css"].map((f) => rd(`./${f}`)).join("\n");
+  const old = ["styles/base.css"].map((f) => rd(`./${f}`)).join("\n");
   assert.ok(!/\.(v5-ipo|v7-sc|v7-tier|v7-arrow|v7-srow|v7-ipo-row|cc-card|hot-grid)\b/.test(old), "an old rule is back");
   const used = new Set();
   for (const f of ["IpoLifecycle", "IpoTracker", "SurpriseStocks", "Trades", "WatchlistManager"]) for (const m of rd(`./components/${f}.tsx`).matchAll(/["'` ](mk-(?:ipo|sc|tier|arrow|srow)[a-z0-9-]*)(?![\w-])/g)) used.add(m[1]);

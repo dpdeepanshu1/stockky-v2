@@ -41,14 +41,14 @@ export default function SetupScorecardPanel({ svc }: { svc: Svc }) {
       {err && <Msg kind="err">{err}</Msg>}
       <Card title="Setup ladder" right={<Chip tone={lad.ladderOn === false ? "warn" : undefined} title="Display only. The ladder itself is the SLOT_LADDER_ENABLED switch.">{lad.ladderOn === false ? "ladder off" : "read-only"}</Chip>}>
         <p className="text-[12px] text-mist" data-testid="ladder-words">{lad.words}</p>
-        <ol className="v8-setups mt-2" data-testid="setup-ladder">
+        <ol className="w-setups mt-2" data-testid="setup-ladder">
           {lad.cards.map((c) => (
-            <li key={c.id} className={`v8-setup ${c.stage}`} title={c.why}>
-              <span className="v8-setup-id">{c.short}</span>
-              <span className="v8-setup-body">
+            <li key={c.id} className={`w-setup ${c.stage}`} title={c.why}>
+              <span className="w-setup-id">{c.short}</span>
+              <span className="w-setup-body">
                 <b>{c.name}</b>
                 <small>{c.side} · from {c.from} · {c.start}</small>
-                <small className="v8-setup-stage">{c.stageText}</small>
+                <small className="w-setup-stage">{c.stageText}</small>
               </span>
             </li>
           ))}

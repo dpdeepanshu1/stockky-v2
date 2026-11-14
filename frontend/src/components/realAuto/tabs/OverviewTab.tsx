@@ -399,23 +399,23 @@ export function OverviewTab({
                   {(!dhanAccount?.connected || showDhanForm) && (
                     <div className="mt-3 space-y-2 border-t border-slate pt-3">
                       <p className="font-display tabular-nums text-[10px] text-mist">{dhanAccount?.connected ? "Paste a fresh access token to rotate" : "Connect your Dhan account"}</p>
-                      <div className="rt-field">
-                        <label className="rt-label" htmlFor="rt-dhan-client">Dhan Client ID</label>
+                      <div className="ra-field">
+                        <label className="ra-label" htmlFor="rt-dhan-client">Dhan Client ID</label>
                         <input id="rt-dhan-client" type="text" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
                           placeholder="Dhan Client ID" value={dhanClientId} onChange={e => setDhanClientId(e.target.value)} />
                       </div>
-                      <div className="rt-field">
-                        <label className="rt-label" htmlFor="rt-dhan-token">Access token</label>
+                      <div className="ra-field">
+                        <label className="ra-label" htmlFor="rt-dhan-token">Access token</label>
                         <input id="rt-dhan-token" type="password" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false}
                           placeholder="Access Token (generate at web.dhan.co → DhanHQ APIs)" value={dhanToken} onChange={e => setDhanToken(e.target.value)} />
                       </div>
                       <div className="flex flex-col sm:flex-row gap-2">
                         <button onClick={() => void doConnectDhan()} disabled={loading || !dhanClientId || !dhanToken}
-                          className="rt-btn rt-btn-primary flex-1">
+                          className="ra-btn ra-btn-primary flex-1">
                           {loading ? "Connecting…" : dhanAccount?.connected ? "Save new token" : "Connect Dhan"}
                         </button>
                         {dhanAccount?.connected && (
-                          <button onClick={() => setShowDhanForm(false)} className="rt-btn rt-btn-ghost">
+                          <button onClick={() => setShowDhanForm(false)} className="ra-btn ra-btn-ghost">
                             Cancel
                           </button>
                         )}

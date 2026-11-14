@@ -749,7 +749,7 @@ function PositionCard({
   const net = paperNet(trade);
   const days = daysHeld(trade.entry_date);
   return (
-    <div className="border border-slate/40 rounded-2xl overflow-hidden transition-all hover:border-slate/60 v4-lazy">
+    <div className="border border-slate/40 rounded-2xl overflow-hidden transition-all hover:border-slate/60 w-lazy">
       <div onClick={onToggle} role="button" tabIndex={0} aria-expanded={expanded}
         onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onToggle(); } }}
         className="p-4 cursor-pointer flex items-center justify-between gap-4">

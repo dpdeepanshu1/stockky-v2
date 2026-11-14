@@ -1,7 +1,7 @@
 // group 464: guards for the light-theme contrast layer (run: node --experimental-strip-types src/lightContrast.test.mjs)
 import { readFileSync, readdirSync } from "node:fs";
 import assert from "node:assert/strict";
-const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/base.css", import.meta.url), "utf8");
 const tokensCss = readFileSync(new URL("./styles/tokens.css", import.meta.url), "utf8");   // round 8i: tokens.css loads after legacy.css, so its value wins; the last match is the effective one
 const main = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
 let passed = 0;
@@ -27,7 +27,7 @@ test("ink colours pass AA on their own 35% tint over white and over the page", (
 });
 test("disabled buttons are readable (>= 4.5:1) and not opacity-faded", () => {
   assert.ok(ratio(tok("disabled-fg"), tok("disabled-bg")) >= 4.5);
-  assert.match(css, /\.rt-btn:disabled[\s\S]*?opacity: 1;/);
+  assert.match(css, /\.ra-btn:disabled[\s\S]*?opacity: 1;/);
 });
 test("plain text-white can no longer land on a pale background", () => {
   assert.match(css, /\.text-white:not\(\[class\*="bg-signal-"\]\)/);

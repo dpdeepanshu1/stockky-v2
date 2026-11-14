@@ -3,7 +3,7 @@
    Styles for components/kit/*. Every class starts with `k-`, so nothing here can clash with the old design-v3 .. v8 layers; pages opt in one at a time.
    Loaded after tokens.css. Presentation only. Roll back: delete the import in main.tsx and the components/kit folder.
    Motion rules: transform / opacity only; every animation and transition sits behind the same off switches
-   (prefers-reduced-motion, html.tv, html.v6-calm) and loops pause on a hidden tab (html[data-hidden="true"]).
+   (prefers-reduced-motion, html.tv, html.anim-off) and loops pause on a hidden tab (html[data-hidden="true"]).
    ═══════════════════════════════════════════════════════════════════════ */
 
 :root {
@@ -148,14 +148,14 @@ html:not(.light) .k-btn.danger { color: #1a0509; }
 
 /* ── Motion (the only animations in the kit) ─────────────────────────── */
 @media (prefers-reduced-motion: no-preference) {
-  html:not(.tv):not(.v6-calm) .k-tab-ind { transition: transform 260ms var(--k-ease); }
-  html:not(.tv):not(.v6-calm) .k-switch, html:not(.tv):not(.v6-calm) .k-switch::after { transition: transform 160ms var(--k-ease), background-color 160ms; }
-  html:not(.tv):not(.v6-calm) .k-btn { transition: filter 140ms, background-color 140ms; }
-  html:not(.tv):not(.v6-calm) .k-btn:not(:disabled):active { transform: scale(0.98); }
-  html:not(.tv):not(.v6-calm) .k-sheet { animation: k-sheet-in 240ms var(--k-ease) backwards; }
-  html:not(.tv):not(.v6-calm) .k-sheet-backdrop { animation: k-fade-in 200ms ease-out backwards; }
-  html:not(.tv):not(.v6-calm) .k-skel::after { animation: k-shimmer 1.4s ease-in-out infinite; }
-  html:not(.tv):not(.v6-calm) .k-btn .k-spin { animation: k-spin 0.8s linear infinite; }
+  html:not(.tv):not(.anim-off) .k-tab-ind { transition: transform 260ms var(--k-ease); }
+  html:not(.tv):not(.anim-off) .k-switch, html:not(.tv):not(.anim-off) .k-switch::after { transition: transform 160ms var(--k-ease), background-color 160ms; }
+  html:not(.tv):not(.anim-off) .k-btn { transition: filter 140ms, background-color 140ms; }
+  html:not(.tv):not(.anim-off) .k-btn:not(:disabled):active { transform: scale(0.98); }
+  html:not(.tv):not(.anim-off) .k-sheet { animation: k-sheet-in 240ms var(--k-ease) backwards; }
+  html:not(.tv):not(.anim-off) .k-sheet-backdrop { animation: k-fade-in 200ms ease-out backwards; }
+  html:not(.tv):not(.anim-off) .k-skel::after { animation: k-shimmer 1.4s ease-in-out infinite; }
+  html:not(.tv):not(.anim-off) .k-btn .k-spin { animation: k-spin 0.8s linear infinite; }
   html[data-hidden="true"] .k-skel::after, html[data-hidden="true"] .k-btn .k-spin { animation-play-state: paused; }
 }
 @keyframes k-sheet-in { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }

@@ -52,10 +52,10 @@ export default function PositionStocksTab() {
 
 
   return (
-    <div className="page-terminal v6-page v6-flow space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
+    <div className="page-terminal hx-page hx-flow space-y-4 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · live Dhan scalp orders">
       <PageHero glow={killSwitchTripped ? "halt" : status?.armed ? "armed" : undefined} icon="trend" title="Position Stocks" kicker="AI-assisted · live Dhan scalps" subtitle="1m / 5m / 15m / 60m scalp pool"
         right={(
-          <span className="rt-updated font-display tabular-nums">
+          <span className="ra-updated font-display tabular-nums">
             {lastRefreshed ? `Updated ${lastRefreshed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Refreshing…"}
           </span>
         )} />
@@ -114,7 +114,7 @@ export default function PositionStocksTab() {
       {!loggedIn ? (
         <SessionMissingNote service="Position Stocks" />
       ) : (
-        <div className="rt-session rt-session-ok">
+        <div className="ra-session ra-session-ok">
           <span className="font-display tabular-nums">● Admin session active</span>
           <button onClick={logoutEverywhere} className="font-display tabular-nums">Log out</button>
         </div>

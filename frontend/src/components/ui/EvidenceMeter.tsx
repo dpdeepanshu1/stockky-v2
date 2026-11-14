@@ -6,20 +6,20 @@ import { evidenceView } from "../../v7View";
 export function EvidenceMeter({ done, needed, days, daysNeeded }: { done: number; needed: number; days: number; daysNeeded: number }) {
   const v = evidenceView(done, needed, days, daysNeeded);
   const row = (label: string, now: number, goal: number, pct: number) => (
-    <div className="v7-meter-row">
-      <span className="v7-meter-label">{label}</span>
-      <span className="v7-meter" role="meter" aria-valuemin={0} aria-valuemax={goal} aria-valuenow={Math.min(now, goal)} aria-label={`${label}: ${now} of ${goal}`}>
-        <i className="v7-meter-fill" style={{ width: `${pct}%` }} />
-        {[25, 50, 75].map((t) => <b key={t} className="v7-meter-tick" style={{ left: `${t}%` }} />)}
+    <div className="w-meter-row">
+      <span className="w-meter-label">{label}</span>
+      <span className="w-meter" role="meter" aria-valuemin={0} aria-valuemax={goal} aria-valuenow={Math.min(now, goal)} aria-label={`${label}: ${now} of ${goal}`}>
+        <i className="w-meter-fill" style={{ width: `${pct}%` }} />
+        {[25, 50, 75].map((t) => <b key={t} className="w-meter-tick" style={{ left: `${t}%` }} />)}
       </span>
-      <span className="v7-meter-num">{now} / {goal}</span>
+      <span className="w-meter-num">{now} / {goal}</span>
     </div>
   );
   return (
-    <div className={`v7-evidence${v.ready ? " ready" : ""}`}>
+    <div className={`w-evidence${v.ready ? " ready" : ""}`}>
       {row("Closed trades", done, needed, v.tradesPct)}
       {row("Entry days", days, daysNeeded, v.daysPct)}
-      <p className="v7-evidence-words">{v.ready ? "✓ " : "… "}{v.words}</p>
+      <p className="w-evidence-words">{v.ready ? "✓ " : "… "}{v.words}</p>
     </div>
   );
 }

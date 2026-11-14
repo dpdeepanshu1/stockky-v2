@@ -12,17 +12,17 @@ export function ExposureStrip({ rows, title = "Where the open money sits" }: { r
   if (!v.count) return null;
   const pnlTone = v.pnlTotal == null || Math.abs(v.pnlTotal) < 0.5 ? "flat" : v.pnlTotal > 0 ? "up" : "down";
   return (
-    <section className="v7-expo" aria-label={title}>
-      <header className="v7-expo-head">
+    <section className="w-expo" aria-label={title}>
+      <header className="w-expo-head">
         <b>{title}</b>
-        <ul className="v7-expo-chips">
-          <li className="v7-chip">{v.count} open · {inr(v.totalValue)} in</li>
-          {v.shortCount > 0 && <li className="v7-chip">↗ {v.longCount} long · ↘ {v.shortCount} short</li>}
-          {v.pnlTotal != null && <li className={`v7-chip pnl ${pnlTone}`}>{pnlTone === "up" ? "▲ " : pnlTone === "down" ? "▼ " : ""}now {signed(v.pnlTotal)}</li>}
-          {v.nearStop.length > 0 && <li className="v7-chip warn">⚠ {v.nearStop.length} near stop: {v.nearStop.slice(0, 3).join(", ")}{v.nearStop.length > 3 ? "…" : ""}</li>}
+        <ul className="w-expo-chips">
+          <li className="w-expo-chip">{v.count} open · {inr(v.totalValue)} in</li>
+          {v.shortCount > 0 && <li className="w-expo-chip">↗ {v.longCount} long · ↘ {v.shortCount} short</li>}
+          {v.pnlTotal != null && <li className={`w-expo-chip pnl ${pnlTone}`}>{pnlTone === "up" ? "▲ " : pnlTone === "down" ? "▼ " : ""}now {signed(v.pnlTotal)}</li>}
+          {v.nearStop.length > 0 && <li className="w-expo-chip warn">⚠ {v.nearStop.length} near stop: {v.nearStop.slice(0, 3).join(", ")}{v.nearStop.length > 3 ? "…" : ""}</li>}
         </ul>
       </header>
-      <ul className="v7-expo-bar" aria-label="Open positions by money put in">
+      <ul className="w-expo-bar" aria-label="Open positions by money put in">
         {v.segments.map((s, i) => (
           <li key={`${s.symbol}-${i}`} className={`seg ${s.tone}${s.side === "SHORT" ? " short" : ""}`} style={{ flexBasis: `${Math.max(s.widthPct, 3)}%`, ["--i" as string]: i } as CSSProperties}
             title={`${s.symbol} · ${s.side === "SHORT" ? "short" : "long"} · ${inr(s.value)} in · ${s.tone === "up" ? "up" : s.tone === "down" ? "down" : "flat"} now`}>
@@ -31,7 +31,7 @@ export function ExposureStrip({ rows, title = "Where the open money sits" }: { r
           </li>
         ))}
       </ul>
-      <p className="v7-expo-note">Block width = money put in (entry × quantity). ▲ up, ▼ down right now. Hatched blocks are shorts.</p>
+      <p className="w-expo-note">Block width = money put in (entry × quantity). ▲ up, ▼ down right now. Hatched blocks are shorts.</p>
     </section>
   );
 }

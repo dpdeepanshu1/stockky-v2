@@ -6,17 +6,17 @@ export type AiOrbState = "idle" | "thinking" | "done";
 
 export function AiOrb({ state = "idle", size = 72 }: { state?: AiOrbState; size?: number }) {
   return (
-    <span className={`v5-orb ${state}`} style={{ width: size, height: size }} aria-hidden="true">
-      <span className="v5-orb-glow" />
-      <span className="v5-orb-ring r1"><i /></span>
-      <span className="v5-orb-ring r2"><i /></span>
-      <span className="v5-orb-ring r3"><i /></span>
-      <span className="v5-orb-core" />
+    <span className={`w-orb ${state}`} style={{ width: size, height: size }} aria-hidden="true">
+      <span className="w-orb-glow" />
+      <span className="w-orb-ring r1"><i /></span>
+      <span className="w-orb-ring r2"><i /></span>
+      <span className="w-orb-ring r3"><i /></span>
+      <span className="w-orb-core" />
     </span>
   );
 }
 
 /** A tiny three-bar "AI is typing" indicator for inline status lines. */
 export function AiTyping() {
-  return <span className="v5-typing" aria-hidden="true"><i /><i /><i /></span>;
+  return <span className="w-typing" aria-hidden="true"><i /><i /><i /></span>;
 }

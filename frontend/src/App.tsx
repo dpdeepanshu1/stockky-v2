@@ -250,7 +250,7 @@ export default function App() {
       <StockPopup row={boardSym} onClose={() => setBoardSym(null)} reduced={false} />
       <a className="skip-link" href="#main-content">Skip to content</a>
       {statusMessage && (
-        <div role="status" aria-live="polite" className="app-toast fixed top-4 right-4 z-50 bg-graphite border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
+        <div role="status" aria-live="polite" className="app-toast fixed top-4 right-4 z-50 border border-signal-buy/40 rounded-lg px-4 py-2.5 shadow-2xl animate-fadeIn flex items-center gap-2">
           <p className="font-mono text-sm text-paper">{statusMessage}</p>
         </div>
       )}

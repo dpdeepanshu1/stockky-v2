@@ -527,11 +527,11 @@ export default function DataFeed() {
               return (
               <li
                 key={a.id}
-                className={`v7-alert-row ${v.word || "flat"} flex justify-between items-center font-display tabular-nums text-[11px] text-mist border-b border-slate/40 py-1 pl-2`}
+                className={`w-alert-row ${v.word || "flat"} flex justify-between items-center font-display tabular-nums text-[11px] text-mist border-b border-slate/40 py-1 pl-2`}
               >
                 <span>
                   {v.symbol}{" "}
-                  <span className="v7-alert-dir">{v.glyph && <i aria-hidden="true">{v.glyph}</i>}{v.word || "—"}</span>{" "}
+                  <span className="w-alert-dir">{v.glyph && <i aria-hidden="true">{v.glyph}</i>}{v.word || "—"}</span>{" "}
                   {v.target}
                   {v.fired ? ` · ${v.fired}` : ""}
                 </span>

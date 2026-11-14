@@ -63,47 +63,47 @@ export default function AiInsightDeck({ view, liveScanRows, onSelect, onQuickSca
   }
 
   return (
-    <section className="v5-deck" aria-label="AI insights" aria-live="polite">
-      <div className="v5-deck-head">
+    <section className="ai-deck" aria-label="AI insights" aria-live="polite">
+      <div className="ai-deck-head">
         <AiOrb state={orb} size={64} />
-        <div className="v5-deck-text">
-          <div className="v5-eyebrow">AI INSIGHTS {loading && <AiTyping />}</div>
-          <h2 className="v5-deck-title">{title}</h2>
-          <p className="v5-deck-sub">{sub}</p>
+        <div className="ai-deck-text">
+          <div className="w-eyebrow">AI INSIGHTS {loading && <AiTyping />}</div>
+          <h2 className="ai-deck-title">{title}</h2>
+          <p className="ai-deck-sub">{sub}</p>
         </div>
         {!loading && rows.length === 0 && (
-          <button type="button" className="v5-cta" onClick={() => onQuickScan()}>Try a quick scan</button>
+          <button type="button" className="ai-cta" onClick={() => onQuickScan()}>Try a quick scan</button>
         )}
       </div>
 
       {loading && (
-        <div className="v5-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
-          <span className="v5-progress-bar" style={{ transform: `scaleX(${pct / 100})` }} />
-          <span className="v5-progress-sweep" />
+        <div className="ai-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+          <span className="ai-progress-bar" style={{ transform: `scaleX(${pct / 100})` }} />
+          <span className="ai-progress-sweep" />
         </div>
       )}
 
       {rows.length > 1 && (
-        <div className="v5-counts" role="list">
-          <span className="v5-count buy" role="listitem"><b>{buy}</b> Buy now</span>
-          <span className="v5-count prep" role="listitem"><b>{prep}</b> Prepare</span>
-          <span className="v5-count hold" role="listitem"><b>{hold}</b> Hold</span>
-          <span className="v5-count avoid" role="listitem"><b>{avoid}</b> Avoid</span>
+        <div className="ai-counts" role="list">
+          <span className="ai-count buy" role="listitem"><b>{buy}</b> Buy now</span>
+          <span className="ai-count prep" role="listitem"><b>{prep}</b> Prepare</span>
+          <span className="ai-count hold" role="listitem"><b>{hold}</b> Hold</span>
+          <span className="ai-count avoid" role="listitem"><b>{avoid}</b> Avoid</span>
         </div>
       )}
 
       {picks.length > 0 && rows.length > 1 && (
-        <div className="v5-picks">
+        <div className="ai-picks">
           {picks.map((d, i) => {
             const score = Math.max(0, Math.min(100, Math.round(d.combined_score ?? 0)));
             return (
-              <button type="button" key={d.symbol} className="v5-pick" style={{ animationDelay: `${i * 80}ms` }} onClick={() => onSelect(d.symbol)}>
-                <span className="v5-pick-top">
-                  <span className="v5-pick-sym">{d.symbol}</span>
-                  <span className={`v5-pick-tag ${isBuy(d) ? "buy" : "prep"}`}>{isBuy(d) ? "▲ Buy now" : "◆ Prepare"}</span>
+              <button type="button" key={d.symbol} className="ai-pick" style={{ animationDelay: `${i * 80}ms` }} onClick={() => onSelect(d.symbol)}>
+                <span className="ai-pick-top">
+                  <span className="ai-pick-sym">{d.symbol}</span>
+                  <span className={`ai-pick-tag ${isBuy(d) ? "buy" : "prep"}`}>{isBuy(d) ? "▲ Buy now" : "◆ Prepare"}</span>
                 </span>
-                <span className="v5-pick-meter" aria-hidden="true"><span style={{ transform: `scaleX(${score / 100})` }} /></span>
-                <span className="v5-pick-meta">AI score <b className="num">{score}</b>/100 · {d.confidence} confidence</span>
+                <span className="ai-pick-meter" aria-hidden="true"><span style={{ transform: `scaleX(${score / 100})` }} /></span>
+                <span className="ai-pick-meta">AI score <b className="num">{score}</b>/100 · {d.confidence} confidence</span>
               </button>
             );
           })}
@@ -111,10 +111,10 @@ export default function AiInsightDeck({ view, liveScanRows, onSelect, onQuickSca
       )}
 
       {view.mode === "idle" && (
-        <ol className="v5-steps">
+        <ol className="ai-steps">
           {STEPS.map((s) => (
-            <li key={s.n} className="v5-step">
-              <span className="v5-step-n">{s.n}</span>
+            <li key={s.n} className="ai-step">
+              <span className="ai-step-n">{s.n}</span>
               <span><b>{s.t}</b><small>{s.d}</small></span>
             </li>
           ))}

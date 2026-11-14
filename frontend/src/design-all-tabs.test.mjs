@@ -57,9 +57,9 @@ test("no hard-coded hex colours in the files touched", () => {
 });
 
 test("the saved 'Animations: Off' choice is applied at start-up, not only when a hero mounts (F-09)", () => {
-  assert.ok(/getItem\("stockky:v6_calm"\) === "1"/.test(mn) && /classList\.add\("v6-calm"\)/.test(mn), "main.tsx must apply v6-calm at start");
+  assert.ok(/getItem\("stockky:v6_calm"\) === "1"/.test(mn) && /classList\.add\("anim-off"\)/.test(mn), "main.tsx must apply anim-off at start");
   assert.ok(/try \{[^\n]*stockky:v6_calm[^\n]*\} catch/.test(mn), "storage read must be wrapped in try/catch");
-  assert.ok(mn.indexOf("v6-calm") < mn.indexOf("ReactDOM.createRoot"), "applied before the first render");
+  assert.ok(mn.indexOf("anim-off") < mn.indexOf("ReactDOM.createRoot"), "applied before the first render");
 });
 
 console.log(`${n} all-tabs design tests passed`);

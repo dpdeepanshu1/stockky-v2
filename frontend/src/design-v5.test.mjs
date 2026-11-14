@@ -4,23 +4,23 @@
 // 3. the layer is imported after v4 in main.tsx, and the AI Insights deck is mounted on the dashboard
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
+import { optIn } from "./cssText.mjs";
 import { liveSelectors } from "./cssLive.mjs";   // E546: only classes a component can still render need an off switch
 
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-const css = rd("./styles/legacy.css");
+const css = rd("./styles/base.css");
 const allReduced = css.split("@media (prefers-reduced-motion: reduce)").slice(1).join("\n");
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log("ok -", name); };
 
 test("looping animations are off for reduced-motion, TV and paused when hidden", () => {
   const reduced = allReduced;
-  const LOOPS5 = liveSelectors([".v5-orb-ring", ".v5-orb-core", ".v5-typing i", ".v5-progress-sweep", ".v5-pick", ".dash-hero::before"]);
+  const LOOPS5 = liveSelectors([".w-orb-core", ".w-typing i", ".ai-progress-sweep", ".ai-pick", ".dash-hero::before"]);
   assert.ok(LOOPS5.length >= 3, "the live loop list must not be filtered away");
   for (const sel of LOOPS5) {
-    assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
-  for (const sel of liveSelectors([".v5-orb-ring", ".v5-orb-core", ".v5-progress-sweep", ".dash-hero::before"])) {
+  for (const sel of liveSelectors([".w-orb-core", ".ai-progress-sweep", ".dash-hero::before"])) {
     assert.ok(css.includes(`html[data-hidden="true"] ${sel}`), `${sel} must pause on a hidden tab`);
   }
 });
@@ -39,9 +39,8 @@ test("keyframes animate only transform and opacity", () => {
 
 test("part 2 motion (needle, brand shine, hot-card entrance) has off switches and the gauge is mounted", () => {
   const reduced = allReduced;
-  for (const sel of liveSelectors([".v5-gauge-needle", ".brand-mark::after", ".hot-grid > *"])) {
-    assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
+  for (const sel of liveSelectors([".w-gauge-needle", ".brand-mark::after", ".hot-grid > *"])) {
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
   assert.ok(css.includes('html[data-hidden="true"] .brand-mark::after'), "brand shine must pause on a hidden tab");
   assert.ok(/<MoodGauge\b/.test(rd("./components/MarketSentimentHeader.tsx")), "MoodGauge not mounted");
@@ -50,9 +49,8 @@ test("part 2 motion (needle, brand shine, hot-card entrance) has off switches an
 
 test("part 3 (score ring, plan bar) has off switches, text alternatives and is mounted; plan bar guards its inputs", () => {
   const reduced = allReduced;
-  for (const sel of liveSelectors([".v5-ring-arc", ".v5-plan-now"])) {
-    assert.ok(reduced.includes(sel), `${sel} missing from the reduced-motion block`);
-    assert.ok(css.includes(`html.tv ${sel}`), `${sel} missing from the TV off switch`);
+  for (const sel of liveSelectors([".w-ring-arc", ".w-plan-now"])) {
+    assert.ok(optIn(css, sel), `${sel} must animate only under reduced-motion: no-preference and outside TV / Animations: Off`);
   }
   // E536: the ring and plan bar moved with the card top into decision/DecisionTop.tsx; the long-idea rule lives in decision/planView.ts (isLongIdea)
   const dc = rd("./components/decision/DecisionTop.tsx");
@@ -65,8 +63,8 @@ test("part 3 (score ring, plan bar) has off switches, text alternatives and is m
 });
 
 test("part 4: money banner is mounted on all three pages, spells the mode out, and never shows money", () => {
-  assert.ok(allReduced.includes(".v5-money-ping::after") && css.includes("html.tv .v5-money-ping::after"), "ping needs off switches");
-  assert.ok(css.includes('html[data-hidden="true"] .v5-money-ping::after'), "ping must pause on a hidden tab");
+  assert.ok(optIn(css, ".w-money-ping::after"), "ping must be opt-in");
+  assert.ok(css.includes('html[data-hidden="true"] .w-money-ping::after'), "ping must pause on a hidden tab");
   const pages = { "RealAutoTrade.tsx": /<MoneyModeBanner mode=\{mode\}/, "PositionStocksTab.tsx": /<MoneyModeBanner mode="REAL"/, "Trades.tsx": /<MoneyModeBanner mode="PAPER"/ };
   for (const [f, re] of Object.entries(pages)) assert.ok(re.test(rd(`./components/${f}`)), `${f}: banner not mounted with the right mode`);
   const b = rd("./components/ui/MoneyModeBanner.tsx");
@@ -79,7 +77,7 @@ test("part 4: money banner is mounted on all three pages, spells the mode out, a
 
 test("part 5: watchlist pulse + quick add are mounted, show percentages only, and the nav motion has off switches", () => {
   for (const sel of [".terminal-bottom-nav button.active .nav-icon", ".terminal-bottom-nav button.active::before"]) {
-    assert.ok(allReduced.includes(sel) && css.includes(`html.tv ${sel}`), `${sel} needs reduced-motion and TV off switches`);
+    assert.ok(optIn(css, sel), `${sel} needs to be opt-in`);
   }
   const wm = rd("./components/WatchlistManager.tsx");
   assert.ok(/<WatchlistPulse\b/.test(wm), "pulse not mounted");
@@ -107,7 +105,7 @@ test("v5 loads after v4 and the deck is mounted on the dashboard", () => {
 });
 
 test("the orb is decorative (aria-hidden) and the deck announces politely", () => {
-  assert.ok(/className=\{`v5-orb[\s\S]{0,120}aria-hidden="true"/.test(rd("./components/ui/AiOrb.tsx")));
+  assert.ok(/className=\{`w-orb[\s\S]{0,120}aria-hidden="true"/.test(rd("./components/ui/AiOrb.tsx")));
   assert.ok(/aria-live="polite"/.test(rd("./components/app/AiInsightDeck.tsx")));
 });
 

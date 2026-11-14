@@ -1,5 +1,6 @@
 // E535: guards for redesign round 3, the app shell (run: node --experimental-strip-types src/shell.test.mjs). Pure logic is run; the rest is static checks on source and CSS.
 import { readFileSync } from "node:fs";
+import { cascadeOrder } from "./cssText.mjs";
 import assert from "node:assert/strict";
 import { psSource } from "./psSource.mjs";   // E538
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
@@ -84,7 +85,7 @@ test("the pages follow the shared login: they re-read their token when the gate 
   }
 });
 test("login page: names the page being unlocked; no looping animation, shake or lock animation", () => {
-  const g = rd("./components/AdminGate.tsx"); const c = [...stripCss(rd("./styles/legacy.css")).matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => /\.auth-/.test(sel)).map((m) => m[0]).join("\n");   // round 8i: the login rules inside the folded legacy file
+  const g = rd("./components/AdminGate.tsx"); const c = [...stripCss(rd("./styles/base.css")).matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => /\.auth-/.test(sel)).map((m) => m[0]).join("\n");   // round 8i: the login rules inside the folded legacy file
   assert.ok(g.includes("heading={`Unlock ${title}`}") && g.includes("aria-label={`Unlock ${title}`}"));
   assert.ok(!/@keyframes|animation\s*:/.test(c), "the login rules have no animation");
   assert.ok(!/backdrop-filter|linear-gradient/.test(c), "flat: no blur, no gradient");
@@ -169,7 +170,7 @@ test("the command palette knows the five sections", () => {
 /* ---------- CSS ---------- */
 test("shell.css: loads right after the kit (only home.css, trading.css, control.css and markets.css are later), tokens only, no animation, no !important, no blur or gradient", () => {
   const css = stripCss(rd("./styles/shell.css")); const main = rd("./main.tsx");
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
+  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
   assert.equal(imports[imports.length - 5], "styles/shell.css"); assert.equal(imports[imports.length - 4], "styles/home.css"); assert.equal(imports[imports.length - 3], "styles/trading.css"); assert.equal(imports[imports.length - 2], "styles/control.css"); assert.equal(imports[imports.length - 1], "styles/markets.css");
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");

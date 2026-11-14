@@ -16,10 +16,10 @@ export function PriceRoll({ value, text, animate = true, className = "" }: { val
     setDir(value > p ? "up" : "down");
     setK((n) => n + 1);
   }, [value, animate]);
-  return <span key={k} className={`v4-roll ${dir} ${className}`.trim()}>{text}</span>;
+  return <span key={k} className={`w-roll ${dir} ${className}`.trim()}>{text}</span>;
 }
 
-/** 2. Tick glint: returns "v4-glint-up" / "v4-glint-down" for ~700 ms after `value` changes. Use on VISIBLE rows only. */
+/** 2. Tick glint: returns "w-glint-up" / "w-glint-down" for ~700 ms after `value` changes. Use on VISIBLE rows only. */
 export function useTickGlint(value: number | null | undefined, enabled = true): string {
   const prev = useRef(value);
   const [cls, setCls] = useState("");
@@ -28,7 +28,7 @@ export function useTickGlint(value: number | null | undefined, enabled = true): 
     prev.current = value;
     if (!enabled || p == null || value == null || value === p) return;
     if (typeof document !== "undefined" && document.hidden) return;
-    setCls(value > p ? "v4-glint-up" : "v4-glint-down");
+    setCls(value > p ? "w-glint-up" : "w-glint-down");
     const id = window.setTimeout(() => setCls(""), 720);
     return () => window.clearTimeout(id);
   }, [value, enabled]);
@@ -37,13 +37,13 @@ export function useTickGlint(value: number | null | undefined, enabled = true): 
 
 /** 4. Market breathing dot: green + pulsing when the feed is live, grey and still when stale or the market is closed. */
 export function LiveDot({ state = "live", label }: { state?: "live" | "stale" | "closed"; label?: string }) {
-  return <span className={`v4-live-dot ${state === "live" ? "" : state}`} role="img" aria-label={label || (state === "live" ? "Live data" : state === "stale" ? "Data is stale" : "Market closed")} />;
+  return <span className={`w-live ${state === "live" ? "" : state}`} role="img" aria-label={label || (state === "live" ? "Live data" : state === "stale" ? "Data is stale" : "Market closed")} />;
 }
 
 /** 5. Skeleton shimmer instead of a spinner. */
 export function Skeleton({ w = "100%", h = 14, className = "" }: { w?: number | string; h?: number | string; className?: string }) {
   const style: CSSProperties = { width: w, height: h };
-  return <span className={`v4-skel ${className}`.trim()} style={style} aria-hidden="true" />;
+  return <span className={`k-skel ${className}`.trim()} style={style} aria-hidden="true" />;
 }
 
 /** Row wrapper for a live price: the row edge flashes green / red for ~700 ms when `value` (a PRICE, never a P&L or order value) changes. */

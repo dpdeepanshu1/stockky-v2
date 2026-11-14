@@ -17,11 +17,11 @@ function line(pts: [number, number][]): string {
 export function DriftBeat({ kind, warnCount }: { kind: unknown; warnCount?: number }) {
   const b = beatKind(kind, warnCount);
   return (
-    <div className={`v7-beat ${b}`} role="img" aria-label={WORDS[b]}>
-      <svg viewBox="0 0 240 40" className="v7-beat-svg" aria-hidden="true" focusable="false" preserveAspectRatio="none">
-        {b === "alarm" || b === "idle" ? <path d="M0 20 L240 20" className="v7-beat-flat" /> : <g className="v7-beat-run"><path d={line(b === "warn" ? ROUGH : PULSE)} className="v7-beat-line" /></g>}
+    <div className={`w-beat ${b}`} role="img" aria-label={WORDS[b]}>
+      <svg viewBox="0 0 240 40" className="w-beat-svg" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+        {b === "alarm" || b === "idle" ? <path d="M0 20 L240 20" className="w-beat-flat" /> : <g className="w-beat-run"><path d={line(b === "warn" ? ROUGH : PULSE)} className="w-beat-line" /></g>}
       </svg>
-      <span className="v7-beat-word">{WORDS[b]}</span>
+      <span className="w-beat-word">{WORDS[b]}</span>
     </div>
   );
 }

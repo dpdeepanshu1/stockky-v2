@@ -7,19 +7,19 @@ const SYMBOL = { past: "✓", current: "●", future: "○" } as const;
 
 export function ModeLadder({ mode, lane, twoStep = false }: { mode: unknown; lane: string; twoStep?: boolean }) {
   const v = ladderView(mode, lane, twoStep);
-  // mode classes are prefixed (v7m-) on purpose: a bare "shadow" class is a Tailwind box-shadow utility
+  // mode classes are prefixed (wm-) on purpose: a bare "shadow" class is a Tailwind box-shadow utility
   return (
-    <div className={`v7-ladder v7m-${v.mode}`}>
-      <ol className="v7-ladder-steps" aria-label={`${lane} mode`} style={twoStep ? { gridTemplateColumns: "repeat(2, 1fr)" } : undefined}>
+    <div className={`w-ladder wm-${v.mode}`}>
+      <ol className="w-ladder-steps" aria-label={`${lane} mode`} style={twoStep ? { gridTemplateColumns: "repeat(2, 1fr)" } : undefined}>
         {v.steps.map((s) => (
-          <li key={s.id} className={`step v7m-${s.id} ${s.state}`} aria-current={s.state === "current" ? "step" : undefined}>
+          <li key={s.id} className={`step wm-${s.id} ${s.state}`} aria-current={s.state === "current" ? "step" : undefined}>
             <span className="dot" aria-hidden="true">{SYMBOL[s.state]}</span>
             <b>{s.label}</b>
             <small>{s.note}</small>
           </li>
         ))}
       </ol>
-      <p className="v7-ladder-words">{v.words}</p>
+      <p className="w-ladder-words">{v.words}</p>
     </div>
   );
 }

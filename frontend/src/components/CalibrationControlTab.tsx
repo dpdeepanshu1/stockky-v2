@@ -110,7 +110,7 @@ function Body({ svc, setSvc }: { svc: Svc; setSvc: (s: Svc) => void }) {
     ...(waiting > 0 ? [{ label: `${waiting} waiting`, state: "idle" as const }] : []),
   ] : [];
   return (
-    <div className="v6-page v6-flow space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
+    <div className="hx-page hx-flow space-y-3 mode-frame" data-mode="REAL" data-frame-label="REAL MONEY · these switches change live trading">
       <PageHero icon="sliders" title="Real Money Calibration" kicker="AI-assisted · real-money switches"
         subtitle="Switch the rules of both trading services on or off, check the day's trades, and run tests and training from buttons." />
       <AiPulse title="Calibration runner" working={running.length > 0} chips={pulseChips}

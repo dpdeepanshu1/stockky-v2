@@ -1,5 +1,6 @@
 // E539 (redesign round 6): guards for the F&O option-chain table, the engine status row and the Calibration side list. Run: node --experimental-strip-types src/control.test.mjs
 import { readFileSync } from "node:fs";
+import { cascadeOrder } from "./cssText.mjs";
 import assert from "node:assert/strict";
 import * as ch from "./fnoChainView.ts";
 import * as en from "./fnoEngineView.ts";
@@ -161,7 +162,7 @@ test("Switch rows show a one-line description and the last-changed line; apply, 
 /* ---------- CSS ---------- */
 test("control.css: loads last, tokens only, no animation, no !important, no blur or gradient, no hex colour; every oc- / cx- class used is defined", () => {
   const css = stripCss(rd("./styles/control.css")); const main = rd("./main.tsx");
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
+  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
   assert.equal(imports[imports.length - 2], "styles/control.css");   // markets.css (E540) is the only later file
   assert.ok(!/@keyframes|animation\s*:|transition\s*:/.test(css) && !/!important/.test(css) && !/backdrop-filter|linear-gradient/.test(css));
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(css), "no hard-coded hex colours");
@@ -194,10 +195,10 @@ test("round 8c (E548): no component uses btn-terminal any more; the nine former 
     assert.ok(!/btn-terminal/.test(s) && /<Button\b/.test(s) && /import \{[^}]*\bButton\b[^}]*\} from "\.{1,2}\/kit/.test(s), `${f} still has an old button or no kit import`);
   }
 });
-test("round 8d (E549): scan-action buttons are kit Buttons, SubTabs is the kit Tabs, the old subtabs and v6-kpi rules are gone", () => {
+test("round 8d (E549): scan-action buttons are kit Buttons, SubTabs is the kit Tabs, the old subtabs and hx-kpi rules are gone", () => {
   for (const f of ["DataHealthAudit", "ScanPanel"]) { const s = rd(`./components/${f}.tsx`); assert.ok(!/scan-action-btn/.test(s) && /<Button variant=/.test(s), `${f} still has an old action button`); }
   const st = rd("./components/ui/SubTabs.tsx");
   assert.ok(/from "\.\.\/kit\/Tabs"/.test(st) && /SubTabs = Tabs/.test(st) && !/useLayoutEffect|className=/.test(st));
-  const old = ["styles/base.css", "styles/legacy.css"].map((f) => rd(`./${f}`)).join("\n");
-  assert.ok(!/\.subtab\b|\.subtabs\b|\.scan-action-btn|\.v6-kpi\b/.test(old), "an old rule is back");
+  const old = ["styles/base.css"].map((f) => rd(`./${f}`)).join("\n");
+  assert.ok(!/\.subtab\b|\.subtabs\b|\.scan-action-btn|\.hx-kpi\b/.test(old), "an old rule is back");
 });

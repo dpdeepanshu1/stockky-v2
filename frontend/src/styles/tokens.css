@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════
    STOCKKY — TOKENS (redesign round E513, "calm Groww")
-   Loaded LAST (after alignment.css) so it wins over the old design-v3 .. v8 layers while they are still being retired.
+   Loads after base.css (which holds the folded old design layers), so it wins over them.
    Presentation only: no component logic, state, API call or handler depends on this file.
    Roll back: delete the `./styles/tokens.css` import in main.tsx.
 
@@ -8,7 +8,7 @@
      1. One palette for both themes: one brand green; green / red stay P&L-only (always with a sign or arrow next to the colour).
      2. One font family (Inter). Plus Jakarta Sans and DM Sans are no longer used or downloaded.
      3. Flat surfaces: the title gradient, hero glows and card lift on hover are switched off; the gradient token becomes a flat green.
-     4. It adds NO animation. The old layers keep their reduced-motion / TV / v6-calm / hidden-tab off switches.
+     4. It adds NO animation. The old layers keep their reduced-motion / TV / anim-off / hidden-tab off switches.
    ═══════════════════════════════════════════════════════════════════════ */
 
 :root {
@@ -61,13 +61,10 @@ html.light {
 
 /* titles: plain text colour, one weight family */
 .page-title { background: none; color: rgb(var(--fg-rgb)); -webkit-background-clip: border-box; background-clip: border-box; font-weight: 700; }
-.brand-name, .dash-section-title, .hot-section-title, .rt-title-text, .rt-login-title, .mtb-app, .auth-title, .auth-brand { font-weight: 700; }
+.brand-name, .dash-section-title, .hot-section-title, .ra-title-text, .ra-login-title, .mtb-app, .auth-title, .auth-brand { font-weight: 700; }
 
 /* hero: no glow blobs */
 .dash-hero::before, .dash-hero::after { display: none; }
 
 /* cards: no lift on hover (the border colour change stays) */
 .hot-card:hover, .conviction-card:hover, .cc-card:hover, .cc-card[role="button"]:hover { transform: none; }
-
-/* AI orb: keep the soft breathing core, stop the three spinning rings */
-.v5-orb-ring, .v5-orb-ring.r2, .v5-orb-ring.r3 { animation: none; }

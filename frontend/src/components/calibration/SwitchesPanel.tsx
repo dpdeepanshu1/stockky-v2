@@ -185,7 +185,7 @@ export default function SwitchesPanel({ svc, onChanged }: { svc: SwitchSvc; onCh
                         {f.kind === "bool" ? (
                           <button type="button" role="switch" aria-checked={cur === "true"} aria-label={`${f.title}: ${valueLabel(f, cur)}`} disabled={busy === f.key}
                             onClick={() => void apply(f, cur === "true" ? "false" : "true")}
-                            className={`v6-switch ${cur === "true" ? "on" : "off"}`}>
+                            className={`hx-switch ${cur === "true" ? "on" : "off"}`}>
                             {busy === f.key ? "…" : cur === "true" ? "ON" : "OFF"}
                           </button>
                         ) : f.kind === "enum" ? (

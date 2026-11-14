@@ -124,7 +124,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
           )}
         </div>
 
-        {note && <p className="v7-wl-note" role="status">{note}</p>}
+        {note && <p className="mk-wl-note" role="status">{note}</p>}
 
         {/* design v5: summary of the figures below (percentages only) */}
         {symbols.length > 0 && (
@@ -132,7 +132,7 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
         )}
         {/* design v5: one-tap suggestions while the list is short; uses the same add() as the Add button */}
         {symbols.length < 5 && (
-          <div className="v5-suggest" aria-label="Quick add">
+          <div className="ai-suggest" aria-label="Quick add">
             <span>Quick add</span>
             {["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN"].filter((x) => !symbols.includes(x)).slice(0, 5).map((x) => (
               <button type="button" key={x} onClick={() => add(x)}>+ {x}</button>
@@ -160,10 +160,10 @@ export default function WatchlistManager({ symbols, onChange, onAnalyse, onScanW
                 onDrop={canMove && dragging ? (e) => { e.preventDefault(); const next = dropSymbol(symbols, dragging, s); setDragging(null); if (next.some((x, i) => x !== symbols[i])) onChange(next); } : undefined}
                 onDragEnd={() => setDragging(null)}
                 data-dragging={dragging === s ? "true" : undefined}
-                className="v5-wl-card flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition v4-lazy"
+                className="mk-wl-card flex items-center justify-between gap-2 border border-slate/50 rounded-lg px-3 py-2 bg-ink/40 hover:border-signal-prepare/30 transition w-lazy"
                 data-tone={tone(pctSince(added[s], prices[s]))}
               >
-                <span className="v5-wl-avatar" aria-hidden="true">{s.slice(0, 1)}</span>
+                <span className="mk-wl-avatar" aria-hidden="true">{s.slice(0, 1)}</span>
                 <div className="flex flex-col items-start min-w-0">
                   <button
                     type="button"

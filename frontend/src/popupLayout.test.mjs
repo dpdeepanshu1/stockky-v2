@@ -1,13 +1,14 @@
 // Run: node --experimental-strip-types src/popupLayout.test.mjs  (Node >= 22.6)
 // group 456 guard: popups must never be positioned against the animated page wrapper (that put the Run window out of sight and dimmed the whole page).
 import assert from "node:assert/strict";
+import { animRules } from "./cssText.mjs";
 import { readFileSync } from "node:fs";
 
-const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/base.css", import.meta.url), "utf8");
 for (const sel of [".terminal-main > *", ".animate-fadeIn"]) {
-  const line = css.split("\n").find((l) => l.startsWith(sel + " {") && l.includes("animation:"));
-  assert.ok(line, `${sel} animation rule not found`);
-  assert.ok(!/\b(both|forwards)\b/.test(line), `${sel} must not use fill-mode both/forwards (keeps a transform containing block): ${line}`);
+  const rules = animRules(css).filter((r) => r.sel.replace(/^:where\(html:not\(\.tv\):not\(\.anim-off\)\)\s+/, "") === sel && !r.none);
+  assert.ok(rules.length > 0, `${sel} animation rule not found`);
+  for (const r of rules) assert.ok(!/\b(both|forwards)\b/.test(r.decl), `${sel} must not use fill-mode both/forwards (keeps a transform containing block): ${r.decl}`);
 }
 
 const modal = readFileSync(new URL("./components/calibration/SwitchesPanel.tsx", import.meta.url), "utf8");

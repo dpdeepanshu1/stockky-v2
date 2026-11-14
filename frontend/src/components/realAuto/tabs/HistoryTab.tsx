@@ -91,83 +91,83 @@ export function HistoryTab({ mode, loggedIn }: HistoryTabProps) {
   const lossPct = summary.counted ? (summary.losses / summary.counted) * 100 : 0;
 
   return (
-    <div className="v6-history v6-flow space-y-3">
-      <div className="v6-toolbar">
-        <div className="v6-seg" role="group" aria-label="Period">
+    <div className="hx-history hx-flow space-y-3">
+      <div className="hx-toolbar">
+        <div className="hx-seg" role="group" aria-label="Period">
           {HISTORY_RANGES.map((x) => (
             <button key={x.id} type="button" aria-pressed={range === x.id} onClick={() => setRange(x.id)}>{x.label}</button>
           ))}
         </div>
-        <div className="v6-seg" role="group" aria-label="Outcome">
+        <div className="hx-seg" role="group" aria-label="Outcome">
           {OUTCOMES.map((x) => (
             <button key={x.id} type="button" aria-pressed={outcome === x.id} onClick={() => setOutcome(x.id)}>{x.label}</button>
           ))}
         </div>
-        <input type="search" className="v6-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a symbol" aria-label="Find a symbol" />
-        <span className="v6-toolbar-gap" />
-        {updated && <span className="v6-updated">Updated {updated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}</span>}
-        <button type="button" className="v6-btn" onClick={() => void load()} disabled={loading || needsLogin}>{loading ? "Loading…" : "↻ Refresh"}</button>
-        <button type="button" className="v6-btn" onClick={download} disabled={!rows.length}>⤓ CSV</button>
+        <input type="search" className="hx-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a symbol" aria-label="Find a symbol" />
+        <span className="hx-toolbar-gap" />
+        {updated && <span className="hx-updated">Updated {updated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}</span>}
+        <button type="button" className="hx-btn" onClick={() => void load()} disabled={loading || needsLogin}>{loading ? "Loading…" : "↻ Refresh"}</button>
+        <button type="button" className="hx-btn" onClick={download} disabled={!rows.length}>⤓ CSV</button>
       </div>
 
       {needsLogin ? (
         <EmptyState icon="lock" title="Log in to see your real trades" hint="Open the Overview tab and sign in. The history is read-only." />
       ) : error && records == null ? (
-        <div className="rt-alert" role="alert"><span>{error}</span><button onClick={() => void load()} aria-label="Retry">↻</button></div>
+        <div className="ra-alert" role="alert"><span>{error}</span><button onClick={() => void load()} aria-label="Retry">↻</button></div>
       ) : records == null ? (
-        <div className="v6-skels" aria-busy="true">
+        <div className="hx-skels" aria-busy="true">
           <Skeleton h={78} /><Skeleton h={120} /><Skeleton h={54} /><Skeleton h={54} />
         </div>
       ) : (
         <>
-          {error && <div className="rt-alert" role="alert"><span>{error} (showing the last good data)</span></div>}
+          {error && <div className="ra-alert" role="alert"><span>{error} (showing the last good data)</span></div>}
           <KpiStrip items={kpis} label="Trade history summary" />
 
           {scoped.length === 0 ? (
             <EmptyState icon="trend" title={range === "today" ? "No closed trades today" : "No closed trades in this period"} hint="Closed positions appear here with their entry, exit, reason and charges." />
           ) : (
             <>
-              <div className="v6-grid2">
-                <section className="v6-card" aria-label="Equity curve">
-                  <h3 className="v6-card-h">Running P&L</h3>
-                  <p className="v6-card-note">Cumulative result in close order: {curve.length > 1 ? `starts ${signedInr(curve[0])}, ends ${signedInr(curve[curve.length - 1])}` : "needs two or more trades"}.</p>
+              <div className="hx-grid2">
+                <section className="hx-card" aria-label="Equity curve">
+                  <h3 className="hx-card-h">Running P&L</h3>
+                  <p className="hx-card-note">Cumulative result in close order: {curve.length > 1 ? `starts ${signedInr(curve[0])}, ends ${signedInr(curve[curve.length - 1])}` : "needs two or more trades"}.</p>
                   {curve.length > 1 && <Spark points={curve} height={84} label={`Running P&L from ${signedInr(curve[0])} to ${signedInr(curve[curve.length - 1])} over ${curve.length} trades`} />}
-                  <div className="v6-mixbar" role="img" aria-label={`${summary.wins} winners, ${summary.losses} losers`}>
+                  <div className="hx-mixbar" role="img" aria-label={`${summary.wins} winners, ${summary.losses} losers`}>
                     <i className="w" style={{ width: `${winPct}%` }} /><i className="l" style={{ width: `${lossPct}%` }} />
                   </div>
-                  <p className="v6-card-note">▲ {summary.wins} winners · ▼ {summary.losses} losers{summary.payoff != null ? ` · avg win ${summary.payoff.toFixed(2)}× avg loss` : ""}</p>
+                  <p className="hx-card-note">▲ {summary.wins} winners · ▼ {summary.losses} losers{summary.payoff != null ? ` · avg win ${summary.payoff.toFixed(2)}× avg loss` : ""}</p>
                 </section>
 
-                <section className="v6-card v6-ai" aria-label="Pattern read">
-                  <div className="v6-ai-head"><AiOrb state="idle" size={34} /><div><h3 className="v6-card-h">Pattern read</h3><p className="v6-card-note">What already happened, in plain words. Not a forecast.</p></div></div>
-                  {notes.length === 0 ? <p className="v6-card-note">Needs at least 3 closed trades with a known result.</p> : (
-                    <ul className="v6-insights">
+                <section className="hx-card hx-ai" aria-label="Pattern read">
+                  <div className="hx-ai-head"><AiOrb state="idle" size={34} /><div><h3 className="hx-card-h">Pattern read</h3><p className="hx-card-note">What already happened, in plain words. Not a forecast.</p></div></div>
+                  {notes.length === 0 ? <p className="hx-card-note">Needs at least 3 closed trades with a known result.</p> : (
+                    <ul className="hx-insights">
                       {notes.map((n) => <li key={n.title} className={n.tone}><b>{n.title}</b><span>{n.body}</span></li>)}
                     </ul>
                   )}
                 </section>
               </div>
 
-              <section className="v6-card v6-records" aria-label="Closed trades">
-                <h3 className="v6-card-h">Closed trades <span className="v6-count">{rows.length}</span></h3>
-                {rows.length === 0 ? <p className="v6-card-note">No trade matches this filter.</p> : (
-                  <ul className="v6-rowlist">
+              <section className="hx-card hx-records" aria-label="Closed trades">
+                <h3 className="hx-card-h">Closed trades <span className="hx-count">{rows.length}</span></h3>
+                {rows.length === 0 ? <p className="hx-card-note">No trade matches this filter.</p> : (
+                  <ul className="hx-rowlist">
                     {rows.map((r, i) => {
                       const p = pnlOf(r);
                       const t = tone(p);
                       const isOpen = open === r.position_id;
                       return (
                         <Fragment key={r.position_id}>
-                          <li className={`v6-row ${t}`} style={{ ["--i" as string]: Math.min(i, 14) } as CSSProperties}>
-                            <button type="button" className="v6-row-main" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : r.position_id)}>
-                              <span className="v6-row-sym"><b>{r.symbol}</b><small>{stamp(r)}</small></span>
-                              <span className="v6-row-px">{priceLabel(r.entry_price)} → {priceLabel(r.exit_price)}<small>{r.quantity ?? "—"} qty · {heldLabel(r)}</small></span>
-                              <span className="v6-row-why">{reasonLabel(r.exit_reason)}{(() => { const er = entryReason(r.setup); return er.known ? <small title={er.title} data-testid="entry-reason">in: {er.label} · {er.slot}</small> : null; })()}</span>
-                              <span className={`v6-pnl ${t}`}>{t === "up" ? "▲ " : t === "down" ? "▼ " : ""}{signedInr(p)}<small>{pctLabel(r.return_pct)}</small></span>
-                              <span className="v6-chev" aria-hidden="true">{isOpen ? "▴" : "▾"}</span>
+                          <li className={`hx-row ${t}`} style={{ ["--i" as string]: Math.min(i, 14) } as CSSProperties}>
+                            <button type="button" className="hx-row-main" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : r.position_id)}>
+                              <span className="hx-row-sym"><b>{r.symbol}</b><small>{stamp(r)}</small></span>
+                              <span className="hx-row-px">{priceLabel(r.entry_price)} → {priceLabel(r.exit_price)}<small>{r.quantity ?? "—"} qty · {heldLabel(r)}</small></span>
+                              <span className="hx-row-why">{reasonLabel(r.exit_reason)}{(() => { const er = entryReason(r.setup); return er.known ? <small title={er.title} data-testid="entry-reason">in: {er.label} · {er.slot}</small> : null; })()}</span>
+                              <span className={`hx-pnl ${t}`}>{t === "up" ? "▲ " : t === "down" ? "▼ " : ""}{signedInr(p)}<small>{pctLabel(r.return_pct)}</small></span>
+                              <span className="hx-chev" aria-hidden="true">{isOpen ? "▴" : "▾"}</span>
                             </button>
                             {isOpen && (
-                              <dl className="v6-detail">
+                              <dl className="hx-detail">
                                 <div><dt>Gross P&L</dt><dd>{signedInr(r.gross_pnl)}</dd></div>
                                 <div><dt>Charges</dt><dd>{r.charges != null ? `₹${Math.round(r.charges).toLocaleString("en-IN")}` : "—"}</dd></div>
                                 <div><dt>Net P&L</dt><dd>{signedInr(r.net_pnl)}</dd></div>

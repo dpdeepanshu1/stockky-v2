@@ -14,23 +14,23 @@ const SYMBOL = { ok: "✓", warn: "⚠", bad: "✕" } as const;
 export function MoneyModeBanner({ mode, detail, chips = [] }: { mode: MoneyMode; detail?: string; chips?: SafetyChip[] }) {
   const c = COPY[mode];
   return (
-    <div className="v5-money" data-money={mode} role="status" aria-label={`${c.title}. ${detail || c.line}`}>
-      <span className="v5-money-icon" aria-hidden="true">
+    <div className="w-money" data-money={mode} role="status" aria-label={`${c.title}. ${detail || c.line}`}>
+      <span className="w-money-icon" aria-hidden="true">
         {mode === "REAL" ? (
           <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6l8-3z" /><path d="M12 8v5" /><path d="M12 16h.01" /></svg>
         ) : (
           <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M9 10c0-1 1-2 3-2s3 1 3 2-1 1.6-3 2-3 1-3 2 1 2 3 2 3-1 3-2" /></svg>
         )}
-        {mode === "REAL" && <i className="v5-money-ping" />}
+        {mode === "REAL" && <i className="w-money-ping" />}
       </span>
-      <div className="v5-money-text">
-        <b className="v5-money-title">{c.title}</b>
-        <span className="v5-money-line">{detail || c.line}</span>
+      <div className="w-money-text">
+        <b className="w-money-title">{c.title}</b>
+        <span className="w-money-line">{detail || c.line}</span>
       </div>
       {chips.length > 0 && (
-        <ul className="v5-money-chips">
+        <ul className="w-money-chips">
           {chips.map((x) => (
-            <li key={x.label} className={`v5-chip ${x.state}`}><span aria-hidden="true">{SYMBOL[x.state]}</span> {x.label}</li>
+            <li key={x.label} className={`w-money-chip ${x.state}`}><span aria-hidden="true">{SYMBOL[x.state]}</span> {x.label}</li>
           ))}
         </ul>
       )}

@@ -8,16 +8,16 @@ const SYMBOL = { ok: "✓", warn: "⚠", bad: "✕", idle: "•" } as const;
 
 export function AiPulse({ title, line, working = false, chips = [] }: { title: string; line: string; working?: boolean; chips?: PulseChip[] }) {
   return (
-    <div className={`v6-pulse ${working ? "working" : "idle"}`} role="status" aria-live="polite">
+    <div className={`w-pulse ${working ? "working" : "idle"}`} role="status" aria-live="polite">
       <AiOrb state={working ? "thinking" : "idle"} size={40} />
-      <div className="v6-pulse-text">
-        <b className="v6-pulse-title">{title}<span className="v6-pulse-state">{working ? "working" : "idle"}</span></b>
-        <span className="v6-pulse-line">{line}</span>
+      <div className="w-pulse-text">
+        <b className="w-pulse-title">{title}<span className="w-pulse-state">{working ? "working" : "idle"}</span></b>
+        <span className="w-pulse-line">{line}</span>
       </div>
       {chips.length > 0 && (
-        <ul className="v6-pulse-chips">
+        <ul className="w-pulse-chips">
           {chips.map((c) => (
-            <li key={c.label} className={`v6-chip ${c.state}`}><span aria-hidden="true">{SYMBOL[c.state]}</span> {c.label}</li>
+            <li key={c.label} className={`w-pulse-chip ${c.state}`}><span aria-hidden="true">{SYMBOL[c.state]}</span> {c.label}</li>
           ))}
         </ul>
       )}

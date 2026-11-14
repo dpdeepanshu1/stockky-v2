@@ -29,7 +29,7 @@ export default function PremarketPlanCard({ active, fetcher }: { active: boolean
       {err && <p className="text-[11px] text-signal-sell">{err}</p>}
       <p className={`text-[12px] ${v.tone ? TONE[v.tone] : "text-mist"}`} data-testid="plan-headline">{v.headline}</p>
       {v.tiles.length > 0 && (
-        <ul className="v8-tiles mt-2" data-testid="plan-tiles">
+        <ul className="w-tiles mt-2" data-testid="plan-tiles">
           {v.tiles.map((t) => (
             <li key={t.label} title={t.hint}>
               <small>{t.label}</small>

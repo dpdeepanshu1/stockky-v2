@@ -667,13 +667,13 @@ export default function ScanPanel({ result, onSelect, onBack, onAddToWatchlist, 
         <div className="font-display tabular-nums text-xs text-mist/70">{commitMessage}</div>
       )}
       {balanceLow && (
-        <div className="balance-modal-overlay" role="dialog" aria-modal="true">
-          <div className="balance-modal">
+        <div className="bm-overlay" role="dialog" aria-modal="true">
+          <div className="bm">
             <h3 className="mono text-sm text-signal-hold uppercase tracking-widest mb-2">Insufficient cash</h3>
             <p className="text-xs text-mist/90 mb-3">
               Some paper trades could not be opened. Deposit funds to continue.
             </p>
-            <div className="balance-modal-grid mono text-xs mb-4">
+            <div className="bm-grid mono text-xs mb-4">
               <div>
                 <span className="text-mist">Available cash</span>
                 <strong>₹{(balanceLow.available ?? 0).toLocaleString("en-IN")}</strong>

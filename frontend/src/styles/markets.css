@@ -17,8 +17,8 @@
 .mk-move button { width: 28px; height: 20px; line-height: 1; font-size: 0.625rem; border: 1px solid rgb(var(--border-rgb)); border-radius: 4px; background: rgb(var(--panel-rgb)); color: rgb(var(--muted-rgb)); cursor: pointer; }
 .mk-move button:disabled { opacity: 0.35; cursor: default; }
 .mk-move button:focus-visible { outline: 2px solid rgb(var(--accent-rgb)); outline-offset: 1px; }
-.watchlist-terminal .v5-wl-card[draggable="true"] { cursor: grab; }
-.watchlist-terminal .v5-wl-card[data-dragging="true"] { opacity: 0.5; outline: 2px dashed rgb(var(--accent-rgb)); }
+.watchlist-terminal .mk-wl-card[draggable="true"] { cursor: grab; }
+.watchlist-terminal .mk-wl-card[data-dragging="true"] { opacity: 0.5; outline: 2px dashed rgb(var(--accent-rgb)); }
 
 /* Markets pages: the shared search + sort bar (Hot Picks, Surprise Momentum, IPO Tracker) */
 .mk-filter { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-2) var(--k-gap-4); margin: 0 0 var(--k-gap-3); }
@@ -99,8 +99,8 @@ html.light .mk-hot-error { color: rgb(138 27 43); }
 .mk-cc-quality.med .mk-cc-badge { border-color: rgb(var(--warn-rgb) / 0.55); background: rgb(var(--warn-rgb) / 0.08); }
 .mk-cc-quality.low .mk-cc-badge { border-color: rgb(var(--sell-rgb) / 0.55); background: rgb(var(--sell-rgb) / 0.08); }
 .mk-cc-hero { display: flex; flex-wrap: wrap; align-items: center; gap: var(--k-gap-3) var(--k-gap-4); }
-.mk-cc-hero .v5-plan { flex: 1 1 180px; }
-.mk-cc-hero .v5-plan-head { margin-bottom: var(--k-gap-3); }
+.mk-cc-hero .w-plan { flex: 1 1 180px; }
+.mk-cc-hero .w-plan-head { margin-bottom: var(--k-gap-3); }
 .mk-cc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr)); gap: var(--k-gap-2) var(--k-gap-3); }
 .mk-cc-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mk-cc-label { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
@@ -161,3 +161,22 @@ html.light .mk-cc-up { color: rgb(3 84 61); }
 .mk-ipo-pop .up { color: rgb(var(--buy-rgb)); font-weight: 700; } .mk-ipo-pop .down { color: rgb(var(--sell-rgb)); font-weight: 700; }
 html.light .mk-ipo-pop .up { color: rgb(3 84 61); } html.light .mk-ipo-pop .down { color: rgb(138 27 43); }
 @media (max-width: 767px) { .mk-ipo-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); } .mk-ipo-title { font-size: 1.0625rem; } }
+/* watchlist pulse / wl tiles (moved from base.css in round 532) */
+.mk-pulse { display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); margin-bottom: 1rem; }
+.mk-pulse-tile { display: flex; flex-direction: column; gap: 2px; padding: 0.65rem 0.8rem; text-align: left; border-radius: 14px; color: inherit; border: 1px solid rgb(var(--border-rgb)); background: rgb(var(--panel-2-rgb)); }
+.mk-pulse-tile small { font-size: 0.64rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: rgb(var(--muted-2-rgb)); }
+.mk-pulse-tile b { font-size: 1.25rem; font-weight: 800; letter-spacing: -0.02em; }
+.mk-pulse-tile > span { font-size: 0.75rem; color: rgb(var(--muted-rgb)); }
+.mk-pulse .up { color: rgb(var(--buy-rgb)); }
+.mk-pulse .down { color: rgb(var(--sell-rgb)); }
+.mk-pulse-btn { cursor: pointer; }
+.mk-pulse-btn:hover:not(:disabled) { transform: translateY(-2px); border-color: rgb(var(--accent-rgb) / 0.5); box-shadow: var(--v5-lift-hover); }
+.mk-pulse-btn:disabled { cursor: default; opacity: 0.7; }
+.mk-wl-card { position: relative; box-shadow: inset 3px 0 0 rgb(var(--border-strong-rgb)); }
+.mk-wl-card[data-tone="up"] { box-shadow: inset 3px 0 0 rgb(var(--buy-rgb)); }
+.mk-wl-card[data-tone="down"] { box-shadow: inset 3px 0 0 rgb(var(--sell-rgb)); }
+.mk-wl-card:hover { transform: translateY(-1px); }
+.mk-wl-avatar { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; font-weight: 800; font-size: 0.85rem; color: rgb(var(--on-solid-rgb)); background: var(--v5-grad); }
+.mk-wl-card > .flex { flex: 1; }
+html.tv .mk-pulse-tile b { font-size: 1.6rem; }
+.mk-wl-note { margin: -0.5rem 0 0.75rem; font-size: 0.75rem; font-weight: 700; color: rgb(var(--warn-rgb)); }

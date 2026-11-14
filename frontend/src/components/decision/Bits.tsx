@@ -154,14 +154,14 @@ export function HorizonStrip({ data }: { data: any }) {
   const hasCards = order.some((k) => hz[k]);
   if (!fv && !hasCards) return null;
   return (
-    <div className="hz-strip">
+    <div className="dh-strip">
       {fv && (
-        <div className="hz-verdict">
-          <div className="hz-verdict-title">Final verdict · short preferred</div>
-          <div className="hz-verdict-body">{fv.summary || fv.headline}</div>
+        <div className="dh-verdict">
+          <div className="dh-verdict-title">Final verdict · short preferred</div>
+          <div className="dh-verdict-body">{fv.summary || fv.headline}</div>
         </div>
       )}
-      <div className="hz-cards">
+      <div className="dh-cards">
         {order.map((k) => {
           const h = hz[k];
           if (!h) return null;
@@ -171,11 +171,11 @@ export function HorizonStrip({ data }: { data: any }) {
             /PREPARE/i.test(dec) ? "prep" :
             /HOLD|WAIT/i.test(dec) ? "hold" : "sell";
           return (
-            <div key={k} className={`hz-card hz-${tone}`}>
-              <div className="hz-card-label">{h.label || k}</div>
-              <div className="hz-card-decision">{h.decision}</div>
-              <div className="hz-card-score">Score {h.score}</div>
-              <div className="hz-card-period">{h.holding_period}</div>
+            <div key={k} className={`dh-card dh-${tone}`}>
+              <div className="dh-card-label">{h.label || k}</div>
+              <div className="dh-card-decision">{h.decision}</div>
+              <div className="dh-card-score">Score {h.score}</div>
+              <div className="dh-card-period">{h.holding_period}</div>
             </div>
           );
         })}

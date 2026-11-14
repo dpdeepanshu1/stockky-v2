@@ -649,8 +649,8 @@ export default function Training() {
             { key: "dec", header: "Decision", render: (p) => p.decision },
             { key: "price", header: "Price", render: (p) => predictionRowView(p).price },   // E164: formatted text; null is "not evaluated", not a miss
             { key: "date", header: "Date", render: (p) => formatDate(p.timestamp) },
-            { key: "t1", header: "T+1 Success", render: (p) => { const m = predictionRowView(p).t1; return <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
-            { key: "t5", header: "T+5 Success", render: (p) => { const m = predictionRowView(p).t5; return <span className={`v7-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
+            { key: "t1", header: "T+1 Success", render: (p) => { const m = predictionRowView(p).t1; return <span className={`w-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
+            { key: "t5", header: "T+5 Success", render: (p) => { const m = predictionRowView(p).t5; return <span className={`w-mark ${m.tone}`} title={m.word}><i aria-hidden="true">{m.glyph}</i><small>{m.word}</small></span>; } },
             { key: "out", header: "Outcome", render: (p) => predictionRowView(p).outcomes },
           ]}
         />

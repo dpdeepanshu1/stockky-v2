@@ -8,7 +8,7 @@ import { classIsLive } from "./cssLive.mjs";
 
 const rd = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "");
-const OLD = ["styles/base.css", "styles/legacy.css"];
+const OLD = ["styles/base.css"];
 
 test("no old layer has a rule for a class that nothing renders", () => {
   const dead = [];
@@ -37,7 +37,7 @@ test("ratchet: !important and root stylesheet size only go down (round 8i: 80 oc
   assert.ok(lines <= 1810, `folded old layers are ${lines} lines, the ratchet is 1810`);
 });
 test("classIsLive: a literal class, a class built from a prefix pattern, and a dead class", () => {
-  assert.ok(classIsLive("k-card") && classIsLive("v6-calm") && classIsLive("tv"));
+  assert.ok(classIsLive("k-card") && classIsLive("anim-off") && classIsLive("tv"));
   assert.ok(classIsLive("signal-pill-buy"));
   assert.equal(classIsLive("dash-hero-top"), false);
   assert.equal(classIsLive("definitely-not-a-class-xyz"), false);

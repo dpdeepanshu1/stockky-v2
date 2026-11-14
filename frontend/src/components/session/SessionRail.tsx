@@ -13,16 +13,16 @@ export default function SessionRail({ service }: { service: SessionService }) {
   }, []);
   const v = sessionView(service, now);
   return (
-    <section className={`v8-day ${v.weekday ? "" : "off"}`} aria-label={v.title} data-testid={`session-rail-${service}`}>
-      <header className="v8-day-head">
+    <section className={`w-day ${v.weekday ? "" : "off"}`} aria-label={v.title} data-testid={`session-rail-${service}`}>
+      <header className="w-day-head">
         <h3>{v.title}</h3>
-        <span className="v8-day-clock">{v.weekday ? "IST" : "weekend"}</span>
+        <span className="w-day-clock">{v.weekday ? "IST" : "weekend"}</span>
       </header>
-      <div className="v8-day-scroll">
-        <ol className="v8-slots" style={{ ["--n" as any]: v.slots.length, ["--p" as any]: v.pct }}>
-          <li className="v8-track" aria-hidden="true"><span className="v8-fill" /></li>
+      <div className="w-day-scroll">
+        <ol className="w-slots" style={{ ["--n" as any]: v.slots.length, ["--p" as any]: v.pct }}>
+          <li className="w-track" aria-hidden="true"><span className="w-fill" /></li>
           {v.slots.map((s) => (
-            <li key={s.id} className={`v8-slot ${s.state}`} aria-current={s.state === "now" ? "step" : undefined} title={s.note}>
+            <li key={s.id} className={`w-slot ${s.state}`} aria-current={s.state === "now" ? "step" : undefined} title={s.note}>
               <span className="dot" aria-hidden="true">{s.state === "done" ? "✓" : s.state === "now" ? "●" : "○"}</span>
               <b>{s.label}</b>
               <small>{s.at}</small>
@@ -30,7 +30,7 @@ export default function SessionRail({ service }: { service: SessionService }) {
           ))}
         </ol>
       </div>
-      <p className="v8-day-words" data-testid="session-words">{v.words}</p>
+      <p className="w-day-words" data-testid="session-words">{v.words}</p>
     </section>
   );
 }

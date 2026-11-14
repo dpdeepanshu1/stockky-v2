@@ -102,7 +102,7 @@ export default function ManualTradeTicket({
   const blockedByArm = mode === "REAL" && !armed && side === "BUY";
 
   return (
-    <div className="rt-ticket">
+    <div className="ra-ticket">
       <p className="font-display tabular-nums text-xs text-paper/70 mb-3">Manual Trade Ticket ({mode})</p>
 
       <div className="grid grid-cols-2 gap-2 mb-2">
@@ -113,7 +113,7 @@ export default function ManualTradeTicket({
           className="bg-graphite border border-white/10 rounded px-3 py-2 font-display tabular-nums text-xs uppercase"
           autoCapitalize="characters" autoCorrect="off" spellCheck={false}
         />
-        <div className="rt-side">
+        <div className="ra-side">
           {(["BUY", "SELL"] as const).map((s) => (
             <button
               key={s}

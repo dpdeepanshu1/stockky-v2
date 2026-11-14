@@ -1,5 +1,6 @@
 // E534: guards for the component kit (run: node --experimental-strip-types src/kit.test.mjs). Static checks on source and CSS, no browser needed.
 import { readFileSync, existsSync } from "node:fs";
+import { cascadeOrder } from "./cssText.mjs";
 import assert from "node:assert/strict";
 const rd = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
 const css = rd("./styles/components.css").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -13,22 +14,22 @@ test("every kit component file exists and the index exports the whole kit", () =
   for (const name of ["Card", "CardHeader", "Stat", "Stats", "StatusPill", "Tabs", "Button", "Field", "Switch", "DataTable", "Sheet", "Skeleton", "SkeletonLines", "Empty", "ErrorState"]) assert.ok(new RegExp(`\\b${name}\\b`).test(index), `index does not export ${name}`);
 });
 test("components.css loads after tokens.css; only the shell (E535), home (E536), trading (E537) and control (E539) styles come after it", () => {
-  const imports = [...main.matchAll(/import "\.\/([\w/-]+\.css)"/g)].map((m) => m[1]);
+  const imports = cascadeOrder();   // round 532: base, tokens, components, then pages.css expanded
   assert.deepEqual(imports.slice(-6), ["styles/components.css", "styles/shell.css", "styles/home.css", "styles/trading.css", "styles/control.css", "styles/markets.css"]);
   assert.ok(imports.indexOf("styles/components.css") > imports.indexOf("styles/tokens.css"));
 });
 test("every class the kit styles starts with k- (it cannot clash with the old layers)", () => {
-  const bad = [...css.matchAll(/(?:^|[},\s])\.([a-z][\w-]*)/gm)].map((m) => m[1]).filter((c) => !c.startsWith("k-") && !["light", "tv", "v6-calm", "up", "down", "warn", "sm", "lg", "md", "block", "flush", "quiet", "invalid", "live", "armed", "paused", "offline", "closed", "info", "primary", "soft", "ghost", "danger", "asking", "click", "dense", "ready", "r", "tint-warn", "tint-sell"].includes(c));
+  const bad = [...css.matchAll(/(?:^|[},\s])\.([a-z][\w-]*)/gm)].map((m) => m[1]).filter((c) => !c.startsWith("k-") && !["light", "tv", "anim-off", "up", "down", "warn", "sm", "lg", "md", "block", "flush", "quiet", "invalid", "live", "armed", "paused", "offline", "closed", "info", "primary", "soft", "ghost", "danger", "asking", "click", "dense", "ready", "r", "tint-warn", "tint-sell"].includes(c));
   assert.deepEqual([...new Set(bad)], []);
 });
-test("every animation and transition sits behind reduced-motion, TV and v6-calm; keyframes use transform / opacity only", () => {
+test("every animation and transition sits behind reduced-motion, TV and anim-off; keyframes use transform / opacity only", () => {
   const motion = css.slice(css.indexOf("@media (prefers-reduced-motion: no-preference)"));
   const end = motion.indexOf("\n}\n");
   const guarded = motion.slice(0, end);
   const before = css.slice(0, css.indexOf("@media (prefers-reduced-motion: no-preference)"));
   assert.ok(!/\b(animation|transition)\s*:/.test(before), "an animation or transition is declared outside the guarded block");
   for (const [, sel] of [...guarded.matchAll(/([^{}]+)\{[^{}]*\b(?:animation|transition)\s*:[^{}]*\}/g)]) {
-    for (const one of sel.split(",").map((x) => x.trim()).filter(Boolean)) assert.ok(one.startsWith("html:not(.tv):not(.v6-calm)"), `"${one}" has no TV / v6-calm off switch`);
+    for (const one of sel.split(",").map((x) => x.trim()).filter(Boolean)) assert.ok(one.startsWith("html:not(.tv):not(.anim-off)"), `"${one}" has no TV / anim-off off switch`);
   }
   for (const [, name, inner] of [...css.matchAll(/@keyframes\s+([\w-]+)\s*\{([\s\S]*?\})\s*\}/g)]) for (const [, p] of inner.matchAll(/([a-z-]+)\s*:/g)) assert.ok(p === "transform" || p === "opacity", `${name} animates ${p}`);
   assert.ok(!/animation[^;{}]*\b(both|forwards)\b/.test(css), "use backwards, not both/forwards");

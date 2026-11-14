@@ -15,18 +15,18 @@ export function TradePlanBar({ stop, entryLow, entryHigh, target, price }: Props
   const px = ok(price) ? price : null;
   const outside = px != null && (px < stop || px > target);
   return (
-    <div className="v5-plan" role="group" aria-label="Trade plan: stop loss, entry zone and target">
-      <div className="v5-plan-head">
-        <span className="v5-eyebrow">TRADE PLAN</span>
-        {rr != null && <span className="v5-plan-rr">Risk : reward <b className="num">1 : {rr.toFixed(1)}</b></span>}
+    <div className="w-plan" role="group" aria-label="Trade plan: stop loss, entry zone and target">
+      <div className="w-plan-head">
+        <span className="w-eyebrow">TRADE PLAN</span>
+        {rr != null && <span className="w-plan-rr">Risk : reward <b className="num">1 : {rr.toFixed(1)}</b></span>}
       </div>
-      <div className="v5-plan-rail">
-        <span className="v5-plan-risk" style={{ left: 0, width: `${pos(lo)}%` }} />
-        <span className="v5-plan-zone" style={{ left: `${pos(lo)}%`, width: `${Math.max(2, pos(hi) - pos(lo))}%` }} />
-        <span className="v5-plan-gain" style={{ left: `${pos(hi)}%`, right: 0 }} />
-        {px != null && <span className="v5-plan-now" style={{ left: `${pos(px)}%` }} title={`Now ${rs(px)}`}><i>{outside ? (px < stop ? "◀" : "▶") : "▼"}</i></span>}
+      <div className="w-plan-rail">
+        <span className="w-plan-risk" style={{ left: 0, width: `${pos(lo)}%` }} />
+        <span className="w-plan-zone" style={{ left: `${pos(lo)}%`, width: `${Math.max(2, pos(hi) - pos(lo))}%` }} />
+        <span className="w-plan-gain" style={{ left: `${pos(hi)}%`, right: 0 }} />
+        {px != null && <span className="w-plan-now" style={{ left: `${pos(px)}%` }} title={`Now ${rs(px)}`}><i>{outside ? (px < stop ? "◀" : "▶") : "▼"}</i></span>}
       </div>
-      <div className="v5-plan-legend">
+      <div className="w-plan-legend">
         <span className="sell"><small>Stop loss</small><b className="num">{rs(stop)}</b></span>
         <span className="acc"><small>Buy zone</small><b className="num">{rs(lo)}{hi !== lo ? ` – ${rs(hi)}` : ""}</b></span>
         <span className="buy"><small>Target</small><b className="num">{rs(target)}</b></span>

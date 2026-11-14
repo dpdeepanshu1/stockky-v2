@@ -1,7 +1,7 @@
 // group 465: guards for the layout alignment layer (run: node --experimental-strip-types src/alignment.test.mjs)
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-const css = readFileSync(new URL("./styles/legacy.css", import.meta.url), "utf8");
+const css = readFileSync(new URL("./styles/base.css", import.meta.url), "utf8");
 const main = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
 const movers = readFileSync(new URL("./components/MarketMovers.tsx", import.meta.url), "utf8");
 let passed = 0;

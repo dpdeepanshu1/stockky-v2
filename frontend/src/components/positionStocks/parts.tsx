@@ -380,10 +380,10 @@ export function PositionRow({ p, onClose, busy, loggedIn }: {
   // a manual way out).
   const canClose = onClose && (p.status === "OPEN" || p.status === "EXIT_LEGS_REJECTED");
   return (
-    <GlintBox value={p.current_price} className={`v7-pos${isShort(p) ? " short" : ""} border border-slate rounded-xl p-3`}>
+    <GlintBox value={p.current_price} className={`w-pos${isShort(p) ? " short" : ""} border border-slate rounded-xl p-3`}>
       <div className="flex items-center justify-between mb-2">
         <span className="font-display tabular-nums font-bold text-sm text-paper">{p.symbol}{isShort(p) && (
-          <span className="v7-side short ml-2" title="Short: sold first, covered (bought back) later. Intraday only."><i aria-hidden="true">↘</i>{sideBadge(p)}</span>
+          <span className="w-side short ml-2" title="Short: sold first, covered (bought back) later. Intraday only."><i aria-hidden="true">↘</i>{sideBadge(p)}</span>
         )}</span>
         <div className="flex items-center gap-2">
           <span className="font-display tabular-nums text-[10px] text-mist">{p.window_source}</span>
